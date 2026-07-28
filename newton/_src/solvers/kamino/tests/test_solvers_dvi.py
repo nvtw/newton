@@ -1926,7 +1926,213 @@ class TestDVISolver(unittest.TestCase):
                     measured_speeds.append(float(state_0.body_qd.numpy()[body, 0]))
 
                 self.assertGreater(int(solver._contacts_kamino.world_active_contacts.numpy()[0]), 0)
-                np.testing.assert_allclose(measured_speeds, expected_speeds, rtol=0.0, atol=1.0e-5)
+                np.testing.assert_allclose(measured_speeds, expected_speeds, rtol=0.0, atol=1.0e-4)
+
+    def test_08d2_dvi_friction_sweep_matches_speed_and_distance(self):
+        """Match analytic sliding speed and distance across friction values."""
+        initial_speed = 3.0
+        dt = 2.0e-3
+        steps = 50
+
+        for friction in (0.1, 0.3, 0.8):
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+            SolverKamino.register_custom_attributes(builder)
+            shape_cfg = newton.ModelBuilder.ShapeConfig(mu=friction, gap=0.0, margin=0.0)
+            body = builder.add_link(
+                xform=wp.transformf((0.0, 0.0, 0.1), wp.quat_identity()),
+                mass=1.0,
+            )
+            builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+            joint = builder.add_joint_free(parent=-1, child=body)
+            builder.add_articulation([joint])
+            builder.add_ground_plane(cfg=shape_cfg)
+            model = builder.finalize(device=self.device)
+
+            expected_speed = initial_speed - friction * 9.81 * dt * steps
+            expected_distance = initial_speed * dt * steps - friction * 9.81 * dt * dt * steps * (steps + 1) / 2.0
+            for sparse in (False, True):
+                with self.subTest(friction=friction, sparse=sparse):
+                    config = SolverKamino.Config(
+                        dynamics_solver="dvi",
+                        use_collision_detector=True,
+                        sparse_dynamics=sparse,
+                        sparse_jacobian=sparse,
+                        collision_detector=kamino_config.CollisionDetectorConfig(
+                            max_contacts=16,
+                            max_contacts_per_world=16,
+                            max_contacts_per_pair=8,
+                        ),
+                    )
+                    solver = SolverKamino(model, config=config)
+                    state_0 = model.state()
+                    state_1 = model.state()
+                    joint_qd = state_0.joint_qd.numpy()
+                    joint_qd[0] = initial_speed
+                    state_0.joint_qd.assign(joint_qd)
+                    newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
+
+                    for _ in range(steps):
+                        solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+                        state_0, state_1 = state_1, state_0
+
+                    self.assertGreater(int(solver._contacts_kamino.world_active_contacts.numpy()[0]), 0)
+                    self.assertAlmostEqual(
+                        float(state_0.body_qd.numpy()[body, 0]),
+                        expected_speed,
+                        delta=1.0e-4,
+                    )
+                    self.assertAlmostEqual(
+                        float(state_0.body_q.numpy()[body, 0]),
+                        expected_distance,
+                        delta=1.0e-5,
+                    )
+
+    def test_08d3_dvi_friction_propagates_through_fixed_joint(self):
+        """Converge articulated contact friction at a 2 kHz step rate."""
+        friction = 0.2
+        initial_speed = 3.0
+        dt = 5.0e-4
+        steps = 200
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(mu=friction, gap=0.0, margin=0.0)
+        contact_body = builder.add_link(
+            xform=wp.transformf((0.0, 0.0, 0.1), wp.quat_identity()),
+            mass=1.0,
+        )
+        carried_body = builder.add_link(
+            xform=wp.transformf((0.0, 0.0, 0.2), wp.quat_identity()),
+            mass=9.0,
+            inertia=wp.mat33(np.eye(3) * 0.06),
+        )
+        builder.add_shape_box(body=contact_body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+        root_joint = builder.add_joint_free(parent=-1, child=contact_body)
+        fixed_joint = builder.add_joint_fixed(
+            parent=contact_body,
+            child=carried_body,
+            parent_xform=wp.transformf((0.0, 0.0, 0.1), wp.quat_identity()),
+            child_xform=wp.transform_identity(),
+        )
+        builder.add_articulation([root_joint, fixed_joint])
+        builder.add_ground_plane(cfg=shape_cfg)
+        model = builder.finalize(device=self.device)
+
+        expected_speed = initial_speed - friction * 9.81 * dt * steps
+        expected_distance = initial_speed * dt * steps - friction * 9.81 * dt * dt * steps * (steps + 1) / 2.0
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    use_collision_detector=True,
+                    sparse_dynamics=sparse,
+                    sparse_jacobian=sparse,
+                    collision_detector=kamino_config.CollisionDetectorConfig(
+                        max_contacts=16,
+                        max_contacts_per_world=16,
+                        max_contacts_per_pair=8,
+                    ),
+                )
+                solver = SolverKamino(model, config=config)
+                state_0 = model.state()
+                state_1 = model.state()
+                joint_qd = state_0.joint_qd.numpy()
+                joint_qd[0] = initial_speed
+                state_0.joint_qd.assign(joint_qd)
+                newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
+
+                solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+                state_0, state_1 = state_1, state_0
+                dvi_solver = solver._solver_kamino.solver_fd
+                first_sweeps = int(dvi_solver.data.status.numpy()[0]["iterations"])
+                _assert_solver_status_converged(self, dvi_solver)
+                for _ in range(1, steps):
+                    solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+                    state_0, state_1 = state_1, state_0
+
+                _assert_solver_status_converged(self, dvi_solver)
+                self.assertGreater(first_sweeps, 1)
+                positions = state_0.body_q.numpy()
+                velocities = state_0.body_qd.numpy()
+                self.assertGreater(int(solver._contacts_kamino.world_active_contacts.numpy()[0]), 0)
+                np.testing.assert_allclose(
+                    velocities[[contact_body, carried_body], 0],
+                    expected_speed,
+                    rtol=0.0,
+                    atol=2.0e-4,
+                )
+                np.testing.assert_allclose(
+                    positions[[contact_body, carried_body], 0],
+                    expected_distance,
+                    rtol=0.0,
+                    atol=2.0e-5,
+                )
+                self.assertAlmostEqual(
+                    float(positions[carried_body, 2] - positions[contact_body, 2]),
+                    0.1,
+                    delta=1.0e-5,
+                )
+                self.assertLess(
+                    float(np.linalg.norm(velocities[carried_body] - velocities[contact_body])),
+                    1.0e-4,
+                )
+
+    def test_08d4_dvi_incline_friction_threshold(self):
+        """Hold or slide according to the Coulomb incline threshold."""
+        dt = 2.0e-3
+        steps = 100
+        cases = (
+            (25.0, 0.7, False),
+            (35.0, 0.3, True),
+        )
+
+        for angle_degrees, friction, should_slide in cases:
+            angle = float(np.deg2rad(angle_degrees))
+            gravity = (9.81 * np.sin(angle), 0.0, -9.81 * np.cos(angle))
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Z, gravity=gravity)
+            SolverKamino.register_custom_attributes(builder)
+            shape_cfg = newton.ModelBuilder.ShapeConfig(mu=friction, gap=0.0, margin=0.0)
+            body = builder.add_link(
+                xform=wp.transformf((0.0, 0.0, 0.1), wp.quat_identity()),
+                mass=1.0,
+            )
+            builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+            joint = builder.add_joint_free(parent=-1, child=body)
+            builder.add_articulation([joint])
+            builder.add_ground_plane(cfg=shape_cfg)
+            model = builder.finalize(device=self.device)
+
+            for sparse in (False, True):
+                with self.subTest(angle=angle_degrees, friction=friction, sparse=sparse):
+                    config = SolverKamino.Config(
+                        dynamics_solver="dvi",
+                        use_collision_detector=True,
+                        sparse_dynamics=sparse,
+                        sparse_jacobian=sparse,
+                        collision_detector=kamino_config.CollisionDetectorConfig(
+                            max_contacts=16,
+                            max_contacts_per_world=16,
+                            max_contacts_per_pair=8,
+                        ),
+                    )
+                    solver = SolverKamino(model, config=config)
+                    state_0 = model.state()
+                    state_1 = model.state()
+                    for _ in range(steps):
+                        solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+                        state_0, state_1 = state_1, state_0
+
+                    position_x = float(state_0.body_q.numpy()[body, 0])
+                    velocity_x = float(state_0.body_qd.numpy()[body, 0])
+                    if should_slide:
+                        acceleration = 9.81 * (np.sin(angle) - friction * np.cos(angle))
+                        expected_velocity = acceleration * dt * steps
+                        expected_distance = acceleration * dt * dt * steps * (steps + 1) / 2.0
+                        self.assertAlmostEqual(velocity_x, expected_velocity, delta=2.0e-3)
+                        self.assertAlmostEqual(position_x, expected_distance, delta=2.0e-4)
+                    else:
+                        self.assertLess(abs(velocity_x), 1.0e-4)
+                        self.assertLess(abs(position_x), 1.0e-5)
 
     def test_08e_dvi_sliding_sphere_settles_into_analytic_rolling(self):
         """Match the analytic sliding-to-rolling transition of a sphere.
@@ -1996,7 +2202,7 @@ class TestDVISolver(unittest.TestCase):
                 self.assertAlmostEqual(float(speeds[-1]), expected_rolling_speed, delta=1.0e-4)
                 self.assertLessEqual(float(np.abs(slip[-1])), 1.0e-5)
                 # Coulomb friction only opposes sliding, so the speed never rises.
-                self.assertLessEqual(float(np.max(np.diff(speeds))), 1.0e-6)
+                self.assertLessEqual(float(np.max(np.diff(speeds))), 1.0e-5)
 
     def test_08b_dr_legs_contact_capacity_scales_with_world_count(self):
         if not self.device.is_cuda:

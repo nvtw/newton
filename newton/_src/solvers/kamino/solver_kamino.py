@@ -453,14 +453,9 @@ class SolverKamino(SolverBase, CouplingInterface):
             if self.padmm is None:
                 self.padmm = config.PADMMSolverConfig()
             if self.dvi is None:
-                if self.dynamics_solver == "dvi" and self.sparse_dynamics:
-                    self.dvi = config.DVISolverConfig(
-                        max_alternating_iterations=16,
-                        inequality_sweeps_per_iteration=2,
-                        bilateral_solve_interval=2,
-                    )
-                else:
-                    self.dvi = config.DVISolverConfig()
+                # Storage backends share one convergence schedule; sparse
+                # optimizations must not silently weaken DVI semantics.
+                self.dvi = config.DVISolverConfig()
             if self.materials is None:
                 self.materials = config.MaterialManagerConfig()
 
