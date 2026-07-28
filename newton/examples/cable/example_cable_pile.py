@@ -158,17 +158,12 @@ class Example:
 
         builder.color()
 
-        self.model = builder.finalize()
+        self.model = self.finalize_model(builder)
         # Size persistent contact history before CUDA graph capture.
-        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="latest")
+        self.collision_pipeline = self.create_collision_pipeline()
         self.contacts = self.collision_pipeline.contacts()
 
-        self.solver = newton.solvers.SolverVBD(
-            self.model,
-            iterations=self.sim_iterations,
-            rigid_body_contact_buffer_size=256,
-            rigid_contact_history=True,
-        )
+        self.solver = self.create_solver()
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -184,6 +179,23 @@ class Example:
             picking.pick_state.assign(ps)
 
         self.capture()
+
+    def finalize_model(self, builder):
+        """Finalize the model used by this scene."""
+        return builder.finalize()
+
+    def create_collision_pipeline(self):
+        """Create the collision pipeline used by this scene."""
+        return newton.CollisionPipeline(self.model, contact_matching="latest")
+
+    def create_solver(self):
+        """Create the solver used by this scene."""
+        return newton.solvers.SolverVBD(
+            self.model,
+            iterations=self.sim_iterations,
+            rigid_body_contact_buffer_size=256,
+            rigid_contact_history=True,
+        )
 
     def capture(self):
         """Capture simulation loop into a graph for optimal performance."""

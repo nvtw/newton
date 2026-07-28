@@ -200,13 +200,13 @@ class Example:
         self.model = builder.finalize()
 
         # Use full hard-contact correction (contact alpha 0.0) for stronger repulsion with low iterations.
-        self.solver = newton.solvers.SolverVBD(self.model, iterations=self.sim_iterations, rigid_avbd_contact_alpha=0.0)
+        self.solver = self.create_solver()
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        self.collision_pipeline = newton.CollisionPipeline(self.model)
+        self.collision_pipeline = self.create_collision_pipeline()
         self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
@@ -216,6 +216,22 @@ class Example:
         self.first_twist_rates = wp.array(twist_rates, dtype=wp.float32)
 
         self.capture()
+
+    def create_solver(self):
+        """Create the solver used by this scene."""
+        return newton.solvers.SolverVBD(
+            self.model,
+            iterations=self.sim_iterations,
+            rigid_avbd_contact_alpha=0.0,
+        )
+
+    def create_collision_pipeline(self):
+        """Create the collision pipeline used by this scene."""
+        return newton.CollisionPipeline(self.model)
+
+    def update_solver_contact_history(self, refresh_contacts):
+        """Tell VBD whether contacts were refreshed this substep."""
+        self.solver.set_rigid_history_update(refresh_contacts)
 
     def capture(self):
         """Capture simulation loop into a CUDA graph for optimal GPU performance."""
@@ -247,7 +263,7 @@ class Example:
             if refresh_contacts:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
 
-            self.solver.set_rigid_history_update(refresh_contacts)
+            self.update_solver_contact_history(refresh_contacts)
             self.solver.step(
                 self.state_0,
                 self.state_1,
