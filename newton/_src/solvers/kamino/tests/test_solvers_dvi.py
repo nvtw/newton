@@ -91,6 +91,54 @@ def _build_high_mass_ratio_sphere_stack() -> ModelBuilderKamino:
     return builder
 
 
+def _build_reduced_kapla_tower(layer_count: int = 6) -> tuple[newton.ModelBuilder, list[int], np.ndarray]:
+    """Build a compact pinwheel tower for dynamic contact regressions."""
+    plank_length = 0.30
+    plank_thickness = 0.02
+    plank_height = 0.06
+    half_side = 0.5 * (plank_length + plank_thickness)
+    local_specs = (
+        ((0.5 * plank_length, 0.5 * plank_thickness), 0.0),
+        ((plank_length + 0.5 * plank_thickness, 0.5 * plank_length), 0.5 * np.pi),
+        ((0.5 * plank_length + plank_thickness, plank_length + 0.5 * plank_thickness), np.pi),
+        ((0.5 * plank_thickness, 0.5 * plank_length + plank_thickness), -0.5 * np.pi),
+    )
+
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    SolverKamino.register_custom_attributes(builder)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.5, gap=0.0, margin=0.0)
+    bodies = []
+    initial_positions = []
+    for layer in range(layer_count):
+        layer_yaw = 0.25 * np.pi if layer % 2 else 0.0
+        cos_layer = float(np.cos(layer_yaw))
+        sin_layer = float(np.sin(layer_yaw))
+        z = 0.5 * plank_height + layer * plank_height
+        for (local_x, local_y), local_yaw in local_specs:
+            centered_x = local_x - half_side
+            centered_y = local_y - half_side
+            x = cos_layer * centered_x - sin_layer * centered_y
+            y = sin_layer * centered_x + cos_layer * centered_y
+            yaw = float(layer_yaw + local_yaw)
+            body = builder.add_body(
+                xform=wp.transformf(
+                    (x, y, z),
+                    wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), yaw),
+                ),
+            )
+            builder.add_shape_box(
+                body=body,
+                hx=0.5 * plank_length,
+                hy=0.5 * plank_thickness,
+                hz=0.5 * plank_height,
+                cfg=shape_cfg,
+            )
+            bodies.append(body)
+            initial_positions.append((x, y, z))
+    builder.add_ground_plane(cfg=shape_cfg)
+    return builder, bodies, np.asarray(initial_positions, dtype=np.float32)
+
+
 def _reduce_solver_status(status: np.ndarray) -> dict[str, object]:
     """Reduce per-world status while requiring every world to converge."""
     return {
@@ -1470,6 +1518,61 @@ class TestDVISolver(unittest.TestCase):
                         expected_total_impulse,
                         delta=0.02 * expected_total_impulse,
                     )
+
+    def test_05b2_dvi_reduced_kapla_tower_remains_stable(self):
+        """Keep a six-layer plank tower stable in dense and sparse modes."""
+        builder, bodies, initial_positions = _build_reduced_kapla_tower()
+        model = builder.finalize(device=self.device)
+        dt = 1.0e-3
+        steps = 50
+        final_positions = []
+
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    use_collision_detector=True,
+                    sparse_dynamics=sparse,
+                    sparse_jacobian=sparse,
+                    collision_detector=kamino_config.CollisionDetectorConfig(
+                        max_contacts=512,
+                        max_contacts_per_world=512,
+                        max_contacts_per_pair=8,
+                    ),
+                )
+                solver = SolverKamino(model, config=config)
+                state_0 = model.state()
+                state_1 = model.state()
+                if self.device.is_cuda and wp.is_mempool_enabled(self.device):
+                    solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+                    solver.step(state_1, state_0, control=None, contacts=None, dt=dt)
+                    with wp.ScopedCapture(self.device) as capture:
+                        solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+                        solver.step(state_1, state_0, control=None, contacts=None, dt=dt)
+                    for _ in range((steps - 4) // 2):
+                        wp.capture_launch(capture.graph)
+                else:
+                    for _ in range(steps):
+                        solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+                        state_0, state_1 = state_1, state_0
+
+                _assert_solver_status_converged(self, solver._solver_kamino.solver_fd)
+                positions = state_0.body_q.numpy()[bodies, :3]
+                velocities = state_0.body_qd.numpy()[bodies]
+                drop = initial_positions[:, 2] - positions[:, 2]
+                horizontal_drift = np.linalg.norm(positions[:, :2] - initial_positions[:, :2], axis=1)
+
+                contact_count = int(solver._contacts_kamino.world_active_contacts.numpy()[0])
+                self.assertGreater(contact_count, len(bodies))
+                self.assertLess(contact_count, 512)
+                self.assertTrue(np.all(np.isfinite(positions)))
+                self.assertTrue(np.all(np.isfinite(velocities)))
+                self.assertLess(float(np.max(drop)), 0.015)
+                self.assertLess(float(np.max(horizontal_drift)), 0.01)
+                final_positions.append(positions)
+
+        if len(final_positions) == 2:
+            np.testing.assert_allclose(final_positions[0], final_positions[1], rtol=0.0, atol=2.0e-3)
 
     def test_05c_dvi_high_mass_ratio_stack_supports_weight(self):
         """Support a 100:1 sphere stack accurately in dense and sparse modes."""
