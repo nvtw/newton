@@ -140,7 +140,7 @@ class _MatchData:
     new_count: wp.array[wp.int32]
     canonical_to_source: wp.array[wp.int32]
     use_permutation: int
-    reject_separated: int
+    sticky: int
 
     # Body transforms for world-space conversion
     body_q: wp.array[wp.transform]
@@ -210,7 +210,7 @@ def _match_contacts_kernel(data: _MatchData):
     new_pos_w = 0.5 * (p0w + p1w)
     new_n = data.new_normal[source]
     fresh_gap = wp.dot(p1w - p0w, new_n) - (data.new_margin0[source] + data.new_margin1[source])
-    if data.reject_separated != 0 and fresh_gap > wp.float32(0.0):
+    if data.sticky != 0 and fresh_gap > wp.float32(0.0):
         data.match_index[tid] = MATCH_BROKEN
         return
 
@@ -237,6 +237,10 @@ def _match_contacts_kernel(data: _MatchData):
         old_pos = data.prev_pos_world[old_idx]
         diff = new_pos_w - old_pos
         dist_sq = wp.dot(diff, diff)
+        # Sticky anchors age through surface slip, not normal compression.
+        if data.sticky != 0:
+            normal_dist = wp.dot(diff, new_n)
+            dist_sq = wp.max(dist_sq - normal_dist * normal_dist, wp.float32(0.0))
         old_n = data.prev_normal[old_idx]
         ndot = wp.dot(new_n, old_n)
 
@@ -472,7 +476,9 @@ class ContactMatcher:
 
     Args:
         capacity: Maximum contact count.
-        pos_threshold: Maximum midpoint distance [m] for a match.
+        pos_threshold: Maximum midpoint drift [m] for a match. Sticky matching
+            measures drift in the current contact plane; other modes use 3-D
+            world-space distance.
         normal_dot_threshold: Minimum normal dot product for a match.
         contact_report: Whether to retain matched flags for reports.
         sticky: Whether to retain canonical sticky geometry history.
@@ -597,7 +603,9 @@ class ContactMatcher:
 
         Distance is measured between world-space contact midpoints
         (``0.5 * (world(point0) + world(point1))``) so the metric is symmetric
-        in shape 0 / shape 1.
+        in shape 0 / shape 1. Sticky matching projects midpoint drift onto
+        the current contact plane; its normal validity is handled separately
+        by the fresh margin-aware gap.
 
         Args:
             sort_keys: Current-frame int64 sort keys.
@@ -644,7 +652,7 @@ class ContactMatcher:
         data.new_count = contact_count
         data.canonical_to_source = canonical_to_source if canonical_to_source is not None else match_index_out
         data.use_permutation = 1 if canonical_to_source is not None else 0
-        data.reject_separated = 1 if self._sticky else 0
+        data.sticky = 1 if self._sticky else 0
         data.body_q = body_q
         data.shape_body = shape_body
         data.match_index = match_index_out

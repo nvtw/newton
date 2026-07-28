@@ -76,6 +76,7 @@
 - Skip zero-weight optional reward-family calculations in the experimental G1 PhoenXRL environment while preserving enabled reward behavior.
 - Keep integrated reduced-coordinate PhoenX forward recurrences within CUDA warp groups and avoid publishing transient response workspaces.
 - Store sticky collision offset directions in octahedral vec2 history and reconstruct their magnitudes from contact margins.
+- Measure sticky contact-anchor expiry in the contact plane while retaining margin-aware normal validity.
 - Reduce PhoenX contact warm-start traffic by loading local anchors only when contact reuse or stale-anchor correction requires them.
 - Restore the experimental `SolverPhoenX.max_colored_partitions` default to 12 and the Kapla example to its faster 8-color/10-iteration hybrid; pass `max_colored_partitions=24` explicitly to retain the higher-quality, lower-throughput policy.
 - Improve `BroadPhaseSAP` performance on anisotropic scenes with denser projection-axis coverage and longer best-axis reuse.
