@@ -44,6 +44,7 @@ from .collision_core import sat_box_intersection
 from .contact_data import ContactData
 from .contact_reduction import get_slot
 from .contact_reduction_global import (
+    CONTACT_ID_BITS,
     GlobalContactReducerData,
     decode_oct,
     encode_oct,
@@ -73,10 +74,10 @@ PRE_PRUNE_MAX_PENETRATING = 2
 # reduction fingerprint and as the contact sort sub-key.
 MAX_MC_FACES_PER_VOXEL = 5
 
-# Contact sort sub-keys reserve bit 22 for hydroelastic anchor contacts (see
-# ``create_export_hydroelastic_reduced_contacts_kernel``), so face fingerprints
-# must stay below it to remain distinguishable after masking.
-_MAX_FACE_FINGERPRINT = 0x400000
+# Contact sort sub-keys reserve bit 22 for hydroelastic anchor contacts and bit
+# 0 for the normal/voxel reduction source. Face fingerprints are shifted left
+# by one during export, so they must stay below bit 21.
+_MAX_FACE_FINGERPRINT = 0x200000
 
 
 def _validate_deterministic_fingerprint_range(max_num_iso_voxels: int) -> None:
@@ -513,6 +514,15 @@ class HydroelasticSDF:
             self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
             if deterministic:
                 _validate_deterministic_fingerprint_range(self.max_num_iso_voxels)
+                max_det_contacts = 1 << int(CONTACT_ID_BITS)
+                if self.max_num_face_contacts > max_det_contacts:
+                    raise ValueError(
+                        f"Deterministic hydroelastic contact packing supports at most {max_det_contacts} "
+                        f"buffered face contacts ({int(CONTACT_ID_BITS)}-bit contact_id), but "
+                        f"HydroelasticSDF allocated {self.max_num_face_contacts}. Lower "
+                        "HydroelasticSDF.Config.buffer_mult_contact or buffer_fraction, or disable "
+                        "deterministic mode."
+                    )
 
             if self.config.output_contact_surface:
                 # stores the point and depth of the contact surface vertex
@@ -604,7 +614,7 @@ class HydroelasticSDF:
         self._host_warning_poll_interval = 120
         self._launch_counter = 0
 
-    def validate_deterministic(self, deterministic: bool) -> None:
+    def _validate_deterministic(self, deterministic: bool) -> None:
         """Raise if ``deterministic`` disagrees with the mode chosen at construction.
 
         Lets :class:`~newton.geometry.NarrowPhase` reject a pre-built instance

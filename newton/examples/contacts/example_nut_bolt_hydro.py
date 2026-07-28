@@ -10,6 +10,7 @@
 #
 ###########################################################################
 
+import argparse
 import tempfile
 from pathlib import Path
 
@@ -154,6 +155,7 @@ class Example:
         self.viewer = viewer
         self.solver_type = args.solver
         self.test_mode = args.test
+        self.deterministic = args.deterministic
 
         # XPBD contact correction (0.0 = no correction, 1.0 = full correction)
         self.xpbd_contact_relaxation = 0.8
@@ -212,6 +214,7 @@ class Example:
             rigid_contact_max=self.rigid_contact_max,
             broad_phase=self.broad_phase_mode,
             sdf_hydroelastic_config=sdf_hydroelastic_config,
+            deterministic=self.deterministic,
         )
 
         # Create solver based on user choice
@@ -220,6 +223,9 @@ class Example:
                 self.model,
                 iterations=10,
                 rigid_contact_relaxation=self.xpbd_contact_relaxation,
+                deterministic=wp.DeterministicMode.RUN_TO_RUN
+                if self.deterministic
+                else wp.DeterministicMode.NOT_GUARANTEED,
             )
         elif self.solver_type == "mujoco":
             num_per_world = self.rigid_contact_max // self.world_count
@@ -234,6 +240,9 @@ class Example:
                 iterations=15,
                 ls_iterations=100,
                 impratio=1.0,
+                deterministic=wp.DeterministicMode.RUN_TO_RUN
+                if self.deterministic
+                else wp.DeterministicMode.NOT_GUARANTEED,
             )
         else:
             raise ValueError(f"Unknown solver '{self.solver_type}'")
@@ -455,6 +464,12 @@ class Example:
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
         parser.set_defaults(world_count=20)
+        parser.add_argument(
+            "--deterministic",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Make contacts and the solver bit-exact across runs on the same GPU.",
+        )
         parser.add_argument(
             "--solver",
             type=str,

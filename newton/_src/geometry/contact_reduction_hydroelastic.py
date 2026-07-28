@@ -88,11 +88,6 @@ MIN_FRICTION_SCALE = 1e-2
 # Sentinel exponent meaning "this entry saw no usable contribution".
 FIXED_EXP_NONE = wp.constant(-10000)
 
-# Keeps ``2**|shift|`` inside the float32 range when converting to and from the
-# fixed-point grid; contributions this far below the entry maximum round to zero
-# in float32 arithmetic anyway.
-FIXED_EXP_CLAMP = wp.constant(80)
-
 # Fixed accumulator slots, laid out slot-major as ``slot * ht_capacity + entry``
 # to match ``ht_values``.
 FIXED_AGG_FORCE = wp.constant(0)  # 3 components
@@ -158,15 +153,20 @@ def _max_abs_component(v: wp.vec3) -> float:
 
 
 @wp.func
-def _fixed_shift(exp_ref: int, mantissa_bits: int) -> float:
+def _fixed_shift(exp_ref: int, mantissa_bits: int) -> wp.float64:
     """Power-of-two factor mapping an entry's grid onto the fixed-point range."""
-    return wp.pow(2.0, float(mantissa_bits - wp.clamp(exp_ref, -FIXED_EXP_CLAMP, FIXED_EXP_CLAMP)))
+    # Every non-sentinel exponent comes from a finite float32 contribution, so
+    # forming the exact shift in float64 covers its full exponent range while
+    # preserving the int64 overflow proof in ``_fixed_mantissa_bits``.
+    return wp.pow(wp.float64(2.0), wp.float64(mantissa_bits - exp_ref))
 
 
 @wp.func
 def _to_fixed(x: float, exp_ref: int, mantissa_bits: int) -> wp.int64:
     """Quantize ``x`` onto the fixed-point grid selected for its entry."""
-    return wp.int64(wp.round(wp.float64(x) * wp.float64(_fixed_shift(exp_ref, mantissa_bits))))
+    if exp_ref == FIXED_EXP_NONE:
+        return wp.int64(0)
+    return wp.int64(wp.round(wp.float64(x) * _fixed_shift(exp_ref, mantissa_bits)))
 
 
 @wp.func
@@ -174,7 +174,7 @@ def _from_fixed(v: wp.int64, exp_ref: int, mantissa_bits: int) -> float:
     """Convert a completed fixed-point sum back to float32."""
     if exp_ref == FIXED_EXP_NONE:
         return 0.0
-    return wp.float32(wp.float64(v) / wp.float64(_fixed_shift(exp_ref, mantissa_bits)))
+    return wp.float32(wp.float64(v) / _fixed_shift(exp_ref, mantissa_bits))
 
 
 @wp.func
@@ -597,7 +597,14 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
             bin_id = get_slot(normal)
             key = make_contact_key(shape_a, shape_b, bin_id)
 
-            entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+            entry_idx = int(-1)
+            if reducer_data.deterministic != 0:
+                # Deterministic aggregate accumulation pre-registers normal
+                # bins. Reuse that result so a failed registration is counted
+                # once rather than again in this kernel.
+                entry_idx = reducer_data.contact_nbin_entry[i]
+            else:
+                entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
 
             # Cache normal-bin entry index for downstream kernels (avoids repeated hash lookups)
             if reducer_data.contact_nbin_entry.shape[0] > 0:
@@ -652,7 +659,7 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any):
                         area_i = reducer_data.contact_area[i]
                         p_i = wp.static(pressure_func)(depth, shape_b, pressure_data)
                         wp.atomic_add(agg_moment_unreduced, entry_idx, area_i * p_i * lever)
-            else:
+            elif reducer_data.deterministic == 0:
                 wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
             # === Part 2: Voxel-based reduction ===
@@ -1032,6 +1039,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(
         for i in range(tid, num_active, total_num_threads):
             # Get the hashtable entry index
             entry_idx = ht_active_slots[i]
+            bin_id = int((ht_keys[entry_idx] >> wp.uint64(55)) & wp.uint64(0xFF))
+            is_voxel_entry = bin_id >= wp.static(NUM_NORMAL_BINS)
 
             # === First pass: collect unique contacts and compute aggregates ===
             exported_ids = exported_ids_vec()
@@ -1361,7 +1370,10 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.gap_sum = gap_sum
                 contact_data.contact_stiffness = c_stiffness
                 contact_data.contact_friction_scale = wp.float32(c_friction_scale)
-                contact_data.sort_sub_key = contact_fingerprints[contact_id]
+                # Both copies contribute to the force-preserving denominator
+                # when a face wins a normal and voxel entry. Tag their sources
+                # so their exported sort keys remain unique.
+                contact_data.sort_sub_key = (contact_fingerprints[contact_id] << 1) | int(is_voxel_entry)
 
                 # Call the writer function
                 writer_func(contact_data, writer_data, -1)
@@ -1388,7 +1400,6 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 contact_data.gap_sum = gap_sum
                 contact_data.contact_stiffness = shared_stiffness
                 contact_data.contact_friction_scale = wp.float32(anchor_friction_scale)
-                bin_id = int((ht_keys[entry_idx] >> wp.uint64(55)) & wp.uint64(0xFF))
                 contact_data.sort_sub_key = 0x400000 | bin_id
 
                 # Call the writer function for anchor
