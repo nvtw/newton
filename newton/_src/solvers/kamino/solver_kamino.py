@@ -17,13 +17,6 @@ import warp as wp
 
 from ...core.types import override
 from ...geometry.types import GeoType
-from ...sim.collide import (
-    _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE,
-    _RIGID_CONTACT_MIN_CAPACITY,
-    _RIGID_CONTACTS_PER_MESH_PAIR,
-    _RIGID_CONTACTS_PER_PRIMITIVE_PAIR,
-    _estimate_rigid_contact_max,
-)
 from ...sim import (
     Contacts,
     Control,
@@ -33,6 +26,13 @@ from ...sim import (
     ModelFlags,
     State,
     StateFlags,
+)
+from ...sim.collide import (
+    _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE,
+    _RIGID_CONTACT_MIN_CAPACITY,
+    _RIGID_CONTACTS_PER_MESH_PAIR,
+    _RIGID_CONTACTS_PER_PRIMITIVE_PAIR,
+    _estimate_rigid_contact_max,
 )
 from ..coupled.interface import CouplingInterface
 from ..solver import SolverBase
@@ -83,14 +83,11 @@ def _estimate_dvi_contacts_per_world(model, newton_model: Model) -> int:
         primitive_count = non_plane_count - mesh_count
         plane_count = int(np.count_nonzero(plane_mask))
         non_plane_contacts = (
-            primitive_count
-            * _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE
-            * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR
+            primitive_count * _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR
             + mesh_count * _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE * _RIGID_CONTACTS_PER_MESH_PAIR
         ) // 2
         plane_contacts = plane_count * (
-            primitive_count * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR
-            + mesh_count * _RIGID_CONTACTS_PER_MESH_PAIR
+            primitive_count * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR + mesh_count * _RIGID_CONTACTS_PER_MESH_PAIR
         )
         max_world_contacts = max(
             max_world_contacts,
