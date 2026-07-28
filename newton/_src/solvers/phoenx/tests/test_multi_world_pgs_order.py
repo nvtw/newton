@@ -44,6 +44,7 @@ def _phoenx_factory(step_layout: str, multi_world_scheduler: str = "auto"):
             step_layout=step_layout,
             multi_world_scheduler=multi_world_scheduler,
             prepare_refresh_stride=1,
+            articulation_mode="maximal",
         )
 
     return make

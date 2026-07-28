@@ -91,6 +91,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     read_int,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
+    _OFF_STRUCTURAL_DIRECT,
     ADBS_TIME_US_OFFSET,
     actuated_double_ball_socket_cached_warmstart,
     actuated_double_ball_socket_iterate,
@@ -122,6 +123,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_side0_bary,
     cc_get_side1_bary,
+)
+from newton._src.solvers.phoenx.constraints.joint_inequality import (
+    actuated_double_ball_socket_iterate_inequality,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
@@ -168,6 +172,7 @@ __all__ = [
     "_PER_WORLD_FAST_FAMILIES",
     "_STRAGGLER_BLOCK_DIM",
     "_choose_fast_tail_worlds_per_block",
+    "_collapse_direct_equality_elements_kernel",
     "_constraint_gather_errors_kernel",
     "_constraint_gather_wrenches_kernel",
     "_constraints_to_elements_kernel",
@@ -980,6 +985,27 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
         t0 = wp.uint64(0)
         if wp.static(enable_column_timers):
             t0 = read_global_timer_ns()
+        if read_int(constraints, _OFF_STRUCTURAL_DIRECT, cid) != wp.int32(0):
+            sweep = wp.int32(0)
+            while sweep < num_sweeps:
+                actuated_double_ball_socket_iterate_inequality(
+                    constraints,
+                    cid,
+                    bodies,
+                    particles,
+                    copy_state,
+                    num_bodies,
+                    wp.int32(0),
+                    idt,
+                    sor_boost,
+                    use_bias,
+                )
+                sweep += wp.int32(1)
+            if wp.static(enable_column_timers):
+                constraint_accumulate_time_us(
+                    constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns())
+                )
+            return
         if wp.static(revolute_only):
             revolute_iterate_multi(
                 constraints,
@@ -2670,6 +2696,8 @@ def _constraints_to_elements_kernel(
     particles: ParticleContainer,
     num_constraints: wp.array[wp.int32],
     num_joints: wp.int32,
+    joint_pgs_enabled: wp.array[wp.int32],
+    preserve_equality_island_edges: wp.int32,
     num_cloth_triangles: wp.int32,
     num_cloth_bending: wp.int32,
     num_soft_tetrahedra: wp.int32,
@@ -2704,6 +2732,11 @@ def _constraints_to_elements_kernel(
     packed_priorities[tid] = random_values[tid] & wp.int32(0x00FFFFFF)
     if tid < num_joints:
         element_family[tid] = wp.int32(0)
+        if joint_pgs_enabled[tid] == wp.int32(0) and preserve_equality_island_edges == wp.int32(0):
+            elements[tid] = _element_data_compact2(wp.int32(-1), wp.int32(-1))
+            if track_rigid_topology != wp.int32(0):
+                _record_rigid_topology(tid, wp.int32(-1), wp.int32(-1), previous_topology, topology_rebuild)
+            return
         b1 = constraint_get_body1(constraints, tid)
         b2 = constraint_get_body2(constraints, tid)
         b1 = _rigid_graph_node(b1, bodies)
@@ -2845,6 +2878,21 @@ def _constraints_to_elements_kernel(
     elements[tid] = _element_data_compact8(b1, b2, e0a, e0b, e0c, e1a, e1b, e1c)
     if track_rigid_topology != wp.int32(0):
         _record_rigid_topology(tid, b1, b2, previous_topology, topology_rebuild)
+
+
+@wp.kernel(enable_backward=False)
+def _collapse_direct_equality_elements_kernel(
+    num_constraints: wp.array[wp.int32],
+    num_joints: wp.int32,
+    joint_pgs_enabled: wp.array[wp.int32],
+    elements: wp.array[ElementInteractionData],
+):
+    """Remove equality-only island edges before graph coloring."""
+    cid = wp.tid()
+    if cid >= num_constraints[0] or cid >= num_joints:
+        return
+    if joint_pgs_enabled[cid] == wp.int32(0):
+        elements[cid] = _element_data_compact2(wp.int32(-1), wp.int32(-1))
 
 
 @wp.kernel(enable_backward=False)
@@ -3472,9 +3520,23 @@ def _make_singleworld_rigid_joint_dispatch_func(
         if wp.static(is_prepare or is_cached_prepare):
             joint_func(constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt)
         else:
-            joint_func(
-                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost, use_bias
-            )
+            if read_int(constraints, _OFF_STRUCTURAL_DIRECT, cid) != wp.int32(0):
+                actuated_double_ball_socket_iterate_inequality(
+                    constraints,
+                    cid,
+                    bodies,
+                    particles,
+                    copy_state,
+                    num_bodies,
+                    parallel_id,
+                    idt,
+                    sor_boost,
+                    use_bias,
+                )
+            else:
+                joint_func(
+                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost, use_bias
+                )
 
         if wp.static(enable_column_timers):
             constraint_accumulate_time_us(constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns()))

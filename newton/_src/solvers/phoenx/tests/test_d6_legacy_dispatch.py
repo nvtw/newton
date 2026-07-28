@@ -30,7 +30,7 @@ def _make_body(builder: newton.ModelBuilder) -> int:
 
 
 def _mode_for(model: newton.Model) -> int:
-    solver = newton.solvers.SolverPhoenX(model, substeps=1)
+    solver = newton.solvers.SolverPhoenX(model, substeps=1, articulation_mode="maximal")
     return int(solver._adbs.joint_mode.numpy()[0])
 
 
@@ -48,7 +48,7 @@ class TestD6LegacyDispatch(unittest.TestCase):
         builder.add_articulation([joint])
 
         model = builder.finalize()
-        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        solver = newton.solvers.SolverPhoenX(model, substeps=1, articulation_mode="maximal")
 
         self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_BALL_SOCKET))
         self.assertEqual(int(solver._adbs.d6_limit_count.numpy()[0]), 3)
@@ -66,7 +66,7 @@ class TestD6LegacyDispatch(unittest.TestCase):
         builder.add_articulation([joint])
 
         model = builder.finalize()
-        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        solver = newton.solvers.SolverPhoenX(model, substeps=1, articulation_mode="maximal")
 
         self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
         self.assertEqual(int(solver._adbs.d6_limit_count.numpy()[0]), 2)
@@ -84,7 +84,7 @@ class TestD6LegacyDispatch(unittest.TestCase):
         builder.add_articulation([joint])
         model = builder.finalize()
         model.set_gravity((0.0, 0.0, 0.0))
-        solver = newton.solvers.SolverPhoenX(model, substeps=2, solver_iterations=8)
+        solver = newton.solvers.SolverPhoenX(model, substeps=2, solver_iterations=8, articulation_mode="maximal")
 
         state_0 = model.state()
         state_1 = model.state()
@@ -121,7 +121,7 @@ class TestD6LegacyDispatch(unittest.TestCase):
         joint = builder.add_joint_d6(parent=-1, child=body, angular_axes=axes)
         builder.add_articulation([joint])
         model = builder.finalize()
-        solver = newton.solvers.SolverPhoenX(model, substeps=1)
+        solver = newton.solvers.SolverPhoenX(model, substeps=1, articulation_mode="maximal")
 
         self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_REVOLUTE))
         self.assertEqual(int(solver._adbs.joint_idx_to_dof_start.numpy()[0]), 0)
@@ -147,7 +147,7 @@ class TestD6LegacyDispatch(unittest.TestCase):
         builder.add_articulation([joint])
 
         with self.assertRaisesRegex(NotImplementedError, "cannot be reduced"):
-            newton.solvers.SolverPhoenX(builder.finalize(), substeps=1)
+            newton.solvers.SolverPhoenX(builder.finalize(), substeps=1, articulation_mode="maximal")
 
 
 if __name__ == "__main__":

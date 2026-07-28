@@ -32,12 +32,16 @@ class MultiWorldDispatcher:
         pass
 
     def solve(self, idt: wp.float32) -> None:
-        # Bundles prepare + every iterate into one scheduler launch.
+        direct = getattr(self._world, "_direct_equality_system", None)
+        if direct is not None and direct.enabled:
+            direct.prepare_and_factor(idt)
         if self._world._regular_pgs_active_this_step:
             if self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported():
                 self._world._solve_main_block_world()
             else:
                 self._world._solve_main()
+        elif direct is not None and direct.enabled:
+            direct.solve(use_bias=True)
         if self._world._maximal_tree_projector is not None:
             self._world._maximal_tree_projector.project(use_bias=True, dt=self._world.substep_dt)
             self._world._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
@@ -45,11 +49,14 @@ class MultiWorldDispatcher:
             self._world._reduced_articulation.solve_constraints(self._world, idt, relax=False)
 
     def relax(self, idt: wp.float32) -> None:
+        direct = getattr(self._world, "_direct_equality_system", None)
         if self._world._regular_pgs_active_this_step:
             if self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported():
                 self._world._relax_velocities_block_world()
             else:
                 self._world._relax_velocities()
+        elif direct is not None and direct.enabled and self._world.velocity_iterations > 0:
+            direct.solve(use_bias=False)
         if self._world._maximal_tree_projector is not None:
             self._world._maximal_tree_projector.project(use_bias=False, dt=self._world.substep_dt)
             if self._world.velocity_iterations > 0:

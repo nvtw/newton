@@ -47,6 +47,20 @@ class SingleWorldMassSplittingDispatcher:
             # for the next substep.
             w._mass_splitting_writeback()
             return
+        direct = getattr(w, "_direct_equality_system", None)
+        if direct is not None and direct.enabled:
+            direct.prepare_and_factor(idt)
+
+        if not w._regular_pgs_active_this_step:
+            w._mass_splitting_writeback()
+            if direct is not None and direct.enabled:
+                direct.solve(use_bias=True)
+            if w._maximal_tree_projector is not None:
+                w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
+                w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
+            if w._reduced_constraints_active_this_step:
+                w._reduced_articulation.solve_constraints(w, idt, relax=False)
+            return
 
         inv_dt = 1.0 / w.substep_dt
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
@@ -72,15 +86,35 @@ class SingleWorldMassSplittingDispatcher:
                 contact_container=w._contact_container_solve,
             )
             w._mass_splitting_average_and_broadcast(inv_dt)
+            if direct is not None and direct.enabled:
+                w._mass_splitting_writeback(already_averaged=True)
+                direct.solve(use_bias=True)
+                w._mass_splitting_broadcast()
 
         # Writeback slot[0].velocity -> body.velocity. step()'s
         # integrate_positions then advances bodies with the post-PGS
         # velocity.
         w._mass_splitting_writeback(already_averaged=True)
+        if w._maximal_tree_projector is not None:
+            w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
+            w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
+        if w._reduced_constraints_active_this_step:
+            w._reduced_articulation.solve_constraints(w, idt, relax=False)
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
         if w._constraint_capacity == 0 or w.velocity_iterations <= 0:
+            return
+
+        direct = getattr(w, "_direct_equality_system", None)
+        if not w._regular_pgs_active_this_step:
+            if direct is not None and direct.enabled:
+                direct.solve(use_bias=False)
+            if w._maximal_tree_projector is not None:
+                w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
+                w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
+            if w._reduced_constraints_active_this_step:
+                w._reduced_articulation.solve_constraints(w, idt, relax=True)
             return
 
         # Pose integration updates anisotropic angular velocity and world
@@ -100,9 +134,19 @@ class SingleWorldMassSplittingDispatcher:
             )
             w._mass_splitting_average_and_broadcast(inv_dt)
 
+            if direct is not None and direct.enabled:
+                w._mass_splitting_writeback(already_averaged=True)
+                direct.solve(use_bias=False)
+                w._mass_splitting_broadcast()
         # Second writeback after relax: relax also routes through slots,
         # so the next substep would see stale body.velocity otherwise.
         w._mass_splitting_writeback(already_averaged=True)
+
+        if w._maximal_tree_projector is not None:
+            w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
+            w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
+        if w._reduced_constraints_active_this_step:
+            w._reduced_articulation.solve_constraints(w, idt, relax=True)
 
 
 __all__ = ["SingleWorldMassSplittingDispatcher"]

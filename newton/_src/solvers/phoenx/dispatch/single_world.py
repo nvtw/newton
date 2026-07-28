@@ -32,6 +32,9 @@ class SingleWorldDispatcher:
         w = self._world
         if w._constraint_capacity == 0:
             return
+        direct = getattr(w, "_direct_equality_system", None)
+        if direct is not None and direct.enabled:
+            direct.prepare_and_factor(idt)
         if w._regular_pgs_active_this_step:
             prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
             if w._refresh_prepare_this_substep():
@@ -42,6 +45,10 @@ class SingleWorldDispatcher:
             for _ in range(w.solver_iterations):
                 w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
+                if direct is not None and direct.enabled:
+                    direct.solve(use_bias=True)
+        elif direct is not None and direct.enabled:
+            direct.solve(use_bias=True)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
             w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
@@ -52,11 +59,16 @@ class SingleWorldDispatcher:
         w = self._world
         if w._constraint_capacity == 0:
             return
+        direct = getattr(w, "_direct_equality_system", None)
         if w._regular_pgs_active_this_step and w.velocity_iterations > 0:
             _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
             for _ in range(w.velocity_iterations):
                 w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
+                if direct is not None and direct.enabled:
+                    direct.solve(use_bias=False)
+        elif direct is not None and direct.enabled and w.velocity_iterations > 0:
+            direct.solve(use_bias=False)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
             if w.velocity_iterations > 0:

@@ -15,6 +15,7 @@ import warp as wp
 
 import newton
 from newton._src.sim import BodyFlags, Contacts, Control, JointType, Model, ModelFlags, State
+from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem
 from newton._src.solvers.phoenx.articulations.maximal_contact_gs import MaximalContactRunSchedule
 from newton._src.solvers.phoenx.articulations.maximal_contact_response import MaximalContactResponse
 from newton._src.solvers.phoenx.articulations.maximal_projector import MaximalTreeProjector
@@ -28,6 +29,16 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_STIFFNESS_DRIVE,
     _OFF_TARGET,
     _OFF_TARGET_VELOCITY,
+    DRIVE_MODE_OFF,
+    JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_CABLE,
+    JOINT_MODE_FIXED,
+    JOINT_MODE_PRISMATIC,
+    JOINT_MODE_REVOLUTE,
+    JOINT_MODE_UNIVERSAL,
+)
+from newton._src.solvers.phoenx.constraints.joint_inequality import (
+    mark_direct_equality_joints_kernel,
 )
 from newton._src.solvers.phoenx.model_adapter import (
     AdbsInitArrays,
@@ -233,8 +244,9 @@ class SolverPhoenX(SolverBase):
         prepare_refresh_stride: int | str = "auto",
         solver_flavor: str = "standard",
         jacobi_max_colors: int = 10,
-        articulation_mode: str = "maximal",
+        articulation_mode: str = "auto",
         reduced_articulation_path: str = "reference",
+        joint_equality_solver: str = "direct",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -297,8 +309,13 @@ class SolverPhoenX(SolverBase):
                 threshold before being flagged sleeping. Default 30
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
                 ``0`` recovers single-frame sleep.
-            articulation_mode: ``"maximal"`` keeps independent-body tree
-                dynamics and classic PhoenX PGS. Revolute ``joint_armature`` is
+            articulation_mode: ``"auto"`` selects reduced coordinates for
+                declared articulations with the direct equality solver and
+                maximal coordinates with the legacy PGS equality solver.
+                ``"maximal"`` keeps independent-body tree
+                dynamics; structural joint rows use the selected
+                ``joint_equality_solver`` and inequality rows remain in
+                PhoenX PGS. Revolute ``joint_armature`` is
                 added to the stator-side parent body and reflected through
                 ``joint_gear`` onto the rotor-side child body.
                 ``"maximal_projected"`` additionally applies an exact
@@ -315,9 +332,29 @@ class SolverPhoenX(SolverBase):
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
                 topology-proven cross-phase articulation fusion on CUDA.
+            joint_equality_solver: ``"direct"`` solves structural joint rows
+                in one RCM-reordered block-Cholesky system per connected
+                maximal-coordinate mechanism. ``"pgs"`` retains the legacy
+                per-joint projected Gauss-Seidel rows.
         """
         super().__init__(model)
         gravity_np = self._read_model_gravity_np(model)
+        if joint_equality_solver not in ("direct", "pgs"):
+            raise ValueError("joint_equality_solver must be 'direct' or 'pgs'")
+        if articulation_mode == "auto":
+            joint_types_for_mode = np.asarray(model.joint_type.numpy(), dtype=np.int32)
+            joint_articulation = np.asarray(model.joint_articulation.numpy(), dtype=np.int32)
+            declared_constraint_articulation = np.any(
+                (joint_types_for_mode != int(JointType.FREE)) & (joint_articulation >= 0)
+            )
+            reduced_supported = (
+                declared_constraint_articulation
+                and not np.any(joint_types_for_mode == int(JointType.CABLE))
+                and not multi_world_scheduler.startswith("block_world")
+            )
+            articulation_mode = "reduced" if joint_equality_solver == "direct" and reduced_supported else "maximal"
+        self.joint_equality_solver = joint_equality_solver
+
         num_worlds = max(1, int(gravity_np.shape[0]))
         has_deformables = any(
             int(getattr(model, field, 0) or 0) > 0
@@ -369,8 +406,8 @@ class SolverPhoenX(SolverBase):
             and solver_flavor != "standard"
         ):
             raise ValueError("projected/hybrid/reduced articulations currently require solver_flavor='standard'")
-        if articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid", "reduced") and mass_splitting:
-            raise ValueError("projected/hybrid/reduced articulation modes require mass_splitting=False")
+        if articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid") and mass_splitting:
+            raise ValueError("projected and hybrid articulation modes require mass_splitting=False")
         if articulation_mode in (
             "maximal_projected",
             "maximal_articulated",
@@ -676,6 +713,72 @@ class SolverPhoenX(SolverBase):
                     if owned and cid >= 0:
                         joint_pgs_enabled[cid] = 0
             self.world.set_reduced_articulation(self._reduced_articulation, joint_pgs_enabled)
+
+        self._direct_equality_system: DirectEqualitySystem | None = None
+        if self.joint_equality_solver == "direct":
+            excluded_joint_mask = None
+            if self._reduced_articulation is not None and self._uses_reduced_joint_ownership:
+                excluded_joint_mask = self._reduced_articulation.owned_joint_mask_np
+            joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
+            effective_joint_mode = np.full(int(model.joint_count), -1, dtype=np.int32)
+            active_joint = joint_idx_to_cid >= 0
+            if np.any(active_joint):
+                effective_joint_mode[active_joint] = self._adbs.joint_mode.numpy()[joint_idx_to_cid[active_joint]]
+            effective_joint_dof_start = self._adbs.joint_idx_to_dof_start.numpy().copy()
+            cable_joint = effective_joint_mode == int(JOINT_MODE_CABLE)
+            if np.any(cable_joint):
+                effective_joint_dof_start[cable_joint] = model.joint_qd_start.numpy()[: int(model.joint_count)][
+                    cable_joint
+                ]
+            self._direct_equality_system = DirectEqualitySystem(
+                model,
+                self.bodies,
+                excluded_joint_mask=excluded_joint_mask,
+                effective_joint_mode=effective_joint_mode,
+                effective_joint_dof_start=effective_joint_dof_start,
+            )
+            self.world._direct_equality_system = self._direct_equality_system
+            if self._direct_equality_system.enabled:
+                # Equality-only columns leave coloring entirely. Axial drive,
+                # friction, and limit columns keep only their lean inequality
+                # iteration in PGS.
+                joint_pgs_enabled = self.world._joint_pgs_enabled.numpy()[:num_joints].copy()
+                drive_mode_np = self._adbs.drive_mode.numpy()
+                friction_np = self._adbs.friction_coefficient.numpy()
+                min_value_np = self._adbs.min_value.numpy()
+                max_value_np = self._adbs.max_value.numpy()
+                d6_limit_count_np = self._adbs.d6_limit_count.numpy()
+                structural_direct = np.zeros(num_joints, dtype=np.int32)
+                for joint in np.flatnonzero(self._direct_equality_system.joint_mask):
+                    cid = int(joint_idx_to_cid[joint])
+                    if cid < 0:
+                        continue
+                    mode = int(effective_joint_mode[joint])
+                    equality_only = mode in (int(JOINT_MODE_FIXED), int(JOINT_MODE_CABLE))
+                    if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
+                        has_drive = int(drive_mode_np[cid]) != int(DRIVE_MODE_OFF)
+                        has_friction = float(friction_np[cid]) > 0.0
+                        lower = float(min_value_np[cid])
+                        upper = float(max_value_np[cid])
+                        # Newton stores unbounded ranges as [-1e10, 1e10].
+                        has_limit = lower <= upper and (lower > -5.0e9 or upper < 5.0e9)
+                        equality_only = not (has_drive or has_friction or has_limit)
+                    elif mode in (int(JOINT_MODE_BALL_SOCKET), int(JOINT_MODE_UNIVERSAL)):
+                        equality_only = int(d6_limit_count_np[cid]) == 0
+                    if not equality_only:
+                        structural_direct[cid] = 1
+                        continue
+                    joint_pgs_enabled[cid] = 0
+                if num_joints > 0:
+                    structural_direct_wp = wp.array(structural_direct, dtype=wp.int32, device=self.device)
+                    wp.launch(
+                        mark_direct_equality_joints_kernel,
+                        dim=num_joints,
+                        inputs=[self._constraints, structural_direct_wp, wp.int32(num_joints)],
+                        device=self.device,
+                    )
+                if num_joints > 0:
+                    self.world.set_joint_pgs_ownership(joint_pgs_enabled)
 
         if num_cloth_triangles > 0:
             self.world.populate_cloth_triangles_from_model(model)

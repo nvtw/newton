@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Add mechanism-wide RCM-reordered direct equality solves to experimental `SolverPhoenX`; pass `joint_equality_solver="pgs"` to retain legacy per-joint PGS equality rows.
+
 
 - Add opt-in adjacency-free endpoint-owner coloring to experimental `SolverPhoenX` single-world mass splitting.
 
@@ -64,6 +66,8 @@
 - Add `forward_depth_image` output support to `SensorTiledCamera.update()` and `SensorTiledCamera.utils.create_forward_depth_image_output()` for native forward-depth rendering without post-processing `depth_image`.
 
 ### Changed
+
+- Make direct joint equalities and reduced ownership of declared PhoenX articulations the default; pass `joint_equality_solver="pgs"` and `articulation_mode="maximal"` for legacy behavior.
 
 - Specialize reduced-coordinate PhoenX fused advance and publication by articulation topology width.
 - Accelerate reduced-coordinate PhoenX compact patch-contact rows with subgroup-cooperative response and solved-delta traversal without changing hard-contact equations.

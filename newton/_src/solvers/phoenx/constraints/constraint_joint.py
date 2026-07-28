@@ -26,8 +26,6 @@ import os
 
 import warp as wp
 
-_SUPPRESS_PGS_DRIVE = os.environ.get("PHOENX_MAXIMAL_IMPLICIT_DRIVE", "0").lower() not in ("0", "", "false", "off")
-
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import (
     MOTION_STATIC,
@@ -98,6 +96,8 @@ from newton._src.solvers.phoenx.solver_config import (
     PHOENX_BOOST_REVOLUTE_LIMIT,
     PHOENX_FRICTION_SLIP_VELOCITY,
 )
+
+_SUPPRESS_PGS_DRIVE = os.environ.get("PHOENX_MAXIMAL_IMPLICIT_DRIVE", "0").lower() not in ("0", "", "false", "off")
 
 __all__ = [
     "ADBS_DWORDS",
@@ -236,7 +236,7 @@ class ActuatedDoubleBallSocketData:
 
     Union over revolute / prismatic / ball-socket / fixed / cable.
     Mode-specific Schur caches live in dedicated slots; the rest is
-    shared. 117 dwords (468 B per joint). See field-level ``#:``
+    shared. 118 dwords (472 B per joint). See field-level ``#:``
     comments for individual slot semantics.
     """
 
@@ -247,6 +247,7 @@ class ActuatedDoubleBallSocketData:
 
     # ---- Shared positional block -------------------------------------
     joint_mode: wp.int32
+    structural_direct: wp.int32
     local_anchor1_b1: wp.vec3f
     local_anchor1_b2: wp.vec3f
     local_anchor2_b1: wp.vec3f
@@ -381,6 +382,7 @@ assert_constraint_header(ActuatedDoubleBallSocketData)
 _OFF_BODY1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "body1"))
 _OFF_BODY2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "body2"))
 _OFF_JOINT_MODE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "joint_mode"))
+_OFF_STRUCTURAL_DIRECT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "structural_direct"))
 _OFF_LA1_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor1_b1"))
 _OFF_LA1_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor1_b2"))
 _OFF_LA2_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor2_b1"))
