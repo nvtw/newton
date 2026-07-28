@@ -208,11 +208,14 @@ def _color_mapped_dvi_inequalities(
     body_color_masks: wp.array[wp.uint64],
     inequality_colors: wp.array[int32],
     inequality_num_colors: wp.array[int32],
+    inequality_ids_by_color: wp.array[int32],
+    inequality_color_starts: wp.array[int32],
 ):
     """Greedily color one world per thread using per-body 64-bit masks.
 
     This favors the many-small-world workload. Unusually high-degree graphs
     that exhaust 64 colors use a slower pairwise fallback without a color cap.
+    The same pass emits compact color ranges shared by dense and sparse PGS.
     """
     wid = wp.tid()
     nu = problem_nl[wid] + problem_nc[wid]
@@ -254,6 +257,25 @@ def _color_mapped_dvi_inequalities(
 
     inequality_num_colors[wid] = num_colors
 
+    schedule_offset = uio + wid
+    for color in range(num_colors + int32(1)):
+        inequality_color_starts[schedule_offset + color] = int32(0)
+    for uid in range(nu):
+        color = inequality_colors[uio + uid]
+        inequality_color_starts[schedule_offset + color + int32(1)] += int32(1)
+    for color in range(num_colors):
+        inequality_color_starts[schedule_offset + color + int32(1)] += inequality_color_starts[schedule_offset + color]
+    for uid in range(nu):
+        color = inequality_colors[uio + uid]
+        slot = inequality_color_starts[schedule_offset + color]
+        inequality_ids_by_color[uio + slot] = uid
+        inequality_color_starts[schedule_offset + color] = slot + int32(1)
+    previous = int32(0)
+    for color in range(num_colors + int32(1)):
+        cursor = inequality_color_starts[schedule_offset + color]
+        inequality_color_starts[schedule_offset + color] = previous
+        previous = cursor
+
 
 @wp.kernel
 def _solve_dvi_sparse_inequalities_pgs(
@@ -281,8 +303,9 @@ def _solve_dvi_sparse_inequalities_pgs(
     problem_v_f: wp.array[float32],
     problem_diag: wp.array[float32],
     eta: wp.array[float32],
-    inequality_colors: wp.array[int32],
     inequality_num_colors: wp.array[int32],
+    inequality_ids_by_color: wp.array[int32],
+    inequality_color_starts: wp.array[int32],
     block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
     body_space: wp.array[float32],
@@ -304,6 +327,7 @@ def _solve_dvi_sparse_inequalities_pgs(
     lio = problem_lio[wid]
     cio = problem_cio[wid]
     uio = problem_uio[wid]
+    schedule_offset = uio + wid
     lcgo = problem_lcgo[wid]
     ccgo = problem_ccgo[wid]
     vio = problem_vio[wid]
@@ -316,8 +340,11 @@ def _solve_dvi_sparse_inequalities_pgs(
 
     for _sweep in range(sweep_budget):
         for color in range(inequality_num_colors[wid]):
-            uid = lane
-            while uid < nu:
+            color_start = inequality_color_starts[schedule_offset + color]
+            color_end = inequality_color_starts[schedule_offset + color + int32(1)]
+            color_slot = color_start + lane
+            while color_slot < color_end:
+                uid = inequality_ids_by_color[uio + color_slot]
                 # An inequality without mapped topology has no Jacobian offsets
                 # to read, so it is skipped rather than dereferenced.
                 mapped_id = int32(-1)
@@ -325,7 +352,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                     mapped_id = limit_indices[lio + uid]
                 else:
                     mapped_id = contact_indices[cio + uid - nl]
-                if inequality_colors[uio + uid] == color and mapped_id >= int32(0):
+                if mapped_id >= int32(0):
                     if uid < nl:
                         limit_id = mapped_id
                         row = lcgo + uid
@@ -427,7 +454,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     + row_2[j] * contact_delta_body.z
                                 )
                             body_group += int32(3)
-                uid += threads_per_world
+                color_slot += threads_per_world
             _sync_threads()
 
 
