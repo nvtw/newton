@@ -913,6 +913,7 @@ class TestDVISolver(unittest.TestCase):
             dtype=wp.vec2i,
             device=self.device,
         )
+        body_color_masks = wp.zeros(shape=3, dtype=wp.uint64, device=self.device)
         inequality_colors = wp.full(shape=5, value=-1, dtype=wp.int32, device=self.device)
         inequality_num_colors = wp.zeros(shape=1, dtype=wp.int32, device=self.device)
 
@@ -924,6 +925,7 @@ class TestDVISolver(unittest.TestCase):
                 problem_nc,
                 problem_uio,
                 contact_bid_ab,
+                body_color_masks,
                 inequality_colors,
                 inequality_num_colors,
             ],
@@ -936,6 +938,76 @@ class TestDVISolver(unittest.TestCase):
         self.assertNotEqual(colors[0], colors[1])
         self.assertNotEqual(colors[1], colors[4])
         self.assertLess(colors[3], num_colors)
+
+    def test_03g1_dvi_inequality_coloring_keeps_worlds_independent(self):
+        """Color independent worlds concurrently without sharing body masks."""
+        problem_nl = wp.array([0, 0], dtype=wp.int32, device=self.device)
+        problem_nc = wp.array([2, 2], dtype=wp.int32, device=self.device)
+        problem_uio = wp.array([0, 2], dtype=wp.int32, device=self.device)
+        inequality_bodies = wp.array(
+            [wp.vec2i(0, -1), wp.vec2i(0, -1), wp.vec2i(1, -1), wp.vec2i(1, -1)],
+            dtype=wp.vec2i,
+            device=self.device,
+        )
+        body_color_masks = wp.zeros(shape=2, dtype=wp.uint64, device=self.device)
+        inequality_colors = wp.full(shape=4, value=-1, dtype=wp.int32, device=self.device)
+        inequality_num_colors = wp.zeros(shape=2, dtype=wp.int32, device=self.device)
+
+        wp.launch(
+            kernel=_color_mapped_dvi_inequalities,
+            dim=2,
+            inputs=[
+                problem_nl,
+                problem_nc,
+                problem_uio,
+                inequality_bodies,
+                body_color_masks,
+                inequality_colors,
+                inequality_num_colors,
+            ],
+            device=self.device,
+        )
+
+        np.testing.assert_array_equal(inequality_colors.numpy(), [0, 1, 0, 1])
+        np.testing.assert_array_equal(inequality_num_colors.numpy(), [2, 2])
+
+    def test_03g2_dvi_inequality_coloring_handles_more_than_64_colors(self):
+        """Preserve valid coloring when one body requires more than 64 colors."""
+        num_inequalities = 66
+        problem_nl = wp.array([0], dtype=wp.int32, device=self.device)
+        problem_nc = wp.array([num_inequalities], dtype=wp.int32, device=self.device)
+        problem_uio = wp.array([0], dtype=wp.int32, device=self.device)
+        inequality_bodies = wp.array(
+            [wp.vec2i(0, -1)] * num_inequalities,
+            dtype=wp.vec2i,
+            device=self.device,
+        )
+        body_color_masks = wp.zeros(shape=1, dtype=wp.uint64, device=self.device)
+        inequality_colors = wp.full(
+            shape=num_inequalities,
+            value=-1,
+            dtype=wp.int32,
+            device=self.device,
+        )
+        inequality_num_colors = wp.zeros(shape=1, dtype=wp.int32, device=self.device)
+
+        wp.launch(
+            kernel=_color_mapped_dvi_inequalities,
+            dim=1,
+            inputs=[
+                problem_nl,
+                problem_nc,
+                problem_uio,
+                inequality_bodies,
+                body_color_masks,
+                inequality_colors,
+                inequality_num_colors,
+            ],
+            device=self.device,
+        )
+
+        np.testing.assert_array_equal(inequality_colors.numpy(), np.arange(num_inequalities))
+        self.assertEqual(int(inequality_num_colors.numpy()[0]), num_inequalities)
 
     def test_03i_dvi_coldstart_is_repeatable(self):
         for sparse in (False, True):

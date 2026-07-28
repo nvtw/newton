@@ -16,6 +16,7 @@ wp.set_module_options({"enable_backward": False})
 
 float32 = wp.float32
 int32 = wp.int32
+uint64 = wp.uint64
 vec2f = wp.vec2f
 vec2i = wp.vec2i
 
@@ -98,6 +99,7 @@ class DVIState:
         self.limit_indices: wp.array[int32] | None = None
         self.contact_indices: wp.array[int32] | None = None
         self.inequality_bodies: wp.array[vec2i] | None = None
+        self.inequality_body_color_masks: wp.array[uint64] | None = None
         self.inequality_colors: wp.array[int32] | None = None
         self.inequality_num_colors: wp.array[int32] | None = None
         if size is not None:
@@ -116,6 +118,7 @@ class DVIState:
         self.limit_indices = wp.full(max(1, size.sum_of_max_limits), -1, dtype=int32)
         self.contact_indices = wp.full(max(1, size.sum_of_max_contacts), -1, dtype=int32)
         self.inequality_bodies = wp.full(max(1, size.sum_of_max_unilaterals), vec2i(-1, -1), dtype=vec2i)
+        self.inequality_body_color_masks = wp.zeros(max(1, size.sum_of_num_bodies), dtype=uint64)
         self.inequality_colors = wp.full(max(1, size.sum_of_max_unilaterals), -1, dtype=int32)
         self.inequality_num_colors = wp.zeros(max(1, size.num_worlds), dtype=int32)
 
@@ -132,6 +135,7 @@ class DVIState:
         self.limit_indices.fill_(-1)
         self.contact_indices.fill_(-1)
         self.inequality_bodies.fill_(vec2i(-1, -1))
+        self.inequality_body_color_masks.zero_()
         self.inequality_colors.fill_(-1)
         self.inequality_num_colors.zero_()
 

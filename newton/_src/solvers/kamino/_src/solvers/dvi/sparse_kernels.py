@@ -184,38 +184,74 @@ def _inequalities_share_dynamic_body(a: wp.vec2i, b: wp.vec2i) -> bool:
     return shares_body
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return ((int)__ffsll((long long)mask)) - 1;
+#else
+if (mask == 0) return -1;
+int position = 0;
+while ((mask & 1LL) == 0LL) { mask >>= 1; position++; }
+return position;
+#endif
+""")
+def _lowest_set_color(mask: wp.int64) -> wp.int32:
+    """Return the lowest set bit, or -1 when no bit is set."""
+    ...
+
+
 @wp.kernel
 def _color_mapped_dvi_inequalities(
     problem_nl: wp.array[int32],
     problem_nc: wp.array[int32],
     problem_uio: wp.array[int32],
     inequality_bodies: wp.array[wp.vec2i],
+    body_color_masks: wp.array[wp.uint64],
     inequality_colors: wp.array[int32],
     inequality_num_colors: wp.array[int32],
 ):
-    """Color limits and contacts together using their dynamic body endpoints."""
+    """Greedily color one world per thread using per-body 64-bit masks.
+
+    This favors the many-small-world workload. Unusually high-degree graphs
+    that exhaust 64 colors use a slower pairwise fallback without a color cap.
+    """
     wid = wp.tid()
     nu = problem_nl[wid] + problem_nc[wid]
     uio = problem_uio[wid]
     num_colors = int32(0)
     for uid in range(nu):
         pair = inequality_bodies[uio + uid]
-        color = int32(0)
-        found = int32(0)
-        while found == int32(0) and color < nu:
-            conflict = int32(0)
-            for previous_uid in range(uid):
-                if inequality_colors[uio + previous_uid] == color:
-                    previous_pair = inequality_bodies[uio + previous_uid]
-                    if _inequalities_share_dynamic_body(pair, previous_pair):
-                        conflict = int32(1)
-                        break
-            if conflict == int32(0):
-                found = int32(1)
-            else:
-                color += int32(1)
+        forbidden = wp.uint64(0)
+        if pair[0] >= int32(0):
+            forbidden |= body_color_masks[pair[0]]
+        if pair[1] >= int32(0):
+            forbidden |= body_color_masks[pair[1]]
+
+        color = _lowest_set_color(wp.int64(forbidden) ^ wp.int64(-1))
+        if color < int32(0):
+            # All lower colors conflict, so only overflow colors need scanning.
+            color = int32(64)
+            found = int32(0)
+            while found == int32(0) and color < nu:
+                conflict = int32(0)
+                for previous_uid in range(uid):
+                    if inequality_colors[uio + previous_uid] == color:
+                        previous_pair = inequality_bodies[uio + previous_uid]
+                        if _inequalities_share_dynamic_body(pair, previous_pair):
+                            conflict = int32(1)
+                            break
+                if conflict == int32(0):
+                    found = int32(1)
+                else:
+                    color += int32(1)
         inequality_colors[uio + uid] = color
         num_colors = wp.max(num_colors, color + int32(1))
+        if color < int32(64):
+            color_bit = wp.uint64(1) << wp.uint64(color)
+            if pair[0] >= int32(0):
+                body_color_masks[pair[0]] |= color_bit
+            if pair[1] >= int32(0):
+                body_color_masks[pair[1]] |= color_bit
+
     inequality_num_colors[wid] = num_colors
 
 

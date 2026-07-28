@@ -517,7 +517,7 @@ class DVISolver:
             raise ValueError("DVI requires `contacts` when the model allocates contacts.")
 
     def _prepare_inequality_coloring(self, problem: DualProblem) -> None:
-        """Map and color every active DVI inequality."""
+        """Map and color active inequalities with the multi-world fast path."""
         state = self._data.state
         self._validate_inequality_topology()
         limits = self._limits
@@ -555,6 +555,7 @@ class DVISolver:
                 ],
                 device=self.device,
             )
+        state.inequality_body_color_masks.zero_()
         wp.launch(
             kernel=_color_mapped_dvi_inequalities,
             dim=self._size.num_worlds,
@@ -563,6 +564,7 @@ class DVISolver:
                 problem.data.nc,
                 problem.data.uio,
                 state.inequality_bodies,
+                state.inequality_body_color_masks,
                 state.inequality_colors,
                 state.inequality_num_colors,
             ],

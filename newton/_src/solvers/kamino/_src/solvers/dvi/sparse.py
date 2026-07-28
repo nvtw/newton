@@ -126,7 +126,7 @@ def _can_use_sparse_colored_inequalities(path: SparseDVIPath) -> bool:
 
 
 def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
-    """Map and color all active inequalities for sparse PGS."""
+    """Map and color active inequalities with the multi-world fast path."""
     state = path.data.state
     limits = path.limits
     if limits is not None and limits.model_max_limits_host > 0:
@@ -163,6 +163,7 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
             ],
             device=path.device,
         )
+    state.inequality_body_color_masks.zero_()
     wp.launch(
         kernel=_color_mapped_dvi_inequalities,
         dim=path.size.num_worlds,
@@ -171,6 +172,7 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
             problem.data.nc,
             problem.data.uio,
             state.inequality_bodies,
+            state.inequality_body_color_masks,
             state.inequality_colors,
             state.inequality_num_colors,
         ],

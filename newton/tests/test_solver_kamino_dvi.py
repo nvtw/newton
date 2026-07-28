@@ -21,6 +21,8 @@ _DVI_QUALITY_TESTS = (
     "test_03e_dvi_direct_block_no_unilateral_rows_reports_single_iteration",
     "test_03f_dvi_bilateral_only_solve_resets_stale_status",
     "test_03g_dvi_inequality_coloring_separates_dynamic_conflicts",
+    "test_03g1_dvi_inequality_coloring_keeps_worlds_independent",
+    "test_03g2_dvi_inequality_coloring_handles_more_than_64_colors",
     "test_03h_dvi_canonical_contact_solution_metrics",
     "test_03i_dvi_coldstart_is_repeatable",
     "test_03j_dvi_omega_scales_projected_updates_without_moving_the_solution",
