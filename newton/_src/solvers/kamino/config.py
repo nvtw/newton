@@ -781,15 +781,6 @@ class DVISolverConfig:
     A container to hold configurations for the DVI forward dynamics solver.
     """
 
-    max_inequality_sweeps: int = 20
-    """
-    Maximum projected Gauss-Seidel sweeps for the inequality-only
-    fallback path. The direct bilateral block path is controlled by
-    `max_alternating_iterations` and `inequality_sweeps_per_iteration`.
-    Must be greater than zero.
-    Defaults to `20`.
-    """
-
     tolerance: float = 1e-5
     """
     The convergence tolerance on the projected update size.
@@ -808,18 +799,19 @@ class DVISolverConfig:
     Must be in the range `(0, 2]`. Defaults to `1.0`.
     """
 
-    max_alternating_iterations: int = 32
+    max_alternating_iterations: int = 20
     """
     Maximum number of outer DVI iterations alternating direct bilateral
     solves with projected inequality solves. Must be greater than zero.
-    Defaults to `32`.
+    This schedule is also used when no bilateral constraints are present;
+    in that case, the bilateral solve is skipped. Defaults to `20`.
     """
 
-    inequality_sweeps_per_iteration: int = 4
+    inequality_sweeps_per_iteration: int = 1
     """
     Number of projected Gauss-Seidel sweeps used for unilateral inequalities
     during each alternating DVI iteration. Contacts use graph-colored sweeps
-    on CUDA. Must be greater than zero. Defaults to `4`.
+    on CUDA. Must be greater than zero. Defaults to `1`.
     """
 
     bilateral_solve_interval: int = 1
@@ -881,9 +873,9 @@ class DVISolverConfig:
         cfg = DVISolverConfig(**kwargs)
         kamino_attrs = getattr(model, "kamino", None)
         if kamino_attrs is not None and hasattr(kamino_attrs, "max_solver_iterations"):
-            max_inequality_sweeps = int(kamino_attrs.max_solver_iterations.numpy()[0])
-            if max_inequality_sweeps >= 0:
-                cfg.max_inequality_sweeps = max_inequality_sweeps
+            max_alternating_iterations = int(kamino_attrs.max_solver_iterations.numpy()[0])
+            if max_alternating_iterations >= 0:
+                cfg.max_alternating_iterations = max_alternating_iterations
         cfg.validate()
         return cfg
 
@@ -893,10 +885,6 @@ class DVISolverConfig:
         from ._src.solvers.common import WarmStartMode  # noqa: PLC0415
         from ._src.solvers.warmstart import WarmstarterContacts  # noqa: PLC0415
 
-        if self.max_inequality_sweeps <= 0:
-            raise ValueError(
-                f"Invalid maximum inequality sweeps: {self.max_inequality_sweeps}. Must be a positive integer."
-            )
         if self.tolerance < 0.0:
             raise ValueError(f"Invalid tolerance: {self.tolerance}. Must be non-negative.")
         if self.regularization <= 0.0:

@@ -19,7 +19,6 @@ from .kernels import (
     _scatter_bilateral_solution,
     _set_dvi_bilateral_active_dim,
     _set_dvi_direct_status_iterations,
-    _set_dvi_fixed_status_iterations,
 )
 from .sparse_kernels import (
     _build_sparse_bilateral_block,
@@ -59,9 +58,7 @@ class SparseDVIPath:
         contacts: ContactsKamino | None,
         jacobians: SparseSystemJacobians | None,
         bilateral_solver,
-        max_inequality_sweeps: int,
         max_alternating_iterations: int,
-        max_inequality_sweeps_per_iteration: int,
         has_unilateral_constraints: bool,
         all_worlds_mask: wp.array[wp.bool],
         should_solve_bilateral_after_block,
@@ -77,9 +74,7 @@ class SparseDVIPath:
         self.jacobians = jacobians
         self.body_space = wp.empty(shape=size.sum_of_num_body_dofs, dtype=wp.float32, device=device)
         self.bilateral_solver = bilateral_solver
-        self.max_inequality_sweeps = max_inequality_sweeps
         self.max_alternating_iterations = max_alternating_iterations
-        self.max_inequality_sweeps_per_iteration = max_inequality_sweeps_per_iteration
         self.has_unilateral_constraints = has_unilateral_constraints
         self.all_worlds_mask = all_worlds_mask
         self.should_solve_bilateral_after_block = should_solve_bilateral_after_block
@@ -241,12 +236,13 @@ def _solve_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) -> N
     delassus = _get_sparse_delassus(problem)
     delassus.diagonal(path.data.state.scratch)
     _prepare_sparse_inequality_pgs(path, problem)
-    _launch_sparse_inequality_pgs(path, problem, block_iteration=-1)
+    for block_iteration in range(path.max_alternating_iterations):
+        _launch_sparse_inequality_pgs(path, problem, block_iteration)
     _compute_sparse_solution_vectors(path, problem)
     wp.launch(
-        kernel=_set_dvi_fixed_status_iterations,
+        kernel=_set_dvi_direct_status_iterations,
         dim=path.size.num_worlds,
-        inputs=[problem.data.dim, path.data.config, path.data.status],
+        inputs=[problem.data.nl, problem.data.nc, path.data.config, path.data.status],
         device=path.device,
     )
 

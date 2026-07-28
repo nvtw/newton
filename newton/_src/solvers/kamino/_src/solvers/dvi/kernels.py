@@ -312,25 +312,6 @@ def _set_dvi_direct_status_iterations(
 
 
 @wp.kernel
-def _set_dvi_fixed_status_iterations(
-    # Inputs:
-    problem_dim: wp.array[int32],
-    solver_config: wp.array[DVIConfigStruct],
-    # Outputs:
-    solver_status: wp.array[DVIStatus],
-):
-    wid = wp.tid()
-    status = solver_status[wid]
-    if problem_dim[wid] == int32(0):
-        status.iterations = int32(0)
-    else:
-        # Inequality-only PGS runs `max_inequality_sweeps` sweeps without a block
-        # schedule; terminal residuals come from the shared status kernel.
-        status.iterations = solver_config[wid].max_inequality_sweeps
-    solver_status[wid] = status
-
-
-@wp.kernel
 def _set_dvi_bilateral_active_dim(
     # Inputs:
     problem_njc: wp.array[int32],
@@ -426,11 +407,7 @@ def _solve_dvi_inequalities_colored_pgs(
     uio = problem_uio[wid]
     schedule_offset = uio + wid
     contact_end = ccgo + int32(3) * nc
-    sweep_budget = cfg.inequality_sweeps_per_iteration
-    if block_iteration < int32(0):
-        sweep_budget = cfg.max_inequality_sweeps
-
-    for _sweep in range(sweep_budget):
+    for _sweep in range(cfg.inequality_sweeps_per_iteration):
         for color in range(inequality_num_colors[wid]):
             color_start = inequality_color_starts[schedule_offset + color]
             color_end = inequality_color_starts[schedule_offset + color + int32(1)]
