@@ -455,7 +455,6 @@ class SolverKamino(SolverBase, CouplingInterface):
             if self.dvi is None:
                 if self.dynamics_solver == "dvi" and self.sparse_dynamics:
                     self.dvi = config.DVISolverConfig(
-                        omega=0.3,
                         max_alternating_iterations=16,
                         inequality_sweeps_per_iteration=2,
                         bilateral_solve_interval=2,

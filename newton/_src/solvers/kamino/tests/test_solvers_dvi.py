@@ -281,6 +281,7 @@ class TestDVISolver(unittest.TestCase):
         sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
         self.assertTrue(sparse_config.sparse_dynamics)
         self.assertTrue(sparse_config.sparse_jacobian)
+        self.assertEqual(sparse_config.dvi.omega, 1.0)
         self.assertEqual(sparse_config.dynamics.linear_solver_type, "CR")
         self.assertEqual(sparse_config.dynamics.linear_solver_kwargs, {"maxiter": 9})
         with self.assertRaises(ValueError):
@@ -339,6 +340,10 @@ class TestDVISolver(unittest.TestCase):
         self.assertLess(
             solver._contacts_kamino.model_max_contacts_host,
             solver._model_kamino.geoms.model_minimum_contacts,
+        )
+        self.assertGreater(
+            solver._collision_detector_kamino._unified_pipeline._max_contacts,
+            solver._contacts_kamino.model_max_contacts_host,
         )
 
         override_config = SolverKamino.Config(
