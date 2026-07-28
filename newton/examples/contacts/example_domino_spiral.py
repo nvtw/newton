@@ -132,7 +132,8 @@ class Example:
             solver_config.use_collision_detector = True
             solver_config.integrator = "moreau"
             solver_config.constraints.gamma = 0.2
-            solver_config.dvi.max_inequality_sweeps = 10
+            solver_config.dvi.max_alternating_iterations = 10
+            solver_config.dvi.inequality_sweeps_per_iteration = 1
             solver_config.dvi.omega = 1.0
             solver_config.dvi.bilateral_solver_type = "LLTBRCM"
             solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}

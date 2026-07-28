@@ -202,7 +202,6 @@ class Example:
             solver_config.integrator = "moreau"
             solver_config.dvi.bilateral_solver_type = "LLTBRCM"
             solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
-            solver_config.dvi.max_inequality_sweeps = 5
             solver_config.dvi.max_alternating_iterations = 5
             solver_config.dvi.inequality_sweeps_per_iteration = 1
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
