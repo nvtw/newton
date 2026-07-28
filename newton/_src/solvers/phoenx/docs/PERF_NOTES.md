@@ -614,3 +614,19 @@ These later results supersede the early FP16/contact-row prioritization:
   but reduced complete G1 throughput about 0.8%; moving the scratch overwrite
   also invalidated the sequential scalar/cooperative parity harness. The
   candidate was fully reverted rather than complicating the data contract.
+
+- Experimental `wp.array_noalias` did not clear the integration threshold.
+  The generalized solve improved about 1.8%, contact-row construction was
+  neutral, a gather regressed about 1.3%, and complete G1 improved only about
+  1% within measurement noise. The implementation remains isolated in the
+  Warp stash and should not be merged without new evidence.
+
+- Warp commit `715e9478f` adds an explicit `wp.array_aligned[...]` contract
+  without changing ordinary vector layout or array behavior. It validates
+  pointer/stride alignment and emits 64/128-bit CUDA loads and stores for
+  supported `vec2`/`vec4` types. CPU/CUDA tests cover exact repeated results,
+  `wp.func`, generics, dimensions, raw/external descriptors, unsupported
+  widths, and misalignment. A final ASV run measured a six-`vec4` random
+  gather at 16.6 versus 13.3 us (-19.9%), while a bandwidth-saturated copy was
+  neutral at 194 versus 192 us. The PhoenX mini packed-record gather improved
+  29.2% and its pipeline 5.1%; a production layout A/B is still required.
