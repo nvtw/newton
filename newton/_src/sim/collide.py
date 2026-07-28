@@ -342,10 +342,7 @@ def _estimate_rigid_contact_max(model: Model) -> int:
 
     # Weighted average contacts-per-pair based on the scene's shape mix.
     avg_cpp = (
-        (
-            num_primitives * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR
-            + num_meshes * _RIGID_CONTACTS_PER_MESH_PAIR
-        )
+        (num_primitives * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR + num_meshes * _RIGID_CONTACTS_PER_MESH_PAIR)
         // max(num_non_planes, 1)
         if num_non_planes > 0
         else 0
@@ -388,8 +385,7 @@ def _estimate_rigid_contact_max(model: Model) -> int:
         else:
             # Fallback: exact type-weighted sum (correct for single-world models).
             plane_contacts = num_planes * (
-                num_primitives * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR
-                + num_meshes * _RIGID_CONTACTS_PER_MESH_PAIR
+                num_primitives * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR + num_meshes * _RIGID_CONTACTS_PER_MESH_PAIR
             )
 
     total_contacts = non_plane_contacts + plane_contacts
