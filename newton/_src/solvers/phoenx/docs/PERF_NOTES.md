@@ -576,3 +576,18 @@ These later results supersede the early FP16/contact-row prioritization:
   (+0.23%), too little for the added representation and native accessor. The
   production candidate was removed; reuse by the larger reduced-advance walk
   is the only justified follow-up.
+
+- The `f9a0407` depth-descriptor follow-up from
+  `twidmer/phoenx-kapla-sleeping` improved a five-run, 100-replay G1 median
+  from 2.18080M to 2.18761M steps/s (+0.31%). Forcing every descriptor access
+  to `ld.global.v4.u32` was neutral against NVCC's split loads. Pooling both
+  descriptors and depth schedules by arbitrary repeated topology signatures
+  reached 2.19042M (+0.44%). The gain does not justify another reduced-only
+  representation, so none of these candidates or the branch commit were kept.
+
+- The same trace assigned 32.3% of GPU time to packed-row construction, 21.3%
+  to generalized contact solve, 7.2% to reduced contact gather, and only 7.5%
+  to the two advance kernels. This bounds topology-only sharing to a
+  low-single-digit opportunity in the current G1 pipeline. A future
+  template/instance split should be tested as a compact cross-consumer data
+  model, not added piecemeal to individual kernels.
