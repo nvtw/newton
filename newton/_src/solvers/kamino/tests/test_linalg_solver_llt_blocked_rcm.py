@@ -194,6 +194,50 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
         expected = np.linalg.solve(matrix, rhs)
         np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-4, atol=1.0e-5)
 
+    def test_parallel_factorization_compacts_heterogeneous_panels(self):
+        """Solve heterogeneous systems with one task per valid panel tile."""
+        dimensions = [8, 17, 33, 65]
+        matrices = []
+        right_hand_sides = []
+        expected = []
+        for dimension in dimensions:
+            matrix = np.eye(dimension, dtype=np.float32) * 2.0
+            indices = np.arange(dimension - 1)
+            matrix[indices, indices + 1] = -0.25
+            matrix[indices + 1, indices] = -0.25
+            rhs = np.ones(dimension, dtype=np.float32)
+            matrices.append(matrix.reshape(-1))
+            right_hand_sides.append(rhs)
+            expected.append(np.linalg.solve(matrix, rhs))
+
+        info = DenseSquareMultiLinearInfo()
+        info.finalize(dimensions=dimensions, dtype=wp.float32, device=self.default_device)
+        matrix_wp = wp.array(np.concatenate(matrices), dtype=wp.float32, device=self.default_device)
+        rhs_wp = wp.array(np.concatenate(right_hand_sides), dtype=wp.float32, device=self.default_device)
+        result_wp = wp.zeros(sum(dimensions), dtype=wp.float32, device=self.default_device)
+        solver = LLTBlockedRCMSolver(
+            operator=DenseLinearOperatorData(info=info, mat=matrix_wp),
+            block_size=16,
+            reuse_permutation=True,
+            parallel_factorization=True,
+            device=self.default_device,
+        )
+
+        solver.compute(matrix_wp)
+        solver.solve(rhs_wp, result_wp)
+
+        self.assertEqual(solver._diagonal_task_bids[0].size, 4)
+        self.assertEqual(solver._diagonal_task_bids[2].size, 2)
+        self.assertEqual(solver._panel_task_bids[0].size, 7)
+        np.testing.assert_array_equal(solver._panel_task_bids[2].numpy(), [3, 3])
+        np.testing.assert_array_equal(solver._panel_task_tiles[2].numpy(), [3, 4])
+        np.testing.assert_allclose(
+            result_wp.numpy(),
+            np.concatenate(expected),
+            rtol=1.0e-4,
+            atol=1.0e-5,
+        )
+
     def test_cached_permutation_on_cpu_fallback(self):
         """Verify the CPU fallback reuses a cached permutation."""
         device = wp.get_device("cpu")

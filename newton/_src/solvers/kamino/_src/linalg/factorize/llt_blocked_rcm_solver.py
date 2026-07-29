@@ -167,6 +167,9 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._factorize_block_dim: int = factorize_block_dim
 
         # Reordering options
+        self._diagonal_task_bids: list[wp.array[wp.int32]] = []
+        self._panel_task_bids: list[wp.array[wp.int32]] = []
+        self._panel_task_tiles: list[wp.array[wp.int32]] = []
         self._reorder_tol: float = reorder_tol
         self._rcm_max_bfs_iters = rcm_max_bfs_iters
         self._reuse_permutation = bool(reuse_permutation)
@@ -278,6 +281,20 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             # Tile-pattern flat storage + offsets.
             self._tile_pattern = wp.zeros(shape=(total_tp_size,), dtype=wp.int32)
             self._tpo = to_warp_int32_array(tp_offsets[:-1])
+            self._diagonal_task_bids = []
+            self._panel_task_bids = []
+            self._panel_task_tiles = []
+            tile_counts = [(dimension + bs - 1) // bs for dimension in dims]
+            for tile_k in range(max_n_tiles):
+                diagonal_bids = [bid for bid, tile_count in enumerate(tile_counts) if tile_k < tile_count]
+                panel_tasks = [
+                    (bid, tile_i)
+                    for bid, tile_count in enumerate(tile_counts)
+                    for tile_i in range(tile_k + 1, tile_count)
+                ]
+                self._diagonal_task_bids.append(to_warp_int32_array(diagonal_bids))
+                self._panel_task_bids.append(to_warp_int32_array([bid for bid, _ in panel_tasks]))
+                self._panel_task_tiles.append(to_warp_int32_array([tile_i for _, tile_i in panel_tasks]))
 
             # Batched-RCM scratch. Owning these here matches how the other
             # linalg solvers hold their buffers and keeps the recorded-launch
@@ -402,7 +419,9 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
                 A=self._A_hat,
                 tile_pattern=self._tile_pattern,
                 L=self._L,
-                num_blocks=num_blocks,
+                diagonal_task_bids=self._diagonal_task_bids,
+                panel_task_bids=self._panel_task_bids,
+                panel_task_tiles=self._panel_task_tiles,
                 max_tiles=(self._max_dim + self._block_size - 1) // self._block_size,
                 block_dim=self._factorize_block_dim,
                 device=self._device,

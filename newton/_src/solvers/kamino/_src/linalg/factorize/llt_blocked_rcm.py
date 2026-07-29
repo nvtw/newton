@@ -397,6 +397,7 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
 
     @wp.kernel(enable_backward=False)
     def factorize_diagonal_kernel(
+        task_bid: wp.array[wp.int32],
         tile_k: int,
         dim: wp.array[wp.int32],
         mio: wp.array[wp.int32],
@@ -405,7 +406,8 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
         tile_pattern: wp.array[wp.int32],
         L: wp.array[wp.float32],
     ):
-        bid, tid_block = wp.tid()
+        task, tid_block = wp.tid()
+        bid = task_bid[task]
         block_dim = wp.block_dim()
         n = dim[bid]
         k = tile_k * block_size
@@ -447,6 +449,8 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
 
     @wp.kernel(enable_backward=False)
     def factorize_panel_kernel(
+        task_bid: wp.array[wp.int32],
+        task_tile_i: wp.array[wp.int32],
         tile_k: int,
         dim: wp.array[wp.int32],
         mio: wp.array[wp.int32],
@@ -455,8 +459,9 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
         tile_pattern: wp.array[wp.int32],
         L: wp.array[wp.float32],
     ):
-        bid, panel_tile_i, tid_block = wp.tid()
-        tile_i = panel_tile_i + tile_k + 1
+        task, tid_block = wp.tid()
+        bid = task_bid[task]
+        tile_i = task_tile_i[task]
         block_dim = wp.block_dim()
         n = dim[bid]
         n_tiles = (n + block_size - 1) // block_size
@@ -838,7 +843,9 @@ def llt_blocked_rcm_factorize_parallel(
     A: wp.array[wp.float32],
     tile_pattern: wp.array[wp.int32],
     L: wp.array[wp.float32],
-    num_blocks: int,
+    diagonal_task_bids: list[wp.array[wp.int32]],
+    panel_task_bids: list[wp.array[wp.int32]],
+    panel_task_tiles: list[wp.array[wp.int32]],
     max_tiles: int,
     block_dim: int = 128,
     device: wp.DeviceLike = None,
@@ -848,17 +855,17 @@ def llt_blocked_rcm_factorize_parallel(
     for tile_k in range(max_tiles):
         wp.launch_tiled(
             kernel=diagonal_kernel,
-            dim=num_blocks,
-            inputs=[tile_k, dim, mio, tpo, A, tile_pattern, L],
+            dim=diagonal_task_bids[tile_k].size,
+            inputs=[diagonal_task_bids[tile_k], tile_k, dim, mio, tpo, A, tile_pattern, L],
             block_dim=block_dim,
             device=device,
         )
-        panel_tiles = max_tiles - tile_k - 1
-        if panel_tiles > 0:
+        panel_bids = panel_task_bids[tile_k]
+        if panel_bids.size > 0:
             wp.launch_tiled(
                 kernel=panel_kernel,
-                dim=(num_blocks, panel_tiles),
-                inputs=[tile_k, dim, mio, tpo, A, tile_pattern, L],
+                dim=panel_bids.size,
+                inputs=[panel_bids, panel_task_tiles[tile_k], tile_k, dim, mio, tpo, A, tile_pattern, L],
                 block_dim=block_dim,
                 device=device,
             )
