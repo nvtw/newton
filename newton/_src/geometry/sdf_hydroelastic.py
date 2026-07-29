@@ -443,14 +443,9 @@ class HydroelasticSDF:
         if deterministic and config.pre_prune_contacts:
             # Pre-pruning keeps a per-thread top-K of faces, so which faces reach
             # the contact buffer depends on how voxels are distributed over threads.
-            warnings.warn(
-                "Deterministic hydroelastic contacts require HydroelasticSDF.Config.pre_prune_contacts=False; "
-                "disabling it. This doubles the face-contact buffer (contact_buffer_fraction no longer applies) "
-                "and changes the generated contact set.",
-                # Reach past __init__ / _from_model / CollisionPipeline.__init__ to
-                # the caller that asked for a deterministic pipeline.
-                stacklevel=4,
-            )
+            # Deterministic mode is the supported way to ask for reproducibility,
+            # so this is silent; the cost is documented on ``pre_prune_contacts``
+            # and in the deterministic-collisions section of the collision docs.
             config = replace(config, pre_prune_contacts=False)
 
         self.config = config
