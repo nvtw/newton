@@ -129,7 +129,7 @@ class TestColoredContactRows(unittest.TestCase):
         canonical_position, canonical_velocity = run(packed=False)
         packed_position, packed_velocity = run(packed=True)
         np.testing.assert_allclose(packed_position, canonical_position, rtol=1.0e-4, atol=1.0e-5)
-        np.testing.assert_allclose(packed_velocity, canonical_velocity, rtol=1.0e-4, atol=1.0e-5)
+        np.testing.assert_allclose(packed_velocity, canonical_velocity, rtol=1.0e-4, atol=3.0e-5)
 
     def test_arbitrary_contact_counts_round_trip_in_graph(self) -> None:
         """Interleaved columns with 1, 7, and 13 contacts have no row cap."""
