@@ -317,13 +317,21 @@ def _set_dvi_bilateral_active_dim(
     problem_njc: wp.array[int32],
     problem_nl: wp.array[int32],
     problem_nc: wp.array[int32],
+    block_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
     # Outputs:
     bilateral_active_dim: wp.array[int32],
 ):
     wid = wp.tid()
     active_dim = int32(0)
     if problem_nl[wid] > int32(0) or problem_nc[wid] > int32(0):
-        active_dim = problem_njc[wid]
+        if block_iteration < int32(0):
+            active_dim = problem_njc[wid]
+        else:
+            next_block = block_iteration + int32(1)
+            cfg = solver_config[wid]
+            if next_block < cfg.max_alternating_iterations and next_block % cfg.bilateral_solve_interval == int32(0):
+                active_dim = problem_njc[wid]
     bilateral_active_dim[wid] = active_dim
 
 

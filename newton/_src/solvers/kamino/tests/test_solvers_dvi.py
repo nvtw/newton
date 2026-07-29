@@ -818,6 +818,7 @@ class TestDVISolver(unittest.TestCase):
         )
 
     def test_03d_dvi_direct_block_honors_per_world_iteration_counts(self):
+        """Honor each world's projected and bilateral iteration schedule."""
         builder = builder_utils.make_homogeneous_builder(
             num_worlds=3,
             build_fn=basics.build_boxes_hinged,
@@ -851,6 +852,7 @@ class TestDVISolver(unittest.TestCase):
                 regularization=1e-5,
                 max_alternating_iterations=3,
                 inequality_sweeps_per_iteration=1,
+                bilateral_solve_interval=2,
             ),
             kamino_config.DVISolverConfig(
                 tolerance=0.0,
@@ -870,9 +872,35 @@ class TestDVISolver(unittest.TestCase):
                 config=configs,
                 warmstart=WarmStartMode.NONE,
             )
+            self.assertEqual(solver._bilateral_solve_after_block, (False, True))
+            zero_dims = np.zeros(3, dtype=np.int32)
+            joint_dims = problem.data.njc.numpy()
+            solver._set_bilateral_active_dim(problem, 0)
+            np.testing.assert_array_equal(solver.data.state.bilateral_active_dim.numpy(), zero_dims)
+            solver._set_bilateral_active_dim(problem, 1)
+            np.testing.assert_array_equal(
+                solver.data.state.bilateral_active_dim.numpy(),
+                np.array([0, joint_dims[1], 0], dtype=np.int32),
+            )
+            solver._set_bilateral_active_dim(problem, -1)
+            np.testing.assert_array_equal(solver.data.state.bilateral_active_dim.numpy(), joint_dims)
+            active_dim_updates = []
+            set_bilateral_active_dim = solver._set_bilateral_active_dim
+
+            def record_bilateral_active_dim(problem: DualProblem, block_iteration: int) -> None:
+                set_bilateral_active_dim(problem, block_iteration)
+                active_dim_updates.append((block_iteration, solver.data.state.bilateral_active_dim.numpy().copy()))
+
+            solver._set_bilateral_active_dim = record_bilateral_active_dim
             solver.reset()
             solver.coldstart()
             solver.solve(problem)
+            self.assertEqual([block_iteration for block_iteration, _ in active_dim_updates], [1, -1])
+            np.testing.assert_array_equal(
+                active_dim_updates[0][1],
+                np.array([0, joint_dims[1], 0], dtype=np.int32),
+            )
+            np.testing.assert_array_equal(active_dim_updates[1][1], joint_dims)
             status = solver.data.status.numpy()
             self.assertEqual([int(status[wid]["iterations"]) for wid in range(3)], [1, 3, 3])
             self.assertTrue(np.all(solver.data.state.inequality_num_colors.numpy() > 0))
@@ -891,6 +919,67 @@ class TestDVISolver(unittest.TestCase):
         normal_sums = solve_normal_sums()
         self.assertGreater(normal_sums[1], normal_sums[0])
         self.assertGreater(normal_sums[2], normal_sums[0])
+
+    def test_03d1_sparse_dvi_honors_per_world_bilateral_intervals(self):
+        """Restrict sparse bilateral re-solves to each world's configured interval."""
+        builder = builder_utils.make_homogeneous_builder(
+            num_worlds=2,
+            build_fn=basics.build_boxes_hinged,
+        )
+        model, data, state, limits, detector, jacobians = make_containers(
+            builder=builder,
+            device=self.device,
+            max_world_contacts=8,
+            sparse=True,
+        )
+        update_containers(
+            model=model,
+            data=data,
+            state=state,
+            limits=limits,
+            detector=detector,
+            jacobians=jacobians,
+        )
+        problem = _make_sparse_dual_problem(model, data, limits, detector.contacts, jacobians)
+        configs = [
+            kamino_config.DVISolverConfig(
+                max_alternating_iterations=3,
+                bilateral_solve_interval=1,
+            ),
+            kamino_config.DVISolverConfig(
+                max_alternating_iterations=3,
+                bilateral_solve_interval=99,
+            ),
+        ]
+        solver = DVISolver(
+            model=model,
+            data=data,
+            limits=limits,
+            contacts=detector.contacts,
+            jacobians=jacobians,
+            problem=problem,
+            config=configs,
+            warmstart=WarmStartMode.NONE,
+        )
+        active_dim_updates = []
+        set_bilateral_active_dim = solver._sparse_path.set_bilateral_active_dim
+
+        def record_bilateral_active_dim(problem: DualProblem, block_iteration: int) -> None:
+            set_bilateral_active_dim(problem, block_iteration)
+            active_dim_updates.append((block_iteration, solver.data.state.bilateral_active_dim.numpy().copy()))
+
+        solver._sparse_path.set_bilateral_active_dim = record_bilateral_active_dim
+        solver.coldstart()
+        solver.solve(problem)
+
+        joint_dims = problem.data.njc.numpy()
+        self.assertEqual([block_iteration for block_iteration, _ in active_dim_updates], [0, 1, -1])
+        np.testing.assert_array_equal(
+            active_dim_updates[0][1],
+            np.array([joint_dims[0], 0], dtype=np.int32),
+        )
+        np.testing.assert_array_equal(active_dim_updates[1][1], active_dim_updates[0][1])
+        np.testing.assert_array_equal(active_dim_updates[2][1], joint_dims)
 
     def test_03d2_dvi_direct_block_finishes_with_bilateral_solve(self):
         builder = basics.build_boxes_hinged()

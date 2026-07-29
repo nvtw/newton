@@ -17,7 +17,6 @@ from ...kinematics.limits import LimitsKamino
 from .kernels import (
     _initialize_dvi_status,
     _scatter_bilateral_solution,
-    _set_dvi_bilateral_active_dim,
     _set_dvi_direct_status_iterations,
 )
 from .sparse_kernels import (
@@ -62,6 +61,7 @@ class SparseDVIPath:
         has_unilateral_constraints: bool,
         all_worlds_mask: wp.array[wp.bool],
         should_solve_bilateral_after_block,
+        set_bilateral_active_dim,
     ):
         """Initialize the sparse-path workspace references."""
         self.device = device
@@ -78,6 +78,7 @@ class SparseDVIPath:
         self.has_unilateral_constraints = has_unilateral_constraints
         self.all_worlds_mask = all_worlds_mask
         self.should_solve_bilateral_after_block = should_solve_bilateral_after_block
+        self.set_bilateral_active_dim = set_bilateral_active_dim
         self.bilateral_nzb_pairs: (
             tuple[
                 wp.array[wp.int32],
@@ -482,18 +483,6 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         ],
         device=path.device,
     )
-    wp.launch(
-        kernel=_set_dvi_bilateral_active_dim,
-        dim=path.size.num_worlds,
-        inputs=[
-            problem.data.njc,
-            problem.data.nl,
-            problem.data.nc,
-            state.bilateral_active_dim,
-        ],
-        device=path.device,
-    )
-
     if not _can_use_sparse_colored_inequalities(path):
         raise RuntimeError(_SPARSE_INEQUALITY_TOPOLOGY_ERROR)
     _prepare_sparse_inequality_pgs(path, problem)
@@ -502,8 +491,10 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         _launch_sparse_inequality_pgs(path, problem, block_iteration)
 
         if path.should_solve_bilateral_after_block(block_iteration):
+            path.set_bilateral_active_dim(problem, block_iteration)
             _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
 
+    path.set_bilateral_active_dim(problem, -1)
     _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
     wp.launch(
         kernel=_set_dvi_direct_status_iterations,
