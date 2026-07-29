@@ -1033,6 +1033,82 @@ def _loop_closure_error(model, state, loop_joint):
 
 
 class TestReducedArticulation(unittest.TestCase):
+    def test_implicit_pd_drive_and_armature_match_analytical_step(self):
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+        inertia = 2.0
+        armature = 0.7
+        stiffness = 40.0
+        drive_damping = 3.0
+        passive_damping = 0.6
+        q0 = 0.2
+        qd0 = -0.4
+        target_q = 0.7
+        target_qd = 0.15
+        dt = 0.01
+
+        for target_mode in (newton.JointTargetMode.POSITION_VELOCITY, newton.JointTargetMode.NONE):
+            with self.subTest(target_mode=target_mode):
+                builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+                body = builder.add_link(
+                    mass=1.0,
+                    inertia=((inertia, 0.0, 0.0), (0.0, inertia, 0.0), (0.0, 0.0, inertia)),
+                )
+                joint = builder.add_joint_revolute(
+                    parent=-1,
+                    child=body,
+                    axis=newton.Axis.Z,
+                    target_ke=stiffness,
+                    target_kd=drive_damping,
+                    damping=passive_damping,
+                    armature=armature,
+                    actuator_mode=target_mode,
+                )
+                builder.add_articulation([joint])
+                model = builder.finalize(device=device)
+                state = model.state()
+                output = model.state()
+                state.joint_q.assign(np.array([q0], dtype=np.float32))
+                state.joint_qd.assign(np.array([qd0], dtype=np.float32))
+                newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+                control = model.control()
+                control.joint_target_q.assign(np.array([target_q], dtype=np.float32))
+                control.joint_target_qd.assign(np.array([target_qd], dtype=np.float32))
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    articulation_mode="reduced",
+                    substeps=1,
+                    solver_iterations=1,
+                    velocity_iterations=1,
+                )
+
+                with wp.ScopedCapture(device=device) as capture:
+                    solver.step(state, output, control, None, dt)
+                wp.capture_launch(capture.graph)
+
+                if target_mode == newton.JointTargetMode.POSITION_VELOCITY:
+                    active_stiffness = stiffness
+                    active_drive_damping = drive_damping
+                    active_target_velocity = target_qd
+                else:
+                    active_stiffness = 0.0
+                    active_drive_damping = 0.0
+                    active_target_velocity = 0.0
+                factor = inertia + armature + dt * (active_drive_damping + passive_damping) + dt * dt * active_stiffness
+                implicit_force = (
+                    active_stiffness * (target_q - q0)
+                    + active_drive_damping * (active_target_velocity - qd0)
+                    - passive_damping * qd0
+                    - dt * active_stiffness * qd0
+                )
+                expected_qd = qd0 + dt * implicit_force / factor
+                expected_q = q0 + dt * expected_qd
+
+                self.assertAlmostEqual(float(output.joint_qd.numpy()[0]), expected_qd, places=5)
+                self.assertAlmostEqual(float(output.joint_q.numpy()[0]), expected_q, places=5)
+
     def test_compact_transformed_inertia_matches_dense_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:

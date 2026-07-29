@@ -350,15 +350,22 @@ wrenches via the stock :func:`apply_joint_forces` kernel and folded
 into the per-body force accumulator before the PGS solve.
 
 **Joint armature** (:attr:`Model.joint_armature`) is supported on
-``REVOLUTE`` and ``PRISMATIC`` joints. Because PhoenX is
-maximal-coordinate, armature is implemented by **baking the rotor
-inertia into both attached bodies along the joint axis** at solver
-construction (and on
-:meth:`~SolverPhoenX.notify_model_changed` for ``BODY_INERTIAL_PROPERTIES``
-or ``JOINT_PROPERTIES``). This is how the constraint kernel sees
-``M_eff = M_chain + armature`` along the joint axis without any
-hot-path overhead. Armature on ``BALL`` / ``FIXED`` / ``FREE``
-joints is ignored (no axial DoF). Critical for stability of
+``REVOLUTE`` and ``PRISMATIC`` joints. The default direct maximal
+solver adds one dynamic row per nonzero-armature DoF to the mechanism
+system. Its equation is ``J v+ + lambda / a_eff = J v-``, where
+``a_eff = joint_gear**2 * joint_armature``. The factorization therefore
+sees ``M_eff = M_chain + a_eff`` without changing
+either attached body's inertia tensor. This matches reduced-coordinate
+armature for fixed and floating parents and lets contact, drive, and
+external-force impulses share the same generalized inertia.
+
+Changing an armature between zero and nonzero through
+:meth:`~SolverPhoenX.notify_model_changed` rebuilds that mechanism's
+precomputed row topology; changing a nonzero value or its gear ratio
+reuses the topology and permutation. The legacy PGS equality solver and experimental
+maximal-projector modes retain a revolute-only stator/rotor body-inertia
+approximation. Armature on ``BALL`` / ``FIXED`` / ``FREE`` joints is
+ignored because they have no scalar axial DoF. Armature is critical for
 high-stiffness PD drives on chains where an intermediate link has
 near-zero inertia about the joint axis (e.g. humanoid waist links
 of <0.1 kg with ``target_ke = 300`` N·m/rad).

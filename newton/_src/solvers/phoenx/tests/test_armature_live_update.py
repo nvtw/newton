@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Live reflected-rotor armature tests for maximal SolverPhoenX."""
+"""Live generalized-armature tests for maximal SolverPhoenX."""
 
 from __future__ import annotations
 
@@ -61,14 +61,14 @@ def _measure_period_zero_crossings(signal: np.ndarray, dt: float) -> float:
     "PhoenX armature tests run on CUDA with graph capture only",
 )
 class TestArmatureLiveUpdate(unittest.TestCase):
-    """Live updates rebuild stator- and rotor-side effective body inertia."""
+    """Live updates rebuild direct dynamic rows without changing bodies."""
 
     @staticmethod
     def _child_inverse_inertia(solver: newton.solvers.SolverPhoenX) -> np.ndarray:
         # PhoenX body slot zero is the static world.
         return solver.bodies.inverse_inertia.numpy()[1]
 
-    def test_joint_dof_properties_notify_updates_row(self) -> None:
+    def test_joint_dof_properties_notify_activates_dynamic_row(self) -> None:
         model = _build_anchored_revolute(mass=1.0, length=1.0, armature=0.0)
         solver = newton.solvers.SolverPhoenX(model, substeps=1)
         inertia_before = self._child_inverse_inertia(solver).copy()
@@ -77,10 +77,11 @@ class TestArmatureLiveUpdate(unittest.TestCase):
         solver.notify_model_changed(int(ModelFlags.JOINT_DOF_PROPERTIES))
 
         inertia_after = self._child_inverse_inertia(solver)
-        self.assertAlmostEqual(float(inertia_after[1, 1]), 1.0 / (1.0e-4 + 2.0), places=6)
-        np.testing.assert_array_equal(inertia_after[[0, 2], :], inertia_before[[0, 2], :])
+        np.testing.assert_array_equal(inertia_after, inertia_before)
+        np.testing.assert_array_equal(solver._direct_equality_system.dynamic_joint_mask, [True])
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, (6,))
 
-    def test_rotor_inertia_uses_child_body_frame_and_gear_squared(self) -> None:
+    def test_generalized_armature_keeps_body_inertia_unchanged(self) -> None:
         builder = newton.ModelBuilder()
         builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(armature=0.5, gear_ratio=2.0)
         child = builder.add_link(
@@ -99,13 +100,15 @@ class TestArmatureLiveUpdate(unittest.TestCase):
         builder.add_articulation([joint])
         solver = newton.solvers.SolverPhoenX(builder.finalize(), substeps=1)
 
-        # The child-frame axis is +Y. Reflected inertia is 2^2 * 0.5 = 2.
+        # The generalized row reflects motor inertia through gear squared;
+        # body-space inertia itself remains the authored rigid-body inertia.
         np.testing.assert_allclose(
             self._child_inverse_inertia(solver),
-            np.diag([1.0 / 2.0, 1.0 / 5.0, 1.0 / 4.0]),
+            np.diag([1.0 / 2.0, 1.0 / 3.0, 1.0 / 4.0]),
             rtol=1.0e-6,
             atol=1.0e-7,
         )
+        np.testing.assert_array_equal(solver._direct_equality_system.dynamic_joint_mask, [True])
 
     def test_free_motor_conserves_augmented_angular_momentum(self) -> None:
         builder = newton.ModelBuilder()
@@ -146,10 +149,8 @@ class TestArmatureLiveUpdate(unittest.TestCase):
             wp.capture_launch(capture.graph)
 
         angular_velocity = state_in.body_qd.numpy()[:, 3:]
-        # The parent carries motor-side stator inertia 0.5 kg m^2.
-        parent_momentum = 2.5 * float(angular_velocity[parent, 1])
-        # The child receives gear^2 * armature = 2 kg m^2 about +Y.
-        child_momentum = 3.0 * float(angular_velocity[child, 1])
+        parent_momentum = 2.0 * float(angular_velocity[parent, 1])
+        child_momentum = 1.0 * float(angular_velocity[child, 1])
         momentum_scale = max(abs(parent_momentum), abs(child_momentum))
         self.assertGreater(momentum_scale, 0.1)
         self.assertLess(
@@ -163,18 +164,24 @@ class TestArmatureLiveUpdate(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(model, substeps=1)
         model.joint_armature.assign(np.array([1.5], dtype=np.float32))
         solver.notify_model_changed(int(ModelFlags.JOINT_DOF_PROPERTIES))
-        first = solver.bodies.inverse_inertia.numpy().copy()
+        first_inertia = solver.bodies.inverse_inertia.numpy().copy()
+        first_dimensions = solver._direct_equality_system.topology.dimensions
+        first_permutation = solver._direct_equality_system.topology.permutation.copy()
         solver.notify_model_changed(int(ModelFlags.JOINT_DOF_PROPERTIES))
-        second = solver.bodies.inverse_inertia.numpy()
-        np.testing.assert_array_equal(second, first)
+        np.testing.assert_array_equal(solver.bodies.inverse_inertia.numpy(), first_inertia)
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, first_dimensions)
+        np.testing.assert_array_equal(solver._direct_equality_system.topology.permutation, first_permutation)
 
     def test_revert_to_zero_updates_row(self) -> None:
         model = _build_anchored_revolute(mass=1.0, length=1.0, armature=5.0)
         solver = newton.solvers.SolverPhoenX(model, substeps=1)
-        self.assertAlmostEqual(float(self._child_inverse_inertia(solver)[1, 1]), 1.0 / (1.0e-4 + 5.0), places=6)
+        inertia_before = self._child_inverse_inertia(solver).copy()
+        np.testing.assert_array_equal(solver._direct_equality_system.dynamic_joint_mask, [True])
         model.joint_armature.assign(np.array([0.0], dtype=np.float32))
         solver.notify_model_changed(int(ModelFlags.JOINT_DOF_PROPERTIES))
-        self.assertAlmostEqual(float(self._child_inverse_inertia(solver)[1, 1]), 1.0 / 1.0e-4, places=2)
+        np.testing.assert_array_equal(self._child_inverse_inertia(solver), inertia_before)
+        np.testing.assert_array_equal(solver._direct_equality_system.dynamic_joint_mask, [False])
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, (5,))
 
 
 def _run_pendulum_graph(

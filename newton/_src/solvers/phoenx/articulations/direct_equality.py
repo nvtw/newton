@@ -45,6 +45,7 @@ class DirectEqualityTopology:
     joints: np.ndarray
     row_joint: np.ndarray
     row_local: np.ndarray
+    row_dynamic: np.ndarray
     dimensions: tuple[int, ...]
     permutation: np.ndarray
     mechanism_row_start: np.ndarray
@@ -79,6 +80,7 @@ def build_direct_equality_topology(
     *,
     excluded_joint_mask: np.ndarray | None = None,
     effective_joint_mode: np.ndarray | None = None,
+    dynamic_joint_mask: np.ndarray | None = None,
 ) -> DirectEqualityTopology:
     """Find disconnected maximal-coordinate mechanisms and their equality rows."""
     body_count = int(model.body_count)
@@ -105,6 +107,13 @@ def build_direct_equality_topology(
     )
     if excluded.shape != (joint_count,):
         raise ValueError(f"excluded_joint_mask must have shape ({joint_count},), got {excluded.shape}")
+    dynamic_rows = (
+        np.asarray(dynamic_joint_mask, dtype=bool)
+        if dynamic_joint_mask is not None
+        else np.zeros(joint_count, dtype=bool)
+    )
+    if dynamic_rows.shape != (joint_count,):
+        raise ValueError(f"dynamic_joint_mask must have shape ({joint_count},), got {dynamic_rows.shape}")
 
     inverse_mass = np.asarray(model.body_inv_mass.numpy(), dtype=np.float32)
     dynamic = inverse_mass > 0.0
@@ -152,6 +161,7 @@ def build_direct_equality_topology(
     ordered_mechanisms = sorted(mechanisms.values(), key=min)
     row_joint: list[int] = []
     row_local: list[int] = []
+    row_dynamic: list[bool] = []
     mechanism_row_start = [0]
     ordered_joints: list[int] = []
     for joints in ordered_mechanisms:
@@ -160,6 +170,11 @@ def build_direct_equality_topology(
             for local_row in range(_structural_row_count(int(joint_mode[joint]))):
                 row_joint.append(joint)
                 row_local.append(local_row)
+                row_dynamic.append(False)
+            if dynamic_rows[joint]:
+                row_joint.append(joint)
+                row_local.append(5)
+                row_dynamic.append(True)
         mechanism_row_start.append(len(row_joint))
 
     body_rows_lists: list[list[int]] = [[] for _ in range(body_count + 1)]
@@ -219,6 +234,7 @@ def build_direct_equality_topology(
         joints=np.asarray(ordered_joints, dtype=np.int32),
         row_joint=np.asarray(row_joint, dtype=np.int32),
         row_local=np.asarray(row_local, dtype=np.int32),
+        row_dynamic=np.asarray(row_dynamic, dtype=bool),
         dimensions=dimensions,
         permutation=np.asarray(permutation, dtype=np.int32),
         mechanism_row_start=np.asarray(mechanism_row_start, dtype=np.int32),
@@ -352,6 +368,16 @@ def _prepare_direct_rows(
         )
         row_error[structural_index, 3] = error0
         row_error[structural_index, 4] = error1
+        _set_angular_row(
+            structural_index,
+            wp.int32(5),
+            axis0,
+            wp.float32(0.0),
+            wp.float32(0.0),
+            row_wrench0,
+            row_wrench1,
+            row_bias,
+        )
         return wp.int32(5)
 
     rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
@@ -402,6 +428,18 @@ def _prepare_direct_rows(
         )
         row_error[structural_index, 0] = error0
         row_error[structural_index, 1] = error1
+        _set_direct_point_row(
+            structural_index,
+            wp.int32(5),
+            point0_com,
+            point1_com,
+            axis0,
+            wp.float32(0.0),
+            wp.float32(0.0),
+            row_wrench0,
+            row_wrench1,
+            row_bias,
+        )
 
     for angular_row in range(3):
         direction = wp.quat_rotate(
@@ -529,6 +567,7 @@ def _assemble_direct_equality_matrix_kernel(
     vector_offsets: wp.array[wp.int32],
     row_joint: wp.array[wp.int32],
     row_local: wp.array[wp.int32],
+    row_dynamic: wp.array[wp.bool],
     joint_to_structural: wp.array[wp.int32],
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
@@ -540,6 +579,9 @@ def _assemble_direct_equality_matrix_kernel(
     row_error: wp.array2d[wp.float32],
     row_stiffness: wp.array2d[wp.float32],
     row_damping: wp.array2d[wp.float32],
+    joint_armature: wp.array[wp.float32],
+    joint_gear: wp.array[wp.float32],
+    effective_joint_dof_start: wp.array[wp.int32],
     row_bias: wp.array2d[wp.float32],
     matrix: wp.array[wp.float32],
 ):
@@ -596,18 +638,24 @@ def _assemble_direct_equality_matrix_kernel(
 
     if local_row == local_column:
         inverse_effective_mass = value
-        stiffness = row_stiffness[row_structural, row_local_index]
-        damping = row_damping[row_structural, row_local_index]
-        if (stiffness > wp.float32(0.0) or damping > wp.float32(0.0)) and not wp.isinf(stiffness):
-            dt = wp.float32(1.0) / idt
-            denominator = damping + dt * stiffness
-            if denominator > wp.float32(0.0) and not wp.isinf(damping):
-                softness = wp.float32(1.0) / denominator
-                value += softness * idt
-                bias_factor = dt * stiffness * softness
-                row_bias[row_structural, row_local_index] = (
-                    row_error[row_structural, row_local_index] * bias_factor * idt
-                )
+        if row_dynamic[row]:
+            dof = effective_joint_dof_start[row_joint_index]
+            gear = joint_gear[dof]
+            armature = joint_armature[dof] * gear * gear
+            value += wp.float32(1.0) / wp.max(armature, wp.float32(1.0e-10))
+        else:
+            stiffness = row_stiffness[row_structural, row_local_index]
+            damping = row_damping[row_structural, row_local_index]
+            if (stiffness > wp.float32(0.0) or damping > wp.float32(0.0)) and not wp.isinf(stiffness):
+                dt = wp.float32(1.0) / idt
+                denominator = damping + dt * stiffness
+                if denominator > wp.float32(0.0) and not wp.isinf(damping):
+                    softness = wp.float32(1.0) / denominator
+                    value += softness * idt
+                    bias_factor = dt * stiffness * softness
+                    row_bias[row_structural, row_local_index] = (
+                        row_error[row_structural, row_local_index] * bias_factor * idt
+                    )
         value += wp.max(
             regularization * wp.max(inverse_effective_mass, wp.float32(1.0)),
             wp.float32(1.0e-10),
@@ -652,12 +700,18 @@ def _equilibrate_direct_equality_matrix_kernel(
 def _build_direct_equality_rhs_kernel(
     row_joint: wp.array[wp.int32],
     row_local: wp.array[wp.int32],
+    row_dynamic: wp.array[wp.bool],
     joint_to_structural: wp.array[wp.int32],
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     row_wrench0: wp.array2d[wp.spatial_vector],
     row_wrench1: wp.array2d[wp.spatial_vector],
     row_bias: wp.array2d[wp.float32],
+    velocity_reference: wp.array[wp.float32],
+    accumulated_impulse: wp.array[wp.float32],
+    joint_armature: wp.array[wp.float32],
+    joint_gear: wp.array[wp.float32],
+    effective_joint_dof_start: wp.array[wp.int32],
     bodies: BodyContainer,
     use_bias: wp.bool,
     row_scale: wp.array[wp.float32],
@@ -674,8 +728,62 @@ def _build_direct_equality_rhs_kernel(
         relative_velocity += wp.dot(row_wrench0[structural_index, local_row], _body_com_twist(bodies, body0))
     if body1 > wp.int32(0):
         relative_velocity += wp.dot(row_wrench1[structural_index, local_row], _body_com_twist(bodies, body1))
-    bias = row_bias[structural_index, local_row] if use_bias else wp.float32(0.0)
-    rhs[row] = -row_scale[row] * (relative_velocity + bias)
+    if row_dynamic[row]:
+        dof = effective_joint_dof_start[joint]
+        gear = joint_gear[dof]
+        armature = joint_armature[dof] * gear * gear
+        rhs[row] = row_scale[row] * (
+            velocity_reference[row]
+            - relative_velocity
+            - accumulated_impulse[row] / wp.max(armature, wp.float32(1.0e-10))
+        )
+    else:
+        bias = row_bias[structural_index, local_row] if use_bias else wp.float32(0.0)
+        rhs[row] = -row_scale[row] * (relative_velocity + bias)
+
+
+@wp.kernel(enable_backward=False)
+def _snapshot_direct_dynamic_velocity_kernel(
+    row_joint: wp.array[wp.int32],
+    row_local: wp.array[wp.int32],
+    row_dynamic: wp.array[wp.bool],
+    joint_to_structural: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    bodies: BodyContainer,
+    velocity_reference: wp.array[wp.float32],
+    accumulated_impulse: wp.array[wp.float32],
+):
+    row = wp.tid()
+    accumulated_impulse[row] = wp.float32(0.0)
+    if not row_dynamic[row]:
+        velocity_reference[row] = wp.float32(0.0)
+        return
+    joint = row_joint[row]
+    structural_index = joint_to_structural[joint]
+    local_row = row_local[row]
+    body0 = joint_parent[joint] + wp.int32(1)
+    body1 = joint_child[joint] + wp.int32(1)
+    relative_velocity = wp.float32(0.0)
+    if body0 > wp.int32(0):
+        relative_velocity += wp.dot(row_wrench0[structural_index, local_row], _body_com_twist(bodies, body0))
+    if body1 > wp.int32(0):
+        relative_velocity += wp.dot(row_wrench1[structural_index, local_row], _body_com_twist(bodies, body1))
+    velocity_reference[row] = relative_velocity
+
+
+@wp.kernel(enable_backward=False)
+def _accumulate_direct_dynamic_impulse_kernel(
+    row_dynamic: wp.array[wp.bool],
+    delta: wp.array[wp.float32],
+    row_scale: wp.array[wp.float32],
+    accumulated_impulse: wp.array[wp.float32],
+):
+    row = wp.tid()
+    if row_dynamic[row]:
+        accumulated_impulse[row] += row_scale[row] * delta[row]
 
 
 @wp.kernel(enable_backward=False)
@@ -795,10 +903,32 @@ class DirectEqualitySystem:
         joint_count = int(model.joint_count)
         if joint_mode.shape != (joint_count,) or joint_dof_start.shape != (joint_count,):
             raise ValueError("effective joint mode and DoF arrays must contain one entry per Newton joint")
+        excluded = (
+            np.asarray(excluded_joint_mask, dtype=bool)
+            if excluded_joint_mask is not None
+            else np.zeros(joint_count, dtype=bool)
+        )
+        armature = np.asarray(model.joint_armature.numpy(), dtype=np.float32)
+        dynamic_joint_mask = np.zeros(joint_count, dtype=bool)
+        for joint, mode in enumerate(joint_mode):
+            dof = int(joint_dof_start[joint])
+            if (
+                not excluded[joint]
+                and mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC))
+                and 0 <= dof < len(armature)
+                and float(armature[dof]) > 0.0
+            ):
+                dynamic_joint_mask[joint] = True
+        self._excluded_joint_mask = excluded
+        self._joint_mode_np = joint_mode.copy()
+        self._joint_dof_start_np = joint_dof_start.copy()
+        self.dynamic_joint_mask = dynamic_joint_mask
+        self.has_dynamic_rows = bool(np.any(dynamic_joint_mask))
         self.topology = build_direct_equality_topology(
             model,
-            excluded_joint_mask=excluded_joint_mask,
+            excluded_joint_mask=excluded,
             effective_joint_mode=joint_mode,
+            dynamic_joint_mask=dynamic_joint_mask,
         )
         self.regularization = float(regularization)
         self.enabled = bool(self.topology.dimensions)
@@ -821,6 +951,7 @@ class DirectEqualitySystem:
         self.effective_joint_dof_start = wp.array(joint_dof_start, dtype=wp.int32, device=device)
         self.row_joint = wp.array(self.topology.row_joint, dtype=wp.int32, device=device)
         self.row_local = wp.array(self.topology.row_local, dtype=wp.int32, device=device)
+        self.row_dynamic = wp.array(self.topology.row_dynamic, dtype=wp.bool, device=device)
         self.joint_to_structural = wp.array(joint_to_structural, dtype=wp.int32, device=device)
         self.body_row_start = wp.array(self.topology.body_row_start, dtype=wp.int32, device=device)
         self.body_rows = wp.array(self.topology.body_rows, dtype=wp.int32, device=device)
@@ -831,6 +962,8 @@ class DirectEqualitySystem:
         self.row_error = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.float32, device=device)
         self.row_stiffness = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.float32, device=device)
         self.row_damping = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.float32, device=device)
+        self.velocity_reference = wp.zeros(row_count, dtype=wp.float32, device=device)
+        self.accumulated_impulse = wp.zeros(row_count, dtype=wp.float32, device=device)
         dof_count = max(1, int(model.joint_dof_count))
         self.joint_target_ke = (
             model.joint_target_ke
@@ -889,7 +1022,32 @@ class DirectEqualitySystem:
             mask[self.topology.joints] = True
         return mask
 
-    def prepare_and_factor(self, idt: wp.float32) -> None:
+    def refresh_joint_properties(self) -> None:
+        """Rebuild topology only when armature rows activate or deactivate."""
+        armature = np.asarray(self.model.joint_armature.numpy(), dtype=np.float32)
+        dynamic_joint_mask = np.zeros(int(self.model.joint_count), dtype=bool)
+        for joint, mode in enumerate(self._joint_mode_np):
+            dof = int(self._joint_dof_start_np[joint])
+            if (
+                not self._excluded_joint_mask[joint]
+                and mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC))
+                and 0 <= dof < len(armature)
+                and float(armature[dof]) > 0.0
+            ):
+                dynamic_joint_mask[joint] = True
+        if np.array_equal(dynamic_joint_mask, self.dynamic_joint_mask):
+            return
+        self.__init__(
+            self.model,
+            self.bodies,
+            excluded_joint_mask=self._excluded_joint_mask,
+            effective_joint_mode=self._joint_mode_np,
+            effective_joint_dof_start=self._joint_dof_start_np,
+            regularization=self.regularization,
+        )
+
+    def begin_substep(self, idt: wp.float32) -> None:
+        """Prepare body-space rows and snapshot pre-force joint velocities."""
         if not self.enabled:
             return
         wp.launch(
@@ -918,6 +1076,29 @@ class DirectEqualitySystem:
             ],
             device=self.model.device,
         )
+        if self.has_dynamic_rows:
+            wp.launch(
+                _snapshot_direct_dynamic_velocity_kernel,
+                dim=len(self.topology.row_joint),
+                inputs=[
+                    self.row_joint,
+                    self.row_local,
+                    self.row_dynamic,
+                    self.joint_to_structural,
+                    self.model.joint_parent,
+                    self.model.joint_child,
+                    self.row_wrench0,
+                    self.row_wrench1,
+                    self.bodies,
+                    self.velocity_reference,
+                    self.accumulated_impulse,
+                ],
+                device=self.model.device,
+            )
+
+    def prepare_and_factor(self, idt: wp.float32) -> None:
+        if not self.enabled:
+            return
         wp.launch(
             _assemble_direct_equality_matrix_kernel,
             dim=self.operator.mat.size,
@@ -929,6 +1110,7 @@ class DirectEqualitySystem:
                 self.operator.info.vio,
                 self.row_joint,
                 self.row_local,
+                self.row_dynamic,
                 self.joint_to_structural,
                 self.model.joint_parent,
                 self.model.joint_child,
@@ -940,6 +1122,9 @@ class DirectEqualitySystem:
                 self.row_error,
                 self.row_stiffness,
                 self.row_damping,
+                self.model.joint_armature,
+                self.model.joint_gear,
+                self.effective_joint_dof_start,
                 self.row_bias,
                 self.operator.mat,
             ],
@@ -980,12 +1165,18 @@ class DirectEqualitySystem:
             inputs=[
                 self.row_joint,
                 self.row_local,
+                self.row_dynamic,
                 self.joint_to_structural,
                 self.model.joint_parent,
                 self.model.joint_child,
                 self.row_wrench0,
                 self.row_wrench1,
                 self.row_bias,
+                self.velocity_reference,
+                self.accumulated_impulse,
+                self.model.joint_armature,
+                self.model.joint_gear,
+                self.effective_joint_dof_start,
                 self.bodies,
                 wp.bool(use_bias),
                 self.row_scale,
@@ -994,6 +1185,18 @@ class DirectEqualitySystem:
             device=self.model.device,
         )
         self.solver.solve(self.rhs, self.delta)
+        if self.has_dynamic_rows:
+            wp.launch(
+                _accumulate_direct_dynamic_impulse_kernel,
+                dim=len(self.topology.row_joint),
+                inputs=[
+                    self.row_dynamic,
+                    self.delta,
+                    self.row_scale,
+                    self.accumulated_impulse,
+                ],
+                device=self.model.device,
+            )
         wp.launch(
             _apply_direct_equality_delta_kernel,
             dim=int(self.model.body_count) + 1,

@@ -1124,9 +1124,9 @@ class Model:
         self.joint_armature: wp.array[wp.float32] | None = None
         """Armature [kg·m² (rotational) or kg (translational)] for each joint axis, shape [joint_dof_count], float.
 
-        :class:`~newton.solvers.SolverPhoenX` maximal mode supports rotational
-        armature on revolute joints as stator-side parent inertia plus
-        gear-reflected rotor-side child inertia.
+        :class:`~newton.solvers.SolverPhoenX` direct maximal mode supports exact
+        generalized armature on revolute and prismatic joints. The effective
+        joint-space inertia is reflected through :attr:`joint_gear` squared.
         """
         self.joint_target_mode: wp.array[wp.int32] | None = None
         """Joint target mode per DOF, see :class:`newton.JointTargetMode`. Shape [joint_dof_count], dtype int32."""

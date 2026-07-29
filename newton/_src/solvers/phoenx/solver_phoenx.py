@@ -3000,6 +3000,9 @@ class PhoenXWorld:
                         and self._reduced_articulation.contact_block_system.requires_impulse_response
                     ),
                 )
+            direct = getattr(self, "_direct_equality_system", None)
+            if direct is not None and direct.enabled:
+                direct.begin_substep(wp.float32(1.0 / self.substep_dt))
             self._integrate_forces_and_gravity()
             # TGS-soft (Box2D-v3) substep order: solve-with-bias ->
             # integrate -> relax (bias=False). Reversing regresses

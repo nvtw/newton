@@ -65,6 +65,9 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             return
 
         inv_dt = 1.0 / w.substep_dt
+        if direct is not None and direct.enabled:
+            direct.solve(use_bias=False)
+            w._mass_splitting_broadcast()
         prepare_head, _, iterate_head, _, _, _ = w._singleworld_kernels()
         if w._refresh_prepare_this_substep():
             w._partitioner.begin_sweep()
@@ -80,12 +83,10 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             w._partitioner.begin_sweep()
             self._unrolled_sweep(iterate_head, idt, w._contact_container_solve)
             w._mass_splitting_average_and_broadcast(inv_dt)
-            if direct is not None and direct.enabled:
-                w._mass_splitting_writeback(already_averaged=True)
-                direct.solve(use_bias=True)
-                w._mass_splitting_broadcast()
 
         w._mass_splitting_writeback(already_averaged=True)
+        if direct is not None and direct.enabled:
+            direct.solve(use_bias=True)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
         if w._reduced_constraints_active_this_step:
@@ -114,11 +115,9 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             self._unrolled_sweep(relax_head, idt, w._contact_container_solve)
             w._mass_splitting_average_and_broadcast(inv_dt)
 
-            if direct is not None and direct.enabled:
-                w._mass_splitting_writeback(already_averaged=True)
-                direct.solve(use_bias=False)
-                w._mass_splitting_broadcast()
         w._mass_splitting_writeback(already_averaged=True)
+        if direct is not None and direct.enabled:
+            direct.solve(use_bias=False)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
         if w._reduced_constraints_active_this_step:

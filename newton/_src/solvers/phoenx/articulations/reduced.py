@@ -10,7 +10,7 @@ import functools
 import numpy as np
 import warp as wp
 
-from newton._src.sim import Control, JointType, Model, State
+from newton._src.sim import Control, JointTargetMode, JointType, Model, State
 from newton._src.sim.articulation import eval_fk
 from newton._src.solvers.featherstone.kernels import (
     compute_com_transforms,
@@ -228,6 +228,7 @@ def _configure_implicit_joint_dynamics_kernel(
     joint_target_qd: wp.array[wp.float32],
     joint_target_ke: wp.array[wp.float32],
     joint_target_kd: wp.array[wp.float32],
+    joint_target_mode: wp.array[wp.int32],
     joint_limit_lower: wp.array[wp.float32],
     joint_limit_upper: wp.array[wp.float32],
     joint_limit_ke: wp.array[wp.float32],
@@ -256,6 +257,15 @@ def _configure_implicit_joint_dynamics_kernel(
             drive_damping = joint_target_kd[dof]
             target_position = joint_target_q[target_start + local]
             target_velocity = joint_target_qd[dof]
+            target_mode = joint_target_mode[dof]
+            if target_mode == JointTargetMode.NONE or target_mode == JointTargetMode.EFFORT:
+                stiffness = wp.float32(0.0)
+                drive_damping = wp.float32(0.0)
+                target_velocity = wp.float32(0.0)
+            elif target_mode == JointTargetMode.POSITION:
+                target_velocity = wp.float32(0.0)
+            elif target_mode == JointTargetMode.VELOCITY:
+                stiffness = wp.float32(0.0)
             predicted_q = q + dt * qd
             if q < joint_limit_lower[dof] or predicted_q < joint_limit_lower[dof]:
                 stiffness = joint_limit_ke[dof]
@@ -3892,6 +3902,7 @@ class ReducedArticulationSystem:
                     control.joint_target_qd,
                     self.model.joint_target_ke,
                     self.model.joint_target_kd,
+                    self.model.joint_target_mode,
                     self.model.joint_limit_lower,
                     self.model.joint_limit_upper,
                     self.model.joint_limit_ke,

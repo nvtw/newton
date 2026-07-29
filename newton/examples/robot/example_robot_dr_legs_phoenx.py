@@ -185,7 +185,7 @@ class Example:
         # ``--fps`` controls how often we enter the per-frame pipeline:
         # broad/narrow-phase collide() once, then a single
         # ``solver.step(..., dt=frame_dt)`` call. PhoenX runs
-        # ``args.sim_substeps`` PGS substeps internally per step, so
+        # ``args.sim_substeps`` solver substeps internally per step, so
         # the integrator dt is ``frame_dt / sim_substeps``.
         self.fps = args.fps
         self.frame_dt = 1.0 / self.fps
@@ -259,17 +259,13 @@ class Example:
         self.model = builder.finalize()
 
         # PhoenX handles substepping internally. ``substeps`` controls
-        # the number of PGS substeps per :meth:`step` call;
-        # ``solver_iterations`` is PGS iterations per substep;
+        # the number of solver substeps per :meth:`step` call;
+        # ``solver_iterations`` is inequality PGS iterations per substep;
         # ``velocity_iterations`` is the TGS-soft relax sweep count.
-        # ``armature_mode`` defaults to ``"bake"``; ``"exact"`` is
-        # physically the more principled per-joint virtual-rotor
-        # treatment, but the PhoenX docstring warns it diverges for
-        # dr_legs-class scenes (light parallel rods + stiff PD +
-        # ground contact) because external-force paths still see the
-        # raw 2e-7 kg.m^2 rod inertia, and a stiff contact impulse
-        # against that raw inertia launches the chain instantly.
-        # ``"bake"`` is the empirically working choice for this asset.
+        # Full-coordinate revolute armature is an exact generalized
+        # inertia in the direct mechanism solve. The 0.001 default
+        # preserves this controller's historical tuning; changing it
+        # changes the physical plant and may require retuning the policy.
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
             substeps=args.sim_substeps,
@@ -526,22 +522,21 @@ class Example:
             type=int,
             default=40,
             help=(
-                "PhoenX internal PGS substeps per ``solver.step`` call."
+                "PhoenX internal solver substeps per ``solver.step`` call."
                 " The asset has ~6 g parallel-rod / ankle-bracket bodies"
                 " with min principal inertia ~2e-7 kg.m^2. The actuated"
-                " joints use a small ``--armature`` rotor, while the"
-                " unactuated parallel-rod / ankle-bracket loop closers"
-                " still run on the raw body inertia and set the stiffest"
-                " local timestep bound. At fps=60 the default gives a"
-                " 0.42 ms substep and is validated by the walking"
-                " regression."
+                " joints and loop closures are solved as direct mechanisms;"
+                " contacts and bounded drives remain iterative. At fps=60"
+                " the default gives a 0.42 ms substep. The bundled gait is"
+                " open-loop and requires controller retuning for the exact"
+                " generalized-armature plant."
             ),
         )
         parser.add_argument(
             "--solver-iterations",
             type=int,
             default=8,
-            help="PhoenX PGS iterations per substep.",
+            help="PhoenX inequality PGS iterations per substep.",
         )
         parser.add_argument(
             "--velocity-iterations",
@@ -566,11 +561,10 @@ class Example:
             default=0.001,  # 0.011 is the physical XH540 reflected rotor inertia.
             help=(
                 "Per-joint axial armature [kg*m^2] applied as the"
-                " builder default. 0.001 is the validated PhoenX walking"
-                " setting. 0.011 is the Dynamixel XH540-V150 reflected"
+                " builder default. 0.001 preserves the historical controller"
+                " tuning. 0.011 is the Dynamixel XH540-V150 reflected"
                 " rotor inertia used by the Kamino reference example"
-                " (``a_j``), but needs a more robust PhoenX armature path"
-                " before it is a low-substep default."
+                " (``a_j``); using it may require controller retuning."
             ),
         )
         parser.add_argument(

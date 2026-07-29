@@ -63,6 +63,9 @@ class SingleWorldMassSplittingDispatcher:
             return
 
         inv_dt = 1.0 / w.substep_dt
+        if direct is not None and direct.enabled:
+            direct.solve(use_bias=False)
+            w._mass_splitting_broadcast()
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
         # Prepare applies the warm-start impulse to each body's slots;
         # average so the iterate phase starts from converged slot values.
@@ -86,15 +89,13 @@ class SingleWorldMassSplittingDispatcher:
                 contact_container=w._contact_container_solve,
             )
             w._mass_splitting_average_and_broadcast(inv_dt)
-            if direct is not None and direct.enabled:
-                w._mass_splitting_writeback(already_averaged=True)
-                direct.solve(use_bias=True)
-                w._mass_splitting_broadcast()
 
         # Writeback slot[0].velocity -> body.velocity. step()'s
         # integrate_positions then advances bodies with the post-PGS
         # velocity.
         w._mass_splitting_writeback(already_averaged=True)
+        if direct is not None and direct.enabled:
+            direct.solve(use_bias=True)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
             w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
@@ -134,13 +135,11 @@ class SingleWorldMassSplittingDispatcher:
             )
             w._mass_splitting_average_and_broadcast(inv_dt)
 
-            if direct is not None and direct.enabled:
-                w._mass_splitting_writeback(already_averaged=True)
-                direct.solve(use_bias=False)
-                w._mass_splitting_broadcast()
         # Second writeback after relax: relax also routes through slots,
         # so the next substep would see stale body.velocity otherwise.
         w._mass_splitting_writeback(already_averaged=True)
+        if direct is not None and direct.enabled:
+            direct.solve(use_bias=False)
 
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)

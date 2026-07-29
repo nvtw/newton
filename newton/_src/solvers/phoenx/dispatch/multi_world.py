@@ -36,6 +36,9 @@ class MultiWorldDispatcher:
         if direct is not None and direct.enabled:
             direct.prepare_and_factor(idt)
         if self._world._regular_pgs_active_this_step:
+            if direct is not None and direct.enabled:
+                # Expose force-integrated mechanism motion to inequalities.
+                direct.solve(use_bias=False)
             if self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported():
                 self._world._solve_main_block_world()
             else:

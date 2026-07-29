@@ -64,12 +64,15 @@ def dr_legs_publish_joint_state_kernel(
     joint_xform_parent: wp.array[wp.transform],
     joint_xform_child: wp.array[wp.transform],
     joint_axis: wp.array[wp.vec3],
+    joint_type: wp.array[wp.int32],
     joint_q_start: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
     joint_q: wp.array[wp.float32],
     joint_qd: wp.array[wp.float32],
 ):
     joint = wp.tid()
+    if joint_type[joint] != wp.int32(newton.JointType.REVOLUTE):
+        return
     parent = joint_parent[joint]
     child = joint_child[joint]
     parent_joint = body_q[parent] * joint_xform_parent[joint]
@@ -95,7 +98,8 @@ def dr_legs_observe_reward_kernel(
     body_qd: wp.array[wp.spatial_vector],
     joint_q: wp.array[wp.float32],
     joint_qd: wp.array[wp.float32],
-    actuated_joint: wp.array[wp.int32],
+    actuated_joint_q: wp.array[wp.int32],
+    actuated_joint_qd: wp.array[wp.int32],
     current_actions: wp.array2d[wp.float32],
     previous_actions: wp.array2d[wp.float32],
     previous_previous_actions: wp.array2d[wp.float32],
@@ -103,7 +107,8 @@ def dr_legs_observe_reward_kernel(
     foot_contacts: wp.array2d[wp.float32],
     episode_steps: wp.array[wp.int32],
     body_stride: wp.int32,
-    joint_stride: wp.int32,
+    joint_q_stride: wp.int32,
+    joint_qd_stride: wp.int32,
     obs_dim: wp.int32,
     task: wp.int32,
     max_episode_steps: wp.int32,
@@ -138,7 +143,7 @@ def dr_legs_observe_reward_kernel(
         value = angular_body[col - wp.int32(3)]
     elif col < wp.int32(18):
         action = col - wp.int32(6)
-        value = joint_q[world * joint_stride + actuated_joint[action]]
+        value = joint_q[world * joint_q_stride + actuated_joint_q[action]]
     elif col < wp.int32(30):
         action = col - wp.int32(18)
         value = action_scale * previous_actions[world, action]
@@ -161,8 +166,8 @@ def dr_legs_observe_reward_kernel(
         joint_deviation = wp.float32(0.0)
         torque_proxy = wp.float32(0.0)
         for action in range(ACTION_DIM_DR_LEGS):
-            q = joint_q[world * joint_stride + actuated_joint[action]]
-            qd = joint_qd[world * joint_stride + actuated_joint[action]]
+            q = joint_q[world * joint_q_stride + actuated_joint_q[action]]
+            qd = joint_qd[world * joint_qd_stride + actuated_joint_qd[action]]
             target = action_scale * current_actions[world, action]
             torque = wp.float32(5.0) * (target - q) - wp.float32(0.2) * qd
             delta = current_actions[world, action] - previous_actions[world, action]
@@ -304,7 +309,8 @@ def dr_legs_reset_done_kernel(
     default_joint_q: wp.array[wp.float32],
     default_joint_qd: wp.array[wp.float32],
     body_stride: wp.int32,
-    joint_stride: wp.int32,
+    joint_q_stride: wp.int32,
+    joint_qd_stride: wp.int32,
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
     joint_q: wp.array[wp.float32],
@@ -321,9 +327,11 @@ def dr_legs_reset_done_kernel(
         body = world * body_stride + col
         body_q[body] = default_body_q[body]
         body_qd[body] = default_body_qd[body]
-    if col < joint_stride:
-        joint = world * joint_stride + col
+    if col < joint_q_stride:
+        joint = world * joint_q_stride + col
         joint_q[joint] = default_joint_q[joint]
+    if col < joint_qd_stride:
+        joint = world * joint_qd_stride + col
         joint_qd[joint] = default_joint_qd[joint]
     if col < ACTION_DIM_DR_LEGS:
         previous_actions[world, col] = wp.float32(0.0)
@@ -416,8 +424,9 @@ class EnvDrLegsPhoenX:
         self.model = self._build_model()
         self.body_stride = int(self.model.body_count) // self.world_count
         self.joint_stride = int(self.model.joint_coord_count) // self.world_count
-        if self.body_stride != 31 or self.joint_stride != 36:
-            raise RuntimeError(f"Expected DR Legs strides (31, 36), got ({self.body_stride}, {self.joint_stride})")
+        self.joint_dof_stride = int(self.model.joint_dof_count) // self.world_count
+        if self.body_stride != 31:
+            raise RuntimeError(f"Expected DR Legs body stride 31, got {self.body_stride}")
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
             substeps=1,
@@ -429,7 +438,8 @@ class EnvDrLegsPhoenX:
         self.control = self.model.control()
         self.contacts = self.model.contacts()
         self._can_scan_foot_contacts = self.model.shape_body is not None and self.model.shape_world is not None
-        self.actuated_joint = wp.array(_DR_LEGS_ACTUATED_JOINT, dtype=wp.int32, device=self.device)
+        self.actuated_joint = wp.array(self._actuated_joint_q, dtype=wp.int32, device=self.device)
+        self.actuated_joint_qd = wp.array(self._actuated_joint_qd, dtype=wp.int32, device=self.device)
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
         self.command = wp.array(command_np, dtype=wp.float32, device=self.device)
         self._command_seed_counter = wp.array([int(self.config.command_seed)], dtype=wp.int32, device=self.device)
@@ -466,10 +476,18 @@ class EnvDrLegsPhoenX:
             enable_self_collisions=False,
             hide_collision_shapes=True,
         )
-        if len(robot.joint_q) != 36 or len(robot.body_q) != 31:
-            raise RuntimeError(
-                f"Expected DR Legs joint/body counts (36, 31), got ({len(robot.joint_q)}, {len(robot.body_q)})"
-            )
+        if len(robot.body_q) != 31:
+            raise RuntimeError(f"Expected DR Legs body count 31, got {len(robot.body_q)}")
+        revolute_joints = [
+            joint
+            for joint, joint_type in enumerate(robot.joint_type)
+            if int(joint_type) == int(newton.JointType.REVOLUTE)
+        ]
+        if len(revolute_joints) != 36:
+            raise RuntimeError(f"Expected 36 DR Legs revolute joints, got {len(revolute_joints)}")
+        actuated_joints = [revolute_joints[index] for index in _DR_LEGS_ACTUATED_JOINT]
+        self._actuated_joint_q = tuple(int(robot.joint_q_start[joint]) for joint in actuated_joints)
+        self._actuated_joint_qd = tuple(int(robot.joint_qd_start[joint]) for joint in actuated_joints)
         foot_bodies = {
             label.rsplit("/", 1)[-1]: body
             for body, label in enumerate(robot.body_label)
@@ -485,12 +503,12 @@ class EnvDrLegsPhoenX:
             position = wp.transform_get_translation(transform)
             rotation = wp.transform_get_rotation(transform)
             robot.body_q[body] = wp.transform(position + wp.vec3(0.0, 0.0, translation_z), rotation)
-        for dof in range(36):
+        for dof in range(len(robot.joint_target_ke)):
             robot.joint_target_ke[dof] = 0.0
             robot.joint_target_kd[dof] = 0.0
             robot.joint_target_mode[dof] = int(newton.JointTargetMode.NONE)
             robot.joint_effort_limit[dof] = 400.0
-        for dof in _DR_LEGS_ACTUATED_JOINT:
+        for dof in self._actuated_joint_qd:
             robot.joint_target_ke[dof] = 5.0
             robot.joint_target_kd[dof] = 0.2
             robot.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
@@ -568,6 +586,7 @@ class EnvDrLegsPhoenX:
                 self.state_0.joint_q,
                 self.state_0.joint_qd,
                 self.actuated_joint,
+                self.actuated_joint_qd,
                 self.current_actions,
                 self.previous_actions,
                 self.previous_previous_actions,
@@ -576,6 +595,7 @@ class EnvDrLegsPhoenX:
                 self.episode_steps,
                 self.body_stride,
                 self.joint_stride,
+                self.joint_dof_stride,
                 self.obs_dim,
                 self.task,
                 int(self.config.max_episode_steps),
@@ -611,7 +631,10 @@ class EnvDrLegsPhoenX:
         self._sample_done_commands()
         wp.launch(
             dr_legs_reset_done_kernel,
-            dim=(self.world_count, max(self.body_stride, self.joint_stride, self.action_dim)),
+            dim=(
+                self.world_count,
+                max(self.body_stride, self.joint_stride, self.joint_dof_stride, self.action_dim),
+            ),
             inputs=[
                 self.dones,
                 self.model.body_q,
@@ -620,6 +643,7 @@ class EnvDrLegsPhoenX:
                 self.model.joint_qd,
                 self.body_stride,
                 self.joint_stride,
+                self.joint_dof_stride,
             ],
             outputs=[
                 self.state_0.body_q,
@@ -670,6 +694,7 @@ class EnvDrLegsPhoenX:
                 self.model.joint_X_p,
                 self.model.joint_X_c,
                 self.model.joint_axis,
+                self.model.joint_type,
                 self.model.joint_q_start,
                 self.model.joint_qd_start,
             ],

@@ -355,6 +355,9 @@ class ActuatedDoubleBallSocketData:
     # Cached scalar inverse effective mass for the axial row,
     # ``J M^-1 J^T`` (used by the Box2D limit path).
     eff_inv_axial: wp.float32
+    # Friction may need a direct-structural Schur correction while drives
+    # retain their existing maximal-coordinate response.
+    eff_inv_friction: wp.float32
     bias_drive: wp.float32
     gamma_drive: wp.float32
     eff_mass_drive_soft: wp.float32
@@ -479,6 +482,7 @@ _OFF_DAMPING_RATIO_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketD
 _OFF_STIFFNESS_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_limit"))
 _OFF_DAMPING_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_limit"))
 _OFF_EFF_INV_AXIAL = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_inv_axial"))
+_OFF_EFF_INV_FRICTION = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_inv_friction"))
 _OFF_BIAS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias_drive"))
 _OFF_GAMMA_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "gamma_drive"))
 _OFF_EFF_MASS_DRIVE_SOFT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_mass_drive_soft"))
@@ -705,6 +709,7 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_STIFFNESS_LIMIT, cid, stiffness_limit[tid])
     write_float(constraints, _OFF_DAMPING_LIMIT, cid, damping_limit[tid])
     write_float(constraints, _OFF_EFF_INV_AXIAL, cid, 0.0)
+    write_float(constraints, _OFF_EFF_INV_FRICTION, cid, 0.0)
     write_float(constraints, _OFF_BIAS_DRIVE, cid, 0.0)
     write_float(constraints, _OFF_GAMMA_DRIVE, cid, 0.0)
     write_float(constraints, _OFF_EFF_MASS_DRIVE_SOFT, cid, 0.0)
@@ -806,6 +811,7 @@ def _adbs_clear_reset_worlds_kernel(
     constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, zero3)
     constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, zero3)
     write_float(constraints, _OFF_EFF_INV_AXIAL, cid, wp.float32(0.0))
+    write_float(constraints, _OFF_EFF_INV_FRICTION, cid, wp.float32(0.0))
     write_float(constraints, _OFF_BIAS_DRIVE, cid, wp.float32(0.0))
     write_float(constraints, _OFF_GAMMA_DRIVE, cid, wp.float32(0.0))
     write_float(constraints, _OFF_EFF_MASS_DRIVE_SOFT, cid, wp.float32(0.0))
@@ -1073,7 +1079,7 @@ def _axial_drive_limit_iterate(
     friction = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
     acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)
     if friction > 0.0:
-        eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+        eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_FRICTION, cid)
         max_lambda_friction = friction * (wp.float32(1.0) / idt)
         if eff_inv_friction > 0.0 and max_lambda_friction > 0.0:
             slip_velocity = PHOENX_FRICTION_SLIP_VELOCITY
@@ -1111,6 +1117,7 @@ def _axial_drive_limit_prepare_at(
     base_offset: wp.int32,
     cumulative_value: wp.float32,
     eff_inv: wp.float32,
+    eff_inv_friction: wp.float32,
     dt: wp.float32,
     drive_boost: wp.float32,
     limit_boost: wp.float32,
@@ -1150,6 +1157,7 @@ def _axial_drive_limit_prepare_at(
     damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
 
     write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
+    write_float(constraints, base_offset + _OFF_EFF_INV_FRICTION, cid, eff_inv_friction)
 
     # ---- Drive (PD only) ---------------------------------------------
     drive_C = float(0.0)
@@ -2322,6 +2330,7 @@ def _d6_prepare_rows_at(
             base_offset,
             slide,
             eff_inv,
+            eff_inv,
             dt,
             PHOENX_BOOST_PRISMATIC_DRIVE,
             PHOENX_BOOST_PRISMATIC_LIMIT,
@@ -2332,6 +2341,18 @@ def _d6_prepare_rows_at(
         angular_velocity2 = angular_velocity2 - inv_inertia2 @ wp.cross(r1_b2, n_hat * axial_imp)
     elif has_axial:
         eff_inv = wp.dot(n_hat, inv_inertia1 @ n_hat) + wp.dot(n_hat, inv_inertia2 @ n_hat)
+        eff_inv_friction = eff_inv
+        if read_int(constraints, base_offset + _OFF_STRUCTURAL_DIRECT, cid) != wp.int32(0):
+            # Eliminate the direct point-lock rows from the free-axis
+            # response. Without this Schur correction, an offset hinge
+            # friction row sees COM inertia and can be orders of magnitude
+            # too soft compared with the constrained pivot inertia.
+            coupling = wp.cross(r1_b1, inv_inertia1 @ n_hat) + wp.cross(r1_b2, inv_inertia2 @ n_hat)
+            a1_inv_s6 = read_vec6(constraints, base_offset + _OFF_A1_INV_S6, cid)
+            eff_inv_friction = wp.max(
+                wp.float32(0.0),
+                eff_inv - wp.dot(coupling, mul_sym3(a1_inv_s6, coupling)),
+            )
         j1 = wp.quat_rotate(orientation1, read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid))
         inv_init = read_quat(constraints, base_offset + _OFF_INV_INITIAL_ORIENTATION, cid)
         diff = orientation2 * inv_init * wp.quat_inverse(orientation1)
@@ -2348,6 +2369,7 @@ def _d6_prepare_rows_at(
             base_offset,
             cumulative_angle,
             eff_inv,
+            eff_inv_friction,
             dt,
             PHOENX_BOOST_REVOLUTE_DRIVE,
             PHOENX_BOOST_REVOLUTE_LIMIT,
@@ -2395,6 +2417,7 @@ def _d6_prepare_rows_at(
         constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, 0.0)
         constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
         write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, 0.0)
+        write_float(constraints, base_offset + _OFF_EFF_INV_FRICTION, cid, 0.0)
         write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, 0.0)
 
 
@@ -2966,7 +2989,7 @@ def _revolute_iterate_at_multi(
     gamma_friction = wp.float32(0.0)
     eff_mass_friction = wp.float32(0.0)
     if friction_active:
-        eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+        eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_FRICTION, cid)
         friction_active = eff_inv_friction > wp.float32(0.0) and max_lambda_friction > wp.float32(0.0)
         if friction_active:
             acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)

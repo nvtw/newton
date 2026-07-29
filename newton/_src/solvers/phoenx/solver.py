@@ -114,7 +114,7 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
 
 
 def _build_maximal_motor_body_inv_inertia(model: Model) -> wp.array[wp.mat33f]:
-    """Build stator/rotor motor inertia for maximal coordinates.
+    """Build the legacy PGS/projector stator-rotor approximation.
 
     Each revolute DoF adds motor-side armature to its parent body and
     gear-reflected armature to its child body, both along the joint axis in
@@ -315,9 +315,12 @@ class SolverPhoenX(SolverBase):
                 ``"maximal"`` keeps independent-body tree
                 dynamics; structural joint rows use the selected
                 ``joint_equality_solver`` and inequality rows remain in
-                PhoenX PGS. Revolute ``joint_armature`` is
-                added to the stator-side parent body and reflected through
-                ``joint_gear`` onto the rotor-side child body.
+                PhoenX PGS. With the direct equality solver, revolute and
+                prismatic ``joint_armature`` use exact generalized dynamic
+                rows, reflected through ``joint_gear`` squared, in each
+                mechanism system. The legacy PGS and experimental
+                maximal-projector paths retain a revolute stator/rotor body
+                inertia approximation.
                 ``"maximal_projected"`` additionally applies an exact
                 mass-metric tree projection on supported CUDA robot forests.
                 Experimental ``"maximal_articulated"`` also applies exact
@@ -440,7 +443,7 @@ class SolverPhoenX(SolverBase):
         )
         self._phoenx_body_inv_inertia = (
             _build_maximal_motor_body_inv_inertia(model)
-            if articulation_mode == "maximal" or self._uses_maximal_tree_projector
+            if (articulation_mode == "maximal" and joint_equality_solver == "pgs") or self._uses_maximal_tree_projector
             else model.body_inv_inertia
         )
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -715,7 +718,10 @@ class SolverPhoenX(SolverBase):
             self.world.set_reduced_articulation(self._reduced_articulation, joint_pgs_enabled)
 
         self._direct_equality_system: DirectEqualitySystem | None = None
-        if self.joint_equality_solver == "direct":
+        # The experimental maximal tree projector already owns structural tree
+        # equalities. Installing a second direct owner would apply incompatible
+        # projections and overwrite its prepare-only PGS ownership state.
+        if self.joint_equality_solver == "direct" and not self._uses_maximal_tree_projector:
             excluded_joint_mask = None
             if self._reduced_articulation is not None and self._uses_reduced_joint_ownership:
                 excluded_joint_mask = self._reduced_articulation.owned_joint_mask_np
@@ -1292,6 +1298,8 @@ class SolverPhoenX(SolverBase):
             )
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
+            if self._direct_equality_system is not None:
+                self._direct_equality_system.refresh_joint_properties()
         if flags & int(ModelFlags.MODEL_PROPERTIES):
             self.world.gravity = wp.array(self._read_model_gravity_np(self.model), dtype=wp.vec3f, device=self.device)
         # Single body refresh kernel covers both BODY_PROPERTIES and
@@ -1302,8 +1310,15 @@ class SolverPhoenX(SolverBase):
         uses_maximal_mass = self.articulation_mode == "maximal" or self._uses_maximal_tree_projector
         maximal_joint_properties_changed = joint_props_changed and uses_maximal_mass
         reduced_joint_properties_changed = joint_props_changed and self._reduced_articulation is not None
+        uses_legacy_body_armature = (
+            self.articulation_mode == "maximal" and self.joint_equality_solver == "pgs"
+        ) or self._uses_maximal_tree_projector
         if uses_maximal_mass and (body_properties_changed or joint_props_changed):
-            self._phoenx_body_inv_inertia = _build_maximal_motor_body_inv_inertia(self.model)
+            self._phoenx_body_inv_inertia = (
+                _build_maximal_motor_body_inv_inertia(self.model)
+                if uses_legacy_body_armature
+                else self.model.body_inv_inertia
+            )
         if body_properties_changed or maximal_joint_properties_changed or reduced_joint_properties_changed:
             if self.model.body_count > 0:
                 self._launch_init_phoenx_bodies(self.model)
