@@ -213,6 +213,7 @@
 - Fix the reduced-coordinate PhoenX fallback fast-path proof to retain deterministic fallback coloring for unrelated maximal rigid-body contacts.
 - Fix `SolverPhoenX` contact ingest to apply per-contact friction scales and keep mixed-material compound contacts in friction-compatible columns.
 - Fix experimental PhoenX G1 replacement foot boxes bypassing the MJCF no-self-collision filters, preventing unintended robot self-contacts during policy exploration.
+- Keep mechanism-wide PhoenX direct equality solves finite under extreme mass ratios and large world translations.
 - Fix the experimental PhoenX G1 recipe to match nanoG1's 8192-world batch and full-range command distribution; the pinned build does not enable its optional command curriculum.
 - Fix maximal-coordinate PhoenX revolute armature by adding motor-side stator inertia to the parent and gear-reflected rotor inertia to the child, preserving rigid-body momentum and gyroscopic dynamics without auxiliary constraint rows.
 - Fix `SolverPhoenX` state imports leaving world-space inverse inertia at the previous orientation, which produced incorrect first-frame impulses and angular-momentum jumps after resets or externally modified poses.

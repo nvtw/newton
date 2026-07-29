@@ -969,6 +969,7 @@ class PhoenXWorld:
         self._has_maximal_dynamic_bodies = True
         self._joint_pgs_ownership_active = False
         self._joint_pgs_all_disabled = False
+        self._joint_pgs_inequality_only = False
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
@@ -2022,7 +2023,7 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def set_joint_pgs_ownership(self, joint_pgs_enabled: np.ndarray) -> None:
+    def set_joint_pgs_ownership(self, joint_pgs_enabled: np.ndarray, *, inequality_only: bool = False) -> None:
         """Set joint ownership: 0 disabled, 1 prepare and iterate, 2 prepare only."""
         enabled = np.asarray(joint_pgs_enabled, dtype=np.int32)
         if enabled.shape != (self.num_joints,):
@@ -2030,6 +2031,7 @@ class PhoenXWorld:
         self._joint_pgs_enabled.assign(enabled)
         self._joint_pgs_ownership_active = True
         self._joint_pgs_all_disabled = not bool(enabled.any())
+        self._joint_pgs_inequality_only = bool(inequality_only and enabled.any())
 
     def set_reduced_articulation(self, articulation, joint_pgs_enabled: np.ndarray) -> None:
         """Bind a reduced backend and transfer ownership of selected joint columns."""
@@ -4558,6 +4560,7 @@ class PhoenXWorld:
             "has_joints": self.num_joints > 0,
             "skip_joint_pgs": self._skip_all_joint_pgs(),
             "selective_joint_pgs": self._selective_joint_pgs_enabled(),
+            "joint_inequality_only": self._joint_pgs_inequality_only,
             "has_sleeping": self._sleeping_enabled,
             "has_soft_contact_pd": bool(self._has_soft_contact_pd),
         }
@@ -4589,6 +4592,7 @@ class PhoenXWorld:
             "has_contacts": self.max_contact_columns > 0,
             "skip_joint_pgs": dispatch_kw["skip_joint_pgs"],
             "selective_joint_pgs": dispatch_kw["selective_joint_pgs"],
+            "joint_inequality_only": dispatch_kw["joint_inequality_only"],
             "has_sleeping": dispatch_kw["has_sleeping"],
             "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
             "patch_friction": self._contact_patch_enabled,
@@ -4636,6 +4640,7 @@ class PhoenXWorld:
                 has_contacts=self.max_contact_columns > 0,
                 skip_joint_pgs=self._skip_all_joint_pgs(),
                 selective_joint_pgs=self._selective_joint_pgs_enabled(),
+                joint_inequality_only=self._joint_pgs_inequality_only,
                 has_mass_splitting=False,
                 packed_contact_headers=False,
                 has_sleeping=False,
@@ -4653,6 +4658,7 @@ class PhoenXWorld:
                 has_contacts=self.max_contact_columns > 0,
                 skip_joint_pgs=self._skip_all_joint_pgs(),
                 selective_joint_pgs=self._selective_joint_pgs_enabled(),
+                joint_inequality_only=self._joint_pgs_inequality_only,
                 has_mass_splitting=False,
                 packed_contact_headers=False,
                 has_sleeping=False,

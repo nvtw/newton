@@ -16,11 +16,8 @@ from newton._src.solvers.kamino._src.linalg.core import DenseLinearOperatorData,
 from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked_rcm_solver import LLTBlockedRCMSolver
 from newton._src.solvers.phoenx.articulations.reduced_loop import (
     _body_origin_transform,
-    _body_origin_twist,
     _quat_log,
     _set_angular_row,
-    _set_point_row,
-    _tile_rigid_wrench_response,
 )
 from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -231,6 +228,26 @@ def build_direct_equality_topology(
 
 
 @wp.func
+def _set_direct_point_row(
+    structural_index: wp.int32,
+    row: wp.int32,
+    point0_com: wp.vec3,
+    point1_com: wp.vec3,
+    direction: wp.vec3,
+    error: wp.float32,
+    bias_rate: wp.float32,
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    row_bias: wp.array2d[wp.float32],
+):
+    force0 = -direction
+    force1 = direction
+    row_wrench0[structural_index, row] = wp.spatial_vector(force0, wp.cross(point0_com, force0))
+    row_wrench1[structural_index, row] = wp.spatial_vector(force1, wp.cross(point1_com, force1))
+    row_bias[structural_index, row] = bias_rate * error
+
+
+@wp.func
 def _prepare_direct_rows(
     structural_index: wp.int32,
     joint: wp.int32,
@@ -261,6 +278,12 @@ def _prepare_direct_rows(
     q0 = wp.transform_get_rotation(x_wpj)
     q1 = wp.transform_get_rotation(x_wcj)
     mode = effective_joint_mode[joint]
+    point0_com = point0
+    point1_com = point1
+    if parent > wp.int32(0):
+        point0_com -= bodies.position[parent]
+    if child > wp.int32(0):
+        point1_com -= bodies.position[child]
 
     for row in range(_MAX_ROWS):
         row_wrench0[structural_index, row] = wp.spatial_vector()
@@ -282,11 +305,11 @@ def _prepare_direct_rows(
         for row in range(3):
             direction = wp.vec3(0.0)
             direction[row] = wp.float32(1.0)
-            _set_point_row(
+            _set_direct_point_row(
                 structural_index,
                 wp.int32(row),
-                point0,
-                point1,
+                point0_com,
+                point1_com,
                 direction,
                 point_error[row],
                 bias_rate,
@@ -353,11 +376,11 @@ def _prepare_direct_rows(
         point_error = point1 - point0
         error0 = wp.dot(point_error, tangent0)
         error1 = wp.dot(point_error, tangent1)
-        _set_point_row(
+        _set_direct_point_row(
             structural_index,
             wp.int32(0),
-            point0,
-            point1,
+            point0_com,
+            point1_com,
             tangent0,
             error0,
             bias_rate,
@@ -365,11 +388,11 @@ def _prepare_direct_rows(
             row_wrench1,
             row_bias,
         )
-        _set_point_row(
+        _set_direct_point_row(
             structural_index,
             wp.int32(1),
-            point0,
-            point1,
+            point0_com,
+            point1_com,
             tangent1,
             error1,
             bias_rate,
@@ -438,7 +461,7 @@ def _prepare_direct_equality_rows_kernel(
         wp.float32(1.0) / idt,
     )
     joint = structural_joints[structural_index]
-    row_count[structural_index] = _prepare_direct_rows(
+    count = _prepare_direct_rows(
         structural_index,
         joint,
         effective_joint_mode,
@@ -459,6 +482,7 @@ def _prepare_direct_equality_rows_kernel(
         row_stiffness,
         row_damping,
     )
+    row_count[structural_index] = count
 
 
 @wp.func
@@ -479,9 +503,28 @@ def _row_wrench_for_body(
     return wp.spatial_vector()
 
 
+@wp.func
+def _direct_wrench_response(
+    wrench: wp.spatial_vector,
+    inverse_mass: wp.float32,
+    inverse_inertia: wp.mat33,
+) -> wp.spatial_vector:
+    return wp.spatial_vector(
+        inverse_mass * wp.spatial_top(wrench),
+        inverse_inertia * wp.spatial_bottom(wrench),
+    )
+
+
+@wp.func
+def _body_com_twist(bodies: BodyContainer, body: wp.int32) -> wp.spatial_vector:
+    return wp.spatial_vector(bodies.velocity[body], bodies.angular_velocity[body])
+
+
 @wp.kernel(enable_backward=False)
 def _assemble_direct_equality_matrix_kernel(
     dimensions: wp.array[wp.int32],
+    num_mechanisms: wp.int32,
+    matrix_mechanism: wp.array[wp.int32],
     matrix_offsets: wp.array[wp.int32],
     vector_offsets: wp.array[wp.int32],
     row_joint: wp.array[wp.int32],
@@ -500,10 +543,14 @@ def _assemble_direct_equality_matrix_kernel(
     row_bias: wp.array2d[wp.float32],
     matrix: wp.array[wp.float32],
 ):
-    mechanism, local_row, local_column = wp.tid()
+    matrix_index = wp.tid()
+    mechanism = wp.int32(0)
+    if num_mechanisms > wp.int32(1):
+        mechanism = matrix_mechanism[matrix_index]
     dimension = dimensions[mechanism]
-    if local_row >= dimension or local_column >= dimension:
-        return
+    local_index = matrix_index - matrix_offsets[mechanism]
+    local_row = local_index // dimension
+    local_column = local_index - local_row * dimension
     row = vector_offsets[mechanism] + local_row
     column = vector_offsets[mechanism] + local_column
     row_joint_index = row_joint[row]
@@ -540,9 +587,8 @@ def _assemble_direct_equality_matrix_kernel(
             row_wrench0,
             row_wrench1,
         )
-        response = _tile_rigid_wrench_response(
+        response = _direct_wrench_response(
             column_wrench,
-            bodies.position[body],
             bodies.inverse_mass[body],
             mat33_from_sym6(bodies.inverse_inertia_world[body]),
         )
@@ -566,7 +612,40 @@ def _assemble_direct_equality_matrix_kernel(
             regularization * wp.max(inverse_effective_mass, wp.float32(1.0)),
             wp.float32(1.0e-10),
         )
-    matrix[matrix_offsets[mechanism] + local_row * dimension + local_column] = value
+    matrix[matrix_index] = value
+
+
+@wp.kernel(enable_backward=False)
+def _compute_direct_equality_row_scale_kernel(
+    diagonal_index: wp.array[wp.int32],
+    matrix: wp.array[wp.float32],
+    row_scale: wp.array[wp.float32],
+):
+    row = wp.tid()
+    diagonal = matrix[diagonal_index[row]]
+    row_scale[row] = wp.float32(1.0) / wp.sqrt(wp.max(diagonal, wp.float32(1.0e-20)))
+
+
+@wp.kernel(enable_backward=False)
+def _equilibrate_direct_equality_matrix_kernel(
+    dimensions: wp.array[wp.int32],
+    num_mechanisms: wp.int32,
+    matrix_mechanism: wp.array[wp.int32],
+    matrix_offsets: wp.array[wp.int32],
+    vector_offsets: wp.array[wp.int32],
+    row_scale: wp.array[wp.float32],
+    matrix: wp.array[wp.float32],
+):
+    matrix_index = wp.tid()
+    mechanism = wp.int32(0)
+    if num_mechanisms > wp.int32(1):
+        mechanism = matrix_mechanism[matrix_index]
+    dimension = dimensions[mechanism]
+    local_index = matrix_index - matrix_offsets[mechanism]
+    local_row = local_index // dimension
+    local_column = local_index - local_row * dimension
+    vector_offset = vector_offsets[mechanism]
+    matrix[matrix_index] *= row_scale[vector_offset + local_row] * row_scale[vector_offset + local_column]
 
 
 @wp.kernel(enable_backward=False)
@@ -581,6 +660,7 @@ def _build_direct_equality_rhs_kernel(
     row_bias: wp.array2d[wp.float32],
     bodies: BodyContainer,
     use_bias: wp.bool,
+    row_scale: wp.array[wp.float32],
     rhs: wp.array[wp.float32],
 ):
     row = wp.tid()
@@ -591,11 +671,11 @@ def _build_direct_equality_rhs_kernel(
     body1 = joint_child[joint] + wp.int32(1)
     relative_velocity = wp.float32(0.0)
     if body0 > wp.int32(0):
-        relative_velocity += wp.dot(row_wrench0[structural_index, local_row], _body_origin_twist(bodies, body0))
+        relative_velocity += wp.dot(row_wrench0[structural_index, local_row], _body_com_twist(bodies, body0))
     if body1 > wp.int32(0):
-        relative_velocity += wp.dot(row_wrench1[structural_index, local_row], _body_origin_twist(bodies, body1))
+        relative_velocity += wp.dot(row_wrench1[structural_index, local_row], _body_com_twist(bodies, body1))
     bias = row_bias[structural_index, local_row] if use_bias else wp.float32(0.0)
-    rhs[row] = -(relative_velocity + bias)
+    rhs[row] = -row_scale[row] * (relative_velocity + bias)
 
 
 @wp.kernel(enable_backward=False)
@@ -610,6 +690,7 @@ def _apply_direct_equality_delta_kernel(
     row_wrench0: wp.array2d[wp.spatial_vector],
     row_wrench1: wp.array2d[wp.spatial_vector],
     delta: wp.array[wp.float32],
+    row_scale: wp.array[wp.float32],
     bodies: BodyContainer,
 ):
     body = wp.tid()
@@ -621,20 +702,23 @@ def _apply_direct_equality_delta_kernel(
         joint = row_joint[row]
         structural_index = joint_to_structural[joint]
         local_row = row_local[row]
-        wrench += delta[row] * _row_wrench_for_body(
-            body,
-            joint,
-            structural_index,
-            local_row,
-            joint_parent,
-            joint_child,
-            row_wrench0,
-            row_wrench1,
+        wrench += (
+            row_scale[row]
+            * delta[row]
+            * _row_wrench_for_body(
+                body,
+                joint,
+                structural_index,
+                local_row,
+                joint_parent,
+                joint_child,
+                row_wrench0,
+                row_wrench1,
+            )
         )
     force = wp.spatial_top(wrench)
-    torque_com = wp.spatial_bottom(wrench) - wp.cross(bodies.position[body], force)
     bodies.velocity[body] += bodies.inverse_mass[body] * force
-    bodies.angular_velocity[body] += mat33_from_sym6(bodies.inverse_inertia_world[body]) * torque_com
+    bodies.angular_velocity[body] += mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
 
 
 def _effective_joint_axes(
@@ -693,7 +777,7 @@ class DirectEqualitySystem:
         excluded_joint_mask: np.ndarray | None = None,
         effective_joint_mode: np.ndarray | None = None,
         effective_joint_dof_start: np.ndarray | None = None,
-        regularization: float = 1.0e-7,
+        regularization: float = 3.0e-6,
     ):
         self.model = model
         self.bodies = bodies
@@ -765,6 +849,28 @@ class DirectEqualitySystem:
         self.operator = DenseLinearOperatorData(info=info, mat=matrix)
         self.rhs = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.delta = wp.zeros(row_count, dtype=wp.float32, device=device)
+        matrix_mechanism = np.zeros(1, dtype=np.int32)
+        if len(self.topology.dimensions) > 1:
+            matrix_mechanism = np.repeat(
+                np.arange(len(self.topology.dimensions), dtype=np.int32),
+                np.square(self.topology.dimensions),
+            )
+        self.matrix_mechanism = wp.array(
+            matrix_mechanism,
+            dtype=wp.int32,
+            device=device,
+        )
+        matrix_offset = 0
+        diagonal_index = []
+        for dimension in self.topology.dimensions:
+            diagonal_index.extend(matrix_offset + row * dimension + row for row in range(dimension))
+            matrix_offset += dimension * dimension
+        self.diagonal_index = wp.array(
+            np.asarray(diagonal_index, dtype=np.int32),
+            dtype=wp.int32,
+            device=device,
+        )
+        self.row_scale = wp.ones(row_count, dtype=wp.float32, device=device)
         self.solver = LLTBlockedRCMSolver(
             operator=self.operator,
             block_size=16,
@@ -814,9 +920,11 @@ class DirectEqualitySystem:
         )
         wp.launch(
             _assemble_direct_equality_matrix_kernel,
-            dim=(len(self.topology.dimensions), self.max_dimension, self.max_dimension),
+            dim=self.operator.mat.size,
             inputs=[
                 self.operator.info.dim,
+                wp.int32(len(self.topology.dimensions)),
+                self.matrix_mechanism,
                 self.operator.info.mio,
                 self.operator.info.vio,
                 self.row_joint,
@@ -833,6 +941,30 @@ class DirectEqualitySystem:
                 self.row_stiffness,
                 self.row_damping,
                 self.row_bias,
+                self.operator.mat,
+            ],
+            device=self.model.device,
+        )
+        wp.launch(
+            _compute_direct_equality_row_scale_kernel,
+            dim=len(self.topology.row_joint),
+            inputs=[
+                self.diagonal_index,
+                self.operator.mat,
+                self.row_scale,
+            ],
+            device=self.model.device,
+        )
+        wp.launch(
+            _equilibrate_direct_equality_matrix_kernel,
+            dim=self.operator.mat.size,
+            inputs=[
+                self.operator.info.dim,
+                wp.int32(len(self.topology.dimensions)),
+                self.matrix_mechanism,
+                self.operator.info.mio,
+                self.operator.info.vio,
+                self.row_scale,
                 self.operator.mat,
             ],
             device=self.model.device,
@@ -856,6 +988,7 @@ class DirectEqualitySystem:
                 self.row_bias,
                 self.bodies,
                 wp.bool(use_bias),
+                self.row_scale,
                 self.rhs,
             ],
             device=self.model.device,
@@ -875,6 +1008,7 @@ class DirectEqualitySystem:
                 self.row_wrench0,
                 self.row_wrench1,
                 self.delta,
+                self.row_scale,
                 self.bodies,
             ],
             device=self.model.device,

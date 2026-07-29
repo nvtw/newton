@@ -118,6 +118,28 @@ Use `--mass-ratios` and `--settings SUBSTEPSxITERATIONS` to widen the sweep.
 Every physics frame is CUDA-graph captured; diagnostic readback is excluded
 from the separately reported graph-replay throughput.
 
+## Direct joint-equality convergence
+
+The maximal-coordinate joint benchmark compares the mechanism-wide direct
+solve with the legacy colored PGS equality rows at the same one-substep,
+one-iteration work point. It reports anchor error, graph-replay FPS, and both
+the original and diagonally equilibrated mechanism-matrix condition numbers.
+
+```bash
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_direct_equality
+
+uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_direct_equality \
+    --lengths 12 26 --mass-ratios 1 10000 1000000 \
+    --output /tmp/phoenx-direct-equality.json
+```
+
+Add `--heterogeneous 32x2 8x8 2x26` to measure one world containing
+32 two-link, eight eight-link, and two 26-link mechanisms. The result includes
+the compact matrix-entry task count and the former rectangular launch size.
+
+Compilation, diagnostics, and condition-number readback are outside the
+timing window.
+
 ## Share an artefact
 
 To show someone the results, grab:
