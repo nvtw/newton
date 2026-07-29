@@ -4612,6 +4612,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 auto_reset=False,
                 controlled_action_count=rl.ACTION_DIM_G1,
                 articulation_mode="maximal_projected",
+                contact_friction_model="point",
             ),
             device=device,
         )

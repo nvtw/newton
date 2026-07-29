@@ -4062,49 +4062,45 @@ class PhoenXWorld:
         cached_prepare = not self._refresh_prepare_this_substep()
         direct = getattr(self, "_direct_equality_system", None)
         direct_enabled = direct is not None and direct.enabled
-        sweep_count = self.solver_iterations if direct_enabled else 1
-        iterations_per_launch = 1 if direct_enabled else self.solver_iterations
-        for sweep in range(sweep_count):
-            sweep_cached_prepare = bool(cached_prepare or sweep > 0)
-            for fixed_tpw in self._fast_tail_auto_fixed_choices():
-                kernel = get_fast_tail_kernel(
-                    kind="prepare_plus_iterate",
-                    **self._fast_tail_kernel_flags(fixed_tpw, cached_prepare=sweep_cached_prepare),
-                )
-                wp.launch(
-                    kernel,
-                    dim=self._fast_tail_launch_dim_for(fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound),
-                    block_dim=self._fast_tail_block_dim(),
-                    inputs=[
-                        self.constraints,
-                        self._contact_cols,
-                        self.bodies,
-                        self._particles_or_sentinel(),
-                        idt,
-                        wp.float32(self.sor_boost),
-                        self._world_element_ids_by_color,
-                        self._world_color_starts,
-                        self._world_color_family_starts,
-                        self._world_csr_offsets,
-                        self._world_num_colors,
-                        self._contact_container,
-                        contact_views,
-                        wp.int32(iterations_per_launch),
-                        wp.int32(self.num_worlds),
-                        wp.int32(self.num_joints),
-                        self._joint_pgs_enabled,
-                        wp.int32(self.num_cloth_triangles),
-                        wp.int32(self.num_cloth_bending),
-                        wp.int32(self.num_soft_tetrahedra),
-                        wp.int32(self.num_soft_hexahedra),
-                        wp.int32(self.num_bodies),
-                        self._tpw_choice,
-                        self._copy_state,
-                    ],
-                    device=self.device,
-                )
-            if direct_enabled:
-                direct.solve(use_bias=True)
+        for fixed_tpw in self._fast_tail_auto_fixed_choices():
+            kernel = get_fast_tail_kernel(
+                kind="prepare_plus_iterate",
+                **self._fast_tail_kernel_flags(fixed_tpw, cached_prepare=cached_prepare),
+            )
+            wp.launch(
+                kernel,
+                dim=self._fast_tail_launch_dim_for(fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound),
+                block_dim=self._fast_tail_block_dim(),
+                inputs=[
+                    self.constraints,
+                    self._contact_cols,
+                    self.bodies,
+                    self._particles_or_sentinel(),
+                    idt,
+                    wp.float32(self.sor_boost),
+                    self._world_element_ids_by_color,
+                    self._world_color_starts,
+                    self._world_color_family_starts,
+                    self._world_csr_offsets,
+                    self._world_num_colors,
+                    self._contact_container,
+                    contact_views,
+                    wp.int32(self.solver_iterations),
+                    wp.int32(self.num_worlds),
+                    wp.int32(self.num_joints),
+                    self._joint_pgs_enabled,
+                    wp.int32(self.num_cloth_triangles),
+                    wp.int32(self.num_cloth_bending),
+                    wp.int32(self.num_soft_tetrahedra),
+                    wp.int32(self.num_soft_hexahedra),
+                    wp.int32(self.num_bodies),
+                    self._tpw_choice,
+                    self._copy_state,
+                ],
+                device=self.device,
+            )
+        if direct_enabled:
+            direct.solve(use_bias=True)
 
     def _relax_velocities(self) -> None:
         """TGS-soft relax (bias=False) — removes drift velocity from main bias."""
@@ -4114,23 +4110,20 @@ class PhoenXWorld:
         contact_views = self._active_contact_views()
         direct = getattr(self, "_direct_equality_system", None)
         direct_enabled = direct is not None and direct.enabled
-        sweep_count = self.velocity_iterations if direct_enabled else 1
-        iterations_per_launch = 1 if direct_enabled else self.velocity_iterations
-        for _sweep in range(sweep_count):
-            for fixed_tpw in self._fast_tail_auto_fixed_choices():
-                kernel = get_fast_tail_kernel(
-                    kind="relax",
-                    **self._fast_tail_kernel_flags(fixed_tpw),
-                )
-                self._launch_fast_iter(
-                    kernel,
-                    iterations_per_launch,
-                    idt,
-                    contact_views,
-                    launch_tpw_bound=fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound,
-                )
-            if direct_enabled:
-                direct.solve(use_bias=False)
+        for fixed_tpw in self._fast_tail_auto_fixed_choices():
+            kernel = get_fast_tail_kernel(
+                kind="relax",
+                **self._fast_tail_kernel_flags(fixed_tpw),
+            )
+            self._launch_fast_iter(
+                kernel,
+                self.velocity_iterations,
+                idt,
+                contact_views,
+                launch_tpw_bound=fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound,
+            )
+        if direct_enabled:
+            direct.solve(use_bias=False)
 
     def _parse_multi_world_scheduler_policy(self, policy: str) -> tuple[str, int]:
         """Normalize a construction-time multi-world scheduler policy."""
@@ -4211,44 +4204,41 @@ class PhoenXWorld:
         cached_prepare = not self._refresh_prepare_this_substep()
         direct = getattr(self, "_direct_equality_system", None)
         direct_enabled = direct is not None and direct.enabled
-        sweep_count = self.solver_iterations if direct_enabled else 1
-        iterations_per_launch = 1 if direct_enabled else self.solver_iterations
-        for sweep in range(sweep_count):
-            kernel = get_block_world_kernel(
-                kind="prepare_plus_iterate",
-                **self._block_world_kernel_flags(
-                    block_dim,
-                    cached_prepare=bool(cached_prepare or sweep > 0),
-                ),
-            )
-            wp.launch(
-                kernel,
-                dim=self._block_world_launch_dim(block_dim),
-                block_dim=block_dim,
-                inputs=[
-                    self.constraints,
-                    self._contact_cols,
-                    self.bodies,
-                    self._particles_or_sentinel(),
-                    wp.float32(1.0 / self.substep_dt),
-                    wp.float32(self.sor_boost),
-                    self._world_element_ids_by_color,
-                    self._world_color_starts,
-                    self._world_csr_offsets,
-                    self._world_num_colors,
-                    self._contact_container,
-                    contact_views,
-                    wp.int32(iterations_per_launch),
-                    wp.int32(self.num_worlds),
-                    wp.int32(self.num_joints),
-                    self._joint_pgs_enabled,
-                    wp.int32(self.num_bodies),
-                    self._copy_state,
-                ],
-                device=self.device,
-            )
-            if direct_enabled:
-                direct.solve(use_bias=True)
+        kernel = get_block_world_kernel(
+            kind="prepare_plus_iterate",
+            **self._block_world_kernel_flags(
+                block_dim,
+                cached_prepare=cached_prepare,
+            ),
+        )
+        wp.launch(
+            kernel,
+            dim=self._block_world_launch_dim(block_dim),
+            block_dim=block_dim,
+            inputs=[
+                self.constraints,
+                self._contact_cols,
+                self.bodies,
+                self._particles_or_sentinel(),
+                wp.float32(1.0 / self.substep_dt),
+                wp.float32(self.sor_boost),
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                self._contact_container,
+                contact_views,
+                wp.int32(self.solver_iterations),
+                wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
+                wp.int32(self.num_bodies),
+                self._copy_state,
+            ],
+            device=self.device,
+        )
+        if direct_enabled:
+            direct.solve(use_bias=True)
 
     def _relax_velocities_block_world(self, block_dim: int | None = None) -> None:
         """Private multi-world TGS-soft relax using one physical block per world."""
@@ -4260,41 +4250,38 @@ class PhoenXWorld:
         contact_views = self._active_contact_views()
         direct = getattr(self, "_direct_equality_system", None)
         direct_enabled = direct is not None and direct.enabled
-        sweep_count = self.velocity_iterations if direct_enabled else 1
-        iterations_per_launch = 1 if direct_enabled else self.velocity_iterations
-        for _sweep in range(sweep_count):
-            kernel = get_block_world_kernel(
-                kind="relax",
-                **self._block_world_kernel_flags(block_dim),
-            )
-            wp.launch(
-                kernel,
-                dim=self._block_world_launch_dim(block_dim),
-                block_dim=block_dim,
-                inputs=[
-                    self.constraints,
-                    self._contact_cols,
-                    self.bodies,
-                    self._particles_or_sentinel(),
-                    wp.int32(self.num_bodies),
-                    wp.float32(1.0 / self.substep_dt),
-                    wp.float32(self.sor_boost),
-                    self._world_element_ids_by_color,
-                    self._world_color_starts,
-                    self._world_csr_offsets,
-                    self._world_num_colors,
-                    self._contact_container,
-                    contact_views,
-                    wp.int32(iterations_per_launch),
-                    wp.int32(self.num_worlds),
-                    wp.int32(self.num_joints),
-                    self._joint_pgs_enabled,
-                    self._copy_state,
-                ],
-                device=self.device,
-            )
-            if direct_enabled:
-                direct.solve(use_bias=False)
+        kernel = get_block_world_kernel(
+            kind="relax",
+            **self._block_world_kernel_flags(block_dim),
+        )
+        wp.launch(
+            kernel,
+            dim=self._block_world_launch_dim(block_dim),
+            block_dim=block_dim,
+            inputs=[
+                self.constraints,
+                self._contact_cols,
+                self.bodies,
+                self._particles_or_sentinel(),
+                wp.int32(self.num_bodies),
+                wp.float32(1.0 / self.substep_dt),
+                wp.float32(self.sor_boost),
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                self._contact_container,
+                contact_views,
+                wp.int32(self.velocity_iterations),
+                wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
+                self._copy_state,
+            ],
+            device=self.device,
+        )
+        if direct_enabled:
+            direct.solve(use_bias=False)
 
     # Single-world dispatch (wp.capture_while over the global colour CSR).
 

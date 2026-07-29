@@ -163,6 +163,7 @@ class TestDirectEquality(unittest.TestCase):
             solver_iterations=2,
             velocity_iterations=1,
             mass_splitting=True,
+            articulation_mode="auto",
             step_layout="single_world",
         )
         self.assertEqual(solver.articulation_mode, "reduced")
@@ -415,6 +416,74 @@ class TestDirectEquality(unittest.TestCase):
         state_out = model.state()
         for _ in range(20):
             solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
+            state_in, state_out = state_out, state_in
+        self.assertTrue(np.isfinite(state_in.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state_in.body_qd.numpy()).all())
+
+    def test_multi_world_hybrid_reduced_and_direct_mechanisms(self):
+        """Solve reduced and direct mechanisms together across several worlds."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+
+        template = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        parent = -1
+        reduced_joints = []
+        for index in range(2):
+            child = _add_link(template, wp.vec3(0.0, 0.0, -float(index) - 0.5), 1.0)
+            parent_xform = wp.transform(
+                wp.vec3(0.0, 0.0, 0.0) if parent < 0 else wp.vec3(0.0, 0.0, -0.5),
+                wp.quat_identity(),
+            )
+            reduced_joints.append(
+                template.add_joint_revolute(
+                    parent=parent,
+                    child=child,
+                    axis=wp.vec3(0.0, 1.0, 0.0),
+                    parent_xform=parent_xform,
+                    child_xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()),
+                    limit_lower=-np.inf,
+                    limit_upper=np.inf,
+                )
+            )
+            parent = child
+        template.add_articulation(reduced_joints)
+
+        direct_body = _add_link(template, wp.vec3(2.0, 0.0, -0.5), 1.0)
+        template.add_joint_revolute(
+            parent=-1,
+            child=direct_body,
+            axis=wp.vec3(0.0, 1.0, 0.0),
+            parent_xform=wp.transform(wp.vec3(2.0, 0.0, 0.0), wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()),
+            limit_lower=-np.inf,
+            limit_upper=np.inf,
+        )
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        builder.replicate(template, 3)
+        model = builder.finalize()
+        model.set_gravity((9.81, 0.0, 0.0))
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=1,
+            solver_iterations=2,
+            velocity_iterations=1,
+            articulation_mode="reduced",
+            step_layout="multi_world",
+        )
+
+        direct = solver._direct_equality_system
+        self.assertEqual(model.world_count, 3)
+        self.assertEqual(direct.topology.dimensions, (5, 5, 5))
+        self.assertEqual(int(np.count_nonzero(solver._reduced_articulation.owned_joint_mask_np)), 6)
+        self.assertEqual(int(np.count_nonzero(direct.joint_mask)), 3)
+        self.assertTrue(direct.solver._fixed_permutation)
+
+        state_in = model.state()
+        state_out = model.state()
+        control = model.control()
+        for _ in range(10):
+            solver.step(state_in, state_out, control, None, 1.0 / 60.0)
             state_in, state_out = state_out, state_in
         self.assertTrue(np.isfinite(state_in.body_q.numpy()).all())
         self.assertTrue(np.isfinite(state_in.body_qd.numpy()).all())

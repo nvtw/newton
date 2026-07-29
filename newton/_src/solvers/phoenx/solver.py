@@ -244,7 +244,7 @@ class SolverPhoenX(SolverBase):
         prepare_refresh_stride: int | str = "auto",
         solver_flavor: str = "standard",
         jacobi_max_colors: int = 10,
-        articulation_mode: str = "auto",
+        articulation_mode: str = "maximal",
         reduced_articulation_path: str = "reference",
         joint_equality_solver: str = "direct",
     ):

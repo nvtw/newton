@@ -86,7 +86,7 @@
 - Add `joint_dof_mask` to `newton.ik.IKSolver` to keep selected joint DOFs fixed during LM optimization. (#3488)
 ### Changed
 
-- Make direct joint equalities and reduced ownership of declared PhoenX articulations the default; pass `joint_equality_solver="pgs"` and `articulation_mode="maximal"` for legacy behavior.
+ Make direct joint equalities the default in maximal-coordinate PhoenX; pass `joint_equality_solver="pgs"` to retain legacy per-joint PGS equality rows, or select `articulation_mode="auto"` to opt into reduced ownership of supported declared articulations.
 
 - Specialize reduced-coordinate PhoenX fused advance and publication by articulation topology width.
 - Accelerate reduced-coordinate PhoenX compact patch-contact rows with subgroup-cooperative response and solved-delta traversal without changing hard-contact equations.
@@ -198,6 +198,7 @@
 - Fix experimental PhoenX PPO adaptive KL increasing the learning rate when measured KL is exactly zero.
 - Fix experimental PhoenX Ant rollouts to terminate and reset non-finite or physically exploded states instead of retaining corrupted simulation state.
 - Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.
+- Fix PhoenX direct-equality scheduling to apply cached drive and limit warm-start impulses once per substep instead of once per PGS iteration.
 
 - Fix persistent vibration in single-world PhoenX Gauss-Seidel stacks by restoring forward-only color traversal as the default; alternating traversal remains opt-in.
 - Fix PhoenX torque-free anisotropic rotation to preserve angular momentum and rotational energy with an implicit midpoint update.
