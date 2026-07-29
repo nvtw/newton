@@ -1511,6 +1511,72 @@ class TestImportMjcfGeometry(unittest.TestCase):
         # Body 6: mass="0" should also have zero inertia
         self.assertAlmostEqual(np.trace(body_inertia[6]), 0.0, places=6, msg="Body 6 (mass=0) should have zero inertia")
 
+    def test_explicit_small_mesh_geom_mass(self):
+        """Test that a positive mass on a solid or hollow mesh sets body mass and inertia."""
+        mjcf_content = """<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="explicit_mesh_mass_test">
+    <asset>
+        <mesh name="box_mesh" file="box.obj" scale="0.005 0.005 0.005"/>
+    </asset>
+    <worldbody>
+        <body name="body">
+            <freejoint/>
+            <geom type="mesh" mesh="box_mesh" mass="0.012" density="5000"/>
+        </body>
+    </worldbody>
+</mujoco>
+"""
+        mesh_content = """v -0.5 -0.5 -0.5
+v 0.5 -0.5 -0.5
+v 0.5 0.5 -0.5
+v -0.5 0.5 -0.5
+v -0.5 -0.5 0.5
+v 0.5 -0.5 0.5
+v 0.5 0.5 0.5
+v -0.5 0.5 0.5
+f 1 3 2
+f 1 4 3
+f 5 6 7
+f 5 7 8
+f 1 2 6
+f 1 6 5
+f 2 3 7
+f 2 7 6
+f 3 4 8
+f 3 8 7
+f 4 1 5
+f 4 5 8
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mjcf_path = os.path.join(tmpdir, "test.xml")
+            mesh_path = os.path.join(tmpdir, "box.obj")
+            with open(mesh_path, "w") as f:
+                f.write(mesh_content)
+            with open(mjcf_path, "w") as f:
+                f.write(mjcf_content)
+
+            for name, is_solid, margin in (("solid", True, 0.0), ("hollow", False, 0.001)):
+                with self.subTest(name=name):
+                    builder = newton.ModelBuilder()
+                    builder.default_shape_cfg.is_solid = is_solid
+                    builder.default_shape_cfg.margin = margin
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter("always")
+                        builder.add_mjcf(mjcf_path)
+
+                    self.assertFalse(any("explicit mass" in str(w.message) for w in caught))
+                    self.assertAlmostEqual(builder.body_mass[0], 0.012, places=7)
+                    np.testing.assert_allclose(builder.body_com[0], np.zeros(3), atol=1e-7)
+                    inertia = np.array(builder.body_inertia[0]).reshape(3, 3)
+                    self.assertGreater(np.trace(inertia), 0.0)
+                    if is_solid:
+                        np.testing.assert_allclose(
+                            inertia,
+                            np.diag([5.0e-8, 5.0e-8, 5.0e-8]),
+                            atol=1e-11,
+                            rtol=1e-6,
+                        )
+
     def test_zero_mass_mesh_geom_no_warning(self):
         """Regression test: mass='0' on mesh geoms must not emit a warning.
 
@@ -2782,6 +2848,161 @@ class TestImportMjcfGeometry(unittest.TestCase):
             0.0,
             msg="Visual geom with explicit mass should contribute non-zero inertia",
         )
+
+    def test_geom_inertia_independent_of_visual_loading(self):
+        """Preserve combined geom mass properties across visual-loading modes."""
+        cases = {
+            "explicit mass": ('mass="1.25"', 'mass="2.75"'),
+            "density": ("", 'density="600"'),
+        }
+        import_modes = {
+            "visuals": ({"parse_visuals": True}, 2),
+            "no visuals": ({"parse_visuals": False}, 1),
+            "visuals as colliders": ({"parse_visuals_as_colliders": True}, 1),
+        }
+        visual_com = np.array([0.4, -0.2, 0.15])
+        collider_com = np.array([-0.3, 0.25, -0.1])
+
+        for case_name, (visual_mass_attrib, collider_mass_attrib) in cases.items():
+            mjcf = f"""<?xml version="1.0" ?>
+<mujoco>
+  <default>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="2"/>
+    </default>
+    <default class="collision">
+      <geom group="3"/>
+    </default>
+  </default>
+  <worldbody>
+    <body name="test">
+      <freejoint/>
+      <geom name="visual" class="visual" type="box" size="0.12 0.07 0.03"
+            pos="0.4 -0.2 0.15" quat="0.9238795 0 0 0.3826834" {visual_mass_attrib}/>
+      <geom name="collision" class="collision" type="cylinder" size="0.08 0.2"
+            pos="-0.3 0.25 -0.1" euler="20 0 0" {collider_mass_attrib}/>
+    </body>
+  </worldbody>
+</mujoco>"""
+            properties = {}
+            for mode_name, (options, expected_shape_count) in import_modes.items():
+                with self.subTest(case=case_name, mode=mode_name):
+                    builder = newton.ModelBuilder()
+                    builder.add_mjcf(mjcf, **options)
+
+                    self.assertEqual(builder.shape_count, expected_shape_count)
+                    properties[mode_name] = (
+                        builder.body_mass[0],
+                        np.array(builder.body_com[0]),
+                        np.array(builder.body_inertia[0]).reshape(3, 3),
+                    )
+
+            reference_mass, reference_com, reference_inertia = properties["visuals"]
+            self.assertFalse(np.allclose(reference_com, visual_com))
+            self.assertFalse(np.allclose(reference_com, collider_com))
+            self.assertGreater(
+                np.max(np.abs(reference_inertia - np.diag(np.diag(reference_inertia)))),
+                1e-4,
+            )
+            for mode_name in ("no visuals", "visuals as colliders"):
+                with self.subTest(case=case_name, mode=mode_name):
+                    mass, com, inertia = properties[mode_name]
+                    self.assertAlmostEqual(mass, reference_mass, places=6)
+                    np.testing.assert_allclose(com, reference_com, atol=1e-7, rtol=1e-6)
+                    np.testing.assert_allclose(inertia, reference_inertia, atol=1e-7, rtol=1e-6)
+
+    def test_compiler_inertiagrouprange(self):
+        """Test that only geom groups in the compiler range contribute inertia."""
+        mjcf = """<?xml version="1.0" ?>
+<mujoco>
+  <compiler inertiagrouprange="0 2"/>
+  <worldbody>
+    <body name="test">
+      <freejoint/>
+      <geom type="sphere" size="0.1" group="2" mass="0.5"/>
+      <geom type="box" size="0.1 0.1 0.1" group="3" mass="8"/>
+    </body>
+  </worldbody>
+</mujoco>"""
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf)
+
+        self.assertAlmostEqual(builder.body_mass[0], 0.5, places=6)
+        np.testing.assert_allclose(
+            np.array(builder.body_inertia[0]).reshape(3, 3),
+            np.diag([0.002, 0.002, 0.002]),
+            atol=1e-7,
+            rtol=1e-6,
+        )
+
+    def test_compiler_inertiafromgeom_modes(self):
+        """Test inertiafromgeom modes with and without an inertial element."""
+        expected_properties = {
+            "auto": (1.0, [0.1, 0.2, 0.3], [0.01, 0.02, 0.03]),
+            "false": (1.0, [0.1, 0.2, 0.3], [0.01, 0.02, 0.03]),
+            "true": (2.0, [-0.2, 0.4, 0.1], [0.008, 0.008, 0.008]),
+        }
+        for mode, (expected_mass, expected_com, expected_inertia) in expected_properties.items():
+            with self.subTest(mode=mode):
+                mjcf = f"""<?xml version="1.0" ?>
+<mujoco>
+  <compiler inertiafromgeom="{mode}"/>
+  <worldbody>
+    <body name="test">
+      <freejoint/>
+      <inertial pos="0.1 0.2 0.3" mass="1" diaginertia="0.01 0.02 0.03"/>
+      <geom type="sphere" size="0.1" pos="-0.2 0.4 0.1" mass="2"/>
+    </body>
+  </worldbody>
+</mujoco>"""
+                builder = newton.ModelBuilder()
+                builder.add_mjcf(mjcf)
+
+                self.assertAlmostEqual(builder.body_mass[0], expected_mass, places=6)
+                np.testing.assert_allclose(builder.body_com[0], expected_com, atol=1e-7)
+                np.testing.assert_allclose(
+                    np.array(builder.body_inertia[0]).reshape(3, 3),
+                    np.diag(expected_inertia),
+                    atol=1e-7,
+                )
+
+        mjcf_missing_inertial = """<?xml version="1.0" ?>
+<mujoco>
+  <compiler inertiafromgeom="false"/>
+  <worldbody>
+    <body name="missing_inertial">
+      <freejoint/>
+      <geom type="sphere" size="0.1" mass="2"/>
+    </body>
+  </worldbody>
+</mujoco>"""
+        with self.assertRaisesRegex(ValueError, "requires an <inertial> element"):
+            newton.ModelBuilder().add_mjcf(mjcf_missing_inertial)
+
+        mjcf_fixed_missing_inertial = """<?xml version="1.0" ?>
+<mujoco>
+  <compiler inertiafromgeom="false"/>
+  <worldbody>
+    <body name="fixed_root">
+      <geom type="sphere" size="0.1"/>
+    </body>
+    <body name="moving_parent">
+      <joint type="hinge"/>
+      <inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+      <body name="fixed_child">
+        <geom type="sphere" size="0.1"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>"""
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf_fixed_missing_inertial)
+        fixed_body_indices = [
+            index for index, label in enumerate(builder.body_label) if label.endswith(("fixed_root", "fixed_child"))
+        ]
+        self.assertEqual(len(fixed_body_indices), 2)
+        for body_index in fixed_body_indices:
+            self.assertEqual(builder.body_mass[body_index], 0.0)
 
     def test_inertial_locks_body_against_frame_geom_mass(self):
         """Regression: explicit <inertial> must lock body mass/COM against later frame geoms.
@@ -9258,6 +9479,57 @@ class TestOverrideRootXform(unittest.TestCase):
                 atol=1e-4,
                 err_msg=f"{name} should be at xform + original offset",
             )
+
+
+class TestMjcfPrimitiveColors(unittest.TestCase):
+    def test_named_material_colors_primitives(self):
+        """Verify named MJCF materials color every primitive shape."""
+        mjcf = """
+<mujoco model="primitive_materials">
+    <asset>
+        <material name="dark" rgba="0.2 0.3 0.4 1"/>
+    </asset>
+    <worldbody>
+        <geom name="sphere" type="sphere" size="0.1" material="dark" contype="0" conaffinity="0"/>
+        <geom name="box" type="box" size="0.1 0.2 0.3" material="dark" contype="0" conaffinity="0"/>
+        <geom name="capsule" type="capsule" size="0.1 0.2" material="dark" contype="0" conaffinity="0"/>
+        <geom name="cylinder" type="cylinder" size="0.1 0.2" material="dark" contype="0" conaffinity="0"/>
+        <geom name="ellipsoid" type="ellipsoid" size="0.1 0.2 0.3" material="dark" contype="0" conaffinity="0"/>
+        <geom name="plane" type="plane" size="1 1 0.1" material="dark" contype="0" conaffinity="0"/>
+    </worldbody>
+</mujoco>
+"""
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf)
+
+        self.assertEqual(builder.shape_count, 6)
+        for color in builder.shape_color:
+            np.testing.assert_allclose(color, [0.2, 0.3, 0.4], atol=1.0e-6)
+
+    def test_inline_rgba_overrides_primitive_material(self):
+        """Verify inline MJCF RGBA overrides a primitive's named material."""
+        mjcf = """
+<mujoco model="primitive_rgba">
+    <asset>
+        <material name="red" rgba="1 0 0 1"/>
+    </asset>
+    <worldbody>
+        <geom
+            name="sphere"
+            type="sphere"
+            size="0.1"
+            material="red"
+            rgba="0 1 0 1"
+            contype="0"
+            conaffinity="0"
+        />
+    </worldbody>
+</mujoco>
+"""
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf)
+
+        np.testing.assert_allclose(builder.shape_color[0], [0.0, 1.0, 0.0], atol=1.0e-6)
 
 
 if __name__ == "__main__":

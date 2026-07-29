@@ -11,6 +11,7 @@ import functools
 import inspect
 import math
 import warnings
+import weakref
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -113,6 +114,13 @@ _SCALAR_GRAVITY_DEPRECATION_MSG = (
 # dispatch through overload resolution and would initialize the Warp runtime at import.
 _IDENTITY_TRANSFORM = np.asarray(wp.transformf((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)), dtype=np.float32)
 _IDENTITY_ROTATION = np.asarray(wp.quatf(0.0, 0.0, 0.0, 1.0), dtype=np.float32)
+
+_MERGE_VALIDATION_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+"""Memoizes :meth:`ModelBuilder._validate_builder_merge` as ``dest -> {source: schema epochs}``.
+
+Kept out of the builders themselves: this is a memoization table, not model state, and it must
+not show up in builder-state comparisons or survive past either builder's lifetime.
+"""
 
 
 @dataclass(frozen=True)
@@ -449,6 +457,9 @@ class ModelBuilder:
         shape_constructor: str | None = None
         """Warp model shape BVH constructor backend. If ``None``, Warp's default is used."""
 
+        shape_flags: ShapeFlags = ShapeFlags.VISIBLE
+        """Mask of :class:`~newton.ShapeFlags`; a shape is included in the model shape BVH if any of its flags are set in the mask."""
+
     @dataclass
     class MeshApproximationConfig:
         """Default settings for mesh approximation.
@@ -517,7 +528,7 @@ class ModelBuilder:
         """Indicates whether the shape is visible in the simulation. Defaults to True."""
         is_site: bool = False
         """Indicates whether the shape is a site (non-colliding reference point). Directly setting this to True will NOT enforce site invariants. Use `mark_as_site()` or set via the `flags` property to ensure invariants. Defaults to False."""
-        sdf_narrow_band_range: tuple[float, float] = (-0.1, 0.1)
+        sdf_narrow_band_range: tuple[float, float] | list[float] = (-0.1, 0.1)
         """The narrow band distance range (inner, outer) for primitive SDF computation."""
         sdf_target_voxel_size: float | None = None
         """Target voxel size for sparse SDF grid.
@@ -629,19 +640,41 @@ class ModelBuilder:
                 raise ValueError(
                     f"Unknown sdf_texture_format {self.sdf_texture_format!r}. Expected one of {list(_valid_tex_fmts)}."
                 )
+            if not math.isfinite(self.density) or self.density < 0.0:
+                raise ValueError(f"density must be finite and >= 0 (got {self.density}).")
+
+            if self.sdf_target_voxel_size is not None and (
+                not math.isfinite(self.sdf_target_voxel_size) or self.sdf_target_voxel_size <= 0.0
+            ):
+                raise ValueError(f"sdf_target_voxel_size must be finite and > 0 (got {self.sdf_target_voxel_size}).")
+
+            if self.sdf_padding is not None and (not math.isfinite(self.sdf_padding) or self.sdf_padding < 0.0):
+                raise ValueError(f"sdf_padding must be finite and >= 0 (got {self.sdf_padding}).")
+
+            if not isinstance(self.sdf_narrow_band_range, (tuple, list)) or len(self.sdf_narrow_band_range) != 2:
+                raise ValueError(
+                    "sdf_narrow_band_range must contain two distances (inner, outer) with inner < 0 < outer."
+                )
+            inner, outer = self.sdf_narrow_band_range
+            if not math.isfinite(inner) or not math.isfinite(outer) or not inner < 0.0 < outer:
+                raise ValueError(
+                    f"sdf_narrow_band_range must contain finite values satisfying inner < 0 < outer "
+                    f"(got {self.sdf_narrow_band_range})."
+                )
+
             if self.sdf_max_resolution is not None and self.sdf_target_voxel_size is not None:
                 raise ValueError("Set only one of sdf_max_resolution or sdf_target_voxel_size, not both.")
-            if self.sdf_max_resolution is not None and self.sdf_max_resolution % 8 != 0:
-                raise ValueError(
-                    f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "
-                    "This is required because SDF volumes are allocated in 8x8x8 tiles."
-                )
-            hydroelastic_supported = shape_type not in (
-                GeoType.PLANE,
-                GeoType.HFIELD,
-                GeoType.TRIANGLE,
-                GeoType.TETRAHEDRON,
-            )
+            if self.sdf_max_resolution is not None:
+                if self.sdf_max_resolution <= 0:
+                    raise ValueError(f"sdf_max_resolution must be > 0 (got {self.sdf_max_resolution}).")
+                if self.sdf_max_resolution >= (1 << 16):
+                    raise ValueError(f"sdf_max_resolution must be less than {1 << 16}.")
+                if self.sdf_max_resolution % 8 != 0:
+                    raise ValueError(
+                        f"sdf_max_resolution must be divisible by 8 (got {self.sdf_max_resolution}). "
+                        "This is required because SDF volumes are allocated in 8x8x8 tiles."
+                    )
+            hydroelastic_supported = shape_type not in (GeoType.PLANE, GeoType.HFIELD)
             hydroelastic_requires_configured_sdf = shape_type in (
                 GeoType.SPHERE,
                 GeoType.BOX,
@@ -1288,6 +1321,10 @@ class ModelBuilder:
         self._shape_collision_filter_pairs: _BuilderShapeCollisionFilterPairs | list[tuple[int, int]] = (
             _BuilderShapeCollisionFilterPairs()
         )
+        self._merge_filter_template: tuple[list[tuple[int, int]], int, tuple[tuple[int, int], ...]] | None = None
+        """Cache backing :meth:`_materialized_filter_template`, as ``(source, length, template)``."""
+        self._custom_schema_epoch: int = 0
+        """Bumped whenever the custom attribute/frequency registry changes; keys the merge-validation cache."""
 
         self._requested_contact_attributes: set[str] = set()
         """Optional contact attributes requested via :meth:`request_contact_attributes`."""
@@ -1647,6 +1684,25 @@ class ModelBuilder:
     def shape_collision_filter_pairs(self, pairs: list[tuple[int, int]]) -> None:
         self._shape_collision_filter_pairs = pairs
 
+    def _materialized_filter_template(self) -> tuple[tuple[int, int], ...]:
+        """This builder's filter pairs as one tuple, stable across repeated merges.
+
+        Merging a source builder world-by-world (one :meth:`add_builder` per world) must
+        hand out the *same* tuple object every time: the collision-filter and
+        contact-pair template caches in :meth:`finalize` are keyed by object identity, so
+        a freshly built tuple per world silently disables them and makes finalization
+        scale with world count instead of with the number of distinct sources.
+        """
+        pairs = self._shape_collision_filter_pairs
+        if isinstance(pairs, _BuilderShapeCollisionFilterPairs):
+            return pairs.template_pairs()
+        cached = self._merge_filter_template
+        if cached is not None and cached[0] is pairs and cached[1] == len(pairs):
+            return cached[2]
+        template = tuple(pairs)
+        self._merge_filter_template = (pairs, len(pairs), template)
+        return template
+
     def add_shape_collision_filter_pair(self, shape_a: int, shape_b: int) -> None:
         """Add a collision filter pair in canonical order.
 
@@ -1745,6 +1801,7 @@ class ModelBuilder:
             )
 
         self.custom_attributes[key] = attribute
+        self._custom_schema_epoch += 1
 
     def _add_custom_attribute_model_finalizer(
         self,
@@ -1798,6 +1855,7 @@ class ModelBuilder:
             return
 
         self.custom_frequencies[freq_key] = freq_obj
+        self._custom_schema_epoch += 1
         if freq_key not in self._custom_frequency_counts:
             self._custom_frequency_counts[freq_key] = 0
 
@@ -2644,6 +2702,8 @@ class ModelBuilder:
         builder: ModelBuilder,
         world_count: int,
         spacing: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        *,
+        xforms: Sequence[Transform] | None = None,
     ):
         """
         Replicates the given builder multiple times, offsetting each copy according to the supplied spacing.
@@ -2672,9 +2732,12 @@ class ModelBuilder:
         Args:
             builder: The builder to replicate. All entities from this builder will be copied.
             world_count: The number of worlds to create.
-            spacing: The spacing between each copy along each axis.
+            spacing: The spacing between each copy along each axis. Ignored when
+                ``xforms`` is provided.
                 For example, (5.0, 5.0, 0.0) arranges copies in a 2D grid in the XY plane.
                 Defaults to (0.0, 0.0, 0.0).
+            xforms: Optional sequence of transforms, one per replicated world.
+                When provided, its length must equal ``world_count``.
         """
         if world_count <= 0:
             return
@@ -2683,10 +2746,14 @@ class ModelBuilder:
                 f"Cannot begin a new world: already in world context (current_world={self.current_world}). "
                 "Call end_world() first to close the current world context."
             )
-        offsets = compute_world_offsets(world_count, spacing, self.up_axis)
+        if xforms is None:
+            offsets = compute_world_offsets(world_count, spacing, self.up_axis)
+            xforms = [wp.transform(offset, wp.quat_identity()) for offset in offsets]
+        elif len(xforms) != world_count:
+            raise ValueError(f"xforms must contain {world_count} entries, got {len(xforms)}")
+
         base_world = self.world_count
         worlds = list(range(base_world, base_world + world_count))
-        xforms = [wp.transform(offset, wp.quat_identity()) for offset in offsets]
         self._merge_builder_copies(builder, worlds, xforms, [None] * world_count)
 
         self.world_gravity.extend(builder._gravity_as_vector() for _ in range(world_count))
@@ -2866,11 +2933,7 @@ class ModelBuilder:
 
         source_filter_pairs = builder._shape_collision_filter_pairs
         if source_filter_pairs:
-            template_pairs = (
-                source_filter_pairs.template_pairs()
-                if isinstance(source_filter_pairs, _BuilderShapeCollisionFilterPairs)
-                else tuple(source_filter_pairs)
-            )
+            template_pairs = builder._materialized_filter_template()
             for world, shape_start in zip(worlds.tolist(), shape_starts.tolist(), strict=True):
                 if isinstance(self._shape_collision_filter_pairs, _BuilderShapeCollisionFilterPairs):
                     self._shape_collision_filter_pairs.extend_offset(
@@ -3049,6 +3112,18 @@ class ModelBuilder:
         return bool(matches)
 
     def _validate_builder_merge(self, builder: ModelBuilder, entity_kinds: set[str]) -> None:
+        # Replication merges the same handful of source builders once per world, and this
+        # check is pure schema validation: it compares custom-attribute specs and defaults,
+        # which cannot change unless one of the two registries changes. Both are versioned,
+        # so a repeat merge of an unchanged pair is skipped. Without this the element-wise
+        # equality on Warp-typed defaults runs once per attribute per world.
+        # ``valid_references`` only ever grows as merges accumulate frequency counts, so a
+        # pair that validated before still validates.
+        cache_key = (self._custom_schema_epoch, builder._custom_schema_epoch, frozenset(entity_kinds))
+        validated = _MERGE_VALIDATION_CACHE.setdefault(self, weakref.WeakKeyDictionary())
+        if validated.get(builder) == cache_key:
+            return
+
         valid_references = entity_kinds | set(self._custom_frequency_counts) | set(builder._custom_frequency_counts)
 
         for freq_key, frequency in builder.custom_frequencies.items():
@@ -3096,6 +3171,8 @@ class ModelBuilder:
                     f"Custom attribute finalizer '{key}' is already registered with a different callback "
                     f"({existing!r} != {finalizer!r})."
                 )
+
+        validated[builder] = cache_key
 
     def add_articulation(
         self, joints: list[int], label: str | None = None, custom_attributes: dict[str, Any] | None = None
@@ -3419,6 +3496,7 @@ class ModelBuilder:
         skip_mesh_approximation: bool = False,
         load_sites: bool = True,
         load_visual_shapes: bool = True,
+        load_static_visual_shapes: bool = True,
         hide_collision_shapes: bool = False,
         force_show_colliders: bool = False,
         parse_mujoco_options: bool = True,
@@ -3525,6 +3603,9 @@ class ModelBuilder:
             skip_mesh_approximation: If True, mesh approximation is skipped. Otherwise, meshes are approximated according to the ``physics:approximation`` attribute defined on the UsdPhysicsMeshCollisionAPI (if it is defined), using the settings from :attr:`~newton.ModelBuilder.default_mesh_approximation_cfg`. Default is False.
             load_sites: If True, sites (prims with ``NewtonSiteAPI`` or ``MjcSiteAPI``) are loaded as non-colliding reference points. If False, sites are ignored. Default is True.
             load_visual_shapes: If True, non-physics visual geometry is loaded. If False, visual-only shapes are ignored (sites are still controlled by ``load_sites``). Default is True.
+            load_static_visual_shapes: If True, supported visual-only geometry outside
+                rigid-body hierarchies is loaded as static shapes when
+                ``load_visual_shapes`` is also True. Default is True.
             hide_collision_shapes: If True, collision shapes on bodies that already
                 have visual-only geometry are hidden unconditionally, regardless of
                 whether the collider has authored PBR material data. Default is False.
@@ -3663,6 +3744,7 @@ class ModelBuilder:
             skip_mesh_approximation=skip_mesh_approximation,
             load_sites=load_sites,
             load_visual_shapes=load_visual_shapes,
+            load_static_visual_shapes=load_static_visual_shapes,
             hide_collision_shapes=hide_collision_shapes,
             force_show_colliders=force_show_colliders,
             parse_mujoco_options=parse_mujoco_options,
@@ -4046,6 +4128,7 @@ class ModelBuilder:
                     freq_key = attr.frequency
                     mapped_values = [] if isinstance(freq_key, str) else {}
                     self.custom_attributes[full_key] = replace(attr, values=mapped_values)
+                    self._custom_schema_epoch += 1
                 continue
 
             freq_key = attr.frequency
@@ -4137,6 +4220,7 @@ class ModelBuilder:
                 else:
                     mapped_values = {index_offset + idx: value for idx, value in attr.values.items()}
                 self.custom_attributes[full_key] = replace(attr, values=mapped_values)
+                self._custom_schema_epoch += 1
                 continue
 
             if not self._custom_attribute_defaults_match(merged.default, attr.default):
@@ -4175,6 +4259,7 @@ class ModelBuilder:
         for freq_key, freq_obj in builder.custom_frequencies.items():
             if freq_key not in self.custom_frequencies:
                 self.custom_frequencies[freq_key] = freq_obj
+                self._custom_schema_epoch += 1
 
         for freq_key, builder_count in builder._custom_frequency_counts.items():
             offset = custom_frequency_offsets.get(freq_key, 0)
@@ -4862,6 +4947,7 @@ class ModelBuilder:
         child_xform: Transform | None = None,
         armature: float | None = None,
         friction: float | None = None,
+        damping: float | None = None,
         label: str | None = None,
         collision_filter_parent: bool | None = None,
         enabled: bool = True,
@@ -4877,6 +4963,7 @@ class ModelBuilder:
             child_xform: The transform from the child body frame to the joint child anchor frame.
             armature: Artificial inertia added around the joint axes. If None, the default value from ``ModelBuilder.default_joint_cfg.armature`` is used.
             friction: Friction coefficient for the joint axes. If None, the default value from ``ModelBuilder.default_joint_cfg.friction`` is used.
+            damping: Passive angular velocity damping [N·s/m or N·m·s/rad, depending on joint type] always active on all three BALL joint angular DOFs. If None, the default value from ``ModelBuilder.default_joint_cfg.damping`` is used.
             label: The label of the joint.
             collision_filter_parent: Whether to filter collisions between shapes of the parent and child bodies. Defaults to ``False`` for joints to world, ``True`` otherwise.
             enabled: Whether the joint is enabled.
@@ -4894,23 +4981,28 @@ class ModelBuilder:
             armature = self.default_joint_cfg.armature
         if friction is None:
             friction = self.default_joint_cfg.friction
+        if damping is None:
+            damping = self.default_joint_cfg.damping
 
         x = ModelBuilder.JointDofConfig(
             axis=Axis.X,
             armature=armature,
             friction=friction,
+            damping=damping,
             actuator_mode=actuator_mode,
         )
         y = ModelBuilder.JointDofConfig(
             axis=Axis.Y,
             armature=armature,
             friction=friction,
+            damping=damping,
             actuator_mode=actuator_mode,
         )
         z = ModelBuilder.JointDofConfig(
             axis=Axis.Z,
             armature=armature,
             friction=friction,
+            damping=damping,
             actuator_mode=actuator_mode,
         )
 
@@ -5165,40 +5257,68 @@ class ModelBuilder:
         child_xform: Transform | None = None,
         stretch_stiffness: float | None = None,
         stretch_damping: float | None = None,
+        shear_stiffness: float | None = None,
+        shear_damping: float | None = None,
         bend_stiffness: float | None = None,
         bend_damping: float | None = None,
+        twist_stiffness: float | None = None,
+        twist_damping: float | None = None,
         label: str | None = None,
         collision_filter_parent: bool | None = None,
         enabled: bool = True,
         custom_attributes: dict[str, Any] | None = None,
         **kwargs,
     ) -> int:
-        """Adds a cable joint to the model. It has two degrees of freedom: one linear (stretch)
-        that constrains the distance between the attachment points, and one angular (bend/twist)
-        that penalizes the relative rotation of the attachment frames.
+        """Adds a cable joint to the model.
+
+        Cable joints have split linear stretch/shear DoFs plus separate angular
+        bend and twist DoFs. When both ``shear_stiffness`` and
+        ``shear_damping`` are omitted, shear uses the stretch stiffness /
+        damping, reproducing the isotropic linear energy while using the
+        split layout. When both ``twist_stiffness`` and ``twist_damping`` are
+        omitted, twist uses the bend stiffness / damping, reproducing the
+        isotropic angular energy while using the split layout.
 
         .. note::
 
-            Cable joints are represented in the joint data model, but their two entries
-            are VBD stretch and bend/twist constraint slots rather than
-            ``joint_q`` coordinates. Cable body transforms are integrated directly by
-            :class:`newton.solvers.SolverVBD`; they are not reconstructed by
-            :func:`newton.eval_fk`.
+            Cable joints are supported by :class:`newton.solvers.SolverVBD`, which uses an
+            AVBD backend for rigid bodies. Split cables are represented in the
+            joint data model as VBD stretch, shear, bend, and twist constraint
+            slots rather than ``joint_q`` coordinates. Cable body transforms are
+            integrated directly by :class:`newton.solvers.SolverVBD`; they are
+            not reconstructed by :func:`newton.eval_fk`.
+
+            Split cables use each anchor frame's local ``+Z`` as the material
+            tangent axis for separating axial stretch from shear and twist from
+            bend. For a body-to-body cable span, the parent anchor ``+Z`` should
+            point from the parent attachment toward the child attachment.
+            :meth:`add_rod` and :meth:`add_rod_graph` satisfy the tangent
+            convention automatically.
 
         Args:
             parent: The index of the parent body.
             child: The index of the child body.
             parent_xform: The transform from the parent body frame to the joint parent anchor frame; its
-                translation is the attachment point.
+                translation is the attachment point and its local ``+Z`` axis is the parent-side material
+                tangent.
             child_xform: The transform from the child body frame to the joint child anchor frame; its
-                translation is the attachment point.
+                translation is the attachment point and its local ``+Z`` axis is the child-side material
+                tangent.
             stretch_stiffness: Cable stretch stiffness (stored as ``target_ke``) [N/m]. If None, defaults to 1.0e5.
             stretch_damping: Cable stretch damping [N·s/m] (stored as ``target_kd``). If None,
                 defaults to 0.0.
-            bend_stiffness: Cable bend/twist stiffness (stored as ``target_ke``) [N*m] (torque per radian). If None,
+            shear_stiffness: Optional transverse shear stiffness [N/m]. If None,
+                defaults to ``stretch_stiffness``.
+            shear_damping: Optional transverse shear damping [N·s/m]. If None, defaults to
+                ``stretch_damping`` only when both ``shear_stiffness`` and ``shear_damping`` are None. Otherwise
                 defaults to 0.0.
-            bend_damping: Cable bend/twist damping [N·m·s/rad] (stored as ``target_kd``). If None,
-                defaults to 0.0.
+            bend_stiffness: Cable bend stiffness (stored as ``target_ke``) [N*m]
+                (torque per radian). If None, defaults to 0.0.
+            bend_damping: Cable bend damping [N·m·s/rad] (stored as ``target_kd``). If None, defaults to 0.0.
+            twist_stiffness: Optional twist stiffness [N*m] (torque per radian). If None,
+                defaults to ``bend_stiffness``.
+            twist_damping: Optional twist damping [N·m·s/rad]. If None, defaults to ``bend_damping`` only when
+                both ``twist_stiffness`` and ``twist_damping`` are None. Otherwise defaults to 0.0.
             label: The label of the joint.
             collision_filter_parent: Whether to filter collisions between shapes of the parent and child bodies. Defaults to ``False`` for joints to world, ``True`` otherwise.
             enabled: Whether the joint is enabled.
@@ -5209,15 +5329,35 @@ class ModelBuilder:
             The index of the added joint.
 
         """
-        # Linear DOF (stretch)
-        se_ke = 1.0e5 if stretch_stiffness is None else stretch_stiffness
-        se_kd = 0.0 if stretch_damping is None else stretch_damping
-        ax_lin = ModelBuilder.JointDofConfig(target_ke=se_ke, target_kd=se_kd)
+        # Linear DOFs (stretch and shear). Default shear to stretch so omitted
+        # shear reproduces the isotropic linear anchor energy in the split layout.
+        stretch_ke = 1.0e5 if stretch_stiffness is None else stretch_stiffness
+        stretch_kd = 0.0 if stretch_damping is None else stretch_damping
+        stretch_axis = ModelBuilder.JointDofConfig(target_ke=stretch_ke, target_kd=stretch_kd)
+        if shear_stiffness is None and shear_damping is None:
+            shear_ke = stretch_ke
+            shear_kd = stretch_kd
+        else:
+            shear_ke = stretch_ke if shear_stiffness is None else shear_stiffness
+            shear_kd = 0.0 if shear_damping is None else shear_damping
+        shear_axis = ModelBuilder.JointDofConfig(target_ke=shear_ke, target_kd=shear_kd)
 
-        # Angular DOF (bend/twist)
+        # Angular DOFs (bend and twist). Default twist to bend so omitted twist
+        # reproduces the isotropic angular energy in the split layout.
         bend_ke = 0.0 if bend_stiffness is None else bend_stiffness
         bend_kd = 0.0 if bend_damping is None else bend_damping
-        ax_ang = ModelBuilder.JointDofConfig(target_ke=bend_ke, target_kd=bend_kd)
+        bend_axis = ModelBuilder.JointDofConfig(target_ke=bend_ke, target_kd=bend_kd)
+        if twist_stiffness is None and twist_damping is None:
+            twist_ke = bend_ke
+            twist_kd = bend_kd
+        else:
+            twist_ke = bend_ke if twist_stiffness is None else twist_stiffness
+            twist_kd = 0.0 if twist_damping is None else twist_damping
+        if stretch_ke < 0.0 or shear_ke < 0.0 or bend_ke < 0.0 or twist_ke < 0.0:
+            raise ValueError(
+                "add_joint_cable: stretch_stiffness, shear_stiffness, bend_stiffness, and twist_stiffness must be >= 0"
+            )
+        twist_axis = ModelBuilder.JointDofConfig(target_ke=twist_ke, target_kd=twist_kd)
 
         return self.add_joint(
             JointType.CABLE,
@@ -5225,8 +5365,8 @@ class ModelBuilder:
             child,
             parent_xform=parent_xform,
             child_xform=child_xform,
-            linear_axes=[ax_lin],
-            angular_axes=[ax_ang],
+            linear_axes=[stretch_axis, shear_axis],
+            angular_axes=[bend_axis, twist_axis],
             label=label,
             collision_filter_parent=collision_filter_parent,
             enabled=enabled,
@@ -7716,8 +7856,12 @@ class ModelBuilder:
         cfg: ShapeConfig | None = None,
         stretch_stiffness: float | None = None,
         stretch_damping: float | None = None,
+        shear_stiffness: float | None = None,
+        shear_damping: float | None = None,
         bend_stiffness: float | None = None,
         bend_damping: float | None = None,
+        twist_stiffness: float | None = None,
+        twist_damping: float | None = None,
         closed: bool = False,
         label: str | None = None,
         wrap_in_articulation: bool = True,
@@ -7728,8 +7872,8 @@ class ModelBuilder:
 
         Constructs a chain of capsule bodies from the given centerline points and orientations.
         Each segment is a capsule aligned by the corresponding quaternion, and adjacent capsules
-        are connected by cable joints providing one linear (stretch) and one angular (bend/twist)
-        degree of freedom.
+        are connected by cable joints providing split linear stretch/shear and split angular
+        bend/twist degrees of freedom.
 
         Args:
             positions: Centerline node positions (segment endpoints) in world space. These are the
@@ -7745,10 +7889,18 @@ class ModelBuilder:
                 If None, defaults to 1.0e5.
             stretch_damping: Stretch damping [N·s/m] for the cable joints (applied per-joint; not length-normalized). If None,
                 defaults to 0.0.
-            bend_stiffness: Per-joint cable bend/twist stiffness, stored directly as ``target_ke``
+            shear_stiffness: Optional per-joint transverse shear stiffness [N/m]. If None, defaults to
+                ``stretch_stiffness``.
+            shear_damping: Optional per-joint transverse shear damping [N·s/m]. If None, defaults to
+                ``stretch_damping`` only when both ``shear_stiffness`` and ``shear_damping`` are None. Otherwise defaults to 0.0.
+            bend_stiffness: Per-joint cable bend stiffness, stored directly as ``target_ke`` [N*m]
                 (torque per radian). If None, defaults to 0.0.
-            bend_damping: Bend/twist damping [N·m·s/rad] for the cable joints (applied per-joint; not length-normalized). If None,
+            bend_damping: Bend damping [N·m·s/rad] for the cable joints (applied per-joint; not length-normalized). If None,
                 defaults to 0.0.
+            twist_stiffness: Optional per-joint cable twist stiffness [N*m]. If None, defaults to
+                ``bend_stiffness``.
+            twist_damping: Optional per-joint cable twist damping [N·m·s/rad]. If None, defaults to ``bend_damping``
+                only when both ``twist_stiffness`` and ``twist_damping`` are None. Otherwise defaults to 0.0.
             closed: If True, connects the last segment back to the first to form a closed loop. If False,
                 creates an open chain. Note: rods require at least 2 segments.
             label: Optional label prefix for bodies, shapes, and joints.
@@ -7783,7 +7935,7 @@ class ModelBuilder:
         Note:
             - Bend defaults are 0.0 (no bending resistance unless specified). Stretch defaults to 1.0e5;
               pass a larger value when neighboring capsules should remain nearly inextensible.
-            - Stretch, bend, and damping values are passed through as provided per joint.
+            - Stretch, shear, bend, twist, and damping values are passed through as provided per joint.
             - Each segment is implemented as a capsule primitive. ``half_height`` is the half-length of
               the cylindrical centerline, excluding the hemispherical caps.
             - With ``body_frame_origin="start"``, the body origin is at the first centerline endpoint,
@@ -7807,6 +7959,10 @@ class ModelBuilder:
         # Input validation
         if stretch_stiffness < 0.0 or bend_stiffness < 0.0:
             raise ValueError("add_rod: stretch_stiffness and bend_stiffness must be >= 0")
+        if shear_stiffness is not None and shear_stiffness < 0.0:
+            raise ValueError("add_rod: shear_stiffness must be >= 0")
+        if twist_stiffness is not None and twist_stiffness < 0.0:
+            raise ValueError("add_rod: twist_stiffness must be >= 0")
         body_frame_origin = self._resolve_rod_body_frame_origin("add_rod", body_frame_origin)
 
         num_segments = len(positions) - 1
@@ -7846,8 +8002,12 @@ class ModelBuilder:
             cfg=cfg,
             stretch_stiffness=stretch_stiffness,
             stretch_damping=stretch_damping,
+            shear_stiffness=shear_stiffness,
+            shear_damping=shear_damping,
             bend_stiffness=bend_stiffness,
             bend_damping=bend_damping,
+            twist_stiffness=twist_stiffness,
+            twist_damping=twist_damping,
             label=label,
             wrap_in_articulation=False,
             quaternions=quaternions,
@@ -7901,8 +8061,12 @@ class ModelBuilder:
                     child_xform=child_xform,
                     bend_stiffness=bend_stiffness,
                     bend_damping=bend_damping,
+                    twist_stiffness=twist_stiffness,
+                    twist_damping=twist_damping,
                     stretch_stiffness=stretch_stiffness,
                     stretch_damping=stretch_damping,
+                    shear_stiffness=shear_stiffness,
+                    shear_damping=shear_damping,
                     label=loop_joint_label,
                     collision_filter_parent=True,
                     enabled=True,
@@ -7921,8 +8085,12 @@ class ModelBuilder:
         cfg: ShapeConfig | None = None,
         stretch_stiffness: float | None = None,
         stretch_damping: float | None = None,
+        shear_stiffness: float | None = None,
+        shear_damping: float | None = None,
         bend_stiffness: float | None = None,
         bend_damping: float | None = None,
+        twist_stiffness: float | None = None,
+        twist_damping: float | None = None,
         label: str | None = None,
         wrap_in_articulation: bool = True,
         quaternions: list[Quat] | None = None,
@@ -7962,10 +8130,17 @@ class ModelBuilder:
             stretch_stiffness: Per-joint cable stretch stiffness, stored directly as ``target_ke`` [N/m].
                 Defaults to 1.0e5.
             stretch_damping: Stretch damping [N·s/m] (per joint). Defaults to 0.0.
-            bend_stiffness: Per-joint cable bend/twist stiffness, stored directly as ``target_ke``
-                (torque per radian).
+            shear_stiffness: Optional per-joint transverse shear stiffness [N/m]. If None, defaults to
+                ``stretch_stiffness``.
+            shear_damping: Optional per-joint transverse shear damping [N·s/m]. If None, defaults to
+                ``stretch_damping`` only when both ``shear_stiffness`` and ``shear_damping`` are None. Otherwise defaults to 0.0.
+            bend_stiffness: Per-joint cable bend stiffness, stored directly as ``target_ke`` [N*m].
                 Defaults to 0.0.
-            bend_damping: Bend/twist damping [N·m·s/rad] (per joint). Defaults to 0.0.
+            bend_damping: Bend damping [N·m·s/rad] (per joint). Defaults to 0.0.
+            twist_stiffness: Optional per-joint cable twist stiffness [N*m]. If None, defaults to
+                ``bend_stiffness``.
+            twist_damping: Optional per-joint cable twist damping [N·m·s/rad]. If None, defaults to ``bend_damping``
+                only when both ``twist_stiffness`` and ``twist_damping`` are None. Otherwise defaults to 0.0.
             label: Optional label prefix for bodies, shapes, joints, and articulations.
             wrap_in_articulation: If True, wraps the generated joint forest into one articulation
                 per connected component.
@@ -8007,6 +8182,10 @@ class ModelBuilder:
 
         if stretch_stiffness < 0.0 or bend_stiffness < 0.0:
             raise ValueError("add_rod_graph: stretch_stiffness and bend_stiffness must be >= 0")
+        if shear_stiffness is not None and shear_stiffness < 0.0:
+            raise ValueError("add_rod_graph: shear_stiffness must be >= 0")
+        if twist_stiffness is not None and twist_stiffness < 0.0:
+            raise ValueError("add_rod_graph: twist_stiffness must be >= 0")
         body_frame_origin = self._resolve_rod_body_frame_origin("add_rod_graph", body_frame_origin)
         if len(node_positions) < 2:
             raise ValueError("add_rod_graph: node_positions must contain at least 2 nodes")
@@ -8168,8 +8347,12 @@ class ModelBuilder:
                         child_xform=child_xform,
                         bend_stiffness=bend_stiffness,
                         bend_damping=bend_damping,
+                        twist_stiffness=twist_stiffness,
+                        twist_damping=twist_damping,
                         stretch_stiffness=stretch_stiffness,
                         stretch_damping=stretch_damping,
+                        shear_stiffness=shear_stiffness,
+                        shear_damping=shear_damping,
                         label=joint_label,
                         collision_filter_parent=True,
                         enabled=True,
@@ -8223,8 +8406,12 @@ class ModelBuilder:
                                 child_xform=child_xform,
                                 bend_stiffness=bend_stiffness,
                                 bend_damping=bend_damping,
+                                twist_stiffness=twist_stiffness,
+                                twist_damping=twist_damping,
                                 stretch_stiffness=stretch_stiffness,
                                 stretch_damping=stretch_damping,
+                                shear_stiffness=shear_stiffness,
+                                shear_damping=shear_damping,
                                 label=joint_label,
                                 collision_filter_parent=True,
                                 enabled=True,
@@ -8376,9 +8563,32 @@ class ModelBuilder:
 
         Note:
             Set the mass equal to zero to create a 'kinematic' particle that is not subject to dynamics.
+
+        Raises:
+            ValueError: If a particle input or custom attribute list has a mismatched length.
         """
-        particle_start = self.particle_count
         particle_count = len(pos)
+        required_inputs = (
+            ("vel", vel),
+            ("mass", mass),
+        )
+        optional_inputs = (
+            ("radius", radius),
+            ("flags", flags),
+        )
+        for name, values in required_inputs:
+            if values is None or len(values) != particle_count:
+                actual_count = "None" if values is None else len(values)
+                raise ValueError(
+                    f"{name} length mismatch: expected {particle_count} values to match pos, got {actual_count}"
+                )
+        for name, values in optional_inputs:
+            if values is not None and len(values) != particle_count:
+                raise ValueError(
+                    f"{name} length mismatch: expected {particle_count} values to match pos, got {len(values)}"
+                )
+
+        particle_start = self.particle_count
 
         self.particle_q.extend(pos)
         self.particle_qd.extend(vel)
@@ -10617,7 +10827,21 @@ class ModelBuilder:
                     f"{next_start[idx]}."
                 )
 
-        # Validate array length consistency
+        particle_count = self.particle_count
+        particle_arrays = (
+            ("particle_qd", self.particle_qd),
+            ("particle_mass", self.particle_mass),
+            ("particle_radius", self.particle_radius),
+            ("particle_flags", self.particle_flags),
+            ("particle_world", self.particle_world),
+        )
+        for name, values in particle_arrays:
+            if len(values) != particle_count:
+                raise ValueError(
+                    f"Array length mismatch: {name} has length {len(values)}, "
+                    f"but expected {particle_count} (particle_count)."
+                )
+
         if joint_count > 0:
             # Per-DOF arrays should have length == joint_dof_count
             dof_arrays = [
@@ -11370,28 +11594,6 @@ class ModelBuilder:
 
             # ---------------------
             # Compute and compact texture SDF resources (shared table + per-shape index indirection)
-            from ..geometry.types import Mesh as NewtonMesh  # noqa: PLC0415
-
-            def _create_primitive_mesh(stype: int, scale: Sequence[float] | None) -> NewtonMesh | None:
-                """Create a watertight mesh from a primitive shape for texture SDF construction."""
-                from ..core.types import Axis  # noqa: PLC0415
-
-                sx, sy, sz = scale if scale is not None else (1.0, 1.0, 1.0)
-                common_kw = {"compute_normals": False, "compute_uvs": False, "compute_inertia": False}
-                if stype == GeoType.BOX:
-                    return NewtonMesh.create_box(sx, sy, sz, duplicate_vertices=False, **common_kw)
-                elif stype == GeoType.SPHERE:
-                    return NewtonMesh.create_sphere(sx, **common_kw)
-                elif stype == GeoType.CAPSULE:
-                    return NewtonMesh.create_capsule(sx, sy, up_axis=Axis.Z, **common_kw)
-                elif stype == GeoType.CYLINDER:
-                    return NewtonMesh.create_cylinder(sx, sy, up_axis=Axis.Z, **common_kw)
-                elif stype == GeoType.CONE:
-                    return NewtonMesh.create_cone(sx, sy, up_axis=Axis.Z, **common_kw)
-                elif stype == GeoType.ELLIPSOID:
-                    return NewtonMesh.create_ellipsoid(sx, sy, sz, **common_kw)
-                return None
-
             current_device = wp.get_device(device)
             is_gpu = current_device.is_cuda
 
@@ -11435,6 +11637,7 @@ class ModelBuilder:
                 TextureSDFData,
                 create_empty_texture_sdf_data,
                 create_texture_sdf_from_mesh,
+                create_texture_sdf_from_primitive,
             )
 
             _tex_fmt_map = {
@@ -11561,44 +11764,39 @@ class ModelBuilder:
                                 compact_texture_sdf_subgrid_textures.append(None)
                                 compact_texture_sdf_subgrid_start_slots.append(None)
                         else:
-                            prim_mesh = _create_primitive_mesh(shape_type, shape_scale)
-                            if prim_mesh is not None:
-                                prim_wp_mesh = wp.Mesh(
-                                    points=wp.array(prim_mesh.vertices, dtype=wp.vec3, device=device),
-                                    indices=wp.array(prim_mesh.indices.flatten(), dtype=wp.int32, device=device),
-                                    support_winding_number=True,
+                            try:
+                                tex_data, c_tex, s_tex = create_texture_sdf_from_primitive(
+                                    shape_type,
+                                    shape_scale,
+                                    margin=sdf_gen_margin,
+                                    narrow_band_range=tuple(sdf_narrow_band_range),
+                                    max_resolution=effective_max_resolution,
+                                    target_voxel_size=sdf_target_voxel_size,
+                                    quantization_mode=_tex_fmt_map[sdf_tex_fmt],
+                                    scale_baked=True,
+                                    device=device,
                                 )
-                                try:
-                                    tex_data, c_tex, s_tex = create_texture_sdf_from_mesh(
-                                        prim_wp_mesh,
-                                        margin=sdf_gen_margin,
-                                        narrow_band_range=tuple(sdf_narrow_band_range),
-                                        max_resolution=effective_max_resolution,
-                                        target_voxel_size=sdf_target_voxel_size,
-                                        quantization_mode=_tex_fmt_map[sdf_tex_fmt],
-                                        scale_baked=True,
-                                        device=device,
-                                    )
-                                except Exception as e:
-                                    warnings.warn(
-                                        f"Texture SDF construction failed for shape {i} "
-                                        f"(type={shape_type}): {e}. Falling back to BVH.",
-                                        stacklevel=2,
-                                    )
-                                    tex_data = create_empty_texture_sdf_data()
-                                    c_tex = None
-                                    s_tex = None
-                                compact_texture_sdf_data.append(tex_data)
-                                compact_texture_sdf_coarse_textures.append(c_tex)
-                                compact_texture_sdf_subgrid_textures.append(s_tex)
-                                compact_texture_sdf_subgrid_start_slots.append(
-                                    tex_data.subgrid_start_slots if c_tex is not None else None
-                                )
-                            else:
+                            except NotImplementedError:
                                 compact_texture_sdf_data.append(create_empty_texture_sdf_data())
                                 compact_texture_sdf_coarse_textures.append(None)
                                 compact_texture_sdf_subgrid_textures.append(None)
                                 compact_texture_sdf_subgrid_start_slots.append(None)
+                                continue
+                            except Exception as e:
+                                warnings.warn(
+                                    f"Texture SDF construction failed for shape {i} "
+                                    f"(type={shape_type}): {e}. Falling back to BVH.",
+                                    stacklevel=2,
+                                )
+                                tex_data = create_empty_texture_sdf_data()
+                                c_tex = None
+                                s_tex = None
+                            compact_texture_sdf_data.append(tex_data)
+                            compact_texture_sdf_coarse_textures.append(c_tex)
+                            compact_texture_sdf_subgrid_textures.append(s_tex)
+                            compact_texture_sdf_subgrid_start_slots.append(
+                                tex_data.subgrid_start_slots if c_tex is not None else None
+                            )
 
             # Build volume SDFs for participating MESH/CONVEX_MESH shapes that still lack one, when a
             # per-shape SDF is requested -- ShapeConfig.configure_sdf(force_sdf=True), or an sdf
@@ -12192,7 +12390,11 @@ class ModelBuilder:
             # Add custom attributes onto the model (with lazy evaluation)
             # Early return if no custom attributes exist to avoid overhead
             if not self.custom_attributes:
-                m.bvh_build_shapes(m, bvh_constructor=self.default_bvh_cfg.shape_constructor)
+                m.bvh_build_shapes(
+                    m,
+                    bvh_constructor=self.default_bvh_cfg.shape_constructor,
+                    shape_flags=self.default_bvh_cfg.shape_flags,
+                )
                 m.bvh_build_particles(m)
                 return m
 
@@ -12299,7 +12501,11 @@ class ModelBuilder:
                     custom_attr.references,
                 )
 
-            m.bvh_build_shapes(m, bvh_constructor=self.default_bvh_cfg.shape_constructor)
+            m.bvh_build_shapes(
+                m,
+                bvh_constructor=self.default_bvh_cfg.shape_constructor,
+                shape_flags=self.default_bvh_cfg.shape_flags,
+            )
             m.bvh_build_particles(m)
             return m
 

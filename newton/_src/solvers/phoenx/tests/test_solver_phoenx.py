@@ -22,7 +22,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.flags import SolverNotifyFlags
+from newton._src.sim import ModelFlags
 from newton._src.solvers.phoenx.tests._test_helpers import run_solver_capture_loop
 
 GRAVITY = 9.81
@@ -602,9 +602,9 @@ class TestSolverPhoenX(unittest.TestCase):
 
         # Must not raise -- this is the regression.
         solver.notify_model_changed(
-            int(SolverNotifyFlags.BODY_INERTIAL_PROPERTIES)
-            | int(SolverNotifyFlags.BODY_PROPERTIES)
-            | int(SolverNotifyFlags.SHAPE_PROPERTIES)
+            int(ModelFlags.BODY_INERTIAL_PROPERTIES)
+            | int(ModelFlags.BODY_PROPERTIES)
+            | int(ModelFlags.SHAPE_PROPERTIES)
         )
 
         dt = 1.0 / 240.0

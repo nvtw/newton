@@ -39,7 +39,6 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    SolverImplicitMPM
    SolverKamino
    SolverMuJoCo
-   SolverNotifyFlags
    SolverPhoenX
    SolverSemiImplicit
    SolverStyle3D
