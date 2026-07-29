@@ -154,7 +154,15 @@ def _max_abs_component(v: wp.vec3) -> float:
 
 @wp.func
 def _fixed_shift(exp_ref: int, mantissa_bits: int) -> wp.float64:
-    """Power-of-two factor mapping an entry's grid onto the fixed-point range."""
+    """Power-of-two factor mapping an entry's grid onto the fixed-point range.
+
+    Returns zero for the sentinel exponent so that quantization collapses to
+    zero without a branch at every call site.  This is a double-precision
+    ``pow``, so callers hoist it out of per-component loops: computing it once
+    per entry instead of once per scalar is ~10x cheaper on consumer GPUs.
+    """
+    if exp_ref == FIXED_EXP_NONE:
+        return wp.float64(0.0)
     # Every non-sentinel exponent comes from a finite float32 contribution, so
     # forming the exact shift in float64 covers its full exponent range while
     # preserving the int64 overflow proof in ``_fixed_mantissa_bits``.
@@ -162,19 +170,29 @@ def _fixed_shift(exp_ref: int, mantissa_bits: int) -> wp.float64:
 
 
 @wp.func
+def _to_fixed_scaled(x: float, shift: wp.float64) -> wp.int64:
+    """Quantize ``x`` onto a grid whose shift was already computed."""
+    return wp.int64(wp.round(wp.float64(x) * shift))
+
+
+@wp.func
+def _from_fixed_scaled(v: wp.int64, shift: wp.float64) -> float:
+    """Convert a completed fixed-point sum back to float32."""
+    if shift == wp.float64(0.0):
+        return 0.0
+    return wp.float32(wp.float64(v) / shift)
+
+
+@wp.func
 def _to_fixed(x: float, exp_ref: int, mantissa_bits: int) -> wp.int64:
     """Quantize ``x`` onto the fixed-point grid selected for its entry."""
-    if exp_ref == FIXED_EXP_NONE:
-        return wp.int64(0)
-    return wp.int64(wp.round(wp.float64(x) * _fixed_shift(exp_ref, mantissa_bits)))
+    return _to_fixed_scaled(x, _fixed_shift(exp_ref, mantissa_bits))
 
 
 @wp.func
 def _from_fixed(v: wp.int64, exp_ref: int, mantissa_bits: int) -> float:
     """Convert a completed fixed-point sum back to float32."""
-    if exp_ref == FIXED_EXP_NONE:
-        return 0.0
-    return wp.float32(wp.float64(v) / _fixed_shift(exp_ref, mantissa_bits))
+    return _from_fixed_scaled(v, _fixed_shift(exp_ref, mantissa_bits))
 
 
 @wp.func
@@ -192,11 +210,10 @@ def _add_fixed(
     entry_idx: int,
     ht_capacity: int,
     value: float,
-    exp_ref: int,
-    mantissa_bits: int,
+    shift: wp.float64,
 ):
     """Accumulate a scalar contribution in fixed point."""
-    wp.atomic_add(accum, slot * ht_capacity + entry_idx, _to_fixed(value, exp_ref, mantissa_bits))
+    wp.atomic_add(accum, slot * ht_capacity + entry_idx, _to_fixed_scaled(value, shift))
 
 
 @wp.func
@@ -206,23 +223,22 @@ def _add_fixed_vec(
     entry_idx: int,
     ht_capacity: int,
     value: wp.vec3,
-    exp_ref: int,
-    mantissa_bits: int,
+    shift: wp.float64,
 ):
     """Accumulate a vector contribution component-wise in fixed point."""
     for i in range(3):
-        wp.atomic_add(accum, (slot + i) * ht_capacity + entry_idx, _to_fixed(value[i], exp_ref, mantissa_bits))
+        wp.atomic_add(accum, (slot + i) * ht_capacity + entry_idx, _to_fixed_scaled(value[i], shift))
 
 
 @wp.func
 def _read_fixed_vec(
-    accum: wp.array[wp.int64], slot: int, entry_idx: int, ht_capacity: int, exp_ref: int, mantissa_bits: int
+    accum: wp.array[wp.int64], slot: int, entry_idx: int, ht_capacity: int, shift: wp.float64
 ) -> wp.vec3:
     """Convert a completed fixed-point vector sum back to float32."""
     return wp.vec3(
-        _from_fixed(accum[slot * ht_capacity + entry_idx], exp_ref, mantissa_bits),
-        _from_fixed(accum[(slot + 1) * ht_capacity + entry_idx], exp_ref, mantissa_bits),
-        _from_fixed(accum[(slot + 2) * ht_capacity + entry_idx], exp_ref, mantissa_bits),
+        _from_fixed_scaled(accum[slot * ht_capacity + entry_idx], shift),
+        _from_fixed_scaled(accum[(slot + 1) * ht_capacity + entry_idx], shift),
+        _from_fixed_scaled(accum[(slot + 2) * ht_capacity + entry_idx], shift),
     )
 
 
@@ -395,16 +411,15 @@ def _create_unreduced_aggregate_kernel(pressure_func, mantissa_bits: int):
                 _record_scale(fixed_scale, SCALE_DEPTH_VOLUME, entry_idx, ht_capacity, _max_abs_component(depth_volume))
                 continue
 
-            exp_force = fixed_scale[wp.static(SCALE_FORCE) * ht_capacity + entry_idx]
-            exp_pos = fixed_scale[wp.static(SCALE_WEIGHTED_POS) * ht_capacity + entry_idx]
-            exp_vol = fixed_scale[wp.static(SCALE_DEPTH_VOLUME) * ht_capacity + entry_idx]
+            # One shift per scale family, not per component: see ``_fixed_shift``.
             mb = wp.static(mantissa_bits)
-            _add_fixed_vec(fixed_accum, FIXED_AGG_FORCE, entry_idx, ht_capacity, force_weight * normal, exp_force, mb)
-            _add_fixed(fixed_accum, FIXED_WEIGHT_SUM, entry_idx, ht_capacity, force_weight, exp_force, mb)
-            _add_fixed_vec(
-                fixed_accum, FIXED_WEIGHTED_POS, entry_idx, ht_capacity, force_weight * position, exp_pos, mb
-            )
-            _add_fixed_vec(fixed_accum, FIXED_DEPTH_VOLUME, entry_idx, ht_capacity, depth_volume, exp_vol, mb)
+            shift_force = _fixed_shift(fixed_scale[wp.static(SCALE_FORCE) * ht_capacity + entry_idx], mb)
+            shift_pos = _fixed_shift(fixed_scale[wp.static(SCALE_WEIGHTED_POS) * ht_capacity + entry_idx], mb)
+            shift_vol = _fixed_shift(fixed_scale[wp.static(SCALE_DEPTH_VOLUME) * ht_capacity + entry_idx], mb)
+            _add_fixed_vec(fixed_accum, FIXED_AGG_FORCE, entry_idx, ht_capacity, force_weight * normal, shift_force)
+            _add_fixed(fixed_accum, FIXED_WEIGHT_SUM, entry_idx, ht_capacity, force_weight, shift_force)
+            _add_fixed_vec(fixed_accum, FIXED_WEIGHTED_POS, entry_idx, ht_capacity, force_weight * position, shift_pos)
+            _add_fixed_vec(fixed_accum, FIXED_DEPTH_VOLUME, entry_idx, ht_capacity, depth_volume, shift_vol)
 
     return accumulate_unreduced_aggregates_kernel
 
@@ -454,16 +469,10 @@ def _create_unreduced_moment_kernel(pressure_func, mantissa_bits: int):
                 _record_scale(fixed_scale, SCALE_MOMENT_UNREDUCED, entry_idx, ht_capacity, moment)
                 continue
 
-            exp_ref = fixed_scale[wp.static(SCALE_MOMENT_UNREDUCED) * ht_capacity + entry_idx]
-            _add_fixed(
-                fixed_accum,
-                FIXED_MOMENT_UNREDUCED,
-                entry_idx,
-                ht_capacity,
-                moment,
-                exp_ref,
-                wp.static(mantissa_bits),
+            shift = _fixed_shift(
+                fixed_scale[wp.static(SCALE_MOMENT_UNREDUCED) * ht_capacity + entry_idx], wp.static(mantissa_bits)
             )
+            _add_fixed(fixed_accum, FIXED_MOMENT_UNREDUCED, entry_idx, ht_capacity, moment, shift)
 
     return accumulate_unreduced_moment_kernel
 
@@ -491,30 +500,30 @@ def _create_finalize_fixed_kernel(mantissa_bits: int):
         mb = wp.static(mantissa_bits)
 
         if group == wp.static(FINALIZE_UNREDUCED):
-            exp_force = fixed_scale[wp.static(SCALE_FORCE) * ht_capacity + entry_idx]
-            exp_pos = fixed_scale[wp.static(SCALE_WEIGHTED_POS) * ht_capacity + entry_idx]
-            exp_vol = fixed_scale[wp.static(SCALE_DEPTH_VOLUME) * ht_capacity + entry_idx]
+            shift_force = _fixed_shift(fixed_scale[wp.static(SCALE_FORCE) * ht_capacity + entry_idx], mb)
+            shift_pos = _fixed_shift(fixed_scale[wp.static(SCALE_WEIGHTED_POS) * ht_capacity + entry_idx], mb)
+            shift_vol = _fixed_shift(fixed_scale[wp.static(SCALE_DEPTH_VOLUME) * ht_capacity + entry_idx], mb)
             reducer_data.agg_force[entry_idx] = _read_fixed_vec(
-                fixed_accum, FIXED_AGG_FORCE, entry_idx, ht_capacity, exp_force, mb
+                fixed_accum, FIXED_AGG_FORCE, entry_idx, ht_capacity, shift_force
             )
-            reducer_data.weight_sum[entry_idx] = _from_fixed(
-                fixed_accum[wp.static(FIXED_WEIGHT_SUM) * ht_capacity + entry_idx], exp_force, mb
+            reducer_data.weight_sum[entry_idx] = _from_fixed_scaled(
+                fixed_accum[wp.static(FIXED_WEIGHT_SUM) * ht_capacity + entry_idx], shift_force
             )
             reducer_data.weighted_pos_sum[entry_idx] = _read_fixed_vec(
-                fixed_accum, FIXED_WEIGHTED_POS, entry_idx, ht_capacity, exp_pos, mb
+                fixed_accum, FIXED_WEIGHTED_POS, entry_idx, ht_capacity, shift_pos
             )
             reducer_data.agg_depth_volume[entry_idx] = _read_fixed_vec(
-                fixed_accum, FIXED_DEPTH_VOLUME, entry_idx, ht_capacity, exp_vol, mb
+                fixed_accum, FIXED_DEPTH_VOLUME, entry_idx, ht_capacity, shift_vol
             )
         elif group == wp.static(FINALIZE_REDUCED_DEPTH):
-            exp_depth = fixed_scale[wp.static(SCALE_REDUCED_DEPTH) * ht_capacity + entry_idx]
-            reducer_data.total_depth_reduced[entry_idx] = _from_fixed(
-                fixed_accum[wp.static(FIXED_TOTAL_DEPTH) * ht_capacity + entry_idx], exp_depth, mb
+            shift_depth = _fixed_shift(fixed_scale[wp.static(SCALE_REDUCED_DEPTH) * ht_capacity + entry_idx], mb)
+            reducer_data.total_depth_reduced[entry_idx] = _from_fixed_scaled(
+                fixed_accum[wp.static(FIXED_TOTAL_DEPTH) * ht_capacity + entry_idx], shift_depth
             )
             reducer_data.total_normal_reduced[entry_idx] = _read_fixed_vec(
-                fixed_accum, FIXED_TOTAL_NORMAL, entry_idx, ht_capacity, exp_depth, mb
+                fixed_accum, FIXED_TOTAL_NORMAL, entry_idx, ht_capacity, shift_depth
             )
-        elif agg_moment_unreduced.shape[0] > 0:
+        elif group == wp.static(FINALIZE_MOMENTS) and agg_moment_unreduced.shape[0] > 0:
             agg_moment_unreduced[entry_idx] = _from_fixed(
                 fixed_accum[wp.static(FIXED_MOMENT_UNREDUCED) * ht_capacity + entry_idx],
                 fixed_scale[wp.static(SCALE_MOMENT_UNREDUCED) * ht_capacity + entry_idx],
@@ -781,17 +790,18 @@ def _create_accumulate_reduced_depth_kernel(deterministic: bool = False, mantiss
                             if phase == wp.static(PHASE_SCALE):
                                 _record_scale(fixed_scale, SCALE_REDUCED_DEPTH, nbin_idx, ht_capacity, pen_mag)
                             else:
-                                exp_ref = fixed_scale[wp.static(SCALE_REDUCED_DEPTH) * ht_capacity + nbin_idx]
-                                mb = wp.static(mantissa_bits)
-                                _add_fixed(fixed_accum, FIXED_TOTAL_DEPTH, nbin_idx, ht_capacity, pen_mag, exp_ref, mb)
+                                shift = _fixed_shift(
+                                    fixed_scale[wp.static(SCALE_REDUCED_DEPTH) * ht_capacity + nbin_idx],
+                                    wp.static(mantissa_bits),
+                                )
+                                _add_fixed(fixed_accum, FIXED_TOTAL_DEPTH, nbin_idx, ht_capacity, pen_mag, shift)
                                 _add_fixed_vec(
                                     fixed_accum,
                                     FIXED_TOTAL_NORMAL,
                                     nbin_idx,
                                     ht_capacity,
                                     pen_mag * contact_normal,
-                                    exp_ref,
-                                    mb,
+                                    shift,
                                 )
                         else:
                             wp.atomic_add(total_depth_reduced, nbin_idx, pen_mag)
@@ -914,8 +924,7 @@ def _create_accumulate_moments_kernel(
                             nbin_idx,
                             ht_capacity,
                             pen_mag * lever,
-                            fixed_scale[wp.static(SCALE_MOMENT_REDUCED) * ht_capacity + nbin_idx],
-                            mb,
+                            _fixed_shift(fixed_scale[wp.static(SCALE_MOMENT_REDUCED) * ht_capacity + nbin_idx], mb),
                         )
                         _add_fixed(
                             fixed_accum,
@@ -923,8 +932,7 @@ def _create_accumulate_moments_kernel(
                             nbin_idx,
                             ht_capacity,
                             pen_mag * lever * lever,
-                            fixed_scale[wp.static(SCALE_MOMENT2_REDUCED) * ht_capacity + nbin_idx],
-                            mb,
+                            _fixed_shift(fixed_scale[wp.static(SCALE_MOMENT2_REDUCED) * ht_capacity + nbin_idx], mb),
                         )
                 else:
                     wp.atomic_add(agg_moment_reduced, nbin_idx, pen_mag * lever)
