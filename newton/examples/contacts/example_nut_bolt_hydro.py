@@ -37,8 +37,14 @@ MESH_SDF_CACHE_DIR = Path(tempfile.gettempdir()) / "newton_sdf_cache"
 SHAPE_CFG = newton.ModelBuilder.ShapeConfig(
     margin=0.0,
     mu=0.01,
-    ke=1e7,  # Contact stiffness for MuJoCo solver
-    kd=1e4,  # Contact damping
+    # Hydroelastic supplies the per-contact stiffness for the nut/bolt pair, so
+    # ``ke``/``kd`` reach only the non-hydroelastic contacts. At the 1e10 ``kh``
+    # default the thread contacts resolve over a ~95 ms solref time constant --
+    # roughly 45 substeps -- and the nut sits visibly cocked under MuJoCo. XPBD
+    # projects positions and is insensitive to this either way.
+    kh=1e11,  # Hydroelastic contact stiffness
+    ke=1e7,
+    kd=1e4,
     gap=0.005,
     density=8000.0,
     mu_torsional=0.0,
@@ -171,9 +177,14 @@ class Example:
         self.grid_x = int(np.ceil(np.sqrt(self.num_per_world)))
         self.grid_y = int(np.ceil(self.num_per_world / self.grid_x))
 
+        # Contact budget per world. MuJoCo's njmax/nconmax are per-world limits
+        # while CollisionPipeline's rigid_contact_max covers every world, so both
+        # derive from this rather than from a fixed whole-scene pool. A threading
+        # assembly peaks near 115 contacts, so this leaves ~9x headroom.
+        self.contacts_per_world = 1024 * self.num_per_world
+
         # Maximum number of rigid contacts to allocate (limits memory usage)
-        # None = auto-calculate (can be very large), or set explicit limit (e.g., 1_000_000)
-        self.rigid_contact_max = 40_000
+        self.rigid_contact_max = self.contacts_per_world * self.world_count
 
         # Broad phase mode: NXN (O(N²)), SAP (O(N log N)), EXPLICIT (precomputed pairs)
         self.broad_phase_mode = "sap"
@@ -228,15 +239,17 @@ class Example:
                 else wp.DeterministicMode.NOT_GUARANTEED,
             )
         elif self.solver_type == "mujoco":
-            num_per_world = self.rigid_contact_max // self.world_count
             self.solver = newton.solvers.SolverMuJoCo(
                 self.model,
                 use_mujoco_contacts=False,
+                # The scene defines no sensors, and MuJoCo's tactile sensor kernel
+                # mixes max/add reductions, which deterministic mode rejects.
+                disable_sensors=True,
                 solver="newton",
                 integrator="implicitfast",
                 cone="elliptic",
-                njmax=num_per_world,
-                nconmax=num_per_world,
+                njmax=self.contacts_per_world,
+                nconmax=self.contacts_per_world,
                 iterations=15,
                 ls_iterations=100,
                 impratio=1.0,
@@ -468,7 +481,11 @@ class Example:
             "--deterministic",
             action=argparse.BooleanOptionalAction,
             default=False,
-            help="Make contacts and the solver bit-exact across runs on the same GPU.",
+            help=(
+                "Make contacts and the solver bit-exact across runs on the same GPU. "
+                "Needs a world count small enough to keep the hydroelastic face-contact "
+                "buffer under the 2^20 deterministic contact-id limit."
+            ),
         )
         parser.add_argument(
             "--solver",

@@ -447,7 +447,9 @@ class HydroelasticSDF:
                 "Deterministic hydroelastic contacts require HydroelasticSDF.Config.pre_prune_contacts=False; "
                 "disabling it. This doubles the face-contact buffer (contact_buffer_fraction no longer applies) "
                 "and changes the generated contact set.",
-                stacklevel=3,
+                # Reach past __init__ / _from_model / CollisionPipeline.__init__ to
+                # the caller that asked for a deterministic pipeline.
+                stacklevel=4,
             )
             config = replace(config, pre_prune_contacts=False)
 
