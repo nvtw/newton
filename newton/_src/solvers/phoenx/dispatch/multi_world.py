@@ -39,12 +39,16 @@ class MultiWorldDispatcher:
             if direct is not None and direct.enabled:
                 # Expose force-integrated mechanism motion to inequalities.
                 direct.solve(use_bias=False)
+                direct.resolve_bounded_drives(idt, use_bias=False)
             if self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported():
                 self._world._solve_main_block_world()
             else:
                 self._world._solve_main()
+            if direct is not None and direct.enabled:
+                direct.resolve_bounded_drives(idt, use_bias=True)
         elif direct is not None and direct.enabled:
             direct.solve(use_bias=True)
+            direct.resolve_bounded_drives(idt, use_bias=True)
         if self._world._maximal_tree_projector is not None:
             self._world._maximal_tree_projector.project(use_bias=True, dt=self._world.substep_dt)
             self._world._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
@@ -58,8 +62,11 @@ class MultiWorldDispatcher:
                 self._world._relax_velocities_block_world()
             else:
                 self._world._relax_velocities()
+            if direct is not None and direct.enabled:
+                direct.resolve_bounded_drives(idt, use_bias=False)
         elif direct is not None and direct.enabled and self._world.velocity_iterations > 0:
             direct.solve(use_bias=False)
+            direct.resolve_bounded_drives(idt, use_bias=False)
         if self._world._maximal_tree_projector is not None:
             self._world._maximal_tree_projector.project(use_bias=False, dt=self._world.substep_dt)
             if self._world.velocity_iterations > 0:

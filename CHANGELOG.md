@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- Add mechanism-wide RCM-reordered direct equality solves to experimental `SolverPhoenX`; pass `joint_equality_solver="pgs"` to retain legacy per-joint PGS equality rows.
+- Add mechanism-wide RCM-reordered direct equality and implicit PD drive solves to experimental `SolverPhoenX`, including finite motor-effort active sets; pass `joint_equality_solver="pgs"` to retain legacy per-joint PGS rows.
 
 
 - Add opt-in adjacency-free endpoint-owner coloring to experimental `SolverPhoenX` single-world mass splitting.

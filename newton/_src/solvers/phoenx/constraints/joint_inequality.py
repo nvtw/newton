@@ -18,6 +18,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_BODY1,
     _OFF_BODY2,
     _OFF_CLAMP,
+    _OFF_DIRECT_DRIVE,
     _OFF_JOINT_MODE,
     _OFF_R1_B1,
     _OFF_R1_B2,
@@ -26,7 +27,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
-    _axial_drive_limit_iterate,
+    _axial_limit_friction_iterate,
     _d6_angular_limits_block,
     _ms_load_body_pair,
     _ms_store_body_pair,
@@ -39,11 +40,13 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 def mark_direct_equality_joints_kernel(
     constraints: ConstraintContainer,
     structural_direct: wp.array[wp.int32],
+    direct_drive: wp.array[wp.int32],
     num_joints: wp.int32,
 ):
     cid = wp.tid()
     if cid < num_joints:
         write_int(constraints, _OFF_STRUCTURAL_DIRECT, cid, structural_direct[cid])
+        write_int(constraints, _OFF_DIRECT_DRIVE, cid, direct_drive[cid])
 
 
 @wp.func
@@ -59,7 +62,7 @@ def actuated_double_ball_socket_iterate_inequality(
     sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
-    """Iterate only the free-axis drive, limit, and friction rows."""
+    """Iterate only free-axis limit and friction rows."""
     mode = read_int(constraints, _OFF_JOINT_MODE, cid)
     if (
         mode != JOINT_MODE_REVOLUTE
@@ -129,7 +132,7 @@ def actuated_double_ball_socket_iterate_inequality(
     clamp = read_int(constraints, _OFF_CLAMP, cid)
     if mode == JOINT_MODE_REVOLUTE:
         axial_velocity = wp.dot(axis, angular_velocity1 - angular_velocity2)
-        impulse = _axial_drive_limit_iterate(
+        impulse = _axial_limit_friction_iterate(
             constraints,
             cid,
             wp.int32(0),
@@ -147,7 +150,7 @@ def actuated_double_ball_socket_iterate_inequality(
         anchor_velocity1 = velocity1 + wp.cross(angular_velocity1, lever1)
         anchor_velocity2 = velocity2 + wp.cross(angular_velocity2, lever2)
         axial_velocity = wp.dot(axis, anchor_velocity1 - anchor_velocity2)
-        impulse = _axial_drive_limit_iterate(
+        impulse = _axial_limit_friction_iterate(
             constraints,
             cid,
             wp.int32(0),

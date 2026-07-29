@@ -14,6 +14,9 @@ Examples::
 
     uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_direct_equality \
         --lengths 12 26 --mass-ratios 1 10000 --output /tmp/direct-equality.json
+
+    uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_direct_equality \
+        --driven --lengths 12 26 --mass-ratios 1 10000
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ class BenchResult:
     """One direct or PGS measurement."""
 
     equality_solver: str
+    driven: bool
     length: int
     mass_ratio: float
     equation_count: int
@@ -51,6 +55,7 @@ class HeterogeneousResult:
     """One heterogeneous direct-solver scheduling measurement."""
 
     mechanism_lengths: tuple[int, ...]
+    driven: bool
     mass_ratio: float
     equation_count: int
     matrix_entry_tasks: int
@@ -68,7 +73,7 @@ def _add_link(builder: newton.ModelBuilder, position: wp.vec3, mass: float) -> i
     )
 
 
-def _build_chain(length: int, mass_ratio: float) -> newton.Model:
+def _build_chain(length: int, mass_ratio: float, *, driven: bool = False) -> newton.Model:
     builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
     parent = -1
     joints = []
@@ -80,6 +85,14 @@ def _build_chain(length: int, mass_ratio: float) -> newton.Model:
             wp.vec3(0.0, 0.0, 0.0) if parent < 0 else wp.vec3(0.0, 0.0, -0.5),
             wp.quat_identity(),
         )
+        drive_kwargs = {}
+        if driven:
+            drive_kwargs = {
+                "target_ke": 100.0,
+                "target_kd": 10.0,
+                "actuator_mode": newton.JointTargetMode.POSITION,
+                "effort_limit": 1000.0,
+            }
         joints.append(
             builder.add_joint_revolute(
                 parent=parent,
@@ -89,6 +102,7 @@ def _build_chain(length: int, mass_ratio: float) -> newton.Model:
                 child_xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()),
                 limit_lower=-np.inf,
                 limit_upper=np.inf,
+                **drive_kwargs,
             )
         )
         parent = child
@@ -98,7 +112,12 @@ def _build_chain(length: int, mass_ratio: float) -> newton.Model:
     return model
 
 
-def _build_heterogeneous_mechanisms(lengths: tuple[int, ...], mass_ratio: float) -> newton.Model:
+def _build_heterogeneous_mechanisms(
+    lengths: tuple[int, ...],
+    mass_ratio: float,
+    *,
+    driven: bool = False,
+) -> newton.Model:
     builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
     light_mass = 1.0 / mass_ratio
     for mechanism, length in enumerate(lengths):
@@ -116,6 +135,14 @@ def _build_heterogeneous_mechanisms(lengths: tuple[int, ...], mass_ratio: float)
                 wp.vec3(offset_x, 0.0, 0.0) if parent < 0 else wp.vec3(0.0, 0.0, -0.5),
                 wp.quat_identity(),
             )
+            drive_kwargs = {}
+            if driven:
+                drive_kwargs = {
+                    "target_ke": 100.0,
+                    "target_kd": 10.0,
+                    "actuator_mode": newton.JointTargetMode.POSITION,
+                    "effort_limit": 1000.0,
+                }
             joints.append(
                 builder.add_joint_revolute(
                     parent=parent,
@@ -125,6 +152,7 @@ def _build_heterogeneous_mechanisms(lengths: tuple[int, ...], mass_ratio: float)
                     child_xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()),
                     limit_lower=-np.inf,
                     limit_upper=np.inf,
+                    **drive_kwargs,
                 )
             )
             parent = child
@@ -182,12 +210,13 @@ def _matrix_conditions(solver: newton.solvers.SolverPhoenX) -> tuple[float, floa
 def _run_one(
     *,
     equality_solver: str,
+    driven: bool,
     length: int,
     mass_ratio: float,
     quality_frames: int,
     measure_frames: int,
 ) -> BenchResult:
-    model = _build_chain(length, mass_ratio)
+    model = _build_chain(length, mass_ratio, driven=driven)
     solver = newton.solvers.SolverPhoenX(
         model,
         substeps=1,
@@ -227,9 +256,12 @@ def _run_one(
     body_qd = state_0.body_qd.numpy()
     finite = bool(np.isfinite(body_q).all() and np.isfinite(body_qd).all())
     direct = solver._direct_equality_system
-    equation_count = sum(direct.topology.dimensions) if direct is not None and direct.enabled else 5 * length
+    equation_count = (
+        sum(direct.topology.dimensions) if direct is not None and direct.enabled else (6 if driven else 5) * length
+    )
     return BenchResult(
         equality_solver=equality_solver,
+        driven=driven,
         length=length,
         mass_ratio=mass_ratio,
         equation_count=equation_count,
@@ -250,7 +282,8 @@ def _print_pair(pgs: BenchResult, direct: BenchResult) -> None:
     fps_ratio = direct.fps / pgs.fps
     print(
         f"links={direct.length:2d}  ratio={direct.mass_ratio:9.1g}:1  "
-        f"equations={direct.equation_count:3d}  cond={condition:10.3e}->{equilibrated_condition:10.3e}"
+        f"driven={direct.driven!s:5s}  equations={direct.equation_count:3d}  "
+        f"cond={condition:10.3e}->{equilibrated_condition:10.3e}"
     )
     print(f"  PGS     fps={pgs.fps:9.1f}  anchor={pgs.anchor_error_m:10.3e} m  finite={pgs.finite}")
     print(
@@ -264,8 +297,9 @@ def _run_heterogeneous(
     lengths: tuple[int, ...],
     mass_ratio: float,
     measure_frames: int,
+    driven: bool,
 ) -> HeterogeneousResult:
-    model = _build_heterogeneous_mechanisms(lengths, mass_ratio)
+    model = _build_heterogeneous_mechanisms(lengths, mass_ratio, driven=driven)
     solver = newton.solvers.SolverPhoenX(
         model,
         substeps=1,
@@ -297,6 +331,7 @@ def _run_heterogeneous(
     finite = bool(np.isfinite(state_0.body_q.numpy()).all() and np.isfinite(state_0.body_qd.numpy()).all())
     return HeterogeneousResult(
         mechanism_lengths=lengths,
+        driven=driven,
         mass_ratio=mass_ratio,
         equation_count=sum(direct.topology.dimensions),
         matrix_entry_tasks=direct.operator.mat.size,
@@ -318,6 +353,11 @@ def main() -> None:
     )
     parser.add_argument("--quality-frames", type=int, default=20)
     parser.add_argument("--measure-frames", type=int, default=400)
+    parser.add_argument(
+        "--driven",
+        action="store_true",
+        help="benchmark finite-effort implicit PD drives in addition to structural joint rows",
+    )
     parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
 
@@ -335,6 +375,7 @@ def main() -> None:
         for mass_ratio in args.mass_ratios:
             pgs = _run_one(
                 equality_solver="pgs",
+                driven=args.driven,
                 length=length,
                 mass_ratio=mass_ratio,
                 quality_frames=args.quality_frames,
@@ -342,6 +383,7 @@ def main() -> None:
             )
             direct = _run_one(
                 equality_solver="direct",
+                driven=args.driven,
                 length=length,
                 mass_ratio=mass_ratio,
                 quality_frames=args.quality_frames,
@@ -357,9 +399,11 @@ def main() -> None:
             lengths=mechanism_lengths,
             mass_ratio=max(args.mass_ratios),
             measure_frames=args.measure_frames,
+            driven=args.driven,
         )
         print(
-            f"heterogeneous mechanisms={len(mechanism_lengths)}  equations={heterogeneous.equation_count}  "
+            f"heterogeneous mechanisms={len(mechanism_lengths)}  driven={heterogeneous.driven}  "
+            f"equations={heterogeneous.equation_count}  "
             f"matrix_tasks={heterogeneous.matrix_entry_tasks}/{heterogeneous.rectangular_entry_slots}  "
             f"fps={heterogeneous.fps:.1f}  finite={heterogeneous.finite}"
         )

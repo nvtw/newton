@@ -38,6 +38,7 @@ class SingleWorldDispatcher:
         if w._regular_pgs_active_this_step:
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=False)
+                direct.resolve_bounded_drives(idt, use_bias=False)
             prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
             if w._refresh_prepare_this_substep():
                 w._partitioner.begin_sweep()
@@ -49,8 +50,10 @@ class SingleWorldDispatcher:
                 w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=True)
+                direct.resolve_bounded_drives(idt, use_bias=True)
         elif direct is not None and direct.enabled:
             direct.solve(use_bias=True)
+            direct.resolve_bounded_drives(idt, use_bias=True)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
             w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
@@ -69,8 +72,10 @@ class SingleWorldDispatcher:
                 w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=False)
+                direct.resolve_bounded_drives(idt, use_bias=False)
         elif direct is not None and direct.enabled and w.velocity_iterations > 0:
             direct.solve(use_bias=False)
+            direct.resolve_bounded_drives(idt, use_bias=False)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
             if w.velocity_iterations > 0:

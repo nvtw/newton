@@ -55,6 +55,7 @@ class SingleWorldMassSplittingDispatcher:
             w._mass_splitting_writeback()
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=True)
+                direct.resolve_bounded_drives(idt, use_bias=True)
             if w._maximal_tree_projector is not None:
                 w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
                 w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
@@ -65,6 +66,7 @@ class SingleWorldMassSplittingDispatcher:
         inv_dt = 1.0 / w.substep_dt
         if direct is not None and direct.enabled:
             direct.solve(use_bias=False)
+            direct.resolve_bounded_drives(idt, use_bias=False)
             w._mass_splitting_broadcast()
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
         # Prepare applies the warm-start impulse to each body's slots;
@@ -96,6 +98,7 @@ class SingleWorldMassSplittingDispatcher:
         w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.solve(use_bias=True)
+            direct.resolve_bounded_drives(idt, use_bias=True)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
             w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
@@ -111,6 +114,7 @@ class SingleWorldMassSplittingDispatcher:
         if not w._regular_pgs_active_this_step:
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=False)
+                direct.resolve_bounded_drives(idt, use_bias=False)
             if w._maximal_tree_projector is not None:
                 w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
                 w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
@@ -140,6 +144,7 @@ class SingleWorldMassSplittingDispatcher:
         w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.solve(use_bias=False)
+            direct.resolve_bounded_drives(idt, use_bias=False)
 
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)

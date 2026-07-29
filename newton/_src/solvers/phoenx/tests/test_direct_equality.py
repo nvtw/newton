@@ -252,7 +252,7 @@ class TestDirectEquality(unittest.TestCase):
         self.assertTrue(np.isfinite(state_out.body_q.numpy()).all())
         self.assertTrue(np.isfinite(state_out.body_qd.numpy()).all())
 
-    def test_driven_hinge_keeps_only_inequality_row_in_pgs(self):
+    def test_direct_driven_hinge_leaves_pgs_when_no_inequality_remains(self):
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
@@ -265,10 +265,11 @@ class TestDirectEquality(unittest.TestCase):
             articulation_mode="maximal",
         )
         self.assertTrue(solver._direct_equality_system.enabled)
-        self.assertTrue(solver.world._joint_pgs_inequality_only)
+        self.assertTrue(solver._direct_equality_system.direct_drive_joint_mask[0])
+        self.assertTrue(solver.world._skip_all_joint_pgs())
         np.testing.assert_array_equal(
             solver.world._joint_pgs_enabled.numpy()[: solver.world.num_joints],
-            [1],
+            [0],
         )
 
         state_in = model.state()
@@ -280,6 +281,31 @@ class TestDirectEquality(unittest.TestCase):
         orientation = state_in.body_q.numpy()[0, 3:7]
         self.assertGreater(abs(float(orientation[1])), 0.05)
         self.assertTrue(np.isfinite(state_in.body_qd.numpy()).all())
+
+    def test_direct_driven_hinge_keeps_joint_limit_in_pgs(self):
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+
+        model = _pendulum(
+            target_pos=0.7,
+            target_ke=100.0,
+            target_kd=10.0,
+            limit_lower=-0.2,
+            limit_upper=0.2,
+        )
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=2,
+            solver_iterations=4,
+            velocity_iterations=1,
+            articulation_mode="maximal",
+        )
+        self.assertTrue(solver._direct_equality_system.direct_drive_joint_mask[0])
+        self.assertTrue(solver.world._joint_pgs_inequality_only)
+        np.testing.assert_array_equal(
+            solver.world._joint_pgs_enabled.numpy()[: solver.world.num_joints],
+            [1],
+        )
 
     def test_ill_conditioned_chain_converges_better_than_pgs(self):
         if not wp.get_device().is_cuda:

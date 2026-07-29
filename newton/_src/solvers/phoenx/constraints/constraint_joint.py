@@ -236,7 +236,7 @@ class ActuatedDoubleBallSocketData:
 
     Union over revolute / prismatic / ball-socket / fixed / cable.
     Mode-specific Schur caches live in dedicated slots; the rest is
-    shared. 118 dwords (472 B per joint). See field-level ``#:``
+    shared. 119 dwords (476 B per joint). See field-level ``#:``
     comments for individual slot semantics.
     """
 
@@ -248,6 +248,7 @@ class ActuatedDoubleBallSocketData:
     # ---- Shared positional block -------------------------------------
     joint_mode: wp.int32
     structural_direct: wp.int32
+    direct_drive: wp.int32
     local_anchor1_b1: wp.vec3f
     local_anchor1_b2: wp.vec3f
     local_anchor2_b1: wp.vec3f
@@ -386,6 +387,7 @@ _OFF_BODY1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "body1"))
 _OFF_BODY2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "body2"))
 _OFF_JOINT_MODE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "joint_mode"))
 _OFF_STRUCTURAL_DIRECT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "structural_direct"))
+_OFF_DIRECT_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "direct_drive"))
 _OFF_LA1_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor1_b1"))
 _OFF_LA1_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor1_b2"))
 _OFF_LA2_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor2_b1"))
@@ -1105,6 +1107,75 @@ def _axial_drive_limit_iterate(
     return lam_drive + lam_limit + lam_friction
 
 
+@wp.func
+def _axial_limit_friction_iterate(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    base_offset: wp.int32,
+    jv_axial: wp.float32,
+    clamp: wp.int32,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    store_friction: wp.bool,
+) -> wp.float32:
+    """Drive-free axial PGS step for direct-owned scalar joints."""
+    lam_limit = wp.float32(0.0)
+    if clamp != _CLAMP_NONE:
+        stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
+        damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
+        acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
+        if stiffness_limit > wp.float32(0.0) or damping_limit > wp.float32(0.0):
+            pd_mass = read_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid)
+            pd_gamma = read_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid)
+            pd_beta = read_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid)
+            if pd_mass > wp.float32(0.0):
+                lam_limit = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
+        else:
+            eff_inv = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
+            if eff_inv > wp.float32(0.0):
+                bias_box = read_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid)
+                mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid)
+                impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
+                lam_unsoft = -(jv_axial + bias_box) / eff_inv
+                lam_limit = mass_coeff * lam_unsoft - impulse_coeff * acc_limit
+        old_acc_limit = acc_limit
+        acc_limit += lam_limit * sor_boost
+        if clamp == _CLAMP_MAX:
+            acc_limit = wp.max(wp.float32(0.0), acc_limit)
+        else:
+            acc_limit = wp.min(wp.float32(0.0), acc_limit)
+        lam_limit = acc_limit - old_acc_limit
+        constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, acc_limit)
+
+    lam_friction = wp.float32(0.0)
+    friction = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
+    acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)
+    if friction > wp.float32(0.0):
+        eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_FRICTION, cid)
+        max_lambda_friction = friction / idt
+        if eff_inv_friction > wp.float32(0.0) and max_lambda_friction > wp.float32(0.0):
+            slip_velocity = PHOENX_FRICTION_SLIP_VELOCITY
+            slip_scale = read_float(constraints, base_offset + _OFF_FRICTION_SLIP_SCALE, cid)
+            if slip_scale > wp.float32(0.0):
+                slip_velocity = slip_scale * eff_inv_friction * friction
+            gamma_friction = slip_velocity / max_lambda_friction
+            effective_mass = wp.float32(1.0) / (eff_inv_friction + gamma_friction)
+            lam_friction = -effective_mass * (jv_axial + gamma_friction * acc_friction) * sor_boost
+            old_acc_friction = acc_friction
+            acc_friction = wp.clamp(
+                acc_friction + lam_friction,
+                -max_lambda_friction,
+                max_lambda_friction,
+            )
+            lam_friction = acc_friction - old_acc_friction
+            if store_friction:
+                constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, acc_friction)
+    else:
+        constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
+
+    return lam_limit + lam_friction
+
+
 # ---------------------------------------------------------------------------
 # Shared axial (drive + limit) prepare helper
 # ---------------------------------------------------------------------------
@@ -1163,16 +1234,18 @@ def _axial_drive_limit_prepare_at(
     drive_C = float(0.0)
     if drive_mode == DRIVE_MODE_POSITION:
         drive_C = cumulative_value - target
-    if (stiffness_drive > 0.0 or damping_drive > 0.0) and not wp.static(_SUPPRESS_PGS_DRIVE):
+    direct_drive = read_int(constraints, base_offset + _OFF_DIRECT_DRIVE, cid) != wp.int32(0)
+    if (stiffness_drive > 0.0 or damping_drive > 0.0) and not direct_drive and not wp.static(_SUPPRESS_PGS_DRIVE):
         gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients(
             stiffness_drive, damping_drive, drive_C, eff_inv, dt, drive_boost
         )
     else:
-        # When the maximal projector owns the exact implicit-PD drive, the PGS
-        # drive row is suppressed here so the drive is not applied twice.
+        # Suppress PGS when a direct mechanism solver owns the implicit-PD
+        # drive so the actuator is not applied twice.
         gamma_drive = wp.float32(0.0)
         bias_drive = wp.float32(0.0)
         eff_mass_drive_soft = wp.float32(0.0)
+        constraint_write_multiplier(constraints, _MUL_ACC_DRIVE, cid, wp.float32(0.0))
     bias_drive = bias_drive - target_velocity
     write_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid, gamma_drive)
     write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft)

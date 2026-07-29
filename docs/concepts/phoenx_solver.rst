@@ -8,11 +8,12 @@
 PhoenX Solver
 =============
 
-:class:`~newton.solvers.SolverPhoenX` is a maximal-coordinate, GPU-resident
-rigid-body solver built on a **substepped Projected Gauss-Seidel (PGS) +
-TGS-soft relax** loop with a deterministic graph-coloured constraint
-schedule and a fast-tail multi-world dispatch designed for fleets of small,
-independent simulations (locomotion, manipulation, RL training).
+:class:`~newton.solvers.SolverPhoenX` is a GPU-resident rigid-body solver
+built on mechanism-wide direct equality solves plus a **substepped Projected
+Gauss-Seidel (PGS) + TGS-soft relax** loop for inequalities. It uses a
+deterministic graph-coloured inequality schedule and a fast-tail multi-world
+dispatch designed for fleets of small, independent simulations (locomotion,
+manipulation, RL training).
 
 The solver is a Warp port of the C# PhoenX engine; the contact
 backbone closely follows Box2D v3 (``b2SolveOverflowContacts`` /
@@ -105,13 +106,15 @@ Each :meth:`SolverPhoenX.step` call executes the following pipeline:
      subgraph Substep ["For each substep (× substeps)"]
        direction TB
        E["Apply forces + gravity"] --> F
-       F["Main PGS sweep<br/>(solver_iterations, bias=ON)"] --> G
-       G["Semi-implicit position integration"] --> H
-       H["TGS-soft relax<br/>(velocity_iterations, bias=OFF)"] --> I
-       I["Kinematic interp<br/>+ global damping"]
+       F["Direct mechanism solve<br/>(equalities + drives)"] --> G
+       G["Main PGS sweep<br/>(inequalities, bias=ON)"] --> H
+       H["Direct mechanism correction"] --> I
+       I["Semi-implicit position integration"] --> J
+       J["TGS-soft relax<br/>(velocity_iterations, bias=OFF)"] --> K
+       K["Kinematic interp<br/>+ global damping"]
      end
-     I --> J["Update inertia<br/>+ clear forces"]
-     J --> K["Export State<br/>(eval_ik for joint_q/qd)"]
+     K --> L["Update inertia<br/>+ clear forces"]
+     L --> M["Export State<br/>(eval_ik for joint_q/qd)"]
 
 
 Substepping
@@ -158,9 +161,13 @@ admissible set:
 - **Contact friction** (2 tangent rows): pyramidal Coulomb,
   ``|λ_t| ≤ μ · λ_n`` per tangent direction, evaluated against the
   current normal accumulator.
-- **Joint rows**: hard equality (``λ`` unbounded) for ball-socket
-  point lock and weld; soft PD limit/drive rows are clamped to the
-  drive's ``effort_limit`` per substep.
+- **Joint inequality rows**: unilateral limits and bounded Coulomb
+  friction. Structural equalities and supported scalar drives use the
+  direct mechanism system by default.
+
+Pass ``joint_equality_solver="pgs"`` to retain the legacy path, where
+structural joint equalities and PD drives also run in the coloured PGS
+kernels.
 
 Impulses accumulate across iterations within the substep (warm-start
 between iterations). The Baumgarte positional bias
@@ -341,6 +348,32 @@ Drives (``REVOLUTE`` / ``PRISMATIC``) are PD with per-DoF
 :attr:`Model.joint_target_mode`: ``POSITION``, ``VELOCITY``, or
 ``POSITION_VELOCITY``.
 
+The default direct maximal solver folds each scalar drive, passive damping,
+and gear-reflected armature into its connected mechanism. For implicit Euler,
+the drive row uses
+
+.. math::
+
+   m_d &= g^2 a + \Delta t (b + k_d) + \Delta t^2 k_p, \\
+   h_d &= g^2 a\,\dot q^- +
+          \Delta t\left[k_p(q^* - q) + k_d\dot q^*\right], \\
+   Jv^+ + \lambda/m_d &= h_d/m_d.
+
+``POSITION`` sets ``dot(q)*`` to zero and ``VELOCITY`` sets ``k_p`` to
+zero. This couples every drive through the mechanism mass matrix in one
+solve instead of relying on PGS convergence. Finite
+``joint_effort_limit`` values use an on-device active set: the unconstrained
+implicit torque is checked after the solve, violated drives are clamped to
+``gear * effort_limit``, and only then is a correction factorization
+scheduled. Unsaturated finite drives therefore take the same single
+factorization path as unlimited drives.
+
+Connected full-coordinate mechanisms are detected automatically. Their RCM
+permutations and compact panel-task lists are precomputed and reused; a
+world may contain any number of differently sized mechanisms. CUDA schedules
+one block per valid panel task, so heterogeneous mechanisms share the device
+work queue without rectangular padding or a separate global atomic stack.
+
 Joint limits for ``REVOLUTE`` / ``PRISMATIC`` use
 ``joint_limit_lower`` / ``joint_limit_upper`` with the same PD-style
 ``ke``/``kd`` as drives.
@@ -351,8 +384,9 @@ into the per-body force accumulator before the PGS solve.
 
 **Joint armature** (:attr:`Model.joint_armature`) is supported on
 ``REVOLUTE`` and ``PRISMATIC`` joints. The default direct maximal
-solver adds one dynamic row per nonzero-armature DoF to the mechanism
-system. Its equation is ``J v+ + lambda / a_eff = J v-``, where
+solver adds one dynamic row per DoF with armature, passive damping, or a
+drive to the mechanism system. With armature alone its equation is
+``J v+ + lambda / a_eff = J v-``, where
 ``a_eff = joint_gear**2 * joint_armature``. The factorization therefore
 sees ``M_eff = M_chain + a_eff`` without changing
 either attached body's inertia tensor. This matches reduced-coordinate

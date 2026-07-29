@@ -58,6 +58,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             w._mass_splitting_writeback()
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=True)
+                direct.resolve_bounded_drives(idt, use_bias=True)
             if w._maximal_tree_projector is not None:
                 w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
             if w._reduced_constraints_active_this_step:
@@ -67,6 +68,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         inv_dt = 1.0 / w.substep_dt
         if direct is not None and direct.enabled:
             direct.solve(use_bias=False)
+            direct.resolve_bounded_drives(idt, use_bias=False)
             w._mass_splitting_broadcast()
         prepare_head, _, iterate_head, _, _, _ = w._singleworld_kernels()
         if w._refresh_prepare_this_substep():
@@ -87,6 +89,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.solve(use_bias=True)
+            direct.resolve_bounded_drives(idt, use_bias=True)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
         if w._reduced_constraints_active_this_step:
@@ -101,6 +104,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         if not w._regular_pgs_active_this_step:
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=False)
+                direct.resolve_bounded_drives(idt, use_bias=False)
             if w._maximal_tree_projector is not None:
                 w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
             if w._reduced_constraints_active_this_step:
@@ -118,6 +122,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.solve(use_bias=False)
+            direct.resolve_bounded_drives(idt, use_bias=False)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
         if w._reduced_constraints_active_this_step:
