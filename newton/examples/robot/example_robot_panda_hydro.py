@@ -58,6 +58,7 @@ class Example:
         self.scene = SceneType(args.scene)
         self.test_mode = args.test
         self.deterministic = args.deterministic
+        self.deterministic_solver = args.deterministic_solver
         self.show_isosurface = False  # Disabled by default for performance
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -301,7 +302,7 @@ class Example:
             ls_iterations=100,
             impratio=1000.0,
             deterministic=wp.DeterministicMode.RUN_TO_RUN
-            if self.deterministic
+            if self.deterministic_solver
             else wp.DeterministicMode.NOT_GUARANTEED,
         )
 
@@ -537,7 +538,20 @@ class Example:
             "--deterministic",
             action=argparse.BooleanOptionalAction,
             default=False,
-            help="Make contacts and the solver bit-exact across runs on the same GPU.",
+            help=(
+                "Make contact generation and ordering reproducible across runs on the same GPU. "
+                "Costs a few percent of step time."
+            ),
+        )
+        parser.add_argument(
+            "--deterministic-solver",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help=(
+                "Additionally make the solver bit-exact. Separate from --deterministic because "
+                "it instruments every atomic scatter in the solver and costs ~7x step time, "
+                "while contact ordering is what varies between runs."
+            ),
         )
         parser.add_argument(
             "--scene",

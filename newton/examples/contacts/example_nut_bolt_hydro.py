@@ -162,6 +162,7 @@ class Example:
         self.solver_type = args.solver
         self.test_mode = args.test
         self.deterministic = args.deterministic
+        self.deterministic_solver = args.deterministic_solver
 
         # XPBD contact correction (0.0 = no correction, 1.0 = full correction)
         self.xpbd_contact_relaxation = 0.8
@@ -235,7 +236,7 @@ class Example:
                 iterations=10,
                 rigid_contact_relaxation=self.xpbd_contact_relaxation,
                 deterministic=wp.DeterministicMode.RUN_TO_RUN
-                if self.deterministic
+                if self.deterministic_solver
                 else wp.DeterministicMode.NOT_GUARANTEED,
             )
         elif self.solver_type == "mujoco":
@@ -254,7 +255,7 @@ class Example:
                 ls_iterations=100,
                 impratio=1.0,
                 deterministic=wp.DeterministicMode.RUN_TO_RUN
-                if self.deterministic
+                if self.deterministic_solver
                 else wp.DeterministicMode.NOT_GUARANTEED,
             )
         else:
@@ -482,9 +483,19 @@ class Example:
             action=argparse.BooleanOptionalAction,
             default=False,
             help=(
-                "Make contacts and the solver bit-exact across runs on the same GPU. "
-                "Needs a world count small enough to keep the hydroelastic face-contact "
-                "buffer under the 2^20 deterministic contact-id limit."
+                "Make contact generation and ordering reproducible across runs on the same GPU. "
+                "Costs a few percent of step time. Needs a world count small enough to keep the "
+                "hydroelastic face-contact buffer under the 2^20 deterministic contact-id limit."
+            ),
+        )
+        parser.add_argument(
+            "--deterministic-solver",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help=(
+                "Additionally make the solver bit-exact. Separate from --deterministic because "
+                "it instruments every atomic scatter in the solver and costs ~7x step time, "
+                "while contact ordering is what varies between runs."
             ),
         )
         parser.add_argument(
