@@ -394,6 +394,63 @@ def pressure_jacobi(
 
 
 @wp.kernel(enable_backward=False)
+def pressure_chebyshev(
+    grid: SparseGridData,
+    cell_mass: wp.array[float],
+    min_mass: float,
+    pressure_rhs: wp.array[float],
+    pressure_diag: wp.array[float],
+    alpha: float,
+    beta: float,
+    pressure_in: wp.array[float],
+    direction_in: wp.array[float],
+    pressure_out: wp.array[float],
+    direction_out: wp.array[float],
+):
+    """Perform one Chebyshev-accelerated sparse pressure iteration."""
+    index = wp.tid()
+    tile_volume = grid.tile_size * grid.tile_size * grid.tile_size
+    tile = index // tile_volume
+    if tile >= grid.tile_count[0]:
+        pressure_out[index] = 0.0
+        direction_out[index] = 0.0
+        return
+    diagonal = pressure_diag[index]
+    if diagonal == 0.0:
+        pressure_out[index] = 0.0
+        direction_out[index] = 0.0
+        return
+
+    local = index - tile * tile_volume
+    x = local % grid.tile_size
+    y = (local // grid.tile_size) % grid.tile_size
+    z = local // (grid.tile_size * grid.tile_size)
+    neighbor_sum = 0.0
+    x_lo = sparse_grid_cell_index(grid, tile, x - 1, y, z)
+    x_hi = sparse_grid_cell_index(grid, tile, x + 1, y, z)
+    y_lo = sparse_grid_cell_index(grid, tile, x, y - 1, z)
+    y_hi = sparse_grid_cell_index(grid, tile, x, y + 1, z)
+    z_lo = sparse_grid_cell_index(grid, tile, x, y, z - 1)
+    z_hi = sparse_grid_cell_index(grid, tile, x, y, z + 1)
+    if _is_liquid(cell_mass, x_lo, min_mass):
+        neighbor_sum += pressure_in[x_lo]
+    if _is_liquid(cell_mass, x_hi, min_mass):
+        neighbor_sum += pressure_in[x_hi]
+    if _is_liquid(cell_mass, y_lo, min_mass):
+        neighbor_sum += pressure_in[y_lo]
+    if _is_liquid(cell_mass, y_hi, min_mass):
+        neighbor_sum += pressure_in[y_hi]
+    if _is_liquid(cell_mass, z_lo, min_mass):
+        neighbor_sum += pressure_in[z_lo]
+    if _is_liquid(cell_mass, z_hi, min_mass):
+        neighbor_sum += pressure_in[z_hi]
+    residual = (-pressure_rhs[index] - diagonal * pressure_in[index] + neighbor_sum) / diagonal
+    direction = alpha * residual + beta * direction_in[index]
+    direction_out[index] = direction
+    pressure_out[index] = pressure_in[index] + direction
+
+
+@wp.kernel(enable_backward=False)
 def apply_pressure(
     grid: SparseGridData,
     cell_mass: wp.array[float],

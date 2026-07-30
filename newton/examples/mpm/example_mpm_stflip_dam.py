@@ -208,7 +208,7 @@ class Example:
         parser = newton.examples.create_parser()
         parser.add_argument("--cell-size", type=float, default=0.08)
         parser.add_argument("--substeps", type=int, default=4)
-        parser.add_argument("--pressure-iterations", type=int, default=60)
+        parser.add_argument("--pressure-iterations", type=int, default=20)
         parser.add_argument("--max-active-tiles", type=int, default=160)
         parser.add_argument("--capture", action="store_true", default=True)
         parser.add_argument("--no-capture", action="store_false", dest="capture")

@@ -30,7 +30,7 @@ from .kernels import (
     normalize_grid,
     particle_faces_to_grid,
     particles_to_grid,
-    pressure_jacobi,
+    pressure_chebyshev,
     sample_transfer_components,
     update_particle_clocks,
 )
@@ -66,8 +66,8 @@ class SolverSTFLIP(SolverBase):
         """Maximum number of simultaneously active sparse tiles."""
         padding_tiles: int = 1
         """Number of core-tile layers activated around occupied tiles."""
-        pressure_iterations: int = 80
-        """Number of fixed Jacobi pressure iterations."""
+        pressure_iterations: int = 20
+        """Number of fixed Chebyshev pressure iterations."""
         liquid_density: float = 1000.0
         """Liquid rest density [kg/m³]."""
         particles_per_cell: float = 8.0
@@ -163,6 +163,20 @@ class SolverSTFLIP(SolverBase):
         self.pressure_scratch = wp.zeros(capacity, dtype=wp.float32, device=model.device)
         self.pressure_rhs = wp.zeros(capacity, dtype=wp.float32, device=model.device)
         self.pressure_diag = wp.zeros(capacity, dtype=wp.float32, device=model.device)
+        self._pressure_direction = wp.zeros(capacity, dtype=wp.float32, device=model.device)
+        self._pressure_direction_scratch = wp.zeros(capacity, dtype=wp.float32, device=model.device)
+        lambda_min = 0.02
+        lambda_max = 2.0
+        center = 0.5 * (lambda_max + lambda_min)
+        radius = 0.5 * (lambda_max - lambda_min)
+        alpha = 1.0 / center
+        self._pressure_coefficients = []
+        for _ in range(self.config.pressure_iterations):
+            beta = 0.0
+            if self._pressure_coefficients:
+                beta = (0.5 * radius * alpha) ** 2
+                alpha = 1.0 / (center - beta / alpha)
+            self._pressure_coefficients.append((alpha, beta))
         self._zero_affine = wp.zeros(model.particle_count, dtype=wp.mat33, device=model.device)
         self._transfer_samples = wp.zeros(3 * model.particle_count, dtype=wp.vec4, device=model.device)
         self._transfer_gradient_z = wp.zeros(3 * model.particle_count, dtype=wp.float32, device=model.device)
@@ -342,9 +356,11 @@ class SolverSTFLIP(SolverBase):
         )
         pressure_in = self.pressure
         pressure_out = self.pressure_scratch
-        for _ in range(self.config.pressure_iterations):
+        direction_in = self._pressure_direction
+        direction_out = self._pressure_direction_scratch
+        for alpha, beta in self._pressure_coefficients:
             wp.launch(
-                pressure_jacobi,
+                pressure_chebyshev,
                 dim=self.grid.cell_capacity,
                 inputs=[
                     self.grid.data,
@@ -352,12 +368,17 @@ class SolverSTFLIP(SolverBase):
                     min_mass,
                     self.pressure_rhs,
                     self.pressure_diag,
+                    alpha,
+                    beta,
                     pressure_in,
+                    direction_in,
                     pressure_out,
+                    direction_out,
                 ],
                 device=self.device,
             )
             pressure_in, pressure_out = pressure_out, pressure_in
+            direction_in, direction_out = direction_out, direction_in
 
         wp.launch(
             apply_pressure,

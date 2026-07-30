@@ -9,6 +9,7 @@ import warp as wp
 from newton._src.solvers.stflip.kernels import (
     apply_pressure,
     build_pressure_system,
+    pressure_chebyshev,
     pressure_jacobi,
 )
 from newton._src.solvers.stflip.sparse_grid import SparseGrid, SparseGridData, sparse_grid_cell_coord
@@ -75,6 +76,8 @@ class TestSTFLIPPressure(unittest.TestCase):
             "diag": wp.zeros(capacity, dtype=wp.float32, device=device),
             "pressure": wp.zeros(capacity, dtype=wp.float32, device=device),
             "scratch": wp.zeros(capacity, dtype=wp.float32, device=device),
+            "direction": wp.zeros(capacity, dtype=wp.float32, device=device),
+            "direction_scratch": wp.zeros(capacity, dtype=wp.float32, device=device),
         }
         wp.launch(
             _initialize_pressure_case,
@@ -110,27 +113,55 @@ class TestSTFLIPPressure(unittest.TestCase):
         mass = arrays["cell_mass"].numpy()
         return arrays["rhs"].numpy()[mass > 0.5]
 
-    def _project(self, device, iterations):
+    def _project(self, device, iterations, accelerated=False):
         """Project the expanding manufactured velocity field."""
         grid, arrays = self._create_case(device, velocity_mode=0)
         before = self._divergence(grid, arrays, device)
         pressure_in = arrays["pressure"]
         pressure_out = arrays["scratch"]
-        for _ in range(iterations):
-            wp.launch(
-                pressure_jacobi,
-                dim=grid.cell_capacity,
-                inputs=[
-                    grid.data,
-                    arrays["cell_mass"],
-                    0.5,
-                    arrays["rhs"],
-                    arrays["diag"],
-                    pressure_in,
-                    pressure_out,
-                ],
-                device=device,
-            )
+        direction_in = arrays["direction"]
+        direction_out = arrays["direction_scratch"]
+        alpha = 1.0 / 1.01
+        for iteration in range(iterations):
+            if accelerated:
+                beta = 0.0
+                if iteration:
+                    beta = (0.99 * 0.5 * alpha) ** 2
+                    alpha = 1.0 / (1.01 - beta / alpha)
+                wp.launch(
+                    pressure_chebyshev,
+                    dim=grid.cell_capacity,
+                    inputs=[
+                        grid.data,
+                        arrays["cell_mass"],
+                        0.5,
+                        arrays["rhs"],
+                        arrays["diag"],
+                        alpha,
+                        beta,
+                        pressure_in,
+                        direction_in,
+                        pressure_out,
+                        direction_out,
+                    ],
+                    device=device,
+                )
+                direction_in, direction_out = direction_out, direction_in
+            else:
+                wp.launch(
+                    pressure_jacobi,
+                    dim=grid.cell_capacity,
+                    inputs=[
+                        grid.data,
+                        arrays["cell_mass"],
+                        0.5,
+                        arrays["rhs"],
+                        arrays["diag"],
+                        pressure_in,
+                        pressure_out,
+                    ],
+                    device=device,
+                )
             pressure_in, pressure_out = pressure_out, pressure_in
         wp.launch(
             apply_pressure,
@@ -148,6 +179,14 @@ class TestSTFLIPPressure(unittest.TestCase):
         )
         after = self._divergence(grid, arrays, device)
         return before, after
+
+    def test_chebyshev_acceleration_reduces_iteration_count(self):
+        """Converge faster than unaccelerated Jacobi pressure iterations."""
+        for device in self._devices():
+            with self.subTest(device=device):
+                _before, accelerated = self._project(device, iterations=20, accelerated=True)
+                _before, jacobi = self._project(device, iterations=20)
+                self.assertLess(np.linalg.norm(accelerated), np.linalg.norm(jacobi))
 
     def test_projection_reduces_manufactured_divergence(self):
         """Reduce a manufactured expanding field to near-zero divergence."""
