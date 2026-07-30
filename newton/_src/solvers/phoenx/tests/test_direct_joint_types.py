@@ -194,8 +194,8 @@ class TestDirectJointTypes(unittest.TestCase):
                     self.assertLess(float(np.max(np.abs(result[body]))), 0.8)
 
     def test_mixed_small_and_large_direct_blocks_match_dense_residuals(self) -> None:
-        """Solve ill-conditioned 3-, 5-, and 17-row blocks in one launch set."""
-        dimensions = (3, 5, 17)
+        """Solve narrow and wide ill-conditioned blocks in one launch set."""
+        dimensions = (3, 5, 17, 40)
         starts = np.cumsum(np.asarray((0, *dimensions), dtype=np.int32))
         permutation = np.concatenate([np.arange(dimension, dtype=np.int32) for dimension in dimensions])
         row_bodies = tuple(
@@ -209,8 +209,9 @@ class TestDirectJointTypes(unittest.TestCase):
             device=wp.get_preferred_device(),
         )
         np.testing.assert_array_equal(panel.small_mechanism.numpy(), [0, 1])
-        np.testing.assert_array_equal(panel.large_mechanism.numpy(), [2])
-        np.testing.assert_array_equal(panel.partial_large_mechanism.numpy(), [2])
+        np.testing.assert_array_equal(panel.large_mechanism.numpy(), [2, 3])
+        np.testing.assert_array_equal(panel.partial_large_mechanism.numpy(), [2, 3])
+        self.assertEqual(panel.narrow_mechanism.size, 0)
 
         rng = np.random.default_rng(1234)
         matrices = []
