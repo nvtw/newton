@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Lean drive, limit, and friction iteration for direct-equality joints."""
+"""Lean limit and friction iteration for direct-equality joints."""
 
 import warp as wp
 
@@ -18,7 +18,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_BODY1,
     _OFF_BODY2,
     _OFF_CLAMP,
-    _OFF_DIRECT_DRIVE,
     _OFF_JOINT_MODE,
     _OFF_R1_B1,
     _OFF_R1_B2,
@@ -40,13 +39,11 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 def mark_direct_equality_joints_kernel(
     constraints: ConstraintContainer,
     structural_direct: wp.array[wp.int32],
-    direct_drive: wp.array[wp.int32],
     num_joints: wp.int32,
 ):
     cid = wp.tid()
     if cid < num_joints:
         write_int(constraints, _OFF_STRUCTURAL_DIRECT, cid, structural_direct[cid])
-        write_int(constraints, _OFF_DIRECT_DRIVE, cid, direct_drive[cid])
 
 
 @wp.func

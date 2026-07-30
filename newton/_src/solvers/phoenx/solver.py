@@ -29,7 +29,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_STIFFNESS_DRIVE,
     _OFF_TARGET,
     _OFF_TARGET_VELOCITY,
-    DRIVE_MODE_OFF,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
     JOINT_MODE_CYLINDRICAL,
@@ -769,13 +768,11 @@ class SolverPhoenX(SolverBase):
                 self._direct_base_joint_pgs_enabled = self.world._joint_pgs_enabled.numpy()[:num_joints].copy()
                 self._direct_effective_joint_mode = effective_joint_mode
                 joint_pgs_enabled = self._direct_base_joint_pgs_enabled.copy()
-                drive_mode_np = self._adbs.drive_mode.numpy()
                 friction_np = self._adbs.friction_coefficient.numpy()
                 min_value_np = self._adbs.min_value.numpy()
                 max_value_np = self._adbs.max_value.numpy()
                 d6_limit_count_np = self._adbs.d6_limit_count.numpy()
                 structural_direct = np.zeros(num_joints, dtype=np.int32)
-                direct_drive = np.zeros(num_joints, dtype=np.int32)
                 for joint in np.flatnonzero(self._direct_equality_system.joint_mask):
                     cid = int(joint_idx_to_cid[joint])
                     if cid < 0:
@@ -783,15 +780,12 @@ class SolverPhoenX(SolverBase):
                     mode = int(effective_joint_mode[joint])
                     equality_only = mode in (int(JOINT_MODE_FIXED), int(JOINT_MODE_CABLE))
                     if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
-                        owns_drive = bool(self._direct_equality_system.direct_drive_joint_mask[joint])
-                        direct_drive[cid] = int(owns_drive)
-                        has_drive = int(drive_mode_np[cid]) != int(DRIVE_MODE_OFF) and not owns_drive
                         has_friction = float(friction_np[cid]) > 0.0
                         lower = float(min_value_np[cid])
                         upper = float(max_value_np[cid])
                         # Newton stores unbounded ranges as [-1e10, 1e10].
                         has_limit = lower <= upper and (lower > -5.0e9 or upper < 5.0e9)
-                        equality_only = not (has_drive or has_friction or has_limit)
+                        equality_only = not (has_friction or has_limit)
                     elif mode in (
                         int(JOINT_MODE_BALL_SOCKET),
                         int(JOINT_MODE_UNIVERSAL),
@@ -805,14 +799,12 @@ class SolverPhoenX(SolverBase):
                     joint_pgs_enabled[cid] = 0
                 if num_joints > 0:
                     structural_direct_wp = wp.array(structural_direct, dtype=wp.int32, device=self.device)
-                    direct_drive_wp = wp.array(direct_drive, dtype=wp.int32, device=self.device)
                     wp.launch(
                         mark_direct_equality_joints_kernel,
                         dim=num_joints,
                         inputs=[
                             self._constraints,
                             structural_direct_wp,
-                            direct_drive_wp,
                             wp.int32(num_joints),
                         ],
                         device=self.device,
@@ -891,13 +883,11 @@ class SolverPhoenX(SolverBase):
         num_joints = int(self.model.joint_count)
         joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
         joint_pgs_enabled = self._direct_base_joint_pgs_enabled.copy()
-        drive_mode = self._adbs.drive_mode.numpy()
         friction = self._adbs.friction_coefficient.numpy()
         lower_limit = self._adbs.min_value.numpy()
         upper_limit = self._adbs.max_value.numpy()
         d6_limit_count = self._adbs.d6_limit_count.numpy()
         structural_direct = np.zeros(num_joints, dtype=np.int32)
-        direct_drive = np.zeros(num_joints, dtype=np.int32)
         for joint in np.flatnonzero(direct.joint_mask):
             cid = int(joint_idx_to_cid[joint])
             if cid < 0:
@@ -905,14 +895,11 @@ class SolverPhoenX(SolverBase):
             mode = int(self._direct_effective_joint_mode[joint])
             equality_only = mode in (int(JOINT_MODE_FIXED), int(JOINT_MODE_CABLE))
             if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
-                owns_drive = bool(direct.direct_drive_joint_mask[joint])
-                direct_drive[cid] = int(owns_drive)
-                has_drive = int(drive_mode[cid]) != int(DRIVE_MODE_OFF) and not owns_drive
                 has_friction = float(friction[cid]) > 0.0
                 lower = float(lower_limit[cid])
                 upper = float(upper_limit[cid])
                 has_limit = lower <= upper and (lower > -5.0e9 or upper < 5.0e9)
-                equality_only = not (has_drive or has_friction or has_limit)
+                equality_only = not (has_friction or has_limit)
             elif mode in (
                 int(JOINT_MODE_BALL_SOCKET),
                 int(JOINT_MODE_UNIVERSAL),
@@ -930,7 +917,6 @@ class SolverPhoenX(SolverBase):
             inputs=[
                 self._constraints,
                 wp.array(structural_direct, dtype=wp.int32, device=self.device),
-                wp.array(direct_drive, dtype=wp.int32, device=self.device),
                 wp.int32(num_joints),
             ],
             device=self.device,

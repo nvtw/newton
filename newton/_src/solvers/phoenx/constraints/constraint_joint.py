@@ -4,12 +4,10 @@
 
 Bilateral equalities are assembled per connected mechanism and solved by the
 direct maximal-coordinate system. The PGS-facing routines in this module are
-limited to joint limits, friction, and bounded-drive residuals.
+limited to joint limits and friction.
 """
 
 from __future__ import annotations
-
-import os
 
 import warp as wp
 
@@ -66,14 +64,10 @@ from newton._src.solvers.phoenx.mass_splitting.access import (
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_config import (
-    PHOENX_BOOST_PRISMATIC_DRIVE,
     PHOENX_BOOST_PRISMATIC_LIMIT,
-    PHOENX_BOOST_REVOLUTE_DRIVE,
     PHOENX_BOOST_REVOLUTE_LIMIT,
     PHOENX_FRICTION_SLIP_VELOCITY,
 )
-
-_SUPPRESS_PGS_DRIVE = os.environ.get("PHOENX_MAXIMAL_IMPLICIT_DRIVE", "0").lower() not in ("0", "", "false", "off")
 
 __all__ = [
     "ADBS_DWORDS",
@@ -203,7 +197,7 @@ class ActuatedDoubleBallSocketData:
 
     Union over revolute / prismatic / ball-socket / fixed / cable.
     Mode-specific Schur caches live in dedicated slots; the rest is
-    shared. 119 dwords (476 B per joint). See field-level ``#:``
+    shared. See field-level ``#:``
     comments for individual slot semantics.
     """
 
@@ -215,7 +209,6 @@ class ActuatedDoubleBallSocketData:
     # ---- Shared positional block -------------------------------------
     joint_mode: wp.int32
     structural_direct: wp.int32
-    direct_drive: wp.int32
     local_anchor1_b1: wp.vec3f
     local_anchor1_b2: wp.vec3f
     local_anchor2_b1: wp.vec3f
@@ -354,7 +347,6 @@ _OFF_BODY1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "body1"))
 _OFF_BODY2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "body2"))
 _OFF_JOINT_MODE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "joint_mode"))
 _OFF_STRUCTURAL_DIRECT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "structural_direct"))
-_OFF_DIRECT_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "direct_drive"))
 _OFF_LA1_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor1_b1"))
 _OFF_LA1_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor1_b2"))
 _OFF_LA2_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor2_b1"))
@@ -918,7 +910,7 @@ def _ms_store_body_pair(
 
 
 # ---------------------------------------------------------------------------
-# Shared axial (drive + limit) iterate helper
+# Shared axial limit and friction iterate helper
 # ---------------------------------------------------------------------------
 
 
@@ -992,12 +984,12 @@ def _axial_limit_friction_iterate(
 
 
 # ---------------------------------------------------------------------------
-# Shared axial (drive + limit) prepare helper
+# Shared axial limit and friction prepare helper
 # ---------------------------------------------------------------------------
 
 
 @wp.func
-def _axial_drive_limit_prepare_at(
+def _axial_limit_friction_prepare_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
     base_offset: wp.int32,
@@ -1005,36 +997,9 @@ def _axial_drive_limit_prepare_at(
     eff_inv: wp.float32,
     eff_inv_friction: wp.float32,
     dt: wp.float32,
-    drive_boost: wp.float32,
     limit_boost: wp.float32,
 ) -> wp.float32:
-    """Shared drive + limit prepare for the axial scalar row.
-
-    Both revolute and prismatic drive / limit rows are scalar
-    position-error PDs with optional Box2D fallback on the limit
-    side. The only per-mode difference is what ``cumulative_value``
-    means (cumulative_angle [rad] vs slide [m]) and how the caller
-    spreads the warm-start axial impulse onto the body velocities
-    (pure torque vs linear impulse with lever arm). This helper does
-    everything in between: reads gain / target / limit scalars,
-    computes drive_C, calls :func:`pd_coefficients`, decides the PD
-    vs Box2D limit path, writes all coefficient slots, selects the
-    clamp state, and returns the warm-start ``axial_imp =
-    acc_drive + acc_limit`` (with ``acc_limit`` zeroed when the
-    limit is inactive, matching the standalone modules).
-
-    ``drive_boost`` / ``limit_boost`` are per-joint-type Nyquist
-    headroom multipliers (e.g. :data:`PHOENX_BOOST_REVOLUTE_DRIVE`)
-    threaded in from the per-mode caller; both are clamped to
-    ``[1, _PD_NYQUIST_HEADROOM_MAX]`` inside :func:`pd_coefficients`.
-
-    Pairs with :func:`_axial_drive_limit_iterate`.
-    """
-    drive_mode = read_int(constraints, base_offset + _OFF_DRIVE_MODE, cid)
-    target = read_float(constraints, base_offset + _OFF_TARGET, cid)
-    target_velocity = read_float(constraints, base_offset + _OFF_TARGET_VELOCITY, cid)
-    stiffness_drive = read_float(constraints, base_offset + _OFF_STIFFNESS_DRIVE, cid)
-    damping_drive = read_float(constraints, base_offset + _OFF_DAMPING_DRIVE, cid)
+    """Prepare unilateral limit and friction state for one free axial row."""
     min_value = read_float(constraints, base_offset + _OFF_MIN_VALUE, cid)
     max_value = read_float(constraints, base_offset + _OFF_MAX_VALUE, cid)
     hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
@@ -1044,27 +1009,6 @@ def _axial_drive_limit_prepare_at(
 
     write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
     write_float(constraints, base_offset + _OFF_EFF_INV_FRICTION, cid, eff_inv_friction)
-
-    # ---- Drive (PD only) ---------------------------------------------
-    drive_C = float(0.0)
-    if drive_mode == DRIVE_MODE_POSITION:
-        drive_C = cumulative_value - target
-    direct_drive = read_int(constraints, base_offset + _OFF_DIRECT_DRIVE, cid) != wp.int32(0)
-    if (stiffness_drive > 0.0 or damping_drive > 0.0) and not direct_drive and not wp.static(_SUPPRESS_PGS_DRIVE):
-        gamma_drive, bias_drive, eff_mass_drive_soft = pd_coefficients(
-            stiffness_drive, damping_drive, drive_C, eff_inv, dt, drive_boost
-        )
-    else:
-        # Suppress PGS when a direct mechanism solver owns the implicit-PD
-        # drive so the actuator is not applied twice.
-        gamma_drive = wp.float32(0.0)
-        bias_drive = wp.float32(0.0)
-        eff_mass_drive_soft = wp.float32(0.0)
-        constraint_write_multiplier(constraints, _MUL_ACC_DRIVE, cid, wp.float32(0.0))
-    bias_drive = bias_drive - target_velocity
-    write_float(constraints, base_offset + _OFF_GAMMA_DRIVE, cid, gamma_drive)
-    write_float(constraints, base_offset + _OFF_EFF_MASS_DRIVE_SOFT, cid, eff_mass_drive_soft)
-    write_float(constraints, base_offset + _OFF_BIAS_DRIVE, cid, bias_drive)
 
     # ---- Limit (dual convention) -------------------------------------
     clamp = _CLAMP_NONE
@@ -1095,9 +1039,8 @@ def _axial_drive_limit_prepare_at(
         write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
         write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
 
-    # Warm-start: sum of drive + limit accumulated impulses, with
+    # Warm-start the active limit and friction impulses, with
     # ``acc_limit`` forcibly zeroed when the limit is inactive.
-    acc_drive = constraint_read_multiplier(constraints, _MUL_ACC_DRIVE, cid)
     acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
     if clamp == _CLAMP_NONE:
         acc_limit = 0.0
@@ -1107,7 +1050,7 @@ def _axial_drive_limit_prepare_at(
     if friction <= 0.0:
         acc_friction = 0.0
         constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
-    return acc_drive + acc_limit + acc_friction
+    return acc_limit + acc_friction
 
 
 # ---------------------------------------------------------------------------
@@ -1353,7 +1296,7 @@ def actuated_double_ball_socket_prepare_inequality(
     parallel_id: wp.int32,
     idt: wp.float32,
 ):
-    """Prepare only limit, friction, and residual drive rows."""
+    """Prepare only free-axis limit and friction rows."""
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
@@ -1400,7 +1343,7 @@ def actuated_double_ball_socket_prepare_inequality(
         if mode == JOINT_MODE_PRISMATIC:
             eff_inv = wp.dot(axis, metric @ axis)
             slide = wp.dot(axis, position2 + r1_b2 - position1 - r1_b1)
-            axial_impulse = _axial_drive_limit_prepare_at(
+            axial_impulse = _axial_limit_friction_prepare_at(
                 constraints,
                 cid,
                 wp.int32(0),
@@ -1408,7 +1351,6 @@ def actuated_double_ball_socket_prepare_inequality(
                 eff_inv,
                 eff_inv,
                 dt,
-                PHOENX_BOOST_PRISMATIC_DRIVE,
                 PHOENX_BOOST_PRISMATIC_LIMIT,
             )
             impulse = axis * axial_impulse
@@ -1433,7 +1375,7 @@ def actuated_double_ball_socket_prepare_inequality(
             write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, counter)
             write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, previous)
             coordinate = revolution_tracker_angle(counter, previous)
-            axial_impulse = _axial_drive_limit_prepare_at(
+            axial_impulse = _axial_limit_friction_prepare_at(
                 constraints,
                 cid,
                 wp.int32(0),
@@ -1441,7 +1383,6 @@ def actuated_double_ball_socket_prepare_inequality(
                 eff_inv,
                 eff_inv_friction,
                 dt,
-                PHOENX_BOOST_REVOLUTE_DRIVE,
                 PHOENX_BOOST_REVOLUTE_LIMIT,
             )
             angular_velocity1 += inv_inertia1 @ (axis * axial_impulse)
@@ -1503,10 +1444,9 @@ def actuated_double_ball_socket_world_wrench_at(
     r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
     r3_b2 = read_vec3(constraints, base_offset + _OFF_R3_B2, cid)
     n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    acc_drive = constraint_read_multiplier(constraints, _MUL_ACC_DRIVE, cid)
     acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
     acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)
-    acc_axial = acc_drive + acc_limit + acc_friction
+    acc_axial = acc_limit + acc_friction
 
     if joint_mode == JOINT_MODE_REVOLUTE:
         force = (acc1 + acc2) * idt
