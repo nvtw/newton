@@ -504,6 +504,9 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/mpm/example_mpm_stflip_dam.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_mpm_stflip_dam.jpg" alt="ST-FLIP Dam Break">
+      </a>
     </td>
   </tr>
   <tr>
@@ -514,6 +517,7 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples mpm_snow_ball</code>
     </td>
     <td align="center" width="33%">
+      <code>python -m newton.examples mpm_stflip_dam</code>
     </td>
   </tr>
   <tr>

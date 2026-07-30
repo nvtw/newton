@@ -118,6 +118,14 @@ Supported Features
      - 🟨 no self-collision
      - ✅
      - 🟨 basic :sup:`2`
+   * - :class:`~newton.solvers.SolverSTFLIP`
+     - Temporally staggered FLIP/APIC
+     - Limited: free rigid bodies through particle contacts
+     - No
+     - Yes: incompressible fluid
+     - No
+     - No
+     - No
    * - :class:`~newton.solvers.SolverStyle3D`
      - Implicit
      - ❌
@@ -170,11 +178,13 @@ formulation.
   :class:`~newton.solvers.SolverXPBD`, :class:`~newton.solvers.SolverMuJoCo`,
   :class:`~newton.solvers.SolverVBD`, :class:`~newton.solvers.SolverKamino`,
   :class:`~newton.solvers.SolverStyle3D`, and
-  :class:`~newton.solvers.SolverImplicitMPM`.
+  :class:`~newton.solvers.SolverImplicitMPM`, and
+  :class:`~newton.solvers.SolverSTFLIP`.
 - ``ke`` / ``kd``: :class:`~newton.solvers.SolverFeatherstone`,
   :class:`~newton.solvers.SolverSemiImplicit`,
   :class:`~newton.solvers.SolverMuJoCo`, and
-  :class:`~newton.solvers.SolverVBD`.
+  :class:`~newton.solvers.SolverVBD`; they are also used by
+  :class:`~newton.solvers.SolverSTFLIP` for particle-rigid coupling.
 - ``kf`` / ``ka``: :class:`~newton.solvers.SolverFeatherstone` and
   :class:`~newton.solvers.SolverSemiImplicit`; ``kf`` is also used by
   :class:`~newton.solvers.SolverMuJoCo`
