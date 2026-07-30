@@ -169,7 +169,7 @@ with pose, margin, and collision settings.
      - Cone
      - Convex hull
    * - Plane
-     - 0 / 5
+     - 5
      - 1
      - 2
      - 1
@@ -241,8 +241,8 @@ with pose, margin, and collision settings.
      - 5
      - 5
 
-Plane--plane produces no contacts when both planes are infinite; otherwise its
-upper bound is five.
+The plane--plane upper bound is five when at least one plane is finite. Two
+infinite planes produce no contacts.
 
 **Mesh, heightfield, and SDF routes**
 
