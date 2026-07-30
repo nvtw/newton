@@ -126,6 +126,9 @@ def make_persistent_factor_kernel(block_size: int):
         task_panel_count: wp.array[wp.int32],
         task_next_diagonal: wp.array[wp.int32],
         task_owner_diagonal: wp.array[wp.int32],
+        task_update_start: wp.array[wp.int32],
+        update_left_panel: wp.array[wp.int32],
+        update_right_panel: wp.array[wp.int32],
         dimensions: wp.array[wp.int32],
         panel_table_offset: wp.array[wp.int32],
         tile_counts: wp.array[wp.int32],
@@ -198,10 +201,8 @@ def make_persistent_factor_kernel(block_size: int):
                             value = wp.where(row == column, wp.float32(1.0), wp.float32(0.0))
                         diagonal[row, column] = value
 
-                for tile_j in range(tile_k):
-                    previous_panel = panel_index[table_offset + tile_k * tile_count + tile_j]
-                    if previous_panel < 0:
-                        continue
+                for update in range(task_update_start[task], task_update_start[task + wp.int32(1)]):
+                    previous_panel = update_left_panel[update]
                     previous_matrix = wp.array(
                         ptr=_get_float_array_offset_ptr(factor, previous_panel * tile_elements),
                         shape=(block_size, block_size),
@@ -245,11 +246,9 @@ def make_persistent_factor_kernel(block_size: int):
                     )
                     panel = wp.tile_load(panel_matrix, shape=(block_size, block_size), storage="shared")
                     diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size), storage="shared")
-                    for tile_j in range(tile_k):
-                        left_panel = panel_index[table_offset + tile_i * tile_count + tile_j]
-                        right_panel = panel_index[table_offset + tile_k * tile_count + tile_j]
-                        if left_panel < 0 or right_panel < 0:
-                            continue
+                    for update in range(task_update_start[task], task_update_start[task + wp.int32(1)]):
+                        left_panel = update_left_panel[update]
+                        right_panel = update_right_panel[update]
                         left_matrix = wp.array(
                             ptr=_get_float_array_offset_ptr(factor, left_panel * tile_elements),
                             shape=(block_size, block_size),

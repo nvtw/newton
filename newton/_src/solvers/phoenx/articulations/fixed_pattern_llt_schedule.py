@@ -30,8 +30,21 @@ class PersistentFactorSchedule:
         task_panel_count: list[int] = []
         task_next_diagonal: list[int] = []
         task_owner_diagonal: list[int] = []
+        task_update_start: list[int] = [0]
+        update_left_panel: list[int] = []
+        update_right_panel: list[int] = []
         remaining_initial: list[int] = []
         initial_task: list[int] = []
+
+        def append_symbolic_updates(table: np.ndarray, tile_i: int, tile_k: int) -> None:
+            """Record only numerical panel products present in the symbolic factor."""
+            for tile_j in range(tile_k):
+                left_panel = int(table[tile_i, tile_j])
+                right_panel = int(table[tile_k, tile_j])
+                if left_panel >= 0 and right_panel >= 0:
+                    update_left_panel.append(left_panel)
+                    update_right_panel.append(right_panel)
+            task_update_start.append(len(update_left_panel))
 
         for mechanism, table in enumerate(panel_tables):
             previous_diagonal = -1
@@ -49,6 +62,7 @@ class PersistentFactorSchedule:
                 task_next_diagonal.append(-1)
                 task_owner_diagonal.append(diagonal_task)
                 remaining_initial.append(len(panel_rows))
+                append_symbolic_updates(table, tile_k, tile_k)
                 for tile_i in panel_rows:
                     task_mechanism.append(mechanism)
                     task_tile_i.append(tile_i)
@@ -57,6 +71,7 @@ class PersistentFactorSchedule:
                     task_next_diagonal.append(-1)
                     task_owner_diagonal.append(diagonal_task)
                     remaining_initial.append(0)
+                    append_symbolic_updates(table, tile_i, tile_k)
                 previous_diagonal = diagonal_task
 
         if len(task_mechanism) != panel_count:
@@ -71,6 +86,9 @@ class PersistentFactorSchedule:
         self.task_panel_count = task_array(task_panel_count)
         self.task_next_diagonal = task_array(task_next_diagonal)
         self.task_owner_diagonal = task_array(task_owner_diagonal)
+        self.task_update_start = task_array(task_update_start)
+        self.update_left_panel = task_array(update_left_panel)
+        self.update_right_panel = task_array(update_right_panel)
         self.remaining_initial = task_array(remaining_initial)
         self.initial_task = task_array(initial_task)
         self.queue = wp.full(panel_count, -1, dtype=wp.int32, device=device)
@@ -118,6 +136,9 @@ class PersistentFactorSchedule:
                 self.task_panel_count,
                 self.task_next_diagonal,
                 self.task_owner_diagonal,
+                self.task_update_start,
+                self.update_left_panel,
+                self.update_right_panel,
                 dimensions,
                 panel_table_offset,
                 tile_counts,

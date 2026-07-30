@@ -4543,7 +4543,10 @@ class PhoenXWorld:
             or self.num_soft_hexahedra > 0
         )
         return {
-            "revolute_only": bool(self._use_revolute_specialization),
+            # The lean direct-owned path dispatches by residual inequality
+            # type, so the legacy structural revolute specialization cannot
+            # change generated code and would only multiply cache variants.
+            "revolute_only": bool(self._use_revolute_specialization and not self._joint_pgs_inequality_only),
             "cloth_support": cloth_on,
             "soft_tet_neohookean": bool(self._soft_tet_uses_neohookean),
             "enable_column_timers": self.enable_column_timers,
