@@ -65,7 +65,7 @@ class SolverSTFLIP(SolverBase):
         """Maximum number of simultaneously active sparse tiles."""
         padding_tiles: int = 1
         """Number of core-tile layers activated around occupied tiles."""
-        pressure_iterations: int = 20
+        pressure_iterations: int = 15
         """Number of fixed Chebyshev pressure iterations."""
         liquid_density: float = 1000.0
         """Liquid rest density [kg/m³]."""
@@ -321,20 +321,8 @@ class SolverSTFLIP(SolverBase):
             ],
             device=self.device,
         )
-        wp.launch(
-            extrapolate_face_velocities,
-            dim=3 * self.grid.cell_capacity,
-            inputs=[
-                self.grid.data,
-                self.cell_mass,
-                min_mass,
-                self.face_velocity_scratch,
-                self.face_valid_scratch,
-                self.face_velocity,
-                self.face_valid,
-            ],
-            device=self.device,
-        )
+        self.face_velocity, self.face_velocity_scratch = self.face_velocity_scratch, self.face_velocity
+        self.face_valid, self.face_valid_scratch = self.face_valid_scratch, self.face_valid
         wp.launch(
             build_pressure_system,
             dim=self.grid.cell_capacity,

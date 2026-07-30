@@ -118,7 +118,7 @@ class Example:
             self.model,
             SolverSTFLIP.Config(
                 cell_size=options.cell_size,
-                tile_size=8,
+                tile_size=options.tile_size,
                 max_active_tile_count=options.max_active_tiles,
                 padding_tiles=1,
                 pressure_iterations=options.pressure_iterations,
@@ -207,9 +207,10 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.add_argument("--cell-size", type=float, default=0.08)
+        parser.add_argument("--tile-size", type=int, default=8)
         parser.add_argument("--substeps", type=int, default=4)
-        parser.add_argument("--pressure-iterations", type=int, default=20)
-        parser.add_argument("--max-active-tiles", type=int, default=160)
+        parser.add_argument("--pressure-iterations", type=int, default=15)
+        parser.add_argument("--max-active-tiles", type=int, default=128)
         parser.add_argument("--capture", action="store_true", default=True)
         parser.add_argument("--no-capture", action="store_false", dest="capture")
         return parser
