@@ -56,13 +56,28 @@ def _grid_index(position: wp.vec3, offset: wp.vec3, inv_cell_size: float) -> wp.
 
 
 @wp.func
-def _stencil_index(grid: SparseGridData, base_index: int, x: int, y: int, z: int) -> int:
+def _stencil_coordinates(grid: SparseGridData, base_index: int) -> tuple[int, int, int, int]:
+    """Return the owner tile and local coordinates of a packed cell."""
     tile_volume = grid.tile_size * grid.tile_size * grid.tile_size
     tile = base_index // tile_volume
     local = base_index - tile * tile_volume
     local_x = local % grid.tile_size
     local_y = (local // grid.tile_size) % grid.tile_size
     local_z = local // (grid.tile_size * grid.tile_size)
+    return tile, local_x, local_y, local_z
+
+
+@wp.func
+def _stencil_index(
+    grid: SparseGridData,
+    tile: int,
+    local_x: int,
+    local_y: int,
+    local_z: int,
+    x: int,
+    y: int,
+    z: int,
+) -> int:
     return sparse_grid_cell_index(grid, tile, local_x + x, local_y + y, local_z + z)
 
 
@@ -83,21 +98,27 @@ def _scatter_component(
     base_index = sparse_grid_index_from_cell(grid, base)
     if base_index < 0:
         return
+    tile, local_x, local_y, local_z = _stencil_coordinates(grid, base_index)
     p_grid = position * inv_cell_size - offset
     fraction = p_grid - wp.vec3(base)
     weight_x = wp.vec2(1.0 - fraction[0], fraction[0])
     weight_y = wp.vec2(1.0 - fraction[1], fraction[1])
     weight_z = wp.vec2(1.0 - fraction[2], fraction[2])
+    cell_size = 1.0 / inv_cell_size
+    base_displacement = (wp.vec3(base) + offset) * cell_size - position
     for z in range(2):
         for y in range(2):
             for x in range(2):
-                cell = base + wp.vec3i(x, y, z)
-                index = _stencil_index(grid, base_index, x, y, z)
-                if index >= 0 and 3 * index + component < face_mass.shape[0]:
-                    node = (wp.vec3(cell) + offset) / inv_cell_size
-                    displacement = node - position
+                index = _stencil_index(grid, tile, local_x, local_y, local_z, x, y, z)
+                if index >= 0:
+                    displacement = base_displacement + wp.vec3(float(x), float(y), float(z)) * cell_size
                     w = weight_x[x] * weight_y[y] * weight_z[z]
-                    momentum = mass * w * (velocity[component] + (affine * displacement)[component])
+                    affine_velocity = (
+                        affine[component, 0] * displacement[0]
+                        + affine[component, 1] * displacement[1]
+                        + affine[component, 2] * displacement[2]
+                    )
+                    momentum = mass * w * (velocity[component] + affine_velocity)
                     wp.atomic_add(face_mass, 3 * index + component, mass * w)
                     wp.atomic_add(face_momentum, 3 * index + component, momentum)
 
@@ -129,6 +150,7 @@ def particles_to_grid(
     base_index = sparse_grid_index_from_cell(grid, base)
     if base_index < 0:
         return
+    tile, local_x, local_y, local_z = _stencil_coordinates(grid, base_index)
     p_grid = position * inv_cell_size - wp.vec3(0.5)
     fraction = p_grid - wp.vec3(base)
     weight_x = wp.vec2(1.0 - fraction[0], fraction[0])
@@ -137,8 +159,8 @@ def particles_to_grid(
     for z in range(2):
         for y in range(2):
             for x in range(2):
-                index = _stencil_index(grid, base_index, x, y, z)
-                if index >= 0 and index < cell_mass.shape[0]:
+                index = _stencil_index(grid, tile, local_x, local_y, local_z, x, y, z)
+                if index >= 0:
                     w = weight_x[x] * weight_y[y] * weight_z[z]
                     wp.atomic_add(cell_mass, index, mass * w)
 
@@ -215,6 +237,39 @@ def normalize_grid(
 @wp.func
 def _is_liquid(cell_mass: wp.array[float], index: int, min_mass: float) -> bool:
     return index >= 0 and cell_mass[index] > min_mass
+
+
+@wp.func
+def _axis_aligned_neighbors(
+    grid: SparseGridData,
+    index: int,
+    tile: int,
+    x: int,
+    y: int,
+    z: int,
+) -> tuple[int, int, int, int, int, int]:
+    """Resolve six cell neighbors with contiguous interior fast paths."""
+    tile_size = grid.tile_size
+    tile_area = tile_size * tile_size
+    x_lo = index - 1
+    x_hi = index + 1
+    y_lo = index - tile_size
+    y_hi = index + tile_size
+    z_lo = index - tile_area
+    z_hi = index + tile_area
+    if x == 0:
+        x_lo = sparse_grid_cell_index(grid, tile, -1, y, z)
+    if x == tile_size - 1:
+        x_hi = sparse_grid_cell_index(grid, tile, tile_size, y, z)
+    if y == 0:
+        y_lo = sparse_grid_cell_index(grid, tile, x, -1, z)
+    if y == tile_size - 1:
+        y_hi = sparse_grid_cell_index(grid, tile, x, tile_size, z)
+    if z == 0:
+        z_lo = sparse_grid_cell_index(grid, tile, x, y, -1)
+    if z == tile_size - 1:
+        z_hi = sparse_grid_cell_index(grid, tile, x, y, tile_size)
+    return x_lo, x_hi, y_lo, y_hi, z_lo, z_hi
 
 
 @wp.kernel(enable_backward=False)
@@ -315,32 +370,30 @@ def build_pressure_system(
     x = local % grid.tile_size
     y = (local // grid.tile_size) % grid.tile_size
     z = local // (grid.tile_size * grid.tile_size)
-    ux = sparse_grid_cell_index(grid, tile, x + 1, y, z)
-    vy = sparse_grid_cell_index(grid, tile, x, y + 1, z)
-    wz = sparse_grid_cell_index(grid, tile, x, y, z + 1)
+    x_lo, x_hi, y_lo, y_hi, z_lo, z_hi = _axis_aligned_neighbors(grid, index, tile, x, y, z)
     divergence = 0.0
-    if ux >= 0:
-        divergence += face_velocity[3 * ux]
+    if x_hi >= 0:
+        divergence += face_velocity[3 * x_hi]
     divergence -= face_velocity[3 * index]
-    if vy >= 0:
-        divergence += face_velocity[3 * vy + 1]
+    if y_hi >= 0:
+        divergence += face_velocity[3 * y_hi + 1]
     divergence -= face_velocity[3 * index + 1]
-    if wz >= 0:
-        divergence += face_velocity[3 * wz + 2]
+    if z_hi >= 0:
+        divergence += face_velocity[3 * z_hi + 2]
     divergence -= face_velocity[3 * index + 2]
 
     diagonal = 0.0
-    if sparse_grid_cell_index(grid, tile, x - 1, y, z) >= 0:
+    if x_lo >= 0:
         diagonal += 1.0
-    if ux >= 0:
+    if x_hi >= 0:
         diagonal += 1.0
-    if sparse_grid_cell_index(grid, tile, x, y - 1, z) >= 0:
+    if y_lo >= 0:
         diagonal += 1.0
-    if vy >= 0:
+    if y_hi >= 0:
         diagonal += 1.0
-    if sparse_grid_cell_index(grid, tile, x, y, z - 1) >= 0:
+    if z_lo >= 0:
         diagonal += 1.0
-    if wz >= 0:
+    if z_hi >= 0:
         diagonal += 1.0
     pressure_rhs[index] = divergence * rhs_scale
     pressure_diag[index] = diagonal
@@ -372,12 +425,7 @@ def pressure_jacobi(
     y = (local // grid.tile_size) % grid.tile_size
     z = local // (grid.tile_size * grid.tile_size)
     neighbor_sum = 0.0
-    x_lo = sparse_grid_cell_index(grid, tile, x - 1, y, z)
-    x_hi = sparse_grid_cell_index(grid, tile, x + 1, y, z)
-    y_lo = sparse_grid_cell_index(grid, tile, x, y - 1, z)
-    y_hi = sparse_grid_cell_index(grid, tile, x, y + 1, z)
-    z_lo = sparse_grid_cell_index(grid, tile, x, y, z - 1)
-    z_hi = sparse_grid_cell_index(grid, tile, x, y, z + 1)
+    x_lo, x_hi, y_lo, y_hi, z_lo, z_hi = _axis_aligned_neighbors(grid, index, tile, x, y, z)
     if _is_liquid(cell_mass, x_lo, min_mass):
         neighbor_sum += pressure_in[x_lo]
     if _is_liquid(cell_mass, x_hi, min_mass):
@@ -426,12 +474,7 @@ def pressure_chebyshev(
     y = (local // grid.tile_size) % grid.tile_size
     z = local // (grid.tile_size * grid.tile_size)
     neighbor_sum = 0.0
-    x_lo = sparse_grid_cell_index(grid, tile, x - 1, y, z)
-    x_hi = sparse_grid_cell_index(grid, tile, x + 1, y, z)
-    y_lo = sparse_grid_cell_index(grid, tile, x, y - 1, z)
-    y_hi = sparse_grid_cell_index(grid, tile, x, y + 1, z)
-    z_lo = sparse_grid_cell_index(grid, tile, x, y, z - 1)
-    z_hi = sparse_grid_cell_index(grid, tile, x, y, z + 1)
+    x_lo, x_hi, y_lo, y_hi, z_lo, z_hi = _axis_aligned_neighbors(grid, index, tile, x, y, z)
     if _is_liquid(cell_mass, x_lo, min_mass):
         neighbor_sum += pressure_in[x_lo]
     if _is_liquid(cell_mass, x_hi, min_mass):
@@ -506,6 +549,7 @@ def _sample_component(
     base_index = sparse_grid_index_from_cell(grid, base)
     if base_index < 0:
         return 0.0
+    tile, local_x, local_y, local_z = _stencil_coordinates(grid, base_index)
     p_grid = position * inv_cell_size - offset
     fraction = p_grid - wp.vec3(base)
     weight_x = wp.vec2(1.0 - fraction[0], fraction[0])
@@ -516,8 +560,8 @@ def _sample_component(
     for z in range(2):
         for y in range(2):
             for x in range(2):
-                index = _stencil_index(grid, base_index, x, y, z)
-                if index >= 0 and 3 * index + component < values.shape[0]:
+                index = _stencil_index(grid, tile, local_x, local_y, local_z, x, y, z)
+                if index >= 0:
                     w = weight_x[x] * weight_y[y] * weight_z[z]
                     result += w * values[3 * index + component]
                     weight_sum += w
@@ -559,6 +603,7 @@ def _sample_component_pair_gradient(
     base_index = sparse_grid_index_from_cell(grid, base)
     if base_index < 0:
         return 0.0, 0.0, wp.vec3(0.0)
+    tile, local_x, local_y, local_z = _stencil_coordinates(grid, base_index)
 
     fraction = p_grid - wp.vec3(base)
     weight_x = wp.vec2(1.0 - fraction[0], fraction[0])
@@ -571,8 +616,8 @@ def _sample_component_pair_gradient(
     for z in range(2):
         for y in range(2):
             for x in range(2):
-                index = _stencil_index(grid, base_index, x, y, z)
-                if index >= 0 and 3 * index + component < current_values.shape[0]:
+                index = _stencil_index(grid, tile, local_x, local_y, local_z, x, y, z)
+                if index >= 0:
                     wx = weight_x[x]
                     wy = weight_y[y]
                     wz = weight_z[z]
