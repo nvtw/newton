@@ -8,6 +8,7 @@ import warp as wp
 from ...geometry import ParticleFlags
 from .sparse_grid import (
     SparseGridData,
+    sparse_grid_cell_coord,
     sparse_grid_cell_index,
     sparse_grid_index_from_cell,
 )
@@ -40,6 +41,120 @@ def update_particle_clocks(
         return
     residual_out[particle] = offsets[particle] * dt
     age_out[particle] = age_in[particle] + dt
+
+
+@wp.kernel(enable_backward=False)
+def apply_particle_body_contact_impulses(
+    particle_x: wp.array[wp.vec3],
+    particle_v: wp.array[wp.vec3],
+    particle_inv_mass: wp.array[float],
+    particle_radius: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    body_inv_mass: wp.array[float],
+    body_inv_inertia: wp.array[wp.mat33],
+    shape_body: wp.array[int],
+    shape_mu: wp.array[float],
+    particle_mu: float,
+    contact_count: wp.array[int],
+    contact_particle: wp.array[int],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_body_vel: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    contact_max: int,
+    dt: float,
+    relaxation: float,
+    max_speed: float,
+    particle_f: wp.array[wp.vec3],
+    body_f: wp.array[wp.spatial_vector],
+):
+    """Apply mass-aware, equal-and-opposite particle-body contact impulses."""
+    contact = wp.tid()
+    if contact >= wp.min(contact_max, contact_count[0]):
+        return
+    particle = contact_particle[contact]
+    if (particle_flags[particle] & _ACTIVE) == 0:
+        return
+    inv_particle_mass = particle_inv_mass[particle]
+    if inv_particle_mass <= 0.0:
+        return
+
+    shape = contact_shape[contact]
+    body = shape_body[shape]
+    transform = wp.transform_identity()
+    center_of_mass = wp.vec3(0.0)
+    body_twist = wp.spatial_vector(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    inv_body_mass = 0.0
+    inv_body_inertia = wp.mat33(0.0)
+    if body >= 0:
+        transform = body_q[body]
+        center_of_mass = body_com[body]
+        body_twist = body_qd[body]
+        inv_body_mass = body_inv_mass[body]
+        inv_body_inertia = body_inv_inertia[body]
+
+    body_point = wp.transform_point(transform, contact_body_pos[contact])
+    moment_arm = body_point - wp.transform_point(transform, center_of_mass)
+    normal = contact_normal[contact]
+    separation = wp.dot(normal, particle_x[particle] - body_point) - particle_radius[particle]
+    if separation >= 0.0:
+        return
+
+    angular_velocity = wp.spatial_bottom(body_twist)
+    body_velocity = wp.spatial_top(body_twist) + wp.transform_vector(transform, contact_body_vel[contact])
+    body_velocity += wp.cross(angular_velocity, moment_arm)
+    relative_velocity = particle_v[particle] - body_velocity
+    normal_velocity = wp.dot(normal, relative_velocity)
+
+    angular_normal = 0.0
+    if body >= 0 and inv_body_mass > 0.0:
+        rotation = wp.transform_get_rotation(transform)
+        moment_normal = wp.cross(moment_arm, normal)
+        angular_response = wp.quat_rotate(
+            rotation,
+            inv_body_inertia * wp.quat_rotate_inv(rotation, moment_normal),
+        )
+        angular_normal = wp.max(wp.dot(wp.cross(angular_response, moment_arm), normal), 0.0)
+    denominator = inv_particle_mass + inv_body_mass + angular_normal
+    if denominator <= 0.0:
+        return
+
+    correction_speed = relaxation * (-separation) / dt
+    impulse_speed = wp.clamp(-normal_velocity + correction_speed, 0.0, max_speed)
+    normal_impulse = impulse_speed / denominator
+    impulse = normal * normal_impulse
+
+    tangent_velocity = relative_velocity - normal * normal_velocity
+    tangent_speed = wp.length(tangent_velocity)
+    if tangent_speed > 0.0:
+        tangent = tangent_velocity / tangent_speed
+        angular_tangent = 0.0
+        if body >= 0 and inv_body_mass > 0.0:
+            rotation = wp.transform_get_rotation(transform)
+            moment_tangent = wp.cross(moment_arm, tangent)
+            angular_response = wp.quat_rotate(
+                rotation,
+                inv_body_inertia * wp.quat_rotate_inv(rotation, moment_tangent),
+            )
+            angular_tangent = wp.max(wp.dot(wp.cross(angular_response, moment_arm), tangent), 0.0)
+        tangent_denominator = inv_particle_mass + inv_body_mass + angular_tangent
+        if tangent_denominator > 0.0:
+            friction = 0.5 * (particle_mu + shape_mu[shape])
+            tangent_impulse = wp.min(tangent_speed / tangent_denominator, friction * normal_impulse)
+            impulse -= tangent * tangent_impulse
+
+    force = impulse / dt
+    wp.atomic_add(particle_f, particle, force)
+    if body >= 0:
+        body_force = -force
+        wp.atomic_add(
+            body_f,
+            body,
+            wp.spatial_vector(body_force, wp.cross(moment_arm, body_force)),
+        )
 
 
 @wp.func
@@ -273,6 +388,38 @@ def initialize_face_validity(face_mass: wp.array[float], face_valid: wp.array[in
 
 
 @wp.kernel(enable_backward=False)
+def enforce_grid_domain(
+    grid: SparseGridData,
+    lower: wp.vec3i,
+    upper: wp.vec3i,
+    velocity: wp.array[float],
+    velocity_old: wp.array[float],
+    valid: wp.array[int],
+):
+    """Enforce closed, free-slip boundaries on a grid-aligned domain."""
+    index = wp.tid()
+    tile_volume = grid.tile_size * grid.tile_size * grid.tile_size
+    if index >= grid.tile_count[0] * tile_volume:
+        return
+    cell = sparse_grid_cell_coord(grid, index)
+    outside = (
+        cell[0] < lower[0]
+        or cell[0] >= upper[0]
+        or cell[1] < lower[1]
+        or cell[1] >= upper[1]
+        or cell[2] < lower[2]
+        or cell[2] >= upper[2]
+    )
+    for axis in range(3):
+        face = 3 * index + axis
+        boundary = outside or cell[axis] == lower[axis]
+        if boundary:
+            velocity[face] = 0.0
+            velocity_old[face] = 0.0
+            valid[face] = 0
+
+
+@wp.kernel(enable_backward=False)
 def extrapolate_face_velocities(
     grid: SparseGridData,
     cell_mass: wp.array[float],
@@ -353,6 +500,9 @@ def build_pressure_system(
     face_velocity: wp.array[float],
     min_mass: float,
     rhs_scale: float,
+    has_domain: bool,
+    domain_lower: wp.vec3i,
+    domain_upper: wp.vec3i,
     pressure_rhs: wp.array[float],
     pressure_diag: wp.array[float],
 ):
@@ -365,6 +515,18 @@ def build_pressure_system(
         pressure_diag[index] = 0.0
         return
     if not _is_liquid(cell_mass, index, min_mass):
+        pressure_rhs[index] = 0.0
+        pressure_diag[index] = 0.0
+        return
+    cell = sparse_grid_cell_coord(grid, index)
+    if has_domain and (
+        cell[0] < domain_lower[0]
+        or cell[0] >= domain_upper[0]
+        or cell[1] < domain_lower[1]
+        or cell[1] >= domain_upper[1]
+        or cell[2] < domain_lower[2]
+        or cell[2] >= domain_upper[2]
+    ):
         pressure_rhs[index] = 0.0
         pressure_diag[index] = 0.0
         return
@@ -386,17 +548,17 @@ def build_pressure_system(
     divergence -= face_velocity[3 * index + 2]
 
     diagonal = 0.0
-    if x_lo >= 0:
+    if x_lo >= 0 and (not has_domain or cell[0] > domain_lower[0]):
         diagonal += 1.0
-    if x_hi >= 0:
+    if x_hi >= 0 and (not has_domain or cell[0] + 1 < domain_upper[0]):
         diagonal += 1.0
-    if y_lo >= 0:
+    if y_lo >= 0 and (not has_domain or cell[1] > domain_lower[1]):
         diagonal += 1.0
-    if y_hi >= 0:
+    if y_hi >= 0 and (not has_domain or cell[1] + 1 < domain_upper[1]):
         diagonal += 1.0
-    if z_lo >= 0:
+    if z_lo >= 0 and (not has_domain or cell[2] > domain_lower[2]):
         diagonal += 1.0
-    if z_hi >= 0:
+    if z_hi >= 0 and (not has_domain or cell[2] + 1 < domain_upper[2]):
         diagonal += 1.0
     pressure_rhs[index] = divergence * rhs_scale
     pressure_diag[index] = diagonal
@@ -503,6 +665,9 @@ def apply_pressure(
     min_mass: float,
     pressure: wp.array[float],
     pressure_scale: float,
+    has_domain: bool,
+    domain_lower: wp.vec3i,
+    domain_upper: wp.vec3i,
     face_valid: wp.array[int],
     face_velocity: wp.array[float],
 ):
@@ -516,9 +681,19 @@ def apply_pressure(
     x = local % grid.tile_size
     y = (local // grid.tile_size) % grid.tile_size
     z = local // (grid.tile_size * grid.tile_size)
+    cell = sparse_grid_cell_coord(grid, index)
     for axis in range(3):
         face = 3 * index + axis
-        if face_valid[face] != 0:
+        boundary = has_domain and (
+            cell[0] < domain_lower[0]
+            or cell[0] >= domain_upper[0]
+            or cell[1] < domain_lower[1]
+            or cell[1] >= domain_upper[1]
+            or cell[2] < domain_lower[2]
+            or cell[2] >= domain_upper[2]
+            or cell[axis] == domain_lower[axis]
+        )
+        if face_valid[face] != 0 and not boundary:
             left = -1
             if axis == 0:
                 left = sparse_grid_cell_index(grid, tile, x - 1, y, z)

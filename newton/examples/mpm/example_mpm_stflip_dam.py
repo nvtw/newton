@@ -6,6 +6,7 @@
 Command: python -m newton.examples mpm_stflip_dam
 """
 
+import numpy as np
 import warp as wp
 
 import newton
@@ -29,6 +30,7 @@ class Example:
         self.frame_dt = 1.0 / 60.0
         self.sim_dt = self.frame_dt / options.substeps
         self.sim_substeps = options.substeps
+        self.cell_size = options.cell_size
         self.sim_time = 0.0
         self.frame = 0
 
@@ -134,6 +136,7 @@ class Example:
             ),
         )
         self.colors = wp.empty(self.model.particle_count, dtype=wp.vec3, device=self.model.device)
+        self.minimum_occupied_cells = int(0.75 * self.model.particle_count / float(particle_resolution**3))
 
         self.viewer.set_model(self.model)
         self.viewer.show_particles = False
@@ -200,11 +203,23 @@ class Example:
         newton.examples.test_body_state(
             self.model,
             self.state_0,
-            "ST-FLIP rigid body remains finite",
-            lambda q, qd: wp.length(wp.transform_get_translation(q)) < 100.0 and wp.length(qd) < 1.0e4,
+            "ST-FLIP rigid body remains bounded",
+            lambda q, qd: (
+                wp.abs(wp.transform_get_translation(q)[0]) < 2.0
+                and wp.abs(wp.transform_get_translation(q)[1]) < 1.5
+                and wp.abs(wp.transform_get_translation(q)[2]) < 5.0
+                and wp.length(qd) < 20.0
+            ),
             show_body_q=True,
             show_body_qd=True,
         )
+        positions = self.state_0.particle_q.numpy()
+        occupied_cells = np.unique(np.floor(positions / self.cell_size).astype(np.int32), axis=0).shape[0]
+        if occupied_cells < self.minimum_occupied_cells:
+            raise AssertionError(
+                f"ST-FLIP retained only {occupied_cells} occupied cells, expected at least "
+                f"{self.minimum_occupied_cells}"
+            )
 
     @staticmethod
     def create_parser():
@@ -213,7 +228,7 @@ class Example:
         parser.add_argument("--tile-size", type=int, default=8)
         parser.add_argument("--particle-resolution", type=int, default=3)
         parser.add_argument("--substeps", type=int, default=4)
-        parser.add_argument("--pressure-iterations", type=int, default=15)
+        parser.add_argument("--pressure-iterations", type=int, default=30)
         parser.add_argument("--max-active-tiles", type=int, default=128)
         parser.add_argument("--capture", action="store_true", default=True)
         parser.add_argument("--no-capture", action="store_false", dest="capture")

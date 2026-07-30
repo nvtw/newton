@@ -9,10 +9,16 @@ import warp as wp
 from newton._src.solvers.stflip.kernels import (
     apply_pressure,
     build_pressure_system,
+    enforce_grid_domain,
     pressure_chebyshev,
     pressure_jacobi,
 )
-from newton._src.solvers.stflip.sparse_grid import SparseGrid, SparseGridData, sparse_grid_cell_coord
+from newton._src.solvers.stflip.sparse_grid import (
+    SparseGrid,
+    SparseGridData,
+    sparse_grid_cell_coord,
+    sparse_grid_index_from_cell,
+)
 
 
 @wp.func
@@ -43,6 +49,19 @@ def _initialize_pressure_case(
                 face_velocity[face] = float(cell[axis])
             else:
                 face_velocity[face] = float(axis + 1) * 0.25
+
+
+@wp.kernel(enable_backward=False)
+def _read_pressure_cells(
+    grid: SparseGridData,
+    cells: wp.array[wp.vec3i],
+    diagonal: wp.array[float],
+    face_velocity: wp.array[float],
+    values: wp.array[wp.vec2],
+):
+    sample = wp.tid()
+    index = sparse_grid_index_from_cell(grid, cells[sample])
+    values[sample] = wp.vec2(diagonal[index], face_velocity[3 * index])
 
 
 class TestSTFLIPPressure(unittest.TestCase):
@@ -105,6 +124,9 @@ class TestSTFLIPPressure(unittest.TestCase):
                 arrays["face_velocity"],
                 0.5,
                 1.0,
+                False,
+                wp.vec3i(0),
+                wp.vec3i(0),
                 arrays["rhs"],
                 arrays["diag"],
             ],
@@ -121,13 +143,15 @@ class TestSTFLIPPressure(unittest.TestCase):
         pressure_out = arrays["scratch"]
         direction_in = arrays["direction"]
         direction_out = arrays["direction_scratch"]
-        alpha = 1.0 / 1.01
+        center = 1.01
+        radius = 0.99
+        alpha = 1.0 / center
         for iteration in range(iterations):
             if accelerated:
                 beta = 0.0
                 if iteration:
-                    beta = (0.99 * 0.5 * alpha) ** 2
-                    alpha = 1.0 / (1.01 - beta / alpha)
+                    beta = (0.5 * radius * alpha) ** 2
+                    alpha = 1.0 / (center - beta / alpha)
                 wp.launch(
                     pressure_chebyshev,
                     dim=grid.cell_capacity,
@@ -172,6 +196,9 @@ class TestSTFLIPPressure(unittest.TestCase):
                 0.5,
                 pressure_in,
                 1.0,
+                False,
+                wp.vec3i(0),
+                wp.vec3i(0),
                 arrays["face_valid"],
                 arrays["face_velocity"],
             ],
@@ -245,12 +272,65 @@ class TestSTFLIPPressure(unittest.TestCase):
                         0.5,
                         pressure_in,
                         1.0,
+                        False,
+                        wp.vec3i(0),
+                        wp.vec3i(0),
                         arrays["face_valid"],
                         arrays["face_velocity"],
                     ],
                     device=device,
                 )
                 np.testing.assert_array_equal(arrays["face_velocity"].numpy(), velocity_before)
+
+    def test_closed_domain_enforces_neumann_wall_faces(self):
+        """Exclude solid-wall neighbors and zero boundary-normal velocity."""
+        for device in self._devices():
+            with self.subTest(device=device):
+                grid, arrays = self._create_case(device, velocity_mode=1)
+                lower = wp.vec3i(0)
+                upper = wp.vec3i(4)
+                wp.launch(
+                    enforce_grid_domain,
+                    dim=grid.cell_capacity,
+                    inputs=[
+                        grid.data,
+                        lower,
+                        upper,
+                        arrays["face_velocity"],
+                        arrays["face_velocity"],
+                        arrays["face_valid"],
+                    ],
+                    device=device,
+                )
+                wp.launch(
+                    build_pressure_system,
+                    dim=grid.cell_capacity,
+                    inputs=[
+                        grid.data,
+                        arrays["cell_mass"],
+                        arrays["face_velocity"],
+                        0.5,
+                        1.0,
+                        True,
+                        lower,
+                        upper,
+                        arrays["rhs"],
+                        arrays["diag"],
+                    ],
+                    device=device,
+                )
+                cells = wp.array([(0, 1, 1), (1, 1, 1)], dtype=wp.vec3i, device=device)
+                values = wp.empty(2, dtype=wp.vec2, device=device)
+                wp.launch(
+                    _read_pressure_cells,
+                    dim=2,
+                    inputs=[grid.data, cells, arrays["diag"], arrays["face_velocity"], values],
+                    device=device,
+                )
+                np.testing.assert_allclose(
+                    values.numpy(),
+                    np.array([[5.0, 0.0], [6.0, 0.25]], dtype=np.float32),
+                )
 
 
 if __name__ == "__main__":

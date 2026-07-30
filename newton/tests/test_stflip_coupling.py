@@ -63,6 +63,45 @@ class TestSTFLIPCoupling(unittest.TestCase):
         )
         return model, solver, collision_pipeline, contacts, body
 
+    def _body_force_for_particle_sampling(self, device, particle_count):
+        """Measure one contact patch with fixed total particle mass."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        newton.solvers.SolverSTFLIP.register_custom_attributes(builder)
+        body = builder.add_body(
+            xform=wp.transform(wp.vec3(0.0), wp.quat_identity()),
+            mass=2.0,
+            inertia=wp.mat33(np.eye(3, dtype=np.float32) * 0.05),
+        )
+        builder.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
+        for _ in range(particle_count):
+            builder.add_particle(
+                pos=(0.22, 0.0, 0.0),
+                vel=(-1.0, 0.0, 0.0),
+                mass=0.4 / particle_count,
+                radius=0.05,
+            )
+        model = builder.finalize(device=device)
+        collision_pipeline = newton.CollisionPipeline(model, broad_phase="nxn", soft_contact_margin=0.1)
+        contacts = collision_pipeline.contacts()
+        solver = newton.solvers.SolverSTFLIP(
+            model,
+            newton.solvers.SolverSTFLIP.Config(
+                cell_size=0.1,
+                tile_size=4,
+                max_active_tile_count=27,
+                padding_tiles=1,
+                pressure_iterations=4,
+                transfer_scheme="pic",
+                temporal_staggering=False,
+            ),
+        )
+        state_in = model.state()
+        state_out = model.state()
+        state_in.clear_forces()
+        collision_pipeline.collide(state_in, contacts)
+        solver.step(state_in, state_out, None, contacts, 1.0 / 240.0)
+        return state_in.body_f.numpy()[body, 0]
+
     def test_contact_force_and_wrench_are_equal_and_opposite(self):
         """Balance particle force and rigid wrench at an off-center contact."""
         for device in self._devices():
@@ -111,6 +150,16 @@ class TestSTFLIPCoupling(unittest.TestCase):
                 self.assertLess(float(body_velocity[0]), 0.0)
                 self.assertTrue(np.all(np.isfinite(state_out.particle_q.numpy())))
                 self.assertTrue(np.all(np.isfinite(state_out.body_q.numpy())))
+
+    def test_contact_impulse_is_particle_sampling_invariant(self):
+        """Keep rigid coupling nearly invariant under particle refinement."""
+        for device in self._devices():
+            with self.subTest(device=device):
+                coarse = self._body_force_for_particle_sampling(device, 4)
+                fine = self._body_force_for_particle_sampling(device, 64)
+                self.assertLess(coarse, 0.0)
+                self.assertLess(fine, 0.0)
+                self.assertAlmostEqual(coarse / fine, 1.0, delta=0.06)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ The temporal transfer is adapted from st-flip-blender; see
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -16,12 +17,14 @@ import warp as wp
 
 import newton
 
-from ..semi_implicit.kernels_contact import eval_body_contact_forces, eval_particle_body_contact_forces
+from ..semi_implicit.kernels_contact import eval_body_contact_forces
 from ..solver import SolverBase
 from .kernels import (
+    apply_particle_body_contact_impulses,
     apply_pressure,
     build_pressure_system,
     constrain_particles,
+    enforce_grid_domain,
     extrapolate_face_velocities,
     finalize_grid_to_particles,
     initialize_face_validity,
@@ -65,7 +68,7 @@ class SolverSTFLIP(SolverBase):
         """Maximum number of simultaneously active sparse tiles."""
         padding_tiles: int = 1
         """Number of core-tile layers activated around occupied tiles."""
-        pressure_iterations: int = 15
+        pressure_iterations: int = 30
         """Number of fixed Chebyshev pressure iterations."""
         liquid_density: float = 1000.0
         """Liquid rest density [kg/m³]."""
@@ -87,6 +90,8 @@ class SolverSTFLIP(SolverBase):
         """Use deterministic per-particle temporal offsets during P2G."""
         seed: int = 42
         """Seed for deterministic temporal phase offsets."""
+        contact_relaxation: float = 0.2
+        """Fraction of particle-body penetration corrected per time step."""
 
     @classmethod
     def register_custom_attributes(cls, builder: newton.ModelBuilder) -> None:
@@ -138,8 +143,25 @@ class SolverSTFLIP(SolverBase):
             raise ValueError("each domain_lower component must be less than domain_upper")
         if self.config.max_velocity <= 0.0:
             raise ValueError("max_velocity must be positive")
+        if not 0.0 <= self.config.contact_relaxation <= 1.0:
+            raise ValueError("contact_relaxation must be in [0, 1]")
         if model.world_count > 1:
             raise ValueError("SolverSTFLIP currently supports single-world models only")
+        self._has_domain = self.config.domain_lower is not None
+        self._domain_cell_lower = wp.vec3i(0)
+        self._domain_cell_upper = wp.vec3i(0)
+        if self._has_domain:
+            inv_cell_size = 1.0 / self.config.cell_size
+            self._domain_cell_lower = wp.vec3i(
+                math.ceil(self.config.domain_lower[0] * inv_cell_size - 0.5),
+                math.ceil(self.config.domain_lower[1] * inv_cell_size - 0.5),
+                math.ceil(self.config.domain_lower[2] * inv_cell_size - 0.5),
+            )
+            self._domain_cell_upper = wp.vec3i(
+                math.floor(self.config.domain_upper[0] * inv_cell_size - 0.5) + 1,
+                math.floor(self.config.domain_upper[1] * inv_cell_size - 0.5) + 1,
+                math.floor(self.config.domain_upper[2] * inv_cell_size - 0.5) + 1,
+            )
 
         self.grid = SparseGrid(
             point_capacity=model.particle_count,
@@ -165,6 +187,9 @@ class SolverSTFLIP(SolverBase):
         self._pressure_direction = wp.zeros(capacity, dtype=wp.float32, device=model.device)
         self._pressure_direction_scratch = wp.zeros(capacity, dtype=wp.float32, device=model.device)
         lambda_min = 0.02
+        if self._has_domain:
+            domain_extent = max(self._domain_cell_upper[axis] - self._domain_cell_lower[axis] for axis in range(3))
+            lambda_min = min(lambda_min, 4.5 / float(domain_extent * domain_extent))
         lambda_max = 2.0
         center = 0.5 * (lambda_max + lambda_min)
         radius = 0.5 * (lambda_max - lambda_min)
@@ -225,12 +250,37 @@ class SolverSTFLIP(SolverBase):
             body_force = state_in.body_f
             if body_force is None:
                 body_force = self._contact_body_force_dummy
-            eval_particle_body_contact_forces(
-                self.model,
-                state_in,
-                contacts,
-                state_in.particle_f,
-                body_force,
+            wp.launch(
+                apply_particle_body_contact_impulses,
+                dim=contacts.soft_contact_max,
+                inputs=[
+                    state_in.particle_q,
+                    state_in.particle_qd,
+                    self.model.particle_inv_mass,
+                    self.model.particle_radius,
+                    self.model.particle_flags,
+                    state_in.body_q,
+                    state_in.body_qd,
+                    self.model.body_com,
+                    self.model.body_inv_mass,
+                    self.model.body_inv_inertia,
+                    self.model.shape_body,
+                    self.model.shape_material_mu,
+                    self.model.soft_contact_mu,
+                    contacts.soft_contact_count,
+                    contacts.soft_contact_particle,
+                    contacts.soft_contact_shape,
+                    contacts.soft_contact_body_pos,
+                    contacts.soft_contact_body_vel,
+                    contacts.soft_contact_normal,
+                    contacts.soft_contact_max,
+                    dt,
+                    self.config.contact_relaxation,
+                    self.config.max_velocity,
+                    state_in.particle_f,
+                    body_force,
+                ],
+                device=self.device,
             )
         if self.model.body_count and contacts is not None and contacts.rigid_contact_max:
             eval_body_contact_forces(self.model, state_in, contacts)
@@ -307,22 +357,37 @@ class SolverSTFLIP(SolverBase):
             inputs=[self.face_mass, self.face_valid],
             device=self.device,
         )
-        wp.launch(
-            extrapolate_face_velocities,
-            dim=3 * self.grid.cell_capacity,
-            inputs=[
-                self.grid.data,
-                self.cell_mass,
-                min_mass,
-                self.face_velocity,
-                self.face_valid,
-                self.face_velocity_scratch,
-                self.face_valid_scratch,
-            ],
-            device=self.device,
-        )
-        self.face_velocity, self.face_velocity_scratch = self.face_velocity_scratch, self.face_velocity
-        self.face_valid, self.face_valid_scratch = self.face_valid_scratch, self.face_valid
+        for _ in range(2):
+            wp.launch(
+                extrapolate_face_velocities,
+                dim=3 * self.grid.cell_capacity,
+                inputs=[
+                    self.grid.data,
+                    self.cell_mass,
+                    min_mass,
+                    self.face_velocity,
+                    self.face_valid,
+                    self.face_velocity_scratch,
+                    self.face_valid_scratch,
+                ],
+                device=self.device,
+            )
+            self.face_velocity, self.face_velocity_scratch = self.face_velocity_scratch, self.face_velocity
+            self.face_valid, self.face_valid_scratch = self.face_valid_scratch, self.face_valid
+        if self._has_domain:
+            wp.launch(
+                enforce_grid_domain,
+                dim=self.grid.cell_capacity,
+                inputs=[
+                    self.grid.data,
+                    self._domain_cell_lower,
+                    self._domain_cell_upper,
+                    self.face_velocity,
+                    self.face_velocity_old,
+                    self.face_valid,
+                ],
+                device=self.device,
+            )
         wp.launch(
             build_pressure_system,
             dim=self.grid.cell_capacity,
@@ -332,6 +397,9 @@ class SolverSTFLIP(SolverBase):
                 self.face_velocity,
                 min_mass,
                 self.config.liquid_density * self.config.cell_size / dt,
+                self._has_domain,
+                self._domain_cell_lower,
+                self._domain_cell_upper,
                 self.pressure_rhs,
                 self.pressure_diag,
             ],
@@ -372,6 +440,9 @@ class SolverSTFLIP(SolverBase):
                 min_mass,
                 pressure_in,
                 dt / (self.config.liquid_density * self.config.cell_size),
+                self._has_domain,
+                self._domain_cell_lower,
+                self._domain_cell_upper,
                 self.face_valid,
                 self.face_velocity,
             ],
