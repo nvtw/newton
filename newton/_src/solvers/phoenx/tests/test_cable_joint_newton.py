@@ -4,8 +4,8 @@
 """Newton-side ``JointType.CABLE`` -> PhoenX ``JointMode.CABLE`` adapter
 tests.
 
-The PhoenX cable constraint itself is exercised analytically in
-``test_cable_joint.py`` -- this file checks the *adapter glue*: that
+This module exercises the PhoenX cable constraint analytically and checks
+the adapter glue: that
 :meth:`ModelBuilder.add_joint_cable` survives ``model.finalize()`` and
 lands on PhoenX's cable mode with the right anchor / stiffness /
 damping wiring.

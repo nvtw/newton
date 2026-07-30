@@ -30,7 +30,7 @@ directory (override via ``NEWTON_PHOENX_TIMING_REPORT``) so regressions
 in test wall-time -- typically a graph-capture fallback to eager
 stepping -- are caught at a glance. Sample report row::
 
-    1.234s  ok       newton._src.solvers.phoenx.tests.test_cable_joint.TestCableAnalytical.test_undamped_period_within_5pct
+    1.234s  ok       newton._src.solvers.phoenx.tests.test_cable_joint_newton.TestNewtonCableAdapter.test_cable_bend_equilibrium_matches_hookes_law
 """
 
 from __future__ import annotations
