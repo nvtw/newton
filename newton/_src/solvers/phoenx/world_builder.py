@@ -843,6 +843,10 @@ class WorldBuilder:
         ``%globaltimer``-based per-column wall-clock profiler.
         """
         device = wp.get_device(device)
+        if solver_flavor == "simple" and self._joint_descriptors:
+            raise NotImplementedError(
+                "raw WorldBuilder joint scenes require solver_flavor='standard'; the simple flavor is contact-only"
+            )
 
         # Shape mass/inertia must run before _build_body_container reads it.
         self._accumulate_mass_inertia_from_shapes()

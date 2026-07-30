@@ -275,10 +275,10 @@ class SolverPhoenX(SolverBase):
                 conservative stride from the substep count and falls back
                 to ``1`` when cached prepare is unsupported. Pass ``1``
                 to force exact per-substep rebuilds.
-            solver_flavor: ``"standard"`` uses coloured PGS. ``"simple"``
-                uses uncoloured, one-thread-per-equation Jacobi with
-                copy-free atomic mass splitting. Cable joints and D6 angular limits
-                currently require the standard flavor.
+            solver_flavor: ``"standard"`` uses coloured inequality PGS and
+                direct joint equalities. ``"simple"`` is an experimental
+                contact-only, one-thread-per-row Jacobi flavor with copy-free
+                atomic mass splitting; jointed models require ``"standard"``.
             jacobi_max_colors: Estimated maximum number of colors the classic
                 solver would require. The simple Jacobi flavor uses
                 ``substeps * jacobi_max_colors`` substeps. Defaults to 10.
@@ -370,6 +370,11 @@ class SolverPhoenX(SolverBase):
         )
         joint_types = model.joint_type.numpy() if int(model.joint_count) > 0 else np.empty(0, dtype=np.int32)
         has_constraint_joints = bool(np.any(joint_types != int(JointType.FREE)))
+        if solver_flavor == "simple" and has_constraint_joints:
+            raise NotImplementedError(
+                "solver_flavor='simple' is contact-only; use solver_flavor='standard' for direct joint "
+                "equalities or MiniSolver for experimental joint PGS"
+            )
         step_layout = _resolve_auto_step_layout(
             step_layout=step_layout,
             num_worlds=num_worlds,

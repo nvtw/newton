@@ -665,10 +665,10 @@ class PhoenXWorld:
                 Pass ``1`` to force exact per-substep rebuilds. Contact
                 worlds currently support up to ``3``; joint-only worlds
                 may use larger values.
-            solver_flavor: ``"standard"`` selects coloured PGS;
-                ``"simple"`` selects uncoloured scalar-row Jacobi with
-                copy-free atomic mass splitting. Cable joints and D6 angular limits
-                currently require the standard flavor.
+            solver_flavor: ``"standard"`` selects coloured inequality PGS.
+                ``"simple"`` selects experimental contact-only scalar-row
+                Jacobi with copy-free atomic mass splitting; its caller must
+                reject jointed models.
             jacobi_max_colors: Estimated number of colored PGS partitions
                 replaced by each Jacobi step. The simple solver uses
                 ``substeps * jacobi_max_colors`` substeps. Defaults to 10.

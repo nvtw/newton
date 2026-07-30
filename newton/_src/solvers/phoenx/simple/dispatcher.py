@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Uncoloured Jacobi dispatcher for the simple PhoenX flavor."""
+"""Contact-only Jacobi dispatcher for the simple PhoenX flavor."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from .contacts import (
     assemble_contact_scalar_rows_kernel,
     writeback_contact_lambdas_kernel,
 )
-from .joints import JOINT_ROW_STRIDE, assemble_joint_scalar_rows_kernel
 from .rows import (
     apply_body_velocity_deltas_kernel,
     apply_row_warmstart_kernel,
@@ -33,15 +32,14 @@ _ROW_BLOCK_DIM = 256
 
 
 class SimplePhoenXDispatcher:
-    """One-thread-per-equation Jacobi dispatcher with atomic delta fan-in."""
+    """One-thread-per-contact-row Jacobi dispatcher with atomic delta fan-in."""
 
     def __init__(self, world: PhoenXWorld) -> None:
         self._world = world
         self.block_dim = _ROW_BLOCK_DIM
-        self._joint_row_count = int(world.num_joints) * JOINT_ROW_STRIDE
-        self._contact_row_offset = self._joint_row_count
+        self._contact_row_offset = 0
         self._contact_row_count = int(world.rigid_contact_max) * CONTACT_ROW_STRIDE
-        self._row_count = max(1, self._joint_row_count + self._contact_row_count)
+        self._row_count = max(1, self._contact_row_count)
         self.rows = scalar_row_container_zeros(self._row_count, device=world.device)
         self._multiplier_snapshot = wp.zeros(self._row_count, dtype=wp.float32, device=world.device)
         self._velocity_snapshot = wp.zeros(world.num_bodies, dtype=wp.vec3f, device=world.device)
@@ -51,12 +49,11 @@ class SimplePhoenXDispatcher:
         self._body_split_count = wp.zeros(world.num_bodies, dtype=wp.int32, device=world.device)
 
     def begin_step(self) -> None:
-        # Joint lambdas persist in their stable rows; matched contact lambdas
-        # are seeded from the contact cache during row assembly.
+        # Matched contact lambdas are seeded from the contact cache during row assembly.
         pass
 
     def solve(self, idt: wp.float32) -> None:
-        if self._joint_row_count == 0 and self._contact_row_count == 0:
+        if self._contact_row_count == 0:
             return
         w = self._world
         wp.launch(
@@ -66,15 +63,6 @@ class SimplePhoenXDispatcher:
             block_dim=self.block_dim,
             device=w.device,
         )
-        if self._joint_row_count > 0:
-            wp.launch(
-                assemble_joint_scalar_rows_kernel,
-                dim=self._joint_row_count,
-                inputs=[w.constraints, w.bodies, wp.int32(w.num_joints), idt],
-                outputs=[self.rows, self._body_split_count],
-                block_dim=self.block_dim,
-                device=w.device,
-            )
         contact_views = w._active_contact_views()
         if self._contact_row_count > 0:
             wp.launch(
@@ -161,7 +149,7 @@ class SimplePhoenXDispatcher:
             )
 
     def relax(self, idt: wp.float32) -> None:
-        if self._joint_row_count == 0 and self._contact_row_count == 0:
+        if self._contact_row_count == 0:
             return
         w = self._world
         for _ in range(w.velocity_iterations):
