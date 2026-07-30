@@ -39,6 +39,13 @@ from newton._src.solvers.phoenx.helpers.math_helpers import create_orthonormal
 
 _MAX_ROWS = 6
 
+# Independent rows retain the high-accuracy floor. Symbolically redundant
+# mechanisms use a sqrt(epsilon)-scale constraint-force-mixing floor so their
+# equilibrated systems remain inside the reliable FP32 condition range.
+_FP32_BASE_REGULARIZATION = 3.0e-6
+_FP32_RANK_REGULARIZATION = float(np.sqrt(np.finfo(np.float32).eps))
+_DIRECT_BAUMGARTE = 0.2
+
 
 @dataclass(frozen=True)
 class DirectEqualityTopology:
@@ -51,6 +58,7 @@ class DirectEqualityTopology:
     dimensions: tuple[int, ...]
     permutation: np.ndarray
     mechanism_row_start: np.ndarray
+    mechanism_requires_rank_floor: tuple[bool, ...]
     body_row_start: np.ndarray
     body_rows: np.ndarray
 
@@ -201,6 +209,28 @@ def build_direct_equality_topology(
         mechanisms.setdefault(root, []).append(joint)
 
     ordered_mechanisms = sorted(mechanisms.values(), key=min)
+    mechanism_requires_rank_floor: list[bool] = []
+    for joints in ordered_mechanisms:
+        dynamic_bodies: set[int] = set()
+        endpoint_pairs: set[tuple[int, int]] = set()
+        repeated_pair = False
+        anchored = False
+        structural_rows = 0
+        for joint in joints:
+            body0 = int(joint_parent[joint])
+            body1 = int(joint_child[joint])
+            dynamic_bodies.update(body for body in (body0, body1) if body >= 0 and dynamic[body])
+            anchored = anchored or body0 < 0 or body1 < 0
+            pair = (min(body0, body1), max(body0, body1))
+            repeated_pair = repeated_pair or pair in endpoint_pairs
+            endpoint_pairs.add(pair)
+            structural_rows += _structural_row_count(int(joint_mode[joint]))
+        # An anchored component has 6n generalized rigid-body directions; a
+        # floating one has six free rigid modes. Repeated body pairs also imply
+        # dependent rows for every supported structural joint combination.
+        maximum_rank = max(0, 6 * len(dynamic_bodies) - (0 if anchored else 6))
+        mechanism_requires_rank_floor.append(repeated_pair or structural_rows > maximum_rank)
+
     row_joint: list[int] = []
     row_local: list[int] = []
     row_dynamic: list[bool] = []
@@ -280,6 +310,7 @@ def build_direct_equality_topology(
         dimensions=dimensions,
         permutation=np.asarray(permutation, dtype=np.int32),
         mechanism_row_start=np.asarray(mechanism_row_start, dtype=np.int32),
+        mechanism_requires_rank_floor=tuple(mechanism_requires_rank_floor),
         body_row_start=np.asarray(body_row_start, dtype=np.int32),
         body_rows=np.asarray(body_rows, dtype=np.int32),
     )
@@ -626,7 +657,7 @@ def _assemble_direct_equality_matrix_kernel(
     row_wrench0: wp.array2d[wp.spatial_vector],
     row_wrench1: wp.array2d[wp.spatial_vector],
     bodies: BodyContainer,
-    regularization: wp.float32,
+    row_regularization: wp.array[wp.float32],
     idt: wp.float32,
     row_error: wp.array2d[wp.float32],
     row_stiffness: wp.array2d[wp.float32],
@@ -697,7 +728,7 @@ def _assemble_direct_equality_matrix_kernel(
                         row_error[row_structural, row_local_index] * bias_factor * idt
                     )
         value += wp.max(
-            regularization * wp.max(inverse_effective_mass, wp.float32(1.0)),
+            row_regularization[row] * wp.max(inverse_effective_mass, wp.float32(1.0)),
             wp.float32(1.0e-10),
         )
     matrix[matrix_storage[entry]] = value
@@ -1068,7 +1099,7 @@ class DirectEqualitySystem:
         effective_joint_mode: np.ndarray | None = None,
         effective_joint_dof_start: np.ndarray | None = None,
         effective_joint_target_start: np.ndarray | None = None,
-        regularization: float = 3.0e-6,
+        regularization: float = _FP32_BASE_REGULARIZATION,
     ):
         self.model = model
         self.bodies = bodies
@@ -1120,6 +1151,19 @@ class DirectEqualitySystem:
             dynamic_joint_mask=dynamic_joint_mask,
         )
         self.regularization = float(regularization)
+        row_regularization = np.full(len(self.topology.row_joint), self.regularization, dtype=np.float32)
+        for mechanism, needs_rank_floor in enumerate(self.topology.mechanism_requires_rank_floor):
+            if not needs_rank_floor:
+                continue
+            start = int(self.topology.mechanism_row_start[mechanism])
+            end = int(self.topology.mechanism_row_start[mechanism + 1])
+            mechanism_regularization = row_regularization[start:end]
+            structural_rows = ~self.topology.row_dynamic[start:end]
+            mechanism_regularization[structural_rows] = max(
+                self.regularization,
+                _FP32_RANK_REGULARIZATION,
+            )
+        self.row_regularization = wp.array(row_regularization, dtype=wp.float32, device=model.device)
         self.enabled = bool(self.topology.dimensions)
         if not self.enabled:
             return
@@ -1293,7 +1337,7 @@ class DirectEqualitySystem:
                 self.joint_target_ke,
                 self.joint_target_kd,
                 self.bodies,
-                idt,
+                wp.float32(_DIRECT_BAUMGARTE) * idt,
                 self.row_count,
                 self.row_wrench0,
                 self.row_wrench1,
@@ -1429,7 +1473,7 @@ class DirectEqualitySystem:
                 self.row_wrench0,
                 self.row_wrench1,
                 self.bodies,
-                wp.float32(self.regularization),
+                self.row_regularization,
                 idt,
                 self.row_error,
                 self.row_stiffness,

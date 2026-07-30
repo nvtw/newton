@@ -128,6 +128,31 @@ def _maximum_anchor_error(model: newton.Model, state: newton.State) -> float:
     return maximum
 
 
+def _build_redundant_double_ball_chain(length: int = 6) -> newton.Model:
+    """Build a chain whose paired point locks contain exact null rows."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+    parent = -1
+    for index in range(length):
+        child = _add_link(builder, wp.vec3(0.0, 0.0, -float(index) - 0.5), 1.0)
+        for side in (-1.0, 1.0):
+            child_anchor = wp.vec3(0.0, side * 0.25, 0.5)
+            if parent < 0:
+                # A 5 cm length mismatch makes the redundant root rows
+                # inconsistent, as can happen in authored closed loops.
+                parent_y = side * 0.25 + (0.05 if side > 0.0 else 0.0)
+                parent_anchor = wp.vec3(0.0, parent_y, 0.0)
+            else:
+                parent_anchor = wp.vec3(0.0, side * 0.25, -0.5)
+            builder.add_joint_ball(
+                parent=parent,
+                child=child,
+                parent_xform=wp.transform(parent_anchor, wp.quat_identity()),
+                child_xform=wp.transform(child_anchor, wp.quat_identity()),
+            )
+        parent = child
+    return builder.finalize(skip_validation_joints=True)
+
+
 class TestDirectEquality(unittest.TestCase):
     def test_world_anchor_does_not_merge_mechanisms(self):
         model = _build_two_mechanisms()
@@ -257,6 +282,51 @@ class TestDirectEquality(unittest.TestCase):
         solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
         self.assertTrue(np.isfinite(state_out.body_q.numpy()).all())
         self.assertTrue(np.isfinite(state_out.body_qd.numpy()).all())
+
+    def test_redundant_double_ball_chain_has_bounded_rank_and_motion(self):
+        """Bound the condition and motion of inconsistent redundant rows."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+
+        model = _build_redundant_double_ball_chain()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=5,
+            solver_iterations=2,
+            velocity_iterations=1,
+            articulation_mode="maximal",
+        )
+        direct = solver._direct_equality_system
+        self.assertEqual(direct.topology.dimensions, (36,))
+        self.assertTrue(solver.world._skip_all_joint_pgs())
+
+        state = model.state()
+        state.body_q.assign(model.body_q)
+        state.body_qd.assign(model.body_qd)
+        control = model.control()
+        with wp.ScopedCapture(model.device) as capture:
+            solver.step(state, state, control, None, 1.0 / 60.0)
+        wp.capture_launch(capture.graph)
+        row_count = direct.topology.dimensions[0]
+        matrix = np.zeros((row_count, row_count), dtype=np.float64)
+        matrix_row = direct.matrix_row.numpy()
+        matrix_column = direct.matrix_column.numpy()
+        matrix_storage = direct.matrix_storage.numpy()
+        matrix_values = direct.matrix.numpy()
+        matrix[matrix_row, matrix_column] = matrix_values[matrix_storage]
+        matrix[matrix_column, matrix_row] = matrix_values[matrix_storage]
+        self.assertLess(float(np.linalg.cond(matrix)), 2.0e4)
+        self.assertLess(float(np.max(np.abs(direct.delta.numpy()))), 20.0)
+
+        for _ in range(59):
+            wp.capture_launch(capture.graph)
+
+        body_q = state.body_q.numpy()
+        body_qd = state.body_qd.numpy()
+        self.assertTrue(np.isfinite(body_q).all())
+        self.assertTrue(np.isfinite(body_qd).all())
+        self.assertLess(float(np.max(np.abs(body_q[:, :3]))), 10.0)
+        self.assertLess(float(np.max(np.abs(body_qd))), 10.0)
 
     def test_direct_driven_hinge_leaves_pgs_when_no_inequality_remains(self):
         if not wp.get_device().is_cuda:

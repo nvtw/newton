@@ -58,8 +58,8 @@ def _xf(position) -> wp.transform:
 
 
 class Example(PortedExample):
-    sim_substeps = 16
-    solver_iterations = 8
+    sim_substeps = 5
+    solver_iterations = 2
     velocity_iterations = 1
     step_layout = "single_world"
     broad_phase = "sap"
