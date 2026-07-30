@@ -24,7 +24,9 @@ from .kernels import (
     build_particle_active_mask,
     build_pressure_system,
     constrain_particles,
+    extrapolate_face_velocities,
     grid_to_particles,
+    initialize_face_validity,
     initialize_temporal_offsets,
     normalize_grid,
     particle_faces_to_grid,
@@ -156,7 +158,10 @@ class SolverSTFLIP(SolverBase):
         self.face_mass = wp.zeros(3 * capacity, dtype=wp.float32, device=model.device)
         self.face_momentum = wp.zeros(3 * capacity, dtype=wp.float32, device=model.device)
         self.face_velocity = wp.zeros(3 * capacity, dtype=wp.float32, device=model.device)
+        self.face_velocity_scratch = wp.zeros(3 * capacity, dtype=wp.float32, device=model.device)
         self.face_velocity_old = wp.zeros(3 * capacity, dtype=wp.float32, device=model.device)
+        self.face_valid = wp.zeros(3 * capacity, dtype=wp.int32, device=model.device)
+        self.face_valid_scratch = wp.zeros(3 * capacity, dtype=wp.int32, device=model.device)
         self.pressure = wp.zeros(capacity, dtype=wp.float32, device=model.device)
         self.pressure_scratch = wp.zeros(capacity, dtype=wp.float32, device=model.device)
         self.pressure_rhs = wp.zeros(capacity, dtype=wp.float32, device=model.device)
@@ -293,6 +298,40 @@ class SolverSTFLIP(SolverBase):
         nominal_mass = self.config.liquid_density * self.config.cell_size**3
         min_mass = self.config.min_cell_mass_fraction * nominal_mass
         wp.launch(
+            initialize_face_validity,
+            dim=3 * self.grid.cell_capacity,
+            inputs=[self.face_mass, self.face_valid],
+            device=self.device,
+        )
+        wp.launch(
+            extrapolate_face_velocities,
+            dim=3 * self.grid.cell_capacity,
+            inputs=[
+                self.grid.data,
+                self.cell_mass,
+                min_mass,
+                self.face_velocity,
+                self.face_valid,
+                self.face_velocity_scratch,
+                self.face_valid_scratch,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            extrapolate_face_velocities,
+            dim=3 * self.grid.cell_capacity,
+            inputs=[
+                self.grid.data,
+                self.cell_mass,
+                min_mass,
+                self.face_velocity_scratch,
+                self.face_valid_scratch,
+                self.face_velocity,
+                self.face_valid,
+            ],
+            device=self.device,
+        )
+        wp.launch(
             build_pressure_system,
             dim=self.grid.cell_capacity,
             inputs=[
@@ -334,7 +373,7 @@ class SolverSTFLIP(SolverBase):
                 min_mass,
                 pressure_in,
                 dt / (self.config.liquid_density * self.config.cell_size),
-                self.face_mass,
+                self.face_valid,
                 self.face_velocity,
             ],
             device=self.device,

@@ -6,7 +6,12 @@
 import warp as wp
 
 from ...geometry import ParticleFlags
-from .sparse_grid import SparseGridData, sparse_grid_cell_coord, sparse_grid_index_from_cell
+from .sparse_grid import (
+    SparseGridData,
+    sparse_grid_cell_coord,
+    sparse_grid_cell_index,
+    sparse_grid_index_from_cell,
+)
 
 _ACTIVE = wp.constant(int(ParticleFlags.ACTIVE))
 
@@ -49,6 +54,15 @@ def update_particle_clocks(
 def _weight(x: float) -> float:
     x = wp.abs(x)
     return wp.max(1.0 - x, 0.0)
+
+
+@wp.func
+def _weight_gradient(x: float, inv_cell_size: float) -> float:
+    if x > 0.0 and x <= 1.0:
+        return -inv_cell_size
+    if x >= -1.0 and x <= 0.0:
+        return inv_cell_size
+    return 0.0
 
 
 @wp.func
@@ -195,12 +209,85 @@ def normalize_grid(
         if mass > 0.0:
             velocity = face_momentum[face] / mass
         face_velocity_old[face] = velocity
-        face_velocity[face] = velocity + gravity[0][axis] * dt
+        if mass > 0.0:
+            velocity += gravity[0][axis] * dt
+        face_velocity[face] = velocity
 
 
 @wp.func
 def _is_liquid(cell_mass: wp.array[float], index: int, min_mass: float) -> bool:
     return index >= 0 and cell_mass[index] > min_mass
+
+
+@wp.kernel(enable_backward=False)
+def initialize_face_validity(face_mass: wp.array[float], face_valid: wp.array[int]):
+    """Mark MAC faces that received particle weight."""
+    face = wp.tid()
+    face_valid[face] = int(face_mass[face] > 0.0)
+
+
+@wp.kernel(enable_backward=False)
+def extrapolate_face_velocities(
+    grid: SparseGridData,
+    cell_mass: wp.array[float],
+    min_mass: float,
+    velocity_in: wp.array[float],
+    valid_in: wp.array[int],
+    velocity_out: wp.array[float],
+    valid_out: wp.array[int],
+):
+    """Extrapolate sampled velocities onto adjacent liquid-air faces."""
+    face = wp.tid()
+    index = face // 3
+    component = face - 3 * index
+    tile_volume = grid.tile_size * grid.tile_size * grid.tile_size
+    if index >= grid.tile_count[0] * tile_volume:
+        velocity_out[face] = 0.0
+        valid_out[face] = 0
+        return
+    if valid_in[face] != 0:
+        velocity_out[face] = velocity_in[face]
+        valid_out[face] = 1
+        return
+
+    tile = index // tile_volume
+    local = index - tile * tile_volume
+    local_x = local % grid.tile_size
+    local_y = (local // grid.tile_size) % grid.tile_size
+    local_z = local // (grid.tile_size * grid.tile_size)
+    left_x = local_x
+    left_y = local_y
+    left_z = local_z
+    if component == 0:
+        left_x -= 1
+    elif component == 1:
+        left_y -= 1
+    else:
+        left_z -= 1
+    left = sparse_grid_cell_index(grid, tile, left_x, left_y, left_z)
+    right = index
+    if not (_is_liquid(cell_mass, left, min_mass) or _is_liquid(cell_mass, right, min_mass)):
+        velocity_out[face] = velocity_in[face]
+        valid_out[face] = 0
+        return
+
+    velocity_sum = 0.0
+    count = 0
+    for z in range(-1, 2):
+        for y in range(-1, 2):
+            for x in range(-1, 2):
+                neighbor = sparse_grid_cell_index(grid, tile, local_x + x, local_y + y, local_z + z)
+                if neighbor >= 0:
+                    neighbor_face = 3 * neighbor + component
+                    if valid_in[neighbor_face] != 0:
+                        velocity_sum += velocity_in[neighbor_face]
+                        count += 1
+    if count > 0:
+        velocity_out[face] = velocity_sum / float(count)
+        valid_out[face] = 1
+    else:
+        velocity_out[face] = velocity_in[face]
+        valid_out[face] = 0
 
 
 @wp.kernel(enable_backward=False)
@@ -291,7 +378,7 @@ def apply_pressure(
     min_mass: float,
     pressure: wp.array[float],
     pressure_scale: float,
-    face_mass: wp.array[float],
+    face_valid: wp.array[int],
     face_velocity: wp.array[float],
 ):
     """Apply pressure gradients to active MAC faces."""
@@ -299,7 +386,7 @@ def apply_pressure(
     cell = sparse_grid_cell_coord(grid, index)
     for axis in range(3):
         face = 3 * index + axis
-        if face_mass[face] > 0.0:
+        if face_valid[face] != 0:
             direction = wp.vec3i(0)
             direction[axis] = 1
             left = sparse_grid_index_from_cell(grid, cell - direction)
@@ -370,8 +457,11 @@ def _sample_component_gradient(
     component: int,
     values: wp.array[float],
 ) -> wp.vec3:
-    base = _grid_index(position, offset, inv_cell_size)
     p_grid = position * inv_cell_size - offset
+    base = _grid_index(position, offset, inv_cell_size)
+    for axis in range(3):
+        if wp.abs(p_grid[axis] - float(base[axis])) < 1.0e-6:
+            base[axis] -= 1
     gradient = wp.vec3(0.0)
     for z in range(2):
         for y in range(2):
@@ -383,9 +473,9 @@ def _sample_component_gradient(
                     wx = _weight(delta[0])
                     wy = _weight(delta[1])
                     wz = _weight(delta[2])
-                    dwx = -wp.sign(delta[0]) * inv_cell_size
-                    dwy = -wp.sign(delta[1]) * inv_cell_size
-                    dwz = -wp.sign(delta[2]) * inv_cell_size
+                    dwx = _weight_gradient(delta[0], inv_cell_size)
+                    dwy = _weight_gradient(delta[1], inv_cell_size)
+                    dwz = _weight_gradient(delta[2], inv_cell_size)
                     value = values[3 * index + component]
                     gradient += value * wp.vec3(dwx * wy * wz, wx * dwy * wz, wx * wy * dwz)
     return gradient
