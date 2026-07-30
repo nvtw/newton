@@ -178,11 +178,26 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        """Verify that the simulated fluid remains finite."""
+        """Verify that the coupled dam break remains bounded and finite."""
+        self.solver.check_status()
         newton.examples.test_particle_state(
             self.state_0,
-            "ST-FLIP particles remain finite",
-            lambda q, qd: wp.length(q) < 100.0 and wp.length(qd) < 1.0e4,
+            "ST-FLIP particles remain inside the tank",
+            lambda q, qd: (
+                q[0] >= -1.181
+                and q[0] <= 1.181
+                and q[1] >= -0.581
+                and q[1] <= 0.581
+                and q[2] >= 0.019
+                and q[2] <= 1.351
+                and wp.length(qd) <= 15.001
+            ),
+        )
+        newton.examples.test_body_state(
+            self.model,
+            self.state_0,
+            "ST-FLIP rigid body remains finite",
+            lambda q, qd: wp.length(wp.transform_get_translation(q)) < 100.0 and wp.length(qd) < 1.0e4,
         )
 
     @staticmethod
