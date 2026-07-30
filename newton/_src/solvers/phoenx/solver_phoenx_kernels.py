@@ -97,6 +97,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     actuated_double_ball_socket_iterate,
     actuated_double_ball_socket_iterate_multi,
     actuated_double_ball_socket_prepare_for_iteration,
+    actuated_double_ball_socket_prepare_inequality,
     actuated_double_ball_socket_world_error,
     actuated_double_ball_socket_world_wrench,
     revolute_cached_warmstart,
@@ -807,7 +808,11 @@ def _make_multiworld_rigid_prepare_dispatch_func(
         t0 = wp.uint64(0)
         if wp.static(enable_column_timers):
             t0 = read_global_timer_ns()
-        if wp.static(cached_prepare):
+        if wp.static(joint_inequality_only):
+            actuated_double_ball_socket_prepare_inequality(
+                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+            )
+        elif wp.static(cached_prepare):
             if wp.static(revolute_only):
                 revolute_cached_warmstart(constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt)
             else:

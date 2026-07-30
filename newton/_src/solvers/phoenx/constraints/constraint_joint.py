@@ -122,6 +122,7 @@ __all__ = [
     "actuated_double_ball_socket_iterate_multi",
     "actuated_double_ball_socket_prepare_for_iteration",
     "actuated_double_ball_socket_prepare_for_iteration_at",
+    "actuated_double_ball_socket_prepare_inequality",
     "actuated_double_ball_socket_world_error",
     "actuated_double_ball_socket_world_error_at",
     "actuated_double_ball_socket_world_wrench",
@@ -2937,6 +2938,143 @@ def actuated_double_ball_socket_prepare_for_iteration_at(
         body_pair,
         idt,
         joint_mode,
+    )
+
+
+@wp.func
+def actuated_double_ball_socket_prepare_inequality(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    idt: wp.float32,
+):
+    """Prepare only limit, friction, and residual drive rows."""
+    b1 = read_int(constraints, _OFF_BODY1, cid)
+    b2 = read_int(constraints, _OFF_BODY2, cid)
+    body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
+    body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
+    mode = read_int(constraints, _OFF_JOINT_MODE, cid)
+    orientation1 = body_load_orientation(bodies, b1)
+    orientation2 = body_load_orientation(bodies, b2)
+    position1 = bodies.position[b1]
+    position2 = bodies.position[b2]
+    (
+        velocity1,
+        velocity2,
+        angular_velocity1,
+        angular_velocity2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        slot1,
+        slot2,
+    ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
+
+    la1_b1 = read_vec3(constraints, _OFF_LA1_B1, cid)
+    la1_b2 = read_vec3(constraints, _OFF_LA1_B2, cid)
+    r1_b1 = wp.quat_rotate(orientation1, la1_b1)
+    r1_b2 = wp.quat_rotate(orientation2, la1_b2)
+    write_vec3(constraints, _OFF_R1_B1, cid, r1_b1)
+    write_vec3(constraints, _OFF_R1_B2, cid, r1_b2)
+    axis = wp.normalize(wp.quat_rotate(orientation1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)))
+    write_vec3(constraints, _OFF_AXIS_WORLD, cid, axis)
+    dt = wp.float32(1.0) / idt
+
+    if mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_PRISMATIC:
+        metric = _d6_metric_anchor_block(
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            r1_b1,
+            r1_b2,
+            r1_b1,
+            r1_b2,
+        )
+        if mode == JOINT_MODE_PRISMATIC:
+            eff_inv = wp.dot(axis, metric @ axis)
+            slide = wp.dot(axis, position2 + r1_b2 - position1 - r1_b1)
+            axial_impulse = _axial_drive_limit_prepare_at(
+                constraints,
+                cid,
+                wp.int32(0),
+                slide,
+                eff_inv,
+                eff_inv,
+                dt,
+                PHOENX_BOOST_PRISMATIC_DRIVE,
+                PHOENX_BOOST_PRISMATIC_LIMIT,
+            )
+            impulse = axis * axial_impulse
+            velocity1 += inv_mass1 * impulse
+            angular_velocity1 += inv_inertia1 @ wp.cross(r1_b1, impulse)
+            velocity2 -= inv_mass2 * impulse
+            angular_velocity2 -= inv_inertia2 @ wp.cross(r1_b2, impulse)
+        else:
+            eff_inv = wp.dot(axis, inv_inertia1 @ axis) + wp.dot(axis, inv_inertia2 @ axis)
+            coupling = wp.cross(r1_b1, inv_inertia1 @ axis) + wp.cross(r1_b2, inv_inertia2 @ axis)
+            metric_inverse = inv_sym3(sym6_from_mat33_upper(metric))
+            eff_inv_friction = wp.max(
+                wp.float32(0.0),
+                eff_inv - wp.dot(coupling, mul_sym3(metric_inverse, coupling)),
+            )
+            inv_initial = read_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid)
+            difference = orientation2 * inv_initial * wp.quat_inverse(orientation1)
+            wrapped = extract_rotation_angle(difference, axis)
+            old_counter = read_int(constraints, _OFF_REVOLUTION_COUNTER, cid)
+            old_previous = read_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
+            counter, previous = revolution_tracker_update(wrapped, old_counter, old_previous)
+            write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, counter)
+            write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, previous)
+            coordinate = revolution_tracker_angle(counter, previous)
+            axial_impulse = _axial_drive_limit_prepare_at(
+                constraints,
+                cid,
+                wp.int32(0),
+                coordinate,
+                eff_inv,
+                eff_inv_friction,
+                dt,
+                PHOENX_BOOST_REVOLUTE_DRIVE,
+                PHOENX_BOOST_REVOLUTE_LIMIT,
+            )
+            angular_velocity1 += inv_inertia1 @ (axis * axial_impulse)
+            angular_velocity2 -= inv_inertia2 @ (axis * axial_impulse)
+    elif mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
+        count = read_int(constraints, _OFF_D6_LIMIT_COUNT, cid)
+        if count > wp.int32(0):
+            angular_velocity1, angular_velocity2 = _d6_angular_limits_prepare_at(
+                constraints,
+                cid,
+                wp.int32(0),
+                mode,
+                orientation1,
+                orientation2,
+                inv_inertia1,
+                inv_inertia2,
+                angular_velocity1,
+                angular_velocity2,
+                dt,
+            )
+
+    _ms_store_body_pair(
+        bodies,
+        particles,
+        copy_state,
+        b1,
+        b2,
+        slot1,
+        slot2,
+        num_bodies,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
     )
 
 
