@@ -26,7 +26,9 @@ _MAX_RIGID_CABLE_TIP_SAG = 1.0e-3
 _STEP_LAYOUTS = ("multi_world", "single_world")
 
 
-def _build_cantilever(device: wp.context.Device, joint_type: newton.JointType) -> newton.Model:
+def _build_cantilever(
+    device: wp.context.Device, joint_type: newton.JointType, *, num_links: int = NUM_LINKS
+) -> newton.Model:
     """Build a horizontal chain whose connectivity PhoenX detects independently."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, -GRAVITY), up_axis=newton.Axis.Z)
     bodies = [
@@ -35,7 +37,7 @@ def _build_cantilever(device: wp.context.Device, joint_type: newton.JointType) -
             mass=1.0,
             inertia=_INERTIA,
         )
-        for index in range(NUM_LINKS)
+        for index in range(num_links)
     ]
     joints: list[int] = []
     for index, child in enumerate(bodies):
@@ -101,6 +103,31 @@ def _tip_sag(state: newton.State) -> float:
     return -float(state.body_q.numpy()[-1, 2])
 
 
+def _transform_point(body_q: np.ndarray, point: np.ndarray) -> np.ndarray:
+    """Transform a local point by one ``(position, quaternion)`` row."""
+    vector = body_q[3:6]
+    rotated = point + 2.0 * body_q[6] * np.cross(vector, point)
+    rotated += 2.0 * np.cross(vector, np.cross(vector, point))
+    return body_q[:3] + rotated
+
+
+def _max_anchor_error(model: newton.Model, state: newton.State) -> float:
+    """Return the largest parent/child joint-anchor separation."""
+    body_q = state.body_q.numpy()
+    parent = model.joint_parent.numpy()
+    child = model.joint_child.numpy()
+    parent_xform = model.joint_X_p.numpy()
+    child_xform = model.joint_X_c.numpy()
+    error = 0.0
+    for joint in range(model.joint_count):
+        parent_anchor = parent_xform[joint, :3]
+        if parent[joint] >= 0:
+            parent_anchor = _transform_point(body_q[parent[joint]], parent_anchor)
+        child_anchor = _transform_point(body_q[child[joint]], child_xform[joint, :3])
+        error = max(error, float(np.linalg.norm(parent_anchor - child_anchor)))
+    return error
+
+
 @unittest.skipUnless(
     wp.get_preferred_device().is_cuda,
     "PhoenX chain tests require CUDA graph capture.",
@@ -124,6 +151,41 @@ class TestJointChainConvergence(unittest.TestCase):
                     _MAX_TIP_SAG,
                     msg=f"revolute cantilever drooped {sag * 1e3:.1f} mm",
                 )
+
+    def test_hundred_link_revolute_chain_survives_tip_shock(self) -> None:
+        """Keep a 100-link direct mechanism bounded after a tip shock."""
+        device = wp.get_preferred_device()
+        num_links = 100
+        model = _build_cantilever(device, newton.JointType.REVOLUTE, num_links=num_links)
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        body_qd = state.body_qd.numpy()
+        body_qd[-1, :3] = np.asarray((5.0, -3.0, 2.0), dtype=np.float32)
+        body_qd[-1, 3:] = np.asarray((2.0, 0.5, 1.0), dtype=np.float32)
+        state.body_qd.assign(body_qd)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=SUBSTEPS,
+            solver_iterations=SOLVER_ITERATIONS,
+            velocity_iterations=1,
+            articulation_mode="maximal",
+            step_layout="multi_world",
+        )
+        control = model.control()
+        with wp.ScopedCapture(device) as capture:
+            state.clear_forces()
+            solver.step(state, state, control, None, 1.0 / FPS)
+        for _ in range(60):
+            wp.capture_launch(capture.graph)
+
+        body_q = state.body_q.numpy()
+        final_qd = state.body_qd.numpy()
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, (5 * num_links,))
+        self.assertFalse(np.any(solver.world._joint_pgs_enabled.numpy()))
+        self.assertTrue(np.isfinite(body_q).all())
+        self.assertTrue(np.isfinite(final_qd).all())
+        self.assertLess(_max_anchor_error(model, state), 2.0e-3)
+        self.assertLess(float(np.max(np.linalg.norm(final_qd, axis=1))), 100.0)
 
     def test_rigid_bend_cable_stays_straight(self) -> None:
         """Keep a rigid-bend cable within one millimetre of straight."""
