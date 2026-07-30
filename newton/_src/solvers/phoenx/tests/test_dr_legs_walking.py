@@ -21,25 +21,14 @@ from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs
 
 _PELVIS_LABEL = "/DR_Legs/RigidBodies/pelvis"
 _SAMPLE_FRAMES = (0, 120, 240, 360, 480, 600)
-_REFERENCE_PELVIS_XY_80_SUBSTEPS = np.array(
+_REFERENCE_PELVIS_XY_5_SUBSTEPS = np.array(
     [
         [0.00210191, -0.00000001],
-        [0.09024552, -0.07226246],
-        [0.17129117, 0.05888342],
-        [0.23876992, -0.01924408],
-        [0.34276560, 0.02577228],
-        [0.40250567, 0.01641181],
-    ],
-    dtype=np.float32,
-)
-_REFERENCE_PELVIS_XY_40_SUBSTEPS = np.array(
-    [
-        [0.00210191, -0.00000001],
-        [0.08991610, -0.06922619],
-        [0.17868425, 0.05219497],
-        [0.24254240, -0.04291271],
-        [0.32319218, -0.00230198],
-        [0.38382810, 0.07196540],
+        [0.07753123, -0.07548883],
+        [0.16516693, 0.04843618],
+        [0.24390568, -0.04104612],
+        [0.32787579, -0.00862035],
+        [0.40740278, -0.01539288],
     ],
     dtype=np.float32,
 )
@@ -135,20 +124,13 @@ class TestDrLegsWalking(unittest.TestCase):
         self.assertLess(max_abs_body_speed, 2.0, "DR Legs developed excessive body linear speed")
         self.assertLess(max_abs_joint_speed, 20.0, "DR Legs developed excessive joint speed")
 
-    def test_single_dr_legs_walks_with_old_settings(self) -> None:
+    def test_single_dr_legs_walks_with_five_substeps(self) -> None:
+        """Keep the driven robot walking robustly with five substeps."""
         self._assert_single_dr_legs_walks(
-            substeps=80,
+            substeps=5,
             armature=0.001,
             prepare_refresh_stride="auto",
-            reference_pelvis_xy=_REFERENCE_PELVIS_XY_80_SUBSTEPS,
-        )
-
-    def test_single_dr_legs_walks_with_low_substeps(self) -> None:
-        self._assert_single_dr_legs_walks(
-            substeps=40,
-            armature=0.001,
-            prepare_refresh_stride="auto",
-            reference_pelvis_xy=_REFERENCE_PELVIS_XY_40_SUBSTEPS,
+            reference_pelvis_xy=_REFERENCE_PELVIS_XY_5_SUBSTEPS,
         )
 
 
