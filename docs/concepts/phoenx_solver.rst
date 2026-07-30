@@ -369,10 +369,12 @@ scheduled. Unsaturated finite drives therefore take the same single
 factorization path as unlimited drives.
 
 Connected full-coordinate mechanisms are detected automatically. Their RCM
-permutations and compact panel-task lists are precomputed and reused; a
-world may contain any number of differently sized mechanisms. CUDA schedules
-one block per valid panel task, so heterogeneous mechanisms share the device
-work queue without rectangular padding or a separate global atomic stack.
+permutations, symbolic fill, and compact panel addresses are precomputed and
+reused; panels outside the fill pattern are never stored. A world may contain
+any number of differently sized mechanisms. A persistent CUDA ready queue lets
+thread blocks atomically claim factor-ready panels across all mechanisms, so
+heterogeneous mechanisms share the device without rectangular padding or
+host-side launches between panel columns.
 
 Joint limits for ``REVOLUTE`` / ``PRISMATIC`` use
 ``joint_limit_lower`` / ``joint_limit_upper`` with the same PD-style

@@ -10,6 +10,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.articulations.direct_equality import build_direct_equality_topology
+from newton._src.solvers.phoenx.examples.example_motorized_hinge_chain import _build_model
 from newton._src.solvers.phoenx.tests.test_drive_stability import _pendulum
 
 
@@ -231,6 +232,7 @@ class TestDirectEquality(unittest.TestCase):
         self.assertEqual(int(roots[0]), int(roots[1]))
 
     def test_large_mechanism_uses_panel_parallel_factorization(self):
+        """Solve a large mechanism with compact panel-parallel tasks."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
@@ -244,7 +246,11 @@ class TestDirectEquality(unittest.TestCase):
         )
         direct = solver._direct_equality_system
         self.assertEqual(direct.topology.dimensions, (130,))
-        self.assertTrue(direct.solver._parallel_factorization)
+        self.assertEqual(direct.solver.symbolic.tile_counts, (9,))
+        self.assertGreater(direct.solver.symbolic.panel_count, 9)
+        self.assertLess(direct.matrix.size, 130 * 130)
+        schedule = direct.solver._persistent_schedule
+        self.assertTrue(np.any(schedule.task_tile_i.numpy() != schedule.task_tile_k.numpy()))
 
         state_in = model.state()
         state_out = model.state()
@@ -316,7 +322,7 @@ class TestDirectEquality(unittest.TestCase):
             model = _build_badly_conditioned_chain()
             solver = newton.solvers.SolverPhoenX(
                 model,
-                substeps=1,
+                substeps=5,
                 solver_iterations=1,
                 velocity_iterations=0,
                 articulation_mode="maximal",
@@ -340,7 +346,7 @@ class TestDirectEquality(unittest.TestCase):
         model = _build_badly_conditioned_chain(mass_ratio=1.0e6)
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=1,
+            substeps=5,
             solver_iterations=1,
             velocity_iterations=0,
             articulation_mode="maximal",
@@ -371,7 +377,7 @@ class TestDirectEquality(unittest.TestCase):
             model = _build_badly_conditioned_chain(length=8, offset_x=offset_x)
             solver = newton.solvers.SolverPhoenX(
                 model,
-                substeps=1,
+                substeps=5,
                 solver_iterations=1,
                 velocity_iterations=0,
                 articulation_mode="maximal",
@@ -402,8 +408,7 @@ class TestDirectEquality(unittest.TestCase):
             parent = -1
             joints = []
             for index in range(length):
-                mass = 1.0 if index % 2 == 0 else 1.0e-4
-                child = _add_link(builder, wp.vec3(offset_x, 0.0, -float(index) - 0.5), mass)
+                child = _add_link(builder, wp.vec3(offset_x, 0.0, -float(index) - 0.5), 1.0)
                 parent_xform = wp.transform(
                     wp.vec3(offset_x, 0.0, 0.0) if parent < 0 else wp.vec3(0.0, 0.0, -0.5),
                     wp.quat_identity(),
@@ -425,18 +430,32 @@ class TestDirectEquality(unittest.TestCase):
         model.set_gravity((9.81, 0.0, 0.0))
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=1,
-            solver_iterations=1,
+            substeps=5,
+            solver_iterations=2,
             velocity_iterations=0,
             articulation_mode="maximal",
             joint_equality_solver="direct",
         )
         direct = solver._direct_equality_system
         self.assertEqual(direct.topology.dimensions, (10, 40, 130))
-        self.assertEqual(direct.operator.mat.size, 10 * 10 + 40 * 40 + 130 * 130)
-        self.assertLess(direct.operator.mat.size, len(direct.topology.dimensions) * direct.max_dimension**2)
-        self.assertEqual(direct.solver._panel_task_bids[0].size, 10)
-        self.assertEqual(direct.solver._diagonal_task_bids[3].size, 1)
+        symbolic = direct.solver.symbolic
+        self.assertEqual(direct.matrix.size, symbolic.panel_count * direct.solver.block_size**2)
+        self.assertLess(direct.matrix.size, 10 * 10 + 40 * 40 + 130 * 130)
+        persistent = direct.solver._persistent_schedule
+        self.assertEqual(persistent.task_mechanism.size, symbolic.panel_count)
+        self.assertEqual(persistent.initial_task.size, 3)
+        task_mechanism = persistent.task_mechanism.numpy()
+        task_tile_i = persistent.task_tile_i.numpy()
+        task_tile_k = persistent.task_tile_k.numpy()
+        self.assertEqual(
+            int(np.count_nonzero(task_tile_i != task_tile_k)), symbolic.panel_count - sum(symbolic.tile_counts)
+        )
+        np.testing.assert_array_equal(np.unique(task_mechanism), np.arange(3, dtype=np.int32))
+        for mechanism, tile_count in enumerate(symbolic.tile_counts):
+            self.assertEqual(
+                int(np.count_nonzero((task_mechanism == mechanism) & (task_tile_i == task_tile_k))),
+                tile_count,
+            )
 
         state_in = model.state()
         state_out = model.state()
@@ -446,8 +465,49 @@ class TestDirectEquality(unittest.TestCase):
         self.assertTrue(np.isfinite(state_in.body_q.numpy()).all())
         self.assertTrue(np.isfinite(state_in.body_qd.numpy()).all())
 
-    def test_multi_world_hybrid_reduced_and_direct_mechanisms(self):
-        """Solve reduced and direct mechanisms together across several worlds."""
+    def test_hundred_link_driven_chain_recovers_from_pick_impulse(self):
+        """Recover a long driven chain from a strong pick-like impulse."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+
+        num_links = 100
+        model = _build_model(num_links)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=5,
+            solver_iterations=2,
+            velocity_iterations=1,
+            articulation_mode="maximal",
+            joint_equality_solver="direct",
+        )
+        state = model.state()
+        control = model.control()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        body_qd = state.body_qd.numpy()
+        body_qd[num_links // 2, 0] = 10.0
+        body_qd[num_links // 2, 3] = 10.0
+        state.body_qd.assign(body_qd)
+
+        with wp.ScopedCapture(model.device) as capture:
+            solver.step(state, state, control, None, 1.0 / 60.0)
+        peak_velocity = 0.0
+        peak_anchor_error = 0.0
+        checkpoints = {0, 9, 29, 59, 119}
+        for frame in range(120):
+            wp.capture_launch(capture.graph)
+            if frame in checkpoints:
+                body_qd = state.body_qd.numpy()
+                peak_velocity = max(peak_velocity, float(np.max(np.abs(body_qd))))
+                peak_anchor_error = max(peak_anchor_error, _maximum_anchor_error(model, state))
+
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
+        self.assertLess(peak_velocity, 2.0)
+        self.assertLess(peak_anchor_error, 1.0e-4)
+        self.assertLess(_maximum_anchor_error(model, state), 5.0e-6)
+
+    def test_multi_world_hybrid_reduced_and_direct_ownership(self):
+        """Assign disjoint reduced and direct mechanisms in every world."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
@@ -491,7 +551,7 @@ class TestDirectEquality(unittest.TestCase):
         model.set_gravity((9.81, 0.0, 0.0))
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=1,
+            substeps=5,
             solver_iterations=2,
             velocity_iterations=1,
             articulation_mode="reduced",
@@ -503,16 +563,7 @@ class TestDirectEquality(unittest.TestCase):
         self.assertEqual(direct.topology.dimensions, (5, 5, 5))
         self.assertEqual(int(np.count_nonzero(solver._reduced_articulation.owned_joint_mask_np)), 6)
         self.assertEqual(int(np.count_nonzero(direct.joint_mask)), 3)
-        self.assertTrue(direct.solver._fixed_permutation)
-
-        state_in = model.state()
-        state_out = model.state()
-        control = model.control()
-        for _ in range(10):
-            solver.step(state_in, state_out, control, None, 1.0 / 60.0)
-            state_in, state_out = state_out, state_in
-        self.assertTrue(np.isfinite(state_in.body_q.numpy()).all())
-        self.assertTrue(np.isfinite(state_in.body_qd.numpy()).all())
+        np.testing.assert_array_equal(direct.solver.permutation.numpy(), direct.topology.permutation)
 
 
 if __name__ == "__main__":

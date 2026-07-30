@@ -59,6 +59,7 @@ class HeterogeneousResult:
     mass_ratio: float
     equation_count: int
     matrix_entry_tasks: int
+    compact_panel_slots: int
     rectangular_entry_slots: int
     fps: float
     finite: bool
@@ -197,8 +198,14 @@ def _maximum_anchor_error(model: newton.Model, state: newton.State) -> float:
 def _matrix_conditions(solver: newton.solvers.SolverPhoenX) -> tuple[float, float]:
     direct = solver._direct_equality_system
     dimension = direct.topology.dimensions[0]
-    offset = int(direct.operator.info.mio.numpy()[0])
-    equilibrated = direct.operator.mat.numpy()[offset : offset + dimension * dimension].reshape(dimension, dimension)
+    symbolic = direct.solver.symbolic
+    matrix_values = direct.matrix.numpy()
+    equilibrated = np.zeros((dimension, dimension), dtype=np.float32)
+    rows = symbolic.matrix_row
+    columns = symbolic.matrix_column
+    values = matrix_values[symbolic.matrix_storage]
+    equilibrated[rows, columns] = values
+    equilibrated[columns, rows] = values
     row_scale = direct.row_scale.numpy()[:dimension].astype(np.float64)
     unscaled = equilibrated.astype(np.float64) / np.outer(row_scale, row_scale)
     try:
@@ -215,12 +222,14 @@ def _run_one(
     mass_ratio: float,
     quality_frames: int,
     measure_frames: int,
+    substeps: int,
+    solver_iterations: int,
 ) -> BenchResult:
     model = _build_chain(length, mass_ratio, driven=driven)
     solver = newton.solvers.SolverPhoenX(
         model,
-        substeps=1,
-        solver_iterations=1,
+        substeps=substeps,
+        solver_iterations=solver_iterations,
         velocity_iterations=0,
         articulation_mode="maximal",
         joint_equality_solver=equality_solver,
@@ -298,12 +307,14 @@ def _run_heterogeneous(
     mass_ratio: float,
     measure_frames: int,
     driven: bool,
+    substeps: int,
+    solver_iterations: int,
 ) -> HeterogeneousResult:
     model = _build_heterogeneous_mechanisms(lengths, mass_ratio, driven=driven)
     solver = newton.solvers.SolverPhoenX(
         model,
-        substeps=1,
-        solver_iterations=1,
+        substeps=substeps,
+        solver_iterations=solver_iterations,
         velocity_iterations=0,
         articulation_mode="maximal",
         joint_equality_solver="direct",
@@ -334,7 +345,8 @@ def _run_heterogeneous(
         driven=driven,
         mass_ratio=mass_ratio,
         equation_count=sum(direct.topology.dimensions),
-        matrix_entry_tasks=direct.operator.mat.size,
+        matrix_entry_tasks=direct.matrix_storage.size,
+        compact_panel_slots=direct.matrix.size,
         rectangular_entry_slots=len(lengths) * direct.max_dimension**2,
         fps=float(2 * measure_replays / elapsed),
         finite=finite,
@@ -353,6 +365,8 @@ def main() -> None:
     )
     parser.add_argument("--quality-frames", type=int, default=20)
     parser.add_argument("--measure-frames", type=int, default=400)
+    parser.add_argument("--substeps", type=int, default=5)
+    parser.add_argument("--solver-iterations", type=int, default=2)
     parser.add_argument(
         "--driven",
         action="store_true",
@@ -367,8 +381,8 @@ def main() -> None:
         parser.error("chain lengths must be at least two")
     if any(ratio < 1.0 for ratio in args.mass_ratios):
         parser.error("mass ratios must be at least one")
-    if args.quality_frames < 1 or args.measure_frames < 1:
-        parser.error("frame counts must be positive")
+    if min(args.quality_frames, args.measure_frames, args.substeps, args.solver_iterations) < 1:
+        parser.error("frame and solver work counts must be positive")
 
     results: list[BenchResult] = []
     for length in args.lengths:
@@ -380,6 +394,8 @@ def main() -> None:
                 mass_ratio=mass_ratio,
                 quality_frames=args.quality_frames,
                 measure_frames=args.measure_frames,
+                substeps=args.substeps,
+                solver_iterations=args.solver_iterations,
             )
             direct = _run_one(
                 equality_solver="direct",
@@ -388,6 +404,8 @@ def main() -> None:
                 mass_ratio=mass_ratio,
                 quality_frames=args.quality_frames,
                 measure_frames=args.measure_frames,
+                substeps=args.substeps,
+                solver_iterations=args.solver_iterations,
             )
             results.extend((pgs, direct))
             _print_pair(pgs, direct)
@@ -400,11 +418,14 @@ def main() -> None:
             mass_ratio=max(args.mass_ratios),
             measure_frames=args.measure_frames,
             driven=args.driven,
+            substeps=args.substeps,
+            solver_iterations=args.solver_iterations,
         )
         print(
             f"heterogeneous mechanisms={len(mechanism_lengths)}  driven={heterogeneous.driven}  "
             f"equations={heterogeneous.equation_count}  "
             f"matrix_tasks={heterogeneous.matrix_entry_tasks}/{heterogeneous.rectangular_entry_slots}  "
+            f"panel_slots={heterogeneous.compact_panel_slots}  "
             f"fps={heterogeneous.fps:.1f}  finite={heterogeneous.finite}"
         )
 

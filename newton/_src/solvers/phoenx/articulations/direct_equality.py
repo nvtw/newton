@@ -12,8 +12,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.sim import JointTargetMode, JointType, Model
-from newton._src.solvers.kamino._src.linalg.core import DenseLinearOperatorData, DenseSquareMultiLinearInfo
-from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked_rcm_solver import LLTBlockedRCMSolver
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import FixedPatternPanelLLT
 from newton._src.solvers.phoenx.articulations.reduced_loop import (
     _body_origin_transform,
     _quat_log,
@@ -603,11 +602,9 @@ def _body_com_twist(bodies: BodyContainer, body: wp.int32) -> wp.spatial_vector:
 
 @wp.kernel(enable_backward=False)
 def _assemble_direct_equality_matrix_kernel(
-    dimensions: wp.array[wp.int32],
-    num_mechanisms: wp.int32,
-    matrix_mechanism: wp.array[wp.int32],
-    matrix_offsets: wp.array[wp.int32],
-    vector_offsets: wp.array[wp.int32],
+    matrix_row: wp.array[wp.int32],
+    matrix_column: wp.array[wp.int32],
+    matrix_storage: wp.array[wp.int32],
     row_joint: wp.array[wp.int32],
     row_local: wp.array[wp.int32],
     row_dynamic: wp.array[wp.bool],
@@ -626,16 +623,9 @@ def _assemble_direct_equality_matrix_kernel(
     row_bias: wp.array2d[wp.float32],
     matrix: wp.array[wp.float32],
 ):
-    matrix_index = wp.tid()
-    mechanism = wp.int32(0)
-    if num_mechanisms > wp.int32(1):
-        mechanism = matrix_mechanism[matrix_index]
-    dimension = dimensions[mechanism]
-    local_index = matrix_index - matrix_offsets[mechanism]
-    local_row = local_index // dimension
-    local_column = local_index - local_row * dimension
-    row = vector_offsets[mechanism] + local_row
-    column = vector_offsets[mechanism] + local_column
+    entry = wp.tid()
+    row = matrix_row[entry]
+    column = matrix_column[entry]
     row_joint_index = row_joint[row]
     column_joint_index = row_joint[column]
     row_structural = joint_to_structural[row_joint_index]
@@ -677,7 +667,7 @@ def _assemble_direct_equality_matrix_kernel(
         )
         value += wp.dot(row_wrench, response)
 
-    if local_row == local_column:
+    if row == column:
         inverse_effective_mass = value
         if row_dynamic[row]:
             value += wp.float32(1.0) / wp.max(dynamic_mass[row], wp.float32(1.0e-10))
@@ -698,7 +688,7 @@ def _assemble_direct_equality_matrix_kernel(
             regularization * wp.max(inverse_effective_mass, wp.float32(1.0)),
             wp.float32(1.0e-10),
         )
-    matrix[matrix_index] = value
+    matrix[matrix_storage[entry]] = value
 
 
 @wp.kernel(enable_backward=False)
@@ -714,24 +704,16 @@ def _compute_direct_equality_row_scale_kernel(
 
 @wp.kernel(enable_backward=False)
 def _equilibrate_direct_equality_matrix_kernel(
-    dimensions: wp.array[wp.int32],
-    num_mechanisms: wp.int32,
-    matrix_mechanism: wp.array[wp.int32],
-    matrix_offsets: wp.array[wp.int32],
-    vector_offsets: wp.array[wp.int32],
+    matrix_row: wp.array[wp.int32],
+    matrix_column: wp.array[wp.int32],
+    matrix_storage: wp.array[wp.int32],
     row_scale: wp.array[wp.float32],
     matrix: wp.array[wp.float32],
 ):
-    matrix_index = wp.tid()
-    mechanism = wp.int32(0)
-    if num_mechanisms > wp.int32(1):
-        mechanism = matrix_mechanism[matrix_index]
-    dimension = dimensions[mechanism]
-    local_index = matrix_index - matrix_offsets[mechanism]
-    local_row = local_index // dimension
-    local_column = local_index - local_row * dimension
-    vector_offset = vector_offsets[mechanism]
-    matrix[matrix_index] *= row_scale[vector_offset + local_row] * row_scale[vector_offset + local_column]
+    entry = wp.tid()
+    row = matrix_row[entry]
+    column = matrix_column[entry]
+    matrix[matrix_storage[entry]] *= row_scale[row] * row_scale[column]
 
 
 @wp.kernel(enable_backward=False)
@@ -1063,7 +1045,7 @@ def _effective_joint_axes(
 
 
 class DirectEqualitySystem:
-    """Batched direct equality systems, one dense block per mechanism."""
+    """Batched fixed-pattern direct equality systems, one per mechanism."""
 
     def __init__(
         self,
@@ -1207,43 +1189,34 @@ class DirectEqualitySystem:
         self.control_target_q = model.joint_target_q
         self.control_target_qd = model.joint_target_qd
 
-        info = DenseSquareMultiLinearInfo()
-        info.finalize(dimensions=list(self.topology.dimensions), dtype=wp.float32, device=device)
-        matrix = wp.zeros(info.total_mat_size, dtype=wp.float32, device=device)
-        self.operator = DenseLinearOperatorData(info=info, mat=matrix)
         self.rhs = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.delta = wp.zeros(row_count, dtype=wp.float32, device=device)
-        matrix_mechanism = np.zeros(1, dtype=np.int32)
-        if len(self.topology.dimensions) > 1:
-            matrix_mechanism = np.repeat(
-                np.arange(len(self.topology.dimensions), dtype=np.int32),
-                np.square(self.topology.dimensions),
+        inverse_mass = np.asarray(model.body_inv_mass.numpy(), dtype=np.float32)
+        joint_parent = np.asarray(model.joint_parent.numpy(), dtype=np.int32)
+        joint_child = np.asarray(model.joint_child.numpy(), dtype=np.int32)
+        row_bodies = tuple(
+            frozenset(
+                body
+                for body in (int(joint_parent[joint]), int(joint_child[joint]))
+                if body >= 0 and inverse_mass[body] > 0.0
             )
-        self.matrix_mechanism = wp.array(
-            matrix_mechanism,
-            dtype=wp.int32,
-            device=device,
+            for joint in self.topology.row_joint
         )
-        matrix_offset = 0
-        diagonal_index = []
-        for dimension in self.topology.dimensions:
-            diagonal_index.extend(matrix_offset + row * dimension + row for row in range(dimension))
-            matrix_offset += dimension * dimension
-        self.diagonal_index = wp.array(
-            np.asarray(diagonal_index, dtype=np.int32),
-            dtype=wp.int32,
-            device=device,
-        )
-        self.row_scale = wp.ones(row_count, dtype=wp.float32, device=device)
-        self.solver = LLTBlockedRCMSolver(
-            operator=self.operator,
+        self.solver = FixedPatternPanelLLT(
+            self.topology.dimensions,
+            self.topology.mechanism_row_start,
+            self.topology.permutation,
+            row_bodies,
             block_size=16,
-            reorder_tol=1.0e-12,
-            parallel_factorization=max(self.topology.dimensions) >= 128,
             device=device,
         )
-        permutation_wp = wp.array(self.topology.permutation, dtype=wp.int32, device=device)
-        self.solver.set_permutation(permutation_wp)
+        symbolic = self.solver.symbolic
+        self.matrix_row = wp.array(symbolic.matrix_row, dtype=wp.int32, device=device)
+        self.matrix_column = wp.array(symbolic.matrix_column, dtype=wp.int32, device=device)
+        self.matrix_storage = wp.array(symbolic.matrix_storage, dtype=wp.int32, device=device)
+        self.diagonal_index = wp.array(symbolic.diagonal_storage, dtype=wp.int32, device=device)
+        self.matrix = self.solver.matrix
+        self.row_scale = wp.ones(row_count, dtype=wp.float32, device=device)
         self.max_dimension = max(self.topology.dimensions)
 
     @property
@@ -1430,13 +1403,11 @@ class DirectEqualitySystem:
             return
         wp.launch(
             _assemble_direct_equality_matrix_kernel,
-            dim=self.operator.mat.size,
+            dim=self.matrix_storage.size,
             inputs=[
-                self.operator.info.dim,
-                wp.int32(len(self.topology.dimensions)),
-                self.matrix_mechanism,
-                self.operator.info.mio,
-                self.operator.info.vio,
+                self.matrix_row,
+                self.matrix_column,
+                self.matrix_storage,
                 self.row_joint,
                 self.row_local,
                 self.row_dynamic,
@@ -1453,7 +1424,7 @@ class DirectEqualitySystem:
                 self.row_damping,
                 self.dynamic_mass,
                 self.row_bias,
-                self.operator.mat,
+                self.matrix,
             ],
             device=self.model.device,
         )
@@ -1462,26 +1433,24 @@ class DirectEqualitySystem:
             dim=len(self.topology.row_joint),
             inputs=[
                 self.diagonal_index,
-                self.operator.mat,
+                self.matrix,
                 self.row_scale,
             ],
             device=self.model.device,
         )
         wp.launch(
             _equilibrate_direct_equality_matrix_kernel,
-            dim=self.operator.mat.size,
+            dim=self.matrix_storage.size,
             inputs=[
-                self.operator.info.dim,
-                wp.int32(len(self.topology.dimensions)),
-                self.matrix_mechanism,
-                self.operator.info.mio,
-                self.operator.info.vio,
+                self.matrix_row,
+                self.matrix_column,
+                self.matrix_storage,
                 self.row_scale,
-                self.operator.mat,
+                self.matrix,
             ],
             device=self.model.device,
         )
-        self.solver.compute(self.operator.mat)
+        self.solver.compute()
 
     def solve(self, *, use_bias: bool) -> None:
         if not self.enabled:
