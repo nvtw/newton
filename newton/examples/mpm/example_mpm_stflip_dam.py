@@ -82,22 +82,22 @@ class Example:
         )
 
         body = builder.add_body(
-            xform=wp.transform(wp.vec3(0.35, 0.0, 0.65), wp.quat_identity()),
+            xform=wp.transform(wp.vec3(0.85, 0.0, 0.65), wp.quat_identity()),
             label="fluid-coupled sphere",
         )
         sphere_cfg = builder.default_shape_cfg.copy()
         sphere_cfg.density = 450.0
         builder.add_shape_sphere(body, radius=0.18, cfg=sphere_cfg, color=wp.vec3(1.0, 0.35, 0.08))
 
-        spacing = options.cell_size * 0.5
+        spacing = options.cell_size / 3.0
         particle_mass = 1000.0 * spacing**3
         builder.add_particle_grid(
             pos=wp.vec3(-1.05, -0.48, 0.08),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0),
-            dim_x=20,
-            dim_y=18,
-            dim_z=20,
+            dim_x=64,
+            dim_y=34,
+            dim_z=48,
             cell_x=spacing,
             cell_y=spacing,
             cell_z=spacing,
@@ -122,6 +122,7 @@ class Example:
                 max_active_tile_count=options.max_active_tiles,
                 padding_tiles=1,
                 pressure_iterations=options.pressure_iterations,
+                particles_per_cell=27.0,
                 transfer_scheme="apic",
                 flip_blend=0.97,
                 domain_lower=(-1.18, -0.58, 0.02),
@@ -198,6 +199,8 @@ class Example:
             self.state_0,
             "ST-FLIP rigid body remains finite",
             lambda q, qd: wp.length(wp.transform_get_translation(q)) < 100.0 and wp.length(qd) < 1.0e4,
+            show_body_q=True,
+            show_body_qd=True,
         )
 
     @staticmethod

@@ -8,7 +8,6 @@ import warp as wp
 from ...geometry import ParticleFlags
 from .sparse_grid import (
     SparseGridData,
-    sparse_grid_cell_coord,
     sparse_grid_cell_index,
     sparse_grid_index_from_cell,
 )
@@ -72,6 +71,17 @@ def _grid_index(position: wp.vec3, offset: wp.vec3, inv_cell_size: float) -> wp.
 
 
 @wp.func
+def _stencil_index(grid: SparseGridData, base_index: int, x: int, y: int, z: int) -> int:
+    tile_volume = grid.tile_size * grid.tile_size * grid.tile_size
+    tile = base_index // tile_volume
+    local = base_index - tile * tile_volume
+    local_x = local % grid.tile_size
+    local_y = (local // grid.tile_size) % grid.tile_size
+    local_z = local // (grid.tile_size * grid.tile_size)
+    return sparse_grid_cell_index(grid, tile, local_x + x, local_y + y, local_z + z)
+
+
+@wp.func
 def _scatter_component(
     grid: SparseGridData,
     position: wp.vec3,
@@ -85,12 +95,15 @@ def _scatter_component(
     face_momentum: wp.array[float],
 ):
     base = _grid_index(position, offset, inv_cell_size)
+    base_index = sparse_grid_index_from_cell(grid, base)
+    if base_index < 0:
+        return
     p_grid = position * inv_cell_size - offset
     for z in range(2):
         for y in range(2):
             for x in range(2):
                 cell = base + wp.vec3i(x, y, z)
-                index = sparse_grid_index_from_cell(grid, cell)
+                index = _stencil_index(grid, base_index, x, y, z)
                 if index >= 0 and 3 * index + component < face_mass.shape[0]:
                     node = (wp.vec3(cell) + offset) / inv_cell_size
                     displacement = node - position
@@ -130,12 +143,15 @@ def particles_to_grid(
     position = positions[particle] + velocity * (temporal_offsets[particle] * dt)
     mass = masses[particle]
     base = _grid_index(position, wp.vec3(0.5), inv_cell_size)
+    base_index = sparse_grid_index_from_cell(grid, base)
+    if base_index < 0:
+        return
     p_grid = position * inv_cell_size - wp.vec3(0.5)
     for z in range(2):
         for y in range(2):
             for x in range(2):
                 cell = base + wp.vec3i(x, y, z)
-                index = sparse_grid_index_from_cell(grid, cell)
+                index = _stencil_index(grid, base_index, x, y, z)
                 if index >= 0 and index < cell_mass.shape[0]:
                     w = (
                         _weight(p_grid[0] - float(cell[0]))
@@ -302,39 +318,48 @@ def build_pressure_system(
 ):
     """Build the free-surface Poisson right-hand side and diagonal."""
     index = wp.tid()
+    tile_volume = grid.tile_size * grid.tile_size * grid.tile_size
+    tile = index // tile_volume
+    if tile >= grid.tile_count[0]:
+        pressure_rhs[index] = 0.0
+        pressure_diag[index] = 0.0
+        return
     if not _is_liquid(cell_mass, index, min_mass):
         pressure_rhs[index] = 0.0
         pressure_diag[index] = 0.0
         return
 
-    cell = sparse_grid_cell_coord(grid, index)
-    u0 = sparse_grid_index_from_cell(grid, cell)
-    ux = sparse_grid_index_from_cell(grid, cell + wp.vec3i(1, 0, 0))
-    vy = sparse_grid_index_from_cell(grid, cell + wp.vec3i(0, 1, 0))
-    wz = sparse_grid_index_from_cell(grid, cell + wp.vec3i(0, 0, 1))
+    local = index - tile * tile_volume
+    x = local % grid.tile_size
+    y = (local // grid.tile_size) % grid.tile_size
+    z = local // (grid.tile_size * grid.tile_size)
+    ux = sparse_grid_cell_index(grid, tile, x + 1, y, z)
+    vy = sparse_grid_cell_index(grid, tile, x, y + 1, z)
+    wz = sparse_grid_cell_index(grid, tile, x, y, z + 1)
     divergence = 0.0
     if ux >= 0:
         divergence += face_velocity[3 * ux]
-    if u0 >= 0:
-        divergence -= face_velocity[3 * u0]
+    divergence -= face_velocity[3 * index]
     if vy >= 0:
         divergence += face_velocity[3 * vy + 1]
-    if u0 >= 0:
-        divergence -= face_velocity[3 * u0 + 1]
+    divergence -= face_velocity[3 * index + 1]
     if wz >= 0:
         divergence += face_velocity[3 * wz + 2]
-    if u0 >= 0:
-        divergence -= face_velocity[3 * u0 + 2]
+    divergence -= face_velocity[3 * index + 2]
 
     diagonal = 0.0
-    directions = wp.vec3i(0)
-    for axis in range(3):
-        directions = wp.vec3i(0)
-        directions[axis] = 1
-        if sparse_grid_index_from_cell(grid, cell - directions) >= 0:
-            diagonal += 1.0
-        if sparse_grid_index_from_cell(grid, cell + directions) >= 0:
-            diagonal += 1.0
+    if sparse_grid_cell_index(grid, tile, x - 1, y, z) >= 0:
+        diagonal += 1.0
+    if ux >= 0:
+        diagonal += 1.0
+    if sparse_grid_cell_index(grid, tile, x, y - 1, z) >= 0:
+        diagonal += 1.0
+    if vy >= 0:
+        diagonal += 1.0
+    if sparse_grid_cell_index(grid, tile, x, y, z - 1) >= 0:
+        diagonal += 1.0
+    if wz >= 0:
+        diagonal += 1.0
     pressure_rhs[index] = divergence * rhs_scale
     pressure_diag[index] = diagonal
 
@@ -351,23 +376,39 @@ def pressure_jacobi(
 ):
     """Perform one sparse free-surface Jacobi pressure iteration."""
     index = wp.tid()
+    tile_volume = grid.tile_size * grid.tile_size * grid.tile_size
+    tile = index // tile_volume
+    if tile >= grid.tile_count[0]:
+        pressure_out[index] = 0.0
+        return
     diagonal = pressure_diag[index]
     if diagonal == 0.0:
         pressure_out[index] = 0.0
         return
 
-    cell = sparse_grid_cell_coord(grid, index)
+    local = index - tile * tile_volume
+    x = local % grid.tile_size
+    y = (local // grid.tile_size) % grid.tile_size
+    z = local // (grid.tile_size * grid.tile_size)
     neighbor_sum = 0.0
-    direction = wp.vec3i(0)
-    for axis in range(3):
-        direction = wp.vec3i(0)
-        direction[axis] = 1
-        lo = sparse_grid_index_from_cell(grid, cell - direction)
-        hi = sparse_grid_index_from_cell(grid, cell + direction)
-        if _is_liquid(cell_mass, lo, min_mass):
-            neighbor_sum += pressure_in[lo]
-        if _is_liquid(cell_mass, hi, min_mass):
-            neighbor_sum += pressure_in[hi]
+    x_lo = sparse_grid_cell_index(grid, tile, x - 1, y, z)
+    x_hi = sparse_grid_cell_index(grid, tile, x + 1, y, z)
+    y_lo = sparse_grid_cell_index(grid, tile, x, y - 1, z)
+    y_hi = sparse_grid_cell_index(grid, tile, x, y + 1, z)
+    z_lo = sparse_grid_cell_index(grid, tile, x, y, z - 1)
+    z_hi = sparse_grid_cell_index(grid, tile, x, y, z + 1)
+    if _is_liquid(cell_mass, x_lo, min_mass):
+        neighbor_sum += pressure_in[x_lo]
+    if _is_liquid(cell_mass, x_hi, min_mass):
+        neighbor_sum += pressure_in[x_hi]
+    if _is_liquid(cell_mass, y_lo, min_mass):
+        neighbor_sum += pressure_in[y_lo]
+    if _is_liquid(cell_mass, y_hi, min_mass):
+        neighbor_sum += pressure_in[y_hi]
+    if _is_liquid(cell_mass, z_lo, min_mass):
+        neighbor_sum += pressure_in[z_lo]
+    if _is_liquid(cell_mass, z_hi, min_mass):
+        neighbor_sum += pressure_in[z_hi]
     pressure_out[index] = (neighbor_sum - pressure_rhs[index]) / diagonal
 
 
@@ -383,14 +424,25 @@ def apply_pressure(
 ):
     """Apply pressure gradients to active MAC faces."""
     index = wp.tid()
-    cell = sparse_grid_cell_coord(grid, index)
+    tile_volume = grid.tile_size * grid.tile_size * grid.tile_size
+    tile = index // tile_volume
+    if tile >= grid.tile_count[0]:
+        return
+    local = index - tile * tile_volume
+    x = local % grid.tile_size
+    y = (local // grid.tile_size) % grid.tile_size
+    z = local // (grid.tile_size * grid.tile_size)
     for axis in range(3):
         face = 3 * index + axis
         if face_valid[face] != 0:
-            direction = wp.vec3i(0)
-            direction[axis] = 1
-            left = sparse_grid_index_from_cell(grid, cell - direction)
-            right = sparse_grid_index_from_cell(grid, cell)
+            left = -1
+            if axis == 0:
+                left = sparse_grid_cell_index(grid, tile, x - 1, y, z)
+            elif axis == 1:
+                left = sparse_grid_cell_index(grid, tile, x, y - 1, z)
+            else:
+                left = sparse_grid_cell_index(grid, tile, x, y, z - 1)
+            right = index
             left_liquid = _is_liquid(cell_mass, left, min_mass)
             right_liquid = _is_liquid(cell_mass, right, min_mass)
             if left_liquid or right_liquid:
@@ -413,6 +465,9 @@ def _sample_component(
     values: wp.array[float],
 ) -> float:
     base = _grid_index(position, offset, inv_cell_size)
+    base_index = sparse_grid_index_from_cell(grid, base)
+    if base_index < 0:
+        return 0.0
     p_grid = position * inv_cell_size - offset
     result = 0.0
     weight_sum = 0.0
@@ -420,7 +475,7 @@ def _sample_component(
         for y in range(2):
             for x in range(2):
                 cell = base + wp.vec3i(x, y, z)
-                index = sparse_grid_index_from_cell(grid, cell)
+                index = _stencil_index(grid, base_index, x, y, z)
                 if index >= 0 and 3 * index + component < values.shape[0]:
                     w = (
                         _weight(p_grid[0] - float(cell[0]))
@@ -462,12 +517,15 @@ def _sample_component_gradient(
     for axis in range(3):
         if wp.abs(p_grid[axis] - float(base[axis])) < 1.0e-6:
             base[axis] -= 1
+    base_index = sparse_grid_index_from_cell(grid, base)
+    if base_index < 0:
+        return wp.vec3(0.0)
     gradient = wp.vec3(0.0)
     for z in range(2):
         for y in range(2):
             for x in range(2):
                 cell = base + wp.vec3i(x, y, z)
-                index = sparse_grid_index_from_cell(grid, cell)
+                index = _stencil_index(grid, base_index, x, y, z)
                 if index >= 0 and 3 * index + component < values.shape[0]:
                     delta = p_grid - wp.vec3(cell)
                     wx = _weight(delta[0])

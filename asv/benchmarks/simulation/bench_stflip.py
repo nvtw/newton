@@ -16,7 +16,7 @@ from newton.solvers import SolverSTFLIP
 class STFLIPStepScaling:
     """Track complete sparse-fluid step scaling with particle count."""
 
-    params = ([8, 16, 24],)
+    params = ([8, 16, 24, 47],)
     param_names = ["particle_dimension"]
     number = 1
     repeat = 5
@@ -45,7 +45,8 @@ class STFLIPStepScaling:
             radius_mean=0.015,
         )
         self.model = builder.finalize(device=device)
-        tile_capacity = {8: 32, 16: 64, 24: 80}[particle_dimension]
+        tile_capacity = {8: 32, 16: 64, 24: 80, 47: 160}[particle_dimension]
+        domain_extent = max(1.2, 0.04 * particle_dimension + 0.2)
         self.solver = SolverSTFLIP(
             self.model,
             SolverSTFLIP.Config(
@@ -56,7 +57,7 @@ class STFLIPStepScaling:
                 pressure_iterations=40,
                 transfer_scheme="apic",
                 domain_lower=(0.0, 0.0, 0.0),
-                domain_upper=(1.2, 1.2, 1.2),
+                domain_upper=(domain_extent, domain_extent, domain_extent),
             ),
         )
         self.state_0 = self.model.state()
@@ -78,7 +79,7 @@ class STFLIPStepScaling:
 class SparseGridRebuildScaling:
     """Track packed sparse-grid rebuild scaling with point count."""
 
-    params = ([1024, 8192, 65536],)
+    params = ([1024, 8192, 65536, 131072],)
     param_names = ["point_count"]
     number = 1
     repeat = 5
@@ -133,9 +134,9 @@ class STFLIPGraphReplay:
             pos=wp.vec3(0.1),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0),
-            dim_x=20,
-            dim_y=20,
-            dim_z=20,
+            dim_x=47,
+            dim_y=47,
+            dim_z=47,
             cell_x=spacing,
             cell_y=spacing,
             cell_z=spacing,
@@ -149,12 +150,12 @@ class STFLIPGraphReplay:
             SolverSTFLIP.Config(
                 cell_size=0.08,
                 tile_size=8,
-                max_active_tile_count=80,
+                max_active_tile_count=160,
                 padding_tiles=1,
                 pressure_iterations=60,
                 transfer_scheme="apic",
                 domain_lower=(0.0, 0.0, 0.0),
-                domain_upper=(1.2, 1.2, 1.2),
+                domain_upper=(2.2, 2.2, 2.2),
             ),
         )
         self.state_0 = self.model.state()

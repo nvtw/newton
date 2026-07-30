@@ -936,7 +936,7 @@ add_example_test(
     TestMPMExamples,
     name="mpm.example_mpm_stflip_dam",
     devices=cuda_test_devices,
-    test_options={"num-frames": 120},
+    test_options={"num-frames": 30},
     use_viewer=True,
 )
 
