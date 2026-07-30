@@ -32,14 +32,9 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.examples.scene_registry import Scene, scene
+import newton
 from newton._src.solvers.phoenx.tests._test_helpers import STEP_LAYOUTS
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
-from newton._src.solvers.phoenx.world_builder import (
-    DriveMode,
-    JointMode,
-    WorldBuilder,
-)
 
 GRAVITY = 9.81
 HE = 0.5  # cube half-extent for stack tests
@@ -315,210 +310,98 @@ class TestSandwichedLightCube(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# High mass-ratio pendulum
+# High mass-ratio direct mechanism
 # ---------------------------------------------------------------------------
 
-
-_PENDULUM_LENGTH = 1.0
-_PENDULUM_FPS = 240
-_PENDULUM_SUBSTEPS = 8
-_PENDULUM_ITERATIONS = 16
+PENDULUM_LENGTH = 1.0
+PENDULUM_FPS = 240
+PENDULUM_SUBSTEPS = 5
 
 
-def _build_high_ratio_pendulum(
-    device,
-    *,
-    hub_mass: float,
-    bob_mass: float,
-    initial_angle: float = 0.2,
-    step_layout: str = "multi_world",
-):
-    """Hub body fixed to the world via a fixed joint, with a small bob
-    hung off it via a +z revolute joint. ``initial_angle`` is the
-    starting deflection [rad] from straight-down; the pendulum then
-    swings under gravity.
-
-    The hub is fixed via a separate :class:`JointMode.FIXED` joint to
-    the world body so the bob's pendulum dynamics see the full hub
-    inertia (vs. the world's infinite inertia). This mimics a robot
-    arm's distal links carrying a small payload, where the inertia
-    ratio between the parent link and the payload sets the natural
-    frequency the controller must operate at.
-    """
-    b = WorldBuilder()
-    anchor = b.world_body
-    # Hub: massive, anchored to world by a fixed joint.
-    hub_inv_mass = 1.0 / hub_mass
-    hub_i = (1.0 / 6.0) * hub_mass * (2 * 0.2) * (2 * 0.2)
-    hub_inv_inertia = ((1.0 / hub_i, 0.0, 0.0), (0.0, 1.0 / hub_i, 0.0), (0.0, 0.0, 1.0 / hub_i))
-    hub = b.add_dynamic_body(
-        position=(0.0, 0.0, 0.0),
-        inverse_mass=hub_inv_mass,
-        inverse_inertia=hub_inv_inertia,
-        affected_by_gravity=False,  # held by FIXED joint
+def _build_high_ratio_pendulum(*, hub_mass: float, bob_mass: float, initial_angle: float) -> tuple[newton.Model, int]:
+    """Build a heavy fixed hub carrying a light revolute pendulum."""
+    builder = newton.ModelBuilder(gravity=(0.0, -GRAVITY, 0.0), up_axis=newton.Axis.Y)
+    hub_inertia = hub_mass * (0.4**2) / 6.0
+    hub = builder.add_link(
+        xform=wp.transform_identity(),
+        mass=hub_mass,
+        inertia=((hub_inertia, 0.0, 0.0), (0.0, hub_inertia, 0.0), (0.0, 0.0, hub_inertia)),
     )
-    # Bob: light, hangs below hub with initial deflection.
-    bx = _PENDULUM_LENGTH * math.sin(initial_angle)
-    by = -_PENDULUM_LENGTH * math.cos(initial_angle)
-    # Cube approx: I = (1/6) * m * (2*he)^2 for a unit-aspect cube of
-    # half-extent 0.05. Bob is essentially a point mass for the
-    # pendulum dynamics.
-    bob_he = 0.05
-    bob_i = (1.0 / 6.0) * bob_mass * (2 * bob_he) * (2 * bob_he)
-    bob_inv_inertia = ((1.0 / bob_i, 0.0, 0.0), (0.0, 1.0 / bob_i, 0.0), (0.0, 0.0, 1.0 / bob_i))
-    bob = b.add_dynamic_body(
-        position=(bx, by, 0.0),
-        inverse_mass=1.0 / bob_mass,
-        inverse_inertia=bob_inv_inertia,
-        affected_by_gravity=True,
+    bob_inertia = bob_mass * (0.1**2) / 6.0
+    bob = builder.add_link(
+        xform=wp.transform_identity(),
+        mass=bob_mass,
+        inertia=((bob_inertia, 0.0, 0.0), (0.0, bob_inertia, 0.0), (0.0, 0.0, bob_inertia)),
     )
-    # FIXED joint world->hub keeps hub locked at origin.
-    b.add_joint(
-        body1=anchor,
-        body2=hub,
-        anchor1=(0.0, 0.0, 0.0),
-        anchor2=(0.0, 0.0, 1.0),
-        mode=JointMode.FIXED,
+    fixed = builder.add_joint_fixed(parent=-1, child=hub)
+    revolute = builder.add_joint_revolute(
+        parent=hub,
+        child=bob,
+        axis=(0.0, 0.0, 1.0),
+        child_xform=wp.transform((0.0, PENDULUM_LENGTH, 0.0), wp.quat_identity()),
+        damping=0.0,
     )
-    # Revolute hub->bob about +z; anchor at hub origin.
-    b.add_joint(
-        body1=hub,
-        body2=bob,
-        anchor1=(0.0, 0.0, 0.0),
-        anchor2=(0.0, 0.0, 1.0),
-        mode=JointMode.REVOLUTE,
-        drive_mode=DriveMode.OFF,
-    )
-    return b.finalize(
-        substeps=_PENDULUM_SUBSTEPS,
-        solver_iterations=_PENDULUM_ITERATIONS,
-        gravity=(0.0, -GRAVITY, 0.0),
-        step_layout=step_layout,
-        device=device,
-    )
+    builder.add_articulation([fixed, revolute])
+    model = builder.finalize(device=wp.get_preferred_device())
+    model.joint_q.assign(np.asarray((initial_angle,), dtype=np.float32))
+    return model, bob
 
 
-@scene(
-    "Mass ratio: 1000:1 pendulum",
-    description=(
-        "Pendulum on a 1000:1 mass-ratio hinge: heavy hub (1000 kg) "
-        "fixed to the world, light bob (1 kg) hangs 1 m below via a "
-        "revolute joint. Initial 0.2 rad deflection."
-    ),
-    tags=("mass_ratio", "pendulum"),
-)
-def build_high_ratio_pendulum_scene(device) -> Scene:
-    world = _build_high_ratio_pendulum(device, hub_mass=1000.0, bob_mass=1.0)
-    he = np.zeros((world.num_bodies, 3), dtype=np.float32)
-    he[1] = 0.2  # hub
-    he[2] = 0.05  # bob
-    return Scene(
-        world=world,
-        body_half_extents=he,
-        frame_dt=1.0 / _PENDULUM_FPS,
-        substeps=_PENDULUM_SUBSTEPS,
-    )
-
-
-@unittest.skipUnless(
-    wp.get_preferred_device().is_cuda,
-    "PhoenX simulation tests run on CUDA only (graph capture required for reasonable run-time).",
-)
+@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX mass-ratio tests require CUDA graphs.")
 class TestHeavyPendulum(unittest.TestCase):
-    """High-mass-ratio pendulum natural period must match ``2*pi*sqrt(L/g)``.
-
-    A correctly-conditioned hinge with a 1000:1 hub-to-bob mass ratio
-    behaves as a fixed-pivot pendulum (the hub's inertia dominates so
-    the bob swings against an effectively immovable anchor). A broken
-    solver typically reports an inflated or NaN period, or damps the
-    oscillation.
-    """
+    """Check a poorly conditioned full-coordinate mechanism analytically."""
 
     def test_natural_period_matches_analytic(self) -> None:
-        device = wp.get_preferred_device()
-        # Small initial deflection so the small-angle period
-        # ``T = 2*pi*sqrt(L/g)`` is accurate.
-        initial_angle = 0.15  # rad
+        """Match the small-angle period at a 1000-to-1 adjacent mass ratio."""
+        initial_angle = 0.15
+        expected_period = 2.0 * math.pi * math.sqrt(PENDULUM_LENGTH / GRAVITY)
+        frame_count = int(round(2.1 * expected_period * PENDULUM_FPS))
         for layout in STEP_LAYOUTS:
             with self.subTest(step_layout=layout):
-                world = _build_high_ratio_pendulum(
-                    device,
+                model, bob = _build_high_ratio_pendulum(
                     hub_mass=1000.0,
                     bob_mass=1.0,
                     initial_angle=initial_angle,
+                )
+                state = model.state()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    substeps=PENDULUM_SUBSTEPS,
+                    solver_iterations=1,
+                    velocity_iterations=0,
+                    articulation_mode="maximal",
                     step_layout=layout,
                 )
+                self.assertEqual(solver._direct_equality_system.topology.dimensions, (11,))
+                np.testing.assert_array_equal(solver.world._joint_pgs_enabled.numpy(), [0, 0])
+                control = model.control()
+                with wp.ScopedCapture(model.device) as capture:
+                    state.clear_forces()
+                    solver.step(state, state, control, None, 1.0 / PENDULUM_FPS)
 
-                # Four zero-crossings need just under two periods; add
-                # a small margin instead of simulating three periods.
-                T_expected = 2.0 * math.pi * math.sqrt(_PENDULUM_LENGTH / GRAVITY)
-                n_frames = int(round(2.1 * T_expected * _PENDULUM_FPS))
-                dt = 1.0 / _PENDULUM_FPS
+                angles = np.empty(frame_count + 1, dtype=np.float32)
+                position = state.body_q.numpy()[bob, :2]
+                angles[0] = math.atan2(float(position[0]), -float(position[1]))
+                for frame in range(frame_count):
+                    wp.capture_launch(capture.graph)
+                    position = state.body_q.numpy()[bob, :2]
+                    angles[frame + 1] = math.atan2(float(position[0]), -float(position[1]))
 
-                # Warm-up step + capture single step + replay.
-                world.step(dt)
-                with wp.ScopedCapture(device=device) as cap:
-                    world.step(dt)
-                graph = cap.graph
-
-                # Initial bob xy from the post-warmup state.
-                bob_xy = np.empty((n_frames + 1, 2), dtype=np.float32)
-                positions = world.bodies.position.numpy()
-                bob_xy[0] = positions[2, 0:2]
-                for i in range(n_frames):
-                    wp.capture_launch(graph)
-                    positions = world.bodies.position.numpy()
-                    bob_xy[i + 1] = positions[2, 0:2]
-
-                # Pendulum angle: atan2(x, -y) where straight-down is 0.
-                angles = np.arctan2(bob_xy[:, 0], -bob_xy[:, 1])
-                # No NaN.
-                self.assertTrue(np.isfinite(angles).all(), "bob angle went non-finite")
-
-                # Detect zero-crossings (sign change in angle) to estimate
-                # half-periods. Take the first 4 crossings -> 2 full periods.
-                signs = np.sign(angles)
-                crossings = np.where(np.diff(signs) != 0)[0]
-                self.assertGreaterEqual(
-                    len(crossings),
-                    4,
-                    msg=f"only {len(crossings)} zero-crossings in {n_frames} frames -- pendulum may not be oscillating",
-                )
-
-                # Linear interpolate each crossing to sub-frame precision.
-                cross_times = []
-                for k in crossings[:4]:
-                    a0 = float(angles[k])
-                    a1 = float(angles[k + 1])
-                    # frac in [0, 1]: where angle would be 0.
-                    frac = a0 / (a0 - a1) if (a0 - a1) != 0.0 else 0.0
-                    cross_times.append((k + frac) * dt)
-                # Period = 2 * average half-period.
-                half_periods = np.diff(cross_times)
-                T_measured = 2.0 * float(np.mean(half_periods))
-
-                # Tolerance: 5% on the period. A broken solver typically
-                # misses by 20+%.
-                rel_err = abs(T_measured - T_expected) / T_expected
-                self.assertLess(
-                    rel_err,
-                    0.05,
-                    msg=f"T_measured={T_measured:.4f} s, expected={T_expected:.4f} s, rel_err={rel_err * 100:.2f}%",
-                )
-
-                # Amplitude must remain meaningful (no spurious damping).
-                # First-period peak amplitude should be within 10% of the
-                # initial deflection.
-                first_period_end = int(round(T_expected * _PENDULUM_FPS))
-                peak_first = float(np.abs(angles[: first_period_end + 1]).max())
-                self.assertGreater(
-                    peak_first,
-                    0.9 * initial_angle,
-                    msg=f"peak amplitude {peak_first:.4f} rad < 0.9 * initial "
-                    f"{initial_angle:.4f} rad -- spurious damping",
-                )
+                self.assertTrue(np.isfinite(angles).all())
+                crossings = np.flatnonzero(np.diff(np.signbit(angles)))
+                self.assertGreaterEqual(len(crossings), 4)
+                times: list[float] = []
+                for frame in crossings[:4]:
+                    angle0 = float(angles[frame])
+                    angle1 = float(angles[frame + 1])
+                    fraction = angle0 / (angle0 - angle1)
+                    times.append((frame + fraction) / PENDULUM_FPS)
+                measured_period = 2.0 * float(np.mean(np.diff(times)))
+                self.assertLess(abs(measured_period - expected_period) / expected_period, 0.05)
+                first_period = int(round(expected_period * PENDULUM_FPS))
+                self.assertGreater(float(np.max(np.abs(angles[: first_period + 1]))), 0.9 * initial_angle)
 
 
 if __name__ == "__main__":
-    wp.init()
     unittest.main()

@@ -446,6 +446,7 @@ def _prepare_direct_rows(
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
+    joint_dof_dim: wp.array2d[wp.int32],
     joint_x_p: wp.array[wp.transform],
     joint_x_c: wp.array[wp.transform],
     joint_target_ke: wp.array[wp.float32],
@@ -505,22 +506,49 @@ def _prepare_direct_rows(
         or mode == JOINT_MODE_UNIVERSAL
     )
     if has_point_lock:
-        for row in range(3):
-            direction = wp.vec3(0.0)
-            direction[row] = wp.float32(1.0)
-            _set_direct_point_row(
-                structural_index,
-                wp.int32(row),
-                point0_com,
-                point1_com,
-                direction,
-                point_error[row],
-                bias_rate,
-                row_wrench0,
-                row_wrench1,
-                row_bias,
-            )
-            row_error[structural_index, row] = point_error[row]
+        if mode == JOINT_MODE_CABLE:
+            material_axis = wp.normalize(wp.quat_rotate(q0, wp.vec3(0.0, 0.0, 1.0)))
+            material_tangent0 = create_orthonormal(material_axis)
+            material_tangent1 = wp.cross(material_axis, material_tangent0)
+            for row in range(3):
+                direction = material_axis if row == 0 else (material_tangent0 if row == 1 else material_tangent1)
+                dof = joint_qd_start[joint] + (wp.int32(0) if row == 0 else wp.int32(1))
+                stiffness = joint_target_ke[dof]
+                damping = joint_target_kd[dof]
+                if stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
+                    error = wp.dot(point_error, direction)
+                    _set_direct_point_row(
+                        structural_index,
+                        wp.int32(row),
+                        point0_com,
+                        point1_com,
+                        direction,
+                        error,
+                        bias_rate,
+                        row_wrench0,
+                        row_wrench1,
+                        row_bias,
+                    )
+                    row_error[structural_index, row] = error
+                    row_stiffness[structural_index, row] = stiffness
+                    row_damping[structural_index, row] = damping
+        else:
+            for row in range(3):
+                direction = wp.vec3(0.0)
+                direction[row] = wp.float32(1.0)
+                _set_direct_point_row(
+                    structural_index,
+                    wp.int32(row),
+                    point0_com,
+                    point1_com,
+                    direction,
+                    point_error[row],
+                    bias_rate,
+                    row_wrench0,
+                    row_wrench1,
+                    row_bias,
+                )
+                row_error[structural_index, row] = point_error[row]
         if mode == JOINT_MODE_BALL_SOCKET:
             return wp.int32(3)
 
@@ -619,6 +647,35 @@ def _prepare_direct_rows(
         return wp.int32(3)
 
     rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
+    if mode == JOINT_MODE_CABLE:
+        material_axis = wp.normalize(wp.quat_rotate(q0, wp.vec3(0.0, 0.0, 1.0)))
+        material_tangent0 = create_orthonormal(material_axis)
+        material_tangent1 = wp.cross(material_axis, material_tangent0)
+        linear_count = joint_dof_dim[joint, 0]
+        for angular_row in range(3):
+            direction = (
+                material_axis if angular_row == 0 else (material_tangent0 if angular_row == 1 else material_tangent1)
+            )
+            dof = joint_qd_start[joint] + linear_count + (wp.int32(1) if angular_row == 0 else wp.int32(0))
+            stiffness = joint_target_ke[dof]
+            damping = joint_target_kd[dof]
+            if stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
+                row = wp.int32(angular_row + 3)
+                error = wp.dot(rotation_error, direction)
+                _set_angular_row(
+                    structural_index,
+                    row,
+                    direction,
+                    error,
+                    bias_rate,
+                    row_wrench0,
+                    row_wrench1,
+                    row_bias,
+                )
+                row_error[structural_index, row] = error
+                row_stiffness[structural_index, row] = stiffness
+                row_damping[structural_index, row] = damping
+        return wp.int32(6)
     if mode == JOINT_MODE_UNIVERSAL:
         error = wp.dot(rotation_error, axis0)
         _set_angular_row(
@@ -700,10 +757,6 @@ def _prepare_direct_rows(
             row_bias,
         )
         row_error[structural_index, row] = error
-        if mode == JOINT_MODE_CABLE:
-            bend_dof = joint_qd_start[joint] + wp.int32(1)
-            row_stiffness[structural_index, row] = joint_target_ke[bend_dof]
-            row_damping[structural_index, row] = joint_target_kd[bend_dof]
     return wp.int32(5) if mode == JOINT_MODE_PRISMATIC else wp.int32(6)
 
 
@@ -715,6 +768,7 @@ def _prepare_direct_equality_rows_kernel(
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
+    joint_dof_dim: wp.array2d[wp.int32],
     joint_x_p: wp.array[wp.transform],
     joint_x_c: wp.array[wp.transform],
     joint_target_ke: wp.array[wp.float32],
@@ -744,6 +798,7 @@ def _prepare_direct_equality_rows_kernel(
         joint_parent,
         joint_child,
         joint_qd_start,
+        joint_dof_dim,
         joint_x_p,
         joint_x_c,
         joint_target_ke,
@@ -1660,6 +1715,7 @@ class DirectEqualitySystem:
                 self.model.joint_parent,
                 self.model.joint_child,
                 self.effective_joint_dof_start,
+                self.model.joint_dof_dim,
                 self.model.joint_X_p,
                 self.model.joint_X_c,
                 self.joint_target_ke,
