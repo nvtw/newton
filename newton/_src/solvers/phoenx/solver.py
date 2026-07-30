@@ -938,10 +938,7 @@ class SolverPhoenX(SolverBase):
         self.world.set_joint_pgs_ownership(joint_pgs_enabled)
 
     def _apply_joint_control(self, control: Control) -> None:
-        """Rewrite ADBS drive dwords from control + model. Falls back to Model
-        targets if Control doesn't supply them."""
-        if self._adbs.num_drive_columns == 0:
-            return
+        """Bind direct targets and rewrite retained inequality-drive metadata."""
         model = self.model
         target_pos = (
             control.joint_target_q
@@ -957,6 +954,8 @@ class SolverPhoenX(SolverBase):
             return  # no per-DOF drive configured
         if self._direct_equality_system is not None:
             self._direct_equality_system.set_control_targets(target_pos, target_vel)
+        if self._adbs.num_drive_columns == 0:
+            return
         wp.launch(
             _apply_joint_drive_control_kernel,
             dim=int(self._adbs.num_drive_columns),
