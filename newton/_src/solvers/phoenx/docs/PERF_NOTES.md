@@ -111,6 +111,7 @@ Do not retry without new evidence or a materially different design.
 | One-block-per-world all-substep megakernel | Register pressure and limited parallelism. |
 | Multiple fused inner sweeps | Live-state cost exceeded launch savings. |
 | 31-row direct panels | Hoberman measured 15.5 FPS versus 34.4 FPS with 32-row panels and compiled more slowly; an odd logical tile did not provide the proposed bank-conflict benefit in Warp's tile layout. |
+| Wider DR Legs direct panels/workers | At 2,000 worlds and 5 substeps x 2 iterations, the retained 16-row/64-thread path measures 114.3 FPS. Solve-only 128-thread workers measure 96.6, factor-only 128-thread workers 113.5, 24-row/64-thread panels 110.8, and 32-row/128-thread panels 76.9 FPS. Many small mechanisms already supply enough independent blocks; keep the 16-row path. |
 | Single-world multi-sweep iterate | Same register/dependency problem. |
 | Small algebra/function-extraction rewrites | Neutral or negative generated code. |
 | Lean greedy fixed-iteration coloring | Incorrect or slower on difficult graphs. |
