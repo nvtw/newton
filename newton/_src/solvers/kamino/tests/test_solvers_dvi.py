@@ -368,8 +368,8 @@ class TestDVISolver(unittest.TestCase):
         )
         self.assertEqual(kamino_config.DVISolverConfig.from_model(model_with_attrs).max_alternating_iterations, 37)
 
-    def test_00a_dvi_contact_capacity_uses_geometry_heuristic(self):
-        """Limit DVI contact allocation while honoring explicit overrides."""
+    def test_00a_contact_capacity_uses_geometry_heuristic(self):
+        """Limit contact allocation for both solvers while honoring explicit overrides."""
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         for box_index in range(10):
@@ -377,17 +377,19 @@ class TestDVISolver(unittest.TestCase):
             builder.add_shape_box(body, hx=0.5, hy=0.5, hz=0.5)
         model = builder.finalize(device=self.device)
 
-        config = SolverKamino.Config(
-            dynamics_solver="dvi",
-            sparse_jacobian=False,
-            use_collision_detector=True,
-        )
-        solver = SolverKamino(model, config)
-        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1000])
-        self.assertLess(
-            solver._contacts_kamino.model_max_contacts_host,
-            solver._model_kamino.geoms.model_minimum_contacts,
-        )
+        for dynamics_solver in ("padmm", "dvi"):
+            with self.subTest(dynamics_solver=dynamics_solver):
+                config = SolverKamino.Config(
+                    dynamics_solver=dynamics_solver,
+                    sparse_jacobian=False,
+                    use_collision_detector=True,
+                )
+                solver = SolverKamino(model, config)
+                self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1000])
+                self.assertLess(
+                    solver._contacts_kamino.model_max_contacts_host,
+                    solver._model_kamino.geoms.model_minimum_contacts,
+                )
         override_config = SolverKamino.Config(
             dynamics_solver="dvi",
             sparse_jacobian=False,
@@ -411,6 +413,16 @@ class TestDVISolver(unittest.TestCase):
                 builder.add_body(is_kinematic=True)
             builder.end_world()
         model = builder.finalize(device=self.device)
+
+        inferred_solver = SolverKamino(
+            model,
+            SolverKamino.Config(
+                dynamics_solver="dvi",
+                sparse_jacobian=False,
+                use_collision_detector=True,
+            ),
+        )
+        self.assertEqual(inferred_solver._collision_detector_kamino._config.max_contacts_per_world, 1000)
 
         config = SolverKamino.Config(
             dynamics_solver="dvi",

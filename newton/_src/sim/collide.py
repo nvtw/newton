@@ -290,6 +290,8 @@ def compute_shape_aabbs(
     geom_xform[shape_id] = X_ws
 
 
+# Primitive pairs (GJK/MPR) produce up to 5 manifold contacts.
+# Mesh-involved pairs (SDF + contact reduction) typically retain about 40.
 _RIGID_CONTACTS_PER_PRIMITIVE_PAIR = 5
 _RIGID_CONTACTS_PER_MESH_PAIR = 40
 _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE = 20
@@ -322,8 +324,6 @@ def _estimate_rigid_contact_max(model: Model) -> int:
     shape_types = model.shape_type.numpy()
     colliding_mask = _shape_collide_mask(model, len(shape_types))
 
-    # Primitive pairs (GJK/MPR) produce up to 5 manifold contacts.
-    # Mesh-involved pairs (SDF + contact reduction) typically retain ~40.
     mesh_mask = colliding_mask & ((shape_types == int(GeoType.MESH)) | (shape_types == int(GeoType.HFIELD)))
     plane_mask = colliding_mask & (shape_types == int(GeoType.PLANE))
     non_plane_mask = colliding_mask & ~plane_mask
