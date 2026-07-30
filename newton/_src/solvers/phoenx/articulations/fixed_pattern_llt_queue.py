@@ -45,42 +45,37 @@ def _block_fence(): ...
 
 @wp.func
 def factor_partial_panel_row(
-    dimension: wp.int32,
-    tile_i: wp.int32,
-    tile_k: wp.int32,
-    table_offset: wp.int32,
-    tile_count: wp.int32,
-    panel_index: wp.array[wp.int32],
+    active_rows: wp.int32,
+    panel_id: wp.int32,
+    diagonal_panel: wp.int32,
+    update_begin: wp.int32,
+    update_end: wp.int32,
+    update_left_panel: wp.array[wp.int32],
+    update_right_panel: wp.array[wp.int32],
     matrix: wp.array[wp.float32],
     factor: wp.array[wp.float32],
     lane: wp.int32,
     block_size: wp.int32,
 ):
-    """Factor one active row of a partial off-diagonal panel."""
-    i = tile_i * block_size
-    if i + lane >= dimension:
+    """Factor one partial panel row using precomputed symbolic addresses."""
+    if lane >= active_rows:
         return
     tile_elements = block_size * block_size
-    panel_id = panel_index[table_offset + tile_i * tile_count + tile_k]
-    diagonal_panel = panel_index[table_offset + tile_k * tile_count + tile_k]
     panel_offset = panel_id * tile_elements
     diagonal_offset = diagonal_panel * tile_elements
 
     column = wp.int32(0)
     while column < block_size:
         value = matrix[panel_offset + lane * block_size + column]
-        tile_j = wp.int32(0)
-        while tile_j < tile_k:
-            left_panel = panel_index[table_offset + tile_i * tile_count + tile_j]
-            right_panel = panel_index[table_offset + tile_k * tile_count + tile_j]
-            if left_panel >= wp.int32(0) and right_panel >= wp.int32(0):
-                left_offset = left_panel * tile_elements + lane * block_size
-                right_offset = right_panel * tile_elements + column * block_size
-                inner = wp.int32(0)
-                while inner < block_size:
-                    value -= factor[left_offset + inner] * factor[right_offset + inner]
-                    inner += wp.int32(1)
-            tile_j += wp.int32(1)
+        update = update_begin
+        while update < update_end:
+            left_offset = update_left_panel[update] * tile_elements + lane * block_size
+            right_offset = update_right_panel[update] * tile_elements + column * block_size
+            inner = wp.int32(0)
+            while inner < block_size:
+                value -= factor[left_offset + inner] * factor[right_offset + inner]
+                inner += wp.int32(1)
+            update += wp.int32(1)
 
         inner = wp.int32(0)
         while inner < column:
@@ -118,19 +113,15 @@ def make_persistent_factor_kernel(block_size: int):
 
     @wp.kernel(enable_backward=False)
     def factor_persistent(
-        task_mechanism: wp.array[wp.int32],
-        task_tile_i: wp.array[wp.int32],
-        task_tile_k: wp.array[wp.int32],
+        task_panel: wp.array[wp.int32],
+        task_diagonal_panel: wp.array[wp.int32],
+        task_active_rows: wp.array[wp.int32],
         task_panel_count: wp.array[wp.int32],
         task_next_diagonal: wp.array[wp.int32],
         task_owner_diagonal: wp.array[wp.int32],
         task_update_start: wp.array[wp.int32],
         update_left_panel: wp.array[wp.int32],
         update_right_panel: wp.array[wp.int32],
-        dimensions: wp.array[wp.int32],
-        panel_table_offset: wp.array[wp.int32],
-        tile_counts: wp.array[wp.int32],
-        panel_index: wp.array[wp.int32],
         matrix: wp.array[wp.float32],
         factor: wp.array[wp.float32],
         queue: wp.array[wp.int32],
@@ -140,7 +131,7 @@ def make_persistent_factor_kernel(block_size: int):
         worker_task: wp.array[wp.int32],
     ):
         worker, lane = wp.tid()
-        task_count = task_mechanism.shape[0]
+        task_count = task_panel.shape[0]
 
         while True:
             if lane == 0:
@@ -157,17 +148,11 @@ def make_persistent_factor_kernel(block_size: int):
             if task < 0:
                 break
 
-            mechanism = task_mechanism[task]
-            tile_i = task_tile_i[task]
-            tile_k = task_tile_k[task]
-            dimension = dimensions[mechanism]
-            tile_count = tile_counts[mechanism]
-            table_offset = panel_table_offset[mechanism]
-            i = tile_i * block_size
-            k = tile_k * block_size
+            panel_id = task_panel[task]
+            diagonal_panel = task_diagonal_panel[task]
+            active_rows = task_active_rows[task]
 
-            if tile_i == tile_k:
-                diagonal_panel = panel_index[table_offset + tile_k * tile_count + tile_k]
+            if panel_id == diagonal_panel:
                 diagonal_matrix = wp.array(
                     ptr=_get_float_array_offset_ptr(matrix, diagonal_panel * tile_elements),
                     shape=(block_size, block_size),
@@ -178,13 +163,13 @@ def make_persistent_factor_kernel(block_size: int):
                     shape=(block_size, block_size),
                     storage="shared",
                 )
-                if k + block_size > dimension:
+                if active_rows < block_size:
                     for iteration in range((tile_elements + wp.block_dim() - 1) // wp.block_dim()):
                         index = (lane + iteration * wp.block_dim()) % tile_elements
                         row = index // block_size
                         column = index % block_size
                         value = diagonal[row, column]
-                        if k + row >= dimension or k + column >= dimension:
+                        if row >= active_rows or column >= active_rows:
                             value = wp.where(row == column, wp.float32(1.0), wp.float32(0.0))
                         diagonal[row, column] = value
 
@@ -205,22 +190,21 @@ def make_persistent_factor_kernel(block_size: int):
                 )
                 wp.tile_store(diagonal_factor, diagonal)
             else:
-                if i + block_size > dimension:
+                if active_rows < block_size:
                     factor_partial_panel_row(
-                        dimension,
-                        tile_i,
-                        tile_k,
-                        table_offset,
-                        tile_count,
-                        panel_index,
+                        active_rows,
+                        panel_id,
+                        diagonal_panel,
+                        task_update_start[task],
+                        task_update_start[task + wp.int32(1)],
+                        update_left_panel,
+                        update_right_panel,
                         matrix,
                         factor,
                         lane,
                         wp.int32(block_size),
                     )
                 else:
-                    panel_id = panel_index[table_offset + tile_i * tile_count + tile_k]
-                    diagonal_panel = panel_index[table_offset + tile_k * tile_count + tile_k]
                     panel_matrix = wp.array(
                         ptr=_get_float_array_offset_ptr(matrix, panel_id * tile_elements),
                         shape=(block_size, block_size),
@@ -259,7 +243,7 @@ def make_persistent_factor_kernel(block_size: int):
                     wp.tile_store(panel_factor, wp.tile_transpose(transposed))
             _block_fence()
             if lane == 0:
-                if tile_i == tile_k:
+                if panel_id == diagonal_panel:
                     panel_count = task_panel_count[task]
                     if panel_count:
                         first_slot = wp.atomic_add(tail, wp.int32(0), panel_count)

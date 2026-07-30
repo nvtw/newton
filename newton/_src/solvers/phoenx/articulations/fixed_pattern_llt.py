@@ -216,12 +216,13 @@ def _make_narrow_factor_kernel(block_size: int):
                 i = tile_i * block_size
                 if i + block_size > dimension:
                     factor_partial_panel_row(
-                        dimension,
-                        tile_i,
-                        tile_k,
-                        table_offset,
-                        tile_count,
-                        panel_index,
+                        dimension - i,
+                        panel_id,
+                        diagonal_panel,
+                        offdiag_update_start[tile_slot],
+                        offdiag_update_start[tile_slot + wp.int32(1)],
+                        offdiag_update_left,
+                        offdiag_update_right,
                         matrix,
                         factor,
                         lane,
@@ -788,6 +789,7 @@ class FixedPatternPanelLLT:
 
         self._persistent_schedule = PersistentFactorSchedule(
             panel_tables,
+            dimensions,
             self.symbolic.panel_count,
             block_size,
             self.device,
@@ -848,10 +850,6 @@ class FixedPatternPanelLLT:
             )
         else:
             self._persistent_schedule.compute(
-                self.dimension,
-                self.panel_table_offset,
-                self.tile_count,
-                self.panel_index,
                 self.matrix,
                 self.factor,
             )

@@ -302,7 +302,7 @@ class TestDirectEquality(unittest.TestCase):
         self.assertGreater(direct.solver.symbolic.panel_count, 9)
         self.assertLess(direct.matrix.size, 130 * 130)
         schedule = direct.solver._persistent_schedule
-        self.assertTrue(np.any(schedule.task_tile_i.numpy() != schedule.task_tile_k.numpy()))
+        self.assertTrue(np.any(schedule.task_panel.numpy() != schedule.task_diagonal_panel.numpy()))
 
         state = model.state()
         _run_captured_steps(solver, state, model.control(), 1)
@@ -517,20 +517,16 @@ class TestDirectEquality(unittest.TestCase):
         self.assertEqual(direct.matrix.size, symbolic.panel_count * direct.solver.block_size**2)
         self.assertLess(direct.matrix.size, 10 * 10 + 40 * 40 + 130 * 130)
         persistent = direct.solver._persistent_schedule
-        self.assertEqual(persistent.task_mechanism.size, symbolic.panel_count)
+        self.assertEqual(persistent.task_panel.size, symbolic.panel_count)
         self.assertEqual(persistent.initial_task.size, 3)
-        task_mechanism = persistent.task_mechanism.numpy()
-        task_tile_i = persistent.task_tile_i.numpy()
-        task_tile_k = persistent.task_tile_k.numpy()
+        task_panel = persistent.task_panel.numpy()
+        task_diagonal_panel = persistent.task_diagonal_panel.numpy()
         self.assertEqual(
-            int(np.count_nonzero(task_tile_i != task_tile_k)), symbolic.panel_count - sum(symbolic.tile_counts)
+            int(np.count_nonzero(task_panel != task_diagonal_panel)),
+            symbolic.panel_count - sum(symbolic.tile_counts),
         )
-        np.testing.assert_array_equal(np.unique(task_mechanism), np.arange(3, dtype=np.int32))
-        for mechanism, tile_count in enumerate(symbolic.tile_counts):
-            self.assertEqual(
-                int(np.count_nonzero((task_mechanism == mechanism) & (task_tile_i == task_tile_k))),
-                tile_count,
-            )
+        np.testing.assert_array_equal(np.sort(task_panel), np.arange(symbolic.panel_count, dtype=np.int32))
+        self.assertEqual(int(np.count_nonzero(task_panel == task_diagonal_panel)), sum(symbolic.tile_counts))
 
         state = model.state()
         _run_captured_steps(solver, state, model.control(), 20)

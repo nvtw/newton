@@ -22,13 +22,14 @@ class PersistentFactorSchedule:
     def __init__(
         self,
         panel_tables: list[np.ndarray],
+        dimensions: tuple[int, ...],
         panel_count: int,
         block_size: int,
         device: wp.Device,
     ):
-        task_mechanism: list[int] = []
-        task_tile_i: list[int] = []
-        task_tile_k: list[int] = []
+        task_panel: list[int] = []
+        task_diagonal_panel: list[int] = []
+        task_active_rows: list[int] = []
         task_panel_count: list[int] = []
         task_next_diagonal: list[int] = []
         task_owner_diagonal: list[int] = []
@@ -52,23 +53,23 @@ class PersistentFactorSchedule:
             previous_diagonal = -1
             for tile_k in range(table.shape[0]):
                 panel_rows = [tile_i for tile_i in range(tile_k + 1, table.shape[0]) if table[tile_i, tile_k] >= 0]
-                diagonal_task = len(task_mechanism)
+                diagonal_task = len(task_panel)
                 if previous_diagonal < 0:
                     initial_task.append(diagonal_task)
                 else:
                     task_next_diagonal[previous_diagonal] = diagonal_task
-                task_mechanism.append(mechanism)
-                task_tile_i.append(tile_k)
-                task_tile_k.append(tile_k)
+                task_panel.append(int(table[tile_k, tile_k]))
+                task_diagonal_panel.append(int(table[tile_k, tile_k]))
+                task_active_rows.append(min(block_size, dimensions[mechanism] - tile_k * block_size))
                 task_panel_count.append(len(panel_rows))
                 task_next_diagonal.append(-1)
                 task_owner_diagonal.append(diagonal_task)
                 remaining_initial.append(len(panel_rows))
                 append_symbolic_updates(table, tile_k, tile_k)
                 for tile_i in panel_rows:
-                    task_mechanism.append(mechanism)
-                    task_tile_i.append(tile_i)
-                    task_tile_k.append(tile_k)
+                    task_panel.append(int(table[tile_i, tile_k]))
+                    task_diagonal_panel.append(int(table[tile_k, tile_k]))
+                    task_active_rows.append(min(block_size, dimensions[mechanism] - tile_i * block_size))
                     task_panel_count.append(0)
                     task_next_diagonal.append(-1)
                     task_owner_diagonal.append(diagonal_task)
@@ -76,15 +77,15 @@ class PersistentFactorSchedule:
                     append_symbolic_updates(table, tile_i, tile_k)
                 previous_diagonal = diagonal_task
 
-        if len(task_mechanism) != panel_count:
+        if len(task_panel) != panel_count:
             raise RuntimeError("persistent task graph must contain one task per symbolic panel")
 
         def task_array(values: list[int]) -> wp.array[wp.int32]:
             return wp.array(values, dtype=wp.int32, device=device)
 
-        self.task_mechanism = task_array(task_mechanism)
-        self.task_tile_i = task_array(task_tile_i)
-        self.task_tile_k = task_array(task_tile_k)
+        self.task_panel = task_array(task_panel)
+        self.task_diagonal_panel = task_array(task_diagonal_panel)
+        self.task_active_rows = task_array(task_active_rows)
         self.task_panel_count = task_array(task_panel_count)
         self.task_next_diagonal = task_array(task_next_diagonal)
         self.task_owner_diagonal = task_array(task_owner_diagonal)
@@ -104,17 +105,13 @@ class PersistentFactorSchedule:
 
     def compute(
         self,
-        dimensions: wp.array[wp.int32],
-        panel_table_offset: wp.array[wp.int32],
-        tile_counts: wp.array[wp.int32],
-        panel_index: wp.array[wp.int32],
         matrix: wp.array[wp.float32],
         factor: wp.array[wp.float32],
     ) -> None:
         """Initialize and drain the dependency-ready panel queue."""
         wp.launch(
             initialize_panel_queue,
-            dim=self.task_mechanism.size,
+            dim=self.task_panel.size,
             inputs=[
                 self.initial_task,
                 self.remaining_initial,
@@ -130,19 +127,15 @@ class PersistentFactorSchedule:
             dim=self.worker_task.size,
             block_dim=64,
             inputs=[
-                self.task_mechanism,
-                self.task_tile_i,
-                self.task_tile_k,
+                self.task_panel,
+                self.task_diagonal_panel,
+                self.task_active_rows,
                 self.task_panel_count,
                 self.task_next_diagonal,
                 self.task_owner_diagonal,
                 self.task_update_start,
                 self.update_left_panel,
                 self.update_right_panel,
-                dimensions,
-                panel_table_offset,
-                tile_counts,
-                panel_index,
                 matrix,
                 factor,
                 self.queue,
