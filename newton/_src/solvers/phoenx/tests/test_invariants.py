@@ -25,6 +25,7 @@ from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
 )
+from newton._src.solvers.phoenx.constraints.constraint_joint import DRIVE_MODE_OFF, JOINT_MODE_PRISMATIC
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES
 from newton._src.solvers.phoenx.solver_phoenx import (
     PhoenXWorld,
@@ -33,7 +34,6 @@ from newton._src.solvers.phoenx.solver_phoenx import (
     _choose_fast_tail_worlds_per_block_for_scene,
     _choose_multi_world_scheduler,
 )
-from newton._src.solvers.phoenx.world_builder import DriveMode, JointMode
 
 
 def _make_kwargs(
@@ -408,6 +408,7 @@ class TestPrepareRefreshStride(unittest.TestCase):
             )
 
     def test_accepts_non_revolute_joint_stride(self) -> None:
+        """Accept the inequality-column storage for a prismatic joint."""
         w = PhoenXWorld(
             **_make_kwargs(num_bodies=2, num_joints=1, rigid_contact_max=1),
             step_layout="single_world",
@@ -431,8 +432,8 @@ class TestPrepareRefreshStride(unittest.TestCase):
             anchor2=_v((1.0, 0.0, 0.0)),
             hertz=_f(60.0),
             damping_ratio=_f(1.0),
-            joint_mode=_i(int(JointMode.PRISMATIC)),
-            drive_mode=_i(int(DriveMode.OFF)),
+            joint_mode=_i(int(JOINT_MODE_PRISMATIC)),
+            drive_mode=_i(int(DRIVE_MODE_OFF)),
             target=_f(0.0),
             target_velocity=_f(0.0),
             max_force_drive=_f(0.0),

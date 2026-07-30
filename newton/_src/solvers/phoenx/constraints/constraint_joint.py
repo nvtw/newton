@@ -178,8 +178,7 @@ DRIVE_MODE_POSITION = wp.constant(wp.int32(1))
 #: supply ``damping_drive > 0`` [N*s/m or N*m*s/rad], which acts as the
 #: proportional gain on velocity error. ``max_force_drive`` optionally
 #: clamps the per-substep impulse (N*s or N*m*s). There is no rigid
-#: pure-velocity-motor fallback when ``damping_drive == 0``;
-#: :meth:`WorldBuilder.add_joint` rejects that up front.
+#: pure-velocity-motor fallback when ``damping_drive == 0``.
 DRIVE_MODE_VELOCITY = wp.constant(wp.int32(2))
 
 

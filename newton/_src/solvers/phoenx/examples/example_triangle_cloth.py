@@ -9,18 +9,7 @@
 # body whose mass / inertia comes from the prism interpretation of
 # :data:`newton.GeoType.TRIANGLE` (thickness ``2 * margin``); neighbouring
 # triangles are tied together with ball-socket joints at the cloth-grid
-# corners they share, so each corner anchors a "fan" of incident triangle
-# bodies in the same way the capsule net anchors a star of capsule
-# segments.
-#
-# Comparison with :mod:`example_capsule_net`:
-#
-# * Capsule net: cells are linked by capsule *edges* and joined at corners.
-# * Triangle cloth: cells are filled by triangle *faces* (two per quad)
-#   and joined at corners as well.
-#
-# Both share the same chain-of-incident-bodies pattern at each corner --
-# one ball-socket joint per consecutive pair, no redundant links.
+# corners they share. Each corner anchors a fan of incident triangle bodies.
 #
 # Collision filtering. Two triangles that share even a single vertex sit
 # at zero (or near-zero) separation at rest and would generate spurious
@@ -32,10 +21,10 @@
 # ~6^2 / 2 per corner for a regular grid. Non-adjacent triangles still
 # collide normally (e.g. two cloths swinging into each other).
 #
-# Articulation. PhoenX's ADBS treats every enabled joint as an
-# independent constraint column, so the cloth's joint graph is allowed
-# to have cycles -- but ``ModelBuilder.finalize`` insists every dynamic
-# body be reachable from some articulated joint. ``add_body`` already
+# Joint graph. PhoenX automatically detects the connected mechanism and
+# solves its bilateral ball-socket rows as one direct equality system. Cycles
+# are allowed. ``ModelBuilder.finalize`` still requires every dynamic body to
+# be reachable from an articulated joint. ``add_body`` already
 # does that for us: each call wraps the new body in a single-joint
 # articulation backed by a FREE joint (which the PhoenX model adapter
 # skips, see ``newton._src.solvers.phoenx.model_adapter``). Every

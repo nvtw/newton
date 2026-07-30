@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Host-side builder assembling a :class:`PhoenXWorld` from Python descriptors.
+"""Host-side builder assembling a contact-only :class:`PhoenXWorld`.
 
-Two-phase: append descriptors, then :meth:`WorldBuilder.finalize` packs them and
-returns the ready :class:`PhoenXWorld`. Bodies ``[0, num_worlds)`` are each
-world's static anchor; user bodies start at index ``num_worlds``.
+Two-phase: append body and shape descriptors, then
+:meth:`WorldBuilder.finalize` packs them and returns the ready
+:class:`PhoenXWorld`. Bodies ``[0, num_worlds)`` are static anchors; user
+bodies start at index ``num_worlds``. Jointed scenes must use
+:class:`ModelBuilder` so PhoenX can assemble direct equality systems.
 """
 
 from __future__ import annotations
@@ -29,29 +31,10 @@ from newton._src.solvers.phoenx.body import (
     inertia_sym6_pack_np,
     reduced_articulation_data_zeros,
 )
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    DEFAULT_DAMPING_RATIO,
-    DEFAULT_HERTZ_LIMIT,
-    DEFAULT_HERTZ_LINEAR,
-)
-from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    DRIVE_MODE_OFF,
-    DRIVE_MODE_POSITION,
-    DRIVE_MODE_VELOCITY,
-    JOINT_MODE_BALL_SOCKET,
-    JOINT_MODE_CABLE,
-    JOINT_MODE_FIXED,
-    JOINT_MODE_PRISMATIC,
-    JOINT_MODE_REVOLUTE,
-)
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 __all__ = [
     "WORLD_BODY",
-    "DriveMode",
-    "JointDescriptor",
-    "JointHandle",
-    "JointMode",
     "RigidBodyDescriptor",
     "ShapeDescriptor",
     "ShapeType",
@@ -59,7 +42,7 @@ __all__ = [
 ]
 
 
-#: Sentinel for joint add helpers to refer to the static world anchor.
+#: Body index of the world 0 static anchor.
 WORLD_BODY = 0
 
 
@@ -81,34 +64,6 @@ def _all_finite(seq) -> bool:
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
-
-
-class DriveMode(IntEnum):
-    """Drive mode for an actuated joint's free DoF. Values match the
-    underlying Warp ``DRIVE_MODE_*`` constants exactly."""
-
-    OFF = int(DRIVE_MODE_OFF)
-    POSITION = int(DRIVE_MODE_POSITION)
-    VELOCITY = int(DRIVE_MODE_VELOCITY)
-
-
-class JointMode(IntEnum):
-    """ADBS joint mode.
-
-    * REVOLUTE — 5-DoF hinge along ``anchor1 -> anchor2``.
-    * PRISMATIC — 5-DoF slider along ``anchor1 -> anchor2``.
-    * BALL_SOCKET — 3-DoF point lock at ``anchor1`` (no drive/limit).
-    * FIXED — 6-DoF weld (no drive/limit).
-    * CABLE — soft fixed joint with PD bend (anchor-2 tangent rows) and PD twist
-      (anchor-3 scalar row). User-facing ``bend_*`` reuses drive slots; ``twist_*``
-      reuses limit slots. Gains rescaled by ``1 / rest_length^2``.
-    """
-
-    REVOLUTE = int(JOINT_MODE_REVOLUTE)
-    PRISMATIC = int(JOINT_MODE_PRISMATIC)
-    BALL_SOCKET = int(JOINT_MODE_BALL_SOCKET)
-    FIXED = int(JOINT_MODE_FIXED)
-    CABLE = int(JOINT_MODE_CABLE)
 
 
 class ShapeType(IntEnum):
@@ -152,45 +107,6 @@ class RigidBodyDescriptor:
     #: Index of the world this body belongs to. Must be in
     #: ``[0, num_worlds)``.
     world_id: int = 0
-
-
-@dataclass
-class JointDescriptor:
-    """One ADBS joint. ``anchor1``/``anchor2`` are world points on the joint axis
-    at finalize() time. Drive disabled when stiffness_drive == damping_drive == 0;
-    limit disabled when min_value > max_value. Positive limit PD gains use the PD
-    path, else the Box2D (hertz, damping_ratio) formulation."""
-
-    body1: int
-    body2: int
-    anchor1: tuple[float, float, float]
-    anchor2: tuple[float, float, float]
-    mode: JointMode = JointMode.REVOLUTE
-    hertz: float = float(DEFAULT_HERTZ_LINEAR)
-    damping_ratio: float = float(DEFAULT_DAMPING_RATIO)
-    drive_mode: DriveMode = DriveMode.OFF
-    target: float = 0.0
-    target_velocity: float = 0.0
-    max_force_drive: float = 0.0
-    stiffness_drive: float = 0.0
-    damping_drive: float = 0.0
-    min_value: float = 1.0
-    max_value: float = -1.0
-    hertz_limit: float = float(DEFAULT_HERTZ_LIMIT)
-    damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO)
-    stiffness_limit: float = 0.0
-    damping_limit: float = 0.0
-
-
-@dataclass
-class JointHandle:
-    """Global cid of a joint created by :meth:`WorldBuilder.add_joint`.
-
-    Returned with sentinel ``cid = -1``; rewritten in place by
-    :meth:`finalize` to the joint's cid in the shared
-    :class:`ConstraintContainer`."""
-
-    cid: int = -1
 
 
 @dataclass
@@ -344,25 +260,25 @@ def _validate_body_descriptor(desc: RigidBodyDescriptor, body_index: int) -> Non
 
 
 class WorldBuilder:
-    """Append bodies and joints, then materialise a :class:`PhoenXWorld`.
+    """Append bodies and shapes, then materialise a :class:`PhoenXWorld`.
 
     Usage::
 
         b = WorldBuilder()
-        anchor = b.add_static_body()
-        body_a = b.add_dynamic_body(position=(0, 0, 0), inverse_mass=1.0)
-        body_b = b.add_dynamic_body(position=(1, 0, 0), inverse_mass=1.0)
-        b.add_joint(body_a, body_b, anchor1=(0.5, 0, 0), mode=JointMode.BALL_SOCKET)
-        world = b.finalize(substeps=1, solver_iterations=8)
+        body = b.add_dynamic_body(position=(0, 0, 1), inverse_mass=1.0)
+        b.add_shape_sphere(body, radius=0.5)
+        world = b.finalize(substeps=5, solver_iterations=2)
 
-    Single-use; call :meth:`finalize` exactly once.
+    This low-level builder is contact-only. Use :class:`ModelBuilder` for
+    jointed scenes so PhoenX can detect mechanisms and solve their equalities
+    directly. Single-use; call :meth:`finalize` exactly once.
     """
 
     def __init__(self, num_worlds: int = 1):
         if num_worlds < 1:
             raise ValueError(f"num_worlds must be >= 1 (got {num_worlds})")
         self._num_worlds: int = int(num_worlds)
-        # One static world anchor per world (drives per-world CSR bucketing).
+        # One static anchor per world.
         self._bodies: list[RigidBodyDescriptor] = [
             RigidBodyDescriptor(
                 inverse_mass=0.0,
@@ -372,8 +288,6 @@ class WorldBuilder:
             )
             for w in range(self._num_worlds)
         ]
-        self._joint_descriptors: list[JointDescriptor] = []
-        self._joint_handles: list[JointHandle] = []
         self._collision_filter_pairs: set[tuple[int, int]] = set()
         self._shapes: list[ShapeDescriptor] = []
 
@@ -624,181 +538,6 @@ class WorldBuilder:
             )
         )
 
-    # ------------------------------------------------------------------
-    # Joint API
-    # ------------------------------------------------------------------
-
-    def add_joint(
-        self,
-        body1: int,
-        body2: int,
-        anchor1: tuple[float, float, float],
-        anchor2: tuple[float, float, float] | None = None,
-        mode: JointMode = JointMode.REVOLUTE,
-        hertz: float = float(DEFAULT_HERTZ_LINEAR),
-        damping_ratio: float = float(DEFAULT_DAMPING_RATIO),
-        drive_mode: DriveMode = DriveMode.OFF,
-        target: float = 0.0,
-        target_velocity: float = 0.0,
-        max_force_drive: float = 0.0,
-        stiffness_drive: float = 0.0,
-        damping_drive: float = 0.0,
-        min_value: float = 1.0,
-        max_value: float = -1.0,
-        hertz_limit: float = float(DEFAULT_HERTZ_LIMIT),
-        damping_ratio_limit: float = float(DEFAULT_DAMPING_RATIO),
-        stiffness_limit: float = 0.0,
-        damping_limit: float = 0.0,
-        # CABLE mode only -- per-component bend / twist stiffness and damping.
-        bend_stiffness: float = 0.0,
-        twist_stiffness: float = 0.0,
-        bend_damping: float = 0.0,
-        twist_damping: float = 0.0,
-    ) -> JointHandle:
-        """Append an actuated double-ball-socket joint. Returns a handle whose
-        ``cid`` is rewritten by :meth:`finalize`.
-
-        REVOLUTE/PRISMATIC use ``anchor1 -> anchor2`` as the joint axis (drive/
-        limit in rad/[N·m] or m/[N]); FIXED welds along that line; CABLE adds PD
-        bend (perp axes) and PD twist (along axis). BALL_SOCKET point-locks at
-        anchor1. ``min_value > max_value`` disables the limit.
-        """
-        self._validate_body(body1)
-        self._validate_body(body2)
-
-        mode_enum = JointMode(int(mode))
-        drive_mode_enum = DriveMode(int(drive_mode))
-
-        if mode_enum is JointMode.BALL_SOCKET:
-            if anchor2 is not None:
-                raise ValueError("add_joint(mode=BALL_SOCKET) must not receive an ``anchor2``")
-            if drive_mode_enum is not DriveMode.OFF:
-                raise ValueError("add_joint(mode=BALL_SOCKET) has no drive row; leave drive_mode=DriveMode.OFF")
-            if target != 0.0 or target_velocity != 0.0 or max_force_drive != 0.0:
-                raise ValueError(
-                    "add_joint(mode=BALL_SOCKET) has no drive row; leave "
-                    "target/target_velocity/max_force_drive at defaults"
-                )
-            if min_value <= max_value:
-                raise ValueError(
-                    "add_joint(mode=BALL_SOCKET) has no limit row; leave "
-                    "min_value/max_value at defaults (min > max disables)"
-                )
-            if stiffness_limit != 0.0 or damping_limit != 0.0:
-                raise ValueError(
-                    "add_joint(mode=BALL_SOCKET) has no limit row; leave stiffness_limit/damping_limit at 0"
-                )
-            anchor2_effective: tuple[float, float, float] = tuple(anchor1)  # type: ignore[assignment]
-        elif mode_enum is JointMode.FIXED:
-            if anchor2 is None:
-                raise ValueError(
-                    "add_joint(mode=FIXED) requires ``anchor2``; the line "
-                    "anchor1 -> anchor2 defines the weld's body-frame axis"
-                )
-            if drive_mode_enum is not DriveMode.OFF:
-                raise ValueError("add_joint(mode=FIXED) has no drive row; leave drive_mode=DriveMode.OFF")
-            if target != 0.0 or target_velocity != 0.0 or max_force_drive != 0.0:
-                raise ValueError(
-                    "add_joint(mode=FIXED) has no drive row; leave target/target_velocity/max_force_drive at defaults"
-                )
-            if min_value <= max_value:
-                raise ValueError(
-                    "add_joint(mode=FIXED) has no limit row; leave min_value/max_value at defaults (min > max disables)"
-                )
-            if stiffness_limit != 0.0 or damping_limit != 0.0:
-                raise ValueError("add_joint(mode=FIXED) has no limit row; leave stiffness_limit/damping_limit at 0")
-            anchor2_effective = anchor2
-        elif mode_enum is JointMode.CABLE:
-            if anchor2 is None:
-                raise ValueError(
-                    "add_joint(mode=CABLE) requires ``anchor2``; the line "
-                    "anchor1 -> anchor2 defines the cable's reference "
-                    "axis. Bend stiffness acts on the two axes "
-                    "perpendicular to it; twist stiffness on the axis "
-                    "itself."
-                )
-            if drive_mode_enum is not DriveMode.OFF:
-                raise ValueError(
-                    "add_joint(mode=CABLE) has no drive row; leave "
-                    "drive_mode=DriveMode.OFF (use bend_stiffness / "
-                    "twist_stiffness instead of the drive)"
-                )
-            if target != 0.0 or target_velocity != 0.0 or max_force_drive != 0.0:
-                raise ValueError(
-                    "add_joint(mode=CABLE) has no drive row; leave target/target_velocity/max_force_drive at defaults"
-                )
-            if min_value <= max_value:
-                raise ValueError(
-                    "add_joint(mode=CABLE) has no limit row; leave min_value/max_value at defaults (min > max disables)"
-                )
-            if stiffness_drive != 0.0 or damping_drive != 0.0:
-                raise ValueError(
-                    "add_joint(mode=CABLE) does not use stiffness_drive / "
-                    "damping_drive directly -- pass bend_stiffness / "
-                    "bend_damping (they share the same column slots)"
-                )
-            if stiffness_limit != 0.0 or damping_limit != 0.0:
-                raise ValueError(
-                    "add_joint(mode=CABLE) does not use stiffness_limit / "
-                    "damping_limit directly -- pass twist_stiffness / "
-                    "twist_damping (they share the same column slots)"
-                )
-            if bend_stiffness < 0.0 or twist_stiffness < 0.0 or bend_damping < 0.0 or twist_damping < 0.0:
-                raise ValueError("add_joint(mode=CABLE) requires non-negative bend / twist stiffness and damping")
-            # The kernel reads bend_*/twist_* from drive/limit slots; gains
-            # rescaled by 1/rest_length^2 to convert N·m/rad -> N/m.
-            stiffness_drive = float(bend_stiffness)
-            damping_drive = float(bend_damping)
-            stiffness_limit = float(twist_stiffness)
-            damping_limit = float(twist_damping)
-            anchor2_effective = anchor2
-        else:
-            if anchor2 is None:
-                raise ValueError(
-                    f"add_joint(mode={mode_enum.name}) requires ``anchor2``; "
-                    "the line anchor1 -> anchor2 defines the joint axis"
-                )
-            anchor2_effective = anchor2
-            if drive_mode_enum is DriveMode.VELOCITY and damping_drive <= 0.0:
-                raise ValueError(
-                    f"add_joint(mode={mode_enum.name}, drive_mode=VELOCITY) "
-                    "requires damping_drive > 0 (PD velocity servo)."
-                )
-
-        if mode_enum is not JointMode.CABLE and (
-            bend_stiffness != 0.0 or twist_stiffness != 0.0 or bend_damping != 0.0 or twist_damping != 0.0
-        ):
-            raise ValueError(
-                f"add_joint(mode={mode_enum.name}): bend/twist stiffness / "
-                "damping are only meaningful for JointMode.CABLE"
-            )
-
-        descriptor = JointDescriptor(
-            body1=body1,
-            body2=body2,
-            anchor1=anchor1,
-            anchor2=anchor2_effective,
-            mode=mode_enum,
-            hertz=hertz,
-            damping_ratio=damping_ratio,
-            drive_mode=drive_mode_enum,
-            target=target,
-            target_velocity=target_velocity,
-            max_force_drive=max_force_drive,
-            stiffness_drive=stiffness_drive,
-            damping_drive=damping_drive,
-            min_value=min_value,
-            max_value=max_value,
-            hertz_limit=hertz_limit,
-            damping_ratio_limit=damping_ratio_limit,
-            stiffness_limit=stiffness_limit,
-            damping_limit=damping_limit,
-        )
-        handle = JointHandle(cid=-1)
-        self._joint_descriptors.append(descriptor)
-        self._joint_handles.append(handle)
-        return handle
-
     def add_collision_filter_pair(self, body_a: int, body_b: int) -> None:
         """Ignore contacts between ``body_a`` and ``body_b`` (canonical (min, max))."""
         self._validate_body(body_a)
@@ -843,18 +582,12 @@ class WorldBuilder:
         ``%globaltimer``-based per-column wall-clock profiler.
         """
         device = wp.get_device(device)
-        if solver_flavor == "simple" and self._joint_descriptors:
-            raise NotImplementedError(
-                "raw WorldBuilder joint scenes require solver_flavor='standard'; the simple flavor is contact-only"
-            )
-
         # Shape mass/inertia must run before _build_body_container reads it.
         self._accumulate_mass_inertia_from_shapes()
 
-        num_joints = len(self._joint_descriptors)
         bodies = self._build_body_container(device)
         constraints = PhoenXWorld.make_constraint_container(
-            num_joints=num_joints,
+            num_joints=0,
             device=device,
         )
 
@@ -875,7 +608,7 @@ class WorldBuilder:
             velocity_iterations=velocity_iterations,
             gravity=gravity,
             rigid_contact_max=rigid_contact_max,
-            num_joints=num_joints,
+            num_joints=0,
             collision_filter_pairs=self._collision_filter_pairs,
             default_friction=default_friction,
             num_worlds=self._num_worlds,
@@ -890,13 +623,6 @@ class WorldBuilder:
             enable_column_timers=enable_column_timers,
             device=device,
         )
-
-        if num_joints > 0:
-            joint_arrays = self._pack_joint_arrays(device)
-            world.initialize_actuated_double_ball_socket_joints(**joint_arrays)
-            # Patch handle cids (joints occupy cids [0, num_joints)).
-            for i, handle in enumerate(self._joint_handles):
-                handle.cid = i
 
         if self._shapes:
             shape_body_np = np.asarray([int(s.body) for s in self._shapes], dtype=np.int32)
@@ -920,8 +646,6 @@ class WorldBuilder:
             )
             for w in range(self._num_worlds)
         ]
-        self._joint_descriptors = []
-        self._joint_handles = []
         self._collision_filter_pairs = set()
         self._shapes = []
         return world
@@ -1090,70 +814,3 @@ class WorldBuilder:
         c.island_root = wp.full(n, value=-1, dtype=wp.int32, device=device)
         c.frames_below_threshold = wp.zeros(n, dtype=wp.int32, device=device)
         return c
-
-    def _pack_joint_arrays(self, device: wp.context.Device) -> dict:
-        """Pack joint descriptors into init kwargs for
-        :meth:`PhoenXWorld.initialize_actuated_double_ball_socket_joints`."""
-        n = len(self._joint_descriptors)
-        body1 = np.empty(n, dtype=np.int32)
-        body2 = np.empty(n, dtype=np.int32)
-        anchor1 = np.empty((n, 3), dtype=np.float32)
-        anchor2 = np.empty((n, 3), dtype=np.float32)
-        hertz = np.empty(n, dtype=np.float32)
-        damping_ratio = np.empty(n, dtype=np.float32)
-        joint_mode = np.empty(n, dtype=np.int32)
-        drive_mode = np.empty(n, dtype=np.int32)
-        target = np.empty(n, dtype=np.float32)
-        target_velocity = np.empty(n, dtype=np.float32)
-        max_force_drive = np.empty(n, dtype=np.float32)
-        stiffness_drive = np.empty(n, dtype=np.float32)
-        damping_drive = np.empty(n, dtype=np.float32)
-        min_value = np.empty(n, dtype=np.float32)
-        max_value = np.empty(n, dtype=np.float32)
-        hertz_limit = np.empty(n, dtype=np.float32)
-        damping_ratio_limit = np.empty(n, dtype=np.float32)
-        stiffness_limit = np.empty(n, dtype=np.float32)
-        damping_limit = np.empty(n, dtype=np.float32)
-
-        for i, d in enumerate(self._joint_descriptors):
-            body1[i] = int(d.body1)
-            body2[i] = int(d.body2)
-            anchor1[i] = d.anchor1
-            anchor2[i] = d.anchor2
-            hertz[i] = float(d.hertz)
-            damping_ratio[i] = float(d.damping_ratio)
-            joint_mode[i] = int(d.mode)
-            drive_mode[i] = int(d.drive_mode)
-            target[i] = float(d.target)
-            target_velocity[i] = float(d.target_velocity)
-            max_force_drive[i] = float(d.max_force_drive)
-            stiffness_drive[i] = float(d.stiffness_drive)
-            damping_drive[i] = float(d.damping_drive)
-            min_value[i] = float(d.min_value)
-            max_value[i] = float(d.max_value)
-            hertz_limit[i] = float(d.hertz_limit)
-            damping_ratio_limit[i] = float(d.damping_ratio_limit)
-            stiffness_limit[i] = float(d.stiffness_limit)
-            damping_limit[i] = float(d.damping_limit)
-
-        return {
-            "body1": wp.array(body1, dtype=wp.int32, device=device),
-            "body2": wp.array(body2, dtype=wp.int32, device=device),
-            "anchor1": wp.array(anchor1, dtype=wp.vec3f, device=device),
-            "anchor2": wp.array(anchor2, dtype=wp.vec3f, device=device),
-            "hertz": wp.array(hertz, dtype=wp.float32, device=device),
-            "damping_ratio": wp.array(damping_ratio, dtype=wp.float32, device=device),
-            "joint_mode": wp.array(joint_mode, dtype=wp.int32, device=device),
-            "drive_mode": wp.array(drive_mode, dtype=wp.int32, device=device),
-            "target": wp.array(target, dtype=wp.float32, device=device),
-            "target_velocity": wp.array(target_velocity, dtype=wp.float32, device=device),
-            "max_force_drive": wp.array(max_force_drive, dtype=wp.float32, device=device),
-            "stiffness_drive": wp.array(stiffness_drive, dtype=wp.float32, device=device),
-            "damping_drive": wp.array(damping_drive, dtype=wp.float32, device=device),
-            "min_value": wp.array(min_value, dtype=wp.float32, device=device),
-            "max_value": wp.array(max_value, dtype=wp.float32, device=device),
-            "hertz_limit": wp.array(hertz_limit, dtype=wp.float32, device=device),
-            "damping_ratio_limit": wp.array(damping_ratio_limit, dtype=wp.float32, device=device),
-            "stiffness_limit": wp.array(stiffness_limit, dtype=wp.float32, device=device),
-            "damping_limit": wp.array(damping_limit, dtype=wp.float32, device=device),
-        }

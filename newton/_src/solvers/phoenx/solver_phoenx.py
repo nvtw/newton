@@ -1915,10 +1915,9 @@ class PhoenXWorld:
                 the joint axis for revolute / prismatic modes.
             hertz, damping_ratio: Positional-block soft-constraint
                 frequency [Hz] and damping ratio.
-            joint_mode: Per-joint
-                :class:`JointMode` enum (``wp.array[int32]``).
-            drive_mode: Per-joint
-                :class:`DriveMode` enum.
+            joint_mode: Per-joint ``JOINT_MODE_*`` tag
+                (``wp.array[int32]``).
+            drive_mode: Per-joint ``DRIVE_MODE_*`` tag.
             target, target_velocity: PD setpoints [rad / rad/s for
                 revolute, m / m/s for prismatic].
             max_force_drive, stiffness_drive, damping_drive: Drive

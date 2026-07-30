@@ -21,7 +21,6 @@ from newton._src.solvers.phoenx.simple.rows import (
     solve_scalar_rows_jacobi_kernel,
 )
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
-from newton._src.solvers.phoenx.world_builder import JointMode, WorldBuilder
 
 
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "simple PhoenX tests require CUDA graph capture")
@@ -75,21 +74,6 @@ class TestSimplePhoenX(unittest.TestCase):
                 velocity_iterations=0,
                 solver_flavor="simple",
             )
-
-        raw_builder = WorldBuilder()
-        raw_body = raw_builder.add_dynamic_body(
-            inverse_mass=1.0,
-            inverse_inertia=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
-        )
-        raw_builder.add_joint(
-            body1=raw_builder.world_body,
-            body2=raw_body,
-            anchor1=(0.0, 0.0, 0.0),
-            mode=JointMode.FIXED,
-            anchor2=(1.0, 0.0, 0.0),
-        )
-        with self.assertRaisesRegex(NotImplementedError, "contact-only"):
-            raw_builder.finalize(solver_flavor="simple", device=wp.get_preferred_device())
 
     def test_contact_rows_settle_in_captured_pipeline(self) -> None:
         """Settle contact rows in both captured scheduling layouts."""

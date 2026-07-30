@@ -353,7 +353,7 @@ class TestKinematicNewtonCollisionPipeline(unittest.TestCase):
             getattr(bodies, arr_name).assign(arr)
         for arr_name in ("inverse_inertia", "inverse_inertia_world"):
             arr = getattr(bodies, arr_name).numpy()
-            arr[slot] = np.zeros((3, 3), dtype=np.float32)
+            arr[slot] = 0.0
             getattr(bodies, arr_name).assign(arr)
 
         constraints = PhoenXWorld.make_constraint_container(num_joints=0, device=device)
