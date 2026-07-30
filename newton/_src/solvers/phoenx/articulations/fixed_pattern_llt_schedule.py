@@ -101,6 +101,7 @@ class PersistentFactorSchedule:
         worker_count = min(panel_count, max(1, 4 * device.sm_count))
         self.worker_task = wp.full(worker_count, -1, dtype=wp.int32, device=device)
         self.kernel = make_persistent_factor_kernel(block_size)
+        self.block_dim = 128 if block_size == 32 else 64
         self.device = device
 
     def compute(
@@ -125,7 +126,7 @@ class PersistentFactorSchedule:
         wp.launch_tiled(
             self.kernel,
             dim=self.worker_task.size,
-            block_dim=64,
+            block_dim=self.block_dim,
             inputs=[
                 self.task_panel,
                 self.task_diagonal_panel,

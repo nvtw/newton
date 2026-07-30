@@ -53,6 +53,10 @@ _MAX_ROWS = 6
 _FP32_BASE_REGULARIZATION = 3.0e-6
 _FP32_RANK_REGULARIZATION = float(np.sqrt(np.finfo(np.float32).eps))
 _DIRECT_BAUMGARTE = 0.2
+_PANEL_BLOCK_SIZE = 16
+_WIDE_PANEL_BLOCK_SIZE = 32
+_WIDE_PANEL_MIN_ROWS = 1024
+_WIDE_PANEL_CYCLE_SCALE = 4
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,34 @@ class DirectEqualityTopology:
     mechanism_requires_rank_floor: tuple[bool, ...]
     body_row_start: np.ndarray
     body_rows: np.ndarray
+
+
+def _select_panel_block_size(
+    topology: DirectEqualityTopology,
+    joint_parent: np.ndarray,
+    joint_child: np.ndarray,
+    inverse_mass: np.ndarray,
+) -> int:
+    """Select wider panels only for one large, loop-dense mechanism."""
+    if len(topology.dimensions) != 1 or topology.dimensions[0] < _WIDE_PANEL_MIN_ROWS:
+        return _PANEL_BLOCK_SIZE
+
+    joints = topology.joints
+    dynamic_bodies: set[int] = set()
+    anchored = False
+    for joint_np in joints:
+        joint = int(joint_np)
+        for body in (int(joint_parent[joint]), int(joint_child[joint])):
+            if body >= 0 and inverse_mass[body] > 0.0:
+                dynamic_bodies.add(body)
+            else:
+                anchored = True
+
+    free_modes = 0 if anchored else 1
+    cycle_rank = max(0, len(joints) - len(dynamic_bodies) + free_modes)
+    if dynamic_bodies and _WIDE_PANEL_CYCLE_SCALE * cycle_rank >= len(dynamic_bodies):
+        return _WIDE_PANEL_BLOCK_SIZE
+    return _PANEL_BLOCK_SIZE
 
 
 def _default_joint_modes(joint_types: np.ndarray) -> np.ndarray:
@@ -1706,12 +1738,18 @@ class DirectEqualitySystem:
             )
             for joint in self.topology.row_joint
         )
+        panel_block_size = _select_panel_block_size(
+            self.topology,
+            joint_parent,
+            joint_child,
+            inverse_mass,
+        )
         self.solver = FixedPatternPanelLLT(
             self.topology.dimensions,
             self.topology.mechanism_row_start,
             self.topology.permutation,
             row_bodies,
-            block_size=16,
+            block_size=panel_block_size,
             device=device,
         )
         symbolic = self.solver.symbolic

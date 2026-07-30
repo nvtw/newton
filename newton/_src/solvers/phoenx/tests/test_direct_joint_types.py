@@ -286,6 +286,50 @@ class TestDirectJointTypes(unittest.TestCase):
             relative_residual = np.linalg.norm(residual) / np.linalg.norm(rhs_np[begin:end])
             self.assertLess(relative_residual, 5.0e-3)
 
+    def test_wide_partial_panels_match_dense_residual(self) -> None:
+        """Match a dense residual with 32-row partial panels."""
+        dimension = 100
+        starts = np.asarray((0, dimension), dtype=np.int32)
+        permutation = np.arange(dimension, dtype=np.int32)
+        row_bodies = tuple(frozenset((0,)) for _ in range(dimension))
+        panel = FixedPatternPanelLLT(
+            (dimension,),
+            starts,
+            permutation,
+            row_bodies,
+            block_size=32,
+            device=wp.get_preferred_device(),
+        )
+        self.assertEqual(panel.block_size, 32)
+        self.assertEqual(panel.partial_large_mechanism.size, 1)
+
+        rng = np.random.default_rng(5678)
+        basis, _ = np.linalg.qr(rng.normal(size=(dimension, dimension)))
+        eigenvalues = np.geomspace(1.0, 1.0e4, dimension)
+        matrix = basis @ np.diag(eigenvalues) @ basis.T
+        rhs_np = rng.normal(size=dimension).astype(np.float32)
+
+        storage = np.zeros(panel.matrix.size, dtype=np.float32)
+        for row, column, address in zip(
+            panel.symbolic.matrix_row,
+            panel.symbolic.matrix_column,
+            panel.symbolic.matrix_storage,
+            strict=True,
+        ):
+            storage[address] = matrix[row, column]
+        panel.matrix.assign(storage)
+        rhs = wp.array(rhs_np, dtype=wp.float32, device=wp.get_preferred_device())
+        solution = wp.zeros_like(rhs)
+
+        with wp.ScopedCapture(wp.get_preferred_device()) as capture:
+            panel.compute()
+            panel.solve(rhs, solution)
+        wp.capture_launch(capture.graph)
+
+        residual = matrix @ solution.numpy() - rhs_np
+        relative_residual = np.linalg.norm(residual) / np.linalg.norm(rhs_np)
+        self.assertLess(relative_residual, 5.0e-3)
+
     def test_branching_panel_solve_uses_global_ready_queue(self) -> None:
         """Solve a branching panel graph through the global ready queue."""
         dimension = 64

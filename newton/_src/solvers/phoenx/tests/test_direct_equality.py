@@ -11,7 +11,10 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx import solver_phoenx_kernels
-from newton._src.solvers.phoenx.articulations.direct_equality import build_direct_equality_topology
+from newton._src.solvers.phoenx.articulations.direct_equality import (
+    _select_panel_block_size,
+    build_direct_equality_topology,
+)
 from newton._src.solvers.phoenx.constraints import constraint_joint
 from newton._src.solvers.phoenx.examples.example_motorized_hinge_chain import _build_model
 from newton._src.solvers.phoenx.tests.test_drive_stability import _pendulum
@@ -175,6 +178,29 @@ def _run_captured_steps(
 
 
 class TestDirectEquality(unittest.TestCase):
+    def test_panel_size_selector_keeps_trees_narrow_and_widens_dense_loops(self) -> None:
+        """Select panel sizes from precomputed mechanism cycle density."""
+        body_count = 200
+        inverse_mass = np.ones(body_count, dtype=np.float32)
+        tree_parent = np.arange(-1, body_count - 1, dtype=np.int32)
+        tree_child = np.arange(body_count, dtype=np.int32)
+
+        class Topology:
+            dimensions = (1200,)
+            mechanism_row_start = np.asarray((0, 1200), dtype=np.int32)
+
+        tree = Topology()
+        tree.joints = np.arange(body_count, dtype=np.int32)
+        tree.row_joint = np.repeat(tree.joints, 6)
+        self.assertEqual(_select_panel_block_size(tree, tree_parent, tree_child, inverse_mass), 16)
+
+        loop_parent = np.concatenate((tree_parent, np.arange(100, dtype=np.int32)))
+        loop_child = np.concatenate((tree_child, np.arange(100, dtype=np.int32) + 100))
+        loops = Topology()
+        loops.joints = np.arange(300, dtype=np.int32)
+        loops.row_joint = np.repeat(loops.joints, 4)
+        self.assertEqual(_select_panel_block_size(loops, loop_parent, loop_child, inverse_mass), 32)
+
     def test_world_anchor_does_not_merge_mechanisms(self):
         """Keep world-anchored mechanisms in separate direct systems."""
         model = _build_two_mechanisms()
@@ -547,6 +573,7 @@ class TestDirectEquality(unittest.TestCase):
             velocity_iterations=1,
             articulation_mode="maximal",
         )
+        self.assertEqual(solver._direct_equality_system.solver.block_size, 16)
         state = model.state()
         control = model.control()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state)

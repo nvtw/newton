@@ -83,6 +83,10 @@ class Example:
             raise RuntimeError("Hoberman joints were not assigned to the direct equality solver")
         if len(direct.topology.dimensions) != 1:
             raise RuntimeError(f"expected one connected Hoberman mechanism, got {direct.topology.dimensions}")
+        if direct.solver.block_size != 32:
+            raise RuntimeError(
+                f"expected 32-row panels for the loop-dense Hoberman mechanism, got {direct.solver.block_size}"
+            )
         if not self.solver.world._joint_pgs_all_disabled:
             raise RuntimeError("bilateral Hoberman rows unexpectedly remain in PGS")
         print(

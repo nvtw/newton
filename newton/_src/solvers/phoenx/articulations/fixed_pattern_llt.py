@@ -820,6 +820,7 @@ class FixedPatternPanelLLT:
         self._solve_forward_partial = _make_forward_solve_kernel(block_size)
         self._solve_partial_backward = _make_partial_backward_solve_kernel(block_size)
         self._solve_backward_partial = _make_backward_solve_kernel(block_size)
+        self._cooperative_solve_block_dim = 128 if block_size == 32 else 64
 
     def compute(self) -> None:
         """Factor narrow mechanisms cooperatively or use the ready queue."""
@@ -910,7 +911,7 @@ class FixedPatternPanelLLT:
             wp.launch_tiled(
                 self._solve_aligned,
                 dim=self.aligned_large_mechanism.size,
-                block_dim=64,
+                block_dim=self._cooperative_solve_block_dim,
                 inputs=[
                     self.aligned_large_mechanism,
                     self.dimension,
@@ -939,7 +940,7 @@ class FixedPatternPanelLLT:
             wp.launch_tiled(
                 self._solve_forward_partial,
                 dim=self.partial_large_mechanism.size,
-                block_dim=64,
+                block_dim=self._cooperative_solve_block_dim,
                 inputs=[
                     self.partial_large_mechanism,
                     self.dimension,
@@ -981,7 +982,7 @@ class FixedPatternPanelLLT:
             wp.launch_tiled(
                 self._solve_backward_partial,
                 dim=self.partial_large_mechanism.size,
-                block_dim=64,
+                block_dim=self._cooperative_solve_block_dim,
                 inputs=[
                     self.partial_large_mechanism,
                     self.dimension,
