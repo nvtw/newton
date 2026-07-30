@@ -173,6 +173,7 @@ def sparse_grid_cell_index(data: SparseGridData, tile: int, x: int, y: int, z: i
 def _prepare_point_keys(
     positions: wp.array[wp.vec3],
     active: wp.array[wp.int32],
+    active_mask: int,
     origin: wp.vec3,
     inv_cell_size: float,
     tile_size: int,
@@ -182,9 +183,13 @@ def _prepare_point_keys(
 ):
     point = wp.tid()
     indices[point] = point
-    if active.shape[0] > 0 and active[point] == 0:
-        keys[point] = _KEY_SENTINEL
-        return
+    if active.shape[0] > 0:
+        is_active = active[point] != 0
+        if active_mask != 0:
+            is_active = (active[point] & active_mask) != 0
+        if not is_active:
+            keys[point] = _KEY_SENTINEL
+            return
 
     p = (positions[point] - origin) * inv_cell_size
     cell = wp.vec3i(int(wp.floor(p[0])), int(wp.floor(p[1])), int(wp.floor(p[2])))
@@ -238,16 +243,6 @@ def _compact_unique_keys(
         if count > tile_capacity:
             wp.atomic_or(status, 0, _STATUS_TILE_CAPACITY_EXCEEDED)
         tile_count[0] = wp.min(count, tile_capacity)
-
-
-@wp.kernel(enable_backward=False)
-def _clear_inactive_tile_keys(
-    tile_keys: wp.array[wp.int64],
-    tile_count: wp.array[wp.int32],
-):
-    index = wp.tid()
-    if index >= tile_count[0]:
-        tile_keys[index] = _KEY_SENTINEL
 
 
 @wp.kernel(enable_backward=False)
@@ -313,21 +308,6 @@ def _build_neighbors(
         neighbors[index] = -1
     else:
         neighbors[index] = _find_key(tile_keys, count, _tile_key(coords))
-
-
-@wp.kernel(enable_backward=False)
-def _map_sorted_points_to_tiles(
-    sorted_keys: wp.array[wp.int64],
-    tile_keys: wp.array[wp.int64],
-    tile_count: wp.array[wp.int32],
-    point_tile: wp.array[wp.int32],
-):
-    point = wp.tid()
-    key = sorted_keys[point]
-    if key == _KEY_SENTINEL:
-        point_tile[point] = -1
-    else:
-        point_tile[point] = _find_key(tile_keys, tile_count[0], key)
 
 
 class SparseGrid:
@@ -403,7 +383,6 @@ class SparseGrid:
             self.tile_keys = wp.full(self.tile_capacity, value=_KEY_SENTINEL, dtype=wp.int64)
             self.tile_neighbors = wp.full(27 * self.tile_capacity, value=-1, dtype=wp.int32)
             self.tile_count = wp.zeros(1, dtype=wp.int32)
-            self.sorted_point_tiles = wp.full(self.point_capacity, value=-1, dtype=wp.int32)
             self.status = wp.zeros(1, dtype=wp.int32)
             self._empty_active = wp.empty(0, dtype=wp.int32)
 
@@ -418,8 +397,20 @@ class SparseGrid:
         """Maximum number of stored core cells."""
         return self.tile_capacity * self.tile_size**3
 
-    def build(self, positions: wp.array[wp.vec3], active: wp.array[wp.int32] | None = None) -> None:
-        """Rebuild the occupied-tile topology from fixed-capacity points."""
+    def build(
+        self,
+        positions: wp.array[wp.vec3],
+        active: wp.array[wp.int32] | None = None,
+        active_mask: int = 0,
+    ) -> None:
+        """Rebuild the occupied-tile topology from fixed-capacity points.
+
+        Args:
+            positions: Point positions used to select occupied tiles.
+            active: Optional nonzero active markers or integer flags.
+            active_mask: Bit mask selecting active entries in ``active``. A
+                value of zero treats every nonzero entry as active.
+        """
         if positions.device != self.device:
             raise ValueError(f"positions are on {positions.device}, expected {self.device}")
         if positions.shape[0] != self.point_capacity:
@@ -436,6 +427,7 @@ class SparseGrid:
             inputs=[
                 positions,
                 active,
+                active_mask,
                 self.origin,
                 1.0 / self.cell_size,
                 self.tile_size,
@@ -470,12 +462,6 @@ class SparseGrid:
                 self.tile_count,
                 self.status,
             ],
-            device=self.device,
-        )
-        wp.launch(
-            _clear_inactive_tile_keys,
-            dim=self.tile_capacity,
-            inputs=[self.tile_keys, self.tile_count],
             device=self.device,
         )
         for _ in range(self.padding_tiles):
@@ -521,27 +507,10 @@ class SparseGrid:
                 ],
                 device=self.device,
             )
-            wp.launch(
-                _clear_inactive_tile_keys,
-                dim=self.tile_capacity,
-                inputs=[self.tile_keys, self.tile_count],
-                device=self.device,
-            )
         wp.launch(
             _build_neighbors,
             dim=27 * self.tile_capacity,
             inputs=[self.tile_keys, self.tile_count, self.tile_neighbors],
-            device=self.device,
-        )
-        wp.launch(
-            _map_sorted_points_to_tiles,
-            dim=self.point_capacity,
-            inputs=[
-                self.sorted_point_keys,
-                self.tile_keys,
-                self.tile_count,
-                self.sorted_point_tiles,
-            ],
             device=self.device,
         )
 

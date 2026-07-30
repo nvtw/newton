@@ -6,6 +6,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.stflip.sparse_grid import (
     SparseGrid,
     SparseGridData,
@@ -126,7 +127,17 @@ class TestSparseGrid(unittest.TestCase):
         grid.check_status()
 
         self.assertEqual(int(grid.tile_count.numpy()[0]), 1)
-        self.assertEqual(int(grid.sorted_point_tiles.numpy()[1]), -1)
+
+    def test_filter_flag_array_with_active_mask(self):
+        """Select active points from a packed integer flag array."""
+        active_flag = int(newton.ParticleFlags.ACTIVE)
+        positions = wp.array([(0.0, 0.0, 0.0), (8.0, 0.0, 0.0), (16.0, 0.0, 0.0)], dtype=wp.vec3, device="cpu")
+        flags = wp.array([active_flag, 2, active_flag | 2], dtype=wp.int32, device="cpu")
+        grid = SparseGrid(point_capacity=3, tile_capacity=3, tile_size=4, device="cpu")
+        grid.build(positions, flags, active_mask=active_flag)
+        grid.check_status()
+
+        self.assertEqual(int(grid.tile_count.numpy()[0]), 2)
 
     def test_activate_padding_without_halo_cells(self):
         """Activate neighboring core tiles without allocating halo cells."""
@@ -292,7 +303,6 @@ class TestSparseGrid(unittest.TestCase):
 
         np.testing.assert_array_equal(_decode_tile_keys(grids[0]), _decode_tile_keys(grids[1]))
         np.testing.assert_array_equal(grids[0].tile_neighbors.numpy(), grids[1].tile_neighbors.numpy())
-        np.testing.assert_array_equal(grids[0].sorted_point_tiles.numpy(), grids[1].sorted_point_tiles.numpy())
 
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA is required for graph capture")
     def test_rebuild_inside_cuda_graph(self):

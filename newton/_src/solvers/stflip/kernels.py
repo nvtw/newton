@@ -16,13 +16,6 @@ _ACTIVE = wp.constant(int(ParticleFlags.ACTIVE))
 
 
 @wp.kernel(enable_backward=False)
-def build_particle_active_mask(flags: wp.array[int], active: wp.array[int]):
-    """Convert particle flags to the sparse builder's binary active mask."""
-    particle = wp.tid()
-    active[particle] = int((flags[particle] & _ACTIVE) != 0)
-
-
-@wp.kernel(enable_backward=False)
 def initialize_temporal_offsets(seed: int, offsets: wp.array[float]):
     """Initialize deterministic particle phase offsets in [-0.5, 0.5)."""
     particle = wp.tid()
@@ -308,6 +301,14 @@ def extrapolate_face_velocities(
     local_x = local % grid.tile_size
     local_y = (local // grid.tile_size) % grid.tile_size
     local_z = local // (grid.tile_size * grid.tile_size)
+    interior = (
+        local_x > 0
+        and local_x < grid.tile_size - 1
+        and local_y > 0
+        and local_y < grid.tile_size - 1
+        and local_z > 0
+        and local_z < grid.tile_size - 1
+    )
     left_x = local_x
     left_y = local_y
     left_z = local_z
@@ -329,7 +330,9 @@ def extrapolate_face_velocities(
     for z in range(-1, 2):
         for y in range(-1, 2):
             for x in range(-1, 2):
-                neighbor = sparse_grid_cell_index(grid, tile, local_x + x, local_y + y, local_z + z)
+                neighbor = index + x + grid.tile_size * (y + grid.tile_size * z)
+                if not interior:
+                    neighbor = sparse_grid_cell_index(grid, tile, local_x + x, local_y + y, local_z + z)
                 if neighbor >= 0:
                     neighbor_face = 3 * neighbor + component
                     if valid_in[neighbor_face] != 0:

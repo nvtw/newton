@@ -20,7 +20,6 @@ from ..semi_implicit.kernels_contact import eval_body_contact_forces, eval_parti
 from ..solver import SolverBase
 from .kernels import (
     apply_pressure,
-    build_particle_active_mask,
     build_pressure_system,
     constrain_particles,
     extrapolate_face_velocities,
@@ -182,7 +181,6 @@ class SolverSTFLIP(SolverBase):
         self._transfer_gradient_z = wp.zeros(3 * model.particle_count, dtype=wp.float32, device=model.device)
         self._temporal_offsets = wp.zeros(model.particle_count, dtype=wp.float32, device=model.device)
         self._contact_body_force_dummy = wp.zeros(1, dtype=wp.spatial_vector, device=model.device)
-        self._active_mask = wp.zeros(model.particle_count, dtype=wp.int32, device=model.device)
         if self.config.temporal_staggering:
             wp.launch(
                 initialize_temporal_offsets,
@@ -237,18 +235,15 @@ class SolverSTFLIP(SolverBase):
         if self.model.body_count and contacts is not None and contacts.rigid_contact_max:
             eval_body_contact_forces(self.model, state_in, contacts)
 
-        wp.launch(
-            build_particle_active_mask,
-            dim=self.model.particle_count,
-            inputs=[self.model.particle_flags, self._active_mask],
-            device=self.device,
+        self.grid.build(
+            state_in.particle_q,
+            self.model.particle_flags,
+            active_mask=int(newton.ParticleFlags.ACTIVE),
         )
-        self.grid.build(state_in.particle_q, self._active_mask)
         self.cell_mass.zero_()
         self.face_mass.zero_()
         self.face_momentum.zero_()
         self.pressure.zero_()
-        self.pressure_scratch.zero_()
         affine_transfer = affine_in if self.config.transfer_scheme == "apic" else self._zero_affine
 
         wp.launch(
