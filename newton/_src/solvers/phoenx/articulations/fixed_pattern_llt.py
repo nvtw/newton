@@ -12,7 +12,10 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync, factor_partial_panel_row
-from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_schedule import PersistentFactorSchedule
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_schedule import (
+    PersistentFactorSchedule,
+    PersistentSolveSchedule,
+)
 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
@@ -789,6 +792,26 @@ class FixedPatternPanelLLT:
             block_size,
             self.device,
         )
+        self._forward_schedule = PersistentSolveSchedule(
+            panel_tables,
+            large_mechanisms,
+            block_size,
+            self.device,
+            forward=True,
+        )
+        self._backward_schedule = PersistentSolveSchedule(
+            panel_tables,
+            large_mechanisms,
+            block_size,
+            self.device,
+            forward=False,
+        )
+        mechanism_count = len(large_mechanisms)
+        ready_width = min(
+            self._forward_schedule.max_ready_count,
+            self._backward_schedule.max_ready_count,
+        )
+        self._use_persistent_solve = mechanism_count < self.device.sm_count and ready_width > mechanism_count
         self._factor_narrow = _make_narrow_factor_kernel(block_size)
         self._solve_small = _make_small_solve_kernel(block_size)
         self._solve_aligned = _make_aligned_solve_kernel(block_size)
@@ -855,11 +878,41 @@ class FixedPatternPanelLLT:
                 ],
                 device=self.device,
             )
-        if self.aligned_large_mechanism.size > 0:
+        if self._use_persistent_solve and self.large_mechanism.size > 0:
+            self._forward_schedule.solve(
+                self.dimension,
+                self.vector_offset,
+                self.workspace_offset,
+                self.panel_table_offset,
+                self.tile_count,
+                self.panel_index,
+                self.permutation,
+                self.factor,
+                rhs,
+                self.intermediate,
+                self.solution_permuted,
+                solution,
+            )
+            self._backward_schedule.solve(
+                self.dimension,
+                self.vector_offset,
+                self.workspace_offset,
+                self.panel_table_offset,
+                self.tile_count,
+                self.panel_index,
+                self.permutation,
+                self.factor,
+                rhs,
+                self.intermediate,
+                self.solution_permuted,
+                solution,
+            )
+
+        if not self._use_persistent_solve and self.aligned_large_mechanism.size > 0:
             wp.launch_tiled(
                 self._solve_aligned,
                 dim=self.aligned_large_mechanism.size,
-                block_dim=256,
+                block_dim=64,
                 inputs=[
                     self.aligned_large_mechanism,
                     self.dimension,
@@ -884,11 +937,11 @@ class FixedPatternPanelLLT:
                 ],
                 device=self.device,
             )
-        if self.partial_large_mechanism.size > 0:
+        if not self._use_persistent_solve and self.partial_large_mechanism.size > 0:
             wp.launch_tiled(
                 self._solve_forward_partial,
                 dim=self.partial_large_mechanism.size,
-                block_dim=256,
+                block_dim=64,
                 inputs=[
                     self.partial_large_mechanism,
                     self.dimension,
@@ -930,7 +983,7 @@ class FixedPatternPanelLLT:
             wp.launch_tiled(
                 self._solve_backward_partial,
                 dim=self.partial_large_mechanism.size,
-                block_dim=256,
+                block_dim=64,
                 inputs=[
                     self.partial_large_mechanism,
                     self.dimension,

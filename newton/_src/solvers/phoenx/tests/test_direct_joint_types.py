@@ -286,6 +286,50 @@ class TestDirectJointTypes(unittest.TestCase):
             relative_residual = np.linalg.norm(residual) / np.linalg.norm(rhs_np[begin:end])
             self.assertLess(relative_residual, 5.0e-3)
 
+    def test_branching_panel_solve_uses_global_ready_queue(self) -> None:
+        """Solve a branching panel graph through the global ready queue."""
+        dimension = 64
+        starts = np.asarray((0, dimension), dtype=np.int32)
+        permutation = np.arange(dimension, dtype=np.int32)
+        row_bodies = tuple(
+            frozenset((tile,)) if tile < 3 else frozenset((0, 1, 2)) for tile in range(4) for _ in range(16)
+        )
+        panel = FixedPatternPanelLLT(
+            (dimension,),
+            starts,
+            permutation,
+            row_bodies,
+            device=wp.get_preferred_device(),
+        )
+        self.assertTrue(panel._use_persistent_solve)
+        self.assertEqual(panel._forward_schedule.max_ready_count, 3)
+
+        matrix = np.eye(dimension, dtype=np.float32) * 2.0
+        storage = np.zeros(panel.matrix.size, dtype=np.float32)
+        for row, column, address in zip(
+            panel.symbolic.matrix_row,
+            panel.symbolic.matrix_column,
+            panel.symbolic.matrix_storage,
+            strict=True,
+        ):
+            if row != column:
+                matrix[row, column] = 1.0e-3
+                matrix[column, row] = 1.0e-3
+            storage[address] = matrix[row, column]
+
+        rng = np.random.default_rng(4321)
+        rhs_np = rng.normal(size=dimension).astype(np.float32)
+        rhs = wp.array(rhs_np, dtype=wp.float32, device=wp.get_preferred_device())
+        solution = wp.zeros_like(rhs)
+        panel.matrix.assign(storage)
+
+        with wp.ScopedCapture(wp.get_preferred_device()) as capture:
+            panel.compute()
+            panel.solve(rhs, solution)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(matrix @ solution.numpy(), rhs_np, rtol=2.0e-4, atol=2.0e-4)
+
     def test_free_joint_emits_no_direct_or_pgs_rows(self) -> None:
         """Leave a free joint outside both direct and PGS constraint paths."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)

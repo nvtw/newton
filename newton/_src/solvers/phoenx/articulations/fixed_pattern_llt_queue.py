@@ -94,13 +94,12 @@ def factor_partial_panel_row(
 
 
 @wp.kernel(enable_backward=False)
-def initialize_factor_queue(
+def initialize_panel_queue(
     initial_task: wp.array[wp.int32],
     remaining_initial: wp.array[wp.int32],
     queue: wp.array[wp.int32],
     head: wp.array[wp.int32],
     tail: wp.array[wp.int32],
-    completed: wp.array[wp.int32],
     remaining: wp.array[wp.int32],
 ):
     index = wp.tid()
@@ -111,7 +110,6 @@ def initialize_factor_queue(
     if index == 0:
         head[0] = wp.int32(0)
         tail[0] = initial_task.shape[0]
-        completed[0] = wp.int32(0)
 
 
 def make_persistent_factor_kernel(block_size: int):
@@ -138,7 +136,6 @@ def make_persistent_factor_kernel(block_size: int):
         queue: wp.array[wp.int32],
         head: wp.array[wp.int32],
         tail: wp.array[wp.int32],
-        completed: wp.array[wp.int32],
         remaining: wp.array[wp.int32],
         worker_task: wp.array[wp.int32],
     ):
@@ -147,22 +144,12 @@ def make_persistent_factor_kernel(block_size: int):
 
         while True:
             if lane == 0:
-                claimed_task = wp.int32(-1)
-                while claimed_task == wp.int32(-1):
-                    queue_head = wp.atomic_add(head, wp.int32(0), wp.int32(0))
-                    queue_tail = wp.atomic_add(tail, wp.int32(0), wp.int32(0))
-                    if queue_head < queue_tail:
-                        observed = wp.atomic_cas(
-                            head,
-                            wp.int32(0),
-                            queue_head,
-                            queue_head + wp.int32(1),
-                        )
-                        if observed == queue_head:
-                            while claimed_task == wp.int32(-1):
-                                claimed_task = wp.atomic_add(queue, queue_head, wp.int32(0))
-                    elif wp.atomic_add(completed, wp.int32(0), wp.int32(0)) == task_count:
-                        claimed_task = wp.int32(-2)
+                queue_slot = wp.atomic_add(head, wp.int32(0), wp.int32(1))
+                claimed_task = wp.int32(-2)
+                if queue_slot < task_count:
+                    claimed_task = wp.int32(-1)
+                    while claimed_task == wp.int32(-1):
+                        claimed_task = wp.atomic_add(queue, queue_slot, wp.int32(0))
                 worker_task[worker] = claimed_task
             _block_sync()
 
@@ -299,10 +286,235 @@ def make_persistent_factor_kernel(block_size: int):
                         if next_diagonal >= 0:
                             slot = wp.atomic_add(tail, wp.int32(0), wp.int32(1))
                             wp.atomic_exch(queue, slot, next_diagonal)
-                wp.atomic_add(completed, wp.int32(0), wp.int32(1))
             _block_sync()
 
     return factor_persistent
 
 
-__all__ = ["initialize_factor_queue", "make_persistent_factor_kernel"]
+def make_persistent_forward_solve_kernel(block_size: int):
+    """Create a dependency-driven forward panel solve worker kernel."""
+    tile_elements = block_size * block_size
+
+    @wp.kernel(enable_backward=False)
+    def solve_forward_persistent(
+        task_mechanism: wp.array[wp.int32],
+        task_tile: wp.array[wp.int32],
+        dependent_start: wp.array[wp.int32],
+        dependent_task: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        vector_offsets: wp.array[wp.int32],
+        workspace_offsets: wp.array[wp.int32],
+        panel_table_offset: wp.array[wp.int32],
+        tile_counts: wp.array[wp.int32],
+        panel_index: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        rhs: wp.array[wp.float32],
+        intermediate: wp.array[wp.float32],
+        queue: wp.array[wp.int32],
+        head: wp.array[wp.int32],
+        tail: wp.array[wp.int32],
+        remaining: wp.array[wp.int32],
+        worker_task: wp.array[wp.int32],
+    ):
+        worker, lane = wp.tid()
+        task_count = task_mechanism.shape[0]
+
+        while True:
+            if lane == 0:
+                queue_slot = wp.atomic_add(head, wp.int32(0), wp.int32(1))
+                claimed_task = wp.int32(-2)
+                if queue_slot < task_count:
+                    claimed_task = wp.int32(-1)
+                    while claimed_task == wp.int32(-1):
+                        claimed_task = wp.atomic_add(queue, queue_slot, wp.int32(0))
+                worker_task[worker] = claimed_task
+            _block_sync()
+
+            task = worker_task[worker]
+            if task < 0:
+                break
+
+            mechanism = task_mechanism[task]
+            tile_i = task_tile[task]
+            dimension = dimensions[mechanism]
+            vector_offset = vector_offsets[mechanism]
+            workspace_offset = workspace_offsets[mechanism]
+            tile_count = tile_counts[mechanism]
+            table_offset = panel_table_offset[mechanism]
+            i = tile_i * block_size
+            workspace_dimension = tile_count * block_size
+            intermediate_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(intermediate, workspace_offset),
+                shape=(workspace_dimension, 1),
+                dtype=wp.float32,
+            )
+
+            right_hand_side = wp.tile_zeros(shape=(block_size, 1), dtype=wp.float32, storage="shared")
+            for iteration in range((block_size + wp.block_dim() - 1) // wp.block_dim()):
+                row = lane + iteration * wp.block_dim()
+                active = row < block_size and i + row < dimension
+                value = wp.float32(0.0)
+                if active:
+                    value = rhs[vector_offset + permutation[vector_offset + i + row]]
+                wp.tile_scatter_masked(right_hand_side, row, 0, value, active)
+
+            for tile_j in range(tile_i):
+                factor_panel = panel_index[table_offset + tile_i * tile_count + tile_j]
+                if factor_panel >= wp.int32(0):
+                    factor_matrix = wp.array(
+                        ptr=_get_float_array_offset_ptr(factor, factor_panel * tile_elements),
+                        shape=(block_size, block_size),
+                        dtype=wp.float32,
+                    )
+                    left = wp.tile_load(factor_matrix, shape=(block_size, block_size))
+                    previous = wp.tile_load(
+                        intermediate_matrix,
+                        shape=(block_size, 1),
+                        offset=(tile_j * block_size, 0),
+                    )
+                    wp.tile_matmul(left, previous, right_hand_side, alpha=-1.0)
+
+            diagonal_panel = panel_index[table_offset + tile_i * tile_count + tile_i]
+            diagonal_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(factor, diagonal_panel * tile_elements),
+                shape=(block_size, block_size),
+                dtype=wp.float32,
+            )
+            diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size))
+            wp.tile_lower_solve_inplace(diagonal, right_hand_side)
+            wp.tile_store(intermediate_matrix, right_hand_side, offset=(i, 0))
+
+            _block_fence()
+            if lane == 0:
+                for dependent in range(dependent_start[task], dependent_start[task + wp.int32(1)]):
+                    next_task = dependent_task[dependent]
+                    old_remaining = wp.atomic_sub(remaining, next_task, wp.int32(1))
+                    if old_remaining == wp.int32(1):
+                        slot = wp.atomic_add(tail, wp.int32(0), wp.int32(1))
+                        wp.atomic_exch(queue, slot, next_task)
+            _block_sync()
+
+    return solve_forward_persistent
+
+
+def make_persistent_backward_solve_kernel(block_size: int):
+    """Create a dependency-driven backward panel solve worker kernel."""
+    tile_elements = block_size * block_size
+
+    @wp.kernel(enable_backward=False)
+    def solve_backward_persistent(
+        task_mechanism: wp.array[wp.int32],
+        task_tile: wp.array[wp.int32],
+        dependent_start: wp.array[wp.int32],
+        dependent_task: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        vector_offsets: wp.array[wp.int32],
+        workspace_offsets: wp.array[wp.int32],
+        panel_table_offset: wp.array[wp.int32],
+        tile_counts: wp.array[wp.int32],
+        panel_index: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        intermediate: wp.array[wp.float32],
+        solution_permuted: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+        queue: wp.array[wp.int32],
+        head: wp.array[wp.int32],
+        tail: wp.array[wp.int32],
+        remaining: wp.array[wp.int32],
+        worker_task: wp.array[wp.int32],
+    ):
+        worker, lane = wp.tid()
+        task_count = task_mechanism.shape[0]
+
+        while True:
+            if lane == 0:
+                queue_slot = wp.atomic_add(head, wp.int32(0), wp.int32(1))
+                claimed_task = wp.int32(-2)
+                if queue_slot < task_count:
+                    claimed_task = wp.int32(-1)
+                    while claimed_task == wp.int32(-1):
+                        claimed_task = wp.atomic_add(queue, queue_slot, wp.int32(0))
+                worker_task[worker] = claimed_task
+            _block_sync()
+
+            task = worker_task[worker]
+            if task < 0:
+                break
+
+            mechanism = task_mechanism[task]
+            tile_i = task_tile[task]
+            dimension = dimensions[mechanism]
+            vector_offset = vector_offsets[mechanism]
+            workspace_offset = workspace_offsets[mechanism]
+            tile_count = tile_counts[mechanism]
+            table_offset = panel_table_offset[mechanism]
+            i = tile_i * block_size
+            workspace_dimension = tile_count * block_size
+            intermediate_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(intermediate, workspace_offset),
+                shape=(workspace_dimension, 1),
+                dtype=wp.float32,
+            )
+            solution_permuted_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(solution_permuted, workspace_offset),
+                shape=(workspace_dimension, 1),
+                dtype=wp.float32,
+            )
+
+            right_hand_side = wp.tile_load(
+                intermediate_matrix,
+                shape=(block_size, 1),
+                offset=(i, 0),
+            )
+            for tile_j in range(tile_i + wp.int32(1), tile_count):
+                factor_panel = panel_index[table_offset + tile_j * tile_count + tile_i]
+                if factor_panel >= wp.int32(0):
+                    factor_matrix = wp.array(
+                        ptr=_get_float_array_offset_ptr(factor, factor_panel * tile_elements),
+                        shape=(block_size, block_size),
+                        dtype=wp.float32,
+                    )
+                    lower = wp.tile_load(factor_matrix, shape=(block_size, block_size))
+                    solved = wp.tile_load(
+                        solution_permuted_matrix,
+                        shape=(block_size, 1),
+                        offset=(tile_j * block_size, 0),
+                    )
+                    wp.tile_matmul(wp.tile_transpose(lower), solved, right_hand_side, alpha=-1.0)
+
+            diagonal_panel = panel_index[table_offset + tile_i * tile_count + tile_i]
+            diagonal_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(factor, diagonal_panel * tile_elements),
+                shape=(block_size, block_size),
+                dtype=wp.float32,
+            )
+            diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size))
+            wp.tile_upper_solve_inplace(wp.tile_transpose(diagonal), right_hand_side)
+            wp.tile_store(solution_permuted_matrix, right_hand_side, offset=(i, 0))
+            for iteration in range((block_size + wp.block_dim() - 1) // wp.block_dim()):
+                row = lane + iteration * wp.block_dim()
+                if row < block_size and i + row < dimension:
+                    original = permutation[vector_offset + i + row]
+                    solution[vector_offset + original] = right_hand_side[row, 0]
+
+            _block_fence()
+            if lane == 0:
+                for dependent in range(dependent_start[task], dependent_start[task + wp.int32(1)]):
+                    next_task = dependent_task[dependent]
+                    old_remaining = wp.atomic_sub(remaining, next_task, wp.int32(1))
+                    if old_remaining == wp.int32(1):
+                        slot = wp.atomic_add(tail, wp.int32(0), wp.int32(1))
+                        wp.atomic_exch(queue, slot, next_task)
+            _block_sync()
+
+    return solve_backward_persistent
+
+
+__all__ = [
+    "initialize_panel_queue",
+    "make_persistent_backward_solve_kernel",
+    "make_persistent_factor_kernel",
+    "make_persistent_forward_solve_kernel",
+]
