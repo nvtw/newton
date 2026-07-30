@@ -4,389 +4,145 @@
 ###########################################################################
 # Example PhoenX Motorized Cable Chain
 #
-# One-for-one cable counterpart of :mod:`example_motorized_hinge_chain`.
-# Geometry, bodies, masses, inertia, gravity, anchors, solver schedule,
-# rendering, and test are identical. Only the joint configuration changes:
-# every revolute joint is replaced by a zero-compliance CABLE bend lock
-# whose reference axis follows the strand tangent.
+# A 100-link maximal-coordinate cable mechanism. The links are ordinary
+# Newton bodies and cable joints; SolverPhoenX discovers their connected
+# graph, builds one RCM-ordered direct system, and leaves no bilateral rows
+# in PGS. The first link is fixed to the world and the remaining cable joints
+# use stiff stretch, shear, and bend energies while leaving twist free.
 #
-# The shared unified-joint schema lets the PhoenX solver reuse the
-# jitter solver's fast-path dispatcher and graph-colouring machinery
-# for joints + contacts in one CSR sweep. All we need to do on the
-# PhoenX side is:
-#
-#   * Size the :class:`ConstraintContainer` for ``NUM_HINGES`` joint
-#     columns + any contact column capacity (zero contacts here
-#     because the chain never touches itself / the ground),
-#   * Populate the joint columns once via
-#     :meth:`PhoenXWorld.initialize_actuated_double_ball_socket_joints`,
-#   * Populate the body container directly (no ``WorldBuilder`` --
-#     PhoenX takes raw containers).
-#
-# CABLE repurposes the drive/limit storage as bend/twist material
-# parameters. Infinite bend stiffness locks both transverse rotations;
-# zero twist stiffness leaves rotation about the strand tangent free.
-#
-# Picking is wired through :class:`Picking`, which binds to the
-# body container directly and therefore works unchanged against
-# :class:`PhoenXWorld`.
-#
-# Run:  python -m newton._src.solvers.phoenx.examples.example_motorized_cable_chain
+# Run: python -m newton._src.solvers.phoenx.examples.example_motorized_cable_chain
 ###########################################################################
 
 from __future__ import annotations
-
-import enum
-import math
 
 import numpy as np
 import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.phoenx.body import (
-    MOTION_DYNAMIC,
-    MOTION_STATIC,
-    body_container_zeros,
-    inertia_sym6_pack_np,
-)
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    DEFAULT_DAMPING_RATIO,
-    DEFAULT_HERTZ_LINEAR,
-)
-from newton._src.solvers.phoenx.picking import (
-    Picking,
-    register_with_viewer_gl,
-)
-from newton._src.solvers.phoenx.solver_phoenx import (
-    PhoenXWorld,
-    pack_body_xforms_kernel,
-)
-from newton._src.solvers.phoenx.world_builder import DriveMode, JointMode
 
-
-class JointKind(enum.Enum):
-    """Which unified-joint mode to build the chain with.
-
-    :class:`PhoenXWorld` only supports the actuated double-ball-socket
-    joint (see :mod:`solver_phoenx`), so unlike the jitter version
-    this example selects CABLE mode while retaining the same unified
-    joint storage and solver dispatch as the revolute reference.
-    """
-
-    ACTUATED_DOUBLE_BALL_SOCKET = "actuated_double_ball_socket"
-
-
-JOINT_KIND = JointKind.ACTUATED_DOUBLE_BALL_SOCKET
-
-
-class BodyShape(enum.Enum):
-    """Visible shape of each chain link.
-
-    * :attr:`CUBE` -- diamond-rotated unit cubes (the original layout).
-    * :attr:`CAPSULE` -- capsules whose body-local +z axis is aligned
-      with world -y so the chain reads as a rope of pill-shaped links.
-      Consecutive capsules share their line-segment endpoints at the
-      hinge location and a collision filter pair is registered for
-      every joint-connected body pair.
-    """
-
-    CUBE = "cube"
-    CAPSULE = "capsule"
-
-
-# Body shape for chain links. Flip to ``BodyShape.CAPSULE`` to render
-# (and physically space) the chain as capsules instead of cubes.
-BODY_SHAPE = BodyShape.CAPSULE
-
-# Capsule geometry (used only when ``BODY_SHAPE == BodyShape.CAPSULE``).
-# ``CAPSULE_LENGTH`` is the line-segment length of the capsule -- the
-# straight cylindrical mid-section between the two hemispherical end
-# caps. The total axial length of a rendered capsule is therefore
-# ``CAPSULE_LENGTH + CAPSULE_DIAMETER``. Defaults: 10 cm line-segment
-# with 5 cm diameter -> 15 cm total length per capsule.
+DENSITY = 1000.0
 CAPSULE_LENGTH = 0.10
 CAPSULE_DIAMETER = 0.05
-_CAPSULE_RADIUS = 0.5 * CAPSULE_DIAMETER
-_CAPSULE_HALF_HEIGHT = 0.5 * CAPSULE_LENGTH
+CAPSULE_RADIUS = 0.5 * CAPSULE_DIAMETER
+CAPSULE_HALF_HEIGHT = 0.5 * CAPSULE_LENGTH
+NUM_LINKS = 100
 
-# Cable material configuration. Infinite bend stiffness is the
-# zero-compliance limit of the same 3+2 Schur system used at finite
-# stiffness. Zero twist stiffness leaves the reference axis free,
-# matching a revolute joint.
-DRIVE_MODE = DriveMode.OFF
-BEND_STIFFNESS = math.inf
+STRETCH_STIFFNESS = 1.0e9
+STRETCH_DAMPING = 0.0
+BEND_STIFFNESS = 1.0e9
 BEND_DAMPING = 0.0
 TWIST_STIFFNESS = 0.0
 TWIST_DAMPING = 0.0
 
-NUM_CUBES = 250
-HALF_EXTENT = 0.05
-NUM_BODIES = NUM_CUBES + 1
-NUM_HINGES = NUM_CUBES  # retained name for exact layout parity with the hinge example
-
-_DIAGONAL_HALF = HALF_EXTENT * math.sqrt(2.0)
-_HALF_ANGLE = math.pi / 8.0
-_DIAGONAL_QUAT = (0.0, 0.0, math.sin(_HALF_ANGLE), math.cos(_HALF_ANGLE))
-
-# Body-local +z onto world -y: 90 deg rotation about world +x, xyzw.
-_CAPSULE_QUAT = (math.sin(math.pi / 4.0), 0.0, 0.0, math.cos(math.pi / 4.0))
-
-# Solid-body inverse inertia [kg^-1 m^-2] for the displayed 1 kg link.
-# The capsule's body-local z axis is rotated onto world -y initially.
-if BODY_SHAPE is BodyShape.CAPSULE:
-    _INV_INERTIA = ((600.938967, 0.0, 0.0), (0.0, 600.938967, 0.0), (0.0, 0.0, 3368.421053))
-    _INV_INERTIA_WORLD = ((600.938967, 0.0, 0.0), (0.0, 3368.421053, 0.0), (0.0, 0.0, 600.938967))
-else:
-    _INV_INERTIA = ((600.0, 0.0, 0.0), (0.0, 600.0, 0.0), (0.0, 0.0, 600.0))
-    _INV_INERTIA_WORLD = _INV_INERTIA
+# Body-local +Z points along world -Y, the cable material tangent.
+_LINK_ORIENTATION = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.5 * np.pi)
 
 
-def _link_layout() -> tuple[float, tuple[float, float, float, float]]:
-    """Return ``(pitch, orientation_quat)`` for the active body shape.
+def _build_model(num_links: int = NUM_LINKS) -> newton.Model:
+    """Build one full-coordinate connected cable mechanism."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=DENSITY)
 
-    ``pitch`` is the centre-to-centre spacing along world -y so
-    consecutive links share the joint anchor at their boundary. The
-    orientation quaternion is applied to every dynamic body.
-    """
-    if BODY_SHAPE is BodyShape.CUBE:
-        return 2.0 * _DIAGONAL_HALF, _DIAGONAL_QUAT
-    if BODY_SHAPE is BodyShape.CAPSULE:
-        # Capsule line-segment endpoints meet at the hinge: centre-to-
-        # centre spacing equals the line-segment length.
-        return CAPSULE_LENGTH, _CAPSULE_QUAT
-    raise ValueError(f"unsupported BODY_SHAPE: {BODY_SHAPE!r}")
+    bodies: list[int] = []
+    for index in range(num_links):
+        body = builder.add_link(
+            xform=wp.transform(
+                wp.vec3(0.0, -(index + 0.5) * CAPSULE_LENGTH, 0.0),
+                _LINK_ORIENTATION,
+            ),
+            label=f"link_{index}",
+        )
+        builder.add_shape_capsule(
+            body,
+            radius=CAPSULE_RADIUS,
+            half_height=CAPSULE_HALF_HEIGHT,
+            cfg=shape_cfg,
+        )
+        bodies.append(body)
 
+    joints: list[int] = []
+    root = builder.add_joint_fixed(
+        parent=-1,
+        child=bodies[0],
+        parent_xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), _LINK_ORIENTATION),
+        child_xform=wp.transform(wp.vec3(0.0, 0.0, -CAPSULE_HALF_HEIGHT), wp.quat_identity()),
+        label="cable_root",
+    )
+    joints.append(root)
 
-def _populate_chain_bodies(
-    bodies,
-    device: wp.context.Device,
-) -> None:
-    """Fill :class:`BodyContainer` slots with the chain's initial state.
+    for index in range(1, num_links):
+        joint = builder.add_joint_cable(
+            parent=bodies[index - 1],
+            child=bodies[index],
+            parent_xform=wp.transform(wp.vec3(0.0, 0.0, CAPSULE_HALF_HEIGHT), wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(0.0, 0.0, -CAPSULE_HALF_HEIGHT), wp.quat_identity()),
+            stretch_stiffness=STRETCH_STIFFNESS,
+            stretch_damping=STRETCH_DAMPING,
+            shear_stiffness=STRETCH_STIFFNESS,
+            shear_damping=STRETCH_DAMPING,
+            bend_stiffness=BEND_STIFFNESS,
+            bend_damping=BEND_DAMPING,
+            twist_stiffness=TWIST_STIFFNESS,
+            twist_damping=TWIST_DAMPING,
+            collision_filter_parent=True,
+            label=f"cable_{index}",
+        )
+        joints.append(joint)
 
-    Slot 0: static world anchor (default-initialised -- mass / inertia
-    already zero, motion type already :data:`MOTION_STATIC`).
-    Slots 1..NUM_BODIES: dynamic links in a column along world -y.
-    Each link has unit mass and solid-geometry body-frame inertia. For
-    cubes the rotation is ``_DIAGONAL_QUAT`` (corners on the y axis);
-    for capsules it is ``_CAPSULE_QUAT`` so the body-local +z capsule
-    axis aligns with world -y.
-    """
-    pitch, link_quat = _link_layout()
-    positions = np.zeros((NUM_BODIES, 3), dtype=np.float32)
-    orientations = np.zeros((NUM_BODIES, 4), dtype=np.float32)
-    # World anchor: identity orientation.
-    orientations[0] = (0.0, 0.0, 0.0, 1.0)
-    for j in range(NUM_CUBES):
-        positions[j + 1] = (0.0, -(j + 0.5) * pitch, 0.0)
-        orientations[j + 1] = link_quat
-    bodies.position.assign(positions)
-    bodies.orientation.assign(orientations)
-
-    inv_mass_np = np.zeros(NUM_BODIES, dtype=np.float32)
-    inv_mass_np[1:] = 1.0  # unit mass on every dynamic link
-    bodies.inverse_mass.assign(inv_mass_np)
-
-    inv_inertia_np = np.zeros((NUM_BODIES, 3, 3), dtype=np.float32)
-    inv_inertia_world_np = np.zeros_like(inv_inertia_np)
-    inv_inertia_np[1:] = _INV_INERTIA
-    inv_inertia_world_np[1:] = _INV_INERTIA_WORLD
-    bodies.inverse_inertia.assign(inv_inertia_np)
-    bodies.inverse_inertia_world.assign(inertia_sym6_pack_np(inv_inertia_world_np))
-
-    motion = np.full(NUM_BODIES, int(MOTION_STATIC), dtype=np.int32)
-    motion[1:] = int(MOTION_DYNAMIC)
-    bodies.motion_type.assign(motion)
-
-
-def _build_joint_arrays(
-    device: wp.context.Device,
-) -> dict[str, wp.array]:
-    """Assemble the per-joint descriptor arrays the init kernel needs.
-
-    Every joint connects consecutive links on the world y axis with a
-    cable reference axis along world +z.
-    Anchor 1 is the shared link boundary. Anchor 2 lies one pitch along
-    world -y, so ``anchor2 - anchor1`` follows the cable tangent. Both
-    physical bend directions are locked; only axial twist remains free.
-    """
-    pitch, _ = _link_layout()
-
-    body1 = np.zeros(NUM_HINGES, dtype=np.int32)
-    body2 = np.zeros(NUM_HINGES, dtype=np.int32)
-    anchor1 = np.zeros((NUM_HINGES, 3), dtype=np.float32)
-    anchor2 = np.zeros((NUM_HINGES, 3), dtype=np.float32)
-    # Slot 0 is the static world anchor; the first link is slot 1.
-    world_slot = 0
-    for k in range(NUM_HINGES):
-        body1[k] = world_slot if k == 0 else (k)  # link_{k-1} -> slot k
-        body2[k] = k + 1  # link_k -> slot k+1
-        y = -k * pitch
-        anchor1[k] = (0.0, y, 0.0)
-        anchor2[k] = (0.0, y - pitch, 0.0)
-
-    target = np.zeros(NUM_HINGES, dtype=np.float32)
-    target_velocity = np.zeros(NUM_HINGES, dtype=np.float32)
-    max_force_drive = np.zeros(NUM_HINGES, dtype=np.float32)
-    stiffness_drive = np.full(NUM_HINGES, BEND_STIFFNESS, dtype=np.float32)
-    damping_drive = np.full(NUM_HINGES, BEND_DAMPING, dtype=np.float32)
-
-    # No angle limit (min > max disables the limit row).
-    min_value = np.full(NUM_HINGES, 1.0, dtype=np.float32)
-    max_value = np.full(NUM_HINGES, -1.0, dtype=np.float32)
-
-    joint_mode = np.full(NUM_HINGES, int(JointMode.CABLE), dtype=np.int32)
-    drive_mode = np.full(NUM_HINGES, int(DRIVE_MODE), dtype=np.int32)
-
-    # Positional block soft-constraint knobs. The jitter WorldBuilder
-    # defaults these to ``DEFAULT_HERTZ_LINEAR = 1e9`` (i.e. a
-    # maximally-stiff lock that behaves as a rigid joint in single
-    # precision) / ``DEFAULT_DAMPING_RATIO = 1.0``. Using a low hertz
-    # (e.g. 60 Hz) here would turn each joint into a soft spring --
-    # fine for one joint, but 50 soft springs in series stretch
-    # catastrophically under the full chain weight (each joint sags
-    # by ``weight / kp`` and that adds up along the chain). Matching
-    # the jitter default keeps every joint rigid-enough that the
-    # top-link load propagates straight through to the bottom.
-    hertz = np.full(NUM_HINGES, float(DEFAULT_HERTZ_LINEAR), dtype=np.float32)
-    damping_ratio = np.full(NUM_HINGES, float(DEFAULT_DAMPING_RATIO), dtype=np.float32)
-    hertz_limit = np.full(NUM_HINGES, float(DEFAULT_HERTZ_LINEAR), dtype=np.float32)
-    damping_ratio_limit = np.full(NUM_HINGES, float(DEFAULT_DAMPING_RATIO), dtype=np.float32)
-    # Free axial twist about the cable tangent.
-    stiffness_limit = np.full(NUM_HINGES, TWIST_STIFFNESS, dtype=np.float32)
-    damping_limit = np.full(NUM_HINGES, TWIST_DAMPING, dtype=np.float32)
-
-    return {
-        "body1": wp.array(body1, dtype=wp.int32, device=device),
-        "body2": wp.array(body2, dtype=wp.int32, device=device),
-        "anchor1": wp.array(anchor1, dtype=wp.vec3f, device=device),
-        "anchor2": wp.array(anchor2, dtype=wp.vec3f, device=device),
-        "hertz": wp.array(hertz, dtype=wp.float32, device=device),
-        "damping_ratio": wp.array(damping_ratio, dtype=wp.float32, device=device),
-        "joint_mode": wp.array(joint_mode, dtype=wp.int32, device=device),
-        "drive_mode": wp.array(drive_mode, dtype=wp.int32, device=device),
-        "target": wp.array(target, dtype=wp.float32, device=device),
-        "target_velocity": wp.array(target_velocity, dtype=wp.float32, device=device),
-        "max_force_drive": wp.array(max_force_drive, dtype=wp.float32, device=device),
-        "stiffness_drive": wp.array(stiffness_drive, dtype=wp.float32, device=device),
-        "damping_drive": wp.array(damping_drive, dtype=wp.float32, device=device),
-        "min_value": wp.array(min_value, dtype=wp.float32, device=device),
-        "max_value": wp.array(max_value, dtype=wp.float32, device=device),
-        "hertz_limit": wp.array(hertz_limit, dtype=wp.float32, device=device),
-        "damping_ratio_limit": wp.array(damping_ratio_limit, dtype=wp.float32, device=device),
-        "stiffness_limit": wp.array(stiffness_limit, dtype=wp.float32, device=device),
-        "damping_limit": wp.array(damping_limit, dtype=wp.float32, device=device),
-    }
+    # This annotation records topology. Explicit maximal mode keeps the
+    # mechanism in full coordinates and lets PhoenX discover it automatically.
+    builder.add_articulation(joints)
+    return builder.finalize()
 
 
 class Example:
+    """Simulate a long full-coordinate cable mechanism with direct rows."""
+
     def __init__(self, viewer, args):
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 50
-        self.solver_iterations = 4
-
         self.viewer = viewer
-        self.args = args
         self.device = wp.get_device()
 
-        # ---- Body container ------------------------------------------
-        # Raw :class:`BodyContainer` -- PhoenX has no ``WorldBuilder``
-        # since it does not construct joints through an abstraction
-        # layer; direct population of the SoA is the one and only
-        # API. Slot 0 is the static world anchor (default-initialised
-        # static), slots 1..NUM_CUBES are the diamond cubes.
-        self.bodies = body_container_zeros(NUM_BODIES, device=self.device)
-        _populate_chain_bodies(self.bodies, self.device)
-
-        # ---- Constraint container with reserved joint slots ----------
-        # Zero contact capacity -- the chain never produces contacts
-        # (it hangs in free space, no ground plane, no inter-cube
-        # penetration). The factory picks ``ADBS_DWORDS`` width since
-        # we asked for joints.
-        self.constraints = PhoenXWorld.make_constraint_container(
-            num_joints=NUM_HINGES,
-            device=self.device,
-        )
-
-        # ---- Solver ---------------------------------------------------
-        # ``rigid_contact_max=0`` -- the solver's contact ingest paths
-        # stay dormant and the partitioner only sees joint elements.
-        # In capsule mode we also register a collision filter for every
-        # joint-connected pair so neighbouring capsules never produce
-        # contacts even if a future build of this example raises
-        # ``rigid_contact_max`` above zero.
-        collision_filter_pairs: list[tuple[int, int]] = []
-        if BODY_SHAPE is BodyShape.CAPSULE:
-            for k in range(NUM_HINGES):
-                a = 0 if k == 0 else k
-                b = k + 1
-                collision_filter_pairs.append((a, b))
-        self.world = PhoenXWorld(
-            bodies=self.bodies,
-            constraints=self.constraints,
-            substeps=self.sim_substeps,
-            solver_iterations=self.solver_iterations,
+        self.model = _build_model()
+        self.state = self.model.state()
+        self.control = self.model.control()
+        self.solver = newton.solvers.SolverPhoenX(
+            self.model,
+            substeps=5,
+            solver_iterations=2,
             velocity_iterations=1,
-            gravity=(0.0, 0.0, -9.81),  # match the jitter variant's -y gravity
-            rigid_contact_max=0,
-            num_joints=NUM_HINGES,
-            collision_filter_pairs=collision_filter_pairs,
-            device=self.device,
+            articulation_mode="maximal",
         )
 
-        # ---- Joint initialisation ------------------------------------
-        # One-shot launch of the shared init kernel over cids
-        # ``[0, NUM_HINGES)``. The dispatcher (fast-path tail kernels
-        # in :mod:`solver_phoenx_kernels`) handles everything beyond
-        # this point.
-        joint_arrays = _build_joint_arrays(self.device)
-        self.world.initialize_actuated_double_ball_socket_joints(**joint_arrays)
+        direct = self.solver._direct_equality_system
+        if direct is None or not direct.enabled:
+            raise RuntimeError("cable mechanism was not assigned to the direct equality solver")
+        expected_dimension = 6 * NUM_LINKS
+        if direct.topology.dimensions != (expected_dimension,):
+            raise RuntimeError(f"expected one {expected_dimension}-row mechanism, got {direct.topology.dimensions}")
+        if not self.solver.world._joint_pgs_all_disabled:
+            raise RuntimeError("bilateral cable rows unexpectedly remain in PGS")
 
-        # ---- Rendering scratch ---------------------------------------
-        self._xforms = wp.zeros(NUM_BODIES, dtype=wp.transform, device=self.device)
+        self.viewer.set_model(self.model)
+        self.viewer.set_camera(pos=wp.vec3(8.0, -10.0, 5.0), pitch=-18.0, yaw=140.0)
 
-        # ---- Picking --------------------------------------------------
-        # Half-extents per body in body-local frame; (0, 0, 0) marks
-        # the world anchor as non-pickable. For capsules the bounding
-        # box is (radius, radius, half_height + radius) in the
-        # body-local frame whose +z runs along the capsule axis.
-        half_extents_np = np.zeros((NUM_BODIES, 3), dtype=np.float32)
-        if BODY_SHAPE is BodyShape.CAPSULE:
-            half_extents_np[1:] = (
-                _CAPSULE_RADIUS,
-                _CAPSULE_RADIUS,
-                _CAPSULE_HALF_HEIGHT + _CAPSULE_RADIUS,
-            )
-        else:
-            half_extents_np[1:] = HALF_EXTENT
-        self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
-        self.picking = Picking(self.world, self._half_extents)
-        register_with_viewer_gl(self.viewer, self.picking)
-
-        # ---- CUDA graph capture --------------------------------------
-        self.capture()
-
-    def capture(self) -> None:
+        self.graph = None
         if self.device.is_cuda:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
-        else:
-            self.graph = None
 
     def simulate(self) -> None:
-        # Picking PD force is accumulated into ``bodies.force`` once
-        # per frame, before the step. The solver's
-        # ``_phoenx_apply_external_forces_kernel`` picks it up each
-        # substep and ``_clear_forces`` zeroes it for the next frame.
-        self.picking.apply_force()
-        # Chain scene has no contacts -> pass ``contacts=None`` so the
-        # solver skips the ingest pipeline entirely.
-        self.world.step(dt=self.frame_dt, contacts=None, shape_body=None)
+        """Advance one rendered frame."""
+        self.state.clear_forces()
+        self.viewer.apply_forces(self.state)
+        self.solver.step(self.state, self.state, self.control, None, self.frame_dt)
 
     def step(self) -> None:
+        """Advance the captured or eager simulation."""
         if self.graph is not None:
             wp.capture_launch(self.graph)
         else:
@@ -394,68 +150,33 @@ class Example:
         self.sim_time += self.frame_dt
 
     def render(self) -> None:
-        wp.launch(
-            pack_body_xforms_kernel,
-            dim=NUM_BODIES,
-            inputs=[self.bodies, self._xforms],
-            device=self.device,
-        )
+        """Render the current body state."""
         self.viewer.begin_frame(self.sim_time)
-        if BODY_SHAPE is BodyShape.CAPSULE:
-            self.viewer.log_shapes(
-                "/world/capsules",
-                newton.GeoType.CAPSULE,
-                (_CAPSULE_RADIUS, _CAPSULE_HALF_HEIGHT),
-                self._xforms[1:],
-            )
-        else:
-            self.viewer.log_shapes(
-                "/world/cubes",
-                newton.GeoType.BOX,
-                (HALF_EXTENT, HALF_EXTENT, HALF_EXTENT),
-                self._xforms[1:],
-            )
+        self.viewer.log_state(self.state)
         self.viewer.end_frame()
 
-    def _tip_sag(self) -> tuple[float, float]:
-        """Return ``(tip_sag, max_sag)`` of the cantilever in metres.
+    def test_final(self) -> None:
+        """Verify the direct cable remains finite with bounded bending."""
+        body_q = self.state.body_q.numpy()
+        body_qd = self.state.body_qd.numpy()
+        assert np.isfinite(body_q).all(), "cable chain produced non-finite poses"
+        assert np.isfinite(body_qd).all(), "cable chain produced non-finite velocities"
 
-        The chain and every cable reference axis extend along world -y;
-        gravity is along -z. The zero-compliance bend lock constrains both
-        transverse rotations, including lateral bending about +z. Only axial
-        twist about -y is free. An ideally converged solver keeps every link
-        at ``z = 0``;
-        the downward -z deflection of the links is therefore a direct
-        measure of joint-lock convergence. ``tip_sag`` is the free-end
-        link's drop; ``max_sag`` is the worst drop along the chain.
-        """
-        positions = self.bodies.position.numpy()
-        z = positions[1:NUM_BODIES, 2]
+        z = body_q[:NUM_LINKS, 2]
         tip_sag = float(-z[-1])
         max_sag = float(-np.min(z))
-        return tip_sag, max_sag
-
-    def test_final(self) -> None:
-        """After settling the cable chain must still be a near-rigid cantilever:
-        finite, not blown up, and with bounded free-end droop (catches the
-        block-Gauss-Seidel swing-lock convergence regression).
-        """
-        positions = self.bodies.position.numpy()
-        for i in range(1, NUM_BODIES):
-            assert np.isfinite(positions[i]).all(), f"body {i} produced non-finite position"
-            assert positions[i, 1] > -10.0 * NUM_CUBES, f"body {i} fell unreasonably far ({positions[i, 1]})"
-
-        tip_sag, max_sag = self._tip_sag()
-        chain_len = NUM_CUBES * _link_layout()[0]
+        chain_length = NUM_LINKS * CAPSULE_LENGTH
         print(
-            f"[cable_chain] tip_sag={tip_sag * 1e3:.1f} mm  max_sag={max_sag * 1e3:.1f} mm "
-            f"({tip_sag / chain_len * 100.0:.2f}% of {chain_len:.1f} m chain)"
+            f"[direct_cable_chain] tip_sag={tip_sag * 1.0e3:.3f} mm "
+            f"max_sag={max_sag * 1.0e3:.3f} mm "
+            f"({tip_sag / chain_length * 100.0:.5f}% of {chain_length:.1f} m chain)"
         )
-        # The decoupled formulation collapsed by metres. Bound both signs so
-        # an upward numerical explosion cannot pass a one-sided sag check.
-        max_abs_z = float(np.max(np.abs(positions[1:NUM_BODIES, 2])))
-        assert abs(tip_sag) < 0.6, f"free-end error {tip_sag * 1e3:.1f} mm -- cable bend lock under-converged"
-        assert max_abs_z < 0.6, f"maximum vertical error {max_abs_z * 1e3:.1f} mm"
+        maximum_sag = 0.015 * chain_length
+        assert abs(tip_sag) < maximum_sag, (
+            f"direct cable-chain tip error is {tip_sag * 1.0e3:.3f} mm "
+            f"({tip_sag / chain_length * 100.0:.3f}% of chain length)"
+        )
+        assert max_sag < maximum_sag, "direct cable chain bent beyond 1.5% of its length"
 
 
 if __name__ == "__main__":
