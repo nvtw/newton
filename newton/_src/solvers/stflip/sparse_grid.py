@@ -144,12 +144,19 @@ def sparse_grid_cell_coord(data: SparseGridData, index: int) -> wp.vec3i:
 def sparse_grid_cell_index(data: SparseGridData, tile: int, x: int, y: int, z: int) -> int:
     """Resolve a core-cell index, including a one-tile neighbor crossing."""
     tile_size = data.tile_size
-    tile_dx = _floor_div(x, tile_size)
-    tile_dy = _floor_div(y, tile_size)
-    tile_dz = _floor_div(z, tile_size)
-    if tile_dx < -1 or tile_dx > 1 or tile_dy < -1 or tile_dy > 1 or tile_dz < -1 or tile_dz > 1:
+    if (
+        x < -tile_size
+        or x >= 2 * tile_size
+        or y < -tile_size
+        or y >= 2 * tile_size
+        or z < -tile_size
+        or z >= 2 * tile_size
+    ):
         return -1
 
+    tile_dx = int(x >= tile_size) - int(x < 0)
+    tile_dy = int(y >= tile_size) - int(y < 0)
+    tile_dz = int(z >= tile_size) - int(z < 0)
     owner = tile
     if tile_dx != 0 or tile_dy != 0 or tile_dz != 0:
         owner = data.tile_neighbors[27 * tile + _neighbor_slot(tile_dx, tile_dy, tile_dz)]

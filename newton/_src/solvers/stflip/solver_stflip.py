@@ -25,16 +25,14 @@ from .kernels import (
     build_pressure_system,
     constrain_particles,
     extrapolate_face_velocities,
-    grid_to_particles,
+    finalize_grid_to_particles,
     initialize_face_validity,
     initialize_temporal_offsets,
     normalize_grid,
     particle_faces_to_grid,
     particles_to_grid,
     pressure_jacobi,
-    reconstruct_affine_rows,
-    sample_grid_velocity,
-    store_affine,
+    sample_transfer_components,
     update_particle_clocks,
 )
 from .sparse_grid import SparseGrid
@@ -167,8 +165,8 @@ class SolverSTFLIP(SolverBase):
         self.pressure_rhs = wp.zeros(capacity, dtype=wp.float32, device=model.device)
         self.pressure_diag = wp.zeros(capacity, dtype=wp.float32, device=model.device)
         self._zero_affine = wp.zeros(model.particle_count, dtype=wp.mat33, device=model.device)
-        self._particle_velocity_old = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
-        self._affine_rows = wp.zeros(9 * model.particle_count, dtype=wp.float32, device=model.device)
+        self._transfer_samples = wp.zeros(3 * model.particle_count, dtype=wp.vec4, device=model.device)
+        self._transfer_gradient_z = wp.zeros(3 * model.particle_count, dtype=wp.float32, device=model.device)
         self._temporal_offsets = wp.zeros(model.particle_count, dtype=wp.float32, device=model.device)
         self._contact_body_force_dummy = wp.zeros(1, dtype=wp.spatial_vector, device=model.device)
         self._active_mask = wp.zeros(model.particle_count, dtype=wp.int32, device=model.device)
@@ -256,8 +254,6 @@ class SolverSTFLIP(SolverBase):
                 1.0 / self.config.cell_size,
                 dt,
                 self.cell_mass,
-                self.face_mass,
-                self.face_momentum,
             ],
             device=self.device,
         )
@@ -380,30 +376,32 @@ class SolverSTFLIP(SolverBase):
         )
         flip_blend = 0.0 if self.config.transfer_scheme == "pic" else self.config.flip_blend
         wp.launch(
-            sample_grid_velocity,
-            dim=self.model.particle_count,
+            sample_transfer_components,
+            dim=3 * self.model.particle_count,
             inputs=[
                 self.grid.data,
                 state_in.particle_q,
                 self.model.particle_flags,
                 1.0 / self.config.cell_size,
+                self.face_velocity,
                 self.face_velocity_old,
-                self._particle_velocity_old,
+                self.config.transfer_scheme == "apic",
+                self._transfer_samples,
+                self._transfer_gradient_z,
             ],
             device=self.device,
         )
         wp.launch(
-            grid_to_particles,
+            finalize_grid_to_particles,
             dim=self.model.particle_count,
             inputs=[
-                self.grid.data,
                 state_in.particle_q,
                 state_in.particle_qd,
                 self.model.particle_flags,
-                1.0 / self.config.cell_size,
                 flip_blend,
-                self.face_velocity,
-                self._particle_velocity_old,
+                self.config.transfer_scheme == "apic",
+                self._transfer_samples,
+                self._transfer_gradient_z,
                 state_out.particle_q,
                 state_out.particle_qd,
                 affine_out,
@@ -437,26 +435,6 @@ class SolverSTFLIP(SolverBase):
                     state_out.particle_q,
                     state_out.particle_qd,
                 ],
-                device=self.device,
-            )
-        if self.config.transfer_scheme == "apic":
-            wp.launch(
-                reconstruct_affine_rows,
-                dim=3 * self.model.particle_count,
-                inputs=[
-                    self.grid.data,
-                    state_in.particle_q,
-                    self.model.particle_flags,
-                    1.0 / self.config.cell_size,
-                    self.face_velocity,
-                    self._affine_rows,
-                ],
-                device=self.device,
-            )
-            wp.launch(
-                store_affine,
-                dim=self.model.particle_count,
-                inputs=[self._affine_rows, affine_out],
                 device=self.device,
             )
         wp.launch(

@@ -8,14 +8,12 @@ import warp as wp
 
 import newton
 from newton._src.solvers.stflip.kernels import (
-    grid_to_particles,
+    finalize_grid_to_particles,
     initialize_temporal_offsets,
     normalize_grid,
     particle_faces_to_grid,
     particles_to_grid,
-    reconstruct_affine_rows,
-    sample_grid_velocity,
-    store_affine,
+    sample_transfer_components,
     update_particle_clocks,
 )
 from newton._src.solvers.stflip.sparse_grid import SparseGrid
@@ -76,8 +74,6 @@ class TestSTFLIPTransfers(unittest.TestCase):
                 1.0,
                 dt,
                 cell_mass,
-                face_mass,
-                face_momentum,
             ],
             device=device,
         )
@@ -158,22 +154,46 @@ class TestSTFLIPTransfers(unittest.TestCase):
         for device in self._devices():
             with self.subTest(device=device):
                 transfer = self._transfer(device, positions, velocities, masses, active)
-                sampled = wp.zeros(len(positions), dtype=wp.vec3, device=device)
+                samples = wp.zeros(3 * len(positions), dtype=wp.vec4, device=device)
+                gradient_z = wp.zeros(3 * len(positions), dtype=wp.float32, device=device)
+                positions_out = wp.zeros_like(transfer["positions"])
+                velocities_out = wp.zeros_like(transfer["velocities"])
+                affine_out = wp.zeros(len(positions), dtype=wp.mat33, device=device)
                 wp.launch(
-                    sample_grid_velocity,
-                    dim=len(positions),
+                    sample_transfer_components,
+                    dim=3 * len(positions),
                     inputs=[
                         transfer["grid"].data,
                         transfer["positions"],
                         transfer["flags"],
                         1.0,
                         transfer["face_velocity"],
-                        sampled,
+                        transfer["face_velocity"],
+                        False,
+                        samples,
+                        gradient_z,
+                    ],
+                    device=device,
+                )
+                wp.launch(
+                    finalize_grid_to_particles,
+                    dim=len(positions),
+                    inputs=[
+                        transfer["positions"],
+                        transfer["velocities"],
+                        transfer["flags"],
+                        0.0,
+                        False,
+                        samples,
+                        gradient_z,
+                        positions_out,
+                        velocities_out,
+                        affine_out,
                     ],
                     device=device,
                 )
 
-                np.testing.assert_allclose(sampled.numpy(), velocities, rtol=2.0e-6, atol=2.0e-6)
+                np.testing.assert_allclose(velocities_out.numpy(), velocities, rtol=2.0e-6, atol=2.0e-6)
 
     def test_apic_reproduces_affine_velocity(self):
         """Reproduce particle velocity and gradient through APIC transfer."""
@@ -189,24 +209,13 @@ class TestSTFLIPTransfers(unittest.TestCase):
         for device in self._devices():
             with self.subTest(device=device):
                 transfer = self._transfer(device, positions, velocities, masses, active, affine=affine)
-                sampled = wp.zeros(1, dtype=wp.vec3, device=device)
-                rows = wp.zeros(9, dtype=wp.float32, device=device)
-                reconstructed = wp.zeros(1, dtype=wp.mat33, device=device)
+                samples = wp.zeros(3, dtype=wp.vec4, device=device)
+                gradient_z = wp.zeros(3, dtype=wp.float32, device=device)
+                positions_out = wp.zeros_like(transfer["positions"])
+                velocities_out = wp.zeros_like(transfer["velocities"])
+                affine_out = wp.zeros(1, dtype=wp.mat33, device=device)
                 wp.launch(
-                    sample_grid_velocity,
-                    dim=1,
-                    inputs=[
-                        transfer["grid"].data,
-                        transfer["positions"],
-                        transfer["flags"],
-                        1.0,
-                        transfer["face_velocity"],
-                        sampled,
-                    ],
-                    device=device,
-                )
-                wp.launch(
-                    reconstruct_affine_rows,
+                    sample_transfer_components,
                     dim=3,
                     inputs=[
                         transfer["grid"].data,
@@ -214,14 +223,33 @@ class TestSTFLIPTransfers(unittest.TestCase):
                         transfer["flags"],
                         1.0,
                         transfer["face_velocity"],
-                        rows,
+                        transfer["face_velocity"],
+                        True,
+                        samples,
+                        gradient_z,
                     ],
                     device=device,
                 )
-                wp.launch(store_affine, dim=1, inputs=[rows, reconstructed], device=device)
+                wp.launch(
+                    finalize_grid_to_particles,
+                    dim=1,
+                    inputs=[
+                        transfer["positions"],
+                        transfer["velocities"],
+                        transfer["flags"],
+                        0.0,
+                        True,
+                        samples,
+                        gradient_z,
+                        positions_out,
+                        velocities_out,
+                        affine_out,
+                    ],
+                    device=device,
+                )
 
-                np.testing.assert_allclose(sampled.numpy(), velocities, rtol=2.0e-6, atol=2.0e-6)
-                np.testing.assert_allclose(reconstructed.numpy(), affine, rtol=3.0e-6, atol=3.0e-6)
+                np.testing.assert_allclose(velocities_out.numpy(), velocities, rtol=2.0e-6, atol=2.0e-6)
+                np.testing.assert_allclose(affine_out.numpy(), affine, rtol=3.0e-6, atol=3.0e-6)
 
     def test_flip_preserves_velocity_without_grid_delta(self):
         """Preserve particle velocity when the FLIP grid delta is zero."""
@@ -234,35 +262,38 @@ class TestSTFLIPTransfers(unittest.TestCase):
         for device in self._devices():
             with self.subTest(device=device):
                 transfer = self._transfer(device, positions, velocities, masses, active)
-                particle_velocity_old = wp.zeros(len(positions), dtype=wp.vec3, device=device)
+                samples = wp.zeros(3 * len(positions), dtype=wp.vec4, device=device)
+                gradient_z = wp.zeros(3 * len(positions), dtype=wp.float32, device=device)
                 positions_out = wp.zeros_like(transfer["positions"])
                 velocities_out = wp.zeros_like(transfer["velocities"])
                 affine_out = wp.zeros(len(positions), dtype=wp.mat33, device=device)
                 wp.launch(
-                    sample_grid_velocity,
-                    dim=len(positions),
+                    sample_transfer_components,
+                    dim=3 * len(positions),
                     inputs=[
                         transfer["grid"].data,
                         transfer["positions"],
                         transfer["flags"],
                         1.0,
                         transfer["face_velocity"],
-                        particle_velocity_old,
+                        transfer["face_velocity"],
+                        False,
+                        samples,
+                        gradient_z,
                     ],
                     device=device,
                 )
                 wp.launch(
-                    grid_to_particles,
+                    finalize_grid_to_particles,
                     dim=len(positions),
                     inputs=[
-                        transfer["grid"].data,
                         transfer["positions"],
                         transfer["velocities"],
                         transfer["flags"],
                         1.0,
-                        1.0,
-                        transfer["face_velocity"],
-                        particle_velocity_old,
+                        False,
+                        samples,
+                        gradient_z,
                         positions_out,
                         velocities_out,
                         affine_out,
