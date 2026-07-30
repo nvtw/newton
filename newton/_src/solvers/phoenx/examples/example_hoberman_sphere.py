@@ -4,45 +4,13 @@
 ###########################################################################
 # Example PhoenX Hoberman Sphere
 #
-# PhoenX variant of the kamino articulation demo in
-# ``example_sim_hoberman_sphere.py``: same Hoberman sphere USD
-# (``models/hoberman_sphere_articulation.usda``, 240 rigid struts
-# linked by revolute joints), same zero-gravity rigid-body spin,
-# same authored configuration -- driven directly by
-# :class:`PhoenXWorld` (no :class:`SolverPhoenX` adapter, no
-# Newton state ping-pong inside the step) so the example doubles as
-# a minimal walkthrough of the raw PhoenX API.
+# A 240-strut, full-coordinate looped mechanism loaded from the Hoberman
+# sphere USD. SolverPhoenX automatically discovers its connected revolute
+# graph, precomputes one RCM-ordered sparse direct system, and leaves no
+# bilateral rows in PGS. The authored overlapping visual struts remain
+# non-colliding, and zero gravity lets the sphere coast with a rigid-body spin.
 #
-# Joint plumbing:
-#   * The USD's revolute joints are translated into ADBS columns by
-#     :func:`build_adbs_init_arrays` and uploaded once via
-#     :meth:`PhoenXWorld.initialize_actuated_double_ball_socket_joints`.
-#     With the joints active the cluster stays hinged when picked --
-#     pulling on one strut now drags its neighbours along the chain
-#     instead of breaking it free of the sphere.
-#   * No collision pipeline -- the struts overlap by design in the
-#     authored pose (they're meant to be hinged), so any contact
-#     detection would explode the sphere on frame 1. PhoenX runs
-#     with ``rigid_contact_max=0`` and ``world.step(contacts=None)``.
-#   * No gravity -- matches the kamino demo's
-#     ``set_gravity([0, 0, 0])`` so the cluster just spins.
-#
-# Each strut is seeded with a rigid-body spin about +Z so the whole
-# sphere rotates as one cluster: ``v = omega x r``, ``omega = 0.1 z``.
-# Matches the kamino demo's initial-velocity setup verbatim.
-#
-# Rendering: the USD authors every strut as its own :class:`newton.Mesh`
-# prim (16 verts / 24 tris each, all bit-different vertex floats),
-# which Newton's viewer hashes to 240 single-instance batches and
-# 240 GL draws per frame -- enough to drag the framerate to ~12 fps
-# even when paused. Following the kapla-tower fast path, we replace
-# every USD mesh shape's source with a single shared :class:`Mesh`
-# stub (1 invisible viewer batch instead of 240) and re-add each
-# strut as two :func:`add_shape_box` tiles. Snap-to-grid quantising
-# the tile half-extents collapses ~480 box shapes into a handful of
-# unique sizes -- one viewer batch per size, just like kapla.
-#
-# Run:  python -m newton._src.solvers.phoenx.examples.example_hoberman_sphere
+# Run: python -m newton._src.solvers.phoenx.examples.example_hoberman_sphere
 ###########################################################################
 
 from __future__ import annotations
@@ -54,103 +22,31 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.phoenx.body import body_container_zeros
-from newton._src.solvers.phoenx.examples.example_common import (
-    init_phoenx_bodies_kernel,
-    newton_to_phoenx_kernel,
-    phoenx_to_newton_kernel,
-)
-from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
-from newton._src.solvers.phoenx.picking import (
-    Picking,
-    register_with_viewer_gl,
-)
-from newton._src.solvers.phoenx.solver_phoenx import (
-    PhoenXWorld,
-    pack_body_xforms_kernel,
-)
 
-# Strut tile count: every Hoberman strut mesh is authored as two
-# rotated rectangular tiles glued at the hinge end (8 verts each
-# inside the 16-vert mesh). Rendering each as its own oriented box
-# preserves the USD silhouette.
 _TILES_PER_STRUT = 2
-
-# Quantisation step (m) for tile half-extents. The USD authors
-# nominally-equal tile sizes with sub-millimetre float-noise
-# differences which would otherwise produce one viewer batch per
-# tile. Snapping to a 1 mm grid collapses the ~480 tiles down to
-# ~12 unique sizes (the actual authored variants) -> ~12 viewer
-# batches, while keeping the rendered geometry within 1 mm of the
-# joint-anchor placement -- well below the visible threshold for
-# a strut spanning ~50 cm.
 _TILE_SIZE_QUANTUM_M = 0.001
-
-# Authored Hoberman tile cross-section (m). The USD ships every
-# strut tile as a 5 cm-wide / 5 cm-thick slab; we hard-code the
-# halves rather than measuring per-strut so that the rendered
-# boxes share a single width-and-thickness pair across all 480
-# tiles (collapses one more axis of viewer-batch variation).
 _TILE_HALF_WIDTH_M = 0.025
 _TILE_HALF_THICKNESS_M = 0.025
 
-# Path to the Hoberman sphere USDA -- shared with the kamino
-# articulation demo.
 USDA_PATH = os.path.join(
     os.path.dirname(os.path.realpath(__file__)),
     "models",
     "hoberman_sphere_articulation.usda",
 )
-
-# Initial rigid-body spin applied to the whole cluster [rad/s].
-# Matches the kamino demo: 0.1 rad/s about +Z, which rotates the full
-# sphere about once every ~63 s.
-SPIN_RATE_RAD_S: float = 0.1
+SPIN_RATE_RAD_S = 0.1
 
 
 class Example:
-    """Hoberman sphere rotating in zero-g, driven by :class:`PhoenXWorld`.
-
-    Pipeline per frame:
-        1. Sync Newton state -> PhoenX body container.
-        2. Call :meth:`PhoenXWorld.step` with ``contacts=None``.
-        3. Sync PhoenX body container -> Newton state.
-
-    The USD's revolute joints are ingested through the ADBS
-    constraint columns so the sphere stays articulated under
-    picking. There are no contacts (``rigid_contact_max=0``) and no
-    gravity, so once seeded with the rigid-body spin the cluster
-    coasts forever.
-    """
+    """Simulate a looped Hoberman mechanism with direct equalities."""
 
     def __init__(self, viewer, args):
-        # Frame pacing. 50 Hz / 1 ms substep matches the kamino demo.
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
-        # 1 ms substep matches the kamino demo. With ~240 hinged
-        # struts a few PGS iterations per substep keep the chain
-        # rigid under picking forces; 1 iteration was fine when the
-        # joints were ignored but lets the chain stretch visibly now.
-        self.sim_substeps = 4
         self.sim_time = 0.0
-        self.solver_iterations = 4
-
         self.viewer = viewer
         self.device = wp.get_device()
 
-        self._build_scene()
-
-    # ------------------------------------------------------------------
-    # Scene construction
-    # ------------------------------------------------------------------
-
-    def _build_scene(self) -> None:
-        builder = newton.ModelBuilder()
-
-        # USD loader options match the kamino demo verbatim so the two
-        # examples build out of the same Newton model. The articulation
-        # comes along for the ride (the USD has revolute joints) but
-        # PhoenX never touches it.
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         builder.add_usd(
             USDA_PATH,
             joint_ordering=None,
@@ -161,185 +57,56 @@ class Example:
             collapse_fixed_joints=False,
             apply_up_axis_from_stage=True,
         )
-
-        # Replace USD-imported per-strut Mesh shapes with shared
-        # box-shaped tiles -- see :meth:`_swap_struts_for_box_tiles`
-        # for the rationale (kapla-style viewer batching).
         self._swap_struts_for_box_tiles(builder)
-
         builder.color()
         self.model = builder.finalize(skip_validation_joints=True)
-        body_inv_mass_np = self.model.body_inv_mass.numpy()
-        self._strut_body_ids = [int(i) for i in range(self.model.body_count) if body_inv_mass_np[i] > 0.0]
-        print(
-            f"[PhoenX Hoberman] bodies={self.model.body_count} "
-            f"shapes={self.model.shape_count} "
-            f"struts={len(self._strut_body_ids)}"
-        )
 
-        # State: ``add_usd`` populates ``model.body_q`` with each
-        # body's absolute world transform. We skip ``newton.eval_fk``
-        # because it would walk the USD's revolute-joint chain and
-        # collapse body_q to the joint-derived pose -- we want the
-        # authored absolute positions.
         self.state = self.model.state()
         self.state.body_q.assign(self.model.body_q)
+        body_q = self.model.body_q.numpy()
+        angular_velocity = np.array([0.0, 0.0, SPIN_RATE_RAD_S], dtype=np.float32)
+        body_qd = np.zeros((self.model.body_count, 6), dtype=np.float32)
+        body_qd[:, :3] = np.cross(angular_velocity, body_q[:, :3])
+        body_qd[:, 3:] = angular_velocity
+        self.state.body_qd.assign(body_qd)
+        self.control = self.model.control()
 
-        # Seed every body with a rigid-body spin about +Z so the
-        # cluster rotates as one rigid body: ``v = omega x r``.
-        body_q_np = self.model.body_q.numpy()
-        ang_vel = np.array([0.0, 0.0, SPIN_RATE_RAD_S], dtype=np.float32)
-        body_qd_np = np.zeros((self.model.body_count, 6), dtype=np.float32)
-        for i in range(self.model.body_count):
-            pos = body_q_np[i, 0:3]
-            body_qd_np[i, 0:3] = np.cross(ang_vel, pos)
-            body_qd_np[i, 3:6] = ang_vel
-        self.state.body_qd.assign(body_qd_np)
-
-        # ---- PhoenX body container (slot 0 = static world anchor) ----
-        num_phoenx_bodies = int(self.model.body_count) + 1
-        bodies = body_container_zeros(num_phoenx_bodies, device=self.device)
-        # Seed every slot's orientation to identity so the rotation-
-        # to-matrix call in the inertia-refresh kernel doesn't blow up
-        # on the zero-quaternion default.
-        bodies.orientation.assign(np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32))
-        wp.launch(
-            init_phoenx_bodies_kernel,
-            dim=self.model.body_count,
-            inputs=[
-                self.model.body_q,
-                self.state.body_qd,
-                self.model.body_com,
-                self.model.body_inv_mass,
-                self.model.body_inv_inertia,
-            ],
-            outputs=[
-                bodies.position,
-                bodies.orientation,
-                bodies.velocity,
-                bodies.angular_velocity,
-                bodies.inverse_mass,
-                bodies.inverse_inertia,
-                bodies.inverse_inertia_world,
-                bodies.motion_type,
-                bodies.body_com,
-            ],
-            device=self.device,
-        )
-        self.bodies = bodies
-
-        # ---- Joint translation ---------------------------------------
-        # ``build_adbs_init_arrays`` walks ``model.joint_*`` and packs
-        # one actuated-double-ball-socket descriptor per joint. The
-        # USD ships ~240 revolute hinges; we keep them all and let
-        # PhoenX hold them rigid (drive_mode=OFF, no PD gains, no
-        # axial limit) so the sphere behaves as one articulated
-        # body when picked.
-        self._adbs = build_adbs_init_arrays(self.model, device=self.device)
-        num_joints = self._adbs.num_joint_columns
-
-        # Constraint container sized for every USD joint plus zero
-        # contact / cloth / soft-tet capacity.
-        self.constraints = PhoenXWorld.make_constraint_container(
-            num_joints=num_joints,
-            device=self.device,
-        )
-
-        # ---- Solver ---------------------------------------------------
-        # ``rigid_contact_max=0`` disables PhoenX's contact-column
-        # pipeline; ``gravity=(0, 0, 0)`` matches the kamino demo's
-        # ``set_gravity([0, 0, 0])``. With the joints active, picking
-        # a single strut drags the rest of the chain along -- the
-        # cluster stays hinged instead of breaking apart.
-        self.world = PhoenXWorld(
-            bodies=self.bodies,
-            constraints=self.constraints,
-            substeps=self.sim_substeps,
-            solver_iterations=self.solver_iterations,
+        self.solver = newton.solvers.SolverPhoenX(
+            self.model,
+            substeps=5,
+            solver_iterations=2,
             velocity_iterations=1,
-            gravity=(0.0, 0.0, 0.0),
-            rigid_contact_max=0,
-            num_joints=num_joints,
-            device=self.device,
+            articulation_mode="maximal",
+        )
+        direct = self.solver._direct_equality_system
+        if direct is None or not direct.enabled:
+            raise RuntimeError("Hoberman joints were not assigned to the direct equality solver")
+        if len(direct.topology.dimensions) != 1:
+            raise RuntimeError(f"expected one connected Hoberman mechanism, got {direct.topology.dimensions}")
+        if not self.solver.world._joint_pgs_all_disabled:
+            raise RuntimeError("bilateral Hoberman rows unexpectedly remain in PGS")
+        print(
+            f"[PhoenX Hoberman] bodies={self.model.body_count} "
+            f"joints={self.model.joint_count} direct_rows={direct.topology.dimensions[0]}"
         )
 
-        # The ADBS init kernel reads PhoenX body positions to
-        # snapshot body-local anchor offsets, so it must run *after*
-        # the body container has been seeded above.
-        if num_joints > 0:
-            self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
-
-        # ---- Viewer ---------------------------------------------------
-        self._xforms = wp.zeros(num_phoenx_bodies, dtype=wp.transform, device=self.device)
         self.viewer.set_model(self.model)
-        # Authored sphere radius is ~2 m; pull the camera back to ~3x
-        # so the whole cluster stays in frame.
-        self.viewer.set_camera(
-            pos=wp.vec3(6.0, -6.0, 2.0),
-            pitch=-15.0,
-            yaw=135.0,
-        )
+        self.viewer.set_camera(pos=wp.vec3(6.0, -6.0, 2.0), pitch=-15.0, yaw=135.0)
 
-        # ---- Picking --------------------------------------------------
-        # Uniform conservative AABB per strut (~0.6 m cube). Slot 0
-        # (static world anchor) stays at zero so rays ignore it.
-        half_extents_np = np.zeros((num_phoenx_bodies, 3), dtype=np.float32)
-        for newton_idx in self._strut_body_ids:
-            half_extents_np[newton_idx + 1] = (0.3, 0.3, 0.3)
-        self._half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
-        self.picking = Picking(self.world, self._half_extents)
-        register_with_viewer_gl(self.viewer, self.picking)
-
-        # CUDA graph capture for the per-frame step pipeline. Falls
-        # back to direct :meth:`simulate` on CPU.
         self.graph = None
         if self.device.is_cuda:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
 
-    # ------------------------------------------------------------------
-    # Simulation + rendering
-    # ------------------------------------------------------------------
-
     def simulate(self) -> None:
-        self._sync_newton_to_phoenx()
-        self.picking.apply_force()
-        self.world.step(dt=self.frame_dt)
-        self._sync_phoenx_to_newton()
-
-    def _sync_newton_to_phoenx(self) -> None:
-        n = self.model.body_count
-        wp.launch(
-            newton_to_phoenx_kernel,
-            dim=n,
-            inputs=[self.state.body_q, self.state.body_qd, self.model.body_com],
-            outputs=[
-                self.bodies.position[1 : 1 + n],
-                self.bodies.orientation[1 : 1 + n],
-                self.bodies.velocity[1 : 1 + n],
-                self.bodies.angular_velocity[1 : 1 + n],
-            ],
-            device=self.device,
-        )
-
-    def _sync_phoenx_to_newton(self) -> None:
-        n = self.model.body_count
-        wp.launch(
-            phoenx_to_newton_kernel,
-            dim=n,
-            inputs=[
-                self.bodies.position[1 : 1 + n],
-                self.bodies.orientation[1 : 1 + n],
-                self.bodies.velocity[1 : 1 + n],
-                self.bodies.angular_velocity[1 : 1 + n],
-                self.model.body_com,
-            ],
-            outputs=[self.state.body_q, self.state.body_qd],
-            device=self.device,
-        )
+        """Advance one rendered frame."""
+        self.state.clear_forces()
+        self.viewer.apply_forces(self.state)
+        self.solver.step(self.state, self.state, self.control, None, self.frame_dt)
 
     def step(self) -> None:
+        """Advance the captured or eager simulation."""
         if self.graph is not None:
             wp.capture_launch(self.graph)
         else:
@@ -394,7 +161,11 @@ class Example:
         # Mass-less ShapeConfig keeps the new tile boxes from
         # rewriting the USD-authored body inertia: ``add_shape``
         # only calls ``_update_body_mass`` when ``cfg.density > 0``.
-        massless_cfg = newton.ModelBuilder.ShapeConfig(density=0.0)
+        massless_cfg = newton.ModelBuilder.ShapeConfig(
+            density=0.0,
+            has_shape_collision=False,
+            has_particle_collision=False,
+        )
 
         # Body-local revolute joint info: anchor position (3D, in
         # body frame) + hinge axis (3D, in body frame). The hinge
@@ -653,50 +424,24 @@ class Example:
         return np.array([x, y, z, w], dtype=np.float32)
 
     def render(self) -> None:
-        wp.launch(
-            pack_body_xforms_kernel,
-            dim=self.world.num_bodies,
-            inputs=[self.bodies, self._xforms],
-            device=self.device,
-        )
+        """Render the current Newton body state."""
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state)
         self.viewer.end_frame()
 
-    # ------------------------------------------------------------------
-    # Post-step validation
-    # ------------------------------------------------------------------
-
     def test_final(self) -> None:
-        """Every strut must have finite state and stay within a
-        generous envelope around the authored sphere centre.
+        """Verify the looped direct mechanism remains finite and bounded."""
+        body_q = self.state.body_q.numpy()
+        body_qd = self.state.body_qd.numpy()
+        assert np.isfinite(body_q).all(), "Hoberman sphere produced non-finite poses"
+        assert np.isfinite(body_qd).all(), "Hoberman sphere produced non-finite velocities"
 
-        With no contacts and no gravity, the only motion is the
-        seeded ``omega x r`` rigid-body spin. Joint constraints
-        keep the cluster hinged (no separation), so the bounding
-        sphere is invariant -- any drift past a wide tolerance
-        indicates an integrator blow-up.
-        """
-        positions = self.bodies.position.numpy()
-        velocities = self.bodies.velocity.numpy()
-        radius_tolerance = 8.0
-        for newton_idx in self._strut_body_ids:
-            slot = newton_idx + 1
-            pos = positions[slot]
-            vel = velocities[slot]
-            assert np.isfinite(pos).all(), f"strut {newton_idx} pos non-finite ({pos})"
-            assert np.isfinite(vel).all(), f"strut {newton_idx} vel non-finite ({vel})"
-            r = float(np.linalg.norm(pos))
-            assert r < radius_tolerance, (
-                f"strut {newton_idx} flew off the sphere: r={r:.3f} m, tol={radius_tolerance:.3f}, pos={pos}"
-            )
+        maximum_radius = float(np.linalg.norm(body_q[:, :3], axis=1).max())
+        print(f"[direct_hoberman] maximum_radius={maximum_radius:.4f} m")
+        assert maximum_radius < 8.0, f"Hoberman sphere escaped its stability envelope: {maximum_radius:.3f} m"
 
 
 if __name__ == "__main__":
-    parser = newton.examples.create_parser()
-    viewer, args = newton.examples.init(parser)
+    viewer, args = newton.examples.init()
     example = Example(viewer, args)
-    # Start paused so the viewer shows the authored sphere
-    # configuration before the spin starts (matches the kamino demo).
-    example.viewer._paused = True
     newton.examples.run(example, args)
