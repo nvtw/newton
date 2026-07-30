@@ -12,9 +12,8 @@ deformable cloth iterate, the cloth is a network of
 come from the prism interpretation (thickness ``2 * margin``), connected
 by ADBS ball joints.
 
-The scene is hand-rolled directly against :class:`PhoenXWorld` (no
-:class:`SolverPhoenX` adapter), mirroring the structure of
-:mod:`example_cloth_rigid_drop`:
+The scene uses :class:`newton.solvers.SolverPhoenX`, mirroring the structure
+of :mod:`example_cloth_rigid_drop`:
 
 * Triangulated cloth is built in :class:`newton.ModelBuilder`, two
   triangles per quad sharing the diagonal A-C, joined at every shared
@@ -26,9 +25,8 @@ The scene is hand-rolled directly against :class:`PhoenXWorld` (no
   :meth:`~newton.ModelBuilder.add_joint_ball` against ``parent=-1``.
 * A free-floating rigid cube is added with density-derived mass /
   inertia and spawns above the cloth centre.
-* :func:`build_adbs_init_arrays` translates the Newton joint graph into
-  ADBS columns; PhoenX advances the rigid bodies, contact pipeline, and
-  joints in a single PGS sweep.
+* PhoenX detects the connected rigid-cloth joint mechanism automatically and
+  solves its bilateral rows directly; contact inequalities remain in PGS.
 
 Run::
 
@@ -42,16 +40,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.phoenx.body import body_container_zeros
-from newton._src.solvers.phoenx.examples.example_common import (
-    init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
-)
-from newton._src.solvers.phoenx.examples.example_common import (
-    phoenx_to_newton_kernel as _phoenx_to_newton_kernel,
-)
-from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
-from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 # ---------------------------------------------------------------------
 # Triangle construction helpers
@@ -92,6 +80,8 @@ class Example:
         width: int = 12,
         height: int = 12,
         cloth_density: float = 600.0,
+        mass_splitting: bool = False,
+        mass_splitting_unrolled: bool = False,
     ):
         self.viewer = viewer
         self.device = wp.get_device()
@@ -100,11 +90,10 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
 
-        # Articulated cloth + cube benefits from a similar substep
-        # budget to the deformable variant: many ball-joint loops plus
-        # rigid contact resolution share the PGS sweep.
-        self.sim_substeps = 8
-        self.solver_iterations = 12
+        # Bilateral cloth rows are solved directly; PGS work is limited to
+        # cube/cloth contact inequalities.
+        self.sim_substeps = 5
+        self.solver_iterations = 2
         self.velocity_iterations = 1
 
         self.dim_x = int(width)
@@ -130,11 +119,10 @@ class Example:
         # ---- Build the Newton model -----------------------------------
         # Cloth lies flat in the XY plane, centred on the origin; the
         # rigid cube spawns above the centre and falls onto it.
-        builder = newton.ModelBuilder()
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
 
         self._build_rigid_cloth(builder)
 
-        # Free-floating rigid cube spawned above the cloth centre.
         self.cube_he = 0.05
         self.cube_spawn_z = self.cloth_z + 0.4
         self.cube_body = builder.add_body(
@@ -147,121 +135,27 @@ class Example:
             hz=self.cube_he,
             cfg=newton.ModelBuilder.ShapeConfig(density=600.0, mu=0.6),
         )
-        builder.gravity = -9.81
-
         self.model = builder.finalize(device=self.device)
-
-        # ``add_body`` queues each free-joint pose in ``joint_q``; FK
-        # propagates them into ``body_q`` so the PhoenX init kernel
-        # seeds every triangle / the cube at its spawn pose instead of
-        # the URDF-rest origin.
-        if int(self.model.body_count) > 0 and int(self.model.joint_count) > 0:
-            tmp_state = self.model.state()
-            newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, tmp_state)
-            self.model.body_q.assign(tmp_state.body_q)
-            self.model.body_qd.assign(tmp_state.body_qd)
-
-        # ---- Newton collision pipeline -------------------------------
-        # Pure rigid-body scene -> standard ``newton.CollisionPipeline``;
-        # no cloth-aware suffix, no virtual cloth-triangle shapes. NXN
-        # is fine for the modest body count of these grids.
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
-            contact_matching=PHOENX_CONTACT_MATCHING,
+            contact_matching="sticky",
             broad_phase="nxn",
         )
         self.contacts = self.collision_pipeline.contacts()
-        rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
-
-        # ---- Build the PhoenX body container -------------------------
-        # Slot 0 is the static world anchor; Newton bodies occupy
-        # slots ``[1, body_count + 1)``.
-        num_phoenx_bodies = int(self.model.body_count) + 1
-        bodies = body_container_zeros(num_phoenx_bodies, device=self.device)
-        wp.copy(
-            bodies.orientation,
-            wp.array(
-                np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32),
-                dtype=wp.quatf,
-                device=self.device,
-            ),
-        )
-        wp.launch(
-            _init_phoenx_bodies_kernel,
-            dim=self.model.body_count,
-            inputs=[
-                self.model.body_q,
-                self.model.body_qd,
-                self.model.body_com,
-                self.model.body_inv_mass,
-                self.model.body_inv_inertia,
-            ],
-            outputs=[
-                bodies.position,
-                bodies.orientation,
-                bodies.velocity,
-                bodies.angular_velocity,
-                bodies.inverse_mass,
-                bodies.inverse_inertia,
-                bodies.inverse_inertia_world,
-                bodies.motion_type,
-                bodies.body_com,
-            ],
-            device=self.device,
-        )
-        self.bodies = bodies
-
-        # ---- Translate Newton joints into ADBS columns ---------------
-        # Each ball-socket joint (corner chain links + four world pins)
-        # becomes a single ADBS constraint column. ``add_body`` also
-        # creates a per-body FREE joint to satisfy ``finalize``'s
-        # reachability check; the model adapter's joint translator
-        # ignores those.
-        self._adbs = build_adbs_init_arrays(self.model, device=self.device)
-        num_joints = self._adbs.num_joint_columns
-
-        self.constraints = PhoenXWorld.make_constraint_container(
-            num_joints=num_joints,
-            device=self.device,
-        )
-
-        # Newton's ``shape_body`` uses -1 for the world anchor; PhoenX
-        # uses slot 0. Shift accordingly so contact ingest finds the
-        # right body slot per shape.
-        shape_body_np = self.model.shape_body.numpy()
-        shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
-        self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
-
-        # ---- Build the PhoenXWorld -----------------------------------
-        self.world = PhoenXWorld(
-            bodies=self.bodies,
-            constraints=self.constraints,
-            num_joints=num_joints,
-            num_worlds=1,
+        self.solver = newton.solvers.SolverPhoenX(
+            self.model,
+            collision_pipeline=self.collision_pipeline,
             substeps=self.sim_substeps,
             solver_iterations=self.solver_iterations,
             velocity_iterations=self.velocity_iterations,
-            gravity=(0.0, 0.0, -9.81),
-            rigid_contact_max=rigid_contact_max,
             step_layout="single_world",
-            device=self.device,
+            articulation_mode="maximal",
+            mass_splitting=mass_splitting,
+            mass_splitting_unrolled=mass_splitting_unrolled,
         )
-
-        # Joint columns must be initialised after the body container is
-        # seeded (the ADBS init kernel reads PhoenX body positions to
-        # snapshot the body-local anchor offsets).
-        if num_joints > 0:
-            self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
-
-        # ---- Newton state for the renderer ---------------------------
-        # We mirror PhoenX body state -> ``state.body_q`` / ``body_qd``
-        # once per frame; a fresh ``model.collide`` pass refreshes the
-        # contact buffer before each PhoenX step.
         self.state = self.model.state()
-
-        # Snapshot the rigid-cloth pinned-corner triangle slots so we
-        # can assert they didn't drift in ``test_final``.
-        self._initial_body_q = self.model.body_q.numpy().copy()
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
+        self.control = self.model.control()
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(2.0, -2.0, 1.6), pitch=-15.0, yaw=135.0)
@@ -440,61 +334,16 @@ class Example:
     # Simulation
     # ------------------------------------------------------------------
 
-    def _sync_phoenx_to_newton(self) -> None:
-        """Mirror PhoenX body state into the Newton ``State``.
-
-        The state is what the viewer renders and what
-        ``model.collide`` reads from when it refreshes the contact
-        buffer. ``_phoenx_to_newton_kernel`` reconstructs Newton's
-        body-origin transform convention from the COM-centred PhoenX
-        layout.
-        """
-        n = self.model.body_count
-        if n == 0:
-            return
-        wp.launch(
-            _phoenx_to_newton_kernel,
-            dim=n,
-            inputs=[
-                self.bodies.position[1 : 1 + n],
-                self.bodies.orientation[1 : 1 + n],
-                self.bodies.velocity[1 : 1 + n],
-                self.bodies.angular_velocity[1 : 1 + n],
-                self.model.body_com,
-            ],
-            outputs=[self.state.body_q, self.state.body_qd],
-            device=self.device,
-        )
-
     def _simulate_one_frame(self) -> None:
-        """One physics frame: mirror state, refresh contacts, then step.
-
-        Order matters:
-
-        1. Mirror PhoenX bodies into ``state.body_q`` / ``body_qd`` so
-           the collision pipeline reads the freshest pose.
-        2. Run ``model.collide`` to populate the rigid-body contact
-           buffer for this frame.
-        3. ``world.step`` advances the bodies + joints, ingesting the
-           refreshed contacts. The next frame's mirror picks up the
-           result.
-        """
-        self._sync_phoenx_to_newton()
-        self.model.collide(
-            self.state,
-            contacts=self.contacts,
-            collision_pipeline=self.collision_pipeline,
-        )
-        self.world.step(
-            dt=self.frame_dt,
-            contacts=self.contacts,
-            shape_body=self._shape_body,
-        )
+        """Advance the rigid-cloth mechanism and contact inequalities."""
+        self.state.clear_forces()
+        self.viewer.apply_forces(self.state)
+        self.collision_pipeline.collide(self.state, self.contacts)
+        self.solver.step(self.state, self.state, self.control, self.contacts, self.frame_dt)
 
     def _capture(self) -> None:
-        """Capture per-frame ``simulate`` into a CUDA graph."""
+        """Capture one complete frame into a CUDA graph."""
         if self.device.is_cuda:
-            self._simulate_one_frame()  # warm-up
             with wp.ScopedCapture(device=self.device) as capture:
                 self._simulate_one_frame()
             self.graph = capture.graph
@@ -512,14 +361,6 @@ class Example:
     # Viewer + tests
     # ------------------------------------------------------------------
 
-    def _final_state(self) -> None:
-        """Mirror PhoenX state into Newton state once for assertions /
-        rendering after a captured-graph step. The graph captures the
-        sync inside ``_simulate_one_frame`` so this is a redundant
-        no-op except on the very first frame; we run it
-        unconditionally for clarity."""
-        self._sync_phoenx_to_newton()
-
     def test_final(self) -> None:
         """After the example finishes:
 
@@ -533,7 +374,6 @@ class Example:
           heights below the pinned cloth plane is acceptable to allow
           for the cloth sagging under load).
         """
-        self._final_state()
         body_q = self.state.body_q.numpy()
         if not np.all(np.isfinite(body_q)):
             raise RuntimeError("non-finite body transform in final state")
@@ -562,7 +402,6 @@ class Example:
             raise RuntimeError(f"cube fell through cloth (z={cube_z:.4f} m, floor={floor:.4f} m)")
 
     def render(self) -> None:
-        self._final_state()
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state)
         self.viewer.log_contacts(self.contacts, self.state)

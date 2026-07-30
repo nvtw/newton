@@ -36,16 +36,28 @@ class MultiWorldDispatcher:
         if direct is not None and direct.enabled:
             direct.prepare_and_factor(idt)
         if self._world._regular_pgs_active_this_step:
+            block_world = self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported()
             if direct is not None and direct.enabled:
-                # Expose force-integrated mechanism motion to inequalities.
+                # Factor once, then alternate inequality sweeps with triangular
+                # solves so contacts see mechanism-level mobility.
                 direct.solve(use_bias=False)
                 direct.resolve_bounded_drives(idt, use_bias=False)
-            if self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported():
+                if block_world:
+                    self._world._solve_main_block_world(num_iterations=0, solve_direct=False)
+                else:
+                    self._world._solve_main(num_iterations=0, solve_direct=False)
+                direct.solve(use_bias=False)
+                for iteration in range(self._world.solver_iterations):
+                    if block_world:
+                        self._world._iterate_main_block_world(iteration)
+                    else:
+                        self._world._iterate_main(iteration)
+                    direct.solve(use_bias=iteration == self._world.solver_iterations - 1)
+                direct.resolve_bounded_drives(idt, use_bias=True)
+            elif block_world:
                 self._world._solve_main_block_world()
             else:
                 self._world._solve_main()
-            if direct is not None and direct.enabled:
-                direct.resolve_bounded_drives(idt, use_bias=True)
         elif direct is not None and direct.enabled:
             direct.solve(use_bias=True)
             direct.resolve_bounded_drives(idt, use_bias=True)
@@ -58,12 +70,21 @@ class MultiWorldDispatcher:
     def relax(self, idt: wp.float32) -> None:
         direct = getattr(self._world, "_direct_equality_system", None)
         if self._world._regular_pgs_active_this_step:
-            if self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported():
+            block_world = self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported()
+            if direct is not None and direct.enabled:
+                for iteration in range(self._world.velocity_iterations):
+                    if block_world:
+                        self._world._relax_velocities_block_world(
+                            num_iterations=1, solve_direct=False, iteration_offset=iteration
+                        )
+                    else:
+                        self._world._relax_velocities(num_iterations=1, solve_direct=False, iteration_offset=iteration)
+                    direct.solve(use_bias=False)
+                direct.resolve_bounded_drives(idt, use_bias=False)
+            elif block_world:
                 self._world._relax_velocities_block_world()
             else:
                 self._world._relax_velocities()
-            if direct is not None and direct.enabled:
-                direct.resolve_bounded_drives(idt, use_bias=False)
         elif direct is not None and direct.enabled and self._world.velocity_iterations > 0:
             direct.solve(use_bias=False)
             direct.resolve_bounded_drives(idt, use_bias=False)

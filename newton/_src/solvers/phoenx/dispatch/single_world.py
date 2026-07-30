@@ -45,11 +45,16 @@ class SingleWorldDispatcher:
                 w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
             else:
                 w._run_cached_prepare_bookkeeping(idt)
-            for _ in range(w.solver_iterations):
+            if direct is not None and direct.enabled:
+                # Project contact/limit warm starts before the first inequality
+                # sweep. The factor is fixed for the entire substep.
+                direct.solve(use_bias=False)
+            for iteration in range(w.solver_iterations):
                 w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
+                if direct is not None and direct.enabled:
+                    direct.solve(use_bias=iteration == w.solver_iterations - 1)
             if direct is not None and direct.enabled:
-                direct.solve(use_bias=True)
                 direct.resolve_bounded_drives(idt, use_bias=True)
         elif direct is not None and direct.enabled:
             direct.solve(use_bias=True)
@@ -70,8 +75,9 @@ class SingleWorldDispatcher:
             for _ in range(w.velocity_iterations):
                 w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
+                if direct is not None and direct.enabled:
+                    direct.solve(use_bias=False)
             if direct is not None and direct.enabled:
-                direct.solve(use_bias=False)
                 direct.resolve_bounded_drives(idt, use_bias=False)
         elif direct is not None and direct.enabled and w.velocity_iterations > 0:
             direct.solve(use_bias=False)

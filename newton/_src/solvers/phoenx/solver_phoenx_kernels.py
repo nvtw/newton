@@ -1687,8 +1687,9 @@ def _make_fast_tail_relax_kernel(
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
     family_split: bool = False,
+    use_bias: bool = False,
 ):
-    """Multi-world relax fast-tail kernel with global color sweep order."""
+    """Build a multi-world iterate kernel with global color sweep order."""
     (
         _dispatch_iterate_cid,
         _dispatch_iterate_joint,
@@ -1703,7 +1704,7 @@ def _make_fast_tail_relax_kernel(
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
-        use_bias=False,
+        use_bias=use_bias,
         patch_friction=patch_friction,
     )
     _dispatch_relax_any_cid = None
@@ -1723,7 +1724,7 @@ def _make_fast_tail_relax_kernel(
             has_soft_contact_pd=has_soft_contact_pd,
             is_prepare=False,
             is_cached_prepare=False,
-            use_bias=False,
+            use_bias=use_bias,
         )[0]
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -1743,6 +1744,7 @@ def _make_fast_tail_relax_kernel(
         cc: ContactContainer,
         contacts: ContactViews,
         num_iterations: wp.int32,
+        iteration_offset: wp.int32,
         num_worlds: wp.int32,
         num_joints: wp.int32,
         joint_pgs_enabled: wp.array[wp.int32],
@@ -1796,7 +1798,7 @@ def _make_fast_tail_relax_kernel(
             c = wp.int32(0)
             while c < n_colors:
                 color = c
-                if (it & wp.int32(1)) != wp.int32(0):
+                if ((it + iteration_offset) & wp.int32(1)) != wp.int32(0):
                     color = n_colors - wp.int32(1) - c
                 start = world_base + world_color_starts[world_id, color]
                 end = world_base + world_color_starts[world_id, color + 1]
@@ -2110,8 +2112,9 @@ def _make_block_world_relax_kernel(
     patch_friction: bool = False,
     enable_column_timers: bool = False,
     block_dim: int = 128,
+    use_bias: bool = False,
 ):
-    """Build a multi-world bias-off relax kernel with one block per world."""
+    """Build a multi-world iterate kernel with one block per world."""
     (
         _dispatch_iterate_cid,
         _dispatch_iterate_joint,
@@ -2126,7 +2129,7 @@ def _make_block_world_relax_kernel(
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
-        use_bias=False,
+        use_bias=use_bias,
         patch_friction=patch_friction,
     )
 
@@ -2146,6 +2149,7 @@ def _make_block_world_relax_kernel(
         cc: ContactContainer,
         contacts: ContactViews,
         num_iterations: wp.int32,
+        iteration_offset: wp.int32,
         num_worlds: wp.int32,
         num_joints: wp.int32,
         joint_pgs_enabled: wp.array[wp.int32],
@@ -2166,7 +2170,7 @@ def _make_block_world_relax_kernel(
             c = wp.int32(0)
             while c < n_colors:
                 color = c
-                if (it & wp.int32(1)) != wp.int32(0):
+                if ((it + iteration_offset) & wp.int32(1)) != wp.int32(0):
                     color = n_colors - wp.int32(1) - c
                 start = world_base + world_color_starts[world_id, color]
                 end = world_base + world_color_starts[world_id, color + wp.int32(1)]
@@ -2324,9 +2328,9 @@ def get_block_world_kernel(
 ):
     """Lazy block-per-world kernel builder.
 
-    ``kind`` is ``"prepare_plus_iterate"`` or ``"relax"``. This scheduler is
-    intended for multi-world rigid scenes where one block can keep a world's
-    colors busy without the short lane groups used by fast-tail.
+    ``kind`` is ``"prepare_plus_iterate"``, ``"iterate"``, or ``"relax"``.
+    This scheduler is intended for multi-world rigid scenes where one block
+    can keep a world's colors busy without the short lane groups used by fast-tail.
     """
     if kind == "prepare_plus_iterate":
         return _make_block_world_prepare_plus_iterate_kernel(
@@ -2344,7 +2348,7 @@ def get_block_world_kernel(
             block_dim=block_dim,
             solve_inner_sweeps=solve_inner_sweeps,
         )
-    if kind == "relax":
+    if kind in ("iterate", "relax"):
         return _make_block_world_relax_kernel(
             revolute_only=revolute_only,
             has_joints=has_joints,
@@ -2357,6 +2361,7 @@ def get_block_world_kernel(
             patch_friction=patch_friction,
             enable_column_timers=enable_column_timers,
             block_dim=block_dim,
+            use_bias=kind == "iterate",
         )
     raise ValueError(f"unknown block-world kernel kind: {kind!r}")
 
@@ -2384,8 +2389,8 @@ def get_fast_tail_kernel(
     solve_contact_inner_sweeps: int = _FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS,
     solve_outer_iteration_chunk: int = _FAST_TAIL_SOLVE_OUTER_ITERATION_CHUNK,
 ):
-    """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``
-    or ``"relax"``. Each (kind, revolute_only, has_joints,
+    """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``,
+    ``"iterate"``, or ``"relax"``. Each (kind, revolute_only, has_joints,
     has_contacts, has_sleeping, cached_prepare, enable_column_timers,
     fixed_tpw, guard_tpw) tuple is cached
     after first build by the underlying factory's ``functools.cache``. ``fixed_tpw=0``
@@ -2413,7 +2418,7 @@ def get_fast_tail_kernel(
             solve_contact_inner_sweeps=solve_contact_inner_sweeps,
             solve_outer_iteration_chunk=solve_outer_iteration_chunk,
         )
-    if kind == "relax":
+    if kind in ("iterate", "relax"):
         return _make_fast_tail_relax_kernel(
             revolute_only=revolute_only,
             has_joints=has_joints,
@@ -2430,6 +2435,7 @@ def get_fast_tail_kernel(
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,
             family_split=family_split,
+            use_bias=kind == "iterate",
         )
     raise ValueError(f"unknown fast-tail kernel kind: {kind!r}")
 

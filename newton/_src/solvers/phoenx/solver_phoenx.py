@@ -1558,6 +1558,8 @@ class PhoenXWorld:
                 kernels.extend(self._singleworld_cached_prepare_kernels())
         else:
             include_cached_prepare = self.prepare_refresh_stride > 1
+            direct = getattr(self, "_direct_equality_system", None)
+            include_direct_iterate = direct is not None and direct.enabled
             if self._multi_world_scheduler == "block_world" and self._block_world_supported():
                 prepare_kw = self._block_world_kernel_flags(self._multi_world_block_dim, cached_prepare=False)
                 kernels.append(get_block_world_kernel(kind="prepare_plus_iterate", **prepare_kw))
@@ -1566,6 +1568,8 @@ class PhoenXWorld:
                     kernels.append(get_block_world_kernel(kind="prepare_plus_iterate", **cached_kw))
                 relax_kw = self._block_world_kernel_flags(self._multi_world_block_dim)
                 kernels.append(get_block_world_kernel(kind="relax", **relax_kw))
+                if include_direct_iterate:
+                    kernels.append(get_block_world_kernel(kind="iterate", **relax_kw))
             else:
                 for fixed_tpw in self._fast_tail_auto_fixed_choices():
                     prepare_kw = self._fast_tail_kernel_flags(fixed_tpw, cached_prepare=False)
@@ -1575,6 +1579,8 @@ class PhoenXWorld:
                         kernels.append(get_fast_tail_kernel(kind="prepare_plus_iterate", **cached_kw))
                     relax_kw = self._fast_tail_kernel_flags(fixed_tpw)
                     kernels.append(get_fast_tail_kernel(kind="relax", **relax_kw))
+                    if include_direct_iterate:
+                        kernels.append(get_fast_tail_kernel(kind="iterate", **relax_kw))
 
         # De-duplicate by module; ``functools.cache`` already collapses
         # identical (axes-tuple) factory calls but cheap to be defensive.
@@ -4055,9 +4061,8 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _solve_main(self) -> None:
-        """Per-substep main PGS solve: prepare + solver_iterations iterate sweeps
-        with bias=True (fused into one launch)."""
+    def _solve_main(self, *, num_iterations: int | None = None, solve_direct: bool = True) -> None:
+        """Run the fused multi-world prepare and biased iterate phase."""
         if self._constraint_capacity == 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
@@ -4088,7 +4093,7 @@ class PhoenXWorld:
                     self._world_num_colors,
                     self._contact_container,
                     contact_views,
-                    wp.int32(self.solver_iterations),
+                    wp.int32(self.solver_iterations if num_iterations is None else num_iterations),
                     wp.int32(self.num_worlds),
                     wp.int32(self.num_joints),
                     self._joint_pgs_enabled,
@@ -4102,11 +4107,37 @@ class PhoenXWorld:
                 ],
                 device=self.device,
             )
-        if direct_enabled:
+        if direct_enabled and solve_direct:
             direct.solve(use_bias=True)
 
-    def _relax_velocities(self) -> None:
-        """TGS-soft relax (bias=False) — removes drift velocity from main bias."""
+    def _iterate_main(self, iteration: int) -> None:
+        """Run one biased multi-world inequality sweep."""
+        if self._constraint_capacity == 0:
+            return
+        idt = wp.float32(1.0 / self.substep_dt)
+        contact_views = self._active_contact_views()
+        for fixed_tpw in self._fast_tail_auto_fixed_choices():
+            kernel = get_fast_tail_kernel(
+                kind="iterate",
+                **self._fast_tail_kernel_flags(fixed_tpw),
+            )
+            self._launch_fast_iter(
+                kernel,
+                1,
+                idt,
+                contact_views,
+                launch_tpw_bound=fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound,
+                iteration_offset=iteration,
+            )
+
+    def _relax_velocities(
+        self,
+        *,
+        num_iterations: int | None = None,
+        solve_direct: bool = True,
+        iteration_offset: int = 0,
+    ) -> None:
+        """Run the fused multi-world bias-off iterate phase."""
         if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
@@ -4120,12 +4151,13 @@ class PhoenXWorld:
             )
             self._launch_fast_iter(
                 kernel,
-                self.velocity_iterations,
+                self.velocity_iterations if num_iterations is None else num_iterations,
                 idt,
                 contact_views,
                 launch_tpw_bound=fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound,
+                iteration_offset=iteration_offset,
             )
-        if direct_enabled:
+        if direct_enabled and solve_direct:
             direct.solve(use_bias=False)
 
     def _parse_multi_world_scheduler_policy(self, policy: str) -> tuple[str, int]:
@@ -4196,8 +4228,14 @@ class PhoenXWorld:
             raise ValueError(f"block_world block_dim must be one of (32, 64, 128), got {block_dim}")
         return block_dim
 
-    def _solve_main_block_world(self, block_dim: int | None = None) -> None:
-        """Private multi-world PGS solve using one physical block per world."""
+    def _solve_main_block_world(
+        self,
+        block_dim: int | None = None,
+        *,
+        num_iterations: int | None = None,
+        solve_direct: bool = True,
+    ) -> None:
+        """Run the block-world prepare and biased iterate phase."""
         if self._constraint_capacity == 0:
             return
         if not self._block_world_supported():
@@ -4231,7 +4269,7 @@ class PhoenXWorld:
                 self._world_num_colors,
                 self._contact_container,
                 contact_views,
-                wp.int32(self.solver_iterations),
+                wp.int32(self.solver_iterations if num_iterations is None else num_iterations),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,
@@ -4240,11 +4278,57 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
-        if direct_enabled:
+        if direct_enabled and solve_direct:
             direct.solve(use_bias=True)
 
-    def _relax_velocities_block_world(self, block_dim: int | None = None) -> None:
-        """Private multi-world TGS-soft relax using one physical block per world."""
+    def _iterate_main_block_world(self, iteration: int, block_dim: int | None = None) -> None:
+        """Run one biased inequality sweep with one block per world."""
+        if self._constraint_capacity == 0:
+            return
+        if not self._block_world_supported():
+            raise NotImplementedError("block-world scheduler currently supports rigid multi-world scenes only")
+        block_dim = self._validate_block_world_dim(self._multi_world_block_dim if block_dim is None else block_dim)
+        kernel = get_block_world_kernel(
+            kind="iterate",
+            **self._block_world_kernel_flags(block_dim),
+        )
+        wp.launch(
+            kernel,
+            dim=self._block_world_launch_dim(block_dim),
+            block_dim=block_dim,
+            inputs=[
+                self.constraints,
+                self._contact_cols,
+                self.bodies,
+                self._particles_or_sentinel(),
+                wp.int32(self.num_bodies),
+                wp.float32(1.0 / self.substep_dt),
+                wp.float32(self.sor_boost),
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                self._contact_container,
+                self._active_contact_views(),
+                wp.int32(1),
+                wp.int32(iteration),
+                wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
+                self._copy_state,
+            ],
+            device=self.device,
+        )
+
+    def _relax_velocities_block_world(
+        self,
+        block_dim: int | None = None,
+        *,
+        num_iterations: int | None = None,
+        solve_direct: bool = True,
+        iteration_offset: int = 0,
+    ) -> None:
+        """Run the block-world bias-off iterate phase."""
         if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
             return
         if not self._block_world_supported():
@@ -4275,7 +4359,8 @@ class PhoenXWorld:
                 self._world_num_colors,
                 self._contact_container,
                 contact_views,
-                wp.int32(self.velocity_iterations),
+                wp.int32(self.velocity_iterations if num_iterations is None else num_iterations),
+                wp.int32(iteration_offset),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,
@@ -4283,7 +4368,7 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
-        if direct_enabled:
+        if direct_enabled and solve_direct:
             direct.solve(use_bias=False)
 
     # Single-world dispatch (wp.capture_while over the global colour CSR).
@@ -4747,6 +4832,7 @@ class PhoenXWorld:
         idt: wp.float32,
         contact_views: ContactViews,
         launch_tpw_bound: int | None = None,
+        iteration_offset: int = 0,
     ) -> None:
         """Launch an iterate/relax kernel running ``num_iterations`` sweeps internally."""
         wp.launch(
@@ -4769,6 +4855,7 @@ class PhoenXWorld:
                 self._contact_container,
                 contact_views,
                 wp.int32(num_iterations),
+                wp.int32(iteration_offset),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,

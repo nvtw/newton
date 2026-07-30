@@ -82,7 +82,11 @@ class SingleWorldMassSplittingDispatcher:
             w._mass_splitting_average_and_broadcast(inv_dt)
         else:
             w._run_cached_prepare_bookkeeping(idt)
-        for _ in range(w.solver_iterations):
+        if direct is not None and direct.enabled:
+            w._mass_splitting_writeback(already_averaged=True)
+            direct.solve(use_bias=False)
+            w._mass_splitting_broadcast()
+        for iteration in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(
                 iterate_head,
@@ -91,13 +95,18 @@ class SingleWorldMassSplittingDispatcher:
                 contact_container=w._contact_container_solve,
             )
             w._mass_splitting_average_and_broadcast(inv_dt)
+            if direct is not None and direct.enabled:
+                w._mass_splitting_writeback(already_averaged=True)
+                direct.solve(use_bias=iteration == w.solver_iterations - 1)
+                if iteration + 1 < w.solver_iterations:
+                    w._mass_splitting_broadcast()
 
         # Writeback slot[0].velocity -> body.velocity. step()'s
         # integrate_positions then advances bodies with the post-PGS
         # velocity.
-        w._mass_splitting_writeback(already_averaged=True)
+        if direct is None or not direct.enabled:
+            w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
-            direct.solve(use_bias=True)
             direct.resolve_bounded_drives(idt, use_bias=True)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
@@ -129,7 +138,7 @@ class SingleWorldMassSplittingDispatcher:
         w._mass_splitting_broadcast()
         inv_dt = 1.0 / w.substep_dt
         _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
-        for _ in range(w.velocity_iterations):
+        for iteration in range(w.velocity_iterations):
             w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(
                 relax_head,
@@ -138,12 +147,17 @@ class SingleWorldMassSplittingDispatcher:
                 contact_container=w._contact_container_solve,
             )
             w._mass_splitting_average_and_broadcast(inv_dt)
+            if direct is not None and direct.enabled:
+                w._mass_splitting_writeback(already_averaged=True)
+                direct.solve(use_bias=False)
+                if iteration + 1 < w.velocity_iterations:
+                    w._mass_splitting_broadcast()
 
         # Second writeback after relax: relax also routes through slots,
         # so the next substep would see stale body.velocity otherwise.
-        w._mass_splitting_writeback(already_averaged=True)
+        if direct is None or not direct.enabled:
+            w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
-            direct.solve(use_bias=False)
             direct.resolve_bounded_drives(idt, use_bias=False)
 
         if w._maximal_tree_projector is not None:
