@@ -168,7 +168,6 @@ class Example:
             solver_iterations=2,
             velocity_iterations=1,
             articulation_mode="maximal",
-            joint_equality_solver="direct",
         )
         direct = self.solver._direct_equality_system
         if direct is None or not direct.enabled:

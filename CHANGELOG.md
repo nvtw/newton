@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- Add compact, panel-parallel, RCM-reordered direct equality and implicit PD drive solves per connected mechanism to experimental `SolverPhoenX`, including finite motor-effort active sets; pass `joint_equality_solver="pgs"` to retain legacy per-joint PGS rows.
+- Add compact, panel-parallel, RCM-reordered direct equality and implicit PD drive solves per connected mechanism to experimental `SolverPhoenX`, including finite motor-effort active sets
 
 
 - Add opt-in adjacency-free endpoint-owner coloring to experimental `SolverPhoenX` single-world mass splitting.
@@ -86,8 +86,6 @@
 - Add `joint_dof_mask` to `newton.ik.IKSolver` to keep selected joint DOFs fixed during LM optimization. (#3488)
 ### Changed
 - Represent revolute and prismatic armature in direct maximal PhoenX as exact gear-reflected generalized inertia without modifying either attached rigid-body inertia.
-
- Make direct joint equalities the default in maximal-coordinate PhoenX; pass `joint_equality_solver="pgs"` to retain legacy per-joint PGS equality rows, or select `articulation_mode="auto"` to opt into reduced ownership of supported declared articulations.
 
 - Specialize reduced-coordinate PhoenX fused advance and publication by articulation topology width.
 - Accelerate reduced-coordinate PhoenX compact patch-contact rows with subgroup-cooperative response and solved-delta traversal without changing hard-contact equations.

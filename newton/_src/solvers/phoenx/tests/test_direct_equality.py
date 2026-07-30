@@ -313,30 +313,27 @@ class TestDirectEquality(unittest.TestCase):
             [1],
         )
 
-    def test_ill_conditioned_chain_converges_better_than_pgs(self):
+    def test_ill_conditioned_chain_remains_accurate_at_one_iteration(self):
+        """Keep a badly conditioned chain accurate with one direct solve."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
-        errors = {}
-        for equality_solver in ("pgs", "direct"):
-            model = _build_badly_conditioned_chain()
-            solver = newton.solvers.SolverPhoenX(
-                model,
-                substeps=5,
-                solver_iterations=1,
-                velocity_iterations=0,
-                articulation_mode="maximal",
-                joint_equality_solver=equality_solver,
-            )
-            state_in = model.state()
-            state_out = model.state()
-            control = model.control()
-            for _ in range(20):
-                solver.step(state_in, state_out, control, None, 1.0 / 60.0)
-                state_in, state_out = state_out, state_in
-            errors[equality_solver] = _maximum_anchor_error(model, state_in)
+        model = _build_badly_conditioned_chain()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=5,
+            solver_iterations=1,
+            velocity_iterations=0,
+            articulation_mode="maximal",
+        )
+        state_in = model.state()
+        state_out = model.state()
+        control = model.control()
+        for _ in range(20):
+            solver.step(state_in, state_out, control, None, 1.0 / 60.0)
+            state_in, state_out = state_out, state_in
 
-        self.assertLess(errors["direct"], 0.1 * errors["pgs"])
+        self.assertLess(_maximum_anchor_error(model, state_in), 1.0e-3)
 
     def test_equilibration_keeps_extreme_mass_ratio_finite(self):
         """Keep an extreme-mass-ratio chain finite with bounded anchor error."""
@@ -350,7 +347,6 @@ class TestDirectEquality(unittest.TestCase):
             solver_iterations=1,
             velocity_iterations=0,
             articulation_mode="maximal",
-            joint_equality_solver="direct",
         )
         state_in = model.state()
         state_out = model.state()
@@ -381,7 +377,6 @@ class TestDirectEquality(unittest.TestCase):
                 solver_iterations=1,
                 velocity_iterations=0,
                 articulation_mode="maximal",
-                joint_equality_solver="direct",
             )
             state_in = model.state()
             state_out = model.state()
@@ -434,7 +429,6 @@ class TestDirectEquality(unittest.TestCase):
             solver_iterations=2,
             velocity_iterations=0,
             articulation_mode="maximal",
-            joint_equality_solver="direct",
         )
         direct = solver._direct_equality_system
         self.assertEqual(direct.topology.dimensions, (10, 40, 130))
@@ -478,7 +472,6 @@ class TestDirectEquality(unittest.TestCase):
             solver_iterations=2,
             velocity_iterations=1,
             articulation_mode="maximal",
-            joint_equality_solver="direct",
         )
         state = model.state()
         control = model.control()

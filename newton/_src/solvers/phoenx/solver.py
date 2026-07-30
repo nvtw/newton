@@ -246,7 +246,6 @@ class SolverPhoenX(SolverBase):
         jacobi_max_colors: int = 10,
         articulation_mode: str = "maximal",
         reduced_articulation_path: str = "reference",
-        joint_equality_solver: str = "direct",
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -310,17 +309,14 @@ class SolverPhoenX(SolverBase):
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
                 ``0`` recovers single-frame sleep.
             articulation_mode: ``"auto"`` selects reduced coordinates for
-                declared articulations with the direct equality solver and
-                maximal coordinates with the legacy PGS equality solver.
-                ``"maximal"`` keeps independent-body tree
-                dynamics; structural joint rows use the selected
-                ``joint_equality_solver`` and inequality rows remain in
-                PhoenX PGS. With the direct equality solver, revolute and
+                supported declared articulations and maximal coordinates
+                otherwise. ``"maximal"`` keeps independent-body tree
+                dynamics; structural joint rows use one direct mechanism
+                system and inequality rows remain in PhoenX PGS. With the direct equality solver, revolute and
                 prismatic ``joint_armature`` use exact generalized dynamic
                 rows, reflected through ``joint_gear`` squared, in each
-                mechanism system. The legacy PGS and experimental
-                maximal-projector paths retain a revolute stator/rotor body
-                inertia approximation.
+                mechanism system. Experimental maximal-projector paths retain
+                a revolute stator/rotor body-inertia approximation.
                 ``"maximal_projected"`` additionally applies an exact
                 mass-metric tree projection on supported CUDA robot forests.
                 Experimental ``"maximal_articulated"`` also applies exact
@@ -335,15 +331,9 @@ class SolverPhoenX(SolverBase):
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
                 topology-proven cross-phase articulation fusion on CUDA.
-            joint_equality_solver: ``"direct"`` solves structural joint rows
-                in one RCM-reordered block-Cholesky system per connected
-                maximal-coordinate mechanism. ``"pgs"`` retains the legacy
-                per-joint projected Gauss-Seidel rows.
         """
         super().__init__(model)
         gravity_np = self._read_model_gravity_np(model)
-        if joint_equality_solver not in ("direct", "pgs"):
-            raise ValueError("joint_equality_solver must be 'direct' or 'pgs'")
         if articulation_mode == "auto":
             joint_types_for_mode = np.asarray(model.joint_type.numpy(), dtype=np.int32)
             joint_articulation = np.asarray(model.joint_articulation.numpy(), dtype=np.int32)
@@ -355,8 +345,7 @@ class SolverPhoenX(SolverBase):
                 and not np.any(joint_types_for_mode == int(JointType.CABLE))
                 and not multi_world_scheduler.startswith("block_world")
             )
-            articulation_mode = "reduced" if joint_equality_solver == "direct" and reduced_supported else "maximal"
-        self.joint_equality_solver = joint_equality_solver
+            articulation_mode = "reduced" if reduced_supported else "maximal"
 
         num_worlds = max(1, int(gravity_np.shape[0]))
         has_deformables = any(
@@ -443,7 +432,7 @@ class SolverPhoenX(SolverBase):
         )
         self._phoenx_body_inv_inertia = (
             _build_maximal_motor_body_inv_inertia(model)
-            if (articulation_mode == "maximal" and joint_equality_solver == "pgs") or self._uses_maximal_tree_projector
+            if self._uses_maximal_tree_projector
             else model.body_inv_inertia
         )
         valid_readouts = ("substep_end", "finite_difference", "substep_average")
@@ -721,7 +710,7 @@ class SolverPhoenX(SolverBase):
         # The experimental maximal tree projector already owns structural tree
         # equalities. Installing a second direct owner would apply incompatible
         # projections and overwrite its prepare-only PGS ownership state.
-        if self.joint_equality_solver == "direct" and not self._uses_maximal_tree_projector:
+        if not self._uses_maximal_tree_projector:
             excluded_joint_mask = None
             if self._reduced_articulation is not None and self._uses_reduced_joint_ownership:
                 excluded_joint_mask = self._reduced_articulation.owned_joint_mask_np
@@ -1379,9 +1368,7 @@ class SolverPhoenX(SolverBase):
         uses_maximal_mass = self.articulation_mode == "maximal" or self._uses_maximal_tree_projector
         maximal_joint_properties_changed = joint_props_changed and uses_maximal_mass
         reduced_joint_properties_changed = joint_props_changed and self._reduced_articulation is not None
-        uses_legacy_body_armature = (
-            self.articulation_mode == "maximal" and self.joint_equality_solver == "pgs"
-        ) or self._uses_maximal_tree_projector
+        uses_legacy_body_armature = self._uses_maximal_tree_projector
         if uses_maximal_mass and (body_properties_changed or joint_props_changed):
             self._phoenx_body_inv_inertia = (
                 _build_maximal_motor_body_inv_inertia(self.model)

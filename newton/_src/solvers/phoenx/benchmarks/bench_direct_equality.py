@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compare direct and PGS joint equalities on ill-conditioned chains.
+"""Measure direct joint equalities on ill-conditioned chains.
 
-The benchmark reports graph-replay throughput and joint-anchor error at the
-same PhoenX work point. For the direct solve it also reports the condition
-number of the assembled mechanism matrix. Compilation and host diagnostics
+The benchmark reports graph-replay throughput, joint-anchor error, and the
+condition number of each assembled mechanism matrix. Compilation and host diagnostics
 are excluded from the timing window.
 
 Examples::
@@ -36,15 +35,14 @@ import newton
 
 @dataclass(frozen=True)
 class BenchResult:
-    """One direct or PGS measurement."""
+    """One direct mechanism-solver measurement."""
 
-    equality_solver: str
     driven: bool
     length: int
     mass_ratio: float
     equation_count: int
-    matrix_condition: float | None
-    equilibrated_condition: float | None
+    matrix_condition: float
+    equilibrated_condition: float
     anchor_error_m: float
     fps: float
     finite: bool
@@ -216,7 +214,6 @@ def _matrix_conditions(solver: newton.solvers.SolverPhoenX) -> tuple[float, floa
 
 def _run_one(
     *,
-    equality_solver: str,
     driven: bool,
     length: int,
     mass_ratio: float,
@@ -232,7 +229,6 @@ def _run_one(
         solver_iterations=solver_iterations,
         velocity_iterations=0,
         articulation_mode="maximal",
-        joint_equality_solver=equality_solver,
         step_layout="single_world",
     )
     state_0 = model.state()
@@ -248,10 +244,7 @@ def _run_one(
     for _ in range(quality_replays):
         wp.capture_launch(graph)
     anchor_error = _maximum_anchor_error(model, state_0)
-    if equality_solver == "direct":
-        matrix_condition, equilibrated_condition = _matrix_conditions(solver)
-    else:
-        matrix_condition, equilibrated_condition = None, None
+    matrix_condition, equilibrated_condition = _matrix_conditions(solver)
 
     measure_replays = (measure_frames + 1) // 2
     wp.synchronize_device(model.device)
@@ -265,11 +258,8 @@ def _run_one(
     body_qd = state_0.body_qd.numpy()
     finite = bool(np.isfinite(body_q).all() and np.isfinite(body_qd).all())
     direct = solver._direct_equality_system
-    equation_count = (
-        sum(direct.topology.dimensions) if direct is not None and direct.enabled else (6 if driven else 5) * length
-    )
+    equation_count = sum(direct.topology.dimensions)
     return BenchResult(
-        equality_solver=equality_solver,
         driven=driven,
         length=length,
         mass_ratio=mass_ratio,
@@ -282,23 +272,13 @@ def _run_one(
     )
 
 
-def _print_pair(pgs: BenchResult, direct: BenchResult) -> None:
-    condition = direct.matrix_condition
-    assert condition is not None
-    equilibrated_condition = direct.equilibrated_condition
-    assert equilibrated_condition is not None
-    error_gain = pgs.anchor_error_m / max(direct.anchor_error_m, np.finfo(np.float64).tiny)
-    fps_ratio = direct.fps / pgs.fps
+def _print_result(result: BenchResult) -> None:
     print(
-        f"links={direct.length:2d}  ratio={direct.mass_ratio:9.1g}:1  "
-        f"driven={direct.driven!s:5s}  equations={direct.equation_count:3d}  "
-        f"cond={condition:10.3e}->{equilibrated_condition:10.3e}"
+        f"links={result.length:3d}  ratio={result.mass_ratio:9.1g}:1  "
+        f"driven={result.driven!s:5s}  equations={result.equation_count:4d}  "
+        f"cond={result.matrix_condition:10.3e}->{result.equilibrated_condition:10.3e}"
     )
-    print(f"  PGS     fps={pgs.fps:9.1f}  anchor={pgs.anchor_error_m:10.3e} m  finite={pgs.finite}")
-    print(
-        f"  direct  fps={direct.fps:9.1f}  anchor={direct.anchor_error_m:10.3e} m  "
-        f"finite={direct.finite}  speed={fps_ratio:6.1%}  error_gain={error_gain:9.1f}x"
-    )
+    print(f"  direct  fps={result.fps:9.1f}  anchor={result.anchor_error_m:10.3e} m  finite={result.finite}")
 
 
 def _run_heterogeneous(
@@ -317,7 +297,6 @@ def _run_heterogeneous(
         solver_iterations=solver_iterations,
         velocity_iterations=0,
         articulation_mode="maximal",
-        joint_equality_solver="direct",
         step_layout="single_world",
     )
     state_0 = model.state()
@@ -387,8 +366,7 @@ def main() -> None:
     results: list[BenchResult] = []
     for length in args.lengths:
         for mass_ratio in args.mass_ratios:
-            pgs = _run_one(
-                equality_solver="pgs",
+            result = _run_one(
                 driven=args.driven,
                 length=length,
                 mass_ratio=mass_ratio,
@@ -397,18 +375,8 @@ def main() -> None:
                 substeps=args.substeps,
                 solver_iterations=args.solver_iterations,
             )
-            direct = _run_one(
-                equality_solver="direct",
-                driven=args.driven,
-                length=length,
-                mass_ratio=mass_ratio,
-                quality_frames=args.quality_frames,
-                measure_frames=args.measure_frames,
-                substeps=args.substeps,
-                solver_iterations=args.solver_iterations,
-            )
-            results.extend((pgs, direct))
-            _print_pair(pgs, direct)
+            results.append(result)
+            _print_result(result)
 
     heterogeneous = None
     if args.heterogeneous:
@@ -431,7 +399,7 @@ def main() -> None:
 
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"comparisons": [asdict(result) for result in results]}
+        payload = {"measurements": [asdict(result) for result in results]}
         if heterogeneous is not None:
             payload["heterogeneous"] = asdict(heterogeneous)
         args.output.write_text(json.dumps(payload, indent=2) + "\n")
