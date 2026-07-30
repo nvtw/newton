@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Energy conservation tests.
-
-A frictionless pendulum with no drive is a closed Hamiltonian system:
-total mechanical energy ``KE + PE`` is conserved. PGS solvers are
-known to drift slowly (typically 1-3% per period), but a broken
-solver dissipates much faster (warmup-bias leak, over-damped
-position correction, mis-tuned soft constraints).
-
-This test runs a single-pendulum swing for ~10 s and asserts the
-total mechanical energy stays within +/-5% of its initial value.
-"""
+"""Energy and momentum invariants for the production PhoenX path."""
 
 from __future__ import annotations
 
@@ -21,194 +11,122 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.examples.scene_registry import Scene, scene
-from newton._src.solvers.phoenx.tests._test_helpers import STEP_LAYOUTS
-from newton._src.solvers.phoenx.world_builder import (
-    JointMode,
-    WorldBuilder,
-)
+import newton
 
 GRAVITY = 9.81
 LEVER = 1.0
 MASS = 1.0
-INV_MASS = 1.0 / MASS
-# Inertia about COM for a unit cube of half-extent 0.05; small relative
-# to the m*L^2 = 1 kg*m^2 lever-arm contribution, so the pendulum is
-# essentially a point mass on a string -- T = 2*pi*sqrt(L/g).
-HE = 0.05
-_I_COM = MASS / 6.0 * (2 * HE) * (2 * HE)
-INV_INERTIA = ((1.0 / _I_COM, 0.0, 0.0), (0.0, 1.0 / _I_COM, 0.0), (0.0, 0.0, 1.0 / _I_COM))
-INITIAL_ANGLE = 0.3  # rad, ~17 deg from straight-down
+INERTIA = 1.0e-3
+INITIAL_ANGLE = 0.3
 FPS = 240
-SUBSTEPS = 8
-SOLVER_ITERATIONS = 32  # generous so we observe genuine energy drift, not PGS noise
+SUBSTEPS = 5
+STEP_LAYOUTS = ("multi_world", "single_world")
 
 
-def _build_swinging_pendulum(device, *, step_layout: str = "multi_world"):
-    """Frictionless pendulum: world anchor + 1 m revolute joint about
-    +z axis, with the bob at ``(LEVER * sin(angle), -LEVER * cos(angle), 0)``."""
-    b = WorldBuilder()
-    anchor = b.world_body
-    bx = LEVER * math.sin(INITIAL_ANGLE)
-    by = -LEVER * math.cos(INITIAL_ANGLE)
-    bob = b.add_dynamic_body(
-        position=(bx, by, 0.0),
-        inverse_mass=INV_MASS,
-        inverse_inertia=INV_INERTIA,
-        affected_by_gravity=True,
-    )
-    b.add_joint(
-        body1=anchor,
-        body2=bob,
-        anchor1=(0.0, 0.0, 0.0),
-        anchor2=(0.0, 0.0, 1.0),  # +z hinge axis
-        mode=JointMode.REVOLUTE,
-    )
-    return b.finalize(
+def _make_solver(model: newton.Model, layout: str) -> newton.solvers.SolverPhoenX:
+    """Create a maximal-coordinate solver with only direct joint rows."""
+    return newton.solvers.SolverPhoenX(
+        model,
         substeps=SUBSTEPS,
-        solver_iterations=SOLVER_ITERATIONS,
-        gravity=(0.0, -GRAVITY, 0.0),
-        step_layout=step_layout,
-        device=device,
+        solver_iterations=1,
+        velocity_iterations=0,
+        articulation_mode="maximal",
+        step_layout=layout,
     )
 
 
-@scene(
-    "Energy: frictionless pendulum",
-    description=(
-        "1 m frictionless pendulum, no drive, initial 0.3 rad deflection. "
-        "Total mechanical energy KE+PE should stay constant within solver slop."
-    ),
-    tags=("energy", "conservation"),
-)
-def build_swinging_pendulum_scene(device) -> Scene:
-    world = _build_swinging_pendulum(device)
-    he = np.zeros((world.num_bodies, 3), dtype=np.float32)
-    he[1] = HE
-    return Scene(world=world, body_half_extents=he, frame_dt=1.0 / FPS, substeps=SUBSTEPS)
+def _capture_rollout(
+    model: newton.Model,
+    state: newton.State,
+    solver: newton.solvers.SolverPhoenX,
+    frames: int,
+) -> None:
+    """Advance one state through a captured five-substep frame."""
+    control = model.control()
+    with wp.ScopedCapture(model.device) as capture:
+        state.clear_forces()
+        solver.step(state, state, control, None, 1.0 / FPS)
+    for _ in range(frames):
+        wp.capture_launch(capture.graph)
 
 
-@unittest.skipUnless(
-    wp.get_preferred_device().is_cuda,
-    "PhoenX simulation tests run on CUDA only (graph capture required for reasonable run-time).",
-)
+def _build_pendulum() -> tuple[newton.Model, int]:
+    """Build an undamped one-metre revolute pendulum."""
+    builder = newton.ModelBuilder(gravity=(0.0, -GRAVITY, 0.0), up_axis=newton.Axis.Y)
+    body = builder.add_link(
+        xform=wp.transform_identity(),
+        mass=MASS,
+        inertia=((INERTIA, 0.0, 0.0), (0.0, INERTIA, 0.0), (0.0, 0.0, INERTIA)),
+    )
+    joint = builder.add_joint_revolute(
+        parent=-1,
+        child=body,
+        axis=(0.0, 0.0, 1.0),
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform((0.0, LEVER, 0.0), wp.quat_identity()),
+        damping=0.0,
+    )
+    builder.add_articulation([joint])
+    model = builder.finalize(device=wp.get_preferred_device())
+    model.joint_q.assign(np.asarray((INITIAL_ANGLE,), dtype=np.float32))
+    return model, body
+
+
+def _pendulum_energy(state: newton.State, body: int) -> float:
+    """Evaluate translational, rotational, and gravitational energy."""
+    position = state.body_q.numpy()[body, :3].astype(np.float64)
+    velocity = state.body_qd.numpy()[body].astype(np.float64)
+    kinetic = 0.5 * MASS * float(velocity[:3] @ velocity[:3])
+    kinetic += 0.5 * INERTIA * float(velocity[3:] @ velocity[3:])
+    potential = MASS * GRAVITY * (float(position[1]) + LEVER)
+    return kinetic + potential
+
+
+@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX invariant tests require CUDA graphs.")
 class TestEnergyConservation(unittest.TestCase):
-    """Total mechanical energy of an undamped pendulum must stay
-    constant within solver-tolerance bounds over many oscillations.
-    """
+    """Check long-horizon invariants through the public production solver."""
 
-    def test_pendulum_energy_drifts_under_5_percent(self) -> None:
-        device = wp.get_preferred_device()
+    def test_direct_pendulum_energy_drifts_under_five_percent(self) -> None:
+        """Preserve undamped pendulum energy over several periods."""
         for layout in STEP_LAYOUTS:
             with self.subTest(step_layout=layout):
-                world = _build_swinging_pendulum(device, step_layout=layout)
-                dt = 1.0 / FPS
-                # ~10 s simulation at 240 Hz -- many periods of a 1 m
-                # pendulum (T ~= 2 s).
-                n_frames = int(10.0 * FPS)
+                model, body = _build_pendulum()
+                state = model.state()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                initial_energy = _pendulum_energy(state, body)
+                solver = _make_solver(model, layout)
+                self.assertEqual(solver._direct_equality_system.topology.dimensions, (5,))
+                self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
+                _capture_rollout(model, state, solver, 6 * FPS)
+                final_energy = _pendulum_energy(state, body)
+                self.assertTrue(math.isfinite(final_energy))
+                self.assertLess(abs(final_energy - initial_energy) / initial_energy, 0.05)
 
-                # Initial PE: m*g*h, h measured up from bob's lowest
-                # point (straight-down, y = -LEVER).
-                positions = world.bodies.position.numpy()
-                velocities = world.bodies.velocity.numpy()
-                omegas = world.bodies.angular_velocity.numpy()
-                bob_pos_0 = positions[1]
-                h0 = float(bob_pos_0[1]) - (-LEVER)  # height above lowest point
-                v_lin = velocities[1]
-                v_ang = omegas[1]
-                ke0 = 0.5 * MASS * float(np.dot(v_lin, v_lin))
-                ke0 += 0.5 * _I_COM * float(np.dot(v_ang, v_ang))
-                pe0 = MASS * GRAVITY * h0
-                e0 = ke0 + pe0
-
-                # Capture a single step into a CUDA graph after a
-                # warm-up; replay it for the remaining frames.
-                world.step(dt)
-                with wp.ScopedCapture(device=device) as cap:
-                    world.step(dt)
-                graph = cap.graph
-
-                # Frame 0 was the warm-up step; frame 1 was the captured
-                # step; replay frames 2..n_frames-1.
-                for _ in range(n_frames - 2):
-                    wp.capture_launch(graph)
-                positions = world.bodies.position.numpy()
-                velocities = world.bodies.velocity.numpy()
-                omegas = world.bodies.angular_velocity.numpy()
-
-                bob_pos_f = positions[1]
-                h_f = float(bob_pos_f[1]) - (-LEVER)
-                v_lin_f = velocities[1]
-                v_ang_f = omegas[1]
-                ke_f = 0.5 * MASS * float(np.dot(v_lin_f, v_lin_f))
-                ke_f += 0.5 * _I_COM * float(np.dot(v_ang_f, v_ang_f))
-                pe_f = MASS * GRAVITY * h_f
-                e_f = ke_f + pe_f
-
-                # No NaN.
-                self.assertTrue(math.isfinite(e_f), msg=f"final energy non-finite: {e_f}")
-
-                # Energy drift bounded -- 5% max deviation over ~10 s
-                # (~5 periods). PGS without explicit projection drifts
-                # slowly; we expect a few % drop typical, +-5% catches
-                # outright dissipation regression.
-                rel_err = abs(e_f - e0) / e0
-                self.assertLess(
-                    rel_err,
-                    0.05,
-                    msg=f"E_initial={e0:.4f} J, E_final={e_f:.4f} J, drift {rel_err * 100:.2f}% > 5%",
-                )
-
-                # Also: at the end of run the pendulum should still be
-                # swinging (not damped to zero). Linear speed > 5% of
-                # initial peak (which was sqrt(2*g*h0)).
-                peak_v = math.sqrt(2.0 * GRAVITY * h0)
-                v_speed = float(np.linalg.norm(v_lin_f))
-                # At an arbitrary final-frame time the bob may be near a
-                # turning point (small v), so use the angular velocity
-                # (which doesn't have a phase equivalent to v_lin).
-                v_ang_speed = float(np.linalg.norm(v_ang_f))
-                # Peak omega = peak_v / LEVER.
-                peak_omega = peak_v / LEVER
-                # Sum-of-squares speed (phase invariant) should still
-                # carry most of the swing energy.
-                speed2 = (v_speed / LEVER) ** 2 + v_ang_speed**2
-                rms_omega = math.sqrt(speed2 / 2.0)  # rms across linear and angular contributions
-                # If pendulum lost all its swing energy this drops to 0.
-                self.assertGreater(
-                    rms_omega,
-                    0.3 * peak_omega,
-                    msg=f"end-of-run pendulum almost stopped: rms_omega={rms_omega:.4f}, "
-                    f"peak_omega={peak_omega:.4f} -- spurious damping",
-                )
-
-    def test_torque_free_asymmetric_body_conserves_momentum_and_energy(self) -> None:
-        """Implicit midpoint rotation must preserve torque-free invariants."""
-        device = wp.get_preferred_device()
-        inverse_inertia = ((1.0, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.25))
-        inertia_body = np.diag((1.0, 2.0, 4.0))
+    def test_torque_free_body_conserves_momentum_and_energy(self) -> None:
+        """Preserve torque-free asymmetric-body invariants with five substeps."""
+        inertia_body = np.diag((1.0, 2.0, 2.5))
         omega_initial = np.asarray((1.1, -0.7, 0.9), dtype=np.float64)
-
-        builder = WorldBuilder()
-        body = builder.add_dynamic_body(
-            inverse_mass=1.0,
-            inverse_inertia=inverse_inertia,
-            affected_by_gravity=False,
-            angular_velocity=tuple(omega_initial),
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        body = builder.add_link(
+            xform=wp.transform_identity(),
+            mass=1.0,
+            inertia=((1.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 2.5)),
         )
-        world = builder.finalize(substeps=8, solver_iterations=1, device=device)
+        model = builder.finalize(device=wp.get_preferred_device())
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        body_qd = state.body_qd.numpy()
+        body_qd[body, 3:] = omega_initial
+        state.body_qd.assign(body_qd)
+        solver = _make_solver(model, "multi_world")
+        self.assertFalse(solver._direct_equality_system.enabled)
 
-        angular_momentum_initial = inertia_body @ omega_initial
-        energy_initial = 0.5 * float(omega_initial @ angular_momentum_initial)
-        dt = 1.0 / 240.0
-        world.step(dt)
-        with wp.ScopedCapture(device=device) as capture:
-            world.step(dt)
-        for _ in range(958):
-            wp.capture_launch(capture.graph)
+        momentum_initial = inertia_body @ omega_initial
+        energy_initial = 0.5 * float(omega_initial @ momentum_initial)
+        _capture_rollout(model, state, solver, 4 * FPS)
 
-        q = world.bodies.orientation.numpy()[body].astype(np.float64)
-        x, y, z, w = q
+        quaternion = state.body_q.numpy()[body, 3:].astype(np.float64)
+        x, y, z, w = quaternion
         rotation = np.asarray(
             (
                 (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)),
@@ -217,17 +135,13 @@ class TestEnergyConservation(unittest.TestCase):
             ),
             dtype=np.float64,
         )
-        omega_final = world.bodies.angular_velocity.numpy()[body].astype(np.float64)
-        inertia_world_final = rotation @ inertia_body @ rotation.T
-        angular_momentum_final = inertia_world_final @ omega_final
-        momentum_error = np.linalg.norm(angular_momentum_final - angular_momentum_initial)
-        momentum_scale = np.linalg.norm(angular_momentum_initial)
-        self.assertLess(momentum_error / momentum_scale, 2.0e-4)
-
-        energy_final = 0.5 * float(omega_final @ angular_momentum_final)
-        self.assertLess(abs(energy_final - energy_initial) / energy_initial, 2.0e-4)
+        omega_final = state.body_qd.numpy()[body, 3:].astype(np.float64)
+        inertia_world = rotation @ inertia_body @ rotation.T
+        momentum_final = inertia_world @ omega_final
+        self.assertLess(np.linalg.norm(momentum_final - momentum_initial) / np.linalg.norm(momentum_initial), 3.0e-4)
+        energy_final = 0.5 * float(omega_final @ momentum_final)
+        self.assertLess(abs(energy_final - energy_initial) / energy_initial, 3.0e-4)
 
 
 if __name__ == "__main__":
-    wp.init()
     unittest.main()

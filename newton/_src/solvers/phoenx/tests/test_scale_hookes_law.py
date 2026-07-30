@@ -1,87 +1,83 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hooke-law smoke tests for prismatic PD limits."""
+"""Scale-independent hard-limit tests for direct prismatic structure."""
 
 from __future__ import annotations
 
-import math
 import unittest
 
+import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.tests._test_helpers import run_settle_loop
-from newton._src.solvers.phoenx.world_builder import JointMode, WorldBuilder
+import newton
 
-_GRAVITY = 9.81
-_LIMIT_LOWER = -0.05
-_LIMIT_UPPER = 0.05
-_FPS = 120
-_SETTLE_FRAMES = 240
-_INV_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+GRAVITY = 9.81
+LIMIT_LOWER = -0.05
+LIMIT_UPPER = 0.05
+FPS = 120
+SUBSTEPS = 5
+SETTLE_FRAMES = 240
+INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
 
-def _settle_slider(*, mass: float, limit_ke: float) -> tuple[float, float]:
-    """Return final ``(z, vz)`` for a gravity-loaded limited slider."""
-    b = WorldBuilder()
-    body = b.add_dynamic_body(
-        position=(0.0, 0.0, 0.0),
-        inverse_mass=1.0 / mass,
-        inverse_inertia=_INV_INERTIA,
-        affected_by_gravity=True,
+def _settle_slider(*, mass: float, limit_ke: float) -> tuple[float, float, newton.solvers.SolverPhoenX]:
+    """Return a gravity-loaded slider coordinate, velocity, and solver."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -GRAVITY), up_axis=newton.Axis.Z)
+    body = builder.add_link(xform=wp.transform_identity(), mass=mass, inertia=INERTIA)
+    joint = builder.add_joint_prismatic(
+        parent=-1,
+        child=body,
+        axis=(0.0, 0.0, 1.0),
+        limit_lower=LIMIT_LOWER,
+        limit_upper=LIMIT_UPPER,
+        limit_ke=limit_ke,
+        limit_kd=2.0,
     )
-    b.add_joint(
-        body1=b.world_body,
-        body2=body,
-        anchor1=(0.0, 0.0, 0.0),
-        anchor2=(0.0, 0.0, 1.0),
-        mode=JointMode.PRISMATIC,
-        min_value=_LIMIT_LOWER,
-        max_value=_LIMIT_UPPER,
-        stiffness_limit=limit_ke,
-        damping_limit=2.0 * math.sqrt(limit_ke * mass),
+    builder.add_articulation([joint])
+    model = builder.finalize(device=wp.get_preferred_device())
+    state = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    solver = newton.solvers.SolverPhoenX(
+        model,
+        substeps=SUBSTEPS,
+        solver_iterations=2,
+        velocity_iterations=1,
+        articulation_mode="maximal",
     )
-    world = b.finalize(
-        substeps=8,
-        solver_iterations=16,
-        gravity=(0.0, 0.0, -_GRAVITY),
-        device=wp.get_preferred_device(),
-    )
-    run_settle_loop(world, _SETTLE_FRAMES, 1.0 / _FPS)
-    position = world.bodies.position.numpy()[1]
-    velocity = world.bodies.velocity.numpy()[1]
-    return float(position[2]), float(velocity[2])
+    control = model.control()
+    with wp.ScopedCapture(model.device) as capture:
+        state.clear_forces()
+        solver.step(state, state, control, None, 1.0 / FPS)
+    for _ in range(SETTLE_FRAMES):
+        wp.capture_launch(capture.graph)
+    q = wp.zeros_like(model.joint_q)
+    qd = wp.zeros_like(model.joint_qd)
+    newton.eval_ik(model, state, q, qd)
+    return float(q.numpy()[0]), float(qd.numpy()[0]), solver
 
 
-@unittest.skipUnless(
-    wp.get_preferred_device().is_cuda,
-    "PhoenX scale tests run on CUDA only (graph capture path).",
-)
-class TestScaleHookesLaw(unittest.TestCase):
-    """Linear PD limit deflection should scale with ``force / ke``."""
+@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX scale tests require CUDA graphs.")
+class TestScaleLimitContract(unittest.TestCase):
+    """Check Newton limit gains preserve the public rigid-stop contract."""
 
-    def test_deflection_matches_hookes_law(self) -> None:
+    def test_gravity_loaded_slider_stops_at_lower_limit(self) -> None:
+        """Hold several masses and limit gains at the exact lower stop."""
         for mass, ke in ((1.0, 200.0), (1.0, 1000.0), (2.0, 5000.0)):
-            with self.subTest(mass=mass, ke=ke):
-                z, vz = _settle_slider(mass=mass, limit_ke=ke)
-                self.assertLess(abs(vz), 1.0e-3, msg=f"slider not settled: vz={vz:.6f} m/s")
-                expected = mass * _GRAVITY / ke
-                actual = _LIMIT_LOWER - z
-                self.assertAlmostEqual(
-                    actual,
-                    expected,
-                    delta=max(0.06 * expected, 2.0e-4),
-                    msg=f"deflection={actual:.6f} m, expected={expected:.6f} m for mass={mass}, ke={ke}",
-                )
+            with self.subTest(mass=mass, stiffness=ke):
+                q, qd, solver = _settle_slider(mass=mass, limit_ke=ke)
+                self.assertEqual(solver._direct_equality_system.topology.dimensions, (5,))
+                np.testing.assert_array_equal(solver.world._joint_pgs_enabled.numpy(), [1])
+                self.assertLess(abs(qd), 1.0e-3)
+                self.assertAlmostEqual(q, LIMIT_LOWER, delta=5.0e-4)
 
-    def test_stiffer_limit_reduces_deflection(self) -> None:
-        soft_z, _ = _settle_slider(mass=1.0, limit_ke=200.0)
-        stiff_z, _ = _settle_slider(mass=1.0, limit_ke=5000.0)
-        soft_deflection = _LIMIT_LOWER - soft_z
-        stiff_deflection = _LIMIT_LOWER - stiff_z
-        self.assertLess(stiff_deflection, 0.25 * soft_deflection)
+    def test_limit_gain_does_not_soften_public_stop(self) -> None:
+        """Keep the public stop rigid for different XPBD gain metadata."""
+        soft_q, _, _ = _settle_slider(mass=1.0, limit_ke=200.0)
+        stiff_q, _, _ = _settle_slider(mass=1.0, limit_ke=5000.0)
+        self.assertAlmostEqual(soft_q, stiff_q, delta=2.0e-4)
+        self.assertAlmostEqual(stiff_q, LIMIT_LOWER, delta=5.0e-4)
 
 
 if __name__ == "__main__":
-    wp.init()
     unittest.main()
