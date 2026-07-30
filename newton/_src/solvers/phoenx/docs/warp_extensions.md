@@ -20,10 +20,6 @@ Keep new native snippets tiny, GPU-scoped, and documented here.
   used by the one-warp-per-world no-coloring PGS feasibility benchmark. They
   let lanes propose constraint rows and greedily accept a body-disjoint
   micro-wave without global atomics.
-- `benchmarks/experimental/bench_color_grid_actual_solve` defines the same
-  shuffle/ballot wrappers for an actual-solve no-color scheduler experiment,
-  including a refill/tile-stack variant. These are benchmarking entry points
-  only; current real-kernel measurements do not justify production use.
 - `articulations.reduced_contact_block._broadcast_contact_scalar` uses a
   full-warp shuffle in the one-warp reduced contact solvers. It replaces
   `tile_from_thread` shared-memory broadcasts and their block barriers.

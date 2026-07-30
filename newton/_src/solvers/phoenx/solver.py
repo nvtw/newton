@@ -818,9 +818,7 @@ class SolverPhoenX(SolverBase):
                         device=self.device,
                     )
                 if num_joints > 0:
-                    active_pgs = joint_pgs_enabled != 0
-                    inequality_only = bool(np.any(active_pgs) and np.all(structural_direct[active_pgs] != 0))
-                    self.world.set_joint_pgs_ownership(joint_pgs_enabled, inequality_only=inequality_only)
+                    self.world.set_joint_pgs_ownership(joint_pgs_enabled)
 
         if num_cloth_triangles > 0:
             self.world.populate_cloth_triangles_from_model(model)
@@ -937,9 +935,7 @@ class SolverPhoenX(SolverBase):
             ],
             device=self.device,
         )
-        active_pgs = joint_pgs_enabled != 0
-        inequality_only = bool(np.any(active_pgs) and np.all(structural_direct[active_pgs] != 0))
-        self.world.set_joint_pgs_ownership(joint_pgs_enabled, inequality_only=inequality_only)
+        self.world.set_joint_pgs_ownership(joint_pgs_enabled)
 
     def _apply_joint_control(self, control: Control) -> None:
         """Rewrite ADBS drive dwords from control + model. Falls back to Model

@@ -39,7 +39,6 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
 @functools.cache
 def _make_serial_world_prepare_plus_iterate_kernel(
     *,
-    revolute_only: bool,
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
@@ -64,7 +63,6 @@ def _make_serial_world_prepare_plus_iterate_kernel(
 
     (_dispatch_prepare_cid, _dispatch_prepare_joint, _dispatch_prepare_contact) = (
         _make_multiworld_rigid_prepare_dispatch_func(
-            revolute_only=revolute_only,
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
@@ -76,7 +74,6 @@ def _make_serial_world_prepare_plus_iterate_kernel(
     )
     (_dispatch_iterate_cid, _dispatch_iterate_joint, _dispatch_iterate_contact) = (
         _make_multiworld_rigid_iterate_dispatch_funcs(
-            revolute_only=revolute_only,
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
@@ -209,7 +206,6 @@ def _make_serial_world_prepare_plus_iterate_kernel(
 @functools.cache
 def _make_serial_world_relax_kernel(
     *,
-    revolute_only: bool,
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
@@ -234,7 +230,6 @@ def _make_serial_world_relax_kernel(
 
     (_dispatch_iterate_cid, _dispatch_iterate_joint, _dispatch_iterate_contact) = (
         _make_multiworld_rigid_iterate_dispatch_funcs(
-            revolute_only=revolute_only,
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,

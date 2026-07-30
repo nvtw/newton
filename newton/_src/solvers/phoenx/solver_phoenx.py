@@ -71,7 +71,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     ADBS_DWORDS,
     ADBS_TIME_US_OFFSET,
     JOINT_MODE_CABLE,
-    JOINT_MODE_REVOLUTE,
     actuated_double_ball_socket_initialize_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_hexahedron import (
@@ -943,17 +942,6 @@ class PhoenXWorld:
         if not (0.1 <= self.sor_boost <= 2.0):
             raise ValueError(f"sor_boost must be in [0.1, 2.0] (got {self.sor_boost})")
 
-        # Joint-type specialisation flag for the single-world kernels.
-        # ``True`` means every joint is revolute (or there are none),
-        # so :meth:`_singleworld_kernels` returns the revolute-only
-        # variants that skip the ``joint_mode`` global read + dispatch
-        # branch in the iterate hot loop. Defaults to ``True`` for
-        # ``num_joints == 0`` (the joint branch is dead anyway, and
-        # the smaller binary helps occupancy / icache); flipped to
-        # ``False`` if :meth:`initialize_actuated_double_ball_socket_joints`
-        # observes any non-revolute mode. Must be stable before
-        # ``wp.ScopedCapture`` records the step.
-        self._use_revolute_specialization: bool = True
         self._joint_pgs_enabled: wp.array[wp.int32] = wp.ones(
             max(1, self.num_joints), dtype=wp.int32, device=self.device
         )
@@ -969,7 +957,6 @@ class PhoenXWorld:
         self._has_maximal_dynamic_bodies = True
         self._joint_pgs_ownership_active = False
         self._joint_pgs_all_disabled = False
-        self._joint_pgs_inequality_only = False
 
         self.num_worlds: int = int(num_worlds)
         if self.num_worlds <= 0:
@@ -1974,17 +1961,11 @@ class PhoenXWorld:
             d6_limit_upper = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
         if d6_limit_count is None:
             d6_limit_count = wp.zeros(self.num_joints, dtype=wp.int32, device=self.device)
-        # Detect whether the single-world solve can use the revolute-
-        # only iterate kernels. ``joint_mode`` is a host-readable
-        # ``wp.array[int32]`` of length ``num_joints``; one D2H copy
-        # at init time is acceptable (this method runs once before
-        # any graph capture).
         try:
             mode_np = joint_mode.numpy()
         except Exception:
             mode_np = None
         if mode_np is not None and mode_np.size > 0:
-            self._use_revolute_specialization = bool((mode_np == int(JOINT_MODE_REVOLUTE)).all())
             if self.solver_flavor == "simple" and (mode_np == int(JOINT_MODE_CABLE)).any():
                 raise NotImplementedError(
                     "solver_flavor='simple' does not yet support cable joint bend and twist softness"
@@ -2029,7 +2010,7 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def set_joint_pgs_ownership(self, joint_pgs_enabled: np.ndarray, *, inequality_only: bool = False) -> None:
+    def set_joint_pgs_ownership(self, joint_pgs_enabled: np.ndarray) -> None:
         """Set joint ownership: 0 disabled, 1 prepare and iterate, 2 prepare only."""
         enabled = np.asarray(joint_pgs_enabled, dtype=np.int32)
         if enabled.shape != (self.num_joints,):
@@ -2037,7 +2018,6 @@ class PhoenXWorld:
         self._joint_pgs_enabled.assign(enabled)
         self._joint_pgs_ownership_active = True
         self._joint_pgs_all_disabled = not bool(enabled.any())
-        self._joint_pgs_inequality_only = bool(inequality_only and enabled.any())
 
     def set_reduced_articulation(self, articulation, joint_pgs_enabled: np.ndarray) -> None:
         """Bind a reduced backend and transfer ownership of selected joint columns."""
@@ -4628,17 +4608,12 @@ class PhoenXWorld:
             or self.num_soft_hexahedra > 0
         )
         return {
-            # The lean direct-owned path dispatches by residual inequality
-            # type, so the legacy structural revolute specialization cannot
-            # change generated code and would only multiply cache variants.
-            "revolute_only": bool(self._use_revolute_specialization and not self._joint_pgs_inequality_only),
             "cloth_support": cloth_on,
             "soft_tet_neohookean": bool(self._soft_tet_uses_neohookean),
             "enable_column_timers": self.enable_column_timers,
             "has_joints": self.num_joints > 0,
             "skip_joint_pgs": self._skip_all_joint_pgs(),
             "selective_joint_pgs": self._selective_joint_pgs_enabled(),
-            "joint_inequality_only": self._joint_pgs_inequality_only,
             "has_sleeping": self._sleeping_enabled,
             "has_soft_contact_pd": bool(self._has_soft_contact_pd),
         }
@@ -4665,12 +4640,10 @@ class PhoenXWorld:
         """Factory flags for rigid block-world kernels."""
         dispatch_kw = self._dispatch_specialization_flags()
         kw: dict[str, object] = {
-            "revolute_only": dispatch_kw["revolute_only"],
             "has_joints": dispatch_kw["has_joints"],
             "has_contacts": self.max_contact_columns > 0,
             "skip_joint_pgs": dispatch_kw["skip_joint_pgs"],
             "selective_joint_pgs": dispatch_kw["selective_joint_pgs"],
-            "joint_inequality_only": dispatch_kw["joint_inequality_only"],
             "has_sleeping": dispatch_kw["has_sleeping"],
             "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
             "patch_friction": self._contact_patch_enabled,
@@ -4685,7 +4658,7 @@ class PhoenXWorld:
     def _singleworld_kernels(self):
         """Return ``(prepare_head, prepare_fused, iterate_head,
         iterate_fused, relax_head, relax_fused)``. Specialised via
-        compile-time ``revolute_only``, ``cloth_support``, and the
+        compile-time ``cloth_support`` and the
         scene-wide soft-tet variant."""
         kw = {
             **self._dispatch_specialization_flags(),
@@ -4710,7 +4683,6 @@ class PhoenXWorld:
             get_singleworld_kernel(
                 phase="cached_prepare",
                 fused=False,
-                revolute_only=True,
                 cloth_support=False,
                 enable_column_timers=self.enable_column_timers,
                 soft_tet_neohookean=False,
@@ -4718,7 +4690,6 @@ class PhoenXWorld:
                 has_contacts=self.max_contact_columns > 0,
                 skip_joint_pgs=self._skip_all_joint_pgs(),
                 selective_joint_pgs=self._selective_joint_pgs_enabled(),
-                joint_inequality_only=self._joint_pgs_inequality_only,
                 has_mass_splitting=False,
                 packed_contact_headers=False,
                 has_sleeping=False,
@@ -4728,7 +4699,6 @@ class PhoenXWorld:
             get_singleworld_kernel(
                 phase="cached_prepare",
                 fused=True,
-                revolute_only=True,
                 cloth_support=False,
                 enable_column_timers=self.enable_column_timers,
                 soft_tet_neohookean=False,
@@ -4736,7 +4706,6 @@ class PhoenXWorld:
                 has_contacts=self.max_contact_columns > 0,
                 skip_joint_pgs=self._skip_all_joint_pgs(),
                 selective_joint_pgs=self._selective_joint_pgs_enabled(),
-                joint_inequality_only=self._joint_pgs_inequality_only,
                 has_mass_splitting=False,
                 packed_contact_headers=False,
                 has_sleeping=False,

@@ -97,9 +97,6 @@ measurements and profiles.
 
 ```bash
 python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_megakernel_scheduling
-python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_color_grid_actual_solve
-python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_wave_schedule_actual_solve
-python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_chunk_task_actual_solve
 python -m newton._src.solvers.phoenx.benchmarks.experimental.bench_unified_block_pipeline
 ```
 

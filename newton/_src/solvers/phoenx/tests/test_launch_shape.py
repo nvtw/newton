@@ -90,7 +90,6 @@ class TestPhoenXSingleWorldLaunchMetadata(unittest.TestCase):
             kernel = get_singleworld_kernel(
                 phase=phase,
                 fused=False,
-                revolute_only=True,
                 cloth_support=False,
             )
             self.assertIs(kernel.options.get("grid_stride"), False)

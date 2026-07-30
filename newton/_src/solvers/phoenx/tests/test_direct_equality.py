@@ -3,13 +3,16 @@
 
 """Regression tests for mechanism-wide PhoenX equality solves."""
 
+import inspect
 import unittest
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx import solver_phoenx_kernels
 from newton._src.solvers.phoenx.articulations.direct_equality import build_direct_equality_topology
+from newton._src.solvers.phoenx.constraints import constraint_joint
 from newton._src.solvers.phoenx.examples.example_motorized_hinge_chain import _build_model
 from newton._src.solvers.phoenx.tests.test_drive_stability import _pendulum
 
@@ -398,7 +401,6 @@ class TestDirectEquality(unittest.TestCase):
             articulation_mode="maximal",
         )
         self.assertTrue(solver._direct_equality_system.direct_drive_joint_mask[0])
-        self.assertTrue(solver.world._joint_pgs_inequality_only)
         np.testing.assert_array_equal(
             solver.world._joint_pgs_enabled.numpy()[: solver.world.num_joints],
             [1],
@@ -633,6 +635,34 @@ class TestDirectEquality(unittest.TestCase):
         self.assertEqual(int(np.count_nonzero(solver._reduced_articulation.owned_joint_mask_np)), 6)
         self.assertEqual(int(np.count_nonzero(direct.joint_mask)), 3)
         np.testing.assert_array_equal(direct.solver.permutation.numpy(), direct.topology.permutation)
+
+    def test_production_pgs_exposes_only_joint_inequalities(self) -> None:
+        """Exclude bilateral joint solvers and their specialization axes from production PGS."""
+        removed_entries = (
+            "actuated_double_ball_socket_cached_warmstart",
+            "actuated_double_ball_socket_iterate",
+            "actuated_double_ball_socket_iterate_at",
+            "actuated_double_ball_socket_iterate_multi",
+            "actuated_double_ball_socket_prepare_for_iteration",
+            "actuated_double_ball_socket_prepare_for_iteration_at",
+            "revolute_cached_warmstart",
+            "revolute_iterate",
+            "revolute_iterate_multi",
+            "revolute_prepare_for_iteration",
+        )
+        for entry in removed_entries:
+            with self.subTest(entry=entry):
+                self.assertFalse(hasattr(constraint_joint, entry))
+
+        for factory in (
+            solver_phoenx_kernels.get_singleworld_kernel,
+            solver_phoenx_kernels.get_fast_tail_kernel,
+            solver_phoenx_kernels.get_block_world_kernel,
+        ):
+            with self.subTest(factory=factory.__name__):
+                parameters = inspect.signature(factory).parameters
+                self.assertNotIn("revolute_only", parameters)
+                self.assertNotIn("joint_inequality_only", parameters)
 
 
 if __name__ == "__main__":

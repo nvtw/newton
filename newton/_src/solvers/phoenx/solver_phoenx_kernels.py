@@ -91,19 +91,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     read_int,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    _OFF_STRUCTURAL_DIRECT,
     ADBS_TIME_US_OFFSET,
-    actuated_double_ball_socket_cached_warmstart,
-    actuated_double_ball_socket_iterate,
-    actuated_double_ball_socket_iterate_multi,
-    actuated_double_ball_socket_prepare_for_iteration,
     actuated_double_ball_socket_prepare_inequality,
     actuated_double_ball_socket_world_error,
     actuated_double_ball_socket_world_wrench,
-    revolute_cached_warmstart,
-    revolute_iterate,
-    revolute_iterate_multi,
-    revolute_prepare_for_iteration,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_hexahedron import (
     SOFT_HEX_TIME_US_OFFSET,
@@ -776,18 +767,16 @@ def get_per_world_greedy_coloring_kernel(group_families: bool):
 # full CSR with __syncthreads between colours; same-colour cids never share a
 # body so per-lane RMW is race-free.
 #
-# Multi-world fast-tail kernels: revolute_only skips the joint-mode branch.
+# Multi-world fast-tail kernels.
 
 
 @functools.cache
 def _make_multiworld_rigid_prepare_dispatch_func(
     *,
-    revolute_only: bool,
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
     selective_joint_pgs: bool,
-    joint_inequality_only: bool,
     has_soft_contact_pd: bool,
     cached_prepare: bool,
     enable_column_timers: bool,
@@ -808,25 +797,9 @@ def _make_multiworld_rigid_prepare_dispatch_func(
         t0 = wp.uint64(0)
         if wp.static(enable_column_timers):
             t0 = read_global_timer_ns()
-        if wp.static(joint_inequality_only):
-            actuated_double_ball_socket_prepare_inequality(
-                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
-            )
-        elif wp.static(cached_prepare):
-            if wp.static(revolute_only):
-                revolute_cached_warmstart(constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt)
-            else:
-                actuated_double_ball_socket_cached_warmstart(
-                    constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
-                )
-        elif wp.static(revolute_only):
-            revolute_prepare_for_iteration(
-                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
-            )
-        else:
-            actuated_double_ball_socket_prepare_for_iteration(
-                constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
-            )
+        actuated_double_ball_socket_prepare_inequality(
+            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+        )
         if wp.static(enable_column_timers):
             constraint_accumulate_time_us(constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns()))
 
@@ -963,12 +936,10 @@ def _make_multiworld_rigid_prepare_dispatch_func(
 @functools.cache
 def _make_multiworld_rigid_iterate_dispatch_funcs(
     *,
-    revolute_only: bool,
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
     selective_joint_pgs: bool,
-    joint_inequality_only: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
     enable_column_timers: bool,
@@ -992,50 +963,9 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
         t0 = wp.uint64(0)
         if wp.static(enable_column_timers):
             t0 = read_global_timer_ns()
-        if wp.static(joint_inequality_only):
-            sweep = wp.int32(0)
-            while sweep < num_sweeps:
-                actuated_double_ball_socket_iterate_inequality(
-                    constraints,
-                    cid,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    wp.int32(0),
-                    idt,
-                    sor_boost,
-                    use_bias,
-                )
-                sweep += wp.int32(1)
-            if wp.static(enable_column_timers):
-                constraint_accumulate_time_us(
-                    constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns())
-                )
-            return
-        if read_int(constraints, _OFF_STRUCTURAL_DIRECT, cid) != wp.int32(0):
-            sweep = wp.int32(0)
-            while sweep < num_sweeps:
-                actuated_double_ball_socket_iterate_inequality(
-                    constraints,
-                    cid,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    wp.int32(0),
-                    idt,
-                    sor_boost,
-                    use_bias,
-                )
-                sweep += wp.int32(1)
-            if wp.static(enable_column_timers):
-                constraint_accumulate_time_us(
-                    constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns())
-                )
-            return
-        if wp.static(revolute_only):
-            revolute_iterate_multi(
+        sweep = wp.int32(0)
+        while sweep < num_sweeps:
+            actuated_double_ball_socket_iterate_inequality(
                 constraints,
                 cid,
                 bodies,
@@ -1046,22 +976,8 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
                 idt,
                 sor_boost,
                 use_bias,
-                num_sweeps,
             )
-        else:
-            actuated_double_ball_socket_iterate_multi(
-                constraints,
-                cid,
-                bodies,
-                particles,
-                copy_state,
-                num_bodies,
-                wp.int32(0),
-                idt,
-                sor_boost,
-                use_bias,
-                num_sweeps,
-            )
+            sweep += wp.int32(1)
         if wp.static(enable_column_timers):
             constraint_accumulate_time_us(constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns()))
 
@@ -1215,12 +1131,10 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
 @functools.cache
 def _make_fast_tail_prepare_plus_iterate_kernel(
     *,
-    revolute_only: bool,
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
     selective_joint_pgs: bool,
-    joint_inequality_only: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -1241,12 +1155,10 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         _dispatch_prepare_joint,
         _dispatch_prepare_contact,
     ) = _make_multiworld_rigid_prepare_dispatch_func(
-        revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=cached_prepare,
         enable_column_timers=enable_column_timers,
@@ -1257,12 +1169,10 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         _dispatch_iterate_joint,
         _dispatch_iterate_contact,
     ) = _make_multiworld_rigid_iterate_dispatch_funcs(
-        revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -1273,14 +1183,12 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     _dispatch_iterate_any_cid = None
     if cloth_support:
         _dispatch_prepare_any_cid = _make_singleworld_dispatch_func(
-            revolute_only=revolute_only,
             cloth_support=cloth_support,
             enable_column_timers=enable_column_timers,
             soft_tet_neohookean=soft_tet_neohookean,
             has_joints=has_joints,
             skip_joint_pgs=skip_joint_pgs,
             selective_joint_pgs=selective_joint_pgs,
-            joint_inequality_only=joint_inequality_only,
             has_mass_splitting=False,
             packed_contact_headers=False,
             has_sleeping=has_sleeping,
@@ -1290,14 +1198,12 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
             use_bias=True,
         )[0]
         _dispatch_iterate_any_cid = _make_singleworld_dispatch_func(
-            revolute_only=revolute_only,
             cloth_support=cloth_support,
             enable_column_timers=enable_column_timers,
             soft_tet_neohookean=soft_tet_neohookean,
             has_joints=has_joints,
             skip_joint_pgs=skip_joint_pgs,
             selective_joint_pgs=selective_joint_pgs,
-            joint_inequality_only=joint_inequality_only,
             has_mass_splitting=False,
             packed_contact_headers=False,
             has_sleeping=has_sleeping,
@@ -1672,12 +1578,10 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
 @functools.cache
 def _make_fast_tail_relax_kernel(
     *,
-    revolute_only: bool,
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
     selective_joint_pgs: bool,
-    joint_inequality_only: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -1695,12 +1599,10 @@ def _make_fast_tail_relax_kernel(
         _dispatch_iterate_joint,
         _dispatch_iterate_contact,
     ) = _make_multiworld_rigid_iterate_dispatch_funcs(
-        revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -1710,14 +1612,12 @@ def _make_fast_tail_relax_kernel(
     _dispatch_relax_any_cid = None
     if cloth_support:
         _dispatch_relax_any_cid = _make_singleworld_dispatch_func(
-            revolute_only=revolute_only,
             cloth_support=cloth_support,
             enable_column_timers=enable_column_timers,
             soft_tet_neohookean=soft_tet_neohookean,
             has_joints=has_joints,
             skip_joint_pgs=skip_joint_pgs,
             selective_joint_pgs=selective_joint_pgs,
-            joint_inequality_only=joint_inequality_only,
             has_mass_splitting=False,
             packed_contact_headers=False,
             has_sleeping=has_sleeping,
@@ -1940,12 +1840,10 @@ def _make_fast_tail_relax_kernel(
 @functools.cache
 def _make_block_world_prepare_plus_iterate_kernel(
     *,
-    revolute_only: bool,
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
     selective_joint_pgs: bool,
-    joint_inequality_only: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     patch_friction: bool = False,
@@ -1960,12 +1858,10 @@ def _make_block_world_prepare_plus_iterate_kernel(
         _dispatch_prepare_joint,
         _dispatch_prepare_contact,
     ) = _make_multiworld_rigid_prepare_dispatch_func(
-        revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=cached_prepare,
         enable_column_timers=enable_column_timers,
@@ -1976,12 +1872,10 @@ def _make_block_world_prepare_plus_iterate_kernel(
         _dispatch_iterate_joint,
         _dispatch_iterate_contact,
     ) = _make_multiworld_rigid_iterate_dispatch_funcs(
-        revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -2101,12 +1995,10 @@ def _make_block_world_prepare_plus_iterate_kernel(
 @functools.cache
 def _make_block_world_relax_kernel(
     *,
-    revolute_only: bool,
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
     selective_joint_pgs: bool,
-    joint_inequality_only: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     patch_friction: bool = False,
@@ -2120,12 +2012,10 @@ def _make_block_world_relax_kernel(
         _dispatch_iterate_joint,
         _dispatch_iterate_contact,
     ) = _make_multiworld_rigid_iterate_dispatch_funcs(
-        revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -2312,12 +2202,10 @@ def _reduce_contact_time_us_kernel(
 def get_block_world_kernel(
     *,
     kind: str,
-    revolute_only: bool,
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
     selective_joint_pgs: bool = False,
-    joint_inequality_only: bool = False,
     has_sleeping: bool = False,
     has_soft_contact_pd: bool = False,
     patch_friction: bool = False,
@@ -2334,12 +2222,10 @@ def get_block_world_kernel(
     """
     if kind == "prepare_plus_iterate":
         return _make_block_world_prepare_plus_iterate_kernel(
-            revolute_only=revolute_only,
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
             selective_joint_pgs=selective_joint_pgs,
-            joint_inequality_only=joint_inequality_only,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             patch_friction=patch_friction,
@@ -2350,12 +2236,10 @@ def get_block_world_kernel(
         )
     if kind in ("iterate", "relax"):
         return _make_block_world_relax_kernel(
-            revolute_only=revolute_only,
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
             selective_joint_pgs=selective_joint_pgs,
-            joint_inequality_only=joint_inequality_only,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             patch_friction=patch_friction,
@@ -2369,12 +2253,10 @@ def get_block_world_kernel(
 def get_fast_tail_kernel(
     *,
     kind: str,
-    revolute_only: bool,
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
     selective_joint_pgs: bool = False,
-    joint_inequality_only: bool = False,
     has_sleeping: bool = False,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -2390,20 +2272,17 @@ def get_fast_tail_kernel(
     solve_outer_iteration_chunk: int = _FAST_TAIL_SOLVE_OUTER_ITERATION_CHUNK,
 ):
     """Lazy fast-tail kernel builder. ``kind`` is ``"prepare_plus_iterate"``,
-    ``"iterate"``, or ``"relax"``. Each (kind, revolute_only, has_joints,
-    has_contacts, has_sleeping, cached_prepare, enable_column_timers,
+    ``"iterate"``, or ``"relax"``. Each (kind, has_joints, has_contacts, has_sleeping, cached_prepare, enable_column_timers,
     fixed_tpw, guard_tpw) tuple is cached
     after first build by the underlying factory's ``functools.cache``. ``fixed_tpw=0``
     keeps the graph-capture-safe dynamic threads-per-world buffer read;
     ``guard_tpw`` keeps fixed variants selectable in auto mode."""
     if kind == "prepare_plus_iterate":
         return _make_fast_tail_prepare_plus_iterate_kernel(
-            revolute_only=revolute_only,
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
             selective_joint_pgs=selective_joint_pgs,
-            joint_inequality_only=joint_inequality_only,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             cloth_support=cloth_support,
@@ -2420,12 +2299,10 @@ def get_fast_tail_kernel(
         )
     if kind in ("iterate", "relax"):
         return _make_fast_tail_relax_kernel(
-            revolute_only=revolute_only,
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
             selective_joint_pgs=selective_joint_pgs,
-            joint_inequality_only=joint_inequality_only,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             cloth_support=cloth_support,
@@ -3365,8 +3242,7 @@ def _singleworld_color_range_from_cursor(
 
 
 # Single-world kernel factories: persistent (head) + single-block (fused tail)
-# for prepare/iterate/relax x revolute_only/generic. ``phase`` and ``revolute_only``
-# are compile-time so Warp constant-folds + dead-code-eliminates the unused branch.
+# for prepare/iterate/relax.
 
 
 @functools.cache
@@ -3537,23 +3413,12 @@ def _make_singleworld_rigid_contact_dispatch_func(
 @functools.cache
 def _make_singleworld_rigid_joint_dispatch_func(
     *,
-    revolute_only: bool,
     is_prepare: bool,
-    joint_inequality_only: bool,
     is_cached_prepare: bool,
     use_bias: bool,
     enable_column_timers: bool,
 ):
     """Generated rigid-joint dispatch for single-world kernels."""
-
-    if is_cached_prepare:
-        joint_func = revolute_cached_warmstart if revolute_only else actuated_double_ball_socket_cached_warmstart
-    elif is_prepare:
-        joint_func = (
-            revolute_prepare_for_iteration if revolute_only else actuated_double_ball_socket_prepare_for_iteration
-        )
-    else:
-        joint_func = revolute_iterate if revolute_only else actuated_double_ball_socket_iterate
 
     @wp.func
     def _dispatch_rigid_joint(
@@ -3572,38 +3437,22 @@ def _make_singleworld_rigid_joint_dispatch_func(
             t0 = read_global_timer_ns()
 
         if wp.static(is_prepare or is_cached_prepare):
-            joint_func(constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt)
+            actuated_double_ball_socket_prepare_inequality(
+                constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+            )
         else:
-            if wp.static(joint_inequality_only):
-                actuated_double_ball_socket_iterate_inequality(
-                    constraints,
-                    cid,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    parallel_id,
-                    idt,
-                    sor_boost,
-                    use_bias,
-                )
-            elif read_int(constraints, _OFF_STRUCTURAL_DIRECT, cid) != wp.int32(0):
-                actuated_double_ball_socket_iterate_inequality(
-                    constraints,
-                    cid,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    parallel_id,
-                    idt,
-                    sor_boost,
-                    use_bias,
-                )
-            else:
-                joint_func(
-                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt, sor_boost, use_bias
-                )
+            actuated_double_ball_socket_iterate_inequality(
+                constraints,
+                cid,
+                bodies,
+                particles,
+                copy_state,
+                num_bodies,
+                parallel_id,
+                idt,
+                sor_boost,
+                use_bias,
+            )
 
         if wp.static(enable_column_timers):
             constraint_accumulate_time_us(constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns()))
@@ -3614,14 +3463,12 @@ def _make_singleworld_rigid_joint_dispatch_func(
 @functools.cache
 def _make_singleworld_dispatch_func(
     *,
-    revolute_only: bool,
     cloth_support: bool,
     soft_tet_neohookean: bool,
     enable_column_timers: bool,
     has_joints: bool,
     skip_joint_pgs: bool,
     selective_joint_pgs: bool,
-    joint_inequality_only: bool,
     has_mass_splitting: bool,
     packed_contact_headers: bool,
     has_sleeping: bool,
@@ -3648,9 +3495,7 @@ def _make_singleworld_dispatch_func(
         patch_friction=patch_friction,
     )
     _dispatch_rigid_joint = _make_singleworld_rigid_joint_dispatch_func(
-        revolute_only=revolute_only,
         is_prepare=is_prepare,
-        joint_inequality_only=joint_inequality_only,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
         enable_column_timers=enable_column_timers,
@@ -3909,12 +3754,10 @@ def _make_singleworld_dispatch_func(
 @functools.cache
 def _make_singleworld_rigid_direct_color_func(
     *,
-    revolute_only: bool,
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
     selective_joint_pgs: bool,
-    joint_inequality_only: bool,
     has_mass_splitting: bool,
     packed_contact_headers: bool,
     has_sleeping: bool,
@@ -3936,23 +3779,19 @@ def _make_singleworld_rigid_direct_color_func(
         use_bias=use_bias,
     )
     _, _dispatch_prepare_rigid_joint, _ = _make_multiworld_rigid_prepare_dispatch_func(
-        revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=is_cached_prepare,
         enable_column_timers=enable_column_timers,
     )
     _, _dispatch_iterate_rigid_joint, _ = _make_multiworld_rigid_iterate_dispatch_funcs(
-        revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -4049,7 +3888,6 @@ def _make_singleworld_rigid_direct_color_func(
 def _make_singleworld_persistent_kernel(
     *,
     phase: str,
-    revolute_only: bool,
     cloth_support: bool,
     enable_column_timers: bool = False,
     soft_tet_neohookean: bool = False,
@@ -4057,7 +3895,6 @@ def _make_singleworld_persistent_kernel(
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
     selective_joint_pgs: bool = False,
-    joint_inequality_only: bool = False,
     has_mass_splitting: bool = True,
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
@@ -4080,14 +3917,12 @@ def _make_singleworld_persistent_kernel(
     use_bias = is_iterate  # iterate ON, relax OFF (prepare ignores)
 
     _dispatch_one_cid, _ = _make_singleworld_dispatch_func(
-        revolute_only=revolute_only,
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
         soft_tet_neohookean=soft_tet_neohookean,
         has_joints=has_joints,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_mass_splitting=has_mass_splitting,
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
@@ -4098,12 +3933,10 @@ def _make_singleworld_persistent_kernel(
         patch_friction=patch_friction,
     )
     _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
-        revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_mass_splitting=has_mass_splitting,
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
@@ -4253,7 +4086,6 @@ def _make_singleworld_persistent_kernel(
 def _make_singleworld_fused_kernel(
     *,
     phase: str,
-    revolute_only: bool,
     cloth_support: bool,
     enable_column_timers: bool = False,
     soft_tet_neohookean: bool = False,
@@ -4261,7 +4093,6 @@ def _make_singleworld_fused_kernel(
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
     selective_joint_pgs: bool = False,
-    joint_inequality_only: bool = False,
     has_mass_splitting: bool = True,
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
@@ -4277,14 +4108,12 @@ def _make_singleworld_fused_kernel(
     use_bias = is_iterate
 
     _dispatch_one_cid, _ = _make_singleworld_dispatch_func(
-        revolute_only=revolute_only,
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
         soft_tet_neohookean=soft_tet_neohookean,
         has_joints=has_joints,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_mass_splitting=has_mass_splitting,
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
@@ -4295,12 +4124,10 @@ def _make_singleworld_fused_kernel(
         patch_friction=patch_friction,
     )
     _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
-        revolute_only=revolute_only,
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_mass_splitting=has_mass_splitting,
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
@@ -4447,7 +4274,6 @@ def get_singleworld_kernel(
     *,
     phase: str,
     fused: bool,
-    revolute_only: bool,
     cloth_support: bool,
     enable_column_timers: bool = False,
     soft_tet_neohookean: bool = False,
@@ -4455,7 +4281,6 @@ def get_singleworld_kernel(
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
     selective_joint_pgs: bool = False,
-    joint_inequality_only: bool = False,
     has_mass_splitting: bool = True,
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
@@ -4468,7 +4293,6 @@ def get_singleworld_kernel(
     factory = _make_singleworld_fused_kernel if fused else _make_singleworld_persistent_kernel
     return factory(
         phase=phase,
-        revolute_only=revolute_only,
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
         soft_tet_neohookean=soft_tet_neohookean,
@@ -4476,7 +4300,6 @@ def get_singleworld_kernel(
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
         selective_joint_pgs=selective_joint_pgs,
-        joint_inequality_only=joint_inequality_only,
         has_mass_splitting=has_mass_splitting,
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,

@@ -445,7 +445,7 @@ class TestPrepareRefreshStride(unittest.TestCase):
             stiffness_limit=_f(0.0),
             damping_limit=_f(0.0),
         )
-        self.assertFalse(w._use_revolute_specialization)
+        self.assertEqual(w.num_joints, 1)
 
     def test_rejects_mass_splitting_stride(self) -> None:
         with self.assertRaisesRegex(NotImplementedError, "deformables, mass splitting, or sleeping"):
