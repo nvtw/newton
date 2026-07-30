@@ -339,9 +339,23 @@ def _prepare_direct_rows(
     point0_com = point0
     point1_com = point1
     if parent > wp.int32(0):
-        point0_com -= bodies.position[parent]
+        point0_com = wp.quat_rotate(
+            bodies.orientation[parent],
+            wp.transform_get_translation(joint_x_p[joint]) - bodies.body_com[parent],
+        )
     if child > wp.int32(0):
-        point1_com -= bodies.position[child]
+        point1_com = wp.quat_rotate(
+            bodies.orientation[child],
+            wp.transform_get_translation(joint_x_c[joint]) - bodies.body_com[child],
+        )
+
+    point_error = point1 - point0
+    if parent > wp.int32(0) and child > wp.int32(0):
+        point_error = bodies.position[child] - bodies.position[parent] + point1_com - point0_com
+    elif child > wp.int32(0):
+        point_error = bodies.position[child] - point0 + point1_com
+    elif parent > wp.int32(0):
+        point_error = point1 - bodies.position[parent] - point0_com
 
     for row in range(_MAX_ROWS):
         row_wrench0[structural_index, row] = wp.spatial_vector()
@@ -359,7 +373,6 @@ def _prepare_direct_rows(
         or mode == JOINT_MODE_UNIVERSAL
     )
     if has_point_lock:
-        point_error = point1 - point0
         for row in range(3):
             direction = wp.vec3(0.0)
             direction[row] = wp.float32(1.0)
@@ -441,7 +454,6 @@ def _prepare_direct_rows(
     if mode == JOINT_MODE_PRISMATIC:
         tangent0 = create_orthonormal(axis0)
         tangent1 = wp.cross(axis0, tangent0)
-        point_error = point1 - point0
         error0 = wp.dot(point_error, tangent0)
         error1 = wp.dot(point_error, tangent1)
         _set_direct_point_row(

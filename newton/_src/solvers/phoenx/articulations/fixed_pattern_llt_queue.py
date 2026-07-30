@@ -43,6 +43,56 @@ __syncthreads();
 def _block_fence(): ...
 
 
+@wp.func
+def factor_partial_panel_row(
+    dimension: wp.int32,
+    tile_i: wp.int32,
+    tile_k: wp.int32,
+    table_offset: wp.int32,
+    tile_count: wp.int32,
+    panel_index: wp.array[wp.int32],
+    matrix: wp.array[wp.float32],
+    factor: wp.array[wp.float32],
+    lane: wp.int32,
+    block_size: wp.int32,
+):
+    """Factor one active row of a partial off-diagonal panel."""
+    i = tile_i * block_size
+    if i + lane >= dimension:
+        return
+    tile_elements = block_size * block_size
+    panel_id = panel_index[table_offset + tile_i * tile_count + tile_k]
+    diagonal_panel = panel_index[table_offset + tile_k * tile_count + tile_k]
+    panel_offset = panel_id * tile_elements
+    diagonal_offset = diagonal_panel * tile_elements
+
+    column = wp.int32(0)
+    while column < block_size:
+        value = matrix[panel_offset + lane * block_size + column]
+        tile_j = wp.int32(0)
+        while tile_j < tile_k:
+            left_panel = panel_index[table_offset + tile_i * tile_count + tile_j]
+            right_panel = panel_index[table_offset + tile_k * tile_count + tile_j]
+            if left_panel >= wp.int32(0) and right_panel >= wp.int32(0):
+                left_offset = left_panel * tile_elements + lane * block_size
+                right_offset = right_panel * tile_elements + column * block_size
+                inner = wp.int32(0)
+                while inner < block_size:
+                    value -= factor[left_offset + inner] * factor[right_offset + inner]
+                    inner += wp.int32(1)
+            tile_j += wp.int32(1)
+
+        inner = wp.int32(0)
+        while inner < column:
+            value -= (
+                factor[diagonal_offset + column * block_size + inner] * factor[panel_offset + lane * block_size + inner]
+            )
+            inner += wp.int32(1)
+        value /= factor[diagonal_offset + column * block_size + column]
+        factor[panel_offset + lane * block_size + column] = value
+        column += wp.int32(1)
+
+
 @wp.kernel(enable_backward=False)
 def initialize_factor_queue(
     initial_task: wp.array[wp.int32],
@@ -167,61 +217,60 @@ def make_persistent_factor_kernel(block_size: int):
                 )
                 wp.tile_store(diagonal_factor, diagonal)
             else:
-                panel_id = panel_index[table_offset + tile_i * tile_count + tile_k]
-                diagonal_panel = panel_index[table_offset + tile_k * tile_count + tile_k]
-                panel_matrix = wp.array(
-                    ptr=_get_float_array_offset_ptr(matrix, panel_id * tile_elements),
-                    shape=(block_size, block_size),
-                    dtype=wp.float32,
-                )
-                diagonal_matrix = wp.array(
-                    ptr=_get_float_array_offset_ptr(factor, diagonal_panel * tile_elements),
-                    shape=(block_size, block_size),
-                    dtype=wp.float32,
-                )
-                panel = wp.tile_load(panel_matrix, shape=(block_size, block_size), storage="shared")
-                diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size), storage="shared")
-                if i + block_size > dimension or k + block_size > dimension:
-                    for iteration in range((tile_elements + wp.block_dim() - 1) // wp.block_dim()):
-                        index = (lane + iteration * wp.block_dim()) % tile_elements
-                        row = index // block_size
-                        column = index % block_size
-                        if i + row >= dimension or k + column >= dimension:
-                            panel[row, column] = wp.float32(0.0)
-                        if k + row >= dimension or k + column >= dimension:
-                            diagonal[row, column] = wp.where(
-                                row == column,
-                                wp.float32(1.0),
-                                wp.float32(0.0),
-                            )
-
-                for tile_j in range(tile_k):
-                    left_panel = panel_index[table_offset + tile_i * tile_count + tile_j]
-                    right_panel = panel_index[table_offset + tile_k * tile_count + tile_j]
-                    if left_panel < 0 or right_panel < 0:
-                        continue
-                    left_matrix = wp.array(
-                        ptr=_get_float_array_offset_ptr(factor, left_panel * tile_elements),
+                if i + block_size > dimension:
+                    factor_partial_panel_row(
+                        dimension,
+                        tile_i,
+                        tile_k,
+                        table_offset,
+                        tile_count,
+                        panel_index,
+                        matrix,
+                        factor,
+                        lane,
+                        wp.int32(block_size),
+                    )
+                else:
+                    panel_id = panel_index[table_offset + tile_i * tile_count + tile_k]
+                    diagonal_panel = panel_index[table_offset + tile_k * tile_count + tile_k]
+                    panel_matrix = wp.array(
+                        ptr=_get_float_array_offset_ptr(matrix, panel_id * tile_elements),
                         shape=(block_size, block_size),
                         dtype=wp.float32,
                     )
-                    right_matrix = wp.array(
-                        ptr=_get_float_array_offset_ptr(factor, right_panel * tile_elements),
+                    diagonal_matrix = wp.array(
+                        ptr=_get_float_array_offset_ptr(factor, diagonal_panel * tile_elements),
                         shape=(block_size, block_size),
                         dtype=wp.float32,
                     )
-                    left = wp.tile_load(left_matrix, shape=(block_size, block_size))
-                    right = wp.tile_load(right_matrix, shape=(block_size, block_size))
-                    wp.tile_matmul(left, wp.tile_transpose(right), panel, alpha=-1.0)
-                transposed = wp.tile_transpose(panel)
-                wp.tile_lower_solve_inplace(diagonal, transposed)
-                panel_factor = wp.array(
-                    ptr=_get_float_array_offset_ptr(factor, panel_id * tile_elements),
-                    shape=(block_size, block_size),
-                    dtype=wp.float32,
-                )
-                wp.tile_store(panel_factor, wp.tile_transpose(transposed))
-
+                    panel = wp.tile_load(panel_matrix, shape=(block_size, block_size), storage="shared")
+                    diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size), storage="shared")
+                    for tile_j in range(tile_k):
+                        left_panel = panel_index[table_offset + tile_i * tile_count + tile_j]
+                        right_panel = panel_index[table_offset + tile_k * tile_count + tile_j]
+                        if left_panel < 0 or right_panel < 0:
+                            continue
+                        left_matrix = wp.array(
+                            ptr=_get_float_array_offset_ptr(factor, left_panel * tile_elements),
+                            shape=(block_size, block_size),
+                            dtype=wp.float32,
+                        )
+                        right_matrix = wp.array(
+                            ptr=_get_float_array_offset_ptr(factor, right_panel * tile_elements),
+                            shape=(block_size, block_size),
+                            dtype=wp.float32,
+                        )
+                        left = wp.tile_load(left_matrix, shape=(block_size, block_size))
+                        right = wp.tile_load(right_matrix, shape=(block_size, block_size))
+                        wp.tile_matmul(left, wp.tile_transpose(right), panel, alpha=-1.0)
+                    transposed = wp.tile_transpose(panel)
+                    wp.tile_lower_solve_inplace(diagonal, transposed)
+                    panel_factor = wp.array(
+                        ptr=_get_float_array_offset_ptr(factor, panel_id * tile_elements),
+                        shape=(block_size, block_size),
+                        dtype=wp.float32,
+                    )
+                    wp.tile_store(panel_factor, wp.tile_transpose(transposed))
             _block_fence()
             if lane == 0:
                 if tile_i == tile_k:

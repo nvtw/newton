@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import factor_partial_panel_row
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_schedule import PersistentFactorSchedule
 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
@@ -210,69 +211,74 @@ def _make_factor_kernels(block_size: int):
         dimension = dimensions[mechanism]
         tile_count = tile_counts[mechanism]
         table_offset = panel_table_offset[mechanism]
-        panel_id = panel_index[table_offset + tile_i * tile_count + tile_k]
-        diagonal_panel = panel_index[table_offset + tile_k * tile_count + tile_k]
-        panel_matrix = wp.array(
-            ptr=_get_float_array_offset_ptr(matrix, panel_id * tile_elements),
-            shape=(block_size, block_size),
-            dtype=wp.float32,
-        )
-        diagonal_matrix = wp.array(
-            ptr=_get_float_array_offset_ptr(factor, diagonal_panel * tile_elements),
-            shape=(block_size, block_size),
-            dtype=wp.float32,
-        )
-        panel = wp.tile_load(panel_matrix, shape=(block_size, block_size), storage="shared")
-        diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size), storage="shared")
         i = tile_i * block_size
-        k = tile_k * block_size
-        if i + block_size > dimension or k + block_size > dimension:
-            for iteration in range((tile_elements + wp.block_dim() - 1) // wp.block_dim()):
-                index = (lane + iteration * wp.block_dim()) % tile_elements
-                row = index // block_size
-                column = index % block_size
-                if i + row >= dimension or k + column >= dimension:
-                    panel[row, column] = wp.float32(0.0)
-                if k + row >= dimension or k + column >= dimension:
-                    diagonal[row, column] = wp.where(row == column, wp.float32(1.0), wp.float32(0.0))
-
-        for tile_j in range(tile_k):
-            left_panel = panel_index[table_offset + tile_i * tile_count + tile_j]
-            right_panel = panel_index[table_offset + tile_k * tile_count + tile_j]
-            if left_panel < 0 or right_panel < 0:
-                continue
-            left_matrix = wp.array(
-                ptr=_get_float_array_offset_ptr(factor, left_panel * tile_elements),
+        if i + block_size > dimension:
+            factor_partial_panel_row(
+                dimension,
+                tile_i,
+                wp.int32(tile_k),
+                table_offset,
+                tile_count,
+                panel_index,
+                matrix,
+                factor,
+                lane,
+                wp.int32(block_size),
+            )
+        else:
+            panel_id = panel_index[table_offset + tile_i * tile_count + tile_k]
+            diagonal_panel = panel_index[table_offset + tile_k * tile_count + tile_k]
+            panel_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(matrix, panel_id * tile_elements),
                 shape=(block_size, block_size),
                 dtype=wp.float32,
             )
-            right_matrix = wp.array(
-                ptr=_get_float_array_offset_ptr(factor, right_panel * tile_elements),
+            diagonal_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(factor, diagonal_panel * tile_elements),
                 shape=(block_size, block_size),
                 dtype=wp.float32,
             )
-            left = wp.tile_load(left_matrix, shape=(block_size, block_size))
-            right = wp.tile_load(right_matrix, shape=(block_size, block_size))
-            wp.tile_matmul(left, wp.tile_transpose(right), panel, alpha=-1.0)
-        transposed = wp.tile_transpose(panel)
-        wp.tile_lower_solve_inplace(diagonal, transposed)
-        panel_factor = wp.array(
-            ptr=_get_float_array_offset_ptr(factor, panel_id * tile_elements),
-            shape=(block_size, block_size),
-            dtype=wp.float32,
-        )
-        wp.tile_store(panel_factor, wp.tile_transpose(transposed))
+            panel = wp.tile_load(panel_matrix, shape=(block_size, block_size), storage="shared")
+            diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size), storage="shared")
+            for tile_j in range(tile_k):
+                left_panel = panel_index[table_offset + tile_i * tile_count + tile_j]
+                right_panel = panel_index[table_offset + tile_k * tile_count + tile_j]
+                if left_panel < 0 or right_panel < 0:
+                    continue
+                left_matrix = wp.array(
+                    ptr=_get_float_array_offset_ptr(factor, left_panel * tile_elements),
+                    shape=(block_size, block_size),
+                    dtype=wp.float32,
+                )
+                right_matrix = wp.array(
+                    ptr=_get_float_array_offset_ptr(factor, right_panel * tile_elements),
+                    shape=(block_size, block_size),
+                    dtype=wp.float32,
+                )
+                left = wp.tile_load(left_matrix, shape=(block_size, block_size))
+                right = wp.tile_load(right_matrix, shape=(block_size, block_size))
+                wp.tile_matmul(left, wp.tile_transpose(right), panel, alpha=-1.0)
+            transposed = wp.tile_transpose(panel)
+            wp.tile_lower_solve_inplace(diagonal, transposed)
+            panel_factor = wp.array(
+                ptr=_get_float_array_offset_ptr(factor, panel_id * tile_elements),
+                shape=(block_size, block_size),
+                dtype=wp.float32,
+            )
+            wp.tile_store(panel_factor, wp.tile_transpose(transposed))
 
     return factor_diagonal, factor_panel
 
 
-def _make_solve_kernel(block_size: int):
+def _make_aligned_solve_kernel(block_size: int):
     tile_elements = block_size * block_size
 
     @wp.kernel
     def solve(
+        mechanisms: wp.array[wp.int32],
         dimensions: wp.array[wp.int32],
         vector_offsets: wp.array[wp.int32],
+        workspace_offsets: wp.array[wp.int32],
         panel_table_offset: wp.array[wp.int32],
         tile_counts: wp.array[wp.int32],
         panel_index: wp.array[wp.int32],
@@ -283,18 +289,20 @@ def _make_solve_kernel(block_size: int):
         solution_permuted: wp.array[wp.float32],
         solution: wp.array[wp.float32],
     ):
-        mechanism, lane = wp.tid()
+        task, lane = wp.tid()
+        mechanism = mechanisms[task]
         dimension = dimensions[mechanism]
         vector_offset = vector_offsets[mechanism]
         tile_count = tile_counts[mechanism]
+        workspace_offset = workspace_offsets[mechanism]
         table_offset = panel_table_offset[mechanism]
         intermediate_matrix = wp.array(
-            ptr=_get_float_array_offset_ptr(intermediate, vector_offset),
+            ptr=_get_float_array_offset_ptr(intermediate, workspace_offset),
             shape=(dimension, 1),
             dtype=wp.float32,
         )
         solution_permuted_matrix = wp.array(
-            ptr=_get_float_array_offset_ptr(solution_permuted, vector_offset),
+            ptr=_get_float_array_offset_ptr(solution_permuted, workspace_offset),
             shape=(dimension, 1),
             dtype=wp.float32,
         )
@@ -384,6 +392,260 @@ def _make_solve_kernel(block_size: int):
     return solve
 
 
+def _make_forward_solve_kernel(block_size: int):
+    tile_elements = block_size * block_size
+
+    @wp.kernel
+    def solve_forward(
+        mechanisms: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        vector_offsets: wp.array[wp.int32],
+        workspace_offsets: wp.array[wp.int32],
+        panel_table_offset: wp.array[wp.int32],
+        tile_counts: wp.array[wp.int32],
+        panel_index: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        rhs: wp.array[wp.float32],
+        intermediate: wp.array[wp.float32],
+    ):
+        task, lane = wp.tid()
+        mechanism = mechanisms[task]
+        dimension = dimensions[mechanism]
+        vector_offset = vector_offsets[mechanism]
+        tile_count = tile_counts[mechanism]
+        workspace_offset = workspace_offsets[mechanism]
+        workspace_dimension = tile_count * block_size
+        table_offset = panel_table_offset[mechanism]
+        intermediate_matrix = wp.array(
+            ptr=_get_float_array_offset_ptr(intermediate, workspace_offset),
+            shape=(workspace_dimension, 1),
+            dtype=wp.float32,
+        )
+
+        for tile_i in range(tile_count):
+            i = tile_i * block_size
+            right_hand_side = wp.tile_zeros(shape=(block_size, 1), dtype=wp.float32, storage="shared")
+            for iteration in range((block_size + wp.block_dim() - 1) // wp.block_dim()):
+                row = lane + iteration * wp.block_dim()
+                active = row < block_size and i + row < dimension
+                value = wp.float32(0.0)
+                if active:
+                    value = rhs[vector_offset + permutation[vector_offset + i + row]]
+                wp.tile_scatter_masked(right_hand_side, row, 0, value, active)
+            for tile_j in range(tile_i):
+                factor_panel = panel_index[table_offset + tile_i * tile_count + tile_j]
+                if factor_panel < 0:
+                    continue
+                factor_matrix = wp.array(
+                    ptr=_get_float_array_offset_ptr(factor, factor_panel * tile_elements),
+                    shape=(block_size, block_size),
+                    dtype=wp.float32,
+                )
+                left = wp.tile_load(factor_matrix, shape=(block_size, block_size))
+                previous = wp.tile_load(
+                    intermediate_matrix,
+                    shape=(block_size, 1),
+                    offset=(tile_j * block_size, 0),
+                )
+                wp.tile_matmul(left, previous, right_hand_side, alpha=-1.0)
+            diagonal_panel = panel_index[table_offset + tile_i * tile_count + tile_i]
+            diagonal_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(factor, diagonal_panel * tile_elements),
+                shape=(block_size, block_size),
+                dtype=wp.float32,
+            )
+            diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size))
+            wp.tile_lower_solve_inplace(diagonal, right_hand_side)
+            wp.tile_store(intermediate_matrix, right_hand_side, offset=(i, 0))
+
+    return solve_forward
+
+
+def _make_partial_backward_solve_kernel(block_size: int):
+    tile_elements = block_size * block_size
+
+    @wp.kernel(enable_backward=False)
+    def solve_partial_backward(
+        mechanisms: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        vector_offsets: wp.array[wp.int32],
+        workspace_offsets: wp.array[wp.int32],
+        panel_table_offset: wp.array[wp.int32],
+        tile_counts: wp.array[wp.int32],
+        panel_index: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        intermediate: wp.array[wp.float32],
+        solution_permuted: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+    ):
+        mechanism = mechanisms[wp.tid()]
+        dimension = dimensions[mechanism]
+        vector_offset = vector_offsets[mechanism]
+        workspace_offset = workspace_offsets[mechanism]
+        tile_count = tile_counts[mechanism]
+        table_offset = panel_table_offset[mechanism]
+        tile_i = tile_count - wp.int32(1)
+        i = tile_i * block_size
+        active_rows = dimension - i
+        diagonal_panel = panel_index[table_offset + tile_i * tile_count + tile_i]
+        factor_offset = diagonal_panel * tile_elements
+
+        row = active_rows - wp.int32(1)
+        while row >= wp.int32(0):
+            value = intermediate[workspace_offset + i + row]
+            column = row + wp.int32(1)
+            while column < active_rows:
+                value -= (
+                    factor[factor_offset + column * block_size + row] * solution_permuted[workspace_offset + i + column]
+                )
+                column += wp.int32(1)
+            value /= factor[factor_offset + row * block_size + row]
+            solution_permuted[workspace_offset + i + row] = value
+            original = permutation[vector_offset + i + row]
+            solution[vector_offset + original] = value
+            row -= wp.int32(1)
+
+    return solve_partial_backward
+
+
+def _make_backward_solve_kernel(block_size: int):
+    tile_elements = block_size * block_size
+
+    @wp.kernel
+    def solve_backward(
+        mechanisms: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        vector_offsets: wp.array[wp.int32],
+        workspace_offsets: wp.array[wp.int32],
+        panel_table_offset: wp.array[wp.int32],
+        tile_counts: wp.array[wp.int32],
+        panel_index: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        intermediate: wp.array[wp.float32],
+        solution_permuted: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+    ):
+        task, lane = wp.tid()
+        mechanism = mechanisms[task]
+        dimension = dimensions[mechanism]
+        vector_offset = vector_offsets[mechanism]
+        tile_count = tile_counts[mechanism]
+        workspace_offset = workspace_offsets[mechanism]
+        workspace_dimension = tile_count * block_size
+        table_offset = panel_table_offset[mechanism]
+        intermediate_matrix = wp.array(
+            ptr=_get_float_array_offset_ptr(intermediate, workspace_offset),
+            shape=(workspace_dimension, 1),
+            dtype=wp.float32,
+        )
+        solution_permuted_matrix = wp.array(
+            ptr=_get_float_array_offset_ptr(solution_permuted, workspace_offset),
+            shape=(workspace_dimension, 1),
+            dtype=wp.float32,
+        )
+
+        reverse_count = tile_count - wp.int32(1)
+        for reverse_tile in range(reverse_count):
+            tile_i = tile_count - 2 - reverse_tile
+            i = tile_i * block_size
+            right_hand_side = wp.tile_load(
+                intermediate_matrix,
+                shape=(block_size, 1),
+                offset=(i, 0),
+            )
+            diagonal_panel = panel_index[table_offset + tile_i * tile_count + tile_i]
+            diagonal_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(factor, diagonal_panel * tile_elements),
+                shape=(block_size, block_size),
+                dtype=wp.float32,
+            )
+            diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size))
+            for tile_j in range(tile_i + 1, tile_count):
+                factor_panel = panel_index[table_offset + tile_j * tile_count + tile_i]
+                if factor_panel < 0:
+                    continue
+                factor_matrix = wp.array(
+                    ptr=_get_float_array_offset_ptr(factor, factor_panel * tile_elements),
+                    shape=(block_size, block_size),
+                    dtype=wp.float32,
+                )
+                lower = wp.tile_load(factor_matrix, shape=(block_size, block_size))
+                solved = wp.tile_load(
+                    solution_permuted_matrix,
+                    shape=(block_size, 1),
+                    offset=(tile_j * block_size, 0),
+                )
+                wp.tile_matmul(wp.tile_transpose(lower), solved, right_hand_side, alpha=-1.0)
+            wp.tile_upper_solve_inplace(wp.tile_transpose(diagonal), right_hand_side)
+            wp.tile_store(solution_permuted_matrix, right_hand_side, offset=(i, 0))
+            for iteration in range((block_size + wp.block_dim() - 1) // wp.block_dim()):
+                row = lane + iteration * wp.block_dim()
+                if row < block_size and i + row < dimension:
+                    original = permutation[vector_offset + i + row]
+                    solution[vector_offset + original] = right_hand_side[row, 0]
+
+    return solve_backward
+
+
+def _make_small_solve_kernel(block_size: int):
+    tile_elements = block_size * block_size
+
+    @wp.kernel(enable_backward=False)
+    def solve_small(
+        mechanisms: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        vector_offsets: wp.array[wp.int32],
+        workspace_offsets: wp.array[wp.int32],
+        panel_table_offset: wp.array[wp.int32],
+        panel_index: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        rhs: wp.array[wp.float32],
+        intermediate: wp.array[wp.float32],
+        solution_permuted: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+    ):
+        mechanism = mechanisms[wp.tid()]
+        dimension = dimensions[mechanism]
+        vector_offset = vector_offsets[mechanism]
+        workspace_offset = workspace_offsets[mechanism]
+        table_offset = panel_table_offset[mechanism]
+        diagonal_panel = panel_index[table_offset]
+        factor_offset = diagonal_panel * tile_elements
+
+        row = wp.int32(0)
+        while row < dimension:
+            original = permutation[vector_offset + row]
+            value = rhs[vector_offset + original]
+            column = wp.int32(0)
+            while column < row:
+                value -= factor[factor_offset + row * block_size + column] * intermediate[workspace_offset + column]
+                column += wp.int32(1)
+            value /= factor[factor_offset + row * block_size + row]
+            intermediate[workspace_offset + row] = value
+            row += wp.int32(1)
+
+        row = dimension - wp.int32(1)
+        while row >= wp.int32(0):
+            value = intermediate[workspace_offset + row]
+            column = row + wp.int32(1)
+            while column < dimension:
+                value -= (
+                    factor[factor_offset + column * block_size + row] * solution_permuted[workspace_offset + column]
+                )
+                column += wp.int32(1)
+            value /= factor[factor_offset + row * block_size + row]
+            solution_permuted[workspace_offset + row] = value
+            original = permutation[vector_offset + row]
+            solution[vector_offset + original] = value
+            row -= wp.int32(1)
+
+    return solve_small
+
+
 class FixedPatternPanelLLT:
     """Factor and solve fixed-topology mechanism matrices in compact panels."""
 
@@ -408,8 +670,28 @@ class FixedPatternPanelLLT:
             block_size,
         )
         vector_offsets = np.asarray(mechanism_row_start[:-1], dtype=np.int32)
+        padded_dimensions = np.asarray(
+            [((dimension + block_size - 1) // block_size) * block_size for dimension in dimensions],
+            dtype=np.int32,
+        )
+        workspace_offsets = np.zeros(len(dimensions), dtype=np.int32)
+        if len(dimensions) > 1:
+            workspace_offsets[1:] = np.cumsum(padded_dimensions[:-1])
         self.dimension = wp.array(dimensions, dtype=wp.int32, device=self.device)
         self.vector_offset = wp.array(vector_offsets, dtype=wp.int32, device=self.device)
+        self.workspace_offset = wp.array(workspace_offsets, dtype=wp.int32, device=self.device)
+        small_mechanisms = np.flatnonzero(padded_dimensions == block_size).astype(np.int32)
+        large_mechanisms = np.flatnonzero(padded_dimensions > block_size).astype(np.int32)
+        partial_large_mechanisms = np.flatnonzero(
+            (padded_dimensions > block_size) & (padded_dimensions != np.asarray(dimensions))
+        ).astype(np.int32)
+        aligned_large_mechanisms = np.flatnonzero(
+            (padded_dimensions > block_size) & (padded_dimensions == np.asarray(dimensions))
+        ).astype(np.int32)
+        self.small_mechanism = wp.array(small_mechanisms, dtype=wp.int32, device=self.device)
+        self.large_mechanism = wp.array(large_mechanisms, dtype=wp.int32, device=self.device)
+        self.partial_large_mechanism = wp.array(partial_large_mechanisms, dtype=wp.int32, device=self.device)
+        self.aligned_large_mechanism = wp.array(aligned_large_mechanisms, dtype=wp.int32, device=self.device)
         self.permutation = wp.array(permutation, dtype=wp.int32, device=self.device)
         self.panel_table_offset = wp.array(
             self.symbolic.panel_table_offset,
@@ -421,9 +703,9 @@ class FixedPatternPanelLLT:
         storage_size = self.symbolic.panel_count * block_size * block_size
         self.matrix = wp.zeros(storage_size, dtype=wp.float32, device=self.device)
         self.factor = wp.zeros_like(self.matrix)
-        row_count = int(mechanism_row_start[-1])
-        self.intermediate = wp.zeros(row_count, dtype=wp.float32, device=self.device)
-        self.solution_permuted = wp.zeros(row_count, dtype=wp.float32, device=self.device)
+        workspace_size = int(np.sum(padded_dimensions))
+        self.intermediate = wp.zeros(workspace_size, dtype=wp.float32, device=self.device)
+        self.solution_permuted = wp.zeros(workspace_size, dtype=wp.float32, device=self.device)
 
         panel_tables = []
         offset = 0
@@ -437,7 +719,11 @@ class FixedPatternPanelLLT:
             block_size,
             self.device,
         )
-        self._solve = _make_solve_kernel(block_size)
+        self._solve_small = _make_small_solve_kernel(block_size)
+        self._solve_aligned = _make_aligned_solve_kernel(block_size)
+        self._solve_forward_partial = _make_forward_solve_kernel(block_size)
+        self._solve_partial_backward = _make_partial_backward_solve_kernel(block_size)
+        self._solve_backward_partial = _make_backward_solve_kernel(block_size)
 
     def compute(self) -> None:
         """Factor all mechanisms through one persistent atomic panel queue."""
@@ -452,25 +738,107 @@ class FixedPatternPanelLLT:
 
     def solve(self, rhs: wp.array[wp.float32], solution: wp.array[wp.float32]) -> None:
         """Solve all mechanism blocks and unpermute the result."""
-        wp.launch_tiled(
-            self._solve,
-            dim=len(self.dimensions),
-            block_dim=256,
-            inputs=[
-                self.dimension,
-                self.vector_offset,
-                self.panel_table_offset,
-                self.tile_count,
-                self.panel_index,
-                self.permutation,
-                self.factor,
-                rhs,
-                self.intermediate,
-                self.solution_permuted,
-                solution,
-            ],
-            device=self.device,
-        )
+        if self.small_mechanism.size > 0:
+            wp.launch(
+                self._solve_small,
+                dim=self.small_mechanism.size,
+                inputs=[
+                    self.small_mechanism,
+                    self.dimension,
+                    self.vector_offset,
+                    self.workspace_offset,
+                    self.panel_table_offset,
+                    self.panel_index,
+                    self.permutation,
+                    self.factor,
+                    rhs,
+                    self.intermediate,
+                    self.solution_permuted,
+                    solution,
+                ],
+                device=self.device,
+            )
+        if self.aligned_large_mechanism.size > 0:
+            wp.launch_tiled(
+                self._solve_aligned,
+                dim=self.aligned_large_mechanism.size,
+                block_dim=256,
+                inputs=[
+                    self.aligned_large_mechanism,
+                    self.dimension,
+                    self.vector_offset,
+                    self.workspace_offset,
+                    self.panel_table_offset,
+                    self.tile_count,
+                    self.panel_index,
+                    self.permutation,
+                    self.factor,
+                    rhs,
+                    self.intermediate,
+                    self.solution_permuted,
+                    solution,
+                ],
+                device=self.device,
+            )
+        if self.partial_large_mechanism.size > 0:
+            wp.launch_tiled(
+                self._solve_forward_partial,
+                dim=self.partial_large_mechanism.size,
+                block_dim=256,
+                inputs=[
+                    self.partial_large_mechanism,
+                    self.dimension,
+                    self.vector_offset,
+                    self.workspace_offset,
+                    self.panel_table_offset,
+                    self.tile_count,
+                    self.panel_index,
+                    self.permutation,
+                    self.factor,
+                    rhs,
+                    self.intermediate,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                self._solve_partial_backward,
+                dim=self.partial_large_mechanism.size,
+                inputs=[
+                    self.partial_large_mechanism,
+                    self.dimension,
+                    self.vector_offset,
+                    self.workspace_offset,
+                    self.panel_table_offset,
+                    self.tile_count,
+                    self.panel_index,
+                    self.permutation,
+                    self.factor,
+                    self.intermediate,
+                    self.solution_permuted,
+                    solution,
+                ],
+                device=self.device,
+            )
+            wp.launch_tiled(
+                self._solve_backward_partial,
+                dim=self.partial_large_mechanism.size,
+                block_dim=256,
+                inputs=[
+                    self.partial_large_mechanism,
+                    self.dimension,
+                    self.vector_offset,
+                    self.workspace_offset,
+                    self.panel_table_offset,
+                    self.tile_count,
+                    self.panel_index,
+                    self.permutation,
+                    self.factor,
+                    self.intermediate,
+                    self.solution_permuted,
+                    solution,
+                ],
+                device=self.device,
+            )
 
 
 __all__ = ["FixedPanelSymbolic", "FixedPatternPanelLLT", "build_fixed_panel_symbolic"]
