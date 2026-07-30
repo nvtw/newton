@@ -77,6 +77,8 @@ __all__ = [
     "DRIVE_MODE_VELOCITY",
     "JOINT_MODE_BALL_SOCKET",
     "JOINT_MODE_CABLE",
+    "JOINT_MODE_CARTESIAN",
+    "JOINT_MODE_CARTESIAN_PLANE",
     "JOINT_MODE_CYLINDRICAL",
     "JOINT_MODE_FIXED",
     "JOINT_MODE_PLANAR",
@@ -140,6 +142,10 @@ JOINT_MODE_CABLE = wp.constant(wp.int32(4))
 JOINT_MODE_UNIVERSAL = wp.constant(wp.int32(5))
 JOINT_MODE_CYLINDRICAL = wp.constant(wp.int32(6))
 JOINT_MODE_PLANAR = wp.constant(wp.int32(7))
+#: Cartesian translation joint with two free in-plane linear axes.
+JOINT_MODE_CARTESIAN_PLANE = wp.constant(wp.int32(8))
+#: Cartesian translation joint with all three linear axes free.
+JOINT_MODE_CARTESIAN = wp.constant(wp.int32(9))
 
 # Per-anchor solve kinds for the unified D6 row engine. Each anchor block
 # in :func:`_d6_iterate_rows_at` selects one; the math lives once in the

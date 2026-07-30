@@ -3,8 +3,8 @@
 """Host-side conversion from Newton :class:`Model` joints to ADBS init arrays.
 
 Mapping: REVOLUTE/PRISMATIC/BALL/FIXED/CABLE -> ADBS joint modes; FREE -> no
-column; DISTANCE unsupported. D6 joints are reduced to an existing ADBS joint
-mode when their authored axes match the old PhoenX joint vocabulary. PhoenX
+column; DISTANCE unsupported. D6 joints use exact restored modes where possible,
+including two- and three-axis Cartesian translation modes. PhoenX
 slot 0 is the static world anchor, so Newton body ``i`` maps to PhoenX slot
 ``i + 1`` and ``joint_parent == -1`` maps to slot 0.
 """
@@ -28,6 +28,8 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
+    JOINT_MODE_CARTESIAN,
+    JOINT_MODE_CARTESIAN_PLANE,
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
     JOINT_MODE_PLANAR,
@@ -123,6 +125,12 @@ def _classify_d6_legacy_mode(
 
     if len(lin_free) == 2 and len(ang_free) == 1:
         return "PLANAR", -1
+
+    if len(lin_free) == 2 and not ang_free:
+        return "CARTESIAN_PLANE", -1
+
+    if len(lin_free) == 3 and not ang_free:
+        return "CARTESIAN", -1
 
     return None, -1
 
@@ -506,7 +514,7 @@ def build_adbs_init_arrays(
                     f"D6 joint {j} cannot be reduced to a restored PhoenX joint "
                     f"({n_lin} linear axes / {n_ang} angular axes; "
                     f"locked linear={tuple(locked_lin)}, locked angular={tuple(locked_ang)}). "
-                    "Supported reductions: fixed, ball, universal, revolute, prismatic, cylindrical, planar. "
+                    "Supported reductions: fixed, ball, universal, revolute, prismatic, cylindrical, planar, Cartesian. "
                     "Generic D6 requires the post-unification joint path."
                 )
             if classified_tag == "BALL":
@@ -613,6 +621,29 @@ def build_adbs_init_arrays(
             damp_drive = bend_kd
             stiff_limit = bend_ke
             damp_limit = bend_kd
+        elif d6_mode_tag in ("CARTESIAN_PLANE", "CARTESIAN"):
+            phoenx_mode = (
+                int(JOINT_MODE_CARTESIAN_PLANE) if d6_mode_tag == "CARTESIAN_PLANE" else int(JOINT_MODE_CARTESIAN)
+            )
+            lin_free = [i for i, locked in enumerate(locked_lin) if not locked]
+            linear_axes = np.asarray([joint_axis[qd_start + i] for i in lin_free], dtype=np.float32)
+            linear_rank = int(np.linalg.matrix_rank(linear_axes, tol=1.0e-6))
+            if linear_rank != len(lin_free):
+                raise NotImplementedError(f"Cartesian D6 joint {j} has linearly dependent translation axes.")
+            for linear_index in lin_free:
+                dof = qd_start + linear_index
+                lower = float(limit_lower[dof]) if limit_lower is not None else -1.0e10
+                upper = float(limit_upper[dof]) if limit_upper is not None else 1.0e10
+                if lower > -5.0e9 or upper < 5.0e9:
+                    raise NotImplementedError(
+                        f"Cartesian D6 joint {j} has a finite linear limit; "
+                        "Cartesian limit inequalities are not implemented yet."
+                    )
+                if joint_friction is not None and float(joint_friction[dof]) > 0.0:
+                    raise NotImplementedError(
+                        f"Cartesian D6 joint {j} has linear Coulomb friction; "
+                        "Cartesian friction inequalities are not implemented yet."
+                    )
         elif d6_mode_tag in ("CYLINDRICAL", "PLANAR"):
             phoenx_mode = int(JOINT_MODE_CYLINDRICAL) if d6_mode_tag == "CYLINDRICAL" else int(JOINT_MODE_PLANAR)
             lin_free = [i for i, locked in enumerate(locked_lin) if not locked]

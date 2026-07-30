@@ -31,6 +31,8 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
+    JOINT_MODE_CARTESIAN,
+    JOINT_MODE_CARTESIAN_PLANE,
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
     JOINT_MODE_PLANAR,
@@ -85,8 +87,10 @@ def _structural_row_count(mode: int) -> int:
         return 3
     if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
         return 5
-    if mode == int(JOINT_MODE_CYLINDRICAL):
+    if mode in (int(JOINT_MODE_CYLINDRICAL), int(JOINT_MODE_CARTESIAN_PLANE)):
         return 4
+    if mode == int(JOINT_MODE_CARTESIAN):
+        return 3
     if mode == int(JOINT_MODE_PLANAR):
         return 3
     if mode in (int(JOINT_MODE_FIXED), int(JOINT_MODE_CABLE)):
@@ -141,6 +145,13 @@ def _dynamic_joint_masks(
             continue
         if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
             candidates = (int(joint_dof_start[joint]),)
+        elif joint_type[joint] == int(JointType.D6) and mode in (
+            int(JOINT_MODE_CARTESIAN_PLANE),
+            int(JOINT_MODE_CARTESIAN),
+        ):
+            start = int(qd_start[joint])
+            count = int(dof_dim[joint, 0])
+            candidates = tuple(dof for dof in range(start, start + count) if float(lower[dof]) <= float(upper[dof]))
         elif (
             joint_type[joint] == int(JointType.D6)
             and mode == int(JOINT_MODE_BALL_SOCKET)
@@ -181,6 +192,8 @@ def _active_dynamic_dofs(
         int(JOINT_MODE_UNIVERSAL),
         int(JOINT_MODE_CYLINDRICAL),
         int(JOINT_MODE_PLANAR),
+        int(JOINT_MODE_CARTESIAN_PLANE),
+        int(JOINT_MODE_CARTESIAN),
     }
     for joint in range(joint_count):
         if excluded[joint]:
@@ -205,8 +218,10 @@ def _active_dynamic_dofs(
                     or float(damping[dof]) > 0.0
                     or (
                         joint_type[joint] == int(JointType.D6)
-                        and mode == int(JOINT_MODE_BALL_SOCKET)
-                        and tuple(dof_dim[joint]) == (0, 3)
+                        and (
+                            mode in (int(JOINT_MODE_CARTESIAN_PLANE), int(JOINT_MODE_CARTESIAN))
+                            or (mode == int(JOINT_MODE_BALL_SOCKET) and tuple(dof_dim[joint]) == (0, 3))
+                        )
                         and drive_dof[dof]
                     )
                 )
@@ -497,6 +512,50 @@ def _prepare_direct_rows(
         row_error[structural_index, row] = wp.float32(0.0)
         row_stiffness[structural_index, row] = wp.float32(0.0)
         row_damping[structural_index, row] = wp.float32(0.0)
+
+    if mode == JOINT_MODE_CARTESIAN_PLANE or mode == JOINT_MODE_CARTESIAN:
+        angular_start = wp.int32(0)
+        if mode == JOINT_MODE_CARTESIAN_PLANE:
+            normal = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
+            normal_error = wp.dot(point_error, normal)
+            _set_direct_point_row(
+                structural_index,
+                wp.int32(0),
+                point0_com,
+                point1_com,
+                normal,
+                normal_error,
+                bias_rate,
+                row_wrench0,
+                row_wrench1,
+                row_bias,
+            )
+            row_error[structural_index, 0] = normal_error
+            angular_start = wp.int32(1)
+        rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
+        for angular_row in range(3):
+            direction = wp.quat_rotate(
+                q0,
+                wp.vec3(
+                    wp.float32(1.0) if angular_row == 0 else wp.float32(0.0),
+                    wp.float32(1.0) if angular_row == 1 else wp.float32(0.0),
+                    wp.float32(1.0) if angular_row == 2 else wp.float32(0.0),
+                ),
+            )
+            row = angular_start + wp.int32(angular_row)
+            error = wp.dot(rotation_error, direction)
+            _set_angular_row(
+                structural_index,
+                row,
+                direction,
+                error,
+                bias_rate,
+                row_wrench0,
+                row_wrench1,
+                row_bias,
+            )
+            row_error[structural_index, row] = error
+        return angular_start + wp.int32(3)
 
     has_point_lock = (
         mode == JOINT_MODE_BALL_SOCKET
@@ -1398,6 +1457,16 @@ def _effective_joint_axes(
                 if lower is None or upper is None or float(lower[dof]) <= float(upper[dof]):
                     axes[joint] = model_axes[dof]
                     break
+        elif mode == int(JOINT_MODE_CARTESIAN_PLANE):
+            start = int(qd_start[joint])
+            linear_count = int(dof_dim[joint, 0])
+            free_axes = []
+            for linear_axis in range(linear_count):
+                dof = start + linear_axis
+                if lower is None or upper is None or float(lower[dof]) <= float(upper[dof]):
+                    free_axes.append(model_axes[dof])
+            if len(free_axes) == 2:
+                axes[joint] = np.cross(free_axes[0], free_axes[1])
         elif mode == int(JOINT_MODE_PLANAR):
             start = int(qd_start[joint])
             linear_count = int(dof_dim[joint, 0])
@@ -1569,7 +1638,12 @@ class DirectEqualitySystem:
         for row, (joint, dof) in enumerate(zip(self.topology.row_joint, self.topology.row_dof, strict=True)):
             if self.topology.row_dynamic[row] and dof >= 0:
                 mode = int(joint_mode[joint])
-                drive_supported = mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)) or (
+                drive_supported = mode in (
+                    int(JOINT_MODE_REVOLUTE),
+                    int(JOINT_MODE_PRISMATIC),
+                    int(JOINT_MODE_CARTESIAN_PLANE),
+                    int(JOINT_MODE_CARTESIAN),
+                ) or (
                     joint_types[joint] == int(JointType.D6)
                     and mode == int(JOINT_MODE_BALL_SOCKET)
                     and tuple(model_dof_dim[joint]) == (0, 3)

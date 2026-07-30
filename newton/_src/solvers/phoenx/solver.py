@@ -31,6 +31,8 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_TARGET_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
+    JOINT_MODE_CARTESIAN,
+    JOINT_MODE_CARTESIAN_PLANE,
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
     JOINT_MODE_PLANAR,
@@ -796,6 +798,8 @@ class SolverPhoenX(SolverBase):
                         int(JOINT_MODE_UNIVERSAL),
                         int(JOINT_MODE_CYLINDRICAL),
                         int(JOINT_MODE_PLANAR),
+                        int(JOINT_MODE_CARTESIAN_PLANE),
+                        int(JOINT_MODE_CARTESIAN),
                     ):
                         equality_only = int(d6_limit_count_np[cid]) == 0
                     if not equality_only:
@@ -910,6 +914,8 @@ class SolverPhoenX(SolverBase):
                 int(JOINT_MODE_UNIVERSAL),
                 int(JOINT_MODE_CYLINDRICAL),
                 int(JOINT_MODE_PLANAR),
+                int(JOINT_MODE_CARTESIAN_PLANE),
+                int(JOINT_MODE_CARTESIAN),
             ):
                 equality_only = int(d6_limit_count[cid]) == 0
             if not equality_only:

@@ -13,6 +13,8 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_CARTESIAN,
+    JOINT_MODE_CARTESIAN_PLANE,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
@@ -84,7 +86,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         builder.add_articulation([joint])
         model = builder.finalize()
         model.set_gravity((0.0, 0.0, 0.0))
-        solver = newton.solvers.SolverPhoenX(model, substeps=2, solver_iterations=8, articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, solver_iterations=8, articulation_mode="maximal")
 
         state_0 = model.state()
         state_1 = model.state()
@@ -136,17 +138,73 @@ class TestD6DirectDispatch(unittest.TestCase):
 
         self.assertEqual(_mode_for(builder.finalize()), int(JOINT_MODE_PRISMATIC))
 
-    def test_generic_d6_still_raises(self) -> None:
+    def test_two_axis_cartesian_d6_uses_four_direct_rows(self) -> None:
+        """Preserve only the two authored Cartesian translation directions."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        body = _make_body(builder)
+        axes = [
+            newton.ModelBuilder.JointDofConfig.create_unlimited((1.0, 0.0, 0.0)),
+            newton.ModelBuilder.JointDofConfig.create_unlimited((0.0, 1.0, 0.0)),
+        ]
+        joint = builder.add_joint_d6(parent=-1, child=body, linear_axes=axes)
+        builder.add_articulation([joint])
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=5,
+            solver_iterations=2,
+            articulation_mode="maximal",
+        )
+        direct = solver._direct_equality_system
+
+        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_CARTESIAN_PLANE))
+        self.assertEqual(direct.topology.dimensions, (4,))
+        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
+
+        state_0 = model.state()
+        state_1 = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+        initial_qd = np.array([[1.25, -0.75, 2.0, 3.0, -2.0, 1.0]], dtype=np.float32)
+        state_0.body_qd.assign(initial_qd)
+        with wp.ScopedCapture(device=model.device) as capture:
+            state_0.clear_forces()
+            solver.step(state_0, state_1, model.control(), None, 1.0 / 60.0)
+        wp.capture_launch(capture.graph)
+
+        final_qd = state_1.body_qd.numpy()[0]
+        np.testing.assert_allclose(final_qd[:2], initial_qd[0, :2], rtol=1.0e-4, atol=1.0e-4)
+        np.testing.assert_allclose(final_qd[2:], 0.0, rtol=0.0, atol=2.0e-4)
+
+    def test_three_axis_cartesian_d6_uses_three_direct_rows(self) -> None:
+        """Lock rotation while leaving all Cartesian translations free."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        body = _make_body(builder)
+        axes = [
+            newton.ModelBuilder.JointDofConfig.create_unlimited((1.0, 0.0, 0.0)),
+            newton.ModelBuilder.JointDofConfig.create_unlimited((0.0, 1.0, 0.0)),
+            newton.ModelBuilder.JointDofConfig.create_unlimited((0.0, 0.0, 1.0)),
+        ]
+        joint = builder.add_joint_d6(parent=-1, child=body, linear_axes=axes)
+        builder.add_articulation([joint])
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, solver_iterations=2, articulation_mode="maximal")
+
+        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_CARTESIAN))
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, (3,))
+        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
+
+    def test_cartesian_d6_finite_limit_raises_explicitly(self) -> None:
+        """Reject Cartesian limits until their inequality row is implemented."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         body = _make_body(builder)
         axes = [
             newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0), limit_lower=-1.0, limit_upper=1.0),
-            newton.ModelBuilder.JointDofConfig(axis=(0.0, 1.0, 0.0), limit_lower=-1.0, limit_upper=1.0),
+            newton.ModelBuilder.JointDofConfig.create_unlimited((0.0, 1.0, 0.0)),
         ]
         joint = builder.add_joint_d6(parent=-1, child=body, linear_axes=axes)
         builder.add_articulation([joint])
 
-        with self.assertRaisesRegex(NotImplementedError, "cannot be reduced"):
+        with self.assertRaisesRegex(NotImplementedError, "Cartesian limit inequalities"):
             newton.solvers.SolverPhoenX(builder.finalize(), substeps=5, articulation_mode="maximal")
 
     def test_three_axis_gimbals_use_direct_translation_rows(self) -> None:
