@@ -41,7 +41,9 @@
 # Half of those joints were flipped, so their animation channels are
 # negated to compensate. PhoenX handles substepping internally:
 # per-frame we call ``solver.step(..., dt=frame_dt)`` exactly once
-# and the solver advances ``substeps`` PGS substeps under the hood.
+# and the solver advances ``substeps`` integration/constraint substeps
+# under the hood.
+# Only contacts, limits, and friction use the inequality PGS sweeps.
 # ``--fps`` controls how often the broad/narrow-phase collision
 # detection runs.
 #
@@ -59,6 +61,11 @@ import newton
 import newton.examples
 import newton.utils
 
+# The articulation-root metadata below only guides USD topology import.
+# SolverPhoenX runs this model in maximal coordinates and automatically
+# groups all 36 joints into one direct connected mechanism; the reduced-
+# coordinate articulation backend is not used by this example.
+#
 # Joints whose body0/body1 (and matching local pose attrs) are swapped
 # before ``add_usd()`` so all hinges share a consistent
 # ``body0=parent`` convention. The j1-j4 inner-chain joints in this
@@ -409,7 +416,8 @@ class Example:
     def simulate(self):
         # One collide() per frame -- ``--fps`` chooses how often
         # broad/narrow-phase fires. PhoenX advances
-        # ``args.sim_substeps`` PGS substeps inside the single
+        # ``args.sim_substeps`` integration/constraint substeps inside
+        # the single
         # ``solver.step`` below. PhoenX imports ``state_0`` into its
         # internal body container before advancing, so in-place export
         # is graph-safe and avoids copy-back kernels.
@@ -482,7 +490,8 @@ class Example:
             help=(
                 "Frame rate (Hz) at which collision detection runs and the"
                 " solver is stepped. PhoenX advances ``--sim-substeps``"
-                " PGS substeps internally per step, so the integrator dt"
+                " integration/constraint substeps internally per step, so the"
+                " integrator dt"
                 " is ``1 / (fps * sim_substeps)``."
             ),
         )

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""PhoenX world driver: unified joint, deformable, and contact PGS."""
+"""PhoenX world driver: direct joints with iterative inequalities and deformables."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 # PhoenX Solver Internals
 
-PhoenX is Newton's deterministic, maximal-coordinate, CUDA-oriented PGS/TGS solver for rigid bodies, joints, contacts, cloth triangles/bending, and soft-body constraints. It is built to handle both very large single worlds and many independent small worlds without changing the constraint model. This note is for people changing the solver; it gives the mental model before you open the large kernel files.
+PhoenX is Newton's deterministic, maximal-coordinate, CUDA-oriented solver. It uses sparse direct systems for bilateral full-coordinate joints and PGS/TGS for contacts, joint inequalities, cloth, and soft-body constraints. It is built to handle both very large single worlds and many independent small worlds without changing the constraint model. This note is for people changing the solver; it gives the mental model before you open the large kernel files.
 
 For tuning history, use [`PERF_NOTES.md`](docs/PERF_NOTES.md). For compound contact grouping design notes, use [`CONTACT_GROUP_COMPOUND_OPT.md`](docs/CONTACT_GROUP_COMPOUND_OPT.md).
 

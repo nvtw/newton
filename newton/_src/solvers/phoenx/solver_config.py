@@ -38,9 +38,7 @@ PHOENX_USE_GREEDY_COLORING: bool = True
 # k <= 1 / (M_inv * dt^2) (N=1); the constants let each PD row request N on top.
 # Capped at _PD_NYQUIST_HEADROOM_MAX (10) inside pd_coefficients.
 
-PHOENX_BOOST_REVOLUTE_DRIVE = wp.constant(wp.float32(10.0))
 PHOENX_BOOST_REVOLUTE_LIMIT = wp.constant(wp.float32(10.0))
-PHOENX_BOOST_PRISMATIC_DRIVE = wp.constant(wp.float32(10.0))
 PHOENX_BOOST_PRISMATIC_LIMIT = wp.constant(wp.float32(10.0))
 PHOENX_BOOST_CABLE_BEND = wp.constant(wp.float32(10.0))
 PHOENX_BOOST_CABLE_TWIST = wp.constant(wp.float32(10.0))
@@ -69,9 +67,7 @@ __all__ = [
     "PHOENX_BOOST_CABLE_BEND",
     "PHOENX_BOOST_CABLE_TWIST",
     "PHOENX_BOOST_CONTACT_NORMAL",
-    "PHOENX_BOOST_PRISMATIC_DRIVE",
     "PHOENX_BOOST_PRISMATIC_LIMIT",
-    "PHOENX_BOOST_REVOLUTE_DRIVE",
     "PHOENX_BOOST_REVOLUTE_LIMIT",
     "PHOENX_CONTACT_MATCHING",
     "PHOENX_FRICTION_SLIP_VELOCITY",

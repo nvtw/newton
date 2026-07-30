@@ -438,21 +438,6 @@ def run_ported_example(
     factory -> ``newton.examples.run``. Subclasses use this to keep the
     entry-point boilerplate one line."""
     parser = newton.examples.create_parser()
-    parser.add_argument(
-        "--solver",
-        choices=("classic", "jacobi"),
-        default="classic",
-        help="Select graph-colored PGS or the uncolored scalar-row Jacobi solver.",
-    )
-    parser.add_argument(
-        "--max-colors",
-        type=int,
-        default=10,
-        help=(
-            "Estimated classic color count used by Jacobi: effective substeps "
-            "equal max-colors times the configured substeps (default: 10)."
-        ),
-    )
     if configure_parser is not None:
         configure_parser(parser)
     viewer, args = newton.examples.init(parser)

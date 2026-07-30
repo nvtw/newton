@@ -308,20 +308,12 @@ class ActuatedDoubleBallSocketData:
     damping_ratio_limit: wp.float32
     stiffness_limit: wp.float32
     damping_limit: wp.float32
-    # Cached per-substep coefficients (drive row is always PD):
-    #   gamma_drive         -- 1 / (kd + kp*dt).
-    #   bias_drive          -- Jitter2 ``beta * C / dt`` minus
-    #                          ``target_velocity``.
-    #   eff_mass_drive_soft -- 1 / (J M^-1 J^T + gamma_drive).
     # Cached scalar inverse effective mass for the axial row,
     # ``J M^-1 J^T`` (used by the Box2D limit path).
     eff_inv_axial: wp.float32
     # Friction may need a direct-structural Schur correction while drives
     # retain their existing maximal-coordinate response.
     eff_inv_friction: wp.float32
-    bias_drive: wp.float32
-    gamma_drive: wp.float32
-    eff_mass_drive_soft: wp.float32
     # Aliased per-substep limit cache: 3 dwords shared between the
     # Box2D and PD limit formulations. The discriminator is
     # ``stiffness_limit > 0 or damping_limit > 0`` -> PD, else Box2D;
@@ -444,9 +436,6 @@ _OFF_STIFFNESS_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData,
 _OFF_DAMPING_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_limit"))
 _OFF_EFF_INV_AXIAL = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_inv_axial"))
 _OFF_EFF_INV_FRICTION = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_inv_friction"))
-_OFF_BIAS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias_drive"))
-_OFF_GAMMA_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "gamma_drive"))
-_OFF_EFF_MASS_DRIVE_SOFT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_mass_drive_soft"))
 # Aliased Box2D / PD limit cache: 3 shared dwords. Layouts:
 #   Box2D: [bias_limit_box2d, mass_coeff_limit, impulse_coeff_limit]
 #   PD:    [pd_gamma_limit,   pd_beta_limit,    pd_mass_coeff_limit]
@@ -460,9 +449,8 @@ _OFF_PD_MASS_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
 _OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
 # Family-aliased mutable state in three aligned vec4 groups: impulse.xyz and
-# its correlated drive/limit/friction scalar in w.
+# its correlated limit/friction scalar in w.
 _MUL_ACC_IMP1 = wp.constant(wp.int32(0))
-_MUL_ACC_DRIVE = wp.constant(wp.int32(3))
 _MUL_ACC_IMP2 = wp.constant(wp.int32(4))
 _MUL_ACC_LIMIT = wp.constant(wp.int32(7))
 _MUL_ACC_IMP3 = wp.constant(wp.int32(8))
@@ -671,9 +659,6 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_DAMPING_LIMIT, cid, damping_limit[tid])
     write_float(constraints, _OFF_EFF_INV_AXIAL, cid, 0.0)
     write_float(constraints, _OFF_EFF_INV_FRICTION, cid, 0.0)
-    write_float(constraints, _OFF_BIAS_DRIVE, cid, 0.0)
-    write_float(constraints, _OFF_GAMMA_DRIVE, cid, 0.0)
-    write_float(constraints, _OFF_EFF_MASS_DRIVE_SOFT, cid, 0.0)
     # ``limit_cache`` is mode-aliased Box2D vs PD; one zero-fill of
     # the 3 shared dwords covers both layouts. Prepare overwrites
     # them every substep based on the limit type.
@@ -682,7 +667,6 @@ def actuated_double_ball_socket_initialize_kernel(
     write_float(constraints, _OFF_LIMIT_CACHE + 2, cid, 0.0)
     write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
-    constraint_write_multiplier(constraints, _MUL_ACC_DRIVE, cid, 0.0)
     constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, 0.0)
     constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
 
@@ -773,15 +757,11 @@ def _adbs_clear_reset_worlds_kernel(
     constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, zero3)
     write_float(constraints, _OFF_EFF_INV_AXIAL, cid, wp.float32(0.0))
     write_float(constraints, _OFF_EFF_INV_FRICTION, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_BIAS_DRIVE, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_GAMMA_DRIVE, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_EFF_MASS_DRIVE_SOFT, cid, wp.float32(0.0))
     write_float(constraints, _OFF_LIMIT_CACHE + 0, cid, wp.float32(0.0))
     write_float(constraints, _OFF_LIMIT_CACHE + 1, cid, wp.float32(0.0))
     write_float(constraints, _OFF_LIMIT_CACHE + 2, cid, wp.float32(0.0))
     write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, zero3)
-    constraint_write_multiplier(constraints, _MUL_ACC_DRIVE, cid, wp.float32(0.0))
     constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, wp.float32(0.0))
     constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
 

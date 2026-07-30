@@ -166,7 +166,7 @@ class Example:
             "--solver-substeps",
             type=int,
             default=6,
-            help="PhoenX internal PGS substeps per solver step.",
+            help="PhoenX integration/constraint substeps per solver step.",
         )
         parser.add_argument("--solver-iterations", type=int, default=6, help="PhoenX PGS iterations per substep.")
         parser.add_argument(

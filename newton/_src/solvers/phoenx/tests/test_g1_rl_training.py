@@ -27,30 +27,6 @@ from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
     benchmark_train_to_gate,
 )
-from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    CONSTRAINT_MULTIPLIER_VEC4S,
-    ConstraintContainer,
-)
-from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    _MUL_ACC_DRIVE,
-    _OFF_AXIS_WORLD,
-    _OFF_BIAS1,
-    _OFF_BIAS3,
-    _OFF_BIAS_DRIVE,
-    _OFF_CLAMP,
-    _OFF_EFF_INV_AXIAL,
-    _OFF_EFF_MASS_DRIVE_SOFT,
-    _OFF_GAMMA_DRIVE,
-    _OFF_IMPULSE_COEFF,
-    _OFF_LIMIT_CACHE,
-    _OFF_MASS_COEFF,
-    _OFF_MODE_CACHE,
-    _OFF_PREVIOUS_QUATERNION_ANGLE,
-    _OFF_R1_B1,
-    _OFF_R3_B1,
-    _OFF_REVOLUTION_COUNTER,
-)
 from newton._src.solvers.phoenx.experimental.nanog1_import import (
     PufferNetWeights,
     assign_puffernet_weights,
@@ -127,7 +103,6 @@ from newton._src.solvers.phoenx.rl_training.training import (
     _quat_rotate_inverse_xyzw_np,
     _train_g1_ppo_cycle,
 )
-from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_REVOLUTE_DRIVE
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 _NANOG1_ROOT = Path("/home/twidmer/Documents/git/nanoG1")
@@ -350,113 +325,6 @@ class _SequenceRewardPPOEnv:
         )
         wp.launch(_sequence_env_increment_kernel, dim=1, outputs=[self.step_counter], device=self.device)
         return self.obs, self.rewards, self.dones
-
-
-@wp.kernel(enable_backward=False)
-def _poison_adbs_reset_runtime_state_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    joint_count: wp.int32,
-):
-    cid = wp.tid()
-    poison = wp.float32(0.0) / wp.float32(0.0)
-    if cid == wp.int32(0):
-        bodies.velocity[0] = wp.vec3f(poison, poison, poison)
-        bodies.angular_velocity[0] = wp.vec3f(poison, poison, poison)
-    if cid >= joint_count:
-        return
-
-    for row in range(18):
-        constraints.data[_OFF_R1_B1 + row, cid] = poison
-    constraints.data[_OFF_MASS_COEFF, cid] = poison
-    constraints.data[_OFF_IMPULSE_COEFF, cid] = poison
-    for row in range(6):
-        constraints.data[_OFF_BIAS1 + row, cid] = poison
-    for row in range(27):
-        constraints.data[_OFF_MODE_CACHE + row, cid] = poison
-    constraints.data[_OFF_REVOLUTION_COUNTER, cid] = poison
-    constraints.data[_OFF_PREVIOUS_QUATERNION_ANGLE, cid] = poison
-    for row in range(6):
-        constraints.data[_OFF_R3_B1 + row, cid] = poison
-    constraints.data[_OFF_BIAS3, cid] = poison
-    for group in range(CONSTRAINT_MULTIPLIER_VEC4S):
-        constraints.multipliers[group, cid] = wp.vec4f(poison)
-    constraints.data[_OFF_EFF_INV_AXIAL, cid] = poison
-    constraints.data[_OFF_BIAS_DRIVE, cid] = poison
-    constraints.data[_OFF_GAMMA_DRIVE, cid] = poison
-    constraints.data[_OFF_EFF_MASS_DRIVE_SOFT, cid] = poison
-    for row in range(3):
-        constraints.data[_OFF_LIMIT_CACHE + row, cid] = poison
-    constraints.data[_OFF_CLAMP, cid] = poison
-    for row in range(3):
-        constraints.data[_OFF_AXIS_WORLD + row, cid] = poison
-
-
-@wp.kernel(enable_backward=False)
-def _adbs_runtime_nonfinite_flags_kernel(
-    constraints: ConstraintContainer,
-    bodies: BodyContainer,
-    joint_count: wp.int32,
-    check_body_velocity: wp.int32,
-    flags: wp.array[wp.int32],
-):
-    cid = wp.tid()
-    if cid >= joint_count:
-        return
-
-    bad = wp.int32(0)
-    if check_body_velocity != wp.int32(0) and cid == wp.int32(0):
-        velocity = bodies.velocity[0]
-        angular_velocity = bodies.angular_velocity[0]
-        if not wp.isfinite(velocity[0]):
-            bad = wp.int32(1)
-        if not wp.isfinite(velocity[1]):
-            bad = wp.int32(1)
-        if not wp.isfinite(velocity[2]):
-            bad = wp.int32(1)
-        if not wp.isfinite(angular_velocity[0]):
-            bad = wp.int32(1)
-        if not wp.isfinite(angular_velocity[1]):
-            bad = wp.int32(1)
-        if not wp.isfinite(angular_velocity[2]):
-            bad = wp.int32(1)
-
-    for row in range(18):
-        if not wp.isfinite(constraints.data[_OFF_R1_B1 + row, cid]):
-            bad = wp.int32(1)
-    if not wp.isfinite(constraints.data[_OFF_MASS_COEFF, cid]):
-        bad = wp.int32(1)
-    if not wp.isfinite(constraints.data[_OFF_IMPULSE_COEFF, cid]):
-        bad = wp.int32(1)
-    for row in range(6):
-        if not wp.isfinite(constraints.data[_OFF_BIAS1 + row, cid]):
-            bad = wp.int32(1)
-    for row in range(27):
-        if not wp.isfinite(constraints.data[_OFF_MODE_CACHE + row, cid]):
-            bad = wp.int32(1)
-    if not wp.isfinite(constraints.data[_OFF_PREVIOUS_QUATERNION_ANGLE, cid]):
-        bad = wp.int32(1)
-    for group in range(CONSTRAINT_MULTIPLIER_VEC4S):
-        packed = constraints.multipliers[group, cid]
-        for lane in range(4):
-            if not wp.isfinite(packed[lane]):
-                bad = wp.int32(1)
-    if not wp.isfinite(constraints.data[_OFF_EFF_INV_AXIAL, cid]):
-        bad = wp.int32(1)
-    if not wp.isfinite(constraints.data[_OFF_BIAS_DRIVE, cid]):
-        bad = wp.int32(1)
-    if not wp.isfinite(constraints.data[_OFF_GAMMA_DRIVE, cid]):
-        bad = wp.int32(1)
-    if not wp.isfinite(constraints.data[_OFF_EFF_MASS_DRIVE_SOFT, cid]):
-        bad = wp.int32(1)
-    for row in range(3):
-        if not wp.isfinite(constraints.data[_OFF_LIMIT_CACHE + row, cid]):
-            bad = wp.int32(1)
-    for row in range(3):
-        if not wp.isfinite(constraints.data[_OFF_AXIS_WORLD + row, cid]):
-            bad = wp.int32(1)
-
-    flags[cid] = bad
 
 
 def _load_reference_module(path: Path, name: str):
@@ -4691,73 +4559,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertLess(float(np.max(tracking_error)), 0.02)
         self.assertEqual(float(env.dones.numpy()[0]), 0.0)
 
-    def test_constraint_drive_softness_matches_implicit_pd_coefficients_inside_graph(self) -> None:
-        device = require_cuda_graph_capture("PhoenX G1 implicit-drive coefficient tests")
-        perturb = np.float32(0.05)
-        substep_dt = np.float32(g1_recipe.FRAME_DT / g1_recipe.SIM_SUBSTEPS)
-        env = rl.EnvG1PhoenX(
-            rl.ConfigEnvG1PhoenX(
-                world_count=rl.ACTION_DIM_G1,
-                frame_dt=float(substep_dt),
-                sim_substeps=1,
-                solver_iterations=g1_recipe.SOLVER_ITERATIONS,
-                velocity_iterations=0,
-                max_episode_steps=0,
-                auto_reset=False,
-                actuation_model="constraint_drive",
-            ),
-            device=device,
-        )
-        self.assertEqual(env.config.actuation_model, "constraint_drive")
-
-        q = env.model.joint_q.numpy().reshape(env.world_count, env.coord_stride).copy()
-        qd = env.model.joint_qd.numpy().reshape(env.world_count, env.dof_stride).copy()
-        qd[:, :] = 0.0
-        q[:, 2] = 3.0
-        for world in range(env.world_count):
-            q[world, 7 + world] += perturb
-        env.state_0.joint_q.assign(q.reshape(-1))
-        env.state_0.joint_qd.assign(qd.reshape(-1))
-        newton.eval_fk(env.model, env.state_0.joint_q, env.state_0.joint_qd, env.state_0)
-
-        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
-        with wp.ScopedCapture(device=device) as capture:
-            env.step(actions)
-        wp.capture_launch(capture.graph)
-
-        cids = env.solver._adbs.drive_cid.numpy().reshape(env.world_count, env.action_dim)
-        data = env.solver._constraints.data.numpy()
-        multipliers = env.solver._constraints.multipliers.numpy()
-        eff_inv = data[int(_OFF_EFF_INV_AXIAL), cids]
-        gamma = data[int(_OFF_GAMMA_DRIVE), cids]
-        bias = data[int(_OFF_BIAS_DRIVE), cids]
-        eff_mass_soft = data[int(_OFF_EFF_MASS_DRIVE_SOFT), cids]
-        drive_offset = int(_MUL_ACC_DRIVE)
-        acc_drive = multipliers[drive_offset // 4, cids, drive_offset % 4]
-
-        kp = env.actuator_ke.numpy()[None, :]
-        kd = env.actuator_kd.numpy()[None, :]
-        drive_c = np.zeros((env.world_count, env.action_dim), dtype=np.float32)
-        np.fill_diagonal(drive_c, perturb)
-        boost = np.float32(float(PHOENX_BOOST_REVOLUTE_DRIVE))
-        k_max = boost / (eff_inv * substep_dt * substep_dt)
-        k_clamped = np.minimum(kp, k_max)
-        softness = np.float32(1.0) / (kd + substep_dt * k_clamped)
-        expected_gamma = softness / substep_dt
-        expected_bias = drive_c * substep_dt * k_clamped * softness / substep_dt
-        expected_eff_mass = np.float32(1.0) / (eff_inv + expected_gamma)
-
-        np.testing.assert_allclose(gamma, expected_gamma, rtol=1.0e-6, atol=1.0e-5)
-        np.testing.assert_allclose(bias, expected_bias, rtol=1.0e-5, atol=1.0e-5)
-        np.testing.assert_allclose(eff_mass_soft, expected_eff_mass, rtol=1.0e-6, atol=1.0e-7)
-
-        coefficient_force_ratio = np.diag(expected_eff_mass / (substep_dt * (kd + substep_dt * k_clamped)))
-        observed_force_ratio = np.diag(acc_drive) / (substep_dt * env.actuator_ke.numpy() * perturb)
-        self.assertLess(float(np.max(coefficient_force_ratio)), 0.75)
-        self.assertLess(float(np.mean(coefficient_force_ratio)), 0.45)
-        self.assertLess(float(np.max(observed_force_ratio)), 0.95)
-        self.assertLess(float(np.mean(observed_force_ratio)), 0.65)
-
     def test_graph_replay_advances_policy_steps(self) -> None:
         env = _g1_test_env(world_count=1)
         actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=env.device)
@@ -4788,74 +4589,6 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertTrue(np.isfinite(env.obs.numpy()).all())
         self.assertTrue(np.isfinite(env.rewards.numpy()).all())
         self.assertTrue(np.all(env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)[:, 2] > 0.5))
-
-    def test_reset_clears_poisoned_adbs_runtime_state_inside_graph(self) -> None:
-        device = require_cuda_graph_capture("PhoenX G1 poisoned ADBS reset tests")
-        env = rl.EnvG1PhoenX(
-            g1_recipe.default_g1_env_config(world_count=32, auto_reset=False, max_episode_steps=0),
-            device=device,
-        )
-        actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
-        joint_count = env.solver.world.num_joints
-        bad_before_reset = wp.zeros(joint_count, dtype=wp.int32, device=device)
-        bad_after_reset = wp.zeros(joint_count, dtype=wp.int32, device=device)
-        bad_after_step = wp.zeros(joint_count, dtype=wp.int32, device=device)
-
-        with wp.ScopedCapture(device=device) as capture:
-            wp.launch(
-                _poison_adbs_reset_runtime_state_kernel,
-                dim=joint_count,
-                inputs=[env.solver.world.constraints, env.solver.world.bodies, joint_count],
-                device=device,
-            )
-            wp.launch(
-                _adbs_runtime_nonfinite_flags_kernel,
-                dim=joint_count,
-                inputs=[
-                    env.solver.world.constraints,
-                    env.solver.world.bodies,
-                    joint_count,
-                    wp.int32(1),
-                    bad_before_reset,
-                ],
-                device=device,
-            )
-            env.reset()
-            wp.launch(
-                _adbs_runtime_nonfinite_flags_kernel,
-                dim=joint_count,
-                inputs=[
-                    env.solver.world.constraints,
-                    env.solver.world.bodies,
-                    joint_count,
-                    wp.int32(0),
-                    bad_after_reset,
-                ],
-                device=device,
-            )
-            env.step(actions)
-            wp.launch(
-                _adbs_runtime_nonfinite_flags_kernel,
-                dim=joint_count,
-                inputs=[
-                    env.solver.world.constraints,
-                    env.solver.world.bodies,
-                    joint_count,
-                    wp.int32(1),
-                    bad_after_step,
-                ],
-                device=device,
-            )
-        wp.capture_launch(capture.graph)
-
-        self.assertTrue(np.any(bad_before_reset.numpy() != 0))
-        self.assertFalse(np.any(bad_after_reset.numpy() != 0))
-        self.assertFalse(np.any(bad_after_step.numpy() != 0))
-        self.assertFalse(np.any(env.step_dones.numpy() > 0.0))
-        self.assertTrue(np.isfinite(env.state_0.joint_q.numpy()).all())
-        self.assertTrue(np.isfinite(env.state_0.joint_qd.numpy()).all())
-        self.assertTrue(np.isfinite(env.solver.world.bodies.velocity.numpy()).all())
-        self.assertTrue(np.isfinite(env.solver.world.bodies.angular_velocity.numpy()).all())
 
     def test_randomize_commands_graph_capture(self) -> None:
         env = _g1_test_env(world_count=4)

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 from typing import ClassVar
 
@@ -102,14 +103,24 @@ class Example(PortedExample):
                             builder,
                             None,
                             (column_size, column_size, column_height),
-                            (-0.5 * width + grid_x * 0.5 * width, -0.5 * depth + grid_y * depth, floor_z + 0.5 * column_height),
+                            (
+                                -0.5 * width + grid_x * 0.5 * width,
+                                -0.5 * depth + grid_y * depth,
+                                floor_z + 0.5 * column_height,
+                            ),
                             1.6,
                         )
                     )
             for x in (-0.25 * width, 0.25 * width):
                 for y in (-0.5 * depth, 0.5 * depth):
                     self.structure.append(
-                        self._box(builder, None, (column_size, column_size, column_height), (x, y, floor_z + 0.5 * column_height), 1.6)
+                        self._box(
+                            builder,
+                            None,
+                            (column_size, column_size, column_height),
+                            (x, y, floor_z + 0.5 * column_height),
+                            1.6,
+                        )
                     )
             self.structure.append(
                 self._box(
@@ -132,7 +143,13 @@ class Example(PortedExample):
         mast_x = jib_tip_x + math.sin(theta) * (chain_length + ball_radius) + ball_radius + 1.2
         self._box(builder, -1, (5.5, 5.5, 0.8), (mast_x + 1.0, 0.0, 0.4), color=CRANE_COLOR)
         self._box(builder, -1, (1.1, 1.1, jib_z), (mast_x, 0.0, 0.5 * jib_z), color=CRANE_COLOR)
-        self._box(builder, -1, (mast_x - jib_tip_x + 2.4, 0.9, 0.9), (0.5 * (mast_x + jib_tip_x), 0.0, jib_z + 0.45), color=CRANE_COLOR)
+        self._box(
+            builder,
+            -1,
+            (mast_x - jib_tip_x + 2.4, 0.9, 0.9),
+            (0.5 * (mast_x + jib_tip_x), 0.0, jib_z + 0.45),
+            color=CRANE_COLOR,
+        )
         self._box(builder, -1, (2.0, 2.2, 1.6), (mast_x + 2.6, 0.0, jib_z - 0.5), color=CRANE_COLOR)
 
         tip = _p(jib_tip_x, 0.0, jib_z)
@@ -215,7 +232,7 @@ class Example(PortedExample):
         cfg = self._cfg(density, collision_group=-1)
         previous_body = None
         previous_far_anchor = None
-        for point_a, point_b in zip(points[:-1], points[1:]):
+        for point_a, point_b in itertools.pairwise(points):
             segment = point_b - point_a
             length = float(np.linalg.norm(segment))
             if length < 1.0e-6:
@@ -258,17 +275,17 @@ class Example(PortedExample):
         max_half = np.zeros(3)
         for size, offset, density in parts:
             half = 0.5 * np.asarray(size, dtype=float)
-            offset = np.asarray(offset, dtype=float)
+            offset_np = np.asarray(offset, dtype=float)
             builder.add_shape_box(
                 body,
-                xform=_xf(offset),
+                xform=_xf(offset_np),
                 hx=float(half[0]),
                 hy=float(half[1]),
                 hz=float(half[2]),
                 cfg=self._cfg(density),
                 color=FURNITURE_COLOR,
             )
-            max_half = np.maximum(max_half, np.abs(offset) + half)
+            max_half = np.maximum(max_half, np.abs(offset_np) + half)
         self._record_extent(body, tuple(float(value) for value in max_half))
         return body
 
@@ -348,7 +365,9 @@ class Example(PortedExample):
         self._box(builder, None, (0.75, 0.75, 1.85), position + _p(0.0, 0.0, 0.925), 0.8, color=FURNITURE_COLOR)
 
     def _counter(self, builder: newton.ModelBuilder, position, length: float, yaw: float) -> None:
-        self._box(builder, None, (length, 0.65, 0.95), position + _p(0.0, 0.0, 0.475), 0.7, yaw=yaw, color=FURNITURE_COLOR)
+        self._box(
+            builder, None, (length, 0.65, 0.95), position + _p(0.0, 0.0, 0.475), 0.7, yaw=yaw, color=FURNITURE_COLOR
+        )
 
     def _shelf(self, builder: newton.ModelBuilder, position, yaw: float) -> None:
         self._box(builder, None, (1.2, 0.35, 1.7), position + _p(0.0, 0.0, 0.85), 0.5, yaw=yaw, color=FURNITURE_COLOR)
@@ -412,18 +431,6 @@ class Example(PortedExample):
 
 def run_example() -> None:
     parser = newton.examples.create_parser()
-    parser.add_argument(
-        "--solver",
-        choices=("classic", "jacobi"),
-        default="classic",
-        help="Select graph-colored PGS or the uncolored scalar-row Jacobi solver.",
-    )
-    parser.add_argument(
-        "--max-colors",
-        type=int,
-        default=10,
-        help="Estimated classic color count used by Jacobi.",
-    )
     parser.add_argument(
         "--fix-ball-attachment",
         action="store_true",
