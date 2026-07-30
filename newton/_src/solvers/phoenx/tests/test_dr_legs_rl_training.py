@@ -42,16 +42,34 @@ def _max_anchor_residual(env: rl.EnvDrLegsPhoenX) -> float:
 
 
 class TestDrLegsPhoenXRL(unittest.TestCase):
-    def test_hold_pose_preserves_loops_inside_cuda_graph(self) -> None:
+    def test_hold_pose_preserves_direct_loops_after_shock_inside_cuda_graph(self) -> None:
+        """Keep every direct DR Legs joint closed after a body shock."""
         device = require_cuda_graph_capture("PhoenX DR Legs RL tests")
         env = rl.EnvDrLegsPhoenX(
-            rl.ConfigEnvDrLegsPhoenX(task="hold", world_count=1, max_episode_steps=0, auto_reset=False),
+            rl.ConfigEnvDrLegsPhoenX(
+                task="hold",
+                world_count=1,
+                sim_substeps=5,
+                collision_refresh_interval=1,
+                solver_iterations=2,
+                max_episode_steps=0,
+                auto_reset=False,
+            ),
             device=device,
         )
         actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
+        direct = env.solver._direct_equality_system
+        self.assertEqual(direct.topology.dimensions, (192,))
+        self.assertEqual(int(np.count_nonzero(direct.joint_mask)), 36)
+        self.assertEqual(int(np.count_nonzero(direct.direct_drive_joint_mask)), 12)
+        self.assertEqual(int(np.count_nonzero(env.solver.world._joint_pgs_enabled.numpy())), 12)
 
         env.step(actions)
         env.reset()
+        body_qd = env.state_0.body_qd.numpy()
+        body_qd[0, :3] = np.asarray((0.5, -0.3, 0.2), dtype=np.float32)
+        body_qd[0, 3:] = np.asarray((1.0, 0.3, 0.0), dtype=np.float32)
+        env.state_0.body_qd.assign(body_qd)
         with wp.ScopedCapture(device=device) as capture:
             for _ in range(10):
                 env.step(actions)
@@ -68,11 +86,12 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
         self.assertLess(_max_anchor_residual(env), 1.0e-3)
 
     def test_walk_observation_and_targets_inside_cuda_graph(self) -> None:
+        """Publish finite walking observations and direct drive targets."""
         device = require_cuda_graph_capture("PhoenX DR Legs RL tests")
         config = rl.ConfigEnvDrLegsPhoenX(
             task="walk",
             world_count=2,
-            sim_substeps=4,
+            sim_substeps=5,
             collision_refresh_interval=2,
             solver_iterations=4,
             command=(0.2, -0.1, 0.3),
@@ -106,12 +125,13 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.step_dones.numpy(), 0.0, rtol=0.0, atol=0.0)
 
     def test_walk_commands_resample_on_reset_inside_cuda_graph(self) -> None:
+        """Resample bounded walking commands during captured resets."""
         device = require_cuda_graph_capture("PhoenX DR Legs RL tests")
         env = rl.EnvDrLegsPhoenX(
             rl.ConfigEnvDrLegsPhoenX(
                 task="walk",
                 world_count=8,
-                sim_substeps=2,
+                sim_substeps=5,
                 collision_refresh_interval=1,
                 solver_iterations=2,
                 max_episode_steps=1,
@@ -139,6 +159,7 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
         self.assertTrue(np.all(commands[:, 2] <= 0.8))
 
     def test_hold_time_to_policy_smoke_inside_cuda_graph(self) -> None:
+        """Train and evaluate a minimal captured hold policy."""
         device = require_cuda_graph_capture("PhoenX DR Legs time-to-policy tests")
         with tempfile.TemporaryDirectory() as tmpdir:
             checkpoint = str(Path(tmpdir) / "checkpoint_{iteration:06d}.npz")
@@ -156,7 +177,7 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
                     "--rollout-steps",
                     "1",
                     "--sim-substeps",
-                    "1",
+                    "5",
                     "--collision-refresh-interval",
                     "1",
                     "--solver-iterations",
