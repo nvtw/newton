@@ -14,7 +14,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.sim import BodyFlags, Contacts, Control, JointType, Model, ModelFlags, State
+from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
 from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem
 from newton._src.solvers.phoenx.articulations.maximal_contact_gs import MaximalContactRunSchedule
 from newton._src.solvers.phoenx.articulations.maximal_contact_response import MaximalContactResponse
@@ -222,6 +222,7 @@ class SolverPhoenX(SolverBase):
         self,
         model: Model,
         *,
+        collision_pipeline: CollisionPipeline | None = None,
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
@@ -236,8 +237,11 @@ class SolverPhoenX(SolverBase):
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
+        mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
+        max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
+        enable_column_timers: bool = False,
         sor_boost: float = 1.0,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
@@ -250,6 +254,9 @@ class SolverPhoenX(SolverBase):
         """Build the PhoenX solver from ``model``.
 
         Args:
+            collision_pipeline: Optional preconfigured collision pipeline.
+                PhoenX reuses this pipeline and its contact-buffer sizing
+                instead of creating a default sticky pipeline.
             substeps: PhoenX internal substeps per :meth:`step` call.
             solver_iterations: PGS iterations per substep.
             velocity_iterations: TGS-soft relax sweeps per substep.
@@ -291,11 +298,19 @@ class SolverPhoenX(SolverBase):
             mass_splitting: Enable the graph-colored mass-splitting tail.
             max_colored_partitions: True GS colors retained before the
                 mass-splitting tail. Defaults to 12.
+            mass_splitting_unrolled: Use the fixed-launch mass-splitting
+                dispatcher. This can reduce graph-control overhead on
+                workloads whose overflow structure is stable.
             partitioner_algorithm: ``"greedy"`` (default),
                 ``"endpoint_owner"`` (single-world mass splitting only), or
                 ``"luby_fixed"`` (single-world only).
+            max_greedy_outer_iters: Optional cap on greedy partitioner
+                iterations. Remaining constraints enter the overflow
+                partition.
             enable_warm_start_coloring: Reuse previous-frame colour
                 assignments. No-op on multi-world.
+            enable_column_timers: Collect per-constraint-column timing
+                counters for diagnostics. Defaults to ``False``.
             sor_boost: Per-impulse SOR factor. 1.0 = vanilla PGS;
                 1.1-1.5 typical; ``>= 2.0`` diverges.
             sleeping_velocity_threshold: Per-island sleep cutoff
@@ -488,6 +503,11 @@ class SolverPhoenX(SolverBase):
         self._particle_state_imported: State | None = None
         self._default_joint_gear = wp.ones(max(1, int(model.joint_dof_count)), dtype=wp.float32, device=self.device)
 
+        if collision_pipeline is not None:
+            if collision_pipeline.model is not model:
+                raise ValueError("collision_pipeline must have been created for model")
+            model._collision_pipeline = collision_pipeline
+
         # PhoenX's warm-start path needs contact_matching != "disabled".
         # Auto-attach a sticky pipeline so users don't have to size Contacts.
         self._sleeping_enabled: bool = float(sleeping_velocity_threshold) > 0.0
@@ -594,8 +614,11 @@ class SolverPhoenX(SolverBase):
             jacobi_max_colors=jacobi_max_colors,
             contact_friction_model=contact_friction_model if articulation_mode == "maximal" else "point",
             mass_splitting_batch_size=mass_splitting_batch_size,
+            mass_splitting_unrolled=mass_splitting_unrolled,
             partitioner_algorithm=partitioner_algorithm,
+            max_greedy_outer_iters=max_greedy_outer_iters,
             enable_warm_start_coloring=enable_warm_start_coloring,
+            enable_column_timers=enable_column_timers,
             sor_boost=sor_boost,
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),
             sleeping_frames_required=int(sleeping_frames_required),

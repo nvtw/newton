@@ -6,9 +6,9 @@
 Every ported demo plugs into the same per-frame pipeline:
 
 1. :class:`newton.ModelBuilder` -> :class:`newton.Model`
-2. ``model.contacts()`` / ``model.collide()`` for contacts
-3. PhoenX :class:`BodyContainer` seeded from the model
-4. :class:`PhoenXWorld` step loop captured into a CUDA graph
+2. A reusable :class:`newton.CollisionPipeline` for contacts
+3. :class:`newton.solvers.SolverPhoenX` for constraints and integration
+4. A CUDA-graph-captured step loop
 
 The boilerplate is identical across demos -- only the body / shape /
 joint construction and the camera differ. Subclasses implement
@@ -25,19 +25,6 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.phoenx.body import body_container_zeros
-from newton._src.solvers.phoenx.examples.example_common import (
-    init_phoenx_bodies_kernel,
-    newton_to_phoenx_kernel,
-    phoenx_to_newton_kernel,
-)
-from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
-from newton._src.solvers.phoenx.picking import (
-    Picking,
-    register_with_viewer_gl,
-)
-from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 __all__ = [
     "PortedExample",
@@ -276,8 +263,7 @@ class PortedExample:
         viewer.set_camera(pos=wp.vec3(6.0, 0.0, 2.0), pitch=-15.0, yaw=180.0)
 
     def post_build(self) -> None:
-        """Optional hook called after the world / picking are wired up
-        but **before** the simulate graph is captured.
+        """Customize the solver before the simulation graph is captured.
 
         Subclasses override this to install per-shape materials via
         ``self.world.set_materials(...)``, register collision filter
@@ -290,7 +276,7 @@ class PortedExample:
     # ------------------------------------------------------------------
 
     def _build(self) -> None:
-        self._builder = newton.ModelBuilder()
+        self._builder = newton.ModelBuilder(gravity=self.gravity)
         cfg = newton.ModelBuilder.ShapeConfig(
             density=1000.0,
             mu=self.default_friction,
@@ -300,131 +286,55 @@ class PortedExample:
         pick_extents = self.build_scene(self._builder)
 
         self.model = self._builder.finalize(**(self.finalize_kwargs or {}))
-
+        pipeline_kwargs = {
+            "contact_matching": "sticky",
+            "broad_phase": self.broad_phase,
+        }
         if self.shape_pairs_max is not None:
-            self.collision_pipeline = newton.CollisionPipeline(
-                self.model,
-                contact_matching=PHOENX_CONTACT_MATCHING,
-                broad_phase=self.broad_phase,
-                shape_pairs_max=self.shape_pairs_max,
-            )
-        else:
-            self.collision_pipeline = newton.CollisionPipeline(
-                self.model,
-                contact_matching=PHOENX_CONTACT_MATCHING,
-                broad_phase=self.broad_phase,
-            )
-        self.contacts = self.model.contacts(collision_pipeline=self.collision_pipeline)
-        rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
+            pipeline_kwargs["shape_pairs_max"] = self.shape_pairs_max
+        self.collision_pipeline = newton.CollisionPipeline(self.model, **pipeline_kwargs)
+        self.contacts = self.collision_pipeline.contacts()
 
         self.state = self.model.state()
         if self.evaluate_fk:
             newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
             self.model.body_q.assign(self.state.body_q)
+        else:
+            self.state.body_q.assign(self.model.body_q)
+            self.state.body_qd.assign(self.model.body_qd)
+        self.control = self.model.control()
 
-        num_phoenx_bodies = int(self.model.body_count) + 1
-        bodies = body_container_zeros(num_phoenx_bodies, device=self.device)
-        wp.copy(
-            bodies.orientation,
-            wp.array(
-                np.tile([0.0, 0.0, 0.0, 1.0], (num_phoenx_bodies, 1)).astype(np.float32),
-                dtype=wp.quatf,
-                device=self.device,
-            ),
-        )
-        if self.model.body_count > 0:
-            wp.launch(
-                init_phoenx_bodies_kernel,
-                dim=self.model.body_count,
-                inputs=[
-                    self.model.body_q,
-                    self.state.body_qd,
-                    self.model.body_com,
-                    self.model.body_inv_mass,
-                    self.model.body_inv_inertia,
-                ],
-                outputs=[
-                    bodies.position,
-                    bodies.orientation,
-                    bodies.velocity,
-                    bodies.angular_velocity,
-                    bodies.inverse_mass,
-                    bodies.inverse_inertia,
-                    bodies.inverse_inertia_world,
-                    bodies.motion_type,
-                    bodies.body_com,
-                ],
-                device=self.device,
-            )
-        self.bodies = bodies
-
-        # Translate Newton joints (revolute / prismatic / ball / fixed)
-        # into ADBS constraint columns. Without this the ported demos
-        # build chains via ``builder.add_joint_revolute(...)`` but the
-        # PhoenX solver was running with ``num_joints=0``, so the chain
-        # links were free-floating and only ever interacted via contacts
-        # (visibly "not really connected"). The ``model_adapter`` snapshots
-        # body-local anchors from ``model.body_q`` after the optional
-        # FK initialization path above.
-        self._adbs = build_adbs_init_arrays(self.model, device=self.device)
-        num_joints = self._adbs.num_joint_columns
-        self.constraints = PhoenXWorld.make_constraint_container(
-            num_joints=num_joints,
-            device=self.device,
-        )
-
-        shape_body_np = self.model.shape_body.numpy()
-        shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
-        self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
-
-        self.world = PhoenXWorld(
-            bodies=self.bodies,
-            constraints=self.constraints,
+        self.solver = newton.solvers.SolverPhoenX(
+            self.model,
+            collision_pipeline=self.collision_pipeline,
             substeps=self.sim_substeps,
             solver_iterations=1 if self.solver_mode == "jacobi" else self.solver_iterations,
             velocity_iterations=self.velocity_iterations,
-            gravity=self.gravity,
-            rigid_contact_max=rigid_contact_max,
-            num_joints=num_joints,
             default_friction=self.default_friction,
             step_layout=self.step_layout,
+            max_thread_blocks=self.max_thread_blocks,
             mass_splitting=self.mass_splitting,
             max_colored_partitions=self.max_colored_partitions,
             mass_splitting_unrolled=self.mass_splitting_unrolled,
             max_greedy_outer_iters=self.max_greedy_outer_iters,
-            max_thread_blocks=self.max_thread_blocks,
             enable_warm_start_coloring=self.enable_warm_start_coloring,
             enable_column_timers=self.enable_column_timers,
             solver_flavor="simple" if self.solver_mode == "jacobi" else "standard",
             jacobi_max_colors=self.max_colors,
-            device=self.device,
+            articulation_mode="maximal",
         )
-
-        # Joint columns must be initialised after the body container is
-        # seeded (the ADBS init kernel reads PhoenX body positions to
-        # snapshot the body-local anchor offsets).
-        if num_joints > 0:
-            self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
+        # Retain diagnostic aliases used by specialized example checks.
+        self.world = self.solver.world
+        self.bodies = self.solver.bodies
+        self.constraints = self.solver._constraints
+        self._shape_body = self.solver._shape_body
 
         self.viewer.set_model(self.model)
         self.configure_camera(self.viewer)
+        self._pick_extents = pick_extents
 
-        # Picking: per-body OBB half-extents. Bodies the subclass marks
-        # ``None`` get a zero extent so picking ignores them.
-        half_extents_np = np.zeros((self.world.num_bodies, 3), dtype=np.float32)
-        for newton_idx, he in enumerate(pick_extents):
-            if he is None:
-                continue
-            half_extents_np[newton_idx + 1] = he
-        self._pick_half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=self.device)
-        self.picking = Picking(self.world, self._pick_half_extents)
-        register_with_viewer_gl(self.viewer, self.picking)
-
-        # Subclass hook: last chance to install per-shape materials,
-        # tweak solver knobs, etc., *before* the simulate graph is
-        # captured. Anything written into a wp.array here will still
-        # be visible inside the captured graph because the kernels
-        # bind the array references, not their contents.
+        # Subclasses may install material tables or other world settings before
+        # graph capture.
         self.post_build()
 
         self.graph = None
@@ -438,46 +348,11 @@ class PortedExample:
     # ------------------------------------------------------------------
 
     def simulate(self) -> None:
-        self._sync_newton_to_phoenx()
-        self.model.collide(self.state, contacts=self.contacts)
-        self.picking.apply_force()
-        self.world.step(dt=self.frame_dt, contacts=self.contacts, shape_body=self._shape_body)
-        self._sync_phoenx_to_newton()
-
-    def _sync_newton_to_phoenx(self) -> None:
-        n = self.model.body_count
-        if n == 0:
-            return
-        wp.launch(
-            newton_to_phoenx_kernel,
-            dim=n,
-            inputs=[self.state.body_q, self.state.body_qd, self.model.body_com],
-            outputs=[
-                self.bodies.position[1 : 1 + n],
-                self.bodies.orientation[1 : 1 + n],
-                self.bodies.velocity[1 : 1 + n],
-                self.bodies.angular_velocity[1 : 1 + n],
-            ],
-            device=self.device,
-        )
-
-    def _sync_phoenx_to_newton(self) -> None:
-        n = self.model.body_count
-        if n == 0:
-            return
-        wp.launch(
-            phoenx_to_newton_kernel,
-            dim=n,
-            inputs=[
-                self.bodies.position[1 : 1 + n],
-                self.bodies.orientation[1 : 1 + n],
-                self.bodies.velocity[1 : 1 + n],
-                self.bodies.angular_velocity[1 : 1 + n],
-                self.model.body_com,
-            ],
-            outputs=[self.state.body_q, self.state.body_qd],
-            device=self.device,
-        )
+        """Advance one frame through the production SolverPhoenX adapter."""
+        self.state.clear_forces()
+        self.viewer.apply_forces(self.state)
+        self.collision_pipeline.collide(self.state, self.contacts)
+        self.solver.step(self.state, self.state, self.control, self.contacts, self.frame_dt)
 
     def step(self) -> None:
         if self.graph is not None:

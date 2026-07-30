@@ -169,9 +169,10 @@ def _make_solver_and_pipeline(model: newton.Model, step_layout: str):
         contact_matching="sticky",
         broad_phase="sap",
     )
-    contacts = model.contacts(collision_pipeline=pipeline)
+    contacts = pipeline.contacts()
     solver = newton.solvers.SolverPhoenX(
         model,
+        collision_pipeline=pipeline,
         substeps=_SUBSTEPS,
         solver_iterations=_SOLVER_ITERATIONS,
         velocity_iterations=_VELOCITY_ITERATIONS,
@@ -202,7 +203,7 @@ def _step_n(model: newton.Model, solver, pipeline, contacts, total_steps: int, d
         # Two paired steps so s0 / s1 return to their starting roles.
         for s_in, s_out in ((s0, s1), (s1, s0)):
             s_in.clear_forces()
-            model.collide(s_in, contacts, collision_pipeline=pipeline)
+            pipeline.collide(s_in, contacts)
             solver.step(s_in, s_out, control, contacts, dt)
 
     if not device.is_cuda or total_steps < 4:

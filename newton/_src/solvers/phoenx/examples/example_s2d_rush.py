@@ -22,7 +22,6 @@ import math
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.examples._ported_example_base import (
     PortedExample,
     default_sphere_half_extents,
@@ -43,32 +42,26 @@ RUSH_DEAD_RADIUS = 0.1  # bodies closer than this to the origin are skipped
 
 @wp.kernel(enable_backward=False)
 def _apply_rush_force_kernel(
-    bodies: BodyContainer,
-    first_body: wp.int32,
-    last_body: wp.int32,
+    body_q: wp.array[wp.transform],
+    body_f: wp.array[wp.spatial_vector],
     force_mag: wp.float32,
     dead_radius: wp.float32,
 ):
-    """Add a constant-magnitude inward radial force toward the origin
-    (full XYZ) to every dynamic body in ``[first_body, last_body)``.
+    """Add an inward radial force to each modeled body.
 
     Generalises solver2d's ``Rush::Step`` force branch from 2D to 3D:
     for each body ``i``, ``f = -(force_mag / |p|) * p``, skipping
     bodies whose distance to the origin is below ``dead_radius``.
     Force is additive (atomic) so it stacks with picking forces if
     the user grabs a body."""
-    tid = wp.tid()
-    bid = first_body + tid
-    if bid >= last_body:
-        return
-
-    p = bodies.position[bid]
+    body = wp.tid()
+    p = wp.transform_get_translation(body_q[body])
     r = wp.length(p)
     if r < dead_radius:
         return
 
     f = p * (-force_mag / r)
-    wp.atomic_add(bodies.force, bid, f)
+    wp.atomic_add(body_f, body, wp.spatial_vector(f, wp.vec3f(0.0)))
 
 
 class Example(PortedExample):
@@ -127,34 +120,23 @@ class Example(PortedExample):
         viewer.set_camera(pos=wp.vec3(0.0, -40.0, 30.0), pitch=-30.0, yaw=90.0)
 
     def simulate(self) -> None:
-        # Inline the base pipeline so the rush force is written into
-        # ``bodies.force`` *after* :meth:`_sync_newton_to_phoenx`
-        # refreshes ``bodies.position`` (otherwise we'd compute the
-        # radial direction from last-frame positions). Order mirrors
-        # :meth:`PortedExample.simulate` plus our extra force kernel
-        # right before ``world.step``.
-        self._sync_newton_to_phoenx()
-        self.model.collide(self.state, contacts=self.contacts, collision_pipeline=self.collision_pipeline)
-        n = self.model.body_count
-        if n > 0:
-            # PhoenX body indices are Newton body index + 1 (slot 0 is
-            # the world anchor); the ``N`` dynamic spheres live
-            # contiguously in ``[1, 1 + body_count)``.
+        """Apply the inward force before the production PhoenX step."""
+        self.state.clear_forces()
+        self.viewer.apply_forces(self.state)
+        self.collision_pipeline.collide(self.state, self.contacts)
+        if self.model.body_count > 0:
             wp.launch(
                 _apply_rush_force_kernel,
-                dim=n,
+                dim=self.model.body_count,
                 inputs=[
-                    self.bodies,
-                    wp.int32(1),
-                    wp.int32(1 + n),
+                    self.state.body_q,
+                    self.state.body_f,
                     wp.float32(RUSH_FORCE),
                     wp.float32(RUSH_DEAD_RADIUS),
                 ],
                 device=self.device,
             )
-        self.picking.apply_force()
-        self.world.step(dt=self.frame_dt, contacts=self.contacts, shape_body=self._shape_body)
-        self._sync_phoenx_to_newton()
+        self.solver.step(self.state, self.state, self.control, self.contacts, self.frame_dt)
 
 
 if __name__ == "__main__":
