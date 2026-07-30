@@ -117,10 +117,12 @@ from the separately reported graph-replay throughput.
 
 ## Direct joint-equality convergence
 
-The maximal-coordinate joint benchmark compares the mechanism-wide direct
-solve with the legacy colored PGS equality rows at the same one-substep,
-one-iteration work point. It reports anchor error, graph-replay FPS, and both
-the original and diagonally equilibrated mechanism-matrix condition numbers.
+The maximal-coordinate joint benchmark measures the production mechanism-wide
+direct solve at the default five-substep, two-inequality-iteration work point.
+It reports anchor error, graph-replay FPS, and both the original and diagonally
+equilibrated mechanism-matrix condition numbers. Production PhoenX no longer
+contains a PGS equality mode; compare historical commits explicitly when a PGS
+baseline is needed.
 
 ```bash
 uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.bench_direct_equality

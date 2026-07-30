@@ -162,8 +162,8 @@ def _build_heterogeneous_mechanisms(
 
 
 def _parse_mechanism_group(value: str) -> tuple[int, int]:
-    match = re.fullmatch(r"([1-9][0-9]*)x([2-9][0-9]*)", value)
-    if match is None:
+    match = re.fullmatch(r"([1-9][0-9]*)x([1-9][0-9]*)", value)
+    if match is None or int(match.group(2)) < 2:
         raise argparse.ArgumentTypeError("mechanism groups must have the form COUNTxLENGTH, for example 32x2")
     return int(match.group(1)), int(match.group(2))
 
