@@ -153,39 +153,59 @@ def _build_redundant_double_ball_chain(length: int = 6) -> newton.Model:
     return builder.finalize(skip_validation_joints=True)
 
 
+def _run_captured_steps(
+    solver: newton.solvers.SolverPhoenX,
+    state: newton.State,
+    control: newton.Control,
+    frames: int,
+    *,
+    collision_pipeline: newton.CollisionPipeline | None = None,
+    contacts: newton.Contacts | None = None,
+) -> None:
+    """Replay a five-substep PhoenX frame through one CUDA graph."""
+    with wp.ScopedCapture(solver.model.device) as capture:
+        if collision_pipeline is not None:
+            collision_pipeline.collide(state, contacts)
+        solver.step(state, state, control, contacts, 1.0 / 60.0)
+    for _ in range(frames):
+        wp.capture_launch(capture.graph)
+
+
 class TestDirectEquality(unittest.TestCase):
     def test_world_anchor_does_not_merge_mechanisms(self):
+        """Keep world-anchored mechanisms in separate direct systems."""
         model = _build_two_mechanisms()
         topology = build_direct_equality_topology(model)
         self.assertEqual(topology.dimensions, (12, 18))
 
     def test_varying_mechanism_blocks_solve_together(self):
+        """Solve differently sized mechanisms in one captured frame."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
         model = _build_two_mechanisms()
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=1,
+            substeps=5,
             solver_iterations=1,
             velocity_iterations=1,
             articulation_mode="maximal",
         )
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (12, 18))
-        state_in = model.state()
-        state_out = model.state()
-        solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
-        self.assertTrue(np.isfinite(state_out.body_q.numpy()).all())
-        self.assertTrue(np.isfinite(state_out.body_qd.numpy()).all())
+        state = model.state()
+        _run_captured_steps(solver, state, model.control(), 1)
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
     def test_declared_articulation_remains_reduced_with_mass_splitting(self):
+        """Keep declared articulations reduced with mass splitting enabled."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
         model = _build_badly_conditioned_chain(length=4)
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=1,
+            substeps=5,
             solver_iterations=2,
             velocity_iterations=1,
             mass_splitting=True,
@@ -196,20 +216,20 @@ class TestDirectEquality(unittest.TestCase):
         self.assertIsNotNone(solver._reduced_articulation)
         self.assertFalse(solver._direct_equality_system.enabled)
 
-        state_in = model.state()
-        state_out = model.state()
-        solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
-        self.assertTrue(np.isfinite(state_out.body_q.numpy()).all())
-        self.assertTrue(np.isfinite(state_out.body_qd.numpy()).all())
+        state = model.state()
+        _run_captured_steps(solver, state, model.control(), 1)
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
     def test_direct_only_mechanism_with_mass_splitting(self):
+        """Solve a direct-only mechanism alongside mass splitting."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
         model = _build_badly_conditioned_chain(length=4)
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=1,
+            substeps=5,
             solver_iterations=4,
             velocity_iterations=1,
             articulation_mode="maximal",
@@ -219,20 +239,20 @@ class TestDirectEquality(unittest.TestCase):
         self.assertTrue(solver._direct_equality_system.enabled)
         self.assertTrue(solver.world._skip_all_joint_pgs())
 
-        state_in = model.state()
-        state_out = model.state()
-        solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
-        self.assertTrue(np.isfinite(state_out.body_q.numpy()).all())
-        self.assertTrue(np.isfinite(state_out.body_qd.numpy()).all())
+        state = model.state()
+        _run_captured_steps(solver, state, model.control(), 1)
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
     def test_direct_joint_edges_survive_sleeping_partition_reuse(self):
+        """Preserve direct mechanism island edges across partition reuse."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
         model = _build_fixed_pair_with_shapes()
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=1,
+            substeps=5,
             solver_iterations=1,
             velocity_iterations=0,
             articulation_mode="maximal",
@@ -241,16 +261,20 @@ class TestDirectEquality(unittest.TestCase):
         )
         self.assertTrue(solver.world._skip_all_joint_pgs())
 
-        state_in = model.state()
-        state_out = model.state()
+        state = model.state()
         control = model.control()
         collision_pipeline = model._collision_pipeline
         contacts = collision_pipeline.contacts()
         for reuse_partition in (False, True):
-            collision_pipeline.collide(state_in, contacts)
             solver.reuse_partition = reuse_partition
-            solver.step(state_in, state_out, control, contacts, 1.0 / 60.0)
-            state_in, state_out = state_out, state_in
+            _run_captured_steps(
+                solver,
+                state,
+                control,
+                1,
+                collision_pipeline=collision_pipeline,
+                contacts=contacts,
+            )
 
         roots = solver.world.bodies.island_root.numpy()[1:3]
         self.assertGreaterEqual(int(roots[0]), 0)
@@ -264,7 +288,7 @@ class TestDirectEquality(unittest.TestCase):
         model = _build_badly_conditioned_chain(length=26)
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=1,
+            substeps=5,
             solver_iterations=1,
             velocity_iterations=0,
             articulation_mode="maximal",
@@ -277,11 +301,10 @@ class TestDirectEquality(unittest.TestCase):
         schedule = direct.solver._persistent_schedule
         self.assertTrue(np.any(schedule.task_tile_i.numpy() != schedule.task_tile_k.numpy()))
 
-        state_in = model.state()
-        state_out = model.state()
-        solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
-        self.assertTrue(np.isfinite(state_out.body_q.numpy()).all())
-        self.assertTrue(np.isfinite(state_out.body_qd.numpy()).all())
+        state = model.state()
+        _run_captured_steps(solver, state, model.control(), 1)
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
     def test_redundant_double_ball_chain_has_bounded_rank_and_motion(self):
         """Bound the condition and motion of inconsistent redundant rows."""
@@ -329,6 +352,7 @@ class TestDirectEquality(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(body_qd))), 10.0)
 
     def test_direct_driven_hinge_leaves_pgs_when_no_inequality_remains(self):
+        """Remove a direct-driven hinge entirely from PGS."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
@@ -348,17 +372,14 @@ class TestDirectEquality(unittest.TestCase):
             [0],
         )
 
-        state_in = model.state()
-        state_out = model.state()
-        control = model.control()
-        for _ in range(30):
-            solver.step(state_in, state_out, control, None, 1.0 / 60.0)
-            state_in, state_out = state_out, state_in
-        orientation = state_in.body_q.numpy()[0, 3:7]
+        state = model.state()
+        _run_captured_steps(solver, state, model.control(), 30)
+        orientation = state.body_q.numpy()[0, 3:7]
         self.assertGreater(abs(float(orientation[1])), 0.05)
-        self.assertTrue(np.isfinite(state_in.body_qd.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
     def test_direct_driven_hinge_keeps_joint_limit_in_pgs(self):
+        """Keep only a driven hinge limit in inequality PGS."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
@@ -396,14 +417,10 @@ class TestDirectEquality(unittest.TestCase):
             velocity_iterations=0,
             articulation_mode="maximal",
         )
-        state_in = model.state()
-        state_out = model.state()
-        control = model.control()
-        for _ in range(20):
-            solver.step(state_in, state_out, control, None, 1.0 / 60.0)
-            state_in, state_out = state_out, state_in
+        state = model.state()
+        _run_captured_steps(solver, state, model.control(), 20)
 
-        self.assertLess(_maximum_anchor_error(model, state_in), 1.0e-3)
+        self.assertLess(_maximum_anchor_error(model, state), 1.0e-3)
 
     def test_equilibration_keeps_extreme_mass_ratio_finite(self):
         """Keep an extreme-mass-ratio chain finite with bounded anchor error."""
@@ -418,16 +435,12 @@ class TestDirectEquality(unittest.TestCase):
             velocity_iterations=0,
             articulation_mode="maximal",
         )
-        state_in = model.state()
-        state_out = model.state()
-        control = model.control()
-        for _ in range(20):
-            solver.step(state_in, state_out, control, None, 1.0 / 60.0)
-            state_in, state_out = state_out, state_in
+        state = model.state()
+        _run_captured_steps(solver, state, model.control(), 20)
 
-        self.assertTrue(np.isfinite(state_in.body_q.numpy()).all())
-        self.assertTrue(np.isfinite(state_in.body_qd.numpy()).all())
-        self.assertLess(_maximum_anchor_error(model, state_in), 0.05)
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
+        self.assertLess(_maximum_anchor_error(model, state), 0.05)
         self.assertLess(
             float(np.min(solver._direct_equality_system.row_scale.numpy())),
             0.01,
@@ -448,15 +461,11 @@ class TestDirectEquality(unittest.TestCase):
                 velocity_iterations=0,
                 articulation_mode="maximal",
             )
-            state_in = model.state()
-            state_out = model.state()
-            control = model.control()
-            for _ in range(20):
-                solver.step(state_in, state_out, control, None, 1.0 / 60.0)
-                state_in, state_out = state_out, state_in
-            body_q = state_in.body_q.numpy()
+            state = model.state()
+            _run_captured_steps(solver, state, model.control(), 20)
+            body_q = state.body_q.numpy()
             body_q[:, 0] -= offset_x
-            results[offset_x] = (body_q, state_in.body_qd.numpy())
+            results[offset_x] = (body_q, state.body_qd.numpy())
 
         self.assertTrue(np.isfinite(results[1000.0][0]).all())
         self.assertTrue(np.isfinite(results[1000.0][1]).all())
@@ -521,13 +530,10 @@ class TestDirectEquality(unittest.TestCase):
                 tile_count,
             )
 
-        state_in = model.state()
-        state_out = model.state()
-        for _ in range(20):
-            solver.step(state_in, state_out, model.control(), None, 1.0 / 60.0)
-            state_in, state_out = state_out, state_in
-        self.assertTrue(np.isfinite(state_in.body_q.numpy()).all())
-        self.assertTrue(np.isfinite(state_in.body_qd.numpy()).all())
+        state = model.state()
+        _run_captured_steps(solver, state, model.control(), 20)
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
     def test_hundred_link_driven_chain_recovers_from_pick_impulse(self):
         """Recover a long driven chain from a strong pick-like impulse."""
