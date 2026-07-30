@@ -1356,6 +1356,10 @@ class DirectEqualitySystem:
         self.direct_drive_joint_mask = direct_drive_joint_mask
         self.bounded_drive_joint_mask = bounded_drive_joint_mask
         self.has_dynamic_rows = bool(np.any(dynamic_joint_mask))
+        self.has_multi_axis_dynamic_rows = any(
+            dofs and joint_mode[joint] not in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC))
+            for joint, dofs in enumerate(dynamic_joint_dofs)
+        )
         self.has_bounded_drives = bool(np.any(bounded_drive_joint_mask))
         self.topology = build_direct_equality_topology(
             model,
@@ -1572,7 +1576,7 @@ class DirectEqualitySystem:
             ],
             device=self.model.device,
         )
-        if self.has_dynamic_rows:
+        if self.has_multi_axis_dynamic_rows:
             wp.launch(
                 _prepare_direct_dynamic_rows_kernel,
                 dim=len(self.topology.row_joint),
@@ -1596,6 +1600,7 @@ class DirectEqualitySystem:
                 ],
                 device=self.model.device,
             )
+        if self.has_dynamic_rows:
             wp.launch(
                 _snapshot_direct_dynamic_velocity_kernel,
                 dim=len(self.topology.row_joint),
