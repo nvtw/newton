@@ -27,7 +27,9 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
+    JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
+    JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
@@ -55,6 +57,7 @@ class DirectEqualityTopology:
     row_joint: np.ndarray
     row_local: np.ndarray
     row_dynamic: np.ndarray
+    row_dof: np.ndarray
     dimensions: tuple[int, ...]
     permutation: np.ndarray
     mechanism_row_start: np.ndarray
@@ -78,6 +81,10 @@ def _structural_row_count(mode: int) -> int:
         return 3
     if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
         return 5
+    if mode == int(JOINT_MODE_CYLINDRICAL):
+        return 4
+    if mode == int(JOINT_MODE_PLANAR):
+        return 3
     if mode in (int(JOINT_MODE_FIXED), int(JOINT_MODE_CABLE)):
         return 6
     if mode == int(JOINT_MODE_UNIVERSAL):
@@ -125,12 +132,57 @@ def _dynamic_joint_masks(
     return dynamic, direct_drive, bounded_drive
 
 
+def _active_dynamic_dofs(
+    model: Model,
+    joint_mode: np.ndarray,
+    joint_dof_start: np.ndarray,
+    excluded: np.ndarray,
+) -> tuple[tuple[int, ...], ...]:
+    """Return free DoFs whose armature or passive damping needs a direct row."""
+    joint_count = int(model.joint_count)
+    armature = np.asarray(model.joint_armature.numpy(), dtype=np.float32)
+    damping = np.asarray(model.joint_damping.numpy(), dtype=np.float32)
+    qd_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
+    dof_dim = np.asarray(model.joint_dof_dim.numpy(), dtype=np.int32)
+    lower = np.asarray(model.joint_limit_lower.numpy(), dtype=np.float32)
+    upper = np.asarray(model.joint_limit_upper.numpy(), dtype=np.float32)
+    result: list[tuple[int, ...]] = []
+    multi_axis_modes = {
+        int(JOINT_MODE_BALL_SOCKET),
+        int(JOINT_MODE_UNIVERSAL),
+        int(JOINT_MODE_CYLINDRICAL),
+        int(JOINT_MODE_PLANAR),
+    }
+    for joint in range(joint_count):
+        if excluded[joint]:
+            result.append(())
+            continue
+        mode = int(joint_mode[joint])
+        if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
+            candidates = (int(joint_dof_start[joint]),)
+        elif mode in multi_axis_modes:
+            start = int(qd_start[joint])
+            count = int(dof_dim[joint, 0] + dof_dim[joint, 1])
+            candidates = tuple(dof for dof in range(start, start + count) if float(lower[dof]) <= float(upper[dof]))
+        else:
+            candidates = ()
+        result.append(
+            tuple(
+                dof
+                for dof in candidates
+                if 0 <= dof < len(armature) and (float(armature[dof]) > 0.0 or float(damping[dof]) > 0.0)
+            )
+        )
+    return tuple(result)
+
+
 def build_direct_equality_topology(
     model: Model,
     *,
     excluded_joint_mask: np.ndarray | None = None,
     effective_joint_mode: np.ndarray | None = None,
     dynamic_joint_mask: np.ndarray | None = None,
+    dynamic_joint_dofs: tuple[tuple[int, ...], ...] | None = None,
 ) -> DirectEqualityTopology:
     """Find disconnected maximal-coordinate mechanisms and their equality rows."""
     body_count = int(model.body_count)
@@ -164,6 +216,9 @@ def build_direct_equality_topology(
     )
     if dynamic_rows.shape != (joint_count,):
         raise ValueError(f"dynamic_joint_mask must have shape ({joint_count},), got {dynamic_rows.shape}")
+    dynamic_dofs = dynamic_joint_dofs if dynamic_joint_dofs is not None else tuple(() for _ in range(joint_count))
+    if len(dynamic_dofs) != joint_count:
+        raise ValueError(f"dynamic_joint_dofs must contain {joint_count} entries, got {len(dynamic_dofs)}")
 
     inverse_mass = np.asarray(model.body_inv_mass.numpy(), dtype=np.float32)
     dynamic = inverse_mass > 0.0
@@ -234,6 +289,7 @@ def build_direct_equality_topology(
     row_joint: list[int] = []
     row_local: list[int] = []
     row_dynamic: list[bool] = []
+    row_dof: list[int] = []
     mechanism_row_start = [0]
     ordered_joints: list[int] = []
     for joints in ordered_mechanisms:
@@ -243,10 +299,15 @@ def build_direct_equality_topology(
                 row_joint.append(joint)
                 row_local.append(local_row)
                 row_dynamic.append(False)
-            if dynamic_rows[joint]:
+                row_dof.append(-1)
+            for dynamic_index, dof in enumerate(dynamic_dofs[joint]):
+                local_row = _structural_row_count(int(joint_mode[joint])) + dynamic_index
+                if local_row >= _MAX_ROWS:
+                    raise ValueError(f"joint {joint} requires more than {_MAX_ROWS} direct rows")
                 row_joint.append(joint)
-                row_local.append(5)
+                row_local.append(local_row)
                 row_dynamic.append(True)
+                row_dof.append(dof)
         mechanism_row_start.append(len(row_joint))
 
     body_rows_lists: list[list[int]] = [[] for _ in range(body_count + 1)]
@@ -307,6 +368,7 @@ def build_direct_equality_topology(
         row_joint=np.asarray(row_joint, dtype=np.int32),
         row_local=np.asarray(row_local, dtype=np.int32),
         row_dynamic=np.asarray(row_dynamic, dtype=bool),
+        row_dof=np.asarray(row_dof, dtype=np.int32),
         dimensions=dimensions,
         permutation=np.asarray(permutation, dtype=np.int32),
         mechanism_row_start=np.asarray(mechanism_row_start, dtype=np.int32),
@@ -425,16 +487,63 @@ def _prepare_direct_rows(
 
     local_axis = effective_joint_axis[joint]
     axis0 = wp.normalize(wp.quat_rotate(q0, local_axis))
-    if mode == JOINT_MODE_REVOLUTE:
+    if mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_CYLINDRICAL or mode == JOINT_MODE_PLANAR:
         axis1 = wp.normalize(wp.quat_rotate(q1, local_axis))
         tangent0 = create_orthonormal(axis0)
         tangent1 = wp.cross(axis0, tangent0)
         alignment_error = wp.cross(axis0, axis1)
         error0 = wp.dot(alignment_error, tangent0)
         error1 = wp.dot(alignment_error, tangent1)
+        angular_start = wp.int32(3)
+        if mode == JOINT_MODE_CYLINDRICAL:
+            point_error0 = wp.dot(point_error, tangent0)
+            point_error1 = wp.dot(point_error, tangent1)
+            _set_direct_point_row(
+                structural_index,
+                wp.int32(0),
+                point0_com,
+                point1_com,
+                tangent0,
+                point_error0,
+                bias_rate,
+                row_wrench0,
+                row_wrench1,
+                row_bias,
+            )
+            _set_direct_point_row(
+                structural_index,
+                wp.int32(1),
+                point0_com,
+                point1_com,
+                tangent1,
+                point_error1,
+                bias_rate,
+                row_wrench0,
+                row_wrench1,
+                row_bias,
+            )
+            row_error[structural_index, 0] = point_error0
+            row_error[structural_index, 1] = point_error1
+            angular_start = wp.int32(2)
+        elif mode == JOINT_MODE_PLANAR:
+            point_axis_error = wp.dot(point_error, axis0)
+            _set_direct_point_row(
+                structural_index,
+                wp.int32(0),
+                point0_com,
+                point1_com,
+                axis0,
+                point_axis_error,
+                bias_rate,
+                row_wrench0,
+                row_wrench1,
+                row_bias,
+            )
+            row_error[structural_index, 0] = point_axis_error
+            angular_start = wp.int32(1)
         _set_angular_row(
             structural_index,
-            wp.int32(3),
+            angular_start,
             tangent0,
             error0,
             bias_rate,
@@ -444,7 +553,7 @@ def _prepare_direct_rows(
         )
         _set_angular_row(
             structural_index,
-            wp.int32(4),
+            angular_start + wp.int32(1),
             tangent1,
             error1,
             bias_rate,
@@ -452,19 +561,23 @@ def _prepare_direct_rows(
             row_wrench1,
             row_bias,
         )
-        row_error[structural_index, 3] = error0
-        row_error[structural_index, 4] = error1
-        _set_angular_row(
-            structural_index,
-            wp.int32(5),
-            axis0,
-            wp.float32(0.0),
-            wp.float32(0.0),
-            row_wrench0,
-            row_wrench1,
-            row_bias,
-        )
-        return wp.int32(5)
+        row_error[structural_index, angular_start] = error0
+        row_error[structural_index, angular_start + wp.int32(1)] = error1
+        if mode == JOINT_MODE_REVOLUTE:
+            _set_angular_row(
+                structural_index,
+                wp.int32(5),
+                axis0,
+                wp.float32(0.0),
+                wp.float32(0.0),
+                row_wrench0,
+                row_wrench1,
+                row_bias,
+            )
+            return wp.int32(5)
+        if mode == JOINT_MODE_CYLINDRICAL:
+            return wp.int32(4)
+        return wp.int32(3)
 
     rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
     if mode == JOINT_MODE_UNIVERSAL:
@@ -606,6 +719,75 @@ def _prepare_direct_equality_rows_kernel(
         row_damping,
     )
     row_count[structural_index] = count
+
+
+@wp.kernel(enable_backward=False)
+def _prepare_direct_dynamic_rows_kernel(
+    row_joint: wp.array[wp.int32],
+    row_local: wp.array[wp.int32],
+    row_dynamic: wp.array[wp.bool],
+    row_dof: wp.array[wp.int32],
+    joint_to_structural: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_dof_dim: wp.array2d[wp.int32],
+    joint_axis: wp.array[wp.vec3],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    bodies: BodyContainer,
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    row_bias: wp.array2d[wp.float32],
+):
+    row = wp.tid()
+    if not row_dynamic[row]:
+        return
+    joint = row_joint[row]
+    local_row = row_local[row]
+    dof = row_dof[row]
+    structural_index = joint_to_structural[joint]
+    parent = joint_parent[joint] + wp.int32(1)
+    child = joint_child[joint] + wp.int32(1)
+    x_wpj = _body_origin_transform(bodies, parent) * joint_x_p[joint]
+    q0 = wp.transform_get_rotation(x_wpj)
+    direction = wp.normalize(wp.quat_rotate(q0, joint_axis[dof]))
+    if dof < joint_qd_start[joint] + joint_dof_dim[joint, 0]:
+        point0_com = wp.transform_get_translation(x_wpj)
+        point1_com = wp.transform_get_translation(_body_origin_transform(bodies, child) * joint_x_c[joint])
+        if parent > wp.int32(0):
+            point0_com = wp.quat_rotate(
+                bodies.orientation[parent],
+                wp.transform_get_translation(joint_x_p[joint]) - bodies.body_com[parent],
+            )
+        if child > wp.int32(0):
+            point1_com = wp.quat_rotate(
+                bodies.orientation[child],
+                wp.transform_get_translation(joint_x_c[joint]) - bodies.body_com[child],
+            )
+        _set_direct_point_row(
+            structural_index,
+            local_row,
+            point0_com,
+            point1_com,
+            direction,
+            wp.float32(0.0),
+            wp.float32(0.0),
+            row_wrench0,
+            row_wrench1,
+            row_bias,
+        )
+    else:
+        _set_angular_row(
+            structural_index,
+            local_row,
+            direction,
+            wp.float32(0.0),
+            wp.float32(0.0),
+            row_wrench0,
+            row_wrench1,
+            row_bias,
+        )
 
 
 @wp.func
@@ -805,6 +987,7 @@ def _snapshot_direct_dynamic_velocity_kernel(
     row_joint: wp.array[wp.int32],
     row_local: wp.array[wp.int32],
     row_dynamic: wp.array[wp.bool],
+    row_dof: wp.array[wp.int32],
     row_direct_drive: wp.array[wp.bool],
     joint_to_structural: wp.array[wp.int32],
     effective_joint_mode: wp.array[wp.int32],
@@ -858,7 +1041,7 @@ def _snapshot_direct_dynamic_velocity_kernel(
     dynamic_old_velocity[row] = relative_velocity
     dynamic_coordinate[row] = wp.float32(0.0)
 
-    dof = effective_joint_dof_start[joint]
+    dof = row_dof[row]
     gear = joint_gear[dof]
     armature = joint_armature[dof] * gear * gear
     passive_damping = joint_damping[dof]
@@ -1064,6 +1247,32 @@ def _effective_joint_axes(
             dof = int(joint_dof_start[joint])
             if 0 <= dof < len(model_axes):
                 axes[joint] = model_axes[dof]
+        elif mode == int(JOINT_MODE_CYLINDRICAL):
+            start = int(qd_start[joint])
+            linear_count = int(dof_dim[joint, 0])
+            for linear_axis in range(linear_count):
+                dof = start + linear_axis
+                if lower is None or upper is None or float(lower[dof]) <= float(upper[dof]):
+                    axes[joint] = model_axes[dof]
+                    break
+        elif mode == int(JOINT_MODE_PLANAR):
+            start = int(qd_start[joint])
+            linear_count = int(dof_dim[joint, 0])
+            angular_count = int(dof_dim[joint, 1])
+            axis_found = False
+            if lower is not None and upper is not None:
+                for linear_axis in range(linear_count):
+                    dof = start + linear_axis
+                    if float(lower[dof]) > float(upper[dof]):
+                        axes[joint] = model_axes[dof]
+                        axis_found = True
+                        break
+            if not axis_found:
+                for angular_axis in range(angular_count):
+                    dof = start + linear_count + angular_axis
+                    if lower is None or upper is None or float(lower[dof]) <= float(upper[dof]):
+                        axes[joint] = model_axes[dof]
+                        break
         elif mode == int(JOINT_MODE_UNIVERSAL):
             start = int(qd_start[joint])
             linear_count = int(dof_dim[joint, 0])
@@ -1130,16 +1339,20 @@ class DirectEqualitySystem:
             else np.zeros(joint_count, dtype=bool)
         )
         dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
-            model,
-            joint_mode,
-            joint_dof_start,
-            excluded,
+            model, joint_mode, joint_dof_start, excluded
         )
+        dynamic_joint_dofs = list(_active_dynamic_dofs(model, joint_mode, joint_dof_start, excluded))
+        for joint in np.flatnonzero(dynamic_joint_mask):
+            if not dynamic_joint_dofs[joint]:
+                dynamic_joint_dofs[joint] = (int(joint_dof_start[joint]),)
+        dynamic_joint_dofs = tuple(dynamic_joint_dofs)
+        dynamic_joint_mask |= np.asarray([bool(dofs) for dofs in dynamic_joint_dofs], dtype=bool)
         self._excluded_joint_mask = excluded
         self._joint_mode_np = joint_mode.copy()
         self._joint_dof_start_np = joint_dof_start.copy()
         self._joint_target_start_np = joint_target_start.copy()
         self.dynamic_joint_mask = dynamic_joint_mask
+        self.dynamic_joint_dofs = dynamic_joint_dofs
         self.direct_drive_joint_mask = direct_drive_joint_mask
         self.bounded_drive_joint_mask = bounded_drive_joint_mask
         self.has_dynamic_rows = bool(np.any(dynamic_joint_mask))
@@ -1149,6 +1362,7 @@ class DirectEqualitySystem:
             excluded_joint_mask=excluded,
             effective_joint_mode=joint_mode,
             dynamic_joint_mask=dynamic_joint_mask,
+            dynamic_joint_dofs=dynamic_joint_dofs,
         )
         self.regularization = float(regularization)
         row_regularization = np.full(len(self.topology.row_joint), self.regularization, dtype=np.float32)
@@ -1186,6 +1400,7 @@ class DirectEqualitySystem:
         self.row_joint = wp.array(self.topology.row_joint, dtype=wp.int32, device=device)
         self.row_local = wp.array(self.topology.row_local, dtype=wp.int32, device=device)
         self.row_dynamic = wp.array(self.topology.row_dynamic, dtype=wp.bool, device=device)
+        self.row_dof = wp.array(self.topology.row_dof, dtype=wp.int32, device=device)
         self.joint_to_structural = wp.array(joint_to_structural, dtype=wp.int32, device=device)
         self.body_row_start = wp.array(self.topology.body_row_start, dtype=wp.int32, device=device)
         self.body_rows = wp.array(self.topology.body_rows, dtype=wp.int32, device=device)
@@ -1290,8 +1505,17 @@ class DirectEqualitySystem:
             self._joint_dof_start_np,
             self._excluded_joint_mask,
         )
+        dynamic_joint_dofs = list(
+            _active_dynamic_dofs(self.model, self._joint_mode_np, self._joint_dof_start_np, self._excluded_joint_mask)
+        )
+        for joint in np.flatnonzero(dynamic_joint_mask):
+            if not dynamic_joint_dofs[joint]:
+                dynamic_joint_dofs[joint] = (int(self._joint_dof_start_np[joint]),)
+        dynamic_joint_dofs = tuple(dynamic_joint_dofs)
+        dynamic_joint_mask |= np.asarray([bool(dofs) for dofs in dynamic_joint_dofs], dtype=bool)
         if (
             np.array_equal(dynamic_joint_mask, self.dynamic_joint_mask)
+            and dynamic_joint_dofs == self.dynamic_joint_dofs
             and np.array_equal(
                 direct_drive_joint_mask,
                 self.direct_drive_joint_mask,
@@ -1350,12 +1574,36 @@ class DirectEqualitySystem:
         )
         if self.has_dynamic_rows:
             wp.launch(
+                _prepare_direct_dynamic_rows_kernel,
+                dim=len(self.topology.row_joint),
+                inputs=[
+                    self.row_joint,
+                    self.row_local,
+                    self.row_dynamic,
+                    self.row_dof,
+                    self.joint_to_structural,
+                    self.model.joint_parent,
+                    self.model.joint_child,
+                    self.model.joint_qd_start,
+                    self.model.joint_dof_dim,
+                    self.model.joint_axis,
+                    self.model.joint_X_p,
+                    self.model.joint_X_c,
+                    self.bodies,
+                    self.row_wrench0,
+                    self.row_wrench1,
+                    self.row_bias,
+                ],
+                device=self.model.device,
+            )
+            wp.launch(
                 _snapshot_direct_dynamic_velocity_kernel,
                 dim=len(self.topology.row_joint),
                 inputs=[
                     self.row_joint,
                     self.row_local,
                     self.row_dynamic,
+                    self.row_dof,
                     self.row_direct_drive,
                     self.joint_to_structural,
                     self.effective_joint_mode,

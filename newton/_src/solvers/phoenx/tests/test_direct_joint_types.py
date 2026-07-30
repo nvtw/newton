@@ -15,7 +15,9 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import FixedPatt
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
+    JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
+    JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
@@ -96,6 +98,35 @@ def _build_all_joint_types() -> tuple[newton.Model, dict[str, tuple[int, int]]]:
     )
     x += 2.0
 
+    child = _add_body(builder, (x, 0.0, 0.0))
+    joints["cylindrical"] = (
+        builder.add_joint_d6(
+            parent=-1,
+            child=child,
+            linear_axes=[newton.ModelBuilder.JointDofConfig.create_unlimited(newton.Axis.Z)],
+            angular_axes=[newton.ModelBuilder.JointDofConfig.create_unlimited(newton.Axis.Z)],
+            parent_xform=wp.transform(wp.vec3(x, 0.0, 0.0), wp.quat_identity()),
+        ),
+        child,
+    )
+    x += 2.0
+
+    child = _add_body(builder, (x, 0.0, 0.0))
+    joints["planar"] = (
+        builder.add_joint_d6(
+            parent=-1,
+            child=child,
+            linear_axes=[
+                newton.ModelBuilder.JointDofConfig.create_unlimited(newton.Axis.X),
+                newton.ModelBuilder.JointDofConfig.create_unlimited(newton.Axis.Y),
+            ],
+            angular_axes=[newton.ModelBuilder.JointDofConfig.create_unlimited(newton.Axis.Z)],
+            parent_xform=wp.transform(wp.vec3(x, 0.0, 0.0), wp.quat_identity()),
+        ),
+        child,
+    )
+    x += 2.0
+
     parent = _add_body(builder, (x, 0.0, 0.0))
     child = _add_body(builder, (x, 0.0, -1.0))
     root = builder.add_joint_fixed(
@@ -121,7 +152,7 @@ def _build_all_joint_types() -> tuple[newton.Model, dict[str, tuple[int, int]]]:
 
     # Cable validation requires its pair to be declared, but maximal PhoenX
     # must still discover every direct mechanism from joint connectivity.
-    return builder.finalize(), joints
+    return builder.finalize(device=wp.get_device("cuda:0")), joints
 
 
 def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
@@ -134,7 +165,7 @@ def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
     )
 
 
-@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX direct-joint tests require CUDA")
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX direct-joint tests require CUDA")
 class TestDirectJointTypes(unittest.TestCase):
     def test_every_supported_bilateral_mode_uses_direct_rows(self) -> None:
         """Route every supported bilateral joint mode through direct rows."""
@@ -142,13 +173,15 @@ class TestDirectJointTypes(unittest.TestCase):
         solver = _make_solver(model)
         direct = solver._direct_equality_system
         self.assertTrue(direct.enabled)
-        self.assertEqual(direct.topology.dimensions, (3, 5, 5, 6, 4, 12))
+        self.assertEqual(direct.topology.dimensions, (3, 5, 5, 6, 4, 4, 3, 12))
         expected_modes = {
             "ball": int(JOINT_MODE_BALL_SOCKET),
             "revolute": int(JOINT_MODE_REVOLUTE),
             "prismatic": int(JOINT_MODE_PRISMATIC),
             "fixed": int(JOINT_MODE_FIXED),
             "universal": int(JOINT_MODE_UNIVERSAL),
+            "cylindrical": int(JOINT_MODE_CYLINDRICAL),
+            "planar": int(JOINT_MODE_PLANAR),
             "cable": int(JOINT_MODE_CABLE),
         }
         for kind, expected_mode in expected_modes.items():
@@ -169,12 +202,14 @@ class TestDirectJointTypes(unittest.TestCase):
             "revolute": np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.5]),
             "prismatic": np.asarray([0.0, 0.0, 0.3, 0.0, 0.0, 0.0]),
             "fixed": np.zeros(6),
+            "cylindrical": np.asarray([0.0, 0.0, 0.3, 0.0, 0.0, 0.5]),
+            "planar": np.asarray([0.2, -0.4, 0.0, 0.0, 0.0, 0.5]),
         }
         initial_velocity = np.asarray([0.2, -0.4, 0.3, 0.7, -0.6, 0.5], dtype=np.float32)
         state = model.state()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state)
         body_qd = state.body_qd.numpy()
-        for kind in ("ball", "revolute", "prismatic", "fixed", "cable", "universal"):
+        for kind in ("ball", "revolute", "prismatic", "fixed", "cable", "universal", "cylindrical", "planar"):
             _joint, body = joints[kind]
             body_qd[body] = initial_velocity
         state.body_qd.assign(body_qd)
@@ -185,7 +220,7 @@ class TestDirectJointTypes(unittest.TestCase):
         wp.capture_launch(capture.graph)
         result = state.body_qd.numpy()
         self.assertTrue(np.isfinite(result).all())
-        for kind in ("ball", "revolute", "prismatic", "fixed", "cable", "universal"):
+        for kind in ("ball", "revolute", "prismatic", "fixed", "cable", "universal", "cylindrical", "planar"):
             with self.subTest(kind=kind):
                 _joint, body = joints[kind]
                 if kind in expected_velocity:

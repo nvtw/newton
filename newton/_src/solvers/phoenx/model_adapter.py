@@ -28,7 +28,9 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
+    JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
+    JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
@@ -115,6 +117,12 @@ def _classify_d6_legacy_mode(
 
     if len(lin_free) == 1 and not ang_free:
         return "PRISMATIC", lin_free[0]
+
+    if len(lin_free) == 1 and len(ang_free) == 1:
+        return "CYLINDRICAL", -1
+
+    if len(lin_free) == 2 and len(ang_free) == 1:
+        return "PLANAR", -1
 
     return None, -1
 
@@ -498,7 +506,7 @@ def build_adbs_init_arrays(
                     f"D6 joint {j} cannot be reduced to a restored PhoenX joint "
                     f"({n_lin} linear axes / {n_ang} angular axes; "
                     f"locked linear={tuple(locked_lin)}, locked angular={tuple(locked_ang)}). "
-                    "Supported reductions: fixed, ball, universal, revolute, prismatic. "
+                    "Supported reductions: fixed, ball, universal, revolute, prismatic, cylindrical, planar. "
                     "Generic D6 requires the post-unification joint path."
                 )
             if classified_tag == "BALL":
@@ -605,6 +613,63 @@ def build_adbs_init_arrays(
             damp_drive = bend_kd
             stiff_limit = bend_ke
             damp_limit = bend_kd
+        elif d6_mode_tag in ("CYLINDRICAL", "PLANAR"):
+            phoenx_mode = int(JOINT_MODE_CYLINDRICAL) if d6_mode_tag == "CYLINDRICAL" else int(JOINT_MODE_PLANAR)
+            lin_free = [i for i, locked in enumerate(locked_lin) if not locked]
+            ang_free = [i for i, locked in enumerate(locked_ang) if not locked]
+            angular_axis = np.asarray(joint_axis[qd_start + n_lin + ang_free[0]], dtype=np.float32)
+            angular_length = float(np.linalg.norm(angular_axis))
+            if angular_length <= 1.0e-12:
+                raise NotImplementedError(f"D6 joint {j} has a zero-length free angular axis.")
+            angular_axis /= angular_length
+
+            if d6_mode_tag == "CYLINDRICAL":
+                linear_axis = np.asarray(joint_axis[qd_start + lin_free[0]], dtype=np.float32)
+                linear_length = float(np.linalg.norm(linear_axis))
+                if linear_length <= 1.0e-12:
+                    raise NotImplementedError(f"D6 joint {j} has a zero-length free linear axis.")
+                linear_axis /= linear_length
+                if abs(float(np.dot(linear_axis, angular_axis))) < 1.0 - 1.0e-4:
+                    raise NotImplementedError(
+                        f"D6 joint {j} has non-parallel free linear and angular axes; it is not a cylindrical joint."
+                    )
+                axis_local = linear_axis
+            else:
+                axis_local = angular_axis
+                locked_linear = [i for i, locked in enumerate(locked_lin) if locked]
+                if locked_linear:
+                    linear_axis = np.asarray(joint_axis[qd_start + locked_linear[0]], dtype=np.float32)
+                    linear_length = float(np.linalg.norm(linear_axis))
+                    if linear_length <= 1.0e-12:
+                        raise NotImplementedError(f"D6 joint {j} has a zero-length locked plane-normal axis.")
+                    linear_axis /= linear_length
+                    if abs(float(np.dot(linear_axis, angular_axis))) < 1.0 - 1.0e-4:
+                        raise NotImplementedError(
+                            f"D6 joint {j} has non-parallel locked-linear and free-angular axes; "
+                            "it is not a planar joint."
+                        )
+                    axis_local = linear_axis
+                else:
+                    for linear_index in lin_free:
+                        linear_axis = np.asarray(joint_axis[qd_start + linear_index], dtype=np.float32)
+                        linear_length = float(np.linalg.norm(linear_axis))
+                        if (
+                            linear_length <= 1.0e-12
+                            or abs(float(np.dot(linear_axis / linear_length, axis_local))) > 1.0e-4
+                        ):
+                            raise NotImplementedError(
+                                f"D6 joint {j} has an in-plane axis that is not perpendicular to its normal."
+                            )
+
+            axis_world = _quat_rotate_np(X_w_p[3:], axis_local)
+            anchor2_world = anchor1_world + axis_world
+            for ai in ang_free:
+                d6_limit_count = _append_d6_angular_limit(
+                    qd_start + n_lin + ai,
+                    n_lin + ai,
+                    d6_limit_count=d6_limit_count,
+                    **d6_limit_kwargs,
+                )
         elif d6_mode_tag == "UNIVERSAL":
             phoenx_mode = int(JOINT_MODE_UNIVERSAL)
             if d6_locked_axis_offset >= 0:

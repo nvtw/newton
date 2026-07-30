@@ -32,7 +32,9 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_OFF,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
+    JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
+    JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
@@ -790,7 +792,12 @@ class SolverPhoenX(SolverBase):
                         # Newton stores unbounded ranges as [-1e10, 1e10].
                         has_limit = lower <= upper and (lower > -5.0e9 or upper < 5.0e9)
                         equality_only = not (has_drive or has_friction or has_limit)
-                    elif mode in (int(JOINT_MODE_BALL_SOCKET), int(JOINT_MODE_UNIVERSAL)):
+                    elif mode in (
+                        int(JOINT_MODE_BALL_SOCKET),
+                        int(JOINT_MODE_UNIVERSAL),
+                        int(JOINT_MODE_CYLINDRICAL),
+                        int(JOINT_MODE_PLANAR),
+                    ):
                         equality_only = int(d6_limit_count_np[cid]) == 0
                     if not equality_only:
                         structural_direct[cid] = 1
@@ -908,7 +915,12 @@ class SolverPhoenX(SolverBase):
                 upper = float(upper_limit[cid])
                 has_limit = lower <= upper and (lower > -5.0e9 or upper < 5.0e9)
                 equality_only = not (has_drive or has_friction or has_limit)
-            elif mode in (int(JOINT_MODE_BALL_SOCKET), int(JOINT_MODE_UNIVERSAL)):
+            elif mode in (
+                int(JOINT_MODE_BALL_SOCKET),
+                int(JOINT_MODE_UNIVERSAL),
+                int(JOINT_MODE_CYLINDRICAL),
+                int(JOINT_MODE_PLANAR),
+            ):
                 equality_only = int(d6_limit_count[cid]) == 0
             if not equality_only:
                 structural_direct[cid] = 1
