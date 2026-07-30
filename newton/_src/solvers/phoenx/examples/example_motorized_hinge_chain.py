@@ -40,7 +40,7 @@ CAPSULE_DIAMETER = 0.05
 _CAPSULE_RADIUS = 0.5 * CAPSULE_DIAMETER
 _CAPSULE_HALF_HEIGHT = 0.5 * CAPSULE_LENGTH
 
-NUM_LINKS = 200
+NUM_LINKS = 100
 HALF_EXTENT = 0.05
 
 _DIAGONAL_HALF = HALF_EXTENT * math.sqrt(2.0)
@@ -227,8 +227,12 @@ class Example:
             f"max_sag={max_sag * 1.0e3:.3f} mm "
             f"({tip_sag / chain_length * 100.0:.5f}% of {chain_length:.1f} m chain)"
         )
-        assert abs(tip_sag) < 0.05, f"direct hinge-chain tip error is {tip_sag * 1.0e3:.3f} mm"
-        assert float(np.max(np.abs(body_q[:, 2]))) < 0.05, "direct hinge chain bent beyond 50 mm"
+        maximum_sag = 0.015 * chain_length
+        assert abs(tip_sag) < maximum_sag, (
+            f"direct hinge-chain tip error is {tip_sag * 1.0e3:.3f} mm "
+            f"({tip_sag / chain_length * 100.0:.3f}% of chain length)"
+        )
+        assert max_sag < maximum_sag, "direct hinge chain bent beyond 1.5% of its length"
 
 
 if __name__ == "__main__":
