@@ -10,7 +10,7 @@ articulated cousin of :mod:`example_cloth_rigid_drop`: instead of a
 deformable cloth iterate, the cloth is a network of
 :data:`newton.GeoType.TRIANGLE` rigid bodies whose mass and inertia
 come from the prism interpretation (thickness ``2 * margin``), connected
-by ADBS ball joints.
+by ball joints solved as one direct equality mechanism.
 
 The scene uses :class:`newton.solvers.SolverPhoenX`, mirroring the structure
 of :mod:`example_cloth_rigid_drop`:
