@@ -578,9 +578,13 @@ def sample_transfer_components(
 
 @wp.kernel(enable_backward=False)
 def finalize_grid_to_particles(
+    grid: SparseGridData,
     positions_in: wp.array[wp.vec3],
     velocities_in: wp.array[wp.vec3],
     flags: wp.array[int],
+    inv_cell_size: float,
+    dt: float,
+    face_velocity: wp.array[float],
     flip_blend: float,
     compute_affine: bool,
     samples_gradient_xy: wp.array[wp.vec4],
@@ -589,7 +593,7 @@ def finalize_grid_to_particles(
     velocities_out: wp.array[wp.vec3],
     affine_out: wp.array[wp.mat33],
 ):
-    """Finalize PIC/FLIP velocity and APIC state from packed component samples."""
+    """Finalize the grid transfer and advect particles with a midpoint sample."""
     particle = wp.tid()
     if (flags[particle] & _ACTIVE) == 0:
         positions_out[particle] = positions_in[particle]
@@ -604,8 +608,12 @@ def finalize_grid_to_particles(
     pic = wp.vec3(sample_x[0], sample_y[0], sample_z[0])
     old = wp.vec3(sample_x[1], sample_y[1], sample_z[1])
     flip = velocities_in[particle] + pic - old
-    positions_out[particle] = positions_in[particle]
-    velocities_out[particle] = wp.lerp(pic, flip, flip_blend)
+    velocity = wp.lerp(pic, flip, flip_blend)
+    midpoint = positions_in[particle] + velocity * (0.5 * dt)
+    positions_out[particle] = (
+        positions_in[particle] + _sample_velocity(grid, midpoint, inv_cell_size, face_velocity) * dt
+    )
+    velocities_out[particle] = velocity
     if compute_affine:
         affine_out[particle] = wp.matrix_from_rows(
             wp.vec3(sample_x[2], sample_x[3], gradient_z[component]),
@@ -614,27 +622,6 @@ def finalize_grid_to_particles(
         )
     else:
         affine_out[particle] = wp.mat33(0.0)
-
-
-@wp.kernel(enable_backward=False)
-def advect_particles(
-    grid: SparseGridData,
-    positions_in: wp.array[wp.vec3],
-    velocities: wp.array[wp.vec3],
-    flags: wp.array[int],
-    inv_cell_size: float,
-    dt: float,
-    face_velocity: wp.array[float],
-    positions_out: wp.array[wp.vec3],
-):
-    """Advect particles with one midpoint sparse-grid sample."""
-    particle = wp.tid()
-    if (flags[particle] & _ACTIVE) == 0:
-        positions_out[particle] = positions_in[particle]
-        return
-    midpoint = positions_in[particle] + velocities[particle] * (0.5 * dt)
-    velocity = _sample_velocity(grid, midpoint, inv_cell_size, face_velocity)
-    positions_out[particle] = positions_in[particle] + velocity * dt
 
 
 @wp.kernel(enable_backward=False)

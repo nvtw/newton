@@ -19,7 +19,6 @@ import newton
 from ..semi_implicit.kernels_contact import eval_body_contact_forces, eval_particle_body_contact_forces
 from ..solver import SolverBase
 from .kernels import (
-    advect_particles,
     apply_pressure,
     build_particle_active_mask,
     build_pressure_system,
@@ -395,9 +394,13 @@ class SolverSTFLIP(SolverBase):
             finalize_grid_to_particles,
             dim=self.model.particle_count,
             inputs=[
+                self.grid.data,
                 state_in.particle_q,
                 state_in.particle_qd,
                 self.model.particle_flags,
+                1.0 / self.config.cell_size,
+                dt,
+                self.face_velocity,
                 flip_blend,
                 self.config.transfer_scheme == "apic",
                 self._transfer_samples,
@@ -405,21 +408,6 @@ class SolverSTFLIP(SolverBase):
                 state_out.particle_q,
                 state_out.particle_qd,
                 affine_out,
-            ],
-            device=self.device,
-        )
-        wp.launch(
-            advect_particles,
-            dim=self.model.particle_count,
-            inputs=[
-                self.grid.data,
-                state_in.particle_q,
-                state_out.particle_qd,
-                self.model.particle_flags,
-                1.0 / self.config.cell_size,
-                dt,
-                self.face_velocity,
-                state_out.particle_q,
             ],
             device=self.device,
         )
