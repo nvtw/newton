@@ -1,148 +1,90 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Behavioural tests for :class:`JointMode.FIXED` (weld joint).
+"""Direct-solver behavioral tests for maximal-coordinate fixed joints."""
 
-FIXED is a 6-DoF weld: all three translational and all three rotational
-DoFs are locked. Implemented as REVOLUTE's anchor-1 3-row point lock +
-anchor-2 tangent 2-row lock + PRISMATIC's anchor-3 scalar 1-row lock.
-
-Checks:
-
-* A dynamic cube welded at its COM does not fall under gravity.
-* The welded cube keeps its rest orientation without external torque.
-* Initial spin about locked axes is damped by the weld.
-"""
+from __future__ import annotations
 
 import unittest
 
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.examples.scene_registry import Scene, scene
-from newton._src.solvers.phoenx.tests._test_helpers import run_settle_loop
-from newton._src.solvers.phoenx.world_builder import (
-    JointMode,
-    WorldBuilder,
-)
+import newton
 
-GRAVITY = 9.81
-FPS = 120
-SUBSTEPS = 8
-SOLVER_ITERATIONS = 16
-SETTLE_FRAMES = 240
-HALF_EXTENT = 0.5
-_INV_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+FPS = 60
+SUBSTEPS = 5
+FRAMES = 30
+_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
 
-def _build_world_welded_cube(
-    device,
-    *,
-    cube_position: tuple[float, float, float] = (0.5, 0.0, 0.0),
-    initial_angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
-):
-    """World anchor + dynamic cube welded at its COM."""
-    b = WorldBuilder()
-    anchor = b.world_body
-    cube = b.add_dynamic_body(
-        position=cube_position,
-        inverse_mass=1.0,
-        inverse_inertia=_INV_INERTIA,
-        affected_by_gravity=True,
-        angular_velocity=initial_angular_velocity,
+def _build_fixed_model() -> tuple[newton.Model, int]:
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+    body = builder.add_link(
+        xform=wp.transform(wp.vec3(0.5, 0.0, 0.0), wp.quat_identity()),
+        mass=1.0,
+        inertia=_INERTIA,
     )
-    anchor1 = cube_position
-    anchor2 = (cube_position[0] + 1.0, cube_position[1], cube_position[2])
-    b.add_joint(
-        body1=anchor,
-        body2=cube,
-        anchor1=anchor1,
-        anchor2=anchor2,
-        mode=JointMode.FIXED,
+    joint = builder.add_joint_fixed(
+        parent=-1,
+        child=body,
+        parent_xform=wp.transform(wp.vec3(0.5, 0.0, 0.0), wp.quat_identity()),
+        child_xform=wp.transform_identity(),
     )
-    return b.finalize(
+    builder.add_articulation([joint])
+    return builder.finalize(device=wp.get_preferred_device()), body
+
+
+def _rollout(
+    model: newton.Model, body_velocity: np.ndarray | None = None
+) -> tuple[newton.State, newton.solvers.SolverPhoenX]:
+    solver = newton.solvers.SolverPhoenX(
+        model,
         substeps=SUBSTEPS,
-        solver_iterations=SOLVER_ITERATIONS,
-        gravity=(0.0, 0.0, -GRAVITY),
-        device=device,
+        solver_iterations=2,
+        velocity_iterations=1,
+        articulation_mode="maximal",
     )
+    state = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    if body_velocity is not None:
+        state.body_qd.assign(body_velocity)
+    control = model.control()
+    with wp.ScopedCapture(model.device) as capture:
+        state.clear_forces()
+        solver.step(state, state, control, None, 1.0 / FPS)
+    for _ in range(FRAMES):
+        wp.capture_launch(capture.graph)
+    return state, solver
 
 
-@scene(
-    "Fixed: welded cube under gravity",
-    description="Cube rigidly welded to the world anchor; gravity must not move it.",
-    tags=("fixed",),
-)
-def build_welded_cube_scene(device) -> Scene:
-    world = _build_world_welded_cube(device)
-    he = np.zeros((world.num_bodies, 3), dtype=np.float32)
-    he[1] = HALF_EXTENT
-    return Scene(world=world, body_half_extents=he, frame_dt=1.0 / FPS, substeps=SUBSTEPS)
-
-
-@unittest.skipUnless(
-    wp.get_preferred_device().is_cuda,
-    "PhoenX simulation tests run on CUDA only (graph capture required for reasonable run-time).",
-)
+@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX direct fixed-joint tests require CUDA graphs.")
 class TestFixedJoint(unittest.TestCase):
-    """End-to-end checks for :class:`JointMode.FIXED`."""
+    """Validate fixed joints through six direct equality rows."""
 
-    def test_welded_cube_holds_position_under_gravity(self):
-        """All 6 DoFs locked: the cube must stay at its initial pose
-        (within soft-constraint slop) after a long settle under gravity."""
-        device = wp.get_preferred_device()
-        world = _build_world_welded_cube(device, cube_position=(0.5, 0.0, 0.0))
-        run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
+    def test_welded_cube_holds_position_under_gravity(self) -> None:
+        """Hold the welded body at its authored world position under gravity."""
+        model, body = _build_fixed_model()
+        state, solver = _rollout(model)
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, (6,))
+        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
+        np.testing.assert_allclose(state.body_q.numpy()[body, :3], (0.5, 0.0, 0.0), rtol=0.0, atol=2.0e-3)
 
-        positions = world.bodies.position.numpy()
-        cube = 1
-        drift = float(np.linalg.norm(positions[cube] - np.array([0.5, 0.0, 0.0])))
-        self.assertLess(
-            drift,
-            0.05,
-            msg=f"welded cube drifted {drift:.4f} m under gravity",
-        )
+    def test_welded_cube_does_not_rotate(self) -> None:
+        """Reject initial angular velocity on every locked axis."""
+        model, body = _build_fixed_model()
+        velocity = np.zeros((1, 6), dtype=np.float32)
+        velocity[body, 3:] = (1.0, -0.5, 1.0)
+        state, _solver = _rollout(model, velocity)
+        self.assertLess(float(np.linalg.norm(state.body_qd.numpy()[body, 3:])), 2.0e-3)
 
-    def test_welded_cube_does_not_rotate(self):
-        """An initial spin must not survive the 6-DoF lock."""
-        device = wp.get_preferred_device()
-        world = _build_world_welded_cube(
-            device,
-            cube_position=(0.5, 0.0, 0.0),
-            initial_angular_velocity=(1.0, 0.0, 1.0),
-        )
-        run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
-
-        omegas = world.bodies.angular_velocity.numpy()
-        cube = 1
-        omega_mag = float(np.linalg.norm(omegas[cube]))
-        self.assertLess(
-            omega_mag,
-            0.2,
-            msg=f"welded cube still spinning: |omega|={omega_mag:.3f} rad/s",
-        )
-
-    def test_welded_orientation_preserved(self):
-        """Orientation must return near the identity quaternion after
-        gravity tries to pull the cube down."""
-        device = wp.get_preferred_device()
-        world = _build_world_welded_cube(device, cube_position=(0.5, 0.0, 0.0))
-        run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
-
-        orientations = world.bodies.orientation.numpy()
-        cube = 1
-        q = orientations[cube]  # xyzw
-        # Angular deviation from identity: 2 * acos(|w|). A true weld
-        # should keep w ~ 1 and the xyz components ~ 0.
-        w_clamped = float(min(1.0, max(-1.0, abs(q[3]))))
-        angle = 2.0 * np.arccos(w_clamped)
-        self.assertLess(
-            angle,
-            0.1,
-            msg=f"welded cube rotated {angle:.4f} rad away from rest",
-        )
+    def test_welded_orientation_preserved(self) -> None:
+        """Preserve the authored identity orientation under external load."""
+        model, body = _build_fixed_model()
+        state, _solver = _rollout(model)
+        quaternion = state.body_q.numpy()[body, 3:]
+        self.assertLess(float(2.0 * np.arccos(np.clip(abs(quaternion[3]), 0.0, 1.0))), 2.0e-3)
 
 
 if __name__ == "__main__":
-    wp.init()
     unittest.main()

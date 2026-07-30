@@ -1171,15 +1171,13 @@ def _activate_bounded_direct_drives_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _accumulate_direct_dynamic_impulse_kernel(
-    row_dynamic: wp.array[wp.bool],
+def _accumulate_direct_impulse_kernel(
     delta: wp.array[wp.float32],
     row_scale: wp.array[wp.float32],
     accumulated_impulse: wp.array[wp.float32],
 ):
     row = wp.tid()
-    if row_dynamic[row]:
-        accumulated_impulse[row] += row_scale[row] * delta[row]
+    accumulated_impulse[row] += row_scale[row] * delta[row]
 
 
 @wp.kernel(enable_backward=False)
@@ -1600,48 +1598,47 @@ class DirectEqualitySystem:
                 ],
                 device=self.model.device,
             )
-        if self.has_dynamic_rows:
-            wp.launch(
-                _snapshot_direct_dynamic_velocity_kernel,
-                dim=len(self.topology.row_joint),
-                inputs=[
-                    self.row_joint,
-                    self.row_local,
-                    self.row_dynamic,
-                    self.row_dof,
-                    self.row_direct_drive,
-                    self.joint_to_structural,
-                    self.effective_joint_mode,
-                    self.effective_joint_axis,
-                    self.effective_joint_dof_start,
-                    self.effective_joint_target_start,
-                    self.model.joint_parent,
-                    self.model.joint_child,
-                    self.model.joint_X_p,
-                    self.model.joint_X_c,
-                    self.row_wrench0,
-                    self.row_wrench1,
-                    self.model.joint_armature,
-                    self.joint_damping,
-                    self.model.joint_gear,
-                    self.model.joint_target_mode,
-                    self.joint_target_ke,
-                    self.joint_target_kd,
-                    self.control_target_q,
-                    self.control_target_qd,
-                    wp.float32(1.0) / idt,
-                    self.bodies,
-                    self.previous_coordinate,
-                    self.coordinate_revolutions,
-                    self.dynamic_mass,
-                    self.dynamic_old_velocity,
-                    self.dynamic_coordinate,
-                    self.velocity_reference,
-                    self.accumulated_impulse,
-                    self.drive_saturated,
-                ],
-                device=self.model.device,
-            )
+        wp.launch(
+            _snapshot_direct_dynamic_velocity_kernel,
+            dim=len(self.topology.row_joint),
+            inputs=[
+                self.row_joint,
+                self.row_local,
+                self.row_dynamic,
+                self.row_dof,
+                self.row_direct_drive,
+                self.joint_to_structural,
+                self.effective_joint_mode,
+                self.effective_joint_axis,
+                self.effective_joint_dof_start,
+                self.effective_joint_target_start,
+                self.model.joint_parent,
+                self.model.joint_child,
+                self.model.joint_X_p,
+                self.model.joint_X_c,
+                self.row_wrench0,
+                self.row_wrench1,
+                self.model.joint_armature,
+                self.joint_damping,
+                self.model.joint_gear,
+                self.model.joint_target_mode,
+                self.joint_target_ke,
+                self.joint_target_kd,
+                self.control_target_q,
+                self.control_target_qd,
+                wp.float32(1.0) / idt,
+                self.bodies,
+                self.previous_coordinate,
+                self.coordinate_revolutions,
+                self.dynamic_mass,
+                self.dynamic_old_velocity,
+                self.dynamic_coordinate,
+                self.velocity_reference,
+                self.accumulated_impulse,
+                self.drive_saturated,
+            ],
+            device=self.model.device,
+        )
 
     def resolve_bounded_drives(self, idt: wp.float32, *, use_bias: bool) -> None:
         """Activate finite effort bounds and correct the direct solution."""
@@ -1788,18 +1785,16 @@ class DirectEqualitySystem:
             device=self.model.device,
         )
         self.solver.solve(self.rhs, self.delta)
-        if self.has_dynamic_rows:
-            wp.launch(
-                _accumulate_direct_dynamic_impulse_kernel,
-                dim=len(self.topology.row_joint),
-                inputs=[
-                    self.row_dynamic,
-                    self.delta,
-                    self.row_scale,
-                    self.accumulated_impulse,
-                ],
-                device=self.model.device,
-            )
+        wp.launch(
+            _accumulate_direct_impulse_kernel,
+            dim=len(self.topology.row_joint),
+            inputs=[
+                self.delta,
+                self.row_scale,
+                self.accumulated_impulse,
+            ],
+            device=self.model.device,
+        )
         wp.launch(
             _apply_direct_equality_delta_kernel,
             dim=int(self.model.body_count) + 1,

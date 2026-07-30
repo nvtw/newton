@@ -1,211 +1,140 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Behavioural tests for a :class:`JointMode.BALL_SOCKET` joint.
+"""Direct-solver behavioral tests for maximal-coordinate ball joints."""
 
-Three properties:
-
-* Anchor coincidence after settling.
-* Reaction force on the cube equals ``mass * |g|``.
-* A ball socket leaves all 3 angular DoF free (spin is preserved
-  when the anchor is at the COM).
-
-Scenes are registered with :func:`scene` so the test visualizer can
-replay them interactively.
-"""
+from __future__ import annotations
 
 import unittest
 
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.examples.scene_registry import Scene, scene
-from newton._src.solvers.phoenx.tests._test_helpers import run_settle_loop
-from newton._src.solvers.phoenx.world_builder import JointMode, WorldBuilder
+import newton
 
 GRAVITY = 9.81
 FPS = 60
-SUBSTEPS = 4
-SOLVER_ITERATIONS = 16
-SETTLE_FRAMES = 120  # 2 s @ 60 fps -- PGS warm-start converges well within this
-HALF_EXTENT = 0.5
-_INV_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+SUBSTEPS = 5
+SOLVER_ITERATIONS = 2
+SETTLE_FRAMES = 30
+_INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
 
-def _build_pendulum(
-    device,
+def _build_ball_model(
     *,
-    initial_angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
-    affected_by_gravity: bool = True,
-):
-    """One ball socket between the static world body and a unit cube.
+    center: tuple[float, float, float],
+    child_anchor: tuple[float, float, float],
+    gravity: tuple[float, float, float],
+) -> tuple[newton.Model, int]:
+    builder = newton.ModelBuilder(gravity=gravity, up_axis=newton.Axis.Y)
+    body = builder.add_link(
+        xform=wp.transform(wp.vec3(*center), wp.quat_identity()),
+        mass=1.0,
+        inertia=_INERTIA,
+    )
+    joint = builder.add_joint_ball(
+        parent=-1,
+        child=body,
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform(wp.vec3(*child_anchor), wp.quat_identity()),
+    )
+    builder.add_articulation([joint])
+    return builder.finalize(device=wp.get_preferred_device()), body
 
-    Cube COM sits one unit below the anchor (so the static world
-    anchor is the cube's top face center). Picked deliberately: with
-    gravity on the cube hangs as a 1 m pendulum from a single socket
-    -- the simplest scene that lets us assert (a) anchor coincidence
-    and (b) the reaction force equals ``mass * |g|``.
-    """
-    b = WorldBuilder()
-    world_body = b.world_body
-    cube = b.add_dynamic_body(
-        position=(0.0, -1.0, 0.0),
-        inverse_mass=1.0,
-        inverse_inertia=_INV_INERTIA,
-        affected_by_gravity=affected_by_gravity,
-        angular_velocity=initial_angular_velocity,
-    )
-    b.add_joint(
-        world_body,
-        cube,
-        anchor1=(0.0, 0.0, 0.0),
-        mode=JointMode.BALL_SOCKET,
-    )
-    return b.finalize(
+
+def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
+    return newton.solvers.SolverPhoenX(
+        model,
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
-        device=device,
+        velocity_iterations=1,
+        articulation_mode="maximal",
     )
 
 
-@scene(
-    "BallSocket: 1-cube pendulum",
-    description="Single ball socket holding a unit cube under gravity.",
-    tags=("ball_socket",),
-)
-def build_ball_socket_pendulum_scene(device) -> Scene:
-    world = _build_pendulum(device)
-    he = np.zeros((2, 3), dtype=np.float32)
-    he[1] = HALF_EXTENT
-    return Scene(world=world, body_half_extents=he, frame_dt=1.0 / FPS, substeps=SUBSTEPS)
+def _rollout(model: newton.Model, solver: newton.solvers.SolverPhoenX, state: newton.State, frames: int) -> None:
+    control = model.control()
+    with wp.ScopedCapture(model.device) as capture:
+        state.clear_forces()
+        solver.step(state, state, control, None, 1.0 / FPS)
+    for _ in range(frames):
+        wp.capture_launch(capture.graph)
+
+
+def _transform_point(transform: np.ndarray, point: np.ndarray) -> np.ndarray:
+    x, y, z, w = transform[3:]
+    rotation = np.asarray(
+        (
+            (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)),
+            (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)),
+            (2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)),
+        ),
+        dtype=np.float64,
+    )
+    return transform[:3] + rotation @ point
 
 
 @unittest.skipUnless(
     wp.get_preferred_device().is_cuda,
-    "Jitter simulation tests run on CUDA only (graph capture is required for reasonable run-time).",
+    "PhoenX direct ball-joint tests require CUDA graph capture.",
 )
 class TestBallSocket(unittest.TestCase):
-    """End-to-end physics checks for a :class:`JointMode.BALL_SOCKET` joint."""
+    """Validate maximal-coordinate ball joints through direct equality rows."""
 
-    def test_anchor_coincidence_under_gravity(self):
-        """After settling the world anchor (cube's local +y face) must
-        track the static anchor at the origin to within ~1 cm.
-
-        A drift larger than the soft-constraint slop indicates the
-        positional Jacobian or the bias-rate computation regressed.
-        """
-        device = wp.get_preferred_device()
-        world = _build_pendulum(device)
-        run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
-
-        # Cube top-face centre in body-local frame is (0, +HALF_EXTENT*2 - 1, 0)
-        # = (0, 0, 0) measured from the cube COM at -1; rotate it by
-        # the cube's orientation and add its world position to recover
-        # the world-space anchor point as seen from body 2.
-        positions = world.bodies.position.numpy()
-        orientations = world.bodies.orientation.numpy()  # xyzw
-
-        # body 1 (the world body) sees the anchor at (0, 0, 0) by
-        # construction; we compare against that.
-        local_anchor_b2 = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        q = orientations[1]
-        # Rotate a vector by a quaternion (xyzw)
-        x, y, z, w = q
-        # quat -> rot matrix
-        rot = np.array(
-            [
-                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-            ],
-            dtype=np.float64,
+    def test_anchor_coincidence_under_gravity(self) -> None:
+        """Keep the child and world anchors coincident under gravity."""
+        model, body = _build_ball_model(
+            center=(0.0, -1.0, 0.0),
+            child_anchor=(0.0, 1.0, 0.0),
+            gravity=(0.0, -GRAVITY, 0.0),
         )
-        anchor_world = positions[1].astype(np.float64) + rot @ local_anchor_b2
-        # Anchor on body 1 (static world) is just the origin.
-        drift = np.linalg.norm(anchor_world)
-        self.assertLess(
-            drift,
-            5e-2,  # 5 cm slop -- generous for a soft constraint at default Hz
-            msg=f"ball-socket anchors drifted apart by {drift:.4f} m",
+        solver = _make_solver(model)
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, (3,))
+        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        _rollout(model, solver, state, SETTLE_FRAMES)
+
+        anchor = _transform_point(state.body_q.numpy()[body].astype(np.float64), np.asarray((0.0, 1.0, 0.0)))
+        self.assertLess(float(np.linalg.norm(anchor)), 2.0e-3)
+
+    def test_reaction_force_matches_weight(self) -> None:
+        """Balance unit-body weight with the direct vertical row impulse."""
+        model, _body = _build_ball_model(
+            center=(0.0, -1.0, 0.0),
+            child_anchor=(0.0, 1.0, 0.0),
+            gravity=(0.0, -GRAVITY, 0.0),
         )
+        solver = _make_solver(model)
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        _rollout(model, solver, state, SETTLE_FRAMES)
 
-    def test_reaction_force_matches_weight(self):
-        """The single socket holds up exactly one unit cube under gravity.
+        direct = solver._direct_equality_system
+        impulse = direct.accumulated_impulse.numpy()
+        force = impulse * (FPS * SUBSTEPS)
+        self.assertTrue(np.isfinite(force).all())
+        self.assertAlmostEqual(abs(float(force[1])), GRAVITY, delta=5.0e-3)
+        self.assertLess(float(np.max(np.abs(force[[0, 2]]))), 5.0e-3)
 
-        Reaction +y on body 2 (the cube) must equal ``mass * |g|`` in
-        equilibrium. Lateral and torque components must be ~0 because
-        the anchor sits on the cube's symmetry axis through the COM.
-        """
-        device = wp.get_preferred_device()
-        world = _build_pendulum(device)
-        run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
-
-        out = wp.zeros(world.num_constraints, dtype=wp.spatial_vector, device=device)
-        world.gather_constraint_wrenches(out)
-        wrench = out.numpy()[0]
-        fx, fy, fz, tx, ty, tz = wrench
-        self.assertTrue(np.isfinite(wrench).all(), msg=f"non-finite wrench: {wrench}")
-        self.assertAlmostEqual(
-            fy,
-            GRAVITY,
-            delta=0.05,
-            msg=f"expected fy~{GRAVITY:.3f} N, got {fy:.4f}",
+    def test_does_not_resist_rotation(self) -> None:
+        """Preserve arbitrary spin when the constrained anchor is at the COM."""
+        model, body = _build_ball_model(
+            center=(0.0, 0.0, 0.0),
+            child_anchor=(0.0, 0.0, 0.0),
+            gravity=(0.0, 0.0, 0.0),
         )
-        for label, val in (("fx", fx), ("fz", fz), ("tx", tx), ("ty", ty), ("tz", tz)):
-            self.assertLess(
-                abs(val),
-                0.5,
-                msg=f"{label}={val:.4f} should be near zero for symmetric pendulum",
-            )
+        solver = _make_solver(model)
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        omega = np.asarray((0.7, -0.3, 0.5), dtype=np.float32)
+        velocity = state.body_qd.numpy()
+        velocity[body, 3:] = omega
+        state.body_qd.assign(velocity)
+        _rollout(model, solver, state, SETTLE_FRAMES)
 
-    def test_does_not_resist_rotation(self):
-        """A ball socket leaves all 3 angular DoF free.
-
-        Anchor through the cube's COM (no lever arm) so an arbitrary
-        spin must be preserved exactly: the joint only constrains
-        translation, and with the COM at the pivot rotation does not
-        translate the COM, so no constraint force is needed.
-        """
-        device = wp.get_preferred_device()
-
-        # Build a *no-lever-arm* pendulum: cube COM coincides with the
-        # static world anchor at the origin. Doing this through a
-        # local builder rather than reusing _build_pendulum keeps the
-        # scene's purpose obvious in this single test.
-        omega0 = (0.7, -0.3, 0.5)  # rad/s, deliberately off-axis
-        b = WorldBuilder()
-        world_body = b.world_body
-        cube = b.add_dynamic_body(
-            position=(0.0, 0.0, 0.0),
-            inverse_mass=1.0,
-            inverse_inertia=_INV_INERTIA,
-            affected_by_gravity=False,
-            angular_velocity=omega0,
-        )
-        b.add_joint(
-            world_body,
-            cube,
-            anchor1=(0.0, 0.0, 0.0),
-            mode=JointMode.BALL_SOCKET,
-        )
-        world = b.finalize(substeps=SUBSTEPS, solver_iterations=SOLVER_ITERATIONS, device=device)
-
-        run_settle_loop(world, SETTLE_FRAMES, dt=1.0 / FPS)
-
-        omega_final = world.bodies.angular_velocity.numpy()[1]
-        omega0_arr = np.asarray(omega0)
-        # Identity inertia + no torque about the COM => angular velocity
-        # in body frame is conserved; the world-frame vector also stays
-        # constant because for the unit-inertia case dL/dt = 0 and
-        # I*omega_world = omega_world.
-        diff = np.linalg.norm(omega_final - omega0_arr)
-        self.assertLess(
-            diff,
-            0.05,
-            msg=(f"ball socket bled angular velocity: started at {omega0_arr}, ended at {omega_final}"),
-        )
+        np.testing.assert_allclose(state.body_qd.numpy()[body, 3:], omega, rtol=2.0e-4, atol=2.0e-4)
 
 
 if __name__ == "__main__":
-    wp.init()
     unittest.main()
