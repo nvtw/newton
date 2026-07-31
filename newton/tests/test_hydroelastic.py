@@ -1719,13 +1719,14 @@ add_function_test(
 
 
 def test_no_degenerate_triangles_deep_penetration(test, device):
-    """Verify deep-penetration contact surfaces are repeatable and non-degenerate.
+    """Verify deep-penetration contact surfaces have stable face counts and are non-degenerate.
 
     Two hydroelastic boxes with controlled overlap are tested at multiple
     penetration depths and stiffness ratios.  The isosurface should be free
     of degenerate (zero-area) triangles that arise from vertex collapse at
     SDF ridge boundaries. The deepest-penetration case is rebuilt repeatedly
-    to verify primitive SDF construction produces the same tessellation.
+    to verify primitive SDF construction produces a stable contact-surface
+    face count.
 
     The edge-interpolation clamp
     (:attr:`HydroelasticSDF.Config.mc_edge_clamp_min`) is the mechanism that
