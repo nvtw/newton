@@ -56,8 +56,8 @@ if TYPE_CHECKING:
 __all__ = ["SolverKamino"]
 
 
-def _estimate_contacts_per_world(model, newton_model: Model) -> int:
-    """Estimate Kamino contact capacity using the collision pipeline's weights."""
+def _estimate_dvi_contacts_per_world(model, newton_model: Model) -> int:
+    """Estimate DVI contact capacity using the collision pipeline's weights."""
     theoretical = max(model.geoms.world_minimum_contacts, default=0)
     if model.size.num_worlds == 1:
         heuristic = _estimate_rigid_contact_max(newton_model)
@@ -759,10 +759,10 @@ class SolverKamino(SolverBase, CouplingInterface):
         self._collision_detector_kamino = None
         if self._config.use_collision_detector:
             collision_config = self._config.collision_detector
-            if collision_config.max_contacts_per_world is None:
+            if self._config.dynamics_solver == "dvi" and collision_config.max_contacts_per_world is None:
                 collision_config = replace(
                     collision_config,
-                    max_contacts_per_world=_estimate_contacts_per_world(self._model_kamino, self.model),
+                    max_contacts_per_world=_estimate_dvi_contacts_per_world(self._model_kamino, self.model),
                 )
             self._collision_detector_kamino = self._kamino.CollisionDetector(
                 model=self._model_kamino,
