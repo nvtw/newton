@@ -12,6 +12,7 @@ from newton._src.solvers.phoenx.articulations.direct_contact_response import (
     DirectContactResponseData,
 )
 from newton._src.solvers.phoenx.articulations.direct_equality import _row_wrench_for_body
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import GROUPED_RHS_ITEMS_PER_TASK
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync
 from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_block import block_project_friction_delta_sor_2
@@ -97,6 +98,54 @@ def _build_direct_contact_schedule_kernel(
         response.contact_mechanism[contact] = owner
         response.contact_body0[contact] = body0
         response.contact_body1[contact] = body1
+
+
+@wp.kernel(enable_backward=False)
+def _count_direct_contact_rhs_tasks_kernel(
+    columns: ContactColumnContainer,
+    scheduled_column: wp.array[wp.int32],
+    section_end: wp.array[wp.int32],
+    rhs_task_section_end: wp.array[wp.int32],
+):
+    mechanism = wp.tid()
+    begin = wp.int32(0)
+    if mechanism > wp.int32(0):
+        begin = section_end[mechanism - wp.int32(1)]
+    end = section_end[mechanism]
+    contact_count = wp.int32(0)
+    for scheduled in range(begin, end):
+        contact_count += contact_get_contact_count(columns, scheduled_column[scheduled])
+    group_size = wp.int32(GROUPED_RHS_ITEMS_PER_TASK)
+    rhs_task_section_end[mechanism] = (contact_count + group_size - wp.int32(1)) // group_size
+
+
+@wp.kernel(enable_backward=False)
+def _fill_direct_contact_rhs_tasks_kernel(
+    columns: ContactColumnContainer,
+    scheduled_column: wp.array[wp.int32],
+    section_end: wp.array[wp.int32],
+    rhs_task_section_end: wp.array[wp.int32],
+    task_mechanism: wp.array[wp.int32],
+    task_item: wp.array[wp.int32],
+):
+    mechanism = wp.tid()
+    column_begin = wp.int32(0)
+    task_begin = wp.int32(0)
+    if mechanism > wp.int32(0):
+        column_begin = section_end[mechanism - wp.int32(1)]
+        task_begin = rhs_task_section_end[mechanism - wp.int32(1)]
+    column_end = section_end[mechanism]
+    local_item = wp.int32(0)
+    for scheduled in range(column_begin, column_end):
+        column = scheduled_column[scheduled]
+        first = contact_get_contact_first(columns, column)
+        count = contact_get_contact_count(columns, column)
+        for offset in range(count):
+            group_size = wp.int32(GROUPED_RHS_ITEMS_PER_TASK)
+            task = task_begin + local_item // group_size
+            task_mechanism[task] = mechanism
+            task_item[task * group_size + local_item % group_size] = first + offset
+            local_item += wp.int32(1)
 
 
 @wp.func
@@ -308,7 +357,9 @@ class DirectContactRunSchedule:
         device = response.direct.model.device
         self.keys = wp.empty(2 * self.capacity, dtype=wp.int64, device=device)
         self.columns = wp.empty(2 * self.capacity, dtype=wp.int32, device=device)
-        self.section_end = wp.zeros(len(response.active_mechanisms), dtype=wp.int32, device=device)
+        mechanism_count = len(response.active_mechanisms)
+        self.section_end = wp.zeros(mechanism_count, dtype=wp.int32, device=device)
+        self.rhs_task_section_end = wp.zeros(mechanism_count, dtype=wp.int32, device=device)
 
     def build(
         self,
@@ -319,7 +370,10 @@ class DirectContactRunSchedule:
     ) -> None:
         """Group immutable contacts without changing another response owner's columns."""
         self.section_end.zero_()
+        self.rhs_task_section_end.zero_()
+        self.response.contact_mechanism.fill_(-1)
         self.response.contact_batch.task_mechanism.fill_(-1)
+        self.response.contact_batch.task_item.fill_(-1)
         wp.launch(
             _build_direct_contact_schedule_kernel,
             dim=self.capacity,
@@ -337,6 +391,35 @@ class DirectContactRunSchedule:
         )
         sort_variable_length_int64(self.keys, self.columns, num_columns)
         wp.utils.array_scan(self.section_end, self.section_end, inclusive=True)
+        wp.launch(
+            _count_direct_contact_rhs_tasks_kernel,
+            dim=self.section_end.size,
+            inputs=[
+                columns,
+                self.columns,
+                self.section_end,
+                self.rhs_task_section_end,
+            ],
+            device=self.response.direct.model.device,
+        )
+        wp.utils.array_scan(
+            self.rhs_task_section_end,
+            self.rhs_task_section_end,
+            inclusive=True,
+        )
+        wp.launch(
+            _fill_direct_contact_rhs_tasks_kernel,
+            dim=self.section_end.size,
+            inputs=[
+                columns,
+                self.columns,
+                self.section_end,
+                self.rhs_task_section_end,
+                self.response.contact_batch.task_mechanism,
+                self.response.contact_batch.task_item,
+            ],
+            device=self.response.direct.model.device,
+        )
 
 
 __all__ = ["DirectContactRunSchedule", "iterate_direct_contact_runs_kernel"]

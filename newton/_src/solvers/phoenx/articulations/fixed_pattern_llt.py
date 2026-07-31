@@ -20,6 +20,7 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_schedule import 
 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
+GROUPED_RHS_ITEMS_PER_TASK = 4
 
 _GET_ARRAY_PTR = """return (uint64_t)arr.data;"""
 
@@ -419,15 +420,18 @@ def _make_cooperative_solve_kernel(block_size: int):
     return solve
 
 
-def _make_narrow_rhs_batch_solve_kernel(block_size: int):
-    """Create one three-column solve task per active contact point."""
-    rhs_tile_width = 4
+def _make_grouped_rhs_batch_solve_kernel(block_size: int):
+    """Create one solve task for up to four three-column RHS items."""
+    item_width = 4
+    items_per_task = GROUPED_RHS_ITEMS_PER_TASK
+    rhs_tile_width = item_width * items_per_task
     tile_elements = block_size * rhs_tile_width
     factor_tile_elements = block_size * block_size
 
     @wp.kernel(enable_backward=False)
-    def solve_narrow_rhs_batch(
+    def solve_grouped_rhs_batch(
         task_mechanism: wp.array[wp.int32],
+        task_item: wp.array[wp.int32],
         dimensions: wp.array[wp.int32],
         vector_offsets: wp.array[wp.int32],
         panel_table_offset: wp.array[wp.int32],
@@ -442,7 +446,8 @@ def _make_narrow_rhs_batch_solve_kernel(block_size: int):
         backward_panel: wp.array[wp.int32],
         permutation: wp.array[wp.int32],
         factor: wp.array[wp.float32],
-        workspace_stride: wp.int32,
+        item_workspace_stride: wp.int32,
+        task_workspace_stride: wp.int32,
         rhs: wp.array[wp.float32],
         intermediate: wp.array[wp.float32],
         solution_permuted: wp.array[wp.float32],
@@ -450,23 +455,18 @@ def _make_narrow_rhs_batch_solve_kernel(block_size: int):
     ):
         task, lane = wp.tid()
         mechanism = task_mechanism[task]
-        active = mechanism >= wp.int32(0)
-        if not active:
+        task_active = mechanism >= wp.int32(0)
+        if not task_active:
             mechanism = wp.int32(0)
         dimension = dimensions[mechanism]
         vector_offset = vector_offsets[mechanism]
         tile_count = wp.int32(0)
-        if active:
+        if task_active:
             tile_count = tile_counts[mechanism]
         table_offset = panel_table_offset[mechanism]
         adjacency_offset = tile_adjacency_offset[mechanism]
-        workspace_dimension = workspace_stride // wp.int32(rhs_tile_width)
-        task_offset = task * workspace_stride
-        rhs_matrix = wp.array(
-            ptr=_get_float_array_offset_ptr(rhs, task_offset),
-            shape=(workspace_dimension, rhs_tile_width),
-            dtype=wp.float32,
-        )
+        workspace_dimension = task_workspace_stride // wp.int32(rhs_tile_width)
+        task_offset = task * task_workspace_stride
         intermediate_matrix = wp.array(
             ptr=_get_float_array_offset_ptr(intermediate, task_offset),
             shape=(workspace_dimension, rhs_tile_width),
@@ -477,12 +477,6 @@ def _make_narrow_rhs_batch_solve_kernel(block_size: int):
             shape=(workspace_dimension, rhs_tile_width),
             dtype=wp.float32,
         )
-        solution_matrix = wp.array(
-            ptr=_get_float_array_offset_ptr(solution, task_offset),
-            shape=(workspace_dimension, rhs_tile_width),
-            dtype=wp.float32,
-        )
-
         for tile_i in range(tile_count):
             i = tile_i * block_size
             right_hand_side = wp.tile_zeros(
@@ -494,12 +488,15 @@ def _make_narrow_rhs_batch_solve_kernel(block_size: int):
                 index = (lane + iteration * wp.block_dim()) % tile_elements
                 row = index // rhs_tile_width
                 column = index % rhs_tile_width
-                active = i + row < dimension and column < wp.int32(3)
+                item_slot = column // wp.int32(item_width)
+                item_column = column - item_slot * wp.int32(item_width)
+                item = task_item[task * wp.int32(items_per_task) + item_slot]
+                item_active = i + row < dimension and item_column < wp.int32(3) and item >= wp.int32(0)
                 value = wp.float32(0.0)
-                if active:
+                if item_active:
                     original = permutation[vector_offset + i + row]
-                    value = rhs_matrix[original, column]
-                wp.tile_scatter_masked(right_hand_side, row, column, value, active)
+                    value = rhs[item * item_workspace_stride + original * wp.int32(item_width) + item_column]
+                wp.tile_scatter_masked(right_hand_side, row, column, value, item_active)
             tile_slot = adjacency_offset + tile_i
             for entry in range(forward_start[tile_slot], forward_start[tile_slot + wp.int32(1)]):
                 tile_j = forward_tile[entry]
@@ -563,40 +560,58 @@ def _make_narrow_rhs_batch_solve_kernel(block_size: int):
                 index = (lane + iteration * wp.block_dim()) % tile_elements
                 row = index // rhs_tile_width
                 column = index % rhs_tile_width
-                if i + row < dimension and column < wp.int32(3):
+                item_slot = column // wp.int32(item_width)
+                item_column = column - item_slot * wp.int32(item_width)
+                item = task_item[task * wp.int32(items_per_task) + item_slot]
+                if i + row < dimension and item_column < wp.int32(3) and item >= wp.int32(0):
                     original = permutation[vector_offset + i + row]
-                    solution_matrix[original, column] = right_hand_side[row, column]
+                    solution[item * item_workspace_stride + original * wp.int32(item_width) + item_column] = (
+                        right_hand_side[row, column]
+                    )
 
-    return solve_narrow_rhs_batch
+    return solve_grouped_rhs_batch
 
 
-class FixedPatternNarrowRHSBatch:
-    """Reusable three-column tasks that may select mechanisms at runtime."""
+class FixedPatternGroupedRHSBatch:
+    """Group up to four narrow RHS items without crossing mechanisms."""
 
-    def __init__(self, panel: FixedPatternPanelLLT, task_capacity: int):
-        if task_capacity < 0:
-            raise ValueError("narrow RHS task capacity must be nonnegative")
+    def __init__(self, panel: FixedPatternPanelLLT, item_capacity: int, task_capacity: int):
+        if item_capacity < 0 or task_capacity < 0:
+            raise ValueError("grouped RHS capacities must be nonnegative")
         self.panel = panel
+        self.item_capacity = max(1, int(item_capacity))
         self.task_capacity = max(1, int(task_capacity))
         max_padded_dimension = max(panel.symbolic.tile_counts) * panel.block_size
-        self.workspace_stride = max_padded_dimension * 4
-        storage_size = self.task_capacity * self.workspace_stride
+        self.item_workspace_stride = max_padded_dimension * 4
+        self.task_workspace_stride = max_padded_dimension * 16
         device = panel.device
         self.task_mechanism = wp.full(self.task_capacity, -1, dtype=wp.int32, device=device)
-        self.rhs = wp.zeros(storage_size, dtype=wp.float32, device=device)
-        self.intermediate = wp.zeros_like(self.rhs)
-        self.solution_permuted = wp.zeros_like(self.rhs)
+        self.task_item = wp.full(
+            self.task_capacity * GROUPED_RHS_ITEMS_PER_TASK,
+            -1,
+            dtype=wp.int32,
+            device=device,
+        )
+        self.rhs = wp.zeros(
+            self.item_capacity * self.item_workspace_stride,
+            dtype=wp.float32,
+            device=device,
+        )
+        task_storage_size = self.task_capacity * self.task_workspace_stride
+        self.intermediate = wp.zeros(task_storage_size, dtype=wp.float32, device=device)
+        self.solution_permuted = wp.zeros_like(self.intermediate)
         self.solution = wp.zeros_like(self.rhs)
 
     def solve(self) -> None:
-        """Solve all runtime-selected three-column tasks."""
+        """Solve all runtime-selected groups."""
         panel = self.panel
         wp.launch_tiled(
-            panel._solve_narrow_rhs_batch,
+            panel._solve_grouped_rhs_batch,
             dim=self.task_capacity,
-            block_dim=panel._narrow_rhs_block_dim,
+            block_dim=panel._grouped_rhs_block_dim,
             inputs=[
                 self.task_mechanism,
+                self.task_item,
                 panel.dimension,
                 panel.vector_offset,
                 panel.panel_table_offset,
@@ -611,7 +626,8 @@ class FixedPatternNarrowRHSBatch:
                 panel.backward_panel,
                 panel.permutation,
                 panel.factor,
-                wp.int32(self.workspace_stride),
+                wp.int32(self.item_workspace_stride),
+                wp.int32(self.task_workspace_stride),
                 self.rhs,
                 self.intermediate,
                 self.solution_permuted,
@@ -804,13 +820,17 @@ class FixedPatternPanelLLT:
         self.cooperative_mechanism = wp.array(cooperative_mechanisms, dtype=wp.int32, device=self.device)
         self._factor_narrow = _make_narrow_factor_kernel(block_size)
         self._solve_cooperative = _make_cooperative_solve_kernel(block_size)
-        self._solve_narrow_rhs_batch = _make_narrow_rhs_batch_solve_kernel(block_size)
+        self._solve_grouped_rhs_batch = _make_grouped_rhs_batch_solve_kernel(block_size)
         self._cooperative_solve_block_dim = 128 if block_size == 32 else 64
-        self._narrow_rhs_block_dim = 128
+        self._grouped_rhs_block_dim = 128
 
-    def create_narrow_rhs_batch(self, task_capacity: int) -> FixedPatternNarrowRHSBatch:
-        """Allocate runtime-selected three-column solve tasks."""
-        return FixedPatternNarrowRHSBatch(self, task_capacity)
+    def create_grouped_rhs_batch(
+        self,
+        item_capacity: int,
+        task_capacity: int,
+    ) -> FixedPatternGroupedRHSBatch:
+        """Allocate runtime-selected groups of narrow RHS items."""
+        return FixedPatternGroupedRHSBatch(self, item_capacity, task_capacity)
 
     def compute(self) -> None:
         """Factor narrow mechanisms cooperatively or use the ready queue."""
@@ -916,4 +936,4 @@ class FixedPatternPanelLLT:
             )
 
 
-__all__ = ["FixedPanelSymbolic", "FixedPatternNarrowRHSBatch", "FixedPatternPanelLLT", "build_fixed_panel_symbolic"]
+__all__ = ["FixedPanelSymbolic", "FixedPatternGroupedRHSBatch", "FixedPatternPanelLLT", "build_fixed_panel_symbolic"]

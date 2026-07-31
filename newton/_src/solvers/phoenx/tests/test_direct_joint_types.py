@@ -377,7 +377,7 @@ class TestDirectJointTypes(unittest.TestCase):
                 local_column = int(column - row_start)
                 matrix[local_row, local_column] = matrix_storage[address]
                 matrix[local_column, local_row] = matrix_storage[address]
-        workspace_offset = contact * response.contact_batch.workspace_stride
+        workspace_offset = contact * response.contact_batch.item_workspace_stride
         rhs_storage = response.contact_batch.rhs.numpy()
         rhs = np.stack(
             [rhs_storage[workspace_offset + 4 * row : workspace_offset + 4 * row + 3] for row in range(dimension)]
@@ -496,8 +496,8 @@ class TestDirectJointTypes(unittest.TestCase):
             relative_residual = np.linalg.norm(residual) / np.linalg.norm(rhs_np[begin:end])
             self.assertLess(relative_residual, 5.0e-3)
 
-    def test_panel_narrow_rhs_batch_selects_mechanisms_at_runtime(self) -> None:
-        """Solve contact-width tasks selected across heterogeneous mechanisms."""
+    def test_panel_grouped_rhs_batch_preserves_mechanism_boundaries(self) -> None:
+        """Solve padded contact groups across heterogeneous mechanisms."""
         dimensions = (5, 17, 40)
         starts = np.cumsum(np.asarray((0, *dimensions), dtype=np.int32))
         permutation = np.concatenate([np.arange(dimension, dtype=np.int32) for dimension in dimensions])
@@ -511,9 +511,11 @@ class TestDirectJointTypes(unittest.TestCase):
             row_bodies,
             device=wp.get_preferred_device(),
         )
-        batch = panel.create_narrow_rhs_batch(5)
-        task_mechanisms = np.asarray((2, -1, 0, 1, 2), dtype=np.int32)
+        batch = panel.create_grouped_rhs_batch(item_capacity=8, task_capacity=3)
+        task_mechanisms = np.asarray((2, 0, 1), dtype=np.int32)
+        task_items = np.asarray((0, 1, -1, -1, 2, -1, -1, -1, 3, 4, 5, 6), dtype=np.int32)
         batch.task_mechanism.assign(task_mechanisms)
+        batch.task_item.assign(task_items)
 
         rng = np.random.default_rng(7281)
         matrices = []
@@ -534,13 +536,15 @@ class TestDirectJointTypes(unittest.TestCase):
         rhs_storage = np.zeros(batch.rhs.size, dtype=np.float32)
         expected_rhs = {}
         for task, mechanism in enumerate(task_mechanisms):
-            if mechanism < 0:
-                continue
-            rhs = rng.normal(size=(dimensions[mechanism], 3)).astype(np.float32)
-            expected_rhs[task] = rhs
-            begin = task * batch.workspace_stride
-            for row in range(rhs.shape[0]):
-                rhs_storage[begin + 4 * row : begin + 4 * row + 3] = rhs[row]
+            for slot in range(4):
+                item = int(task_items[4 * task + slot])
+                if item < 0:
+                    continue
+                rhs = rng.normal(size=(dimensions[mechanism], 3)).astype(np.float32)
+                expected_rhs[item] = (int(mechanism), rhs)
+                begin = item * batch.item_workspace_stride
+                for row in range(rhs.shape[0]):
+                    rhs_storage[begin + 4 * row : begin + 4 * row + 3] = rhs[row]
         batch.rhs.assign(rhs_storage)
 
         with wp.ScopedCapture(wp.get_preferred_device()) as capture:
@@ -549,9 +553,8 @@ class TestDirectJointTypes(unittest.TestCase):
         wp.capture_launch(capture.graph)
         solution_storage = batch.solution.numpy()
 
-        for task, rhs in expected_rhs.items():
-            mechanism = int(task_mechanisms[task])
-            begin = task * batch.workspace_stride
+        for item, (mechanism, rhs) in expected_rhs.items():
+            begin = item * batch.item_workspace_stride
             solution = np.stack(
                 [solution_storage[begin + 4 * row : begin + 4 * row + 3] for row in range(rhs.shape[0])]
             )

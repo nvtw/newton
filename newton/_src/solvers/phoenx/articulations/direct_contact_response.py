@@ -11,6 +11,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.articulations.direct_equality import _row_wrench_for_body
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import GROUPED_RHS_ITEMS_PER_TASK
 from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -309,7 +310,14 @@ class DirectContactResponse:
             dtype=wp.int32,
             device=device,
         )
-        self.contact_batch = direct.solver.create_narrow_rhs_batch(capacity)
+        active_mechanism_count = sum(active_mechanisms)
+        group_size = GROUPED_RHS_ITEMS_PER_TASK
+        task_capacity = min(
+            capacity,
+            (capacity + (group_size - 1) * active_mechanism_count + group_size - 1) // group_size,
+        )
+        self.contact_batch = direct.solver.create_grouped_rhs_batch(capacity, task_capacity)
+        self.contact_mechanism = wp.full(capacity, -1, dtype=wp.int32, device=device)
         self.contact_body0 = wp.zeros(capacity, dtype=wp.int32, device=device)
         self.contact_body1 = wp.zeros(capacity, dtype=wp.int32, device=device)
         self.data = DirectContactResponseData()
@@ -323,10 +331,10 @@ class DirectContactResponse:
         self.data.mechanism_body_start = wp.array(body_starts, dtype=wp.int32, device=device)
         self.data.mechanism_body = wp.array(flat_bodies, dtype=wp.int32, device=device)
         self.data.mechanism_row_start = wp.array(topology.mechanism_row_start, dtype=wp.int32, device=device)
-        self.data.contact_mechanism = self.contact_batch.task_mechanism
+        self.data.contact_mechanism = self.contact_mechanism
         self.data.contact_body0 = self.contact_body0
         self.data.contact_body1 = self.contact_body1
-        self.data.workspace_stride = wp.int32(self.contact_batch.workspace_stride)
+        self.data.workspace_stride = wp.int32(self.contact_batch.item_workspace_stride)
         self.data.rhs = self.contact_batch.rhs
         self.data.solution = self.contact_batch.solution
         self.data.accumulated_solution = wp.zeros(len(topology.row_joint), dtype=wp.float32, device=device)
@@ -346,7 +354,7 @@ class DirectContactResponse:
 
     def compute(self, contacts: ContactContainer) -> None:
         """Solve equality responses and form each active contact's local block."""
-        capacity = self.contact_batch.task_capacity
+        capacity = self.contact_batch.item_capacity
         wp.launch(
             _build_contact_equality_rhs_kernel,
             dim=capacity * 128,
