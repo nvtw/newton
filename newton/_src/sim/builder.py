@@ -47,7 +47,7 @@ from ..geometry import (
 )
 from ..geometry.flags import MeshProperties
 from ..geometry.inertia import validate_and_correct_inertia_kernel, verify_and_correct_inertia
-from ..geometry.types import Heightfield
+from ..geometry.types import Heightfield, RevolvedData
 from ..geometry.utils import RemeshingMethod, compute_inertia_obb, remesh_mesh
 from ..math import quat_between_vectors_robust
 from ..usd.schema_resolver import SchemaResolver
@@ -5454,6 +5454,8 @@ class ModelBuilder:
                 return "cylinder"
             if type == GeoType.CONE:
                 return "cone"
+            if type == GeoType.REVOLVED:
+                return "revolved"
             if type == GeoType.MESH:
                 return "mesh"
             if type == GeoType.PLANE:
@@ -6409,7 +6411,8 @@ class ModelBuilder:
                 (sphere, box, capsule, cylinder, ellipsoid, plane, gaussian) since these shapes are point-symmetric.
                 Mesh-class shapes (``MESH``, ``CONVEX_MESH``, SDF, hydroelastic) preserve the sign and treat
                 ``det(scale) < 0`` as a mirror; the same :class:`Mesh` instance can be shared across shapes with
-                different signed scales. Cone and heightfield shapes raise :class:`ValueError` on negative components.
+                different signed scales. Cone, revolved, and heightfield shapes raise :class:`ValueError` on
+                negative components.
             src: The source geometry data, e.g., a :class:`Mesh` object for `GeoType.MESH`. Defaults to `None`.
             is_static: If `True`, the shape will have zero mass, and its density property in `cfg` will be effectively ignored for mass calculation. Typically used for fixed, non-movable collision geometry. Defaults to `False`.
             color: Optional display RGB color with values in [0, 1]. If `None`, mesh-backed shapes fall back to :attr:`~newton.Mesh.color`; otherwise the per-shape palette sequence is used.
@@ -6477,6 +6480,34 @@ class ModelBuilder:
                     "A negative height would swap the apex and base."
                 )
             scale = (abs(float(scale[0])), float(scale[1]), abs(float(scale[2])))
+        elif type == GeoType.REVOLVED:
+            if not isinstance(src, RevolvedData):
+                raise ValueError("Revolved shapes require cubic Bézier control radii.")
+            radius_bottom = float(np.float32(scale[0]))
+            radius_top = float(np.float32(scale[1]))
+            half_height = float(np.float32(scale[2]))
+            control_bottom = src.radius_control_bottom
+            control_top = src.radius_control_top
+            values = (radius_bottom, radius_top, control_bottom, control_top, half_height)
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError("Revolved shape radii and half_height must be finite.")
+            if half_height <= 0.0:
+                raise ValueError(f"Revolved shape half_height must be positive, got {half_height}.")
+            if min(radius_bottom, radius_top, control_bottom, control_top) < 0.0:
+                raise ValueError("Revolved shape radii must be non-negative.")
+            if max(radius_bottom, radius_top, control_bottom, control_top) == 0.0:
+                raise ValueError("Revolved shape must have at least one positive radius.")
+            if control_bottom < radius_bottom:
+                raise ValueError("Revolved shape is not convex: require radius_control_bottom >= radius_bottom.")
+            if control_top < radius_top:
+                raise ValueError("Revolved shape is not convex: require radius_control_top >= radius_top.")
+            if not cfg.is_solid:
+                raise ValueError("Revolved shapes support only solid mass properties.")
+            if cfg.has_particle_collision:
+                raise ValueError("Revolved shapes do not yet support particle collisions or analytic SDF queries.")
+            if cfg.is_hydroelastic:
+                raise ValueError("Revolved shapes do not yet support hydroelastic contact.")
+            scale = (radius_bottom, radius_top, half_height)
         elif type == GeoType.HFIELD:
             if any(float(s) < 0.0 for s in scale):
                 raise ValueError(
@@ -7026,6 +7057,78 @@ class ModelBuilder:
             xform=xform,
             cfg=cfg,
             scale=scale,
+            label=label,
+            custom_attributes=custom_attributes,
+            color=color,
+        )
+
+    @deprecate_nonkeyword_arguments
+    def add_shape_revolved(
+        self,
+        body: int,
+        *,
+        xform: Transform | None = None,
+        radius_bottom: float = 1.0,
+        radius_top: float = 1.0,
+        radius_control_bottom: float | None = None,
+        radius_control_top: float | None = None,
+        half_height: float = 0.5,
+        cfg: ShapeConfig | None = None,
+        as_site: bool = False,
+        color: Vec3 | None = None,
+        label: str | None = None,
+        custom_attributes: dict[str, Any] | None = None,
+    ) -> int:
+        """Add a convex cubic-Bézier solid of revolution.
+
+        The shape is revolved around its local Z-axis and extends from
+        ``-half_height`` to ``+half_height``. Each Bézier control point lies
+        in its adjacent end-cap plane, so curved profiles meet the caps tangentially.
+
+        Args:
+            body: Index of the parent body, or ``-1`` for a world-static shape.
+            xform: Transform in the parent body's local frame.
+            radius_bottom: Radius at ``-half_height`` [m].
+            radius_top: Radius at ``+half_height`` [m].
+            radius_control_bottom: Radius of the lower cubic Bézier control point [m].
+                Must be at least ``radius_bottom``. If ``None``, use ``radius_bottom``
+                to produce a straight frustum.
+            radius_control_top: Radius of the upper cubic Bézier control point [m].
+                Must be at least ``radius_top``. If ``None``, use ``radius_top``
+                to produce a straight frustum.
+            half_height: Half-height along the local Z-axis [m].
+            cfg: Shape configuration. Revolved shapes currently require solid,
+                shape-shape collision without hydroelastic contact.
+            as_site: If ``True``, create a non-colliding site.
+            color: Display RGB color.
+            label: Optional shape label.
+            custom_attributes: Custom shape attributes.
+
+        Returns:
+            The index of the new shape.
+        """
+        radius_bottom = float(np.float32(radius_bottom))
+        radius_top = float(np.float32(radius_top))
+        if radius_control_bottom is None:
+            radius_control_bottom = radius_bottom
+        if radius_control_top is None:
+            radius_control_top = radius_top
+
+        if cfg is None:
+            cfg = (self.default_site_cfg if as_site else self.default_shape_cfg).copy()
+            if not as_site:
+                cfg.has_particle_collision = False
+        elif as_site:
+            cfg = cfg.copy()
+            cfg.mark_as_site()
+
+        return self.add_shape(
+            body=body,
+            type=GeoType.REVOLVED,
+            xform=xform,
+            cfg=cfg,
+            scale=wp.vec3(radius_bottom, radius_top, half_height),
+            src=RevolvedData(radius_control_bottom, radius_control_top),
             label=label,
             custom_attributes=custom_attributes,
             color=color,
@@ -11283,7 +11386,7 @@ class ModelBuilder:
                 zip(self.shape_type, self.shape_source, self.shape_scale, strict=True)
             ):
                 # Create cache key based on shape type and parameters
-                if (shape_type == GeoType.MESH or shape_type == GeoType.CONVEX_MESH) and shape_src is not None:
+                if shape_type in (GeoType.MESH, GeoType.CONVEX_MESH, GeoType.REVOLVED) and shape_src is not None:
                     cache_key = (shape_type, id(shape_src), tuple(shape_scale))
                 else:
                     cache_key = (shape_type, tuple(shape_scale))
@@ -11354,6 +11457,18 @@ class ModelBuilder:
                         r, half_height, _ = shape_scale
                         aabb_lower = np.array([-r, -r, -half_height])
                         aabb_upper = np.array([r, r, half_height])
+                        nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
+
+                    elif shape_type == GeoType.REVOLVED:
+                        radius_bottom, radius_top, half_height = shape_scale
+                        max_radius = max(
+                            radius_bottom,
+                            radius_top,
+                            shape_src.radius_control_bottom,
+                            shape_src.radius_control_top,
+                        )
+                        aabb_lower = np.array([-max_radius, -max_radius, -half_height])
+                        aabb_upper = np.array([max_radius, max_radius, half_height])
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.HFIELD and shape_src is not None:

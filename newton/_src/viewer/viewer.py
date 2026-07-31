@@ -36,6 +36,85 @@ _DEFAULT_LAYER_ID = "__default__"
 _LAYER_CONFIG_FIELDS = frozenset(("layer_id", "visible", "xform"))
 
 
+def _create_revolved_display_mesh(scale, source, radial_segments: int = 32, axial_segments: int = 16):
+    """Create a display mesh for a cubic-Bézier solid of revolution."""
+    r0, r1, half_height = (float(value) for value in scale)
+    c0 = source.radius_control_bottom
+    c1 = source.radius_control_top
+    cubic = -r0 + 3.0 * c0 - 3.0 * c1 + r1
+    quadratic = 3.0 * (r0 - 2.0 * c0 + c1)
+    linear = 3.0 * (c0 - r0)
+
+    positions = []
+    normals = []
+    uvs = []
+    indices = []
+    for row in range(axial_segments + 1):
+        t = row / axial_segments
+        radius = ((cubic * t + quadratic) * t + linear) * t + r0
+        dr_dt = 3.0 * cubic * t * t + 2.0 * quadratic * t + linear
+        dz_dt = 12.0 * half_height * t * (1.0 - t)
+        if dr_dt == 0.0 and dz_dt == 0.0:
+            dr_dt = r1 - r0
+            dz_dt = 2.0 * half_height
+        z = -half_height + half_height * t * t * (6.0 - 4.0 * t)
+        for column in range(radial_segments):
+            angle = 2.0 * math.pi * column / radial_segments
+            cos_angle = math.cos(angle)
+            sin_angle = math.sin(angle)
+            normal_scale = 1.0 / math.sqrt(dz_dt * dz_dt + dr_dt * dr_dt)
+            positions.append((radius * cos_angle, radius * sin_angle, z))
+            normals.append((dz_dt * cos_angle * normal_scale, dz_dt * sin_angle * normal_scale, -dr_dt * normal_scale))
+            uvs.append((column / radial_segments, t))
+
+    for row in range(axial_segments):
+        lower = row * radial_segments
+        upper = lower + radial_segments
+        for column in range(radial_segments):
+            next_column = (column + 1) % radial_segments
+            indices.extend(
+                (
+                    lower + column,
+                    lower + next_column,
+                    upper + next_column,
+                    lower + column,
+                    upper + next_column,
+                    upper + column,
+                )
+            )
+
+    for top, radius, z, normal_z in (
+        (False, r0, -half_height, -1.0),
+        (True, r1, half_height, 1.0),
+    ):
+        center = len(positions)
+        positions.append((0.0, 0.0, z))
+        normals.append((0.0, 0.0, normal_z))
+        uvs.append((0.5, 0.5))
+        ring = len(positions)
+        for column in range(radial_segments):
+            angle = 2.0 * math.pi * column / radial_segments
+            cos_angle = math.cos(angle)
+            sin_angle = math.sin(angle)
+            positions.append((radius * cos_angle, radius * sin_angle, z))
+            normals.append((0.0, 0.0, normal_z))
+            uvs.append((0.5 + 0.5 * cos_angle, 0.5 + 0.5 * sin_angle))
+        for column in range(radial_segments):
+            next_column = (column + 1) % radial_segments
+            if top:
+                indices.extend((center, ring + column, ring + next_column))
+            else:
+                indices.extend((center, ring + next_column, ring + column))
+
+    return newton.Mesh(
+        positions,
+        indices,
+        normals=normals,
+        uvs=uvs,
+        compute_inertia=False,
+    )
+
+
 class Layer:
     """Container holding per-model viewer state for one layer.
 
@@ -1445,6 +1524,9 @@ class ViewerBase(ABC):
             radius, half_height = geo_scale[:2]
             mesh = newton.Mesh.create_cone(radius, half_height, up_axis=newton.Axis.Z, compute_inertia=False)
 
+        elif geo_type == newton.GeoType.REVOLVED:
+            mesh = _create_revolved_display_mesh(geo_scale, geo_src)
+
         elif geo_type == newton.GeoType.BOX:
             if len(geo_scale) == 1:
                 ext = (geo_scale[0],) * 3
@@ -1991,6 +2073,7 @@ class ViewerBase(ABC):
             newton.GeoType.CONE: "cone",
             newton.GeoType.BOX: "box",
             newton.GeoType.ELLIPSOID: "ellipsoid",
+            newton.GeoType.REVOLVED: "revolved",
             newton.GeoType.MESH: "mesh",
             newton.GeoType.CONVEX_MESH: "convex_hull",
             newton.GeoType.HFIELD: "heightfield",
@@ -2011,7 +2094,8 @@ class ViewerBase(ABC):
                 float(thickness),
                 bool(is_solid),
                 geo_src=geo_src
-                if geo_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD)
+                if geo_type
+                in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH, newton.GeoType.HFIELD, newton.GeoType.REVOLVED)
                 else None,
                 hidden=True,
             )
@@ -2134,6 +2218,7 @@ class ViewerBase(ABC):
                         newton.GeoType.MESH,
                         newton.GeoType.CONVEX_MESH,
                         newton.GeoType.HFIELD,
+                        newton.GeoType.REVOLVED,
                     )
                     else None,
                     mirror=mirror,

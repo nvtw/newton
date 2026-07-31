@@ -5,6 +5,7 @@ import enum
 import hashlib
 import math
 import os
+import struct
 import warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -111,6 +112,9 @@ class GeoType(enum.IntEnum):
     GAUSSIAN = 11
     """Gaussian splat."""
 
+    REVOLVED = 12
+    """Convex solid of revolution with a cubic Bézier radial profile."""
+
     @property
     def is_primitive(self) -> bool:
         """Return whether this is a primitive (analytically defined) shape type."""
@@ -122,12 +126,30 @@ class GeoType(enum.IntEnum):
             GeoType.BOX,
             GeoType.ELLIPSOID,
             GeoType.PLANE,
+            GeoType.REVOLVED,
         }
 
     @property
     def is_explicit(self) -> bool:
         """Return whether this is an explicit (data-driven) shape type."""
         return self in {GeoType.MESH, GeoType.CONVEX_MESH, GeoType.HFIELD}
+
+
+class RevolvedData:
+    """Host-side parameters stored in the source field of a revolved shape."""
+
+    def __init__(self, radius_control_bottom: float, radius_control_top: float):
+        self.radius_control_bottom = float(np.float32(radius_control_bottom))
+        self.radius_control_top = float(np.float32(radius_control_top))
+
+    def __hash__(self) -> int:
+        return hash((self.radius_control_bottom, self.radius_control_top))
+
+    def finalize(self) -> int:
+        """Pack both control radii into the existing 64-bit source field."""
+        bottom_bits = struct.unpack("<I", struct.pack("<f", self.radius_control_bottom))[0]
+        top_bits = struct.unpack("<I", struct.pack("<f", self.radius_control_top))[0]
+        return bottom_bits | (top_bits << 32)
 
 
 class Mesh:

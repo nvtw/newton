@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import warp as wp
 
 from ..core import MAXVAL
+from .support_function import unpack_revolved_control_radii
 from .types import Gaussian, GeoType
 
 if TYPE_CHECKING:
@@ -153,6 +154,8 @@ def is_supported_shape_type(shape_type: wp.int32) -> wp.bool:
         return True
     if shape_type == GeoType.CONE:
         return True
+    if shape_type == GeoType.REVOLVED:
+        return True
     if shape_type == GeoType.MESH:
         return True
     if shape_type == GeoType.CONVEX_MESH:
@@ -256,6 +259,7 @@ def compute_shape_bvh_bounds(
     shape_enabled: wp.array[wp.uint32],
     shape_types: wp.array[wp.int32],
     shape_sizes: wp.array[wp.vec3f],
+    shape_sources: wp.array[wp.uint64],
     shape_transforms: wp.array[wp.transformf],
     shape_bounds: wp.array2d[wp.vec3f],
     out_bvh_lowers: wp.array[wp.vec3f],
@@ -291,6 +295,10 @@ def compute_shape_bvh_bounds(
         lower, upper = compute_cylinder_bounds(transform, size)
     elif geom_type == GeoType.CONE:
         lower, upper = compute_cone_bounds(transform, size)
+    elif geom_type == GeoType.REVOLVED:
+        controls = unpack_revolved_control_radii(shape_sources[shape_index])
+        radius = wp.max(wp.max(size[0], size[1]), wp.max(controls[0], controls[1]))
+        lower, upper = compute_cylinder_bounds(transform, wp.vec3(radius, size[2], 0.0))
     elif geom_type == GeoType.PLANE:
         lower, upper = compute_plane_bounds(transform, size)
     elif geom_type == GeoType.ELLIPSOID:
@@ -367,6 +375,7 @@ def compute_shape_bvh_bounds_launch(
             model.bvh_shape_enabled,
             model.shape_type,
             model.shape_scale,
+            model.shape_source_ptr,
             model.bvh_shape_world_transforms,
             model.bvh_shape_bounds,
             lowers,

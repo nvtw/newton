@@ -25,6 +25,8 @@ from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
     pack_mesh_ptr,
+    revolved_power_coefficients,
+    unpack_revolved_control_radii,
 )
 from ..geometry.types import GeoType
 from ..sim.contacts import Contacts
@@ -276,6 +278,9 @@ def compute_shape_aabbs(
         # For CONVEX_MESH, pack the mesh pointer
         if geo_type == GeoType.CONVEX_MESH:
             shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[shape_id])
+        elif geo_type == GeoType.REVOLVED:
+            controls = unpack_revolved_control_radii(shape_source_ptr[shape_id])
+            shape_data.auxiliary = revolved_power_coefficients(geom_scale, controls)
 
         data_provider = SupportMapDataProvider()
 
@@ -1066,13 +1071,14 @@ class CollisionPipeline:
                     )
                     has_meshes = has_meshes or has_planar_sdf_shapes
                 # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
-                # cylinders, or cones (which need full support function and axial
-                # rolling post-processing)
+                # cylinders, cones, or revolved shapes (which need the full
+                # support function and, for axial primitives, rolling post-processing)
                 lean_unsupported = {
                     int(GeoType.CAPSULE),
                     int(GeoType.ELLIPSOID),
                     int(GeoType.CYLINDER),
                     int(GeoType.CONE),
+                    int(GeoType.REVOLVED),
                 }
                 use_lean_gjk_mpr = not bool(lean_unsupported & set(colliding_shape_types.tolist()))
 

@@ -243,10 +243,22 @@ Newton supports the following geometry types via :class:`~GeoType`:
      - Cone
    * - ``ELLIPSOID``
      - Ellipsoid
+   * - ``REVOLVED``
+     - Convex cubic-Bézier solid of revolution
    * - ``MESH``
      - Triangle mesh (arbitrary, including non-convex)
    * - ``CONVEX_MESH``
      - Convex hull mesh
+
+``REVOLVED`` profiles extend along their local Z-axis. Create one with
+``ModelBuilder.add_shape_revolved()`` by specifying the bottom, top, and two cubic
+Bézier control radii. Each control point lies in its adjacent end-cap plane, allowing
+curved profiles to meet both caps tangentially. Setting each control radius equal to
+its adjacent endpoint radius produces an exact straight frustum. Newton validates
+that the radial profile is concave, then evaluates
+its GJK/MPR support point analytically from the single maximum of a cubic objective.
+Ray queries, particle/SDF contact, hydroelastic contact, and interchange import/export
+do not yet support this primitive.
 
 .. note::
    **SDF is collision data, not a standalone shape type.** For mesh shapes, build and attach

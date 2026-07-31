@@ -16,6 +16,7 @@ from .types import (
     GeoType,
     Heightfield,
     Mesh,
+    RevolvedData,
 )
 
 
@@ -70,7 +71,7 @@ def compute_obb_candidates(
     transforms[angle_idx, axis_idx] = wp.transform(world_center, wp.quat_inverse(quat))
 
 
-def compute_shape_radius(geo_type: int, scale: Vec3, src: Mesh | Heightfield | None) -> float:
+def compute_shape_radius(geo_type: int, scale: Vec3, src: Mesh | Heightfield | RevolvedData | None) -> float:
     """
     Calculates the radius of a sphere that encloses the shape, used for broadphase collision detection.
     """
@@ -83,6 +84,14 @@ def compute_shape_radius(geo_type: int, scale: Vec3, src: Mesh | Heightfield | N
     elif geo_type == GeoType.ELLIPSOID:
         # Bounding sphere radius is the largest semi-axis
         return max(abs(scale[0]), abs(scale[1]), abs(scale[2]))
+    elif geo_type == GeoType.REVOLVED:
+        max_radius = max(
+            abs(scale[0]),
+            abs(scale[1]),
+            abs(src.radius_control_bottom),
+            abs(src.radius_control_top),
+        )
+        return float(np.hypot(max_radius, abs(scale[2])))
     elif geo_type == GeoType.MESH or geo_type == GeoType.CONVEX_MESH:
         # Bounding sphere of the local AABB.  We deliberately do NOT use
         # ``max(|vertex|)`` here: that assumes the shape is centered at

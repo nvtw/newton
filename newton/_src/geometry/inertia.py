@@ -16,6 +16,7 @@ from .types import (
     GeoType,
     Heightfield,
     Mesh,
+    RevolvedData,
     Vec3,
 )
 
@@ -41,6 +42,64 @@ _INERTIA_SYMMETRY_RTOL = 1.0e-5
 _INERTIA_SYMMETRY_ATOL = 1.0e-8
 
 _MESH_INERTIA_TILE_SIZE = 256
+
+
+def compute_inertia_revolved(
+    density: float,
+    radius_bottom: float,
+    radius_top: float,
+    radius_control_bottom: float,
+    radius_control_top: float,
+    half_height: float,
+) -> tuple[float, wp.vec3, wp.mat33]:
+    """Compute exact mass properties of a solid cubic-Bézier shape of revolution."""
+    radius = np.array(
+        [
+            radius_bottom,
+            3.0 * (radius_control_bottom - radius_bottom),
+            3.0 * (radius_bottom - 2.0 * radius_control_bottom + radius_control_top),
+            -radius_bottom + 3.0 * radius_control_bottom - 3.0 * radius_control_top + radius_top,
+        ],
+        dtype=np.float64,
+    )
+    radius_sq = np.polynomial.polynomial.polymul(radius, radius)
+    radius_fourth = np.polynomial.polynomial.polymul(radius_sq, radius_sq)
+    z = np.array([-half_height, 0.0, 6.0 * half_height, -4.0 * half_height], dtype=np.float64)
+    z_sq = np.polynomial.polynomial.polymul(z, z)
+    dz_dt = np.array([0.0, 12.0 * half_height, -12.0 * half_height], dtype=np.float64)
+
+    def integrate(coefficients: np.ndarray) -> float:
+        powers = np.arange(1, len(coefficients) + 1, dtype=np.float64)
+        return float(np.sum(coefficients / powers))
+
+    volume = math.pi * integrate(np.polynomial.polynomial.polymul(radius_sq, dz_dt))
+    mass = density * volume
+    first_moment_z = (
+        density
+        * math.pi
+        * integrate(np.polynomial.polynomial.polymul(np.polynomial.polynomial.polymul(z, radius_sq), dz_dt))
+    )
+    com_z = first_moment_z / mass
+
+    inertia_z = density * 0.5 * math.pi * integrate(np.polynomial.polynomial.polymul(radius_fourth, dz_dt))
+    inertia_x_origin = (
+        density
+        * math.pi
+        * integrate(
+            np.polynomial.polynomial.polymul(
+                np.polynomial.polynomial.polyadd(
+                    0.25 * radius_fourth, np.polynomial.polynomial.polymul(z_sq, radius_sq)
+                ),
+                dz_dt,
+            )
+        )
+    )
+    inertia_x = inertia_x_origin - mass * com_z * com_z
+    return (
+        mass,
+        wp.vec3(0.0, 0.0, com_z),
+        wp.mat33(inertia_x, 0.0, 0.0, 0.0, inertia_x, 0.0, 0.0, 0.0, inertia_z),
+    )
 
 
 def _validate_hollow_thickness(
@@ -588,7 +647,7 @@ def transform_inertia(mass: float, inertia: wp.mat33, offset: wp.vec3, quat: wp.
 def compute_inertia_shape(
     type: int,
     scale: Vec3,
-    src: Mesh | Heightfield | None,
+    src: Mesh | Heightfield | RevolvedData | None,
     density: float,
     is_solid: bool = True,
     thickness: list[float] | float = 0.001,
@@ -699,6 +758,19 @@ def compute_inertia_shape(
                 density, scale[0] - thickness, scale[1] - thickness, scale[2] - thickness
             )
             return solid[0] - hollow[0], solid[1], solid[2] - hollow[2]
+    elif type == GeoType.REVOLVED:
+        if not is_solid:
+            raise ValueError("Revolved shapes support only solid mass properties.")
+        if not isinstance(src, RevolvedData):
+            raise ValueError("Revolved shapes require cubic Bézier control radii.")
+        return compute_inertia_revolved(
+            density,
+            scale[0],
+            scale[1],
+            src.radius_control_bottom,
+            src.radius_control_top,
+            scale[2],
+        )
     elif type == GeoType.HFIELD or type == GeoType.GAUSSIAN:
         # Heightfields are always static terrain; Gaussians are render-only (zero mass, zero inertia)
         return 0.0, wp.vec3(), wp.mat33()

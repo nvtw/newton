@@ -19,6 +19,7 @@ Supported primitives:
 - Ellipsoid
 - Cylinder
 - Cone
+- Cubic-Bézier solid of revolution
 - Plane (finite rectangular plane)
 - Convex hull (arbitrary convex mesh)
 - Triangle
@@ -79,6 +80,34 @@ def unpack_mesh_ptr(arr: wp.vec3) -> wp.uint64:
     return chunk1 | chunk2 | chunk3
 
 
+@wp.func_native("""
+return reinterpret_cast<float&>(value);
+""")
+def uint_bits_to_float(value: wp.uint32) -> float: ...
+
+
+@wp.func
+def unpack_revolved_control_radii(value: wp.uint64) -> wp.vec2:
+    """Unpack two float32 control radii from a 64-bit shape source value."""
+    bottom = uint_bits_to_float(wp.uint32(value & wp.uint64(0xFFFFFFFF)))
+    top = uint_bits_to_float(wp.uint32(value >> wp.uint64(32)))
+    return wp.vec2(bottom, top)
+
+
+@wp.func
+def revolved_power_coefficients(scale: wp.vec3, controls: wp.vec2) -> wp.vec3:
+    """Convert a cubic Bézier radius profile to power-basis coefficients."""
+    radius_bottom = scale[0]
+    radius_top = scale[1]
+    control_bottom = controls[0]
+    control_top = controls[1]
+    return wp.vec3(
+        -radius_bottom + 3.0 * control_bottom - 3.0 * control_top + radius_top,
+        3.0 * (radius_bottom - 2.0 * control_bottom + control_top),
+        3.0 * (control_bottom - radius_bottom),
+    )
+
+
 @wp.struct
 class GenericShapeData:
     """
@@ -93,6 +122,8 @@ class GenericShapeData:
       - ELLIPSOID: semi-axes (x, y, z)
       - CYLINDER: radius in x, half-height in y (axis +Z)
       - CONE: radius in x, half-height in y (axis +Z, apex at +Z)
+      - REVOLVED: bottom radius in x, top radius in y, half-height in z;
+        cubic radius power coefficients in auxiliary x/y/z
       - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
       - TRIANGLE: vertex B-A stored in scale, vertex C-A stored in auxiliary
       - TRIANGLE_PRISM: same as TRIANGLE; support function extrudes 1 m along -Z
@@ -116,6 +147,8 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
     - CYLINDER: radius in x, half-height in y (axis along +Z)
     - CONE: radius in x, half-height in y (axis along +Z, apex at +Z)
     - PLANE: half-width in x, half-length in y (lies in XY plane at z=0, normal along +Z)
+    - REVOLVED: scale contains bottom radius, top radius, and half-height;
+      auxiliary contains cubic radius power coefficients
     - CONVEX_MESH: scale contains mesh scale, auxiliary contains packed mesh pointer
     - TRIANGLE: scale contains vector B-A, auxiliary contains vector C-A (relative to vertex A at origin)
     """
@@ -284,6 +317,51 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
                 n_xy = dir_xy / dir_xy_len
                 result = wp.vec3(n_xy[0] * radius, n_xy[1] * radius, -half_height)
 
+    elif geom.shape_type == GeoType.REVOLVED:
+        radius_bottom = geom.scale[0]
+        radius_top = geom.scale[1]
+        half_height = geom.scale[2]
+        cubic = geom.auxiliary[0]
+        quadratic = geom.auxiliary[1]
+        linear = geom.auxiliary[2]
+
+        radial_len = wp.sqrt(direction[0] * direction[0] + direction[1] * direction[1])
+        if radial_len <= eps:
+            if direction[2] > 0.0:
+                result = wp.vec3(0.0, 0.0, half_height)
+            elif direction[2] < 0.0:
+                result = wp.vec3(0.0, 0.0, -half_height)
+            else:
+                result = wp.vec3(radius_bottom, 0.0, -half_height)
+        else:
+            # Both profile coordinates are cubic, so the support derivative is
+            # quadratic. Convexity identifies its + to - crossing as the maximum.
+            qa = 3.0 * radial_len * cubic - 12.0 * half_height * direction[2]
+            qb = 2.0 * radial_len * quadratic + 12.0 * half_height * direction[2]
+            qc = radial_len * linear
+            control_delta_bottom = linear / 3.0
+            control_delta_top = -(3.0 * cubic + 2.0 * quadratic + linear) / 3.0
+
+            if control_delta_bottom + control_delta_top <= eps:
+                # Coincident radial controls produce an exact straight frustum.
+                slope = radial_len * (radius_top - radius_bottom) + 2.0 * half_height * direction[2]
+                best_t = 1.0 if slope >= 0.0 else 0.0
+            elif wp.abs(qa) <= eps:
+                best_t = wp.clamp(-qc / qb, 0.0, 1.0)
+            else:
+                discriminant = wp.max(qb * qb - 4.0 * qa * qc, 0.0)
+                root = wp.sqrt(discriminant)
+                if qb >= 0.0:
+                    best_t = (-qb - root) / (2.0 * qa)
+                else:
+                    best_t = 2.0 * qc / (-qb + root)
+                best_t = wp.clamp(best_t, 0.0, 1.0)
+
+            best_radius = ((cubic * best_t + quadratic) * best_t + linear) * best_t + radius_bottom
+            radial_direction = wp.vec3(direction[0] / radial_len, direction[1] / radial_len, 0.0)
+            result = radial_direction * best_radius
+            result[2] = -half_height + half_height * best_t * best_t * (6.0 - 4.0 * best_t)
+
     elif geom.shape_type == GeoType.PLANE:
         # Finite plane support: rectangular plane in XY, extents in scale[0] (half-width X) and scale[1] (half-length Y)
         # The plane lies at z=0 with normal along +Z
@@ -311,7 +389,7 @@ def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: 
 
     This is a specialized version of support_map with reduced code size to improve
     GPU instruction cache utilization. It omits support for CAPSULE, ELLIPSOID,
-    CYLINDER, CONE, PLANE, and TRIANGLE shapes.
+    CYLINDER, CONE, REVOLVED, PLANE, and TRIANGLE shapes.
     """
     result = wp.vec3(0.0, 0.0, 0.0)
 
@@ -389,6 +467,9 @@ def extract_shape_data(
     # For CONVEX_MESH, pack the mesh pointer into auxiliary
     if shape_types[shape_idx] == GeoType.CONVEX_MESH:
         result.auxiliary = pack_mesh_ptr(shape_source[shape_idx])
+    elif shape_types[shape_idx] == GeoType.REVOLVED:
+        controls = unpack_revolved_control_radii(shape_source[shape_idx])
+        result.auxiliary = revolved_power_coefficients(scale, controls)
 
     return position, orientation, result, scale, margin_offset
 
