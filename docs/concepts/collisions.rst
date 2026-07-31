@@ -285,11 +285,6 @@ average or a per-pair limit.
      - ``E_heightfield + E_mesh``
      - About 40
      - Uses the mesh/SDF route with on-the-fly heightfield evaluation.
-   * - Heightfield--heightfield
-     - 0
-     - 0
-     - 0
-     - The narrow-phase route is unsupported.
    * - Hydroelastic SDF--SDF
      - 240 by default
      - Geometry and buffer dependent
