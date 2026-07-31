@@ -30,6 +30,8 @@ import warp as wp
 import newton
 import newton.examples
 
+ANCHOR_FRAME = True
+
 if source_root is not None and Path(newton.__file__).resolve().parents[1] != source_root:
     raise RuntimeError(
         f"This example belongs to {source_root}, but Python imported Newton from {newton.__file__}. "
@@ -117,6 +119,8 @@ def _rotate_vector(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
 
 
 def _transform_point(body_q: np.ndarray, body: int, point: np.ndarray) -> np.ndarray:
+    if body < 0:
+        return point
     return body_q[body, :3] + _rotate_vector(body_q[body, 3:7], point)
 
 
@@ -138,7 +142,7 @@ class Example:
         self.device = wp.get_device()
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
-        self.sim_substeps = max(1, args.substeps) if args else 8
+        self.sim_substeps = max(1, args.substeps) if args else 6
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
 
@@ -157,6 +161,14 @@ class Example:
             hide_collision_shapes=False,
             ignore_paths=[r"/World/GroundPlane.*"],
         )
+        frame_body = import_result["path_body_map"]["/World/Clock/Frame"]
+        if ANCHOR_FRAME:
+            builder.add_joint_fixed(
+                parent=-1,
+                child=frame_body,
+                parent_xform=builder.body_q[frame_body],
+                label="clock_frame_anchor",
+            )
         # Preserve the source plane's transformed height; z=0 intersects the clock's gears.
         ground_cfg = builder.default_shape_cfg.copy()
         ground_cfg.margin = 0.0
@@ -166,7 +178,7 @@ class Example:
             import_result["path_shape_map"]["/World/Clock/Frame/right_frame_obj0/Cube"],
         }
         for shape in range(ground_shape):
-            if shape not in ground_support_shapes:
+            if ANCHOR_FRAME or shape not in ground_support_shapes:
                 builder.add_shape_collision_filter_pair(shape, ground_shape)
 
         self.model = builder.finalize(skip_validation_joints=True)
@@ -219,7 +231,8 @@ class Example:
         self.joint_qd_start = self.model.joint_qd_start.numpy()
         self.imported_body_count = len(import_result["path_body_map"])
         self.imported_joint_count = len(import_result["path_joint_map"])
-        self.frame_body = import_result["path_body_map"]["/World/Clock/Frame"]
+        self.expected_joint_count = 32 if ANCHOR_FRAME else 31
+        self.frame_body = frame_body
         self.motor_body = import_result["path_body_map"]["/World/Clock/MotorGear"]
         self.middle_body = import_result["path_body_map"]["/World/Clock/MiddleGear"]
         self.motor_shape = import_result["path_shape_map"]["/World/Clock/MotorGear/mesh"]
@@ -317,6 +330,9 @@ class Example:
         """Verify body state and closed-loop joint stability."""
         assert self.imported_body_count == 25, f"Expected 25 clock bodies, imported {self.imported_body_count}"
         assert self.imported_joint_count == 31, f"Expected 31 clock joints, imported {self.imported_joint_count}"
+        assert self.model.joint_count == self.expected_joint_count, (
+            f"Expected {self.expected_joint_count} joints, found {self.model.joint_count}"
+        )
         assert self.velocity_drive_count == 1, f"Expected one velocity drive, found {self.velocity_drive_count}"
         assert self.position_spring_count == 7, f"Expected seven follower springs, found {self.position_spring_count}"
         body_q = self.state_0.body_q.numpy()
@@ -356,6 +372,8 @@ class Example:
             parent_anchor = _transform_point(body_q, parent, parent_xform[:3])
             child_anchor = _transform_point(body_q, child, child_xform[:3])
             max_joint_gap = max(max_joint_gap, float(np.linalg.norm(parent_anchor - child_anchor)))
+            if self.joint_qd_start[joint] == self.joint_qd_start[joint + 1]:
+                continue
             parent_rotation = _quaternion_multiply(body_q[parent, 3:7], parent_xform[3:7])
             child_rotation = _quaternion_multiply(body_q[child, 3:7], child_xform[3:7])
             axis = self.joint_axis[self.joint_qd_start[joint]]
@@ -368,7 +386,7 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
-        parser.add_argument("--substeps", type=int, default=8, help="Simulation substeps per rendered frame.")
+        parser.add_argument("--substeps", type=int, default=6, help="Simulation substeps per rendered frame.")
         return parser
 
 

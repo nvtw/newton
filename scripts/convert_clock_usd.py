@@ -43,11 +43,14 @@ def convert(source: Path, output: Path, max_sdf_resolution: int, gear_sdf_resolu
 
     for prim in stage.Traverse():
         property_names = {prop.GetName() for prop in prim.GetProperties()}
+        has_angular_drive = "PhysicsDriveAPI:angular" in prim.GetAppliedSchemas()
         if any(name.startswith("material:binding") for name in property_names):
             prim.AddAppliedSchema("MaterialBindingAPI")
         for prop in list(prim.GetProperties()):
             name = prop.GetName()
-            if name.startswith("physxCookedData:"):
+            if name.startswith("drive:angular:") and not has_angular_drive:
+                prim.RemoveProperty(name)
+            elif name.startswith("physxCookedData:"):
                 value = prop.Get() if hasattr(prop, "Get") else None
                 removed_bytes += len(value) if value is not None else 0
                 prim.RemoveProperty(name)
