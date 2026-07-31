@@ -18,6 +18,9 @@ import newton.utils
 from newton import JointTargetMode
 from newton.solvers import SolverMuJoCo
 
+# Set to True for PhoenX reduced coordinates; False uses full-coordinate joint mechanisms.
+PHOENX_USE_REDUCED_COORDINATES = True
+
 
 class Example:
     def __init__(self, viewer, args):
@@ -77,7 +80,11 @@ class Example:
             # the multi-world step layout exercises this scene's
             # world_count > 1 behaviour.
             self.solver = newton.solvers.SolverPhoenX(
-                self.model, substeps=4, solver_iterations=8, velocity_iterations=1
+                self.model,
+                substeps=4,
+                solver_iterations=8,
+                velocity_iterations=1,
+                articulation_mode="reduced" if PHOENX_USE_REDUCED_COORDINATES else "maximal",
             )
         else:
             self.solver = SolverMuJoCo(

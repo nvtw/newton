@@ -91,6 +91,7 @@
 - Specialize reduced-coordinate PhoenX fused advance and publication by articulation topology width.
 - Accelerate reduced-coordinate PhoenX compact patch-contact rows with subgroup-cooperative response and solved-delta traversal without changing hard-contact equations.
 - Accelerate dense large-world SAP broad-phase traversal while retaining the existing path for sparse scenes.
+- Default PhoenX-selectable robot examples to reduced coordinates and expose a top-level `PHOENX_USE_REDUCED_COORDINATES` switch; set it to `False` to retain full-coordinate direct joint mechanisms.
 - Accelerate large-batch experimental PhoenXRL FP32 inference with optional cuBLAS contractions while retaining the Warp fallback.
 - Reduce experimental PhoenXRL MinGRU training traffic with sparse FP32 recurrent checkpoints and deterministic register recomputation.
 - Reduce experimental PhoenXRL MinGRU projection activation storage and traffic with BF16 cuBLAS outputs while keeping recurrence and accumulation FP32.
@@ -201,6 +202,7 @@
 - Fix PhoenX-enabled robot and basic examples constructing contact buffers without persistent matching.
 - Fix PhoenX G1 and recording examples replaying a stale CUDA-graph input state when using one outer simulation step.
 - Fix severe post-impact horizontal drift in the PhoenX G1 example caused by under-converged contact and friction inequalities.
+- Fix matched PhoenX contacts changing the world-space direction of warm-started friction impulses when their tangent frames rotate.
 - Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.
 - Fix PhoenX direct-equality scheduling to apply cached drive and limit warm-start impulses once per substep instead of once per PGS iteration.
 - Preserve authored curved cable rest poses in `SolverPhoenX`, including rest-state refresh after joint-frame or body-pose edits.

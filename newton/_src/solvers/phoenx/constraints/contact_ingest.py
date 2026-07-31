@@ -41,7 +41,9 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
+    cc_get_prev_normal,
     cc_get_prev_normal_lambda,
+    cc_get_prev_tangent1,
     cc_get_prev_tangent1_lambda,
     cc_get_prev_tangent2_lambda,
     cc_set_normal,
@@ -885,6 +887,21 @@ def _build_tangent1_from_normal(n: wp.vec3f) -> wp.vec3f:
     )
 
 
+@wp.func
+def _rotate_tangent_warmstart(
+    previous_normal: wp.vec3f,
+    previous_tangent1: wp.vec3f,
+    previous_lambda1: wp.float32,
+    previous_lambda2: wp.float32,
+    normal: wp.vec3f,
+    tangent1: wp.vec3f,
+) -> wp.vec2f:
+    """Express a matched contact world tangent impulse in its new frame."""
+    previous_tangent2 = wp.cross(previous_normal, previous_tangent1)
+    tangent_impulse = previous_lambda1 * previous_tangent1 + previous_lambda2 * previous_tangent2
+    return wp.vec2f(wp.dot(tangent_impulse, tangent1), wp.dot(tangent_impulse, wp.cross(normal, tangent1)))
+
+
 @wp.kernel(enable_backward=False)
 def _contact_warmstart_gather_kernel(
     pair_id: wp.array[wp.int32],
@@ -930,8 +947,18 @@ def _contact_warmstart_gather_kernel(
     lambda_t2 = wp.float32(0.0)
     if prev_valid and carry_impulses != wp.int32(0):
         lambda_n = cc_get_prev_normal_lambda(cc, prev_k)
-        lambda_t1 = cc_get_prev_tangent1_lambda(cc, prev_k)
-        lambda_t2 = cc_get_prev_tangent2_lambda(cc, prev_k)
+        prev_n = cc_get_prev_normal(cc, prev_k)
+        prev_t1 = cc_get_prev_tangent1(cc, prev_k)
+        tangent_lambda = _rotate_tangent_warmstart(
+            prev_n,
+            prev_t1,
+            cc_get_prev_tangent1_lambda(cc, prev_k),
+            cc_get_prev_tangent2_lambda(cc, prev_k),
+            n,
+            t1,
+        )
+        lambda_t1 = tangent_lambda[0]
+        lambda_t2 = tangent_lambda[1]
 
     uses_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
     if uses_start_gap or reuse:

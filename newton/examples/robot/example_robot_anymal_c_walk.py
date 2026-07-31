@@ -20,6 +20,9 @@ import newton.examples
 import newton.utils
 from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
 
+# Set to True for PhoenX reduced coordinates; False uses full-coordinate joint mechanisms.
+PHOENX_USE_REDUCED_COORDINATES = True
+
 lab_to_mujoco = [0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11]
 mujoco_to_lab = [0, 4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11]
 
@@ -168,6 +171,7 @@ class Example:
                 substeps=4,
                 solver_iterations=8,
                 velocity_iterations=1,
+                articulation_mode="reduced" if PHOENX_USE_REDUCED_COORDINATES else "maximal",
             )
         else:
             self.solver = newton.solvers.SolverMuJoCo(

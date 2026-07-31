@@ -21,6 +21,9 @@ import newton.utils
 from newton import JointTargetMode
 from newton.selection import ArticulationView
 
+# Set to True for PhoenX reduced coordinates; False uses full-coordinate joint mechanisms.
+PHOENX_USE_REDUCED_COORDINATES = True
+
 
 @wp.kernel
 def update_joint_target_trajectory_kernel(
@@ -166,6 +169,7 @@ class Example:
                 substeps=self.sim_substeps,
                 solver_iterations=8,
                 velocity_iterations=1,
+                articulation_mode="reduced" if PHOENX_USE_REDUCED_COORDINATES else "maximal",
             )
             self.contacts = self.model.contacts()
         else:

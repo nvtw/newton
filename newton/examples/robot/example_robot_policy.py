@@ -35,6 +35,9 @@ import newton.utils
 from newton import JointTargetMode
 from newton.examples.robot.onnx_policy_utils import validate_policy_io_shapes
 
+# Set to True for PhoenX reduced coordinates; False uses full-coordinate joint mechanisms.
+PHOENX_USE_REDUCED_COORDINATES = True
+
 
 @dataclass
 class RobotConfig:
@@ -356,6 +359,7 @@ class Example:
                 solver_iterations=8,
                 velocity_iterations=2,
                 velocity_readout="substep_end",
+                articulation_mode="reduced" if PHOENX_USE_REDUCED_COORDINATES else "maximal",
             )
         else:
             self.solver = newton.solvers.SolverMuJoCo(

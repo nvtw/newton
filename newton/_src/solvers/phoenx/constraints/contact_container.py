@@ -33,7 +33,9 @@ __all__ = [
     "cc_get_pd_bias",
     "cc_get_pd_eff_soft",
     "cc_get_pd_gamma",
+    "cc_get_prev_normal",
     "cc_get_prev_normal_lambda",
+    "cc_get_prev_tangent1",
     "cc_get_prev_tangent1_lambda",
     "cc_get_prev_tangent2_lambda",
     "cc_get_r0",
@@ -135,6 +137,7 @@ class ContactContainer:
     impulses: wp.array2d[wp.float32]
     prev_impulses: wp.array2d[wp.float32]
     lambdas: wp.array2d[wp.float32]
+    prev_lambdas: wp.array2d[wp.float32]
     derived: wp.array2d[wp.float32]
 
 
@@ -149,6 +152,8 @@ def _contact_container_copy_current_to_prev_kernel(cc: ContactContainer, valid_c
         return
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         cc.prev_impulses[row, k] = cc.impulses[row, k]
+    for row in range(CC_RIGID_DWORDS_PER_CONTACT):
+        cc.prev_lambdas[row, k] = cc.lambdas[row, k]
 
 
 @wp.kernel(enable_backward=False)
@@ -184,6 +189,8 @@ def _contact_container_clear_reset_worlds_kernel(
         cc.prev_impulses[row, k] = wp.float32(0.0)
     for row in range(CC_DWORDS_PER_CONTACT):
         cc.lambdas[row, k] = wp.float32(0.0)
+    for row in range(CC_RIGID_DWORDS_PER_CONTACT):
+        cc.prev_lambdas[row, k] = wp.float32(0.0)
     for row in range(CC_DERIVED_DWORDS_PER_CONTACT):
         cc.derived[row, k] = wp.float32(0.0)
 
@@ -315,6 +322,24 @@ def cc_get_prev_tangent1_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32
 @wp.func
 def cc_get_prev_tangent2_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
     return read2d_f32(cc.prev_impulses, _CC_OFF_TANGENT2_LAMBDA, k)
+
+
+@wp.func
+def cc_get_prev_normal(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    return wp.vec3f(
+        read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_X, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_Y, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_NORMAL_Z, k),
+    )
+
+
+@wp.func
+def cc_get_prev_tangent1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    return wp.vec3f(
+        read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_X, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_Y, k),
+        read2d_f32(cc.prev_lambdas, _CC_OFF_TANGENT1_Z, k),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +485,7 @@ def contact_container_zeros(
     cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.prev_lambdas = wp.zeros((CC_RIGID_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     return cc
 
@@ -475,6 +501,7 @@ def contact_solve_container_zeros(
     cc = ContactContainer()
     cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_impulses = wp.zeros((1, 1), dtype=wp.float32, device=device)
+    cc.prev_lambdas = wp.zeros((1, 1), dtype=wp.float32, device=device)
     # Prepare, iterate, and relax share this color-ordered state across
     # every substep, including manifold anchors needed by prepare.
     lambda_rows = CC_RIGID_DWORDS_PER_CONTACT if rigid_only else CC_DWORDS_PER_CONTACT
