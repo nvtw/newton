@@ -503,6 +503,48 @@ class LinesGL:
             gl.glBindVertexArray(0)
 
 
+def update_line_batch(
+    batches: dict[str, LinesGL],
+    name: str,
+    starts: wp.array[wp.vec3] | None,
+    ends: wp.array[wp.vec3] | None,
+    colors: wp.array[wp.vec3] | wp.array[wp.float32] | tuple[float, float, float] | list[float] | None,
+    device: wp.Device,
+    *,
+    hidden: bool = False,
+) -> None:
+    """Create or update a reusable OpenGL line batch."""
+    if starts is None or ends is None or colors is None:
+        if name in batches:
+            batches[name].update(None, None, None)
+        return
+
+    num_lines = len(starts)
+    if len(ends) != num_lines:
+        raise ValueError("Number of line ends must match line begins")
+
+    if isinstance(colors, tuple | list):
+        colors_array = wp.zeros(num_lines, dtype=wp.vec3, device=device)
+        if num_lines > 0:
+            colors_array.fill_(wp.vec3(*colors))
+        colors = colors_array
+    elif colors.dtype == wp.float32:
+        colors = colors.reshape((num_lines, 3)).view(dtype=wp.vec3)
+
+    if len(colors) != num_lines:
+        raise ValueError("Number of line colors must match line begins")
+
+    if name not in batches:
+        batches[name] = LinesGL(max(num_lines, 1000), device, hidden=hidden)
+    elif num_lines > batches[name].max_lines:
+        old_capacity = batches[name].max_lines
+        batches[name].destroy()
+        batches[name] = LinesGL(max(num_lines, old_capacity * 2), device, hidden=hidden)
+
+    batches[name].update(starts, ends, colors)
+    batches[name].hidden = hidden
+
+
 class WireframeShapeGL:
     """Per-shape wireframe edge data rendered via GL_LINES with a geometry shader.
 

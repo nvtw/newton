@@ -180,6 +180,69 @@ Set the PyOpenGL platform before running:
 
 This is a known issue when running OpenGL applications on Wayland display servers.
 
+OptiX Viewer
+~~~~~~~~~~~~
+
+:class:`~newton.viewer.ViewerOptix` provides interactive path-traced rendering through
+NVIDIA OptiX, with DLSS Ray Reconstruction when it is available on the system. It uses
+the same Newton model/state logging interface as :class:`~newton.viewer.ViewerGL` and
+supports camera navigation, right-click body picking, pause and single-step controls,
+custom ImGui callbacks, depth-tested debug lines and contact arrows, headless rendering,
+and :meth:`~newton.viewer.ViewerOptix.get_frame`. Plane geometry uses a light neutral
+gray by default. Pass ``ground_color=`` to change it, or ``exposure=``, ``contrast=``,
+and ``saturation=`` to adjust tone mapping without remapping authored material inputs.
+The rendering panel provides procedural-sky time-of-day and intensity controls; they
+are also available through ``time_of_day=`` and ``sky_intensity=``. Automatically
+colored shapes use a saturated rainbow palette without pink. Pass
+``default_color_palette=`` or call
+:meth:`~newton.viewer.ViewerOptix.set_default_color_palette` before or after scene
+setup to replace it; explicit and authored colors remain unchanged. Un-authored
+primitive materials use a moderately rough dielectric with a subtle clearcoat; tune
+it with ``default_roughness=``, ``default_ior=``, ``default_specular=``,
+``default_clearcoat=``, and ``default_clearcoat_roughness=``.
+
+The renderer is maintained separately in the ``otk-pyoptix`` repository. Build its
+native PyOptiX binding and install the Warp viewer addon into Newton's environment:
+
+.. code-block:: bash
+
+    git clone https://github.com/NVIDIA/otk-pyoptix.git
+    uv pip install ./otk-pyoptix
+    uv pip install -e './otk-pyoptix/warp_optix[pathtracing,ui,recording]'
+
+The PyOptiX build downloads the supported OptiX and DLSS SDK components automatically.
+A CUDA-capable NVIDIA RTX GPU and compatible display driver are required. When DLSS Ray
+Reconstruction is unavailable, the viewer continues at full render resolution without it.
+
+Run any compatible example by selecting the ``optix`` viewer:
+
+.. code-block:: bash
+
+    uv run -m newton.examples basic_shapes --viewer optix
+
+Or construct it directly:
+
+.. code-block:: python
+
+    viewer = newton.viewer.ViewerOptix(enable_dlss_rr=True)
+    viewer.set_model(model)
+
+    while viewer.is_running():
+        if viewer.should_step():
+            viewer.apply_forces(state)
+            solver.step(state, ...)
+
+        viewer.begin_frame(sim_time)
+        viewer.log_state(state)
+        viewer.end_frame()
+
+    viewer.close()
+
+.. note::
+    The OptiX backend currently ignores textures passed directly to ``log_mesh()``,
+    debug points, image windows, and transform gizmos. Examples relying on those
+    features still run, but those elements are not rendered.
+
 RTX Viewer
 ~~~~~~~~~~
 

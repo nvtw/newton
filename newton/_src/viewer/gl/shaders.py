@@ -781,9 +781,26 @@ in vec3 lineColor;
 out vec4 FragColor;
 
 uniform float alpha;
+uniform sampler2D scene_depth;
+uniform bool use_scene_depth;
+uniform vec2 viewport_size;
+uniform float camera_near;
+uniform float camera_far;
 
 void main()
 {
+    if (use_scene_depth) {
+        vec2 uv = gl_FragCoord.xy / max(viewport_size, vec2(1.0));
+        uv.y = 1.0 - uv.y;
+        float linear_depth = texture(scene_depth, uv).r;
+        if (linear_depth > 0.0) {
+            float scene_window_depth = camera_far / (camera_far - camera_near)
+                - (camera_far * camera_near)
+                    / ((camera_far - camera_near) * linear_depth);
+            if (gl_FragCoord.z > scene_window_depth + 2e-6)
+                discard;
+        }
+    }
     FragColor = vec4(lineColor, alpha);
 }
 """
@@ -810,6 +827,11 @@ class ShaderLine(ShaderGL):
             self.loc_inv_asp_ratio = self._get_uniform_location("inv_asp_ratio")
             self.loc_line_width = self._get_uniform_location("line_width")
             self.loc_alpha = self._get_uniform_location("alpha")
+            self.loc_scene_depth = self._get_uniform_location("scene_depth")
+            self.loc_use_scene_depth = self._get_uniform_location("use_scene_depth")
+            self.loc_viewport_size = self._get_uniform_location("viewport_size")
+            self.loc_camera_near = self._get_uniform_location("camera_near")
+            self.loc_camera_far = self._get_uniform_location("camera_far")
 
     def update_frame(
         self,
@@ -818,6 +840,10 @@ class ShaderLine(ShaderGL):
         inv_asp_ratio: float,
         line_width: float = 0.003,
         alpha: float = 0.7,
+        scene_depth_texture_unit: int | None = None,
+        viewport_size: tuple[int, int] = (1, 1),
+        camera_near: float = 0.01,
+        camera_far: float = 1000.0,
     ):
         """Set per-frame uniforms (call once before rendering all wireframe shapes)."""
         self._gl.glUniformMatrix4fv(self.loc_view, 1, self._gl.GL_FALSE, arr_pointer(view_matrix))
@@ -825,6 +851,11 @@ class ShaderLine(ShaderGL):
         self._gl.glUniform1f(self.loc_inv_asp_ratio, float(inv_asp_ratio))
         self._gl.glUniform1f(self.loc_line_width, float(line_width))
         self._gl.glUniform1f(self.loc_alpha, float(alpha))
+        self._gl.glUniform1i(self.loc_scene_depth, int(scene_depth_texture_unit or 0))
+        self._gl.glUniform1i(self.loc_use_scene_depth, scene_depth_texture_unit is not None)
+        self._gl.glUniform2f(self.loc_viewport_size, float(viewport_size[0]), float(viewport_size[1]))
+        self._gl.glUniform1f(self.loc_camera_near, float(camera_near))
+        self._gl.glUniform1f(self.loc_camera_far, float(camera_far))
 
     def set_world(self, world: np.ndarray):
         """Set the per-shape world matrix uniform."""
@@ -930,6 +961,11 @@ class ShaderArrow(ShaderGL):
             self.loc_line_width = self._get_uniform_location("line_width")
             self.loc_arrow_size = self._get_uniform_location("arrow_size")
             self.loc_alpha = self._get_uniform_location("alpha")
+            self.loc_scene_depth = self._get_uniform_location("scene_depth")
+            self.loc_use_scene_depth = self._get_uniform_location("use_scene_depth")
+            self.loc_viewport_size = self._get_uniform_location("viewport_size")
+            self.loc_camera_near = self._get_uniform_location("camera_near")
+            self.loc_camera_far = self._get_uniform_location("camera_far")
 
     def update_frame(
         self,
@@ -939,6 +975,10 @@ class ShaderArrow(ShaderGL):
         line_width: float = 0.003,
         arrow_size: float = 0.01,
         alpha: float = 1.0,
+        scene_depth_texture_unit: int | None = None,
+        viewport_size: tuple[int, int] = (1, 1),
+        camera_near: float = 0.01,
+        camera_far: float = 1000.0,
     ):
         """Set per-frame uniforms (call once before rendering all arrow batches)."""
         self._gl.glUniformMatrix4fv(self.loc_view, 1, self._gl.GL_FALSE, arr_pointer(view_matrix))
@@ -947,6 +987,11 @@ class ShaderArrow(ShaderGL):
         self._gl.glUniform1f(self.loc_line_width, float(line_width))
         self._gl.glUniform1f(self.loc_arrow_size, float(arrow_size))
         self._gl.glUniform1f(self.loc_alpha, float(alpha))
+        self._gl.glUniform1i(self.loc_scene_depth, int(scene_depth_texture_unit or 0))
+        self._gl.glUniform1i(self.loc_use_scene_depth, scene_depth_texture_unit is not None)
+        self._gl.glUniform2f(self.loc_viewport_size, float(viewport_size[0]), float(viewport_size[1]))
+        self._gl.glUniform1f(self.loc_camera_near, float(camera_near))
+        self._gl.glUniform1f(self.loc_camera_far, float(camera_far))
 
     def set_world(self, world: np.ndarray):
         """Set the per-shape world matrix uniform."""

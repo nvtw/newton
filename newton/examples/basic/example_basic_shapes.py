@@ -107,6 +107,9 @@ class Example:
         usd_stage = Usd.Stage.Open(newton.examples.get_asset("bunny.usd"))
         demo_mesh = newton.usd.get_mesh(usd_stage.GetPrimAtPath("/root/bunny"))
 
+        demo_mesh.color = (0.82, 0.40, 0.025)
+        demo_mesh.roughness = 0.42
+        demo_mesh.metallic = 0.0
         self.mesh_pos = wp.vec3(0.0, 4.0, drop_z - 0.5)
         body_mesh = builder.add_body(xform=wp.transform(p=self.mesh_pos, q=wp.quat(0.5, 0.5, 0.5, 0.5)), label="mesh")
         builder.add_shape_mesh(body_mesh, mesh=demo_mesh)

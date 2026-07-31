@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Add `ViewerOptix` for interactive OptiX path tracing with DLSS Ray Reconstruction, Newton body picking, ImGui callbacks, depth-tested debug lines and contact arrows, a configurable saturated shape palette, procedural-sky time and intensity controls, a light neutral floor, and headless frame extraction through the separately installed `otk-pyoptix` backend.
 - Add compact, panel-parallel, RCM-reordered direct equality and implicit PD drive solves per connected mechanism to experimental `SolverPhoenX`, including finite motor-effort active sets
 
 
@@ -96,6 +97,7 @@
 - Accelerate large-batch experimental PhoenXRL FP32 inference with optional cuBLAS contractions while retaining the Warp fallback.
 - Reduce experimental PhoenXRL MinGRU training traffic with sparse FP32 recurrent checkpoints and deterministic register recomputation.
 - Reduce experimental PhoenXRL MinGRU projection activation storage and traffic with BF16 cuBLAS outputs while keeping recurrence and accumulation FP32.
+- Tune `ViewerOptix` exposure and un-authored primitive materials to preserve saturated colors while improving surface depth and contact contrast.
 - Make reduced-coordinate PhoenX contact friction independent of fleet size and GPU. Use `contact_friction_model="patch"` for compact manifold friction rows on the reference reduced path; the default `"point"` model now remains point friction at every scale. The G1 recipe explicitly selects patch friction to preserve its production physics and throughput.
 - Reuse transformed mesh-edge endpoints between PhoenX SDF culling and contact generation, avoiding duplicate edge loads and transforms.
 - Reuse Nyquist-clamped PhoenX contact solver coefficients across PGS columns while preserving exact coefficients for unusual time steps.
@@ -204,8 +206,11 @@
 - Fix PhoenX G1 and recording examples replaying a stale CUDA-graph input state when using one outer simulation step.
 - Fix severe post-impact horizontal drift in full-coordinate PhoenX robots by evaluating contact and friction impulses through exact joint-constrained mechanism mobility derived solely from the enabled body-joint graph, while preserving general direct solves for closed loops.
 - Fix matched PhoenX contacts changing the world-space direction of warm-started friction impulses when their tangent frames rotate.
+- Fix `ViewerOptix` physical-sky lighting for Y-up OptiX coordinates and non-unit sun directions.
+- Fix severe `ViewerOptix` slowdown in scenes with thousands of instances by batching transform, visibility, material, TLAS, and motion-vector updates.
 - Fix full-coordinate PhoenX contacts injecting energy into armature and implicit-PD drives by preserving generalized reaction momentum across contact corrections.
 - Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.
+- Fix `ViewerOptix` debug-line occlusion when DLSS render resolution differs from the window and account for the OptiX/OpenGL image-origin difference.
 - Fix PhoenX direct-equality scheduling to apply cached drive and limit warm-start impulses once per substep instead of once per PGS iteration.
 - Preserve authored curved cable rest poses in `SolverPhoenX`, including rest-state refresh after joint-frame or body-pose edits.
 - Fix `SolverPhoenX` contact and joint-limit impulses against directly constrained mechanisms by alternating inequality sweeps with reused direct triangular solves.
