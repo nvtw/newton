@@ -5161,7 +5161,8 @@ class ModelBuilder:
         Returns:
             The index of the added joint.
 
-        .. note:: Distance joints are currently only supported in :class:`newton.solvers.SolverXPBD`.
+        .. note:: Distance joints are currently supported in
+            :class:`newton.solvers.SolverXPBD` and :class:`newton.solvers.SolverPhoenX`.
 
         """
 

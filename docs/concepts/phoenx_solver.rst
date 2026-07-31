@@ -46,12 +46,13 @@ It is **not** the right choice for:
 - Generalised-coordinate articulation work that needs the kinematic
   tree (use :class:`~newton.solvers.SolverFeatherstone` or
   :class:`~newton.solvers.SolverMuJoCo`).
-- Equality / mimic constraints, ``D6``, or ``DISTANCE`` joints
+- Newton equality / mimic constraint objects, or generic D6 inequalities
   through Newton's standard :class:`~newton.ModelBuilder` flow (use
   :class:`~newton.solvers.SolverMuJoCo` or
-  :class:`~newton.solvers.SolverXPBD`). ``CABLE`` joints *are*
-  supported, with the caveat that PhoenX has no axial-length
-  compliance — see :ref:`phoenx-cable-joints` below.
+  :class:`~newton.solvers.SolverXPBD`). Maximal ``DISTANCE`` and mixed D6
+  bilateral locks and drives are supported. ``CABLE`` joints *are* supported,
+  with the caveat that PhoenX has no axial-length compliance — see
+  :ref:`phoenx-cable-joints` below.
 - Cloth, particles, soft bodies, MPM (use the dedicated solvers).
 - Differentiable simulation (PhoenX kernels are not authored under
   ``wp.Tape``).
@@ -334,21 +335,20 @@ trees independently of those maximal mechanisms.
 ============== =============================================== =============================================
 Joint type     Behaviour                                       Drive / limit
 ============== =============================================== =============================================
-``REVOLUTE``   1-DoF hinge (5 constrained rows)                Implicit drive, axial limit and friction
-``PRISMATIC``  1-DoF slider (5 constrained rows)               Implicit drive, axial limit and friction
+``REVOLUTE``   1-DoF hinge (5 constrained rows)                Implicit drive, axial position/velocity limit, friction
+``PRISMATIC``  1-DoF slider (5 constrained rows)               Implicit drive, axial position/velocity limit, friction
 ``BALL``       3-DoF ball-socket (3 point-lock rows)           Native: passive; D6 form: per-axis drives/limits
 ``FIXED``      6-DoF weld (3 point + 3 angular)                No free DoF
 ``CABLE``      Rigid stretch + 2 bend + 1 twist soft rows      PD bend/twist; maximal coordinates
 ``FREE``       Free-floating; no constraint rows               —
-``DISTANCE``   Free root / distance-tree coordinate            Reduced-coordinate trees only
-``D6``         Fixed, ball, universal, revolute, prismatic,    Per-free-axis direct drives; limits vary by
-               cylindrical, planar, or Cartesian reductions    reduction
+``DISTANCE``   Radial minimum/maximum anchor separation         Maximal PGS bound; reduced tree coordinate
+``D6``         Specialized reductions or generic bilateral     Per-free-axis direct drives; inequalities vary
+               lock patterns                                   by reduction
 ============== =============================================== =============================================
 
-Generic D6 trees are supported by reduced ownership. Maximal D6 requires one
-of the listed reductions; finite Cartesian linear limits and Cartesian
-Coulomb friction are not implemented. Maximal ``DISTANCE`` joints are not
-supported.
+Maximal generic D6 bilateral locks and drives use precomputed orthogonal
+complements of their free-axis spans. Finite positional limits, velocity
+limits, and Coulomb friction on otherwise generic layouts are not implemented.
 
 Drives (``REVOLUTE`` / ``PRISMATIC``) are PD with per-DoF
 ``joint_target_ke`` (stiffness), ``joint_target_kd`` (damping), and
@@ -385,9 +385,11 @@ heterogeneous mechanisms share the device without rectangular padding or
 host-side launches between panel columns.
 
 Joint limits for ``REVOLUTE`` / ``PRISMATIC`` use
-``joint_limit_lower`` / ``joint_limit_upper``. D6 angular limits are
-also available on the supported ball, universal, cylindrical, and planar
-reductions. These unilateral rows remain in the inequality PGS solve.
+``joint_limit_lower`` / ``joint_limit_upper``. Their axial
+``joint_velocity_limit`` values and maximal ``DISTANCE`` bounds use scalar
+inequality rows. D6 angular limits are also available on the supported
+ball, universal, cylindrical, and planar reductions. These unilateral rows
+remain in the inequality PGS solve.
 
 Feed-forward joint efforts (``Control.joint_f``) are converted to body
 wrenches via the stock :func:`apply_joint_forces` kernel and folded
@@ -648,7 +650,7 @@ make different trade-offs and excel at different things.
 
 **Pick PhoenX when**
 
-- Your model uses the native joint set or a supported D6 reduction and
+- Your model uses the native joint set or D6 bilateral locks and
   does not need Newton CONNECT / WELD / JOINT equality objects or mimic
   constraints.
 - You're running many small worlds in parallel (RL training,
@@ -661,9 +663,9 @@ make different trade-offs and excel at different things.
 
 **Pick MuJoCo Warp when**
 
-- You need arbitrary D6 layouts, equality constraints
-  (``CONNECT`` / ``WELD`` / ``JOINT``), mimic constraints, or
-  velocity limits.
+- You need generic D6 inequalities, equality constraints
+  (``CONNECT`` / ``WELD`` / ``JOINT``), mimic constraints, or velocity limits
+  beyond PhoenX's axial revolute and prismatic support.
 - You need MuJoCo's mature generalized-coordinate modeling and constraint
   semantics beyond PhoenX's reduced articulation backend.
 - You want to mix Newton bodies with MuJoCo's hand-tuned contact
@@ -686,9 +688,9 @@ PhoenX:
   ``enable_restitution=True``) is currently the only rigid-body
   Newton solver that consumes the field directly.
 - No Newton CONNECT / WELD / JOINT equality objects or mimic constraints.
-  Maximal D6 is limited to recognized lock patterns, and maximal
-  ``DISTANCE`` is unsupported. ``CABLE`` is supported with rigid stretch
-  (see :ref:`phoenx-cable-joints`).
+  Maximal generic D6 positional limits and friction remain unsupported.
+  ``CABLE`` is supported with rigid stretch (see
+  :ref:`phoenx-cable-joints`).
 - Pyramidal Coulomb friction, not the exact circular cone (loose by
   a few percent in pathological tangent-misaligned cases).
 - Tall stacks of contacting bodies may need extra ``substeps`` and

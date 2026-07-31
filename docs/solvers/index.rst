@@ -266,7 +266,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - 🟨 :sup:`1`
      - |yes|
      - |no|
-     - 🟨 :sup:`5`
+     - |yes| :sup:`5`
      - |no|
      - |no|
    * - D6
@@ -356,7 +356,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |no|
      - |no|
      - |no|
-     - |no|
+     - 🟨 :sup:`11`
      - |no|
      - |no|
 
@@ -436,12 +436,13 @@ enforce joints as pairwise body constraints but do not use the articulation kine
 
 | :sup:`3` Mimic constraints in MuJoCo are supported for REVOLUTE and PRISMATIC joints only.
 | :sup:`4` VBD interprets ``joint_target_kd`` and ``joint_limit_kd`` as absolute damping coefficients in physical units.
-| :sup:`5` PhoenX supports DISTANCE only inside reduced-coordinate trees; maximal DISTANCE is unsupported.
-| :sup:`6` Maximal PhoenX recognizes fixed, ball, universal, revolute, prismatic, cylindrical, planar, and Cartesian D6 lock patterns. Generic D6 trees require reduced ownership.
+| :sup:`5` PhoenX supports reduced-coordinate DISTANCE trees and maximal-coordinate minimum/maximum distance bounds.
+| :sup:`6` Maximal PhoenX supports specialized D6 reductions and generic bilateral lock and drive layouts; finite generic-layout inequalities remain unsupported.
 | :sup:`7` PhoenX CABLE uses maximal direct rows with rigid axial stretch and soft bend/twist.
 | :sup:`8` PhoenX armature is exact on revolute/prismatic and supported D6 free axes; native BALL/FIXED/FREE joints have no scalar dynamic row.
 | :sup:`9` PhoenX joint friction and authored limit gains are currently limited to axial revolute/prismatic rows.
-| :sup:`10` PhoenX supports axial revolute/prismatic limits and angular limits on supported D6 reductions; finite Cartesian linear limits are unsupported.
+| :sup:`10` PhoenX supports axial revolute/prismatic limits, maximal DISTANCE bounds, and angular limits on supported D6 reductions; finite Cartesian linear limits are unsupported.
+| :sup:`11` PhoenX supports axial velocity limits on revolute and prismatic joints.
 
 
 

@@ -79,7 +79,9 @@ __all__ = [
     "JOINT_MODE_CARTESIAN",
     "JOINT_MODE_CARTESIAN_PLANE",
     "JOINT_MODE_CYLINDRICAL",
+    "JOINT_MODE_DISTANCE",
     "JOINT_MODE_FIXED",
+    "JOINT_MODE_GENERIC_D6",
     "JOINT_MODE_PLANAR",
     "JOINT_MODE_PRISMATIC",
     "JOINT_MODE_REVOLUTE",
@@ -124,6 +126,10 @@ JOINT_MODE_PLANAR = wp.constant(wp.int32(7))
 JOINT_MODE_CARTESIAN_PLANE = wp.constant(wp.int32(8))
 #: Cartesian translation joint with all three linear axes free.
 JOINT_MODE_CARTESIAN = wp.constant(wp.int32(9))
+#: Radial distance interval. This mode has no bilateral structural rows.
+JOINT_MODE_DISTANCE = wp.constant(wp.int32(10))
+#: Generic D6 whose locked row basis is precomputed by the direct solver.
+JOINT_MODE_GENERIC_D6 = wp.constant(wp.int32(11))
 
 # ---------------------------------------------------------------------------
 # Drive-mode tags
@@ -151,6 +157,8 @@ DRIVE_MODE_VELOCITY = wp.constant(wp.int32(2))
 _CLAMP_NONE = wp.constant(wp.int32(0))
 _CLAMP_MAX = wp.constant(wp.int32(1))
 _CLAMP_MIN = wp.constant(wp.int32(2))
+_CLAMP_VELOCITY_MAX = wp.constant(wp.int32(3))
+_CLAMP_VELOCITY_MIN = wp.constant(wp.int32(4))
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +225,8 @@ class ActuatedDoubleBallSocketData:
     # ``target_velocity`` is rad/s or m/s.
     target: wp.float32
     target_velocity: wp.float32
+    # Symmetric free-coordinate speed cap [m/s or rad/s]. Zero disables.
+    velocity_limit: wp.float32
     max_force_drive: wp.float32
     # Drive parameters: normal PD only. ``stiffness_drive`` = kp [N/m or
     # N*m/rad], ``damping_drive`` = kd [N*s/m or N*m*s/rad]. Both zero
@@ -319,6 +329,7 @@ _OFF_REST_LENGTH = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "re
 _OFF_DRIVE_MODE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "drive_mode"))
 _OFF_TARGET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target"))
 _OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target_velocity"))
+_OFF_VELOCITY_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "velocity_limit"))
 _OFF_MAX_FORCE_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_force_drive"))
 _OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_drive"))
 _OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_drive"))
@@ -394,6 +405,7 @@ def actuated_double_ball_socket_initialize_kernel(
     d6_limit_lower: wp.array[wp.vec3f],
     d6_limit_upper: wp.array[wp.vec3f],
     d6_limit_count: wp.array[wp.int32],
+    velocity_limit: wp.array[wp.float32],
 ):
     """Pack one batch of unified joint descriptors.
 
@@ -477,6 +489,9 @@ def actuated_double_ball_socket_initialize_kernel(
 
     constraint_set_type(constraints, cid, CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET)
     mode = joint_mode[tid]
+    if mode == JOINT_MODE_DISTANCE:
+        # Distance endpoints are the two independently authored anchors.
+        la1_b2 = wp.quat_rotate_inv(orient2, a2_w - pos2)
 
     write_int(constraints, _OFF_BODY1, cid, b1)
     write_int(constraints, _OFF_BODY2, cid, b2)
@@ -527,6 +542,7 @@ def actuated_double_ball_socket_initialize_kernel(
     write_int(constraints, _OFF_DRIVE_MODE, cid, drive_mode[tid])
     write_float(constraints, _OFF_TARGET, cid, target[tid])
     write_float(constraints, _OFF_TARGET_VELOCITY, cid, target_velocity[tid])
+    write_float(constraints, _OFF_VELOCITY_LIMIT, cid, velocity_limit[tid])
     write_float(constraints, _OFF_MAX_FORCE_DRIVE, cid, max_force_drive[tid])
     write_float(constraints, _OFF_STIFFNESS_DRIVE, cid, stiffness_drive[tid])
     write_float(constraints, _OFF_DAMPING_DRIVE, cid, damping_drive[tid])
@@ -786,7 +802,8 @@ def _axial_limit_friction_iterate(
         stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
         damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
         acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
-        if stiffness_limit > wp.float32(0.0) or damping_limit > wp.float32(0.0):
+        velocity_clamp = clamp == _CLAMP_VELOCITY_MAX or clamp == _CLAMP_VELOCITY_MIN
+        if not velocity_clamp and (stiffness_limit > wp.float32(0.0) or damping_limit > wp.float32(0.0)):
             pd_mass = read_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid)
             pd_gamma = read_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid)
             pd_beta = read_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid)
@@ -802,7 +819,7 @@ def _axial_limit_friction_iterate(
                 lam_limit = mass_coeff * lam_unsoft - impulse_coeff * acc_limit
         old_acc_limit = acc_limit
         acc_limit += lam_limit * sor_boost
-        if clamp == _CLAMP_MAX:
+        if clamp == _CLAMP_MAX or clamp == _CLAMP_VELOCITY_MAX:
             acc_limit = wp.max(wp.float32(0.0), acc_limit)
         else:
             acc_limit = wp.min(wp.float32(0.0), acc_limit)
@@ -849,6 +866,7 @@ def _axial_limit_friction_prepare_at(
     cid: wp.int32,
     base_offset: wp.int32,
     cumulative_value: wp.float32,
+    axial_velocity: wp.float32,
     eff_inv: wp.float32,
     eff_inv_friction: wp.float32,
     dt: wp.float32,
@@ -868,6 +886,7 @@ def _axial_limit_friction_prepare_at(
     # ---- Limit (dual convention) -------------------------------------
     clamp = _CLAMP_NONE
     limit_C = float(0.0)
+    velocity_bias = float(0.0)
     if min_value <= max_value:
         if cumulative_value > max_value:
             clamp = _CLAMP_MAX
@@ -875,13 +894,27 @@ def _axial_limit_friction_prepare_at(
         elif cumulative_value < min_value:
             clamp = _CLAMP_MIN
             limit_C = cumulative_value - min_value
+
+    # The axial Jacobian is -qdot. Position correction takes precedence.
+    velocity_limit = read_float(constraints, base_offset + _OFF_VELOCITY_LIMIT, cid)
+    if clamp == _CLAMP_NONE and velocity_limit > wp.float32(0.0):
+        if axial_velocity < -velocity_limit:
+            clamp = _CLAMP_VELOCITY_MAX
+            velocity_bias = velocity_limit
+        elif axial_velocity > velocity_limit:
+            clamp = _CLAMP_VELOCITY_MIN
+            velocity_bias = -velocity_limit
     write_int(constraints, base_offset + _OFF_CLAMP, cid, clamp)
 
     # ``limit_cache`` is mode-aliased Box2D / PD: writing both layouts
     # would clobber the active one (same 3 dwords). Iterate gates on
     # ``stiffness_limit > 0 or damping_limit > 0`` to pick the layout,
     # so only the active triple is filled.
-    if stiffness_limit > 0.0 or damping_limit > 0.0:
+    if clamp == _CLAMP_VELOCITY_MAX or clamp == _CLAMP_VELOCITY_MIN:
+        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, velocity_bias)
+        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, wp.float32(1.0))
+        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, wp.float32(0.0))
+    elif stiffness_limit > 0.0 or damping_limit > 0.0:
         pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(
             stiffness_limit, damping_limit, limit_C, eff_inv, dt, limit_boost
         )
@@ -1184,7 +1217,45 @@ def actuated_double_ball_socket_prepare_inequality(
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, axis)
     dt = wp.float32(1.0) / idt
 
-    if mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_PRISMATIC:
+    if mode == JOINT_MODE_DISTANCE:
+        point1 = position1 + r1_b1
+        point2 = position2 + r1_b2
+        separation = point2 - point1
+        distance2 = wp.dot(separation, separation)
+        if distance2 > wp.float32(1.0e-20):
+            axis = separation / wp.sqrt(distance2)
+        write_vec3(constraints, _OFF_AXIS_WORLD, cid, axis)
+        metric = _d6_metric_anchor_block(
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            r1_b1,
+            r1_b2,
+            r1_b1,
+            r1_b2,
+        )
+        eff_inv = wp.dot(axis, metric @ axis)
+        anchor_velocity1 = velocity1 + wp.cross(angular_velocity1, r1_b1)
+        anchor_velocity2 = velocity2 + wp.cross(angular_velocity2, r1_b2)
+        distance = wp.sqrt(wp.max(distance2, wp.float32(0.0)))
+        axial_impulse = _axial_limit_friction_prepare_at(
+            constraints,
+            cid,
+            wp.int32(0),
+            distance,
+            wp.dot(axis, anchor_velocity1 - anchor_velocity2),
+            eff_inv,
+            eff_inv,
+            dt,
+            PHOENX_BOOST_PRISMATIC_LIMIT,
+        )
+        impulse = axis * axial_impulse
+        velocity1 += inv_mass1 * impulse
+        angular_velocity1 += inv_inertia1 @ wp.cross(r1_b1, impulse)
+        velocity2 -= inv_mass2 * impulse
+        angular_velocity2 -= inv_inertia2 @ wp.cross(r1_b2, impulse)
+    elif mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_PRISMATIC:
         metric = _d6_metric_anchor_block(
             inv_mass1,
             inv_mass2,
@@ -1203,6 +1274,10 @@ def actuated_double_ball_socket_prepare_inequality(
                 cid,
                 wp.int32(0),
                 slide,
+                wp.dot(
+                    axis,
+                    velocity1 + wp.cross(angular_velocity1, r1_b1) - velocity2 - wp.cross(angular_velocity2, r1_b2),
+                ),
                 eff_inv,
                 eff_inv,
                 dt,
@@ -1235,6 +1310,7 @@ def actuated_double_ball_socket_prepare_inequality(
                 cid,
                 wp.int32(0),
                 coordinate,
+                wp.dot(axis, angular_velocity1 - angular_velocity2),
                 eff_inv,
                 eff_inv_friction,
                 dt,
@@ -1308,6 +1384,10 @@ def actuated_double_ball_socket_world_wrench_at(
         torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt)
         # Axial block is a torque about -n_hat.
         torque = torque - n_hat * (acc_axial * idt)
+    elif joint_mode == JOINT_MODE_DISTANCE:
+        axial_force = n_hat * (acc_limit * idt)
+        force = -axial_force
+        torque = -wp.cross(r1_b2, axial_force)
     elif joint_mode == JOINT_MODE_PRISMATIC:
         force = (acc1 + acc2 + acc3) * idt
         torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)

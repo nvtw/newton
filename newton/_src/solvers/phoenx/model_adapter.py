@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Host-side conversion from Newton :class:`Model` joints to ADBS init arrays.
 
-Mapping: REVOLUTE/PRISMATIC/BALL/FIXED/CABLE -> ADBS joint modes; FREE -> no
-column; DISTANCE unsupported. D6 joints use exact restored modes where possible,
+Mapping: REVOLUTE/PRISMATIC/BALL/FIXED/CABLE/DISTANCE -> ADBS joint modes;
+FREE -> no column. D6 joints use exact restored modes where possible,
 including two- and three-axis Cartesian translation modes. PhoenX
 slot 0 is the static world anchor, so Newton body ``i`` maps to PhoenX slot
 ``i + 1`` and ``joint_parent == -1`` maps to slot 0.
@@ -31,7 +31,9 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_CARTESIAN,
     JOINT_MODE_CARTESIAN_PLANE,
     JOINT_MODE_CYLINDRICAL,
+    JOINT_MODE_DISTANCE,
     JOINT_MODE_FIXED,
+    JOINT_MODE_GENERIC_D6,
     JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
@@ -225,6 +227,7 @@ class AdbsInitArrays:
         drive_mode: wp.array,
         target: wp.array,
         target_velocity: wp.array,
+        velocity_limit: wp.array,
         max_force_drive: wp.array,
         stiffness_drive: wp.array,
         damping_drive: wp.array,
@@ -262,6 +265,7 @@ class AdbsInitArrays:
         self.drive_mode = drive_mode
         self.target = target
         self.target_velocity = target_velocity
+        self.velocity_limit = velocity_limit
         self.max_force_drive = max_force_drive
         self.stiffness_drive = stiffness_drive
         self.damping_drive = damping_drive
@@ -323,6 +327,7 @@ class AdbsInitArrays:
             "d6_limit_lower": self.d6_limit_lower,
             "d6_limit_upper": self.d6_limit_upper,
             "d6_limit_count": self.d6_limit_count,
+            "velocity_limit": self.velocity_limit,
         }
 
 
@@ -363,8 +368,8 @@ def build_adbs_init_arrays(
             articulation solver instead of maximal-coordinate ADBS columns.
 
     Raises:
-        NotImplementedError: If a non-reduced joint is DISTANCE or a D6
-            configuration cannot be reduced to the restored ADBS mode set.
+        NotImplementedError: If a non-reduced D6 configuration cannot be
+            reduced to the restored ADBS mode set.
     """
     if device is None:
         device = model.device
@@ -389,6 +394,7 @@ def build_adbs_init_arrays(
             drive_mode=empty_i,
             target=empty_f,
             target_velocity=empty_f,
+            velocity_limit=empty_f,
             max_force_drive=empty_f,
             stiffness_drive=empty_f,
             damping_drive=empty_f,
@@ -444,6 +450,7 @@ def build_adbs_init_arrays(
     target_mode = _pull_dof_i(model.joint_target_mode)
     target_pos = _pull_dof_f(model.joint_target_q)
     target_vel = _pull_dof_f(model.joint_target_qd)
+    velocity_limit = _pull_dof_f(model.joint_velocity_limit)
     target_ke = _pull_dof_f(model.joint_target_ke)
     target_kd = _pull_dof_f(model.joint_target_kd)
     joint_friction = _pull_dof_f(model.joint_friction)
@@ -474,14 +481,6 @@ def build_adbs_init_arrays(
             continue
         if jtype is newton.JointType.FREE:
             continue
-        if jtype is newton.JointType.DISTANCE:
-            if reduced_articulations and int(joint_articulation[j]) >= 0:
-                continue
-            raise NotImplementedError(
-                f"PhoenX does not support maximal-coordinate JointType.{jtype.name} (joint {j}). "
-                'Use articulation_mode="reduced" for tree DISTANCE joints.'
-            )
-
         parent_idx = int(joint_parent[j])
         child_idx = int(joint_child[j])
         # Shift Newton body indices to PhoenX slots (slot 0 = static world).
@@ -510,13 +509,7 @@ def build_adbs_init_arrays(
             if classified_tag is None:
                 if reduced_articulations and int(joint_articulation[j]) >= 0:
                     continue
-                raise NotImplementedError(
-                    f"D6 joint {j} cannot be reduced to a restored PhoenX joint "
-                    f"({n_lin} linear axes / {n_ang} angular axes; "
-                    f"locked linear={tuple(locked_lin)}, locked angular={tuple(locked_ang)}). "
-                    "Supported reductions: fixed, ball, universal, revolute, prismatic, cylindrical, planar, Cartesian. "
-                    "Generic D6 requires the post-unification joint path."
-                )
+                classified_tag = "GENERIC"
             if classified_tag == "BALL":
                 effective_jtype = newton.JointType.BALL
             elif classified_tag == "FIXED":
@@ -552,6 +545,7 @@ def build_adbs_init_arrays(
         drive_mode = int(DRIVE_MODE_OFF)
         target_val = 0.0
         target_vel_val = 0.0
+        velocity_limit_val = 0.0
         stiff_drive = 0.0
         damp_drive = 0.0
         max_force = 0.0
@@ -582,7 +576,50 @@ def build_adbs_init_arrays(
             "d6_limit_upper": d6_limit_upper,
         }
 
-        if effective_jtype is newton.JointType.BALL:
+        if d6_mode_tag == "GENERIC":
+            phoenx_mode = int(JOINT_MODE_GENERIC_D6)
+            for dof in range(qd_start, qd_start + n_lin + n_ang):
+                if _is_locked_dof(limit_lower, limit_upper, dof):
+                    continue
+                lo = float(limit_lower[dof]) if limit_lower is not None else -1.0e10
+                hi = float(limit_upper[dof]) if limit_upper is not None else 1.0e10
+                if lo > -1.0e5 or hi < 1.0e5:
+                    raise NotImplementedError(
+                        f"Generic D6 joint {j} has a finite free-axis limit; "
+                        "generic D6 inequalities are not implemented yet."
+                    )
+                if joint_friction is not None and float(joint_friction[dof]) > 0.0:
+                    raise NotImplementedError(
+                        f"Generic D6 joint {j} has Coulomb friction; generic D6 inequalities are not implemented yet."
+                    )
+                if velocity_limit is not None:
+                    raw_velocity_limit = float(velocity_limit[dof])
+                    if np.isfinite(raw_velocity_limit) and 0.0 < raw_velocity_limit < 1.0e5:
+                        raise NotImplementedError(
+                            f"Generic D6 joint {j} has a velocity limit; "
+                            "generic D6 inequalities are not implemented yet."
+                        )
+        elif effective_jtype is newton.JointType.DISTANCE:
+            phoenx_mode = int(JOINT_MODE_DISTANCE)
+            if child_idx >= 0:
+                X_w_c = _transform_multiply(
+                    np.asarray(body_q[child_idx], dtype=np.float32),
+                    np.asarray(joint_X_c[j], dtype=np.float32),
+                )
+            else:
+                X_w_c = np.asarray(joint_X_c[j], dtype=np.float32)
+            anchor2_world = _transform_translation(X_w_c)
+
+            # Newton uses negative distance bounds as independent disabled
+            # sentinels. Distance itself is nonnegative, so an omitted lower
+            # bound maps to zero and an omitted upper bound maps to infinity.
+            distance_dof = qd_start
+            lo = float(limit_lower[distance_dof]) if limit_lower is not None else -1.0
+            hi = float(limit_upper[distance_dof]) if limit_upper is not None else -1.0
+            if lo >= 0.0 or hi >= 0.0:
+                min_val = max(0.0, lo)
+                max_val = hi if hi >= 0.0 else 1.0e10
+        elif effective_jtype is newton.JointType.BALL:
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
             if d6_mode_tag == "BALL":
                 for ai, locked in enumerate(locked_ang):
@@ -772,6 +809,10 @@ def build_adbs_init_arrays(
                 target_val = float(target_pos[target_q_index_for_control])
             if target_vel is not None:
                 target_vel_val = float(target_vel[effective_qd])
+            if velocity_limit is not None:
+                raw_velocity_limit = float(velocity_limit[effective_qd])
+                if np.isfinite(raw_velocity_limit) and 0.0 < raw_velocity_limit < 1.0e5:
+                    velocity_limit_val = raw_velocity_limit
             if effort_limit is not None:
                 # PhoenX reads 0 as "unlimited" for POSITION drives, so clamp inf/NaN to 0.
                 raw = float(effort_limit[effective_qd])
@@ -830,6 +871,7 @@ def build_adbs_init_arrays(
                 # re-applies the offset on each control update.
                 "target": target_val - init_q,
                 "target_velocity": target_vel_val,
+                "velocity_limit": velocity_limit_val,
                 "max_force_drive": max_force,
                 "stiffness_drive": stiff_drive,
                 "damping_drive": damp_drive,
@@ -892,6 +934,7 @@ def build_adbs_init_arrays(
         drive_mode=_stack_i("drive_mode"),
         target=_stack_f("target"),
         target_velocity=_stack_f("target_velocity"),
+        velocity_limit=_stack_f("velocity_limit"),
         max_force_drive=_stack_f("max_force_drive"),
         stiffness_drive=_stack_f("stiffness_drive"),
         damping_drive=_stack_f("damping_drive"),

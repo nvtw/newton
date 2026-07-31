@@ -41,6 +41,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_CARTESIAN_PLANE,
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
+    JOINT_MODE_GENERIC_D6,
     JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
@@ -213,11 +214,11 @@ class _PhoenXCollisionPipelineAdapter:
 class SolverPhoenX(SolverBase):
     """Newton :class:`SolverBase` wrapper around :class:`PhoenXWorld`.
 
-    Supports REVOLUTE / PRISMATIC (PD drive + limit), BALL, FIXED,
-    CABLE (soft fixed with PD bend/twist; stretch DoF is rigid), FREE
-    (no column), and D6 configurations reducible to those old ADBS modes
-    including universal joints with angular limits. Tree DISTANCE and generic
-    D6 joints are accepted when reduced ownership is active.
+    Supports REVOLUTE / PRISMATIC (PD drive, position/velocity limit), BALL,
+    FIXED, CABLE (soft fixed with PD bend/twist; stretch DoF is rigid), FREE
+    (no column), DISTANCE bounds, and D6 bilateral lock patterns and drives.
+    Finite limits and friction on otherwise generic maximal D6 layouts remain
+    unsupported. Reduced-coordinate ownership is available independently.
 
     Newton :class:`Picking` works out of the box: pick force/torque is
     added to ``state.body_f``, which :meth:`step` imports into PhoenX's
@@ -953,6 +954,7 @@ class SolverPhoenX(SolverBase):
         lower_limit = self._adbs.min_value.numpy()
         upper_limit = self._adbs.max_value.numpy()
         d6_limit_count = self._adbs.d6_limit_count.numpy()
+        velocity_limit = self._adbs.velocity_limit.numpy()
         for joint in np.flatnonzero(direct.joint_mask):
             cid = int(joint_idx_to_cid[joint])
             if cid < 0:
@@ -964,7 +966,8 @@ class SolverPhoenX(SolverBase):
                 lower = float(lower_limit[cid])
                 upper = float(upper_limit[cid])
                 has_limit = lower <= upper and (lower > -5.0e9 or upper < 5.0e9)
-                equality_only = not (has_friction or has_limit)
+                has_velocity_limit = float(velocity_limit[cid]) > 0.0
+                equality_only = not (has_friction or has_limit or has_velocity_limit)
             elif mode in (
                 int(JOINT_MODE_BALL_SOCKET),
                 int(JOINT_MODE_UNIVERSAL),
@@ -972,6 +975,7 @@ class SolverPhoenX(SolverBase):
                 int(JOINT_MODE_PLANAR),
                 int(JOINT_MODE_CARTESIAN_PLANE),
                 int(JOINT_MODE_CARTESIAN),
+                int(JOINT_MODE_GENERIC_D6),
             ):
                 equality_only = int(d6_limit_count[cid]) == 0
             if equality_only:

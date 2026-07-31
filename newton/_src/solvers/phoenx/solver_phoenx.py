@@ -1914,6 +1914,7 @@ class PhoenXWorld:
         d6_limit_lower: wp.array | None = None,
         d6_limit_upper: wp.array | None = None,
         d6_limit_count: wp.array | None = None,
+        velocity_limit: wp.array | None = None,
     ) -> None:
         """Pack ``num_joints`` actuated-DBS joint columns. Call once after
         :meth:`__init__`, before the first :meth:`step`. All input arrays must
@@ -1952,6 +1953,8 @@ class PhoenXWorld:
             d6_limit_lower, d6_limit_upper: Optional per-axis limit
                 windows [rad].
             d6_limit_count: Optional number of D6 angular limit axes.
+            velocity_limit: Optional symmetric axial speed cap [m/s or rad/s].
+                None disables the cap.
         """
         if self.num_joints <= 0:
             return
@@ -1971,6 +1974,8 @@ class PhoenXWorld:
             d6_limit_upper = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
         if d6_limit_count is None:
             d6_limit_count = wp.zeros(self.num_joints, dtype=wp.int32, device=self.device)
+        if velocity_limit is None:
+            velocity_limit = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
         try:
             mode_np = joint_mode.numpy()
         except Exception:
@@ -2016,6 +2021,7 @@ class PhoenXWorld:
                 d6_limit_lower,
                 d6_limit_upper,
                 d6_limit_count,
+                velocity_limit,
             ],
             device=self.device,
         )

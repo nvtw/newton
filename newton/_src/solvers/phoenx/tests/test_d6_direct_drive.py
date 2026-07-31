@@ -131,6 +131,9 @@ def _make_reduced_d6(mode: str, axis_index: int) -> newton.Model:
     elif mode == "cylindrical":
         linear_axes = [config((0.0, 0.0, 1.0), 0)]
         angular_axes = [config((0.0, 0.0, 1.0), 1)]
+    elif mode == "generic":
+        linear_axes = [config((1.0, 0.0, 0.0), 0)]
+        angular_axes = [config((0.0, 1.0, 0.0), 1), config((0.0, 0.0, 1.0), 2)]
     else:
         linear_axes = [config((1.0, 0.0, 0.0), 0), config((0.0, 1.0, 0.0), 1)]
         angular_axes = [config((0.0, 0.0, 1.0), 2)]
@@ -223,11 +226,12 @@ class TestD6DirectDrive(unittest.TestCase):
                 self.assertAlmostEqual(float(qd.numpy()[axis_index]), expected_qd, delta=2.0e-5)
 
     def test_reduced_d6_free_axis_drives_match_implicit_euler(self) -> None:
-        """Drive every free universal, cylindrical, and planar D6 axis directly."""
+        """Drive every free axis of reduced-pattern and generic D6 joints directly."""
         cases = (
             ("universal", (INERTIA, INERTIA), 5),
             ("cylindrical", (1.0, INERTIA), 5),
             ("planar", (1.0, 1.0, INERTIA), 4),
+            ("generic", (1.0, INERTIA, INERTIA), 4),
         )
         for mode, physical_masses, expected_dimension in cases:
             for axis_index, physical_mass in enumerate(physical_masses):

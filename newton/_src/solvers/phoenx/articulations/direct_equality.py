@@ -37,6 +37,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_CARTESIAN_PLANE,
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
+    JOINT_MODE_GENERIC_D6,
     JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
@@ -137,6 +138,71 @@ def _structural_row_count(mode: int) -> int:
     return 0
 
 
+def _generic_d6_constraint_bases(
+    model: Model,
+    joint_mode: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Precompute orthonormal complements of generic D6 free-axis spans."""
+    joint_count = int(model.joint_count)
+    linear_axes = np.zeros((joint_count, 3, 3), dtype=np.float32)
+    angular_axes = np.zeros((joint_count, 3, 3), dtype=np.float32)
+    linear_count = np.zeros(joint_count, dtype=np.int32)
+    angular_count = np.zeros(joint_count, dtype=np.int32)
+    structural_count = np.asarray([_structural_row_count(int(mode)) for mode in joint_mode], dtype=np.int32)
+
+    model_axes = np.asarray(model.joint_axis.numpy(), dtype=np.float32)
+    qd_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
+    dof_dim = np.asarray(model.joint_dof_dim.numpy(), dtype=np.int32)
+    lower = np.asarray(model.joint_limit_lower.numpy(), dtype=np.float32)
+    upper = np.asarray(model.joint_limit_upper.numpy(), dtype=np.float32)
+
+    def complement(free_axes: list[np.ndarray], joint: int, label: str) -> np.ndarray:
+        normalized = []
+        for axis in free_axes:
+            length = float(np.linalg.norm(axis))
+            if length <= 1.0e-12:
+                raise NotImplementedError(f"Generic D6 joint {joint} has a zero-length free {label} axis.")
+            normalized.append(axis / length)
+        if not normalized:
+            return np.eye(3, dtype=np.float32)
+        matrix = np.asarray(normalized, dtype=np.float64)
+        rank = int(np.linalg.matrix_rank(matrix, tol=1.0e-6))
+        if rank != len(normalized):
+            raise NotImplementedError(f"Generic D6 joint {joint} has linearly dependent free {label} axes.")
+        _u, _singular, vh = np.linalg.svd(matrix, full_matrices=True)
+        basis = vh[rank:].astype(np.float32)
+        for basis_index, row in enumerate(basis):
+            pivot = int(np.argmax(np.abs(row)))
+            if row[pivot] < 0.0:
+                basis[basis_index] = -row
+        return basis
+
+    for joint in np.flatnonzero(joint_mode == int(JOINT_MODE_GENERIC_D6)):
+        start = int(qd_start[joint])
+        n_linear = int(dof_dim[joint, 0])
+        n_angular = int(dof_dim[joint, 1])
+        free_linear = [
+            model_axes[start + axis]
+            for axis in range(n_linear)
+            if float(lower[start + axis]) <= float(upper[start + axis])
+        ]
+        angular_start = start + n_linear
+        free_angular = [
+            model_axes[angular_start + axis]
+            for axis in range(n_angular)
+            if float(lower[angular_start + axis]) <= float(upper[angular_start + axis])
+        ]
+        locked_linear = complement(free_linear, int(joint), "linear")
+        locked_angular = complement(free_angular, int(joint), "angular")
+        linear_count[joint] = len(locked_linear)
+        angular_count[joint] = len(locked_angular)
+        linear_axes[joint, : len(locked_linear)] = locked_linear
+        angular_axes[joint, : len(locked_angular)] = locked_angular
+        structural_count[joint] = len(locked_linear) + len(locked_angular)
+
+    return linear_axes, angular_axes, linear_count, angular_count, structural_count
+
+
 _MULTI_AXIS_D6_MODES = frozenset(
     (
         int(JOINT_MODE_BALL_SOCKET),
@@ -145,6 +211,7 @@ _MULTI_AXIS_D6_MODES = frozenset(
         int(JOINT_MODE_PLANAR),
         int(JOINT_MODE_CARTESIAN_PLANE),
         int(JOINT_MODE_CARTESIAN),
+        int(JOINT_MODE_GENERIC_D6),
     )
 )
 
@@ -261,6 +328,7 @@ def build_direct_equality_topology(
     effective_joint_mode: np.ndarray | None = None,
     dynamic_joint_mask: np.ndarray | None = None,
     dynamic_joint_dofs: tuple[tuple[int, ...], ...] | None = None,
+    structural_row_counts: np.ndarray | None = None,
 ) -> DirectEqualityTopology:
     """Find disconnected maximal-coordinate mechanisms and their equality rows."""
     body_count = int(model.body_count)
@@ -273,6 +341,14 @@ def build_direct_equality_topology(
     )
     if joint_mode.shape != (joint_count,):
         raise ValueError(f"effective_joint_mode must have shape ({joint_count},), got {joint_mode.shape}")
+    if structural_row_counts is None:
+        _lin_axes, _ang_axes, _lin_count, _ang_count, structural_counts = _generic_d6_constraint_bases(
+            model, joint_mode
+        )
+    else:
+        structural_counts = np.asarray(structural_row_counts, dtype=np.int32)
+    if structural_counts.shape != (joint_count,):
+        raise ValueError(f"structural_row_counts must have shape ({joint_count},), got {structural_counts.shape}")
     joint_parent = np.asarray(model.joint_parent.numpy(), dtype=np.int32)
     joint_child = np.asarray(model.joint_child.numpy(), dtype=np.int32)
     enabled = (
@@ -324,7 +400,7 @@ def build_direct_equality_topology(
 
     structural: list[int] = []
     for joint in range(joint_count):
-        if excluded[joint] or not enabled[joint] or _structural_row_count(int(joint_mode[joint])) == 0:
+        if excluded[joint] or not enabled[joint] or int(structural_counts[joint]) == 0:
             continue
         body0 = int(joint_parent[joint])
         body1 = int(joint_child[joint])
@@ -358,7 +434,7 @@ def build_direct_equality_topology(
             pair = (min(body0, body1), max(body0, body1))
             repeated_pair = repeated_pair or pair in endpoint_pairs
             endpoint_pairs.add(pair)
-            structural_rows += _structural_row_count(int(joint_mode[joint]))
+            structural_rows += int(structural_counts[joint])
         # An anchored component has 6n generalized rigid-body directions; a
         # floating one has six free rigid modes. Repeated body pairs also imply
         # dependent rows for every supported structural joint combination.
@@ -379,13 +455,13 @@ def build_direct_equality_topology(
     for joints in ordered_mechanisms:
         for joint in sorted(joints):
             ordered_joints.append(joint)
-            for local_row in range(_structural_row_count(int(joint_mode[joint]))):
+            for local_row in range(int(structural_counts[joint])):
                 row_joint.append(joint)
                 row_local.append(local_row)
                 row_dynamic.append(False)
                 row_dof.append(-1)
             for dynamic_index, dof in enumerate(dynamic_dofs[joint]):
-                local_row = _structural_row_count(int(joint_mode[joint])) + dynamic_index
+                local_row = int(structural_counts[joint]) + dynamic_index
                 if local_row >= _MAX_ROWS:
                     raise ValueError(f"joint {joint} requires more than {_MAX_ROWS} direct rows")
                 row_joint.append(joint)
@@ -489,6 +565,10 @@ def _prepare_direct_rows(
     joint: wp.int32,
     effective_joint_mode: wp.array[wp.int32],
     effective_joint_axis: wp.array[wp.vec3],
+    generic_linear_axes: wp.array[wp.vec3],
+    generic_angular_axes: wp.array[wp.vec3],
+    generic_linear_count: wp.array[wp.int32],
+    generic_angular_count: wp.array[wp.int32],
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
@@ -544,6 +624,47 @@ def _prepare_direct_rows(
         row_error[structural_index, row] = wp.float32(0.0)
         row_stiffness[structural_index, row] = wp.float32(0.0)
         row_damping[structural_index, row] = wp.float32(0.0)
+
+    if mode == JOINT_MODE_GENERIC_D6:
+        row = wp.int32(0)
+        linear_count = generic_linear_count[joint]
+        for axis_index in range(3):
+            if wp.int32(axis_index) < linear_count:
+                direction = wp.quat_rotate(q0, generic_linear_axes[joint * wp.int32(3) + wp.int32(axis_index)])
+                error = wp.dot(point_error, direction)
+                _set_direct_point_row(
+                    structural_index,
+                    row,
+                    point0_com,
+                    point1_com,
+                    direction,
+                    error,
+                    bias_rate,
+                    row_wrench0,
+                    row_wrench1,
+                    row_bias,
+                )
+                row_error[structural_index, row] = error
+                row += wp.int32(1)
+        rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
+        angular_count = generic_angular_count[joint]
+        for axis_index in range(3):
+            if wp.int32(axis_index) < angular_count:
+                direction = wp.quat_rotate(q0, generic_angular_axes[joint * wp.int32(3) + wp.int32(axis_index)])
+                error = wp.dot(rotation_error, direction)
+                _set_angular_row(
+                    structural_index,
+                    row,
+                    direction,
+                    error,
+                    bias_rate,
+                    row_wrench0,
+                    row_wrench1,
+                    row_bias,
+                )
+                row_error[structural_index, row] = error
+                row += wp.int32(1)
+        return row
 
     if mode == JOINT_MODE_CARTESIAN_PLANE or mode == JOINT_MODE_CARTESIAN:
         angular_start = wp.int32(0)
@@ -857,6 +978,10 @@ def _prepare_direct_equality_rows_kernel(
     structural_joints: wp.array[wp.int32],
     effective_joint_mode: wp.array[wp.int32],
     effective_joint_axis: wp.array[wp.vec3],
+    generic_linear_axes: wp.array[wp.vec3],
+    generic_angular_axes: wp.array[wp.vec3],
+    generic_linear_count: wp.array[wp.int32],
+    generic_angular_count: wp.array[wp.int32],
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
@@ -888,6 +1013,10 @@ def _prepare_direct_equality_rows_kernel(
         joint,
         effective_joint_mode,
         effective_joint_axis,
+        generic_linear_axes,
+        generic_angular_axes,
+        generic_linear_count,
+        generic_angular_count,
         joint_parent,
         joint_child,
         joint_qd_start,
@@ -948,7 +1077,7 @@ def _prepare_direct_dynamic_rows_kernel(
     angular_count = joint_dof_dim[joint, 1]
     angular_start = qd_start + linear_count
     is_two_axis_rotation = joint_type[joint] == JointType.D6 and angular_count == wp.int32(2) and dof >= angular_start
-    is_gimbal = joint_type[joint] == JointType.D6 and linear_count == wp.int32(0) and angular_count == wp.int32(3)
+    is_gimbal = joint_type[joint] == JointType.D6 and angular_count == wp.int32(3) and dof >= angular_start
     if is_two_axis_rotation:
         coordinates_two, _rates_two = invert_2d_rotational_dofs(
             joint_axis[angular_start],
@@ -980,25 +1109,25 @@ def _prepare_direct_dynamic_rows_kernel(
         dynamic_coordinate[row] = coordinates_two[angular_offset_two]
     elif is_gimbal:
         coordinates_raw, _rates = invert_3d_rotational_dofs(
-            joint_axis[qd_start],
-            joint_axis[qd_start + wp.int32(1)],
-            joint_axis[qd_start + wp.int32(2)],
+            joint_axis[angular_start],
+            joint_axis[angular_start + wp.int32(1)],
+            joint_axis[angular_start + wp.int32(2)],
             q0,
             q1,
             wp.vec3(),
         )
         coordinates = wp.vec3f(coordinates_raw[0], coordinates_raw[1], coordinates_raw[2])
         axis0_raw, axis1_raw, axis2_raw = transform_3d_rotational_axes(
-            joint_axis[qd_start],
-            joint_axis[qd_start + wp.int32(1)],
-            joint_axis[qd_start + wp.int32(2)],
+            joint_axis[angular_start],
+            joint_axis[angular_start + wp.int32(1)],
+            joint_axis[angular_start + wp.int32(2)],
             coordinates[0],
             coordinates[1],
         )
         axis0 = wp.vec3f(axis0_raw[0], axis0_raw[1], axis0_raw[2])
         axis1 = wp.vec3f(axis1_raw[0], axis1_raw[1], axis1_raw[2])
         axis2 = wp.vec3f(axis2_raw[0], axis2_raw[1], axis2_raw[2])
-        angular_offset = dof - qd_start
+        angular_offset = dof - angular_start
         direction_local = axis0
         if angular_offset == wp.int32(1):
             direction_local = axis1
@@ -1677,6 +1806,13 @@ class DirectEqualitySystem:
             if excluded_joint_mask is not None
             else np.zeros(joint_count, dtype=bool)
         )
+        (
+            generic_linear_axes_np,
+            generic_angular_axes_np,
+            generic_linear_count_np,
+            generic_angular_count_np,
+            structural_row_counts,
+        ) = _generic_d6_constraint_bases(model, joint_mode)
         dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
             model, joint_mode, joint_dof_start, excluded
         )
@@ -1706,6 +1842,7 @@ class DirectEqualitySystem:
             effective_joint_mode=joint_mode,
             dynamic_joint_mask=dynamic_joint_mask,
             dynamic_joint_dofs=dynamic_joint_dofs,
+            structural_row_counts=structural_row_counts,
         )
         self.regularization = float(regularization)
         row_regularization = np.full(len(self.topology.row_joint), self.regularization, dtype=np.float32)
@@ -1743,6 +1880,18 @@ class DirectEqualitySystem:
             dtype=wp.vec3,
             device=device,
         )
+        self.generic_linear_axes = wp.array(
+            generic_linear_axes_np.reshape(-1, 3),
+            dtype=wp.vec3,
+            device=device,
+        )
+        self.generic_angular_axes = wp.array(
+            generic_angular_axes_np.reshape(-1, 3),
+            dtype=wp.vec3,
+            device=device,
+        )
+        self.generic_linear_count = wp.array(generic_linear_count_np, dtype=wp.int32, device=device)
+        self.generic_angular_count = wp.array(generic_angular_count_np, dtype=wp.int32, device=device)
         self.cable_rest_relative_orientation = wp.array(
             _cable_rest_relative_orientations(model, joint_mode),
             dtype=wp.quat,
@@ -1941,6 +2090,10 @@ class DirectEqualitySystem:
                 self.structural_joints,
                 self.effective_joint_mode,
                 self.effective_joint_axis,
+                self.generic_linear_axes,
+                self.generic_angular_axes,
+                self.generic_linear_count,
+                self.generic_angular_count,
                 self.model.joint_parent,
                 self.model.joint_child,
                 self.effective_joint_dof_start,

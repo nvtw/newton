@@ -193,6 +193,44 @@ class TestD6DirectDispatch(unittest.TestCase):
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (3,))
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
 
+    def test_mixed_d6_uses_complement_direct_rows(self) -> None:
+        """Constrain only the complement of mixed translational and rotational freedoms."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        body = _make_body(builder)
+        linear_axes = [newton.ModelBuilder.JointDofConfig.create_unlimited(newton.Axis.X)]
+        angular_axes = [
+            newton.ModelBuilder.JointDofConfig.create_unlimited(newton.Axis.Y),
+            newton.ModelBuilder.JointDofConfig.create_unlimited(newton.Axis.Z),
+        ]
+        builder.add_joint_d6(
+            parent=-1,
+            child=body,
+            linear_axes=linear_axes,
+            angular_axes=angular_axes,
+        )
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=5,
+            solver_iterations=2,
+            articulation_mode="maximal",
+        )
+
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, (3,))
+        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
+
+        state = model.state()
+        initial_qd = np.asarray(((1.0, 2.0, 3.0, 4.0, 5.0, 6.0),), dtype=np.float32)
+        state.body_qd.assign(initial_qd)
+        with wp.ScopedCapture(model.device) as capture:
+            state.clear_forces()
+            solver.step(state, state, model.control(), None, 1.0 / 60.0)
+        wp.capture_launch(capture.graph)
+
+        final_qd = state.body_qd.numpy()[0]
+        np.testing.assert_allclose(final_qd[[0, 4, 5]], initial_qd[0, [0, 4, 5]], rtol=1.0e-4, atol=1.0e-4)
+        np.testing.assert_allclose(final_qd[[1, 2, 3]], 0.0, rtol=0.0, atol=2.0e-4)
+
     def test_cartesian_d6_finite_limit_raises_explicitly(self) -> None:
         """Reject Cartesian limits until their inequality row is implemented."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)

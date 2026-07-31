@@ -21,6 +21,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_R1_B1,
     _OFF_R1_B2,
     JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_DISTANCE,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
@@ -51,6 +52,7 @@ def actuated_double_ball_socket_iterate_inequality(
     if (
         mode != JOINT_MODE_REVOLUTE
         and mode != JOINT_MODE_PRISMATIC
+        and mode != JOINT_MODE_DISTANCE
         and mode != JOINT_MODE_BALL_SOCKET
         and mode != JOINT_MODE_UNIVERSAL
     ):
