@@ -334,7 +334,7 @@ Disabling reduction exposes the geometry-dependent candidate bounds shown above.
        is open, use ``use_mujoco_contacts=False`` or, if that is not possible,
        approximate load-bearing regions with multiple collision shapes.
 
-The MuJoCo Warp cylinder--box behavior above is a known bug, not the intended
+The MuJoCo Warp cylinder--box behavior above is a known discrepancy, not the intended
 single-contact behavior of the geometry pair. For non-convex assets, use a
 convex compound or Newton's mesh/SDF paths rather than expecting one primitive
 to reproduce the surface. See :ref:`Mesh Collisions` and :ref:`Simulation Tuning`.
