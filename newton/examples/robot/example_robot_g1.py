@@ -75,16 +75,16 @@ class Example:
         use_mujoco_contacts = args.use_mujoco_contacts if args else False
 
         if solver_name == "phoenx":
-            # Let PhoenX own the temporal schedule. Fine temporal steps
-            # stabilize impact, while the contact and friction inequalities
-            # still need PGS sweeps even though joint equalities solve directly.
+            # Let PhoenX own the temporal schedule. Joint equalities solve
+            # directly; two biased and two bias-free inequality sweeps keep
+            # impact and resting friction converged at five temporal steps.
             self.sim_substeps = 1
             self.sim_dt = self.frame_dt
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
-                substeps=16,
-                solver_iterations=8,
-                velocity_iterations=1,
+                substeps=5,
+                solver_iterations=2,
+                velocity_iterations=2,
             )
         else:
             self.solver = newton.solvers.SolverMuJoCo(
