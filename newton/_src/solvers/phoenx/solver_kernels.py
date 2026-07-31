@@ -36,7 +36,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 
 __all__ = [
-    "_apply_joint_control_kernel",
     "_apply_joint_drive_control_kernel",
     "_apply_joint_forces_kernel",
     "_contact_impulse_to_force_wrapper_kernel",
@@ -463,84 +462,6 @@ def _apply_joint_forces_kernel(
     if id_p >= 0:
         wp.atomic_sub(body_f, id_p, wp.spatial_vector(f_total, t_total + wp.cross(r_p, f_total)))
     wp.atomic_add(body_f, id_c, child_wrench_at_com)
-
-
-@wp.kernel(enable_backward=False)
-def _apply_joint_control_kernel(
-    # Per-joint lookup tables (length = model.joint_count).
-    joint_idx_to_cid: wp.array[wp.int32],
-    joint_idx_to_dof_start: wp.array[wp.int32],
-    # PhoenX is init-relative; subtract joint_q_at_init from absolute target.
-    joint_q_at_init_per_cid: wp.array[wp.float32],
-    # Newton Model + Control.
-    joint_target_mode: wp.array[wp.int32],
-    joint_target_ke: wp.array[wp.float32],
-    joint_target_kd: wp.array[wp.float32],
-    joint_effort_limit: wp.array[wp.float32],
-    joint_gear: wp.array[wp.float32],
-    control_target_pos: wp.array[wp.float32],
-    control_target_vel: wp.array[wp.float32],
-    # Drive-mode constants.
-    mode_off: wp.int32,
-    mode_position: wp.int32,
-    mode_velocity: wp.int32,
-    target_mode_position: wp.int32,
-    target_mode_velocity: wp.int32,
-    target_mode_position_velocity: wp.int32,
-    # ADBS column offsets.
-    off_drive_mode: wp.int32,
-    off_target: wp.int32,
-    off_target_velocity: wp.int32,
-    off_stiffness_drive: wp.int32,
-    off_damping_drive: wp.int32,
-    off_max_force_drive: wp.int32,
-    # Constraint container to rewrite.
-    constraints: ConstraintContainer,
-):
-    """Per-joint writeback of drive knobs into the ADBS column. ``cid == -1``
-    or ``dof == -1`` (FREE/disabled/FIXED/BALL) skips."""
-    j = wp.tid()
-    cid = joint_idx_to_cid[j]
-    if cid < 0:
-        return
-    dof = joint_idx_to_dof_start[j]
-    if dof < 0:
-        return
-
-    tm = joint_target_mode[dof]
-    stiffness = joint_target_ke[dof]
-    damping = joint_target_kd[dof]
-    target = control_target_pos[dof] - joint_q_at_init_per_cid[cid]
-    target_vel = control_target_vel[dof]
-    effort = joint_effort_limit[dof]
-    # Gear-ratio scaling on motor-side effort: the joint-frame cap is
-    # ``gear * motor_effort_limit``. ``gear == 1`` (default) leaves the
-    # cap untouched, preserving back-compat. Non-positive / non-finite
-    # gears defensively fall back to 1 (the adapter validates more
-    # strictly at init time).
-    gear = joint_gear[dof]
-    if (gear != gear) or gear <= 0.0:
-        gear = 1.0
-
-    drive = mode_off
-    if tm == target_mode_position or tm == target_mode_position_velocity:
-        if stiffness > 0.0:
-            drive = mode_position
-    elif tm == target_mode_velocity:
-        if damping > 0.0:
-            drive = mode_velocity
-
-    # Clamp non-finite effort (inf) to 0 = "unlimited" for POSITION drives.
-    max_force = gear * effort
-    if (max_force != max_force) or (max_force > 1.0e18) or (max_force < -1.0e18):
-        max_force = 0.0
-
-    write_int(constraints, off_drive_mode, cid, drive)
-    write_float(constraints, off_target, cid, target)
-    write_float(constraints, off_target_velocity, cid, target_vel)
-    write_float(constraints, off_stiffness_drive, cid, stiffness)
-    write_float(constraints, off_damping_drive, cid, damping)
-    write_float(constraints, off_max_force_drive, cid, max_force)
 
 
 @wp.kernel(enable_backward=False)

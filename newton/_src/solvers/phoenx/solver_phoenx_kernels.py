@@ -776,7 +776,6 @@ def _make_multiworld_rigid_prepare_dispatch_func(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
-    selective_joint_pgs: bool,
     has_soft_contact_pd: bool,
     cached_prepare: bool,
     enable_column_timers: bool,
@@ -889,9 +888,7 @@ def _make_multiworld_rigid_prepare_dispatch_func(
 
     @wp.func
     def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
-        if wp.static(selective_joint_pgs):
-            return joint_pgs_enabled[cid] != wp.int32(0)
-        return True
+        return joint_pgs_enabled[cid] != wp.int32(0)
 
     @wp.func
     def _dispatch_prepare_cid(
@@ -939,7 +936,6 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
-    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
     enable_column_timers: bool,
@@ -1077,9 +1073,7 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
 
     @wp.func
     def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
-        if wp.static(selective_joint_pgs):
-            return joint_pgs_enabled[cid] == wp.int32(1)
-        return True
+        return joint_pgs_enabled[cid] == wp.int32(1)
 
     @wp.func
     def _dispatch_iterate_cid(
@@ -1134,7 +1128,6 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
-    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -1158,7 +1151,6 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=cached_prepare,
         enable_column_timers=enable_column_timers,
@@ -1172,7 +1164,6 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -1188,7 +1179,6 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
             soft_tet_neohookean=soft_tet_neohookean,
             has_joints=has_joints,
             skip_joint_pgs=skip_joint_pgs,
-            selective_joint_pgs=selective_joint_pgs,
             has_mass_splitting=False,
             packed_contact_headers=False,
             has_sleeping=has_sleeping,
@@ -1203,7 +1193,6 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
             soft_tet_neohookean=soft_tet_neohookean,
             has_joints=has_joints,
             skip_joint_pgs=skip_joint_pgs,
-            selective_joint_pgs=selective_joint_pgs,
             has_mass_splitting=False,
             packed_contact_headers=False,
             has_sleeping=has_sleeping,
@@ -1327,7 +1316,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                         base = local_tid
                         while base < count_joints:
                             cid = world_element_ids_by_color[joint_start + base]
-                            if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                            if joint_pgs_enabled[cid] != wp.int32(0):
                                 _dispatch_prepare_joint(
                                     constraints,
                                     bodies,
@@ -1463,7 +1452,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             base = local_tid
                             while base < count_joints:
                                 cid = world_element_ids_by_color[joint_start + base]
-                                if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] == wp.int32(1):
+                                if joint_pgs_enabled[cid] == wp.int32(1):
                                     _dispatch_iterate_joint(
                                         constraints,
                                         bodies,
@@ -1525,7 +1514,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                         else:
                             if wp.static(has_joints and not has_contacts):
                                 if wp.static(not skip_joint_pgs):
-                                    if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] == wp.int32(1):
+                                    if joint_pgs_enabled[cid] == wp.int32(1):
                                         _dispatch_iterate_joint(
                                             constraints,
                                             bodies,
@@ -1539,7 +1528,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                         )
                             elif cid < num_joints:
                                 if wp.static(not skip_joint_pgs):
-                                    if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] == wp.int32(1):
+                                    if joint_pgs_enabled[cid] == wp.int32(1):
                                         _dispatch_iterate_joint(
                                             constraints,
                                             bodies,
@@ -1581,7 +1570,6 @@ def _make_fast_tail_relax_kernel(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
-    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -1602,7 +1590,6 @@ def _make_fast_tail_relax_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -1617,7 +1604,6 @@ def _make_fast_tail_relax_kernel(
             soft_tet_neohookean=soft_tet_neohookean,
             has_joints=has_joints,
             skip_joint_pgs=skip_joint_pgs,
-            selective_joint_pgs=selective_joint_pgs,
             has_mass_splitting=False,
             packed_contact_headers=False,
             has_sleeping=has_sleeping,
@@ -1750,7 +1736,7 @@ def _make_fast_tail_relax_kernel(
                             base = local_tid
                             while base < count_joints:
                                 cid = world_element_ids_by_color[joint_start + base]
-                                if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] == wp.int32(1):
+                                if joint_pgs_enabled[cid] == wp.int32(1):
                                     _dispatch_iterate_joint(
                                         constraints,
                                         bodies,
@@ -1843,7 +1829,6 @@ def _make_block_world_prepare_plus_iterate_kernel(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
-    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     patch_friction: bool = False,
@@ -1861,7 +1846,6 @@ def _make_block_world_prepare_plus_iterate_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=cached_prepare,
         enable_column_timers=enable_column_timers,
@@ -1875,7 +1859,6 @@ def _make_block_world_prepare_plus_iterate_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -1998,7 +1981,6 @@ def _make_block_world_relax_kernel(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
-    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     patch_friction: bool = False,
@@ -2015,7 +1997,6 @@ def _make_block_world_relax_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -2205,7 +2186,6 @@ def get_block_world_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
-    selective_joint_pgs: bool = False,
     has_sleeping: bool = False,
     has_soft_contact_pd: bool = False,
     patch_friction: bool = False,
@@ -2225,7 +2205,6 @@ def get_block_world_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
-            selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             patch_friction=patch_friction,
@@ -2239,7 +2218,6 @@ def get_block_world_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
-            selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             patch_friction=patch_friction,
@@ -2256,7 +2234,6 @@ def get_fast_tail_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
-    selective_joint_pgs: bool = False,
     has_sleeping: bool = False,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -2282,7 +2259,6 @@ def get_fast_tail_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
-            selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             cloth_support=cloth_support,
@@ -2302,7 +2278,6 @@ def get_fast_tail_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
-            selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             cloth_support=cloth_support,
@@ -3468,7 +3443,6 @@ def _make_singleworld_dispatch_func(
     enable_column_timers: bool,
     has_joints: bool,
     skip_joint_pgs: bool,
-    selective_joint_pgs: bool,
     has_mass_splitting: bool,
     packed_contact_headers: bool,
     has_sleeping: bool,
@@ -3503,11 +3477,9 @@ def _make_singleworld_dispatch_func(
 
     @wp.func
     def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
-        if wp.static(selective_joint_pgs):
-            if wp.static(is_prepare or is_cached_prepare):
-                return joint_pgs_enabled[cid] != wp.int32(0)
-            return joint_pgs_enabled[cid] == wp.int32(1)
-        return True
+        if wp.static(is_prepare or is_cached_prepare):
+            return joint_pgs_enabled[cid] != wp.int32(0)
+        return joint_pgs_enabled[cid] == wp.int32(1)
 
     @wp.func
     def _dispatch_one_cid(
@@ -3757,7 +3729,6 @@ def _make_singleworld_rigid_direct_color_func(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
-    selective_joint_pgs: bool,
     has_mass_splitting: bool,
     packed_contact_headers: bool,
     has_sleeping: bool,
@@ -3782,7 +3753,6 @@ def _make_singleworld_rigid_direct_color_func(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=is_cached_prepare,
         enable_column_timers=enable_column_timers,
@@ -3791,7 +3761,6 @@ def _make_singleworld_rigid_direct_color_func(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
@@ -3800,11 +3769,9 @@ def _make_singleworld_rigid_direct_color_func(
 
     @wp.func
     def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
-        if wp.static(selective_joint_pgs):
-            if wp.static(is_prepare or is_cached_prepare):
-                return joint_pgs_enabled[cid] != wp.int32(0)
-            return joint_pgs_enabled[cid] == wp.int32(1)
-        return True
+        if wp.static(is_prepare or is_cached_prepare):
+            return joint_pgs_enabled[cid] != wp.int32(0)
+        return joint_pgs_enabled[cid] == wp.int32(1)
 
     @wp.func
     def _dispatch_rigid_direct_color(
@@ -3894,7 +3861,6 @@ def _make_singleworld_persistent_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
-    selective_joint_pgs: bool = False,
     has_mass_splitting: bool = True,
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
@@ -3922,7 +3888,6 @@ def _make_singleworld_persistent_kernel(
         soft_tet_neohookean=soft_tet_neohookean,
         has_joints=has_joints,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
@@ -3936,7 +3901,6 @@ def _make_singleworld_persistent_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
@@ -4092,7 +4056,6 @@ def _make_singleworld_fused_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
-    selective_joint_pgs: bool = False,
     has_mass_splitting: bool = True,
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
@@ -4113,7 +4076,6 @@ def _make_singleworld_fused_kernel(
         soft_tet_neohookean=soft_tet_neohookean,
         has_joints=has_joints,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
@@ -4127,7 +4089,6 @@ def _make_singleworld_fused_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
@@ -4280,7 +4241,6 @@ def get_singleworld_kernel(
     has_joints: bool = True,
     has_contacts: bool = True,
     skip_joint_pgs: bool = False,
-    selective_joint_pgs: bool = False,
     has_mass_splitting: bool = True,
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
@@ -4299,7 +4259,6 @@ def get_singleworld_kernel(
         has_joints=has_joints,
         has_contacts=has_contacts,
         skip_joint_pgs=skip_joint_pgs,
-        selective_joint_pgs=selective_joint_pgs,
         has_mass_splitting=has_mass_splitting,
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,

@@ -25,7 +25,12 @@ from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
 )
-from newton._src.solvers.phoenx.constraints.constraint_joint import DRIVE_MODE_OFF, JOINT_MODE_PRISMATIC
+from newton._src.solvers.phoenx.constraints.constraint_joint import (
+    ADBS_DWORDS,
+    DRIVE_MODE_OFF,
+    JOINT_MODE_PRISMATIC,
+    ActuatedDoubleBallSocketData,
+)
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES
 from newton._src.solvers.phoenx.solver_phoenx import (
     PhoenXWorld,
@@ -75,6 +80,12 @@ def _make_kwargs(
 
 class TestInvariants(unittest.TestCase):
     """``_assert_invariants`` traps four classes of caller mistake."""
+
+    def test_joint_columns_omit_bilateral_factor_caches(self) -> None:
+        """Keep obsolete bilateral PGS caches out of joint columns."""
+        fields = set(ActuatedDoubleBallSocketData.vars)
+        self.assertTrue(fields.isdisjoint({"structural_direct", "mode_cache", "hertz", "mass_coeff", "impulse_coeff"}))
+        self.assertLessEqual(ADBS_DWORDS, 84)
 
     def test_correct_construction_accepted(self) -> None:
         """A correctly-built world constructs without raising."""

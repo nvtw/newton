@@ -42,7 +42,6 @@ def _make_serial_world_prepare_plus_iterate_kernel(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
-    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -66,7 +65,6 @@ def _make_serial_world_prepare_plus_iterate_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
-            selective_joint_pgs=selective_joint_pgs,
             has_soft_contact_pd=has_soft_contact_pd,
             cached_prepare=cached_prepare,
             enable_column_timers=enable_column_timers,
@@ -77,7 +75,6 @@ def _make_serial_world_prepare_plus_iterate_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
-            selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             enable_column_timers=enable_column_timers,
@@ -157,7 +154,7 @@ def _make_serial_world_prepare_plus_iterate_kernel(
                     )
                 elif wp.static(has_joints and not has_contacts):
                     if wp.static(not skip_joint_pgs):
-                        if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                        if joint_pgs_enabled[cid] == wp.int32(1):
                             _dispatch_iterate_joint(
                                 constraints,
                                 bodies,
@@ -171,7 +168,7 @@ def _make_serial_world_prepare_plus_iterate_kernel(
                             )
                 elif cid < num_joints:
                     if wp.static(not skip_joint_pgs):
-                        if wp.static(not selective_joint_pgs) or joint_pgs_enabled[cid] != wp.int32(0):
+                        if joint_pgs_enabled[cid] == wp.int32(1):
                             _dispatch_iterate_joint(
                                 constraints,
                                 bodies,
@@ -209,7 +206,6 @@ def _make_serial_world_relax_kernel(
     has_joints: bool,
     has_contacts: bool,
     skip_joint_pgs: bool,
-    selective_joint_pgs: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool = False,
     cloth_support: bool = False,
@@ -233,7 +229,6 @@ def _make_serial_world_relax_kernel(
             has_joints=has_joints,
             has_contacts=has_contacts,
             skip_joint_pgs=skip_joint_pgs,
-            selective_joint_pgs=selective_joint_pgs,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
             enable_column_timers=enable_column_timers,

@@ -3,8 +3,9 @@
 """PhoenX solver wrapped in Newton's :class:`SolverBase` interface.
 
 Drives :class:`PhoenXWorld` from Newton's Model/State/Control/Contacts. Per step:
-import (Newton -> PhoenX body fields + joint_f), joint-control writeback (Control
-+ Model gains -> drive dwords), export (PhoenX -> body_q / body_qd).
+import (Newton -> PhoenX body fields + joint_f), direct-drive target binding,
+and export (PhoenX -> body_q / body_qd). Experimental maximal projectors also
+mirror drive controls into their private compatibility columns.
 PhoenX slot 0 is the static world anchor; pass ``substeps=1`` to substep outside.
 """
 
@@ -39,9 +40,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
-)
-from newton._src.solvers.phoenx.constraints.joint_inequality import (
-    mark_direct_equality_joints_kernel,
 )
 from newton._src.solvers.phoenx.model_adapter import (
     AdbsInitArrays,
@@ -779,7 +777,6 @@ class SolverPhoenX(SolverBase):
                 min_value_np = self._adbs.min_value.numpy()
                 max_value_np = self._adbs.max_value.numpy()
                 d6_limit_count_np = self._adbs.d6_limit_count.numpy()
-                structural_direct = np.zeros(num_joints, dtype=np.int32)
                 for joint in np.flatnonzero(self._direct_equality_system.joint_mask):
                     cid = int(joint_idx_to_cid[joint])
                     if cid < 0:
@@ -802,22 +799,8 @@ class SolverPhoenX(SolverBase):
                         int(JOINT_MODE_CARTESIAN),
                     ):
                         equality_only = int(d6_limit_count_np[cid]) == 0
-                    if not equality_only:
-                        structural_direct[cid] = 1
-                        continue
-                    joint_pgs_enabled[cid] = 0
-                if num_joints > 0:
-                    structural_direct_wp = wp.array(structural_direct, dtype=wp.int32, device=self.device)
-                    wp.launch(
-                        mark_direct_equality_joints_kernel,
-                        dim=num_joints,
-                        inputs=[
-                            self._constraints,
-                            structural_direct_wp,
-                            wp.int32(num_joints),
-                        ],
-                        device=self.device,
-                    )
+                    if equality_only:
+                        joint_pgs_enabled[cid] = 0
                 if num_joints > 0:
                     self.world.set_joint_pgs_ownership(joint_pgs_enabled)
 
@@ -889,14 +872,12 @@ class SolverPhoenX(SolverBase):
         direct = self._direct_equality_system
         if direct is None or not direct.enabled:
             return
-        num_joints = int(self.model.joint_count)
         joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
         joint_pgs_enabled = self._direct_base_joint_pgs_enabled.copy()
         friction = self._adbs.friction_coefficient.numpy()
         lower_limit = self._adbs.min_value.numpy()
         upper_limit = self._adbs.max_value.numpy()
         d6_limit_count = self._adbs.d6_limit_count.numpy()
-        structural_direct = np.zeros(num_joints, dtype=np.int32)
         for joint in np.flatnonzero(direct.joint_mask):
             cid = int(joint_idx_to_cid[joint])
             if cid < 0:
@@ -918,24 +899,12 @@ class SolverPhoenX(SolverBase):
                 int(JOINT_MODE_CARTESIAN),
             ):
                 equality_only = int(d6_limit_count[cid]) == 0
-            if not equality_only:
-                structural_direct[cid] = 1
-                continue
-            joint_pgs_enabled[cid] = 0
-        wp.launch(
-            mark_direct_equality_joints_kernel,
-            dim=num_joints,
-            inputs=[
-                self._constraints,
-                wp.array(structural_direct, dtype=wp.int32, device=self.device),
-                wp.int32(num_joints),
-            ],
-            device=self.device,
-        )
+            if equality_only:
+                joint_pgs_enabled[cid] = 0
         self.world.set_joint_pgs_ownership(joint_pgs_enabled)
 
     def _apply_joint_control(self, control: Control) -> None:
-        """Bind direct targets and rewrite retained inequality-drive metadata."""
+        """Bind direct targets and update experimental projector drives."""
         model = self.model
         target_pos = (
             control.joint_target_q
@@ -951,7 +920,7 @@ class SolverPhoenX(SolverBase):
             return  # no per-DOF drive configured
         if self._direct_equality_system is not None:
             self._direct_equality_system.set_control_targets(target_pos, target_vel)
-        if self._adbs.num_drive_columns == 0:
+        if not self._uses_maximal_tree_projector or self._adbs.num_drive_columns == 0:
             return
         wp.launch(
             _apply_joint_drive_control_kernel,

@@ -686,6 +686,7 @@ class TestDirectEquality(unittest.TestCase):
                 parameters = inspect.signature(factory).parameters
                 self.assertNotIn("revolute_only", parameters)
                 self.assertNotIn("joint_inequality_only", parameters)
+                self.assertNotIn("selective_joint_pgs", parameters)
 
 
 if __name__ == "__main__":

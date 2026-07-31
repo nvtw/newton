@@ -11,7 +11,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     read_int,
     read_vec3,
-    write_int,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_AXIS_WORLD,
@@ -21,7 +20,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_JOINT_MODE,
     _OFF_R1_B1,
     _OFF_R1_B2,
-    _OFF_STRUCTURAL_DIRECT,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
@@ -33,17 +31,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
 )
 from newton._src.solvers.phoenx.mass_splitting import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
-
-
-@wp.kernel(enable_backward=False)
-def mark_direct_equality_joints_kernel(
-    constraints: ConstraintContainer,
-    structural_direct: wp.array[wp.int32],
-    num_joints: wp.int32,
-):
-    cid = wp.tid()
-    if cid < num_joints:
-        write_int(constraints, _OFF_STRUCTURAL_DIRECT, cid, structural_direct[cid])
 
 
 @wp.func

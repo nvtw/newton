@@ -4590,10 +4590,6 @@ class PhoenXWorld:
             if self.mass_splitting_enabled:
                 self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
 
-    def _selective_joint_pgs_enabled(self) -> bool:
-        """Return whether PGS should skip only reduced-coordinate joint columns."""
-        return self._joint_pgs_ownership_active and self.num_joints > 0 and not self._joint_pgs_all_disabled
-
     def _skip_all_joint_pgs(self) -> bool:
         """Return whether reduced coordinates own every joint column."""
         return self._joint_pgs_ownership_active and self._joint_pgs_all_disabled
@@ -4612,7 +4608,6 @@ class PhoenXWorld:
             "enable_column_timers": self.enable_column_timers,
             "has_joints": self.num_joints > 0,
             "skip_joint_pgs": self._skip_all_joint_pgs(),
-            "selective_joint_pgs": self._selective_joint_pgs_enabled(),
             "has_sleeping": self._sleeping_enabled,
             "has_soft_contact_pd": bool(self._has_soft_contact_pd),
         }
@@ -4642,7 +4637,6 @@ class PhoenXWorld:
             "has_joints": dispatch_kw["has_joints"],
             "has_contacts": self.max_contact_columns > 0,
             "skip_joint_pgs": dispatch_kw["skip_joint_pgs"],
-            "selective_joint_pgs": dispatch_kw["selective_joint_pgs"],
             "has_sleeping": dispatch_kw["has_sleeping"],
             "has_soft_contact_pd": dispatch_kw["has_soft_contact_pd"],
             "patch_friction": self._contact_patch_enabled,
@@ -4688,7 +4682,6 @@ class PhoenXWorld:
                 has_joints=self.num_joints > 0,
                 has_contacts=self.max_contact_columns > 0,
                 skip_joint_pgs=self._skip_all_joint_pgs(),
-                selective_joint_pgs=self._selective_joint_pgs_enabled(),
                 has_mass_splitting=False,
                 packed_contact_headers=False,
                 has_sleeping=False,
@@ -4704,7 +4697,6 @@ class PhoenXWorld:
                 has_joints=self.num_joints > 0,
                 has_contacts=self.max_contact_columns > 0,
                 skip_joint_pgs=self._skip_all_joint_pgs(),
-                selective_joint_pgs=self._selective_joint_pgs_enabled(),
                 has_mass_splitting=False,
                 packed_contact_headers=False,
                 has_sleeping=False,
