@@ -1354,6 +1354,9 @@ class SolverPhoenX(SolverBase):
             if self._direct_equality_system is not None:
                 self._direct_equality_system.refresh_joint_properties()
                 self._refresh_direct_joint_ownership()
+        cable_rest_changed = bool(flags & int(ModelFlags.JOINT_PROPERTIES | ModelFlags.BODY_PROPERTIES))
+        if cable_rest_changed and self._direct_equality_system is not None:
+            self._direct_equality_system.refresh_cable_rest_state()
         if flags & int(ModelFlags.MODEL_PROPERTIES):
             self.world.gravity = wp.array(self._read_model_gravity_np(self.model), dtype=wp.vec3f, device=self.device)
         # Single body refresh kernel covers both BODY_PROPERTIES and

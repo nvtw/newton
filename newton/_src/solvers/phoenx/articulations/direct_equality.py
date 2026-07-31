@@ -505,6 +505,7 @@ def _prepare_direct_rows(
     joint_dof_dim: wp.array2d[wp.int32],
     joint_x_p: wp.array[wp.transform],
     joint_x_c: wp.array[wp.transform],
+    cable_rest_relative_orientation: wp.array[wp.quat],
     joint_target_ke: wp.array[wp.float32],
     joint_target_kd: wp.array[wp.float32],
     bodies: BodyContainer,
@@ -748,6 +749,7 @@ def _prepare_direct_rows(
 
     rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
     if mode == JOINT_MODE_CABLE:
+        rotation_error = _quat_log(q1 * wp.quat_inverse(cable_rest_relative_orientation[joint]) * wp.quat_inverse(q0))
         material_axis = wp.normalize(wp.quat_rotate(q0, wp.vec3(0.0, 0.0, 1.0)))
         material_tangent0 = create_orthonormal(material_axis)
         material_tangent1 = wp.cross(material_axis, material_tangent0)
@@ -871,6 +873,7 @@ def _prepare_direct_equality_rows_kernel(
     joint_dof_dim: wp.array2d[wp.int32],
     joint_x_p: wp.array[wp.transform],
     joint_x_c: wp.array[wp.transform],
+    cable_rest_relative_orientation: wp.array[wp.quat],
     joint_target_ke: wp.array[wp.float32],
     joint_target_kd: wp.array[wp.float32],
     bodies: BodyContainer,
@@ -901,6 +904,7 @@ def _prepare_direct_equality_rows_kernel(
         joint_dof_dim,
         joint_x_p,
         joint_x_c,
+        cable_rest_relative_orientation,
         joint_target_ke,
         joint_target_kd,
         bodies,
@@ -1549,6 +1553,44 @@ def _effective_joint_axes(
     return axes
 
 
+def _cable_rest_relative_orientations(model: Model, joint_mode: np.ndarray) -> np.ndarray:
+    """Snapshot each cable parent-to-child anchor rotation at zero strain."""
+    rest = np.zeros((int(model.joint_count), 4), dtype=np.float32)
+    rest[:, 3] = 1.0
+    body_q = np.asarray(model.body_q.numpy(), dtype=np.float32)
+    joint_parent = np.asarray(model.joint_parent.numpy(), dtype=np.int32)
+    joint_child = np.asarray(model.joint_child.numpy(), dtype=np.int32)
+    joint_x_p = np.asarray(model.joint_X_p.numpy(), dtype=np.float32)
+    joint_x_c = np.asarray(model.joint_X_c.numpy(), dtype=np.float32)
+
+    def multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        av, aw = a[:3], float(a[3])
+        bv, bw = b[:3], float(b[3])
+        return np.asarray(
+            [
+                aw * bv[0] + bw * av[0] + av[1] * bv[2] - av[2] * bv[1],
+                aw * bv[1] + bw * av[1] + av[2] * bv[0] - av[0] * bv[2],
+                aw * bv[2] + bw * av[2] + av[0] * bv[1] - av[1] * bv[0],
+                aw * bw - float(np.dot(av, bv)),
+            ],
+            dtype=np.float32,
+        )
+
+    for joint in np.flatnonzero(joint_mode == int(JOINT_MODE_CABLE)):
+        parent = int(joint_parent[joint])
+        child = int(joint_child[joint])
+        q0 = joint_x_p[joint, 3:] if parent < 0 else multiply(body_q[parent, 3:], joint_x_p[joint, 3:])
+        q1 = joint_x_c[joint, 3:] if child < 0 else multiply(body_q[child, 3:], joint_x_c[joint, 3:])
+        relative = multiply(np.asarray([-q0[0], -q0[1], -q0[2], q0[3]], dtype=np.float32), q1)
+        norm = float(np.linalg.norm(relative))
+        if norm > 1.0e-12:
+            relative /= norm
+        if relative[3] < 0.0:
+            relative = -relative
+        rest[joint] = relative
+    return rest
+
+
 class DirectEqualitySystem:
     """Batched fixed-pattern direct equality systems, one per mechanism."""
 
@@ -1655,6 +1697,11 @@ class DirectEqualitySystem:
         self.effective_joint_axis = wp.array(
             _effective_joint_axes(model, joint_mode, joint_dof_start),
             dtype=wp.vec3,
+            device=device,
+        )
+        self.cable_rest_relative_orientation = wp.array(
+            _cable_rest_relative_orientations(model, joint_mode),
+            dtype=wp.quat,
             device=device,
         )
         self.effective_joint_dof_start = wp.array(joint_dof_start, dtype=wp.int32, device=device)
@@ -1818,6 +1865,12 @@ class DirectEqualitySystem:
             regularization=self.regularization,
         )
 
+    def refresh_cable_rest_state(self) -> None:
+        """Refresh cable zero-strain rotations after joint or body pose edits."""
+        if not self.enabled:
+            return
+        self.cable_rest_relative_orientation.assign(_cable_rest_relative_orientations(self.model, self._joint_mode_np))
+
     def set_control_targets(
         self,
         target_q: wp.array[wp.float32],
@@ -1844,6 +1897,7 @@ class DirectEqualitySystem:
                 self.model.joint_dof_dim,
                 self.model.joint_X_p,
                 self.model.joint_X_c,
+                self.cable_rest_relative_orientation,
                 self.joint_target_ke,
                 self.joint_target_kd,
                 self.bodies,

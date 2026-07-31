@@ -200,6 +200,7 @@
 - Fix experimental PhoenX Ant rollouts to terminate and reset non-finite or physically exploded states instead of retaining corrupted simulation state.
 - Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.
 - Fix PhoenX direct-equality scheduling to apply cached drive and limit warm-start impulses once per substep instead of once per PGS iteration.
+- Preserve authored curved cable rest poses in `SolverPhoenX`, including rest-state refresh after joint-frame or body-pose edits.
 - Fix `SolverPhoenX` contact and joint-limit impulses against directly constrained mechanisms by alternating inequality sweeps with reused direct triangular solves.
 
 - Fix persistent vibration in single-world PhoenX Gauss-Seidel stacks by restoring forward-only color traversal as the default; alternating traversal remains opt-in.

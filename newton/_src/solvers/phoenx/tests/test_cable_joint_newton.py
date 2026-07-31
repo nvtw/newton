@@ -37,6 +37,7 @@ def _two_body_cable_world(
     bend_stiffness: float,
     bend_damping: float,
     gravity: tuple[float, float, float] = (0.0, 0.0, -9.81),
+    rest_bend: float = 0.0,
 ) -> tuple[newton.Model, newton.solvers.SolverPhoenX]:
     """Build a two-body cable scene:
 
@@ -67,8 +68,12 @@ def _two_body_cable_world(
         child_xform=wp.transform_identity(),
     )
 
+    bob_at_anchor = rest_bend != 0.0
     bob = mb.add_link(
-        xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
+        xform=wp.transform(
+            p=wp.vec3(0.0, 0.0, 1.0) if bob_at_anchor else wp.vec3(0.0, 0.0, 0.0),
+            q=wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), rest_bend),
+        ),
         mass=1.0,
         inertia=((1.0e-3, 0, 0), (0, 1.0e-3, 0), (0, 0, 1.0e-3)),
     )
@@ -78,7 +83,9 @@ def _two_body_cable_world(
         parent=anchor,
         child=bob,
         parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
-        child_xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()),
+        child_xform=(
+            wp.transform_identity() if bob_at_anchor else wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity())
+        ),
         stretch_stiffness=1.0e9,
         stretch_damping=0.0,
         bend_stiffness=float(bend_stiffness),
@@ -182,6 +189,37 @@ class TestNewtonCableAdapter(unittest.TestCase):
         for _ in range(40):
             expected = 9.81 * math.cos(expected) / stiffness
         self.assertAlmostEqual(measured, expected, delta=2.0e-3)
+
+    def test_cable_preserves_authored_curved_rest_state(self) -> None:
+        """Preserve a non-straight cable rest orientation without external load."""
+        rest_bend = 0.45
+        model, solver = _two_body_cable_world(
+            bend_stiffness=40.0,
+            bend_damping=4.0,
+            gravity=(0.0, 0.0, 0.0),
+            rest_bend=rest_bend,
+        )
+        body_q = _step_n(model, solver, frames=120, dt=1.0 / 240.0)
+        measured = 2.0 * math.acos(min(abs(float(body_q[1, 6])), 1.0))
+        self.assertAlmostEqual(measured, rest_bend, delta=2.0e-3)
+
+    def test_cable_refreshes_authored_curved_rest_state(self) -> None:
+        """Refresh cable rest bend after an authored body-pose edit."""
+        model, solver = _two_body_cable_world(
+            bend_stiffness=40.0,
+            bend_damping=4.0,
+            gravity=(0.0, 0.0, 0.0),
+            rest_bend=0.45,
+        )
+        rest_bend = 0.25
+        body_q = model.body_q.numpy()
+        body_q[1, 3:7] = (0.0, math.sin(0.5 * rest_bend), 0.0, math.cos(0.5 * rest_bend))
+        model.body_q.assign(body_q)
+        solver.notify_model_changed(newton.ModelFlags.BODY_PROPERTIES)
+
+        body_q = _step_n(model, solver, frames=120, dt=1.0 / 240.0)
+        measured = 2.0 * math.acos(min(abs(float(body_q[1, 6])), 1.0))
+        self.assertAlmostEqual(measured, rest_bend, delta=2.0e-3)
 
 
 if __name__ == "__main__":
