@@ -325,22 +325,30 @@ launch-overhead vs. per-colour parallelism.
 Joint support
 ~~~~~~~~~~~~~
 
-PhoenX supports five Newton :class:`~newton.JointType` values via a
-single unified *actuated double-ball-socket* (ADBS) constraint
-column:
+PhoenX supports native Newton joints plus common D6 lock patterns.
+In maximal coordinates, bilateral rows are assembled into one direct
+mechanism system per connected joint graph; only limits and friction remain
+in the coloured PGS path. Reduced coordinates own declared articulation
+trees independently of those maximal mechanisms.
 
-============== =============================================== =================
+============== =============================================== =============================================
 Joint type     Behaviour                                       Drive / limit
-============== =============================================== =================
-``REVOLUTE``   1-DoF hinge (5 constrained rows)                ✅ both
-``PRISMATIC``  1-DoF slider (5 constrained rows)               ✅ both
-``BALL``       3-DoF ball-socket (3 point-lock rows)           ❌ neither
-``FIXED``      6-DoF weld (3 point + 3 angular)                ❌ neither
-``CABLE``      Rigid ball-socket + 2 bend + 1 twist soft rows  PD on bend/twist
-``FREE``       Free-floating; no constraint column             —
-============== =============================================== =================
+============== =============================================== =============================================
+``REVOLUTE``   1-DoF hinge (5 constrained rows)                Implicit drive, axial limit and friction
+``PRISMATIC``  1-DoF slider (5 constrained rows)               Implicit drive, axial limit and friction
+``BALL``       3-DoF ball-socket (3 point-lock rows)           Native: passive; D6 form: per-axis drives/limits
+``FIXED``      6-DoF weld (3 point + 3 angular)                No free DoF
+``CABLE``      Rigid stretch + 2 bend + 1 twist soft rows      PD bend/twist; maximal coordinates
+``FREE``       Free-floating; no constraint rows               —
+``DISTANCE``   Free root / distance-tree coordinate            Reduced-coordinate trees only
+``D6``         Fixed, ball, universal, revolute, prismatic,    Per-free-axis direct drives; limits vary by
+               cylindrical, planar, or Cartesian reductions    reduction
+============== =============================================== =============================================
 
-``DISTANCE`` and ``D6`` joints raise at construction.
+Generic D6 trees are supported by reduced ownership. Maximal D6 requires one
+of the listed reductions; finite Cartesian linear limits and Cartesian
+Coulomb friction are not implemented. Maximal ``DISTANCE`` joints are not
+supported.
 
 Drives (``REVOLUTE`` / ``PRISMATIC``) are PD with per-DoF
 ``joint_target_ke`` (stiffness), ``joint_target_kd`` (damping), and
@@ -377,8 +385,9 @@ heterogeneous mechanisms share the device without rectangular padding or
 host-side launches between panel columns.
 
 Joint limits for ``REVOLUTE`` / ``PRISMATIC`` use
-``joint_limit_lower`` / ``joint_limit_upper`` with the same PD-style
-``ke``/``kd`` as drives.
+``joint_limit_lower`` / ``joint_limit_upper``. D6 angular limits are
+also available on the supported ball, universal, cylindrical, and planar
+reductions. These unilateral rows remain in the inequality PGS solve.
 
 Feed-forward joint efforts (``Control.joint_f``) are converted to body
 wrenches via the stock :func:`apply_joint_forces` kernel and folded
@@ -400,8 +409,9 @@ Changing an armature between zero and nonzero through
 precomputed row topology; changing a nonzero value or its gear ratio
 reuses the topology and permutation. The legacy PGS equality solver and experimental
 maximal-projector modes retain a revolute-only stator/rotor body-inertia
-approximation. Armature on ``BALL`` / ``FIXED`` / ``FREE`` joints is
-ignored because they have no scalar axial DoF. Armature is critical for
+approximation. D6 free axes use the same exact dynamic-row treatment. Native
+``BALL``, ``FIXED``, and ``FREE`` joints do not expose scalar
+direct-drive rows. Armature is critical for
 high-stiffness PD drives on chains where an intermediate link has
 near-zero inertia about the joint axis (e.g. humanoid waist links
 of <0.1 kg with ``target_ke = 300`` N·m/rad).
@@ -423,9 +433,9 @@ rows formulated against the joint's finalize-time rest pose:
   ``d_twist`` (same units), penalises rotation about the reference
   axis itself.
 
-The angular rows are integrated as PD constraints inside the same
-PGS sweep that handles contacts and rigid joints, so chained cable
-segments converge under the standard ``solver_iterations``.
+The angular rows are integrated as PD constraints in the connected
+mechanism's direct solve. Contacts and joint inequalities remain in PGS, so
+cable equality convergence does not depend on ``solver_iterations``.
 
 **Newton API mapping** (``ModelBuilder.add_joint_cable`` /
 :attr:`~newton.JointType.CABLE`): the parent attachment in world
@@ -638,9 +648,9 @@ make different trade-offs and excel at different things.
 
 **Pick PhoenX when**
 
-- Your model fits the supported joint set (``REVOLUTE`` / ``PRISMATIC``
-  / ``BALL`` / ``FIXED`` / ``FREE``) and you don't need equality,
-  mimic, or ``D6`` constraints.
+- Your model uses the native joint set or a supported D6 reduction and
+  does not need Newton CONNECT / WELD / JOINT equality objects or mimic
+  constraints.
 - You're running many small worlds in parallel (RL training,
   domain randomisation). PhoenX's fast-tail multi-world kernels scale
   well into the thousands of worlds.
@@ -651,12 +661,11 @@ make different trade-offs and excel at different things.
 
 **Pick MuJoCo Warp when**
 
-- You need the full joint vocabulary: ``D6``, ``DISTANCE``, equality
-  constraints (``CONNECT`` / ``WELD`` / ``JOINT``), mimic constraints,
-  friction-loss, velocity limits.
-- You're running on generalised-coordinate articulations and want
-  reduced-coordinate dynamics rather than a maximal-coordinate
-  formulation.
+- You need arbitrary D6 layouts, equality constraints
+  (``CONNECT`` / ``WELD`` / ``JOINT``), mimic constraints, or
+  velocity limits.
+- You need MuJoCo's mature generalized-coordinate modeling and constraint
+  semantics beyond PhoenX's reduced articulation backend.
 - You want to mix Newton bodies with MuJoCo's hand-tuned contact
   dynamics (soft constraints with ``solref`` / ``solimp``, multi-CCD).
 - You need integration schemes beyond semi-implicit Euler (RK4,
@@ -676,10 +685,10 @@ PhoenX:
   gap. :class:`~newton.solvers.SolverXPBD` (opt-in
   ``enable_restitution=True``) is currently the only rigid-body
   Newton solver that consumes the field directly.
-- Smaller joint vocabulary on Newton's standard ``ModelBuilder`` path;
-  no equality / mimic constraints, no ``D6``, no ``DISTANCE``.
-  ``CABLE`` is supported but only with rigid stretch (see
-  :ref:`phoenx-cable-joints`).
+- No Newton CONNECT / WELD / JOINT equality objects or mimic constraints.
+  Maximal D6 is limited to recognized lock patterns, and maximal
+  ``DISTANCE`` is unsupported. ``CABLE`` is supported with rigid stretch
+  (see :ref:`phoenx-cable-joints`).
 - Pyramidal Coulomb friction, not the exact circular cone (loose by
   a few percent in pathological tangent-misaligned cases).
 - Tall stacks of contacting bodies may need extra ``substeps`` and

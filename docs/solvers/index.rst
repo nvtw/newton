@@ -197,8 +197,9 @@ Joint Feature Support
 Not every solver supports every joint type or joint property.
 The tables below document which joint features each solver handles.
 
-Only :class:`~newton.solvers.SolverFeatherstone` and :class:`~newton.solvers.SolverMuJoCo`
-operate on :ref:`articulations <Articulations>` (generalized/reduced coordinates).
+:class:`~newton.solvers.SolverFeatherstone`, :class:`~newton.solvers.SolverMuJoCo`,
+and the reduced backend of :class:`~newton.solvers.SolverPhoenX` operate on
+:ref:`articulations <Articulations>` (generalized/reduced coordinates).
 The maximal-coordinate solvers (:class:`~newton.solvers.SolverSemiImplicit`,
 :class:`~newton.solvers.SolverXPBD`, and :class:`~newton.solvers.SolverKamino`)
 enforce joints as pairwise body constraints but do not use the articulation kinematic-tree structure.
@@ -217,9 +218,11 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - :class:`~newton.solvers.SolverSemiImplicit`
      - :class:`~newton.solvers.SolverXPBD`
      - :class:`~newton.solvers.SolverMuJoCo`
+     - :class:`~newton.solvers.SolverPhoenX`
      - :class:`~newton.solvers.SolverVBD`
      - :class:`~newton.solvers.SolverKamino`
    * - PRISMATIC
+     - |yes|
      - |yes|
      - |yes|
      - |yes|
@@ -233,7 +236,9 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |yes|
      - |yes|
      - |yes|
+     - |yes|
    * - BALL
+     - |yes|
      - |yes|
      - |yes|
      - |yes|
@@ -247,7 +252,9 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |yes|
      - |yes|
      - |yes|
+     - |yes|
    * - FREE
+     - |yes|
      - |yes|
      - |yes|
      - |yes|
@@ -259,6 +266,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - 🟨 :sup:`1`
      - |yes|
      - |no|
+     - 🟨 :sup:`5`
      - |no|
      - |no|
    * - D6
@@ -266,6 +274,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |yes|
      - |yes|
      - |yes|
+     - 🟨 :sup:`6`
      - |yes|
      - |no|
    * - CABLE
@@ -273,6 +282,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |no|
      - |no|
      - |no|
+     - 🟨 :sup:`7`
      - |yes|
      - |no|
 
@@ -290,6 +300,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - :class:`~newton.solvers.SolverSemiImplicit`
      - :class:`~newton.solvers.SolverXPBD`
      - :class:`~newton.solvers.SolverMuJoCo`
+     - :class:`~newton.solvers.SolverPhoenX`
      - :class:`~newton.solvers.SolverVBD`
      - :class:`~newton.solvers.SolverKamino`
    * - :attr:`~newton.Model.joint_enabled`
@@ -298,12 +309,14 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |yes|
      - |no|
      - |yes|
+     - |yes|
      - |no|
    * - :attr:`~newton.Model.joint_armature`
      - |yes|
      - |no|
      - |no|
      - |yes|
+     - 🟨 :sup:`8`
      - |no|
      - |yes|
    * - :attr:`~newton.Model.joint_friction`
@@ -311,6 +324,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |no|
      - |no|
      - |yes|
+     - 🟨 :sup:`9`
      - |no|
      - |no|
    * - :attr:`~newton.Model.joint_limit_lower` / :attr:`~newton.Model.joint_limit_upper`
@@ -318,6 +332,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |yes| :sup:`2`
      - |yes|
      - |yes|
+     - 🟨 :sup:`10`
      - |yes|
      - |yes|
    * - :attr:`~newton.Model.joint_limit_ke` / :attr:`~newton.Model.joint_limit_kd`
@@ -325,6 +340,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |yes| :sup:`2`
      - |no|
      - |yes|
+     - 🟨 :sup:`9`
      - |yes| :sup:`4`
      - |no|
    * - :attr:`~newton.Model.joint_effort_limit`
@@ -332,9 +348,11 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |no|
      - |no|
      - |yes|
+     - |yes|
      - |no|
      - |no|
    * - :attr:`~newton.Model.joint_velocity_limit`
+     - |no|
      - |no|
      - |no|
      - |no|
@@ -356,11 +374,13 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - :class:`~newton.solvers.SolverSemiImplicit`
      - :class:`~newton.solvers.SolverXPBD`
      - :class:`~newton.solvers.SolverMuJoCo`
+     - :class:`~newton.solvers.SolverPhoenX`
      - :class:`~newton.solvers.SolverVBD`
      - :class:`~newton.solvers.SolverKamino`
    * - :attr:`~newton.Model.joint_target_ke` / :attr:`~newton.Model.joint_target_kd`
      - |yes|
      - |yes| :sup:`2`
+     - |yes|
      - |yes|
      - |yes|
      - |yes| :sup:`4`
@@ -370,9 +390,11 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |no|
      - |no|
      - |yes|
+     - |yes|
      - |no|
      - |yes|
    * - :attr:`~newton.Control.joint_f` (feedforward forces)
+     - |yes|
      - |yes|
      - |yes|
      - |yes|
@@ -392,6 +414,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - :class:`~newton.solvers.SolverSemiImplicit`
      - :class:`~newton.solvers.SolverXPBD`
      - :class:`~newton.solvers.SolverMuJoCo`
+     - :class:`~newton.solvers.SolverPhoenX`
      - :class:`~newton.solvers.SolverVBD`
      - :class:`~newton.solvers.SolverKamino`
    * - Equality constraints (CONNECT, WELD, JOINT)
@@ -401,6 +424,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |yes|
      - |no|
      - |no|
+     - |no|
    * - Mimic constraints
      - |no|
      - |no|
@@ -408,9 +432,16 @@ enforce joints as pairwise body constraints but do not use the articulation kine
      - |yes| :sup:`3`
      - |no|
      - |no|
+     - |no|
 
 | :sup:`3` Mimic constraints in MuJoCo are supported for REVOLUTE and PRISMATIC joints only.
 | :sup:`4` VBD interprets ``joint_target_kd`` and ``joint_limit_kd`` as absolute damping coefficients in physical units.
+| :sup:`5` PhoenX supports DISTANCE only inside reduced-coordinate trees; maximal DISTANCE is unsupported.
+| :sup:`6` Maximal PhoenX recognizes fixed, ball, universal, revolute, prismatic, cylindrical, planar, and Cartesian D6 lock patterns. Generic D6 trees require reduced ownership.
+| :sup:`7` PhoenX CABLE uses maximal direct rows with rigid axial stretch and soft bend/twist.
+| :sup:`8` PhoenX armature is exact on revolute/prismatic and supported D6 free axes; native BALL/FIXED/FREE joints have no scalar dynamic row.
+| :sup:`9` PhoenX joint friction and authored limit gains are currently limited to axial revolute/prismatic rows.
+| :sup:`10` PhoenX supports axial revolute/prismatic limits and angular limits on supported D6 reductions; finite Cartesian linear limits are unsupported.
 
 
 
