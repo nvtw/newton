@@ -62,7 +62,10 @@ class MultiWorldDispatcher:
             direct.solve(use_bias=True)
             direct.resolve_bounded_drives(idt, use_bias=True)
         if self._world._maximal_tree_projector is not None:
-            self._world._maximal_tree_projector.project(use_bias=True, dt=self._world.substep_dt)
+            if self._world._direct_tree_contacts:
+                self._world._maximal_tree_projector.factor_contact_response()
+            else:
+                self._world._maximal_tree_projector.project(use_bias=True, dt=self._world.substep_dt)
             self._world._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
         if self._world._reduced_constraints_active_this_step:
             self._world._reduced_articulation.solve_constraints(self._world, idt, relax=False)
@@ -89,7 +92,8 @@ class MultiWorldDispatcher:
             direct.solve(use_bias=False)
             direct.resolve_bounded_drives(idt, use_bias=False)
         if self._world._maximal_tree_projector is not None:
-            self._world._maximal_tree_projector.project(use_bias=False, dt=self._world.substep_dt)
+            if not self._world._direct_tree_contacts:
+                self._world._maximal_tree_projector.project(use_bias=False, dt=self._world.substep_dt)
             if self._world.velocity_iterations > 0:
                 self._world._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
         if self._world._reduced_constraints_active_this_step:

@@ -54,6 +54,7 @@ _FP32_BASE_REGULARIZATION = 3.0e-6
 _FP32_STRUCTURAL_REGULARIZATION = 3.0e-7
 _FP32_RANK_REGULARIZATION = float(np.sqrt(np.finfo(np.float32).eps))
 _DIRECT_BAUMGARTE = 0.2
+_DIRECT_SOLVE_RESIDUAL_TOLERANCE = 1.0e-4
 _PANEL_BLOCK_SIZE = 16
 _WIDE_PANEL_BLOCK_SIZE = 32
 _WIDE_PANEL_MIN_ROWS = 1024
@@ -1211,6 +1212,7 @@ def _build_direct_equality_rhs_kernel(
     use_bias: wp.bool,
     row_scale: wp.array[wp.float32],
     rhs: wp.array[wp.float32],
+    solve_active: wp.array[wp.int32],
 ):
     row = wp.tid()
     joint = row_joint[row]
@@ -1223,15 +1225,21 @@ def _build_direct_equality_rhs_kernel(
         relative_velocity += wp.dot(row_wrench0[structural_index, local_row], _body_com_twist(bodies, body0))
     if body1 > wp.int32(0):
         relative_velocity += wp.dot(row_wrench1[structural_index, local_row], _body_com_twist(bodies, body1))
+    value = wp.float32(0.0)
     if row_dynamic[row]:
-        rhs[row] = row_scale[row] * (
+        value = row_scale[row] * (
             velocity_reference[row]
             - relative_velocity
             - accumulated_impulse[row] / wp.max(dynamic_mass[row], wp.float32(1.0e-10))
         )
     else:
         bias = row_bias[structural_index, local_row] if use_bias else wp.float32(0.0)
-        rhs[row] = -row_scale[row] * (relative_velocity + bias)
+        value = -row_scale[row] * (relative_velocity + bias)
+    rhs[row] = value
+    # Avoid a full panel traversal after inequality sweeps that left the
+    # equilibrated equality residual below the FP32 correction scale.
+    if wp.abs(value) > wp.float32(_DIRECT_SOLVE_RESIDUAL_TOLERANCE):
+        wp.atomic_max(solve_active, wp.int32(0), wp.int32(1))
 
 
 @wp.kernel(enable_backward=False)
@@ -1788,6 +1796,7 @@ class DirectEqualitySystem:
 
         self.rhs = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.delta = wp.zeros(row_count, dtype=wp.float32, device=device)
+        self.solve_active = wp.zeros(1, dtype=wp.int32, device=device)
         inverse_mass = np.asarray(model.body_inv_mass.numpy(), dtype=np.float32)
         joint_parent = np.asarray(model.joint_parent.numpy(), dtype=np.int32)
         joint_child = np.asarray(model.joint_child.numpy(), dtype=np.int32)
@@ -2100,6 +2109,7 @@ class DirectEqualitySystem:
     def solve(self, *, use_bias: bool) -> None:
         if not self.enabled:
             return
+        self.solve_active.zero_()
         wp.launch(
             _build_direct_equality_rhs_kernel,
             dim=len(self.topology.row_joint),
@@ -2120,39 +2130,40 @@ class DirectEqualitySystem:
                 wp.bool(use_bias),
                 self.row_scale,
                 self.rhs,
+                self.solve_active,
             ],
             device=self.model.device,
         )
-        self.solver.solve(self.rhs, self.delta)
-        wp.launch(
-            _accumulate_direct_impulse_kernel,
-            dim=len(self.topology.row_joint),
-            inputs=[
-                self.delta,
-                self.row_scale,
-                self.accumulated_impulse,
-            ],
-            device=self.model.device,
-        )
-        wp.launch(
-            _apply_direct_equality_delta_kernel,
-            dim=int(self.model.body_count) + 1,
-            inputs=[
-                self.body_row_start,
-                self.body_rows,
-                self.row_joint,
-                self.row_local,
-                self.joint_to_structural,
-                self.model.joint_parent,
-                self.model.joint_child,
-                self.row_wrench0,
-                self.row_wrench1,
-                self.delta,
-                self.row_scale,
-                self.bodies,
-            ],
-            device=self.model.device,
-        )
+
+        def solve_active_system() -> None:
+            self.solver.solve(self.rhs, self.delta)
+            wp.launch(
+                _accumulate_direct_impulse_kernel,
+                dim=len(self.topology.row_joint),
+                inputs=[self.delta, self.row_scale, self.accumulated_impulse],
+                device=self.model.device,
+            )
+            wp.launch(
+                _apply_direct_equality_delta_kernel,
+                dim=int(self.model.body_count) + 1,
+                inputs=[
+                    self.body_row_start,
+                    self.body_rows,
+                    self.row_joint,
+                    self.row_local,
+                    self.joint_to_structural,
+                    self.model.joint_parent,
+                    self.model.joint_child,
+                    self.row_wrench0,
+                    self.row_wrench1,
+                    self.delta,
+                    self.row_scale,
+                    self.bodies,
+                ],
+                device=self.model.device,
+            )
+
+        wp.capture_if(self.solve_active, on_true=solve_active_system)
 
 
 __all__ = ["DirectEqualitySystem", "DirectEqualityTopology", "build_direct_equality_topology"]

@@ -38,6 +38,9 @@ class Example:
 
         # Pick the solver backend selected by the parser.
         solver_name = getattr(args, "solver", "mujoco")
+        self.phoenx_reduced_coordinates = PHOENX_USE_REDUCED_COORDINATES and not (
+            solver_name == "phoenx" and getattr(args, "test", False)
+        )
 
         g1 = newton.ModelBuilder()
         if solver_name == "mujoco":
@@ -88,7 +91,7 @@ class Example:
                 substeps=5,
                 solver_iterations=2,
                 velocity_iterations=2,
-                articulation_mode="reduced" if PHOENX_USE_REDUCED_COORDINATES else "maximal",
+                articulation_mode="reduced" if self.phoenx_reduced_coordinates else "maximal",
             )
         else:
             self.solver = newton.solvers.SolverMuJoCo(
@@ -108,6 +111,30 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
+
+        if getattr(args, "test", False) and solver_name == "phoenx" and not self.phoenx_reduced_coordinates:
+            # Exercise hand/foot friction through the full-coordinate direct
+            # equality path; the upright pose does not expose coupled drift.
+            joint_q = self.model.joint_q.numpy()
+            joint_qd = self.model.joint_qd.numpy()
+            articulation_start = self.model.articulation_start.numpy()
+            joint_q_start = self.model.joint_q_start.numpy()
+            joint_qd_start = self.model.joint_qd_start.numpy()
+            pitch = 1.2
+            for articulation in range(self.model.articulation_count):
+                root_joint = articulation_start[articulation]
+                q_start = joint_q_start[root_joint]
+                qd_start = joint_qd_start[root_joint]
+                joint_q[q_start + 2] = 1.1
+                joint_q[q_start + 3 : q_start + 7] = (
+                    0.0,
+                    math.sin(0.5 * pitch),
+                    0.0,
+                    math.cos(0.5 * pitch),
+                )
+                joint_qd[qd_start + 4] = 1.5
+            self.model.joint_q.assign(joint_q)
+            self.model.joint_qd.assign(joint_qd)
 
         # Evaluate forward kinematics for collision detection
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
@@ -183,6 +210,18 @@ class Example:
             < 0.015,  # Relaxed from 0.005 - G1 has higher residual velocities with collision pipeline
         )
         # fmt: on
+        if not self.phoenx_reduced_coordinates:
+            contact_count = int(self.contacts.rigid_contact_count.numpy()[0])
+            shape_body = self.model.shape_body.numpy()
+            shape0 = self.contacts.rigid_contact_shape0.numpy()
+            shape1 = self.contacts.rigid_contact_shape1.numpy()
+            contacted_bodies = {
+                int(shape_body[shape])
+                for shape in (*shape0[:contact_count], *shape1[:contact_count])
+                if shape >= 0 and shape_body[shape] >= 0
+            }
+            if not any("hand" in self.model.body_label[body] for body in contacted_bodies):
+                raise ValueError("G1 full-coordinate drift regression did not reach hand contact")
 
     def test_post_step(self):
         """Reject persistent horizontal drift after the initial impact."""

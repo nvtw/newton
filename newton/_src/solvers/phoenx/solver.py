@@ -440,12 +440,28 @@ class SolverPhoenX(SolverBase):
         self._maximal_contact_response: MaximalContactResponse | None = None
         self._maximal_contact_schedule: MaximalContactRunSchedule | None = None
         self._maximal_tree_projector_cls: type[MaximalTreeProjector] | type[GeneralMaximalTreeProjector] | None = None
+        tree_contact_supported = MaximalTreeProjector.supports_model(model)
+        # Direct LLT remains the equality owner; the tree factor supplies the
+        # exact constrained mobility seen by point-contact inequalities.
+        self._direct_tree_contacts = bool(
+            articulation_mode == "maximal"
+            and contact_friction_model == "point"
+            and not mass_splitting
+            and float(sleeping_velocity_threshold) <= 0.0
+            and not has_deformables
+            and tree_contact_supported
+        )
         if articulation_mode in ("maximal_projected", "maximal_articulated"):
-            if MaximalTreeProjector.supports_model(model):
+            if tree_contact_supported:
                 self._maximal_tree_projector_cls = MaximalTreeProjector
             elif GeneralMaximalTreeProjector.supports_model(model):
                 self._maximal_tree_projector_cls = GeneralMaximalTreeProjector
-        self._uses_maximal_tree_projector = self._maximal_tree_projector_cls is not None
+        elif self._direct_tree_contacts:
+            self._maximal_tree_projector_cls = MaximalTreeProjector
+        self._uses_maximal_tree_projector = bool(
+            articulation_mode in ("maximal_projected", "maximal_articulated")
+            and self._maximal_tree_projector_cls is not None
+        )
         if articulation_mode == "maximal_articulated" and self._maximal_tree_projector_cls is not MaximalTreeProjector:
             raise NotImplementedError("maximal_articulated currently requires free-root revolute articulation trees")
         self._uses_reduced_joint_ownership = articulation_mode == "reduced" or (
@@ -688,7 +704,7 @@ class SolverPhoenX(SolverBase):
             adbs_kwargs = self._adbs.to_initialize_kwargs()
             self.world.initialize_actuated_double_ball_socket_joints(**adbs_kwargs)
 
-        if self._uses_maximal_tree_projector:
+        if self._uses_maximal_tree_projector or self._direct_tree_contacts:
             assert self._maximal_tree_projector_cls is not None
             self._maximal_tree_projector = self._maximal_tree_projector_cls(
                 model,
@@ -697,7 +713,7 @@ class SolverPhoenX(SolverBase):
                 self._adbs.joint_idx_to_cid,
             )
             self.world._maximal_tree_projector = self._maximal_tree_projector
-            if articulation_mode == "maximal_articulated":
+            if articulation_mode == "maximal_articulated" or self._direct_tree_contacts:
                 self._maximal_contact_response = MaximalContactResponse(self._maximal_tree_projector)
                 self._maximal_contact_schedule = MaximalContactRunSchedule(
                     self._maximal_contact_response,
@@ -706,16 +722,18 @@ class SolverPhoenX(SolverBase):
                 )
                 self.world._maximal_contact_response = self._maximal_contact_response
                 self.world._maximal_contact_schedule = self._maximal_contact_schedule
-                joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
-                joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
-                for joint in self._maximal_tree_projector.data.joint_index.numpy().ravel():
-                    if joint >= 0:
-                        cid = int(joint_idx_to_cid[int(joint)])
-                        if cid >= 0:
-                            # Prepare the structural row for projector geometry,
-                            # but let the exact tree projection own its solve.
-                            joint_pgs_enabled[cid] = 2
-                self.world.set_joint_pgs_ownership(joint_pgs_enabled)
+                self.world._direct_tree_contacts = self._direct_tree_contacts
+                if articulation_mode == "maximal_articulated":
+                    joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
+                    joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
+                    for joint in self._maximal_tree_projector.data.joint_index.numpy().ravel():
+                        if joint >= 0:
+                            cid = int(joint_idx_to_cid[int(joint)])
+                            if cid >= 0:
+                                # Prepare the structural row for projector geometry,
+                                # but let the exact tree projection own its solve.
+                                joint_pgs_enabled[cid] = 2
+                    self.world.set_joint_pgs_ownership(joint_pgs_enabled)
         elif (
             self.articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid", "reduced")
             and int(model.articulation_count) > 0

@@ -60,7 +60,10 @@ class SingleWorldDispatcher:
             direct.solve(use_bias=True)
             direct.resolve_bounded_drives(idt, use_bias=True)
         if w._maximal_tree_projector is not None:
-            w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
+            if w._direct_tree_contacts:
+                w._maximal_tree_projector.factor_contact_response()
+            else:
+                w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
             w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
         if w._reduced_constraints_active_this_step:
             w._reduced_articulation.solve_constraints(w, idt, relax=False)
@@ -83,7 +86,8 @@ class SingleWorldDispatcher:
             direct.solve(use_bias=False)
             direct.resolve_bounded_drives(idt, use_bias=False)
         if w._maximal_tree_projector is not None:
-            w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
+            if not w._direct_tree_contacts:
+                w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
             if w.velocity_iterations > 0:
                 w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
         if w._reduced_constraints_active_this_step:

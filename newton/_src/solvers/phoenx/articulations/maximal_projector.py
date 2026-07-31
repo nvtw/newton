@@ -52,7 +52,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
 from newton._src.solvers.phoenx.helpers.math_helpers import revolution_tracker_angle
 from newton._src.solvers.phoenx.solver_phoenx_kernels import _rotation_quaternion
 
-_WARP_SIZE = 32
+_TREE_WIDTH = 64
 
 # See maximal_projector_general.py: opt-in exact implicit-PD drive.
 _PHOENX_MAXIMAL_IMPLICIT_DRIVE = os.environ.get("PHOENX_MAXIMAL_IMPLICIT_DRIVE", "0").lower() not in (
@@ -66,6 +66,10 @@ _SYNC_WARP_CUDA = """__syncwarp();"""
 
 @wp.func_native(_SYNC_WARP_CUDA)
 def _sync_warp(): ...
+
+
+@wp.func_native("__syncthreads();")
+def _sync_tree(): ...
 
 
 @wp.func
@@ -166,8 +170,8 @@ def _gather_maximal_tree_kernel(
     data: MaximalTreeProjectorData,
 ):
     tid = wp.tid()
-    articulation = tid // wp.int32(_WARP_SIZE)
-    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    articulation = tid // wp.int32(_TREE_WIDTH)
+    lane = tid - articulation * wp.int32(_TREE_WIDTH)
     if lane >= data.body_count[articulation]:
         return
 
@@ -341,9 +345,9 @@ def _project_tree_velocities(
 ):
     """Warp-cooperative tree solve: articulated inertia recursion to ``velocity_out``.
 
-    All 32 lanes of the articulation's warp must call this together — the
+    All lanes of the articulation block must call this together — the
     ``lane < body_count`` guards sit INSIDE the depth loops with the warp syncs
-    outside so every lane reaches every :func:`_sync_warp`.
+    outside so every lane reaches every :func:`_sync_tree`.
     """
     if lane < body_count:
         spatial_mass = _make_spatial_mass(data.body_mass[articulation, lane], data.body_inertia[articulation, lane])
@@ -352,7 +356,7 @@ def _project_tree_velocities(
         data.parent_articulated[articulation, lane] = wp.spatial_matrixf(0.0)
         data.parent_bias[articulation, lane] = wp.spatial_vectorf(0.0)
         data.inverse_d[articulation, lane] = wp.float32(0.0)
-    _sync_warp()
+    _sync_tree()
 
     current_depth = max_depth
     while current_depth >= wp.int32(0):
@@ -387,14 +391,14 @@ def _project_tree_velocities(
                 data.parent_bias[articulation, lane] = wp.transpose(joint_transform) @ (
                     projected_bias - projected @ offset
                 )
-        _sync_warp()
+        _sync_tree()
         current_depth -= wp.int32(1)
 
     if lane == wp.int32(0):
         data.velocity_out[articulation, lane] = _solve_spd6(
             data.articulated[articulation, lane], data.bias[articulation, lane]
         )
-    _sync_warp()
+    _sync_tree()
 
     current_depth = wp.int32(1)
     while current_depth <= max_depth:
@@ -414,7 +418,7 @@ def _project_tree_velocities(
                 + drive_bias
             )
             data.velocity_out[articulation, lane] = base + joint_velocity * joint_motion
-        _sync_warp()
+        _sync_tree()
         current_depth += wp.int32(1)
 
 
@@ -439,19 +443,34 @@ def _project_tree_reactions(
                 child_transform = _make_spatial_shift_transform(data.shift[articulation, child])
                 impulse += wp.transpose(child_transform) @ data.reaction[articulation, child]
             data.reaction[articulation, lane] = impulse
-        _sync_warp()
+        _sync_tree()
         current_depth -= wp.int32(1)
 
 
 @wp.kernel(enable_backward=False)
 def _project_maximal_tree_kernel(implicit_drive: wp.bool, data: MaximalTreeProjectorData):
     tid = wp.tid()
-    articulation = tid // wp.int32(_WARP_SIZE)
-    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    articulation = tid // wp.int32(_TREE_WIDTH)
+    lane = tid - articulation * wp.int32(_TREE_WIDTH)
     body_count = data.body_count[articulation]
     max_depth = data.max_depth[articulation]
     _project_tree_velocities(data, articulation, lane, body_count, max_depth, implicit_drive)
     _project_tree_reactions(data, articulation, lane, body_count, max_depth)
+
+
+@wp.kernel(enable_backward=False)
+def _factor_maximal_tree_response_kernel(data: MaximalTreeProjectorData):
+    tid = wp.tid()
+    articulation = tid // wp.int32(_TREE_WIDTH)
+    lane = tid - articulation * wp.int32(_TREE_WIDTH)
+    _project_tree_velocities(
+        data,
+        articulation,
+        lane,
+        data.body_count[articulation],
+        data.max_depth[articulation],
+        wp.bool(False),
+    )
 
 
 @wp.kernel(enable_backward=False)
@@ -462,8 +481,8 @@ def _publish_maximal_tree_kernel(
     data: MaximalTreeProjectorData,
 ):
     tid = wp.tid()
-    articulation = tid // wp.int32(_WARP_SIZE)
-    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    articulation = tid // wp.int32(_TREE_WIDTH)
+    lane = tid - articulation * wp.int32(_TREE_WIDTH)
     if lane >= data.body_count[articulation]:
         return
 
@@ -535,24 +554,24 @@ def _project_maximal_tree_positions_kernel(
 
     Each iteration runs gather -> tree solve -> pose apply entirely
     warp-locally (every body belongs to exactly one free-root tree), with
-    :func:`_sync_warp` between phases so iteration ``k+1`` reads the poses
+    :func:`_sync_tree` between phases so iteration ``k+1`` reads the poses
     written by iteration ``k``. The reaction recursion is skipped — the
     position path never publishes joint impulses.
     """
     tid = wp.tid()
-    articulation = tid // wp.int32(_WARP_SIZE)
-    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    articulation = tid // wp.int32(_TREE_WIDTH)
+    lane = tid - articulation * wp.int32(_TREE_WIDTH)
     body_count = data.body_count[articulation]
     max_depth = data.max_depth[articulation]
 
     for _newton_iter in range(3):
         if lane < body_count:
             _gather_position_lane(joint_to_cid, constraints, bodies, data, articulation, lane)
-        _sync_warp()
+        _sync_tree()
         _project_tree_velocities(data, articulation, lane, body_count, max_depth, wp.bool(False))
         if lane < body_count:
             _apply_position_lane(bodies, data, articulation, lane)
-        _sync_warp()
+        _sync_tree()
 
 
 class MaximalTreeProjector:
@@ -577,7 +596,7 @@ class MaximalTreeProjector:
             start = int(starts[articulation])
             end = int(starts[articulation + 1])
             owned_joints = [joint for joint in range(start, end) if int(joint_articulation[joint]) == articulation]
-            if len(owned_joints) < 2 or len(owned_joints) > _WARP_SIZE:
+            if len(owned_joints) < 2 or len(owned_joints) > _TREE_WIDTH:
                 return False
             root_joint = owned_joints[0]
             root = int(joint_child[root_joint])
@@ -620,28 +639,28 @@ class MaximalTreeProjector:
         joint_to_cid: wp.array[wp.int32],
     ):
         if not self.supports_model(model):
-            raise ValueError("maximal tree projector requires CUDA free-root revolute trees with 2-32 bodies")
+            raise ValueError("maximal tree projector requires CUDA free-root revolute trees with 2-64 bodies")
         self.model = model
         self.constraints = constraints
         self.bodies = bodies
         self.joint_to_cid = joint_to_cid
         self.articulation_count = int(model.articulation_count)
-        self.launch_dim = self.articulation_count * _WARP_SIZE
-        self.block_dim = _WARP_SIZE
+        self.launch_dim = self.articulation_count * _TREE_WIDTH
+        self.block_dim = _TREE_WIDTH
 
         starts = model.articulation_start.numpy()
         joint_articulation = model.joint_articulation.numpy()
         joint_parent = model.joint_parent.numpy()
         joint_child = model.joint_child.numpy()
         joint_to_cid_np = joint_to_cid.numpy()
-        shape = (self.articulation_count, _WARP_SIZE)
+        shape = (self.articulation_count, _TREE_WIDTH)
         body_count = np.zeros(self.articulation_count, dtype=np.int32)
         max_depth = np.zeros(self.articulation_count, dtype=np.int32)
         joint_index = np.full(shape, -1, dtype=np.int32)
         body_slot = np.full(shape, -1, dtype=np.int32)
         depth = np.full(shape, -1, dtype=np.int32)
         parent = np.full(shape, -1, dtype=np.int32)
-        child_start = np.zeros((self.articulation_count, _WARP_SIZE + 1), dtype=np.int32)
+        child_start = np.zeros((self.articulation_count, _TREE_WIDTH + 1), dtype=np.int32)
         child_index = np.full(shape, -1, dtype=np.int32)
 
         for articulation in range(self.articulation_count):
@@ -675,7 +694,7 @@ class MaximalTreeProjector:
             child_index[articulation, : len(flat_children)] = flat_children
             child_start[articulation, count + 1 :] = len(flat_children)
 
-        self.block_dim = 128 if self.articulation_count >= 512 else _WARP_SIZE
+        self.block_dim = _TREE_WIDTH
 
         device = model.device
         data = MaximalTreeProjectorData()
@@ -704,6 +723,23 @@ class MaximalTreeProjector:
         data.drive_bias = wp.zeros(shape, dtype=wp.float32, device=device)
         self.data = data
         self.implicit_drive = _PHOENX_MAXIMAL_IMPLICIT_DRIVE
+
+    def factor_contact_response(self) -> None:
+        """Factor the current tree mobility without changing body velocities."""
+        wp.launch(
+            _gather_maximal_tree_kernel,
+            dim=self.launch_dim,
+            block_dim=self.block_dim,
+            inputs=[True, False, 0.0, self.joint_to_cid, self.constraints, self.bodies, self.data],
+            device=self.model.device,
+        )
+        wp.launch(
+            _factor_maximal_tree_response_kernel,
+            dim=self.launch_dim,
+            block_dim=self.block_dim,
+            inputs=[self.data],
+            device=self.model.device,
+        )
 
     def project(self, *, use_bias: bool, dt: float = 0.0) -> None:
         """Project body twists and publish the recovered joint reactions.

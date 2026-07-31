@@ -950,6 +950,7 @@ class PhoenXWorld:
         self._maximal_tree_projector = None
         self._maximal_contact_response: MaximalContactResponse | None = None
         self._maximal_contact_schedule: MaximalContactRunSchedule | None = None
+        self._direct_tree_contacts = False
         self._regular_pgs_active_this_step = True
         self._reduced_contacts_active_this_step = False
         self._reduced_constraints_active_this_step = False
@@ -3002,7 +3003,7 @@ class PhoenXWorld:
             idt = wp.float32(1.0 / self.substep_dt)
             self._dispatcher.solve(idt)
             self._integrate_positions()
-            if self._maximal_tree_projector is not None:
+            if self._maximal_tree_projector is not None and not self._direct_tree_contacts:
                 # Position-level tree projection: pull post-integrate poses
                 # back onto the joint manifold so the prepare-time Baumgarte
                 # bias only has to absorb one substep of drift.
@@ -3097,10 +3098,6 @@ class PhoenXWorld:
         self._has_soft_contact_pd = (contact_stiffness_src is not None and int(contact_stiffness_src.shape[0]) > 0) or (
             contact_damping_src is not None and int(contact_damping_src.shape[0]) > 0
         )
-        if self._maximal_contact_schedule is not None and self._has_soft_contact_pd:
-            raise NotImplementedError(
-                "maximal_articulated does not yet support soft-PD contacts; use maximal_projected or reduced"
-            )
         contact_stiffness = contact_stiffness_src if contact_stiffness_src is not None else self._soft_contact_sentinel
         contact_damping = contact_damping_src if contact_damping_src is not None else self._soft_contact_sentinel
         contact_friction = (
@@ -4022,25 +4019,30 @@ class PhoenXWorld:
                 ],
                 device=self.device,
             )
-        wp.launch(
-            iterate_maximal_contact_runs_kernel,
-            dim=projector.launch_dim,
-            block_dim=projector.block_dim,
-            inputs=[
-                projector.data,
-                response.data,
-                self.bodies,
-                self._contact_cols,
-                self._contact_container,
-                wp.float32(1.0 / self.substep_dt),
-                wp.float32(self.sor_boost),
-                schedule.columns,
-                schedule.section_end,
-                schedule.mobility,
-                wp.bool(use_bias),
-            ],
-            device=self.device,
+        iterations = (
+            (self.solver_iterations if use_bias else self.velocity_iterations) if self._direct_tree_contacts else 1
         )
+        for _ in range(iterations):
+            wp.launch(
+                iterate_maximal_contact_runs_kernel,
+                dim=projector.launch_dim,
+                block_dim=projector.block_dim,
+                inputs=[
+                    projector.data,
+                    response.data,
+                    self.bodies,
+                    self._contact_cols,
+                    self._contact_container,
+                    wp.float32(1.0 / self.substep_dt),
+                    wp.float32(self.sor_boost),
+                    schedule.columns,
+                    schedule.section_end,
+                    schedule.mobility,
+                    schedule.delta_impulse,
+                    wp.bool(use_bias),
+                ],
+                device=self.device,
+            )
 
     def _solve_main(self, *, num_iterations: int | None = None, solve_direct: bool = True) -> None:
         """Run the fused multi-world prepare and biased iterate phase."""

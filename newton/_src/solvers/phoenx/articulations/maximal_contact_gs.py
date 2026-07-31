@@ -13,10 +13,12 @@ from newton._src.solvers.phoenx.articulations.maximal_contact_response import (
     apply_maximal_contact_impulse_thread,
     maximal_contact_pair_cross_inverse_mass,
     maximal_contact_pair_inverse_mass,
+    maximal_contact_wrench_cross_mobility,
 )
 from newton._src.solvers.phoenx.articulations.maximal_projector import (
+    _TREE_WIDTH,
     MaximalTreeProjectorData,
-    _sync_warp,
+    _sync_tree,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_block import block_project_friction_delta_sor_2
@@ -41,7 +43,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_bias_t2,
     cc_get_normal,
     cc_get_normal_lambda,
+    cc_get_pd_bias,
     cc_get_pd_eff_soft,
+    cc_get_pd_gamma,
     cc_get_r0,
     cc_get_r1,
     cc_get_tangent1,
@@ -50,12 +54,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
-from newton._src.solvers.phoenx.constraints.contact_projection import (
-    contact_project_normal_velocity_update_no_soft_pd,
-)
+from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_normal_velocity_update
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 
-_WARP_SIZE = 32
 _INT64_MAX = 0x7FFFFFFFFFFFFFFF
 
 
@@ -124,47 +125,144 @@ def _set_spatial_impulse(
 
 
 @wp.func
-def _apply_point_impulse(
+def _apply_accumulated_impulse(
     tree: MaximalTreeProjectorData,
     response: MaximalContactResponseData,
     bodies: BodyContainer,
     articulation: wp.int32,
     lane: wp.int32,
-    body0: wp.int32,
-    body1: wp.int32,
-    r0: wp.vec3f,
-    r1: wp.vec3f,
-    impulse_on_body1: wp.vec3f,
 ):
     body_count = tree.body_count[articulation]
-    if lane < body_count:
-        response.impulse[articulation, lane] = wp.spatial_vectorf(0.0)
-    _sync_warp()
-    if lane == wp.int32(0):
-        _set_spatial_impulse(
-            tree,
-            response,
-            articulation,
-            body0,
-            -impulse_on_body1,
-            -wp.cross(r0, impulse_on_body1),
-        )
-        _set_spatial_impulse(
-            tree,
-            response,
-            articulation,
-            body1,
-            impulse_on_body1,
-            wp.cross(r1, impulse_on_body1),
-        )
-    _sync_warp()
     apply_maximal_contact_impulse_thread(articulation, lane, tree, response)
     if lane < body_count:
         body = tree.body_slot[articulation, lane]
         delta = response.velocity[articulation, lane]
         bodies.velocity[body] += wp.spatial_top(delta)
         bodies.angular_velocity[body] += wp.spatial_bottom(delta)
-    _sync_warp()
+    _sync_tree()
+
+
+@wp.func
+def _contact_row_cross_impulse(
+    tree: MaximalTreeProjectorData,
+    response: MaximalContactResponseData,
+    bodies: BodyContainer,
+    body0: wp.int32,
+    body1: wp.int32,
+    point0: wp.vec3f,
+    point1: wp.vec3f,
+    previous_point0: wp.vec3f,
+    previous_point1: wp.vec3f,
+    direction: wp.vec3f,
+    previous_impulse: wp.vec3f,
+):
+    return (
+        maximal_contact_wrench_cross_mobility(
+            tree,
+            response,
+            bodies,
+            body0,
+            point0,
+            -direction,
+            body0,
+            previous_point0,
+            -previous_impulse,
+        )
+        + maximal_contact_wrench_cross_mobility(
+            tree,
+            response,
+            bodies,
+            body0,
+            point0,
+            -direction,
+            body1,
+            previous_point1,
+            previous_impulse,
+        )
+        + maximal_contact_wrench_cross_mobility(
+            tree,
+            response,
+            bodies,
+            body1,
+            point1,
+            direction,
+            body0,
+            previous_point0,
+            -previous_impulse,
+        )
+        + maximal_contact_wrench_cross_mobility(
+            tree,
+            response,
+            bodies,
+            body1,
+            point1,
+            direction,
+            body1,
+            previous_point1,
+            previous_impulse,
+        )
+    )
+
+
+@wp.func
+def _contact_cross_velocity(
+    tree: MaximalTreeProjectorData,
+    response: MaximalContactResponseData,
+    bodies: BodyContainer,
+    contacts: ContactContainer,
+    body0: wp.int32,
+    body1: wp.int32,
+    contact: wp.int32,
+    previous_contact: wp.int32,
+    previous_impulse: wp.vec3f,
+):
+    normal = cc_get_normal(contacts, contact)
+    tangent0 = cc_get_tangent1(contacts, contact)
+    tangent1 = wp.cross(normal, tangent0)
+    point0 = bodies.position[body0] + cc_get_r0(contacts, contact)
+    point1 = bodies.position[body1] + cc_get_r1(contacts, contact)
+    previous_point0 = bodies.position[body0] + cc_get_r0(contacts, previous_contact)
+    previous_point1 = bodies.position[body1] + cc_get_r1(contacts, previous_contact)
+    delta_normal = _contact_row_cross_impulse(
+        tree,
+        response,
+        bodies,
+        body0,
+        body1,
+        point0,
+        point1,
+        previous_point0,
+        previous_point1,
+        normal,
+        previous_impulse,
+    )
+    delta_tangent0 = _contact_row_cross_impulse(
+        tree,
+        response,
+        bodies,
+        body0,
+        body1,
+        point0,
+        point1,
+        previous_point0,
+        previous_point1,
+        tangent0,
+        previous_impulse,
+    )
+    delta_tangent1 = _contact_row_cross_impulse(
+        tree,
+        response,
+        bodies,
+        body0,
+        body1,
+        point0,
+        point1,
+        previous_point0,
+        previous_point1,
+        tangent1,
+        previous_impulse,
+    )
+    return delta_normal * normal + delta_tangent0 * tangent0 + delta_tangent1 * tangent1
 
 
 @wp.func
@@ -260,8 +358,8 @@ def refresh_maximal_contact_mobility_kernel(
     mobility: wp.array2d[wp.float32],
 ):
     tid = wp.tid()
-    articulation = tid // wp.int32(_WARP_SIZE)
-    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    articulation = tid // wp.int32(_TREE_WIDTH)
+    lane = tid - articulation * wp.int32(_TREE_WIDTH)
     if lane != wp.int32(0):
         return
     begin = wp.int32(0)
@@ -299,11 +397,12 @@ def iterate_maximal_contact_runs_kernel(
     scheduled_column: wp.array[wp.int32],
     section_end: wp.array[wp.int32],
     mobility: wp.array2d[wp.float32],
+    delta_impulse: wp.array[wp.vec3f],
     use_bias: wp.bool,
 ):
     tid = wp.tid()
-    articulation = tid // wp.int32(_WARP_SIZE)
-    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    articulation = tid // wp.int32(_TREE_WIDTH)
+    lane = tid - articulation * wp.int32(_TREE_WIDTH)
     begin = wp.int32(0)
     if articulation > wp.int32(0):
         begin = section_end[articulation - wp.int32(1)]
@@ -319,6 +418,9 @@ def iterate_maximal_contact_runs_kernel(
         friction_dynamic = contact_get_friction_dynamic(columns, column)
         first = contact_get_contact_first(columns, column)
         count = contact_get_contact_count(columns, column)
+        if lane < tree.body_count[articulation]:
+            response.impulse[articulation, lane] = wp.spatial_vectorf(0.0)
+        _sync_tree()
         for offset in range(count):
             contact = first + offset
             impulse = wp.vec3f(0.0)
@@ -336,18 +438,37 @@ def iterate_maximal_contact_runs_kernel(
                     - bodies.velocity[body0]
                     - wp.cross(bodies.angular_velocity[body0], r0)
                 )
+                for previous_offset in range(offset):
+                    previous_contact = first + previous_offset
+                    relative_velocity += _contact_cross_velocity(
+                        tree,
+                        response,
+                        bodies,
+                        contacts,
+                        body0,
+                        body1,
+                        contact,
+                        previous_contact,
+                        delta_impulse[previous_contact],
+                    )
                 bias = cc_get_bias(contacts, contact)
                 speculative = bias > wp.float32(0.0)
                 if not use_bias:
                     bias = wp.float32(0.0)
-                if (use_bias or not speculative) and cc_get_pd_eff_soft(contacts, contact) <= wp.float32(0.0):
+                if use_bias or not speculative:
                     row_mass_coeff = mass_coeff
                     row_impulse_coeff = impulse_coeff
                     if speculative or not use_bias:
                         row_mass_coeff = wp.float32(1.0)
                         row_impulse_coeff = wp.float32(0.0)
 
-                    normal_impulse = contact_project_normal_velocity_update_no_soft_pd(
+                    pd_eff = cc_get_pd_eff_soft(contacts, contact)
+                    pd_gamma = cc_get_pd_gamma(contacts, contact)
+                    pd_bias = cc_get_pd_bias(contacts, contact)
+                    if pd_eff > wp.float32(0.0) and mobility[0, contact] > wp.float32(1.0e-12):
+                        projected_inverse_mass = wp.float32(1.0) / mobility[0, contact]
+                        pd_eff = wp.float32(1.0) / (projected_inverse_mass + pd_gamma)
+                    normal_impulse = contact_project_normal_velocity_update(
                         contacts,
                         contact,
                         normal,
@@ -357,14 +478,16 @@ def iterate_maximal_contact_runs_kernel(
                         row_mass_coeff,
                         row_impulse_coeff,
                         sor_boost,
-                        wp.float32(0.0),
-                        wp.float32(0.0),
-                        wp.float32(0.0),
+                        pd_eff,
+                        pd_gamma,
+                        pd_bias,
                     )
                     normal_delta = wp.dot(normal_impulse, normal)
                     normal_lambda = cc_get_normal_lambda(contacts, contact)
-                    normal_load = normal_lambda + (row_mass_coeff * mobility[0, contact] * bias * sor_boost)
-                    normal_load = wp.clamp(normal_load, wp.float32(0.0), normal_lambda)
+                    normal_load = normal_lambda
+                    if pd_eff <= wp.float32(0.0):
+                        normal_load += row_mass_coeff * mobility[0, contact] * bias * sor_boost
+                        normal_load = wp.clamp(normal_load, wp.float32(0.0), normal_lambda)
 
                     rhs0 = wp.dot(relative_velocity, tangent0) + mobility[3, contact] * normal_delta
                     rhs1 = wp.dot(relative_velocity, tangent1) + mobility[4, contact] * normal_delta
@@ -402,18 +525,11 @@ def iterate_maximal_contact_runs_kernel(
                     cc_set_tangent1_lambda(contacts, contact, tangents.lambda_new[0])
                     cc_set_tangent2_lambda(contacts, contact, tangents.lambda_new[1])
                     impulse = normal_impulse + tangents.delta[0] * tangent0 + tangents.delta[1] * tangent1
-            _apply_point_impulse(
-                tree,
-                response,
-                bodies,
-                articulation,
-                lane,
-                body0,
-                body1,
-                r0,
-                r1,
-                impulse,
-            )
+                delta_impulse[contact] = impulse
+                _set_spatial_impulse(tree, response, articulation, body0, -impulse, -wp.cross(r0, impulse))
+                _set_spatial_impulse(tree, response, articulation, body1, impulse, wp.cross(r1, impulse))
+        _sync_tree()
+        _apply_accumulated_impulse(tree, response, bodies, articulation, lane)
 
 
 class MaximalContactRunSchedule:
@@ -436,6 +552,7 @@ class MaximalContactRunSchedule:
             dtype=wp.float32,
             device=device,
         )
+        self.delta_impulse = wp.zeros(max(1, int(contact_capacity)), dtype=wp.vec3f, device=device)
 
     def build(
         self,

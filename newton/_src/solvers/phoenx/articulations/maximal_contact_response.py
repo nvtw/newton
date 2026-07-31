@@ -9,15 +9,14 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.articulations.maximal_projector import (
+    _TREE_WIDTH,
     MaximalTreeProjector,
     MaximalTreeProjectorData,
     _make_spatial_shift_transform,
     _solve_spd6,
-    _sync_warp,
+    _sync_tree,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
-
-_WARP_SIZE = 32
 
 
 @wp.func
@@ -203,8 +202,8 @@ def _compute_maximal_contact_mobility_kernel(
     response: MaximalContactResponseData,
 ):
     tid = wp.tid()
-    articulation = tid // wp.int32(_WARP_SIZE)
-    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    articulation = tid // wp.int32(_TREE_WIDTH)
+    lane = tid - articulation * wp.int32(_TREE_WIDTH)
     body_count = tree.body_count[articulation]
     max_depth = tree.max_depth[articulation]
 
@@ -214,7 +213,7 @@ def _compute_maximal_contact_mobility_kernel(
     if lane == wp.int32(0):
         response.mobility[articulation, lane] = _inverse_spd6(tree.articulated[articulation, lane])
         response.conditional_map[articulation, lane] = identity
-    _sync_warp()
+    _sync_tree()
 
     current_depth = wp.int32(1)
     while current_depth <= max_depth:
@@ -228,7 +227,7 @@ def _compute_maximal_contact_mobility_kernel(
             response.mobility[articulation, lane] = (
                 mapping @ parent_mobility @ wp.transpose(mapping) + conditional_mobility
             )
-        _sync_warp()
+        _sync_tree()
         current_depth += wp.int32(1)
 
 
@@ -246,7 +245,7 @@ def apply_maximal_contact_impulse_thread(
         response.rhs[articulation, lane] = wp.spatial_vectorf(0.0)
         response.parent_rhs[articulation, lane] = wp.spatial_vectorf(0.0)
         response.velocity[articulation, lane] = wp.spatial_vectorf(0.0)
-    _sync_warp()
+    _sync_tree()
 
     current_depth = max_depth
     while current_depth >= wp.int32(0):
@@ -263,12 +262,12 @@ def apply_maximal_contact_impulse_thread(
                 projected_rhs = rhs - tree.inverse_d[articulation, lane] * wp.dot(motion, rhs) * u
                 transform = _make_spatial_shift_transform(tree.shift[articulation, lane])
                 response.parent_rhs[articulation, lane] = wp.transpose(transform) @ projected_rhs
-        _sync_warp()
+        _sync_tree()
         current_depth -= wp.int32(1)
 
     if lane == wp.int32(0):
         response.velocity[articulation, lane] = response.mobility[articulation, lane] @ response.rhs[articulation, lane]
-    _sync_warp()
+    _sync_tree()
 
     current_depth = wp.int32(1)
     while current_depth <= max_depth:
@@ -281,7 +280,7 @@ def apply_maximal_contact_impulse_thread(
                 response.rhs[articulation, lane] - tree.articulated[articulation, lane] @ base,
             )
             response.velocity[articulation, lane] = base + joint_velocity * motion
-        _sync_warp()
+        _sync_tree()
         current_depth += wp.int32(1)
 
 
@@ -291,8 +290,8 @@ def _apply_maximal_contact_impulse_kernel(
     response: MaximalContactResponseData,
 ):
     tid = wp.tid()
-    articulation = tid // wp.int32(_WARP_SIZE)
-    lane = tid - articulation * wp.int32(_WARP_SIZE)
+    articulation = tid // wp.int32(_TREE_WIDTH)
+    lane = tid - articulation * wp.int32(_TREE_WIDTH)
     apply_maximal_contact_impulse_thread(articulation, lane, tree, response)
 
 
