@@ -331,7 +331,7 @@ class TestDirectJointTypes(unittest.TestCase):
         self.assertLess(relative_residual, 5.0e-3)
 
     def test_branching_panel_solve_uses_global_ready_queue(self) -> None:
-        """Solve a branching panel graph through the global ready queue."""
+        """Solve a branching panel graph deterministically through the global queue."""
         dimension = 64
         starts = np.asarray((0, dimension), dtype=np.int32)
         permutation = np.arange(dimension, dtype=np.int32)
@@ -345,8 +345,9 @@ class TestDirectJointTypes(unittest.TestCase):
             row_bodies,
             device=wp.get_preferred_device(),
         )
-        self.assertTrue(panel._use_persistent_solve)
-        self.assertEqual(panel._forward_schedule.max_ready_count, 3)
+        self.assertTrue(panel._use_push_solve)
+        self.assertEqual(panel._push_forward_schedule.max_ready_count, 3)
+        self.assertEqual(panel._push_backward_schedule.max_ready_count, 3)
 
         matrix = np.eye(dimension, dtype=np.float32) * 2.0
         storage = np.zeros(panel.matrix.size, dtype=np.float32)
@@ -371,8 +372,36 @@ class TestDirectJointTypes(unittest.TestCase):
             panel.compute()
             panel.solve(rhs, solution)
         wp.capture_launch(capture.graph)
+        first_solution = solution.numpy()
+        wp.capture_launch(capture.graph)
+        second_solution = solution.numpy()
 
-        np.testing.assert_allclose(matrix @ solution.numpy(), rhs_np, rtol=2.0e-4, atol=2.0e-4)
+        np.testing.assert_array_equal(second_solution, first_solution)
+        np.testing.assert_allclose(matrix @ second_solution, rhs_np, rtol=2.0e-4, atol=2.0e-4)
+
+    def test_many_mechanisms_skip_single_system_parallel_scratch(self) -> None:
+        """Avoid allocating single-mechanism scratch for a mechanism fleet."""
+        device = wp.get_preferred_device()
+        mechanism_count = max(1, int(device.sm_count))
+        dimension = 48
+        dimensions = (dimension,) * mechanism_count
+        starts = np.arange(mechanism_count + 1, dtype=np.int32) * dimension
+        permutation = np.tile(np.arange(dimension, dtype=np.int32), mechanism_count)
+        row_bodies = tuple(frozenset((mechanism,)) for mechanism in range(mechanism_count) for _ in range(dimension))
+        panel = FixedPatternPanelLLT(
+            dimensions,
+            starts,
+            permutation,
+            row_bodies,
+            device=device,
+        )
+
+        self.assertFalse(panel._use_product_factor)
+        self.assertIsNone(panel._product_factor_schedule)
+        self.assertFalse(panel._use_push_solve)
+        self.assertIsNone(panel._push_forward_schedule)
+        self.assertIsNone(panel._push_backward_schedule)
+        self.assertIsNotNone(panel._persistent_schedule)
 
     def test_free_joint_emits_no_direct_or_pgs_rows(self) -> None:
         """Leave a free joint outside both direct and PGS constraint paths."""

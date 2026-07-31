@@ -14,7 +14,8 @@ import warp as wp
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync, factor_partial_panel_row
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_schedule import (
     PersistentFactorSchedule,
-    PersistentSolveSchedule,
+    PersistentProductFactorSchedule,
+    PersistentPushSolveSchedule,
 )
 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
@@ -724,6 +725,14 @@ class FixedPatternPanelLLT:
         workspace_size = int(np.sum(padded_dimensions))
         self.intermediate = wp.zeros(workspace_size, dtype=wp.float32, device=self.device)
         self.solution_permuted = wp.zeros(workspace_size, dtype=wp.float32, device=self.device)
+        workspace_rhs_index = np.full(workspace_size, -1, dtype=np.int32)
+        for mechanism, dimension in enumerate(dimensions):
+            vector_offset = int(vector_offsets[mechanism])
+            workspace_offset = int(workspace_offsets[mechanism])
+            for local_row in range(dimension):
+                workspace_rhs_index[workspace_offset + local_row] = vector_offset + int(
+                    permutation[vector_offset + local_row]
+                )
 
         panel_tables = []
         offset = 0
@@ -787,33 +796,61 @@ class FixedPatternPanelLLT:
         self.offdiag_update_left = wp.array(offdiag_update_left, dtype=wp.int32, device=self.device)
         self.offdiag_update_right = wp.array(offdiag_update_right, dtype=wp.int32, device=self.device)
 
-        self._persistent_schedule = PersistentFactorSchedule(
-            panel_tables,
-            dimensions,
-            self.symbolic.panel_count,
-            block_size,
-            self.device,
-        )
-        self._forward_schedule = PersistentSolveSchedule(
-            panel_tables,
-            large_mechanisms,
-            block_size,
-            self.device,
-            forward=True,
-        )
-        self._backward_schedule = PersistentSolveSchedule(
-            panel_tables,
-            large_mechanisms,
-            block_size,
-            self.device,
-            forward=False,
-        )
+        self._product_factor_schedule = None
+        self._use_product_factor = False
+        if not all_narrow and len(dimensions) < self.device.sm_count:
+            product_schedule = PersistentProductFactorSchedule(
+                panel_tables,
+                dimensions,
+                self.symbolic.panel_count,
+                block_size,
+                self.device,
+            )
+            self._use_product_factor = product_schedule.product_count > 0 and product_schedule.max_ready_count > len(
+                dimensions
+            )
+            if self._use_product_factor:
+                self._product_factor_schedule = product_schedule
+
+        self._persistent_schedule = None
+        if not self._use_product_factor:
+            self._persistent_schedule = PersistentFactorSchedule(
+                panel_tables,
+                dimensions,
+                self.symbolic.panel_count,
+                block_size,
+                self.device,
+            )
+
         mechanism_count = len(large_mechanisms)
-        ready_width = min(
-            self._forward_schedule.max_ready_count,
-            self._backward_schedule.max_ready_count,
-        )
-        self._use_persistent_solve = mechanism_count < self.device.sm_count and ready_width > mechanism_count
+        self._push_forward_schedule = None
+        self._push_backward_schedule = None
+        self._use_push_solve = False
+        if 0 < mechanism_count < self.device.sm_count:
+            push_forward_schedule = PersistentPushSolveSchedule(
+                panel_tables,
+                large_mechanisms,
+                workspace_rhs_index,
+                block_size,
+                self.device,
+                forward=True,
+            )
+            push_backward_schedule = PersistentPushSolveSchedule(
+                panel_tables,
+                large_mechanisms,
+                workspace_rhs_index,
+                block_size,
+                self.device,
+                forward=False,
+            )
+            push_ready_width = min(
+                push_forward_schedule.max_ready_count,
+                push_backward_schedule.max_ready_count,
+            )
+            self._use_push_solve = push_ready_width > mechanism_count
+            if self._use_push_solve:
+                self._push_forward_schedule = push_forward_schedule
+                self._push_backward_schedule = push_backward_schedule
         self._factor_narrow = _make_narrow_factor_kernel(block_size)
         self._solve_small = _make_small_solve_kernel(block_size)
         self._solve_aligned = _make_aligned_solve_kernel(block_size)
@@ -849,7 +886,14 @@ class FixedPatternPanelLLT:
                 ],
                 device=self.device,
             )
+        elif self._use_product_factor:
+            assert self._product_factor_schedule is not None
+            self._product_factor_schedule.compute(
+                self.matrix,
+                self.factor,
+            )
         else:
+            assert self._persistent_schedule is not None
             self._persistent_schedule.compute(
                 self.matrix,
                 self.factor,
@@ -877,8 +921,10 @@ class FixedPatternPanelLLT:
                 ],
                 device=self.device,
             )
-        if self._use_persistent_solve and self.large_mechanism.size > 0:
-            self._forward_schedule.solve(
+        if self._use_push_solve and self.large_mechanism.size > 0:
+            assert self._push_forward_schedule is not None
+            assert self._push_backward_schedule is not None
+            self._push_forward_schedule.solve(
                 self.dimension,
                 self.vector_offset,
                 self.workspace_offset,
@@ -892,7 +938,7 @@ class FixedPatternPanelLLT:
                 self.solution_permuted,
                 solution,
             )
-            self._backward_schedule.solve(
+            self._push_backward_schedule.solve(
                 self.dimension,
                 self.vector_offset,
                 self.workspace_offset,
@@ -907,7 +953,7 @@ class FixedPatternPanelLLT:
                 solution,
             )
 
-        if not self._use_persistent_solve and self.aligned_large_mechanism.size > 0:
+        if not self._use_push_solve and self.aligned_large_mechanism.size > 0:
             wp.launch_tiled(
                 self._solve_aligned,
                 dim=self.aligned_large_mechanism.size,
@@ -936,7 +982,7 @@ class FixedPatternPanelLLT:
                 ],
                 device=self.device,
             )
-        if not self._use_persistent_solve and self.partial_large_mechanism.size > 0:
+        if not self._use_push_solve and self.partial_large_mechanism.size > 0:
             wp.launch_tiled(
                 self._solve_forward_partial,
                 dim=self.partial_large_mechanism.size,
