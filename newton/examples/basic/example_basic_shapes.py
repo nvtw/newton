@@ -176,7 +176,8 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        self.collision_pipeline = newton.CollisionPipeline(self.model)
+        contact_matching = "sticky" if self.solver_type == "phoenx" else "disabled"
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=contact_matching)
         self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)

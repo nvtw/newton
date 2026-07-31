@@ -200,7 +200,8 @@ class Example:
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        self.collision_pipeline = newton.CollisionPipeline(self.model)
+        contact_matching = "sticky" if solver_type == "phoenx" else "disabled"
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=contact_matching)
         self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)

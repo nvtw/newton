@@ -110,7 +110,8 @@ class Example:
         if self.use_mujoco_contacts:
             self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
         else:
-            self.collision_pipeline = newton.CollisionPipeline(self.model)
+            contact_matching = "sticky" if solver_name == "phoenx" else "disabled"
+            self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=contact_matching)
             self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
