@@ -116,6 +116,7 @@ class Example:
 
         self.viewer.set_model(self.model)
 
+        self._graph_input_state = self.state_0
         self.capture()
 
     def capture(self):
@@ -127,7 +128,7 @@ class Example:
     def simulate(self):
         if not self.use_mujoco_contacts:
             self.collision_pipeline.collide(self.state_0, self.contacts)
-        for _ in range(self.sim_substeps):
+        for substep in range(self.sim_substeps):
             self.state_0.clear_forces()
 
             # apply forces to the model for picking, wind, etc
@@ -135,8 +136,10 @@ class Example:
 
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
-            # swap states
-            self.state_0, self.state_1 = self.state_1, self.state_0
+            if self.sim_substeps % 2 == 1 and substep == self.sim_substeps - 1:
+                self.state_0.assign(self.state_1)
+            else:
+                self.state_0, self.state_1 = self.state_1, self.state_0
 
         if self.use_mujoco_contacts:
             self.solver.update_contacts(self.contacts, self.state_0)
@@ -156,6 +159,9 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
+        """Verify the robot remains finite, settled, and graph-stateful."""
+        if self.state_0 is not self._graph_input_state:
+            raise ValueError("G1 CUDA graph did not preserve its input state buffer")
         newton.examples.test_body_state(
             self.model,
             self.state_0,

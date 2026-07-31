@@ -101,12 +101,15 @@ class Example:
         self.viewer.set_model(self.model)
 
     def simulate(self):
-        for _ in range(self.outer_substeps):
+        for substep in range(self.outer_substeps):
             self.state_0.clear_forces()
             if self.contacts is not None:
                 self.model.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
+            if self.outer_substeps % 2 == 1 and substep == self.outer_substeps - 1:
+                self.state_0.assign(self.state_1)
+            else:
+                self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
         with wp.ScopedTimer("step", active=False):
