@@ -45,9 +45,6 @@ def convert(source: Path, output: Path, max_sdf_resolution: int, gear_sdf_resolu
         property_names = {prop.GetName() for prop in prim.GetProperties()}
         if any(name.startswith("material:binding") for name in property_names):
             prim.AddAppliedSchema("MaterialBindingAPI")
-        if any(name.startswith("drive:angular:") for name in property_names):
-            prim.AddAppliedSchema("PhysicsDriveAPI:angular")
-
         for prop in list(prim.GetProperties()):
             name = prop.GetName()
             if name.startswith("physxCookedData:"):

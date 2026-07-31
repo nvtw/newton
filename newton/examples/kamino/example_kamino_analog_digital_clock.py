@@ -158,10 +158,22 @@ class Example:
             ignore_paths=[r"/World/GroundPlane.*"],
         )
         # Preserve the source plane's transformed height; z=0 intersects the clock's gears.
-        builder.add_ground_plane(height=-0.011488295428744683)
+        ground_cfg = builder.default_shape_cfg.copy()
+        ground_cfg.margin = 0.0
+        ground_shape = builder.add_ground_plane(height=-0.011488295428744683, cfg=ground_cfg)
+        ground_support_shapes = {
+            import_result["path_shape_map"]["/World/Clock/Frame/left_frame_obj0/Cube"],
+            import_result["path_shape_map"]["/World/Clock/Frame/right_frame_obj0/Cube"],
+        }
+        for shape in range(ground_shape):
+            if shape not in ground_support_shapes:
+                builder.add_shape_collision_filter_pair(shape, ground_shape)
 
         self.model = builder.finalize(skip_validation_joints=True)
         self.model.rigid_contact_max = 2048
+        joint_target_mode = self.model.joint_target_mode.numpy()
+        self.velocity_drive_count = int(np.count_nonzero(joint_target_mode == int(newton.JointTargetMode.VELOCITY)))
+        self.position_spring_count = int(np.count_nonzero(joint_target_mode == int(newton.JointTargetMode.POSITION)))
 
         config = newton.solvers.SolverKamino.Config.from_model(
             self.model,
@@ -305,6 +317,8 @@ class Example:
         """Verify body state and closed-loop joint stability."""
         assert self.imported_body_count == 25, f"Expected 25 clock bodies, imported {self.imported_body_count}"
         assert self.imported_joint_count == 31, f"Expected 31 clock joints, imported {self.imported_joint_count}"
+        assert self.velocity_drive_count == 1, f"Expected one velocity drive, found {self.velocity_drive_count}"
+        assert self.position_spring_count == 7, f"Expected seven follower springs, found {self.position_spring_count}"
         body_q = self.state_0.body_q.numpy()
         body_qd = self.state_0.body_qd.numpy()
         assert np.all(np.isfinite(body_q)), "Body poses contain NaN or inf values"
