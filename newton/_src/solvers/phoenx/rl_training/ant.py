@@ -516,7 +516,8 @@ class EnvAntPhoenX:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = self.solver._collision_pipeline
+        self.contacts = self.collision_pipeline.contacts()
         self.current_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         self.previous_actions = wp.zeros((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
         self.episode_steps = wp.zeros(self.world_count, dtype=wp.int32, device=self.device)
@@ -710,7 +711,7 @@ class EnvAntPhoenX:
         sub_dt = float(self.config.frame_dt) / float(substeps)
         for substep in range(substeps):
             self.state_0.clear_forces()
-            self.model.collide(self.state_0, self.contacts)
+            self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(
                 self.state_0,
                 self.state_1,

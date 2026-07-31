@@ -610,7 +610,8 @@ class EnvAnymalPhoenX:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = self.solver._collision_pipeline
+        self.contacts = self.collision_pipeline.contacts()
 
         self.lab_to_mujoco = wp.array(
             np.asarray(self._policy_to_model_joint, dtype=np.int32), dtype=wp.int32, device=self.device
@@ -927,11 +928,11 @@ class EnvAnymalPhoenX:
             # substeps (anchors are re-projected each solve). ~20% faster on the
             # 4-substep Anymal config since the narrow phase + contact sort run
             # once instead of per substep; trades sub-frame contact freshness.
-            self.model.collide(self.state_0, self.contacts)
+            self.collision_pipeline.collide(self.state_0, self.contacts)
         for sub in range(int(self.config.sim_substeps)):
             self.state_0.clear_forces()
             if not collide_once:
-                self.model.collide(self.state_0, self.contacts)
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             # When the contact set is detected once and reused, the constraint
             # graph is identical across substeps -- colour it on the first
             # substep and reuse that colouring on the rest (the solver still

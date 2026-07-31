@@ -363,7 +363,8 @@ class EnvHumanoidPhoenX:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = self.solver._collision_pipeline
+        self.contacts = self.collision_pipeline.contacts()
         self.joint_gears = wp.array(_HUMANOID_JOINT_GEARS, dtype=wp.float32, device=self.device)
         self.joint_lower = wp.array(
             np.asarray(self.model.joint_limit_lower.numpy()[6:27], dtype=np.float32),
@@ -498,7 +499,7 @@ class EnvHumanoidPhoenX:
         sub_dt = float(self.config.frame_dt) / float(self.config.sim_substeps)
         for substep in range(int(self.config.sim_substeps)):
             self.state_0.clear_forces()
-            self.model.collide(self.state_0, self.contacts)
+            self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(
                 self.state_0,
                 self.state_1,

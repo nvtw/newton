@@ -51,6 +51,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.phoenx.tests._test_helpers import STEP_LAYOUTS
 from newton._src.solvers.phoenx.tests.test_stacking import (
     _PhoenXScene,
@@ -339,70 +340,109 @@ class TestPhoenXContactForce(unittest.TestCase):
         )
 
     def test_revolute_snowman_stack_ground_reaction_matches_total_weight(self) -> None:
-        """Joint-connected vertical boxes transmit weight through contacts.
-
-        Three boxes of decreasing size are connected by revolute joints whose
-        axes point upward (+Z). Only the bottom box touches the plane, so the
-        bottom contact's normal force must carry the combined weight of all
-        connected bodies. This is a first-principles check for the mixed
-        joint/contact support path relevant to articulated robots standing on
-        feet.
-        """
-        scene = _PhoenXScene(
-            fps=self.FPS,
-            substeps=self.SUBSTEPS,
-            solver_iterations=32,
-            velocity_iterations=self.VELOCITY_ITERATIONS,
-            friction=0.8,
-        )
-        scene.add_ground_plane()
+        """Transmit a joint-connected stack weight through direct rows."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        builder.add_ground_plane()
         half_extents = (0.50, 0.35, 0.25)
         masses = (2.0, 1.0, 0.5)
         clearance = 0.10
         bodies: list[int] = []
         z = half_extents[0] + 0.02
-        bodies.append(
-            scene.add_box(
-                position=(0.0, 0.0, z),
-                half_extents=(half_extents[0], half_extents[0], half_extents[0]),
-                mass=masses[0],
+        for index, (half_extent, mass) in enumerate(zip(half_extents, masses, strict=True)):
+            if index > 0:
+                z += half_extents[index - 1] + clearance + half_extent
+            inertia = mass * (2.0 / 3.0) * half_extent * half_extent
+            body = builder.add_link(
+                xform=wp.transform(wp.vec3(0.0, 0.0, z), wp.quat_identity()),
+                mass=mass,
+                inertia=((inertia, 0.0, 0.0), (0.0, inertia, 0.0), (0.0, 0.0, inertia)),
             )
-        )
-        for i in range(1, len(half_extents)):
-            z += half_extents[i - 1] + clearance + half_extents[i]
-            bodies.append(
-                scene.add_box(
-                    position=(0.0, 0.0, z),
-                    half_extents=(half_extents[i], half_extents[i], half_extents[i]),
-                    mass=masses[i],
-                )
+            builder.add_shape_box(
+                body,
+                hx=half_extent,
+                hy=half_extent,
+                hz=half_extent,
+                cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.8),
             )
+            bodies.append(body)
 
         joints = []
-        for i in range(1, len(bodies)):
-            offset = half_extents[i - 1] + clearance + half_extents[i]
+        for index in range(1, len(bodies)):
+            offset = half_extents[index - 1] + clearance + half_extents[index]
             joints.append(
-                scene.mb.add_joint_revolute(
-                    parent=bodies[i - 1],
-                    child=bodies[i],
-                    parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, offset), q=wp.quat_identity()),
+                builder.add_joint_revolute(
+                    parent=bodies[index - 1],
+                    child=bodies[index],
+                    parent_xform=wp.transform(wp.vec3(0.0, 0.0, offset), wp.quat_identity()),
                     child_xform=wp.transform_identity(),
-                    axis=(0.0, 0.0, 1.0),
+                    axis=newton.Axis.Z,
+                    limit_lower=-np.inf,
+                    limit_upper=np.inf,
                 )
             )
-        scene.mb.add_articulation(joints)
-        scene.finalize()
+        builder.add_articulation(joints)
 
-        for _ in range(240):
-            scene.step()
+        model = builder.finalize(device=wp.get_preferred_device())
+        model.request_contact_attributes("force")
+        state_0 = model.state()
+        state_1 = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+        control = model.control()
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        contacts = pipeline.contacts()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=5,
+            solver_iterations=2,
+            velocity_iterations=1,
+            articulation_mode="maximal",
+        )
+        direct = solver._direct_equality_system
+        self.assertTrue(direct.enabled)
+        self.assertEqual(direct.topology.dimensions, (10,))
+        self.assertTrue(np.all(direct.joint_mask[joints]))
 
+        def step() -> None:
+            state_0.clear_forces()
+            pipeline.collide(state_0, contacts)
+            solver.step(state_0, state_1, control, contacts, 1.0 / self.FPS)
+            wp.copy(state_0.body_q, state_1.body_q)
+            wp.copy(state_0.body_qd, state_1.body_qd)
+
+        step()
+        with wp.ScopedCapture(device=model.device) as capture:
+            step()
+        for _ in range(239):
+            wp.capture_launch(capture.graph)
+
+        body_qd = state_0.body_qd.numpy()
         for body in bodies:
-            self.assertLess(float(np.linalg.norm(scene.body_velocity(body))), 0.02)
+            self.assertLess(float(np.linalg.norm(body_qd[body])), 0.02)
 
-        bottom_force, npairs, npoints = scene.gather_contact_wrench_on_body(bodies[0])
+        solver.update_contacts(contacts, state_0)
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+        shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+        shape_body = model.shape_body.numpy()
+        forces = contacts.force.numpy()[:count, :3]
+
+        def contact_force_on(body: int) -> tuple[np.ndarray, int]:
+            force = np.zeros(3, dtype=np.float32)
+            points = 0
+            for contact in range(count):
+                body0 = int(shape_body[shape0[contact]])
+                body1 = int(shape_body[shape1[contact]])
+                if body0 == body:
+                    force += forces[contact]
+                    points += 1
+                elif body1 == body:
+                    force -= forces[contact]
+                    points += 1
+            return force, points
+
+        bottom_force, npoints = contact_force_on(bodies[0])
         expected = sum(masses) * _G
         rel_err = abs(float(bottom_force[2]) - expected) / expected
-        self.assertGreaterEqual(npairs, 1)
         self.assertGreater(npoints, 0)
         self.assertLess(
             rel_err,
@@ -412,7 +452,8 @@ class TestPhoenXContactForce(unittest.TestCase):
         lateral = math.hypot(float(bottom_force[0]), float(bottom_force[1]))
         self.assertLess(lateral, 0.02 * expected)
         for body in bodies[1:]:
-            force, _, _ = scene.gather_contact_wrench_on_body(body)
+            force, points = contact_force_on(body)
+            self.assertEqual(points, 0)
             self.assertLess(float(np.linalg.norm(force)), 0.02 * expected)
 
     # ------------------------------------------------------------------

@@ -264,6 +264,7 @@ class Example:
         builder.add_ground_plane()
 
         self.model = builder.finalize()
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
 
         # PhoenX handles substepping internally. ``substeps`` controls
         # the number of solver substeps per :meth:`step` call;
@@ -286,11 +287,7 @@ class Example:
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        # PhoenX always uses the model's CollisionPipeline contacts
-        # buffer; the solver auto-attaches a sticky pipeline on
-        # construction so ``model.contacts()`` returns the right
-        # buffer.
-        self.contacts = self.model.contacts()
+        self.contacts = self.collision_pipeline.contacts()
 
         self._animation_enabled: bool = bool(args.animation)
         self._animation_speed: float = args.animation_speed
@@ -443,7 +440,7 @@ class Example:
                     self.control.joint_target_q,
                 ],
             )
-        self.model.collide(self.state_0, self.contacts)
+        self.collision_pipeline.collide(self.state_0, self.contacts)
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
         self.solver.step(self.state_0, self.state_0, self.control, self.contacts, self.frame_dt)

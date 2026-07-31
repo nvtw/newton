@@ -476,7 +476,8 @@ class EnvH1PhoenX:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = self.solver._collision_pipeline
+        self.contacts = self.collision_pipeline.contacts()
         self._can_scan_foot_contacts = self.model.shape_body is not None and self.model.shape_world is not None
         self.default_joint_pos = wp.array(_H1_DEFAULT_Q, dtype=wp.float32, device=self.device)
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
@@ -731,7 +732,7 @@ class EnvH1PhoenX:
             device=self.device,
         )
         sub_dt = float(self.config.frame_dt) / float(self.config.sim_substeps)
-        self.model.collide(self.state_0, self.contacts)
+        self.collision_pipeline.collide(self.state_0, self.contacts)
         for substep in range(int(self.config.sim_substeps)):
             self.state_0.clear_forces()
             self.solver.reuse_partition = substep > 0

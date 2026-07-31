@@ -1702,7 +1702,7 @@ class PhoenXWorld:
         of whether sleeping is enabled::
 
             world.wake_on_external_input()  # no-op when disabled
-            model.collide(state, contacts=contacts, collision_pipeline=cp)
+            cp.collide(state, contacts)
             world.step(dt=dt, contacts=contacts)  # no shape_aabb args
 
         Pre-requisites:
@@ -2718,9 +2718,8 @@ class PhoenXWorld:
             device=self.device,
         )
 
-        # Wire as the model's default pipeline so model.collide(...)
-        # picks it up. The user calls :meth:`collide` on this world
-        # for the cloth-aware extended-AABB code path.
+        # Retain the pipeline for backward compatibility. The user calls
+        # :meth:`collide` on this world for the cloth-aware path.
         model._collision_pipeline = pipeline
         return pipeline
 
@@ -3426,14 +3425,14 @@ class PhoenXWorld:
 
     def wake_on_external_input(self) -> None:
         """Wake every island whose bodies carry a user-applied force or
-        torque, *before* ``model.collide()`` runs the broad phase.
+        torque, *before* ``CollisionPipeline.collide()`` runs the broad phase.
 
         The per-step sleeping pass inside :meth:`step` cannot drive
         broad-phase decisions on the wake frame: by the time it clears
         ``island_root`` for a body that picking just pushed, the
         sleep-aware broad-phase filter has already dropped that body's
         contact pairs and the substep solve sees an empty stack. Call
-        this between ``picking.apply_force()`` and ``model.collide()``
+        this between ``picking.apply_force()`` and ``CollisionPipeline.collide()``
         in the host loop so the wake decision arrives in time.
 
         Uses ``bodies.island_root`` -- a stable body-id label (the

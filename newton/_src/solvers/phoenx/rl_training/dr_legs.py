@@ -436,7 +436,8 @@ class EnvDrLegsPhoenX:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = self.solver._collision_pipeline
+        self.contacts = self.collision_pipeline.contacts()
         self._can_scan_foot_contacts = self.model.shape_body is not None and self.model.shape_world is not None
         self.actuated_joint = wp.array(self._actuated_joint_q, dtype=wp.int32, device=self.device)
         self.actuated_joint_qd = wp.array(self._actuated_joint_qd, dtype=wp.int32, device=self.device)
@@ -671,7 +672,7 @@ class EnvDrLegsPhoenX:
         for substep in range(int(self.config.sim_substeps)):
             self.state_0.clear_forces()
             if substep % refresh == 0:
-                self.model.collide(self.state_0, self.contacts)
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.reuse_partition = substep % refresh != 0
             self.solver.step(
                 self.state_0,

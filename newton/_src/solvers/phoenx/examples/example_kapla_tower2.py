@@ -632,11 +632,7 @@ class Example:
         # regardless of ``ENABLE_SLEEPING``.
         self.picking.apply_force()
         self.world.wake_on_external_input()
-        self.model.collide(
-            self.state,
-            contacts=self.contacts,
-            collision_pipeline=self.collision_pipeline,
-        )
+        self.collision_pipeline.collide(self.state, self.contacts)
         # When sleeping is on, ``attach_collision_pipeline`` cached
         # the per-shape AABB arrays + installed the shape_body map, so
         # no extra step() args are needed.

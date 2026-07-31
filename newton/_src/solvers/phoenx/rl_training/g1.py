@@ -2276,7 +2276,8 @@ class EnvG1PhoenX:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = self.solver._collision_pipeline
+        self.contacts = self.collision_pipeline.contacts()
         self.foot_contacts = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
         self.foot_air_time = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
         self.foot_contact_time = wp.zeros((self.world_count, 2), dtype=wp.float32, device=self.device)
@@ -3185,7 +3186,7 @@ class EnvG1PhoenX:
         substeps = int(self.config.sim_substeps)
         sub_dt = float(self.config.frame_dt) / float(substeps)
         explicit_torque = str(self.config.actuation_model) == "explicit_torque"
-        self.model.collide(self.state_0, self.contacts)
+        self.collision_pipeline.collide(self.state_0, self.contacts)
         for substep in range(substeps):
             self.state_0.clear_forces()
             if explicit_torque or substep == substeps - 1:

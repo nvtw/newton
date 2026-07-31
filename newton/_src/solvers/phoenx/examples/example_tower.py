@@ -363,11 +363,7 @@ class Example:
 
     def simulate(self) -> None:
         self._sync_newton_to_phoenx()
-        self.model.collide(
-            self.state,
-            contacts=self.contacts,
-            collision_pipeline=self.collision_pipeline,
-        )
+        self.collision_pipeline.collide(self.state, self.contacts)
         # Picking PD force is accumulated into ``bodies.force`` once
         # per frame, before :meth:`PhoenXWorld.step` -- the solver's
         # per-substep ``_phoenx_apply_external_forces_kernel`` picks

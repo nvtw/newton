@@ -149,7 +149,7 @@ class Example:
 
         self.model = _build_scale_model()
         self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
-        self.contacts = self.model.contacts(collision_pipeline=self.collision_pipeline)
+        self.contacts = self.collision_pipeline.contacts()
 
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
@@ -177,7 +177,7 @@ class Example:
         sub_dt = self.frame_dt / GRAPH_SUBSTEPS
         for _ in range(GRAPH_SUBSTEPS):
             self.state_0.clear_forces()
-            self.model.collide(self.state_0, self.contacts)
+            self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, sub_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 

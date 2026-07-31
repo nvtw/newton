@@ -467,11 +467,7 @@ class Example:
         # ``_sync_phoenx_to_newton`` already refreshes ``state.body_q``
         # in time for the next ``collide`` call.
         for _ in range(self.steps_per_frame):
-            self.model.collide(
-                self.state,
-                contacts=self.contacts,
-                collision_pipeline=self.collision_pipeline,
-            )
+            self.collision_pipeline.collide(self.state, self.contacts)
             self.picking.apply_force()
             self.world.step(
                 dt=self.frame_dt,

@@ -194,7 +194,7 @@ def _build_maximal_motor_body_inv_inertia(model: Model) -> wp.array[wp.mat33f]:
 
 
 class _PhoenXCollisionPipelineAdapter:
-    """Route model.collide() through PhoenX deformable geometry refresh."""
+    """Route explicit pipeline collisions through PhoenX deformable refresh."""
 
     def __init__(self, solver: SolverPhoenX, pipeline):
         self._solver = solver
@@ -828,37 +828,7 @@ class SolverPhoenX(SolverBase):
                 # Axial friction and limits retain the lean PGS iteration.
                 self._direct_base_joint_pgs_enabled = self.world._joint_pgs_enabled.numpy()[:num_joints].copy()
                 self._direct_effective_joint_mode = effective_joint_mode
-                joint_pgs_enabled = self._direct_base_joint_pgs_enabled.copy()
-                friction_np = self._adbs.friction_coefficient.numpy()
-                min_value_np = self._adbs.min_value.numpy()
-                max_value_np = self._adbs.max_value.numpy()
-                d6_limit_count_np = self._adbs.d6_limit_count.numpy()
-                for joint in np.flatnonzero(self._direct_equality_system.joint_mask):
-                    cid = int(joint_idx_to_cid[joint])
-                    if cid < 0:
-                        continue
-                    mode = int(effective_joint_mode[joint])
-                    equality_only = mode in (int(JOINT_MODE_FIXED), int(JOINT_MODE_CABLE))
-                    if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
-                        has_friction = float(friction_np[cid]) > 0.0
-                        lower = float(min_value_np[cid])
-                        upper = float(max_value_np[cid])
-                        # Newton stores unbounded ranges as [-1e10, 1e10].
-                        has_limit = lower <= upper and (lower > -5.0e9 or upper < 5.0e9)
-                        equality_only = not (has_friction or has_limit)
-                    elif mode in (
-                        int(JOINT_MODE_BALL_SOCKET),
-                        int(JOINT_MODE_UNIVERSAL),
-                        int(JOINT_MODE_CYLINDRICAL),
-                        int(JOINT_MODE_PLANAR),
-                        int(JOINT_MODE_CARTESIAN_PLANE),
-                        int(JOINT_MODE_CARTESIAN),
-                    ):
-                        equality_only = int(d6_limit_count_np[cid]) == 0
-                    if equality_only:
-                        joint_pgs_enabled[cid] = 0
-                if num_joints > 0:
-                    self.world.set_joint_pgs_ownership(joint_pgs_enabled)
+                self._refresh_direct_joint_ownership()
 
                 if direct_tree_contact_candidate and self.world.max_contact_columns > 0:
                     direct_joint_mask = self._direct_equality_system.joint_mask
@@ -899,6 +869,7 @@ class SolverPhoenX(SolverBase):
         if self._has_deformable_collision:
             pipeline = self.world.setup_cloth_collision_pipeline(model, rigid_contact_max=rigid_contact_max)
             model._collision_pipeline = _PhoenXCollisionPipelineAdapter(self, pipeline)
+        self._collision_pipeline = getattr(model, "_collision_pipeline", None)
 
         if model.shape_material_mu is not None and model.shape_count > 0:
             self._install_shape_materials()
@@ -1145,7 +1116,9 @@ class SolverPhoenX(SolverBase):
     def collide(self, state: State, contacts: Contacts) -> None:
         """Run PhoenX deformable-aware collision."""
         if not self._has_deformable_collision:
-            self.model.collide(state, contacts)
+            if self._collision_pipeline is None:
+                raise RuntimeError("SolverPhoenX.collide() requires a model with collision shapes.")
+            self._collision_pipeline.collide(state, contacts)
             return
         self._import_particle_state(state, force=True)
         self.world.collide(state, contacts)
@@ -1260,7 +1233,7 @@ class SolverPhoenX(SolverBase):
     def wake_on_external_input(self, state_in: State) -> None:
         """Wake every sleeping island whose bodies carry an external
         force or torque set in ``state_in.body_f``, *before* the host
-        calls ``model.collide(...)``.
+        calls ``CollisionPipeline.collide(...)``.
 
         The per-step sleeping pass inside :meth:`step` cannot drive
         broad-phase decisions on the wake frame: by the time it clears
@@ -1271,7 +1244,7 @@ class SolverPhoenX(SolverBase):
 
             state.body_f.assign(...)  # picking / wrenches
             solver.wake_on_external_input(state)  # propagate wake
-            model.collide(state, contacts)  # broad-phase keeps pairs
+            collision_pipeline.collide(state, contacts)  # broad-phase keeps pairs
             solver.step(state, state_out, ...)
 
         Imports ``state_in.body_f`` into PhoenX's force accumulators
@@ -1366,7 +1339,7 @@ class SolverPhoenX(SolverBase):
         # When sleeping is enabled, hand the broad-phase per-shape AABB
         # arrays to the world so it can compute body diagonals for the
         # spin-velocity term of the sleep score. ``narrow_phase`` is
-        # populated by ``model.collide(...)`` -- which the caller runs
+        # populated by ``CollisionPipeline.collide(...)`` before stepping.
         # before ``solver.step(...)``.
         shape_aabb_lower = None
         shape_aabb_upper = None

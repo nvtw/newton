@@ -1006,11 +1006,7 @@ class Example:
     def simulate(self):
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
-        self.model.collide(
-            self.state_0,
-            contacts=self.contacts,
-            collision_pipeline=self.collision_pipeline,
-        )
+        self.collision_pipeline.collide(self.state_0, self.contacts)
         self._print_contact_stats()
         if self.solver_type == "phoenx":
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.frame_dt)

@@ -285,7 +285,7 @@ class _PhoenXScene:
         self.model.body_q.assign(self.state.body_q)
 
         self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=PHOENX_CONTACT_MATCHING)
-        self.contacts = self.model.contacts(collision_pipeline=self.collision_pipeline)
+        self.contacts = self.collision_pipeline.contacts()
         rigid_contact_max = int(self.contacts.rigid_contact_point0.shape[0])
 
         # PhoenX body container: slot 0 = static world anchor.
@@ -425,7 +425,7 @@ class _PhoenXScene:
 
     def _simulate(self) -> None:
         self._sync_newton_to_phoenx()
-        self.model.collide(self.state, self.contacts)
+        self.collision_pipeline.collide(self.state, self.contacts)
         self.world.step(
             dt=self.frame_dt,
             contacts=self.contacts,
@@ -723,8 +723,8 @@ class TestPhoenXSolverStacking(unittest.TestCase):
         self.assertLess(float(pos[2]), 0.62)
         self.assertLess(float(np.linalg.norm(vel)), 0.08)
 
-    def test_single_world_rigid_direct_steps(self) -> None:
-        """Single-world joint/contact mixes use the typed family path."""
+    def test_single_world_joint_limit_contact_steps(self) -> None:
+        """Route single-world joint-limit/contact mixes through typed families."""
         scene = _PhoenXScene(substeps=2, solver_iterations=2, step_layout="single_world")
         scene.add_ground_plane()
         body = scene.mb.add_link(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.22), q=wp.quat_identity()))
@@ -751,8 +751,8 @@ class TestPhoenXSolverStacking(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(pos)))
         self.assertTrue(np.all(np.isfinite(vel)))
 
-    def test_multi_world_rigid_family_split_off_by_default(self) -> None:
-        """Small rigid mixed scenes stay on the sorted generic path."""
+    def test_multi_world_joint_limit_family_split_off_by_default(self) -> None:
+        """Keep small joint-limit/contact scenes on the sorted generic path."""
         scene = _PhoenXScene(substeps=2, solver_iterations=2, step_layout="multi_world")
         scene.add_ground_plane()
         body = scene.mb.add_link(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.22), q=wp.quat_identity()))

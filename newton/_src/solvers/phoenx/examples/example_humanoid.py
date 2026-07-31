@@ -83,7 +83,8 @@ class Example:
             velocity_iterations=args.velocity_iterations,
             prepare_refresh_stride=args.prepare_refresh_stride,
         )
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
+        self.contacts = self.collision_pipeline.contacts()
 
         self.state_0 = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
@@ -100,7 +101,7 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.model.collide(self.state_0, self.contacts)
+        self.collision_pipeline.collide(self.state_0, self.contacts)
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
         self.solver.step(self.state_0, self.state_0, self.control, self.contacts, self.sim_dt)

@@ -67,7 +67,8 @@ class Example:
         self.state_0 = self.model.state()
         self.control = self.model.control()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
+        self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
         if self.world_count > 1:
@@ -83,7 +84,7 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.model.collide(self.state_0, self.contacts)
+        self.collision_pipeline.collide(self.state_0, self.contacts)
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
         self.solver.step(self.state_0, self.state_0, self.control, self.contacts, self.frame_dt)

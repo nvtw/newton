@@ -105,7 +105,7 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
         # PhoenX always needs a Contacts buffer; the solver still calls
-        # model.collide() in simulate() to fill it.
+        # CollisionPipeline.collide() in simulate() to fill it.
         self.use_mujoco_contacts = use_mujoco_contacts and solver_name == "mujoco"
         if self.use_mujoco_contacts:
             self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)

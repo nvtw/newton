@@ -76,7 +76,7 @@ class Example:
         use_mujoco_contacts = args.use_mujoco_contacts if args else False
         self.solver_name = getattr(args, "solver", "mujoco")
         if self.solver_name == "phoenx":
-            # PhoenX runs its own contacts via ``self.model.contacts()``;
+            # PhoenX runs its own explicit persistent-contact pipeline;
             # the multi-world step layout exercises this scene's
             # world_count > 1 behaviour.
             self.solver = newton.solvers.SolverPhoenX(

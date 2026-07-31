@@ -171,7 +171,8 @@ class Example:
                 velocity_iterations=1,
                 articulation_mode="reduced" if PHOENX_USE_REDUCED_COORDINATES else "maximal",
             )
-            self.contacts = self.model.contacts()
+            self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
+            self.contacts = self.collision_pipeline.contacts()
         else:
             self.solver = newton.solvers.SolverMuJoCo(
                 self.model,

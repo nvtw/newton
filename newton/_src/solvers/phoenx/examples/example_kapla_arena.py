@@ -302,11 +302,7 @@ class Example:
 
     def simulate(self) -> None:
         self._sync_newton_to_phoenx()
-        self.model.collide(
-            self.state,
-            contacts=self.contacts,
-            collision_pipeline=self.collision_pipeline,
-        )
+        self.collision_pipeline.collide(self.state, self.contacts)
         self.picking.apply_force()
         self.world.step(
             dt=self.frame_dt,

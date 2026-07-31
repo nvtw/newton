@@ -661,11 +661,7 @@ class Example:
 
     def simulate(self) -> None:
         self._sync_newton_to_phoenx()
-        self.model.collide(
-            self.state,
-            contacts=self.contacts,
-            collision_pipeline=self.collision_pipeline,
-        )
+        self.collision_pipeline.collide(self.state, self.contacts)
         # Picking force is accumulated into bodies.force once per
         # frame -- :class:`PhoenXWorld`'s per-substep force kernel
         # consumes it and the post-step ``_clear_forces`` zeros it

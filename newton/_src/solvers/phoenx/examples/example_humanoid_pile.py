@@ -72,7 +72,8 @@ class Example:
         )
         self.state = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
+        self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(9.0, -12.0, 7.0), pitch=-20.0, yaw=145.0)
@@ -84,7 +85,7 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.model.collide(self.state, self.contacts)
+        self.collision_pipeline.collide(self.state, self.contacts)
         self.state.clear_forces()
         self.viewer.apply_forces(self.state)
         self.solver.step(self.state, self.state, self.control, self.contacts, self.frame_dt)

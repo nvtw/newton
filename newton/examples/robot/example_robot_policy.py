@@ -374,11 +374,11 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        # PhoenX drives ``model.collide`` from the per-frame loop and
-        # needs the standard contacts buffer; MuJoCo gets to size its
-        # own from ``get_max_contact_count``.
+        # PhoenX needs persistent contact identities; MuJoCo sizes its
+        # own buffer from ``get_max_contact_count``.
         if self.solver_name == "phoenx":
-            self.contacts = self.model.contacts()
+            self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
+            self.contacts = self.collision_pipeline.contacts()
         else:
             self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
 
@@ -432,7 +432,7 @@ class Example:
             # PhoenX needs explicit collision detection per substep; MuJoCo
             # runs its own internal contact solver and gets ``contacts=None``.
             if self.solver_name == "phoenx":
-                self.model.collide(self.state_0, self.contacts)
+                self.collision_pipeline.collide(self.state_0, self.contacts)
                 self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             else:
                 self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)

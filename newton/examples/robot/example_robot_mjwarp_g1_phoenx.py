@@ -102,7 +102,8 @@ class Example:
         self.state_0 = self.model.state()
         self.control = self.model.control()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-        self.contacts = self.model.contacts()
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
+        self.contacts = self.collision_pipeline.contacts()
 
         self._sim_time_wp = wp.array([0.0], dtype=float)
         self._replay_ctrl_wp = wp.array(replay_ctrl, dtype=float)
@@ -148,7 +149,7 @@ class Example:
                 self.control.joint_target_q,
             ],
         )
-        self.model.collide(self.state_0, self.contacts)
+        self.collision_pipeline.collide(self.state_0, self.contacts)
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
         self.solver.step(self.state_0, self.state_0, self.control, self.contacts, self.frame_dt)
