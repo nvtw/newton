@@ -402,6 +402,79 @@ class TestDirectDriveAnalytical(unittest.TestCase):
                 self.assertAlmostEqual(qd_after, expected_qd, delta=2.0e-5)
                 self.assertAlmostEqual(q_after, q + dt * expected_qd, delta=2.0e-5)
 
+    def test_revolute_pd_is_an_implicit_torsion_spring(self) -> None:
+        """Match a damped torsion spring over repeated five-substep updates."""
+        inertia = 0.7
+        armature = 0.2
+        passive_damping = 0.15
+        kp = 25.0
+        kd = 1.5
+        q = 0.75
+        qd = -0.1
+        dt = 1.0 / 120.0
+        substeps = 5
+        frames = 120
+        model = _make_revolute(
+            two_body=False,
+            inertia=inertia,
+            armature=armature,
+            gear=1.0,
+            passive_damping=passive_damping,
+            kp=kp,
+            kd=kd,
+            target_mode=newton.JointTargetMode.POSITION,
+        )
+        state_0 = model.state()
+        state_1 = model.state()
+        state_0.joint_q.assign(np.asarray([q], dtype=np.float32))
+        state_0.joint_qd.assign(np.asarray([qd], dtype=np.float32))
+        newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
+        control = model.control()
+        control.joint_target_q.zero_()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=substeps,
+            solver_iterations=2,
+            velocity_iterations=1,
+            articulation_mode="maximal",
+        )
+        result_q = wp.zeros(1, dtype=wp.float32, device=model.device)
+        result_qd = wp.zeros(1, dtype=wp.float32, device=model.device)
+
+        def step() -> None:
+            state_0.clear_forces()
+            solver.step(state_0, state_1, control, None, dt)
+            wp.copy(state_0.body_q, state_1.body_q)
+            wp.copy(state_0.body_qd, state_1.body_qd)
+            newton.eval_ik(model, state_0, result_q, result_qd)
+
+        with wp.ScopedCapture(device=model.device) as capture:
+            step()
+        for _ in range(frames):
+            wp.capture_launch(capture.graph)
+
+        expected_q = q
+        expected_qd = qd
+        sub_dt = dt / substeps
+        for _ in range(frames * substeps):
+            expected_qd = _implicit_velocity(
+                physical_inertia=inertia,
+                q=expected_q,
+                qd=expected_qd,
+                target_q=0.0,
+                target_qd=0.0,
+                dt=sub_dt,
+                armature=armature,
+                passive_damping=passive_damping,
+                kp=kp,
+                kd=kd,
+            )
+            expected_q += sub_dt * expected_qd
+
+        self.assertTrue(solver._direct_equality_system.direct_drive_joint_mask[0])
+        self.assertAlmostEqual(float(result_q.numpy()[0]), expected_q, delta=3.0e-4)
+        self.assertAlmostEqual(float(result_qd.numpy()[0]), expected_qd, delta=3.0e-4)
+
     def test_free_two_body_revolute_matches_reduced_inertia(self) -> None:
         inertia = 0.8
         armature = 0.25

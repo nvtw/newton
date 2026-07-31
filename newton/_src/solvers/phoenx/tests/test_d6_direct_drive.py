@@ -103,6 +103,54 @@ def _make_gimbal(axis_index: int | None, *, left_handed: bool, effort_limit: flo
     return builder.finalize(device=wp.get_preferred_device())
 
 
+def _make_reduced_d6(mode: str, axis_index: int) -> newton.Model:
+    """Build a universal, cylindrical, or planar D6 with one drive."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+    body = builder.add_link(
+        xform=wp.transform_identity(),
+        mass=1.0,
+        inertia=((INERTIA, 0.0, 0.0), (0.0, INERTIA, 0.0), (0.0, 0.0, INERTIA)),
+    )
+
+    def config(axis: tuple[float, float, float], index: int) -> newton.ModelBuilder.JointDofConfig:
+        active = index == axis_index
+        return newton.ModelBuilder.JointDofConfig(
+            axis=axis,
+            limit_lower=-1.0e10,
+            limit_upper=1.0e10,
+            target_ke=KP if active else 0.0,
+            target_kd=KD if active else 0.0,
+            armature=ARMATURE if active else 0.0,
+            effort_limit=0.0,
+            actuator_mode=newton.JointTargetMode.POSITION_VELOCITY if active else newton.JointTargetMode.NONE,
+        )
+
+    if mode == "universal":
+        linear_axes = []
+        angular_axes = [config((1.0, 0.0, 0.0), 0), config((0.0, 1.0, 0.0), 1)]
+    elif mode == "cylindrical":
+        linear_axes = [config((0.0, 0.0, 1.0), 0)]
+        angular_axes = [config((0.0, 0.0, 1.0), 1)]
+    else:
+        linear_axes = [config((1.0, 0.0, 0.0), 0), config((0.0, 1.0, 0.0), 1)]
+        angular_axes = [config((0.0, 0.0, 1.0), 2)]
+    joint = builder.add_joint_d6(parent=-1, child=body, linear_axes=linear_axes, angular_axes=angular_axes)
+    builder.add_articulation([joint])
+    return builder.finalize(device=wp.get_preferred_device())
+
+
+def _implicit_reduced_d6_step(physical_mass: float) -> tuple[float, float]:
+    """Integrate one scalar reduced-D6 drive over five substeps."""
+    q = 0.0
+    qd = 0.0
+    h = DT / SUBSTEPS
+    mass = physical_mass + ARMATURE
+    for _ in range(SUBSTEPS):
+        qd = (mass * qd + h * KP * (TARGET - q)) / (mass + h * KD + h * h * KP)
+        q += h * qd
+    return q, qd
+
+
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX D6 drive tests require CUDA graphs.")
 class TestD6DirectDrive(unittest.TestCase):
     """Compare each gimbal-axis drive against its scalar analytical solution."""
@@ -173,6 +221,45 @@ class TestD6DirectDrive(unittest.TestCase):
                 self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
                 self.assertAlmostEqual(float(q.numpy()[axis_index]), expected_q, delta=2.0e-5)
                 self.assertAlmostEqual(float(qd.numpy()[axis_index]), expected_qd, delta=2.0e-5)
+
+    def test_reduced_d6_free_axis_drives_match_implicit_euler(self) -> None:
+        """Drive every free universal, cylindrical, and planar D6 axis directly."""
+        cases = (
+            ("universal", (INERTIA, INERTIA), 5),
+            ("cylindrical", (1.0, INERTIA), 5),
+            ("planar", (1.0, 1.0, INERTIA), 4),
+        )
+        for mode, physical_masses, expected_dimension in cases:
+            for axis_index, physical_mass in enumerate(physical_masses):
+                with self.subTest(mode=mode, axis=axis_index):
+                    model = _make_reduced_d6(mode, axis_index)
+                    state = model.state()
+                    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                    control = model.control()
+                    target = np.zeros(len(physical_masses), dtype=np.float32)
+                    target[axis_index] = TARGET
+                    control.joint_target_q.assign(target)
+                    solver = newton.solvers.SolverPhoenX(
+                        model,
+                        substeps=SUBSTEPS,
+                        solver_iterations=2,
+                        velocity_iterations=1,
+                        articulation_mode="maximal",
+                    )
+                    with wp.ScopedCapture(model.device) as capture:
+                        state.clear_forces()
+                        solver.step(state, state, control, None, DT)
+                    wp.capture_launch(capture.graph)
+                    q = wp.zeros_like(model.joint_q)
+                    qd = wp.zeros_like(model.joint_qd)
+                    newton.eval_ik(model, state, q, qd)
+                    expected_q, expected_qd = _implicit_reduced_d6_step(physical_mass)
+                    direct = solver._direct_equality_system
+                    self.assertEqual(direct.topology.dimensions, (expected_dimension,))
+                    self.assertTrue(direct.direct_drive_joint_mask[0])
+                    self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
+                    self.assertAlmostEqual(float(q.numpy()[axis_index]), expected_q, delta=3.0e-5)
+                    self.assertAlmostEqual(float(qd.numpy()[axis_index]), expected_qd, delta=3.0e-5)
 
     def test_finite_effort_gimbal_drive_saturates_analytically(self) -> None:
         """Match a finite-effort D6 drive against constant-torque integration."""

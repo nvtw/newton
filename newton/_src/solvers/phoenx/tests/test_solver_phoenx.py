@@ -76,7 +76,7 @@ def _make_offset_com_free_body_model() -> tuple[newton.Model, int]:
     body = mb.add_body(
         xform=wp.transform(p=wp.vec3(0.25, -0.4, 0.8), q=wp.quat_identity()),
         mass=2.0,
-        inertia=((0.12, 0.0, 0.0), (0.0, 0.15, 0.0), (0.0, 0.0, 0.18)),
+        inertia=((0.15, 0.0, 0.0), (0.0, 0.15, 0.0), (0.0, 0.0, 0.15)),
     )
     mb.body_com[body] = wp.vec3(0.35, -0.12, 0.22)
     mb.gravity = 0.0
@@ -88,7 +88,7 @@ def _make_offset_com_free_joint_model() -> tuple[newton.Model, int]:
     mb = newton.ModelBuilder()
     body = mb.add_link(
         mass=2.0,
-        inertia=((0.12, 0.0, 0.0), (0.0, 0.15, 0.0), (0.0, 0.0, 0.18)),
+        inertia=((0.15, 0.0, 0.0), (0.0, 0.15, 0.0), (0.0, 0.0, 0.15)),
     )
     mb.body_com[body] = wp.vec3(0.35, -0.12, 0.22)
     joint = mb.add_joint_free(

@@ -13,7 +13,9 @@ import warp as wp
 
 from newton._src.sim import JointTargetMode, JointType, Model
 from newton._src.sim.articulation import (
+    invert_2d_rotational_dofs,
     invert_3d_rotational_dofs,
+    transform_2d_rotational_axes,
     transform_3d_rotational_axes,
 )
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import FixedPatternPanelLLT
@@ -135,6 +137,18 @@ def _structural_row_count(mode: int) -> int:
     return 0
 
 
+_MULTI_AXIS_D6_MODES = frozenset(
+    (
+        int(JOINT_MODE_BALL_SOCKET),
+        int(JOINT_MODE_UNIVERSAL),
+        int(JOINT_MODE_CYLINDRICAL),
+        int(JOINT_MODE_PLANAR),
+        int(JOINT_MODE_CARTESIAN_PLANE),
+        int(JOINT_MODE_CARTESIAN),
+    )
+)
+
+
 def _drive_dof_masks(model: Model) -> tuple[np.ndarray, np.ndarray]:
     """Return active and finite-effort implicit-drive masks per DoF."""
     target_mode = np.asarray(model.joint_target_mode.numpy(), dtype=np.int32)
@@ -180,20 +194,10 @@ def _dynamic_joint_masks(
             continue
         if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
             candidates = (int(joint_dof_start[joint]),)
-        elif joint_type[joint] == int(JointType.D6) and mode in (
-            int(JOINT_MODE_CARTESIAN_PLANE),
-            int(JOINT_MODE_CARTESIAN),
-        ):
+        elif joint_type[joint] == int(JointType.D6) and mode in _MULTI_AXIS_D6_MODES:
             start = int(qd_start[joint])
-            count = int(dof_dim[joint, 0])
+            count = int(dof_dim[joint, 0] + dof_dim[joint, 1])
             candidates = tuple(dof for dof in range(start, start + count) if float(lower[dof]) <= float(upper[dof]))
-        elif (
-            joint_type[joint] == int(JointType.D6)
-            and mode == int(JOINT_MODE_BALL_SOCKET)
-            and tuple(dof_dim[joint]) == (0, 3)
-        ):
-            start = int(qd_start[joint])
-            candidates = tuple(dof for dof in range(start, start + 3) if float(lower[dof]) <= float(upper[dof]))
         else:
             candidates = ()
         candidates = tuple(dof for dof in candidates if 0 <= dof < len(armature))
@@ -222,14 +226,6 @@ def _active_dynamic_dofs(
     lower = np.asarray(model.joint_limit_lower.numpy(), dtype=np.float32)
     upper = np.asarray(model.joint_limit_upper.numpy(), dtype=np.float32)
     result: list[tuple[int, ...]] = []
-    multi_axis_modes = {
-        int(JOINT_MODE_BALL_SOCKET),
-        int(JOINT_MODE_UNIVERSAL),
-        int(JOINT_MODE_CYLINDRICAL),
-        int(JOINT_MODE_PLANAR),
-        int(JOINT_MODE_CARTESIAN_PLANE),
-        int(JOINT_MODE_CARTESIAN),
-    }
     for joint in range(joint_count):
         if excluded[joint]:
             result.append(())
@@ -237,7 +233,7 @@ def _active_dynamic_dofs(
         mode = int(joint_mode[joint])
         if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
             candidates = (int(joint_dof_start[joint]),)
-        elif mode in multi_axis_modes:
+        elif mode in _MULTI_AXIS_D6_MODES:
             start = int(qd_start[joint])
             count = int(dof_dim[joint, 0] + dof_dim[joint, 1])
             candidates = tuple(dof for dof in range(start, start + count) if float(lower[dof]) <= float(upper[dof]))
@@ -251,14 +247,7 @@ def _active_dynamic_dofs(
                 and (
                     float(armature[dof]) > 0.0
                     or float(damping[dof]) > 0.0
-                    or (
-                        joint_type[joint] == int(JointType.D6)
-                        and (
-                            mode in (int(JOINT_MODE_CARTESIAN_PLANE), int(JOINT_MODE_CARTESIAN))
-                            or (mode == int(JOINT_MODE_BALL_SOCKET) and tuple(dof_dim[joint]) == (0, 3))
-                        )
-                        and drive_dof[dof]
-                    )
+                    or (joint_type[joint] == int(JointType.D6) and mode in _MULTI_AXIS_D6_MODES and drive_dof[dof])
                 )
             )
         )
@@ -957,8 +946,39 @@ def _prepare_direct_dynamic_rows_kernel(
     qd_start = joint_qd_start[joint]
     linear_count = joint_dof_dim[joint, 0]
     angular_count = joint_dof_dim[joint, 1]
+    angular_start = qd_start + linear_count
+    is_two_axis_rotation = joint_type[joint] == JointType.D6 and angular_count == wp.int32(2) and dof >= angular_start
     is_gimbal = joint_type[joint] == JointType.D6 and linear_count == wp.int32(0) and angular_count == wp.int32(3)
-    if is_gimbal:
+    if is_two_axis_rotation:
+        coordinates_two, _rates_two = invert_2d_rotational_dofs(
+            joint_axis[angular_start],
+            joint_axis[angular_start + wp.int32(1)],
+            q0,
+            q1,
+            wp.vec3(),
+        )
+        axis0_two, axis1_two = transform_2d_rotational_axes(
+            joint_axis[angular_start],
+            joint_axis[angular_start + wp.int32(1)],
+            coordinates_two[0],
+        )
+        angular_offset_two = dof - angular_start
+        direction_local_two = wp.vec3f(axis0_two[0], axis0_two[1], axis0_two[2])
+        if angular_offset_two == wp.int32(1):
+            direction_local_two = wp.vec3f(axis1_two[0], axis1_two[1], axis1_two[2])
+        direction_two = wp.normalize(wp.quat_rotate(q0, direction_local_two))
+        _set_angular_row(
+            structural_index,
+            local_row,
+            direction_two,
+            wp.float32(0.0),
+            wp.float32(0.0),
+            row_wrench0,
+            row_wrench1,
+            row_bias,
+        )
+        dynamic_coordinate[row] = coordinates_two[angular_offset_two]
+    elif is_gimbal:
         coordinates_raw, _rates = invert_3d_rotational_dofs(
             joint_axis[qd_start],
             joint_axis[qd_start + wp.int32(1)],
@@ -984,11 +1004,11 @@ def _prepare_direct_dynamic_rows_kernel(
             direction_local = axis1
         elif angular_offset == wp.int32(2):
             direction_local = axis2
-        direction = wp.normalize(wp.quat_rotate(q0, direction_local))
+        direction_gimbal = wp.normalize(wp.quat_rotate(q0, direction_local))
         _set_angular_row(
             structural_index,
             local_row,
-            direction,
+            direction_gimbal,
             wp.float32(0.0),
             wp.float32(0.0),
             row_wrench0,
@@ -997,7 +1017,7 @@ def _prepare_direct_dynamic_rows_kernel(
         )
         dynamic_coordinate[row] = coordinates[angular_offset]
     else:
-        direction = wp.normalize(wp.quat_rotate(q0, joint_axis[dof]))
+        direction_single = wp.normalize(wp.quat_rotate(q0, joint_axis[dof]))
         if dof < qd_start + linear_count:
             point0_world = wp.transform_get_translation(x_wpj)
             point1_world = wp.transform_get_translation(x_wcj)
@@ -1018,7 +1038,7 @@ def _prepare_direct_dynamic_rows_kernel(
                 local_row,
                 point0_com,
                 point1_com,
-                direction,
+                direction_single,
                 wp.float32(0.0),
                 wp.float32(0.0),
                 row_wrench0,
@@ -1034,7 +1054,7 @@ def _prepare_direct_dynamic_rows_kernel(
             _set_angular_row(
                 structural_index,
                 local_row,
-                direction,
+                direction_single,
                 wp.float32(0.0),
                 wp.float32(0.0),
                 row_wrench0,
@@ -1259,6 +1279,9 @@ def _snapshot_direct_dynamic_velocity_kernel(
     joint_to_structural: wp.array[wp.int32],
     effective_joint_mode: wp.array[wp.int32],
     effective_joint_axis: wp.array[wp.vec3],
+    joint_type: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_dof_dim: wp.array2d[wp.int32],
     row_target_q: wp.array[wp.int32],
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
@@ -1336,7 +1359,13 @@ def _snapshot_direct_dynamic_velocity_kernel(
         q1 = wp.transform_get_rotation(x_wcj)
         axis = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
         coordinate = dynamic_coordinate[row]
-        if mode == JOINT_MODE_REVOLUTE:
+        qd_start = joint_qd_start[joint]
+        linear_count = joint_dof_dim[joint, 0]
+        angular_count = joint_dof_dim[joint, 1]
+        is_single_d6_angular = (
+            joint_type[joint] == JointType.D6 and angular_count == wp.int32(1) and dof >= qd_start + linear_count
+        )
+        if mode == JOINT_MODE_REVOLUTE or is_single_d6_angular:
             wrapped = extract_rotation_angle(q1 * wp.quat_inverse(q0), axis)
             counter, previous = revolution_tracker_update(
                 wrapped,
@@ -1742,20 +1771,13 @@ class DirectEqualitySystem:
         joint_target_q_start = np.asarray(model.joint_target_q_start.numpy(), dtype=np.int32)
         model_qd_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
         joint_types = np.asarray(model.joint_type.numpy(), dtype=np.int32)
-        model_dof_dim = np.asarray(model.joint_dof_dim.numpy(), dtype=np.int32)
         for row, (joint, dof) in enumerate(zip(self.topology.row_joint, self.topology.row_dof, strict=True)):
             if self.topology.row_dynamic[row] and dof >= 0:
                 mode = int(joint_mode[joint])
                 drive_supported = mode in (
                     int(JOINT_MODE_REVOLUTE),
                     int(JOINT_MODE_PRISMATIC),
-                    int(JOINT_MODE_CARTESIAN_PLANE),
-                    int(JOINT_MODE_CARTESIAN),
-                ) or (
-                    joint_types[joint] == int(JointType.D6)
-                    and mode == int(JOINT_MODE_BALL_SOCKET)
-                    and tuple(model_dof_dim[joint]) == (0, 3)
-                )
+                ) or (joint_types[joint] == int(JointType.D6) and mode in _MULTI_AXIS_D6_MODES)
                 row_direct_drive[row] = drive_supported and drive_dof_mask[dof]
                 row_bounded_drive[row] = drive_supported and bounded_dof_mask[dof]
                 row_target_q[row] = int(joint_target_q_start[joint]) + dof - int(model_qd_start[joint])
@@ -1771,12 +1793,24 @@ class DirectEqualitySystem:
         self.accumulated_impulse = wp.zeros(row_count, dtype=wp.float32, device=device)
         joint_q = np.asarray(model.joint_q.numpy(), dtype=np.float32)
         joint_q_start = np.asarray(model.joint_q_start.numpy(), dtype=np.int32)
+        joint_qd_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
+        joint_dof_dim = np.asarray(model.joint_dof_dim.numpy(), dtype=np.int32)
+        joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
         previous_coordinate = np.zeros(row_count, dtype=np.float32)
         coordinate_revolutions = np.zeros(row_count, dtype=np.int32)
-        for row, joint in enumerate(self.topology.row_joint):
-            if not self.topology.row_dynamic[row] or joint_mode[joint] != int(JOINT_MODE_REVOLUTE):
+        for row, (joint, dof) in enumerate(zip(self.topology.row_joint, self.topology.row_dof, strict=True)):
+            if not self.topology.row_dynamic[row]:
                 continue
-            q = float(joint_q[int(joint_q_start[joint])])
+            mode = int(joint_mode[joint])
+            dof_offset = int(dof) - int(joint_qd_start[joint])
+            is_single_d6_angular = (
+                joint_type[joint] == int(JointType.D6)
+                and int(joint_dof_dim[joint, 1]) == 1
+                and dof_offset >= int(joint_dof_dim[joint, 0])
+            )
+            if mode != int(JOINT_MODE_REVOLUTE) and not is_single_d6_angular:
+                continue
+            q = float(joint_q[int(joint_q_start[joint]) + dof_offset])
             turns = int(np.floor((q + np.pi) / (2.0 * np.pi)))
             previous_coordinate[row] = q - turns * (2.0 * np.pi)
             coordinate_revolutions[row] = turns
@@ -1966,6 +2000,9 @@ class DirectEqualitySystem:
                 self.joint_to_structural,
                 self.effective_joint_mode,
                 self.effective_joint_axis,
+                self.model.joint_type,
+                self.model.joint_qd_start,
+                self.model.joint_dof_dim,
                 self.row_target_q,
                 self.model.joint_parent,
                 self.model.joint_child,

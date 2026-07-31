@@ -89,7 +89,13 @@ def _pendulum(
 
 
 def _solver(model: newton.Model):
-    return newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=16, velocity_iterations=1)
+    return newton.solvers.SolverPhoenX(
+        model,
+        substeps=5,
+        solver_iterations=2,
+        velocity_iterations=1,
+        articulation_mode="maximal",
+    )
 
 
 def _run_with_target_schedule(
@@ -110,13 +116,21 @@ def _run_with_target_schedule(
     n = targets_per_frame.shape[0]
     q_traj = np.empty(n, dtype=np.float32)
     qd_traj = np.empty(n, dtype=np.float32)
+
+    def step() -> None:
+        s0.clear_forces()
+        solver.step(s0, s1, control, None, dt)
+        wp.copy(s0.body_q, s1.body_q)
+        wp.copy(s0.body_qd, s1.body_qd)
+        newton.eval_ik(model, s0, jq, jqd)
+
+    with wp.ScopedCapture(device=model.device) as capture:
+        step()
+
     for i in range(n):
         t = np.asarray([targets_per_frame[i]], dtype=np.float32)
         control.joint_target_q.assign(t)
-        s0.clear_forces()
-        solver.step(s0, s1, control, None, dt)
-        s0, s1 = s1, s0
-        newton.eval_ik(model, s0, jq, jqd)
+        wp.capture_launch(capture.graph)
         q_traj[i] = float(jq.numpy()[0])
         qd_traj[i] = float(jqd.numpy()[0])
     return q_traj, qd_traj
@@ -290,12 +304,20 @@ def _run_target_and_track_rotation(
     bq0 = s0.body_q.numpy()[0]
     last_branch = 2.0 * math.atan2(float(bq0[4]), float(bq0[6]))
     cum = last_branch
+
+    def step() -> None:
+        s0.clear_forces()
+        solver.step(s0, s1, control, None, dt)
+        wp.copy(s0.body_q, s1.body_q)
+        wp.copy(s0.body_qd, s1.body_qd)
+
+    with wp.ScopedCapture(device=model.device) as capture:
+        step()
+
     for i in range(targets_per_frame.shape[0]):
         t = np.asarray([targets_per_frame[i]], dtype=np.float32)
         control.joint_target_q.assign(t)
-        s0.clear_forces()
-        solver.step(s0, s1, control, None, dt)
-        s0, s1 = s1, s0
+        wp.capture_launch(capture.graph)
         cum, last_branch = _cumulative_y_rotation(model, s0, cum, last_branch)
     final_qd = float(s0.body_qd.numpy()[0, 4])  # y-axis angular velocity
     return cum, final_qd
@@ -317,10 +339,9 @@ class TestMultiRevolutionDrive(unittest.TestCase):
     artefact without changing what the solver is doing."""
 
     def test_two_revolutions_drive(self) -> None:
-        """Target = ``2*pi`` (one full rotation). The body's physical
-        cumulative rotation must reach ``2*pi``."""
-        target = 2.0 * math.pi
-        n = 1500
+        """Track a ``4*pi`` target without discarding either revolution."""
+        target = 4.0 * math.pi
+        n = 3000
         dt = 0.005
         targets = np.full(n, target, dtype=np.float32)
         model = _pendulum(
@@ -339,9 +360,9 @@ class TestMultiRevolutionDrive(unittest.TestCase):
         )
 
     def test_negative_multi_revolution_drive(self) -> None:
-        """Target = ``-2*pi`` -- mirror."""
-        target = -2.0 * math.pi
-        n = 1500
+        """Track a ``-4*pi`` target without discarding either revolution."""
+        target = -4.0 * math.pi
+        n = 3000
         dt = 0.005
         targets = np.full(n, target, dtype=np.float32)
         model = _pendulum(
@@ -368,9 +389,7 @@ class TestLimitStability(unittest.TestCase):
     """Joint-limit stability under pathological configurations."""
 
     def test_limit_clamps_initial_spin(self) -> None:
-        """Spin the joint hard into a narrow limit with stiff
-        limit gains. The soft limit must eventually settle the joint
-        inside the window, without NaN or runaway velocity."""
+        """Contain a spinning joint within narrow stops without adding energy."""
         n = 600
         dt = 0.005
         targets = np.zeros(n, dtype=np.float32)
@@ -381,29 +400,18 @@ class TestLimitStability(unittest.TestCase):
             target_kd=0.0,
             limit_lower=-0.5,
             limit_upper=0.5,
-            limit_ke=2.0e3,
-            limit_kd=50.0,
         )
-        # Moderate initial spin so the soft limit can catch it in the
-        # window. Stronger spins saturate any soft constraint.
+        # Two inequality iterations must contain this moderate impact;
+        # one iteration is known to inject energy and cross the stop.
         model.joint_qd.assign(np.array([3.0], dtype=np.float32))
         q, qd = _run_with_target_schedule(model, targets, dt)
 
         self.assertTrue(np.isfinite(q).all())
         self.assertTrue(np.isfinite(qd).all())
-        # Final settled position should be inside the limit window
-        # (within soft-constraint overshoot slop).
-        self.assertLess(
-            abs(float(q[-1])),
-            0.8,
-            msg=f"limit did not settle: final q={q[-1]:.3f}",
-        )
-        # Final velocity should be small.
-        self.assertLess(
-            abs(float(qd[-1])),
-            1.0,
-            msg=f"final |qd|={abs(qd[-1]):.3f} -- limit not damping",
-        )
+        max_angle = float(np.abs(q).max())
+        max_speed = float(np.abs(qd).max())
+        self.assertLess(max_angle, 0.52, msg=f"limit excursion reached {max_angle:.3f} rad")
+        self.assertLessEqual(max_speed, 3.05, msg=f"limit increased speed to {max_speed:.3f} rad/s")
 
     def test_upper_limit_across_multiple_revolutions(self) -> None:
         """A multi-revolution drive must remain stable with an upper
