@@ -1189,6 +1189,13 @@ add_example_test(
 )
 add_example_test(
     TestKaminoExamples,
+    name="kamino.example_kamino_analog_digital_clock",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 30, "usd_required": True},
+    use_viewer=True,
+)
+add_example_test(
+    TestKaminoExamples,
     name="kamino.example_kamino_basic_heterogeneous",
     devices=cuda_test_devices,
     test_options={"num-frames": 120},
