@@ -11,6 +11,8 @@
 #
 ###########################################################################
 
+import math
+
 import warp as wp
 
 import newton
@@ -74,14 +76,14 @@ class Example:
 
         if solver_name == "phoenx":
             # Let PhoenX own the temporal schedule. Fine temporal steps
-            # converge this contact-rich maximal-coordinate chain more
-            # reliably than multiple PGS sweeps over a frozen linearization.
+            # stabilize impact, while the contact and friction inequalities
+            # still need PGS sweeps even though joint equalities solve directly.
             self.sim_substeps = 1
             self.sim_dt = self.frame_dt
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
                 substeps=16,
-                solver_iterations=1,
+                solver_iterations=8,
                 velocity_iterations=1,
             )
         else:
@@ -177,6 +179,23 @@ class Example:
             < 0.015,  # Relaxed from 0.005 - G1 has higher residual velocities with collision pipeline
         )
         # fmt: on
+
+    def test_post_step(self):
+        """Reject persistent horizontal drift after the initial impact."""
+        frame = getattr(self, "_test_frame", 0) + 1
+        self._test_frame = frame
+        if frame not in (120, 500):
+            return
+        pelvis = self.state_0.body_q.numpy()[0]
+        xy = (float(pelvis[0]), float(pelvis[1]))
+        if frame == 120:
+            self._test_settled_xy = xy
+            return
+        dx = xy[0] - self._test_settled_xy[0]
+        dy = xy[1] - self._test_settled_xy[1]
+        drift = math.hypot(dx, dy)
+        if drift > 0.05:
+            raise ValueError(f"G1 drifted {drift:.3f} m horizontally after impact")
 
     @staticmethod
     def create_parser():
