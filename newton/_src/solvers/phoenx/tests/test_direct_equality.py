@@ -177,6 +177,26 @@ def _run_captured_steps(
         wp.capture_launch(capture.graph)
 
 
+def _build_ball_triangle() -> newton.Model:
+    """Build a full-rank floating cycle of three ball joints."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+    positions = (
+        np.asarray((0.0, 0.0, 0.0)),
+        np.asarray((1.0, 0.0, 0.0)),
+        np.asarray((0.5, np.sqrt(0.75), 0.0)),
+    )
+    bodies = [_add_link(builder, wp.vec3(*position), 1.0) for position in positions]
+    for parent, child in ((0, 1), (1, 2), (2, 0)):
+        anchor = 0.5 * (positions[parent] + positions[child])
+        builder.add_joint_ball(
+            parent=bodies[parent],
+            child=bodies[child],
+            parent_xform=wp.transform(wp.vec3(*(anchor - positions[parent])), wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(*(anchor - positions[child])), wp.quat_identity()),
+        )
+    return builder.finalize(skip_validation_joints=True)
+
+
 class TestDirectEquality(unittest.TestCase):
     def test_panel_size_selector_keeps_trees_narrow_and_widens_dense_loops(self) -> None:
         """Select panel sizes from precomputed mechanism cycle density."""
@@ -379,6 +399,30 @@ class TestDirectEquality(unittest.TestCase):
         self.assertTrue(np.isfinite(body_qd).all())
         self.assertLess(float(np.max(np.abs(body_q[:, :3]))), 10.0)
         self.assertLess(float(np.max(np.abs(body_qd))), 10.0)
+
+    def test_full_rank_cycle_keeps_conservative_structural_floor(self):
+        """Keep a conservative structural pivot floor for cyclic mechanisms."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+
+        model = _build_ball_triangle()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=5,
+            solver_iterations=1,
+            velocity_iterations=0,
+            articulation_mode="maximal",
+        )
+        direct = solver._direct_equality_system
+        self.assertEqual(direct.topology.dimensions, (9,))
+        self.assertEqual(direct.topology.mechanism_requires_rank_floor, (False,))
+        self.assertEqual(direct.topology.mechanism_has_cycle, (True,))
+        np.testing.assert_array_equal(direct.row_regularization.numpy(), np.full(9, 3.0e-6, dtype=np.float32))
+
+        state = model.state()
+        _run_captured_steps(solver, state, model.control(), 1)
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
     def test_direct_driven_hinge_leaves_pgs_when_no_inequality_remains(self):
         """Remove a direct-driven hinge entirely from PGS."""
@@ -598,6 +642,29 @@ class TestDirectEquality(unittest.TestCase):
         self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
         self.assertLess(peak_velocity, 2.0)
         self.assertLess(peak_anchor_error, 1.0e-4)
+        self.assertLess(_maximum_anchor_error(model, state), 5.0e-6)
+
+    def test_hundred_link_cantilever_limits_accumulated_swing_drift(self):
+        """Limit accumulated locked-axis drift across a long cantilever."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+
+        num_links = 100
+        model = _build_model(num_links)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=5,
+            solver_iterations=2,
+            velocity_iterations=1,
+            articulation_mode="maximal",
+        )
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        _run_captured_steps(solver, state, model.control(), 120)
+
+        body_q = state.body_q.numpy()
+        self.assertTrue(np.isfinite(body_q).all())
+        self.assertLess(-float(body_q[num_links - 1, 2]), 0.1)
         self.assertLess(_maximum_anchor_error(model, state), 5.0e-6)
 
     def test_multi_world_hybrid_reduced_and_direct_ownership(self):

@@ -47,10 +47,11 @@ from newton._src.solvers.phoenx.helpers.math_helpers import create_orthonormal
 
 _MAX_ROWS = 6
 
-# Independent rows retain the high-accuracy floor. Symbolically redundant
-# mechanisms use a sqrt(epsilon)-scale constraint-force-mixing floor so their
-# equilibrated systems remain inside the reliable FP32 condition range.
+# Dynamic rows retain a conservative pivot floor. Full-rank structural rows
+# use a near-epsilon floor for accuracy, while symbolically redundant systems
+# use sqrt(epsilon) constraint-force mixing to stay reliable in FP32.
 _FP32_BASE_REGULARIZATION = 3.0e-6
+_FP32_STRUCTURAL_REGULARIZATION = 3.0e-7
 _FP32_RANK_REGULARIZATION = float(np.sqrt(np.finfo(np.float32).eps))
 _DIRECT_BAUMGARTE = 0.2
 _PANEL_BLOCK_SIZE = 16
@@ -72,6 +73,7 @@ class DirectEqualityTopology:
     permutation: np.ndarray
     mechanism_row_start: np.ndarray
     mechanism_requires_rank_floor: tuple[bool, ...]
+    mechanism_has_cycle: tuple[bool, ...]
     body_row_start: np.ndarray
     body_rows: np.ndarray
 
@@ -351,6 +353,7 @@ def build_direct_equality_topology(
 
     ordered_mechanisms = sorted(mechanisms.values(), key=min)
     mechanism_requires_rank_floor: list[bool] = []
+    mechanism_has_cycle: list[bool] = []
     for joints in ordered_mechanisms:
         dynamic_bodies: set[int] = set()
         endpoint_pairs: set[tuple[int, int]] = set()
@@ -369,8 +372,13 @@ def build_direct_equality_topology(
         # An anchored component has 6n generalized rigid-body directions; a
         # floating one has six free rigid modes. Repeated body pairs also imply
         # dependent rows for every supported structural joint combination.
+        # Cyclic body graphs can become geometrically near-dependent even when
+        # their nominal row count remains below the rigid-body rank.
         maximum_rank = max(0, 6 * len(dynamic_bodies) - (0 if anchored else 6))
+        tree_edges = max(0, len(dynamic_bodies) - (0 if anchored else 1))
+        has_cycle = len(joints) > tree_edges
         mechanism_requires_rank_floor.append(repeated_pair or structural_rows > maximum_rank)
+        mechanism_has_cycle.append(has_cycle)
 
     row_joint: list[int] = []
     row_local: list[int] = []
@@ -459,6 +467,7 @@ def build_direct_equality_topology(
         permutation=np.asarray(permutation, dtype=np.int32),
         mechanism_row_start=np.asarray(mechanism_row_start, dtype=np.int32),
         mechanism_requires_rank_floor=tuple(mechanism_requires_rank_floor),
+        mechanism_has_cycle=tuple(mechanism_has_cycle),
         body_row_start=np.asarray(body_row_start, dtype=np.int32),
         body_rows=np.asarray(body_rows, dtype=np.int32),
     )
@@ -1614,16 +1623,21 @@ class DirectEqualitySystem:
         )
         self.regularization = float(regularization)
         row_regularization = np.full(len(self.topology.row_joint), self.regularization, dtype=np.float32)
-        for mechanism, needs_rank_floor in enumerate(self.topology.mechanism_requires_rank_floor):
-            if not needs_rank_floor:
-                continue
+        for mechanism, (needs_rank_floor, has_cycle) in enumerate(
+            zip(
+                self.topology.mechanism_requires_rank_floor,
+                self.topology.mechanism_has_cycle,
+                strict=True,
+            )
+        ):
             start = int(self.topology.mechanism_row_start[mechanism])
             end = int(self.topology.mechanism_row_start[mechanism + 1])
             mechanism_regularization = row_regularization[start:end]
             structural_rows = ~self.topology.row_dynamic[start:end]
-            mechanism_regularization[structural_rows] = max(
-                self.regularization,
-                _FP32_RANK_REGULARIZATION,
+            mechanism_regularization[structural_rows] = (
+                max(self.regularization, _FP32_RANK_REGULARIZATION)
+                if needs_rank_floor
+                else (self.regularization if has_cycle else min(self.regularization, _FP32_STRUCTURAL_REGULARIZATION))
             )
         self.row_regularization = wp.array(row_regularization, dtype=wp.float32, device=model.device)
         self.enabled = bool(self.topology.dimensions)
