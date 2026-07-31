@@ -455,6 +455,32 @@ def _make_floating_tree(device):
     return _make_floating_tree_builder().finalize(device=device)
 
 
+def _make_undeclared_floating_tree(device, *, declare_root_only=False):
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+    root = builder.add_link(mass=2.0)
+    child = builder.add_link(mass=1.0)
+    builder.add_shape_box(root, hx=0.25, hy=0.15, hz=0.1)
+    builder.add_shape_box(child, hx=0.2, hy=0.1, hz=0.08)
+    free_joint = builder.add_joint_free(parent=-1, child=root)
+    hinge_joint = builder.add_joint_revolute(
+        parent=root,
+        child=child,
+        axis=newton.Axis.Y,
+        parent_xform=wp.transform(wp.vec3(0.5, 0.0, 0.0), wp.quat_identity()),
+        child_xform=wp.transform(wp.vec3(-0.2, 0.0, 0.0), wp.quat_identity()),
+    )
+    builder.add_articulation([free_joint, hinge_joint])
+    model = builder.finalize(device=device)
+    if declare_root_only:
+        model.joint_articulation.assign(np.asarray([0, -1], dtype=np.int32))
+    else:
+        model.articulation_count = 0
+        model.articulation_start = None
+        model.articulation_end = None
+        model.joint_articulation = None
+    return model, (free_joint, hinge_joint)
+
+
 def _make_driven_floating_tree(device):
     """Free-root two-hinge chain with position drives on both hinges."""
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
@@ -1913,6 +1939,49 @@ class TestReducedArticulation(unittest.TestCase):
             float(expected_cross),
             delta=3.0e-5,
         )
+
+    def test_full_coordinate_tree_detection_ignores_articulation_metadata(self):
+        """Derive full-coordinate contact trees solely from the joint graph."""
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("full-coordinate tree contact tests require CUDA")
+
+        for declare_root_only in (False, True):
+            with self.subTest(declare_root_only=declare_root_only):
+                model, joints = _make_undeclared_floating_tree(device, declare_root_only=declare_root_only)
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    articulation_mode="maximal",
+                    substeps=5,
+                    solver_iterations=2,
+                    velocity_iterations=1,
+                )
+                self.assertTrue(solver._direct_tree_contacts)
+                self.assertIsInstance(solver._maximal_tree_projector, MaximalTreeProjector)
+                self.assertIsNone(solver._direct_contact_response)
+                self.assertIsNone(solver._direct_contact_schedule)
+                np.testing.assert_array_equal(
+                    solver._maximal_tree_projector.data.joint_index.numpy()[0, :2],
+                    np.asarray(joints, dtype=np.int32),
+                )
+
+    def test_full_coordinate_loop_bypasses_tree_contact_projection(self):
+        """Keep cyclic full-coordinate mechanisms on the general direct path."""
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("full-coordinate loop tests require CUDA")
+
+        model, loop_joint = _make_floating_triangle_loop(device)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal",
+            substeps=5,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        self.assertFalse(solver._direct_tree_contacts)
+        self.assertIsNone(solver._maximal_tree_projector)
+        self.assertTrue(solver._direct_equality_system.joint_mask[loop_joint])
 
     def test_maximal_articulated_contact_storage_and_world_modes_inside_graph(self):
         device = wp.get_preferred_device()

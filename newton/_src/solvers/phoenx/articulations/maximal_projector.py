@@ -48,6 +48,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_TARGET,
     _OFF_TARGET_VELOCITY,
     DRIVE_MODE_POSITION,
+    JOINT_MODE_REVOLUTE,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import revolution_tracker_angle
 from newton._src.solvers.phoenx.solver_phoenx_kernels import _rotation_quaternion
@@ -574,6 +575,128 @@ def _project_maximal_tree_positions_kernel(
         _sync_tree()
 
 
+def find_full_coordinate_revolute_trees(
+    model: Model,
+    effective_joint_mode: np.ndarray,
+) -> tuple[tuple[int, ...], ...]:
+    """Find free-root revolute trees from enabled full-coordinate joints.
+
+    The graph, joint modes, body dynamics, and world ownership are the only
+    inputs. Newton articulation ranges are deliberately not consulted because
+    they describe a reduced-coordinate decomposition and may omit loop-closing
+    joints.
+    """
+    joint_count = int(model.joint_count)
+    if joint_count == 0 or not model.device.is_cuda:
+        return ()
+
+    joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
+    joint_parent = np.asarray(model.joint_parent.numpy(), dtype=np.int32)
+    joint_child = np.asarray(model.joint_child.numpy(), dtype=np.int32)
+    joint_enabled = (
+        np.asarray(model.joint_enabled.numpy(), dtype=bool)
+        if model.joint_enabled is not None
+        else np.ones(joint_count, dtype=bool)
+    )
+    body_inv_mass = np.asarray(model.body_inv_mass.numpy())
+    body_world = np.asarray(model.body_world.numpy(), dtype=np.int32)
+    effective_joint_mode = np.asarray(effective_joint_mode, dtype=np.int32)
+    if effective_joint_mode.shape != (joint_count,):
+        raise ValueError("effective_joint_mode must contain one entry per model joint")
+
+    active = [joint for joint in range(joint_count) if joint_enabled[joint] and joint_child[joint] >= 0]
+    adjacency: dict[int, list[int]] = {}
+    candidate_bodies: set[int] = set()
+    for joint in active:
+        parent = int(joint_parent[joint])
+        child = int(joint_child[joint])
+        candidate_bodies.add(child)
+        if parent >= 0:
+            candidate_bodies.add(parent)
+            adjacency.setdefault(parent, []).append(child)
+            adjacency.setdefault(child, []).append(parent)
+
+    components: list[set[int]] = []
+    unvisited = set(candidate_bodies)
+    while unvisited:
+        seed = min(unvisited)
+        component: set[int] = set()
+        stack = [seed]
+        while stack:
+            body = stack.pop()
+            if body in component:
+                continue
+            component.add(body)
+            unvisited.discard(body)
+            stack.extend(adjacency.get(body, ()))
+        components.append(component)
+
+    body_component = {
+        body: component_index for component_index, component in enumerate(components) for body in component
+    }
+    roots_by_component: list[list[int]] = [[] for _ in components]
+    internal_by_component: list[list[int]] = [[] for _ in components]
+    for joint in active:
+        child_component = body_component[int(joint_child[joint])]
+        if joint_parent[joint] < 0:
+            roots_by_component[child_component].append(joint)
+        else:
+            internal_by_component[child_component].append(joint)
+
+    trees: list[tuple[int, ...]] = []
+    for component_index, component in enumerate(components):
+        if len(component) < 2 or len(component) > _TREE_WIDTH:
+            continue
+        roots = roots_by_component[component_index]
+        internal = internal_by_component[component_index]
+        if len(roots) != 1 or len(internal) != len(component) - 1:
+            continue
+        root_joint = roots[0]
+        root_body = int(joint_child[root_joint])
+        if int(joint_type[root_joint]) != int(JointType.FREE):
+            continue
+        if any(not np.isfinite(body_inv_mass[body]) or body_inv_mass[body] <= 0.0 for body in component):
+            continue
+        world = int(body_world[root_body])
+        if any(int(body_world[body]) != world for body in component):
+            continue
+
+        children: dict[int, list[tuple[int, int]]] = {}
+        incoming: set[int] = set()
+        supported = True
+        for joint in internal:
+            parent = int(joint_parent[joint])
+            child = int(joint_child[joint])
+            if int(effective_joint_mode[joint]) != int(JOINT_MODE_REVOLUTE) or child == root_body or child in incoming:
+                supported = False
+                break
+            incoming.add(child)
+            children.setdefault(parent, []).append((joint, child))
+        if not supported or incoming != component - {root_body}:
+            continue
+
+        ordered = [root_joint]
+        visited = {root_body}
+        queue = [root_body]
+        queue_index = 0
+        while queue_index < len(queue):
+            parent = queue[queue_index]
+            queue_index += 1
+            for joint, child in sorted(children.get(parent, ()), key=lambda edge: edge[0]):
+                if child in visited:
+                    supported = False
+                    break
+                visited.add(child)
+                ordered.append(joint)
+                queue.append(child)
+            if not supported:
+                break
+        if supported and visited == component:
+            trees.append(tuple(ordered))
+
+    return tuple(trees)
+
+
 class MaximalTreeProjector:
     """Mass-metric projector for free-root revolute articulation trees."""
 
@@ -637,19 +760,32 @@ class MaximalTreeProjector:
         constraints: ConstraintContainer,
         bodies: BodyContainer,
         joint_to_cid: wp.array[wp.int32],
+        joint_trees: tuple[tuple[int, ...], ...] | None = None,
     ):
-        if not self.supports_model(model):
-            raise ValueError("maximal tree projector requires CUDA free-root revolute trees with 2-64 bodies")
+        if joint_trees is None:
+            if not self.supports_model(model):
+                raise ValueError("maximal tree projector requires CUDA free-root revolute trees with 2-64 bodies")
+            starts = model.articulation_start.numpy()
+            joint_articulation = model.joint_articulation.numpy()
+            joint_trees = tuple(
+                tuple(
+                    joint
+                    for joint in range(int(starts[articulation]), int(starts[articulation + 1]))
+                    if int(joint_articulation[joint]) == articulation
+                )
+                for articulation in range(int(model.articulation_count))
+            )
+        elif not model.device.is_cuda or not joint_trees:
+            raise ValueError("full-coordinate tree projector requires at least one CUDA joint tree")
+
         self.model = model
         self.constraints = constraints
         self.bodies = bodies
         self.joint_to_cid = joint_to_cid
-        self.articulation_count = int(model.articulation_count)
+        self.articulation_count = len(joint_trees)
         self.launch_dim = self.articulation_count * _TREE_WIDTH
         self.block_dim = _TREE_WIDTH
 
-        starts = model.articulation_start.numpy()
-        joint_articulation = model.joint_articulation.numpy()
         joint_parent = model.joint_parent.numpy()
         joint_child = model.joint_child.numpy()
         joint_to_cid_np = joint_to_cid.numpy()
@@ -663,10 +799,7 @@ class MaximalTreeProjector:
         child_start = np.zeros((self.articulation_count, _TREE_WIDTH + 1), dtype=np.int32)
         child_index = np.full(shape, -1, dtype=np.int32)
 
-        for articulation in range(self.articulation_count):
-            start = int(starts[articulation])
-            end = int(starts[articulation + 1])
-            owned_joints = [joint for joint in range(start, end) if int(joint_articulation[joint]) == articulation]
+        for articulation, owned_joints in enumerate(joint_trees):
             count = len(owned_joints)
             body_count[articulation] = count
             body_to_lane: dict[int, int] = {}
@@ -791,4 +924,4 @@ class MaximalTreeProjector:
         )
 
 
-__all__ = ["MaximalTreeProjector", "MaximalTreeProjectorData"]
+__all__ = ["MaximalTreeProjector", "MaximalTreeProjectorData", "find_full_coordinate_revolute_trees"]

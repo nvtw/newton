@@ -155,6 +155,82 @@ def _build_all_joint_types() -> tuple[newton.Model, dict[str, tuple[int, int]]]:
     return builder.finalize(device=wp.get_device("cuda:0")), joints
 
 
+def _build_closed_loop_contact_model() -> tuple[newton.Model, tuple[int, ...], int]:
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    builder.add_ground_plane()
+    identity = wp.quat_identity()
+    quarter_turn = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.5 * wp.pi)
+    poses = (
+        ((0.0, 0.0, 1.0), identity),
+        ((0.5, 0.5, 1.0), quarter_turn),
+        ((0.0, 1.0, 1.0), identity),
+        ((-0.5, 0.5, 1.0), quarter_turn),
+    )
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.8)
+    bodies = []
+    for position, orientation in poses:
+        body = builder.add_link(xform=wp.transform(wp.vec3(*position), orientation))
+        builder.add_shape_box(body, hx=0.5, hy=0.05, hz=0.05, cfg=shape_cfg)
+        bodies.append(body)
+
+    root = builder.add_joint_free(parent=-1, child=bodies[0])
+    connections = (
+        (0, 1, (0.5, 0.0, 0.0), (-0.5, 0.0, 0.0)),
+        (1, 2, (0.5, 0.0, 0.0), (0.5, 0.0, 0.0)),
+        (2, 3, (-0.5, 0.0, 0.0), (0.5, 0.0, 0.0)),
+        (3, 0, (-0.5, 0.0, 0.0), (-0.5, 0.0, 0.0)),
+    )
+    joints = []
+    for parent, child, parent_anchor, child_anchor in connections:
+        joints.append(
+            builder.add_joint_revolute(
+                parent=bodies[parent],
+                child=bodies[child],
+                axis=newton.Axis.Z,
+                parent_xform=wp.transform(wp.vec3(*parent_anchor), identity),
+                child_xform=wp.transform(wp.vec3(*child_anchor), identity),
+                limit_lower=-np.inf,
+                limit_upper=np.inf,
+            )
+        )
+    builder.add_articulation([root, *joints[:3]])
+    builder.joint_articulation[joints[3]] = -1
+    builder.color()
+    return builder.finalize(device=wp.get_preferred_device()), tuple(bodies), joints[3]
+
+
+def _build_mechanism_free_body_contact_model() -> tuple[newton.Model, int, int]:
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.8)
+    mechanism_body = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()))
+    free_body = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 0.18), wp.quat_identity()))
+    builder.add_shape_box(mechanism_body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+    builder.add_shape_box(free_body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+    builder.add_joint_fixed(parent=-1, child=mechanism_body)
+    builder.add_joint_free(parent=-1, child=free_body)
+    builder.color()
+    return builder.finalize(device=wp.get_preferred_device()), mechanism_body, free_body
+
+
+def _joint_anchor_error(model: newton.Model, state: newton.State, joint: int) -> float:
+    body_q = state.body_q.numpy()
+    parent = int(model.joint_parent.numpy()[joint])
+    child = int(model.joint_child.numpy()[joint])
+    parent_anchor = np.asarray(
+        wp.transform_point(
+            wp.transform(*body_q[parent]),
+            wp.vec3(*model.joint_X_p.numpy()[joint, :3]),
+        )
+    )
+    child_anchor = np.asarray(
+        wp.transform_point(
+            wp.transform(*body_q[child]),
+            wp.vec3(*model.joint_X_c.numpy()[joint, :3]),
+        )
+    )
+    return float(np.linalg.norm(parent_anchor - child_anchor))
+
+
 def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
     return newton.solvers.SolverPhoenX(
         model,
@@ -167,6 +243,28 @@ def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX direct-joint tests require CUDA")
 class TestDirectJointTypes(unittest.TestCase):
+    def test_direct_mechanism_contact_with_free_body_uses_schur_response(self) -> None:
+        """Own a mechanism-to-free-body contact with the exact Schur response."""
+        model, mechanism_body, free_body = _build_mechanism_free_body_contact_model()
+        solver = _make_solver(model)
+        state = model.state()
+        control = model.control()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        pipeline = model._collision_pipeline
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+        solver.step(state, state, control, contacts, 1.0 / 60.0)
+
+        response = solver._direct_contact_response
+        self.assertIsNotNone(response)
+        body_mechanism = response.data.body_mechanism.numpy()
+        self.assertGreaterEqual(int(body_mechanism[mechanism_body + 1]), 0)
+        self.assertEqual(int(body_mechanism[free_body + 1]), -1)
+        owner = solver.world._contact_cols.articulation_owner.numpy()
+        count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+        self.assertGreater(count, 0)
+        self.assertTrue(np.all(owner[:count] >= 0))
+
     def test_every_supported_bilateral_mode_uses_direct_rows(self) -> None:
         """Route every supported bilateral joint mode through direct rows."""
         model, joints = _build_all_joint_types()
@@ -228,6 +326,118 @@ class TestDirectJointTypes(unittest.TestCase):
                 else:
                     self.assertLess(float(np.max(np.abs(result[body]))), 0.8)
 
+    def test_closed_loop_contacts_settle_without_horizontal_drift(self) -> None:
+        """Keep a metadata-independent closed loop drift-free on the ground."""
+        model, bodies, loop_joint = _build_closed_loop_contact_model()
+        solver = _make_solver(model)
+        self.assertTrue(solver._direct_equality_system.topology.mechanism_has_cycle[0])
+        self.assertIsNotNone(solver._direct_contact_response)
+        self.assertIsNotNone(solver._direct_contact_schedule)
+        self.assertFalse(solver._direct_tree_contacts)
+
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        pipeline = model._collision_pipeline
+        contacts = pipeline.contacts()
+        dt = 1.0 / 60.0
+
+        def advance_pair() -> None:
+            nonlocal state_0, state_1
+            for _ in range(2):
+                state_0.clear_forces()
+                pipeline.collide(state_0, contacts)
+                solver.step(state_0, state_1, control, contacts, dt)
+                state_0, state_1 = state_1, state_0
+
+        advance_pair()
+
+        with wp.ScopedCapture(model.device) as capture:
+            advance_pair()
+        for _ in range(15):
+            wp.capture_launch(capture.graph)
+
+        response = solver._direct_contact_response
+        direct = solver._direct_equality_system
+        contact_mechanism = response.data.contact_mechanism.numpy()
+        contact = int(np.flatnonzero(contact_mechanism >= 0)[0])
+        mechanism = int(contact_mechanism[contact])
+        dimension = direct.topology.dimensions[mechanism]
+        row_start = int(direct.topology.mechanism_row_start[mechanism])
+        matrix = np.zeros((dimension, dimension), dtype=np.float64)
+        matrix_storage = direct.matrix.numpy()
+        for row, column, address in zip(
+            direct.solver.symbolic.matrix_row,
+            direct.solver.symbolic.matrix_column,
+            direct.solver.symbolic.matrix_storage,
+            strict=True,
+        ):
+            if row_start <= row < row_start + dimension:
+                local_row = int(row - row_start)
+                local_column = int(column - row_start)
+                matrix[local_row, local_column] = matrix_storage[address]
+                matrix[local_column, local_row] = matrix_storage[address]
+        workspace_offset = contact * response.contact_batch.workspace_stride
+        rhs_storage = response.contact_batch.rhs.numpy()
+        rhs = np.stack(
+            [rhs_storage[workspace_offset + 4 * row : workspace_offset + 4 * row + 3] for row in range(dimension)]
+        )
+        lambdas = solver.world._contact_container.lambdas.numpy()
+        derived = solver.world._contact_container.derived.numpy()
+        normal = lambdas[0:3, contact]
+        tangent0 = lambdas[3:6, contact]
+        directions = np.stack((normal, tangent0, np.cross(normal, tangent0)))
+        r0 = derived[9:12, contact]
+        r1 = derived[12:15, contact]
+        body0 = int(response.contact_body0.numpy()[contact])
+        body1 = int(response.contact_body1.numpy()[contact])
+        inverse_mass = solver.bodies.inverse_mass.numpy()
+        packed_inertia = solver.bodies.inverse_inertia_world.numpy()
+        raw = np.zeros((3, 3), dtype=np.float64)
+        for body, lever, sign in ((body0, r0, -1.0), (body1, r1, 1.0)):
+            packed = packed_inertia[body]
+            inverse_inertia = np.asarray(
+                (
+                    (packed[0], packed[3], packed[4]),
+                    (packed[3], packed[1], packed[5]),
+                    (packed[4], packed[5], packed[2]),
+                )
+            )
+            forces = sign * directions
+            torques = np.cross(np.broadcast_to(lever, forces.shape), forces)
+            raw += inverse_mass[body] * forces @ forces.T + torques @ inverse_inertia @ torques.T
+        expected_inverse = raw - rhs.T @ np.linalg.solve(matrix, rhs)
+        mobility = response.data.mobility.numpy()[:, contact]
+        actual_inverse = np.asarray(
+            (
+                (1.0 / mobility[0], mobility[3], mobility[4]),
+                (mobility[3], 1.0 / mobility[1], mobility[5]),
+                (mobility[4], mobility[5], 1.0 / mobility[2]),
+            )
+        )
+        np.testing.assert_allclose(actual_inverse, expected_inverse, rtol=3.0e-4, atol=3.0e-5)
+
+        for _ in range(45):
+            wp.capture_launch(capture.graph)
+        settled_center = np.mean(state_0.body_q.numpy()[list(bodies), :3], axis=0)
+        for _ in range(60):
+            wp.capture_launch(capture.graph)
+
+        body_q = state_0.body_q.numpy()[list(bodies)]
+        body_qd = state_0.body_qd.numpy()[list(bodies)]
+        self.assertTrue(np.isfinite(body_q).all())
+        self.assertTrue(np.isfinite(body_qd).all())
+        center = np.mean(body_q[:, :3], axis=0)
+        self.assertLess(float(np.linalg.norm(center[:2] - (0.0, 0.5))), 1.0e-2)
+        self.assertLess(float(np.linalg.norm(center[:2] - settled_center[:2])), 2.0e-4)
+        self.assertLess(float(np.max(np.abs(body_qd))), 2.0e-2)
+        self.assertLess(_joint_anchor_error(model, state_0, loop_joint), 5.0e-4)
+
+        column_count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+        self.assertGreater(column_count, 0)
+        owners = solver.world._contact_cols.articulation_owner.numpy()[:column_count]
+        self.assertTrue(np.all(owners >= 0))
+
     def test_mixed_small_and_large_direct_blocks_match_dense_residuals(self) -> None:
         """Solve narrow and wide ill-conditioned blocks in one launch set."""
         dimensions = (3, 5, 17, 40)
@@ -285,6 +495,68 @@ class TestDirectJointTypes(unittest.TestCase):
             residual = matrix @ solution_np[begin:end] - rhs_np[begin:end]
             relative_residual = np.linalg.norm(residual) / np.linalg.norm(rhs_np[begin:end])
             self.assertLess(relative_residual, 5.0e-3)
+
+    def test_panel_narrow_rhs_batch_selects_mechanisms_at_runtime(self) -> None:
+        """Solve contact-width tasks selected across heterogeneous mechanisms."""
+        dimensions = (5, 17, 40)
+        starts = np.cumsum(np.asarray((0, *dimensions), dtype=np.int32))
+        permutation = np.concatenate([np.arange(dimension, dtype=np.int32) for dimension in dimensions])
+        row_bodies = tuple(
+            frozenset((mechanism,)) for mechanism, dimension in enumerate(dimensions) for _ in range(dimension)
+        )
+        panel = FixedPatternPanelLLT(
+            dimensions,
+            starts,
+            permutation,
+            row_bodies,
+            device=wp.get_preferred_device(),
+        )
+        batch = panel.create_narrow_rhs_batch(5)
+        task_mechanisms = np.asarray((2, -1, 0, 1, 2), dtype=np.int32)
+        batch.task_mechanism.assign(task_mechanisms)
+
+        rng = np.random.default_rng(7281)
+        matrices = []
+        matrix_storage = np.zeros(panel.matrix.size, dtype=np.float32)
+        for dimension in dimensions:
+            basis, _ = np.linalg.qr(rng.normal(size=(dimension, dimension)))
+            matrices.append(basis @ np.diag(np.geomspace(1.0, 1.0e3, dimension)) @ basis.T)
+        for row, column, address in zip(
+            panel.symbolic.matrix_row,
+            panel.symbolic.matrix_column,
+            panel.symbolic.matrix_storage,
+            strict=True,
+        ):
+            mechanism = int(np.searchsorted(starts[1:], row, side="right"))
+            matrix_storage[address] = matrices[mechanism][row - starts[mechanism], column - starts[mechanism]]
+        panel.matrix.assign(matrix_storage)
+
+        rhs_storage = np.zeros(batch.rhs.size, dtype=np.float32)
+        expected_rhs = {}
+        for task, mechanism in enumerate(task_mechanisms):
+            if mechanism < 0:
+                continue
+            rhs = rng.normal(size=(dimensions[mechanism], 3)).astype(np.float32)
+            expected_rhs[task] = rhs
+            begin = task * batch.workspace_stride
+            for row in range(rhs.shape[0]):
+                rhs_storage[begin + 4 * row : begin + 4 * row + 3] = rhs[row]
+        batch.rhs.assign(rhs_storage)
+
+        with wp.ScopedCapture(wp.get_preferred_device()) as capture:
+            panel.compute()
+            batch.solve()
+        wp.capture_launch(capture.graph)
+        solution_storage = batch.solution.numpy()
+
+        for task, rhs in expected_rhs.items():
+            mechanism = int(task_mechanisms[task])
+            begin = task * batch.workspace_stride
+            solution = np.stack(
+                [solution_storage[begin + 4 * row : begin + 4 * row + 3] for row in range(rhs.shape[0])]
+            )
+            residual = matrices[mechanism] @ solution - rhs
+            self.assertLess(float(np.linalg.norm(residual) / np.linalg.norm(rhs)), 5.0e-3)
 
     def test_wide_partial_panels_match_dense_residual(self) -> None:
         """Match a sparse residual with a partial cooperative panel."""

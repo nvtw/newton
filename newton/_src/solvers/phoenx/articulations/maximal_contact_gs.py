@@ -70,10 +70,12 @@ def _build_maximal_contact_schedule_kernel(
     keys: wp.array[wp.int64],
     scheduled_column: wp.array[wp.int32],
     section_end: wp.array[wp.int32],
+    reset_owner: wp.bool,
 ):
     column = wp.tid()
     scheduled_column[column] = column
-    columns.articulation_owner[column] = wp.int32(-1)
+    if reset_owner:
+        columns.articulation_owner[column] = wp.int32(-1)
     if column >= num_columns[0]:
         keys[column] = wp.int64(_INT64_MAX)
         return
@@ -559,6 +561,8 @@ class MaximalContactRunSchedule:
         columns: ContactColumnContainer,
         bodies: BodyContainer,
         num_columns: wp.array[wp.int32],
+        *,
+        reset_owner: bool = True,
     ) -> None:
         """Group immutable rigid contacts by articulation."""
         self.section_end.zero_()
@@ -574,6 +578,7 @@ class MaximalContactRunSchedule:
                 self.keys,
                 self.columns,
                 self.section_end,
+                wp.bool(reset_owner),
             ],
             device=self.projector.model.device,
         )

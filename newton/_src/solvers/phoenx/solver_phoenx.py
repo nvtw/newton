@@ -10,6 +10,11 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.articulations.direct_contact_gs import (
+    DirectContactRunSchedule,
+    iterate_direct_contact_runs_kernel,
+)
+from newton._src.solvers.phoenx.articulations.direct_contact_response import DirectContactResponse
 from newton._src.solvers.phoenx.articulations.maximal_contact_gs import (
     MaximalContactRunSchedule,
     iterate_maximal_contact_runs_kernel,
@@ -950,7 +955,10 @@ class PhoenXWorld:
         self._maximal_tree_projector = None
         self._maximal_contact_response: MaximalContactResponse | None = None
         self._maximal_contact_schedule: MaximalContactRunSchedule | None = None
+        self._direct_contact_response: DirectContactResponse | None = None
+        self._direct_contact_schedule: DirectContactRunSchedule | None = None
         self._direct_tree_contacts = False
+        self._contact_input_active_this_step = False
         self._regular_pgs_active_this_step = True
         self._reduced_contacts_active_this_step = False
         self._reduced_constraints_active_this_step = False
@@ -2891,6 +2899,7 @@ class PhoenXWorld:
         )
         has_enabled_joint_rows = self.num_joints > 0 and not self._skip_all_joint_pgs()
         has_contact_input = contacts is not None
+        self._contact_input_active_this_step = has_contact_input
         self._reduced_contacts_active_this_step = self._reduced_articulation is not None and has_contact_input
         self._reduced_constraints_active_this_step = self._reduced_articulation is not None and (
             has_contact_input or self._has_reduced_loops
@@ -2907,11 +2916,22 @@ class PhoenXWorld:
         # reused columns are exactly the prior substep's converged values.
         if not reuse_partition:
             self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
+            if (
+                self._contact_input_active_this_step
+                and self._direct_contact_schedule is not None
+                and self._ingest_scratch is not None
+            ):
+                self._direct_contact_schedule.build(
+                    self._contact_cols,
+                    self._ingest_scratch.num_contact_columns,
+                    reset_owner=True,
+                )
             if self._maximal_contact_schedule is not None and self._ingest_scratch is not None:
                 self._maximal_contact_schedule.build(
                     self._contact_cols,
                     self.bodies,
                     self._ingest_scratch.num_contact_columns,
+                    reset_owner=self._direct_contact_schedule is None,
                 )
             if (
                 self._reduced_contacts_active_this_step
@@ -3993,6 +4013,35 @@ class PhoenXWorld:
             inputs=[self.particles, wp.float32(1.0 / self.substep_dt)],
             device=self.device,
         )
+
+    def _solve_direct_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
+        """Run deterministic contact sweeps through the direct equality mobility."""
+        response = self._direct_contact_response
+        schedule = self._direct_contact_schedule
+        if not self._contact_input_active_this_step or response is None or schedule is None:
+            return
+        if refresh_mobility:
+            response.compute(self._contact_container)
+        iterations = self.solver_iterations if use_bias else self.velocity_iterations
+        for _ in range(iterations):
+            wp.launch_tiled(
+                iterate_direct_contact_runs_kernel,
+                dim=response.active_mechanism.size,
+                block_dim=128,
+                inputs=[
+                    response.active_mechanism,
+                    response.data,
+                    self.bodies,
+                    self._contact_cols,
+                    self._contact_container,
+                    wp.float32(1.0 / self.substep_dt),
+                    wp.float32(self.sor_boost),
+                    schedule.columns,
+                    schedule.section_end,
+                    wp.bool(use_bias),
+                ],
+                device=self.device,
+            )
 
     def _solve_maximal_articulated_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
         """Run one exact articulation-response contact correction sweep."""

@@ -201,7 +201,7 @@
 - Fix experimental PhoenX Ant rollouts to terminate and reset non-finite or physically exploded states instead of retaining corrupted simulation state.
 - Fix PhoenX-enabled robot and basic examples constructing contact buffers without persistent matching.
 - Fix PhoenX G1 and recording examples replaying a stale CUDA-graph input state when using one outer simulation step.
-- Fix severe post-impact horizontal drift in full-coordinate PhoenX robots by evaluating contact and friction impulses through the exact joint-constrained mechanism mobility.
+- Fix severe post-impact horizontal drift in full-coordinate PhoenX robots by evaluating contact and friction impulses through exact joint-constrained mechanism mobility derived solely from the enabled body-joint graph, while preserving general direct solves for closed loops.
 - Fix matched PhoenX contacts changing the world-space direction of warm-started friction impulses when their tangent frames rotate.
 - Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.
 - Fix PhoenX direct-equality scheduling to apply cached drive and limit warm-start impulses once per substep instead of once per PGS iteration.

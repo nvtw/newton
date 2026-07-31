@@ -419,6 +419,208 @@ def _make_cooperative_solve_kernel(block_size: int):
     return solve
 
 
+def _make_narrow_rhs_batch_solve_kernel(block_size: int):
+    """Create one three-column solve task per active contact point."""
+    rhs_tile_width = 4
+    tile_elements = block_size * rhs_tile_width
+    factor_tile_elements = block_size * block_size
+
+    @wp.kernel(enable_backward=False)
+    def solve_narrow_rhs_batch(
+        task_mechanism: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        vector_offsets: wp.array[wp.int32],
+        panel_table_offset: wp.array[wp.int32],
+        tile_counts: wp.array[wp.int32],
+        panel_index: wp.array[wp.int32],
+        tile_adjacency_offset: wp.array[wp.int32],
+        forward_start: wp.array[wp.int32],
+        forward_tile: wp.array[wp.int32],
+        forward_panel: wp.array[wp.int32],
+        backward_start: wp.array[wp.int32],
+        backward_tile: wp.array[wp.int32],
+        backward_panel: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        workspace_stride: wp.int32,
+        rhs: wp.array[wp.float32],
+        intermediate: wp.array[wp.float32],
+        solution_permuted: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+    ):
+        task, lane = wp.tid()
+        mechanism = task_mechanism[task]
+        active = mechanism >= wp.int32(0)
+        if not active:
+            mechanism = wp.int32(0)
+        dimension = dimensions[mechanism]
+        vector_offset = vector_offsets[mechanism]
+        tile_count = wp.int32(0)
+        if active:
+            tile_count = tile_counts[mechanism]
+        table_offset = panel_table_offset[mechanism]
+        adjacency_offset = tile_adjacency_offset[mechanism]
+        workspace_dimension = workspace_stride // wp.int32(rhs_tile_width)
+        task_offset = task * workspace_stride
+        rhs_matrix = wp.array(
+            ptr=_get_float_array_offset_ptr(rhs, task_offset),
+            shape=(workspace_dimension, rhs_tile_width),
+            dtype=wp.float32,
+        )
+        intermediate_matrix = wp.array(
+            ptr=_get_float_array_offset_ptr(intermediate, task_offset),
+            shape=(workspace_dimension, rhs_tile_width),
+            dtype=wp.float32,
+        )
+        solution_permuted_matrix = wp.array(
+            ptr=_get_float_array_offset_ptr(solution_permuted, task_offset),
+            shape=(workspace_dimension, rhs_tile_width),
+            dtype=wp.float32,
+        )
+        solution_matrix = wp.array(
+            ptr=_get_float_array_offset_ptr(solution, task_offset),
+            shape=(workspace_dimension, rhs_tile_width),
+            dtype=wp.float32,
+        )
+
+        for tile_i in range(tile_count):
+            i = tile_i * block_size
+            right_hand_side = wp.tile_zeros(
+                shape=(block_size, rhs_tile_width),
+                dtype=wp.float32,
+                storage="shared",
+            )
+            for iteration in range((tile_elements + wp.block_dim() - 1) // wp.block_dim()):
+                index = (lane + iteration * wp.block_dim()) % tile_elements
+                row = index // rhs_tile_width
+                column = index % rhs_tile_width
+                active = i + row < dimension and column < wp.int32(3)
+                value = wp.float32(0.0)
+                if active:
+                    original = permutation[vector_offset + i + row]
+                    value = rhs_matrix[original, column]
+                wp.tile_scatter_masked(right_hand_side, row, column, value, active)
+            tile_slot = adjacency_offset + tile_i
+            for entry in range(forward_start[tile_slot], forward_start[tile_slot + wp.int32(1)]):
+                tile_j = forward_tile[entry]
+                factor_panel = forward_panel[entry]
+                factor_matrix = wp.array(
+                    ptr=_get_float_array_offset_ptr(factor, factor_panel * factor_tile_elements),
+                    shape=(block_size, block_size),
+                    dtype=wp.float32,
+                )
+                lower = wp.tile_load(factor_matrix, shape=(block_size, block_size))
+                previous = wp.tile_load(
+                    intermediate_matrix,
+                    shape=(block_size, rhs_tile_width),
+                    offset=(tile_j * block_size, 0),
+                )
+                wp.tile_matmul(lower, previous, right_hand_side, alpha=-1.0)
+            diagonal_panel = panel_index[table_offset + tile_i * tile_count + tile_i]
+            diagonal_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(factor, diagonal_panel * factor_tile_elements),
+                shape=(block_size, block_size),
+                dtype=wp.float32,
+            )
+            diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size))
+            wp.tile_lower_solve_inplace(diagonal, right_hand_side)
+            wp.tile_store(intermediate_matrix, right_hand_side, offset=(i, 0))
+
+        for reverse_tile in range(tile_count):
+            tile_i = tile_count - wp.int32(1) - reverse_tile
+            i = tile_i * block_size
+            right_hand_side = wp.tile_load(
+                intermediate_matrix,
+                shape=(block_size, rhs_tile_width),
+                offset=(i, 0),
+            )
+            diagonal_panel = panel_index[table_offset + tile_i * tile_count + tile_i]
+            diagonal_matrix = wp.array(
+                ptr=_get_float_array_offset_ptr(factor, diagonal_panel * factor_tile_elements),
+                shape=(block_size, block_size),
+                dtype=wp.float32,
+            )
+            diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size))
+            tile_slot = adjacency_offset + tile_i
+            for entry in range(backward_start[tile_slot], backward_start[tile_slot + wp.int32(1)]):
+                tile_j = backward_tile[entry]
+                factor_panel = backward_panel[entry]
+                factor_matrix = wp.array(
+                    ptr=_get_float_array_offset_ptr(factor, factor_panel * factor_tile_elements),
+                    shape=(block_size, block_size),
+                    dtype=wp.float32,
+                )
+                lower = wp.tile_load(factor_matrix, shape=(block_size, block_size))
+                solved = wp.tile_load(
+                    solution_permuted_matrix,
+                    shape=(block_size, rhs_tile_width),
+                    offset=(tile_j * block_size, 0),
+                )
+                wp.tile_matmul(wp.tile_transpose(lower), solved, right_hand_side, alpha=-1.0)
+            wp.tile_upper_solve_inplace(wp.tile_transpose(diagonal), right_hand_side)
+            wp.tile_store(solution_permuted_matrix, right_hand_side, offset=(i, 0))
+            for iteration in range((tile_elements + wp.block_dim() - 1) // wp.block_dim()):
+                index = (lane + iteration * wp.block_dim()) % tile_elements
+                row = index // rhs_tile_width
+                column = index % rhs_tile_width
+                if i + row < dimension and column < wp.int32(3):
+                    original = permutation[vector_offset + i + row]
+                    solution_matrix[original, column] = right_hand_side[row, column]
+
+    return solve_narrow_rhs_batch
+
+
+class FixedPatternNarrowRHSBatch:
+    """Reusable three-column tasks that may select mechanisms at runtime."""
+
+    def __init__(self, panel: FixedPatternPanelLLT, task_capacity: int):
+        if task_capacity < 0:
+            raise ValueError("narrow RHS task capacity must be nonnegative")
+        self.panel = panel
+        self.task_capacity = max(1, int(task_capacity))
+        max_padded_dimension = max(panel.symbolic.tile_counts) * panel.block_size
+        self.workspace_stride = max_padded_dimension * 4
+        storage_size = self.task_capacity * self.workspace_stride
+        device = panel.device
+        self.task_mechanism = wp.full(self.task_capacity, -1, dtype=wp.int32, device=device)
+        self.rhs = wp.zeros(storage_size, dtype=wp.float32, device=device)
+        self.intermediate = wp.zeros_like(self.rhs)
+        self.solution_permuted = wp.zeros_like(self.rhs)
+        self.solution = wp.zeros_like(self.rhs)
+
+    def solve(self) -> None:
+        """Solve all runtime-selected three-column tasks."""
+        panel = self.panel
+        wp.launch_tiled(
+            panel._solve_narrow_rhs_batch,
+            dim=self.task_capacity,
+            block_dim=panel._narrow_rhs_block_dim,
+            inputs=[
+                self.task_mechanism,
+                panel.dimension,
+                panel.vector_offset,
+                panel.panel_table_offset,
+                panel.tile_count,
+                panel.panel_index,
+                panel.tile_adjacency_offset,
+                panel.forward_start,
+                panel.forward_tile,
+                panel.forward_panel,
+                panel.backward_start,
+                panel.backward_tile,
+                panel.backward_panel,
+                panel.permutation,
+                panel.factor,
+                wp.int32(self.workspace_stride),
+                self.rhs,
+                self.intermediate,
+                self.solution_permuted,
+                self.solution,
+            ],
+            device=panel.device,
+        )
+
+
 class FixedPatternPanelLLT:
     """Factor and solve fixed-topology mechanism matrices in compact panels."""
 
@@ -602,7 +804,13 @@ class FixedPatternPanelLLT:
         self.cooperative_mechanism = wp.array(cooperative_mechanisms, dtype=wp.int32, device=self.device)
         self._factor_narrow = _make_narrow_factor_kernel(block_size)
         self._solve_cooperative = _make_cooperative_solve_kernel(block_size)
+        self._solve_narrow_rhs_batch = _make_narrow_rhs_batch_solve_kernel(block_size)
         self._cooperative_solve_block_dim = 128 if block_size == 32 else 64
+        self._narrow_rhs_block_dim = 128
+
+    def create_narrow_rhs_batch(self, task_capacity: int) -> FixedPatternNarrowRHSBatch:
+        """Allocate runtime-selected three-column solve tasks."""
+        return FixedPatternNarrowRHSBatch(self, task_capacity)
 
     def compute(self) -> None:
         """Factor narrow mechanisms cooperatively or use the ready queue."""
@@ -708,4 +916,4 @@ class FixedPatternPanelLLT:
             )
 
 
-__all__ = ["FixedPanelSymbolic", "FixedPatternPanelLLT", "build_fixed_panel_symbolic"]
+__all__ = ["FixedPanelSymbolic", "FixedPatternNarrowRHSBatch", "FixedPatternPanelLLT", "build_fixed_panel_symbolic"]

@@ -419,7 +419,7 @@ def build_adbs_init_arrays(
 
     # ---- Pull every relevant joint array back to host ----------------
     joint_type = model.joint_type.numpy()
-    joint_articulation = model.joint_articulation.numpy()
+    joint_articulation = model.joint_articulation.numpy() if reduced_articulations else None
     joint_parent = model.joint_parent.numpy()
     joint_child = model.joint_child.numpy()
     joint_X_p = model.joint_X_p.numpy()  # (N, 7) float32

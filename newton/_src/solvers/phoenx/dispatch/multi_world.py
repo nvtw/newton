@@ -61,6 +61,7 @@ class MultiWorldDispatcher:
         elif direct is not None and direct.enabled:
             direct.solve(use_bias=True)
             direct.resolve_bounded_drives(idt, use_bias=True)
+        self._world._solve_direct_contacts(use_bias=True, refresh_mobility=True)
         if self._world._maximal_tree_projector is not None:
             if self._world._direct_tree_contacts:
                 self._world._maximal_tree_projector.factor_contact_response()
@@ -91,6 +92,8 @@ class MultiWorldDispatcher:
         elif direct is not None and direct.enabled and self._world.velocity_iterations > 0:
             direct.solve(use_bias=False)
             direct.resolve_bounded_drives(idt, use_bias=False)
+        if self._world.velocity_iterations > 0:
+            self._world._solve_direct_contacts(use_bias=False, refresh_mobility=False)
         if self._world._maximal_tree_projector is not None:
             if not self._world._direct_tree_contacts:
                 self._world._maximal_tree_projector.project(use_bias=False, dt=self._world.substep_dt)

@@ -16,10 +16,15 @@ import warp as wp
 
 import newton
 from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
+from newton._src.solvers.phoenx.articulations.direct_contact_gs import DirectContactRunSchedule
+from newton._src.solvers.phoenx.articulations.direct_contact_response import DirectContactResponse
 from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem
 from newton._src.solvers.phoenx.articulations.maximal_contact_gs import MaximalContactRunSchedule
 from newton._src.solvers.phoenx.articulations.maximal_contact_response import MaximalContactResponse
-from newton._src.solvers.phoenx.articulations.maximal_projector import MaximalTreeProjector
+from newton._src.solvers.phoenx.articulations.maximal_projector import (
+    MaximalTreeProjector,
+    find_full_coordinate_revolute_trees,
+)
 from newton._src.solvers.phoenx.articulations.maximal_projector_general import GeneralMaximalTreeProjector
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation
 from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
@@ -439,25 +444,32 @@ class SolverPhoenX(SolverBase):
         self._maximal_tree_projector: MaximalTreeProjector | GeneralMaximalTreeProjector | None = None
         self._maximal_contact_response: MaximalContactResponse | None = None
         self._maximal_contact_schedule: MaximalContactRunSchedule | None = None
+        self._direct_contact_response: DirectContactResponse | None = None
+        self._direct_contact_schedule: DirectContactRunSchedule | None = None
+        self._direct_contact_active_mechanisms: tuple[bool, ...] | None = None
         self._maximal_tree_projector_cls: type[MaximalTreeProjector] | type[GeneralMaximalTreeProjector] | None = None
-        tree_contact_supported = MaximalTreeProjector.supports_model(model)
-        # Direct LLT remains the equality owner; the tree factor supplies the
-        # exact constrained mobility seen by point-contact inequalities.
-        self._direct_tree_contacts = bool(
+        shape_flags = model.shape_flags.numpy() if model.shape_flags is not None else np.empty(0, dtype=np.int32)
+        has_rigid_collision_shapes = bool(
+            np.any(np.asarray(shape_flags, dtype=np.int32) & int(newton.ShapeFlags.COLLIDE_SHAPES))
+        )
+        # Direct LLT remains the equality owner; an exact tree factor may
+        # additionally supply constrained mobility to point-contact rows.
+        # Eligibility is resolved from the enabled joint graph after ADBS has
+        # classified D6 joints; reduced-coordinate metadata is never an input.
+        direct_tree_contact_candidate = bool(
             articulation_mode == "maximal"
             and contact_friction_model == "point"
             and not mass_splitting
             and float(sleeping_velocity_threshold) <= 0.0
             and not has_deformables
-            and tree_contact_supported
+            and has_rigid_collision_shapes
         )
+        self._direct_tree_contacts = False
         if articulation_mode in ("maximal_projected", "maximal_articulated"):
-            if tree_contact_supported:
+            if MaximalTreeProjector.supports_model(model):
                 self._maximal_tree_projector_cls = MaximalTreeProjector
             elif GeneralMaximalTreeProjector.supports_model(model):
                 self._maximal_tree_projector_cls = GeneralMaximalTreeProjector
-        elif self._direct_tree_contacts:
-            self._maximal_tree_projector_cls = MaximalTreeProjector
         self._uses_maximal_tree_projector = bool(
             articulation_mode in ("maximal_projected", "maximal_articulated")
             and self._maximal_tree_projector_cls is not None
@@ -504,9 +516,10 @@ class SolverPhoenX(SolverBase):
         if model.body_count:
             self._launch_init_phoenx_bodies(model)
 
-        # FK so model.body_q reflects model.joint_q (URDF rigs may set joint_q
-        # before finalize without running FK).
-        if int(model.body_count) > 0 and int(model.joint_count) > 0:
+        # Reduced/projected backends initialize authored generalized
+        # coordinates through Newton FK. Full coordinates take body poses as
+        # authoritative and must not depend on articulation ranges.
+        if articulation_mode != "maximal" and int(model.body_count) > 0 and int(model.joint_count) > 0:
             newton.eval_fk(model, model.joint_q, model.joint_qd, model)
 
         self._adbs: AdbsInitArrays = build_adbs_init_arrays(
@@ -704,14 +717,35 @@ class SolverPhoenX(SolverBase):
             adbs_kwargs = self._adbs.to_initialize_kwargs()
             self.world.initialize_actuated_double_ball_socket_joints(**adbs_kwargs)
 
+        joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
+        effective_joint_mode = np.full(int(model.joint_count), -1, dtype=np.int32)
+        active_joint = joint_idx_to_cid >= 0
+        if np.any(active_joint):
+            effective_joint_mode[active_joint] = self._adbs.joint_mode.numpy()[joint_idx_to_cid[active_joint]]
+        full_coordinate_tree_joints: tuple[tuple[int, ...], ...] = ()
+        if direct_tree_contact_candidate:
+            full_coordinate_tree_joints = find_full_coordinate_revolute_trees(model, effective_joint_mode)
+            self._direct_tree_contacts = bool(full_coordinate_tree_joints)
+            if self._direct_tree_contacts:
+                self._maximal_tree_projector_cls = MaximalTreeProjector
+
         if self._uses_maximal_tree_projector or self._direct_tree_contacts:
-            assert self._maximal_tree_projector_cls is not None
-            self._maximal_tree_projector = self._maximal_tree_projector_cls(
-                model,
-                self._constraints,
-                self.bodies,
-                self._adbs.joint_idx_to_cid,
-            )
+            if self._direct_tree_contacts:
+                self._maximal_tree_projector = MaximalTreeProjector(
+                    model,
+                    self._constraints,
+                    self.bodies,
+                    self._adbs.joint_idx_to_cid,
+                    joint_trees=full_coordinate_tree_joints,
+                )
+            else:
+                assert self._maximal_tree_projector_cls is not None
+                self._maximal_tree_projector = self._maximal_tree_projector_cls(
+                    model,
+                    self._constraints,
+                    self.bodies,
+                    self._adbs.joint_idx_to_cid,
+                )
             self.world._maximal_tree_projector = self._maximal_tree_projector
             if articulation_mode == "maximal_articulated" or self._direct_tree_contacts:
                 self._maximal_contact_response = MaximalContactResponse(self._maximal_tree_projector)
@@ -761,11 +795,6 @@ class SolverPhoenX(SolverBase):
             excluded_joint_mask = None
             if self._reduced_articulation is not None and self._uses_reduced_joint_ownership:
                 excluded_joint_mask = self._reduced_articulation.owned_joint_mask_np
-            joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
-            effective_joint_mode = np.full(int(model.joint_count), -1, dtype=np.int32)
-            active_joint = joint_idx_to_cid >= 0
-            if np.any(active_joint):
-                effective_joint_mode[active_joint] = self._adbs.joint_mode.numpy()[joint_idx_to_cid[active_joint]]
             effective_joint_dof_start = self._adbs.joint_idx_to_dof_start.numpy().copy()
             effective_joint_target_start = self._adbs.drive_target_q_index.numpy()
             joint_target_start = np.full(int(model.joint_count), -1, dtype=np.int32)
@@ -821,6 +850,36 @@ class SolverPhoenX(SolverBase):
                         joint_pgs_enabled[cid] = 0
                 if num_joints > 0:
                     self.world.set_joint_pgs_ownership(joint_pgs_enabled)
+
+                if direct_tree_contact_candidate and self.world.max_contact_columns > 0:
+                    direct_joint_mask = self._direct_equality_system.joint_mask
+                    tree_joint_sets = {
+                        frozenset(joint for joint in joints if direct_joint_mask[joint])
+                        for joints in full_coordinate_tree_joints
+                    }
+                    topology = self._direct_equality_system.topology
+                    active_mechanisms = tuple(
+                        frozenset(
+                            topology.row_joint[
+                                topology.mechanism_row_start[mechanism] : topology.mechanism_row_start[mechanism + 1]
+                            ]
+                        )
+                        not in tree_joint_sets
+                        for mechanism in range(len(topology.dimensions))
+                    )
+                    if any(active_mechanisms):
+                        self._direct_contact_active_mechanisms = active_mechanisms
+                        self._direct_contact_response = DirectContactResponse(
+                            self._direct_equality_system,
+                            self.world.rigid_contact_max,
+                            active_mechanisms=active_mechanisms,
+                        )
+                        self._direct_contact_schedule = DirectContactRunSchedule(
+                            self._direct_contact_response,
+                            self.world.max_contact_columns,
+                        )
+                        self.world._direct_contact_response = self._direct_contact_response
+                        self.world._direct_contact_schedule = self._direct_contact_schedule
 
         if num_cloth_triangles > 0:
             self.world.populate_cloth_triangles_from_model(model)
@@ -884,6 +943,24 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
         self.world.set_materials(material_data, shape_material_idx)
+
+    def _rebuild_direct_contact_response(self) -> None:
+        """Rebind general contact mobility after a direct factor rebuild."""
+        active_mechanisms = self._direct_contact_active_mechanisms
+        direct = self._direct_equality_system
+        if active_mechanisms is None or direct is None or not direct.enabled:
+            return
+        self._direct_contact_response = DirectContactResponse(
+            direct,
+            self.world.rigid_contact_max,
+            active_mechanisms=active_mechanisms,
+        )
+        self._direct_contact_schedule = DirectContactRunSchedule(
+            self._direct_contact_response,
+            self.world.max_contact_columns,
+        )
+        self.world._direct_contact_response = self._direct_contact_response
+        self.world._direct_contact_schedule = self._direct_contact_schedule
 
     def _refresh_direct_joint_ownership(self) -> None:
         """Reapply direct-drive and residual-PGS ownership after property edits."""
@@ -1370,7 +1447,10 @@ class SolverPhoenX(SolverBase):
             if self._adbs.num_joint_columns > 0:
                 self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
             if self._direct_equality_system is not None:
+                previous_direct_solver = getattr(self._direct_equality_system, "solver", None)
                 self._direct_equality_system.refresh_joint_properties()
+                if previous_direct_solver is not getattr(self._direct_equality_system, "solver", None):
+                    self._rebuild_direct_contact_response()
                 self._refresh_direct_joint_ownership()
         cable_rest_changed = bool(flags & int(ModelFlags.JOINT_PROPERTIES | ModelFlags.BODY_PROPERTIES))
         if cable_rest_changed and self._direct_equality_system is not None:
