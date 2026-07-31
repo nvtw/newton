@@ -203,6 +203,7 @@
 - Fix PhoenX G1 and recording examples replaying a stale CUDA-graph input state when using one outer simulation step.
 - Fix severe post-impact horizontal drift in full-coordinate PhoenX robots by evaluating contact and friction impulses through exact joint-constrained mechanism mobility derived solely from the enabled body-joint graph, while preserving general direct solves for closed loops.
 - Fix matched PhoenX contacts changing the world-space direction of warm-started friction impulses when their tangent frames rotate.
+- Fix full-coordinate PhoenX contacts injecting energy into armature and implicit-PD drives by preserving generalized reaction momentum across contact corrections.
 - Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.
 - Fix PhoenX direct-equality scheduling to apply cached drive and limit warm-start impulses once per substep instead of once per PGS iteration.
 - Preserve authored curved cable rest poses in `SolverPhoenX`, including rest-state refresh after joint-frame or body-pose edits.

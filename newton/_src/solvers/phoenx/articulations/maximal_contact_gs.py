@@ -131,12 +131,20 @@ def _apply_accumulated_impulse(
     tree: MaximalTreeProjectorData,
     response: MaximalContactResponseData,
     bodies: BodyContainer,
+    dynamic_accumulated_impulse: wp.array[wp.float32],
     articulation: wp.int32,
     lane: wp.int32,
 ):
     body_count = tree.body_count[articulation]
     apply_maximal_contact_impulse_thread(articulation, lane, tree, response)
     if lane < body_count:
+        row = tree.dynamic_row[articulation, lane]
+        if row >= wp.int32(0):
+            # Preserve the virtual generalized momentum used by the direct
+            # equality row when a constrained contact changes joint velocity.
+            dynamic_accumulated_impulse[row] -= (
+                tree.generalized_mass[articulation, lane] * response.joint_velocity[articulation, lane]
+            )
         body = tree.body_slot[articulation, lane]
         delta = response.velocity[articulation, lane]
         bodies.velocity[body] += wp.spatial_top(delta)
@@ -392,6 +400,7 @@ def iterate_maximal_contact_runs_kernel(
     tree: MaximalTreeProjectorData,
     response: MaximalContactResponseData,
     bodies: BodyContainer,
+    dynamic_accumulated_impulse: wp.array[wp.float32],
     columns: ContactColumnContainer,
     contacts: ContactContainer,
     inverse_dt: wp.float32,
@@ -531,7 +540,14 @@ def iterate_maximal_contact_runs_kernel(
                 _set_spatial_impulse(tree, response, articulation, body0, -impulse, -wp.cross(r0, impulse))
                 _set_spatial_impulse(tree, response, articulation, body1, impulse, wp.cross(r1, impulse))
         _sync_tree()
-        _apply_accumulated_impulse(tree, response, bodies, articulation, lane)
+        _apply_accumulated_impulse(
+            tree,
+            response,
+            bodies,
+            dynamic_accumulated_impulse,
+            articulation,
+            lane,
+        )
 
 
 class MaximalContactRunSchedule:

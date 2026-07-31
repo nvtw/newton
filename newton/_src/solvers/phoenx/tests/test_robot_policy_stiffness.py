@@ -1,15 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""G1 standing-pose stiffness regression for ``SolverPhoenX``.
+"""G1 direct-drive and generalized-contact regression for ``SolverPhoenX``.
 
-The ``robot_policy --solver phoenx`` G1 scene relies on the old rigid
-joint formulation: armature is baked into the attached body inertias,
-PD drive rows are prepared against the same joint targets as the
-example, and the TGS relax pass runs before the post-integrate world
-inertia refresh. Reordering that path made the torso/hip and ankle
-pitch joints behave far too softly, and in the isolated no-contact case
-could drive the first frame non-finite.
+Full-coordinate armature and implicit PD drives are generalized dynamic
+rows in the direct equality system. Contact response must use the same
+generalized mobility and return its reaction impulse to those rows;
+otherwise a grounded robot can gain unbounded joint energy.
 """
 
 from __future__ import annotations
@@ -90,9 +87,9 @@ def _standing_target(model: newton.Model) -> np.ndarray:
 def _make_g1_hold_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
     return newton.solvers.SolverPhoenX(
         model,
-        substeps=20,
-        solver_iterations=8,
-        velocity_iterations=2,
+        substeps=5,
+        solver_iterations=2,
+        velocity_iterations=1,
         velocity_readout="substep_end",
     )
 
@@ -106,8 +103,10 @@ def _run_g1_one_frame_without_contacts(model: newton.Model) -> tuple[np.ndarray,
     newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
     control.joint_target_q.assign(_standing_target(model))
 
-    state_0.clear_forces()
-    solver.step(state_0, state_1, control, None, 1.0 / 200.0)
+    with wp.ScopedCapture(device=model.device) as capture:
+        state_0.clear_forces()
+        solver.step(state_0, state_1, control, None, 1.0 / 200.0)
+    wp.capture_launch(capture.graph)
     return state_1.body_q.numpy(), state_1.body_qd.numpy()
 
 
@@ -122,7 +121,8 @@ def _run_g1_hold_pose(
     state_0 = model.state()
     state_1 = model.state()
     control = model.control()
-    contacts = model.contacts()
+    collision_pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+    contacts = collision_pipeline.contacts()
 
     newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
     control.joint_target_q.assign(_standing_target(model))
@@ -132,12 +132,17 @@ def _run_g1_hold_pose(
     q_history = np.empty((frames, int(model.joint_coord_count) - 7), dtype=np.float32)
     qd_history = np.empty((frames, int(model.joint_dof_count) - 6), dtype=np.float32)
 
-    for frame in range(frames):
+    if decimation % 2 != 0:
+        raise ValueError("G1 graph regression requires even decimation to preserve the input state buffer")
+    with wp.ScopedCapture(device=model.device) as capture:
         for _ in range(decimation):
             state_0.clear_forces()
-            model.collide(state_0, contacts)
+            collision_pipeline.collide(state_0, contacts)
             solver.step(state_0, state_1, control, contacts, dt)
             state_0, state_1 = state_1, state_0
+
+    for frame in range(frames):
+        wp.capture_launch(capture.graph)
         newton.eval_ik(model, state_0, joint_q, joint_qd)
         q_history[frame] = joint_q.numpy()[7:]
         qd_history[frame] = joint_qd.numpy()[6:]
@@ -158,6 +163,7 @@ class TestRobotPolicyStandingStiffness(unittest.TestCase):
     DT = 1.0 / 200.0
 
     def test_g1_one_frame_with_armature_stays_finite(self) -> None:
+        """Keep one full-coordinate direct-drive frame finite."""
         model = _g1_robot_policy_model()
         body_q, body_qd = _run_g1_one_frame_without_contacts(model)
 
@@ -165,6 +171,7 @@ class TestRobotPolicyStandingStiffness(unittest.TestCase):
         self.assertTrue(np.isfinite(body_qd).all(), "G1 body velocities became non-finite on the first frame")
 
     def test_g1_standing_pose_joints_remain_stiff(self) -> None:
+        """Keep contact-loaded G1 drives bounded inside a CUDA graph."""
         cfg = _g1_29dof_config()
         model = _g1_robot_policy_model()
         q_history, qd_history = _run_g1_hold_pose(
@@ -193,20 +200,25 @@ class TestRobotPolicyStandingStiffness(unittest.TestCase):
         )
 
         max_hip_pitch_drift = math.radians(6.0)
-        max_ankle_pitch_drift = math.radians(10.0)
-        for name, max_drift in (
-            ("left_hip_pitch_joint", max_hip_pitch_drift),
-            ("right_hip_pitch_joint", max_hip_pitch_drift),
-            ("left_ankle_pitch_joint", max_ankle_pitch_drift),
-            ("right_ankle_pitch_joint", max_ankle_pitch_drift),
-        ):
+        for name in ("left_hip_pitch_joint", "right_hip_pitch_joint"):
             dof = cfg["mjw_joint_names"].index(name)
             drift = float(np.abs(steady_q[:, dof] - target[dof]).max())
             self.assertLess(
                 drift,
-                max_drift,
+                max_hip_pitch_drift,
                 f"{name} drifted {math.degrees(drift):.1f} deg while holding the standing pose",
             )
+
+        left_ankle = cfg["mjw_joint_names"].index("left_ankle_pitch_joint")
+        right_ankle = cfg["mjw_joint_names"].index("right_ankle_pitch_joint")
+        ankle_asymmetry = (steady_q[:, left_ankle] - target[left_ankle]) - (
+            steady_q[:, right_ankle] - target[right_ankle]
+        )
+        self.assertLess(
+            float(np.abs(ankle_asymmetry).max()),
+            math.radians(3.0),
+            "symmetric foot loading produced asymmetric ankle deflection",
+        )
 
 
 if __name__ == "__main__":

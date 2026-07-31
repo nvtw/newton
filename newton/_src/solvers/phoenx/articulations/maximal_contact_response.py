@@ -41,6 +41,7 @@ class MaximalContactResponseData:
     rhs: wp.array2d[wp.spatial_vectorf]
     parent_rhs: wp.array2d[wp.spatial_vectorf]
     velocity: wp.array2d[wp.spatial_vectorf]
+    joint_velocity: wp.array2d[wp.float32]
 
 
 @wp.func
@@ -245,6 +246,7 @@ def apply_maximal_contact_impulse_thread(
         response.rhs[articulation, lane] = wp.spatial_vectorf(0.0)
         response.parent_rhs[articulation, lane] = wp.spatial_vectorf(0.0)
         response.velocity[articulation, lane] = wp.spatial_vectorf(0.0)
+        response.joint_velocity[articulation, lane] = wp.float32(0.0)
     _sync_tree()
 
     current_depth = max_depth
@@ -279,6 +281,7 @@ def apply_maximal_contact_impulse_thread(
                 motion,
                 response.rhs[articulation, lane] - tree.articulated[articulation, lane] @ base,
             )
+            response.joint_velocity[articulation, lane] = joint_velocity
             response.velocity[articulation, lane] = base + joint_velocity * motion
         _sync_tree()
         current_depth += wp.int32(1)
@@ -319,6 +322,7 @@ class MaximalContactResponse:
         data.rhs = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.parent_rhs = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.velocity = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
+        data.joint_velocity = wp.empty(shape, dtype=wp.float32, device=device)
         self.data = data
 
     def compute_mobility(self) -> None:

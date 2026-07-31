@@ -4080,6 +4080,7 @@ class PhoenXWorld:
                     projector.data,
                     response.data,
                     self.bodies,
+                    projector.dynamic_accumulated_impulse,
                     self._contact_cols,
                     self._contact_container,
                     wp.float32(1.0 / self.substep_dt),

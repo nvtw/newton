@@ -815,6 +815,15 @@ class SolverPhoenX(SolverBase):
             )
             self.world._direct_equality_system = self._direct_equality_system
             if self._direct_equality_system.enabled:
+                if self._direct_tree_contacts:
+                    assert self._maximal_tree_projector is not None
+                    topology = self._direct_equality_system.topology
+                    self._maximal_tree_projector.bind_direct_dynamic_state(
+                        topology.row_joint,
+                        topology.row_dynamic,
+                        self._direct_equality_system.dynamic_mass,
+                        self._direct_equality_system.accumulated_impulse,
+                    )
                 # Equality- and direct-drive-only columns leave coloring.
                 # Axial friction and limits retain the lean PGS iteration.
                 self._direct_base_joint_pgs_enabled = self.world._joint_pgs_enabled.numpy()[:num_joints].copy()

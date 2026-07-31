@@ -54,7 +54,7 @@ _FP32_BASE_REGULARIZATION = 3.0e-6
 _FP32_STRUCTURAL_REGULARIZATION = 3.0e-7
 _FP32_RANK_REGULARIZATION = float(np.sqrt(np.finfo(np.float32).eps))
 _DIRECT_BAUMGARTE = 0.2
-_DIRECT_SOLVE_RESIDUAL_TOLERANCE = 1.0e-4
+_DIRECT_RELAX_RESIDUAL_TOLERANCE = 1.0e-4
 _PANEL_BLOCK_SIZE = 16
 _WIDE_PANEL_BLOCK_SIZE = 32
 _WIDE_PANEL_MIN_ROWS = 1024
@@ -1162,8 +1162,14 @@ def _assemble_direct_equality_matrix_kernel(
                     row_bias[row_structural, row_local_index] = (
                         row_error[row_structural, row_local_index] * bias_factor * idt
                     )
+        regularization_scale = wp.max(inverse_effective_mass, wp.float32(1.0))
+        if row_dynamic[row]:
+            regularization_scale = wp.max(
+                wp.float32(1.0) / wp.max(dynamic_mass[row], wp.float32(1.0e-10)),
+                wp.float32(1.0),
+            )
         value += wp.max(
-            row_regularization[row] * wp.max(inverse_effective_mass, wp.float32(1.0)),
+            row_regularization[row] * regularization_scale,
             wp.float32(1.0e-10),
         )
     matrix[matrix_storage[entry]] = value
@@ -1236,9 +1242,10 @@ def _build_direct_equality_rhs_kernel(
         bias = row_bias[structural_index, local_row] if use_bias else wp.float32(0.0)
         value = -row_scale[row] * (relative_velocity + bias)
     rhs[row] = value
-    # Avoid a full panel traversal after inequality sweeps that left the
-    # equilibrated equality residual below the FP32 correction scale.
-    if wp.abs(value) > wp.float32(_DIRECT_SOLVE_RESIDUAL_TOLERANCE):
+    # Primary dynamics and bias impulses must never be thresholded: a
+    # small velocity change can carry a large impulse through armature or a
+    # large mass. Only skip negligible repeat relaxation corrections.
+    if not use_bias and wp.abs(value) > wp.float32(_DIRECT_RELAX_RESIDUAL_TOLERANCE):
         wp.atomic_max(solve_active, wp.int32(0), wp.int32(1))
 
 
@@ -2109,7 +2116,7 @@ class DirectEqualitySystem:
     def solve(self, *, use_bias: bool) -> None:
         if not self.enabled:
             return
-        self.solve_active.zero_()
+        self.solve_active.fill_(int(use_bias))
         wp.launch(
             _build_direct_equality_rhs_kernel,
             dim=len(self.topology.row_joint),

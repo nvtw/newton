@@ -158,6 +158,30 @@ class MaximalTreeProjectorData:
     reaction: wp.array2d[wp.spatial_vectorf]
     drive_diag: wp.array2d[wp.float32]
     drive_bias: wp.array2d[wp.float32]
+    generalized_mass: wp.array2d[wp.float32]
+    dynamic_row: wp.array2d[wp.int32]
+
+
+@wp.kernel(enable_backward=False)
+def _gather_maximal_tree_generalized_mass_kernel(
+    joint_dynamic_row: wp.array[wp.int32],
+    dynamic_mass: wp.array[wp.float32],
+    data: MaximalTreeProjectorData,
+):
+    tid = wp.tid()
+    articulation = tid // wp.int32(_TREE_WIDTH)
+    lane = tid - articulation * wp.int32(_TREE_WIDTH)
+    if lane >= data.body_count[articulation]:
+        return
+    joint = data.joint_index[articulation, lane]
+    row = wp.int32(-1)
+    if joint >= wp.int32(0):
+        row = joint_dynamic_row[joint]
+    mass = wp.float32(0.0)
+    if row >= wp.int32(0):
+        mass = dynamic_mass[row]
+    data.generalized_mass[articulation, lane] = mass
+    data.dynamic_row[articulation, lane] = row
 
 
 @wp.kernel(enable_backward=False)
@@ -343,6 +367,7 @@ def _project_tree_velocities(
     body_count: wp.int32,
     max_depth: wp.int32,
     implicit_drive: wp.bool,
+    include_generalized_mass: wp.bool,
 ):
     """Warp-cooperative tree solve: articulated inertia recursion to ``velocity_out``.
 
@@ -376,8 +401,10 @@ def _project_tree_velocities(
                 joint_motion = data.motion[articulation, lane]
                 drive_diag = wp.float32(0.0)
                 drive_bias = wp.float32(0.0)
+                if include_generalized_mass:
+                    drive_diag = data.generalized_mass[articulation, lane]
                 if implicit_drive:
-                    drive_diag = data.drive_diag[articulation, lane]
+                    drive_diag += data.drive_diag[articulation, lane]
                     drive_bias = data.drive_bias[articulation, lane]
                 u = body_articulated @ joint_motion
                 reciprocal_d = wp.float32(1.0) / (wp.dot(joint_motion, u) + drive_diag)
@@ -455,7 +482,15 @@ def _project_maximal_tree_kernel(implicit_drive: wp.bool, data: MaximalTreeProje
     lane = tid - articulation * wp.int32(_TREE_WIDTH)
     body_count = data.body_count[articulation]
     max_depth = data.max_depth[articulation]
-    _project_tree_velocities(data, articulation, lane, body_count, max_depth, implicit_drive)
+    _project_tree_velocities(
+        data,
+        articulation,
+        lane,
+        body_count,
+        max_depth,
+        implicit_drive,
+        wp.bool(False),
+    )
     _project_tree_reactions(data, articulation, lane, body_count, max_depth)
 
 
@@ -471,6 +506,7 @@ def _factor_maximal_tree_response_kernel(data: MaximalTreeProjectorData):
         data.body_count[articulation],
         data.max_depth[articulation],
         wp.bool(False),
+        wp.bool(True),
     )
 
 
@@ -569,7 +605,15 @@ def _project_maximal_tree_positions_kernel(
         if lane < body_count:
             _gather_position_lane(joint_to_cid, constraints, bodies, data, articulation, lane)
         _sync_tree()
-        _project_tree_velocities(data, articulation, lane, body_count, max_depth, wp.bool(False))
+        _project_tree_velocities(
+            data,
+            articulation,
+            lane,
+            body_count,
+            max_depth,
+            wp.bool(False),
+            wp.bool(False),
+        )
         if lane < body_count:
             _apply_position_lane(bodies, data, articulation, lane)
         _sync_tree()
@@ -854,8 +898,34 @@ class MaximalTreeProjector:
         data.reaction = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.drive_diag = wp.zeros(shape, dtype=wp.float32, device=device)
         data.drive_bias = wp.zeros(shape, dtype=wp.float32, device=device)
+        data.generalized_mass = wp.zeros(shape, dtype=wp.float32, device=device)
+        data.dynamic_row = wp.full(shape, -1, dtype=wp.int32, device=device)
         self.data = data
         self.implicit_drive = _PHOENX_MAXIMAL_IMPLICIT_DRIVE
+        self._joint_dynamic_row = wp.full(int(model.joint_count), -1, dtype=wp.int32, device=device)
+        self._dynamic_mass = wp.zeros(1, dtype=wp.float32, device=device)
+        self.dynamic_accumulated_impulse = wp.zeros(1, dtype=wp.float32, device=device)
+
+    def bind_direct_dynamic_state(
+        self,
+        row_joint: np.ndarray,
+        row_dynamic: np.ndarray,
+        dynamic_mass: wp.array[wp.float32],
+        dynamic_accumulated_impulse: wp.array[wp.float32],
+    ) -> None:
+        """Bind the direct generalized mass and reaction-impulse state."""
+        joint_dynamic_row = np.full(int(self.model.joint_count), -1, dtype=np.int32)
+        projected_joints = {int(joint) for joint in self.data.joint_index.numpy().ravel() if joint >= 0}
+        for row in np.flatnonzero(row_dynamic):
+            joint = int(row_joint[row])
+            if joint not in projected_joints:
+                continue
+            if joint_dynamic_row[joint] >= 0:
+                raise ValueError(f"projected revolute joint {joint} has multiple dynamic rows")
+            joint_dynamic_row[joint] = int(row)
+        self._joint_dynamic_row = wp.array(joint_dynamic_row, dtype=wp.int32, device=self.model.device)
+        self._dynamic_mass = dynamic_mass
+        self.dynamic_accumulated_impulse = dynamic_accumulated_impulse
 
     def factor_contact_response(self) -> None:
         """Factor the current tree mobility without changing body velocities."""
@@ -864,6 +934,17 @@ class MaximalTreeProjector:
             dim=self.launch_dim,
             block_dim=self.block_dim,
             inputs=[True, False, 0.0, self.joint_to_cid, self.constraints, self.bodies, self.data],
+            device=self.model.device,
+        )
+        wp.launch(
+            _gather_maximal_tree_generalized_mass_kernel,
+            dim=self.launch_dim,
+            block_dim=self.block_dim,
+            inputs=[
+                self._joint_dynamic_row,
+                self._dynamic_mass,
+                self.data,
+            ],
             device=self.model.device,
         )
         wp.launch(
