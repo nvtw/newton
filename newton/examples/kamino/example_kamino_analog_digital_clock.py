@@ -37,6 +37,77 @@ if source_root is not None and Path(newton.__file__).resolve().parents[1] != sou
     )
 
 
+@wp.kernel
+def _compact_contacts_per_pair(
+    max_contacts_per_pair: int,
+    count_in: wp.array[int],
+    shape0_in: wp.array[int],
+    shape1_in: wp.array[int],
+    point_id_in: wp.array[int],
+    point0_in: wp.array[wp.vec3],
+    point1_in: wp.array[wp.vec3],
+    offset0_in: wp.array[wp.vec3],
+    offset1_in: wp.array[wp.vec3],
+    normal_in: wp.array[wp.vec3],
+    margin0_in: wp.array[float],
+    margin1_in: wp.array[float],
+    tids_in: wp.array[int],
+    count_out: wp.array[int],
+    shape0_out: wp.array[int],
+    shape1_out: wp.array[int],
+    point_id_out: wp.array[int],
+    point0_out: wp.array[wp.vec3],
+    point1_out: wp.array[wp.vec3],
+    offset0_out: wp.array[wp.vec3],
+    offset1_out: wp.array[wp.vec3],
+    normal_out: wp.array[wp.vec3],
+    margin0_out: wp.array[float],
+    margin1_out: wp.array[float],
+    tids_out: wp.array[int],
+):
+    contact = wp.tid()
+    active_count = count_in[0]
+    if contact >= active_count:
+        return
+
+    shape_a = wp.min(shape0_in[contact], shape1_in[contact])
+    shape_b = wp.max(shape0_in[contact], shape1_in[contact])
+    pair_rank = int(0)
+    for previous in range(contact):
+        previous_a = wp.min(shape0_in[previous], shape1_in[previous])
+        previous_b = wp.max(shape0_in[previous], shape1_in[previous])
+        if previous_a == shape_a and previous_b == shape_b:
+            pair_rank += 1
+    if pair_rank >= max_contacts_per_pair:
+        return
+
+    output_contact = int(0)
+    for candidate in range(contact):
+        candidate_a = wp.min(shape0_in[candidate], shape1_in[candidate])
+        candidate_b = wp.max(shape0_in[candidate], shape1_in[candidate])
+        candidate_rank = int(0)
+        for previous in range(candidate):
+            previous_a = wp.min(shape0_in[previous], shape1_in[previous])
+            previous_b = wp.max(shape0_in[previous], shape1_in[previous])
+            if previous_a == candidate_a and previous_b == candidate_b:
+                candidate_rank += 1
+        if candidate_rank < max_contacts_per_pair:
+            output_contact += 1
+
+    shape0_out[output_contact] = shape0_in[contact]
+    shape1_out[output_contact] = shape1_in[contact]
+    point_id_out[output_contact] = point_id_in[contact]
+    point0_out[output_contact] = point0_in[contact]
+    point1_out[output_contact] = point1_in[contact]
+    offset0_out[output_contact] = offset0_in[contact]
+    offset1_out[output_contact] = offset1_in[contact]
+    normal_out[output_contact] = normal_in[contact]
+    margin0_out[output_contact] = margin0_in[contact]
+    margin1_out[output_contact] = margin1_in[contact]
+    tids_out[output_contact] = tids_in[contact]
+    wp.atomic_max(count_out, 0, output_contact + 1)
+
+
 def _rotate_vector(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
     quaternion_vector = quaternion[:3]
     return vector + 2.0 * np.cross(
@@ -56,11 +127,7 @@ def _relative_quaternion(parent: np.ndarray, child: np.ndarray) -> np.ndarray:
 
 
 def _quaternion_multiply(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    vector = (
-        left[3] * right[:3]
-        + right[3] * left[:3]
-        + np.cross(left[:3], right[:3])
-    )
+    vector = left[3] * right[:3] + right[3] * left[:3] + np.cross(left[:3], right[:3])
     scalar = left[3] * right[3] - np.dot(left[:3], right[:3])
     return np.append(vector, scalar)
 
@@ -90,7 +157,8 @@ class Example:
             hide_collision_shapes=False,
             ignore_paths=[r"/World/GroundPlane.*"],
         )
-        builder.add_ground_plane()
+        # Preserve the source plane's transformed height; z=0 intersects the clock's gears.
+        builder.add_ground_plane(height=-0.011488295428744683)
 
         self.model = builder.finalize(skip_validation_joints=True)
         self.model.rigid_contact_max = 2048
@@ -129,7 +197,8 @@ class Example:
             reduce_contacts=True,
             rigid_contact_max=2048,
         )
-        self.contacts = self.collision_pipeline.contacts()
+        self.raw_contacts = self.collision_pipeline.contacts()
+        self.contacts = newton.Contacts(2048, 0, device=self.device)
         self.joint_parent = self.model.joint_parent.numpy()
         self.joint_child = self.model.joint_child.numpy()
         self.joint_X_p = self.model.joint_X_p.numpy()
@@ -140,12 +209,18 @@ class Example:
         self.imported_joint_count = len(import_result["path_joint_map"])
         self.frame_body = import_result["path_body_map"]["/World/Clock/Frame"]
         self.motor_body = import_result["path_body_map"]["/World/Clock/MotorGear"]
+        self.middle_body = import_result["path_body_map"]["/World/Clock/MiddleGear"]
         self.motor_shape = import_result["path_shape_map"]["/World/Clock/MotorGear/mesh"]
         self.middle_shape = import_result["path_shape_map"]["/World/Clock/MiddleGear/mesh"]
+        self.main_shape = import_result["path_shape_map"]["/World/Clock/Cams/MainGear/mesh"]
         initial_body_q = self.state_0.body_q.numpy()
         self.initial_motor_q = _relative_quaternion(
             initial_body_q[self.frame_body, 3:7],
             initial_body_q[self.motor_body, 3:7],
+        )
+        self.initial_middle_q = _relative_quaternion(
+            initial_body_q[self.frame_body, 3:7],
+            initial_body_q[self.middle_body, 3:7],
         )
 
         self.viewer.set_model(self.model)
@@ -166,10 +241,47 @@ class Example:
                 camera.look_at(wp.vec3(0.03, 0.06, 0.42))
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
+        for substep in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+            # SDF contacts remain accurate for two short DVI steps and are expensive to rebuild.
+            if substep % 2 == 0:
+                self.collision_pipeline.collide(self.state_0, self.raw_contacts)
+                self.contacts.clear()
+                wp.launch(
+                    _compact_contacts_per_pair,
+                    dim=self.raw_contacts.rigid_contact_max,
+                    inputs=[
+                        4,
+                        self.raw_contacts.rigid_contact_count,
+                        self.raw_contacts.rigid_contact_shape0,
+                        self.raw_contacts.rigid_contact_shape1,
+                        self.raw_contacts.rigid_contact_point_id,
+                        self.raw_contacts.rigid_contact_point0,
+                        self.raw_contacts.rigid_contact_point1,
+                        self.raw_contacts.rigid_contact_offset0,
+                        self.raw_contacts.rigid_contact_offset1,
+                        self.raw_contacts.rigid_contact_normal,
+                        self.raw_contacts.rigid_contact_margin0,
+                        self.raw_contacts.rigid_contact_margin1,
+                        self.raw_contacts.rigid_contact_tids,
+                    ],
+                    outputs=[
+                        self.contacts.rigid_contact_count,
+                        self.contacts.rigid_contact_shape0,
+                        self.contacts.rigid_contact_shape1,
+                        self.contacts.rigid_contact_point_id,
+                        self.contacts.rigid_contact_point0,
+                        self.contacts.rigid_contact_point1,
+                        self.contacts.rigid_contact_offset0,
+                        self.contacts.rigid_contact_offset1,
+                        self.contacts.rigid_contact_normal,
+                        self.contacts.rigid_contact_margin0,
+                        self.contacts.rigid_contact_margin1,
+                        self.contacts.rigid_contact_tids,
+                    ],
+                    device=self.device,
+                )
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
@@ -200,6 +312,9 @@ class Example:
         motor_q = _relative_quaternion(body_q[self.frame_body, 3:7], body_q[self.motor_body, 3:7])
         motor_rotation = 2.0 * np.arccos(np.clip(abs(np.dot(self.initial_motor_q, motor_q)), 0.0, 1.0))
         assert motor_rotation > 1.0e-4, "Clock motor did not rotate"
+        middle_q = _relative_quaternion(body_q[self.frame_body, 3:7], body_q[self.middle_body, 3:7])
+        middle_rotation = 2.0 * np.arccos(np.clip(abs(np.dot(self.initial_middle_q, middle_q)), 0.0, 1.0))
+        assert middle_rotation > 0.1, "Middle gear did not rotate"
         contact_count = int(self.contacts.rigid_contact_count.numpy()[0])
         shape0 = self.contacts.rigid_contact_shape0.numpy()[:contact_count]
         shape1 = self.contacts.rigid_contact_shape1.numpy()[:contact_count]
@@ -208,15 +323,22 @@ class Example:
             | ((shape0 == self.middle_shape) & (shape1 == self.motor_shape))
         )
         assert has_motor_contact, "Motor gear did not contact the middle gear"
+        has_main_contact = np.any(
+            ((shape0 == self.middle_shape) & (shape1 == self.main_shape))
+            | ((shape0 == self.main_shape) & (shape1 == self.middle_shape))
+        )
+        assert has_main_contact, "Middle gear did not contact the main gear"
         max_joint_gap = 0.0
         max_axis_error = 0.0
-        for joint, (parent, child, parent_xform, child_xform) in enumerate(zip(
-            self.joint_parent,
-            self.joint_child,
-            self.joint_X_p,
-            self.joint_X_c,
-            strict=True,
-        )):
+        for joint, (parent, child, parent_xform, child_xform) in enumerate(
+            zip(
+                self.joint_parent,
+                self.joint_child,
+                self.joint_X_p,
+                self.joint_X_c,
+                strict=True,
+            )
+        ):
             parent_anchor = _transform_point(body_q, parent, parent_xform[:3])
             child_anchor = _transform_point(body_q, child, child_xform[:3])
             max_joint_gap = max(max_joint_gap, float(np.linalg.norm(parent_anchor - child_anchor)))

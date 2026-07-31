@@ -8,17 +8,24 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from pxr import Sdf, Usd
+GEAR_COLLIDER_PATHS = {
+    "/World/Clock/MotorGear/mesh",
+    "/World/Clock/MiddleGear/mesh",
+    "/World/Clock/Cams/MainGear/mesh",
+}
 
 
-def convert(source: Path, output: Path, max_sdf_resolution: int) -> None:
+def convert(source: Path, output: Path, max_sdf_resolution: int, gear_sdf_resolution: int) -> None:
     """Strip PhysX caches and author Newton SDF collision settings.
 
     Args:
         source: Source clock USD path.
         output: Destination path for the converted USD.
         max_sdf_resolution: Maximum generated SDF resolution.
+        gear_sdf_resolution: SDF resolution used by the three meshing gears.
     """
+    from pxr import Sdf, Usd
+
     if source.resolve() == output.resolve():
         raise ValueError("Source and output paths must differ")
     source_stage = Usd.Stage.Open(str(source))
@@ -57,7 +64,8 @@ def convert(source: Path, output: Path, max_sdf_resolution: int) -> None:
         resolution_attr = prim.GetAttribute("physxSDFMeshCollision:sdfResolution")
         resolution = resolution_attr.Get() if resolution_attr else 64
         # Newton SDF textures are tiled in 8x8x8 blocks.
-        resolution = min(max_sdf_resolution, max(8, round(int(resolution) / 8) * 8))
+        resolution_limit = gear_sdf_resolution if str(prim.GetPath()) in GEAR_COLLIDER_PATHS else max_sdf_resolution
+        resolution = min(resolution_limit, max(8, round(int(resolution) / 8) * 8))
         prim.AddAppliedSchema("NewtonSDFCollisionAPI")
         prim.CreateAttribute("newton:sdfMaxResolution", Sdf.ValueTypeNames.Int, custom=True).Set(resolution)
         approximation.Set("none")
@@ -88,10 +96,20 @@ def main() -> None:
         default=128,
         help="Maximum Newton SDF resolution; must be divisible by 8 (default: 128).",
     )
+    parser.add_argument(
+        "--gear-sdf-resolution",
+        type=int,
+        default=256,
+        help="Newton SDF resolution for the three meshing gears (default: 256).",
+    )
     args = parser.parse_args()
-    if args.max_sdf_resolution <= 0 or args.max_sdf_resolution % 8:
-        parser.error("--max-sdf-resolution must be positive and divisible by 8")
-    convert(args.source, args.output, args.max_sdf_resolution)
+    for name, resolution in (
+        ("--max-sdf-resolution", args.max_sdf_resolution),
+        ("--gear-sdf-resolution", args.gear_sdf_resolution),
+    ):
+        if resolution <= 0 or resolution % 8:
+            parser.error(f"{name} must be positive and divisible by 8")
+    convert(args.source, args.output, args.max_sdf_resolution, args.gear_sdf_resolution)
 
 
 if __name__ == "__main__":
