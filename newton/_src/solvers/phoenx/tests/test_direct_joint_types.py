@@ -243,9 +243,9 @@ class TestDirectJointTypes(unittest.TestCase):
             row_bodies,
             device=wp.get_preferred_device(),
         )
-        np.testing.assert_array_equal(panel.small_mechanism.numpy(), [0, 1])
         np.testing.assert_array_equal(panel.large_mechanism.numpy(), [2, 3])
-        np.testing.assert_array_equal(panel.partial_large_mechanism.numpy(), [2, 3])
+        np.testing.assert_array_equal(panel.cooperative_mechanism.numpy(), [0, 1])
+        self.assertTrue(panel._use_push_solve)
         self.assertEqual(panel.narrow_mechanism.size, 0)
 
         rng = np.random.default_rng(1234)
@@ -287,26 +287,26 @@ class TestDirectJointTypes(unittest.TestCase):
             self.assertLess(relative_residual, 5.0e-3)
 
     def test_wide_partial_panels_match_dense_residual(self) -> None:
-        """Match a dense residual with 32-row partial panels."""
-        dimension = 100
+        """Match a sparse residual with a partial cooperative panel."""
+        dimension = 40
         starts = np.asarray((0, dimension), dtype=np.int32)
         permutation = np.arange(dimension, dtype=np.int32)
-        row_bodies = tuple(frozenset((0,)) for _ in range(dimension))
+        row_bodies = tuple(frozenset((row, row + 1)) for row in range(dimension))
         panel = FixedPatternPanelLLT(
             (dimension,),
             starts,
             permutation,
             row_bodies,
-            block_size=32,
             device=wp.get_preferred_device(),
         )
-        self.assertEqual(panel.block_size, 32)
-        self.assertEqual(panel.partial_large_mechanism.size, 1)
+        self.assertEqual(panel.block_size, 16)
+        np.testing.assert_array_equal(panel.cooperative_mechanism.numpy(), [0])
+        self.assertFalse(panel._use_push_solve)
 
         rng = np.random.default_rng(5678)
-        basis, _ = np.linalg.qr(rng.normal(size=(dimension, dimension)))
-        eigenvalues = np.geomspace(1.0, 1.0e4, dimension)
-        matrix = basis @ np.diag(eigenvalues) @ basis.T
+        matrix = np.eye(dimension, dtype=np.float64) * 2.0
+        matrix[np.arange(dimension - 1), np.arange(1, dimension)] = 0.1
+        matrix[np.arange(1, dimension), np.arange(dimension - 1)] = 0.1
         rhs_np = rng.normal(size=dimension).astype(np.float32)
 
         storage = np.zeros(panel.matrix.size, dtype=np.float32)
