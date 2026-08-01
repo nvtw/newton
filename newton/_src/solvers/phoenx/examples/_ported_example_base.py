@@ -152,6 +152,7 @@ class PortedExample:
       :attr:`mass_splitting`, :attr:`max_colored_partitions` as needed.
     """
 
+    overlap_simulation_render: bool = True
     fps: int = 60
     sim_substeps: int = 4
     solver_iterations: int = 8
@@ -162,10 +163,8 @@ class PortedExample:
     shape_pairs_max: int | None = None
     default_friction: float = 0.5
     default_restitution: float = 0.0
-    #: Whether to draw contact arrows. Set ``False`` on big scenes:
-    #: ``viewer.log_contacts`` reads ``rigid_contact_count`` via
-    #: ``.numpy()`` every frame, forcing a host sync that defeats the
-    #: ViewerGL CUDA-OpenGL interop path.
+    #: Whether contact arrows may be drawn. Showing them synchronizes a
+    #: deferred step because the solver-owned contact buffers are not snapshotted.
     show_contacts: bool = True
     #: Start the viewer in paused mode so the user can inspect the
     #: initial scene (toggle with SPACE in :class:`ViewerGL`).
@@ -296,6 +295,10 @@ class PortedExample:
         self.contacts = self.collision_pipeline.contacts()
 
         self.state = self.model.state()
+        self._render_states = (self.model.state(), self.model.state())
+        self._render_state_index = 0
+        self._render_state_prepared = False
+        self._render_time = self.sim_time
         if self.evaluate_fk:
             newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
             self.model.body_q.assign(self.state.body_q)
@@ -399,18 +402,31 @@ class PortedExample:
         label = self.step_report_label or self.__class__.__name__
         print(f"[PhoenX {label}] " + " ".join(fields))
 
+    def prepare_render_state(self) -> None:
+        """Snapshot positions before the next asynchronous physics step."""
+        self._render_state_index = 1 - self._render_state_index
+        render_state = self._render_states[self._render_state_index]
+        for name in ("body_q", "particle_q"):
+            destination = getattr(render_state, name)
+            source = getattr(self.state, name)
+            if destination is not None:
+                wp.copy(destination, source)
+        self._render_time = self.sim_time
+        self._render_state_prepared = True
+
     def render(self) -> None:
-        # ``log_state`` uses ViewerGL's CUDA-OpenGL interop path: the
-        # body-state CUDA buffer is mapped directly into the
-        # instance-transform VBO with no D2H copy. ``log_contacts`` would
-        # break that path on every frame because it reads
-        # ``rigid_contact_count`` via ``.numpy()`` to size the arrow
-        # batch -- skip it for scenes with ``show_contacts = False``.
-        self.viewer.begin_frame(self.sim_time)
-        self.viewer.log_state(self.state)
+        render_state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state
+        render_time = self._render_time if self._render_state_prepared else self.sim_time
+        self.viewer.begin_frame(render_time)
+        self.viewer.log_state(render_state)
         if self.show_contacts:
-            self.viewer.log_contacts(self.contacts, self.state)
+            if getattr(self.viewer, "show_contacts", False):
+                # Contacts remain solver-owned; only the optional debug view
+                # needs to drain the deferred step before reading them.
+                self.viewer.synchronize_simulation_step()
+            self.viewer.log_contacts(self.contacts, render_state)
         self.viewer.end_frame()
+        self._render_state_prepared = False
 
     def test_final(self) -> None:
         """Generic smoke validation for ported demos."""

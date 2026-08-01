@@ -445,8 +445,12 @@ class Picking:
 
     def release(self) -> None:
         """Drop the current pick. Safe to call when not picking."""
+        # Picking callbacks may run while an asynchronous simulation stream is
+        # consuming these buffers. Serialize only while the user interacts.
+        wp.synchronize_device(self.device)
         self._pick_body.fill_(-1)
         self._pick_tri.fill_(-1)
+        wp.synchronize_device(self.device)
         self._is_picking = False
 
     def pick(self, ray_start, ray_dir) -> None:
@@ -460,6 +464,7 @@ class Picking:
         mutually exclusive: at most one is non-``-1`` after a single
         :meth:`pick` call.
         """
+        wp.synchronize_device(self.device)
         self._scratch_dist.fill_(1.0e30)
         self._scratch_body.fill_(-1)
         self._scratch_local.zero_()
@@ -536,12 +541,14 @@ class Picking:
         self._pick_dist.assign([dist])
         # Seed target at current mouse-ray depth so the first drag doesn't yank.
         self._pick_target.assign([target_seed])
+        wp.synchronize_device(self.device)
         self._is_picking = True
 
     def update(self, ray_start, ray_dir) -> None:
-        """Re-project the mouse ray to the latched depth (no sync)."""
+        """Re-project the mouse ray to the latched depth."""
         if not self._is_picking:
             return
+        wp.synchronize_device(self.device)
         rs = wp.vec3f(float(ray_start[0]), float(ray_start[1]), float(ray_start[2]))
         rd = wp.vec3f(float(ray_dir[0]), float(ray_dir[1]), float(ray_dir[2]))
         wp.launch(
@@ -550,6 +557,7 @@ class Picking:
             inputs=[rs, rd, self._pick_dist, self._pick_target],
             device=self.device,
         )
+        wp.synchronize_device(self.device)
 
     def apply_force(self, inv_mass_floor: float = 1.0, dt: float = 1.0 / 60.0) -> None:
         """Add the picking force/impulse to the picked target.
@@ -604,13 +612,36 @@ class Picking:
             )
 
 
+class _OptixPickingAdapter:
+    """Adapt PhoenX picking to the state-aware OptiX callback interface."""
+
+    def __init__(self, picking: Picking):
+        self._picking = picking
+
+    def is_picking(self) -> bool:
+        return self._picking.is_picking()
+
+    def pick(self, state, ray_start, ray_dir) -> None:
+        del state
+        self._picking.pick(ray_start, ray_dir)
+
+    def update(self, ray_start, ray_dir) -> None:
+        self._picking.update(ray_start, ray_dir)
+
+    def release(self) -> None:
+        self._picking.release()
+
+
 def register_with_viewer_gl(viewer, picking: Picking) -> None:
     """Hook ``picking`` into a :class:`ViewerGL`'s mouse callbacks.
-    Right-click picks, right-drag updates, release drops. No-op for non-GL viewers."""
+    Right-click picks, right-drag updates, release drops. OptiX viewers use
+    their state-aware picking callback interface."""
     renderer = getattr(viewer, "renderer", None)
     register_press = getattr(renderer, "register_mouse_press", None) if renderer else None
     if register_press is None:
-        return  # Not a GL viewer, nothing to wire.
+        if hasattr(viewer, "_presenter") and hasattr(viewer, "picking_enabled"):
+            viewer._picking = _OptixPickingAdapter(picking)
+        return
 
     try:
         import pyglet

@@ -8,7 +8,7 @@ import math
 import os
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
@@ -106,6 +106,10 @@ class ViewerBase(ABC):
         """Initialize shared viewer state and rendering caches."""
         self.time = 0.0
         self.device = wp.get_device()
+        self._deferred_simulation_stream: wp.Stream | None = None
+        self._deferred_simulation_raw_stream: Any | None = None
+        self._deferred_simulation_cuda_runtime: Any | None = None
+        self._deferred_simulation_in_flight = False
         self.picking_enabled = True
         self._camera_speed = 4.0
 
@@ -1892,6 +1896,92 @@ class ViewerBase(ABC):
             state: The current state of the simulation.
         """
         pass
+
+    @property
+    def supports_simulation_render_overlap(self) -> bool:
+        """Whether this viewer can overlap a CUDA step with rendering."""
+        return False
+
+    def _supports_cuda_simulation_render_overlap(self) -> bool:
+        """Return whether nonblocking CUDA streams are available."""
+        if not self.device.is_cuda:
+            return False
+        try:
+            from cuda.bindings import runtime as cuda_runtime  # noqa: PLC0415
+        except ImportError:
+            return False
+        return hasattr(cuda_runtime, "cudaStreamCreateWithFlags")
+
+    def synchronize_simulation_step(self) -> None:
+        """Wait for a previously deferred simulation step to complete."""
+        if self._deferred_simulation_in_flight:
+            error = self._deferred_simulation_cuda_runtime.cudaStreamSynchronize(self._deferred_simulation_raw_stream)[
+                0
+            ]
+            if int(error) != 0:
+                raise RuntimeError(f"Failed to synchronize the deferred simulation stream: {error}")
+            self._deferred_simulation_in_flight = False
+
+    def _destroy_simulation_stream(self) -> None:
+        """Drain and release the nonblocking simulation stream."""
+        self.synchronize_simulation_step()
+        stream = self._deferred_simulation_stream
+        if stream is None:
+            return
+        stream.device.runtime.core.wp_cuda_stream_unregister(stream.device.context, stream.cuda_stream)
+        stream.cuda_stream = None
+        self._deferred_simulation_stream = None
+        error = self._deferred_simulation_cuda_runtime.cudaStreamDestroy(self._deferred_simulation_raw_stream)[0]
+        self._deferred_simulation_raw_stream = None
+        self._deferred_simulation_cuda_runtime = None
+        if int(error) != 0:
+            raise RuntimeError(f"Failed to destroy the nonblocking CUDA stream: {error}")
+
+    def launch_simulation_step(
+        self,
+        callback: Callable[[], None],
+        *,
+        prepare_render_state: Callable[[], None] | None = None,
+    ) -> None:
+        """Launch a simulation step concurrently with subsequent rendering.
+
+        When supplied, the render snapshot is copied first on the simulation
+        stream. Rendering waits only for that copy; the simulation step then
+        continues on the same stream without waiting for rendering.
+
+        Args:
+            callback: Simulation step to enqueue on a nonblocking CUDA stream.
+            prepare_render_state: Optional render-state snapshot callback.
+        """
+        if not self.supports_simulation_render_overlap:
+            raise RuntimeError(f"Simulation/render overlap is unavailable for {type(self).__name__}.")
+        if self._deferred_simulation_in_flight:
+            raise RuntimeError("The previous deferred simulation step must be synchronized first.")
+        if self._deferred_simulation_stream is None:
+            from cuda.bindings import runtime as cuda_runtime  # noqa: PLC0415
+
+            error, raw_stream = cuda_runtime.cudaStreamCreateWithFlags(cuda_runtime.cudaStreamNonBlocking)
+            if int(error) != 0:
+                raise RuntimeError(f"Failed to create a nonblocking CUDA stream: {error}")
+            self._deferred_simulation_raw_stream = raw_stream
+            self._deferred_simulation_cuda_runtime = cuda_runtime
+            self._deferred_simulation_stream = wp.Stream(self.device, cuda_stream=int(raw_stream))
+
+        render_stream = wp.get_stream(self.device)
+        simulation_stream = self._deferred_simulation_stream
+        if prepare_render_state is not None:
+            with wp.ScopedStream(simulation_stream, sync_enter=False, sync_exit=False):
+                prepare_render_state()
+            wp.wait_stream(simulation_stream)
+        else:
+            # Preserve the original API for callers that snapshot on the
+            # render stream before launching the deferred step.
+            with wp.ScopedStream(simulation_stream, sync_enter=False, sync_exit=False):
+                wp.wait_stream(render_stream)
+
+        with wp.ScopedStream(simulation_stream, sync_enter=False, sync_exit=False):
+            callback()
+        self._deferred_simulation_in_flight = True
 
     @abstractmethod
     def close(self):

@@ -572,8 +572,7 @@ def run(example, args):
         if viewer.should_step():
             with wp.ScopedTimer("step", active=False):
                 if overlap_simulation_render:
-                    prepare_render_state()
-                    viewer.launch_simulation_step(example.step)
+                    viewer.launch_simulation_step(example.step, prepare_render_state=prepare_render_state)
                 else:
                     example.step()
         if test_post_step:
@@ -682,6 +681,30 @@ def create_parser():
         type=_positive_float,
         default=None,
         help="Maximum render rate in frames per second. Does not change simulation frame timing.",
+    )
+    parser.add_argument(
+        "--optix-dlss-quality",
+        choices=("performance", "balanced", "quality", "ultra_performance", "native"),
+        default="quality",
+        help="DLSS input-resolution/quality mode used by the OptiX viewer.",
+    )
+    parser.add_argument(
+        "--optix-max-bounces",
+        type=int,
+        default=4,
+        help="Maximum path depth used by the OptiX viewer.",
+    )
+    parser.add_argument(
+        "--optix-direct-light-samples",
+        type=int,
+        default=1,
+        help="Direct-light samples per surface hit in the OptiX viewer.",
+    )
+    parser.add_argument(
+        "--optix-samples-per-frame",
+        type=int,
+        default=1,
+        help="Path-traced samples per frame when OptiX DLSS is disabled.",
     )
     parser.add_argument(
         "--headless",
@@ -934,6 +957,10 @@ def init(parser=None):
             headless=args.headless,
             paused=args.paused,
             num_frames=args.num_frames if args.headless else None,
+            dlss_quality=args.optix_dlss_quality,
+            max_bounces=args.optix_max_bounces,
+            direct_light_samples=args.optix_direct_light_samples,
+            samples_per_frame=args.optix_samples_per_frame,
         )
     elif args.viewer == "usd":
         if args.output_path is None:

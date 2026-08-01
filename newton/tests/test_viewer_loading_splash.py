@@ -147,8 +147,9 @@ class TestLoadingSplashLifecycle(unittest.TestCase):
             def synchronize_simulation_step(self):
                 calls.append("synchronize")
 
-            def launch_simulation_step(self, callback):
+            def launch_simulation_step(self, callback, *, prepare_render_state=None):
                 calls.append("launch")
+                prepare_render_state()
                 callback()
 
             def close(self):
@@ -164,7 +165,7 @@ class TestLoadingSplashLifecycle(unittest.TestCase):
         )
         newton.examples.run(example, SimpleNamespace(test=False))
 
-        self.assertEqual(calls, ["synchronize", "prepare", "launch", "step", "render", "synchronize"])
+        self.assertEqual(calls, ["synchronize", "launch", "prepare", "step", "render", "synchronize"])
 
 
 if __name__ == "__main__":

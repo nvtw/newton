@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 import unittest
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.viewer import ViewerBase, ViewerOptix
+from newton.viewer import ViewerBase, ViewerGL, ViewerOptix
 
 try:
     import warp_optix
@@ -82,8 +83,23 @@ class TestViewerOptix(unittest.TestCase):
     def test_public_viewer_and_example_option(self):
         """Expose ViewerOptix through the public API and example parser."""
         self.assertTrue(issubclass(ViewerOptix, ViewerBase))
-        viewer_action = next(action for action in newton.examples.create_parser()._actions if action.dest == "viewer")
+        parser = newton.examples.create_parser()
+        viewer_action = next(action for action in parser._actions if action.dest == "viewer")
         self.assertIn("optix", viewer_action.choices)
+        gl_parameters = inspect.signature(ViewerGL).parameters
+        args = parser.parse_args([])
+        self.assertEqual(args.optix_dlss_quality, "quality")
+        self.assertEqual(args.optix_max_bounces, 4)
+        self.assertEqual(args.optix_direct_light_samples, 1)
+        self.assertEqual(args.optix_samples_per_frame, 1)
+        optix_parameters = inspect.signature(ViewerOptix).parameters
+        self.assertEqual(optix_parameters["width"].default, gl_parameters["width"].default)
+        self.assertEqual(optix_parameters["height"].default, gl_parameters["height"].default)
+        self.assertEqual(optix_parameters["max_instances"].default, 16384)
+        self.assertEqual(optix_parameters["dlss_quality"].default, "quality")
+        self.assertEqual(optix_parameters["max_bounces"].default, 4)
+        self.assertEqual(optix_parameters["direct_light_samples"].default, 1)
+        self.assertEqual(optix_parameters["samples_per_frame"].default, 1)
 
     @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
     def test_default_color_palette(self):
@@ -119,16 +135,21 @@ class TestViewerOptix(unittest.TestCase):
         try:
             self.assertAlmostEqual(viewer.time_of_day, 12.0)
             self.assertAlmostEqual(viewer.sky_intensity, 1.0)
+            self.assertFalse(viewer.grayscale_sky)
             self.assertIsNotNone(api.sky_parameters)
             self.assertEqual(api.temporal_reset_count, 0)
             np.testing.assert_allclose(api.sky_parameters["ground_color"], (0.4, 0.4, 0.4), atol=1.0e-5)
             self.assertAlmostEqual(api.sky_parameters["sun_glow_intensity"], 1.0)
+            self.assertFalse(api.sky_parameters["grayscale"])
 
-            viewer.sky_intensity = 1.5
+            viewer.grayscale_sky = True
             self.assertEqual(api.temporal_reset_count, 1)
+            self.assertTrue(api.sky_parameters["grayscale"])
+            viewer.sky_intensity = 1.5
+            self.assertEqual(api.temporal_reset_count, 2)
             self.assertAlmostEqual(api.sky_parameters["multiplier"], 1.5)
             viewer.time_of_day = 18.0
-            self.assertEqual(api.temporal_reset_count, 2)
+            self.assertEqual(api.temporal_reset_count, 3)
             np.testing.assert_allclose(api.sky_parameters["sun_direction"], (1.0, 0.0, 0.0), atol=1.0e-6)
             with self.assertRaises(ValueError):
                 viewer.time_of_day = 25.0

@@ -63,6 +63,28 @@ else:
     _WARP_OPTIX_IMPORT_ERROR = None
 
 
+@wp.kernel
+def _apply_optix_color_palette(
+    colors: wp.array[wp.vec3],
+    indices: wp.array[wp.int32],
+    defaults: wp.array[wp.vec3],
+    eligible: wp.array[wp.int32],
+    palette: wp.array[wp.vec3],
+    output: wp.array[wp.vec3],
+):
+    index = wp.tid()
+    color = colors[index]
+    default = defaults[index]
+    if (
+        eligible[index] != 0
+        and wp.abs(color[0] - default[0]) <= 1.0e-6
+        and wp.abs(color[1] - default[1]) <= 1.0e-6
+        and wp.abs(color[2] - default[2]) <= 1.0e-6
+    ):
+        color = palette[indices[index] % len(palette)]
+    output[index] = color
+
+
 class _OptixOverlayRenderer:
     """Rendering controls consumed by the shared Newton GUI."""
 
@@ -103,16 +125,20 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
 
     def __init__(
         self,
-        width: int = 1280,
-        height: int = 720,
+        width: int = 1920,
+        height: int = 1080,
         vsync: bool = False,
         headless: bool = False,
         paused: bool = False,
         fps: int = 0,
         num_frames: int | None = None,
         enable_dlss_rr: bool = True,
+        dlss_quality: str = "quality",
+        samples_per_frame: int = 1,
+        max_bounces: int = 4,
+        direct_light_samples: int = 1,
         enable_imgui: bool = True,
-        max_instances: int = 10000,
+        max_instances: int = 16384,
         ground_color: tuple[float, float, float] = (0.7, 0.7, 0.7),
         ground_roughness: float = 0.8,
         default_roughness: float = 0.42,
@@ -123,6 +149,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         default_color_palette: Sequence[Sequence[float]] | None = None,
         time_of_day: float = 12.0,
         sky_intensity: float = 1.0,
+        grayscale_sky: bool = False,
         exposure: float = 0.68,
         contrast: float = 1.08,
         saturation: float = 1.1,
@@ -141,6 +168,14 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             num_frames: Maximum number of rendered frames, or ``None`` to run
                 until the window closes.
             enable_dlss_rr: Enable DLSS Ray Reconstruction when available.
+            dlss_quality: DLSS input-resolution/quality mode. Supported values
+                are ``"performance"``, ``"balanced"``, ``"quality"``,
+                ``"ultra_performance"``, and ``"native"``.
+            samples_per_frame: Path-traced samples per frame when DLSS is disabled.
+                DLSS Ray Reconstruction always consumes one sample per frame.
+            max_bounces: Maximum number of path bounces. Lower values render faster
+                but lose some indirect illumination and reflection depth.
+            direct_light_samples: Direct-light samples evaluated at each surface hit.
             enable_imgui: Enable the interactive ImGui overlay.
             max_instances: Maximum number of OptiX scene instances.
             ground_color: Display-sRGB color used for plane geometry.
@@ -158,6 +193,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
                 saturated OptiX palette.
             time_of_day: Procedural-sky time in hours, in the range [0, 24].
             sky_intensity: Procedural-sky illumination multiplier.
+            grayscale_sky: Render the physical sky in grayscale while
+                preserving its maximum RGB component as brightness.
             exposure: Linear display exposure multiplier.
             contrast: Display contrast multiplier.
             saturation: Display saturation multiplier.
@@ -193,12 +230,15 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._optix_default_material_meshes: set[str] = set()
         self._optix_model_shape_batches: dict[str, ViewerBase.ShapeInstances] = {}
         self._optix_palette_metadata: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._optix_palette_device_metadata: dict[str, tuple[wp.array, wp.array, wp.array]] = {}
         self._optix_palette_color_arrays: dict[str, wp.array[wp.vec3]] = {}
+        self._optix_palette_array: wp.array[wp.vec3] | None = None
         self._default_color_palette = self._validate_color_palette(
             self._DEFAULT_COLOR_PALETTE if default_color_palette is None else default_color_palette
         )
         self._time_of_day = self._validate_time_of_day(time_of_day)
         self._sky_intensity = self._validate_sky_intensity(sky_intensity)
+        self._grayscale_sky = bool(grayscale_sky)
         self.lines = {}
         self._material_arrays: dict[tuple[int, float], wp.array[wp.vec4]] = {}
         self.arrows = {}
@@ -219,6 +259,10 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             render_when_paused=True,
             num_frames=num_frames,
             enable_dlss_rr=enable_dlss_rr,
+            dlss_quality=dlss_quality,
+            samples_per_frame=samples_per_frame,
+            max_bounces=max_bounces,
+            direct_light_samples=direct_light_samples,
             enable_imgui=False,
             vsync=vsync,
             max_instances=max_instances,
@@ -308,7 +352,12 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             return 1.0
         return self.renderer.joint_scale
 
+    @property
     @override
+    def supports_simulation_render_overlap(self) -> bool:
+        """Whether this viewer can overlap a CUDA step with OptiX rendering."""
+        return self._supports_cuda_simulation_render_overlap()
+
     def should_step(self) -> bool:
         """Return whether the simulation should advance by one step."""
         if not self.is_paused():
@@ -361,6 +410,24 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     def _ui_populate_rendering_panel(self, imgui) -> None:
         """Render OptiX-specific controls inside the shared rendering panel."""
         imgui.text("DLSS RR: active" if self._api.dlss_enabled else "DLSS RR: inactive")
+        quality_modes = list(self._api.viewer.DLSS_QUALITY_MODES)
+        quality_index = quality_modes.index(self.dlss_quality)
+        changed, quality_index = imgui.combo("DLSS Quality", quality_index, quality_modes)
+        if changed:
+            self.dlss_quality = quality_modes[quality_index]
+        changed, max_bounces = imgui.slider_int("Max Bounces", self.max_bounces, 1, self._api.max_compiled_bounces)
+        if changed:
+            self.set_ray_budget(max_bounces=max_bounces)
+        changed, direct_light_samples = imgui.slider_int("Direct Light Samples", self.direct_light_samples, 1, 4)
+        if changed:
+            self.set_ray_budget(direct_light_samples=direct_light_samples)
+        if not self._api.dlss_enabled:
+            changed, samples_per_frame = imgui.slider_int("Samples Per Frame", self.samples_per_frame, 1, 8)
+            if changed:
+                self.set_ray_budget(samples_per_frame=samples_per_frame)
+        changed, grayscale_sky = imgui.checkbox("Grayscale Sky", self.grayscale_sky)
+        if changed:
+            self.grayscale_sky = grayscale_sky
         changed, sky_intensity = imgui.slider_float("Sky Intensity", self.sky_intensity, 0.0, 3.0)
         if changed:
             self.sky_intensity = sky_intensity
@@ -571,7 +638,9 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             self._optix_default_material_meshes.clear()
             self._optix_model_shape_batches.clear()
             self._optix_palette_metadata.clear()
+            self._optix_palette_device_metadata.clear()
             self._optix_palette_color_arrays.clear()
+            self._optix_palette_array = None
             self._ground_color_arrays.clear()
             self._material_arrays.clear()
         if self.gui is not None:
@@ -613,8 +682,15 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         }
         self._optix_model_shape_batches = {shapes.name: shapes for shapes in self._shape_instances.values()}
         self._optix_palette_metadata.clear()
+        self._optix_palette_device_metadata.clear()
         for shapes in self._shape_instances.values():
-            self._optix_palette_metadata[shapes.name] = self._create_palette_metadata(shapes)
+            metadata = self._create_palette_metadata(shapes)
+            self._optix_palette_metadata[shapes.name] = metadata
+            self._optix_palette_device_metadata[shapes.name] = (
+                wp.array(metadata[0], dtype=wp.int32, device=self.device),
+                wp.array(metadata[1], dtype=wp.vec3, device=self.device),
+                wp.array(metadata[2].astype(np.int32), dtype=wp.int32, device=self.device),
+            )
         self._optix_palette_color_arrays.clear()
 
         self._camera_dirty = True
@@ -652,6 +728,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         """
         self._default_color_palette = self._validate_color_palette(palette)
         self._optix_palette_color_arrays.clear()
+        self._optix_palette_array = None
         for shapes in self._shape_instances.values():
             shapes.colors_changed = True
 
@@ -668,6 +745,19 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         if not math.isfinite(value) or value < 0.0:
             raise ValueError("sky_intensity must be finite and non-negative")
         return value
+
+    @property
+    def grayscale_sky(self) -> bool:
+        """Whether the physical sky is rendered without chroma."""
+        return self._grayscale_sky
+
+    @grayscale_sky.setter
+    def grayscale_sky(self, value: bool) -> None:
+        value = bool(value)
+        if value == self._grayscale_sky:
+            return
+        self._grayscale_sky = value
+        self._apply_time_of_day(reset_history=True)
 
     @property
     def sky_intensity(self) -> float:
@@ -734,6 +824,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             sun_disk_scale=1.0 + horizon,
             sun_glow_intensity=daylight * (1.0 + 2.0 * horizon),
             y_is_up=1,
+            grayscale=self._grayscale_sky,
         )
         if reset_history:
             self.reset_temporal_history()
@@ -743,24 +834,31 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         if shapes is None or self.model is None:
             return colors
 
-        metadata = self._optix_palette_metadata.get(name)
-        if metadata is None:
+        device_metadata = self._optix_palette_device_metadata.get(name)
+        if device_metadata is None:
             metadata = self._create_palette_metadata(shapes)
             self._optix_palette_metadata[name] = metadata
-        indices, defaults, eligible = metadata
-        mapped = colors.numpy()
-        use_palette = eligible & np.all(np.abs(mapped - defaults) <= 1.0e-6, axis=1)
-        if not np.any(use_palette):
-            return colors
-        palette = np.asarray(self._default_color_palette, dtype=np.float32)
-        mapped[use_palette] = palette[indices[use_palette] % len(palette)]
+            device_metadata = (
+                wp.array(metadata[0], dtype=wp.int32, device=self.device),
+                wp.array(metadata[1], dtype=wp.vec3, device=self.device),
+                wp.array(metadata[2].astype(np.int32), dtype=wp.int32, device=self.device),
+            )
+            self._optix_palette_device_metadata[name] = device_metadata
+        indices, defaults, eligible = device_metadata
+
+        if self._optix_palette_array is None:
+            self._optix_palette_array = wp.array(self._default_color_palette, dtype=wp.vec3, device=self.device)
 
         palette_colors = self._optix_palette_color_arrays.get(name)
-        if palette_colors is None or len(palette_colors) != len(mapped):
-            palette_colors = wp.array(mapped, dtype=wp.vec3, device=self.device)
+        if palette_colors is None or len(palette_colors) != len(colors):
+            palette_colors = wp.empty(len(colors), dtype=wp.vec3, device=self.device)
             self._optix_palette_color_arrays[name] = palette_colors
-        else:
-            palette_colors.assign(mapped)
+        wp.launch(
+            _apply_optix_color_palette,
+            dim=len(colors),
+            inputs=[colors, indices, defaults, eligible, self._optix_palette_array, palette_colors],
+            device=self.device,
+        )
         return palette_colors
 
     @staticmethod
@@ -998,6 +1096,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     @override
     def close(self) -> None:
         """Release the shared UI and OptiX presentation resources."""
+        self._destroy_simulation_stream()
         ui = self.ui
         if ui is not None:
             ui.shutdown()

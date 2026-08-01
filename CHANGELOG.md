@@ -4,6 +4,8 @@
 
 ### Added
 - Add `ViewerOptix` for interactive OptiX path tracing with DLSS Ray Reconstruction, Newton body picking, ImGui callbacks, depth-tested debug lines and contact arrows, a configurable saturated shape palette, procedural-sky time and intensity controls, a light neutral floor, and headless frame extraction through the separately installed `otk-pyoptix` backend.
+- Add a `ViewerOptix` grayscale-sky control that preserves maximum-channel brightness.
+- Add `ViewerOptix` DLSS quality, path-bounce, direct-light sample, and non-DLSS samples-per-frame controls through its constructor, rendering panel, and common example command line.
 - Add compact, panel-parallel, RCM-reordered direct equality and implicit PD drive solves per connected mechanism to experimental `SolverPhoenX`, including finite motor-effort active sets
 
 
@@ -43,7 +45,7 @@
 - Warn from `SolverMuJoCo` when a `JointType.FREE` joint has a non-world parent; MuJoCo requires free joints to attach directly to the world.
 - Document loop closure in the articulations concept page, covering the omit-from-`add_articulation` pattern and USD `excludeFromArticulation` with per-solver caveats
 - Add `ViewerGL.show_loading_splash()` / `ViewerGL.hide_loading_splash()` displaying a stylized Newton's-cradle overlay while the GL viewer waits on Warp kernel compilation; raised automatically by `newton.examples.init()` for visible GL viewers
-- Add opt-in `ViewerGL` simulation/render overlap to the common example runner. Examples can snapshot render state and launch a CUDA-graph-compatible physics step on a nonblocking stream before OpenGL rendering; the PhoenX Kapla tower example uses double-buffered CUDA body transforms.
+- Add `ViewerGL` and `ViewerOptix` simulation/render overlap to the common example runner. The PhoenX Kapla tower and shared ported examples snapshot body and particle positions before launching a CUDA-graph-compatible physics step on a nonblocking stream.
 - Add `ModelBuilder.mesh_edge_lower_angle_threshold_rad` (default 0.1 degree) to drop near-coplanar internal edges when packing precomputed mesh edges for SDF-mesh contact generation. Boundary and non-manifold edges are always kept; set to `0` to disable filtering
 - Add edge-simplification options to `Mesh.build_sdf()`: `edge_lower_angle_threshold_rad`, `edge_upper_angle_threshold_rad`, opt-in `edge_box_absorption`, plus mutually exclusive absolute (`edge_box_half_height` / `edge_box_half_width`) and relative (`edge_box_half_height_rel` / `edge_box_half_width_rel`) box half-extents. The simplified edge set is cached on the `Mesh` and consumed by `ModelBuilder.finalize()` for SDF-mesh contact generation
 - Add 8-node trilinear-hex soft-body constraints to `SolverPhoenX` (`CONSTRAINT_TYPE_SOFT_HEXAHEDRON`, schema in `newton._src.solvers.phoenx.constraints.constraint_soft_hexahedron`). The default model uses xpbd-fem-style integrated trace strain at eight Gauss points plus a reduced center volume row, projected as a coupled 2x2 XPBD block. `PhoenXWorld.populate_soft_hexahedra_from_arrays()` accepts `strain_model="arap"` to use integrated per-Gauss-point ARAP strain coupled with the same center volume row, avoiding the center-point hourglass pitfall. Exposes per-hex `(k_mu, k_lambda, beta_h, beta_d)` Lame + damping, a `num_soft_hexahedra` parameter on `PhoenXWorld`, and a 6th `StepReport.time_us_total_soft_hexahedra` timing bucket. Includes a minimal pinned-face example (`example_soft_hex_pinned`) and CUDA unit tests covering rest-pose boundedness, ballistic free fall, compression volume recovery, rigid rotation, hourglass correction, elevated-stiffness stability, shared-face two-hex patches, and top-face-pin hang. No collision support yet
@@ -88,6 +90,7 @@
 - Add simulation throughput, real-time factor, p95 step-time, steady-state GPU-memory, timestep, and MuJoCo solver-iteration metrics to the ASV robot-learning benchmarks.
 - Add `joint_dof_mask` to `newton.ik.IKSolver` to keep selected joint DOFs fixed during LM optimization. (#3488)
 ### Changed
+- Default `ViewerOptix` to the same 1920 x 1080 window size as `ViewerGL`, raise its instance capacity to 16,384, and default the PhoenX Kapla tower example to OptiX. Pass `--viewer gl` to retain OpenGL for the example, or construct `ViewerOptix(width=1280, height=720, max_instances=10000)` to retain its previous defaults.
 - Represent revolute and prismatic armature in direct maximal PhoenX as exact gear-reflected generalized inertia without modifying either attached rigid-body inertia.
 
 - Specialize reduced-coordinate PhoenX fused advance and publication by articulation topology width.
@@ -208,6 +211,7 @@
 - Fix matched PhoenX contacts changing the world-space direction of warm-started friction impulses when their tangent frames rotate.
 - Fix `ViewerOptix` physical-sky lighting for Y-up OptiX coordinates and non-unit sun directions.
 - Fix severe `ViewerOptix` slowdown in scenes with thousands of instances by batching transform, visibility, material, TLAS, and motion-vector updates.
+- Fix PhoenX picking registration and asynchronous buffer updates with `ViewerOptix`.
 - Fix full-coordinate PhoenX contacts injecting energy into armature and implicit-PD drives by preserving generalized reaction momentum across contact corrections.
 - Fix the PhoenX Kapla tower example retaining per-substep damping after warmup, which slowed free motion and collapsing bricks.
 - Fix `ViewerOptix` debug-line occlusion when DLSS render resolution differs from the window and account for the OptiX/OpenGL image-origin difference.

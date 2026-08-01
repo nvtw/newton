@@ -270,6 +270,7 @@ class Example:
         self._render_states = (self.model.state(), self.model.state())
         self._render_state_index = 0
         self._render_state_prepared = False
+        self._render_time = self.sim_time
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.model.body_q.assign(self.state.body_q)
 
@@ -566,7 +567,7 @@ class Example:
         """Snapshot live body transforms before the next asynchronous step."""
         self._render_state_index = 1 - self._render_state_index
         wp.copy(self._render_states[self._render_state_index].body_q, self.state.body_q)
-        wp.synchronize_stream(self.device)
+        self._render_time = self.sim_time
         self._render_state_prepared = True
 
     def _dump_coloring_graph(self) -> None:
@@ -611,7 +612,8 @@ class Example:
 
     def render(self) -> None:
         render_state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state
-        self.viewer.begin_frame(self.sim_time)
+        render_time = self._render_time if self._render_state_prepared else self.sim_time
+        self.viewer.begin_frame(render_time)
         self.viewer.log_state(render_state)
         if getattr(self.viewer, "show_contacts", False) and hasattr(self.viewer, "synchronize_simulation_step"):
             # Contact buffers are solver-owned. Debug contact rendering remains
@@ -654,6 +656,7 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
+    parser.set_defaults(viewer="optix")
     parser.add_argument(
         "--solver",
         choices=("classic", "jacobi"),

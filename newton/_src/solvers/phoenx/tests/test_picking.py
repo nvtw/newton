@@ -29,7 +29,7 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_lame_from_youngs_poisson_plane_stress,
 )
 from newton._src.solvers.phoenx.examples.example_common import init_phoenx_bodies_kernel
-from newton._src.solvers.phoenx.picking import Picking
+from newton._src.solvers.phoenx.picking import Picking, register_with_viewer_gl
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
@@ -135,6 +135,49 @@ def _build_scene(device, *, kinematic_occluder: bool = False):
     half_extents = wp.array(half_extents_np, dtype=wp.vec3f, device=device)
     picking = Picking(world, half_extents, model=model, particles=world.particles)
     return model, world, picking, half_extents, cube_body
+
+
+class TestPickingRegistration(unittest.TestCase):
+    def test_register_optix_picking_adapter(self):
+        """Route OptiX state-aware callbacks to PhoenX picking."""
+
+        class FakePicking:
+            def __init__(self):
+                self.calls = []
+
+            def is_picking(self):
+                return True
+
+            def pick(self, ray_start, ray_dir):
+                self.calls.append(("pick", ray_start, ray_dir))
+
+            def update(self, ray_start, ray_dir):
+                self.calls.append(("update", ray_start, ray_dir))
+
+            def release(self):
+                self.calls.append(("release",))
+
+        viewer = type(
+            "FakeOptixViewer",
+            (),
+            {"renderer": None, "_presenter": object(), "_picking": None, "picking_enabled": True},
+        )()
+        picking = FakePicking()
+
+        register_with_viewer_gl(viewer, picking)
+        viewer._picking.pick(object(), "ray-start", "ray-dir")
+        viewer._picking.update("drag-start", "drag-dir")
+        viewer._picking.release()
+
+        self.assertTrue(viewer._picking.is_picking())
+        self.assertEqual(
+            picking.calls,
+            [
+                ("pick", "ray-start", "ray-dir"),
+                ("update", "drag-start", "drag-dir"),
+                ("release",),
+            ],
+        )
 
 
 @unittest.skipUnless(

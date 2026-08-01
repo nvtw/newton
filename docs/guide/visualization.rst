@@ -191,8 +191,10 @@ custom ImGui callbacks, depth-tested debug lines and contact arrows, headless re
 and :meth:`~newton.viewer.ViewerOptix.get_frame`. Plane geometry uses a light neutral
 gray by default. Pass ``ground_color=`` to change it, or ``exposure=``, ``contrast=``,
 and ``saturation=`` to adjust tone mapping without remapping authored material inputs.
-The rendering panel provides procedural-sky time-of-day and intensity controls; they
-are also available through ``time_of_day=`` and ``sky_intensity=``. Automatically
+The rendering panel provides procedural-sky time-of-day and intensity controls, plus a
+``Grayscale Sky`` checkbox that removes sky chroma while retaining the brightest RGB
+component. These controls are also available through ``time_of_day=``,
+``sky_intensity=``, and ``grayscale_sky=``. Automatically
 colored shapes use a saturated rainbow palette without pink. Pass
 ``default_color_palette=`` or call
 :meth:`~newton.viewer.ViewerOptix.set_default_color_palette` before or after scene
@@ -200,6 +202,13 @@ setup to replace it; explicit and authored colors remain unchanged. Un-authored
 primitive materials use a moderately rough dielectric with a subtle clearcoat; tune
 it with ``default_roughness=``, ``default_ior=``, ``default_specular=``,
 ``default_clearcoat=``, and ``default_clearcoat_roughness=``.
+
+Examples that enable simulation/render overlap can use ``ViewerOptix`` without
+additional changes. The common PhoenX ported-example base enables it by default:
+body and particle positions are double-buffered on a nonblocking simulation stream,
+then OptiX path tracing and DLSS continue on the render stream while the next physics
+step runs. Enabling debug contact arrows intentionally synchronizes the deferred step
+because contact buffers remain owned by the solver.
 
 The renderer is maintained separately in the ``otk-pyoptix`` repository. Build its
 native PyOptiX binding and install the Warp viewer addon into Newton's environment:
