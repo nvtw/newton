@@ -26,6 +26,9 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.examples.example_kapla_tower import (
+    _compute_camera_tick_position_kernel,
+)
 from newton._src.solvers.phoenx.world_builder import WorldBuilder
 
 
@@ -247,6 +250,36 @@ class TestKinematicBatchApi(unittest.TestCase):
                 delta=1e-4,
                 msg=f"body {slot}: expected x={expected_x}, got {final[slot]}",
             )
+
+    def test_split_render_target_across_physics_ticks(self) -> None:
+        """Land on a render target without overshooting across two physics ticks."""
+        device = wp.get_preferred_device()
+        builder = WorldBuilder()
+        body = builder.add_kinematic_body(position=(1.2, 0.75, 0.4))
+        world = builder.finalize(substeps=1, solver_iterations=1, gravity=(0, 0, 0), device=device)
+        final_pos = wp.array([(10.0, 2.0, 1.5)], dtype=wp.vec3f, device=device)
+        tick_pos = wp.empty(1, dtype=wp.vec3f, device=device)
+        body_ids = wp.array([body], dtype=wp.int32, device=device)
+        orientations = wp.array([(0.0, 0.0, 0.0, 1.0)], dtype=wp.quatf, device=device)
+
+        positions = []
+        velocities = []
+        for remaining_ticks in (2, 1):
+            wp.launch(
+                _compute_camera_tick_position_kernel,
+                dim=1,
+                inputs=[wp.int32(body), final_pos, world.bodies.position, wp.int32(remaining_ticks)],
+                outputs=[tick_pos],
+                device=device,
+            )
+            world.set_kinematic_poses_batch(body_ids, tick_pos, orientations)
+            world.step(dt=1.0 / 120.0)
+            positions.append(world.bodies.position.numpy()[body].copy())
+            velocities.append(world.bodies.velocity.numpy()[body].copy())
+
+        np.testing.assert_allclose(positions[0], (5.6, 1.375, 0.95), rtol=1.0e-6)
+        np.testing.assert_allclose(positions[1], (10.0, 2.0, 1.5), rtol=1.0e-6)
+        np.testing.assert_allclose(velocities[0], velocities[1], rtol=1.0e-6, atol=1.0e-6)
 
 
 @unittest.skipUnless(

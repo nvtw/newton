@@ -356,7 +356,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     @override
     def supports_simulation_render_overlap(self) -> bool:
         """Whether this viewer can overlap a CUDA step with OptiX rendering."""
-        return self._supports_cuda_simulation_render_overlap()
+        return False
 
     def should_step(self) -> bool:
         """Return whether the simulation should advance by one step."""
@@ -888,14 +888,17 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self.camera.yaw = (float(yaw) + 180.0) % 360.0 - 180.0
         self.camera.sync_pivot_to_view()
         self._camera_dirty = True
+        self._sync_camera()
 
     def _sync_camera(self) -> None:
-        if not self._initialized or not hasattr(self, "camera"):
+        if not hasattr(self, "camera"):
             return
         self._camera_position = np.asarray(self.camera.pos, dtype=np.float32)
         self._camera_pitch = float(self.camera.pitch)
         self._camera_yaw = float(self.camera.yaw)
         self._camera_fov = float(self.camera.fov)
+        if not self._initialized:
+            return
         rotation = self._global_transform[:3, :3]
         position = rotation @ self._camera_position
         front = rotation @ np.asarray(self.camera.get_front(), dtype=np.float32)

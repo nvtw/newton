@@ -80,6 +80,11 @@ class TestViewerOptix(unittest.TestCase):
         batch.model_shapes = [1]
         self.assertTrue(ViewerOptix._has_authored_mesh_material(model, batch))
 
+    def test_simulation_render_overlap_disabled(self):
+        """Keep OptiX simulation and rendering serialized for stable scene updates."""
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        self.assertFalse(viewer.supports_simulation_render_overlap)
+
     def test_public_viewer_and_example_option(self):
         """Expose ViewerOptix through the public API and example parser."""
         self.assertTrue(issubclass(ViewerOptix, ViewerBase))
@@ -100,6 +105,22 @@ class TestViewerOptix(unittest.TestCase):
         self.assertEqual(optix_parameters["max_bounces"].default, 4)
         self.assertEqual(optix_parameters["direct_light_samples"].default, 1)
         self.assertEqual(optix_parameters["samples_per_frame"].default, 1)
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_set_camera_updates_backend_pose(self):
+        """Keep the configured camera pose through the first input update."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
+        try:
+            viewer.set_camera(wp.vec3(1.2, 0.75, 0.4), pitch=-12.0, yaw=180.0)
+            viewer._update_camera_from_input(0.0)
+
+            np.testing.assert_allclose(viewer._camera_position, (1.2, 0.75, 0.4))
+            np.testing.assert_allclose(np.asarray(viewer.camera.pos), (1.2, 0.75, 0.4))
+            self.assertAlmostEqual(viewer._camera_pitch, -12.0)
+            self.assertAlmostEqual(viewer._camera_yaw, -180.0)
+        finally:
+            viewer.close()
 
     @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
     def test_default_color_palette(self):

@@ -74,6 +74,20 @@ def _write_camera_body_q_kernel(
     body_q[body_id] = wp.transform(pos[0], orient[0])
 
 
+@wp.kernel(enable_backward=False)
+def _compute_camera_tick_position_kernel(
+    phoenx_body_id: wp.int32,
+    final_pos: wp.array[wp.vec3f],
+    body_positions: wp.array[wp.vec3f],
+    remaining_ticks: wp.int32,
+    tick_pos: wp.array[wp.vec3f],
+):
+    """Split one render-frame camera displacement across its physics ticks."""
+    current = body_positions[phoenx_body_id]
+    alpha = wp.float32(1.0) / wp.float32(remaining_ticks)
+    tick_pos[0] = current + (final_pos[0] - current) * alpha
+
+
 # Mirrors C# ``Demo15.cs``: globalScaling 0.01 there, 0.1 here for a
 # ~70 cm tabletop tower; ground sits at 0.35 * scale.
 GLOBAL_SCALING: float = 0.1
@@ -402,6 +416,11 @@ class Example:
                 dtype=wp.vec3f,
                 device=self.device,
             )
+            self._camera_tick_pos_arr = wp.array(
+                [self._camera_collider_initial_pos],
+                dtype=wp.vec3f,
+                device=self.device,
+            )
             self._camera_orient_arr = wp.array([(0.0, 0.0, 0.0, 1.0)], dtype=wp.quatf, device=self.device)
             self._camera_pos_host = wp.array(
                 [self._camera_collider_initial_pos],
@@ -435,29 +454,10 @@ class Example:
     # ------------------------------------------------------------------
 
     def simulate(self) -> None:
-        # Stage the camera position on the device, hand it to PhoenX as
-        # the kinematic target, AND patch the same slot of
-        # ``state.body_q`` so Newton's CollisionPipeline (which
-        # broad/narrow-phases against ``body_q``) sees the collider at
-        # the live camera location.
+        # Stage the render-frame camera target once. Each physics tick below
+        # receives an intermediate target to preserve its 120 Hz velocity.
         if self._camera_phoenx_slot is not None:
             wp.copy(self._camera_pos_arr, self._camera_pos_host)
-            self.world.set_kinematic_poses_batch(
-                body_ids=self._camera_body_id_arr,
-                positions=self._camera_pos_arr,
-                orientations=self._camera_orient_arr,
-            )
-            wp.launch(
-                _write_camera_body_q_kernel,
-                dim=1,
-                inputs=[
-                    wp.int32(self._camera_body_newton_id),
-                    self._camera_pos_arr,
-                    self._camera_orient_arr,
-                    self.state.body_q,
-                ],
-                device=self.device,
-            )
         self._sync_newton_to_phoenx()
         # Two 120 Hz physics ticks per 60 fps render frame. Each tick
         # needs its own narrow-phase pass because contacts evolve as
@@ -467,7 +467,36 @@ class Example:
         # post-step body container *is* the source of truth, and
         # ``_sync_phoenx_to_newton`` already refreshes ``state.body_q``
         # in time for the next ``collide`` call.
-        for _ in range(self.steps_per_frame):
+        for tick in range(self.steps_per_frame):
+            if self._camera_phoenx_slot is not None:
+                wp.launch(
+                    _compute_camera_tick_position_kernel,
+                    dim=1,
+                    inputs=[
+                        wp.int32(self._camera_phoenx_slot),
+                        self._camera_pos_arr,
+                        self.bodies.position,
+                        wp.int32(self.steps_per_frame - tick),
+                    ],
+                    outputs=[self._camera_tick_pos_arr],
+                    device=self.device,
+                )
+                self.world.set_kinematic_poses_batch(
+                    body_ids=self._camera_body_id_arr,
+                    positions=self._camera_tick_pos_arr,
+                    orientations=self._camera_orient_arr,
+                )
+                wp.launch(
+                    _write_camera_body_q_kernel,
+                    dim=1,
+                    inputs=[
+                        wp.int32(self._camera_body_newton_id),
+                        self._camera_tick_pos_arr,
+                        self._camera_orient_arr,
+                        self.state.body_q,
+                    ],
+                    device=self.device,
+                )
             self.collision_pipeline.collide(self.state, self.contacts)
             self.picking.apply_force()
             self.world.step(
