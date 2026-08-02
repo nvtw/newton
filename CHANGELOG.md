@@ -92,6 +92,7 @@
 ### Changed
 - Default `ViewerOptix` to the same 1920 x 1080 window size as `ViewerGL`, raise its instance capacity to 16,384, and default the PhoenX Kapla tower example to OptiX. Pass `--viewer gl` to retain OpenGL for the example, or construct `ViewerOptix(width=1280, height=720, max_instances=10000)` to retain its previous defaults.
 - Represent revolute and prismatic armature in direct maximal PhoenX as exact gear-reflected generalized inertia without modifying either attached rigid-body inertia.
+- Default `ViewerOptix` to performance DLSS and three path bounces for higher interactive frame rates. Pass `dlss_quality="quality", max_bounces=4` or `--optix-dlss-quality quality --optix-max-bounces 4` to retain the previous rendering budget.
 
 - Specialize reduced-coordinate PhoenX fused advance and publication by articulation topology width.
 - Accelerate reduced-coordinate PhoenX compact patch-contact rows with subgroup-cooperative response and solved-delta traversal without changing hard-contact equations.

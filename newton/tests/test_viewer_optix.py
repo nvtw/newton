@@ -93,16 +93,16 @@ class TestViewerOptix(unittest.TestCase):
         self.assertIn("optix", viewer_action.choices)
         gl_parameters = inspect.signature(ViewerGL).parameters
         args = parser.parse_args([])
-        self.assertEqual(args.optix_dlss_quality, "quality")
-        self.assertEqual(args.optix_max_bounces, 4)
+        self.assertEqual(args.optix_dlss_quality, "performance")
+        self.assertEqual(args.optix_max_bounces, 3)
         self.assertEqual(args.optix_direct_light_samples, 1)
         self.assertEqual(args.optix_samples_per_frame, 1)
         optix_parameters = inspect.signature(ViewerOptix).parameters
         self.assertEqual(optix_parameters["width"].default, gl_parameters["width"].default)
         self.assertEqual(optix_parameters["height"].default, gl_parameters["height"].default)
         self.assertEqual(optix_parameters["max_instances"].default, 16384)
-        self.assertEqual(optix_parameters["dlss_quality"].default, "quality")
-        self.assertEqual(optix_parameters["max_bounces"].default, 4)
+        self.assertEqual(optix_parameters["dlss_quality"].default, "performance")
+        self.assertEqual(optix_parameters["max_bounces"].default, 3)
         self.assertEqual(optix_parameters["direct_light_samples"].default, 1)
         self.assertEqual(optix_parameters["samples_per_frame"].default, 1)
 

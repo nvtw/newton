@@ -685,13 +685,13 @@ def create_parser():
     parser.add_argument(
         "--optix-dlss-quality",
         choices=("performance", "balanced", "quality", "ultra_performance", "native"),
-        default="quality",
+        default="performance",
         help="DLSS input-resolution/quality mode used by the OptiX viewer.",
     )
     parser.add_argument(
         "--optix-max-bounces",
         type=int,
-        default=4,
+        default=3,
         help="Maximum path depth used by the OptiX viewer.",
     )
     parser.add_argument(
