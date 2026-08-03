@@ -23,6 +23,8 @@ float32 = wp.float32
 int32 = wp.int32
 vec3f = wp.vec3f
 
+_FUSED_INEQUALITY_BLOCK = -2
+
 
 @wp.func
 def _compute_row_velocity(
@@ -434,7 +436,10 @@ def _solve_dvi_inequalities_colored_pgs(
     uio = problem_uio[wid]
     schedule_offset = uio + wid
     contact_end = ccgo + int32(3) * nc
-    for _sweep in range(cfg.inequality_sweeps_per_iteration):
+    sweep_count = cfg.inequality_sweeps_per_iteration
+    if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
+        sweep_count *= cfg.max_alternating_iterations
+    for _sweep in range(sweep_count):
         # Resolve all normal loads before friction so transient normal updates
         # cannot seed tangential self-stress in a stationary contact patch.
         for phase in range(2):

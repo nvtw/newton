@@ -9,7 +9,7 @@ import warp as wp
 
 from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
-from .kernels import _sync_threads
+from .kernels import _FUSED_INEQUALITY_BLOCK, _sync_threads
 from .projections import (
     project_contact_normal_update as _project_contact_normal_update,
 )
@@ -334,7 +334,10 @@ def _solve_dvi_sparse_inequalities_pgs(
     row_start = bsm_row_start[wid]
     col_start = bsm_col_start[wid]
     matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
-    for _sweep in range(cfg.inequality_sweeps_per_iteration):
+    sweep_count = cfg.inequality_sweeps_per_iteration
+    if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
+        sweep_count *= cfg.max_alternating_iterations
+    for _sweep in range(sweep_count):
         # Match the dense path: settle all normal loads before evaluating friction.
         for phase in range(2):
             for color in range(inequality_num_colors[wid]):

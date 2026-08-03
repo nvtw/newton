@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -25,7 +26,10 @@ from newton._src.solvers.kamino._src.models.builders import basics, testing
 from newton._src.solvers.kamino._src.models.builders import utils as builder_utils
 from newton._src.solvers.kamino._src.solvers.common import WarmStartMode
 from newton._src.solvers.kamino._src.solvers.dvi import DVISolver
-from newton._src.solvers.kamino._src.solvers.dvi.kernels import _initialize_dvi_status
+from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
+    _initialize_dvi_status,
+    _solve_dvi_inequalities_colored_pgs,
+)
 from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_JOINTS,
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
@@ -892,27 +896,43 @@ class TestDVISolver(unittest.TestCase):
         self.assertAlmostEqual(converged_slow, converged_fast, delta=1.0e-4 * converged_fast)
 
     def test_03k_dvi_inequality_only_status_reports_the_sweep_budget(self):
-        """Report the sweeps actually run by the inequality-only dense path."""
-        model, problem, setup = self._make_box_on_plane_setup()
+        """Fuse inequality-only sweeps while reporting their full budget."""
         max_alternating_iterations = 17
         inequality_sweeps_per_iteration = 3
-        solver = _solve_dvi(
-            model,
-            problem,
-            config=kamino_config.DVISolverConfig(
-                max_alternating_iterations=max_alternating_iterations,
-                tolerance=1e-4,
-                regularization=1e-6,
-                inequality_sweeps_per_iteration=inequality_sweeps_per_iteration,
-            ),
-            setup=setup,
-        )
+        for sparse, inequality_kernel in (
+            (False, _solve_dvi_inequalities_colored_pgs),
+            (True, _solve_dvi_sparse_inequalities_pgs),
+        ):
+            with self.subTest(sparse=sparse):
+                model, problem, setup = self._make_box_on_plane_setup(sparse=sparse)
+                launch_count = 0
+                original_launch = wp.launch
 
-        self.assertTrue(solver._can_use_dense_inequality_pgs())
-        self.assertEqual(
-            int(solver.data.status.numpy()[0]["iterations"]),
-            max_alternating_iterations * inequality_sweeps_per_iteration,
-        )
+                def tracked_launch(*args, _kernel=inequality_kernel, _launch=original_launch, **kwargs):
+                    nonlocal launch_count
+                    kernel = kwargs.get("kernel", args[0] if args else None)
+                    if kernel is _kernel:
+                        launch_count += 1
+                    return _launch(*args, **kwargs)
+
+                with mock.patch.object(wp, "launch", side_effect=tracked_launch):
+                    solver = _solve_dvi(
+                        model,
+                        problem,
+                        config=kamino_config.DVISolverConfig(
+                            max_alternating_iterations=max_alternating_iterations,
+                            tolerance=1e-4,
+                            regularization=1e-6,
+                            inequality_sweeps_per_iteration=inequality_sweeps_per_iteration,
+                        ),
+                        setup=setup,
+                    )
+
+                self.assertEqual(launch_count, 1)
+                self.assertEqual(
+                    int(solver.data.status.numpy()[0]["iterations"]),
+                    max_alternating_iterations * inequality_sweeps_per_iteration,
+                )
 
     def test_03d_dvi_direct_block_honors_per_world_iteration_counts(self):
         """Honor each world's projected and bilateral iteration schedule."""

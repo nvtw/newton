@@ -24,6 +24,7 @@ from ..common import (
     warmstart_limit_constraints,
 )
 from .kernels import (
+    _FUSED_INEQUALITY_BLOCK,
     _build_bilateral_rhs,
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
@@ -620,7 +621,8 @@ class DVISolver:
             device=self.device,
         )
         threads_per_world = 64 if self.device.is_cuda else 1
-        for block_iteration in range(self._max_alternating_iterations):
+        # Inequality-only solves need no host work between PGS blocks.
+        for block_iteration in (_FUSED_INEQUALITY_BLOCK,):
             wp.launch(
                 kernel=_solve_dvi_inequalities_colored_pgs,
                 dim=self._size.num_worlds * threads_per_world,
