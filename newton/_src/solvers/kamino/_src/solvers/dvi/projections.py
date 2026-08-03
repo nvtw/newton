@@ -30,17 +30,37 @@ def project_contact_tangent_update(
     lambda_old: vec2f,
     velocity: vec2f,
     diagonal: vec2f,
+    off_diagonal: float32,
     regularization: float32,
     omega: float32,
     lambda_max: float32,
 ) -> vec2f:
     """Project a tangential contact update onto its Coulomb disk."""
     lambda_new = lambda_old
-    if diagonal.x > FLOAT32_EPS:
-        lambda_new.x -= omega * velocity.x / (diagonal.x + regularization)
-    if diagonal.y > FLOAT32_EPS:
-        lambda_new.y -= omega * velocity.y / (diagonal.y + regularization)
+    a00 = diagonal.x + regularization
+    a11 = diagonal.y + regularization
+    determinant = a00 * a11 - off_diagonal * off_diagonal
+    if determinant > FLOAT32_EPS * a00 * a11:
+        delta = vec2f(
+            (a11 * velocity.x - off_diagonal * velocity.y) / determinant,
+            (a00 * velocity.y - off_diagonal * velocity.x) / determinant,
+        )
+        lambda_new -= omega * delta
+    else:
+        if diagonal.x > FLOAT32_EPS:
+            lambda_new.x -= omega * velocity.x / a00
+        if diagonal.y > FLOAT32_EPS:
+            lambda_new.y -= omega * velocity.y / a11
     tangent_norm = wp.length(lambda_new)
+    if tangent_norm > lambda_max:
+        # A non-scalar inverse changes the Euclidean disk fixed point, so keep
+        # the diagonal update whenever Coulomb sliding is active.
+        lambda_new = lambda_old
+        if diagonal.x > FLOAT32_EPS:
+            lambda_new.x -= omega * velocity.x / a00
+        if diagonal.y > FLOAT32_EPS:
+            lambda_new.y -= omega * velocity.y / a11
+        tangent_norm = wp.length(lambda_new)
     if tangent_norm > lambda_max and tangent_norm > FLOAT32_EPS:
         lambda_new *= lambda_max / tangent_norm
     return lambda_new

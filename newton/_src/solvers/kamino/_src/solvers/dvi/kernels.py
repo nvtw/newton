@@ -499,6 +499,7 @@ def _solve_dvi_inequalities_colored_pgs(
                                 lambda_t_old,
                                 wp.vec2f(state_v_aug[vec_idx], state_v_aug[vec_idx + int32(1)]),
                                 wp.vec2f(diagonal_t0, diagonal_t1),
+                                problem_D[mio + ncts * column + column + int32(1)],
                                 cfg.regularization,
                                 cfg.omega,
                                 problem_mu[cio + cid] * solution_lambdas[vec_idx + int32(2)],

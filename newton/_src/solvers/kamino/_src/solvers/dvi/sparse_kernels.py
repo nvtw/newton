@@ -443,10 +443,21 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 diagonal_t0 = wp.abs(problem_diag[vec_idx]) * P_t0 * P_t0
                                 diagonal_t1 = wp.abs(problem_diag[vec_idx + int32(1)]) * P_t1 * P_t1
                                 lambda_t_old = wp.vec2f(lambda_t0_old, lambda_t1_old)
+                                off_diagonal = float32(0.0)
+                                body_group = int32(0)
+                                while body_group < block_count:
+                                    nzb_idx = nzb_offset + body_group
+                                    mass_weighted_t0 = bsm_nzb_values[nzb_idx]
+                                    jacobian_t1 = jacobian_nzb_values[nzb_idx + int32(1)]
+                                    for j in range(6):
+                                        off_diagonal += mass_weighted_t0[j] * jacobian_t1[j]
+                                    body_group += int32(3)
+                                off_diagonal *= P_t1
                                 lambda_t_new = _project_contact_tangent_update(
                                     lambda_t_old,
                                     wp.vec2f(contact_value.x, contact_value.y),
                                     wp.vec2f(diagonal_t0, diagonal_t1),
+                                    off_diagonal,
                                     cfg.regularization,
                                     cfg.omega,
                                     problem_mu[cio + cid] * solution_lambdas[vec_idx + int32(2)],

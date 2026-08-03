@@ -27,6 +27,7 @@ _DVI_QUALITY_TESTS = (
     "test_03h_dvi_canonical_contact_solution_metrics",
     "test_03i_dvi_coldstart_is_repeatable",
     "test_03j_dvi_omega_scales_projected_updates_without_moving_the_solution",
+    "test_03j1_dvi_tangent_block_update_preserves_sliding",
     "test_03k_dvi_inequality_only_status_reports_the_sweep_budget",
     "test_03l_sparse_dvi_skips_inequalities_without_mapped_topology",
     "test_04_dvi_solve_active_joint_limit",

@@ -109,6 +109,7 @@
 - Resolve Kamino DVI contact normals before friction to reduce stationary patch self-stress and improve stacked-contact convergence.
 - Use contact key-and-position matching for Kamino DVI warmstarts to avoid transferring stale aggregate impulses.
 - Improve Kamino DVI stacked-contact convergence with two inequality sweeps per alternation, and decay only tangential contact warmstarts to release redundant manifold self-stress while retaining normal support forces.
+- Couple Kamino DVI sticking-contact tangent updates through their local effective-mass block while preserving the Coulomb sliding solution.
 - Fix panel-parallel RCM-blocked LLT factorization hanging when a matrix ends in a partial tile.
 - Fix `ModelBuilder.add_usd()` marking a `guide`-purpose collider visible when it has a bound render material. Such a collider is not viewport geometry, and the extra `VISIBLE` flag left it drawn by the viewer's visual toggle instead of its collision toggle. `force_show_colliders` still reveals it.
 - Fix USD capsule, cylinder, and cone visual and site scaling to follow the authored primitive axis.

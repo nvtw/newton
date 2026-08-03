@@ -30,6 +30,9 @@ from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     _initialize_dvi_status,
     _solve_dvi_inequalities_colored_pgs,
 )
+from newton._src.solvers.kamino._src.solvers.dvi.projections import (
+    project_contact_tangent_update as _project_contact_tangent_update,
+)
 from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_JOINTS,
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
@@ -47,6 +50,27 @@ from newton._src.solvers.kamino.tests.test_solvers_padmm import TestSetup
 from newton._src.solvers.kamino.tests.utils.extract import extract_delassus, extract_problem_vector
 from newton._src.solvers.kamino.tests.utils.make import make_containers, make_test_problem_fourbar, update_containers
 from newton.tests.utils import basics as public_basics
+
+
+@wp.kernel
+def _project_contact_tangent_for_test(
+    lambda_old: wp.vec2f,
+    velocity: wp.vec2f,
+    diagonal: wp.vec2f,
+    off_diagonal: wp.float32,
+    lambda_max: wp.float32,
+    result: wp.array[wp.vec2f],
+):
+    """Evaluate the shared DVI tangential projection in a test kernel."""
+    result[0] = _project_contact_tangent_update(
+        lambda_old,
+        velocity,
+        diagonal,
+        off_diagonal,
+        wp.float32(0.0),
+        wp.float32(1.0),
+        lambda_max,
+    )
 
 
 def _build_five_box_stack() -> ModelBuilderKamino:
@@ -894,6 +918,38 @@ class TestDVISolver(unittest.TestCase):
         converged_slow = solve_normal_impulse(0.25, sweep_count=400)
         converged_fast = solve_normal_impulse(1.0, sweep_count=400)
         self.assertAlmostEqual(converged_slow, converged_fast, delta=1.0e-4 * converged_fast)
+
+    def test_03j1_dvi_tangent_block_update_preserves_sliding(self):
+        """Couple sticking updates without changing sliding Coulomb friction."""
+        velocity = np.array([-1.0, -0.2], dtype=np.float32)
+        diagonal = np.array([2.0, 2.0], dtype=np.float32)
+        off_diagonal = 0.75
+
+        def project(lambda_max: float) -> np.ndarray:
+            result = wp.empty(1, dtype=wp.vec2f, device=self.device)
+            wp.launch(
+                kernel=_project_contact_tangent_for_test,
+                dim=1,
+                inputs=[
+                    wp.vec2f(0.0),
+                    wp.vec2f(*velocity),
+                    wp.vec2f(*diagonal),
+                    off_diagonal,
+                    lambda_max,
+                    result,
+                ],
+                device=self.device,
+            )
+            return result.numpy()[0]
+
+        sticking = project(lambda_max=10.0)
+        effective_mass = np.array([[2.0, off_diagonal], [off_diagonal, 2.0]], dtype=np.float32)
+        np.testing.assert_allclose(effective_mass @ sticking + velocity, 0.0, atol=1.0e-6, rtol=0.0)
+
+        sliding = project(lambda_max=0.1)
+        diagonal_candidate = -velocity / diagonal
+        expected_sliding = 0.1 * diagonal_candidate / np.linalg.norm(diagonal_candidate)
+        np.testing.assert_allclose(sliding, expected_sliding, atol=1.0e-6, rtol=0.0)
 
     def test_03k_dvi_inequality_only_status_reports_the_sweep_budget(self):
         """Fuse inequality-only sweeps while reporting their full budget."""
