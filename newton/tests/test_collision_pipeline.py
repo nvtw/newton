@@ -1553,6 +1553,54 @@ for bp_name in ("explicit", "nxn", "sap"):
     )
 
 
+def test_box_box_solver_drift_manifold(test, device, broad_phase: str):
+    """Preserve a face manifold under sub-microradian solver drift.
+
+    The transforms capture two adjacent boxes immediately before an aligned
+    XPBD stack lost its four-point manifold and collapsed.
+    """
+    with wp.ScopedDevice(device):
+        poses = (
+            (
+                wp.vec3(2.22675084e-7, 2.49728513, -9.83917175e-7),
+                wp.quat(-8.44083345e-8, -1.98136689e-8, 3.19972909e-10, 1.0),
+            ),
+            (
+                wp.vec3(3.51331039e-7, 3.49677420, -1.27835642e-6),
+                wp.quat(-8.78333211e-8, -2.35374653e-8, -7.91500110e-9, 1.0),
+            ),
+        )
+
+        builder = newton.ModelBuilder()
+        for position, orientation in poses:
+            body = builder.add_body(xform=wp.transform(position, orientation))
+            builder.add_shape_box(body=body, hx=0.5, hy=0.5, hz=0.5)
+
+        model = builder.finalize(device=device)
+        pipeline = newton.CollisionPipeline(model, broad_phase=broad_phase)
+        contacts = pipeline.contacts()
+        pipeline.collide(model.state(), contacts)
+
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        points = contacts.rigid_contact_point0.numpy()[:count]
+        normals = contacts.rigid_contact_normal.numpy()[:count]
+
+        test.assertEqual(count, 4, f"Expected 4 face-corner contacts, got {count}")
+        test.assertEqual(len(np.unique(np.round(points[:, (0, 2)], decimals=5), axis=0)), 4)
+        for normal in normals:
+            test.assertGreater(normal[1], 0.999, f"Expected upward face normal, got {normal}")
+
+
+for bp_name in ("explicit", "nxn", "sap"):
+    add_function_test(
+        TestRigidContactNormal,
+        f"test_box_box_solver_drift_manifold_{bp_name}",
+        test_box_box_solver_drift_manifold,
+        devices=devices,
+        broad_phase=bp_name,
+    )
+
+
 # ============================================================================
 # Particle-Shape (Soft) Contact Tests
 # ============================================================================

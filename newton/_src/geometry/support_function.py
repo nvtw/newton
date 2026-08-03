@@ -34,9 +34,9 @@ import warp as wp
 from .types import GeoType
 
 # Relative deadband factor for box support-map sign decisions.
-# Near-zero direction components (e.g. from quaternion rotation noise ~1e-14)
+# Near-zero direction components (e.g. from solver rotation drift ~1e-7)
 # are treated as non-negative, biasing toward the +1 vertex.
-BOX_SUPPORT_DEADBAND = 1.0e-10
+BOX_SUPPORT_DEADBAND = 1.0e-6
 
 
 # Is not allowed to share values with GeoType
@@ -174,7 +174,7 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
                 result = result + wp.vec3(0.0, 0.0, -1.0)
     elif geom.shape_type == GeoType.BOX:
         # Use a relative deadband so near-zero direction components
-        # (from quaternion rotation noise ~1e-14) cannot flip the sign
+        # (from solver rotation drift ~1e-7) cannot flip the sign
         # and select a different box vertex.  For face-aligned queries
         # the non-primary components are zero; any vertex on that face
         # is an equally valid support point, so biasing toward +1 is
