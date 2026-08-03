@@ -1649,6 +1649,24 @@ class TestDVISolver(unittest.TestCase):
                     if sparse
                     else _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
                 )
+                low_budget_solver = _solve_dvi(
+                    model,
+                    problem,
+                    config=kamino_config.DVISolverConfig(
+                        max_alternating_iterations=20,
+                        inequality_sweeps_per_iteration=1,
+                        tolerance=0.0,
+                        regularization=1.0e-6,
+                    ),
+                    setup=SimpleNamespace(
+                        data=data,
+                        limits=limits,
+                        contacts=detector.contacts,
+                        jacobians=jacobians,
+                    ),
+                )
+                self.assertLess(float(low_budget_solver.data.status.numpy()[0]["r_d"]), 3.5e-4)
+
                 solver = _solve_dvi(
                     model,
                     problem,

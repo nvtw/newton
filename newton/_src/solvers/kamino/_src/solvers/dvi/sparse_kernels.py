@@ -10,12 +10,7 @@ import warp as wp
 from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from .kernels import _sync_threads
-from .projections import (
-    contact_diagonal_preconditioner as _contact_diagonal_preconditioner,
-)
-from .projections import (
-    project_contact_diagonal_update as _project_contact_diagonal_update,
-)
+from .projections import project_contact_split_update as _project_contact_split_update
 from .types import DVIConfigStruct
 
 wp.set_module_options({"enable_backward": False})
@@ -406,9 +401,6 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 contact_value[component] += block[j] * body_space[x_idx_base + j]
                         contact_value += vec3f(problem_v_f[vec_idx], problem_v_f[vec_idx + 1], problem_v_f[vec_idx + 2])
                         mu = problem_mu[cio + cid]
-                        contact_value.z += mu * wp.sqrt(
-                            contact_value.x * contact_value.x + contact_value.y * contact_value.y
-                        )
                         lambda_contact_old = vec3f(
                             solution_lambdas[vec_idx],
                             solution_lambdas[vec_idx + 1],
@@ -419,10 +411,10 @@ def _solve_dvi_sparse_inequalities_pgs(
                             wp.abs(problem_diag[vec_idx + 1]) * problem_P[vec_idx + 1] * problem_P[vec_idx + 1],
                             wp.abs(problem_diag[vec_idx + 2]) * problem_P[vec_idx + 2] * problem_P[vec_idx + 2],
                         )
-                        lambda_contact_new = _project_contact_diagonal_update(
+                        lambda_contact_new = _project_contact_split_update(
                             lambda_contact_old,
                             contact_value,
-                            _contact_diagonal_preconditioner(contact_diagonal),
+                            contact_diagonal,
                             cfg.regularization,
                             cfg.omega,
                             mu,

@@ -9,12 +9,7 @@ import warp as wp
 
 from ...core.math import FLOAT32_EPS
 from ..padmm.math import project_to_coulomb_cone, project_to_coulomb_dual_cone
-from .projections import (
-    contact_diagonal_preconditioner as _contact_diagonal_preconditioner,
-)
-from .projections import (
-    project_contact_diagonal_update as _project_contact_diagonal_update,
-)
+from .projections import project_contact_split_update as _project_contact_split_update
 from .types import DVIConfigStruct, DVIStatus
 
 wp.set_module_options({"enable_backward": False})
@@ -447,11 +442,7 @@ def _solve_dvi_inequalities_colored_pgs(
                     mu = problem_mu[cio + cid]
                     v_t0 = state_v_aug[vec_idx]
                     v_t1 = state_v_aug[vec_idx + int32(1)]
-                    velocity = vec3f(
-                        v_t0,
-                        v_t1,
-                        state_v_aug[vec_idx + int32(2)] + mu * wp.sqrt(v_t0 * v_t0 + v_t1 * v_t1),
-                    )
+                    velocity = vec3f(v_t0, v_t1, state_v_aug[vec_idx + int32(2)])
                     lambda_contact_old = vec3f(
                         solution_lambdas[vec_idx],
                         solution_lambdas[vec_idx + int32(1)],
@@ -462,10 +453,10 @@ def _solve_dvi_inequalities_colored_pgs(
                         wp.abs(problem_D[mio + ncts * (column + int32(1)) + column + int32(1)]),
                         wp.abs(problem_D[mio + ncts * (column + int32(2)) + column + int32(2)]),
                     )
-                    lambda_contact_new = _project_contact_diagonal_update(
+                    lambda_contact_new = _project_contact_split_update(
                         lambda_contact_old,
                         velocity,
-                        _contact_diagonal_preconditioner(contact_diagonal),
+                        contact_diagonal,
                         cfg.regularization,
                         cfg.omega,
                         mu,
