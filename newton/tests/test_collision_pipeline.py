@@ -1601,6 +1601,57 @@ for bp_name in ("explicit", "nxn", "sap"):
     )
 
 
+def test_unequal_box_box_solver_drift_manifold(test, device, broad_phase: str):
+    """Preserve a face manifold between unequal boxes under solver drift.
+
+    The transforms capture an initially aligned XPBD stack at the substep where
+    its four-point manifold collapsed to one tilted contact and catapulted the
+    upper box.
+    """
+    with wp.ScopedDevice(device):
+        poses_and_sizes = (
+            (
+                wp.vec3(3.7335610e-9, 4.9998292e-1, 3.5263259e-8),
+                wp.quat(-2.1688921e-8, -5.7160970e-10, -2.0992164e-10, 1.0),
+                wp.vec3(1.0, 0.5, 1.0),
+            ),
+            (
+                wp.vec3(6.4867449e-9, 1.4999746, 9.9460351e-8),
+                wp.quat(-2.5269783e-8, 6.4437003e-8, 3.1298550e-9, 1.0),
+                wp.vec3(0.5, 0.5, 0.5),
+            ),
+        )
+
+        builder = newton.ModelBuilder()
+        for position, orientation, half_extents in poses_and_sizes:
+            body = builder.add_body(xform=wp.transform(position, orientation))
+            builder.add_shape_box(body=body, hx=half_extents[0], hy=half_extents[1], hz=half_extents[2])
+
+        model = builder.finalize(device=device)
+        pipeline = newton.CollisionPipeline(model, broad_phase=broad_phase)
+        contacts = pipeline.contacts()
+        pipeline.collide(model.state(), contacts)
+
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        points = contacts.rigid_contact_point0.numpy()[:count]
+        normals = contacts.rigid_contact_normal.numpy()[:count]
+
+        test.assertEqual(count, 4, f"Expected 4 face-corner contacts, got {count}")
+        test.assertEqual(len(np.unique(np.round(points[:, (0, 2)], decimals=5), axis=0)), 4)
+        for normal in normals:
+            test.assertGreater(normal[1], 0.999, f"Expected upward face normal, got {normal}")
+
+
+for bp_name in ("explicit", "nxn", "sap"):
+    add_function_test(
+        TestRigidContactNormal,
+        f"test_unequal_box_box_solver_drift_manifold_{bp_name}",
+        test_unequal_box_box_solver_drift_manifold,
+        devices=devices,
+        broad_phase=bp_name,
+    )
+
+
 # ============================================================================
 # Particle-Shape (Soft) Contact Tests
 # ============================================================================

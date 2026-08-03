@@ -34,9 +34,9 @@ import warp as wp
 from .types import GeoType
 
 # Relative deadband factor for box support-map sign decisions.
-# Near-zero direction components (e.g. from solver rotation drift ~1e-7)
+# Near-zero direction components (e.g. from quaternion rotation noise ~1e-14)
 # are treated as non-negative, biasing toward the +1 vertex.
-BOX_SUPPORT_DEADBAND = 1.0e-6
+BOX_SUPPORT_DEADBAND = 1.0e-10
 
 
 # Is not allowed to share values with GeoType
