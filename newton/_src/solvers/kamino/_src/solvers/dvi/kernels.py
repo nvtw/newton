@@ -443,7 +443,13 @@ def _solve_dvi_inequalities_colored_pgs(
         # Resolve all normal loads before friction so transient normal updates
         # cannot seed tangential self-stress in a stationary contact patch.
         for phase in range(2):
-            for color in range(inequality_num_colors[wid]):
+            # Symmetric tangent ordering reduces load bias in redundant sticking patches.
+            reverse_colors = phase == int32(1) and _sweep % int32(2) != int32(0)
+            num_colors = inequality_num_colors[wid]
+            for color_index in range(num_colors):
+                color = color_index
+                if reverse_colors:
+                    color = num_colors - int32(1) - color_index
                 color_start = inequality_color_starts[schedule_offset + color]
                 color_end = inequality_color_starts[schedule_offset + color + int32(1)]
                 color_slot = color_start + lane

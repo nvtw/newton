@@ -838,6 +838,71 @@ class TestDVISolver(unittest.TestCase):
                 self.assertGreater(float(np.sum(impulses[:, 2])), 0.0)
                 self.assertLess(float(np.max(np.linalg.norm(impulses[:, :2], axis=1))), 1.0e-6)
 
+    def test_03ib_dvi_balances_sticking_friction_across_contact_patch(self):
+        """Balance sticking friction across a symmetric contact patch."""
+        friction = 0.5
+        applied_force = 2.0
+        dt = 2.5e-3
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(mu=friction, gap=0.0, margin=0.0)
+        body = builder.add_link(
+            xform=wp.transformf((0.0, 0.0, 0.1), wp.quat_identity()),
+            mass=1.0,
+        )
+        builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+        joint = builder.add_joint_free(parent=-1, child=body)
+        builder.add_articulation([joint])
+        builder.add_ground_plane(cfg=shape_cfg)
+        model = builder.finalize(device=self.device)
+        body_force = np.zeros((model.body_count, 6), dtype=np.float32)
+        body_force[body, 0] = applied_force
+
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    use_collision_detector=True,
+                    sparse_dynamics=sparse,
+                    sparse_jacobian=sparse,
+                    collision_detector=kamino_config.CollisionDetectorConfig(
+                        max_contacts=16,
+                        max_contacts_per_world=16,
+                        max_contacts_per_pair=8,
+                    ),
+                )
+                solver = SolverKamino(model, config=config)
+                state_0 = model.state()
+                state_1 = model.state()
+                for _ in range(100):
+                    state_0.body_f.assign(body_force)
+                    solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+                    state_0, state_1 = state_1, state_0
+
+                solver_kamino = solver._solver_kamino
+                problem = solver_kamino._problem_fd
+                contacts = solver._contacts_kamino
+                contact_count = int(contacts.world_active_contacts.numpy()[0])
+                constraint_offset = int(problem.data.vio.numpy()[0] + problem.data.ccgo.numpy()[0])
+                contact_lambdas = solver_kamino.solver_fd.data.solution.lambdas.numpy()[
+                    constraint_offset : constraint_offset + 3 * contact_count
+                ].reshape((-1, 3))
+                contact_positions = 0.5 * (
+                    contacts.position_A.numpy()[:contact_count] + contacts.position_B.numpy()[:contact_count]
+                )
+                front_tangent = float(np.sum(contact_lambdas[contact_positions[:, 0] > 0.05, 0]))
+                back_tangent = float(np.sum(contact_lambdas[contact_positions[:, 0] < -0.05, 0]))
+
+                self.assertEqual(contact_count, 4)
+                self.assertAlmostEqual(
+                    abs(front_tangent + back_tangent),
+                    applied_force * dt,
+                    delta=1.0e-6,
+                )
+                self.assertLess(abs(front_tangent - back_tangent), 1.0e-3)
+                self.assertLess(abs(float(state_0.body_qd.numpy()[body, 0])), 1.0e-6)
+
     def test_03ia_dvi_decays_tangential_but_not_normal_warmstarts(self):
         """Decay tangential self-stress while fully retaining normal warmstarts."""
         model, problem, setup = self._make_box_on_plane_setup()
