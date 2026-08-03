@@ -323,7 +323,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.max_alternating_iterations, 32)
         self.assertEqual(config.dvi.inequality_sweeps_per_iteration, 1)
         self.assertEqual(config.dvi.bilateral_solve_interval, 1)
-        self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position_with_net_force_backup")
+        self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position")
         self.assertFalse(config.dynamics.preconditioning)
 
         sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
