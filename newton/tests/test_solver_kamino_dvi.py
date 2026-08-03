@@ -14,6 +14,7 @@ _DVI_QUALITY_TESTS = (
     "test_01_dvi_solve_dense_dual_problem",
     "test_01a_dvi_requires_contact_topology_at_allocation",
     "test_02_public_solver_step_with_dvi",
+    "test_02a_public_solver_reset_accepts_global_mask_slot",
     "test_03_dvi_solve_single_contact",
     "test_03a_sparse_dvi_filtered_matvec_matches_full_rows",
     "test_03d_dvi_direct_block_honors_per_world_iteration_counts",

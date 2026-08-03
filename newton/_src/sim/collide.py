@@ -290,6 +290,8 @@ def compute_shape_aabbs(
     geom_xform[shape_id] = X_ws
 
 
+# Primitive pairs (GJK/MPR) produce up to 5 manifold contacts.
+# Mesh-involved pairs (SDF + contact reduction) typically retain about 40.
 _RIGID_CONTACTS_PER_PRIMITIVE_PAIR = 5
 _RIGID_CONTACTS_PER_MESH_PAIR = 40
 _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE = 20
@@ -322,8 +324,6 @@ def _estimate_rigid_contact_max(model: Model) -> int:
     shape_types = model.shape_type.numpy()
     colliding_mask = _shape_collide_mask(model, len(shape_types))
 
-    # Primitive pairs (GJK/MPR) produce up to 5 manifold contacts.
-    # Mesh-involved pairs (SDF + contact reduction) typically retain ~40.
     mesh_mask = colliding_mask & ((shape_types == int(GeoType.MESH)) | (shape_types == int(GeoType.HFIELD)))
     plane_mask = colliding_mask & (shape_types == int(GeoType.PLANE))
     non_plane_mask = colliding_mask & ~plane_mask
@@ -570,6 +570,28 @@ def _build_soft_particle_rigid_contact_pairs(model: Model) -> wp.array[wp.vec2i]
     return _world_compatible_pairs(model.particle_world.numpy(), model.shape_world.numpy(), world_count, model.device)
 
 
+def _count_soft_particle_rigid_contact_pairs(model: Model) -> int:
+    """Count exactly how many pairs :func:`_build_soft_particle_rigid_contact_pairs` emits for ``model``.
+
+    Reads only the per-world start offsets, so solvers can pre-size soft-contact buffers without
+    downloading per-entity world ids. This is not :attr:`CollisionPipeline.soft_contact_max`, which
+    additionally reserves edge/face headroom when ``enable_rigid_soft_full_surface_contact`` is set.
+    Reads host arrays, so it is not graph-capture-safe; call at solver construction.
+    """
+    particle_start = model.particle_world_start.numpy()
+    shape_start = model.shape_world_start.numpy()
+    global_particles = int(particle_start[-1] - particle_start[-2] + particle_start[0])
+    global_shapes = int(shape_start[-1] - shape_start[-2] + shape_start[0])
+    # Global particles pair with every shape; local particles additionally pair with global shapes.
+    total = global_particles * model.shape_count
+    total += (model.particle_count - global_particles) * global_shapes
+    # Local particles pair with the shapes sharing their world.
+    per_world = slice(0, model.world_count + 1)
+    return total + int(
+        np.dot(np.diff(particle_start[per_world]).astype(np.int64), np.diff(shape_start[per_world]).astype(np.int64))
+    )
+
+
 def _build_soft_face_rigid_contact_pairs(
     model: Model, capable_shape_mask: np.ndarray | None = None
 ) -> wp.array[wp.vec2i]:
@@ -788,7 +810,8 @@ class CollisionPipeline:
             soft_contact_max: Maximum number of soft contacts to allocate.
                 If None, defaults to ``soft_rigid_contact_pair_count``, the number
                 of precomputed soft-rigid (particle-shape) pairs launched for soft
-                contact generation.
+                contact generation, plus the full-surface edge/face headroom when
+                ``enable_rigid_soft_full_surface_contact`` is set.
             soft_contact_margin: Margin for soft contact generation. Defaults to 0.01.
             enable_rigid_soft_full_surface_contact: Generate soft contacts over the full soft-mesh
                 surface -- the edges and triangle interiors -- against rigid SDFs, in addition to the
@@ -832,8 +855,9 @@ class CollisionPipeline:
                 length directly) and for expert paths that pass a
                 pre-built ``narrow_phase``.
             deterministic: Sort contacts after the narrow phase so that results
-                are independent of GPU thread scheduling.  Adds a radix sort +
-                gather pass.  Hydroelastic contacts are not yet covered.
+                are independent of GPU thread scheduling. This also enables
+                deterministic hydroelastic accumulation and contact allocation.
+                Adds a radix sort + gather pass.
             contact_matching: Frame-to-frame contact matching mode.  One of
                 ``"disabled"``, ``"latest"``, or ``"sticky"``.  Any
                 non-disabled mode implies ``deterministic=True`` and
@@ -1024,6 +1048,7 @@ class CollisionPipeline:
                 model,
                 config=sdf_hydroelastic_config,
                 writer_func=write_contact,
+                deterministic=deterministic,
             )
 
             # Detect shape classes to optimize narrow-phase kernel launches.
@@ -1187,7 +1212,8 @@ class CollisionPipeline:
     def soft_rigid_contact_pair_count(self) -> int:
         """Number of precomputed soft-rigid (particle-shape) pairs launched for soft contacts.
 
-        This is the default capacity used for ``soft_contact_max``.
+        This is the base of the default ``soft_contact_max``, which additionally reserves
+        edge/face headroom when ``enable_rigid_soft_full_surface_contact`` is set.
         """
         return self._soft_rigid_contact_pair_count
 

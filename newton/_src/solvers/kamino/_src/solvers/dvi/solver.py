@@ -202,6 +202,7 @@ class DVISolver:
             has_unilateral_constraints=self._has_unilateral_constraints,
             all_worlds_mask=self._all_worlds_mask,
             should_solve_bilateral_after_block=self._should_solve_bilateral_after_block,
+            set_bilateral_active_dim=self._set_bilateral_active_dim,
         )
         self._limits = limits
         self.set_contacts(contacts)
@@ -228,6 +229,22 @@ class DVISolver:
         if block_iteration < 0 or block_iteration >= len(self._bilateral_solve_after_block):
             return False
         return self._bilateral_solve_after_block[block_iteration]
+
+    def _set_bilateral_active_dim(self, problem: DualProblem, block_iteration: int) -> None:
+        """Select worlds whose bilateral block is active for a scheduled solve."""
+        wp.launch(
+            kernel=_set_dvi_bilateral_active_dim,
+            dim=self._size.num_worlds,
+            inputs=[
+                problem.data.njc,
+                problem.data.nl,
+                problem.data.nc,
+                block_iteration,
+                self._data.config,
+                self._data.state.bilateral_active_dim,
+            ],
+            device=self.device,
+        )
 
     def _allocate_bilateral_solver(self, model: ModelKamino):
         """Allocate the reduced dense operator used for bilateral DVI solves."""
@@ -726,18 +743,6 @@ class DVISolver:
             device=self.device,
         )
 
-        wp.launch(
-            kernel=_set_dvi_bilateral_active_dim,
-            dim=self._size.num_worlds,
-            inputs=[
-                problem.data.njc,
-                problem.data.nl,
-                problem.data.nc,
-                self._data.state.bilateral_active_dim,
-            ],
-            device=self.device,
-        )
-
         self._prepare_inequality_coloring(problem)
         threads_per_world = 64 if self.device.is_cuda else 1
         for block_iteration in range(self._max_alternating_iterations):
@@ -787,8 +792,10 @@ class DVISolver:
             )
 
             if self._should_solve_bilateral_after_block(block_iteration):
+                self._set_bilateral_active_dim(problem, block_iteration)
                 self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
 
+        self._set_bilateral_active_dim(problem, -1)
         self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
 
         wp.launch(
