@@ -174,16 +174,6 @@ def _map_active_contacts(
         inequality_bodies[problem_uio[wid] + problem_nl[wid] + cid] = contacts_bid_AB[contact_id]
 
 
-@wp.func
-def _inequalities_share_dynamic_body(a: wp.vec2i, b: wp.vec2i) -> bool:
-    shares_body = bool(False)
-    if a[0] >= int32(0) and (a[0] == b[0] or a[0] == b[1]):
-        shares_body = bool(True)
-    if a[1] >= int32(0) and (a[1] == b[0] or a[1] == b[1]):
-        shares_body = bool(True)
-    return shares_body
-
-
 @wp.func_native("""
 #if defined(__CUDA_ARCH__)
 return ((int)__ffsll((long long)mask)) - 1;
@@ -214,8 +204,8 @@ def _color_mapped_dvi_inequalities(
     """Greedily color one world per thread using per-body 64-bit masks.
 
     This favors the many-small-world workload. Unusually high-degree graphs
-    that exhaust 64 colors use a slower pairwise fallback without a color cap.
-    The same pass emits compact color ranges shared by dense and sparse PGS.
+    that exhaust 64 colors assign fresh colors without a color cap. The same
+    pass emits compact color ranges shared by dense and sparse PGS.
     """
     wid = wp.tid()
     nu = problem_nl[wid] + problem_nc[wid]
@@ -231,21 +221,9 @@ def _color_mapped_dvi_inequalities(
 
         color = _lowest_set_color(wp.int64(forbidden) ^ wp.int64(-1))
         if color < int32(0):
-            # All lower colors conflict, so only overflow colors need scanning.
-            color = int32(64)
-            found = int32(0)
-            while found == int32(0) and color < nu:
-                conflict = int32(0)
-                for previous_uid in range(uid):
-                    if inequality_colors[uio + previous_uid] == color:
-                        previous_pair = inequality_bodies[uio + previous_uid]
-                        if _inequalities_share_dynamic_body(pair, previous_pair):
-                            conflict = int32(1)
-                            break
-                if conflict == int32(0):
-                    found = int32(1)
-                else:
-                    color += int32(1)
+            # A fresh color is always conflict-free and avoids a superlinear
+            # search in dense manifolds that share a body.
+            color = num_colors
         inequality_colors[uio + uid] = color
         num_colors = wp.max(num_colors, color + int32(1))
         if color < int32(64):
