@@ -32,6 +32,7 @@ class Example:
 
         self.viewer = viewer
         self.world_count = args.world_count
+        self.solver_type = args.solver
 
         # Set numpy random seed for reproducibility
         self.seed = 123
@@ -53,6 +54,8 @@ class Example:
         articulation_builder.joint_q[:7] = [0.0, 0.0, 1.5, *start_rot]
 
         builder = newton.ModelBuilder()
+        if self.solver_type == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(builder)
         builder.default_shape_cfg.gap = 0.0
         for _i in range(self.world_count):
             articulation_builder.joint_q[7:] = self.rng.uniform(
@@ -65,15 +68,25 @@ class Example:
         self.model = builder.finalize()
         self.control = self.model.control()
 
-        self.solver = newton.solvers.SolverMuJoCo(
-            self.model,
-            use_mujoco_cpu=False,
-            solver="newton",
-            integrator="euler",
-            iterations=10,
-            ls_iterations=5,
-            njmax=100,
-        )
+        if self.solver_type == "kamino":
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
+            )
+            solver_config.use_collision_detector = True
+            solver_config.integrator = "moreau"
+            solver_config.dvi.max_alternating_iterations = 8
+            solver_config.dvi.bilateral_solve_interval = 2
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                use_mujoco_cpu=False,
+                solver="newton",
+                integrator="euler",
+                iterations=10,
+                ls_iterations=5,
+                njmax=100,
+            )
 
         self.state_0, self.state_1 = self.model.state(), self.model.state()
 
@@ -112,6 +125,7 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
+        parser.add_argument("--solver", choices=["mujoco", "kamino"], default="mujoco")
         parser.add_argument("recording_file", nargs="?", default="humanoid_recording.bin")
         parser.set_defaults(num_frames=1000, world_count=100)
         return parser

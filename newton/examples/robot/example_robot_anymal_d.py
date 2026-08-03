@@ -4,7 +4,7 @@
 ###########################################################################
 # Example Robot Anymal D
 #
-# Shows how to simulate Anymal D with multiple worlds using SolverMuJoCo.
+# Shows how to simulate Anymal D with multiple worlds using MuJoCo or Kamino.
 #
 # Command: python -m newton.examples robot_anymal_d --world-count 16
 #
@@ -16,7 +16,6 @@ import newton
 import newton.examples
 import newton.utils
 from newton import JointTargetMode
-from newton.solvers import SolverMuJoCo
 
 
 class Example:
@@ -28,13 +27,17 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.world_count = args.world_count
+        self.solver_type = args.solver
 
         self.viewer = viewer
 
         self.device = wp.get_device()
 
         articulation_builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        newton.solvers.SolverMuJoCo.register_custom_attributes(articulation_builder)
+        if self.solver_type == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(articulation_builder)
+        else:
+            newton.solvers.SolverMuJoCo.register_custom_attributes(articulation_builder)
         articulation_builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
             limit_ke=1.0e3, limit_kd=1.0e1, friction=1e-5
         )
@@ -70,17 +73,27 @@ class Example:
         builder.add_ground_plane()
 
         self.model = builder.finalize()
-        use_mujoco_contacts = args.use_mujoco_contacts if args else False
-        self.solver = SolverMuJoCo(
-            self.model,
-            cone="elliptic",
-            impratio=100,
-            iterations=100,
-            ls_iterations=50,
-            nconmax=45,
-            njmax=100,
-            use_mujoco_contacts=use_mujoco_contacts,
-        )
+        use_mujoco_contacts = self.solver_type == "mujoco" and args.use_mujoco_contacts
+        if self.solver_type == "kamino":
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
+            )
+            solver_config.use_collision_detector = False
+            solver_config.integrator = "moreau"
+            solver_config.dvi.max_alternating_iterations = 8
+            solver_config.dvi.bilateral_solve_interval = 2
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(
+                self.model,
+                cone="elliptic",
+                impratio=100,
+                iterations=100,
+                ls_iterations=50,
+                nconmax=45,
+                njmax=100,
+                use_mujoco_contacts=use_mujoco_contacts,
+            )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -164,6 +177,7 @@ class Example:
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
         newton.examples.add_mujoco_contacts_arg(parser)
+        parser.add_argument("--solver", choices=["mujoco", "kamino"], default="mujoco")
         parser.set_defaults(world_count=8)
         return parser
 

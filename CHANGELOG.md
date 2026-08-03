@@ -38,7 +38,7 @@
 - Add `sign_method` argument to `Mesh.build_sdf` and `SDF.create_from_mesh` support for a `"normal"` (angle-weighted pseudo-normal) sign strategy, for selecting the inside/outside sign of the baked SDF (`"auto"`, `"parity"`, `"winding"`, or `"normal"`).
 - Add opt-in MuJoCo Warp sleeping support to `SolverMuJoCo` with MJCF sleep configuration, initial tree policies, `sleep_tolerance`, compact `nvmax` storage, and a launchable `mujoco_sleeping` example. (#3725)
 - Add `forward_depth_image` output support to `SensorTiledCamera.update()` and `SensorTiledCamera.utils.create_forward_depth_image_output()` for native forward-depth rendering without post-processing `depth_image`.
-- Add the `basic_conveyor_forces` example: a multi-belt conveyor circuit that transports rigid boxes with per-belt velocity fields, applying Coulomb-limited tangential body forces from reported per-contact normal forces across `SolverXPBD`, `SolverVBD`, and `SolverMuJoCo`.
+- Add the `basic_conveyor_forces` example: a multi-belt conveyor circuit that transports rigid boxes with per-belt velocity fields, applying Coulomb-limited tangential body forces from reported per-contact normal forces across `SolverXPBD`, `SolverVBD`, `SolverMuJoCo`, and `SolverKamino`.
 - Add optional `shear_stiffness`/`shear_damping` and `twist_stiffness`/`twist_damping` controls to `ModelBuilder.add_joint_cable()`, `ModelBuilder.add_rod()`, and `ModelBuilder.add_rod_graph()`; omitted shear defaults to stretch and omitted twist defaults to bend for compatibility.
 - Add `newton.utils.CableStiffness` and extend `newton.utils.create_cable_stiffness_from_elastic_moduli()` with `poissons_ratio`/`shear_modulus` inputs that include torsional `GJ/L` stiffness.
 - Add VBD cable validation examples covering bend stiffness, analytical bend/twist response, torsion material mapping, routed twist transfer, twist-buckling link verification, Michell/Zajac threshold behavior, and Dahl hysteresis.
@@ -65,6 +65,7 @@
 - Improve `SolverKamino` GPU simulation and kernel compilation performance.
 - Rename the `SolverKamino` DVI iteration controls `block_iterations`, `contact_iterations`, and `bilateral_solve_period` to `max_alternating_iterations`, `inequality_sweeps_per_iteration`, and `bilateral_solve_interval`; use `max_alternating_iterations` for inequality-only solves as well, with a default sweep budget of 20 instead of 100.
 - Tune Kamino DVI example step and iteration budgets for improved throughput.
+- Offer Kamino DVI as a solver option in additional rigid-body, robot, sensor, and contact examples.
 - Speed up `Mesh.create_heightfield()` and `Mesh.create_terrain()` by building the vertex and index buffers in place, substantially reducing construction time and peak memory for large terrain grids such as those used by Isaac Lab.
 - Load solver backends lazily on first access to speed up `import newton`; access solver classes through `newton.solvers` as before, and import solver modules explicitly if module-level side effects are required.
 - Speed up USD mesh import for faceVarying normals by resolving the common single-cluster case for all vertices at once instead of clustering every face corner in Python; the split vertices, indices, normals, and UVs are unchanged, except that a corner sitting exactly at `vertex_splitting_angle_threshold_deg` from its cluster may now cluster differently.

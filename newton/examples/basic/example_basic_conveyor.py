@@ -152,10 +152,11 @@ def advance_time(sim_time: wp.array[wp.float32], dt: float):
 
 class Example:
     def __init__(self, viewer, args=None):
+        solver_type = getattr(args, "solver", "xpbd") if args is not None else "xpbd"
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 10
+        self.sim_substeps = 2 if solver_type == "kamino" else 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.viewer = viewer
@@ -256,12 +257,39 @@ class Example:
             is_kinematic=True,
             label="conveyor_belt",
         )
+        # Keep the smooth render mesh while avoiding an oversized mesh-contact system in DVI.
+        belt_mesh_cfg = belt_cfg
+        if solver_type == "kamino":
+            belt_mesh_cfg = belt_cfg.copy()
+            belt_mesh_cfg.has_shape_collision = False
+            belt_mesh_cfg.has_particle_collision = False
         self.belt_shape = builder.add_shape_mesh(
             self.belt_body,
             mesh=belt_mesh,
-            cfg=belt_cfg,
+            cfg=belt_mesh_cfg,
             label="conveyor_belt_mesh",
         )
+        self.belt_collision_shapes = [self.belt_shape]
+        if solver_type == "kamino":
+            belt_collision_cfg = belt_cfg.copy()
+            belt_collision_cfg.is_visible = False
+            belt_collision_segments = 24
+            belt_segment_half_length = 1.05 * math.pi * BELT_RING_RADIUS / belt_collision_segments
+            self.belt_collision_shapes = []
+            for segment in range(belt_collision_segments):
+                angle = 2.0 * math.pi * segment / belt_collision_segments
+                belt_collision_shape = builder.add_shape_box(
+                    self.belt_body,
+                    hx=belt_segment_half_length,
+                    hy=BELT_HALF_WIDTH,
+                    hz=BELT_HALF_THICKNESS,
+                    xform=wp.transform(
+                        p=wp.vec3(BELT_RING_RADIUS * math.cos(angle), BELT_RING_RADIUS * math.sin(angle), 0.0),
+                        q=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), angle + 0.5 * math.pi),
+                    ),
+                    cfg=belt_collision_cfg,
+                )
+                self.belt_collision_shapes.append(belt_collision_shape)
         self.belt_joint = builder.add_joint_revolute(
             parent=-1,
             child=self.belt_body,
@@ -284,9 +312,11 @@ class Example:
                 cfg=rail_cfg,
                 label=rail_label,
             )
-            builder.add_shape_collision_filter_pair(self.belt_shape, rail_shape)
+            for belt_collision_shape in self.belt_collision_shapes:
+                builder.add_shape_collision_filter_pair(belt_collision_shape, rail_shape)
         # Belt should only interact with dynamic rigid bags.
-        builder.add_shape_collision_filter_pair(self.belt_shape, ground_shape)
+        for belt_collision_shape in self.belt_collision_shapes:
+            builder.add_shape_collision_filter_pair(belt_collision_shape, ground_shape)
 
         self.bag_bodies = []
         belt_top_z = BELT_CENTER_Z + BELT_HALF_THICKNESS
@@ -339,20 +369,39 @@ class Example:
             builder.add_articulation([builder.add_joint_free(bag_body)], label=f"bag_{i}")
             self.bag_bodies.append(bag_body)
 
+        if solver_type == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(builder)
+
         builder.color()
         self.model = builder.finalize()
 
-        solver_type = getattr(args, "solver", "xpbd") if args is not None else "xpbd"
         if solver_type == "vbd":
             self.solver = newton.solvers.SolverVBD(self.model, iterations=5, rigid_body_contact_buffer_size=512)
+        elif solver_type == "kamino":
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
+            )
+            solver_config.use_collision_detector = True
+            # The full bag set can briefly exceed 256 contacts at segment seams.
+            solver_config.collision_detector.max_contacts_per_world = 384
+            solver_config.collision_detector.max_contacts_per_pair = 4
+            solver_config.collision_detector.max_triangle_pairs = 16384
+            solver_config.integrator = "moreau"
+            solver_config.dvi.max_alternating_iterations = 8
+            solver_config.dvi.bilateral_solve_interval = 2
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverXPBD(self.model)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.collision_pipeline = newton.CollisionPipeline(self.model)
-        self.contacts = self.collision_pipeline.contacts()
+        if solver_type == "kamino":
+            self.collision_pipeline = None
+            self.contacts = None
+        else:
+            self.collision_pipeline = newton.CollisionPipeline(self.model)
+            self.contacts = self.collision_pipeline.contacts()
 
         # Ensure body state is initialized from model joint buffers.
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
@@ -399,7 +448,8 @@ class Example:
                 body_flag_filter=newton.BodyFlags.KINEMATIC,
             )
 
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+            if self.collision_pipeline is not None:
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
@@ -415,7 +465,8 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        if self.contacts is not None:
+            self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
     def test_final(self):
@@ -437,7 +488,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--solver",
         type=str,
-        choices=["xpbd", "vbd"],
+        choices=["xpbd", "vbd", "kamino"],
         default="xpbd",
         help="Solver backend to use.",
     )
