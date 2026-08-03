@@ -106,6 +106,7 @@
 - Complete Kamino RCM traversal for large and disconnected systems and reuse the resulting permutation by default; set `reuse_permutation=False` to recompute it for changing matrix topology.
 - Bound Kamino DVI contact allocation with a per-world geometry heuristic instead of sizing every contact pair simultaneously; set `collision_detector.max_contacts_per_world` to override the inferred capacity.
 - Improve Kamino DVI contact convergence with split normal and Coulomb-friction projections.
+- Resolve Kamino DVI contact normals before friction to reduce stationary patch self-stress and improve stacked-contact convergence.
 - Use contact key-and-position matching for Kamino DVI warmstarts to avoid transferring stale aggregate impulses.
 - Fix panel-parallel RCM-blocked LLT factorization hanging when a matrix ends in a partial tile.
 - Fix `ModelBuilder.add_usd()` marking a `guide`-purpose collider visible when it has a bound render material. Such a collider is not viewport geometry, and the extra `VISIBLE` flag left it drawn by the viewer's visual toggle instead of its collision toggle. `force_show_colliders` still reveals it.

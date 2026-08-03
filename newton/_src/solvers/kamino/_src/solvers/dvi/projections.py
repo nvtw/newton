@@ -8,34 +8,39 @@ import warp as wp
 from ...core.math import FLOAT32_EPS
 
 float32 = wp.float32
-vec3f = wp.vec3f
+vec2f = wp.vec2f
 
 
 @wp.func
-def project_contact_split_update(
-    lambda_old: vec3f,
-    v_c: vec3f,
-    D_diag: vec3f,
+def project_contact_normal_update(
+    lambda_old: float32,
+    velocity: float32,
+    diagonal: float32,
     regularization: float32,
     omega: float32,
-    mu: float32,
-) -> vec3f:
-    """Solve Signorini normal contact, then project friction onto its Coulomb disk.
+) -> float32:
+    """Project one normal contact update onto the nonnegative half-line."""
+    if diagonal <= FLOAT32_EPS:
+        return lambda_old
+    return wp.max(float32(0.0), lambda_old - omega * velocity / (diagonal + regularization))
 
-    The split keeps the normal load out of the tangential effective-mass step,
-    while the final disk projection enforces ``norm(lambda_t) <= mu * lambda_n``.
-    """
-    lambda_n = lambda_old.z
-    if D_diag.z > FLOAT32_EPS:
-        lambda_n = wp.max(float32(0.0), lambda_old.z - omega * v_c.z / (D_diag.z + regularization))
 
-    lambda_t = vec3f(lambda_old.x, lambda_old.y, float32(0.0))
-    if D_diag.x > FLOAT32_EPS:
-        lambda_t.x = lambda_old.x - omega * v_c.x / (D_diag.x + regularization)
-    if D_diag.y > FLOAT32_EPS:
-        lambda_t.y = lambda_old.y - omega * v_c.y / (D_diag.y + regularization)
-    lambda_t_norm = wp.sqrt(lambda_t.x * lambda_t.x + lambda_t.y * lambda_t.y)
-    lambda_t_max = mu * lambda_n
-    if lambda_t_norm > lambda_t_max and lambda_t_norm > FLOAT32_EPS:
-        lambda_t *= lambda_t_max / lambda_t_norm
-    return vec3f(lambda_t.x, lambda_t.y, lambda_n)
+@wp.func
+def project_contact_tangent_update(
+    lambda_old: vec2f,
+    velocity: vec2f,
+    diagonal: vec2f,
+    regularization: float32,
+    omega: float32,
+    lambda_max: float32,
+) -> vec2f:
+    """Project a tangential contact update onto its Coulomb disk."""
+    lambda_new = lambda_old
+    if diagonal.x > FLOAT32_EPS:
+        lambda_new.x -= omega * velocity.x / (diagonal.x + regularization)
+    if diagonal.y > FLOAT32_EPS:
+        lambda_new.y -= omega * velocity.y / (diagonal.y + regularization)
+    tangent_norm = wp.length(lambda_new)
+    if tangent_norm > lambda_max and tangent_norm > FLOAT32_EPS:
+        lambda_new *= lambda_max / tangent_norm
+    return lambda_new

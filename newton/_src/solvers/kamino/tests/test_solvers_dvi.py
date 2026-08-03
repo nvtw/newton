@@ -762,13 +762,13 @@ class TestDVISolver(unittest.TestCase):
         # An unmapped row keeps its impulse and touches no Jacobian offsets.
         self.assertEqual(solve_single_limit(-1), 0.0)
 
-    def _make_box_on_plane_setup(self, max_world_contacts: int = 4):
+    def _make_box_on_plane_setup(self, max_world_contacts: int = 4, sparse: bool = False):
         """Build an inequality-only box-on-plane problem and its containers."""
         model, data, state, limits, detector, jacobians = make_containers(
             builder=basics.build_box_on_plane(),
             device=self.device,
             max_world_contacts=max_world_contacts,
-            sparse=False,
+            sparse=sparse,
         )
         update_containers(
             model=model,
@@ -778,9 +778,34 @@ class TestDVISolver(unittest.TestCase):
             detector=detector,
             jacobians=jacobians,
         )
-        problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
+        make_problem = _make_sparse_dual_problem if sparse else _make_dense_dual_problem
+        problem = make_problem(model, data, limits, detector.contacts, jacobians)
         setup = SimpleNamespace(data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians)
         return model, problem, setup
+
+    def test_03i_dvi_stationary_contact_patch_avoids_tangent_self_stress(self):
+        """Avoid tangential self-stress while supporting a stationary contact patch."""
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                model, problem, setup = self._make_box_on_plane_setup(sparse=sparse)
+                solver = _solve_dvi(
+                    model,
+                    problem,
+                    config=kamino_config.DVISolverConfig(
+                        max_alternating_iterations=32,
+                        inequality_sweeps_per_iteration=1,
+                        tolerance=0.0,
+                        regularization=1.0e-6,
+                    ),
+                    setup=setup,
+                )
+
+                offset = int(problem.data.vio.numpy()[0] + problem.data.ccgo.numpy()[0])
+                contact_count = int(problem.data.nc.numpy()[0])
+                impulses = solver.data.solution.lambdas.numpy()[offset : offset + 3 * contact_count].reshape(-1, 3)
+
+                self.assertGreater(float(np.sum(impulses[:, 2])), 0.0)
+                self.assertLess(float(np.max(np.linalg.norm(impulses[:, :2], axis=1))), 1.0e-6)
 
     def test_03j_dvi_omega_scales_projected_updates_without_moving_the_solution(self):
         """Relax projected updates by `omega` while preserving the fixed point.
