@@ -801,19 +801,19 @@ class DVISolverConfig:
     Must be in the range `(0, 2]`. Defaults to `1.0`.
     """
 
-    max_alternating_iterations: int = 20
+    max_alternating_iterations: int = 24
     """
     Maximum number of outer DVI iterations alternating direct bilateral
     solves with projected inequality solves. Must be greater than zero.
     This schedule is also used when no bilateral constraints are present;
-    in that case, the bilateral solve is skipped. Defaults to `20`.
+    in that case, the bilateral solve is skipped. Defaults to `24`.
     """
 
-    inequality_sweeps_per_iteration: int = 1
+    inequality_sweeps_per_iteration: int = 2
     """
     Number of projected Gauss-Seidel sweeps used for unilateral inequalities
     during each alternating DVI iteration. Contacts use graph-colored sweeps
-    on CUDA. Must be greater than zero. Defaults to `1`.
+    on CUDA. Must be greater than zero. Defaults to `2`.
     """
 
     bilateral_solve_interval: int = 1
@@ -821,6 +821,13 @@ class DVISolverConfig:
     Number of alternating DVI iterations between repeated direct bilateral solves.
     A value of `1` re-solves after every projected inequality block, preserving
     the standard direct-block schedule. Must be greater than zero. Defaults to `1`.
+    """
+
+    tangential_warmstart_scale: float = 0.97
+    """
+    Scale applied to cached tangential contact reactions before a DVI solve.
+    Normal reactions remain fully warm-started. Must be in the range `[0, 1]`.
+    Defaults to `0.97`.
     """
 
     bilateral_solver_type: Literal["LLTB", "LLTBRCM"] = "LLTB"
@@ -906,6 +913,10 @@ class DVISolverConfig:
         if self.bilateral_solve_interval <= 0:
             raise ValueError(
                 f"Invalid bilateral solve interval: {self.bilateral_solve_interval}. Must be a positive integer."
+            )
+        if self.tangential_warmstart_scale < 0.0 or self.tangential_warmstart_scale > 1.0:
+            raise ValueError(
+                f"Invalid tangential warmstart scale: {self.tangential_warmstart_scale}. Must be in the range [0, 1]."
             )
         if self.bilateral_solver_type not in {"LLTB", "LLTBRCM"}:
             raise ValueError(

@@ -33,6 +33,7 @@ from .kernels import (
     _initialize_dvi_status,
     _reset_dvi_solver_data,
     _reset_dvi_status,
+    _scale_dvi_tangential_warmstart,
     _scatter_bilateral_solution,
     _set_dvi_bilateral_active_dim,
     _set_dvi_direct_status_iterations,
@@ -875,6 +876,17 @@ class DVISolver:
                 device=self.device,
             )
         if contacts is not None and contacts.model_max_contacts_host > 0:
+            wp.launch(
+                kernel=_scale_dvi_tangential_warmstart,
+                dim=contacts.model_max_contacts_host,
+                inputs=[
+                    contacts.model_active_contacts,
+                    contacts.wid,
+                    self._data.config,
+                    contacts.reaction,
+                ],
+                device=self.device,
+            )
             wp.launch(
                 kernel=warmstart_contact_constraints,
                 dim=contacts.model_max_contacts_host,

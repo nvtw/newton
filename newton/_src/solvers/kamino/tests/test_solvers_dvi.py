@@ -293,8 +293,9 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(default_config.dynamics.linear_solver_type, "LLTBRCM")
         self.assertEqual(default_config.dynamics.linear_solver_kwargs, {})
         self.assertEqual(default_config.dvi.omega, 1.0)
-        self.assertEqual(default_config.dvi.max_alternating_iterations, 20)
-        self.assertEqual(default_config.dvi.inequality_sweeps_per_iteration, 1)
+        self.assertEqual(default_config.dvi.max_alternating_iterations, 24)
+        self.assertEqual(default_config.dvi.inequality_sweeps_per_iteration, 2)
+        self.assertEqual(default_config.dvi.tangential_warmstart_scale, 0.97)
         self.assertEqual(default_config.dvi.bilateral_solve_interval, 1)
         self.assertEqual(default_config.dvi.bilateral_solver_type, "LLTB")
         self.assertEqual(default_config.dvi.bilateral_solver_kwargs, {})
@@ -308,7 +309,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertFalse(dense_config.sparse_jacobian)
         self.assertEqual(dense_config.integrator, "euler")
         self.assertEqual(dense_config.dynamics.linear_solver_type, "LLTBRCM")
-        self.assertEqual(dense_config.dvi.max_alternating_iterations, 20)
+        self.assertEqual(dense_config.dvi.max_alternating_iterations, 24)
 
         padmm_config = SolverKamino.Config()
         self.assertFalse(padmm_config.sparse_dynamics)
@@ -321,7 +322,7 @@ class TestDVISolver(unittest.TestCase):
         )
         self.assertEqual(config.dynamics_solver, "dvi")
         self.assertEqual(config.dvi.max_alternating_iterations, 32)
-        self.assertEqual(config.dvi.inequality_sweeps_per_iteration, 1)
+        self.assertEqual(config.dvi.inequality_sweeps_per_iteration, 2)
         self.assertEqual(config.dvi.bilateral_solve_interval, 1)
         self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position")
         self.assertFalse(config.dynamics.preconditioning)
@@ -345,6 +346,8 @@ class TestDVISolver(unittest.TestCase):
             {"max_alternating_iterations": 0},
             {"inequality_sweeps_per_iteration": 0},
             {"bilateral_solve_interval": 0},
+            {"tangential_warmstart_scale": -0.1},
+            {"tangential_warmstart_scale": 1.1},
             {"bilateral_solver_type": "invalid"},
             {"warmstart_mode": "invalid"},
         )
@@ -806,6 +809,51 @@ class TestDVISolver(unittest.TestCase):
 
                 self.assertGreater(float(np.sum(impulses[:, 2])), 0.0)
                 self.assertLess(float(np.max(np.linalg.norm(impulses[:, :2], axis=1))), 1.0e-6)
+
+    def test_03ia_dvi_decays_tangential_but_not_normal_warmstarts(self):
+        """Decay tangential self-stress while fully retaining normal warmstarts."""
+        model, problem, setup = self._make_box_on_plane_setup()
+        contact_count = int(setup.contacts.model_active_contacts.numpy()[0])
+        reactions = setup.contacts.reaction.numpy()
+        reactions[:contact_count] = np.array([2.0, -4.0, 3.0], dtype=np.float32)
+        setup.contacts.reaction.assign(reactions)
+
+        solver = DVISolver(
+            model=model,
+            data=setup.data,
+            limits=setup.limits,
+            contacts=setup.contacts,
+            config=kamino_config.DVISolverConfig(
+                max_alternating_iterations=1,
+                inequality_sweeps_per_iteration=1,
+                tangential_warmstart_scale=0.5,
+            ),
+            warmstart=WarmStartMode.CONTAINERS,
+        )
+        solver.warmstart(
+            problem=problem,
+            model=model,
+            data=setup.data,
+            limits=setup.limits,
+            contacts=setup.contacts,
+        )
+
+        scaled_reactions = setup.contacts.reaction.numpy()[:contact_count]
+        np.testing.assert_allclose(
+            scaled_reactions[:, :2],
+            np.tile(
+                np.array([[1.0, -2.0]], dtype=np.float32),
+                (contact_count, 1),
+            ),
+            atol=0.0,
+            rtol=0.0,
+        )
+        np.testing.assert_allclose(
+            scaled_reactions[:, 2],
+            np.full(contact_count, 3.0, dtype=np.float32),
+            atol=0.0,
+            rtol=0.0,
+        )
 
     def test_03j_dvi_omega_scales_projected_updates_without_moving_the_solution(self):
         """Relax projected updates by `omega` while preserving the fixed point.
@@ -1690,7 +1738,25 @@ class TestDVISolver(unittest.TestCase):
                         jacobians=jacobians,
                     ),
                 )
-                self.assertLess(float(low_budget_solver.data.status.numpy()[0]["r_d"]), 3.5e-4)
+                low_budget_dual_residual = float(low_budget_solver.data.status.numpy()[0]["r_d"])
+                self.assertLess(low_budget_dual_residual, 3.5e-4)
+
+                default_solver = _solve_dvi(
+                    model,
+                    problem,
+                    config=kamino_config.DVISolverConfig(
+                        tolerance=0.0,
+                        regularization=1.0e-6,
+                    ),
+                    setup=SimpleNamespace(
+                        data=data,
+                        limits=limits,
+                        contacts=detector.contacts,
+                        jacobians=jacobians,
+                    ),
+                )
+                default_dual_residual = float(default_solver.data.status.numpy()[0]["r_d"])
+                self.assertLess(default_dual_residual, 0.6 * low_budget_dual_residual)
 
                 solver = _solve_dvi(
                     model,
