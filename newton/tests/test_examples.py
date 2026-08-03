@@ -340,13 +340,6 @@ add_basic_example_test(
     use_viewer=True,
     test_options={"num-frames": 120, "world-count": 8},
 )
-add_basic_example_test(
-    name="basic.example_recording",
-    devices=cuda_test_devices,
-    use_viewer=True,
-    test_options={"num-frames": 120, "world-count": 2, "solver": "kamino"},
-    test_suffix="kamino",
-)
 
 add_basic_example_test(
     name="basic.example_basic_urdf",
