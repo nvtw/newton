@@ -29,11 +29,11 @@ class Example:
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 10
+        self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
+        self.sim_substeps = 5 if self.solver_type == "kamino" else 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.world_count = args.world_count
-        self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
 
         self.viewer = viewer
 
@@ -107,6 +107,8 @@ class Example:
             solver_config.integrator = "moreau"
             solver_config.dvi.bilateral_solver_type = "LLTBRCM"
             solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
+            solver_config.dvi.max_alternating_iterations = 8
+            solver_config.dvi.bilateral_solve_interval = 2
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.update_step_interval = 1
