@@ -352,7 +352,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.max_alternating_iterations, 32)
         self.assertEqual(config.dvi.inequality_sweeps_per_iteration, 2)
         self.assertEqual(config.dvi.bilateral_solve_interval, 1)
-        self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position")
+        self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position_with_tangent_net_force")
         self.assertFalse(config.dynamics.preconditioning)
 
         sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
@@ -386,6 +386,7 @@ class TestDVISolver(unittest.TestCase):
             "key_and_position",
             "geom_pair_net_force",
             "key_and_position_with_net_force_backup",
+            "key_and_position_with_tangent_net_force",
         ):
             self.assertEqual(
                 kamino_config.DVISolverConfig(contact_warmstart_method=method).contact_warmstart_method, method
@@ -900,7 +901,7 @@ class TestDVISolver(unittest.TestCase):
                     applied_force * dt,
                     delta=1.0e-6,
                 )
-                self.assertLess(abs(front_tangent - back_tangent), 1.0e-3)
+                self.assertLess(abs(front_tangent - back_tangent), 1.0e-4)
                 self.assertLess(abs(float(state_0.body_qd.numpy()[body, 0])), 1.0e-6)
 
     def test_03ia_dvi_decays_tangential_but_not_normal_warmstarts(self):
