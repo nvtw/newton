@@ -226,6 +226,7 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             state.inequality_ids_by_color,
             state.inequality_color_starts,
             state.inequality_group_starts,
+            state.inequality_tangent_cross,
             block_iteration,
             path.data.config,
             path.body_space,

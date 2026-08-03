@@ -781,6 +781,7 @@ class TestDVISolver(unittest.TestCase):
                     int32_array([0]),  # inequality_ids_by_color
                     int32_array([0, 1]),  # inequality_color_starts
                     int32_array([0, 1]),  # inequality_group_starts
+                    float_array([0.0]),  # inequality_tangent_cross
                     -1,  # block_iteration
                     config,
                     wp.zeros(6, dtype=wp.float32, device=self.device),  # body_space

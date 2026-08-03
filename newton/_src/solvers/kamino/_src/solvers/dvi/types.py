@@ -105,6 +105,7 @@ class DVIState:
         self.inequality_ids_by_color: wp.array[int32] | None = None
         self.inequality_color_starts: wp.array[int32] | None = None
         self.inequality_group_starts: wp.array[int32] | None = None
+        self.inequality_tangent_cross: wp.array[float32] | None = None
         if size is not None:
             self.finalize(size)
 
@@ -127,6 +128,7 @@ class DVIState:
         self.inequality_ids_by_color = wp.full(max(1, size.sum_of_max_unilaterals), -1, dtype=int32)
         self.inequality_color_starts = wp.zeros(max(1, size.sum_of_max_unilaterals + size.num_worlds), dtype=int32)
         self.inequality_group_starts = wp.zeros(max(1, size.sum_of_max_unilaterals + size.num_worlds), dtype=int32)
+        self.inequality_tangent_cross = wp.zeros(max(1, size.sum_of_max_unilaterals), dtype=float32)
 
     def reset(self):
         """Reset scratch arrays to zero."""
@@ -147,6 +149,7 @@ class DVIState:
         self.inequality_ids_by_color.fill_(-1)
         self.inequality_color_starts.zero_()
         self.inequality_group_starts.zero_()
+        self.inequality_tangent_cross.zero_()
 
 
 class DVIData:

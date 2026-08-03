@@ -371,6 +371,7 @@ def _solve_dvi_sparse_inequalities_pgs(
     inequality_ids_by_color: wp.array[int32],
     inequality_color_starts: wp.array[int32],
     inequality_group_starts: wp.array[int32],
+    inequality_tangent_cross: wp.array[float32],
     block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
     body_space: wp.array[float32],
@@ -500,26 +501,39 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     block_count = int32(6)
 
                                 contact_value = vec3f(0.0)
-                                for component in range(3):
-                                    if (phase == int32(0) and component == int32(2)) or (
-                                        phase == int32(1) and component < int32(2)
-                                    ):
-                                        contact_value[component] = (
-                                            eta[row_start + row + component] * solution_lambdas[vec_idx + component]
-                                        )
-                                for local_block in range(block_count):
-                                    component = local_block % int32(3)
-                                    if (phase == int32(0) and component == int32(2)) or (
-                                        phase == int32(1) and component < int32(2)
-                                    ):
+                                if phase == int32(0):
+                                    contact_value.z = (
+                                        eta[row_start + row + int32(2)] * solution_lambdas[vec_idx + int32(2)]
+                                    )
+                                    local_block = int32(2)
+                                    while local_block < block_count:
                                         nzb_idx = nzb_offset + local_block
-                                        block = bsm_nzb_values[nzb_idx]
+                                        block_n = bsm_nzb_values[nzb_idx]
                                         x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
+                                        body_values = local_body_0
+                                        if x_idx_base == local_x_idx_1:
+                                            body_values = local_body_1
                                         for j in range(6):
-                                            body_value = local_body_0[j]
-                                            if x_idx_base == local_x_idx_1:
-                                                body_value = local_body_1[j]
-                                            contact_value[component] += block[j] * body_value
+                                            contact_value.z += block_n[j] * body_values[j]
+                                        local_block += int32(3)
+                                else:
+                                    contact_value.x = eta[row_start + row] * solution_lambdas[vec_idx]
+                                    contact_value.y = (
+                                        eta[row_start + row + int32(1)] * solution_lambdas[vec_idx + int32(1)]
+                                    )
+                                    local_block = int32(0)
+                                    while local_block < block_count:
+                                        nzb_idx = nzb_offset + local_block
+                                        block_t0 = bsm_nzb_values[nzb_idx]
+                                        block_t1 = bsm_nzb_values[nzb_idx + int32(1)]
+                                        x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
+                                        body_values = local_body_0
+                                        if x_idx_base == local_x_idx_1:
+                                            body_values = local_body_1
+                                        for j in range(6):
+                                            contact_value.x += block_t0[j] * body_values[j]
+                                            contact_value.y += block_t1[j] * body_values[j]
+                                        local_block += int32(3)
 
                                 contact_delta_body = vec3f(0.0)
                                 if phase == int32(0):
@@ -546,16 +560,19 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     diagonal_t0 = wp.abs(problem_diag[vec_idx]) * P_t0 * P_t0
                                     diagonal_t1 = wp.abs(problem_diag[vec_idx + int32(1)]) * P_t1 * P_t1
                                     lambda_t_old = wp.vec2f(lambda_t0_old, lambda_t1_old)
-                                    off_diagonal = float32(0.0)
-                                    body_group = int32(0)
-                                    while body_group < block_count:
-                                        nzb_idx = nzb_offset + body_group
-                                        mass_weighted_t0 = bsm_nzb_values[nzb_idx]
-                                        jacobian_t1 = jacobian_nzb_values[nzb_idx + int32(1)]
-                                        for j in range(6):
-                                            off_diagonal += mass_weighted_t0[j] * jacobian_t1[j]
-                                        body_group += int32(3)
-                                    off_diagonal *= P_t1
+                                    off_diagonal = inequality_tangent_cross[uio + uid]
+                                    if _sweep == int32(0):
+                                        off_diagonal = float32(0.0)
+                                        body_group = int32(0)
+                                        while body_group < block_count:
+                                            nzb_idx = nzb_offset + body_group
+                                            mass_weighted_t0 = bsm_nzb_values[nzb_idx]
+                                            jacobian_t1 = jacobian_nzb_values[nzb_idx + int32(1)]
+                                            for j in range(6):
+                                                off_diagonal += mass_weighted_t0[j] * jacobian_t1[j]
+                                            body_group += int32(3)
+                                        off_diagonal *= P_t1
+                                        inequality_tangent_cross[uio + uid] = off_diagonal
                                     lambda_t_new = _project_contact_tangent_update(
                                         lambda_t_old,
                                         wp.vec2f(contact_value.x, contact_value.y),
@@ -574,19 +591,25 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 while body_group < block_count:
                                     nzb_idx = nzb_offset + body_group
                                     x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
-                                    row_0 = jacobian_nzb_values[nzb_idx]
-                                    row_1 = jacobian_nzb_values[nzb_idx + 1]
-                                    row_2 = jacobian_nzb_values[nzb_idx + 2]
-                                    for j in range(6):
-                                        body_delta = (
-                                            row_0[j] * contact_delta_body.x
-                                            + row_1[j] * contact_delta_body.y
-                                            + row_2[j] * contact_delta_body.z
-                                        )
-                                        if x_idx_base == local_x_idx_0:
-                                            local_body_0[j] += body_delta
-                                        else:
-                                            local_body_1[j] += body_delta
+                                    if phase == int32(0):
+                                        row_n = jacobian_nzb_values[nzb_idx + int32(2)]
+                                        for j in range(6):
+                                            body_delta = row_n[j] * contact_delta_body.z
+                                            if x_idx_base == local_x_idx_0:
+                                                local_body_0[j] += body_delta
+                                            else:
+                                                local_body_1[j] += body_delta
+                                    else:
+                                        row_t0 = jacobian_nzb_values[nzb_idx]
+                                        row_t1 = jacobian_nzb_values[nzb_idx + int32(1)]
+                                        for j in range(6):
+                                            body_delta = (
+                                                row_t0[j] * contact_delta_body.x + row_t1[j] * contact_delta_body.y
+                                            )
+                                            if x_idx_base == local_x_idx_0:
+                                                local_body_0[j] += body_delta
+                                            else:
+                                                local_body_1[j] += body_delta
                                     body_group += int32(3)
                         color_slot += color_step
                     if local_x_idx_0 >= int32(0):
