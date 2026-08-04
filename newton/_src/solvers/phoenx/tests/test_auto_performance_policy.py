@@ -3,6 +3,7 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import warp as wp
 
@@ -14,6 +15,7 @@ from newton._src.solvers.phoenx.solver import (
     _estimate_contact_column_max_phoenx,
     _resolve_auto_step_layout,
 )
+from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
@@ -74,6 +76,32 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         )
         MultiWorldDispatcher(world).solve(wp.float32(1.0))
         self.assertEqual(events[:4], ["factor", "prepare", ("solve", False), ("bounds", False)])
+
+    def test_direct_contact_sweeps_share_one_launch(self) -> None:
+        """Keep sequential direct-contact iterations inside one mechanism launch."""
+        response = SimpleNamespace(
+            active_mechanism=SimpleNamespace(size=7),
+            data=object(),
+            compute=lambda _contacts: None,
+        )
+        schedule = SimpleNamespace(columns=object(), section_end=object())
+        world = SimpleNamespace(
+            _contact_input_active_this_step=True,
+            _direct_contact_response=response,
+            _direct_contact_schedule=schedule,
+            _contact_container=object(),
+            _contact_cols=object(),
+            bodies=object(),
+            solver_iterations=3,
+            velocity_iterations=1,
+            substep_dt=0.01,
+            sor_boost=1.0,
+            device=wp.get_preferred_device(),
+        )
+        with patch.object(wp, "launch_tiled") as launch:
+            PhoenXWorld._solve_direct_contacts(world, use_bias=True, refresh_mobility=True)
+        launch.assert_called_once()
+        self.assertEqual(int(launch.call_args.kwargs["inputs"][-2]), 3)
 
     def test_explicit_overrides_are_preserved(self):
         self.assertEqual(self._resolve(step_layout="multi_world"), "multi_world")

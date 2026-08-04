@@ -175,6 +175,27 @@ cliff at 39.259 versus 39.515 ms for eight items. Dense 16/32-panel residual
 and Gram checks, direct-contact coupling, DR Legs shock and walking, and the
 1,000:1 pendulum period regression pass.
 
+
+Direct contact bias sweeps now execute their unchanged sequential iterations
+inside one mechanism-owning block launch. This preserves the mechanism-local
+Gauss--Seidel order and iteration count while avoiding a launch boundary and
+reloading block state between the usual two bias sweeps. On 2,048-world DR
+Legs, the seven-bracket median fell from 10.328 to 10.249 ms/frame (0.8%); the
+independent 2,000-world full-coordinate humanoid fell from 4.506 to 4.461 ms
+(1.0%). An 80-frame, 64-world matched rollout differed by at most 0.152 mm in
+position, 0.00054 in quaternion components, 0.00373 m/s linear velocity, and
+0.0699 rad/s angular velocity. Direct-contact coupling, captured shock, and
+walking quality gates retain their physical thresholds.
+
+A compact-suffix-aware resident grid was revisited after four-item grouping.
+Capping at 4,096 blocks improved DR Legs to 10.227 ms, but regressed the
+independent humanoid to 4.535 ms, while a 3,008-block grid regressed DR Legs to
+10.746 ms; it was removed. Keeping four row accumulators per lane in registers
+regressed DR Legs to 10.496 ms from occupancy pressure. Precomputing a compact
+body/wrench-side descriptor for every direct matrix entry passed redundant and
+extreme-mass tests but regressed to 10.398 ms because its extra metadata stream
+cost more than cached endpoint tests. These experiments were removed.
+
 Direct-system host setup now gathers and normalizes common axial joint axes in
 bulk, constructs implicit-drive masks once, and vectorizes scalar axial dynamic
 row ownership. With a warm kernel cache, the 20,000-world full-coordinate

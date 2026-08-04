@@ -3975,7 +3975,7 @@ class PhoenXWorld:
         if refresh_mobility:
             response.compute(self._contact_container)
         iterations = self.solver_iterations if use_bias else self.velocity_iterations
-        for _ in range(iterations):
+        if iterations > 0:
             wp.launch_tiled(
                 iterate_direct_contact_runs_kernel,
                 dim=response.active_mechanism.size,
@@ -3990,6 +3990,7 @@ class PhoenXWorld:
                     wp.float32(self.sor_boost),
                     schedule.columns,
                     schedule.section_end,
+                    wp.int32(iterations),
                     wp.bool(use_bias),
                 ],
                 device=self.device,
