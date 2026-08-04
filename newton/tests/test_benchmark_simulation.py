@@ -221,6 +221,27 @@ class TestSimulationBenchmarks(unittest.TestCase):
         self.assertIsNotNone(workload.graph)
         self.assertFalse(workload._capturing_graph)
 
+    def test_kamino_contact_capacity_scales_with_world_count(self):
+        """Scale the model-wide Kamino contact cap across replicated worlds."""
+        settings = SimpleNamespace(
+            collision_detector=SimpleNamespace(max_contacts=1000),
+            solver=SimpleNamespace(collision_detector=None, dynamics=SimpleNamespace(linear_solver_type=None)),
+        )
+        model = SimpleNamespace(world_count=4096)
+
+        with (
+            patch(
+                "newton._src.solvers.kamino.examples.rl.simulation.RigidBodySim.default_settings",
+                return_value=settings,
+            ),
+            patch("benchmark_kamino.newton.solvers.SolverKamino", return_value=object()) as solver_kamino,
+        ):
+            solver = DRLegsBenchmarkWorkload.create_solver(model, sim_dt=0.001)
+
+        self.assertIs(solver, solver_kamino.return_value)
+        self.assertEqual(settings.collision_detector.max_contacts, 4_096_000)
+        self.assertIs(settings.solver.collision_detector, settings.collision_detector)
+
     def test_aws_benchmark_comparison_gates_only_runtime_metrics(self):
         """Gate PR comparisons on runtime while retaining dashboard metrics."""
         workflow_path = BENCHMARK_DIR.parents[1] / ".github" / "workflows" / "aws_gpu_benchmarks.yml"

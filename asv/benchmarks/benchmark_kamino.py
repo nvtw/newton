@@ -524,6 +524,9 @@ class DRLegsBenchmarkWorkload:
 
         settings = RigidBodySim.default_settings(sim_dt)
         settings.solver.collision_detector = settings.collision_detector
+        # The detector's default contact limit is model-wide, so scale it to preserve
+        # the geometry-derived per-world capacity when the robot is replicated.
+        settings.collision_detector.max_contacts *= model.world_count
         # Pin the linear solver so a change to default_settings cannot
         # silently switch what this benchmark measures.
         settings.solver.dynamics.linear_solver_type = "LLTBRCM"
