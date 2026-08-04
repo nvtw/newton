@@ -79,6 +79,10 @@ ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 # Newton examples).
 GRID_DIMS_DEFAULT: tuple[int, int] = (80, 80)
 
+# Build each nut/bolt pair in its own Newton/PhoenX world. Set to
+# ``True`` to use the multi-world layout by default.
+MULTI_SCENE_DEFAULT: bool = False
+
 # Hard frame cap (see :meth:`Example.step`). The GL viewer's
 # ``is_running()`` doesn't honour ``--num-frames`` in interactive
 # runs, so we exit explicitly after this many simulation steps. Bump
@@ -211,7 +215,7 @@ class Example:
             float(getattr(args, "grid_spacing_x", GRID_SPACING_DEFAULT[0])),
             float(getattr(args, "grid_spacing_y", GRID_SPACING_DEFAULT[1])),
         )
-        self.multi_scene: bool = bool(getattr(args, "multi_scene", False))
+        self.multi_scene: bool = bool(getattr(args, "multi_scene", MULTI_SCENE_DEFAULT))
 
         self.viewer = viewer
         self.device = wp.get_device()
@@ -468,6 +472,9 @@ class Example:
             ],
             device=self.device,
         )
+        body_world = np.zeros(num_phoenx_bodies, dtype=np.int32)
+        body_world[1:] = np.maximum(self.model.body_world.numpy(), 0)
+        bodies.world_id.assign(body_world)
         self.bodies = bodies
 
         # ---- Joint-only constraint container ---------------------------
@@ -535,6 +542,7 @@ class Example:
             default_friction=SHAPE_CFG.mu,
             num_worlds=(nx * ny) if self.multi_scene else 1,
             step_layout=step_layout,
+            threads_per_world=8 if self.multi_scene else "auto",
             mass_splitting=False,
             enable_body_pair_grouping=True,
             partitioner_algorithm="greedy",
@@ -841,7 +849,7 @@ class Example:
         parser.add_argument(
             "--multi-scene",
             action=argparse.BooleanOptionalAction,
-            default=False,
+            default=MULTI_SCENE_DEFAULT,
             help=(
                 "Build the grid as one Newton world per pair "
                 "(``--multi-scene`` -- uses ``ModelBuilder.replicate``) "
