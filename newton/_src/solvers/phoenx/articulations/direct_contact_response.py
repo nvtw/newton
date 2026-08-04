@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem
 
 
+_CONTACT_RHS_BLOCK_DIM = 64
+
+
 @wp.struct
 class DirectContactResponseData:
     """Device view of packed contact-space Schur-complement work."""
@@ -113,8 +116,8 @@ def _build_contact_equality_rhs_kernel(
     contacts: ContactContainer,
 ):
     tid = wp.tid()
-    contact = tid // wp.int32(128)
-    lane = tid - contact * wp.int32(128)
+    contact = tid // wp.int32(_CONTACT_RHS_BLOCK_DIM)
+    lane = tid - contact * wp.int32(_CONTACT_RHS_BLOCK_DIM)
     mechanism = response.contact_mechanism[contact]
     if mechanism < wp.int32(0):
         return
@@ -128,7 +131,7 @@ def _build_contact_equality_rhs_kernel(
     row_begin = response.mechanism_row_start[mechanism]
     row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
     task_offset = contact * response.workspace_stride
-    for local_row in range(lane, row_end - row_begin, wp.int32(128)):
+    for local_row in range(lane, row_end - row_begin, wp.int32(_CONTACT_RHS_BLOCK_DIM)):
         offset = task_offset + local_row * wp.int32(4)
         response.rhs[offset] = wp.float32(0.0)
         response.rhs[offset + wp.int32(1)] = wp.float32(0.0)
@@ -140,7 +143,7 @@ def _build_contact_equality_rhs_kernel(
     for incidence in range(
         response.body_row_start[body0] + lane,
         response.body_row_start[body0 + wp.int32(1)],
-        wp.int32(128),
+        wp.int32(_CONTACT_RHS_BLOCK_DIM),
     ):
         row = response.body_rows[incidence]
         joint = response.row_joint[row]
@@ -172,7 +175,7 @@ def _build_contact_equality_rhs_kernel(
     for incidence in range(
         response.body_row_start[body1] + lane,
         response.body_row_start[body1 + wp.int32(1)],
-        wp.int32(128),
+        wp.int32(_CONTACT_RHS_BLOCK_DIM),
     ):
         row = response.body_rows[incidence]
         joint = response.row_joint[row]
@@ -373,8 +376,8 @@ class DirectContactResponse:
         capacity = self.contact_batch.item_capacity
         wp.launch(
             _build_contact_equality_rhs_kernel,
-            dim=capacity * 128,
-            block_dim=128,
+            dim=capacity * _CONTACT_RHS_BLOCK_DIM,
+            block_dim=_CONTACT_RHS_BLOCK_DIM,
             inputs=[self.data, self.direct.bodies, contacts],
             device=self.direct.model.device,
         )
