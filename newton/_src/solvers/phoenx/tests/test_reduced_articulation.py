@@ -3,6 +3,7 @@
 
 """CUDA graph tests for PhoenX reduced-coordinate articulations."""
 
+import inspect
 import unittest
 
 import numpy as np
@@ -10,6 +11,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.featherstone.kernels import transform_spatial_inertia
+from newton._src.solvers.phoenx.articulations import reduced as reduced_module
 from newton._src.solvers.phoenx.articulations.maximal_contact_gs import (
     refresh_maximal_contact_mobility_kernel,
 )
@@ -1059,6 +1061,12 @@ def _loop_closure_error(model, state, loop_joint):
 
 
 class TestReducedArticulation(unittest.TestCase):
+    def test_production_path_omits_dead_factor_advance_fusion(self) -> None:
+        """Keep abandoned reduced-coordinate fusion outside production PhoenX."""
+        factory = reduced_module._make_advance_reduced_articulations_warp_kernel
+        self.assertNotIn("fuse_factor", inspect.signature(factory).parameters)
+        self.assertNotIn("factor_and_advance", inspect.getsource(reduced_module))
+
     def test_implicit_pd_drive_and_armature_match_analytical_step(self) -> None:
         """Match every reduced drive mode over five implicit substeps."""
         device = wp.get_preferred_device()

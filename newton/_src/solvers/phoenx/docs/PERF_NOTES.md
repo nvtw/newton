@@ -95,6 +95,10 @@ current 1.16 module graph. The deprecated ``solver_flavor`` and
 until their public deprecation permits removal. Other production Jacobi
 references describe the intentional mass-splitting overflow schedule, not the
 removed experimental joint solver.
+The unused reduced-coordinate factor/advance fusion entry point was also
+removed: it had no caller, assumed a 32-lane topology despite the production
+8/16/32-lane selector, and was an abandoned experiment rather than a supported
+solver path.
 
 The largest retained full-coordinate gain builds contact equality RHS data
 from the existing eight-contact mechanism-safe task packing. At 20,000 worlds
