@@ -650,7 +650,8 @@ class FixedPatternGroupedRHSBatch:
         )
         task_storage_size = self.task_capacity * self.task_workspace_stride
         self.intermediate = wp.zeros(task_storage_size, dtype=wp.float32, device=device)
-        self.solution_permuted = wp.zeros_like(self.intermediate)
+        # Descending back substitution overwrites each forward tile only after its last read.
+        self.solution_permuted = self.intermediate
         self.solution = wp.zeros_like(self.rhs)
 
     def solve(self) -> None:

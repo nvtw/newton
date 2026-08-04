@@ -102,6 +102,10 @@ the raw contact capacity is 1.9M slots versus 255K grouped tasks. Packing reduce
 the RHS kernel from about 1.054 to 0.327 ms per refresh and frame time from
 34.57 to 31.69 ms. A general grouped-width sweep retained eight contacts per
 task: four regressed 32.01 to 32.43 ms and sixteen regressed to 35.77 ms.
+The grouped forward and backward triangular passes now share one global
+workspace: descending back substitution overwrites a forward tile only after
+its last read. Runtime stayed neutral, the 80-frame state check passed, and
+the 20,000-world ``solution_permuted`` allocation fell by 2.611 GB.
 Full-coordinate construction separately improved from
 36.28 to 16.27 s; it is not included in FPS.
 
