@@ -47,8 +47,9 @@ class Example(ExampleVBD):
             # The inherited frame loop supplies ten contact-refresh substeps.
             substeps=1,
             solver_iterations=self.sim_iterations,
-            velocity_iterations=1,
+            velocity_iterations=2,
             prepare_refresh_stride=1,
+            step_layout="single_world",
         )
 
     def test_final(self):

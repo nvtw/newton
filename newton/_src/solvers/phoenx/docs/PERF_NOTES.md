@@ -135,10 +135,16 @@ throughput improved from 34.73 to 52.02 FPS because the partial response build
 and solves also disappeared. Drift remained 0.118 mm after 600 frames, and a
 new example final-state check rejects regressions above 1 mm. One-mechanism-per-
 world humanoid and DR Legs fleets retain the Schur fast path; a 20,000-world
-humanoid census selected all 20,000 mechanisms. An explicit single-world
-scheduler reached 74.53 FPS but raised maximum displacement to 92.02 mm, so it
-remains rejected. Reducing reserved contacts from 220,000 to 20,000 was neutral
-at 52.29 FPS and is also not retained.
+humanoid census selected all 20,000 mechanisms. A single-world schedule with
+one coupling sweep reached 74.53 FPS but raised maximum displacement to
+92.02 mm, so that configuration remains rejected. Adding a second bias-free
+coupling sweep improved both speed and local slip versus the corrected
+multi-world schedule: 70.65 FPS, 0.237 mm center drift, and 62.88 mm maximum
+displacement after 120 frames. At 600 frames, center drift remained 0.266 mm
+and maximum displacement was 69.98 mm, versus 0.118 and 80.87 mm for the
+multi-world schedule. The retained example is about 2.03x faster than the
+original 34.73 FPS path. Reducing reserved contacts from 220,000 to 20,000 was
+neutral at 52.29 FPS and is not retained.
 
 Full-coordinate construction separately improved from
 36.28 to 16.27 s; it is not included in FPS.
