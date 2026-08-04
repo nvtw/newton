@@ -11,7 +11,10 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import FixedPatternPanelLLT
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
+    GROUPED_RHS_ITEMS_PER_TASK,
+    FixedPatternPanelLLT,
+)
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
@@ -456,7 +459,7 @@ class TestDirectJointTypes(unittest.TestCase):
         np.testing.assert_array_equal(panel.large_mechanism.numpy(), [2, 3])
         np.testing.assert_array_equal(panel.cooperative_mechanism.numpy(), [0, 1])
         self.assertTrue(panel._use_push_solve)
-        self.assertEqual(panel.narrow_mechanism.size, 0)
+        self.assertEqual(panel.cooperative_factor_mechanism.size, 0)
 
         rng = np.random.default_rng(1234)
         matrices = []
@@ -513,7 +516,9 @@ class TestDirectJointTypes(unittest.TestCase):
         )
         batch = panel.create_grouped_rhs_batch(item_capacity=8, task_capacity=3)
         task_mechanisms = np.asarray((2, 0, 1), dtype=np.int32)
-        task_items = np.asarray((0, 1, -1, -1, 2, -1, -1, -1, 3, 4, 5, 6), dtype=np.int32)
+        task_items = np.full(3 * GROUPED_RHS_ITEMS_PER_TASK, -1, dtype=np.int32)
+        for task, items in enumerate(((0, 1), (2,), (3, 4, 5, 6))):
+            task_items[task * GROUPED_RHS_ITEMS_PER_TASK : task * GROUPED_RHS_ITEMS_PER_TASK + len(items)] = items
         batch.task_mechanism.assign(task_mechanisms)
         batch.task_item.assign(task_items)
 
@@ -536,8 +541,8 @@ class TestDirectJointTypes(unittest.TestCase):
         rhs_storage = np.zeros(batch.rhs.size, dtype=np.float32)
         expected_rhs = {}
         for task, mechanism in enumerate(task_mechanisms):
-            for slot in range(4):
-                item = int(task_items[4 * task + slot])
+            for slot in range(GROUPED_RHS_ITEMS_PER_TASK):
+                item = int(task_items[GROUPED_RHS_ITEMS_PER_TASK * task + slot])
                 if item < 0:
                     continue
                 rhs = rng.normal(size=(dimensions[mechanism], 3)).astype(np.float32)
@@ -654,8 +659,8 @@ class TestDirectJointTypes(unittest.TestCase):
         np.testing.assert_array_equal(second_solution, first_solution)
         np.testing.assert_allclose(matrix @ second_solution, rhs_np, rtol=2.0e-4, atol=2.0e-4)
 
-    def test_many_mechanisms_skip_single_system_parallel_scratch(self) -> None:
-        """Avoid allocating single-mechanism scratch for a mechanism fleet."""
+    def test_many_mechanisms_use_cooperative_factorization(self) -> None:
+        """Factor a mechanism fleet without global queue scratch."""
         device = wp.get_preferred_device()
         mechanism_count = max(1, int(device.sm_count))
         dimension = 48
@@ -676,7 +681,31 @@ class TestDirectJointTypes(unittest.TestCase):
         self.assertFalse(panel._use_push_solve)
         self.assertIsNone(panel._push_forward_schedule)
         self.assertIsNone(panel._push_backward_schedule)
-        self.assertIsNotNone(panel._persistent_schedule)
+        self.assertEqual(panel.cooperative_factor_mechanism.size, mechanism_count)
+        self.assertIsNone(panel._persistent_schedule)
+
+        storage = np.zeros(panel.matrix.size, dtype=np.float32)
+        diagonal = np.empty(mechanism_count * dimension, dtype=np.float32)
+        for row, column, address in zip(
+            panel.symbolic.matrix_row,
+            panel.symbolic.matrix_column,
+            panel.symbolic.matrix_storage,
+            strict=True,
+        ):
+            if row == column:
+                value = 2.0 + 0.01 * (row % dimension)
+                storage[address] = value
+                diagonal[row] = value
+        rhs = wp.ones(mechanism_count * dimension, dtype=wp.float32, device=device)
+        solution = wp.zeros_like(rhs)
+        panel.matrix.assign(storage)
+
+        with wp.ScopedCapture(device) as capture:
+            panel.compute()
+            panel.solve(rhs, solution)
+        wp.capture_launch(capture.graph)
+
+        np.testing.assert_allclose(solution.numpy(), 1.0 / diagonal, rtol=2.0e-5, atol=2.0e-5)
 
     def test_free_joint_emits_no_direct_or_pgs_rows(self) -> None:
         """Leave a free joint outside both direct and PGS constraint paths."""

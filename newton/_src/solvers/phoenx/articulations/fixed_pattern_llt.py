@@ -20,7 +20,7 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_schedule import 
 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
-GROUPED_RHS_ITEMS_PER_TASK = 4
+GROUPED_RHS_ITEMS_PER_TASK = 8
 
 _GET_ARRAY_PTR = """return (uint64_t)arr.data;"""
 
@@ -190,12 +190,12 @@ def build_fixed_panel_symbolic(
     )
 
 
-def _make_narrow_factor_kernel(block_size: int):
-    """Create a cooperative factor kernel for at-most-one-panel columns."""
+def _make_cooperative_factor_kernel(block_size: int):
+    """Create a one-block-per-mechanism factor kernel."""
     tile_elements = block_size * block_size
 
     @wp.kernel(enable_backward=False)
-    def factor_narrow(
+    def factor_cooperative(
         mechanisms: wp.array[wp.int32],
         dimensions: wp.array[wp.int32],
         panel_table_offset: wp.array[wp.int32],
@@ -260,17 +260,17 @@ def _make_narrow_factor_kernel(block_size: int):
 
             panel_begin = backward_start[tile_slot]
             panel_end = backward_start[tile_slot + wp.int32(1)]
-            if panel_begin < panel_end:
-                tile_i = backward_tile[panel_begin]
-                panel_id = backward_panel[panel_begin]
+            for panel_entry in range(panel_begin, panel_end):
+                tile_i = backward_tile[panel_entry]
+                panel_id = backward_panel[panel_entry]
                 i = tile_i * block_size
                 if i + block_size > dimension:
                     factor_partial_panel_row(
                         dimension - i,
                         panel_id,
                         diagonal_panel,
-                        offdiag_update_start[tile_slot],
-                        offdiag_update_start[tile_slot + wp.int32(1)],
+                        offdiag_update_start[panel_entry],
+                        offdiag_update_start[panel_entry + wp.int32(1)],
                         offdiag_update_left,
                         offdiag_update_right,
                         matrix,
@@ -291,7 +291,10 @@ def _make_narrow_factor_kernel(block_size: int):
                     )
                     panel = wp.tile_load(panel_matrix, shape=(block_size, block_size), storage="shared")
                     diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size), storage="shared")
-                    for update in range(offdiag_update_start[tile_slot], offdiag_update_start[tile_slot + wp.int32(1)]):
+                    for update in range(
+                        offdiag_update_start[panel_entry],
+                        offdiag_update_start[panel_entry + wp.int32(1)],
+                    ):
                         left_panel = offdiag_update_left[update]
                         right_panel = offdiag_update_right[update]
                         left_matrix = wp.array(
@@ -317,7 +320,7 @@ def _make_narrow_factor_kernel(block_size: int):
                     wp.tile_store(panel_factor, wp.tile_transpose(transposed))
                 _block_sync()
 
-    return factor_narrow
+    return factor_cooperative
 
 
 def _make_cooperative_solve_kernel(block_size: int):
@@ -631,7 +634,7 @@ class FixedPatternGroupedRHSBatch:
         self.task_capacity = max(1, int(task_capacity))
         max_padded_dimension = max(panel.symbolic.tile_counts) * panel.block_size
         self.item_workspace_stride = max_padded_dimension * 4
-        self.task_workspace_stride = max_padded_dimension * 16
+        self.task_workspace_stride = max_padded_dimension * 4 * GROUPED_RHS_ITEMS_PER_TASK
         device = panel.device
         self.task_mechanism = wp.full(self.task_capacity, -1, dtype=wp.int32, device=device)
         self.task_item = wp.full(
@@ -792,17 +795,23 @@ class FixedPatternPanelLLT:
             for tile_k in range(table.shape[0]):
                 panel_rows = [tile_i for tile_i in range(tile_k + 1, table.shape[0]) if table[tile_i, tile_k] >= 0]
                 all_narrow = all_narrow and len(panel_rows) <= 1
-                if panel_rows:
-                    tile_i = panel_rows[0]
+                for tile_i in panel_rows:
                     for tile_j in range(tile_k):
                         left_panel = int(table[tile_i, tile_j])
                         right_panel = int(table[tile_k, tile_j])
                         if left_panel >= 0 and right_panel >= 0:
                             offdiag_update_left.append(left_panel)
                             offdiag_update_right.append(right_panel)
-                offdiag_update_start.append(len(offdiag_update_left))
-        narrow_mechanisms = np.arange(len(dimensions), dtype=np.int32) if all_narrow else np.empty(0, dtype=np.int32)
-        self.narrow_mechanism = wp.array(narrow_mechanisms, dtype=wp.int32, device=self.device)
+                    offdiag_update_start.append(len(offdiag_update_left))
+        use_cooperative_factor = all_narrow or len(dimensions) >= self.device.sm_count
+        cooperative_factor_mechanisms = (
+            np.arange(len(dimensions), dtype=np.int32) if use_cooperative_factor else np.empty(0, dtype=np.int32)
+        )
+        self.cooperative_factor_mechanism = wp.array(
+            cooperative_factor_mechanisms,
+            dtype=wp.int32,
+            device=self.device,
+        )
         self.offdiag_update_start = wp.array(offdiag_update_start, dtype=wp.int32, device=self.device)
         self.offdiag_update_left = wp.array(offdiag_update_left, dtype=wp.int32, device=self.device)
         self.offdiag_update_right = wp.array(offdiag_update_right, dtype=wp.int32, device=self.device)
@@ -824,7 +833,7 @@ class FixedPatternPanelLLT:
                 self._product_factor_schedule = product_schedule
 
         self._persistent_schedule = None
-        if not self._use_product_factor:
+        if not self._use_product_factor and not use_cooperative_factor:
             self._persistent_schedule = PersistentFactorSchedule(
                 panel_tables,
                 dimensions,
@@ -866,7 +875,7 @@ class FixedPatternPanelLLT:
             small_mechanisms if self._use_push_solve else np.arange(len(dimensions), dtype=np.int32)
         )
         self.cooperative_mechanism = wp.array(cooperative_mechanisms, dtype=wp.int32, device=self.device)
-        self._factor_narrow = _make_narrow_factor_kernel(block_size)
+        self._factor_cooperative = _make_cooperative_factor_kernel(block_size)
         self._solve_cooperative = _make_cooperative_solve_kernel(block_size)
         self._solve_grouped_rhs_batch = _make_grouped_rhs_batch_solve_kernel(block_size)
         self._cooperative_solve_block_dim = 128 if block_size == 32 else 64
@@ -882,13 +891,13 @@ class FixedPatternPanelLLT:
 
     def compute(self) -> None:
         """Factor narrow mechanisms cooperatively or use the ready queue."""
-        if self.narrow_mechanism.size > 0:
+        if self.cooperative_factor_mechanism.size > 0:
             wp.launch_tiled(
-                self._factor_narrow,
-                dim=self.narrow_mechanism.size,
+                self._factor_cooperative,
+                dim=self.cooperative_factor_mechanism.size,
                 block_dim=128,
                 inputs=[
-                    self.narrow_mechanism,
+                    self.cooperative_factor_mechanism,
                     self.dimension,
                     self.panel_table_offset,
                     self.tile_count,

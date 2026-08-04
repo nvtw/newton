@@ -3564,6 +3564,7 @@ class TestReducedArticulation(unittest.TestCase):
                 serial._reduced_articulation.system.use_warp_advance = False
                 serial._reduced_articulation.system.use_warp_kinematics = False
                 serial._reduced_articulation.system.use_warp_publish = False
+                warp._reduced_articulation.system.use_warp_factor = True
                 self.assertEqual(warp._reduced_articulation.system.advance_tile_width, expected_tile_width)
                 self.assertEqual(warp._reduced_articulation.system.use_warp_advance, child_count <= 31)
                 self.assertTrue(warp._reduced_articulation.system.use_warp_publish)

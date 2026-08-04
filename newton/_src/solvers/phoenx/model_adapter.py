@@ -11,6 +11,7 @@ slot 0 is the static world anchor, so Newton body ``i`` maps to PhoenX slot
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 import numpy as np
@@ -62,6 +63,23 @@ def _quat_rotate_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     vy = v[1] + qw * ty + (qz * tx - qx * tz)
     vz = v[2] + qw * tz + (qx * ty - qy * tx)
     return np.asarray([vx, vy, vz], dtype=np.float32)
+
+
+def _cross3_np(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Return the cross product of two host-side 3-vectors."""
+    return np.asarray(
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _norm3_np(v: np.ndarray) -> float:
+    """Return the Euclidean norm of a host-side 3-vector."""
+    return math.sqrt(float(v[0]) ** 2 + float(v[1]) ** 2 + float(v[2]) ** 2)
 
 
 def _transform_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -198,7 +216,7 @@ def _append_d6_angular_limit(
         if len(joint_axis) and qd < len(joint_axis)
         else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
     )
-    axis_len = float(np.linalg.norm(axis_local))
+    axis_len = _norm3_np(axis_local)
     if axis_len <= 1.0e-12:
         return d6_limit_count
     axis_world = _quat_rotate_np(joint_world_xform[3:], axis_local / axis_len)
@@ -646,7 +664,7 @@ def build_joint_init_arrays(
             else:  # pragma: no cover
                 X_w_c = np.asarray(joint_X_c[j], dtype=np.float32)
             anchor2_world = _transform_translation(X_w_c)
-            if float(np.linalg.norm(anchor2_world - anchor1_world)) < 1e-6:
+            if _norm3_np(anchor2_world - anchor1_world) < 1e-6:
                 axis_world = _quat_rotate_np(X_w_p[3:], np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
                 anchor2_world = anchor1_world + axis_world
 
@@ -686,14 +704,14 @@ def build_joint_init_arrays(
             lin_free = [i for i, locked in enumerate(locked_lin) if not locked]
             ang_free = [i for i, locked in enumerate(locked_ang) if not locked]
             angular_axis = np.asarray(joint_axis[qd_start + n_lin + ang_free[0]], dtype=np.float32)
-            angular_length = float(np.linalg.norm(angular_axis))
+            angular_length = _norm3_np(angular_axis)
             if angular_length <= 1.0e-12:
                 raise NotImplementedError(f"D6 joint {j} has a zero-length free angular axis.")
             angular_axis /= angular_length
 
             if d6_mode_tag == "CYLINDRICAL":
                 linear_axis = np.asarray(joint_axis[qd_start + lin_free[0]], dtype=np.float32)
-                linear_length = float(np.linalg.norm(linear_axis))
+                linear_length = _norm3_np(linear_axis)
                 if linear_length <= 1.0e-12:
                     raise NotImplementedError(f"D6 joint {j} has a zero-length free linear axis.")
                 linear_axis /= linear_length
@@ -707,7 +725,7 @@ def build_joint_init_arrays(
                 locked_linear = [i for i, locked in enumerate(locked_lin) if locked]
                 if locked_linear:
                     linear_axis = np.asarray(joint_axis[qd_start + locked_linear[0]], dtype=np.float32)
-                    linear_length = float(np.linalg.norm(linear_axis))
+                    linear_length = _norm3_np(linear_axis)
                     if linear_length <= 1.0e-12:
                         raise NotImplementedError(f"D6 joint {j} has a zero-length locked plane-normal axis.")
                     linear_axis /= linear_length
@@ -720,7 +738,7 @@ def build_joint_init_arrays(
                 else:
                     for linear_index in lin_free:
                         linear_axis = np.asarray(joint_axis[qd_start + linear_index], dtype=np.float32)
-                        linear_length = float(np.linalg.norm(linear_axis))
+                        linear_length = _norm3_np(linear_axis)
                         if (
                             linear_length <= 1.0e-12
                             or abs(float(np.dot(linear_axis / linear_length, axis_local))) > 1.0e-4
@@ -750,8 +768,8 @@ def build_joint_init_arrays(
             else:
                 axis_a = np.asarray(joint_axis[qd_start], dtype=np.float32)
                 axis_b = np.asarray(joint_axis[qd_start + 1], dtype=np.float32)
-                axis_local = np.cross(axis_a, axis_b).astype(np.float32)
-            axis_len = float(np.linalg.norm(axis_local))
+                axis_local = _cross3_np(axis_a, axis_b)
+            axis_len = _norm3_np(axis_local)
             if axis_len <= 1.0e-12:
                 raise NotImplementedError(
                     f"D6 joint {j} has two angular axes that cannot define a universal locked twist axis."
@@ -791,7 +809,7 @@ def build_joint_init_arrays(
                 if len(joint_axis) and effective_qd < len(joint_axis)
                 else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
             )
-            axis_len = float(np.linalg.norm(axis_local))
+            axis_len = _norm3_np(axis_local)
             if axis_len > 1e-12:
                 axis_local = axis_local / axis_len
             else:

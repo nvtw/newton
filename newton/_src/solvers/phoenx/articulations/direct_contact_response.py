@@ -12,6 +12,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.articulations.direct_equality import _row_wrench_for_body
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import GROUPED_RHS_ITEMS_PER_TASK
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync
 from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -128,32 +129,31 @@ def _build_contact_equality_rhs_kernel(
     row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
     task_offset = contact * response.workspace_stride
     for local_row in range(lane, row_end - row_begin, wp.int32(128)):
-        row = row_begin + local_row
+        offset = task_offset + local_row * wp.int32(4)
+        response.rhs[offset] = wp.float32(0.0)
+        response.rhs[offset + wp.int32(1)] = wp.float32(0.0)
+        response.rhs[offset + wp.int32(2)] = wp.float32(0.0)
+    _block_sync()
+
+    inverse_inertia0 = mat33_from_sym6(bodies.inverse_inertia_world[body0])
+    inverse_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[body1])
+    for incidence in range(
+        response.body_row_start[body0] + lane,
+        response.body_row_start[body0 + wp.int32(1)],
+        wp.int32(128),
+    ):
+        row = response.body_rows[incidence]
         joint = response.row_joint[row]
-        structural = response.joint_to_structural[joint]
-        row_local = response.row_local[row]
-        row_body0 = _row_wrench_for_body(
+        row_body = _row_wrench_for_body(
             body0,
             joint,
-            structural,
-            row_local,
+            response.joint_to_structural[joint],
+            response.row_local[row],
             response.joint_parent,
             response.joint_child,
             response.row_wrench0,
             response.row_wrench1,
         )
-        row_body1 = _row_wrench_for_body(
-            body1,
-            joint,
-            structural,
-            row_local,
-            response.joint_parent,
-            response.joint_child,
-            response.row_wrench0,
-            response.row_wrench1,
-        )
-        inverse_inertia0 = mat33_from_sym6(bodies.inverse_inertia_world[body0])
-        inverse_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[body1])
         for axis in range(3):
             direction = normal
             if axis == wp.int32(1):
@@ -161,19 +161,45 @@ def _build_contact_equality_rhs_kernel(
             elif axis == wp.int32(2):
                 direction = tangent1
             value = _contact_wrench_response_dot(
-                row_body0,
+                row_body,
                 -direction,
                 -wp.cross(r0, direction),
                 bodies.inverse_mass[body0],
                 inverse_inertia0,
-            ) + _contact_wrench_response_dot(
-                row_body1,
+            )
+            response.rhs[task_offset + (row - row_begin) * wp.int32(4) + axis] = response.row_scale[row] * value
+    _block_sync()
+    for incidence in range(
+        response.body_row_start[body1] + lane,
+        response.body_row_start[body1 + wp.int32(1)],
+        wp.int32(128),
+    ):
+        row = response.body_rows[incidence]
+        joint = response.row_joint[row]
+        row_body = _row_wrench_for_body(
+            body1,
+            joint,
+            response.joint_to_structural[joint],
+            response.row_local[row],
+            response.joint_parent,
+            response.joint_child,
+            response.row_wrench0,
+            response.row_wrench1,
+        )
+        for axis in range(3):
+            direction = normal
+            if axis == wp.int32(1):
+                direction = tangent0
+            elif axis == wp.int32(2):
+                direction = tangent1
+            value = _contact_wrench_response_dot(
+                row_body,
                 direction,
                 wp.cross(r1, direction),
                 bodies.inverse_mass[body1],
                 inverse_inertia1,
             )
-            response.rhs[task_offset + local_row * wp.int32(4) + axis] = response.row_scale[row] * value
+            response.rhs[task_offset + (row - row_begin) * wp.int32(4) + axis] += response.row_scale[row] * value
 
 
 @wp.kernel(enable_backward=False)
@@ -196,54 +222,44 @@ def _compute_contact_schur_diagonal_kernel(
     row_begin = response.mechanism_row_start[mechanism]
     row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
     task_offset = contact * response.workspace_stride
-    inverse = wp.mat33(0.0)
-    for axis0 in range(3):
-        direction00 = -normal
-        direction10 = normal
-        if axis0 == wp.int32(1):
-            direction00 = -tangent0
-            direction10 = tangent0
-        elif axis0 == wp.int32(2):
-            direction00 = -tangent1
-            direction10 = tangent1
-        for axis1 in range(3):
-            direction01 = -normal
-            direction11 = normal
-            if axis1 == wp.int32(1):
-                direction01 = -tangent0
-                direction11 = tangent0
-            elif axis1 == wp.int32(2):
-                direction01 = -tangent1
-                direction11 = tangent1
-            value = _unconstrained_pair_cross_mobility(
-                bodies,
-                body0,
-                r0,
-                direction00,
-                direction01,
-                body1,
-                r1,
-                direction10,
-                direction11,
-            )
-            for local_row in range(row_end - row_begin):
-                value -= (
-                    response.rhs[task_offset + local_row * wp.int32(4) + axis0]
-                    * response.solution[task_offset + local_row * wp.int32(4) + axis1]
-                )
-            inverse[axis0, axis1] = value
+    inverse00 = _unconstrained_pair_cross_mobility(bodies, body0, r0, -normal, -normal, body1, r1, normal, normal)
+    inverse01 = _unconstrained_pair_cross_mobility(bodies, body0, r0, -normal, -tangent0, body1, r1, normal, tangent0)
+    inverse02 = _unconstrained_pair_cross_mobility(bodies, body0, r0, -normal, -tangent1, body1, r1, normal, tangent1)
+    inverse11 = _unconstrained_pair_cross_mobility(
+        bodies, body0, r0, -tangent0, -tangent0, body1, r1, tangent0, tangent0
+    )
+    inverse12 = _unconstrained_pair_cross_mobility(
+        bodies, body0, r0, -tangent0, -tangent1, body1, r1, tangent0, tangent1
+    )
+    inverse22 = _unconstrained_pair_cross_mobility(
+        bodies, body0, r0, -tangent1, -tangent1, body1, r1, tangent1, tangent1
+    )
+    for local_row in range(row_end - row_begin):
+        offset = task_offset + local_row * wp.int32(4)
+        rhs0 = response.rhs[offset]
+        rhs1 = response.rhs[offset + wp.int32(1)]
+        rhs2 = response.rhs[offset + wp.int32(2)]
+        solution0 = response.solution[offset]
+        solution1 = response.solution[offset + wp.int32(1)]
+        solution2 = response.solution[offset + wp.int32(2)]
+        inverse00 -= rhs0 * solution0
+        inverse01 -= rhs0 * solution1
+        inverse02 -= rhs0 * solution2
+        inverse11 -= rhs1 * solution1
+        inverse12 -= rhs1 * solution2
+        inverse22 -= rhs2 * solution2
     response.mobility[0, contact] = wp.float32(0.0)
     response.mobility[1, contact] = wp.float32(0.0)
     response.mobility[2, contact] = wp.float32(0.0)
-    if inverse[0, 0] > wp.float32(1.0e-12):
-        response.mobility[0, contact] = wp.float32(1.0) / inverse[0, 0]
-    if inverse[1, 1] > wp.float32(1.0e-12):
-        response.mobility[1, contact] = wp.float32(1.0) / inverse[1, 1]
-    if inverse[2, 2] > wp.float32(1.0e-12):
-        response.mobility[2, contact] = wp.float32(1.0) / inverse[2, 2]
-    response.mobility[3, contact] = inverse[0, 1]
-    response.mobility[4, contact] = inverse[0, 2]
-    response.mobility[5, contact] = inverse[1, 2]
+    if inverse00 > wp.float32(1.0e-12):
+        response.mobility[0, contact] = wp.float32(1.0) / inverse00
+    if inverse11 > wp.float32(1.0e-12):
+        response.mobility[1, contact] = wp.float32(1.0) / inverse11
+    if inverse22 > wp.float32(1.0e-12):
+        response.mobility[2, contact] = wp.float32(1.0) / inverse22
+    response.mobility[3, contact] = inverse01
+    response.mobility[4, contact] = inverse02
+    response.mobility[5, contact] = inverse12
 
 
 class DirectContactResponse:

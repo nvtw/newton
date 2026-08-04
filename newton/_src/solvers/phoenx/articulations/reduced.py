@@ -958,7 +958,7 @@ def _factor_reduced_multidof_kernel(
     )
 
 
-def _make_factor_reduced_warp_kernel(single_dof_only: bool):
+def _make_factor_reduced_warp_kernel(single_dof_only: bool, tile_width: int = 32):
     """Build the reverse-depth articulated-body factorization kernel.
 
     The per-joint articulated-inertia reduction reduces one warp lane per joint
@@ -972,7 +972,10 @@ def _make_factor_reduced_warp_kernel(single_dof_only: bool):
     is an articulation root (depth 0), whose reduced inertia the depth walk never
     consumes.
     """
-    module = wp.get_module("reduced_factor_singledof" if single_dof_only else "reduced_factor")
+    module_name = "reduced_factor_singledof" if single_dof_only else "reduced_factor"
+    if tile_width != 32:
+        module_name += f"_{tile_width}"
+    module = wp.get_module(module_name)
 
     @wp.func
     def _factor_reduced_warp_device(
@@ -991,8 +994,11 @@ def _make_factor_reduced_warp_kernel(single_dof_only: bool):
         joint_u: wp.array[wp.spatial_vector],
         joint_d_inv: wp.array2d[wp.float32],
     ):
-        articulation = thread // wp.int32(32)
-        lane = thread - articulation * wp.int32(32)
+        articulation = thread // wp.int32(tile_width)
+        lane = thread - articulation * wp.int32(tile_width)
+        warp_lane = thread % wp.int32(32)
+        group_start = warp_lane - lane
+        group_mask = wp.uint32(wp.static((1 << tile_width) - 1)) << wp.uint32(group_start)
 
         for reverse_depth in range(max_depth + wp.int32(1)):
             depth = max_depth - reverse_depth
@@ -1056,8 +1062,8 @@ def _make_factor_reduced_warp_kernel(single_dof_only: bool):
                     # In single-DOF-only mode a multi-DOF joint leaves a defined
                     # (pre-reduction) entry here; its companion launch overwrites it.
                 reduced_inertia[child] = _pack_symmetric_mat66(inertia)
-                index += wp.int32(32)
-            _sync_reduced_warp()
+                index += wp.int32(tile_width)
+            _sync_reduced_group(group_mask)
 
     @wp.kernel(enable_backward=False, module=module, grid_stride=False)
     def _factor_reduced_warp_kernel(
@@ -1095,8 +1101,13 @@ def _make_factor_reduced_warp_kernel(single_dof_only: bool):
     return _factor_reduced_warp_kernel
 
 
-_factor_reduced_warp_kernel = _make_factor_reduced_warp_kernel(False)
-_factor_reduced_singledof_warp_kernel = _make_factor_reduced_warp_kernel(True)
+_FACTOR_REDUCED_WARP_KERNELS = {
+    (single_dof_only, tile_width): _make_factor_reduced_warp_kernel(single_dof_only, tile_width)
+    for single_dof_only in (False, True)
+    for tile_width in (8, 16, 32)
+}
+_factor_reduced_warp_kernel = _FACTOR_REDUCED_WARP_KERNELS[False, 32]
+_factor_reduced_singledof_warp_kernel = _FACTOR_REDUCED_WARP_KERNELS[True, 32]
 
 
 @wp.func
@@ -3944,12 +3955,13 @@ class ReducedArticulationSystem:
         if not factorize:
             return
         if self.use_warp_factor:
-            depth_walk_kernel = (
-                _factor_reduced_singledof_warp_kernel if self._use_factor_dof_split else _factor_reduced_warp_kernel
-            )
+            depth_walk_kernel = _FACTOR_REDUCED_WARP_KERNELS[
+                self._use_factor_dof_split,
+                self.advance_tile_width,
+            ]
             wp.launch(
                 depth_walk_kernel,
-                dim=int(self.model.articulation_count) * 32,
+                dim=int(self.model.articulation_count) * self.advance_tile_width,
                 block_dim=32,
                 inputs=[
                     wp.int32(self.advance_max_depth),

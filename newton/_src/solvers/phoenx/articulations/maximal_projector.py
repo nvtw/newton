@@ -661,17 +661,18 @@ def find_full_coordinate_revolute_trees(
             adjacency.setdefault(child, []).append(parent)
 
     components: list[set[int]] = []
-    unvisited = set(candidate_bodies)
-    while unvisited:
-        seed = min(unvisited)
+    visited: set[int] = set()
+    for seed in sorted(candidate_bodies):
+        if seed in visited:
+            continue
         component: set[int] = set()
         stack = [seed]
         while stack:
             body = stack.pop()
-            if body in component:
+            if body in visited:
                 continue
+            visited.add(body)
             component.add(body)
-            unvisited.discard(body)
             stack.extend(adjacency.get(body, ()))
         components.append(component)
 

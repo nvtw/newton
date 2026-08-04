@@ -3977,7 +3977,7 @@ class PhoenXWorld:
             wp.launch_tiled(
                 iterate_direct_contact_runs_kernel,
                 dim=response.active_mechanism.size,
-                block_dim=128,
+                block_dim=64,
                 inputs=[
                     response.active_mechanism,
                     response.data,
