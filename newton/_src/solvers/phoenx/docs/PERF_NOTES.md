@@ -128,6 +128,20 @@ gate and the rollout check, but one-thread-per-RHS measured 31.93 ms and a
 four-thread subgroup version measured 34.06 ms. Revisit only if Warp gains a
 correct optimized triangular solve for dense non-owning tile views.
 
+Later reduced-coordinate residency and launch-amortization probes were also
+removed. Topology-gated reuse of the existing resident relax-and-publish kernel
+passed contact-count and publication parity tests but measured 122.4 FPS median
+versus 124.4 FPS for the smaller retained refresh fusion. Mapping two contact
+rows per thread halved the builder grid but left its kernel unchanged at
+0.6282 ms versus 0.6283 ms and raised registers from 64 to 69. Folding factor
+initialization into the reverse-depth kernel reduced their combined cost only
+from 0.2388 to 0.2348 ms per substep, while first compilation grew to about
+99 s. Compile-time publication/contact flags improved the isolated kernels by
+about 0.077 ms per frame, but complete 20-warm/30-timed CUDA-event medians
+regressed from 8.067 to 8.185 ms; specializing only the iteration count measured
+8.145 ms. These results favor small producer-consumer fusion while keeping
+larger factor, solve, and publication phases separate.
+
 Fewer substeps did not establish a PhoenX wall-to-quality advantage. Both
 solvers remained finite at one, two, and four substeps over 10 s, but MJWarp at
 two substeps stayed closer to its own four-substep trajectory. A PhoenX contact
