@@ -11,6 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx import model_adapter
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     GROUPED_RHS_ITEM_WIDTH,
     GROUPED_RHS_ITEMS_PER_TASK,
@@ -258,6 +259,20 @@ def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX direct-joint tests require CUDA")
 class TestDirectJointTypes(unittest.TestCase):
+    def test_batched_transform_composition_matches_scalar(self) -> None:
+        """Match batched setup transforms to the scalar composition contract."""
+        rng = np.random.default_rng(20260804)
+        parent = rng.uniform(-1.0, 1.0, (257, 7)).astype(np.float32)
+        local = rng.uniform(-1.0, 1.0, (257, 7)).astype(np.float32)
+        parent[:, 3:] /= np.linalg.norm(parent[:, 3:], axis=1, keepdims=True)
+        local[:, 3:] /= np.linalg.norm(local[:, 3:], axis=1, keepdims=True)
+
+        reference = np.stack([model_adapter._transform_multiply(a, b) for a, b in zip(parent, local, strict=True)])
+        actual = model_adapter._transform_multiply_batch(parent, local)
+
+        np.testing.assert_allclose(actual[:, :3], reference[:, :3], rtol=0.0, atol=1.0e-6)
+        np.testing.assert_array_equal(actual[:, 3:], reference[:, 3:])
+
     def test_shared_world_mechanisms_keep_contacts_in_coupled_pgs(self) -> None:
         """Keep cross-mechanism contacts in the coupled colored solve."""
         solver = _make_solver(_build_two_mechanism_contact_model())

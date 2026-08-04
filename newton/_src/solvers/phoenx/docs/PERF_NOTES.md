@@ -224,8 +224,12 @@ bulk, constructs implicit-drive masks once, and vectorizes scalar axial dynamic
 row ownership. With a warm kernel cache, the 20,000-world full-coordinate
 humanoid's complete model build, solver setup, first frame, and CUDA-graph
 capture decreased from 25.375 to 23.748 s (6.4%); the corresponding profiled
-2,000-world construction decreased from 5.427 to 5.067 s (6.6%). This changes
-only host setup and leaves the captured runtime graph unchanged.
+2,000-world construction decreased from 5.427 to 5.067 s (6.6%). A later
+vectorized parent/joint transform composition reduced isolated 2,000-world
+joint conversion from 0.4820 to 0.3855 s (20.0%) and current warm-cache total
+Example construction from 2.872 to 2.768 s (3.6%). Every generated humanoid
+joint array remained byte-identical to the scalar builder. These changes affect
+only host setup and leave the captured runtime graph unchanged.
 
 The direct contact Schur schedule is now restricted to worlds containing one
 direct mechanism. Its single-owner sweep cannot represent a contact between two

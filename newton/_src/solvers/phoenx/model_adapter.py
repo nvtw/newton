@@ -97,6 +97,37 @@ def _transform_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return out
 
 
+def _transform_multiply_batch(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Compose batches of ``wp.transform`` arrays using the scalar arithmetic contract."""
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    if a.shape != b.shape or a.ndim != 2 or a.shape[1] != 7:
+        raise ValueError("transform batches must have matching shape (N, 7)")
+
+    out = np.empty_like(b)
+    # Match :func:`_quat_rotate_np`: it promotes scalar components to Python
+    # floats, then stores the rotated vector in FP32 before adding translation.
+    q = a[:, 3:].astype(np.float64)
+    v = b[:, :3].astype(np.float64)
+    t = np.empty_like(v)
+    t[:, 0] = 2.0 * (q[:, 1] * v[:, 2] - q[:, 2] * v[:, 1])
+    t[:, 1] = 2.0 * (q[:, 2] * v[:, 0] - q[:, 0] * v[:, 2])
+    t[:, 2] = 2.0 * (q[:, 0] * v[:, 1] - q[:, 1] * v[:, 0])
+    rotated = np.empty_like(v)
+    rotated[:, 0] = v[:, 0] + q[:, 3] * t[:, 0] + (q[:, 1] * t[:, 2] - q[:, 2] * t[:, 1])
+    rotated[:, 1] = v[:, 1] + q[:, 3] * t[:, 1] + (q[:, 2] * t[:, 0] - q[:, 0] * t[:, 2])
+    rotated[:, 2] = v[:, 2] + q[:, 3] * t[:, 2] + (q[:, 0] * t[:, 1] - q[:, 1] * t[:, 0])
+    out[:, :3] = rotated.astype(np.float32) + a[:, :3]
+
+    ax, ay, az, aw = a[:, 3], a[:, 4], a[:, 5], a[:, 6]
+    bx, by, bz, bw = b[:, 3], b[:, 4], b[:, 5], b[:, 6]
+    out[:, 3] = aw * bx + ax * bw + ay * bz - az * by
+    out[:, 4] = aw * by - ax * bz + ay * bw + az * bx
+    out[:, 5] = aw * bz + ax * by - ay * bx + az * bw
+    out[:, 6] = aw * bw - ax * bx - ay * by - az * bz
+    return out
+
+
 def _is_locked_dof(limit_lower: np.ndarray | None, limit_upper: np.ndarray | None, qd: int) -> bool:
     """Return whether a scalar joint DoF uses Newton's locked sentinel."""
     if limit_lower is None or limit_upper is None or qd >= len(limit_lower) or qd >= len(limit_upper):
@@ -483,6 +514,13 @@ def build_joint_init_arrays(
     limit_upper = _pull_dof_f(model.joint_limit_upper)
     joint_enabled = model.joint_enabled.numpy() if model.joint_enabled is not None else np.ones(n_joints, dtype=bool)
 
+    joint_world_xform = np.asarray(joint_X_p, dtype=np.float32).copy()
+    parented = joint_parent >= 0
+    joint_world_xform[parented] = _transform_multiply_batch(
+        body_q[joint_parent[parented]],
+        joint_X_p[parented],
+    )
+
     # ---- Walk joints --------------------------------------------------
     descriptors: list[dict] = []
     joint_idx_to_cid_np = np.full(n_joints, -1, dtype=np.int32)
@@ -509,12 +547,7 @@ def build_joint_init_arrays(
         phoenx_child = 0 if child_idx < 0 else child_idx + 1
 
         # Joint world transform at init: pose_p * joint_X_p[j].
-        if parent_idx < 0:
-            X_w_p = np.asarray(joint_X_p[j], dtype=np.float32)
-        else:
-            X_w_p = _transform_multiply(
-                np.asarray(body_q[parent_idx], dtype=np.float32), np.asarray(joint_X_p[j], dtype=np.float32)
-            )
+        X_w_p = joint_world_xform[j]
 
         anchor1_world = _transform_translation(X_w_p)
         qd_start = int(joint_qd_start[j])
