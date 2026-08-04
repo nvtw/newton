@@ -905,7 +905,7 @@ class TestDVISolver(unittest.TestCase):
                 self.assertLess(abs(float(state_0.body_qd.numpy()[body, 0])), 1.0e-6)
 
     def test_03ia_dvi_decays_tangential_but_not_normal_warmstarts(self):
-        """Decay tangential self-stress while fully retaining normal warmstarts."""
+        """Decay copied tangential warmstarts without mutating cached reactions."""
         model, problem, setup = self._make_box_on_plane_setup()
         contact_count = int(setup.contacts.model_active_contacts.numpy()[0])
         reactions = setup.contacts.reaction.numpy()
@@ -932,22 +932,40 @@ class TestDVISolver(unittest.TestCase):
             contacts=setup.contacts,
         )
 
-        scaled_reactions = setup.contacts.reaction.numpy()[:contact_count]
+        contact_wids = setup.contacts.wid.numpy()[:contact_count]
+        contact_cids = setup.contacts.cid.numpy()[:contact_count]
+        total_cts_offsets = model.info.total_cts_offset.numpy()
+        contact_cts_group_offsets = setup.data.info.contact_cts_group_offset.numpy()
+        contact_offsets = total_cts_offsets[contact_wids] + contact_cts_group_offsets[contact_wids] + 3 * contact_cids
+        preconditioners = problem.data.P.numpy()[contact_offsets]
+        time_steps = model.time.dt.numpy()[contact_wids]
+        expected_lambdas = reactions[:contact_count] * (time_steps / preconditioners)[:, np.newaxis]
+        expected_lambdas[:, :2] *= 0.5
+        solution_lambdas = solver.data.solution.lambdas.numpy()
+        actual_lambdas = np.stack([solution_lambdas[offset : offset + 3] for offset in contact_offsets])
         np.testing.assert_allclose(
-            scaled_reactions[:, :2],
-            np.tile(
-                np.array([[1.0, -2.0]], dtype=np.float32),
-                (contact_count, 1),
-            ),
+            actual_lambdas,
+            expected_lambdas,
+            atol=1.0e-7,
+            rtol=1.0e-6,
+        )
+        np.testing.assert_allclose(
+            setup.contacts.reaction.numpy()[:contact_count],
+            reactions[:contact_count],
             atol=0.0,
             rtol=0.0,
         )
-        np.testing.assert_allclose(
-            scaled_reactions[:, 2],
-            np.full(contact_count, 3.0, dtype=np.float32),
-            atol=0.0,
-            rtol=0.0,
+
+        solver.warmstart(
+            problem=problem,
+            model=model,
+            data=setup.data,
+            limits=setup.limits,
+            contacts=setup.contacts,
         )
+        repeated_lambdas = solver.data.solution.lambdas.numpy()
+        actual_repeated_lambdas = np.stack([repeated_lambdas[offset : offset + 3] for offset in contact_offsets])
+        np.testing.assert_allclose(actual_repeated_lambdas, expected_lambdas, atol=1.0e-7, rtol=1.0e-6)
 
     def test_03j_dvi_omega_scales_projected_updates_without_moving_the_solution(self):
         """Relax projected updates by `omega` while preserving the fixed point.

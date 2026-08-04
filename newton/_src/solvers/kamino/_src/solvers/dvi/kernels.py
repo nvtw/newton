@@ -89,21 +89,25 @@ def _reset_dvi_solver_data(
 
 @wp.kernel
 def _scale_dvi_tangential_warmstart(
+    model_info_total_cts_offset: wp.array[int32],
+    data_info_contact_cts_group_offset: wp.array[int32],
     contact_model_num_contacts: wp.array[int32],
     contact_wid: wp.array[int32],
+    contact_cid: wp.array[int32],
     solver_config: wp.array[DVIConfigStruct],
-    contact_reaction: wp.array[vec3f],
+    solution_lambdas: wp.array[float32],
 ):
-    """Decay cached tangential self-stress while retaining normal warmstarts."""
+    """Decay copied tangential warmstarts while retaining normal warmstarts."""
     cid = wp.tid()
     if cid >= contact_model_num_contacts[0]:
         return
 
-    reaction = contact_reaction[cid]
     wid = contact_wid[cid]
+    vio_k = model_info_total_cts_offset[wid] + data_info_contact_cts_group_offset[wid] + 3 * contact_cid[cid]
     cfg = solver_config[wid]
     scale = cfg.tangential_warmstart_scale
-    contact_reaction[cid] = vec3f(scale * reaction.x, scale * reaction.y, reaction.z)
+    solution_lambdas[vio_k] *= scale
+    solution_lambdas[vio_k + 1] *= scale
 
 
 @wp.kernel
