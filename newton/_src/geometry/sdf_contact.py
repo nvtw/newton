@@ -449,27 +449,44 @@ def get_edge_from_mesh(
 
 
 @wp.func
-def get_edge_from_mesh_cached(
-    mesh_id: wp.uint64,
-    mesh_edge_indices: wp.array[wp.vec2i],
+def get_edge_from_mesh_precomputed(
     mesh_edge_centers: wp.array[wp.vec3],
     mesh_edge_halves: wp.array[wp.vec3],
-    has_precomputed_edge_data: int,
     edge_range: wp.vec2i,
     mesh_scale: wp.vec3,
     X_mesh_ws: wp.transform,
     edge_idx: int,
 ) -> tuple[wp.vec3, wp.vec3]:
-    """Extract an edge, preferring packed center/half-vector data when available."""
-    if has_precomputed_edge_data != 0:
-        packed_idx = edge_range[0] + edge_idx
-        center_local = wp.cw_mul(mesh_edge_centers[packed_idx], mesh_scale)
-        half_local = wp.cw_mul(mesh_edge_halves[packed_idx], mesh_scale)
-        center = wp.transform_point(X_mesh_ws, center_local)
-        half = wp.transform_vector(X_mesh_ws, half_local)
-        return center - half, center + half
+    """Extract an edge from packed center/half-vector data."""
+    packed_idx = edge_range[0] + edge_idx
+    center_local = wp.cw_mul(mesh_edge_centers[packed_idx], mesh_scale)
+    half_local = wp.cw_mul(mesh_edge_halves[packed_idx], mesh_scale)
+    center = wp.transform_point(X_mesh_ws, center_local)
+    half = wp.transform_vector(X_mesh_ws, half_local)
+    return center - half, center + half
 
-    return get_edge_from_mesh(mesh_id, mesh_edge_indices, edge_range, mesh_scale, X_mesh_ws, edge_idx)
+
+def _create_get_edge_from_mesh_func(use_precomputed_edge_data: bool):
+    """Create a mesh-edge accessor with its storage path compiled in."""
+
+    @wp.func
+    def get_edge_from_mesh_func(
+        mesh_id: wp.uint64,
+        mesh_edge_indices: wp.array[wp.vec2i],
+        mesh_edge_centers: wp.array[wp.vec3],
+        mesh_edge_halves: wp.array[wp.vec3],
+        edge_range: wp.vec2i,
+        mesh_scale: wp.vec3,
+        X_mesh_ws: wp.transform,
+        edge_idx: int,
+    ) -> tuple[wp.vec3, wp.vec3]:
+        if wp.static(use_precomputed_edge_data):
+            return get_edge_from_mesh_precomputed(
+                mesh_edge_centers, mesh_edge_halves, edge_range, mesh_scale, X_mesh_ws, edge_idx
+            )
+        return get_edge_from_mesh(mesh_id, mesh_edge_indices, edge_range, mesh_scale, X_mesh_ws, edge_idx)
+
+    return get_edge_from_mesh_func
 
 
 @wp.func
@@ -956,8 +973,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     writer_func: Any,
     enable_heightfields: bool = True,
     reduce_contacts: bool = False,
+    use_precomputed_edge_data: bool = False,
 ):
     do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields)
+    get_edge_from_mesh_specialized = _create_get_edge_from_mesh_func(use_precomputed_edge_data)
 
     # Derive a stable module name from the factory arguments so that
     # identical configurations share the compiled CUDA kernel.  This is
@@ -966,7 +985,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # compiled code, otherwise FMA-fusion or register-allocation
     # differences between independent JIT compilations can produce subtly
     # different floating-point results, breaking bit-exact reproducibility.
-    _module = f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}"
+    _module = f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_{use_precomputed_edge_data}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def mesh_sdf_collision_kernel(
@@ -988,7 +1007,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         mesh_edge_indices: wp.array[wp.vec2i],
         mesh_edge_centers: wp.array[wp.vec3],
         mesh_edge_halves: wp.array[wp.vec3],
-        has_precomputed_edge_data: int,
         shape_edge_range: wp.array[wp.vec2i],
         writer_data: Any,
         total_num_blocks: int,
@@ -1144,24 +1162,22 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         hfd_tri, heightfield_elevations, X_mesh_to_sdf, edge_idx
                                     )
                                 else:
-                                    v0_scaled, v1_scaled = get_edge_from_mesh_cached(
+                                    v0_scaled, v1_scaled = get_edge_from_mesh_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
                                         mesh_edge_halves,
-                                        has_precomputed_edge_data,
                                         edge_range_tri,
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         edge_idx,
                                     )
                             else:
-                                v0_scaled, v1_scaled = get_edge_from_mesh_cached(
+                                v0_scaled, v1_scaled = get_edge_from_mesh_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
                                     mesh_edge_halves,
-                                    has_precomputed_edge_data,
                                     edge_range_tri,
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
@@ -1399,7 +1415,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         mesh_edge_indices: wp.array[wp.vec2i],
         mesh_edge_centers: wp.array[wp.vec3],
         mesh_edge_halves: wp.array[wp.vec3],
-        has_precomputed_edge_data: int,
         shape_edge_range: wp.array[wp.vec2i],
         block_offsets: wp.array[wp.int32],
         reducer_data: GlobalContactReducerData,
@@ -1567,24 +1582,22 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         hfd_tri, heightfield_elevations, X_mesh_to_sdf, edge_idx
                                     )
                                 else:
-                                    v0_scaled, v1_scaled = get_edge_from_mesh_cached(
+                                    v0_scaled, v1_scaled = get_edge_from_mesh_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
                                         mesh_edge_halves,
-                                        has_precomputed_edge_data,
                                         edge_range_tri,
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         edge_idx,
                                     )
                             else:
-                                v0_scaled, v1_scaled = get_edge_from_mesh_cached(
+                                v0_scaled, v1_scaled = get_edge_from_mesh_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
                                     mesh_edge_halves,
-                                    has_precomputed_edge_data,
                                     edge_range_tri,
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,

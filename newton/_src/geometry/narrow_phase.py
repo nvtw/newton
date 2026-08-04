@@ -1629,14 +1629,26 @@ class NarrowPhase:
                     enable_heightfields=has_heightfields,
                     reduce_contacts=True,
                 )
+                self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
+                    write_contact_to_reducer,
+                    enable_heightfields=has_heightfields,
+                    reduce_contacts=True,
+                    use_precomputed_edge_data=True,
+                )
             else:
                 self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     writer_func,
                     enable_heightfields=has_heightfields,
                 )
+                self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
+                    writer_func,
+                    enable_heightfields=has_heightfields,
+                    use_precomputed_edge_data=True,
+                )
         else:
             self.mesh_plane_contacts_kernel = None
             self.mesh_mesh_contacts_kernel = None
+            self.mesh_mesh_contacts_kernel_precomputed = None
 
         # Create global contact reduction kernels for mesh/heightfield-triangle
         # contacts (mirror the predicate used to gate ``self.reduce_contacts``
@@ -2079,7 +2091,7 @@ class NarrowPhase:
                 texture_sdf_data = wp.zeros(0, dtype=TextureSDFData, device=device)
             if mesh_edge_indices is None:
                 mesh_edge_indices = self._empty_edge_indices
-            has_precomputed_edge_data = int(mesh_edge_centers is not None and mesh_edge_halves is not None)
+            has_precomputed_edge_data = mesh_edge_centers is not None and mesh_edge_halves is not None
             if mesh_edge_centers is None:
                 mesh_edge_centers = self._empty_edge_centers
             if mesh_edge_halves is None:
@@ -2088,6 +2100,11 @@ class NarrowPhase:
                 shape_edge_range = self._empty_edge_range
 
             if self.mesh_mesh_contacts_kernel is not None:
+                mesh_mesh_contacts_kernel = (
+                    self.mesh_mesh_contacts_kernel_precomputed
+                    if has_precomputed_edge_data
+                    else self.mesh_mesh_contacts_kernel
+                )
                 if self.reduce_contacts and self.mesh_mesh_block_offsets is not None:
                     # Mesh-mesh contacts → buffer + inline hashtable registration
                     compute_mesh_mesh_block_offsets_scan(
@@ -2105,7 +2122,7 @@ class NarrowPhase:
                     )
 
                     wp.launch_tiled(
-                        kernel=self.mesh_mesh_contacts_kernel,
+                        kernel=mesh_mesh_contacts_kernel,
                         dim=(self.num_mesh_mesh_blocks,),
                         inputs=[
                             shape_data,
@@ -2126,7 +2143,6 @@ class NarrowPhase:
                             mesh_edge_indices,
                             mesh_edge_centers,
                             mesh_edge_halves,
-                            wp.int32(has_precomputed_edge_data),
                             shape_edge_range,
                             self.mesh_mesh_block_offsets,
                             reducer_data,
@@ -2139,7 +2155,7 @@ class NarrowPhase:
                 else:
                     # Non-reduce fallback: direct contact write, no dynamic allocation
                     wp.launch_tiled(
-                        kernel=self.mesh_mesh_contacts_kernel,
+                        kernel=mesh_mesh_contacts_kernel,
                         dim=(self.num_tile_blocks,),
                         inputs=[
                             shape_data,
@@ -2160,7 +2176,6 @@ class NarrowPhase:
                             mesh_edge_indices,
                             mesh_edge_centers,
                             mesh_edge_halves,
-                            wp.int32(has_precomputed_edge_data),
                             shape_edge_range,
                             writer_data,
                             self.num_tile_blocks,
