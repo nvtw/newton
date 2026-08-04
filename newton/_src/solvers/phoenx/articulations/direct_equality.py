@@ -223,17 +223,29 @@ def _drive_dof_masks(model: Model) -> tuple[np.ndarray, np.ndarray]:
     target_kd = np.asarray(model.joint_target_kd.numpy(), dtype=np.float32)
     effort = np.asarray(model.joint_effort_limit.numpy(), dtype=np.float32)
     gear = np.asarray(model.joint_gear.numpy(), dtype=np.float32)
-    active = np.zeros(len(target_mode), dtype=bool)
-    bounded = np.zeros(len(target_mode), dtype=bool)
-    for dof, mode in enumerate(target_mode):
-        active[dof] = (
-            mode in (int(JointTargetMode.POSITION), int(JointTargetMode.POSITION_VELOCITY))
-            and float(target_ke[dof]) > 0.0
-        ) or (mode == int(JointTargetMode.VELOCITY) and float(target_kd[dof]) > 0.0)
-        reflected_limit = float(gear[dof]) * float(effort[dof])
-        unlimited = reflected_limit == 0.0 or not np.isfinite(reflected_limit) or abs(reflected_limit) > 1.0e18
-        bounded[dof] = active[dof] and not unlimited
+    position = (target_mode == int(JointTargetMode.POSITION)) | (target_mode == int(JointTargetMode.POSITION_VELOCITY))
+    velocity = target_mode == int(JointTargetMode.VELOCITY)
+    active = (position & (target_ke > 0.0)) | (velocity & (target_kd > 0.0))
+    reflected_limit = gear.astype(np.float64) * effort
+    unlimited = (reflected_limit == 0.0) | ~np.isfinite(reflected_limit) | (np.abs(reflected_limit) > 1.0e18)
+    bounded = active & ~unlimited
     return active, bounded
+
+
+def _axial_joint_dofs(
+    joint_mode: np.ndarray,
+    joint_dof_start: np.ndarray,
+    dof_count: int,
+    excluded: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the axial-joint mask plus valid joint and DoF indices."""
+    axial = (joint_mode == int(JOINT_MODE_REVOLUTE)) | (joint_mode == int(JOINT_MODE_PRISMATIC))
+    if excluded is not None:
+        axial &= ~excluded
+    joints = np.flatnonzero(axial)
+    dofs = joint_dof_start[joints]
+    valid = (dofs >= 0) & (dofs < dof_count)
+    return axial, joints[valid], dofs[valid]
 
 
 def _dynamic_joint_masks(
@@ -241,6 +253,8 @@ def _dynamic_joint_masks(
     joint_mode: np.ndarray,
     joint_dof_start: np.ndarray,
     excluded: np.ndarray,
+    drive_dof: np.ndarray,
+    bounded_dof: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return scalar dynamics, direct-drive, and bounded-drive joint masks."""
     joint_count = int(model.joint_count)
@@ -251,23 +265,23 @@ def _dynamic_joint_masks(
     upper = np.asarray(model.joint_limit_upper.numpy(), dtype=np.float32)
     armature = np.asarray(model.joint_armature.numpy(), dtype=np.float32)
     damping = np.asarray(model.joint_damping.numpy(), dtype=np.float32)
-    drive_dof, bounded_dof = _drive_dof_masks(model)
-
     dynamic = np.zeros(joint_count, dtype=bool)
     direct_drive = np.zeros(joint_count, dtype=bool)
     bounded_drive = np.zeros(joint_count, dtype=bool)
-    for joint, mode in enumerate(joint_mode):
-        if excluded[joint]:
-            continue
-        if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
-            candidates = (int(joint_dof_start[joint]),)
-        elif joint_type[joint] == int(JointType.D6) and mode in _MULTI_AXIS_D6_MODES:
-            start = int(qd_start[joint])
-            count = int(dof_dim[joint, 0] + dof_dim[joint, 1])
-            candidates = tuple(dof for dof in range(start, start + count) if float(lower[dof]) <= float(upper[dof]))
-        else:
-            candidates = ()
-        candidates = tuple(dof for dof in candidates if 0 <= dof < len(armature))
+    axial, axial_joints, axial_dofs = _axial_joint_dofs(joint_mode, joint_dof_start, len(armature), excluded)
+    direct_drive[axial_joints] = drive_dof[axial_dofs]
+    bounded_drive[axial_joints] = bounded_dof[axial_dofs]
+    dynamic[axial_joints] = (armature[axial_dofs] > 0.0) | (damping[axial_dofs] > 0.0) | drive_dof[axial_dofs]
+
+    multi_axis = np.isin(joint_mode, tuple(_MULTI_AXIS_D6_MODES))
+    for joint in np.flatnonzero(~excluded & ~axial & (joint_type == int(JointType.D6)) & multi_axis):
+        start = int(qd_start[joint])
+        count = int(dof_dim[joint, 0] + dof_dim[joint, 1])
+        candidates = tuple(
+            dof
+            for dof in range(start, start + count)
+            if float(lower[dof]) <= float(upper[dof]) and 0 <= dof < len(armature)
+        )
         direct_drive[joint] = any(drive_dof[dof] for dof in candidates)
         bounded_drive[joint] = any(bounded_dof[dof] for dof in candidates)
         dynamic[joint] = any(
@@ -281,41 +295,36 @@ def _active_dynamic_dofs(
     joint_mode: np.ndarray,
     joint_dof_start: np.ndarray,
     excluded: np.ndarray,
+    drive_dof: np.ndarray,
 ) -> tuple[tuple[int, ...], ...]:
     """Return free DoFs whose armature or passive damping needs a direct row."""
     joint_count = int(model.joint_count)
     armature = np.asarray(model.joint_armature.numpy(), dtype=np.float32)
     damping = np.asarray(model.joint_damping.numpy(), dtype=np.float32)
     joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
-    drive_dof, _bounded_dof = _drive_dof_masks(model)
     qd_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
     dof_dim = np.asarray(model.joint_dof_dim.numpy(), dtype=np.int32)
     lower = np.asarray(model.joint_limit_lower.numpy(), dtype=np.float32)
     upper = np.asarray(model.joint_limit_upper.numpy(), dtype=np.float32)
-    result: list[tuple[int, ...]] = []
-    for joint in range(joint_count):
-        if excluded[joint]:
-            result.append(())
-            continue
-        mode = int(joint_mode[joint])
-        if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
-            candidates = (int(joint_dof_start[joint]),)
-        elif mode in _MULTI_AXIS_D6_MODES:
-            start = int(qd_start[joint])
-            count = int(dof_dim[joint, 0] + dof_dim[joint, 1])
-            candidates = tuple(dof for dof in range(start, start + count) if float(lower[dof]) <= float(upper[dof]))
-        else:
-            candidates = ()
-        result.append(
-            tuple(
-                dof
-                for dof in candidates
-                if 0 <= dof < len(armature)
-                and (
-                    float(armature[dof]) > 0.0
-                    or float(damping[dof]) > 0.0
-                    or (joint_type[joint] == int(JointType.D6) and mode in _MULTI_AXIS_D6_MODES and drive_dof[dof])
-                )
+    result: list[tuple[int, ...]] = [()] * joint_count
+    axial, axial_joints, axial_dofs = _axial_joint_dofs(joint_mode, joint_dof_start, len(armature), excluded)
+    active = (armature[axial_dofs] > 0.0) | (damping[axial_dofs] > 0.0) | drive_dof[axial_dofs]
+    for joint, dof in zip(axial_joints[active], axial_dofs[active], strict=True):
+        result[int(joint)] = (int(dof),)
+
+    multi_axis = np.isin(joint_mode, tuple(_MULTI_AXIS_D6_MODES))
+    for joint in np.flatnonzero(~excluded & ~axial & multi_axis):
+        start = int(qd_start[joint])
+        count = int(dof_dim[joint, 0] + dof_dim[joint, 1])
+        result[joint] = tuple(
+            dof
+            for dof in range(start, start + count)
+            if float(lower[dof]) <= float(upper[dof])
+            and 0 <= dof < len(armature)
+            and (
+                float(armature[dof]) > 0.0
+                or float(damping[dof]) > 0.0
+                or (joint_type[joint] == int(JointType.D6) and drive_dof[dof])
             )
         )
     return tuple(result)
@@ -1675,12 +1684,18 @@ def _effective_joint_axes(
     lower = model.joint_limit_lower.numpy() if model.joint_limit_lower is not None else None
     upper = model.joint_limit_upper.numpy() if model.joint_limit_upper is not None else None
 
-    for joint, mode in enumerate(joint_mode):
-        if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
-            dof = int(joint_dof_start[joint])
-            if 0 <= dof < len(model_axes):
-                axes[joint] = model_axes[dof]
-        elif mode == int(JOINT_MODE_CYLINDRICAL):
+    _axial, axial_joints, axial_dofs = _axial_joint_dofs(joint_mode, joint_dof_start, len(model_axes))
+    axes[axial_joints] = model_axes[axial_dofs]
+
+    special_modes = (
+        int(JOINT_MODE_CYLINDRICAL),
+        int(JOINT_MODE_CARTESIAN_PLANE),
+        int(JOINT_MODE_PLANAR),
+        int(JOINT_MODE_UNIVERSAL),
+    )
+    for joint in np.flatnonzero(np.isin(joint_mode, special_modes)):
+        mode = int(joint_mode[joint])
+        if mode == int(JOINT_MODE_CYLINDRICAL):
             start = int(qd_start[joint])
             linear_count = int(dof_dim[joint, 0])
             for linear_axis in range(linear_count):
@@ -1731,11 +1746,10 @@ def _effective_joint_axes(
                 axes[joint] = model_axes[locked_axis]
             elif angular_count == 2:
                 axes[joint] = np.cross(model_axes[start], model_axes[start + 1])
-        length = float(np.linalg.norm(axes[joint]))
-        if length > 1.0e-12:
-            axes[joint] /= length
-        else:
-            axes[joint] = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    lengths = np.linalg.norm(axes, axis=1)
+    nonzero = lengths > 1.0e-12
+    axes[nonzero] /= lengths[nonzero, None]
+    axes[~nonzero] = (1.0, 0.0, 0.0)
     return axes
 
 
@@ -1826,10 +1840,11 @@ class DirectEqualitySystem:
             generic_angular_count_np,
             structural_row_counts,
         ) = _generic_d6_constraint_bases(model, joint_mode)
+        drive_dof_mask, bounded_dof_mask = _drive_dof_masks(model)
         dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
-            model, joint_mode, joint_dof_start, excluded
+            model, joint_mode, joint_dof_start, excluded, drive_dof_mask, bounded_dof_mask
         )
-        dynamic_joint_dofs = list(_active_dynamic_dofs(model, joint_mode, joint_dof_start, excluded))
+        dynamic_joint_dofs = list(_active_dynamic_dofs(model, joint_mode, joint_dof_start, excluded, drive_dof_mask))
         for joint in np.flatnonzero(dynamic_joint_mask):
             if not dynamic_joint_dofs[joint]:
                 dynamic_joint_dofs[joint] = (int(joint_dof_start[joint]),)
@@ -1926,7 +1941,6 @@ class DirectEqualitySystem:
         self.row_error = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.float32, device=device)
         self.row_stiffness = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.float32, device=device)
         self.row_damping = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.float32, device=device)
-        drive_dof_mask, bounded_dof_mask = _drive_dof_masks(model)
         row_direct_drive = np.zeros(row_count, dtype=bool)
         row_bounded_drive = np.zeros(row_count, dtype=bool)
         row_target_q = np.zeros(row_count, dtype=np.int32)
@@ -2043,14 +2057,23 @@ class DirectEqualitySystem:
 
     def refresh_joint_properties(self) -> None:
         """Rebuild topology only when scalar dynamics rows change ownership."""
+        drive_dof_mask, bounded_dof_mask = _drive_dof_masks(self.model)
         dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
             self.model,
             self._joint_mode_np,
             self._joint_dof_start_np,
             self._excluded_joint_mask,
+            drive_dof_mask,
+            bounded_dof_mask,
         )
         dynamic_joint_dofs = list(
-            _active_dynamic_dofs(self.model, self._joint_mode_np, self._joint_dof_start_np, self._excluded_joint_mask)
+            _active_dynamic_dofs(
+                self.model,
+                self._joint_mode_np,
+                self._joint_dof_start_np,
+                self._excluded_joint_mask,
+                drive_dof_mask,
+            )
         )
         for joint in np.flatnonzero(dynamic_joint_mask):
             if not dynamic_joint_dofs[joint]:

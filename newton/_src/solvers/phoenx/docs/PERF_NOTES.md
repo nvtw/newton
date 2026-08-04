@@ -144,6 +144,14 @@ reduced coordinates do not enter this full-coordinate path. Direct-contact,
 regressions pass. The scheduling regression fails with the previous dispatcher
 ordering.
 
+Direct-system host setup now gathers and normalizes common axial joint axes in
+bulk, constructs implicit-drive masks once, and vectorizes scalar axial dynamic
+row ownership. With a warm kernel cache, the 20,000-world full-coordinate
+humanoid's complete model build, solver setup, first frame, and CUDA-graph
+capture decreased from 25.375 to 23.748 s (6.4%); the corresponding profiled
+2,000-world construction decreased from 5.427 to 5.067 s (6.6%). This changes
+only host setup and leaves the captured runtime graph unchanged.
+
 The direct contact Schur schedule is now restricted to worlds containing one
 direct mechanism. Its single-owner sweep cannot represent a contact between two
 separately factored mechanisms; partially owning only ground and same-mechanism
