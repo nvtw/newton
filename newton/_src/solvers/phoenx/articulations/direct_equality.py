@@ -1256,20 +1256,13 @@ def _assemble_direct_equality_matrix_kernel(
     matrix_storage: wp.array[wp.int32],
     row_joint: wp.array[wp.int32],
     row_local: wp.array[wp.int32],
-    row_dynamic: wp.array[wp.bool],
     joint_to_structural: wp.array[wp.int32],
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     row_wrench0: wp.array2d[wp.spatial_vector],
     row_wrench1: wp.array2d[wp.spatial_vector],
     bodies: BodyContainer,
-    row_regularization: wp.array[wp.float32],
-    idt: wp.float32,
-    row_error: wp.array2d[wp.float32],
-    row_stiffness: wp.array2d[wp.float32],
-    row_damping: wp.array2d[wp.float32],
-    dynamic_mass: wp.array[wp.float32],
-    row_bias: wp.array2d[wp.float32],
+    row_scale: wp.array[wp.float32],
     matrix: wp.array[wp.float32],
 ):
     entry = wp.tid()
@@ -1281,6 +1274,8 @@ def _assemble_direct_equality_matrix_kernel(
     column_structural = joint_to_structural[column_joint_index]
     row_local_index = row_local[row]
     column_local_index = row_local[column]
+    if row == column:
+        return
     value = wp.float32(0.0)
 
     row_body0 = joint_parent[row_joint_index] + wp.int32(1)
@@ -1316,59 +1311,86 @@ def _assemble_direct_equality_matrix_kernel(
         )
         value += wp.dot(row_wrench, response)
 
-    if row == column:
-        inverse_effective_mass = value
-        if row_dynamic[row]:
-            value += wp.float32(1.0) / wp.max(dynamic_mass[row], wp.float32(1.0e-10))
-        else:
-            stiffness = row_stiffness[row_structural, row_local_index]
-            damping = row_damping[row_structural, row_local_index]
-            if (stiffness > wp.float32(0.0) or damping > wp.float32(0.0)) and not wp.isinf(stiffness):
-                dt = wp.float32(1.0) / idt
-                denominator = damping + dt * stiffness
-                if denominator > wp.float32(0.0) and not wp.isinf(damping):
-                    softness = wp.float32(1.0) / denominator
-                    value += softness * idt
-                    bias_factor = dt * stiffness * softness
-                    row_bias[row_structural, row_local_index] = (
-                        row_error[row_structural, row_local_index] * bias_factor * idt
-                    )
-        regularization_scale = wp.max(inverse_effective_mass, wp.float32(1.0))
-        if row_dynamic[row]:
-            regularization_scale = wp.max(
-                wp.float32(1.0) / wp.max(dynamic_mass[row], wp.float32(1.0e-10)),
-                wp.float32(1.0),
-            )
-        value += wp.max(
-            row_regularization[row] * regularization_scale,
-            wp.float32(1.0e-10),
-        )
-    matrix[matrix_storage[entry]] = value
+    matrix[matrix_storage[entry]] = value * row_scale[row] * row_scale[column]
 
 
 @wp.kernel(enable_backward=False)
-def _compute_direct_equality_row_scale_kernel(
+def _prepare_direct_equality_diagonal_kernel(
     diagonal_index: wp.array[wp.int32],
+    row_joint: wp.array[wp.int32],
+    row_local: wp.array[wp.int32],
+    row_dynamic: wp.array[wp.bool],
+    joint_to_structural: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    bodies: BodyContainer,
+    row_regularization: wp.array[wp.float32],
+    idt: wp.float32,
+    row_error: wp.array2d[wp.float32],
+    row_stiffness: wp.array2d[wp.float32],
+    row_damping: wp.array2d[wp.float32],
+    dynamic_mass: wp.array[wp.float32],
+    row_bias: wp.array2d[wp.float32],
     matrix: wp.array[wp.float32],
     row_scale: wp.array[wp.float32],
 ):
     row = wp.tid()
-    diagonal = matrix[diagonal_index[row]]
-    row_scale[row] = wp.float32(1.0) / wp.sqrt(wp.max(diagonal, wp.float32(1.0e-20)))
+    joint = row_joint[row]
+    structural = joint_to_structural[joint]
+    local_row = row_local[row]
+    value = wp.float32(0.0)
+    body0 = joint_parent[joint] + wp.int32(1)
+    body1 = joint_child[joint] + wp.int32(1)
+    for endpoint in range(2):
+        body = body0 if endpoint == 0 else body1
+        if body <= wp.int32(0) or bodies.inverse_mass[body] <= wp.float32(0.0):
+            continue
+        wrench = _row_wrench_for_body(
+            body,
+            joint,
+            structural,
+            local_row,
+            joint_parent,
+            joint_child,
+            row_wrench0,
+            row_wrench1,
+        )
+        response = _direct_wrench_response(
+            wrench,
+            bodies.inverse_mass[body],
+            mat33_from_sym6(bodies.inverse_inertia_world[body]),
+        )
+        value += wp.dot(wrench, response)
 
-
-@wp.kernel(enable_backward=False)
-def _equilibrate_direct_equality_matrix_kernel(
-    matrix_row: wp.array[wp.int32],
-    matrix_column: wp.array[wp.int32],
-    matrix_storage: wp.array[wp.int32],
-    row_scale: wp.array[wp.float32],
-    matrix: wp.array[wp.float32],
-):
-    entry = wp.tid()
-    row = matrix_row[entry]
-    column = matrix_column[entry]
-    matrix[matrix_storage[entry]] *= row_scale[row] * row_scale[column]
+    inverse_effective_mass = value
+    if row_dynamic[row]:
+        value += wp.float32(1.0) / wp.max(dynamic_mass[row], wp.float32(1.0e-10))
+    else:
+        stiffness = row_stiffness[structural, local_row]
+        damping = row_damping[structural, local_row]
+        if (stiffness > wp.float32(0.0) or damping > wp.float32(0.0)) and not wp.isinf(stiffness):
+            dt = wp.float32(1.0) / idt
+            denominator = damping + dt * stiffness
+            if denominator > wp.float32(0.0) and not wp.isinf(damping):
+                softness = wp.float32(1.0) / denominator
+                value += softness * idt
+                bias_factor = dt * stiffness * softness
+                row_bias[structural, local_row] = row_error[structural, local_row] * bias_factor * idt
+    regularization_scale = wp.max(inverse_effective_mass, wp.float32(1.0))
+    if row_dynamic[row]:
+        regularization_scale = wp.max(
+            wp.float32(1.0) / wp.max(dynamic_mass[row], wp.float32(1.0e-10)),
+            wp.float32(1.0),
+        )
+    value += wp.max(
+        row_regularization[row] * regularization_scale,
+        wp.float32(1.0e-10),
+    )
+    scale = wp.float32(1.0) / wp.sqrt(wp.max(value, wp.float32(1.0e-20)))
+    row_scale[row] = scale
+    matrix[diagonal_index[row]] = value * scale * scale
 
 
 @wp.kernel(enable_backward=False)
@@ -2288,13 +2310,13 @@ class DirectEqualitySystem:
     def prepare_and_factor(self, idt: wp.float32) -> None:
         if not self.enabled:
             return
+        # Write already-equilibrated diagonals first so off-diagonal assembly
+        # can apply both row scales without a full matrix read/modify/write pass.
         wp.launch(
-            _assemble_direct_equality_matrix_kernel,
-            dim=self.matrix_storage.size,
+            _prepare_direct_equality_diagonal_kernel,
+            dim=len(self.topology.row_joint),
             inputs=[
-                self.matrix_row,
-                self.matrix_column,
-                self.matrix_storage,
+                self.diagonal_index,
                 self.row_joint,
                 self.row_local,
                 self.row_dynamic,
@@ -2312,26 +2334,25 @@ class DirectEqualitySystem:
                 self.dynamic_mass,
                 self.row_bias,
                 self.matrix,
-            ],
-            device=self.model.device,
-        )
-        wp.launch(
-            _compute_direct_equality_row_scale_kernel,
-            dim=len(self.topology.row_joint),
-            inputs=[
-                self.diagonal_index,
-                self.matrix,
                 self.row_scale,
             ],
             device=self.model.device,
         )
         wp.launch(
-            _equilibrate_direct_equality_matrix_kernel,
+            _assemble_direct_equality_matrix_kernel,
             dim=self.matrix_storage.size,
             inputs=[
                 self.matrix_row,
                 self.matrix_column,
                 self.matrix_storage,
+                self.row_joint,
+                self.row_local,
+                self.joint_to_structural,
+                self.model.joint_parent,
+                self.model.joint_child,
+                self.row_wrench0,
+                self.row_wrench1,
+                self.bodies,
                 self.row_scale,
                 self.matrix,
             ],

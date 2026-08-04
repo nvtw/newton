@@ -219,6 +219,19 @@ parallelism even when maximum breadth is only three. Changing the scalar packed
 row builder from 48-thread blocks to 32 or 64 also regressed the complete graph
 to 2.096 and 2.131 ms, respectively.
 
+Direct equality matrix preparation now forms and equilibrates each diagonal
+before assembling already-scaled off-diagonals. This removes a full sparse
+matrix read/modify/write pass while retaining the FP32 fixed-pattern LLT. In a
+20-frame Nsight Systems trace, diagonal preparation plus off-diagonal assembly
+cost 133.58 us/substep versus 190.30 us for assembly, row scaling, and separate
+equilibration (-29.8%). Two candidate medians averaged 10.047 ms/frame on 2,048
+DR Legs worlds versus a matched 10.258 ms control (2.1% lower); the independent
+2,000-world full-coordinate humanoid averaged 4.424 ms versus 4.507 ms (1.8%
+lower). The one-frame scaled matrix differed by at most one FP32 ULP. Direct
+mass-ratio, coupling, captured-shock, and walking quality gates pass; an 80-frame
+64-world rollout stayed within 0.210 mm position, 0.00379 m/s linear velocity,
+and 0.0639 rad/s angular velocity of the prior ordering.
+
 Direct-system host setup now gathers and normalizes common axial joint axes in
 bulk, constructs implicit-drive masks once, and vectorizes scalar axial dynamic
 row ownership. With a warm kernel cache, the 20,000-world full-coordinate
