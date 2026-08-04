@@ -102,12 +102,10 @@ def _reset_world_selected(
     reset_all: bool,
     world_count: int,
 ):
-    """Query a public reset mask whose optional final entry selects unassigned entities."""
+    """Query a public reset mask whose final entry selects global entities."""
     if reset_all:
         return True
     if world < 0:
-        if world_mask.shape[0] == world_count:
-            return False
         world = world_count
     return world_mask[world]
 
@@ -2731,7 +2729,7 @@ def forward_step_rigid_bodies(
     com_local = body_com[tid]
     I_local = body_inertia[tid]
     inv_I = body_inv_inertia[tid]
-    world_g = gravity[wp.max(world_idx, 0)]
+    world_g = gravity[world_idx]
 
     # Integrate rigid body motion (semi-implicit Euler, no angular damping)
     q_new, qd_new = integrate_rigid_body(

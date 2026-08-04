@@ -952,8 +952,9 @@ class GlobalContactReducer:
 
         # Per-contact dedup flags for cross-entry deduplication during export.
         # ``export_epoch`` lets export mark the current frame without clearing
-        # the full capacity-sized flag array every collision pass.
-        self.exported_flags = wp.zeros(capacity, dtype=wp.int32, device=device)
+        # the full capacity-sized flag array every collision pass. Hydroelastic
+        # reduction preserves and source-tags cross-entry winners instead.
+        self.exported_flags = wp.zeros(0 if store_hydroelastic_data else capacity, dtype=wp.int32, device=device)
         self.export_epoch = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Atomic counter for contact allocation

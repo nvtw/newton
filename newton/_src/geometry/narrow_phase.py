@@ -1526,9 +1526,9 @@ class NarrowPhase:
             mesh_sdf_uses_texture: Compile mesh-SDF kernels without BVH
                 fallback branches. Only set when every mesh shape has a
                 valid texture SDF and no heightfields are present.
-            deterministic: Sort contacts after the narrow phase so that results are
-                independent of GPU thread scheduling.  Adds a radix sort + gather
-                pass.  Hydroelastic contacts are not yet covered.
+            deterministic: Make contact generation and ordering independent of
+                GPU thread scheduling. Adds deterministic hydroelastic atomics
+                and a radix sort + gather pass.
             contact_max: Maximum number of contacts for the deterministic sort buffer.
                 Must match the ``contact_pair`` array size passed to :meth:`launch`.
                 Defaults to ``max_candidate_pairs``.  Set this to a larger value when
@@ -1687,6 +1687,8 @@ class NarrowPhase:
             self.global_contact_reducer = None
 
         self.hydroelastic_sdf = hydroelastic_sdf
+        if self.hydroelastic_sdf is not None:
+            self.hydroelastic_sdf._validate_deterministic(deterministic)
 
         # Pre-allocate all intermediate buffers.
         # Counters live in one consolidated array for efficient zeroing.
