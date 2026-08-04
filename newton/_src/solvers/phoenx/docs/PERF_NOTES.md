@@ -942,4 +942,26 @@ These later results supersede the early FP16/contact-row prioritization:
   per warp. Registers were only 27/34 with no local memory. The next useful
   lever is eliminating dependent adjacency walks, not vec4 packing or register
   caps.
-\n- Adjacency-free endpoint-owner coloring replaced irregular neighbor walks with\n  deterministic per-body elections for capped single-world mass splitting. On\n  the captured 71,991-constraint Kapla graph, the complete production coloring\n  benchmark fell from 3.55 ms for uncapped greedy coloring to 2.00 ms at an\n  eight-color cap. In the full 4-substep/10-iteration scene, eight colors\n  reached 121.75--121.99 FPS but failed the strict 400-frame stationary-speed\n  threshold. Nine colors passed that physics regression and reached\n  114.17--115.27 FPS versus 110.08--110.82 FPS for the prior eight-color greedy\n  default. Mixed 2/3/4/6/8-endpoint tests validate independence, overflow, and\n  deterministic graph replay.\n
+
+- Adjacency-free endpoint-owner coloring replaced irregular neighbor walks with
+  deterministic per-body elections for capped single-world mass splitting. On
+  the captured 71,991-constraint Kapla graph, the complete production coloring
+  benchmark fell from 3.55 ms for uncapped greedy coloring to 2.00 ms at an
+  eight-color cap. In the full 4-substep/10-iteration scene, eight colors
+  reached 121.75--121.99 FPS but failed the strict 400-frame stationary-speed
+  threshold. Nine colors passed that physics regression and reached
+  114.17--115.27 FPS versus 110.08--110.82 FPS for the prior eight-color greedy
+  default. Mixed 2/3/4/6/8-endpoint tests validate independence, overflow, and
+  deterministic graph replay.
+
+- Full-coordinate multi-world solves can overlap the direct equality LLT
+  factorization with the independent regular-contact preparation. On the
+  2,048-world DR Legs benchmark, matched closing medians improved from 9.999
+  to 9.749 ms/frame (2.5%); the independent 2,000-world full-coordinate
+  humanoid benchmark improved from 4.437 to 4.297 ms/frame (3.1%). An Nsight
+  Systems trace found 199 of 200 steady factor/prepare pairs overlapped, with
+  116.32 us mean overlap. The main stream waits before the first triangular
+  solve, so equality ownership and numerical work are unchanged. Candidate
+  versus control 80-frame state differences stayed within control-repeat CUDA
+  variance, and the shock, direct-contact coupling, high-mass-ratio,
+  multi-world graph-capture, and 600-frame DR Legs walking tests passed.

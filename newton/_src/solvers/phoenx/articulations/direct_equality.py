@@ -1914,10 +1914,17 @@ class DirectEqualitySystem:
             )
         self.row_regularization = wp.array(row_regularization, dtype=wp.float32, device=model.device)
         self.enabled = bool(self.topology.dimensions)
+        self.factor_stream = None
+        self.factor_ready_event = None
+        self.factor_done_event = None
         if not self.enabled:
             return
 
         device = model.device
+        if device.is_cuda:
+            self.factor_stream = wp.Stream(device)
+            self.factor_ready_event = wp.Event(device)
+            self.factor_done_event = wp.Event(device)
         structural_count = len(self.topology.joints)
         row_count = len(self.topology.row_joint)
         joint_to_structural = np.full(joint_count, -1, dtype=np.int32)
@@ -2307,7 +2314,7 @@ class DirectEqualitySystem:
             on_false=None,
         )
 
-    def prepare_and_factor(self, idt: wp.float32) -> None:
+    def prepare_matrix(self, idt: wp.float32) -> None:
         if not self.enabled:
             return
         # Write already-equilibrated diagonals first so off-diagonal assembly
@@ -2358,7 +2365,33 @@ class DirectEqualitySystem:
             ],
             device=self.model.device,
         )
-        self.solver.compute()
+
+    def factor(self) -> None:
+        """Factor the prepared equality matrix on the current stream."""
+        if self.enabled:
+            self.solver.compute()
+
+    def prepare_and_factor(self, idt: wp.float32) -> None:
+        """Prepare and factor the equality matrix on the current stream."""
+        self.prepare_matrix(idt)
+        self.factor()
+
+    def factor_async(self) -> None:
+        """Factor on the private stream after current-stream preparation."""
+        if not self.enabled or self.factor_stream is None:
+            self.factor()
+            return
+        main_stream = wp.get_stream(self.model.device)
+        main_stream.record_event(self.factor_ready_event)
+        self.factor_stream.wait_event(self.factor_ready_event)
+        with wp.ScopedStream(self.factor_stream, sync_enter=False, sync_exit=False):
+            self.factor()
+        self.factor_stream.record_event(self.factor_done_event)
+
+    def wait_factor(self) -> None:
+        """Wait for private-stream factorization on the current stream."""
+        if self.factor_stream is not None:
+            wp.get_stream(self.model.device).wait_event(self.factor_done_event)
 
     def solve(self, *, use_bias: bool) -> None:
         if not self.enabled:

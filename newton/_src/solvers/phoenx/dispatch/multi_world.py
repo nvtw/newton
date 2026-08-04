@@ -33,8 +33,19 @@ class MultiWorldDispatcher:
 
     def solve(self, idt: wp.float32) -> None:
         direct = getattr(self._world, "_direct_equality_system", None)
+        overlap_factor = bool(
+            direct is not None
+            and direct.enabled
+            and self._world._regular_pgs_active_this_step
+            and self._world._combine_direct_prepare_projection
+            and direct.factor_stream is not None
+        )
         if direct is not None and direct.enabled:
-            direct.prepare_and_factor(idt)
+            if overlap_factor:
+                direct.prepare_matrix(idt)
+                direct.factor_async()
+            else:
+                direct.prepare_and_factor(idt)
         if self._world._regular_pgs_active_this_step:
             block_world = self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported()
             if direct is not None and direct.enabled:
@@ -47,6 +58,8 @@ class MultiWorldDispatcher:
                     self._world._solve_main_block_world(num_iterations=0, solve_direct=False)
                 else:
                     self._world._solve_main(num_iterations=0, solve_direct=False)
+                if overlap_factor:
+                    direct.wait_factor()
                 direct.solve(use_bias=False)
                 if self._world._combine_direct_prepare_projection:
                     direct.resolve_bounded_drives(idt, use_bias=False)
