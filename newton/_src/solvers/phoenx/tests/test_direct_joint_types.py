@@ -216,6 +216,17 @@ def _build_mechanism_free_body_contact_model() -> tuple[newton.Model, int, int]:
     return builder.finalize(device=wp.get_preferred_device()), mechanism_body, free_body
 
 
+def _build_two_mechanism_contact_model() -> newton.Model:
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.8)
+    for x in (-0.09, 0.09):
+        body = builder.add_link(xform=wp.transform(wp.vec3(x, 0.0, 0.0), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+        builder.add_joint_fixed(parent=-1, child=body)
+    builder.color()
+    return builder.finalize(device=wp.get_preferred_device())
+
+
 def _joint_anchor_error(model: newton.Model, state: newton.State, joint: int) -> float:
     body_q = state.body_q.numpy()
     parent = int(model.joint_parent.numpy()[joint])
@@ -247,6 +258,14 @@ def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX direct-joint tests require CUDA")
 class TestDirectJointTypes(unittest.TestCase):
+    def test_shared_world_mechanisms_keep_contacts_in_coupled_pgs(self) -> None:
+        """Keep cross-mechanism contacts in the coupled colored solve."""
+        solver = _make_solver(_build_two_mechanism_contact_model())
+
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, (6, 6))
+        self.assertIsNone(solver._direct_contact_response)
+        self.assertIsNone(solver._direct_contact_schedule)
+
     def test_direct_mechanism_contact_with_free_body_uses_schur_response(self) -> None:
         """Own a mechanism-to-free-body contact with the exact Schur response."""
         model, mechanism_body, free_body = _build_mechanism_free_body_contact_model()

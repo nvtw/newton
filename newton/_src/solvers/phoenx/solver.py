@@ -852,6 +852,25 @@ class SolverPhoenX(SolverBase):
                         not in tree_joint_sets
                         for mechanism in range(len(topology.dimensions))
                     )
+                    # A single-owner Schur sweep cannot couple two separately factored mechanisms.
+                    row_start = np.asarray(topology.mechanism_row_start[:-1], dtype=np.int32)
+                    representative_joint = np.asarray(topology.row_joint, dtype=np.int32)[row_start]
+                    joint_parent = model.joint_parent.numpy()
+                    representative_body = model.joint_child.numpy()[representative_joint]
+                    representative_body = np.where(
+                        representative_body >= 0,
+                        representative_body,
+                        joint_parent[representative_joint],
+                    )
+                    mechanism_world = model.body_world.numpy()[representative_body]
+                    _, world_inverse, world_counts = np.unique(
+                        mechanism_world,
+                        return_inverse=True,
+                        return_counts=True,
+                    )
+                    active_mechanisms = tuple(
+                        np.asarray(active_mechanisms, dtype=bool) & (world_counts[world_inverse] == 1)
+                    )
                     if any(active_mechanisms):
                         self._direct_contact_active_mechanisms = active_mechanisms
                         self._direct_contact_response = DirectContactResponse(

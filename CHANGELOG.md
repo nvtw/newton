@@ -225,6 +225,7 @@
 - Fix PhoenX G1 and recording examples replaying a stale CUDA-graph input state when using one outer simulation step.
 - Fix severe post-impact horizontal drift in full-coordinate PhoenX robots by evaluating contact and friction impulses through exact joint-constrained mechanism mobility derived solely from the enabled body-joint graph, while preserving general direct solves for closed loops.
 - Fix matched PhoenX contacts changing the world-space direction of warm-started friction impulses when their tangent frames rotate.
+- Fix PhoenX cable-pile lateral creep by keeping contacts between separately factored mechanisms in the coupled colored solve, while retaining exact contact Schur solves for one-mechanism worlds.
 - Fix `ViewerOptix` overwriting a configured camera pose during initialization and make the PhoenX Kapla camera collider preserve its velocity across multiple physics ticks per rendered frame.
 - Fix `ViewerOptix` physical-sky lighting for Y-up OptiX coordinates and non-unit sun directions.
 - Fix severe `ViewerOptix` slowdown in scenes with thousands of instances by batching transform, visibility, material, TLAS, and motion-vector updates.

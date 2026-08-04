@@ -123,6 +123,23 @@ regressed DR Legs to 11.377 and 11.693 ms, respectively, while 64 workers for
 the retained eight-item group measured 11.600 ms; keep eight items and 128
 workers.
 
+The direct contact Schur schedule is now restricted to worlds containing one
+direct mechanism. Its single-owner sweep cannot represent a contact between two
+separately factored mechanisms; partially owning only ground and same-mechanism
+contacts left the remaining cross-mechanism friction rows split from their cable
+equalities. In the 4,000-body cable pile, 615 of 883 settled contact points took
+that split path. Keeping all contacts in the colored PGS/direct-alternation path
+reduced 120-frame center drift from 3.99 to 0.078 mm, mean body XY displacement
+from 8.54 to 3.04 mm, and maximum displacement from 99.55 to 72.42 mm. Captured
+throughput improved from 34.73 to 52.02 FPS because the partial response build
+and solves also disappeared. Drift remained 0.118 mm after 600 frames, and a
+new example final-state check rejects regressions above 1 mm. One-mechanism-per-
+world humanoid and DR Legs fleets retain the Schur fast path; a 20,000-world
+humanoid census selected all 20,000 mechanisms. An explicit single-world
+scheduler reached 74.53 FPS but raised maximum displacement to 92.02 mm, so it
+remains rejected. Reducing reserved contacts from 220,000 to 20,000 was neutral
+at 52.29 FPS and is also not retained.
+
 Full-coordinate construction separately improved from
 36.28 to 16.27 s; it is not included in FPS.
 
