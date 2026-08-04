@@ -1913,6 +1913,8 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
         point_count: wp.array[wp.int32],
         point_contact: wp.array2d[wp.int32],
         point_column: wp.array2d[wp.int32],
+        point0: wp.array2d[wp.vec3],
+        point1: wp.array2d[wp.vec3],
         normal: wp.array2d[wp.vec3],
         tangent0: wp.array2d[wp.vec3],
         row_velocity: wp.array2d[wp.float32],
@@ -1920,6 +1922,7 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
         packed_jacobian: wp.array2d[_rows_dtype],
         packed_response: wp.array2d[_rows_dtype],
         bodies: BodyContainer,
+        refresh_velocity: wp.bool,
         fuse_apply: wp.bool,
         max_depth: wp.int32,
         articulation_depth_start: wp.array2d[wp.int32],
@@ -1928,6 +1931,30 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
         body_delta: wp.array2d[wp.spatial_vector],
     ):
         articulation, lane = wp.tid()
+        if (
+            refresh_velocity
+            and lane
+            < point_count[
+                articulation * wp.int32(_CACHED_PAGE_COUNT) + wp.min(page_index[0], wp.int32(_CACHED_PAGE_COUNT - 1))
+            ]
+        ):
+            _finalize_reduced_contact_rows_device(
+                articulation,
+                lane,
+                columns,
+                bodies,
+                enabled,
+                point_count,
+                page_index,
+                point_column,
+                point0,
+                point1,
+                normal,
+                tangent0,
+                row_velocity,
+            )
+        if refresh_velocity:
+            _sync_contact_warp()
         _solve_generalized_contact_tile_device(
             articulation,
             lane,
@@ -2809,7 +2836,9 @@ class ReducedContactBlockSystem:
             assert self.packed_previous_row_body is not None
             fused_bias = prepare and self.biased_page_launcher is not None
             fused_relax = not prepare and self.relax_page_launcher is not None
-            if not gathered and not fused_relax:
+            # Cached point rows are consumed immediately, so refresh them in the solve block.
+            fused_point_refresh = not prepare and not gathered and not self.patch_rows
+            if not gathered and not fused_relax and not fused_point_refresh:
                 finalize_kernel = (
                     _finalize_reduced_contact_patch_rows_kernel
                     if self.patch_rows
@@ -2963,6 +2992,8 @@ class ReducedContactBlockSystem:
                         self.point_count,
                         self.point_contact,
                         self.point_column,
+                        self.point0,
+                        self.point1,
                         self.normal,
                         self.tangent0,
                         self.row_velocity,
@@ -2970,6 +3001,7 @@ class ReducedContactBlockSystem:
                         self.packed_jacobian,
                         self.packed_response,
                         bodies,
+                        wp.bool(fused_point_refresh),
                         wp.bool(self.fuse_apply),
                         wp.int32(self.max_depth),
                         self.articulation_depth_start,

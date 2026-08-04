@@ -74,7 +74,7 @@ contact gap, no self-collision, and setup/capture excluded from frame timing:
 | PhoenX full, initial | 51.183 ms | 19.54 | 0.391M |
 | PhoenX full, current | 31.693 ms | 31.55 | 0.631M |
 | PhoenX reduced, initial | 9.365 ms | 106.78 | 2.136M |
-| PhoenX reduced, current | 8.095 ms | 123.53 | 2.471M |
+| PhoenX reduced, current | 8.039 ms | 124.40 | 2.488M |
 | MJWarp Newton/implicitfast | 6.948 ms | 143.92 | 2.878M |
 
 MJWarp uses MuJoCo generalized coordinates and forms a small per-world Newton
@@ -108,6 +108,14 @@ its last read. Runtime stayed neutral, the 80-frame state check passed, and
 the 20,000-world ``solution_permuted`` allocation fell by 2.611 GB.
 Full-coordinate construction separately improved from
 36.28 to 16.27 s; it is not included in FPS.
+
+The default reduced point-contact path now refreshes cached relaxation
+velocities inside the solve block that immediately consumes them, removing one
+kernel launch per substep without changing row values or iteration ordering.
+Three 100-frame CUDA-graph runs measured 124.1, 124.4, and 124.5 FPS versus
+121.8, 123.3, and 123.2 FPS with only the fusion disabled (124.4 versus 123.2
+FPS median). Cached-page reference parity and fused/separate contact-apply
+regressions pass at 2e-6 tolerance.
 
 A prototype kept all five 16-row tiles of the humanoid's grouped contact solve
 in about 10 KiB of shared storage across both triangular passes. It measured
