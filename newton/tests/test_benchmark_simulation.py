@@ -223,6 +223,8 @@ class TestSimulationBenchmarks(unittest.TestCase):
 
     def test_kamino_contact_capacity_scales_with_world_count(self):
         """Scale the model-wide Kamino contact cap across replicated worlds."""
+        from newton._src.solvers.kamino.examples.rl.simulation import RigidBodySim  # noqa: PLC0415
+
         settings = SimpleNamespace(
             collision_detector=SimpleNamespace(max_contacts=1000),
             solver=SimpleNamespace(collision_detector=None, dynamics=SimpleNamespace(linear_solver_type=None)),
@@ -230,10 +232,7 @@ class TestSimulationBenchmarks(unittest.TestCase):
         model = SimpleNamespace(world_count=4096)
 
         with (
-            patch(
-                "newton._src.solvers.kamino.examples.rl.simulation.RigidBodySim.default_settings",
-                return_value=settings,
-            ),
+            patch.object(RigidBodySim, "default_settings", return_value=settings),
             patch("benchmark_kamino.newton.solvers.SolverKamino", return_value=object()) as solver_kamino,
         ):
             solver = DRLegsBenchmarkWorkload.create_solver(model, sim_dt=0.001)
