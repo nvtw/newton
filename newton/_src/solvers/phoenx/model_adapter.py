@@ -272,6 +272,7 @@ class JointInitArrays:
         drive_q_at_init: wp.array,
         num_joint_columns: int,
         num_drive_columns: int,
+        has_velocity_limits: bool,
     ):
         self.body1 = body1
         self.body2 = body2
@@ -313,6 +314,7 @@ class JointInitArrays:
         self.drive_q_at_init = drive_q_at_init
         self.num_joint_columns = num_joint_columns
         self.num_drive_columns = num_drive_columns
+        self.has_velocity_limits = has_velocity_limits
 
     def to_initialize_kwargs(self) -> dict:
         """Kwargs for
@@ -439,6 +441,7 @@ def build_joint_init_arrays(
             drive_q_at_init=empty_f,
             num_joint_columns=0,
             num_drive_columns=0,
+            has_velocity_limits=False,
         )
 
     # ---- Pull every relevant joint array back to host ----------------
@@ -979,4 +982,5 @@ def build_joint_init_arrays(
         drive_q_at_init=wp.array(drive_q_at_init_np, dtype=wp.float32, device=device),
         num_joint_columns=num_cols,
         num_drive_columns=int(drive_cid_np.size),
+        has_velocity_limits=any(float(d["velocity_limit"]) > 0.0 for d in descriptors),
     )

@@ -36,7 +36,7 @@ class SingleWorldDispatcher:
         if direct is not None and direct.enabled:
             direct.prepare_and_factor(idt)
         if w._regular_pgs_active_this_step:
-            if direct is not None and direct.enabled:
+            if direct is not None and direct.enabled and not w._combine_direct_prepare_projection:
                 direct.solve(use_bias=False)
                 direct.resolve_bounded_drives(idt, use_bias=False)
             prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
@@ -49,6 +49,8 @@ class SingleWorldDispatcher:
                 # Project contact/limit warm starts before the first inequality
                 # sweep. The factor is fixed for the entire substep.
                 direct.solve(use_bias=False)
+                if w._combine_direct_prepare_projection:
+                    direct.resolve_bounded_drives(idt, use_bias=False)
             for iteration in range(w.solver_iterations):
                 w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)

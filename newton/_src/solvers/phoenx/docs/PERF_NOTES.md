@@ -133,6 +133,17 @@ The bounded grid and narrow tile are therefore not retained. The production
 16x24 triangular solve already uses cuSolverDx LTO. Nsight Compute hardware
 counters were unavailable because the driver denied performance-counter access.
 
+Velocity-invariant point-contact preparation now shares one direct equality
+projection with its warm-start projection instead of projecting once on each
+side of preparation. An alternating same-solver CUDA-graph bracket on 2,048 DR
+Legs worlds reduced the median five-substep, two-iteration frame from 12.153 to
+11.504 ms (5.3%). Patch friction and authored axial velocity limits keep the
+original ordering because their preparation reads the projected velocity;
+reduced coordinates do not enter this full-coordinate path. Direct-contact,
+10,000:1 mass-ratio, joint-type, D6, cable, live-property-update, and scheduling
+regressions pass. The scheduling regression fails with the previous dispatcher
+ordering.
+
 The direct contact Schur schedule is now restricted to worlds containing one
 direct mechanism. Its single-owner sweep cannot represent a contact between two
 separately factored mechanisms; partially owning only ground and same-mechanism

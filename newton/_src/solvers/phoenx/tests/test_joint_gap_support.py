@@ -54,7 +54,7 @@ def _distance_model(*, position: float, lower: float, upper: float) -> newton.Mo
     return builder.finalize(device=wp.get_preferred_device())
 
 
-def _velocity_limited_model(joint_type: newton.JointType) -> newton.Model:
+def _velocity_limited_model(joint_type: newton.JointType, velocity_limit: float = 1.0) -> newton.Model:
     """Build one axial joint starting substantially above its speed limit."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     body = builder.add_link(
@@ -69,7 +69,7 @@ def _velocity_limited_model(joint_type: newton.JointType) -> newton.Model:
             axis=newton.Axis.Z,
             limit_lower=-np.inf,
             limit_upper=np.inf,
-            velocity_limit=1.0,
+            velocity_limit=velocity_limit,
         )
     else:
         joint = builder.add_joint_prismatic(
@@ -78,7 +78,7 @@ def _velocity_limited_model(joint_type: newton.JointType) -> newton.Model:
             axis=newton.Axis.X,
             limit_lower=-np.inf,
             limit_upper=np.inf,
-            velocity_limit=1.0,
+            velocity_limit=velocity_limit,
         )
     builder.add_articulation([joint])
     model = builder.finalize(device=wp.get_preferred_device())
@@ -116,6 +116,7 @@ class TestJointGapSupport(unittest.TestCase):
         newton.eval_ik(model, state, joint_q, joint_qd)
         self.assertLessEqual(abs(float(joint_qd.numpy()[0])), 1.01)
         np.testing.assert_array_equal(solver.world._joint_pgs_enabled.numpy(), [1])
+        self.assertFalse(solver.world._combine_direct_prepare_projection)
 
     def test_prismatic_velocity_limit(self) -> None:
         """Clamp a free slider to its authored maximum linear speed."""
@@ -126,6 +127,21 @@ class TestJointGapSupport(unittest.TestCase):
         newton.eval_ik(model, state, joint_q, joint_qd)
         self.assertLessEqual(abs(float(joint_qd.numpy()[0])), 1.01)
         np.testing.assert_array_equal(solver.world._joint_pgs_enabled.numpy(), [1])
+        self.assertFalse(solver.world._combine_direct_prepare_projection)
+
+    def test_projection_combination_tracks_velocity_limit_updates(self) -> None:
+        """Refresh projection scheduling when an axial velocity limit changes."""
+        model = _velocity_limited_model(newton.JointType.REVOLUTE, velocity_limit=1.0e6)
+        _, solver = _run(model, frames=0)
+        self.assertTrue(solver.world._combine_direct_prepare_projection)
+
+        model.joint_velocity_limit.assign(np.asarray((1.0,), dtype=np.float32))
+        solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+        self.assertFalse(solver.world._combine_direct_prepare_projection)
+
+        model.joint_velocity_limit.assign(np.asarray((1.0e6,), dtype=np.float32))
+        solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+        self.assertTrue(solver.world._combine_direct_prepare_projection)
 
 
 if __name__ == "__main__":

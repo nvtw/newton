@@ -4,9 +4,13 @@
 import unittest
 from types import SimpleNamespace
 
+import warp as wp
+
 import newton
+from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldDispatcher
 from newton._src.solvers.phoenx.examples.example_humanoid import Example as HumanoidExample
 from newton._src.solvers.phoenx.solver import (
+    _can_combine_direct_prepare_projection,
     _estimate_contact_column_max_phoenx,
     _resolve_auto_step_layout,
 )
@@ -39,6 +43,37 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         ):
             with self.subTest(**overrides):
                 self.assertEqual(self._resolve(**overrides), "multi_world")
+
+    def test_combined_projection_requires_velocity_invariant_prepare(self) -> None:
+        """Combine direct projection only when row preparation ignores velocity."""
+        self.assertTrue(_can_combine_direct_prepare_projection(False, "point", "maximal"))
+        self.assertFalse(_can_combine_direct_prepare_projection(True, "point", "maximal"))
+        self.assertFalse(_can_combine_direct_prepare_projection(False, "patch", "maximal"))
+        self.assertFalse(_can_combine_direct_prepare_projection(False, "point", "reduced"))
+
+    def test_combined_projection_follows_prepare_warm_start(self) -> None:
+        """Project direct equalities once after velocity-invariant preparation."""
+        events = []
+        direct = SimpleNamespace(
+            enabled=True,
+            prepare_and_factor=lambda _idt: events.append("factor"),
+            solve=lambda *, use_bias: events.append(("solve", use_bias)),
+            resolve_bounded_drives=lambda _idt, *, use_bias: events.append(("bounds", use_bias)),
+        )
+        world = SimpleNamespace(
+            _direct_equality_system=direct,
+            _regular_pgs_active_this_step=True,
+            _multi_world_scheduler="block_world",
+            _combine_direct_prepare_projection=True,
+            _block_world_supported=lambda: True,
+            _solve_main_block_world=lambda **_kwargs: events.append("prepare"),
+            solver_iterations=0,
+            _solve_direct_contacts=lambda **_kwargs: None,
+            _maximal_tree_projector=None,
+            _reduced_constraints_active_this_step=False,
+        )
+        MultiWorldDispatcher(world).solve(wp.float32(1.0))
+        self.assertEqual(events[:4], ["factor", "prepare", ("solve", False), ("bounds", False)])
 
     def test_explicit_overrides_are_preserved(self):
         self.assertEqual(self._resolve(step_layout="multi_world"), "multi_world")

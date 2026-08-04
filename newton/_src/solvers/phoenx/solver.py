@@ -106,6 +106,13 @@ def _resolve_auto_step_layout(
     return step_layout
 
 
+def _can_combine_direct_prepare_projection(
+    has_velocity_limits: bool, contact_friction_model: str, articulation_mode: str
+) -> bool:
+    """Return whether row preparation is independent of projected velocity."""
+    return articulation_mode == "maximal" and contact_friction_model == "point" and not has_velocity_limits
+
+
 def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     """Tight rigid_contact_max from shape_contact_pair_count * 5 (CPP) * 2 (safety).
     None when pair count is unavailable (caller falls back to Newton's default)."""
@@ -652,6 +659,9 @@ class SolverPhoenX(SolverBase):
             mass_splitting=mass_splitting,
             max_colored_partitions=max_colored_partitions,
             contact_friction_model=contact_friction_model if articulation_mode == "maximal" else "point",
+            combine_direct_prepare_projection=_can_combine_direct_prepare_projection(
+                self._joint_constraints.has_velocity_limits, contact_friction_model, articulation_mode
+            ),
             mass_splitting_batch_size=mass_splitting_batch_size,
             mass_splitting_unrolled=mass_splitting_unrolled,
             partitioner_algorithm=partitioner_algorithm,
@@ -1453,6 +1463,11 @@ class SolverPhoenX(SolverBase):
                 device=self.device,
                 joint_friction_model=self._joint_friction_model,
                 reduced_articulations=self._uses_reduced_joint_ownership,
+            )
+            self.world._combine_direct_prepare_projection = _can_combine_direct_prepare_projection(
+                self._joint_constraints.has_velocity_limits,
+                self.world.contact_friction_model,
+                self.articulation_mode,
             )
             if self._joint_constraints.num_joint_columns > 0:
                 self.world.initialize_joint_constraints(**self._joint_constraints.to_initialize_kwargs())

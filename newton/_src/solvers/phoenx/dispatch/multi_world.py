@@ -40,13 +40,16 @@ class MultiWorldDispatcher:
             if direct is not None and direct.enabled:
                 # Factor once, then alternate inequality sweeps with triangular
                 # solves so contacts see mechanism-level mobility.
-                direct.solve(use_bias=False)
-                direct.resolve_bounded_drives(idt, use_bias=False)
+                if not self._world._combine_direct_prepare_projection:
+                    direct.solve(use_bias=False)
+                    direct.resolve_bounded_drives(idt, use_bias=False)
                 if block_world:
                     self._world._solve_main_block_world(num_iterations=0, solve_direct=False)
                 else:
                     self._world._solve_main(num_iterations=0, solve_direct=False)
                 direct.solve(use_bias=False)
+                if self._world._combine_direct_prepare_projection:
+                    direct.resolve_bounded_drives(idt, use_bias=False)
                 for iteration in range(self._world.solver_iterations):
                     if block_world:
                         self._world._iterate_main_block_world(iteration)

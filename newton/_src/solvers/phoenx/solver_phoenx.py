@@ -649,6 +649,7 @@ class PhoenXWorld:
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
         contact_friction_model: str = "point",
+        combine_direct_prepare_projection: bool = False,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -721,6 +722,7 @@ class PhoenXWorld:
             )
         self.contact_friction_model = contact_friction_model
         self._contact_patch_enabled = contact_friction_model == "patch"
+        self._combine_direct_prepare_projection = bool(combine_direct_prepare_projection)
         self._colored_contact_headers = bool(colored_contact_headers)
         self._colored_contact_rows = bool(colored_contact_rows)
         if self._colored_contact_rows and not self._colored_contact_headers:
