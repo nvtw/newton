@@ -485,41 +485,54 @@ def build_direct_equality_topology(
         body_row_start.append(len(body_rows))
 
     permutation: list[int] = []
+    permutation_cache: dict[tuple[tuple[int, ...], ...], tuple[int, ...]] = {}
     for mechanism in range(len(ordered_mechanisms)):
         start = mechanism_row_start[mechanism]
         end = mechanism_row_start[mechanism + 1]
         dimension = end - start
-        adjacency = [set() for _ in range(dimension)]
-        row_bodies: list[set[int]] = []
+        body_labels: dict[int, int] = {}
+        row_signature: list[tuple[int, ...]] = []
         for row in range(start, end):
             joint = row_joint[row]
-            row_bodies.append(
-                {body for body in (int(joint_parent[joint]), int(joint_child[joint])) if body >= 0 and dynamic[body]}
-            )
-        for row in range(dimension):
-            for column in range(row):
-                if row_bodies[row].intersection(row_bodies[column]):
-                    adjacency[row].add(column)
-                    adjacency[column].add(row)
+            labels: list[int] = []
+            for body in (int(joint_parent[joint]), int(joint_child[joint])):
+                if body < 0 or not dynamic[body]:
+                    continue
+                if body not in body_labels:
+                    body_labels[body] = len(body_labels)
+                labels.append(body_labels[body])
+            row_signature.append(tuple(sorted(labels)))
+        signature = tuple(row_signature)
+        mechanism_order = permutation_cache.get(signature)
+        if mechanism_order is None:
+            adjacency = [set() for _ in range(dimension)]
+            row_bodies = [set(labels) for labels in signature]
+            for row in range(dimension):
+                for column in range(row):
+                    if row_bodies[row].intersection(row_bodies[column]):
+                        adjacency[row].add(column)
+                        adjacency[column].add(row)
 
-        unvisited = set(range(dimension))
-        mechanism_order: list[int] = []
-        while unvisited:
-            seed = min(unvisited, key=lambda row: (len(adjacency[row]), row))
-            queue = deque([seed])
-            unvisited.remove(seed)
-            component: list[int] = []
-            while queue:
-                row = queue.popleft()
-                component.append(row)
-                neighbors = sorted(
-                    adjacency[row].intersection(unvisited),
-                    key=lambda neighbor: (len(adjacency[neighbor]), neighbor),
-                )
-                for neighbor in neighbors:
-                    unvisited.remove(neighbor)
-                    queue.append(neighbor)
-            mechanism_order.extend(reversed(component))
+            unvisited = set(range(dimension))
+            order: list[int] = []
+            while unvisited:
+                seed = min(unvisited, key=lambda row: (len(adjacency[row]), row))
+                queue = deque([seed])
+                unvisited.remove(seed)
+                component: list[int] = []
+                while queue:
+                    row = queue.popleft()
+                    component.append(row)
+                    neighbors = sorted(
+                        adjacency[row].intersection(unvisited),
+                        key=lambda neighbor: (len(adjacency[neighbor]), neighbor),
+                    )
+                    for neighbor in neighbors:
+                        unvisited.remove(neighbor)
+                        queue.append(neighbor)
+                order.extend(reversed(component))
+            mechanism_order = tuple(order)
+            permutation_cache[signature] = mechanism_order
         permutation.extend(mechanism_order)
 
     dimensions = tuple(mechanism_row_start[i + 1] - mechanism_row_start[i] for i in range(len(ordered_mechanisms)))

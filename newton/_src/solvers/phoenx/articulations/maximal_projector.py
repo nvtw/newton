@@ -858,7 +858,7 @@ class MaximalTreeProjector:
                 else:
                     cid = int(joint_to_cid_np[joint])
                     if cid < 0:
-                        raise ValueError(f"projected revolute joint {joint} has no maximal ADBS column")
+                        raise ValueError(f"projected revolute joint {joint} has no maximal joint constraint column")
                     parent_lane = body_to_lane[int(joint_parent[joint])]
                     parent[articulation, lane] = parent_lane
                     depth[articulation, lane] = depth[articulation, parent_lane] + 1

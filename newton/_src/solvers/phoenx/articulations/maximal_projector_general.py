@@ -737,13 +737,13 @@ class GeneralMaximalTreeProjector:
                 else:
                     cid = int(joint_to_cid_np[joint])
                     if cid < 0:
-                        raise ValueError(f"projected joint {joint} has no maximal ADBS column")
+                        raise ValueError(f"projected joint {joint} has no maximal joint constraint column")
                     parent_lane = body_to_lane[int(joint_parent[joint])]
                     parent[articulation, lane] = parent_lane
                     depth[articulation, lane] = depth[articulation, parent_lane] + 1
                     children[parent_lane].append(lane)
             if floating_root[articulation] == 0 and int(joint_to_cid_np[root_joint]) < 0:
-                raise ValueError(f"projected root joint {root_joint} has no maximal ADBS column")
+                raise ValueError(f"projected root joint {root_joint} has no maximal joint constraint column")
             max_depth[articulation] = int(np.max(depth[articulation, :count]))
             flat_children: list[int] = []
             for lane, lane_children in enumerate(children):

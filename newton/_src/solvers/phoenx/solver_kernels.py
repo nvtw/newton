@@ -355,7 +355,7 @@ def _export_body_state_fd_kernel(
     body_qd[tid] = wp.spatial_vector(v_com_fd, omega_fd)
 
 
-# Per-step control -> ADBS column writeback. EFFORT/NONE map to DRIVE_MODE_OFF
+# Per-step control -> joint constraint column writeback. EFFORT/NONE map to DRIVE_MODE_OFF
 # and route torque through _apply_joint_forces_kernel -> body_f.
 
 
@@ -485,7 +485,7 @@ def _apply_joint_drive_control_kernel(
     target_mode_position: wp.int32,
     target_mode_velocity: wp.int32,
     target_mode_position_velocity: wp.int32,
-    # ADBS column offsets.
+    # joint constraint column offsets.
     off_drive_mode: wp.int32,
     off_target: wp.int32,
     off_target_velocity: wp.int32,
@@ -495,7 +495,7 @@ def _apply_joint_drive_control_kernel(
     # Constraint container to rewrite.
     constraints: ConstraintContainer,
 ):
-    """Uniform per-drive writeback into ADBS columns.
+    """Uniform per-drive writeback into joint constraint columns.
 
     The compact lookup arrays contain only active scalar drive rows, so every
     thread follows the same path and reads contiguous drive metadata.

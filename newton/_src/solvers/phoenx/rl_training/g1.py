@@ -13,7 +13,7 @@ import warp as wp
 import newton
 import newton.utils
 from newton._src.solvers.phoenx.constraints.constraint_container import constraint_container_clear_reset_worlds
-from newton._src.solvers.phoenx.constraints.constraint_joint import actuated_double_ball_socket_clear_reset_worlds
+from newton._src.solvers.phoenx.constraints.constraint_joint import joint_constraint_clear_reset_worlds
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_normal_lambda,
@@ -2842,7 +2842,7 @@ class EnvG1PhoenX:
 
     def _clear_reset_solver_state(self) -> None:
         world = self.solver.world
-        actuated_double_ball_socket_clear_reset_worlds(
+        joint_constraint_clear_reset_worlds(
             world.constraints,
             world.bodies,
             world.num_joints,

@@ -33,7 +33,7 @@ from newton._src.solvers.phoenx.experimental.nanog1_import import (
     load_puffernet_weights,
     puffernet_numpy_forward,
 )
-from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
+from newton._src.solvers.phoenx.model_adapter import build_joint_init_arrays
 from newton._src.solvers.phoenx.rl_training import g1_recipe
 from newton._src.solvers.phoenx.rl_training.cublas import (
     gemm_bfloat16,
@@ -723,15 +723,15 @@ class TestG1PhoenXRL(unittest.TestCase):
             atol=1.0e-6,
         )
         self.assertEqual(env.config.joint_friction_model, "mujoco")
-        hard_adbs = build_adbs_init_arrays(env.model, device=device, joint_friction_model="hard")
-        mujoco_adbs = build_adbs_init_arrays(env.model, device=device, joint_friction_model="mujoco")
+        hard_joint_constraints = build_joint_init_arrays(env.model, device=device, joint_friction_model="hard")
+        mujoco_joint_constraints = build_joint_init_arrays(env.model, device=device, joint_friction_model="mujoco")
         np.testing.assert_allclose(
-            hard_adbs.friction_slip_scale.numpy()[: rl.ACTION_DIM_G1],
+            hard_joint_constraints.friction_slip_scale.numpy()[: rl.ACTION_DIM_G1],
             -np.ones(rl.ACTION_DIM_G1, dtype=np.float32),
             rtol=0.0,
             atol=0.0,
         )
-        self.assertGreater(float(np.min(mujoco_adbs.friction_slip_scale.numpy()[: rl.ACTION_DIM_G1])), 0.0)
+        self.assertGreater(float(np.min(mujoco_joint_constraints.friction_slip_scale.numpy()[: rl.ACTION_DIM_G1])), 0.0)
         self.assertEqual(deploy.NU, rl.ACTION_DIM_G1)
         self.assertEqual(deploy.LEG_DOF, g1_recipe.CONTROLLED_ACTION_COUNT)
         self.assertAlmostEqual(deploy.CONTROL_DT, g1_recipe.FRAME_DT)
@@ -4490,7 +4490,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertIsNone(env.solver._reduced_articulation)
         np.testing.assert_array_equal(
             env.solver.world._joint_pgs_enabled.numpy(),
-            np.ones(env.solver._adbs.num_joint_columns, dtype=np.int32),
+            np.ones(env.solver._joint_constraints.num_joint_columns, dtype=np.int32),
         )
         self.assertGreater(float(np.max(env.model.joint_armature.numpy())), 0.0)
         q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)

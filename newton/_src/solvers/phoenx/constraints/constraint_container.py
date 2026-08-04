@@ -24,11 +24,11 @@ __all__ = [
     "CONSTRAINT_BODY2_OFFSET",
     "CONSTRAINT_MULTIPLIER_DWORDS",
     "CONSTRAINT_MULTIPLIER_VEC4S",
-    "CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET",
     "CONSTRAINT_TYPE_CLOTH_BENDING",
     "CONSTRAINT_TYPE_CLOTH_TRIANGLE",
     "CONSTRAINT_TYPE_CONTACT",
     "CONSTRAINT_TYPE_INVALID",
+    "CONSTRAINT_TYPE_JOINT",
     "CONSTRAINT_TYPE_OFFSET",
     "CONSTRAINT_TYPE_SOFT_HEXAHEDRON",
     "CONSTRAINT_TYPE_SOFT_TETRAHEDRON",
@@ -86,7 +86,7 @@ __all__ = [
 CONSTRAINT_TYPE_INVALID = wp.constant(wp.int32(0))
 #: Unified revolute/prismatic/ball-socket/fixed/cable joint. 5-DoF positional
 #: lock + optional scalar actuator row.
-CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET = wp.constant(wp.int32(8))
+CONSTRAINT_TYPE_JOINT = wp.constant(wp.int32(8))
 #: Rigid-rigid contact, one column per (shape_a, shape_b). Warm-start state
 #: lives in :class:`ContactContainer`.
 CONSTRAINT_TYPE_CONTACT = wp.constant(wp.int32(9))
@@ -570,7 +570,7 @@ def constraint_container_clear_reset_worlds(
 def constraint_accumulate_time_us(c: ConstraintContainer, time_us_off: wp.int32, cid: wp.int32, t_us: wp.float32):
     """Atomic-add ``t_us`` microseconds into the column's ``time_us`` slot.
 
-    ``time_us_off`` is the per-schema dword offset (e.g. ``ADBS_TIME_US_OFFSET``).
+    ``time_us_off`` is the per-schema dword offset (e.g. ``JOINT_CONSTRAINT_TIME_US_OFFSET``).
     """
     wp.atomic_add(c.data, time_us_off, cid, t_us)
 

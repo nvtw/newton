@@ -14,7 +14,6 @@
 - Add opt-in running observation normalization to experimental `ConfigPPO`, including graph-captured rollout moments and checkpointed statistics.
 - Add opt-in averaged double-Q targets and actor objectives to experimental `ConfigSAC`, matching the FastSAC estimator used for massively parallel humanoid training.
 - Add experimental `SolverPhoenX(contact_friction_model="patch")` for maximal rigid PGS scenes. It preserves every point normal while coupling convex shape-pair friction into one central 2D Coulomb block with full tangent effective-mass coupling, contact-matched world-space warm starting, CUDA graph capture, and conservative point-friction fallback for raw meshes, heightfields, and compound body-pair columns.
-- Add `SolverPhoenX(solver_flavor="simple")`, an experimental rigid-body flavor that replaces graph-colored block PGS with fixed-capacity, one-thread-per-scalar-equation Jacobi rows and atomic body-delta accumulation and copy-free mass splitting that normalizes arbitrary row fan-in while conserving momentum. `jacobi_max_colors` defaults to 10 and scales the effective Jacobi substep count without constructing a constraint graph. Matched normal and tangent contact multipliers, together with stable Cartesian joint-row multipliers, persist as Jacobi initial guesses.
 - Add `example_motorized_cable_chain` as a one-for-one cable-joint counterpart to the PhoenX motorized hinge-chain example.
 - Add pure-Warp Muon optimizer support to `newton.rl` PPO trainers so experimental G1 runs can match nanoG1 optimizer settings without PyTorch.
 - Add pure-PhoenX `newton.rl` environments and CUDA-graph PPO training scripts for Ant, Unitree Go2 and H1 flat locomotion, classic 21-action Humanoid, and closed-loop DR Legs hold-pose/walking tasks.
@@ -154,7 +153,6 @@
 - Reuse exact reduced-coordinate PhoenX articulated contact responses across bias and velocity-relaxation passes with a bounded graph-capture-safe cache, accelerating contact-rich scenes without changing hard-Hertz contact projection.
 - Reuse bounded reduced-coordinate PhoenX contact geometry during velocity relaxation, recomputing velocity-dependent rows while retaining exact overflow paging and hard-Hertz contact behavior.
 - Schedule experimental reduced-coordinate PhoenX ABA advance with topology-sized 8-, 16-, or 32-lane warp groups, increasing parallelism across independent narrow articulations while retaining full-warp execution for wide trees.
-- Reject cable joints and D6 angular limits in experimental simple PhoenX instead of solving different equations; use `solver_flavor="standard"` for these constraints.
 - Allow opt-in alternating PhoenX PGS color traversal through `symmetric_color_sweep` without changing constraint equations or CUDA graph capture.
 - Change PhoenX cable bend constraints to a physically damped angular Schur block coupled with the point attachment, so high stiffness approaches the revolute lock without SOR or additional constraint storage.
 - Change experimental PhoenX G1 RL actuation to explicit clamped PD torques matching nanoG1/MuJoCo; pass `actuation_model="constraint_drive"` or `--actuation-model constraint_drive` to use the previous implicit PhoenX drive-row formulation.
@@ -208,6 +206,7 @@
 
 ### Removed
 
+- Remove the experimental Jacobi/simple implementation from production PhoenX; use PhoenX Mini for solver experiments. Deprecate `SolverPhoenX.solver_flavor` and `jacobi_max_colors`; omit both arguments for the production solver.
 - Remove the deprecated SDF compatibility attributes `Model.shape_sdf_index`, `Model.texture_sdf_data`, `Model.texture_sdf_coarse_textures`, `Model.texture_sdf_subgrid_textures`, `Model.texture_sdf_subgrid_start_slots`, `Model.sdf_block_coords`, `Model.sdf_index2blocks`, and `SDF.texture_block_coords` (deprecated in 1.3.0); the hydroelastic broadphase derives block coordinates arithmetically and the remaining storage is internal.
 - Remove the deprecated `newton.geometry.build_bvh_shape()`, `refit_bvh_shape()`, `build_bvh_particle()`, and `refit_bvh_particle()` helpers (deprecated in 1.3.0); use `Model.bvh_build_shapes()`, `Model.bvh_refit_shapes()`, `Model.bvh_build_particles()`, and `Model.bvh_refit_particles()` instead.
 - Remove the deprecated `Model.has_heightfields` property (deprecated in 1.3.0); use `Model.heightfield_count`, or `model.heightfield_count > 0` for boolean checks, instead.
@@ -216,6 +215,7 @@
 
 ### Fixed
 
+- Accelerate large replicated PhoenX articulations by reusing symbolic topology, sizing contact columns from shape-pair capacity, reusing injected collision pipelines, and lazily compiling reduced-contact fallback kernels.
 - Fix reduced-coordinate PhoenX CUDA advance omitting joints when an articulation tree depth contains more than 32 joints.
 - Fix experimental PhoenX G1 population-based training discarding fitness statistics after the first eager training interval.
 - Fix experimental PhoenX PPO adaptive KL increasing the learning rate when measured KL is exactly zero.

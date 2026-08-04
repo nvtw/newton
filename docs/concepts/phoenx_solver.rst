@@ -424,8 +424,7 @@ of <0.1 kg with ``target_ke = 300`` N·m/rad).
 Cable joints (bend + twist stiffness)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The actuated double-ball-socket constraint also carries a **cable
-mode** — a rigid ball-socket at ``anchor1`` plus three soft angular
+The PhoenX joint adapter also carries a **cable mode** — a rigid ball-socket at ``anchor1`` plus three soft angular
 rows formulated against the joint's finalize-time rest pose:
 
 - Two **bend** rows, with stiffness ``k_bend`` [N·m/rad] and damping
@@ -631,7 +630,7 @@ when you mutate :class:`~newton.Model` fields after construction:
     * - Flag
       - Effect
     * - ``JOINT_PROPERTIES`` / ``JOINT_DOF_PROPERTIES``
-      - Rebuild ADBS init arrays + re-stamp joint columns.
+      - Rebuild joint initialization arrays + re-stamp joint columns.
     * - ``MODEL_PROPERTIES``
       - Refresh per-world ``gravity``.
     * - ``BODY_PROPERTIES`` / ``BODY_INERTIAL_PROPERTIES``

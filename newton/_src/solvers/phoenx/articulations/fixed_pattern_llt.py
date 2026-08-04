@@ -63,6 +63,8 @@ def build_fixed_panel_symbolic(
     panel_tables: list[np.ndarray] = []
     tile_counts: list[int] = []
     panel_count = 0
+    tile_elements = block_size * block_size
+    symbolic_cache: dict[tuple[int, bytes, tuple[tuple[int, ...], ...]], tuple] = {}
 
     for mechanism, dimension in enumerate(dimensions):
         vector_offset = int(mechanism_row_start[mechanism])
@@ -70,62 +72,108 @@ def build_fixed_panel_symbolic(
             permutation[vector_offset : vector_offset + dimension],
             dtype=np.int32,
         )
-        inverse_permutation = np.empty(dimension, dtype=np.int32)
-        inverse_permutation[local_permutation] = np.arange(dimension, dtype=np.int32)
 
-        body_rows: dict[int, list[int]] = {}
-        active_pairs = {(row, row) for row in range(dimension)}
+        body_labels: dict[int, int] = {}
+        row_signature: list[tuple[int, ...]] = []
         for local_row in range(dimension):
-            for body in row_bodies[vector_offset + local_row]:
-                body_rows.setdefault(body, []).append(local_row)
-        for rows in body_rows.values():
-            for row in rows:
-                for column in rows:
-                    active_pairs.add((max(row, column), min(row, column)))
+            labels: list[int] = []
+            for body in sorted(row_bodies[vector_offset + local_row]):
+                if body not in body_labels:
+                    body_labels[body] = len(body_labels)
+                labels.append(body_labels[body])
+            row_signature.append(tuple(labels))
+        cache_key = (dimension, local_permutation.tobytes(), tuple(row_signature))
+        cached = symbolic_cache.get(cache_key)
+        if cached is None:
+            body_rows: dict[int, list[int]] = {}
+            active_pairs = {(row, row) for row in range(dimension)}
+            for local_row, labels in enumerate(row_signature):
+                for body in labels:
+                    body_rows.setdefault(body, []).append(local_row)
+            for rows in body_rows.values():
+                for row in rows:
+                    for column in rows:
+                        active_pairs.add((max(row, column), min(row, column)))
+            active_pair_key = tuple(sorted(active_pairs))
+            inverse_permutation = np.empty(dimension, dtype=np.int32)
+            inverse_permutation[local_permutation] = np.arange(dimension, dtype=np.int32)
+            permuted_entries: set[tuple[int, int]] = set()
+            for original_row, original_column in active_pair_key:
+                row = int(inverse_permutation[original_row])
+                column = int(inverse_permutation[original_column])
+                if row < column:
+                    row, column = column, row
+                permuted_entries.add((row, column))
 
-        permuted_entries: set[tuple[int, int]] = set()
-        for original_row, original_column in active_pairs:
-            row = int(inverse_permutation[original_row])
-            column = int(inverse_permutation[original_column])
-            if row < column:
-                row, column = column, row
-            permuted_entries.add((row, column))
+            tile_count = (dimension + block_size - 1) // block_size
+            pattern = np.zeros((tile_count, tile_count), dtype=bool)
+            for row, column in permuted_entries:
+                pattern[row // block_size, column // block_size] = True
+            np.fill_diagonal(pattern, True)
+            for column in range(tile_count):
+                for row in range(column + 1, tile_count):
+                    if pattern[row, column]:
+                        continue
+                    for inner in range(column):
+                        if pattern[row, inner] and pattern[column, inner]:
+                            pattern[row, column] = True
+                            break
 
-        tile_count = (dimension + block_size - 1) // block_size
-        tile_counts.append(tile_count)
-        pattern = np.zeros((tile_count, tile_count), dtype=bool)
-        for row, column in permuted_entries:
-            pattern[row // block_size, column // block_size] = True
-        np.fill_diagonal(pattern, True)
-        for column in range(tile_count):
-            for row in range(column + 1, tile_count):
-                if pattern[row, column]:
-                    continue
-                for inner in range(column):
-                    if pattern[row, inner] and pattern[column, inner]:
-                        pattern[row, column] = True
-                        break
+            panel_table = np.full((tile_count, tile_count), -1, dtype=np.int32)
+            local_panel_count = 0
+            for column in range(tile_count):
+                for row in range(column, tile_count):
+                    if pattern[row, column]:
+                        panel_table[row, column] = local_panel_count
+                        local_panel_count += 1
 
-        panel_table = np.full((tile_count, tile_count), -1, dtype=np.int32)
-        for column in range(tile_count):
-            for row in range(column, tile_count):
-                if pattern[row, column]:
-                    panel_table[row, column] = panel_count
-                    panel_count += 1
-        panel_tables.append(panel_table)
-
-        for row, column in sorted(permuted_entries):
-            panel = int(panel_table[row // block_size, column // block_size])
-            storage = panel * block_size * block_size + (row % block_size) * block_size + column % block_size
-            matrix_row.append(vector_offset + int(local_permutation[row]))
-            matrix_column.append(vector_offset + int(local_permutation[column]))
-            matrix_storage.append(storage)
-        for original_row in range(dimension):
-            row = int(inverse_permutation[original_row])
-            panel = int(panel_table[row // block_size, row // block_size])
-            diagonal_storage[vector_offset + original_row] = (
-                panel * block_size * block_size + (row % block_size) * block_size + row % block_size
+            entries = sorted(permuted_entries)
+            local_matrix_row = np.asarray([local_permutation[row] for row, _ in entries], dtype=np.int32)
+            local_matrix_column = np.asarray([local_permutation[column] for _, column in entries], dtype=np.int32)
+            local_matrix_storage = np.asarray(
+                [
+                    int(panel_table[row // block_size, column // block_size]) * tile_elements
+                    + (row % block_size) * block_size
+                    + column % block_size
+                    for row, column in entries
+                ],
+                dtype=np.int32,
             )
+            local_diagonal_storage = np.empty(dimension, dtype=np.int32)
+            for original_row in range(dimension):
+                row = int(inverse_permutation[original_row])
+                panel = int(panel_table[row // block_size, row // block_size])
+                local_diagonal_storage[original_row] = (
+                    panel * tile_elements + (row % block_size) * block_size + row % block_size
+                )
+            cached = (
+                tile_count,
+                panel_table,
+                local_panel_count,
+                local_matrix_row,
+                local_matrix_column,
+                local_matrix_storage,
+                local_diagonal_storage,
+            )
+            symbolic_cache[cache_key] = cached
+
+        (
+            tile_count,
+            local_panel_table,
+            local_panel_count,
+            local_matrix_row,
+            local_matrix_column,
+            local_matrix_storage,
+            local_diagonal_storage,
+        ) = cached
+        storage_offset = panel_count * tile_elements
+        matrix_row.extend((vector_offset + local_matrix_row).tolist())
+        matrix_column.extend((vector_offset + local_matrix_column).tolist())
+        matrix_storage.extend((storage_offset + local_matrix_storage).tolist())
+        diagonal_storage[vector_offset : vector_offset + dimension] = storage_offset + local_diagonal_storage
+        panel_tables.append(np.where(local_panel_table >= 0, local_panel_table + panel_count, -1))
+        tile_counts.append(tile_count)
+        panel_count += local_panel_count
 
     table_offsets = [0]
     for table in panel_tables:

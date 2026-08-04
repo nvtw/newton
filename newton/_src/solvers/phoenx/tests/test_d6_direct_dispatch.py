@@ -33,7 +33,7 @@ def _make_body(builder: newton.ModelBuilder) -> int:
 
 def _mode_for(model: newton.Model) -> int:
     solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
-    return int(solver._adbs.joint_mode.numpy()[0])
+    return int(solver._joint_constraints.joint_mode.numpy()[0])
 
 
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX direct D6 dispatch tests run on CUDA only")
@@ -52,10 +52,10 @@ class TestD6DirectDispatch(unittest.TestCase):
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
 
-        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_BALL_SOCKET))
-        self.assertEqual(int(solver._adbs.d6_limit_count.numpy()[0]), 3)
-        np.testing.assert_allclose(solver._adbs.d6_limit_lower.numpy()[0], [-1.0, -1.0, -1.0], atol=1.0e-6)
-        np.testing.assert_allclose(solver._adbs.d6_limit_upper.numpy()[0], [1.0, 1.0, 1.0], atol=1.0e-6)
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_BALL_SOCKET))
+        self.assertEqual(int(solver._joint_constraints.d6_limit_count.numpy()[0]), 3)
+        np.testing.assert_allclose(solver._joint_constraints.d6_limit_lower.numpy()[0], [-1.0, -1.0, -1.0], atol=1.0e-6)
+        np.testing.assert_allclose(solver._joint_constraints.d6_limit_upper.numpy()[0], [1.0, 1.0, 1.0], atol=1.0e-6)
 
     def test_angular_two_axis_mjcf_style_d6_reduces_to_universal_with_limits(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -70,10 +70,10 @@ class TestD6DirectDispatch(unittest.TestCase):
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
 
-        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
-        self.assertEqual(int(solver._adbs.d6_limit_count.numpy()[0]), 2)
-        np.testing.assert_allclose(solver._adbs.d6_limit_lower.numpy()[0], [-0.8, -1.3, 0.0], atol=1.0e-6)
-        np.testing.assert_allclose(solver._adbs.d6_limit_upper.numpy()[0], [0.8, 0.5, 0.0], atol=1.0e-6)
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
+        self.assertEqual(int(solver._joint_constraints.d6_limit_count.numpy()[0]), 2)
+        np.testing.assert_allclose(solver._joint_constraints.d6_limit_lower.numpy()[0], [-0.8, -1.3, 0.0], atol=1.0e-6)
+        np.testing.assert_allclose(solver._joint_constraints.d6_limit_upper.numpy()[0], [0.8, 0.5, 0.0], atol=1.0e-6)
 
     def test_angular_two_axis_d6_limit_row_reacts_to_violation(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -125,9 +125,9 @@ class TestD6DirectDispatch(unittest.TestCase):
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
 
-        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_REVOLUTE))
-        self.assertEqual(int(solver._adbs.joint_idx_to_dof_start.numpy()[0]), 0)
-        self.assertAlmostEqual(float(solver._adbs.target.numpy()[0]), 0.1, places=6)
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_REVOLUTE))
+        self.assertEqual(int(solver._joint_constraints.joint_idx_to_dof_start.numpy()[0]), 0)
+        self.assertAlmostEqual(float(solver._joint_constraints.target.numpy()[0]), 0.1, places=6)
 
     def test_linear_one_axis_d6_reduces_to_prismatic(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -157,7 +157,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         )
         direct = solver._direct_equality_system
 
-        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_CARTESIAN_PLANE))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_CARTESIAN_PLANE))
         self.assertEqual(direct.topology.dimensions, (4,))
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
 
@@ -189,7 +189,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5, solver_iterations=2, articulation_mode="maximal")
 
-        self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_CARTESIAN))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_CARTESIAN))
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (3,))
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
 
@@ -267,7 +267,7 @@ class TestD6DirectDispatch(unittest.TestCase):
                     articulation_mode="maximal",
                 )
                 direct = solver._direct_equality_system
-                self.assertEqual(int(solver._adbs.joint_mode.numpy()[0]), int(JOINT_MODE_BALL_SOCKET))
+                self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_BALL_SOCKET))
                 self.assertEqual(direct.topology.dimensions, (3,))
                 self.assertTrue(bool(direct.joint_mask[0]))
                 self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)

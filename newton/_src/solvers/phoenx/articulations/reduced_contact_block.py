@@ -340,7 +340,7 @@ def _solve_fallback_contact_column(
         reduced_contact_iterate(columns, column, bodies, idt, sor_boost, cc, contacts, use_bias, wp.bool(False))
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="reduced_contact_fallback")
 def _solve_fallback_contact_color_kernel(
     columns: ContactColumnContainer,
     bodies: BodyContainer,
@@ -394,7 +394,7 @@ def _solve_fallback_contact_color_kernel(
         color_cursor[0] = cursor - wp.int32(1)
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="reduced_contact_fallback")
 def _solve_fallback_contact_world_kernel(
     columns: ContactColumnContainer,
     bodies: BodyContainer,

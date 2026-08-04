@@ -26,10 +26,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    ADBS_DWORDS,
     DRIVE_MODE_OFF,
+    JOINT_CONSTRAINT_DWORDS,
     JOINT_MODE_PRISMATIC,
-    ActuatedDoubleBallSocketData,
+    JointConstraintData,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES
 from newton._src.solvers.phoenx.solver_phoenx import (
@@ -83,9 +83,9 @@ class TestInvariants(unittest.TestCase):
 
     def test_joint_columns_omit_bilateral_factor_caches(self) -> None:
         """Keep obsolete bilateral PGS caches out of joint columns."""
-        fields = set(ActuatedDoubleBallSocketData.vars)
+        fields = set(JointConstraintData.vars)
         self.assertTrue(fields.isdisjoint({"structural_direct", "mode_cache", "hertz", "mass_coeff", "impulse_coeff"}))
-        self.assertLessEqual(ADBS_DWORDS, 84)
+        self.assertLessEqual(JOINT_CONSTRAINT_DWORDS, 85)
 
     def test_correct_construction_accepted(self) -> None:
         """A correctly-built world constructs without raising."""
@@ -112,7 +112,7 @@ class TestInvariants(unittest.TestCase):
         column count -- the bypass-the-factory mistake the audit
         caught -- must fail loudly."""
         kw = _make_kwargs(num_bodies=1, num_joints=2)
-        # ``num_joints=2`` -> factory would emit (ADBS_DWORDS, 2). Pass
+        # ``num_joints=2`` -> factory would emit (JOINT_CONSTRAINT_DWORDS, 2). Pass
         # a too-small container instead.
         kw["constraints"] = constraint_container_zeros(num_constraints=1, num_dwords=1, device=wp.get_device())
         with self.assertRaisesRegex(AssertionError, r"ConstraintContainer\.data has shape"):
@@ -436,7 +436,7 @@ class TestPrepareRefreshStride(unittest.TestCase):
         def _v(v: tuple[float, float, float]) -> wp.array:
             return wp.array([v], dtype=wp.vec3f, device=device)
 
-        w.initialize_actuated_double_ball_socket_joints(
+        w.initialize_joint_constraints(
             body1=_i(0),
             body2=_i(1),
             anchor1=_v((0.0, 0.0, 0.0)),

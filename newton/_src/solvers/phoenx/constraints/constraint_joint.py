@@ -23,7 +23,7 @@ from newton._src.solvers.phoenx.body import (
     mat33_from_sym6,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET,
+    CONSTRAINT_TYPE_JOINT,
     ConstraintBodies,
     ConstraintContainer,
     assert_constraint_header,
@@ -69,11 +69,11 @@ from newton._src.solvers.phoenx.solver_config import (
 )
 
 __all__ = [
-    "ADBS_DWORDS",
-    "ADBS_TIME_US_OFFSET",
     "DRIVE_MODE_OFF",
     "DRIVE_MODE_POSITION",
     "DRIVE_MODE_VELOCITY",
+    "JOINT_CONSTRAINT_DWORDS",
+    "JOINT_CONSTRAINT_TIME_US_OFFSET",
     "JOINT_MODE_BALL_SOCKET",
     "JOINT_MODE_CABLE",
     "JOINT_MODE_CARTESIAN",
@@ -86,14 +86,14 @@ __all__ = [
     "JOINT_MODE_PRISMATIC",
     "JOINT_MODE_REVOLUTE",
     "JOINT_MODE_UNIVERSAL",
-    "ActuatedDoubleBallSocketData",
-    "actuated_double_ball_socket_clear_reset_worlds",
-    "actuated_double_ball_socket_initialize_kernel",
-    "actuated_double_ball_socket_prepare_inequality",
-    "actuated_double_ball_socket_world_error",
-    "actuated_double_ball_socket_world_error_at",
-    "actuated_double_ball_socket_world_wrench",
-    "actuated_double_ball_socket_world_wrench_at",
+    "JointConstraintData",
+    "joint_constraint_clear_reset_worlds",
+    "joint_constraint_initialize_kernel",
+    "joint_constraint_prepare_inequality",
+    "joint_constraint_world_error",
+    "joint_constraint_world_error_at",
+    "joint_constraint_world_wrench",
+    "joint_constraint_world_wrench_at",
 ]
 
 
@@ -167,7 +167,7 @@ _CLAMP_VELOCITY_MIN = wp.constant(wp.int32(4))
 
 
 @wp.struct
-class ActuatedDoubleBallSocketData:
+class JointConstraintData:
     """Store joint inequality state and experimental projector geometry."""
 
     # ---- Header -------------------------------------------------------
@@ -285,30 +285,30 @@ class ActuatedDoubleBallSocketData:
     time_us: wp.float32
 
 
-assert_constraint_header(ActuatedDoubleBallSocketData)
+assert_constraint_header(JointConstraintData)
 
 
 # Dword offsets derived once from the schema. Named per field.
-_OFF_BODY1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "body1"))
-_OFF_BODY2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "body2"))
-_OFF_JOINT_MODE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "joint_mode"))
-_OFF_LA1_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor1_b1"))
-_OFF_LA1_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor1_b2"))
-_OFF_LA2_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor2_b1"))
-_OFF_LA2_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "local_anchor2_b2"))
-_OFF_R1_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r1_b1"))
-_OFF_R1_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r1_b2"))
-_OFF_R2_B1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r2_b1"))
-_OFF_R2_B2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "r2_b2"))
-_OFF_T1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "t1"))
-_OFF_T2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "t2"))
-_OFF_BIAS1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias1"))
-_OFF_BIAS2 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "bias2"))
+_OFF_BODY1 = wp.constant(dword_offset_of(JointConstraintData, "body1"))
+_OFF_BODY2 = wp.constant(dword_offset_of(JointConstraintData, "body2"))
+_OFF_JOINT_MODE = wp.constant(dword_offset_of(JointConstraintData, "joint_mode"))
+_OFF_LA1_B1 = wp.constant(dword_offset_of(JointConstraintData, "local_anchor1_b1"))
+_OFF_LA1_B2 = wp.constant(dword_offset_of(JointConstraintData, "local_anchor1_b2"))
+_OFF_LA2_B1 = wp.constant(dword_offset_of(JointConstraintData, "local_anchor2_b1"))
+_OFF_LA2_B2 = wp.constant(dword_offset_of(JointConstraintData, "local_anchor2_b2"))
+_OFF_R1_B1 = wp.constant(dword_offset_of(JointConstraintData, "r1_b1"))
+_OFF_R1_B2 = wp.constant(dword_offset_of(JointConstraintData, "r1_b2"))
+_OFF_R2_B1 = wp.constant(dword_offset_of(JointConstraintData, "r2_b1"))
+_OFF_R2_B2 = wp.constant(dword_offset_of(JointConstraintData, "r2_b2"))
+_OFF_T1 = wp.constant(dword_offset_of(JointConstraintData, "t1"))
+_OFF_T2 = wp.constant(dword_offset_of(JointConstraintData, "t2"))
+_OFF_BIAS1 = wp.constant(dword_offset_of(JointConstraintData, "bias1"))
+_OFF_BIAS2 = wp.constant(dword_offset_of(JointConstraintData, "bias2"))
 # Aliased mode-extras block. Prismatic packs anchor-3 / r3 / acc_imp3
 # / bias3 (16 dwords); revolute packs the twist-tracker scratch
 # (inv_initial_orientation + revolution_counter + previous_quaternion_angle
 # = 6 dwords). Mutually exclusive, so we share the 16-dword block.
-_OFF_MODE_EXTRAS = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "mode_extras"))
+_OFF_MODE_EXTRAS = wp.constant(dword_offset_of(JointConstraintData, "mode_extras"))
 # Prismatic-only fields, dwords 0..15 of mode_extras:
 _OFF_LA3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
 _OFF_LA3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 3)
@@ -324,37 +324,37 @@ _OFF_D6_LIMIT_LOWER = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
 _OFF_D6_LIMIT_UPPER = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
 _OFF_D6_LIMIT_COUNT = wp.constant(int(_OFF_MODE_EXTRAS) + 12)
 _OFF_D6_LIMIT_EFF_INV = wp.constant(int(_OFF_MODE_EXTRAS) + 13)
-_OFF_AXIS_LOCAL1 = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_local1"))
-_OFF_REST_LENGTH = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "rest_length"))
-_OFF_DRIVE_MODE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "drive_mode"))
-_OFF_TARGET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target"))
-_OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "target_velocity"))
-_OFF_VELOCITY_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "velocity_limit"))
-_OFF_MAX_FORCE_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_force_drive"))
-_OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_drive"))
-_OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_drive"))
-_OFF_FRICTION_COEFFICIENT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "friction_coefficient"))
-_OFF_FRICTION_SLIP_SCALE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "friction_slip_scale"))
-_OFF_MIN_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "min_value"))
-_OFF_MAX_VALUE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "max_value"))
-_OFF_HERTZ_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "hertz_limit"))
-_OFF_DAMPING_RATIO_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_ratio_limit"))
-_OFF_STIFFNESS_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "stiffness_limit"))
-_OFF_DAMPING_LIMIT = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "damping_limit"))
-_OFF_EFF_INV_AXIAL = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_inv_axial"))
-_OFF_EFF_INV_FRICTION = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "eff_inv_friction"))
+_OFF_AXIS_LOCAL1 = wp.constant(dword_offset_of(JointConstraintData, "axis_local1"))
+_OFF_REST_LENGTH = wp.constant(dword_offset_of(JointConstraintData, "rest_length"))
+_OFF_DRIVE_MODE = wp.constant(dword_offset_of(JointConstraintData, "drive_mode"))
+_OFF_TARGET = wp.constant(dword_offset_of(JointConstraintData, "target"))
+_OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(JointConstraintData, "target_velocity"))
+_OFF_VELOCITY_LIMIT = wp.constant(dword_offset_of(JointConstraintData, "velocity_limit"))
+_OFF_MAX_FORCE_DRIVE = wp.constant(dword_offset_of(JointConstraintData, "max_force_drive"))
+_OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(JointConstraintData, "stiffness_drive"))
+_OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(JointConstraintData, "damping_drive"))
+_OFF_FRICTION_COEFFICIENT = wp.constant(dword_offset_of(JointConstraintData, "friction_coefficient"))
+_OFF_FRICTION_SLIP_SCALE = wp.constant(dword_offset_of(JointConstraintData, "friction_slip_scale"))
+_OFF_MIN_VALUE = wp.constant(dword_offset_of(JointConstraintData, "min_value"))
+_OFF_MAX_VALUE = wp.constant(dword_offset_of(JointConstraintData, "max_value"))
+_OFF_HERTZ_LIMIT = wp.constant(dword_offset_of(JointConstraintData, "hertz_limit"))
+_OFF_DAMPING_RATIO_LIMIT = wp.constant(dword_offset_of(JointConstraintData, "damping_ratio_limit"))
+_OFF_STIFFNESS_LIMIT = wp.constant(dword_offset_of(JointConstraintData, "stiffness_limit"))
+_OFF_DAMPING_LIMIT = wp.constant(dword_offset_of(JointConstraintData, "damping_limit"))
+_OFF_EFF_INV_AXIAL = wp.constant(dword_offset_of(JointConstraintData, "eff_inv_axial"))
+_OFF_EFF_INV_FRICTION = wp.constant(dword_offset_of(JointConstraintData, "eff_inv_friction"))
 # Aliased Box2D / PD limit cache: 3 shared dwords. Layouts:
 #   Box2D: [bias_limit_box2d, mass_coeff_limit, impulse_coeff_limit]
 #   PD:    [pd_gamma_limit,   pd_beta_limit,    pd_mass_coeff_limit]
-_OFF_LIMIT_CACHE = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "limit_cache"))
+_OFF_LIMIT_CACHE = wp.constant(dword_offset_of(JointConstraintData, "limit_cache"))
 _OFF_BIAS_LIMIT_BOX2D = wp.constant(int(_OFF_LIMIT_CACHE) + 0)
 _OFF_MASS_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 1)
 _OFF_IMPULSE_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
 _OFF_PD_GAMMA_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 0)
 _OFF_PD_BETA_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 1)
 _OFF_PD_MASS_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
-_OFF_CLAMP = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "clamp"))
-_OFF_AXIS_WORLD = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "axis_world"))
+_OFF_CLAMP = wp.constant(dword_offset_of(JointConstraintData, "clamp"))
+_OFF_AXIS_WORLD = wp.constant(dword_offset_of(JointConstraintData, "axis_world"))
 # Family-aliased mutable state in three aligned vec4 groups: impulse.xyz and
 # its correlated limit/friction scalar in w.
 _MUL_ACC_IMP1 = wp.constant(wp.int32(0))
@@ -362,10 +362,10 @@ _MUL_ACC_IMP2 = wp.constant(wp.int32(4))
 _MUL_ACC_LIMIT = wp.constant(wp.int32(7))
 _MUL_ACC_IMP3 = wp.constant(wp.int32(8))
 _MUL_ACC_FRICTION = wp.constant(wp.int32(11))
-ADBS_TIME_US_OFFSET = wp.constant(dword_offset_of(ActuatedDoubleBallSocketData, "time_us"))
+JOINT_CONSTRAINT_TIME_US_OFFSET = wp.constant(dword_offset_of(JointConstraintData, "time_us"))
 
 #: Total dword count of one unified joint constraint.
-ADBS_DWORDS: int = num_dwords(ActuatedDoubleBallSocketData)
+JOINT_CONSTRAINT_DWORDS: int = num_dwords(JointConstraintData)
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +374,7 @@ ADBS_DWORDS: int = num_dwords(ActuatedDoubleBallSocketData)
 
 
 @wp.kernel(enable_backward=False, module="unique")
-def actuated_double_ball_socket_initialize_kernel(
+def joint_constraint_initialize_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     cid_offset: wp.int32,
@@ -487,7 +487,7 @@ def actuated_double_ball_socket_initialize_kernel(
     la3_b1 = wp.quat_rotate_inv(orient1, a3_w - pos1)
     la3_b2 = wp.quat_rotate_inv(orient2, a3_w - pos2)
 
-    constraint_set_type(constraints, cid, CONSTRAINT_TYPE_ACTUATED_DOUBLE_BALL_SOCKET)
+    constraint_set_type(constraints, cid, CONSTRAINT_TYPE_JOINT)
     mode = joint_mode[tid]
     if mode == JOINT_MODE_DISTANCE:
         # Distance endpoints are the two independently authored anchors.
@@ -592,7 +592,7 @@ def actuated_double_ball_socket_initialize_kernel(
 
 
 @wp.func
-def _adbs_constraint_world(bodies: BodyContainer, b1: wp.int32, b2: wp.int32) -> wp.int32:
+def _joint_constraint_world(bodies: BodyContainer, b1: wp.int32, b2: wp.int32) -> wp.int32:
     if b2 >= wp.int32(0) and b2 < bodies.world_id.shape[0] and bodies.motion_type[b2] != MOTION_STATIC:
         return bodies.world_id[b2]
     if b1 >= wp.int32(0) and b1 < bodies.world_id.shape[0] and bodies.motion_type[b1] != MOTION_STATIC:
@@ -605,7 +605,7 @@ def _adbs_constraint_world(bodies: BodyContainer, b1: wp.int32, b2: wp.int32) ->
 
 
 @wp.kernel(enable_backward=False)
-def _adbs_clear_reset_worlds_kernel(
+def _joint_constraint_clear_reset_worlds_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     joint_count: wp.int32,
@@ -615,7 +615,7 @@ def _adbs_clear_reset_worlds_kernel(
     if cid >= joint_count:
         return
 
-    world = _adbs_constraint_world(
+    world = _joint_constraint_world(
         bodies,
         read_int(constraints, _OFF_BODY1, cid),
         read_int(constraints, _OFF_BODY2, cid),
@@ -657,19 +657,19 @@ def _adbs_clear_reset_worlds_kernel(
     constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
 
 
-def actuated_double_ball_socket_clear_reset_worlds(
+def joint_constraint_clear_reset_worlds(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     joint_count: int,
     dones: wp.array[wp.float32],
     device: wp.DeviceLike = None,
 ) -> None:
-    """Clear ADBS runtime caches and warm starts for reset worlds."""
+    """Clear joint constraint runtime caches and warm starts for reset worlds."""
     count = max(0, min(int(joint_count), int(constraints.data.shape[1])))
     if count == 0:
         return
     wp.launch(
-        _adbs_clear_reset_worlds_kernel,
+        _joint_constraint_clear_reset_worlds_kernel,
         dim=count,
         inputs=[constraints, bodies, wp.int32(count), dones],
         device=device,
@@ -1174,7 +1174,7 @@ def _d6_angular_limits_block(
 
 
 @wp.func
-def actuated_double_ball_socket_prepare_inequality(
+def joint_constraint_prepare_inequality(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
@@ -1352,7 +1352,7 @@ def actuated_double_ball_socket_prepare_inequality(
 
 
 @wp.func
-def actuated_double_ball_socket_world_wrench_at(
+def joint_constraint_world_wrench_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
     base_offset: wp.int32,
@@ -1416,7 +1416,7 @@ def actuated_double_ball_socket_world_wrench_at(
 
 
 @wp.func
-def actuated_double_ball_socket_world_wrench(
+def joint_constraint_world_wrench(
     constraints: ConstraintContainer,
     cid: wp.int32,
     idt: wp.float32,
@@ -1424,13 +1424,13 @@ def actuated_double_ball_socket_world_wrench(
     """World-frame (force, torque) this constraint exerts on body 2.
 
     Units: [N], [N*m]. See
-    :func:`actuated_double_ball_socket_world_wrench_at` for details.
+    :func:`joint_constraint_world_wrench_at` for details.
     """
-    return actuated_double_ball_socket_world_wrench_at(constraints, cid, 0, idt)
+    return joint_constraint_world_wrench_at(constraints, cid, 0, idt)
 
 
 @wp.func
-def actuated_double_ball_socket_world_error_at(
+def joint_constraint_world_error_at(
     constraints: ConstraintContainer,
     cid: wp.int32,
     base_offset: wp.int32,
@@ -1543,13 +1543,13 @@ def actuated_double_ball_socket_world_error_at(
 
 
 @wp.func
-def actuated_double_ball_socket_world_error(
+def joint_constraint_world_error(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
 ) -> wp.spatial_vector:
-    """Direct wrapper around :func:`actuated_double_ball_socket_world_error_at`."""
+    """Direct wrapper around :func:`joint_constraint_world_error_at`."""
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
-    return actuated_double_ball_socket_world_error_at(constraints, cid, 0, bodies, body_pair)
+    return joint_constraint_world_error_at(constraints, cid, 0, bodies, body_pair)

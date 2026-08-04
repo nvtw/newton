@@ -848,7 +848,7 @@ class TestSensorContactPhoenX(unittest.TestCase):
         connecting the two links carry no vertical load in this
         equilibrium (revolute axis is +Y so internal joint moments
         live in the X-Z plane but cancel under symmetric gravity
-        loading). If phoenx's contact + ADBS constraint coupling
+        loading). If phoenx's contact + joint-constraint coupling
         leaked any vertical impulse into the contact rows, per-link
         Fz would deviate from m*g.
         """

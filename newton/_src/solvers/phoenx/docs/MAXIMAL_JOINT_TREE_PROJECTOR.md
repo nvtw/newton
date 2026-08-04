@@ -71,7 +71,7 @@ r_i = M_i (v_i - v_i*) + sum_child X_child^T r_child.
 
 Optimality gives `S_i^T r_i = 0`: the projector applies no impulse along an
 allowed coordinate. A floating root has zero reaction, which is the momentum
-conservation condition. Reactions are decomposed into the existing ADBS
+conservation condition. Reactions are decomposed into the existing joint constraint
 anchor/axial representation for fixed, revolute, prismatic, ball, and
 universal rows, then added to their accumulated multipliers.
 

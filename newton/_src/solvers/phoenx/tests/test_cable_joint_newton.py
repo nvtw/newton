@@ -132,7 +132,7 @@ class TestNewtonCableAdapter(unittest.TestCase):
         self.assertEqual(int(model.joint_count), 2)  # FIXED + CABLE
         types = model.joint_type.numpy()
         self.assertIn(int(newton.JointType.CABLE), types.tolist())
-        self.assertEqual(int(solver._adbs.num_joint_columns), 2)
+        self.assertEqual(int(solver._joint_constraints.num_joint_columns), 2)
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (12,))
         np.testing.assert_array_equal(solver.world._joint_pgs_enabled.numpy(), [0, 0])
 
@@ -140,7 +140,7 @@ class TestNewtonCableAdapter(unittest.TestCase):
         """The descriptor for the Newton cable joint must end up
         tagged as PhoenX :data:`JOINT_MODE_CABLE`."""
         _model, solver = _two_body_cable_world(bend_stiffness=10.0, bend_damping=0.5)
-        modes = solver._adbs.joint_mode.numpy()
+        modes = solver._joint_constraints.joint_mode.numpy()
         self.assertIn(int(JOINT_MODE_CABLE), modes.tolist())
 
     def test_cable_holds_attachment_under_gravity(self) -> None:

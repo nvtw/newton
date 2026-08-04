@@ -319,7 +319,7 @@ phoenx = "phoenx"
 # PhoenX graph-coloring / Luby-MIS implementation.
 MIS = "MIS"
 mis = "mis"
-# Short for "prismatic" in the PhoenX ADBS joint column.
+# Short for "prismatic" in the PhoenX joint constraint column.
 pris = "pris"
 PRIS = "PRIS"
 # MuJoCo Menagerie brand/product names

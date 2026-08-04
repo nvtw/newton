@@ -861,7 +861,7 @@ def _descriptor_arrays(family: np.ndarray, node_count: np.ndarray) -> tuple[np.n
     for i, fam_raw in enumerate(family):
         fam = int(fam_raw)
         n = int(node_count[i])
-        if fam == 0:  # ADBS/revolute-like joint block.
+        if fam == 0:  # joint constraint/revolute-like joint block.
             row_size[i] = 3
             projection[i] = 0
         elif fam == 1:  # Contact normal + two friction rows.

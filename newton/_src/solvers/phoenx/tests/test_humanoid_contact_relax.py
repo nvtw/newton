@@ -51,6 +51,7 @@ class TestPhoenXHumanoidContactRelax(unittest.TestCase):
             joint_random_range=1.0,
             root_height=1.4,
             self_collisions=False,
+            reduced_coordinates=False,
             contact_gap=DEFAULT_CONTACT_GAP,
             solver_substeps=10,
             solver_iterations=8,

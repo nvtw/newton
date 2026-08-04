@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""Host-side conversion from Newton :class:`Model` joints to ADBS init arrays.
+"""Host-side conversion from Newton :class:`Model` joints to joint constraint init arrays.
 
-Mapping: REVOLUTE/PRISMATIC/BALL/FIXED/CABLE/DISTANCE -> ADBS joint modes;
+Mapping: REVOLUTE/PRISMATIC/BALL/FIXED/CABLE/DISTANCE -> joint modes;
 FREE -> no column. D6 joints use exact restored modes where possible,
 including two- and three-axis Cartesian translation modes. PhoenX
 slot 0 is the static world anchor, so Newton body ``i`` maps to PhoenX slot
@@ -41,8 +41,8 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
 )
 
 __all__ = [
-    "AdbsInitArrays",
-    "build_adbs_init_arrays",
+    "JointInitArrays",
+    "build_joint_init_arrays",
 ]
 
 
@@ -92,7 +92,7 @@ def _classify_d6_legacy_mode(
     locked_lin: list[bool],
     locked_ang: list[bool],
 ) -> tuple[str | None, int]:
-    """Map D6 axes to the restored ADBS mode set.
+    """Map D6 axes to the supported joint constraint mode set.
 
     Missing axes are locked by construction in Newton's D6 kinematics.
     ``dof_offset`` is the scalar DoF within the D6 joint used for the
@@ -210,8 +210,8 @@ def _append_d6_angular_limit(
     return d6_limit_count + 1
 
 
-class AdbsInitArrays:
-    """ADBS init kwargs plus joint-index -> cid map for per-step control writeback.
+class JointInitArrays:
+    """joint constraint init kwargs plus joint-index -> cid map for per-step control writeback.
     ``joint_idx_to_cid`` is ``-1`` for joints without a constraint column."""
 
     def __init__(
@@ -285,9 +285,9 @@ class AdbsInitArrays:
         self.d6_limit_count = d6_limit_count
         self.joint_idx_to_cid = joint_idx_to_cid
         self.joint_idx_to_dof_start = joint_idx_to_dof_start
-        #: Per-ADBS-column initial Newton joint coordinate. PhoenX measures
+        #: Per-joint-column initial Newton joint coordinate. PhoenX measures
         #: displacement from init, so Newton's absolute target/limit values
-        #: must be offset by this before being written into the ADBS column.
+        #: must be offset by this before being written into the joint constraint column.
         self.joint_q_at_init = joint_q_at_init
         self.drive_cid = drive_cid
         self.drive_dof_start = drive_dof_start
@@ -298,7 +298,7 @@ class AdbsInitArrays:
 
     def to_initialize_kwargs(self) -> dict:
         """Kwargs for
-        :meth:`PhoenXWorld.initialize_actuated_double_ball_socket_joints`."""
+        :meth:`PhoenXWorld.initialize_joint_constraints`."""
         return {
             "body1": self.body1,
             "body2": self.body2,
@@ -331,7 +331,7 @@ class AdbsInitArrays:
         }
 
 
-def _newton_target_mode_to_adbs_drive_mode(target_mode: int, stiffness: float, damping: float) -> int:
+def _newton_target_mode_to_joint_drive_mode(target_mode: int, stiffness: float, damping: float) -> int:
     """Map Newton :class:`JointTargetMode` to PhoenX :class:`DriveMode`. POSITION/
     VELOCITY drive modes require positive stiffness/damping respectively, else OFF."""
     mode = newton.JointTargetMode(int(target_mode))
@@ -350,14 +350,14 @@ def _newton_target_mode_to_adbs_drive_mode(target_mode: int, stiffness: float, d
     return int(DRIVE_MODE_OFF)
 
 
-def build_adbs_init_arrays(
+def build_joint_init_arrays(
     model: newton.Model,
     device: wp.context.Devicelike | None = None,
     *,
     joint_friction_model: Literal["hard", "mujoco"] = "hard",
     reduced_articulations: bool = False,
-) -> AdbsInitArrays:
-    """Convert ``model``'s joints to ADBS init arrays on ``device``.
+) -> JointInitArrays:
+    """Convert ``model``'s joints to joint constraint init arrays on ``device``.
 
     Args:
         model: Newton model to convert.
@@ -365,11 +365,11 @@ def build_adbs_init_arrays(
         joint_friction_model: ``"hard"`` keeps PhoenX Coulomb friction;
             ``"mujoco"`` maps MuJoCo solref/solimp friction metadata.
         reduced_articulations: Whether tree joints are owned by the reduced
-            articulation solver instead of maximal-coordinate ADBS columns.
+            articulation solver instead of maximal-coordinate joint constraint columns.
 
     Raises:
         NotImplementedError: If a non-reduced D6 configuration cannot be
-            reduced to the restored ADBS mode set.
+            reduced to the supported joint constraint mode set.
     """
     if device is None:
         device = model.device
@@ -383,7 +383,7 @@ def build_adbs_init_arrays(
         empty_f = wp.zeros(0, dtype=wp.float32, device=device)
         joint_idx_to_cid = wp.zeros(0, dtype=wp.int32, device=device)
         joint_idx_to_dof_start = wp.zeros(0, dtype=wp.int32, device=device)
-        return AdbsInitArrays(
+        return JointInitArrays(
             body1=empty_i,
             body2=empty_i,
             anchor1=empty_v,
@@ -472,7 +472,7 @@ def build_adbs_init_arrays(
         jtype = newton.JointType(int(joint_type[j]))
 
         # Reduced coordinates own articulation-tree joints directly; only
-        # out-of-tree closure rows need maximal-coordinate ADBS columns.
+        # out-of-tree closure rows need maximal-coordinate joint constraint columns.
         if reduced_articulations and int(joint_articulation[j]) >= 0:
             continue
 
@@ -818,13 +818,13 @@ def build_adbs_init_arrays(
                 raw = float(effort_limit[effective_qd])
                 max_force = raw if np.isfinite(raw) else 0.0
             if target_mode is not None:
-                drive_mode = _newton_target_mode_to_adbs_drive_mode(
+                drive_mode = _newton_target_mode_to_joint_drive_mode(
                     int(target_mode[effective_qd]), stiff_drive, damp_drive
                 )
             # Limits are hard stops via DEFAULT_HERTZ_LIMIT (matches SolverXPBD's
             # rigid-limit contract; Newton's limit_ke/limit_kd are XPBD-only soft
             # penalties that don't map to PhoenX's absolute SI PD path). Users who
-            # want soft PD limits should drive ADBS init directly.
+            # want soft PD limits should drive joint constraint init directly.
             if limit_lower is not None and limit_upper is not None:
                 lo = float(limit_lower[effective_qd])
                 hi = float(limit_upper[effective_qd])
@@ -841,7 +841,7 @@ def build_adbs_init_arrays(
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
         # Init joint coord for this joint's first DOF. BALL/FIXED publish 0 to
-        # keep the per-joint array length aligned with the ADBS column array.
+        # keep the per-joint array length aligned with the joint constraint column array.
         q_start_idx = int(joint_q_start[j])
         q_coord_idx = q_start_idx + effective_dof_offset
         if (
@@ -923,7 +923,7 @@ def build_adbs_init_arrays(
         )
         return wp.array(a, dtype=wp.vec3f, device=device)
 
-    return AdbsInitArrays(
+    return JointInitArrays(
         body1=_stack_i("body1"),
         body2=_stack_i("body2"),
         anchor1=_stack_v("anchor1"),

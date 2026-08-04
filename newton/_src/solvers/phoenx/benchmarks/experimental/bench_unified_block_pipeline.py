@@ -5,7 +5,7 @@
 
 This is a larger PhoenX unification prototype than the rows3-only sidecars.
 It compares a typed local solve against a max-width descriptor path for the
-main block shapes currently used by rigid contacts and ADBS joints:
+main block shapes currently used by rigid contacts and joint constraint joints:
 
 * 3-row contact cone at a point;
 * 3-row point-anchor dense block;

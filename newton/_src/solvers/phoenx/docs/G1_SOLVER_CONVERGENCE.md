@@ -330,7 +330,7 @@ Three fixes were required before solver tuning was meaningful:
 PhoenX also folds nanoG1 passive `dof_damping` into all 29 G1 position-drive
 `joint_target_kd` values. For these drives the target velocity is zero, so this
 reproduces the same damping force contribution, `-damping * qd`. The generic
-PhoenX model adapter forwards `joint_friction` into the ADBS Coulomb-friction
+PhoenX model adapter forwards `joint_friction` into the joint constraint Coulomb-friction
 row. `SolverPhoenX` defaults to hard PhoenX Coulomb friction; the G1 recipe
 uses `joint_friction_model="mujoco"` so imported `solreffriction` and
 `solimpfriction` soften the row in the same spirit as nanoG1 host physics. The

@@ -19,7 +19,7 @@ import unittest
 import warp as wp
 
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    ADBS_TIME_US_OFFSET,
+    JOINT_CONSTRAINT_TIME_US_OFFSET,
 )
 from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums, _run_frames
 
@@ -34,7 +34,7 @@ class TestPhoenXColumnTimers(unittest.TestCase):
         world, _ = _build_n_pendulums(num_worlds=4, device=device)
         _run_frames(world, 4)
         col = world.constraints.data.numpy()
-        timer_row = col[int(ADBS_TIME_US_OFFSET), : world.num_joints]
+        timer_row = col[int(JOINT_CONSTRAINT_TIME_US_OFFSET), : world.num_joints]
         self.assertTrue(
             (timer_row == 0.0).all(),
             f"time_us row leaked non-zero values when timers were disabled: {timer_row.tolist()}",

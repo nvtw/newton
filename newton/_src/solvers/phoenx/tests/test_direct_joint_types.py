@@ -286,9 +286,9 @@ class TestDirectJointTypes(unittest.TestCase):
             with self.subTest(kind=kind):
                 joint, _body = joints[kind]
                 self.assertTrue(bool(direct.joint_mask[joint]))
-                cid = int(solver._adbs.joint_idx_to_cid.numpy()[joint])
+                cid = int(solver._joint_constraints.joint_idx_to_cid.numpy()[joint])
                 self.assertGreaterEqual(cid, 0)
-                self.assertEqual(int(solver._adbs.joint_mode.numpy()[cid]), expected_mode)
+                self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[cid]), expected_mode)
                 self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[cid]), 0)
 
     def test_every_supported_bilateral_mode_rejects_locked_velocity(self) -> None:
@@ -690,7 +690,7 @@ class TestDirectJointTypes(unittest.TestCase):
         solver = _make_solver(model)
         free_joint = int(np.flatnonzero(model.joint_child.numpy() == free_body)[0])
         self.assertFalse(bool(solver._direct_equality_system.joint_mask[free_joint]))
-        self.assertEqual(int(solver._adbs.joint_idx_to_cid.numpy()[free_joint]), -1)
+        self.assertEqual(int(solver._joint_constraints.joint_idx_to_cid.numpy()[free_joint]), -1)
 
 
 if __name__ == "__main__":

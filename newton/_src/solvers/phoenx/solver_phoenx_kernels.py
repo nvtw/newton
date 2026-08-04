@@ -91,10 +91,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     read_int,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    ADBS_TIME_US_OFFSET,
-    actuated_double_ball_socket_prepare_inequality,
-    actuated_double_ball_socket_world_error,
-    actuated_double_ball_socket_world_wrench,
+    JOINT_CONSTRAINT_TIME_US_OFFSET,
+    joint_constraint_prepare_inequality,
+    joint_constraint_world_error,
+    joint_constraint_world_wrench,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_hexahedron import (
     SOFT_HEX_TIME_US_OFFSET,
@@ -117,7 +117,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_side1_bary,
 )
 from newton._src.solvers.phoenx.constraints.joint_inequality import (
-    actuated_double_ball_socket_iterate_inequality,
+    joint_constraint_iterate_inequality,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
@@ -796,11 +796,13 @@ def _make_multiworld_rigid_prepare_dispatch_func(
         t0 = wp.uint64(0)
         if wp.static(enable_column_timers):
             t0 = read_global_timer_ns()
-        actuated_double_ball_socket_prepare_inequality(
+        joint_constraint_prepare_inequality(
             constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
         )
         if wp.static(enable_column_timers):
-            constraint_accumulate_time_us(constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns()))
+            constraint_accumulate_time_us(
+                constraints, JOINT_CONSTRAINT_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns())
+            )
 
     @wp.func
     def _dispatch_prepare_contact(
@@ -961,7 +963,7 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
             t0 = read_global_timer_ns()
         sweep = wp.int32(0)
         while sweep < num_sweeps:
-            actuated_double_ball_socket_iterate_inequality(
+            joint_constraint_iterate_inequality(
                 constraints,
                 cid,
                 bodies,
@@ -975,7 +977,9 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
             )
             sweep += wp.int32(1)
         if wp.static(enable_column_timers):
-            constraint_accumulate_time_us(constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns()))
+            constraint_accumulate_time_us(
+                constraints, JOINT_CONSTRAINT_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns())
+            )
 
     @wp.func
     def _dispatch_iterate_contact(
@@ -2086,7 +2090,7 @@ def _make_block_world_relax_kernel(
 def _zero_constraint_time_us_kernel(
     constraints: ConstraintContainer,
     num_active: wp.array[wp.int32],
-    adbs_off: wp.int32,
+    joint_off: wp.int32,
     cloth_tri_off: wp.int32,
     cloth_bend_off: wp.int32,
     soft_tet_off: wp.int32,
@@ -2106,7 +2110,7 @@ def _zero_constraint_time_us_kernel(
     if cid >= total:
         return
     if cid < num_joints:
-        off = adbs_off
+        off = joint_off
     elif cid < num_joints + num_cloth_triangles:
         off = cloth_tri_off
     elif cid < num_joints + num_cloth_triangles + num_cloth_bending:
@@ -2136,7 +2140,7 @@ def _zero_contact_time_us_kernel(
 @wp.kernel(enable_backward=False, module="unique")
 def _reduce_constraint_time_us_kernel(
     constraints: ConstraintContainer,
-    adbs_off: wp.int32,
+    joint_off: wp.int32,
     cloth_tri_off: wp.int32,
     cloth_bend_off: wp.int32,
     soft_tet_off: wp.int32,
@@ -2154,7 +2158,7 @@ def _reduce_constraint_time_us_kernel(
     Slot 4 (contacts) is filled by :func:`_reduce_contact_time_us_kernel`."""
     cid = wp.tid()
     if cid < num_joints:
-        wp.atomic_add(totals, 0, constraints.data[adbs_off, cid])
+        wp.atomic_add(totals, 0, constraints.data[joint_off, cid])
     elif cid < num_joints + num_cloth_triangles:
         wp.atomic_add(totals, 1, constraints.data[cloth_tri_off, cid])
     elif cid < num_joints + num_cloth_triangles + num_cloth_bending:
@@ -2820,7 +2824,7 @@ def _constraint_gather_wrenches_kernel(
     force = wp.vec3f(0.0, 0.0, 0.0)
     torque = wp.vec3f(0.0, 0.0, 0.0)
     if cid < num_joints:
-        force, torque = actuated_double_ball_socket_world_wrench(constraints, cid, idt)
+        force, torque = joint_constraint_world_wrench(constraints, cid, idt)
     else:
         force, torque = contact_world_wrench(contact_cols, cid - num_joints, bodies, idt, cc, contacts)
     out[cid] = wp.spatial_vector(force, torque)
@@ -2843,7 +2847,7 @@ def _constraint_gather_errors_kernel(
     zero = wp.spatial_vector(wp.vec3f(0.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, 0.0))
     err = zero
     if cid < num_joints:
-        err = actuated_double_ball_socket_world_error(constraints, cid, bodies)
+        err = joint_constraint_world_error(constraints, cid, bodies)
     else:
         err = contact_world_error(contact_cols, cid - num_joints)
     out[cid] = err
@@ -3412,11 +3416,11 @@ def _make_singleworld_rigid_joint_dispatch_func(
             t0 = read_global_timer_ns()
 
         if wp.static(is_prepare or is_cached_prepare):
-            actuated_double_ball_socket_prepare_inequality(
+            joint_constraint_prepare_inequality(
                 constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
             )
         else:
-            actuated_double_ball_socket_iterate_inequality(
+            joint_constraint_iterate_inequality(
                 constraints,
                 cid,
                 bodies,
@@ -3430,7 +3434,9 @@ def _make_singleworld_rigid_joint_dispatch_func(
             )
 
         if wp.static(enable_column_timers):
-            constraint_accumulate_time_us(constraints, ADBS_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns()))
+            constraint_accumulate_time_us(
+                constraints, JOINT_CONSTRAINT_TIME_US_OFFSET, cid, elapsed_us(t0, read_global_timer_ns())
+            )
 
     return _dispatch_rigid_joint
 

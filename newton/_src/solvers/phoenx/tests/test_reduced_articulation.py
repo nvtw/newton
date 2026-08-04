@@ -2261,7 +2261,7 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertIsNone(solver._maximal_tree_projector)
         self.assertIsNotNone(solver._reduced_articulation)
         self.assertTrue(solver._uses_reduced_joint_ownership)
-        self.assertEqual(solver._adbs.num_joint_columns, 0)
+        self.assertEqual(solver._joint_constraints.num_joint_columns, 0)
 
         with wp.ScopedCapture(device=device) as capture:
             solver.step(state0, state1, None, None, 1.0 / 1000.0)
@@ -2443,7 +2443,7 @@ class TestReducedArticulation(unittest.TestCase):
         )
         np.testing.assert_array_equal(
             solver.world._joint_pgs_enabled.numpy(),
-            np.ones(solver._adbs.num_joint_columns, dtype=np.int32),
+            np.ones(solver._joint_constraints.num_joint_columns, dtype=np.int32),
         )
         with wp.ScopedCapture(device=device) as capture:
             solver.step(state0, state1, None, None, 1.0 / 1000.0)
@@ -2529,7 +2529,7 @@ class TestReducedArticulation(unittest.TestCase):
             solver_iterations=4,
             velocity_iterations=1,
         )
-        joint_to_cid = solver._adbs.joint_idx_to_cid.numpy()
+        joint_to_cid = solver._joint_constraints.joint_idx_to_cid.numpy()
         tree_joint_mask = solver._reduced_articulation.tree_joint_mask_np
         np.testing.assert_array_equal(joint_to_cid[tree_joint_mask], -1)
         self.assertGreaterEqual(int(joint_to_cid[loop_joint]), 0)
@@ -2568,7 +2568,7 @@ class TestReducedArticulation(unittest.TestCase):
         )
         self.assertIsInstance(solver._maximal_tree_projector, MaximalTreeProjector)
         self.assertIsNone(solver._reduced_articulation)
-        loop_cid = int(solver._adbs.joint_idx_to_cid.numpy()[loop_joint])
+        loop_cid = int(solver._joint_constraints.joint_idx_to_cid.numpy()[loop_joint])
         self.assertGreaterEqual(loop_cid, 0)
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[loop_cid]), 1)
 
@@ -2680,7 +2680,7 @@ class TestReducedArticulation(unittest.TestCase):
             solver_iterations=4,
             velocity_iterations=1,
         )
-        loop_cid = int(solver._adbs.joint_idx_to_cid.numpy()[loop_joint])
+        loop_cid = int(solver._joint_constraints.joint_idx_to_cid.numpy()[loop_joint])
         self.assertGreaterEqual(loop_cid, 0)
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[loop_cid]), 0)
         self.assertEqual(solver._reduced_articulation.loop_system.count, 1)
@@ -2782,7 +2782,7 @@ class TestReducedArticulation(unittest.TestCase):
         )
         self.assertIsInstance(solver._maximal_tree_projector, GeneralMaximalTreeProjector)
         self.assertIsNone(solver._reduced_articulation)
-        loop_cid = int(solver._adbs.joint_idx_to_cid.numpy()[loop_joint])
+        loop_cid = int(solver._joint_constraints.joint_idx_to_cid.numpy()[loop_joint])
         self.assertGreaterEqual(loop_cid, 0)
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[loop_cid]), 1)
 
@@ -2835,7 +2835,7 @@ class TestReducedArticulation(unittest.TestCase):
             velocity_iterations=1,
         )
         self.assertEqual(solver._reduced_articulation.loop_system.count, world_count)
-        joint_to_cid = solver._adbs.joint_idx_to_cid.numpy()
+        joint_to_cid = solver._joint_constraints.joint_idx_to_cid.numpy()
         pgs_enabled = solver.world._joint_pgs_enabled.numpy()
         for loop_joint in loop_joints:
             self.assertEqual(int(pgs_enabled[int(joint_to_cid[loop_joint])]), 0)

@@ -2,8 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import unittest
+from types import SimpleNamespace
 
-from newton._src.solvers.phoenx.solver import _resolve_auto_step_layout
+import newton
+from newton._src.solvers.phoenx.examples.example_humanoid import Example as HumanoidExample
+from newton._src.solvers.phoenx.solver import (
+    _estimate_contact_column_max_phoenx,
+    _resolve_auto_step_layout,
+)
 
 
 class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
@@ -15,7 +21,6 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
             "has_joints": False,
             "has_deformables": False,
             "has_shapes": True,
-            "solver_flavor": "standard",
             "contact_friction_model": "point",
             "articulation_mode": "maximal",
         }
@@ -38,6 +43,29 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
     def test_explicit_overrides_are_preserved(self):
         self.assertEqual(self._resolve(step_layout="multi_world"), "multi_world")
         self.assertEqual(self._resolve(step_layout="single_world"), "single_world")
+
+    def test_contact_columns_use_shape_pair_capacity(self) -> None:
+        """Size contact columns from shape pairs instead of contact points."""
+        model = SimpleNamespace(shape_contact_pair_count=38_000)
+        self.assertEqual(_estimate_contact_column_max_phoenx(model, 190_000), 38_000)
+        self.assertEqual(_estimate_contact_column_max_phoenx(model, 20_000), 20_000)
+        self.assertEqual(
+            _estimate_contact_column_max_phoenx(SimpleNamespace(shape_contact_pair_count=4), 50_000), 1_000
+        )
+        self.assertEqual(_estimate_contact_column_max_phoenx(SimpleNamespace(), 50_000), 50_000)
+
+    def test_humanoid_exposes_coordinate_mode_switch(self) -> None:
+        """Select both full and reduced humanoid coordinate modes globally."""
+        parser = HumanoidExample.create_parser()
+        self.assertFalse(parser.parse_args([]).reduced_coordinates)
+        self.assertTrue(parser.parse_args(["--reduced-coordinates"]).reduced_coordinates)
+        self.assertFalse(parser.parse_args(["--no-reduced-coordinates"]).reduced_coordinates)
+
+    def test_removed_simple_solver_points_to_mini(self) -> None:
+        """Deprecate the old flavor argument and direct experiments to Mini."""
+        model = newton.ModelBuilder().finalize()
+        with self.assertWarns(DeprecationWarning), self.assertRaisesRegex(ValueError, "PhoenX Mini"):
+            newton.solvers.SolverPhoenX(model, solver_flavor="simple")
 
 
 if __name__ == "__main__":

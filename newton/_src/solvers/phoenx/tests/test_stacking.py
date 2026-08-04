@@ -46,7 +46,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
 from newton._src.solvers.phoenx.examples.example_common import (
     phoenx_to_newton_kernel as _phoenx_to_newton_kernel,
 )
-from newton._src.solvers.phoenx.model_adapter import build_adbs_init_arrays
+from newton._src.solvers.phoenx.model_adapter import build_joint_init_arrays
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_CONTACT_MATCHING,
 )
@@ -90,8 +90,6 @@ class _PhoenXScene:
         max_thread_blocks: int | None = None,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
-        solver_flavor: str = "standard",
-        jacobi_max_colors: int = 10,
         contact_friction_model: str = "point",
     ) -> None:
         self.device = wp.get_device("cuda:0")
@@ -109,8 +107,6 @@ class _PhoenXScene:
         self.max_thread_blocks = max_thread_blocks
         self.max_colored_partitions = int(max_colored_partitions)
         self.mass_splitting_batch_size = int(mass_splitting_batch_size)
-        self.solver_flavor = solver_flavor
-        self.jacobi_max_colors = int(jacobi_max_colors)
         self.contact_friction_model = contact_friction_model
 
         self.mb = newton.ModelBuilder()
@@ -325,8 +321,8 @@ class _PhoenXScene:
             )
         self.bodies = bodies
 
-        self._adbs = build_adbs_init_arrays(self.model, device=self.device)
-        num_joints = self._adbs.num_joint_columns
+        self._joint_constraints = build_joint_init_arrays(self.model, device=self.device)
+        num_joints = self._joint_constraints.num_joint_columns
         self.constraints = PhoenXWorld.make_constraint_container(
             num_joints=num_joints,
             device=self.device,
@@ -354,14 +350,12 @@ class _PhoenXScene:
             max_thread_blocks=self.max_thread_blocks,
             max_colored_partitions=self.max_colored_partitions,
             mass_splitting_batch_size=self.mass_splitting_batch_size,
-            solver_flavor=self.solver_flavor,
-            jacobi_max_colors=self.jacobi_max_colors,
             contact_friction_model=self.contact_friction_model,
             device=self.device,
         )
 
         if num_joints > 0:
-            self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
+            self.world.initialize_joint_constraints(**self._joint_constraints.to_initialize_kwargs())
 
         # Defer the CUDA graph capture until the first :meth:`step`
         # call. Tests that install materials or change other solver

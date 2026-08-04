@@ -35,7 +35,7 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 
 
 @wp.func
-def actuated_double_ball_socket_iterate_inequality(
+def joint_constraint_iterate_inequality(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
@@ -168,4 +168,4 @@ def actuated_double_ball_socket_iterate_inequality(
     )
 
 
-__all__ = ["actuated_double_ball_socket_iterate_inequality"]
+__all__ = ["joint_constraint_iterate_inequality"]

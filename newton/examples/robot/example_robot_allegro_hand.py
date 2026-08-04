@@ -133,7 +133,7 @@ class Example:
         # PhoenX dispatch intentionally not added: this scene mutates
         # ``joint_X_p`` every substep and calls
         # ``self.solver.notify_model_changed(JOINT_PROPERTIES)`` to
-        # refresh the solver, but PhoenX's notify rebuilds the ADBS
+        # refresh the solver, but PhoenX's notify rebuilds the joint constraint
         # init arrays from host data (numpy roundtrip) which is not
         # legal inside a captured CUDA graph. TODO: make
         # ``SolverPhoenX.notify_model_changed`` graph-capture-safe by

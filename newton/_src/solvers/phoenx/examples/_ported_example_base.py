@@ -240,8 +240,6 @@ class PortedExample:
         self.viewer = viewer
         self.args = args
         self.device = wp.get_device()
-        self.solver_mode = str(getattr(args, "solver", "classic"))
-        self.max_colors = int(getattr(args, "max_colors", 10))
 
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -311,7 +309,7 @@ class PortedExample:
             self.model,
             collision_pipeline=self.collision_pipeline,
             substeps=self.sim_substeps,
-            solver_iterations=1 if self.solver_mode == "jacobi" else self.solver_iterations,
+            solver_iterations=self.solver_iterations,
             velocity_iterations=self.velocity_iterations,
             default_friction=self.default_friction,
             step_layout=self.step_layout,
@@ -322,8 +320,6 @@ class PortedExample:
             max_greedy_outer_iters=self.max_greedy_outer_iters,
             enable_warm_start_coloring=self.enable_warm_start_coloring,
             enable_column_timers=self.enable_column_timers,
-            solver_flavor="simple" if self.solver_mode == "jacobi" else "standard",
-            jacobi_max_colors=self.max_colors,
             articulation_mode="maximal",
         )
         # Retain diagnostic aliases used by specialized example checks.

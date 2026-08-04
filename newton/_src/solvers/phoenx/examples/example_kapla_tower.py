@@ -147,8 +147,6 @@ class Example:
         self.viewer = viewer
         self.args = args
         self.device = wp.get_device()
-        self.solver_mode = str(getattr(args, "solver", "classic"))
-        self.max_colors = int(getattr(args, "max_colors", 10))
 
         # Physics ticks at 120 Hz; rendering runs at 60 fps so each
         # render frame advances physics by two ticks (see
@@ -161,7 +159,7 @@ class Example:
         self.sim_time = 0.0
         self.frame_index: int = 0
         self.sim_substeps = 6
-        self.solver_iterations = 1 if self.solver_mode == "jacobi" else (10 if ENABLE_MASS_SPLITTING else 6)
+        self.solver_iterations = 10 if ENABLE_MASS_SPLITTING else 6
         self.velocity_iterations = 1
 
         self._build_scene()
@@ -357,7 +355,6 @@ class Example:
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
         self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
-        solver_flavor = "simple" if self.solver_mode == "jacobi" else "standard"
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self.constraints,
@@ -370,7 +367,7 @@ class Example:
             # Scale the latency-hiding grid with the GPU. Color-ordered rows
             # make its result independent of launch geometry.
             max_thread_blocks=8 * self.device.sm_count,
-            mass_splitting=ENABLE_MASS_SPLITTING and solver_flavor == "standard",
+            mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,
             mass_splitting_batch_size=1,
@@ -378,8 +375,6 @@ class Example:
             colored_contact_headers=USE_COLORED_CONTACT_HEADERS,
             colored_contact_rows=USE_COLORED_CONTACT_ROWS,
             sor_boost=1.0,
-            solver_flavor=solver_flavor,
-            jacobi_max_colors=self.max_colors,
             device=self.device,
         )
 
@@ -686,21 +681,6 @@ class Example:
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
     parser.set_defaults(viewer="optix")
-    parser.add_argument(
-        "--solver",
-        choices=("classic", "jacobi"),
-        default="classic",
-        help="Select graph-colored PGS or the uncolored scalar-row Jacobi solver.",
-    )
-    parser.add_argument(
-        "--max-colors",
-        type=int,
-        default=10,
-        help=(
-            "Estimated classic color count used by Jacobi: effective substeps "
-            "equal max-colors times the configured substeps (default: 10)."
-        ),
-    )
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
     # Start paused so the initial (potentially inter-penetrating)

@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import argparse
+
 import numpy as np
 import warp as wp
 
@@ -76,14 +78,16 @@ class Example:
         self.model = builder.finalize()
         self.control = self.model.control()
 
+        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
+            collision_pipeline=self.collision_pipeline,
+            articulation_mode="reduced" if args.reduced_coordinates else "maximal",
             substeps=args.solver_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
             prepare_refresh_stride=args.prepare_refresh_stride,
         )
-        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
         self.contacts = self.collision_pipeline.contacts()
 
         self.state_0 = self.model.state()
@@ -161,15 +165,21 @@ class Example:
         parser.add_argument("--joint-random-range", type=float, default=1.0, help="Stress joint angle range [rad].")
         parser.add_argument("--root-height", type=float, default=1.4, help="Root start height [m].")
         parser.add_argument("--self-collisions", action="store_true", help="Enable MJCF self-collisions.")
+        parser.add_argument(
+            "--reduced-coordinates",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Solve articulations in reduced coordinates instead of the full-coordinate equation system.",
+        )
         parser.add_argument("--show-contacts", action="store_true", help="Draw contact arrows.")
         parser.add_argument("--contact-gap", type=float, default=DEFAULT_CONTACT_GAP, help="Contact detection gap [m].")
         parser.add_argument(
             "--solver-substeps",
             type=int,
-            default=6,
+            default=4,
             help="PhoenX integration/constraint substeps per solver step.",
         )
-        parser.add_argument("--solver-iterations", type=int, default=6, help="PhoenX PGS iterations per substep.")
+        parser.add_argument("--solver-iterations", type=int, default=2, help="PhoenX PGS iterations per substep.")
         parser.add_argument(
             "--velocity-iterations",
             type=int,

@@ -11,6 +11,8 @@ PhoenX slot 0 is the static world anchor; pass ``substeps=1`` to substep outside
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import warp as wp
 
@@ -48,8 +50,8 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_UNIVERSAL,
 )
 from newton._src.solvers.phoenx.model_adapter import (
-    AdbsInitArrays,
-    build_adbs_init_arrays,
+    JointInitArrays,
+    build_joint_init_arrays,
 )
 from newton._src.solvers.phoenx.solver_kernels import (
     _apply_joint_drive_control_kernel,
@@ -83,7 +85,6 @@ def _resolve_auto_step_layout(
     has_joints: bool,
     has_deformables: bool,
     has_shapes: bool,
-    solver_flavor: str,
     contact_friction_model: str,
     articulation_mode: str,
 ) -> str:
@@ -97,7 +98,6 @@ def _resolve_auto_step_layout(
         and not has_joints
         and not has_deformables
         and has_shapes
-        and solver_flavor == "standard"
         and contact_friction_model == "point"
         and articulation_mode == "maximal"
     )
@@ -118,6 +118,14 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     PRIMITIVE_CPP = 5
     SAFETY = 2
     return max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
+
+
+def _estimate_contact_column_max_phoenx(model: Model, rigid_contact_max: int) -> int:
+    """Bound shape-pair contact columns independently from contact points."""
+    pair_count = int(getattr(model, "shape_contact_pair_count", 0) or 0)
+    if pair_count <= 0:
+        return int(rigid_contact_max)
+    return min(int(rigid_contact_max), max(1000, pair_count))
 
 
 def _build_maximal_motor_body_inv_inertia(model: Model) -> wp.array[wp.mat33f]:
@@ -253,8 +261,8 @@ class SolverPhoenX(SolverBase):
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
-        solver_flavor: str = "standard",
-        jacobi_max_colors: int = 10,
+        solver_flavor: str | None = None,
+        jacobi_max_colors: int | None = None,
         articulation_mode: str = "maximal",
         reduced_articulation_path: str = "reference",
     ):
@@ -281,13 +289,6 @@ class SolverPhoenX(SolverBase):
                 conservative stride from the substep count and falls back
                 to ``1`` when cached prepare is unsupported. Pass ``1``
                 to force exact per-substep rebuilds.
-            solver_flavor: ``"standard"`` uses coloured inequality PGS and
-                direct joint equalities. ``"simple"`` is an experimental
-                contact-only, one-thread-per-row Jacobi flavor with copy-free
-                atomic mass splitting; jointed models require ``"standard"``.
-            jacobi_max_colors: Estimated maximum number of colors the classic
-                solver would require. The simple Jacobi flavor uses
-                ``substeps * jacobi_max_colors`` substeps. Defaults to 10.
             default_friction: Fallback when Contacts/shapes carry no material.
             step_layout: ``"auto"`` keeps the multi-world scheduler except
                 for one rigid contact-only world with at least 2,048 bodies,
@@ -350,11 +351,29 @@ class SolverPhoenX(SolverBase):
                 redundant maximal joint rows. ``"hybrid"`` retains the
                 articulated-body preconditioner, and
                 ``"reduced"`` lets generalized coordinates own tree joints.
+            solver_flavor: Deprecated compatibility argument. Omit it or pass
+                ``"standard"``. The experimental ``"simple"`` Jacobi solver
+                moved out of production PhoenX; use PhoenX Mini for solver experiments.
+            jacobi_max_colors: Deprecated compatibility argument with no effect.
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
                 topology-proven cross-phase articulation fusion on CUDA.
         """
         super().__init__(model)
+        if solver_flavor is not None:
+            warnings.warn(
+                "SolverPhoenX.solver_flavor is deprecated; omit it to use the production solver.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if solver_flavor != "standard":
+                raise ValueError("solver_flavor='simple' was removed from production PhoenX; use PhoenX Mini")
+        if jacobi_max_colors is not None:
+            warnings.warn(
+                "SolverPhoenX.jacobi_max_colors is deprecated and has no effect.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         gravity_np = self._read_model_gravity_np(model)
         if articulation_mode == "auto":
             joint_types_for_mode = np.asarray(model.joint_type.numpy(), dtype=np.int32)
@@ -376,11 +395,6 @@ class SolverPhoenX(SolverBase):
         )
         joint_types = model.joint_type.numpy() if int(model.joint_count) > 0 else np.empty(0, dtype=np.int32)
         has_constraint_joints = bool(np.any(joint_types != int(JointType.FREE)))
-        if solver_flavor == "simple" and has_constraint_joints:
-            raise NotImplementedError(
-                "solver_flavor='simple' is contact-only; use solver_flavor='standard' for direct joint "
-                "equalities or MiniSolver for experimental joint PGS"
-            )
         step_layout = _resolve_auto_step_layout(
             step_layout=step_layout,
             num_worlds=num_worlds,
@@ -388,7 +402,6 @@ class SolverPhoenX(SolverBase):
             has_joints=has_constraint_joints,
             has_deformables=has_deformables,
             has_shapes=int(model.shape_count) > 0,
-            solver_flavor=solver_flavor,
             contact_friction_model=contact_friction_model,
             articulation_mode=articulation_mode,
         )
@@ -416,15 +429,8 @@ class SolverPhoenX(SolverBase):
             and reduced_articulation_path == "persistent"
         ):
             raise ValueError("contact_friction_model='patch' does not support the persistent reduced articulation path")
-        if contact_friction_model == "patch" and (mass_splitting or solver_flavor != "standard"):
-            raise ValueError(
-                "contact_friction_model='patch' currently requires solver_flavor='standard' and mass_splitting=False"
-            )
-        if (
-            articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid", "reduced")
-            and solver_flavor != "standard"
-        ):
-            raise ValueError("projected/hybrid/reduced articulations currently require solver_flavor='standard'")
+        if contact_friction_model == "patch" and mass_splitting:
+            raise ValueError("contact_friction_model='patch' currently requires mass_splitting=False")
         if articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid") and mass_splitting:
             raise ValueError("projected and hybrid articulation modes require mass_splitting=False")
         if articulation_mode in (
@@ -455,7 +461,7 @@ class SolverPhoenX(SolverBase):
         )
         # Direct LLT remains the equality owner; an exact tree factor may
         # additionally supply constrained mobility to point-contact rows.
-        # Eligibility is resolved from the enabled joint graph after ADBS has
+        # Eligibility is resolved from the enabled joint graph after joint constraint has
         # classified D6 joints; reduced-coordinate metadata is never an input.
         direct_tree_contact_candidate = bool(
             articulation_mode == "maximal"
@@ -523,13 +529,13 @@ class SolverPhoenX(SolverBase):
         if articulation_mode != "maximal" and int(model.body_count) > 0 and int(model.joint_count) > 0:
             newton.eval_fk(model, model.joint_q, model.joint_qd, model)
 
-        self._adbs: AdbsInitArrays = build_adbs_init_arrays(
+        self._joint_constraints: JointInitArrays = build_joint_init_arrays(
             model,
             device=self.device,
             joint_friction_model=self._joint_friction_model,
             reduced_articulations=self._uses_reduced_joint_ownership,
         )
-        num_joints = self._adbs.num_joint_columns
+        num_joints = self._joint_constraints.num_joint_columns
         num_particles = int(getattr(model, "particle_count", 0) or 0)
         num_cloth_triangles = int(getattr(model, "tri_count", 0) or 0)
         num_cloth_bending = int(getattr(model, "edge_count", 0) or 0)
@@ -622,8 +628,6 @@ class SolverPhoenX(SolverBase):
                 counts = np.bincount(sb, minlength=int(model.body_count))
                 has_compound_bodies = bool((counts > 1).any())
 
-        if solver_flavor not in ("standard", "simple"):
-            raise ValueError(f"solver_flavor must be 'standard' or 'simple', got {solver_flavor!r}")
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self._constraints,
@@ -632,6 +636,7 @@ class SolverPhoenX(SolverBase):
             velocity_iterations=int(velocity_iterations),
             gravity=gravity_arg,
             rigid_contact_max=rigid_contact_max,
+            max_contact_columns=_estimate_contact_column_max_phoenx(model, rigid_contact_max),
             num_joints=num_joints,
             num_particles=num_particles,
             num_cloth_triangles=num_cloth_triangles,
@@ -646,8 +651,6 @@ class SolverPhoenX(SolverBase):
             enable_body_pair_grouping=has_compound_bodies and (step_layout == "single_world" or num_worlds == 1),
             mass_splitting=mass_splitting,
             max_colored_partitions=max_colored_partitions,
-            solver_flavor=solver_flavor,
-            jacobi_max_colors=jacobi_max_colors,
             contact_friction_model=contact_friction_model if articulation_mode == "maximal" else "point",
             mass_splitting_batch_size=mass_splitting_batch_size,
             mass_splitting_unrolled=mass_splitting_unrolled,
@@ -691,7 +694,7 @@ class SolverPhoenX(SolverBase):
             self._share_vertex_filter_data = filter_data
             self.world._share_vertex_filter_data = filter_data
 
-        # Seed body pose BEFORE joint init — ADBS init reads body positions to
+        # Seed body pose BEFORE joint init — joint constraint init reads body positions to
         # snapshot body-local anchors. Without this, welds pull child to origin.
         if int(model.body_count) > 0:
             zero_wrench = wp.zeros(int(model.body_count), dtype=wp.spatial_vector, device=self.device)
@@ -715,14 +718,16 @@ class SolverPhoenX(SolverBase):
             )
 
         if num_joints > 0:
-            adbs_kwargs = self._adbs.to_initialize_kwargs()
-            self.world.initialize_actuated_double_ball_socket_joints(**adbs_kwargs)
+            joint_kwargs = self._joint_constraints.to_initialize_kwargs()
+            self.world.initialize_joint_constraints(**joint_kwargs)
 
-        joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
+        joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
         effective_joint_mode = np.full(int(model.joint_count), -1, dtype=np.int32)
         active_joint = joint_idx_to_cid >= 0
         if np.any(active_joint):
-            effective_joint_mode[active_joint] = self._adbs.joint_mode.numpy()[joint_idx_to_cid[active_joint]]
+            effective_joint_mode[active_joint] = self._joint_constraints.joint_mode.numpy()[
+                joint_idx_to_cid[active_joint]
+            ]
         full_coordinate_tree_joints: tuple[tuple[int, ...], ...] = ()
         if direct_tree_contact_candidate:
             full_coordinate_tree_joints = find_full_coordinate_revolute_trees(model, effective_joint_mode)
@@ -736,7 +741,7 @@ class SolverPhoenX(SolverBase):
                     model,
                     self._constraints,
                     self.bodies,
-                    self._adbs.joint_idx_to_cid,
+                    self._joint_constraints.joint_idx_to_cid,
                     joint_trees=full_coordinate_tree_joints,
                 )
             else:
@@ -745,7 +750,7 @@ class SolverPhoenX(SolverBase):
                     model,
                     self._constraints,
                     self.bodies,
-                    self._adbs.joint_idx_to_cid,
+                    self._joint_constraints.joint_idx_to_cid,
                 )
             self.world._maximal_tree_projector = self._maximal_tree_projector
             if articulation_mode == "maximal_articulated" or self._direct_tree_contacts:
@@ -760,7 +765,7 @@ class SolverPhoenX(SolverBase):
                 self.world._direct_tree_contacts = self._direct_tree_contacts
                 if articulation_mode == "maximal_articulated":
                     joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
-                    joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
+                    joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
                     for joint in self._maximal_tree_projector.data.joint_index.numpy().ravel():
                         if joint >= 0:
                             cid = int(joint_idx_to_cid[int(joint)])
@@ -779,7 +784,7 @@ class SolverPhoenX(SolverBase):
                 execution_path=self.reduced_articulation_path,
                 contact_friction_model=contact_friction_model,
             )
-            joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
+            joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
             joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
             if self._uses_reduced_joint_ownership:
                 for joint, owned in enumerate(self._reduced_articulation.owned_joint_mask_np):
@@ -796,8 +801,8 @@ class SolverPhoenX(SolverBase):
             excluded_joint_mask = None
             if self._reduced_articulation is not None and self._uses_reduced_joint_ownership:
                 excluded_joint_mask = self._reduced_articulation.owned_joint_mask_np
-            effective_joint_dof_start = self._adbs.joint_idx_to_dof_start.numpy().copy()
-            effective_joint_target_start = self._adbs.drive_target_q_index.numpy()
+            effective_joint_dof_start = self._joint_constraints.joint_idx_to_dof_start.numpy().copy()
+            effective_joint_target_start = self._joint_constraints.drive_target_q_index.numpy()
             joint_target_start = np.full(int(model.joint_count), -1, dtype=np.int32)
             drive_joint_mask = active_joint & (effective_joint_dof_start >= 0)
             joint_target_start[drive_joint_mask] = effective_joint_target_start
@@ -948,13 +953,13 @@ class SolverPhoenX(SolverBase):
         direct = self._direct_equality_system
         if direct is None or not direct.enabled:
             return
-        joint_idx_to_cid = self._adbs.joint_idx_to_cid.numpy()
+        joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
         joint_pgs_enabled = self._direct_base_joint_pgs_enabled.copy()
-        friction = self._adbs.friction_coefficient.numpy()
-        lower_limit = self._adbs.min_value.numpy()
-        upper_limit = self._adbs.max_value.numpy()
-        d6_limit_count = self._adbs.d6_limit_count.numpy()
-        velocity_limit = self._adbs.velocity_limit.numpy()
+        friction = self._joint_constraints.friction_coefficient.numpy()
+        lower_limit = self._joint_constraints.min_value.numpy()
+        upper_limit = self._joint_constraints.max_value.numpy()
+        d6_limit_count = self._joint_constraints.d6_limit_count.numpy()
+        velocity_limit = self._joint_constraints.velocity_limit.numpy()
         for joint in np.flatnonzero(direct.joint_mask):
             cid = int(joint_idx_to_cid[joint])
             if cid < 0:
@@ -999,16 +1004,16 @@ class SolverPhoenX(SolverBase):
             return  # no per-DOF drive configured
         if self._direct_equality_system is not None:
             self._direct_equality_system.set_control_targets(target_pos, target_vel)
-        if not self._uses_maximal_tree_projector or self._adbs.num_drive_columns == 0:
+        if not self._uses_maximal_tree_projector or self._joint_constraints.num_drive_columns == 0:
             return
         wp.launch(
             _apply_joint_drive_control_kernel,
-            dim=int(self._adbs.num_drive_columns),
+            dim=int(self._joint_constraints.num_drive_columns),
             inputs=[
-                self._adbs.drive_cid,
-                self._adbs.drive_dof_start,
-                self._adbs.drive_target_q_index,
-                self._adbs.drive_q_at_init,
+                self._joint_constraints.drive_cid,
+                self._joint_constraints.drive_dof_start,
+                self._joint_constraints.drive_target_q_index,
+                self._joint_constraints.drive_q_at_init,
                 model.joint_target_mode,
                 model.joint_target_ke,
                 model.joint_target_kd,
@@ -1420,18 +1425,18 @@ class SolverPhoenX(SolverBase):
         )
 
     def notify_model_changed(self, flags: int) -> None:
-        """Refresh state on Model edits. Joint-property changes rebuild the ADBS
+        """Refresh state on Model edits. Joint-property changes rebuild the joint constraint
         init arrays from scratch; gravity is reread from ``model.gravity``."""
         joint_props_changed = bool(flags & (int(ModelFlags.JOINT_PROPERTIES) | int(ModelFlags.JOINT_DOF_PROPERTIES)))
         if joint_props_changed:
-            self._adbs = build_adbs_init_arrays(
+            self._joint_constraints = build_joint_init_arrays(
                 self.model,
                 device=self.device,
                 joint_friction_model=self._joint_friction_model,
                 reduced_articulations=self._uses_reduced_joint_ownership,
             )
-            if self._adbs.num_joint_columns > 0:
-                self.world.initialize_actuated_double_ball_socket_joints(**self._adbs.to_initialize_kwargs())
+            if self._joint_constraints.num_joint_columns > 0:
+                self.world.initialize_joint_constraints(**self._joint_constraints.to_initialize_kwargs())
             if self._direct_equality_system is not None:
                 previous_direct_solver = getattr(self._direct_equality_system, "solver", None)
                 self._direct_equality_system.refresh_joint_properties()
@@ -1474,7 +1479,7 @@ class SolverPhoenX(SolverBase):
                 self.model,
                 self._constraints,
                 self.bodies,
-                self._adbs.joint_idx_to_cid,
+                self._joint_constraints.joint_idx_to_cid,
             )
             self.world._maximal_tree_projector = self._maximal_tree_projector
         if flags & int(ModelFlags.SHAPE_PROPERTIES):
