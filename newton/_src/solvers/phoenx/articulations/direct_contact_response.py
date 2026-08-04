@@ -109,18 +109,15 @@ def _unconstrained_pair_cross_mobility(
     )
 
 
-@wp.kernel(enable_backward=False)
-def _build_contact_equality_rhs_kernel(
+@wp.func
+def _build_contact_equality_rhs(
     response: DirectContactResponseData,
     bodies: BodyContainer,
     contacts: ContactContainer,
+    contact: wp.int32,
+    lane: wp.int32,
 ):
-    tid = wp.tid()
-    contact = tid // wp.int32(_CONTACT_RHS_BLOCK_DIM)
-    lane = tid - contact * wp.int32(_CONTACT_RHS_BLOCK_DIM)
     mechanism = response.contact_mechanism[contact]
-    if mechanism < wp.int32(0):
-        return
     body0 = response.contact_body0[contact]
     body1 = response.contact_body1[contact]
     normal = cc_get_normal(contacts, contact)
@@ -203,6 +200,20 @@ def _build_contact_equality_rhs_kernel(
                 inverse_inertia1,
             )
             response.rhs[task_offset + (row - row_begin) * wp.int32(4) + axis] += response.row_scale[row] * value
+
+
+@wp.kernel(enable_backward=False)
+def _build_grouped_contact_equality_rhs_kernel(
+    response: DirectContactResponseData,
+    bodies: BodyContainer,
+    contacts: ContactContainer,
+    task_item: wp.array[wp.int32],
+):
+    task, lane = wp.tid()
+    for item_slot in range(GROUPED_RHS_ITEMS_PER_TASK):
+        contact = task_item[task * wp.int32(GROUPED_RHS_ITEMS_PER_TASK) + item_slot]
+        if contact >= wp.int32(0):
+            _build_contact_equality_rhs(response, bodies, contacts, contact, lane)
 
 
 @wp.kernel(enable_backward=False)
@@ -374,11 +385,11 @@ class DirectContactResponse:
     def compute(self, contacts: ContactContainer) -> None:
         """Solve equality responses and form each active contact's local block."""
         capacity = self.contact_batch.item_capacity
-        wp.launch(
-            _build_contact_equality_rhs_kernel,
-            dim=capacity * _CONTACT_RHS_BLOCK_DIM,
+        wp.launch_tiled(
+            _build_grouped_contact_equality_rhs_kernel,
+            dim=self.contact_batch.task_capacity,
             block_dim=_CONTACT_RHS_BLOCK_DIM,
-            inputs=[self.data, self.direct.bodies, contacts],
+            inputs=[self.data, self.direct.bodies, contacts, self.contact_batch.task_item],
             device=self.direct.model.device,
         )
         self.contact_batch.solve()
