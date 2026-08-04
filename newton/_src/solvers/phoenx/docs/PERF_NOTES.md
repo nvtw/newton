@@ -123,6 +123,16 @@ regressed DR Legs to 11.377 and 11.693 ms, respectively, while 64 workers for
 the retained eight-item group measured 11.600 ms; keep eight items and 128
 workers.
 
+A second resident-grid probe targeted the grouped direct-contact solve on
+2,048-world DR Legs. Only 2,048 of 9,472 task slots were active after settling.
+A grid of 2,048 persistent task blocks improved an eight-sample, interleaved
+same-solver median from 12.623 to 12.459 ms/frame (1.3%); 1,504 blocks regressed
+to 12.900 ms and smaller grids lost more occupancy. Reverting to one contact
+item per tile, paired with the 2,048-block grid, regressed to 16.581 ms/frame.
+The bounded grid and narrow tile are therefore not retained. The production
+16x24 triangular solve already uses cuSolverDx LTO. Nsight Compute hardware
+counters were unavailable because the driver denied performance-counter access.
+
 The direct contact Schur schedule is now restricted to worlds containing one
 direct mechanism. Its single-owner sweep cannot represent a contact between two
 separately factored mechanisms; partially owning only ground and same-mechanism
