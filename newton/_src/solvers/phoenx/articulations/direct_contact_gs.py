@@ -12,7 +12,10 @@ from newton._src.solvers.phoenx.articulations.direct_contact_response import (
     DirectContactResponseData,
 )
 from newton._src.solvers.phoenx.articulations.direct_equality import _row_wrench_for_body
-from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import GROUPED_RHS_ITEMS_PER_TASK
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
+    GROUPED_RHS_ITEM_WIDTH,
+    GROUPED_RHS_ITEMS_PER_TASK,
+)
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync
 from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_block import block_project_friction_delta_sor_2
@@ -239,9 +242,13 @@ def iterate_direct_contact_runs_kernel(
             correction2 = wp.float32(0.0)
             for local_row in range(lane, row_end - row_begin, wp.block_dim()):
                 accumulated = response.accumulated_solution[row_begin + local_row]
-                correction0 += response.rhs[task_offset + local_row * wp.int32(4)] * accumulated
-                correction1 += response.rhs[task_offset + local_row * wp.int32(4) + wp.int32(1)] * accumulated
-                correction2 += response.rhs[task_offset + local_row * wp.int32(4) + wp.int32(2)] * accumulated
+                correction0 += response.rhs[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)] * accumulated
+                correction1 += (
+                    response.rhs[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + wp.int32(1)] * accumulated
+                )
+                correction2 += (
+                    response.rhs[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + wp.int32(2)] * accumulated
+                )
             correction0 = wp.tile_sum(wp.tile(correction0))[0]
             correction1 = wp.tile_sum(wp.tile(correction1))[0]
             correction2 = wp.tile_sum(wp.tile(correction2))[0]
@@ -336,9 +343,11 @@ def iterate_direct_contact_runs_kernel(
             delta_coordinate = response.delta_coordinate[contact]
             for local_row in range(lane, row_end - row_begin, wp.block_dim()):
                 response.accumulated_solution[row_begin + local_row] += (
-                    response.solution[task_offset + local_row * wp.int32(4)] * delta_coordinate[0]
-                    + response.solution[task_offset + local_row * wp.int32(4) + wp.int32(1)] * delta_coordinate[1]
-                    + response.solution[task_offset + local_row * wp.int32(4) + wp.int32(2)] * delta_coordinate[2]
+                    response.solution[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)] * delta_coordinate[0]
+                    + response.solution[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + wp.int32(1)]
+                    * delta_coordinate[1]
+                    + response.solution[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + wp.int32(2)]
+                    * delta_coordinate[2]
                 )
             _block_sync()
 

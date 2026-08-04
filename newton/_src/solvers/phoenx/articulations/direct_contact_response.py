@@ -11,7 +11,10 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.articulations.direct_equality import _row_wrench_for_body
-from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import GROUPED_RHS_ITEMS_PER_TASK
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
+    GROUPED_RHS_ITEM_WIDTH,
+    GROUPED_RHS_ITEMS_PER_TASK,
+)
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync
 from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.contact_container import (
@@ -129,7 +132,7 @@ def _build_contact_equality_rhs(
     row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
     task_offset = contact * response.workspace_stride
     for local_row in range(lane, row_end - row_begin, wp.int32(_CONTACT_RHS_BLOCK_DIM)):
-        offset = task_offset + local_row * wp.int32(4)
+        offset = task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)
         response.rhs[offset] = wp.float32(0.0)
         response.rhs[offset + wp.int32(1)] = wp.float32(0.0)
         response.rhs[offset + wp.int32(2)] = wp.float32(0.0)
@@ -167,7 +170,9 @@ def _build_contact_equality_rhs(
                 bodies.inverse_mass[body0],
                 inverse_inertia0,
             )
-            response.rhs[task_offset + (row - row_begin) * wp.int32(4) + axis] = response.row_scale[row] * value
+            response.rhs[task_offset + (row - row_begin) * wp.int32(GROUPED_RHS_ITEM_WIDTH) + axis] = (
+                response.row_scale[row] * value
+            )
     _block_sync()
     for incidence in range(
         response.body_row_start[body1] + lane,
@@ -199,7 +204,9 @@ def _build_contact_equality_rhs(
                 bodies.inverse_mass[body1],
                 inverse_inertia1,
             )
-            response.rhs[task_offset + (row - row_begin) * wp.int32(4) + axis] += response.row_scale[row] * value
+            response.rhs[task_offset + (row - row_begin) * wp.int32(GROUPED_RHS_ITEM_WIDTH) + axis] += (
+                response.row_scale[row] * value
+            )
 
 
 @wp.kernel(enable_backward=False)
@@ -249,7 +256,7 @@ def _compute_contact_schur_diagonal_kernel(
         bodies, body0, r0, -tangent1, -tangent1, body1, r1, tangent1, tangent1
     )
     for local_row in range(row_end - row_begin):
-        offset = task_offset + local_row * wp.int32(4)
+        offset = task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)
         rhs0 = response.rhs[offset]
         rhs1 = response.rhs[offset + wp.int32(1)]
         rhs2 = response.rhs[offset + wp.int32(2)]

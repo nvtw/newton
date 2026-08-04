@@ -106,6 +106,23 @@ The grouped forward and backward triangular passes now share one global
 workspace: descending back substitution overwrites a forward tile only after
 its last read. Runtime stayed neutral, the 80-frame state check passed, and
 the 20,000-world ``solution_permuted`` allocation fell by 2.611 GB.
+
+Direct contact batches now store exactly the three physical RHS columns instead
+of carrying a masked fourth column through the grouped triangular solve and its
+consumers. On a warmed, graph-captured 2,000-world DR Legs continuation, five
+50-frame CUDA-event brackets improved from 11.150 to 9.730 ms/frame (89.68 to
+102.78 FPS, 12.7% lower). Matched ten-frame traces reduced the grouped solve
+from 0.7434 to 0.5418 ms/substep, the Schur diagonal from 0.3057 to 0.2056
+ms/substep, and each contact iteration from 0.1211 to 0.1055 ms. The
+20,000-world full-coordinate humanoid median remained neutral at 31.589 versus
+31.693 ms; reset-identical reduced-coordinate measurements were 8.106 ms versus
+the prior 8.067 ms control and do not execute this path. Heterogeneous grouped
+solves, direct/free-body coupling, closed-loop settling, multi-world coupling,
+and the DR Legs CUDA-graph shock regression pass. Four- and sixteen-item groups
+regressed DR Legs to 11.377 and 11.693 ms, respectively, while 64 workers for
+the retained eight-item group measured 11.600 ms; keep eight items and 128
+workers.
+
 Full-coordinate construction separately improved from
 36.28 to 16.27 s; it is not included in FPS.
 
@@ -142,6 +159,16 @@ regressed from 8.067 to 8.185 ms; specializing only the iteration count measured
 8.145 ms. These results favor small producer-consumer fusion while keeping
 larger factor, solve, and publication phases separate.
 
+A fresh 20,000-world humanoid census found eight active contact points on only
+two bodies per articulation, so twelve unit-wrench responses could represent
+the current 24 contact rows. Exact 24-by-12-by-72 tile synthesis measured
+176.25 us, but this does not reopen the compressed-basis direction: the earlier
+production-matched oracle measured compressed prepare plus solve at 504 us
+versus 566 us direct (1.12x), because reducing the row count does not halve the
+latency-bound full-tree traversal. The extra coefficient/basis storage,
+synthesis traffic, floating-point ordering change, and dispatch complexity
+therefore remain unjustified.
+
 Fewer substeps did not establish a PhoenX wall-to-quality advantage. Both
 solvers remained finite at one, two, and four substeps over 10 s, but MJWarp at
 two substeps stayed closer to its own four-substep trajectory. A PhoenX contact
@@ -169,6 +196,7 @@ Do not retry without new evidence or a materially different design.
 | Direction | Result |
 | --- | --- |
 | Resident generalized-contact rows | Extra storage/traffic outweighed reuse. |
+| Unit-wrench contact-response bases | Strong body reuse does not overcome the per-row traversal latency floor plus reconstruction traffic. |
 | Reduced factor/contact stream overlap | Dependencies and capture scheduling prevented a useful gain. |
 | Remove ABA generalized-acceleration publication | No end-to-end win. |
 | Path-sparse packed contact Jacobian | Irregular traffic lost to recomputation. |

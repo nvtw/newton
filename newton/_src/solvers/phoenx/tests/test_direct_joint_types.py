@@ -12,6 +12,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
+    GROUPED_RHS_ITEM_WIDTH,
     GROUPED_RHS_ITEMS_PER_TASK,
     FixedPatternPanelLLT,
 )
@@ -383,7 +384,14 @@ class TestDirectJointTypes(unittest.TestCase):
         workspace_offset = contact * response.contact_batch.item_workspace_stride
         rhs_storage = response.contact_batch.rhs.numpy()
         rhs = np.stack(
-            [rhs_storage[workspace_offset + 4 * row : workspace_offset + 4 * row + 3] for row in range(dimension)]
+            [
+                rhs_storage[
+                    workspace_offset + GROUPED_RHS_ITEM_WIDTH * row : workspace_offset
+                    + GROUPED_RHS_ITEM_WIDTH * row
+                    + 3
+                ]
+                for row in range(dimension)
+            ]
         )
         lambdas = solver.world._contact_container.lambdas.numpy()
         derived = solver.world._contact_container.derived.numpy()
@@ -549,7 +557,9 @@ class TestDirectJointTypes(unittest.TestCase):
                 expected_rhs[item] = (int(mechanism), rhs)
                 begin = item * batch.item_workspace_stride
                 for row in range(rhs.shape[0]):
-                    rhs_storage[begin + 4 * row : begin + 4 * row + 3] = rhs[row]
+                    rhs_storage[begin + GROUPED_RHS_ITEM_WIDTH * row : begin + GROUPED_RHS_ITEM_WIDTH * row + 3] = rhs[
+                        row
+                    ]
         batch.rhs.assign(rhs_storage)
 
         with wp.ScopedCapture(wp.get_preferred_device()) as capture:
@@ -561,7 +571,10 @@ class TestDirectJointTypes(unittest.TestCase):
         for item, (mechanism, rhs) in expected_rhs.items():
             begin = item * batch.item_workspace_stride
             solution = np.stack(
-                [solution_storage[begin + 4 * row : begin + 4 * row + 3] for row in range(rhs.shape[0])]
+                [
+                    solution_storage[begin + GROUPED_RHS_ITEM_WIDTH * row : begin + GROUPED_RHS_ITEM_WIDTH * row + 3]
+                    for row in range(rhs.shape[0])
+                ]
             )
             residual = matrices[mechanism] @ solution - rhs
             self.assertLess(float(np.linalg.norm(residual) / np.linalg.norm(rhs)), 5.0e-3)

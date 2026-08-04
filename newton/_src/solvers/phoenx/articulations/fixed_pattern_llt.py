@@ -21,6 +21,7 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_schedule import 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 GROUPED_RHS_ITEMS_PER_TASK = 8
+GROUPED_RHS_ITEM_WIDTH = 3
 
 _GET_ARRAY_PTR = """return (uint64_t)arr.data;"""
 
@@ -473,7 +474,7 @@ def _make_cooperative_solve_kernel(block_size: int):
 
 def _make_grouped_rhs_batch_solve_kernel(block_size: int):
     """Create one solve task for a fixed group of three-column RHS items."""
-    item_width = 4
+    item_width = GROUPED_RHS_ITEM_WIDTH
     items_per_task = GROUPED_RHS_ITEMS_PER_TASK
     rhs_tile_width = item_width * items_per_task
     tile_elements = block_size * rhs_tile_width
@@ -633,8 +634,8 @@ class FixedPatternGroupedRHSBatch:
         self.item_capacity = max(1, int(item_capacity))
         self.task_capacity = max(1, int(task_capacity))
         max_padded_dimension = max(panel.symbolic.tile_counts) * panel.block_size
-        self.item_workspace_stride = max_padded_dimension * 4
-        self.task_workspace_stride = max_padded_dimension * 4 * GROUPED_RHS_ITEMS_PER_TASK
+        self.item_workspace_stride = max_padded_dimension * GROUPED_RHS_ITEM_WIDTH
+        self.task_workspace_stride = max_padded_dimension * GROUPED_RHS_ITEM_WIDTH * GROUPED_RHS_ITEMS_PER_TASK
         device = panel.device
         self.task_mechanism = wp.full(self.task_capacity, -1, dtype=wp.int32, device=device)
         self.task_item = wp.full(
