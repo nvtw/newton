@@ -184,6 +184,43 @@ class TestSimulationBenchmarks(unittest.TestCase):
         config = json.loads((BENCHMARK_DIR.parents[1] / "asv.conf.json").read_text(encoding="utf-8"))
         self.assertGreater(bench_kamino.KpiDRLegs.setup_cache.timeout, config["default_benchmark_timeout"])
 
+    def test_kamino_capture_warms_up_solver_eagerly(self):
+        """Warm up lazy Kamino allocations before CUDA graph capture."""
+        workload = DRLegsBenchmarkWorkload.__new__(DRLegsBenchmarkWorkload)
+        workload.state_0 = object()
+        workload.solver = Mock()
+        workload.graph = None
+        workload.reset_graph = None
+        workload._capturing_graph = False
+
+        capture_active = False
+        simulate_capture_states = []
+
+        class FakeCapture:
+            def __init__(self):
+                self.graph = object()
+
+            def __enter__(self):
+                nonlocal capture_active
+                capture_active = True
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                nonlocal capture_active
+                capture_active = False
+
+        workload.simulate_tick = Mock(side_effect=lambda: simulate_capture_states.append(capture_active))
+        workload._reset_tick = Mock()
+
+        with patch("benchmark_kamino.wp.ScopedCapture", FakeCapture):
+            workload._capture_cuda_graphs()
+
+        self.assertEqual(simulate_capture_states, [False, True])
+        self.assertEqual(workload.solver.reset.call_count, 2)
+        self.assertIsNotNone(workload.reset_graph)
+        self.assertIsNotNone(workload.graph)
+        self.assertFalse(workload._capturing_graph)
+
     def test_aws_benchmark_comparison_gates_only_runtime_metrics(self):
         """Gate PR comparisons on runtime while retaining dashboard metrics."""
         workflow_path = BENCHMARK_DIR.parents[1] / ".github" / "workflows" / "aws_gpu_benchmarks.yml"

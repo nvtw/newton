@@ -359,15 +359,7 @@ class DRLegsBenchmarkWorkload:
         if use_cuda_graph:
             device = self.model.device
             if device.is_cuda and wp.is_mempool_enabled(device):
-                with wp.ScopedCapture() as reset_capture:
-                    self._reset_tick()
-                self.reset_graph = reset_capture.graph
-                self._capturing_graph = True
-                with wp.ScopedCapture() as capture:
-                    self.simulate_tick()
-                self._capturing_graph = False
-                self.graph = capture.graph
-                self.solver.reset(state=self.state_0)
+                self._capture_cuda_graphs()
             else:
                 warnings.warn(
                     f"use_cuda_graph=True but CUDA graph capture is unavailable on device '{device}' "
@@ -377,6 +369,24 @@ class DRLegsBenchmarkWorkload:
                 )
 
         wp.synchronize_device()
+
+    def _capture_cuda_graphs(self):
+        # Initialize lazy solver buffers eagerly. Large captured allocation nodes can make
+        # cudaGraphInstantiate reject an otherwise valid graph on the first replay.
+        self.simulate_tick()
+        self.solver.reset(state=self.state_0)
+
+        with wp.ScopedCapture() as reset_capture:
+            self._reset_tick()
+        self.reset_graph = reset_capture.graph
+        self._capturing_graph = True
+        try:
+            with wp.ScopedCapture() as capture:
+                self.simulate_tick()
+        finally:
+            self._capturing_graph = False
+        self.graph = capture.graph
+        self.solver.reset(state=self.state_0)
 
     @staticmethod
     def _set_newton_joint_params(model, cfg, world_count):
