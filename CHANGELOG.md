@@ -215,6 +215,7 @@
 
 ### Fixed
 
+- Fix the PhoenX wrecking-ball example chain launch by using its spawn-consistent ball anchor and filtering the pinned capsule from its supporting crane, without changing masses.
 - Accelerate large replicated PhoenX articulations by reusing symbolic topology, sizing contact columns from shape-pair capacity, reusing injected collision pipelines, and lazily compiling reduced-contact fallback kernels.
 - Fix reduced-coordinate PhoenX CUDA advance omitting joints when an articulation tree depth contains more than 32 joints.
 - Fix experimental PhoenX G1 population-based training discarding fitness statistics after the first eager training interval.

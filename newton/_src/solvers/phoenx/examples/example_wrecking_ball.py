@@ -9,7 +9,6 @@
 # ball-jointed capsule chain hung from a static crane.
 #
 # Run: python -m newton._src.solvers.phoenx.examples.example_wrecking_ball
-#      python -m newton._src.solvers.phoenx.examples.example_wrecking_ball --fix-ball-attachment
 ###########################################################################
 
 from __future__ import annotations
@@ -69,11 +68,6 @@ def _yaw(angle: float) -> wp.quat:
 
 
 class Example(PortedExample):
-    # The original PEEL scene deliberately spawns the ball with a large
-    # chain-end violation. Keep that available for solver A/B testing,
-    # but the CLI can opt into a spawn-consistent attachment.
-    FIX_BALL_ATTACHMENT = False
-
     sim_substeps = 20
     solver_iterations = 12
     velocity_iterations = 1
@@ -141,6 +135,7 @@ class Example(PortedExample):
         chain_length = jib_z - self.n_floors * floor_height * 0.5 - ball_radius
         theta = 1.1
         mast_x = jib_tip_x + math.sin(theta) * (chain_length + ball_radius) + ball_radius + 1.2
+        crane_shape_start = builder.shape_count
         self._box(builder, -1, (5.5, 5.5, 0.8), (mast_x + 1.0, 0.0, 0.4), color=CRANE_COLOR)
         self._box(builder, -1, (1.1, 1.1, jib_z), (mast_x, 0.0, 0.5 * jib_z), color=CRANE_COLOR)
         self._box(
@@ -151,6 +146,7 @@ class Example(PortedExample):
             color=CRANE_COLOR,
         )
         self._box(builder, -1, (2.0, 2.2, 1.6), (mast_x + 2.6, 0.0, jib_z - 0.5), color=CRANE_COLOR)
+        crane_shape_end = builder.shape_count
 
         tip = _p(jib_tip_x, 0.0, jib_z)
         hang = chain_length + ball_radius
@@ -164,10 +160,12 @@ class Example(PortedExample):
         direction_unit = direction / np.linalg.norm(direction)
         chain_count = max(3, min(60, int(chain_length / 0.55 + 0.5)))
         chain_points = [tip + direction_unit * (chain_length * index / chain_count) for index in range(chain_count + 1)]
-        fix_arg = getattr(self.args, "fix_ball_attachment", None)
-        use_fix = self.FIX_BALL_ATTACHMENT if fix_arg is None else bool(fix_arg)
-        ball_anchor = -direction_unit * ball_radius if use_fix else _p(0.0, 0.0, ball_radius)
+        first_chain_shape = builder.shape_count
+        ball_anchor = -direction_unit * ball_radius
         self._rope(builder, chain_points, 0.07, 6.0, (-1, None), (self.ball, ball_anchor))
+        # The pinned capsule cap overlaps its supporting jib at the shared attachment point.
+        for crane_shape in range(crane_shape_start, crane_shape_end):
+            builder.add_shape_collision_filter_pair(crane_shape, first_chain_shape)
 
         return self._extents
 
@@ -431,11 +429,6 @@ class Example(PortedExample):
 
 def run_example() -> None:
     parser = newton.examples.create_parser()
-    parser.add_argument(
-        "--fix-ball-attachment",
-        action="store_true",
-        help="Anchor the chain at the spawn-consistent point, removing the deliberate initial constraint violation.",
-    )
     viewer, args = newton.examples.init(parser)
     newton.examples.run(Example(viewer, args), args)
 
