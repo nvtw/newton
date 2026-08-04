@@ -528,6 +528,11 @@ class TestDirectJointTypes(unittest.TestCase):
 
     def test_panel_grouped_rhs_batch_preserves_mechanism_boundaries(self) -> None:
         """Solve padded contact groups across heterogeneous mechanisms."""
+        for block_size in (16, 32):
+            with self.subTest(block_size=block_size):
+                self._assert_panel_grouped_rhs_batch(block_size)
+
+    def _assert_panel_grouped_rhs_batch(self, block_size: int) -> None:
         dimensions = (5, 17, 40)
         starts = np.cumsum(np.asarray((0, *dimensions), dtype=np.int32))
         permutation = np.concatenate([np.arange(dimension, dtype=np.int32) for dimension in dimensions])
@@ -539,6 +544,7 @@ class TestDirectJointTypes(unittest.TestCase):
             starts,
             permutation,
             row_bodies,
+            block_size=block_size,
             device=wp.get_preferred_device(),
         )
         batch = panel.create_grouped_rhs_batch(item_capacity=8, task_capacity=3)
@@ -586,6 +592,7 @@ class TestDirectJointTypes(unittest.TestCase):
             batch.solve()
         wp.capture_launch(capture.graph)
         solution_storage = batch.solution.numpy()
+        gram = batch.gram.numpy()
 
         for item, (mechanism, rhs) in expected_rhs.items():
             begin = item * batch.item_workspace_stride
@@ -597,6 +604,9 @@ class TestDirectJointTypes(unittest.TestCase):
             )
             residual = matrices[mechanism] @ solution - rhs
             self.assertLess(float(np.linalg.norm(residual) / np.linalg.norm(rhs)), 5.0e-3)
+            product = rhs.T @ solution
+            expected_gram = product[np.triu_indices(3)]
+            np.testing.assert_allclose(gram[:, item], expected_gram, rtol=5.0e-4, atol=5.0e-5)
 
     def test_wide_partial_panels_match_dense_residual(self) -> None:
         """Match a sparse residual with a partial cooperative panel."""

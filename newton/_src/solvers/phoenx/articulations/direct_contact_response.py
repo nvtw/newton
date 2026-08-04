@@ -48,6 +48,7 @@ class DirectContactResponseData:
     workspace_stride: wp.int32
     rhs: wp.array[wp.float32]
     solution: wp.array[wp.float32]
+    gram: wp.array2d[wp.float32]
     accumulated_solution: wp.array[wp.float32]
     mobility: wp.array2d[wp.float32]
     delta_coordinate: wp.array[wp.vec3]
@@ -240,9 +241,6 @@ def _compute_contact_schur_diagonal_kernel(
     tangent1 = wp.cross(normal, tangent0)
     r0 = cc_get_r0(contacts, contact)
     r1 = cc_get_r1(contacts, contact)
-    row_begin = response.mechanism_row_start[mechanism]
-    row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
-    task_offset = contact * response.workspace_stride
     inverse00 = _unconstrained_pair_cross_mobility(bodies, body0, r0, -normal, -normal, body1, r1, normal, normal)
     inverse01 = _unconstrained_pair_cross_mobility(bodies, body0, r0, -normal, -tangent0, body1, r1, normal, tangent0)
     inverse02 = _unconstrained_pair_cross_mobility(bodies, body0, r0, -normal, -tangent1, body1, r1, normal, tangent1)
@@ -255,20 +253,12 @@ def _compute_contact_schur_diagonal_kernel(
     inverse22 = _unconstrained_pair_cross_mobility(
         bodies, body0, r0, -tangent1, -tangent1, body1, r1, tangent1, tangent1
     )
-    for local_row in range(row_end - row_begin):
-        offset = task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)
-        rhs0 = response.rhs[offset]
-        rhs1 = response.rhs[offset + wp.int32(1)]
-        rhs2 = response.rhs[offset + wp.int32(2)]
-        solution0 = response.solution[offset]
-        solution1 = response.solution[offset + wp.int32(1)]
-        solution2 = response.solution[offset + wp.int32(2)]
-        inverse00 -= rhs0 * solution0
-        inverse01 -= rhs0 * solution1
-        inverse02 -= rhs0 * solution2
-        inverse11 -= rhs1 * solution1
-        inverse12 -= rhs1 * solution2
-        inverse22 -= rhs2 * solution2
+    inverse00 -= response.gram[0, contact]
+    inverse01 -= response.gram[1, contact]
+    inverse02 -= response.gram[2, contact]
+    inverse11 -= response.gram[3, contact]
+    inverse12 -= response.gram[4, contact]
+    inverse22 -= response.gram[5, contact]
     response.mobility[0, contact] = wp.float32(0.0)
     response.mobility[1, contact] = wp.float32(0.0)
     response.mobility[2, contact] = wp.float32(0.0)
@@ -374,6 +364,7 @@ class DirectContactResponse:
         self.data.workspace_stride = wp.int32(self.contact_batch.item_workspace_stride)
         self.data.rhs = self.contact_batch.rhs
         self.data.solution = self.contact_batch.solution
+        self.data.gram = self.contact_batch.gram
         self.data.accumulated_solution = wp.zeros(len(topology.row_joint), dtype=wp.float32, device=device)
         self.data.mobility = wp.zeros((6, capacity), dtype=wp.float32, device=device)
         self.data.delta_coordinate = wp.zeros(capacity, dtype=wp.vec3, device=device)

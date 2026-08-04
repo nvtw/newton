@@ -35,6 +35,59 @@ def _get_float_array_offset_ptr(arr: wp.array[wp.float32], start: int) -> wp.uin
     return _get_float_array_ptr(arr) + wp.uint64(start * wp.static(sizeof(wp.float32._type_)))
 
 
+@wp.func_native(
+    r"""
+#if defined(__CUDA_ARCH__)
+    const int subgroup = (threadIdx.x & 31) >> 4;
+    const unsigned mask = 0xffffu << (subgroup << 4);
+    for (int offset = 8; offset > 0; offset >>= 1) {
+        value += __shfl_down_sync(mask, value, offset, 16);
+    }
+#endif
+    return value;
+"""
+)
+def _sum_group_16(value: wp.float32) -> wp.float32: ...
+
+
+@wp.func
+def _compute_grouped_rhs_gram_item(
+    item: wp.int32,
+    dimension: wp.int32,
+    item_workspace_stride: wp.int32,
+    rhs: wp.array[wp.float32],
+    solution: wp.array[wp.float32],
+    gram: wp.array2d[wp.float32],
+):
+    begin = item * item_workspace_stride
+    gram00 = wp.float32(0.0)
+    gram01 = wp.float32(0.0)
+    gram02 = wp.float32(0.0)
+    gram11 = wp.float32(0.0)
+    gram12 = wp.float32(0.0)
+    gram22 = wp.float32(0.0)
+    for row in range(dimension):
+        offset = begin + row * wp.int32(GROUPED_RHS_ITEM_WIDTH)
+        rhs0 = rhs[offset]
+        rhs1 = rhs[offset + wp.int32(1)]
+        rhs2 = rhs[offset + wp.int32(2)]
+        solution0 = solution[offset]
+        solution1 = solution[offset + wp.int32(1)]
+        solution2 = solution[offset + wp.int32(2)]
+        gram00 += rhs0 * solution0
+        gram01 += rhs0 * solution1
+        gram02 += rhs0 * solution2
+        gram11 += rhs1 * solution1
+        gram12 += rhs1 * solution2
+        gram22 += rhs2 * solution2
+    gram[0, item] = gram00
+    gram[1, item] = gram01
+    gram[2, item] = gram02
+    gram[3, item] = gram11
+    gram[4, item] = gram12
+    gram[5, item] = gram22
+
+
 @dataclass(frozen=True)
 class FixedPanelSymbolic:
     """Immutable compact storage and task metadata."""
@@ -504,6 +557,7 @@ def _make_grouped_rhs_batch_solve_kernel(block_size: int):
         intermediate: wp.array[wp.float32],
         solution_permuted: wp.array[wp.float32],
         solution: wp.array[wp.float32],
+        gram: wp.array2d[wp.float32],
     ):
         task, lane = wp.tid()
         mechanism = task_mechanism[task]
@@ -529,6 +583,12 @@ def _make_grouped_rhs_batch_solve_kernel(block_size: int):
             shape=(workspace_dimension, rhs_tile_width),
             dtype=wp.float32,
         )
+        gram00 = wp.float32(0.0)
+        gram01 = wp.float32(0.0)
+        gram02 = wp.float32(0.0)
+        gram11 = wp.float32(0.0)
+        gram12 = wp.float32(0.0)
+        gram22 = wp.float32(0.0)
         for tile_i in range(tile_count):
             i = tile_i * block_size
             right_hand_side = wp.tile_zeros(
@@ -608,6 +668,26 @@ def _make_grouped_rhs_batch_solve_kernel(block_size: int):
                 wp.tile_matmul(wp.tile_transpose(lower), solved, right_hand_side, alpha=-1.0)
             wp.tile_upper_solve_inplace(wp.tile_transpose(diagonal), right_hand_side)
             wp.tile_store(solution_permuted_matrix, right_hand_side, offset=(i, 0))
+            if wp.static(block_size == 16):
+                gram_item_slot = lane // wp.int32(block_size)
+                gram_row = lane - gram_item_slot * wp.int32(block_size)
+                gram_item = task_item[task * wp.int32(items_per_task) + gram_item_slot]
+                if task_active and gram_item >= wp.int32(0) and i + gram_row < dimension:
+                    original = permutation[vector_offset + i + gram_row]
+                    rhs_offset = gram_item * item_workspace_stride + original * wp.int32(item_width)
+                    rhs0 = rhs[rhs_offset]
+                    rhs1 = rhs[rhs_offset + wp.int32(1)]
+                    rhs2 = rhs[rhs_offset + wp.int32(2)]
+                    column = gram_item_slot * wp.int32(item_width)
+                    solution0 = right_hand_side[gram_row, column]
+                    solution1 = right_hand_side[gram_row, column + wp.int32(1)]
+                    solution2 = right_hand_side[gram_row, column + wp.int32(2)]
+                    gram00 += rhs0 * solution0
+                    gram01 += rhs0 * solution1
+                    gram02 += rhs0 * solution2
+                    gram11 += rhs1 * solution1
+                    gram12 += rhs1 * solution2
+                    gram22 += rhs2 * solution2
             for iteration in range((tile_elements + wp.block_dim() - 1) // wp.block_dim()):
                 index = (lane + iteration * wp.block_dim()) % tile_elements
                 row = index // rhs_tile_width
@@ -619,6 +699,38 @@ def _make_grouped_rhs_batch_solve_kernel(block_size: int):
                     original = permutation[vector_offset + i + row]
                     solution[item * item_workspace_stride + original * wp.int32(item_width) + item_column] = (
                         right_hand_side[row, column]
+                    )
+
+        if wp.static(block_size == 16):
+            gram00 = _sum_group_16(gram00)
+            gram01 = _sum_group_16(gram01)
+            gram02 = _sum_group_16(gram02)
+            gram11 = _sum_group_16(gram11)
+            gram12 = _sum_group_16(gram12)
+            gram22 = _sum_group_16(gram22)
+            gram_item_slot = lane // wp.int32(block_size)
+            if lane == gram_item_slot * wp.int32(block_size):
+                gram_item = task_item[task * wp.int32(items_per_task) + gram_item_slot]
+                if task_active and gram_item >= wp.int32(0):
+                    gram[0, gram_item] = gram00
+                    gram[1, gram_item] = gram01
+                    gram[2, gram_item] = gram02
+                    gram[3, gram_item] = gram11
+                    gram[4, gram_item] = gram12
+                    gram[5, gram_item] = gram22
+
+        else:
+            _block_sync()
+            if lane < wp.int32(items_per_task):
+                gram_item = task_item[task * wp.int32(items_per_task) + lane]
+                if task_active and gram_item >= wp.int32(0):
+                    _compute_grouped_rhs_gram_item(
+                        gram_item,
+                        dimension,
+                        item_workspace_stride,
+                        rhs,
+                        solution,
+                        gram,
                     )
 
     return solve_grouped_rhs_batch
@@ -654,6 +766,7 @@ class FixedPatternGroupedRHSBatch:
         # Descending back substitution overwrites each forward tile only after its last read.
         self.solution_permuted = self.intermediate
         self.solution = wp.zeros_like(self.rhs)
+        self.gram = wp.zeros((6, self.item_capacity), dtype=wp.float32, device=device)
 
     def solve(self) -> None:
         """Solve all runtime-selected groups."""
@@ -685,6 +798,7 @@ class FixedPatternGroupedRHSBatch:
                 self.intermediate,
                 self.solution_permuted,
                 self.solution,
+                self.gram,
             ],
             device=panel.device,
         )

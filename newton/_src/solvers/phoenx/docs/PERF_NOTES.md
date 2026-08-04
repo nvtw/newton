@@ -148,6 +148,20 @@ reduced coordinates do not enter this full-coordinate path. Direct-contact,
 regressions pass. The scheduling regression fails with the previous dispatcher
 ordering.
 
+The grouped three-column direct contact solve now accumulates the six symmetric
+contact Gram terms while its solution tiles are resident. Sixteen-row panels
+use fixed 16-lane reductions; wider panels retain a general post-solve fallback.
+This removes the equality-vector scan from the following Schur kernel. On the
+same 2,048-world DR Legs workload (five substeps, two iterations), two
+seven-bracket candidate runs measured 10.740 and 10.797 ms/frame median versus
+11.436 ms/frame for the committed control, a 5.6--6.1% reduction. Combined with
+the preceding projection change, frame time is about 11% lower than its 12.153
+ms starting point. The five-substep walking path, captured shock recovery,
+direct/free-body and mixed coupling, closed-loop drift, and extreme-mass-ratio
+regressions pass. Dense Gram checks cover both 16- and 32-row panels. A
+2,000-world full-coordinate humanoid was neutral (4.584 versus 4.603 ms/frame
+median), so the retained claim is DR Legs rather than a broad humanoid gain.
+
 Direct-system host setup now gathers and normalizes common axial joint axes in
 bulk, constructs implicit-drive masks once, and vectorizes scalar axial dynamic
 row ownership. With a warm kernel cache, the 20,000-world full-coordinate
