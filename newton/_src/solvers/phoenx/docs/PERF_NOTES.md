@@ -232,6 +232,16 @@ mass-ratio, coupling, captured-shock, and walking quality gates pass; an 80-fram
 64-world rollout stayed within 0.210 mm position, 0.00379 m/s linear velocity,
 and 0.0639 rad/s angular velocity of the prior ordering.
 
+The cooperative factor now keeps each freshly factorized diagonal tile
+resident while processing its full off-diagonal panel rows instead of storing
+and immediately reloading the same tile. A matched trace reduced factorization
+from 261.79 to 247.54 us/substep (-5.4%). Two DR Legs candidate medians averaged
+9.949 ms/frame versus a 10.056 ms control (1.1% lower); the independent
+full-coordinate humanoid averaged 4.402 versus 4.432 ms (0.7% lower). An
+80-frame DR Legs comparison kept every body pose and velocity byte-identical.
+The related attempt to replace the serial partial-tail solve with a padded
+cooperative tile was neutral at 100.32 versus 100.16 us and was removed.
+
 Direct-system host setup now gathers and normalizes common axial joint axes in
 bulk, constructs implicit-drive masks once, and vectorizes scalar axial dynamic
 row ownership. With a warm kernel cache, the 20,000-world full-coordinate

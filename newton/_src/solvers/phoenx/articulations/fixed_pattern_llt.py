@@ -338,13 +338,7 @@ def _make_cooperative_factor_kernel(block_size: int):
                         shape=(block_size, block_size),
                         dtype=wp.float32,
                     )
-                    diagonal_matrix = wp.array(
-                        ptr=_get_float_array_offset_ptr(factor, diagonal_panel * tile_elements),
-                        shape=(block_size, block_size),
-                        dtype=wp.float32,
-                    )
                     panel = wp.tile_load(panel_matrix, shape=(block_size, block_size), storage="shared")
-                    diagonal = wp.tile_load(diagonal_matrix, shape=(block_size, block_size), storage="shared")
                     for update in range(
                         offdiag_update_start[panel_entry],
                         offdiag_update_start[panel_entry + wp.int32(1)],
