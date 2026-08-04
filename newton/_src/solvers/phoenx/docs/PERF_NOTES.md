@@ -114,9 +114,11 @@ in about 10 KiB of shared storage across both triangular passes. It measured
 about 22.1 ms/frame, but failed the 80-frame bounded-state check while the
 global-workspace control passed. Explicit barriers did not fix it. The likely
 fault is an unsupported in-place triangular solve on aliased ``tile_view``
-slices. Revisit the resident approach only with distinct working tiles and
-explicit shared stores/loads (or a dedicated native kernel), and require a
-tighter direct-solve parity/residual test before rollout timing.
+slices. A distinct-tile version passed the 80-frame check but regressed 29.77
+to 30.14 ms. Native shared-view substitutions passed a tightened 1e-4 residual
+gate and the rollout check, but one-thread-per-RHS measured 31.93 ms and a
+four-thread subgroup version measured 34.06 ms. Revisit only if Warp gains a
+correct optimized triangular solve for dense non-owning tile views.
 
 Fewer substeps did not establish a PhoenX wall-to-quality advantage. Both
 solvers remained finite at one, two, and four substeps over 10 s, but MJWarp at
