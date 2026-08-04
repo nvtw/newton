@@ -93,6 +93,17 @@ ROBOT_CONFIGS = {
 }
 
 
+def _configure_kamino_solver_settings(settings, world_count):
+    settings.solver.collision_detector = settings.collision_detector
+    # The detector's default contact limit is model-wide, so scale it to preserve
+    # the geometry-derived per-world capacity when the robot is replicated.
+    settings.collision_detector.max_contacts *= world_count
+    # Pin the linear solver so a change to default_settings cannot
+    # silently switch what this benchmark measures.
+    settings.solver.dynamics.linear_solver_type = "LLTBRCM"
+    return settings.solver
+
+
 def _load_robot_config(robot):
     asset_cfg = ROBOT_CONFIGS[robot]
     asset_path = newton.utils.download_asset(asset_cfg["asset_name"], ref=asset_cfg["asset_ref"])
@@ -523,14 +534,8 @@ class DRLegsBenchmarkWorkload:
         from newton._src.solvers.kamino.examples.rl.simulation import RigidBodySim  # noqa: PLC0415
 
         settings = RigidBodySim.default_settings(sim_dt)
-        settings.solver.collision_detector = settings.collision_detector
-        # The detector's default contact limit is model-wide, so scale it to preserve
-        # the geometry-derived per-world capacity when the robot is replicated.
-        settings.collision_detector.max_contacts *= model.world_count
-        # Pin the linear solver so a change to default_settings cannot
-        # silently switch what this benchmark measures.
-        settings.solver.dynamics.linear_solver_type = "LLTBRCM"
-        return newton.solvers.SolverKamino(model, config=settings.solver)
+        solver_settings = _configure_kamino_solver_settings(settings, model.world_count)
+        return newton.solvers.SolverKamino(model, config=solver_settings)
 
 
 if __name__ == "__main__":

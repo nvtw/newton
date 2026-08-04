@@ -6,7 +6,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -31,7 +31,7 @@ try:
 
     _DEFERRED_WORKLOAD_MODULES_AFTER_METRIC_IMPORT = {name: name in sys.modules for name in _DEFERRED_WORKLOAD_MODULES}
 
-    from benchmark_kamino import DRLegsBenchmarkWorkload
+    from benchmark_kamino import DRLegsBenchmarkWorkload, _configure_kamino_solver_settings
     from benchmark_mujoco import Example as MuJoCoExample
 finally:
     for _name, _value in _WARP_CONFIG_BEFORE_BENCHMARK_IMPORTS.items():
@@ -227,19 +227,13 @@ class TestSimulationBenchmarks(unittest.TestCase):
             collision_detector=SimpleNamespace(max_contacts=1000),
             solver=SimpleNamespace(collision_detector=None, dynamics=SimpleNamespace(linear_solver_type=None)),
         )
-        model = SimpleNamespace(world_count=4096)
-        simulation_module = ModuleType("newton._src.solvers.kamino.examples.rl.simulation")
-        simulation_module.RigidBodySim = SimpleNamespace(default_settings=Mock(return_value=settings))
 
-        with (
-            patch.dict(sys.modules, {simulation_module.__name__: simulation_module}),
-            patch("benchmark_kamino.newton.solvers.SolverKamino", return_value=object()) as solver_kamino,
-        ):
-            solver = DRLegsBenchmarkWorkload.create_solver(model, sim_dt=0.001)
+        solver_settings = _configure_kamino_solver_settings(settings, world_count=4096)
 
-        self.assertIs(solver, solver_kamino.return_value)
+        self.assertIs(solver_settings, settings.solver)
         self.assertEqual(settings.collision_detector.max_contacts, 4_096_000)
         self.assertIs(settings.solver.collision_detector, settings.collision_detector)
+        self.assertEqual(settings.solver.dynamics.linear_solver_type, "LLTBRCM")
 
     def test_aws_benchmark_comparison_gates_only_runtime_metrics(self):
         """Gate PR comparisons on runtime while retaining dashboard metrics."""
