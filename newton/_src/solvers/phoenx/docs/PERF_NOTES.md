@@ -43,7 +43,7 @@ Detailed experiment histories belong in benchmark output, not here.
 | Collision | Compact primitive-contact sort keys | Lossless key/tiebreak contract. |
 | Inertia | Symmetric-packed body and reduced inertia | Preserve exact unpacking and alignment. |
 | Reduced ABA | Remove unused inertia stores; parallel momentum capture | Retained by full physics tests. |
-| Reduced contacts | Topology-selected packed gather and recomputed path Jacobian | Better than resident/path-sparse row storage. |
+| Reduced contacts | Topology-selected packed gather and recomputed path ``Jacobi``an | Better than resident/path-sparse row storage. |
 | Reduced contacts | Warp-shuffle scalar broadcasts in one-warp contact solves | Removes shared-tile barriers without changing arithmetic. Point-contact G1 improved about 2.82% end to end. |
 | Reduced contacts | Scalar 1-DOF patch-row traversal | Avoids six-wide temporary work for common revolute/prismatic joints. Five-sample G1 mean +0.88%, median +1.05%; mixed-width rows remain bitwise equal. |
 | Coloring | Deterministic per-world greedy/direct endpoint ownership | Large gain for many small worlds; retain fallback above 64 colors. |
@@ -61,6 +61,64 @@ Detailed experiment histories belong in benchmark output, not here.
 | RL recurrence | Four-step sparse FP32 checkpoints with register recomputation | MinGRU forward 53.2 -> 43.9 us; backward neutral at 110.9 -> 111.2 us; randomized reset-boundary outputs and gradients are bitwise exact. |
 | RL activations | BF16 MinGRU projection slabs with FP32 recurrence/accumulation | Production storage 151.0 -> 75.5 MB; isolated forward/backward 0.776 -> 0.730 ms; full A/B/B/A 1.887M -> 1.902M samples/s. Seed 42 passed the 131.072M-sample frozen gate. |
 | Diagnostics | Fixed-order rollout reductions | Deterministic and much faster than contended atomics at production scale. |
+
+## Batched humanoid comparison
+
+Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,
+CUDA-graph replay, a 60 Hz outer step, four 1/240 s solver substeps, two
+position iterations, one velocity iteration, sticky contact matching, a 5 mm
+contact gap, no self-collision, and setup/capture excluded from frame timing:
+
+| Solver | Frame time | FPS | World-steps/s |
+| --- | ---: | ---: | ---: |
+| PhoenX full, initial | 51.183 ms | 19.54 | 0.391M |
+| PhoenX full, current | 31.693 ms | 31.55 | 0.631M |
+| PhoenX reduced, initial | 9.365 ms | 106.78 | 2.136M |
+| PhoenX reduced, current | 8.095 ms | 123.53 | 2.471M |
+| MJWarp Newton/implicitfast | 6.948 ms | 143.92 | 2.878M |
+
+MJWarp uses MuJoCo generalized coordinates and forms a small per-world Newton
+system; it is not a maximal-body-coordinate comparison. Its transferable GPU
+ideas are sparse active-work grouping, topology/static tile selection,
+SM-aware grid-stride launches, and factor reuse only when the quadratic state
+is unchanged. PhoenX retains its Hertz/damping-ratio contact law, reduced ABA,
+full-coordinate fixed-pattern direct equality solve, and projected inequality
+sweeps. Structural joint equalities do not run through production PGS. Its
+remaining joint rows are limits, friction, and velocity limits; the internal
+``joint_pgs_enabled`` name is an ownership mask for those residual rows.
+
+The removed actuated-double-ball-socket kernels are absent from production
+source and guarded by ``test_production_pgs_exposes_only_joint_inequalities``.
+An observed kernel with that name came from the Warp 1.15 disk cache, not the
+current 1.16 module graph. The deprecated ``solver_flavor`` and
+``jacobi_max_colors`` constructor arguments remain no-op compatibility stubs
+until their public deprecation permits removal. Other production Jacobi
+references describe the intentional mass-splitting overflow schedule, not the
+removed experimental joint solver.
+
+The largest retained full-coordinate gain builds contact equality RHS data
+from the existing eight-contact mechanism-safe task packing. At 20,000 worlds
+the raw contact capacity is 1.9M slots versus 255K grouped tasks. Packing reduced
+the RHS kernel from about 1.054 to 0.327 ms per refresh and frame time from
+34.57 to 31.69 ms. A general grouped-width sweep retained eight contacts per
+task: four regressed 32.01 to 32.43 ms and sixteen regressed to 35.77 ms.
+Full-coordinate construction separately improved from
+36.28 to 16.27 s; it is not included in FPS.
+
+A prototype kept all five 16-row tiles of the humanoid's grouped contact solve
+in about 10 KiB of shared storage across both triangular passes. It measured
+about 22.1 ms/frame, but failed the 80-frame bounded-state check while the
+global-workspace control passed. Explicit barriers did not fix it. The likely
+fault is an unsupported in-place triangular solve on aliased ``tile_view``
+slices. Revisit the resident approach only with distinct working tiles and
+explicit shared stores/loads (or a dedicated native kernel), and require a
+tighter direct-solve parity/residual test before rollout timing.
+
+Fewer substeps did not establish a PhoenX wall-to-quality advantage. Both
+solvers remained finite at one, two, and four substeps over 10 s, but MJWarp at
+two substeps stayed closer to its own four-substep trajectory. A PhoenX contact
+refresh stride of two reached about 6.95 ms but changed the settled trajectory
+and remains an opt-in quality/performance tradeoff, not an exact comparison.
 
 ## Representative production profiles
 

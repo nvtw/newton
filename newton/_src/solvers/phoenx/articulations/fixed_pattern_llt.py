@@ -472,7 +472,7 @@ def _make_cooperative_solve_kernel(block_size: int):
 
 
 def _make_grouped_rhs_batch_solve_kernel(block_size: int):
-    """Create one solve task for up to four three-column RHS items."""
+    """Create one solve task for a fixed group of three-column RHS items."""
     item_width = 4
     items_per_task = GROUPED_RHS_ITEMS_PER_TASK
     rhs_tile_width = item_width * items_per_task
@@ -624,7 +624,7 @@ def _make_grouped_rhs_batch_solve_kernel(block_size: int):
 
 
 class FixedPatternGroupedRHSBatch:
-    """Group up to four narrow RHS items without crossing mechanisms."""
+    """Group narrow RHS items without crossing mechanisms."""
 
     def __init__(self, panel: FixedPatternPanelLLT, item_capacity: int, task_capacity: int):
         if item_capacity < 0 or task_capacity < 0:
