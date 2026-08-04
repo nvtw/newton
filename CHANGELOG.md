@@ -59,7 +59,7 @@
 - Tune `ViewerOptix` exposure and un-authored primitive materials to preserve saturated colors while improving surface depth and contact contrast.
 - Make reduced-coordinate PhoenX contact friction independent of fleet size and GPU. Use `contact_friction_model="patch"` for compact manifold friction rows on the reference reduced path; the default `"point"` model now remains point friction at every scale. The G1 recipe explicitly selects patch friction to preserve its production physics and throughput.
 - Reuse transformed mesh-edge endpoints between PhoenX SDF culling and contact generation, avoiding duplicate edge loads and transforms.
-- Specialize mesh-SDF contact kernels for packed edge data, removing unused mesh-index and vertex-fetch code without changing contact generation.
+- Cache packed mesh-SDF collision edge centers and half-vectors and specialize their contact kernels, removing repeated mesh-index and vertex fetches without changing contact generation.
 - Reuse Nyquist-clamped PhoenX contact solver coefficients across PGS columns while preserving exact coefficients for unusual time steps.
 - Bound PhoenX contact-history and warm-start launches to avoid scheduling inactive capacity tails.
 - Skip zero-weight optional reward-family calculations in the experimental G1 PhoenXRL environment while preserving enabled reward behavior.
