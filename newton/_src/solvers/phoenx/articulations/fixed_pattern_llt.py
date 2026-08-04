@@ -20,7 +20,7 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_schedule import 
 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
-GROUPED_RHS_ITEMS_PER_TASK = 8
+GROUPED_RHS_ITEMS_PER_TASK = 4
 GROUPED_RHS_ITEM_WIDTH = 3
 
 _GET_ARRAY_PTR = """return (uint64_t)arr.data;"""
@@ -995,7 +995,7 @@ class FixedPatternPanelLLT:
         self._solve_cooperative = _make_cooperative_solve_kernel(block_size)
         self._solve_grouped_rhs_batch = _make_grouped_rhs_batch_solve_kernel(block_size)
         self._cooperative_solve_block_dim = 128 if block_size == 32 else 64
-        self._grouped_rhs_block_dim = 128
+        self._grouped_rhs_block_dim = block_size * GROUPED_RHS_ITEMS_PER_TASK
 
     def create_grouped_rhs_batch(
         self,

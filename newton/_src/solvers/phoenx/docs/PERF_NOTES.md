@@ -162,6 +162,19 @@ regressions pass. Dense Gram checks cover both 16- and 32-row panels. A
 2,000-world full-coordinate humanoid was neutral (4.584 versus 4.603 ms/frame
 median), so the retained claim is DR Legs rather than a broad humanoid gain.
 
+
+After resident Gram accumulation changed the grouped solve balance, a new
+2/4/8-item sweep selected four contact responses per triangular tile. On the
+same 2,048-world DR Legs benchmark, four items measured 10.328 ms/frame median
+versus 10.742 ms for eight (3.9% lower); two items regressed to 11.321 ms. The
+worker count now follows the panel rows times the item count, keeping 16-row
+panels at 64 workers and 32-row panels at 128. The independent 2,000-world
+full-coordinate humanoid measured 4.506 ms/frame versus the prior committed
+4.584--4.603 ms range. A matched 20,000-world bracket also avoided a scale
+cliff at 39.259 versus 39.515 ms for eight items. Dense 16/32-panel residual
+and Gram checks, direct-contact coupling, DR Legs shock and walking, and the
+1,000:1 pendulum period regression pass.
+
 Direct-system host setup now gathers and normalizes common axial joint axes in
 bulk, constructs implicit-drive masks once, and vectorizes scalar axial dynamic
 row ownership. With a warm kernel cache, the 20,000-world full-coordinate

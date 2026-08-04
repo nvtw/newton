@@ -526,6 +526,10 @@ class TestDirectJointTypes(unittest.TestCase):
             relative_residual = np.linalg.norm(residual) / np.linalg.norm(rhs_np[begin:end])
             self.assertLess(relative_residual, 5.0e-3)
 
+    def test_grouped_rhs_limits_tile_width_for_occupancy(self) -> None:
+        """Limit grouped contact solves to the measured occupancy width."""
+        self.assertEqual(GROUPED_RHS_ITEMS_PER_TASK * GROUPED_RHS_ITEM_WIDTH, 12)
+
     def test_panel_grouped_rhs_batch_preserves_mechanism_boundaries(self) -> None:
         """Solve padded contact groups across heterogeneous mechanisms."""
         for block_size in (16, 32):
