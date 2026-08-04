@@ -196,6 +196,29 @@ body/wrench-side descriptor for every direct matrix entry passed redundant and
 extreme-mass tests but regressed to 10.398 ms because its extra metadata stream
 cost more than cached endpoint tests. These experiments were removed.
 
+A follow-up tested three broader locality ideas against the post-fusion graph.
+Caching the four grouped contact IDs in a per-thread ``vec4i`` increased the
+grouped-solve median from 332.84 to 341.56 us (+2.6%); the additional live
+registers cost more than cached task-ID reloads. A topology-template
+equilibration pass compressed DR Legs row/column metadata by about 2,048x,
+but its two-dimensional scheduling increased the kernel from 52.08 to 56.00 us
+(+7.5%). Finally, a 1 KiB resident equality accumulator removed repeated global
+loads and stores inside contact sweeps. Warp tile indexing made first compilation
+exceed 180 s; a native shared-memory accessor compiled in about 0.62 s but
+increased the bias-sweep population from about 156.9 to 168.3 us (+7.3%) and
+frame time from about 10.25 to 10.37 ms. All three candidates were removed.
+The cached global accumulator already has the better occupancy/locality balance
+on this GPU.
+
+The reduced-coordinate humanoid also rejected a general four-lane topology
+tier. It passed serial ABA and packed contact-row equivalence, but its 2,000-world
+median regressed from 2.074 to 2.162 ms (+4.2%): fused advance/publication rose
+from 59.17 to 77.62 us, external advance from 29.25 to 36.90 us, and factorization
+from 43.97 to 46.27 us. The existing eight-lane floor supplies useful intra-tree
+parallelism even when maximum breadth is only three. Changing the scalar packed
+row builder from 48-thread blocks to 32 or 64 also regressed the complete graph
+to 2.096 and 2.131 ms, respectively.
+
 Direct-system host setup now gathers and normalizes common axial joint axes in
 bulk, constructs implicit-drive masks once, and vectorizes scalar axial dynamic
 row ownership. With a warm kernel cache, the 20,000-world full-coordinate
