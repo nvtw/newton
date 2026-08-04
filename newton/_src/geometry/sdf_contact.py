@@ -165,13 +165,9 @@ def scale_sdf_result_to_world(
     # Use min scale for conservative distance (won't miss contacts)
     scaled_distance = distance * min_sdf_scale
 
-    # Gradient: apply inverse scale and renormalize
+    # Apply inverse scale here; callers normalize after rotating the gradient
+    # into world space, so normalizing before the rigid rotation is redundant.
     scaled_grad = wp.cw_mul(gradient, inv_sdf_scale)
-    grad_len = wp.length(scaled_grad)
-    if grad_len > 0.0:
-        scaled_grad = scaled_grad / grad_len
-    else:
-        scaled_grad = gradient
 
     return scaled_distance, scaled_grad
 
