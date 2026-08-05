@@ -595,17 +595,14 @@ def _create_get_mesh_edge_bounding_sphere_func(use_precomputed_edge_data: bool):
         mesh_scale: wp.vec3,
         X_mesh_ws: wp.transform,
         inv_sdf_scale: wp.vec3,
+        radius_scale: float,
         edge_idx: int,
     ) -> tuple[wp.vec3, float]:
         if wp.static(use_precomputed_edge_data):
             center_radius = mesh_edge_centers[edge_range[0] + edge_idx]
             center_local = wp.cw_mul(wp.vec3(center_radius[0], center_radius[1], center_radius[2]), mesh_scale)
             center = wp.cw_mul(wp.transform_point(X_mesh_ws, center_local), inv_sdf_scale)
-            mesh_scale_bound = wp.max(wp.max(wp.abs(mesh_scale[0]), wp.abs(mesh_scale[1])), wp.abs(mesh_scale[2]))
-            sdf_scale_bound = wp.max(
-                wp.max(wp.abs(inv_sdf_scale[0]), wp.abs(inv_sdf_scale[1])), wp.abs(inv_sdf_scale[2])
-            )
-            return center, center_radius[3] * mesh_scale_bound * sdf_scale_bound
+            return center, center_radius[3] * radius_scale
 
         v0, v1 = get_edge_from_mesh(mesh_id, mesh_edge_indices, edge_range, mesh_scale, X_mesh_ws, edge_idx)
         return get_edge_bounding_sphere(wp.cw_mul(v0, inv_sdf_scale), wp.cw_mul(v1, inv_sdf_scale))
@@ -1129,6 +1126,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 sdf_mesh_margin = scale_data_sdf[3]
 
                 inv_sdf_scale, min_sdf_scale = safe_sdf_scale_inverse(sdf_scale)
+                mesh_scale_bound = wp.max(
+                    wp.max(wp.abs(mesh_scale_tri[0]), wp.abs(mesh_scale_tri[1])), wp.abs(mesh_scale_tri[2])
+                )
+                inv_sdf_scale_bound = wp.max(
+                    wp.max(wp.abs(inv_sdf_scale[0]), wp.abs(inv_sdf_scale[1])), wp.abs(inv_sdf_scale[2])
+                )
+                edge_radius_scale = mesh_scale_bound * inv_sdf_scale_bound
 
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
@@ -1201,6 +1205,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         inv_sdf_scale,
+                                        edge_radius_scale,
                                         edge_idx,
                                     )
                             else:
@@ -1212,6 +1217,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
                                     inv_sdf_scale,
+                                    edge_radius_scale,
                                     edge_idx,
                                 )
 
@@ -1557,6 +1563,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 midpoint = (wp.transform_get_translation(X_tri_ws) + wp.transform_get_translation(X_sdf_ws)) * 0.5
 
                 inv_sdf_scale, min_sdf_scale = safe_sdf_scale_inverse(sdf_scale)
+                mesh_scale_bound = wp.max(
+                    wp.max(wp.abs(mesh_scale_tri[0]), wp.abs(mesh_scale_tri[1])), wp.abs(mesh_scale_tri[2])
+                )
+                inv_sdf_scale_bound = wp.max(
+                    wp.max(wp.abs(inv_sdf_scale[0]), wp.abs(inv_sdf_scale[1])), wp.abs(inv_sdf_scale[2])
+                )
+                edge_radius_scale = mesh_scale_bound * inv_sdf_scale_bound
 
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
@@ -1619,6 +1632,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         inv_sdf_scale,
+                                        edge_radius_scale,
                                         edge_idx,
                                     )
                             else:
@@ -1630,6 +1644,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
                                     inv_sdf_scale,
+                                    edge_radius_scale,
                                     edge_idx,
                                 )
 
