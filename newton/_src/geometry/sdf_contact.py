@@ -446,7 +446,7 @@ def get_edge_from_mesh(
 
 @wp.func
 def get_edge_from_mesh_precomputed(
-    mesh_edge_centers: wp.array[wp.vec3],
+    mesh_edge_centers: wp.array[wp.vec4],
     mesh_edge_halves: wp.array[wp.vec3],
     edge_range: wp.vec2i,
     mesh_scale: wp.vec3,
@@ -455,7 +455,8 @@ def get_edge_from_mesh_precomputed(
 ) -> tuple[wp.vec3, wp.vec3]:
     """Extract an edge from packed center/half-vector data."""
     packed_idx = edge_range[0] + edge_idx
-    center_local = wp.cw_mul(mesh_edge_centers[packed_idx], mesh_scale)
+    center_radius = mesh_edge_centers[packed_idx]
+    center_local = wp.cw_mul(wp.vec3(center_radius[0], center_radius[1], center_radius[2]), mesh_scale)
     half_local = wp.cw_mul(mesh_edge_halves[packed_idx], mesh_scale)
     center = wp.transform_point(X_mesh_ws, center_local)
     half = wp.transform_vector(X_mesh_ws, half_local)
@@ -469,7 +470,7 @@ def _create_get_edge_from_mesh_func(use_precomputed_edge_data: bool):
     def get_edge_from_mesh_func(
         mesh_id: wp.uint64,
         mesh_edge_indices: wp.array[wp.vec2i],
-        mesh_edge_centers: wp.array[wp.vec3],
+        mesh_edge_centers: wp.array[wp.vec4],
         mesh_edge_halves: wp.array[wp.vec3],
         edge_range: wp.vec2i,
         mesh_scale: wp.vec3,
@@ -580,6 +581,36 @@ def get_edge_bounding_sphere(v0: wp.vec3, v1: wp.vec3) -> tuple[wp.vec3, float]:
     midpoint = (v0 + v1) * 0.5
     half_length = wp.length(v1 - v0) * 0.5
     return midpoint, half_length
+
+
+def _create_get_mesh_edge_bounding_sphere_func(use_precomputed_edge_data: bool):
+    """Create a mesh-edge bounding-sphere accessor with its storage path compiled in."""
+
+    @wp.func
+    def get_mesh_edge_bounding_sphere_func(
+        mesh_id: wp.uint64,
+        mesh_edge_indices: wp.array[wp.vec2i],
+        mesh_edge_centers: wp.array[wp.vec4],
+        edge_range: wp.vec2i,
+        mesh_scale: wp.vec3,
+        X_mesh_ws: wp.transform,
+        inv_sdf_scale: wp.vec3,
+        edge_idx: int,
+    ) -> tuple[wp.vec3, float]:
+        if wp.static(use_precomputed_edge_data):
+            center_radius = mesh_edge_centers[edge_range[0] + edge_idx]
+            center_local = wp.cw_mul(wp.vec3(center_radius[0], center_radius[1], center_radius[2]), mesh_scale)
+            center = wp.cw_mul(wp.transform_point(X_mesh_ws, center_local), inv_sdf_scale)
+            mesh_scale_bound = wp.max(wp.max(wp.abs(mesh_scale[0]), wp.abs(mesh_scale[1])), wp.abs(mesh_scale[2]))
+            sdf_scale_bound = wp.max(
+                wp.max(wp.abs(inv_sdf_scale[0]), wp.abs(inv_sdf_scale[1])), wp.abs(inv_sdf_scale[2])
+            )
+            return center, center_radius[3] * mesh_scale_bound * sdf_scale_bound
+
+        v0, v1 = get_edge_from_mesh(mesh_id, mesh_edge_indices, edge_range, mesh_scale, X_mesh_ws, edge_idx)
+        return get_edge_bounding_sphere(wp.cw_mul(v0, inv_sdf_scale), wp.cw_mul(v1, inv_sdf_scale))
+
+    return get_mesh_edge_bounding_sphere_func
 
 
 @wp.func
@@ -973,6 +1004,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 ):
     do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields)
     get_edge_from_mesh_specialized = _create_get_edge_from_mesh_func(use_precomputed_edge_data)
+    get_mesh_edge_bounding_sphere_specialized = _create_get_mesh_edge_bounding_sphere_func(use_precomputed_edge_data)
 
     # Derive a stable module name from the factory arguments so that
     # identical configurations share the compiled CUDA kernel.  This is
@@ -1001,7 +1033,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         heightfield_data: wp.array[HeightfieldData],
         heightfield_elevations: wp.array[wp.float32],
         mesh_edge_indices: wp.array[wp.vec2i],
-        mesh_edge_centers: wp.array[wp.vec3],
+        mesh_edge_centers: wp.array[wp.vec4],
         mesh_edge_halves: wp.array[wp.vec3],
         shape_edge_range: wp.array[wp.vec2i],
         writer_data: Any,
@@ -1157,31 +1189,31 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     v0_scaled, v1_scaled = get_edge_from_heightfield(
                                         hfd_tri, heightfield_elevations, X_mesh_to_sdf, edge_idx
                                     )
+                                    v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                                    v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                                    bsphere_center, bsphere_radius = get_edge_bounding_sphere(v0_cull, v1_cull)
                                 else:
-                                    v0_scaled, v1_scaled = get_edge_from_mesh_specialized(
+                                    bsphere_center, bsphere_radius = get_mesh_edge_bounding_sphere_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
-                                        mesh_edge_halves,
                                         edge_range_tri,
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
+                                        inv_sdf_scale,
                                         edge_idx,
                                     )
                             else:
-                                v0_scaled, v1_scaled = get_edge_from_mesh_specialized(
+                                bsphere_center, bsphere_radius = get_mesh_edge_bounding_sphere_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
-                                    mesh_edge_halves,
                                     edge_range_tri,
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
+                                    inv_sdf_scale,
                                     edge_idx,
                                 )
-                            v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
-                            v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
-                            bsphere_center, bsphere_radius = get_edge_bounding_sphere(v0_cull, v1_cull)
 
                             threshold = bsphere_radius + contact_threshold_unscaled
 
@@ -1407,7 +1439,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         heightfield_data: wp.array[HeightfieldData],
         heightfield_elevations: wp.array[wp.float32],
         mesh_edge_indices: wp.array[wp.vec2i],
-        mesh_edge_centers: wp.array[wp.vec3],
+        mesh_edge_centers: wp.array[wp.vec4],
         mesh_edge_halves: wp.array[wp.vec3],
         shape_edge_range: wp.array[wp.vec2i],
         block_offsets: wp.array[wp.int32],
@@ -1575,31 +1607,31 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     v0_scaled, v1_scaled = get_edge_from_heightfield(
                                         hfd_tri, heightfield_elevations, X_mesh_to_sdf, edge_idx
                                     )
+                                    v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
+                                    v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
+                                    bsphere_center, bsphere_radius = get_edge_bounding_sphere(v0_cull, v1_cull)
                                 else:
-                                    v0_scaled, v1_scaled = get_edge_from_mesh_specialized(
+                                    bsphere_center, bsphere_radius = get_mesh_edge_bounding_sphere_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
-                                        mesh_edge_halves,
                                         edge_range_tri,
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
+                                        inv_sdf_scale,
                                         edge_idx,
                                     )
                             else:
-                                v0_scaled, v1_scaled = get_edge_from_mesh_specialized(
+                                bsphere_center, bsphere_radius = get_mesh_edge_bounding_sphere_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
-                                    mesh_edge_halves,
                                     edge_range_tri,
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
+                                    inv_sdf_scale,
                                     edge_idx,
                                 )
-                            v0_cull = wp.cw_mul(v0_scaled, inv_sdf_scale)
-                            v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
-                            bsphere_center, bsphere_radius = get_edge_bounding_sphere(v0_cull, v1_cull)
 
                             threshold = bsphere_radius + contact_threshold_unscaled
 

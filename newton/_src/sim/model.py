@@ -932,8 +932,8 @@ class Model:
         # Mesh edge data (packed arrays + per-shape slice)
         self.mesh_edge_indices: wp.array[wp.vec2i] | None = None
         """Packed unique edge vertex pairs for all mesh shapes, shape [total_edge_count]."""
-        self.mesh_edge_centers: wp.array[wp.vec3] | None = None
-        """Packed local-space collision-edge centers, shape [total_edge_count, 3] [m]."""
+        self.mesh_edge_centers: wp.array[wp.vec4] | None = None
+        """Packed local-space collision-edge centers and radii, shape [total_edge_count, 4] [m]."""
         self.mesh_edge_halves: wp.array[wp.vec3] | None = None
         """Packed local-space half-vectors from edge center to endpoint, shape [total_edge_count, 3] [m]."""
         self.shape_edge_range: wp.array[wp.vec2i] | None = None

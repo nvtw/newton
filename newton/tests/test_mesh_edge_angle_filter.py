@@ -210,7 +210,7 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
 
 class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
     def test_finalize_packs_collision_edge_geometry(self):
-        """Pack exact centers and half-vectors for collision edges."""
+        """Pack exact centers, radii, and half-vectors for collision edges."""
         mesh = _near_antiparallel_pair_mesh()
         builder = newton.ModelBuilder()
         body = builder.add_body()
@@ -223,8 +223,10 @@ class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
         edge_v1 = vertices[edges[:, 1]]
         expected_centers = np.ascontiguousarray((edge_v0 + edge_v1) * 0.5, dtype=np.float32)
         expected_halves = np.ascontiguousarray((edge_v1 - edge_v0) * 0.5, dtype=np.float32)
+        expected_radii = np.linalg.norm(expected_halves, axis=1)
 
-        np.testing.assert_array_equal(model.mesh_edge_centers.numpy(), expected_centers)
+        np.testing.assert_array_equal(model.mesh_edge_centers.numpy()[:, :3], expected_centers)
+        np.testing.assert_allclose(model.mesh_edge_centers.numpy()[:, 3], expected_radii)
         np.testing.assert_array_equal(model.mesh_edge_halves.numpy(), expected_halves)
 
     def test_finalize_uses_full_edges_without_build_sdf(self):

@@ -1729,7 +1729,7 @@ class NarrowPhase:
             # slot per shape (not per candidate pair).
             num_shapes = shape_aabb_lower.shape[0] if shape_aabb_lower is not None else max_candidate_pairs
             self._empty_edge_indices = wp.zeros(1, dtype=wp.vec2i, device=device)
-            self._empty_edge_centers = wp.zeros(1, dtype=wp.vec3, device=device)
+            self._empty_edge_centers = wp.zeros(1, dtype=wp.vec4, device=device)
             self._empty_edge_halves = wp.zeros(1, dtype=wp.vec3, device=device)
             self._empty_edge_range = wp.full(max(num_shapes, 1), (-1, 0), dtype=wp.vec2i, device=device)
             # Indexed by shape id; all-zero means "no watertight bit set" so the
@@ -1816,7 +1816,7 @@ class NarrowPhase:
         heightfield_data: wp.array[HeightfieldData] | None = None,
         heightfield_elevations: wp.array[wp.float32] | None = None,
         mesh_edge_indices: wp.array[wp.vec2i] | None = None,
-        mesh_edge_centers: wp.array[wp.vec3] | None = None,
+        mesh_edge_centers: wp.array[wp.vec4] | None = None,
         mesh_edge_halves: wp.array[wp.vec3] | None = None,
         shape_edge_range: wp.array[wp.vec2i] | None = None,
         writer_data: Any,

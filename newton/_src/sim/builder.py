@@ -11759,8 +11759,15 @@ class ModelBuilder:
                             vertices = np.asarray(mesh.vertices, dtype=np.float32)
                             edge_v0 = vertices[edges[:, 0]]
                             edge_v1 = vertices[edges[:, 1]]
-                            edge_center_chunks.append(np.ascontiguousarray((edge_v0 + edge_v1) * 0.5, dtype=np.float32))
-                            edge_half_chunks.append(np.ascontiguousarray((edge_v1 - edge_v0) * 0.5, dtype=np.float32))
+                            edge_halves = np.ascontiguousarray((edge_v1 - edge_v0) * 0.5, dtype=np.float32)
+                            edge_centers = np.ascontiguousarray((edge_v0 + edge_v1) * 0.5, dtype=np.float32)
+                            edge_radii = np.linalg.norm(edge_halves, axis=1, keepdims=True)
+                            edge_center_chunks.append(
+                                np.ascontiguousarray(
+                                    np.concatenate((edge_centers, edge_radii), axis=1), dtype=np.float32
+                                )
+                            )
+                            edge_half_chunks.append(edge_halves)
                         edge_offset += count
                         entry = (start, count)
                         edge_cache[mesh_key] = entry
@@ -11779,9 +11786,9 @@ class ModelBuilder:
                 else wp.zeros(1, dtype=wp.vec2i, device=device)
             )
             m.mesh_edge_centers = (
-                wp.array(np.concatenate(edge_center_chunks), dtype=wp.vec3, device=device)
+                wp.array(np.concatenate(edge_center_chunks), dtype=wp.vec4, device=device)
                 if edge_offset > 0
-                else wp.zeros(1, dtype=wp.vec3, device=device)
+                else wp.zeros(1, dtype=wp.vec4, device=device)
             )
             m.mesh_edge_halves = (
                 wp.array(np.concatenate(edge_half_chunks), dtype=wp.vec3, device=device)
