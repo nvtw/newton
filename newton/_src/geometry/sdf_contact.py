@@ -1237,24 +1237,22 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                                 else:
-                                    v0s, v1s = get_edge_from_mesh_cached(
+                                    v0s, v1s = get_edge_from_mesh_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
                                         mesh_edge_halves,
-                                        has_precomputed_edge_data,
                                         edge_range_tri,
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         my_edge_idx,
                                     )
                             else:
-                                v0s, v1s = get_edge_from_mesh_cached(
+                                v0s, v1s = get_edge_from_mesh_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
                                     mesh_edge_halves,
-                                    has_precomputed_edge_data,
                                     edge_range_tri,
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
@@ -1654,24 +1652,22 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                                 else:
-                                    v0s, v1s = get_edge_from_mesh_cached(
+                                    v0s, v1s = get_edge_from_mesh_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
                                         mesh_edge_halves,
-                                        has_precomputed_edge_data,
                                         edge_range_tri,
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         my_edge_idx,
                                     )
                             else:
-                                v0s, v1s = get_edge_from_mesh_cached(
+                                v0s, v1s = get_edge_from_mesh_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
                                     mesh_edge_halves,
-                                    has_precomputed_edge_data,
                                     edge_range_tri,
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
