@@ -15,6 +15,7 @@ from newton._src.geometry.contact_reduction_global import (
     GlobalContactReducer,
     GlobalContactReducerData,
     _make_contact_value_det,
+    _make_contact_value_fast,
     _make_preprune_probe_det,
     _unpack_contact_id_det,
     create_export_reduced_contacts_kernel,
@@ -23,8 +24,10 @@ from newton._src.geometry.contact_reduction_global import (
     export_and_reduce_contact,
     export_and_reduce_contact_centered,
     export_and_reduce_contact_centered_two_spatial_depths,
+    export_contact_to_buffer,
     make_contact_key,
 )
+from newton._src.geometry.hashtable import hashtable_find_or_insert
 from newton._src.geometry.narrow_phase import ContactWriterData
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -539,6 +542,34 @@ def test_export_reduced_contacts_kernel(test, device):
         device=device,
     )
 
+    @wp.kernel
+    def store_roundoff_duplicate_winners_kernel(reducer_data: GlobalContactReducerData):
+        contact_a = export_contact_to_buffer(
+            shape_a=10,
+            shape_b=110,
+            position=wp.vec3(0.01, 0.02, 0.03),
+            normal=wp.vec3(0.0, 1.0, 0.0),
+            depth=-0.01,
+            fingerprint=10,
+            reducer_data=reducer_data,
+        )
+        contact_b = export_contact_to_buffer(
+            shape_a=10,
+            shape_b=110,
+            position=wp.vec3(0.010000000707805157, 0.02, 0.03),
+            normal=wp.vec3(0.0, 1.0, 0.0),
+            depth=-0.01,
+            fingerprint=20,
+            reducer_data=reducer_data,
+        )
+        entry_idx = hashtable_find_or_insert(
+            make_contact_key(10, 110, 0), reducer_data.ht_keys, reducer_data.ht_active_slots
+        )
+        reducer_data.ht_values[entry_idx] = _make_contact_value_fast(1.0, 10, contact_a)
+        reducer_data.ht_values[reducer_data.ht_capacity + entry_idx] = _make_contact_value_fast(1.0, 20, contact_b)
+
+    wp.launch(store_roundoff_duplicate_winners_kernel, dim=1, inputs=[reducer_data], device=device)
+
     # Prepare output buffers
     max_output = 100
     contact_pair_out = wp.zeros(max_output, dtype=wp.vec2i, device=device)
@@ -594,10 +625,10 @@ def test_export_reduced_contacts_kernel(test, device):
         device=device,
     )
 
-    # Verify output - should have exported all unique winners
+    # Verify output: five distinct pairs plus one representative from the
+    # numerically equivalent winner pair.
     num_exported = int(contact_count_out.numpy()[0])
-
-    test.assertGreater(num_exported, 0)
+    test.assertEqual(num_exported, 6)
 
 
 def test_key_uniqueness(test, device):

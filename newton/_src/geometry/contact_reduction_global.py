@@ -121,6 +121,40 @@ def is_contact_already_exported(
 
 
 @wp.func
+def _floats_are_near_ulps(a: float, b: float) -> bool:
+    """Return whether two floats are close in ULPs and absolute magnitude."""
+    if wp.abs(a - b) > 1.0e-8:
+        return False
+    a_bits = float_flip(a)
+    b_bits = float_flip(b)
+    if a_bits > b_bits:
+        return a_bits - b_bits <= wp.uint32(16)
+    return b_bits - a_bits <= wp.uint32(16)
+
+
+@wp.func
+def _contacts_are_numerically_equivalent(
+    contact_a: int,
+    contact_b: int,
+    position_depth: wp.array[wp.vec4],
+    normal: wp.array[wp.vec2],
+) -> bool:
+    """Return whether two buffered contacts differ only by float rounding."""
+    pd_a = position_depth[contact_a]
+    pd_b = position_depth[contact_b]
+    n_a = normal[contact_a]
+    n_b = normal[contact_b]
+    return (
+        _floats_are_near_ulps(pd_a[0], pd_b[0])
+        and _floats_are_near_ulps(pd_a[1], pd_b[1])
+        and _floats_are_near_ulps(pd_a[2], pd_b[2])
+        and _floats_are_near_ulps(pd_a[3], pd_b[3])
+        and _floats_are_near_ulps(n_a[0], n_b[0])
+        and _floats_are_near_ulps(n_a[1], n_b[1])
+    )
+
+
+@wp.func
 def compute_effective_radius(shape_type: int, shape_scale: wp.vec4) -> float:
     """Compute effective radius for a shape based on its type.
 
@@ -1619,7 +1653,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
             exported_ids = exported_ids_vec()
             num_exported = int(0)
 
-            # Read all value slots for this entry (slot-major layout)
+            # Read all value slots for this entry (slot-major layout).
             for slot in range(wp.static(VALUES_PER_KEY)):
                 value = ht_values[slot * ht_capacity + entry_idx]
 
@@ -1637,6 +1671,28 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 # Record this contact ID for intra-entry dedup
                 exported_ids[num_exported] = contact_id
                 num_exported = num_exported + 1
+
+            # Suppress roundoff-equivalent winners using the lower topology
+            # fingerprint. This examines at most 21 pairs per seven-slot entry.
+            duplicate_mask = int(0)
+            for local_idx in range(num_exported):
+                contact_id = exported_ids[local_idx]
+                fingerprint = contact_fingerprints[contact_id]
+                for other_idx in range(local_idx):
+                    other_id = exported_ids[other_idx]
+                    if _contacts_are_numerically_equivalent(contact_id, other_id, position_depth, normal):
+                        other_fingerprint = contact_fingerprints[other_id]
+                        if fingerprint < other_fingerprint:
+                            duplicate_mask = duplicate_mask | (1 << other_idx)
+                        else:
+                            duplicate_mask = duplicate_mask | (1 << local_idx)
+
+            for local_idx in range(num_exported):
+                if duplicate_mask & (1 << local_idx) != 0:
+                    continue
+
+                contact_id = exported_ids[local_idx]
+                fingerprint = contact_fingerprints[contact_id]
 
                 # Cross-entry dedup: same contact can win slots in different entries
                 # (e.g., normal-bin AND voxel entry). Atomic flag per contact_id.
@@ -1677,7 +1733,7 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                 contact_data.shape_a = shape_a
                 contact_data.shape_b = shape_b
                 contact_data.gap_sum = gap_sum
-                contact_data.sort_sub_key = contact_fingerprints[contact_id]
+                contact_data.sort_sub_key = fingerprint
 
                 # Call the writer function
                 writer_func(contact_data, writer_data, -1)
