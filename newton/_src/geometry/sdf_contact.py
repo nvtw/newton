@@ -447,7 +447,7 @@ def get_edge_from_mesh(
 @wp.func
 def get_edge_from_mesh_precomputed(
     mesh_edge_centers: wp.array[wp.vec4],
-    mesh_edge_halves: wp.array[wp.vec3],
+    mesh_edge_halves: wp.array[wp.vec4],
     edge_range: wp.vec2i,
     mesh_scale: wp.vec3,
     X_mesh_ws: wp.transform,
@@ -457,7 +457,8 @@ def get_edge_from_mesh_precomputed(
     packed_idx = edge_range[0] + edge_idx
     center_radius = mesh_edge_centers[packed_idx]
     center_local = wp.vec3(center_radius[0], center_radius[1], center_radius[2])
-    half_local = mesh_edge_halves[packed_idx]
+    packed_half = mesh_edge_halves[packed_idx]
+    half_local = wp.vec3(packed_half[0], packed_half[1], packed_half[2])
     center = wp.transform_point(X_mesh_ws, center_local)
     half = wp.transform_vector(X_mesh_ws, half_local)
     return center - half, center + half
@@ -471,7 +472,7 @@ def _create_get_edge_from_mesh_func(use_precomputed_edge_data: bool):
         mesh_id: wp.uint64,
         mesh_edge_indices: wp.array[wp.vec2i],
         mesh_edge_centers: wp.array[wp.vec4],
-        mesh_edge_halves: wp.array[wp.vec3],
+        mesh_edge_halves: wp.array[wp.vec4],
         edge_range: wp.vec2i,
         mesh_scale: wp.vec3,
         X_mesh_ws: wp.transform,
@@ -1031,7 +1032,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         heightfield_elevations: wp.array[wp.float32],
         mesh_edge_indices: wp.array[wp.vec2i],
         mesh_edge_centers: wp.array[wp.vec4],
-        mesh_edge_halves: wp.array[wp.vec3],
+        mesh_edge_halves: wp.array[wp.vec4],
         shape_edge_range: wp.array[wp.vec2i],
         writer_data: Any,
         total_num_blocks: int,
@@ -1443,7 +1444,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         heightfield_elevations: wp.array[wp.float32],
         mesh_edge_indices: wp.array[wp.vec2i],
         mesh_edge_centers: wp.array[wp.vec4],
-        mesh_edge_halves: wp.array[wp.vec3],
+        mesh_edge_halves: wp.array[wp.vec4],
         shape_edge_range: wp.array[wp.vec2i],
         block_offsets: wp.array[wp.int32],
         reducer_data: GlobalContactReducerData,

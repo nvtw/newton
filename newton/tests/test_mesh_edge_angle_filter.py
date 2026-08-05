@@ -236,7 +236,8 @@ class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
 
             np.testing.assert_array_equal(packed_centers[start : start + count, :3], expected_centers)
             np.testing.assert_allclose(packed_centers[start : start + count, 3], expected_radii)
-            np.testing.assert_array_equal(packed_halves[start : start + count], expected_halves)
+            np.testing.assert_array_equal(packed_halves[start : start + count, :3], expected_halves)
+            np.testing.assert_array_equal(packed_halves[start : start + count, 3], 0.0)
 
     def test_finalize_uses_full_edges_without_build_sdf(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
