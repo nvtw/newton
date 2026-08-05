@@ -227,14 +227,22 @@ def _texture_sample_sdf_grad_hw_scalar_reference(sdf: TextureSDFData, local_pos:
 
 
 @wp.kernel
-def _compare_texture_sdf_hw_gradients_kernel(
+def _sample_texture_sdf_hw_gradient_paired_kernel(
     sdf: TextureSDFData,
     query_points: wp.array[wp.vec3],
     paired: wp.array[wp.vec3],
-    scalar: wp.array[wp.vec3],
 ):
     tid = wp.tid()
     paired[tid] = _texture_sample_sdf_grad_hw_impl(sdf, query_points[tid])
+
+
+@wp.kernel
+def _sample_texture_sdf_hw_gradient_scalar_kernel(
+    sdf: TextureSDFData,
+    query_points: wp.array[wp.vec3],
+    scalar: wp.array[wp.vec3],
+):
+    tid = wp.tid()
     scalar[tid] = _texture_sample_sdf_grad_hw_scalar_reference(sdf, query_points[tid])
 
 
@@ -562,9 +570,15 @@ def test_texture_sdf_paired_hw_gradient_matches_scalar(test, device):
     paired = wp.empty(len(query_np), dtype=wp.vec3, device=device)
     scalar = wp.empty(len(query_np), dtype=wp.vec3, device=device)
     wp.launch(
-        _compare_texture_sdf_hw_gradients_kernel,
+        _sample_texture_sdf_hw_gradient_paired_kernel,
         dim=len(query_np),
-        inputs=[tex_sdf, query_points, paired, scalar],
+        inputs=[tex_sdf, query_points, paired],
+        device=device,
+    )
+    wp.launch(
+        _sample_texture_sdf_hw_gradient_scalar_kernel,
+        dim=len(query_np),
+        inputs=[tex_sdf, query_points, scalar],
         device=device,
     )
 
