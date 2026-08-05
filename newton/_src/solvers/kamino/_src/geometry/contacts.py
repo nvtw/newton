@@ -112,10 +112,12 @@ threshold.
 Set to `1e-5`.
 """
 
-DEFAULT_CULL_SPECULATIVE_CONTACTS: bool = True
+DEFAULT_CULL_SPECULATIVE_CONTACTS: bool = False
 """
 The global default for culling speculative contacts (with positive
 margin-shifted distance) during Newton->Kamino conversion.
+Disabled to preserve persistent contact manifolds when numerical separation
+fluctuates around zero, avoiding discontinuous contact forces.
 """
 
 
