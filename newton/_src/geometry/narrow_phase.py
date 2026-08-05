@@ -1537,7 +1537,7 @@ class NarrowPhase:
         self.reduce_contacts = reduce_contacts
         self.has_meshes = has_meshes
         self.has_heightfields = has_heightfields
-        self.mesh_sdf_texture_only = mesh_sdf_texture_only and not has_heightfields
+        self.mesh_sdf_texture_only = mesh_sdf_texture_only
         self.deterministic = deterministic
         self.verify_buffers = verify_buffers
         device_obj = wp.get_device(device)

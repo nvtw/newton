@@ -1076,7 +1076,8 @@ class CollisionPipeline:
                     )
                     has_meshes = has_meshes or has_planar_sdf_shapes
                     mesh_sdf_shapes = colliding_mask & (
-                        (shape_types == int(GeoType.MESH)) | (shape_edge_range[:, 1] > 0)
+                        (shape_types != int(GeoType.HFIELD))
+                        & ((shape_types == int(GeoType.MESH)) | (shape_edge_range[:, 1] > 0))
                     )
                     coarse_textures = getattr(model, "_texture_sdf_coarse_textures", None)
                     has_texture_sdf = np.array(

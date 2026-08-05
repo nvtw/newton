@@ -460,6 +460,7 @@ class TestHeightfield(unittest.TestCase):
         state = model.state()
 
         pipeline = newton.CollisionPipeline(model)
+        self.assertFalse(pipeline.narrow_phase.mesh_sdf_texture_only)
         contacts = pipeline.contacts()
         pipeline.collide(state, contacts)
 
@@ -475,6 +476,7 @@ class TestHeightfield(unittest.TestCase):
         state = model.state()
 
         pipeline = newton.CollisionPipeline(model)
+        self.assertTrue(pipeline.narrow_phase.mesh_sdf_texture_only)
         contacts = pipeline.contacts()
         pipeline.collide(state, contacts)
 
