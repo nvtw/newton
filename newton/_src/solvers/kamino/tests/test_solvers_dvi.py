@@ -1006,7 +1006,7 @@ class TestDVISolver(unittest.TestCase):
     def test_03j1_dvi_tangent_block_update_preserves_sliding(self):
         """Couple sticking updates without changing sliding Coulomb friction."""
         velocity = np.array([-1.0, -0.2], dtype=np.float32)
-        diagonal = np.array([2.0, 2.0], dtype=np.float32)
+        diagonal = np.array([2.0, 4.0], dtype=np.float32)
         off_diagonal = 0.75
 
         def project(lambda_max: float) -> np.ndarray:
@@ -1027,12 +1027,12 @@ class TestDVISolver(unittest.TestCase):
             return result.numpy()[0]
 
         sticking = project(lambda_max=10.0)
-        effective_mass = np.array([[2.0, off_diagonal], [off_diagonal, 2.0]], dtype=np.float32)
+        effective_mass = np.array([[diagonal[0], off_diagonal], [off_diagonal, diagonal[1]]], dtype=np.float32)
         np.testing.assert_allclose(effective_mass @ sticking + velocity, 0.0, atol=1.0e-6, rtol=0.0)
 
         sliding = project(lambda_max=0.1)
-        diagonal_candidate = -velocity / diagonal
-        expected_sliding = 0.1 * diagonal_candidate / np.linalg.norm(diagonal_candidate)
+        scalar_candidate = -velocity / np.max(diagonal)
+        expected_sliding = 0.1 * scalar_candidate / np.linalg.norm(scalar_candidate)
         np.testing.assert_allclose(sliding, expected_sliding, atol=1.0e-6, rtol=0.0)
 
     def test_03k_dvi_inequality_only_status_reports_the_sweep_budget(self):

@@ -444,9 +444,11 @@ def _solve_dvi_inequalities_colored_pgs(
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
         sweep_count *= cfg.max_alternating_iterations
     for _sweep in range(sweep_count):
-        # Resolve all normal loads before friction so transient normal updates
-        # cannot seed tangential self-stress in a stationary contact patch.
-        for phase in range(2):
+        phase_count = int32(2)
+        if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and _sweep < sweep_count / int32(2):
+            # Establish the support load before friction in inequality-only solves.
+            phase_count = int32(1)
+        for phase in range(phase_count):
             # Symmetric tangent ordering reduces load bias in redundant sticking patches.
             reverse_colors = phase == int32(1) and _sweep % int32(2) != int32(0)
             num_colors = inequality_num_colors[wid]
