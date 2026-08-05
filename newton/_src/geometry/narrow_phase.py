@@ -33,6 +33,8 @@ from ..geometry.collision_primitive import (
 )
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, ContactData, contact_passes_gap_check, make_contact_sort_key
 from ..geometry.contact_reduction_global import (
+    EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
+    EXPORT_REDUCED_CONTACTS_THREAD_BUDGET_MULTIPLIER,
     HASHTABLE_WARN_LOAD_PERCENT,
     GlobalContactReducer,
     create_export_reduced_contacts_kernel,
@@ -2197,9 +2199,16 @@ class NarrowPhase:
             if self.reduce_contacts:
                 # Zero exported_flags for cross-entry deduplication
                 self.global_contact_reducer.exported_flags.zero_()
-                wp.launch(
+                # Export has only one writer lane per block, so use a wider grid than
+                # the contact-generation kernels. On CPU, tiled kernels expose one lane.
+                effective_block_dim = min(self.block_dim, EXPORT_REDUCED_CONTACTS_BLOCK_DIM)
+                export_num_blocks = max(
+                    1,
+                    EXPORT_REDUCED_CONTACTS_THREAD_BUDGET_MULTIPLIER * self.total_num_threads // effective_block_dim,
+                )
+                wp.launch_tiled(
                     kernel=self.export_reduced_contacts_kernel,
-                    dim=self.total_num_threads,
+                    dim=export_num_blocks,
                     inputs=[
                         self.global_contact_reducer.hashtable.keys,
                         self.global_contact_reducer.ht_values,
@@ -2213,11 +2222,12 @@ class NarrowPhase:
                         shape_data,
                         shape_gap,
                         writer_data,
-                        self.total_num_threads,
+                        export_num_blocks,
+                        int(self.block_dim > 1),
                         int(self.global_contact_reducer.deterministic),
                     ],
                     device=device,
-                    block_dim=self.block_dim,
+                    block_dim=EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
                     record_tape=False,
                 )
         if self.hydroelastic_sdf is not None:

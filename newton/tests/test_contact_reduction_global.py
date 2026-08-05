@@ -11,6 +11,7 @@ import warp as wp
 from newton._src.geometry.contact_data import ContactData, make_contact_sort_key
 from newton._src.geometry.contact_reduction import float_flip
 from newton._src.geometry.contact_reduction_global import (
+    EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
     SCORE_SHIFT,
     GlobalContactReducer,
     GlobalContactReducerData,
@@ -550,7 +551,7 @@ def test_export_reduced_contacts_kernel(test, device):
             position=wp.vec3(0.01, 0.02, 0.03),
             normal=wp.vec3(0.0, 1.0, 0.0),
             depth=-0.01,
-            fingerprint=10,
+            fingerprint=30,
             reducer_data=reducer_data,
         )
         contact_b = export_contact_to_buffer(
@@ -562,11 +563,22 @@ def test_export_reduced_contacts_kernel(test, device):
             fingerprint=20,
             reducer_data=reducer_data,
         )
+        contact_c = export_contact_to_buffer(
+            shape_a=10,
+            shape_b=110,
+            position=wp.vec3(0.010000004433095455, 0.02, 0.03),
+            normal=wp.vec3(0.0, 1.0, 0.0),
+            depth=-0.01,
+            fingerprint=10,
+            reducer_data=reducer_data,
+        )
         entry_idx = hashtable_find_or_insert(
             make_contact_key(10, 110, 0), reducer_data.ht_keys, reducer_data.ht_active_slots
         )
-        reducer_data.ht_values[entry_idx] = _make_contact_value_fast(1.0, 10, contact_a)
+        reducer_data.ht_values[entry_idx] = _make_contact_value_fast(1.0, 30, contact_a)
         reducer_data.ht_values[reducer_data.ht_capacity + entry_idx] = _make_contact_value_fast(1.0, 20, contact_b)
+        reducer_data.ht_values[2 * reducer_data.ht_capacity + entry_idx] = _make_contact_value_fast(1.0, 10, contact_c)
+        reducer_data.ht_values[3 * reducer_data.ht_capacity + entry_idx] = _make_contact_value_fast(1.0, 30, contact_a)
 
     wp.launch(store_roundoff_duplicate_winners_kernel, dim=1, inputs=[reducer_data], device=device)
 
@@ -601,11 +613,11 @@ def test_export_reduced_contacts_kernel(test, device):
     writer_data.contact_tangent = contact_tangent_out
 
     # Launch export kernel
-    total_threads = 128  # Grid stride threads
+    total_blocks = 128
     reducer.exported_flags.zero_()
-    wp.launch(
+    wp.launch_tiled(
         export_kernel,
-        dim=total_threads,
+        dim=total_blocks,
         inputs=[
             reducer.hashtable.keys,
             reducer.ht_values,  # Values are now managed by GlobalContactReducer
@@ -619,16 +631,23 @@ def test_export_reduced_contacts_kernel(test, device):
             shape_data,
             shape_gap,
             writer_data,
-            total_threads,
+            total_blocks,
+            int(not device.is_cpu),
             0,  # deterministic=0 (fast packing)
         ],
         device=device,
+        block_dim=EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
     )
 
     # Verify output: five distinct pairs plus one representative from the
     # numerically equivalent winner pair.
     num_exported = int(contact_count_out.numpy()[0])
     test.assertEqual(num_exported, 6)
+    pairs = contact_pair_out.numpy()[:num_exported]
+    positions = contact_position_out.numpy()[:num_exported]
+    duplicate_pair = np.nonzero((pairs[:, 0] == 10) & (pairs[:, 1] == 110))[0]
+    test.assertEqual(len(duplicate_pair), 1)
+    test.assertEqual(positions[duplicate_pair[0], 0], np.float32(0.010000004433095455))
 
 
 def test_key_uniqueness(test, device):

@@ -87,6 +87,9 @@ from .types import GeoType
 BETA_THRESHOLD = 0.0001  # 0.1mm
 
 VALUES_PER_KEY = NUM_SPATIAL_DIRECTIONS + 1
+PAIRS_PER_KEY = VALUES_PER_KEY * (VALUES_PER_KEY - 1) // 2
+EXPORT_REDUCED_CONTACTS_BLOCK_DIM = 32
+EXPORT_REDUCED_CONTACTS_THREAD_BUDGET_MULTIPLIER = 4
 
 # Open-addressed linear probing gets expensive at high load and failed inserts
 # scan the whole table.
@@ -142,16 +145,20 @@ def _contacts_are_numerically_equivalent(
     """Return whether two buffered contacts differ only by float rounding."""
     pd_a = position_depth[contact_a]
     pd_b = position_depth[contact_b]
+    if not _floats_are_near_ulps(pd_a[0], pd_b[0]):
+        return False
+    if not _floats_are_near_ulps(pd_a[1], pd_b[1]):
+        return False
+    if not _floats_are_near_ulps(pd_a[2], pd_b[2]):
+        return False
+    if not _floats_are_near_ulps(pd_a[3], pd_b[3]):
+        return False
+
     n_a = normal[contact_a]
     n_b = normal[contact_b]
-    return (
-        _floats_are_near_ulps(pd_a[0], pd_b[0])
-        and _floats_are_near_ulps(pd_a[1], pd_b[1])
-        and _floats_are_near_ulps(pd_a[2], pd_b[2])
-        and _floats_are_near_ulps(pd_a[3], pd_b[3])
-        and _floats_are_near_ulps(n_a[0], n_b[0])
-        and _floats_are_near_ulps(n_a[1], n_b[1])
-    )
+    if not _floats_are_near_ulps(n_a[0], n_b[0]):
+        return False
+    return _floats_are_near_ulps(n_a[1], n_b[1])
 
 
 @wp.func
@@ -1578,165 +1585,154 @@ def write_contact_to_reducer(
     )
 
 
+@wp.func
+def _roundoff_duplicate_bit_for_slot_pair(
+    pair_idx: int,
+    entry_idx: int,
+    ht_capacity: int,
+    ht_values: wp.array[wp.uint64],
+    position_depth: wp.array[wp.vec4],
+    normal: wp.array[wp.vec2],
+    contact_fingerprints: wp.array[wp.int32],
+    deterministic: int,
+) -> int:
+    """Return the slot bit to suppress for one pair, or zero."""
+    slot_b = int(1)
+    while pair_idx >= slot_b:
+        pair_idx = pair_idx - slot_b
+        slot_b = slot_b + 1
+    slot_a = pair_idx
+
+    value_a = ht_values[slot_a * ht_capacity + entry_idx]
+    value_b = ht_values[slot_b * ht_capacity + entry_idx]
+    if value_a == wp.uint64(0) or value_b == wp.uint64(0):
+        return 0
+
+    contact_a = unpack_contact_id(value_a, deterministic)
+    contact_b = unpack_contact_id(value_b, deterministic)
+    if contact_a == contact_b:
+        return 0
+    if not _contacts_are_numerically_equivalent(contact_a, contact_b, position_depth, normal):
+        return 0
+
+    if contact_fingerprints[contact_b] < contact_fingerprints[contact_a]:
+        return 1 << slot_a
+    return 1 << slot_b
+
+
 def create_export_reduced_contacts_kernel(writer_func: Any):
-    """Create a kernel that exports reduced contacts using a custom writer function.
+    """Create a tiled kernel that exports globally reduced contacts.
 
-    The kernel processes one hashtable ENTRY per thread (not one value slot).
-    Each entry has VALUES_PER_KEY value slots (``NUM_SPATIAL_DIRECTIONS`` spatial + 1 max-depth).
-    The thread reads all slots, collects unique contact IDs, and exports each
-    unique contact once.
-
-    This naturally deduplicates: one thread handles one (shape_pair, bin) entry
-    and can locally track which contact IDs it has already exported.
-
-    Args:
-        writer_func: A warp function with signature (ContactData, writer_data, int) -> None.
-            The third argument is an output_index (-1 indicates the writer should allocate
-            a new slot). This follows the same pattern as narrow_phase.py's write_contact_simple.
-
-    Returns:
-        A warp kernel that can be launched to export reduced contacts.
+    One thread block processes each active hashtable entry. Its first 21 lanes
+    compare the seven possible winner pairs in parallel, preserving the
+    lower-fingerprint representative for roundoff-equivalent geometry. Lane
+    zero then streams the surviving unique contacts to the writer.
     """
-    # Define vector type for tracking exported contact IDs
     exported_ids_vec = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
-
     _module = f"export_reduced_contacts_{writer_func.__name__}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def export_reduced_contacts_kernel(
-        # Hashtable arrays
         ht_keys: wp.array[wp.uint64],
         ht_values: wp.array[wp.uint64],
         ht_active_slots: wp.array[wp.int32],
-        # Contact buffer arrays
         position_depth: wp.array[wp.vec4],
-        normal: wp.array[wp.vec2],  # Octahedral-encoded
+        normal: wp.array[wp.vec2],
         shape_pairs: wp.array[wp.vec2i],
         contact_fingerprints: wp.array[wp.int32],
-        # Global dedup flags: one int per buffer contact, for cross-entry deduplication
         exported_flags: wp.array[wp.int32],
-        # Shape data for extracting margin and effective radius
         shape_types: wp.array[int],
         shape_data: wp.array[wp.vec4],
-        # Per-shape contact gaps
         shape_gap: wp.array[float],
-        # Writer data (custom struct)
         writer_data: Any,
-        # Grid stride parameters
-        total_num_threads: int,
-        # Packing mode (non-zero = deterministic 20-bit contact IDs)
+        total_num_blocks: int,
+        parallel_pairs: int,
         deterministic: int,
     ):
-        """Export reduced contacts to the writer.
-
-        Uses grid stride loop to iterate over active hashtable ENTRIES.
-        For each entry, reads all value slots, collects unique contact IDs,
-        and exports each unique contact once. Uses atomic flags per contact_id
-        for cross-entry deduplication (same contact winning multiple entries).
-        """
-        tid = wp.tid()
-
-        # Get number of active entries (stored at index = ht_capacity)
+        block_id, lane = wp.tid()
         ht_capacity = ht_keys.shape[0]
         num_active = ht_active_slots[ht_capacity]
+        duplicate_bits = wp.tile_zeros(shape=wp.static(EXPORT_REDUCED_CONTACTS_BLOCK_DIM), dtype=int, storage="shared")
 
-        # Early exit if no active entries (fast path for empty work)
-        if num_active == 0:
-            return
+        for active_idx in range(block_id, num_active, total_num_blocks):
+            entry_idx = ht_active_slots[active_idx]
+            duplicate_bit = int(0)
 
-        # Grid stride loop over active entries
-        for i in range(tid, num_active, total_num_threads):
-            # Get the hashtable entry index
-            entry_idx = ht_active_slots[i]
+            if parallel_pairs != 0:
+                if lane < wp.static(PAIRS_PER_KEY):
+                    duplicate_bit = _roundoff_duplicate_bit_for_slot_pair(
+                        lane,
+                        entry_idx,
+                        ht_capacity,
+                        ht_values,
+                        position_depth,
+                        normal,
+                        contact_fingerprints,
+                        deterministic,
+                    )
+            elif lane == 0:
+                for pair_idx in range(wp.static(PAIRS_PER_KEY)):
+                    duplicate_bit = duplicate_bit | _roundoff_duplicate_bit_for_slot_pair(
+                        pair_idx,
+                        entry_idx,
+                        ht_capacity,
+                        ht_values,
+                        position_depth,
+                        normal,
+                        contact_fingerprints,
+                        deterministic,
+                    )
 
-            # Track exported contact IDs for this entry (intra-entry dedup)
-            exported_ids = exported_ids_vec()
-            num_exported = int(0)
+            wp.tile_scatter_masked(duplicate_bits, lane, duplicate_bit, True)
+            duplicate_mask = wp.tile_reduce(wp.bit_or, duplicate_bits)[0]
 
-            # Read all value slots for this entry (slot-major layout).
-            for slot in range(wp.static(VALUES_PER_KEY)):
-                value = ht_values[slot * ht_capacity + entry_idx]
+            if lane == 0:
+                exported_ids = exported_ids_vec()
+                num_exported = int(0)
 
-                # Skip empty slots (value = 0)
-                if value == wp.uint64(0):
-                    continue
+                for slot in range(wp.static(VALUES_PER_KEY)):
+                    if duplicate_mask & (1 << slot) != 0:
+                        continue
+                    value = ht_values[slot * ht_capacity + entry_idx]
+                    if value == wp.uint64(0):
+                        continue
 
-                # Extract contact ID
-                contact_id = unpack_contact_id(value, deterministic)
+                    contact_id = unpack_contact_id(value, deterministic)
+                    if is_contact_already_exported(contact_id, exported_ids, num_exported):
+                        continue
+                    exported_ids[num_exported] = contact_id
+                    num_exported = num_exported + 1
 
-                # Skip if already exported within this entry
-                if is_contact_already_exported(contact_id, exported_ids, num_exported):
-                    continue
+                    old_flag = wp.atomic_add(exported_flags, contact_id, 1)
+                    if old_flag > 0:
+                        continue
 
-                # Record this contact ID for intra-entry dedup
-                exported_ids[num_exported] = contact_id
-                num_exported = num_exported + 1
+                    position, contact_normal, depth = unpack_contact(contact_id, position_depth, normal)
+                    pair = shape_pairs[contact_id]
+                    shape_a = pair[0]
+                    shape_b = pair[1]
+                    margin_offset_a = shape_data[shape_a][3]
+                    margin_offset_b = shape_data[shape_b][3]
+                    radius_eff_a = compute_effective_radius(shape_types[shape_a], shape_data[shape_a])
+                    radius_eff_b = compute_effective_radius(shape_types[shape_b], shape_data[shape_b])
+                    gap_sum = shape_gap[shape_a] + shape_gap[shape_b]
 
-            # Suppress roundoff-equivalent winners using the lower topology
-            # fingerprint. This examines at most 21 pairs per seven-slot entry.
-            duplicate_mask = int(0)
-            for local_idx in range(num_exported):
-                contact_id = exported_ids[local_idx]
-                fingerprint = contact_fingerprints[contact_id]
-                for other_idx in range(local_idx):
-                    other_id = exported_ids[other_idx]
-                    if _contacts_are_numerically_equivalent(contact_id, other_id, position_depth, normal):
-                        other_fingerprint = contact_fingerprints[other_id]
-                        if fingerprint < other_fingerprint:
-                            duplicate_mask = duplicate_mask | (1 << other_idx)
-                        else:
-                            duplicate_mask = duplicate_mask | (1 << local_idx)
+                    contact_data = ContactData()
+                    contact_data.contact_point_center = position
+                    contact_data.contact_normal_a_to_b = contact_normal
+                    contact_data.contact_distance = depth
+                    contact_data.radius_eff_a = radius_eff_a
+                    contact_data.radius_eff_b = radius_eff_b
+                    contact_data.margin_a = margin_offset_a
+                    contact_data.margin_b = margin_offset_b
+                    contact_data.shape_a = shape_a
+                    contact_data.shape_b = shape_b
+                    contact_data.gap_sum = gap_sum
+                    contact_data.sort_sub_key = contact_fingerprints[contact_id]
+                    writer_func(contact_data, writer_data, -1)
 
-            for local_idx in range(num_exported):
-                if duplicate_mask & (1 << local_idx) != 0:
-                    continue
-
-                contact_id = exported_ids[local_idx]
-                fingerprint = contact_fingerprints[contact_id]
-
-                # Cross-entry dedup: same contact can win slots in different entries
-                # (e.g., normal-bin AND voxel entry). Atomic flag per contact_id.
-                old_flag = wp.atomic_add(exported_flags, contact_id, 1)
-                if old_flag > 0:
-                    continue
-
-                # Unpack contact data
-                position, contact_normal, depth = unpack_contact(contact_id, position_depth, normal)
-
-                # Get shape pair
-                pair = shape_pairs[contact_id]
-                shape_a = pair[0]
-                shape_b = pair[1]
-
-                # Extract margin offsets from shape_data (stored in w component)
-                margin_offset_a = shape_data[shape_a][3]
-                margin_offset_b = shape_data[shape_b][3]
-
-                # Compute effective radius for spheres, capsules, and cones
-                radius_eff_a = compute_effective_radius(shape_types[shape_a], shape_data[shape_a])
-                radius_eff_b = compute_effective_radius(shape_types[shape_b], shape_data[shape_b])
-
-                # Use additive per-shape contact gap (matching broad/narrow phase)
-                gap_a = shape_gap[shape_a]
-                gap_b = shape_gap[shape_b]
-                gap_sum = gap_a + gap_b
-
-                # Create ContactData struct
-                contact_data = ContactData()
-                contact_data.contact_point_center = position
-                contact_data.contact_normal_a_to_b = contact_normal
-                contact_data.contact_distance = depth
-                contact_data.radius_eff_a = radius_eff_a
-                contact_data.radius_eff_b = radius_eff_b
-                contact_data.margin_a = margin_offset_a
-                contact_data.margin_b = margin_offset_b
-                contact_data.shape_a = shape_a
-                contact_data.shape_b = shape_b
-                contact_data.gap_sum = gap_sum
-                contact_data.sort_sub_key = fingerprint
-
-                # Call the writer function
-                writer_func(contact_data, writer_data, -1)
+            # Keep lanes together before the shared tile is reused.
+            _sync = wp.tile_extract(duplicate_bits, lane)
 
     return export_reduced_contacts_kernel
 
