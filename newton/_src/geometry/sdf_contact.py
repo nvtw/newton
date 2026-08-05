@@ -453,11 +453,11 @@ def get_edge_from_mesh_precomputed(
     X_mesh_ws: wp.transform,
     edge_idx: int,
 ) -> tuple[wp.vec3, wp.vec3]:
-    """Extract an edge from packed center/half-vector data."""
+    """Extract an edge from packed shape-scaled center/half-vector data."""
     packed_idx = edge_range[0] + edge_idx
     center_radius = mesh_edge_centers[packed_idx]
-    center_local = wp.cw_mul(wp.vec3(center_radius[0], center_radius[1], center_radius[2]), mesh_scale)
-    half_local = wp.cw_mul(mesh_edge_halves[packed_idx], mesh_scale)
+    center_local = wp.vec3(center_radius[0], center_radius[1], center_radius[2])
+    half_local = mesh_edge_halves[packed_idx]
     center = wp.transform_point(X_mesh_ws, center_local)
     half = wp.transform_vector(X_mesh_ws, half_local)
     return center - half, center + half
@@ -600,7 +600,7 @@ def _create_get_mesh_edge_bounding_sphere_func(use_precomputed_edge_data: bool):
     ) -> tuple[wp.vec3, float]:
         if wp.static(use_precomputed_edge_data):
             center_radius = mesh_edge_centers[edge_range[0] + edge_idx]
-            center_local = wp.cw_mul(wp.vec3(center_radius[0], center_radius[1], center_radius[2]), mesh_scale)
+            center_local = wp.vec3(center_radius[0], center_radius[1], center_radius[2])
             center = wp.cw_mul(wp.transform_point(X_mesh_ws, center_local), inv_sdf_scale)
             return center, center_radius[3] * radius_scale
 
@@ -1126,13 +1126,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 sdf_mesh_margin = scale_data_sdf[3]
 
                 inv_sdf_scale, min_sdf_scale = safe_sdf_scale_inverse(sdf_scale)
-                mesh_scale_bound = wp.max(
-                    wp.max(wp.abs(mesh_scale_tri[0]), wp.abs(mesh_scale_tri[1])), wp.abs(mesh_scale_tri[2])
-                )
                 inv_sdf_scale_bound = wp.max(
                     wp.max(wp.abs(inv_sdf_scale[0]), wp.abs(inv_sdf_scale[1])), wp.abs(inv_sdf_scale[2])
                 )
-                edge_radius_scale = mesh_scale_bound * inv_sdf_scale_bound
+                edge_radius_scale = inv_sdf_scale_bound
 
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
@@ -1563,13 +1560,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 midpoint = (wp.transform_get_translation(X_tri_ws) + wp.transform_get_translation(X_sdf_ws)) * 0.5
 
                 inv_sdf_scale, min_sdf_scale = safe_sdf_scale_inverse(sdf_scale)
-                mesh_scale_bound = wp.max(
-                    wp.max(wp.abs(mesh_scale_tri[0]), wp.abs(mesh_scale_tri[1])), wp.abs(mesh_scale_tri[2])
-                )
                 inv_sdf_scale_bound = wp.max(
                     wp.max(wp.abs(inv_sdf_scale[0]), wp.abs(inv_sdf_scale[1])), wp.abs(inv_sdf_scale[2])
                 )
-                edge_radius_scale = mesh_scale_bound * inv_sdf_scale_bound
+                edge_radius_scale = inv_sdf_scale_bound
 
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale

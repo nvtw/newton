@@ -210,24 +210,33 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
 
 class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
     def test_finalize_packs_collision_edge_geometry(self):
-        """Pack exact centers, radii, and half-vectors for collision edges."""
+        """Pack scaled centers, radii, and half-vectors for collision edges."""
         mesh = _near_antiparallel_pair_mesh()
         builder = newton.ModelBuilder()
-        body = builder.add_body()
-        builder.add_shape_mesh(body=body, mesh=mesh)
+        scales = np.asarray(((1.0, 1.0, 1.0), (2.0, 3.0, 4.0)), dtype=np.float32)
+        for scale in scales:
+            body = builder.add_body()
+            builder.add_shape_mesh(body=body, mesh=mesh, scale=scale)
         model = builder.finalize()
 
-        edges = model.mesh_edge_indices.numpy()
-        vertices = np.asarray(mesh.vertices, dtype=np.float32)
-        edge_v0 = vertices[edges[:, 0]]
-        edge_v1 = vertices[edges[:, 1]]
-        expected_centers = np.ascontiguousarray((edge_v0 + edge_v1) * 0.5, dtype=np.float32)
-        expected_halves = np.ascontiguousarray((edge_v1 - edge_v0) * 0.5, dtype=np.float32)
-        expected_radii = np.linalg.norm(expected_halves, axis=1)
+        edge_ranges = model.shape_edge_range.numpy()
+        self.assertNotEqual(edge_ranges[0, 0], edge_ranges[1, 0])
+        packed_edges = model.mesh_edge_indices.numpy()
+        packed_centers = model.mesh_edge_centers.numpy()
+        packed_halves = model.mesh_edge_halves.numpy()
+        for shape_idx, scale in enumerate(scales):
+            start, count = edge_ranges[shape_idx]
+            edges = packed_edges[start : start + count]
+            vertices = np.asarray(mesh.vertices, dtype=np.float32) * scale
+            edge_v0 = vertices[edges[:, 0]]
+            edge_v1 = vertices[edges[:, 1]]
+            expected_centers = np.ascontiguousarray((edge_v0 + edge_v1) * 0.5, dtype=np.float32)
+            expected_halves = np.ascontiguousarray((edge_v1 - edge_v0) * 0.5, dtype=np.float32)
+            expected_radii = np.linalg.norm(expected_halves, axis=1)
 
-        np.testing.assert_array_equal(model.mesh_edge_centers.numpy()[:, :3], expected_centers)
-        np.testing.assert_allclose(model.mesh_edge_centers.numpy()[:, 3], expected_radii)
-        np.testing.assert_array_equal(model.mesh_edge_halves.numpy(), expected_halves)
+            np.testing.assert_array_equal(packed_centers[start : start + count, :3], expected_centers)
+            np.testing.assert_allclose(packed_centers[start : start + count, 3], expected_radii)
+            np.testing.assert_array_equal(packed_halves[start : start + count], expected_halves)
 
     def test_finalize_uses_full_edges_without_build_sdf(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
