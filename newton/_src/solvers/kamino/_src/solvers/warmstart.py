@@ -977,15 +977,16 @@ class WarmstarterContacts:
     This class supports multiple warm-starting strategies, selectable via the `Method` enum:
     - `KEY_AND_POSITION`:
         Warm-starts contacts by matching geom-pair keys and contact-point positions.
-    - `KEY_AND_POSITION_WITH_TANGENT_NET_FORCE`:
-        Warm-starts matched normal reactions and balances tangential force per geom-pair.
+    - `KEY_AND_POSITION_WITH_TANGENTIAL_NET_FORCE`:
+        Warm-starts contacts by matching geom-pair keys and contact-point positions,
+        while distributing the cached net tangential force uniformly across the geom-pair.
     - `GEOM_PAIR_NET_FORCE`:
         Warm-starts contacts using the net body-CoM contact force per geom-pair.
     - `GEOM_PAIR_NET_WRENCH`:
         Warm-starts contacts using the net body-CoM contact wrench per geom-pair.
     - `KEY_AND_POSITION_WITH_NET_FORCE_BACKUP`:
         Warm-starts contacts by matching geom-pair keys and contact-point positions,
-    - with a backup strategy using the net body-CoM contact force per geom-pair.
+        with a backup strategy using the net body-CoM contact force per geom-pair.
     - `KEY_AND_POSITION_WITH_NET_WRENCH_BACKUP`:
         Warm-starts contacts by matching geom-pair keys and contact-point positions,
         with a backup strategy using the net body-CoM contact wrench per geom-pair.
@@ -1020,10 +1021,10 @@ class WarmstarterContacts:
         with a backup strategy using the net body-CoM contact wrench per geom-pair.
         """
 
-        KEY_AND_POSITION_WITH_TANGENT_NET_FORCE = 5
+        KEY_AND_POSITION_WITH_TANGENTIAL_NET_FORCE = 5
         """
-        Warm-start matched normal reactions and distribute the pair's net
-        tangential force uniformly across its cached contact count.
+        Warm-start contacts by matching geom-pair keys and contact-point positions,
+        while distributing the cached net tangential force uniformly across the geom-pair.
         """
 
         @classmethod
@@ -1147,7 +1148,7 @@ class WarmstarterContacts:
                     pair_contact_counts=self._pair_contact_counts,
                 )
 
-            case WarmstarterContacts.Method.KEY_AND_POSITION_WITH_TANGENT_NET_FORCE:
+            case WarmstarterContacts.Method.KEY_AND_POSITION_WITH_TANGENTIAL_NET_FORCE:
                 warmstart_contacts_by_matched_geom_pair_key_and_position(
                     model=model,
                     data=data,
@@ -1197,7 +1198,7 @@ class WarmstarterContacts:
                     "  - GEOM_PAIR_NET_WRENCH (2),"
                     "  - KEY_AND_POSITION_WITH_NET_FORCE_BACKUP (3),"
                     "  - KEY_AND_POSITION_WITH_NET_WRENCH_BACKUP (4),"
-                    "  - KEY_AND_POSITION_WITH_TANGENT_NET_FORCE (5)."
+                    "  - KEY_AND_POSITION_WITH_TANGENTIAL_NET_FORCE (5)."
                 )
 
     def update(self, contacts: ContactsKamino | None = None):
