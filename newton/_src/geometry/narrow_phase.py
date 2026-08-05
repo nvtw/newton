@@ -1472,6 +1472,7 @@ class NarrowPhase:
         has_meshes: bool = True,
         has_heightfields: bool = False,
         use_lean_gjk_mpr: bool = False,
+        mesh_sdf_texture_only: bool = False,
         deterministic: bool = False,
         contact_max: int | None = None,
         verify_buffers: bool = True,
@@ -1499,6 +1500,8 @@ class NarrowPhase:
                 Defaults to True for safety. Set to False when constructing from a model with no meshes.
             has_heightfields: Whether the scene contains any heightfield shapes (GeoType.HFIELD). When True,
                 heightfield collision buffers and kernels are allocated. Defaults to False.
+            mesh_sdf_texture_only: Whether every participating mesh SDF has a texture representation,
+                allowing BVH fallback branches to be removed from mesh/SDF kernels.
             deterministic: Make contact generation and ordering independent of
                 GPU thread scheduling. Adds deterministic hydroelastic atomics
                 and a radix sort + gather pass.
@@ -1534,6 +1537,7 @@ class NarrowPhase:
         self.reduce_contacts = reduce_contacts
         self.has_meshes = has_meshes
         self.has_heightfields = has_heightfields
+        self.mesh_sdf_texture_only = mesh_sdf_texture_only and not has_heightfields
         self.deterministic = deterministic
         self.verify_buffers = verify_buffers
         device_obj = wp.get_device(device)
@@ -1628,22 +1632,26 @@ class NarrowPhase:
                     write_contact_to_reducer,
                     enable_heightfields=has_heightfields,
                     reduce_contacts=True,
+                    use_texture_sdf_only=self.mesh_sdf_texture_only,
                 )
                 self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     write_contact_to_reducer,
                     enable_heightfields=has_heightfields,
                     reduce_contacts=True,
                     use_precomputed_edge_data=True,
+                    use_texture_sdf_only=self.mesh_sdf_texture_only,
                 )
             else:
                 self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     writer_func,
                     enable_heightfields=has_heightfields,
+                    use_texture_sdf_only=self.mesh_sdf_texture_only,
                 )
                 self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     writer_func,
                     enable_heightfields=has_heightfields,
                     use_precomputed_edge_data=True,
+                    use_texture_sdf_only=self.mesh_sdf_texture_only,
                 )
         else:
             self.mesh_plane_contacts_kernel = None

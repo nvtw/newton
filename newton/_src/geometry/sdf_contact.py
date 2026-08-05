@@ -631,7 +631,7 @@ def get_edge_count(shape_type: int, edge_range: wp.vec2i, hfd: HeightfieldData) 
     return edge_range[1]
 
 
-def _create_sdf_contact_funcs(enable_heightfields: bool):
+def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: bool = False):
     """Generate SDF contact functions with heightfield branches eliminated at compile time.
 
     When ``enable_heightfields`` is False, ``wp.static`` strips all heightfield code
@@ -661,7 +661,9 @@ def _create_sdf_contact_funcs(enable_heightfields: bool):
     ) -> float:
         """Sample SDF at the point ``v0 + tt * edge_dir``."""
         pp = v0 + edge_dir * tt
-        if wp.static(enable_heightfields):
+        if wp.static(use_texture_sdf_only):
+            return texture_sample_sdf(texture_sdf, pp)
+        elif wp.static(enable_heightfields):
             if sdf_is_heightfield:
                 return sample_sdf_heightfield(hfd_sdf, elevation_data, pp)
             elif use_bvh_for_sdf:
@@ -999,8 +1001,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     enable_heightfields: bool = True,
     reduce_contacts: bool = False,
     use_precomputed_edge_data: bool = False,
+    use_texture_sdf_only: bool = False,
 ):
-    do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields)
+    do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields, use_texture_sdf_only)
     get_edge_from_mesh_specialized = _create_get_edge_from_mesh_func(use_precomputed_edge_data)
     get_mesh_edge_bounding_sphere_specialized = _create_get_mesh_edge_bounding_sphere_func(use_precomputed_edge_data)
 
@@ -1011,7 +1014,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # compiled code, otherwise FMA-fusion or register-allocation
     # differences between independent JIT compilations can produce subtly
     # different floating-point results, breaking bit-exact reproducibility.
-    _module = f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_{use_precomputed_edge_data}"
+    _module = (
+        f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_"
+        f"{use_precomputed_edge_data}_{use_texture_sdf_only}"
+    )
 
     @wp.kernel(enable_backward=False, module=_module)
     def mesh_sdf_collision_kernel(
@@ -1221,7 +1227,16 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                             threshold = bsphere_radius + contact_threshold_unscaled
 
-                            if sdf_is_heightfield:
+                            if wp.static(use_texture_sdf_only):
+                                culling_radius = threshold
+                                clamped = wp.min(wp.max(bsphere_center, sdf_aabb_lower), sdf_aabb_upper)
+                                aabb_dist_sq = wp.length_sq(bsphere_center - clamped)
+                                if aabb_dist_sq > culling_radius * culling_radius:
+                                    add_edge = False
+                                else:
+                                    midpoint_sdf = texture_sample_sdf(texture_sdf, bsphere_center)
+                                    add_edge = midpoint_sdf <= culling_radius
+                            elif sdf_is_heightfield:
                                 midpoint_sdf = sample_sdf_heightfield(hfd_sdf, heightfield_elevations, bsphere_center)
                                 add_edge = midpoint_sdf <= threshold
                             elif use_bvh_for_sdf:
@@ -1331,7 +1346,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 use_texture_sdf_for_search,
                             )
                             if dist_approx < contact_threshold and inner_cull_consistent:
-                                if wp.static(enable_heightfields):
+                                if wp.static(use_texture_sdf_only):
+                                    direction_unscaled = texture_sample_sdf_grad_only_hw(texture_sdf, point_unscaled)
+                                elif wp.static(enable_heightfields):
                                     if sdf_is_hfield:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(
                                             hfd_sdf, heightfield_elevations, point_unscaled
@@ -1645,7 +1662,16 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                             threshold = bsphere_radius + contact_threshold_unscaled
 
-                            if sdf_is_heightfield:
+                            if wp.static(use_texture_sdf_only):
+                                culling_radius = threshold
+                                clamped = wp.min(wp.max(bsphere_center, sdf_aabb_lower), sdf_aabb_upper)
+                                aabb_dist_sq = wp.length_sq(bsphere_center - clamped)
+                                if aabb_dist_sq > culling_radius * culling_radius:
+                                    add_edge = False
+                                else:
+                                    midpoint_sdf = texture_sample_sdf(texture_sdf, bsphere_center)
+                                    add_edge = midpoint_sdf <= culling_radius
+                            elif sdf_is_heightfield:
                                 midpoint_sdf = sample_sdf_heightfield(hfd_sdf, heightfield_elevations, bsphere_center)
                                 add_edge = midpoint_sdf <= threshold
                             elif use_bvh_for_sdf:
@@ -1752,7 +1778,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 use_texture_sdf_for_search,
                             )
                             if dist_approx < contact_threshold and inner_cull_consistent:
-                                if wp.static(enable_heightfields):
+                                if wp.static(use_texture_sdf_only):
+                                    direction_unscaled = texture_sample_sdf_grad_only_hw(texture_sdf, point_unscaled)
+                                elif wp.static(enable_heightfields):
                                     if sdf_is_hfield:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(
                                             hfd_sdf, heightfield_elevations, point_unscaled
