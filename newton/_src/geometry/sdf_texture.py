@@ -1203,38 +1203,12 @@ def _texture_sample_sdf_hw_pair(
 
 
 @wp.func
-def texture_sample_sdf_hw(
+def _texture_sample_sdf_hw_clamped(
     sdf: TextureSDFData,
-    local_pos: wp.vec3,
+    clamped: wp.vec3,
+    diff_mag: float,
 ) -> float:
-    """Sample SDF value via the GPU's hardware trilinear filter.
-
-    Issues a single ``wp.texture_sample`` per query at a fractional
-    coordinate; the texture unit returns the trilinearly filtered value
-    using its 8-bit fixed-point interpolation weights. Eight times fewer
-    texture fetches than :func:`texture_sample_sdf` for the value-only
-    path; the small interpolation-weight precision loss (~1/256
-    relative) is harmless in PGS / TGS contact solvers but should be
-    avoided in stress-integration paths like hydroelastic contact.
-
-    Args:
-        sdf: texture SDF data
-        local_pos: query position in local SDF space [m]
-
-    Returns:
-        Signed distance value [m].
-    """
-    clamped = wp.vec3(
-        wp.clamp(local_pos[0], sdf.sdf_box_lower[0], sdf.sdf_box_upper[0]),
-        wp.clamp(local_pos[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1]),
-        wp.clamp(local_pos[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
-    )
-    diff = local_pos - clamped
-    diff_mag = float(0.0)
-    # Avoid a square root for the common in-box path.
-    if diff[0] != 0.0 or diff[1] != 0.0 or diff[2] != 0.0:
-        diff_mag = wp.length(diff)
-
+    """Sample a hardware SDF from a point already clamped to its domain."""
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
     loc = _locate_cell(sdf, f)
 
@@ -1275,6 +1249,42 @@ def texture_sample_sdf_hw(
         sdf_val = raw * sdf.subgrids_sdf_value_range + sdf.subgrids_min_sdf_value
 
     return sdf_val + diff_mag
+
+
+@wp.func
+def texture_sample_sdf_hw(
+    sdf: TextureSDFData,
+    local_pos: wp.vec3,
+) -> float:
+    """Sample SDF value via the GPU's hardware trilinear filter.
+
+    Issues a single ``wp.texture_sample`` per query at a fractional
+    coordinate; the texture unit returns the trilinearly filtered value
+    using its 8-bit fixed-point interpolation weights. Eight times fewer
+    texture fetches than :func:`texture_sample_sdf` for the value-only
+    path; the small interpolation-weight precision loss (~1/256
+    relative) is harmless in PGS / TGS contact solvers but should be
+    avoided in stress-integration paths like hydroelastic contact.
+
+    Args:
+        sdf: texture SDF data
+        local_pos: query position in local SDF space [m]
+
+    Returns:
+        Signed distance value [m].
+    """
+    clamped = wp.vec3(
+        wp.clamp(local_pos[0], sdf.sdf_box_lower[0], sdf.sdf_box_upper[0]),
+        wp.clamp(local_pos[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1]),
+        wp.clamp(local_pos[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
+    )
+    diff = local_pos - clamped
+    diff_mag = float(0.0)
+    # Avoid a square root for the common in-box path.
+    if diff[0] != 0.0 or diff[1] != 0.0 or diff[2] != 0.0:
+        diff_mag = wp.length(diff)
+
+    return _texture_sample_sdf_hw_clamped(sdf, clamped, diff_mag)
 
 
 @wp.func

@@ -8,6 +8,7 @@ import warp as wp
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, SHAPE_PAIR_INDEX_MASK, ContactData
 from ..geometry.sdf_texture import (
     TextureSDFData,
+    _texture_sample_sdf_hw_clamped,
     _texture_sample_sdf_hw_pair,
     texture_sample_sdf_grad_only_hw,
 )
@@ -1311,7 +1312,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 if aabb_dist_sq > culling_radius * culling_radius:
                                     add_edge = False
                                 else:
-                                    midpoint_sdf = texture_sample_sdf(texture_sdf, bsphere_center)
+                                    diff_mag = float(0.0)
+                                    if aabb_dist_sq > 0.0:
+                                        diff_mag = wp.sqrt(aabb_dist_sq)
+                                    midpoint_sdf = _texture_sample_sdf_hw_clamped(texture_sdf, clamped, diff_mag)
                                     add_edge = midpoint_sdf <= culling_radius
 
                         cull_result = EdgeCullResult()
@@ -1755,7 +1759,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 if aabb_dist_sq > culling_radius * culling_radius:
                                     add_edge = False
                                 else:
-                                    midpoint_sdf = texture_sample_sdf(texture_sdf, bsphere_center)
+                                    diff_mag = float(0.0)
+                                    if aabb_dist_sq > 0.0:
+                                        diff_mag = wp.sqrt(aabb_dist_sq)
+                                    midpoint_sdf = _texture_sample_sdf_hw_clamped(texture_sdf, clamped, diff_mag)
                                     add_edge = midpoint_sdf <= culling_radius
 
                         cull_result = EdgeCullResult()
