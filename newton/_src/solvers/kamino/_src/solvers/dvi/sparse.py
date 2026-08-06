@@ -23,8 +23,8 @@ from .kernels import (
 from .sparse_kernels import (
     _build_sparse_bilateral_block,
     _build_sparse_bilateral_rhs,
-    _color_mapped_dvi_inequalities,
     _compute_dvi_sparse_solution_vectors,
+    _group_mapped_dvi_inequalities,
     _map_active_contacts,
     _map_active_limits,
     _set_sparse_bilateral_diagonal,
@@ -162,7 +162,7 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
         )
     state.inequality_body_color_masks.zero_()
     wp.launch(
-        kernel=_color_mapped_dvi_inequalities,
+        kernel=_group_mapped_dvi_inequalities,
         dim=path.size.num_worlds,
         inputs=[
             problem.data.nl,
@@ -174,6 +174,7 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
             state.inequality_num_colors,
             state.inequality_ids_by_color,
             state.inequality_color_starts,
+            state.inequality_group_starts,
         ],
         device=path.device,
     )
@@ -224,6 +225,8 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             state.inequality_num_colors,
             state.inequality_ids_by_color,
             state.inequality_color_starts,
+            state.inequality_group_starts,
+            state.inequality_tangent_cross,
             block_iteration,
             path.data.config,
             path.body_space,

@@ -40,6 +40,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _color_mapped_dvi_inequalities,
+    _group_mapped_dvi_inequalities,
     _solve_dvi_sparse_inequalities_pgs,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.types import DVIConfigStruct, convert_config_to_struct
@@ -779,6 +780,8 @@ class TestDVISolver(unittest.TestCase):
                     int32_array([1]),  # inequality_num_colors
                     int32_array([0]),  # inequality_ids_by_color
                     int32_array([0, 1]),  # inequality_color_starts
+                    int32_array([0, 1]),  # inequality_group_starts
+                    float_array([0.0]),  # inequality_tangent_cross
                     -1,  # block_iteration
                     config,
                     wp.zeros(6, dtype=wp.float32, device=self.device),  # body_space
@@ -1515,6 +1518,54 @@ class TestDVISolver(unittest.TestCase):
 
         np.testing.assert_array_equal(inequality_ids_by_color.numpy(), np.arange(num_inequalities))
         np.testing.assert_array_equal(inequality_color_starts.numpy(), np.arange(num_inequalities + 1))
+
+    def test_03g3_dvi_inequality_coloring_groups_contact_pairs(self):
+        """Group consecutive contacts while preserving independent parallel groups."""
+        problem_nl = wp.array([1], dtype=wp.int32, device=self.device)
+        problem_nc = wp.array([5], dtype=wp.int32, device=self.device)
+        problem_uio = wp.array([0], dtype=wp.int32, device=self.device)
+        inequality_bodies = wp.array(
+            [
+                wp.vec2i(0, -1),
+                wp.vec2i(1, -1),
+                wp.vec2i(1, -1),
+                wp.vec2i(2, -1),
+                wp.vec2i(3, -1),
+                wp.vec2i(3, -1),
+            ],
+            dtype=wp.vec2i,
+            device=self.device,
+        )
+        body_color_masks = wp.zeros(shape=4, dtype=wp.uint64, device=self.device)
+        inequality_colors = wp.full(shape=6, value=-1, dtype=wp.int32, device=self.device)
+        inequality_num_colors = wp.zeros(shape=1, dtype=wp.int32, device=self.device)
+        inequality_ids_by_color = wp.full(shape=6, value=-1, dtype=wp.int32, device=self.device)
+        inequality_color_starts = wp.zeros(shape=7, dtype=wp.int32, device=self.device)
+        inequality_group_starts = wp.zeros(shape=7, dtype=wp.int32, device=self.device)
+
+        wp.launch(
+            kernel=_group_mapped_dvi_inequalities,
+            dim=1,
+            inputs=[
+                problem_nl,
+                problem_nc,
+                problem_uio,
+                inequality_bodies,
+                body_color_masks,
+                inequality_colors,
+                inequality_num_colors,
+                inequality_ids_by_color,
+                inequality_color_starts,
+                inequality_group_starts,
+            ],
+            device=self.device,
+        )
+
+        np.testing.assert_array_equal(inequality_colors.numpy(), np.zeros(6, dtype=np.int32))
+        self.assertEqual(int(inequality_num_colors.numpy()[0]), 1)
+        np.testing.assert_array_equal(inequality_ids_by_color.numpy(), np.arange(6))
+        np.testing.assert_array_equal(inequality_color_starts.numpy()[:2], [0, 4])
+        np.testing.assert_array_equal(inequality_group_starts.numpy()[:5], [0, 1, 3, 4, 6])
 
     def test_03i_dvi_coldstart_is_repeatable(self):
         for sparse in (False, True):
