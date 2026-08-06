@@ -440,7 +440,8 @@ def closest_point_on_triangle(
     ab_sq = wp.dot(ab, ab)
     ac_sq = wp.dot(ac, ac)
     EPS2 = 1.0e-20
-    if wp.dot(wp.cross(ab, ac), wp.cross(ab, ac)) < EPS2:
+    triangle_normal = wp.cross(ab, ac)
+    if wp.dot(triangle_normal, triangle_normal) < EPS2:
         bc = tri_c - tri_b
         bc_sq = wp.dot(bc, bc)
         if ab_sq >= ac_sq and ab_sq >= bc_sq:
