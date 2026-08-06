@@ -343,6 +343,15 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                     shape_pairs_mesh[idx] = wp.vec2i(shape_a, shape_b)
                 continue
 
+            # Sorted pairs starting at ellipsoid have no analytical path.
+            # Route them before allocating analytical contact storage and
+            # walking the primitive dispatch chain.
+            if type_a >= GeoType.ELLIPSOID:
+                idx = wp.atomic_add(gjk_candidate_pairs_count, 0, 1)
+                if idx < gjk_candidate_pairs.shape[0]:
+                    gjk_candidate_pairs[idx] = wp.vec2i(shape_a, shape_b)
+                continue
+
             # =====================================================================
             # Handle lightweight primitives analytically
             # =====================================================================
