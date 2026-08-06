@@ -22,6 +22,7 @@ import newton.examples
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
         self.viewer = viewer
         self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
 

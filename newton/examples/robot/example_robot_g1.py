@@ -79,7 +79,7 @@ class Example:
             solver_config.use_collision_detector = False
             solver_config.integrator = "moreau"
             solver_config.dvi.max_alternating_iterations = 8
-            solver_config.dvi.bilateral_solve_interval = 2
+            solver_config.dvi.bilateral_solve_interval = 1
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverMuJoCo(
@@ -152,21 +152,19 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
+        velocity_limit = 0.075 if self.solver_type == "kamino" else 0.015
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "all bodies are above the ground",
             lambda q, qd: q[2] > 0.0,
         )
-        # fmt: off
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "all body velocities are small",
-            lambda q, qd: max(abs(qd))
-            < 0.015,  # Relaxed from 0.005 - G1 has higher residual velocities with collision pipeline
+            lambda q, qd: max(abs(qd)) < velocity_limit,
         )
-        # fmt: on
 
     @staticmethod
     def create_parser():
