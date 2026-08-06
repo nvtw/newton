@@ -776,7 +776,6 @@ def test_centered_two_spatial_depths_prefers_inner_then_outer(test, device):
     ):
         position = wp.vec3(x, 0.0, 0.0)
         normal = wp.vec3(0.0, 1.0, 0.0)
-        X_ws_shape = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
 
         export_and_reduce_contact_centered_two_spatial_depths(
             shape_a=0,
@@ -788,7 +787,7 @@ def test_centered_two_spatial_depths_prefers_inner_then_outer(test, device):
             centered_position=position,
             inner_spatial_depth=0.0,
             outer_spatial_depth=0.1,
-            X_ws_voxel_shape=X_ws_shape,
+            position_local=position,
             aabb_lower_voxel=wp.vec3(-1.0, -1.0, -1.0),
             aabb_upper_voxel=wp.vec3(1.0, 1.0, 1.0),
             voxel_res=wp.vec3i(1, 1, 1),

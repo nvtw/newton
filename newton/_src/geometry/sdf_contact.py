@@ -1930,7 +1930,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         direction_world = wp.vec3(0.0, 1.0, 0.0)
 
                                 contact_normal = -direction_world if mode == 0 else direction_world
-                                X_ws_tri = wp.transform_inverse(X_tri_ws)
+                                position_local_tri = wp.quat_rotate_inv(
+                                    wp.transform_get_rotation(X_tri_ws),
+                                    point_world - wp.transform_get_translation(X_tri_ws),
+                                )
                                 aabb_lower_tri = shape_collision_aabb_lower[tri_shape]
                                 aabb_upper_tri = shape_collision_aabb_upper[tri_shape]
                                 voxel_res_tri = shape_voxel_resolution[tri_shape]
@@ -1951,7 +1954,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     point_world - midpoint,
                                     inner_spatial_depth,
                                     margin_sum + gap_sum,
-                                    X_ws_tri,
+                                    position_local_tri,
                                     aabb_lower_tri,
                                     aabb_upper_tri,
                                     voxel_res_tri,

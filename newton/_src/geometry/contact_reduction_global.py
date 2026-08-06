@@ -1388,7 +1388,7 @@ def export_and_reduce_contact_centered_two_spatial_depths(
     centered_position: wp.vec3,
     inner_spatial_depth: float,
     outer_spatial_depth: float,
-    X_ws_voxel_shape: wp.transform,
+    position_local: wp.vec3,
     aabb_lower_voxel: wp.vec3,
     aabb_upper_voxel: wp.vec3,
     voxel_res: wp.vec3i,
@@ -1435,7 +1435,6 @@ def export_and_reduce_contact_centered_two_spatial_depths(
         wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
     # === Voxel bin: inner depth coverage ===
-    position_local = wp.transform_point(X_ws_voxel_shape, position)
     voxel_idx = compute_voxel_index(position_local, aabb_lower_voxel, aabb_upper_voxel, voxel_res)
     voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
 
