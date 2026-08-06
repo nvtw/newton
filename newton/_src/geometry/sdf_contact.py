@@ -1640,8 +1640,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 triangle_mesh_margin = scale_data_tri[3]
                 sdf_mesh_margin = scale_data_sdf[3]
 
-                midpoint = (wp.transform_get_translation(X_tri_ws) + wp.transform_get_translation(X_sdf_ws)) * 0.5
-
                 if wp.static(use_identity_sdf_scale):
                     inv_sdf_scale = wp.vec3(1.0, 1.0, 1.0)
                     min_sdf_scale = float(1.0)
@@ -1915,6 +1913,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 aabb_upper_tri = shape_collision_aabb_upper[tri_shape]
                                 voxel_res_tri = shape_voxel_resolution[tri_shape]
                                 margin_sum = triangle_mesh_margin + sdf_mesh_margin
+                                midpoint = (
+                                    wp.transform_get_translation(X_tri_ws) + wp.transform_get_translation(X_sdf_ws)
+                                ) * 0.5
                                 inner_spatial_depth = margin_sum
                                 if use_texture_sdf_for_search:
                                     inner_spatial_depth += wp.min(texture_voxel_radius * min_sdf_scale, gap_sum)
