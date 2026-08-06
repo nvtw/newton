@@ -38,6 +38,7 @@ class Example:
         self.args = args
         self.solver_type = getattr(args, "solver", "xpbd") if args is not None else "xpbd"
 
+        newton.use_coord_layout_targets = True
         # setup simulation parameters first
         self.fps = 100
         self.frame_dt = 1.0 / self.fps

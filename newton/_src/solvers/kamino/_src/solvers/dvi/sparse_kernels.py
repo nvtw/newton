@@ -316,8 +316,11 @@ def _solve_dvi_sparse_inequalities_pgs(
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
         sweep_count *= cfg.max_alternating_iterations
     for _sweep in range(sweep_count):
-        # Match the dense path: settle all normal loads before evaluating friction.
-        for phase in range(2):
+        phase_count = int32(2)
+        if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and _sweep < sweep_count / int32(2):
+            # Match the dense path's inequality-only normal-load warmup.
+            phase_count = int32(1)
+        for phase in range(phase_count):
             # Symmetric tangent ordering reduces load bias in redundant sticking patches.
             reverse_colors = phase == int32(1) and _sweep % int32(2) != int32(0)
             num_colors = inequality_num_colors[wid]

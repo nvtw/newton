@@ -314,10 +314,10 @@ class DVISolver:
 
     def reset(self, problem: DualProblem | None = None, world_mask: wp.array[wp.bool] | None = None):
         """Reset scratch state and cached solution data."""
-        self._data.state.reset()
-        if self._data.info is not None:
-            self._data.info.zero()
         if world_mask is None:
+            self._data.state.reset()
+            if self._data.info is not None:
+                self._data.info.zero()
             self._data.solution.zero()
         else:
             if problem is None:
@@ -879,17 +879,6 @@ class DVISolver:
             )
         if contacts is not None and contacts.model_max_contacts_host > 0:
             wp.launch(
-                kernel=_scale_dvi_tangential_warmstart,
-                dim=contacts.model_max_contacts_host,
-                inputs=[
-                    contacts.model_active_contacts,
-                    contacts.wid,
-                    self._data.config,
-                    contacts.reaction,
-                ],
-                device=self.device,
-            )
-            wp.launch(
                 kernel=warmstart_contact_constraints,
                 dim=contacts.model_max_contacts_host,
                 inputs=[
@@ -906,6 +895,20 @@ class DVISolver:
                     self._data.solution.lambdas,
                     self._data.solution.lambdas,
                     self._data.solution.v_plus,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                kernel=_scale_dvi_tangential_warmstart,
+                dim=contacts.model_max_contacts_host,
+                inputs=[
+                    model.info.total_cts_offset,
+                    data.info.contact_cts_group_offset,
+                    contacts.model_active_contacts,
+                    contacts.wid,
+                    contacts.cid,
+                    self._data.config,
+                    self._data.solution.lambdas,
                 ],
                 device=self.device,
             )

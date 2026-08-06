@@ -352,7 +352,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.max_alternating_iterations, 32)
         self.assertEqual(config.dvi.inequality_sweeps_per_iteration, 2)
         self.assertEqual(config.dvi.bilateral_solve_interval, 1)
-        self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position_with_tangent_net_force")
+        self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position_with_tangential_net_force")
         self.assertFalse(config.dynamics.preconditioning)
 
         sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
@@ -386,7 +386,7 @@ class TestDVISolver(unittest.TestCase):
             "key_and_position",
             "geom_pair_net_force",
             "key_and_position_with_net_force_backup",
-            "key_and_position_with_tangent_net_force",
+            "key_and_position_with_tangential_net_force",
         ):
             self.assertEqual(
                 kamino_config.DVISolverConfig(contact_warmstart_method=method).contact_warmstart_method, method
@@ -905,7 +905,7 @@ class TestDVISolver(unittest.TestCase):
                 self.assertLess(abs(float(state_0.body_qd.numpy()[body, 0])), 1.0e-6)
 
     def test_03ia_dvi_decays_tangential_but_not_normal_warmstarts(self):
-        """Decay tangential self-stress while fully retaining normal warmstarts."""
+        """Decay copied tangential warmstarts without mutating cached reactions."""
         model, problem, setup = self._make_box_on_plane_setup()
         contact_count = int(setup.contacts.model_active_contacts.numpy()[0])
         reactions = setup.contacts.reaction.numpy()
@@ -932,22 +932,40 @@ class TestDVISolver(unittest.TestCase):
             contacts=setup.contacts,
         )
 
-        scaled_reactions = setup.contacts.reaction.numpy()[:contact_count]
+        contact_wids = setup.contacts.wid.numpy()[:contact_count]
+        contact_cids = setup.contacts.cid.numpy()[:contact_count]
+        total_cts_offsets = model.info.total_cts_offset.numpy()
+        contact_cts_group_offsets = setup.data.info.contact_cts_group_offset.numpy()
+        contact_offsets = total_cts_offsets[contact_wids] + contact_cts_group_offsets[contact_wids] + 3 * contact_cids
+        preconditioners = problem.data.P.numpy()[contact_offsets]
+        time_steps = model.time.dt.numpy()[contact_wids]
+        expected_lambdas = reactions[:contact_count] * (time_steps / preconditioners)[:, np.newaxis]
+        expected_lambdas[:, :2] *= 0.5
+        solution_lambdas = solver.data.solution.lambdas.numpy()
+        actual_lambdas = np.stack([solution_lambdas[offset : offset + 3] for offset in contact_offsets])
         np.testing.assert_allclose(
-            scaled_reactions[:, :2],
-            np.tile(
-                np.array([[1.0, -2.0]], dtype=np.float32),
-                (contact_count, 1),
-            ),
+            actual_lambdas,
+            expected_lambdas,
+            atol=1.0e-7,
+            rtol=1.0e-6,
+        )
+        np.testing.assert_allclose(
+            setup.contacts.reaction.numpy()[:contact_count],
+            reactions[:contact_count],
             atol=0.0,
             rtol=0.0,
         )
-        np.testing.assert_allclose(
-            scaled_reactions[:, 2],
-            np.full(contact_count, 3.0, dtype=np.float32),
-            atol=0.0,
-            rtol=0.0,
+
+        solver.warmstart(
+            problem=problem,
+            model=model,
+            data=setup.data,
+            limits=setup.limits,
+            contacts=setup.contacts,
         )
+        repeated_lambdas = solver.data.solution.lambdas.numpy()
+        actual_repeated_lambdas = np.stack([repeated_lambdas[offset : offset + 3] for offset in contact_offsets])
+        np.testing.assert_allclose(actual_repeated_lambdas, expected_lambdas, atol=1.0e-7, rtol=1.0e-6)
 
     def test_03j_dvi_omega_scales_projected_updates_without_moving_the_solution(self):
         """Relax projected updates by `omega` while preserving the fixed point.
@@ -988,7 +1006,7 @@ class TestDVISolver(unittest.TestCase):
     def test_03j1_dvi_tangent_block_update_preserves_sliding(self):
         """Couple sticking updates without changing sliding Coulomb friction."""
         velocity = np.array([-1.0, -0.2], dtype=np.float32)
-        diagonal = np.array([2.0, 2.0], dtype=np.float32)
+        diagonal = np.array([2.0, 4.0], dtype=np.float32)
         off_diagonal = 0.75
 
         def project(lambda_max: float) -> np.ndarray:
@@ -1009,12 +1027,12 @@ class TestDVISolver(unittest.TestCase):
             return result.numpy()[0]
 
         sticking = project(lambda_max=10.0)
-        effective_mass = np.array([[2.0, off_diagonal], [off_diagonal, 2.0]], dtype=np.float32)
+        effective_mass = np.array([[diagonal[0], off_diagonal], [off_diagonal, diagonal[1]]], dtype=np.float32)
         np.testing.assert_allclose(effective_mass @ sticking + velocity, 0.0, atol=1.0e-6, rtol=0.0)
 
         sliding = project(lambda_max=0.1)
-        diagonal_candidate = -velocity / diagonal
-        expected_sliding = 0.1 * diagonal_candidate / np.linalg.norm(diagonal_candidate)
+        scalar_candidate = -velocity / np.max(diagonal)
+        expected_sliding = 0.1 * scalar_candidate / np.linalg.norm(scalar_candidate)
         np.testing.assert_allclose(sliding, expected_sliding, atol=1.0e-6, rtol=0.0)
 
     def test_03k_dvi_inequality_only_status_reports_the_sweep_budget(self):

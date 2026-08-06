@@ -153,6 +153,7 @@ def advance_time(sim_time: wp.array[wp.float32], dt: float):
 class Example:
     def __init__(self, viewer, args=None):
         solver_type = getattr(args, "solver", "xpbd") if args is not None else "xpbd"
+        newton.use_coord_layout_targets = True
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0

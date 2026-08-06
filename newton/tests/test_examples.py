@@ -82,6 +82,11 @@ _KAMINO_NON_FLOATING_ROOT_WARNING_RE = (
     r"(?m)^.*Model has articulations whose root is not a free joint attached to the world, "
     r"disabling floating base resets for those worlds\..*\n?"
 )
+_ANYMAL_TEXTURE_WITHOUT_UVS_WARNING_RE = (
+    r"^.*newton[/\\]_src[/\\]utils[/\\]import_urdf\.py:\d+: UserWarning: Warning: mesh "
+    r"[^\n]*[/\\]base\.dae has a texture but no UVs; texture will be ignored\.\n"
+    r"  parse_shapes\(link, visuals, density=0\.0, just_visual=True, visible=not hide_visuals\)\n?"
+)
 _EXAMPLE_ALLOW_OUTPUT_REGEXES = [
     (_PXR_WORK_THREAD_LIMIT_OUTPUT_RE, "stderr"),
     (_WARP_CUDA_UNAVAILABLE_OUTPUT_RE, "stderr"),
@@ -834,6 +839,7 @@ add_example_test(
     name="mpm.example_mpm_anymal",
     devices=cuda_test_devices,
     test_options={"num-frames": 100, "onnx_required": True},
+    allow_output_regexes=[(_ANYMAL_TEXTURE_WITHOUT_UVS_WARNING_RE, "stderr")],
     use_viewer=True,
 )
 
@@ -1389,6 +1395,19 @@ add_example_test(
 add_example_test(
     TestKaminoExamples,
     name="kamino.example_kamino_robot_anymal_d",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 500},
+    use_viewer=True,
+)
+
+
+class TestControllersExamples(unittest.TestCase):
+    pass
+
+
+add_example_test(
+    TestControllersExamples,
+    name="controllers.example_controller_joint_impedance_heterogeneous",
     devices=cuda_test_devices,
     test_options={"num-frames": 120},
     use_viewer=True,

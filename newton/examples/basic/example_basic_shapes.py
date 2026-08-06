@@ -28,6 +28,7 @@ class Example:
         self.viewer = viewer
         self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
 
+        newton.use_coord_layout_targets = True
         # setup simulation parameters first
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
