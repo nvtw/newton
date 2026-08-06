@@ -656,16 +656,8 @@ def collide_plane_cylinder(
         u = perp_roll * cylinder_radius
         v = wp.cross(axis, perp_roll) * cylinder_radius
 
-        # Candidate 0: top side generator (+u)
-        pt = cylinder_pos + axis * cylinder_half_height + u
-        d = wp.dot(pt - plane_pos, n)
-        pos = pt - n * (d * 0.5)
-        if ncontact < 4 and wp.length_sq(pos - deepest_pos) > merge_threshold_sq:
-            contact_dist[ncontact] = d
-            contact_pos[ncontact] = pos
-            ncontact += 1
-
-        # Candidate 1: bottom side generator (+u)
+        # The top side generator is the deepest point already emitted first,
+        # so only the opposite endpoint can add a distinct contact.
         pt = cylinder_pos - axis * cylinder_half_height + u
         d = wp.dot(pt - plane_pos, n)
         pos = pt - n * (d * 0.5)
