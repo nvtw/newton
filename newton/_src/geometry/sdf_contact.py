@@ -1319,8 +1319,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         cull_result.midpoint_sdf = midpoint_sdf
                         cull_result.center_scaled = center_scaled
                         wp.tile_stack_push(edge_stack, cull_result, add_edge)
-                        old_progress = wp.tile_extract(progress, 0)
-                        wp.tile_scatter_masked(progress, 0, old_progress + capacity, t == 0)
+                        wp.tile_scatter_masked(progress, 0, base_edge_idx + capacity, t == 0)
 
                     # Drain the stack completely. ``tile_stack_pop`` only
                     # removes up to ``block_dim`` items per call, so we
@@ -1764,8 +1763,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         cull_result.midpoint_sdf = midpoint_sdf
                         cull_result.center_scaled = center_scaled
                         wp.tile_stack_push(edge_stack, cull_result, add_edge)
-                        old_progress = wp.tile_extract(progress, 0)
-                        wp.tile_scatter_masked(progress, 0, old_progress + capacity, t == 0)
+                        wp.tile_scatter_masked(progress, 0, base_edge_idx + capacity, t == 0)
 
                     # Drain the stack completely — see the matching loop
                     # in ``mesh_sdf_collision_kernel`` for why a single
