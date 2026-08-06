@@ -39,6 +39,18 @@ from .types import GeoType
 BOX_SUPPORT_DEADBAND = 1.0e-10
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __frsqrt_rn(value);
+#else
+return 1.0f / sqrtf(value);
+#endif
+""")
+def _support_rsqrt_rn(value: float) -> float:
+    """Return a round-to-nearest reciprocal square root."""
+    ...
+
+
 # Is not allowed to share values with GeoType
 class GeoTypeEx(enum.IntEnum):
     TRIANGLE = 1000
@@ -191,7 +203,7 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         radius = geom.scale[0]
         dir_len_sq = wp.length_sq(direction)
         if dir_len_sq > eps:
-            n = wp.normalize(direction)
+            n = direction * _support_rsqrt_rn(dir_len_sq)
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
         result = n * radius
@@ -204,7 +216,7 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         # Sphere part: support in normalized direction
         dir_len_sq = wp.length_sq(direction)
         if dir_len_sq > eps:
-            n = wp.normalize(direction)
+            n = direction * _support_rsqrt_rn(dir_len_sq)
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
         result = n * radius
@@ -341,7 +353,7 @@ def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: 
         radius = geom.scale[0]
         dir_len_sq = wp.length_sq(direction)
         if dir_len_sq > 1.0e-12:
-            n = wp.normalize(direction)
+            n = direction * _support_rsqrt_rn(dir_len_sq)
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
         result = n * radius
