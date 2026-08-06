@@ -1495,6 +1495,7 @@ class NarrowPhase:
         has_meshes: bool = True,
         has_heightfields: bool = False,
         use_lean_gjk_mpr: bool = False,
+        has_generic_convex_pairs: bool = True,
         mesh_sdf_texture_only: bool = False,
         mesh_sdf_identity_scale_only: bool = False,
         deterministic: bool = False,
@@ -1524,6 +1525,9 @@ class NarrowPhase:
                 Defaults to True for safety. Set to False when constructing from a model with no meshes.
             has_heightfields: Whether the scene contains any heightfield shapes (GeoType.HFIELD). When True,
                 heightfield collision buffers and kernels are allocated. Defaults to False.
+            has_generic_convex_pairs: Whether any candidate pair can require
+                generic GJK/MPR processing. Set to False only from a complete
+                scene-topology proof; this omits the GJK/MPR launch entirely.
             mesh_sdf_texture_only: Whether every participating mesh SDF has a texture representation,
                 allowing BVH fallback branches to be removed from mesh/SDF kernels.
             mesh_sdf_identity_scale_only: Whether every participating texture SDF is queried with
@@ -1564,6 +1568,7 @@ class NarrowPhase:
         self.has_meshes = has_meshes
         self.has_heightfields = has_heightfields
         self.mesh_sdf_texture_only = mesh_sdf_texture_only
+        self.has_generic_convex_pairs = has_generic_convex_pairs
         self.mesh_sdf_identity_scale_only = mesh_sdf_identity_scale_only
         self.deterministic = deterministic
         self.verify_buffers = verify_buffers
@@ -1938,32 +1943,32 @@ class NarrowPhase:
             record_tape=False,
         )
 
-        # Stage 2: Launch GJK/MPR kernel for remaining convex pairs
-        # These are pairs that couldn't be handled analytically (box, cylinder, cone, convex hull, etc.)
-        # All routing has been done by the primitive kernel, so this kernel just does GJK/MPR.
-        wp.launch(
-            kernel=self.narrow_phase_kernel,
-            dim=self.total_num_threads,
-            inputs=[
-                self.gjk_candidate_pairs,
-                self.gjk_candidate_pairs_count,
-                shape_types,
-                shape_data,
-                shape_transform,
-                shape_source,
-                shape_gap,
-                shape_collision_radius,
-                self.shape_aabb_lower,
-                self.shape_aabb_upper,
-                shape_collision_aabb_lower,
-                shape_collision_aabb_upper,
-                writer_data,
-                self.total_num_threads,
-            ],
-            device=device,
-            block_dim=self.block_dim,
-            record_tape=False,
-        )
+        # Stage 2: Launch GJK/MPR only when complete scene topology can produce
+        # generic convex pairs, so graph capture contains no empty stage.
+        if self.has_generic_convex_pairs:
+            wp.launch(
+                kernel=self.narrow_phase_kernel,
+                dim=self.total_num_threads,
+                inputs=[
+                    self.gjk_candidate_pairs,
+                    self.gjk_candidate_pairs_count,
+                    shape_types,
+                    shape_data,
+                    shape_transform,
+                    shape_source,
+                    shape_gap,
+                    shape_collision_radius,
+                    self.shape_aabb_lower,
+                    self.shape_aabb_upper,
+                    shape_collision_aabb_lower,
+                    shape_collision_aabb_upper,
+                    writer_data,
+                    self.total_num_threads,
+                ],
+                device=device,
+                block_dim=self.block_dim,
+                record_tape=False,
+            )
 
         # Skip mesh/heightfield kernels when no meshes or heightfields are present
         if self.has_meshes or self.has_heightfields:

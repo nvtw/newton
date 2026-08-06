@@ -46,6 +46,66 @@ def _shape_collide_mask(model: Model, shape_count: int | None = None) -> np.ndar
     return (flags & int(ShapeFlags.COLLIDE_SHAPES)) != 0
 
 
+_ANALYTIC_PRIMITIVE_PAIRS = frozenset(
+    {
+        (int(GeoType.PLANE), int(GeoType.SPHERE)),
+        (int(GeoType.PLANE), int(GeoType.CAPSULE)),
+        (int(GeoType.PLANE), int(GeoType.ELLIPSOID)),
+        (int(GeoType.PLANE), int(GeoType.CYLINDER)),
+        (int(GeoType.PLANE), int(GeoType.BOX)),
+        (int(GeoType.SPHERE), int(GeoType.SPHERE)),
+        (int(GeoType.SPHERE), int(GeoType.CAPSULE)),
+        (int(GeoType.SPHERE), int(GeoType.CYLINDER)),
+        (int(GeoType.SPHERE), int(GeoType.BOX)),
+        (int(GeoType.CAPSULE), int(GeoType.CAPSULE)),
+    }
+)
+
+
+def _pair_requires_generic_convex_narrow_phase(type_a: int, type_b: int) -> bool:
+    """Return whether a sorted shape-type pair can reach GJK/MPR."""
+    type_a, type_b = min(type_a, type_b), max(type_a, type_b)
+    if type_a in (int(GeoType.HFIELD), int(GeoType.MESH)):
+        return False
+    if type_b in (int(GeoType.HFIELD), int(GeoType.MESH)):
+        return False
+    if type_a == int(GeoType.PLANE) and type_b == int(GeoType.PLANE):
+        return False
+    return (type_a, type_b) not in _ANALYTIC_PRIMITIVE_PAIRS
+
+
+def _has_generic_convex_pairs(
+    model: Model,
+    *,
+    broad_phase_mode: str,
+    shape_pairs_filtered: wp.array[wp.vec2i] | None,
+) -> bool:
+    """Conservatively prove whether any broad-phase pair can reach GJK/MPR."""
+    shape_types_array = getattr(model, "shape_type", None)
+    if shape_types_array is None:
+        return True
+
+    shape_types = shape_types_array.numpy()
+    if broad_phase_mode == "explicit":
+        if shape_pairs_filtered is None:
+            return True
+        pairs = shape_pairs_filtered.numpy()
+        if pairs.size == 0:
+            return False
+        pair_types = shape_types[pairs.reshape(-1, 2)]
+        return any(
+            _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b)) for type_a, type_b in pair_types
+        )
+
+    colliding_types = shape_types[_shape_collide_mask(model, len(shape_types))]
+    unique_types = np.unique(colliding_types)
+    return any(
+        _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b))
+        for index, type_a in enumerate(unique_types)
+        for type_b in unique_types[index:]
+    )
+
+
 @wp.struct
 class ContactWriterData:
     """Contact writer data for collide write_contact function."""
@@ -1114,6 +1174,11 @@ class CollisionPipeline:
                 }
                 use_lean_gjk_mpr = not bool(lean_unsupported & set(colliding_shape_types.tolist()))
 
+            has_generic_convex_pairs = _has_generic_convex_pairs(
+                model,
+                broad_phase_mode=self.broad_phase_mode,
+                shape_pairs_filtered=self.shape_pairs_filtered,
+            )
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
             # Pass write_contact as custom writer to write directly to final Contacts format
@@ -1138,6 +1203,7 @@ class CollisionPipeline:
                 has_meshes=has_meshes,
                 has_heightfields=model.heightfield_count > 0,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
+                has_generic_convex_pairs=has_generic_convex_pairs,
                 mesh_sdf_identity_scale_only=mesh_sdf_identity_scale_only,
                 mesh_sdf_texture_only=mesh_sdf_texture_only,
                 deterministic=deterministic,
