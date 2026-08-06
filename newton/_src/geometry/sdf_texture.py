@@ -1223,7 +1223,11 @@ def texture_sample_sdf_hw(
         wp.clamp(local_pos[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1]),
         wp.clamp(local_pos[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
     )
-    diff_mag = wp.length(local_pos - clamped)
+    diff = local_pos - clamped
+    diff_mag = float(0.0)
+    # Avoid a square root for the common in-box path.
+    if diff[0] != 0.0 or diff[1] != 0.0 or diff[2] != 0.0:
+        diff_mag = wp.length(diff)
 
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
     loc = _locate_cell(sdf, f)
@@ -1347,12 +1351,13 @@ def _texture_sample_sdf_grad_hw_impl(
         wp.clamp(local_pos[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
     )
     diff = local_pos - clamped
-    diff_mag = wp.length(diff)
 
     # Out-of-box: the clamp-direction extrapolation defines the gradient
     # exactly, so skip the six FD texture fetches that would be discarded.
-    if diff_mag > 0.0:
-        return diff / diff_mag
+    if diff[0] != 0.0 or diff[1] != 0.0 or diff[2] != 0.0:
+        diff_mag = wp.length(diff)
+        if diff_mag > 0.0:
+            return diff / diff_mag
 
     h_x = 0.5 / sdf.inv_sdf_dx[0]
     h_y = 0.5 / sdf.inv_sdf_dx[1]
