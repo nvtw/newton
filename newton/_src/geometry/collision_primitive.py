@@ -569,16 +569,20 @@ def collide_plane_cylinder(
     if has_align:
         perp_align = perp_align * (1.0 / wp.sqrt(perp_align_len_sq))
 
-    # perp_fixed gives a deterministic world-anchored rim orientation.
-    ref = wp.vec3(1.0, 0.0, 0.0)
-    if wp.abs(wp.dot(axis, ref)) > 0.9:
-        ref = wp.vec3(0.0, 1.0, 0.0)
-    perp_fixed = ref - axis * wp.dot(axis, ref)
-    perp_fixed = wp.normalize(perp_fixed)
-
     abs_dot = -dot_na  # in [0, 1], where 1 is upright
     flat_mode_cos = wp.static(CYLINDER_FLAT_MODE_COS)
     in_flat_surface_mode = abs_dot >= flat_mode_cos
+
+    # Flat contacts need a stable rim orientation. Rolling contacts use it
+    # only when the plane-aligned radial direction is degenerate.
+    perp_fixed = wp.vec3()
+    if in_flat_surface_mode or not has_align:
+        ref = wp.vec3(1.0, 0.0, 0.0)
+        if wp.abs(wp.dot(axis, ref)) > 0.9:
+            ref = wp.vec3(0.0, 1.0, 0.0)
+        perp_fixed = ref - axis * wp.dot(axis, ref)
+        perp_fixed = wp.normalize(perp_fixed)
+
     deepest_perp = wp.where(has_align, perp_align, perp_fixed)
     deepest_pt = cap_center + deepest_perp * cylinder_radius
     deepest_d = wp.dot(deepest_pt - plane_pos, n)
