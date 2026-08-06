@@ -1621,11 +1621,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 X_tri_ws = shape_transform[tri_shape]
                 X_sdf_ws = shape_transform[sdf_shape]
-                X_ws_tri = wp.transform_inverse(X_tri_ws)
-
-                aabb_lower_tri = shape_collision_aabb_lower[tri_shape]
-                aabb_upper_tri = shape_collision_aabb_upper[tri_shape]
-                voxel_res_tri = shape_voxel_resolution[tri_shape]
 
                 texture_sdf = TextureSDFData()
                 if sdf_is_hfield:
@@ -1915,6 +1910,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         direction_world = wp.vec3(0.0, 1.0, 0.0)
 
                                 contact_normal = -direction_world if mode == 0 else direction_world
+                                X_ws_tri = wp.transform_inverse(X_tri_ws)
+                                aabb_lower_tri = shape_collision_aabb_lower[tri_shape]
+                                aabb_upper_tri = shape_collision_aabb_upper[tri_shape]
+                                voxel_res_tri = shape_voxel_resolution[tri_shape]
                                 margin_sum = triangle_mesh_margin + sdf_mesh_margin
                                 inner_spatial_depth = margin_sum
                                 if use_texture_sdf_for_search:
