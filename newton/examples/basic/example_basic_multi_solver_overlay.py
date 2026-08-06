@@ -6,7 +6,7 @@
 #
 # Demonstrates the viewer "layer" system by running four simulations of
 # the same quadruple-pendulum chain in a single viewer window, each driven
-# by a different solver (XPBD, Featherstone, MuJoCo Warp). By default the
+# by a different solver (XPBD, Featherstone, MuJoCo Warp, Kamino DVI). By default the
 # layers overlay exactly so the per-solver divergence is obvious; bumping
 # the ``spacing`` constant lays them out side-by-side along the world
 # X-axis via ``viewer.set_layer_transform``. Layers can also be toggled
