@@ -1393,9 +1393,9 @@ def _texture_sample_sdf_grad_hw_impl(
         local_pos + wp.vec3(0.0, 0.0, h_z),
         local_pos - wp.vec3(0.0, 0.0, h_z),
     )
-    gx = (x_values[0] - x_values[1]) / (2.0 * h_x)
-    gy = (y_values[0] - y_values[1]) / (2.0 * h_y)
-    gz = (z_values[0] - z_values[1]) / (2.0 * h_z)
+    gx = (x_values[0] - x_values[1]) * sdf.inv_sdf_dx[0]
+    gy = (y_values[0] - y_values[1]) * sdf.inv_sdf_dx[1]
+    gz = (z_values[0] - z_values[1]) * sdf.inv_sdf_dx[2]
     return wp.vec3(gx, gy, gz)
 
 
