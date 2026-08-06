@@ -729,13 +729,15 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
         """
         golden = 0.3819660112501051  # (3 - sqrt(5)) / 2
         edge_dir = v1 - v0
-        edge_length = wp.length(edge_dir)
+        edge_length_sq = wp.length_sq(edge_dir)
+        inv_edge_length = float(1.0e12)
+        if edge_length_sq > 0.0:
+            inv_edge_length = _sdf_rsqrt_rn(edge_length_sq)
 
         # Parametric tolerance floor: skip Brent for edges where the
-        # midpoint already meets ``precision_target``. ``+ 1e-12`` keeps
-        # zero-length edges from dividing by zero (they trivially meet
-        # any positive precision).
-        tol_floor = 0.5 * precision_target / (edge_length + 1.0e-12)
+        # midpoint already meets ``precision_target``. Zero-length edges
+        # trivially meet any positive precision.
+        tol_floor = 0.5 * precision_target * inv_edge_length
 
         # Initialize Brent's method at the midpoint (SDF value from culling)
         a = float(0.0)
