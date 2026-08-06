@@ -1122,8 +1122,14 @@ def _texture_sample_sdf_hw_pair(
         wp.clamp(local_pos1[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1]),
         wp.clamp(local_pos1[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
     )
-    diff_mag0 = wp.length(local_pos0 - clamped0)
-    diff_mag1 = wp.length(local_pos1 - clamped1)
+    diff0 = local_pos0 - clamped0
+    diff1 = local_pos1 - clamped1
+    diff_mag0 = float(0.0)
+    diff_mag1 = float(0.0)
+    if diff0[0] != 0.0 or diff0[1] != 0.0 or diff0[2] != 0.0:
+        diff_mag0 = wp.length(diff0)
+    if diff1[0] != 0.0 or diff1[1] != 0.0 or diff1[2] != 0.0:
+        diff_mag1 = wp.length(diff1)
 
     f0 = wp.cw_mul(clamped0 - sdf.sdf_box_lower, sdf.inv_sdf_dx)
     f1 = wp.cw_mul(clamped1 - sdf.sdf_box_lower, sdf.inv_sdf_dx)
