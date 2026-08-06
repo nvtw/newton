@@ -1475,6 +1475,7 @@ class NarrowPhase:
         has_heightfields: bool = False,
         use_lean_gjk_mpr: bool = False,
         mesh_sdf_texture_only: bool = False,
+        mesh_sdf_identity_scale_only: bool = False,
         deterministic: bool = False,
         contact_max: int | None = None,
         verify_buffers: bool = True,
@@ -1504,6 +1505,8 @@ class NarrowPhase:
                 heightfield collision buffers and kernels are allocated. Defaults to False.
             mesh_sdf_texture_only: Whether every participating mesh SDF has a texture representation,
                 allowing BVH fallback branches to be removed from mesh/SDF kernels.
+            mesh_sdf_identity_scale_only: Whether every participating texture SDF is queried with
+                identity scale, allowing scale conversion branches to be removed.
             deterministic: Make contact generation and ordering independent of
                 GPU thread scheduling. Adds deterministic hydroelastic atomics
                 and a radix sort + gather pass.
@@ -1540,6 +1543,7 @@ class NarrowPhase:
         self.has_meshes = has_meshes
         self.has_heightfields = has_heightfields
         self.mesh_sdf_texture_only = mesh_sdf_texture_only
+        self.mesh_sdf_identity_scale_only = mesh_sdf_identity_scale_only
         self.deterministic = deterministic
         self.verify_buffers = verify_buffers
         device_obj = wp.get_device(device)
@@ -1635,6 +1639,7 @@ class NarrowPhase:
                     enable_heightfields=has_heightfields,
                     reduce_contacts=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
+                    use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
                 self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     write_contact_to_reducer,
@@ -1642,18 +1647,21 @@ class NarrowPhase:
                     reduce_contacts=True,
                     use_precomputed_edge_data=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
+                    use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
             else:
                 self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     writer_func,
                     enable_heightfields=has_heightfields,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
+                    use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
                 self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     writer_func,
                     enable_heightfields=has_heightfields,
                     use_precomputed_edge_data=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
+                    use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
         else:
             self.mesh_plane_contacts_kernel = None

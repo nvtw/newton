@@ -1052,7 +1052,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     reduce_contacts: bool = False,
     use_precomputed_edge_data: bool = False,
     use_texture_sdf_only: bool = False,
+    use_identity_sdf_scale: bool = False,
 ):
+    if use_identity_sdf_scale and not use_texture_sdf_only:
+        raise ValueError("identity SDF scale specialization requires texture-only SDFs")
     do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields, use_texture_sdf_only)
     get_edge_from_mesh_specialized = _create_get_edge_from_mesh_func(use_precomputed_edge_data)
     get_mesh_edge_bounding_sphere_specialized = _create_get_mesh_edge_bounding_sphere_func(use_precomputed_edge_data)
@@ -1066,7 +1069,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # different floating-point results, breaking bit-exact reproducibility.
     _module = (
         f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_"
-        f"{use_precomputed_edge_data}_{use_texture_sdf_only}"
+        f"{use_precomputed_edge_data}_{use_texture_sdf_only}_{use_identity_sdf_scale}"
     )
 
     @wp.kernel(enable_backward=False, module=_module)
@@ -1171,10 +1174,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 if sdf_is_hfield:
                     sdf_scale = wp.vec3(1.0, 1.0, 1.0)
                 else:
-                    sdf_scale = mesh_scale_sdf
                     if not use_bvh_for_sdf:
                         texture_sdf = texture_sdf_table[sdf_idx]
-                        if texture_sdf.scale_baked:
+                    if wp.static(use_identity_sdf_scale):
+                        sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                    else:
+                        sdf_scale = mesh_scale_sdf
+                        if not use_bvh_for_sdf and texture_sdf.scale_baked:
                             sdf_scale = wp.vec3(1.0, 1.0, 1.0)
 
                 X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_sdf_ws), X_tri_ws)
@@ -1182,11 +1188,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 triangle_mesh_margin = scale_data_tri[3]
                 sdf_mesh_margin = scale_data_sdf[3]
 
-                inv_sdf_scale, min_sdf_scale = safe_sdf_scale_inverse(sdf_scale)
-                inv_sdf_scale_bound = wp.max(
-                    wp.max(wp.abs(inv_sdf_scale[0]), wp.abs(inv_sdf_scale[1])), wp.abs(inv_sdf_scale[2])
-                )
-                edge_radius_scale = inv_sdf_scale_bound
+                if wp.static(use_identity_sdf_scale):
+                    inv_sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                    min_sdf_scale = float(1.0)
+                    edge_radius_scale = float(1.0)
+                else:
+                    inv_sdf_scale, min_sdf_scale = safe_sdf_scale_inverse(sdf_scale)
+                    edge_radius_scale = wp.max(
+                        wp.max(wp.abs(inv_sdf_scale[0]), wp.abs(inv_sdf_scale[1])), wp.abs(inv_sdf_scale[2])
+                    )
 
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
@@ -1433,10 +1443,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                             texture_sdf, point_unscaled
                                         )
 
-                                dist, direction = scale_sdf_result_to_world(
-                                    dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
-                                )
-                                point = wp.cw_mul(point_unscaled, sdf_scale)
+                                if wp.static(use_identity_sdf_scale):
+                                    dist = dist_unscaled
+                                    direction = direction_unscaled
+                                    point = point_unscaled
+                                else:
+                                    dist, direction = scale_sdf_result_to_world(
+                                        dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
+                                    )
+                                    point = wp.cw_mul(point_unscaled, sdf_scale)
                                 point_world = wp.transform_point(X_sdf_ws, point)
 
                                 direction_world = wp.transform_vector(X_sdf_ws, direction)
@@ -1612,10 +1627,13 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 if sdf_is_hfield:
                     sdf_scale = wp.vec3(1.0, 1.0, 1.0)
                 else:
-                    sdf_scale = mesh_scale_sdf
                     if not use_bvh_for_sdf:
                         texture_sdf = texture_sdf_table[sdf_idx]
-                        if texture_sdf.scale_baked:
+                    if wp.static(use_identity_sdf_scale):
+                        sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                    else:
+                        sdf_scale = mesh_scale_sdf
+                        if not use_bvh_for_sdf and texture_sdf.scale_baked:
                             sdf_scale = wp.vec3(1.0, 1.0, 1.0)
 
                 X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_sdf_ws), X_tri_ws)
@@ -1625,11 +1643,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
 
                 midpoint = (wp.transform_get_translation(X_tri_ws) + wp.transform_get_translation(X_sdf_ws)) * 0.5
 
-                inv_sdf_scale, min_sdf_scale = safe_sdf_scale_inverse(sdf_scale)
-                inv_sdf_scale_bound = wp.max(
-                    wp.max(wp.abs(inv_sdf_scale[0]), wp.abs(inv_sdf_scale[1])), wp.abs(inv_sdf_scale[2])
-                )
-                edge_radius_scale = inv_sdf_scale_bound
+                if wp.static(use_identity_sdf_scale):
+                    inv_sdf_scale = wp.vec3(1.0, 1.0, 1.0)
+                    min_sdf_scale = float(1.0)
+                    edge_radius_scale = float(1.0)
+                else:
+                    inv_sdf_scale, min_sdf_scale = safe_sdf_scale_inverse(sdf_scale)
+                    edge_radius_scale = wp.max(
+                        wp.max(wp.abs(inv_sdf_scale[0]), wp.abs(inv_sdf_scale[1])), wp.abs(inv_sdf_scale[2])
+                    )
 
                 contact_threshold = gap_sum + triangle_mesh_margin + sdf_mesh_margin
                 contact_threshold_unscaled = contact_threshold / min_sdf_scale
@@ -1863,10 +1885,15 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                             texture_sdf, point_unscaled
                                         )
 
-                                dist, direction = scale_sdf_result_to_world(
-                                    dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
-                                )
-                                point = wp.cw_mul(point_unscaled, sdf_scale)
+                                if wp.static(use_identity_sdf_scale):
+                                    dist = dist_unscaled
+                                    direction = direction_unscaled
+                                    point = point_unscaled
+                                else:
+                                    dist, direction = scale_sdf_result_to_world(
+                                        dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
+                                    )
+                                    point = wp.cw_mul(point_unscaled, sdf_scale)
                                 point_world = wp.transform_point(X_sdf_ws, point)
 
                                 direction_world = wp.transform_vector(X_sdf_ws, direction)
