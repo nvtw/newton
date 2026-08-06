@@ -1781,7 +1781,8 @@ class NarrowPhase:
         self.num_tile_blocks = num_blocks
 
         # Dynamic block allocation for mesh-mesh and mesh-plane contacts.
-        # On CUDA we target ~4 blocks per SM for good occupancy; on CPU
+        # On CUDA we partition toward ~4 blocks per SM and launch twice as many
+        # mesh-mesh blocks to reduce serial work in long per-pair queues. On CPU
         # there is no SM notion so we pick 64 as a modest parallelism
         # target that splits pair work across OpenMP threads without
         # over-subscribing on small scenes.
@@ -1789,7 +1790,7 @@ class NarrowPhase:
             target_blocks = device_obj.sm_count * 4 if device_obj.is_cuda else 64
             n = max_candidate_pairs + 1
             # Mesh-mesh
-            self.num_mesh_mesh_blocks = target_blocks
+            self.num_mesh_mesh_blocks = target_blocks * 2 if device_obj.is_cuda else target_blocks
             self.mesh_mesh_target_blocks = target_blocks
             self.mesh_mesh_block_offsets = wp.zeros(n, dtype=wp.int32, device=device)
             self.mesh_mesh_block_counts = wp.zeros(n, dtype=wp.int32, device=device)
