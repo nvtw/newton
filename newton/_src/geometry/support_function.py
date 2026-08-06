@@ -241,9 +241,11 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
             cdz = c * direction[2]
             denom_sq = adx * adx + bdy * bdy + cdz * cdz
             if denom_sq > eps:
-                denom = wp.sqrt(denom_sq)
+                inv_denom = _support_rsqrt_rn(denom_sq)
                 result = wp.vec3(
-                    (a * a) * direction[0] / denom, (b * b) * direction[1] / denom, (c * c) * direction[2] / denom
+                    (a * a) * direction[0] * inv_denom,
+                    (b * b) * direction[1] * inv_denom,
+                    (c * c) * direction[2] * inv_denom,
                 )
             else:
                 result = wp.vec3(a, 0.0, 0.0)
