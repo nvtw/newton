@@ -11764,15 +11764,22 @@ class ModelBuilder:
                             edge_halves = np.ascontiguousarray((edge_v1 - edge_v0) * 0.5, dtype=np.float32)
                             edge_centers = np.ascontiguousarray((edge_v0 + edge_v1) * 0.5, dtype=np.float32)
                             edge_radii = np.linalg.norm(edge_halves, axis=1, keepdims=True)
+                            canonical_edges = mesh._canonical_vertex_ids()[edges].reshape(-1)
+                            endpoint_indices = np.arange(2 * count, dtype=np.int64)
+                            first_endpoint = np.full(int(canonical_edges.max()) + 1, 2 * count, dtype=np.int64)
+                            np.minimum.at(first_endpoint, canonical_edges, endpoint_indices)
+                            owns_endpoint = (first_endpoint[canonical_edges] == endpoint_indices).reshape(-1, 2)
+                            # Zero remains the legacy "both endpoints owned" encoding.
+                            corner_ownership = (
+                                4.0 + owns_endpoint[:, 0].astype(np.float32) + 2.0 * owns_endpoint[:, 1]
+                            ).reshape(-1, 1)
                             edge_center_chunks.append(
                                 np.ascontiguousarray(
                                     np.concatenate((edge_centers, edge_radii), axis=1), dtype=np.float32
                                 )
                             )
                             edge_half_chunks.append(
-                                np.ascontiguousarray(
-                                    np.concatenate((edge_halves, np.zeros((count, 1), dtype=np.float32)), axis=1)
-                                )
+                                np.ascontiguousarray(np.concatenate((edge_halves, corner_ownership), axis=1))
                             )
                         edge_offset += count
                         entry = (start, count)

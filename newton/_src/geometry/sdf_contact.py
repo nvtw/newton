@@ -466,12 +466,17 @@ def get_edge_from_mesh_precomputed(
     X_mesh_ws: wp.transform,
     edge_idx: int,
     center: wp.vec3,
-) -> tuple[wp.vec3, wp.vec3]:
-    """Extract an edge while reusing its transformed packed center."""
+) -> tuple[wp.vec3, wp.vec3, int]:
+    """Extract an edge and endpoint ownership while reusing its transformed center.
+
+    A zero ownership code preserves legacy packed arrays by allowing both
+    endpoints. Builder-generated codes use bits zero and one for the first and
+    second endpoint, respectively, plus bit two to mark the encoding explicit.
+    """
     packed_half = mesh_edge_halves[edge_range[0] + edge_idx]
     half_local = wp.vec3(packed_half[0], packed_half[1], packed_half[2])
     half = wp.transform_vector(X_mesh_ws, half_local)
-    return center - half, center + half
+    return center - half, center + half, int(packed_half[3])
 
 
 def _create_get_edge_from_mesh_func(use_precomputed_edge_data: bool):
@@ -488,10 +493,11 @@ def _create_get_edge_from_mesh_func(use_precomputed_edge_data: bool):
         X_mesh_ws: wp.transform,
         edge_idx: int,
         center_scaled: wp.vec3,
-    ) -> tuple[wp.vec3, wp.vec3]:
+    ) -> tuple[wp.vec3, wp.vec3, int]:
         if wp.static(use_precomputed_edge_data):
             return get_edge_from_mesh_precomputed(mesh_edge_halves, edge_range, X_mesh_ws, edge_idx, center_scaled)
-        return get_edge_from_mesh(mesh_id, mesh_edge_indices, edge_range, mesh_scale, X_mesh_ws, edge_idx)
+        v0, v1 = get_edge_from_mesh(mesh_id, mesh_edge_indices, edge_range, mesh_scale, X_mesh_ws, edge_idx)
+        return v0, v1, 0
 
     return get_edge_from_mesh_func
 
@@ -702,7 +708,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
         hfd_sdf: HeightfieldData,
         elevation_data: wp.array[wp.float32],
         precision_target: float,
-    ) -> tuple[float, wp.vec3]:
+    ) -> tuple[float, wp.vec3, int]:
         """Find the deepest point on an edge relative to an SDF volume.
 
         Minimizes the SDF value along the edge parameterized as
@@ -724,8 +730,11 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
         (the one closer to the unconverged bracket boundary) so that vertex
         contacts at edge corners are not missed.
 
+        The endpoint result is zero for an interior winner, one for ``v0``,
+        and two for ``v1`` so duplicate corner contacts can honor edge ownership.
+
         Returns:
-            Tuple of (distance, contact_point).
+            Tuple of (distance, contact_point, endpoint).
         """
         golden = 0.3819660112501051  # (3 - sqrt(5)) / 2
         edge_dir = v1 - v0
@@ -879,6 +888,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
         # Check endpoints only while Brent's bracket still includes them.
         # Once a bound has moved inward, Brent has already excluded that
         # endpoint from containing the minimum.
+        best_endpoint = int(0)
         best_t = x
         best_f = fx
         if a == 0.0:
@@ -897,6 +907,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
             if f_end < best_f:
                 best_t = 0.0
                 best_f = f_end
+                best_endpoint = 1
         if b == 1.0:
             f_end = _sample_sdf_at_t(
                 texture_sdf,
@@ -913,10 +924,11 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
             if f_end < best_f:
                 best_t = 1.0
                 best_f = f_end
+                best_endpoint = 2
 
         p = v0 + edge_dir * best_t
 
-        return best_f, p
+        return best_f, p, best_endpoint
 
     return do_edge_sdf_collision_func
 
@@ -1343,6 +1355,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         has_edge = edge_slot >= 0
 
                         if has_edge:
+                            corner_ownership = int(0)
                             if wp.static(enable_heightfields):
                                 if tri_type == GeoType.HFIELD:
                                     v0s, v1s = get_edge_from_heightfield(
@@ -1352,7 +1365,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                                 else:
-                                    v0s, v1s = get_edge_from_mesh_specialized(
+                                    v0s, v1s, corner_ownership = get_edge_from_mesh_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
@@ -1364,7 +1377,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         cached_center_scaled,
                                     )
                             else:
-                                v0s, v1s = get_edge_from_mesh_specialized(
+                                v0s, v1s, corner_ownership = get_edge_from_mesh_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
@@ -1378,7 +1391,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             v0 = wp.cw_mul(v0s, inv_sdf_scale)
                             v1 = wp.cw_mul(v1s, inv_sdf_scale)
 
-                            dist_unscaled, point_unscaled = do_edge_sdf_collision(
+                            dist_unscaled, point_unscaled, best_endpoint = do_edge_sdf_collision(
                                 texture_sdf,
                                 mesh_id_sdf,
                                 v0,
@@ -1411,7 +1424,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 min_sdf_scale,
                                 use_texture_sdf_for_search,
                             )
-                            if dist_approx < contact_threshold and inner_cull_consistent:
+                            owns_endpoint = (
+                                best_endpoint == 0 or corner_ownership == 0 or (corner_ownership & best_endpoint) != 0
+                            )
+                            if dist_approx < contact_threshold and inner_cull_consistent and owns_endpoint:
                                 if wp.static(enable_heightfields):
                                     if sdf_is_hfield:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(
@@ -1780,6 +1796,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         has_edge = edge_slot >= 0
 
                         if has_edge:
+                            corner_ownership = int(0)
                             if wp.static(enable_heightfields):
                                 if tri_type == GeoType.HFIELD:
                                     v0s, v1s = get_edge_from_heightfield(
@@ -1789,7 +1806,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                                 else:
-                                    v0s, v1s = get_edge_from_mesh_specialized(
+                                    v0s, v1s, corner_ownership = get_edge_from_mesh_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
@@ -1801,7 +1818,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         cached_center_scaled,
                                     )
                             else:
-                                v0s, v1s = get_edge_from_mesh_specialized(
+                                v0s, v1s, corner_ownership = get_edge_from_mesh_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
@@ -1815,7 +1832,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             v0 = wp.cw_mul(v0s, inv_sdf_scale)
                             v1 = wp.cw_mul(v1s, inv_sdf_scale)
 
-                            dist_unscaled, point_unscaled = do_edge_sdf_collision(
+                            dist_unscaled, point_unscaled, best_endpoint = do_edge_sdf_collision(
                                 texture_sdf,
                                 mesh_id_sdf,
                                 v0,
@@ -1848,7 +1865,10 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 min_sdf_scale,
                                 use_texture_sdf_for_search,
                             )
-                            if dist_approx < contact_threshold and inner_cull_consistent:
+                            owns_endpoint = (
+                                best_endpoint == 0 or corner_ownership == 0 or (corner_ownership & best_endpoint) != 0
+                            )
+                            if dist_approx < contact_threshold and inner_cull_consistent and owns_endpoint:
                                 if wp.static(enable_heightfields):
                                     if sdf_is_hfield:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(

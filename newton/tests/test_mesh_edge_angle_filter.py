@@ -13,6 +13,7 @@ edges and non-manifold edges are always kept. The filter is applied from
 import itertools
 import math
 import unittest
+from collections import Counter
 
 import numpy as np
 import warp as wp
@@ -211,7 +212,7 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
 
 class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
     def test_finalize_packs_collision_edge_geometry(self):
-        """Pack scaled centers, radii, and half-vectors for collision edges."""
+        """Pack scaled geometry and unique corner ownership for collision edges."""
         mesh = _near_antiparallel_pair_mesh()
         builder = newton.ModelBuilder()
         scales = np.asarray(((1.0, 1.0, 1.0), (2.0, 3.0, 4.0)), dtype=np.float32)
@@ -238,7 +239,18 @@ class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
             np.testing.assert_array_equal(packed_centers[start : start + count, :3], expected_centers)
             np.testing.assert_allclose(packed_centers[start : start + count, 3], expected_radii)
             np.testing.assert_array_equal(packed_halves[start : start + count, :3], expected_halves)
-            np.testing.assert_array_equal(packed_halves[start : start + count, 3], 0.0)
+
+            ownership = packed_halves[start : start + count, 3].astype(np.int32)
+            self.assertTrue(np.all((ownership >= 4) & (ownership <= 7)))
+            canonical_edges = mesh._canonical_vertex_ids()[edges]
+            owned_counts = Counter()
+            for edge, code in zip(canonical_edges, ownership, strict=True):
+                if code & 1:
+                    owned_counts[int(edge[0])] += 1
+                if code & 2:
+                    owned_counts[int(edge[1])] += 1
+            for vertex_idx in np.unique(canonical_edges):
+                self.assertEqual(owned_counts[int(vertex_idx)], 1)
 
     def test_finalize_uses_full_edges_without_build_sdf(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
