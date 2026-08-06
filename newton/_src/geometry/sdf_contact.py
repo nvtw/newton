@@ -8,6 +8,7 @@ import warp as wp
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, SHAPE_PAIR_INDEX_MASK, ContactData
 from ..geometry.sdf_texture import (
     TextureSDFData,
+    _texture_sample_sdf_hw_pair,
     texture_sample_sdf_grad_only_hw,
 )
 from ..geometry.sdf_texture import (
@@ -645,7 +646,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
 
     When ``enable_heightfields`` is False, ``wp.static`` strips all heightfield code
     paths from the generated functions, reducing register pressure and instruction
-    cache footprint — especially in the 6-iteration Brent's method loop of
+    cache footprint — especially in the bounded edge-minimization loop of
     ``do_edge_sdf_collision``.
 
     Args:
@@ -703,17 +704,20 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
     ) -> tuple[float, wp.vec3]:
         """Find the deepest point on an edge relative to an SDF volume.
 
-        Uses Brent's method (up to 5 iterations) to minimize the SDF value
-        along the edge parameterized as ``p(t) = v0 + t * edge_dir`` for
-        t in [0, 1]. The initial midpoint SDF value is provided by the
-        caller (cached from culling) to avoid a redundant evaluation.
+        Minimizes the SDF value along the edge parameterized as
+        ``p(t) = v0 + t * edge_dir`` for t in [0, 1]. The initial midpoint
+        SDF value is provided by the caller (cached from culling). Heightfield-free
+        texture searches issue the first symmetric pair together, use the three values
+        to tighten the bracket, and spend the remaining three-query budget with
+        Brent's method. Other SDF backends use five adaptive Brent queries.
+        Both paths therefore use at most five interior queries beyond the
+        cached midpoint.
 
         ``precision_target`` is the unscaled SDF space precision the caller
         cares about. Brent's tolerance floor is set
         to ``precision_target / edge_length / 2`` in parametric space so
         edges much shorter than the target precision exit Brent in 0
-        iters (the midpoint is already accurate enough). Long edges still
-        run the full 5 iters to converge.
+        queries (the midpoint is already accurate enough).
 
         After the interior search, evaluates the more promising endpoint
         (the one closer to the unconverged bracket boundary) so that vertex
@@ -744,7 +748,42 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
         d_step = float(0.0)
         e_step = float(0.0)
 
-        for _iter in range(5):
+        if wp.static(use_texture_sdf_only and not enable_heightfields) and tol_floor < 0.25:
+            offset = 0.5 * golden
+            left = 0.5 - offset
+            right = 0.5 + offset
+            pair_values = _texture_sample_sdf_hw_pair(
+                texture_sdf,
+                v0 + edge_dir * left,
+                v0 + edge_dir * right,
+            )
+            f_left = pair_values[0]
+            f_right = pair_values[1]
+
+            if f_left < fx and f_left <= f_right:
+                b = 0.5
+                x = left
+                fx = f_left
+                w = 0.5
+                fw = midpoint_sdf
+                v_brent = right
+                fv = f_right
+            elif f_right < fx:
+                a = 0.5
+                x = right
+                fx = f_right
+                w = 0.5
+                fw = midpoint_sdf
+                v_brent = left
+                fv = f_left
+            else:
+                a = left
+                b = right
+                w = left
+                fw = f_left
+                v_brent = right
+                fv = f_right
+        for _iter in range(wp.static(3 if use_texture_sdf_only and not enable_heightfields else 5)):
             m = 0.5 * (a + b)
             tol = wp.max(1.0e-2 * wp.abs(x) + 1.0e-8, tol_floor)
             tol2 = 2.0 * tol
