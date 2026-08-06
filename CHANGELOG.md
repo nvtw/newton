@@ -14,7 +14,6 @@
 - Add cubic and triplanar `SensorTiledCamera` texture projection modes for shapes without authored UVs.
 - Add CUDA-graph-capturable rebuildable sparse grids to `SolverImplicitMPM` when `max_active_cell_count` is positive, with optional `max_leaf_node_count`, `max_lower_node_count`, and `max_upper_node_count` hierarchy capacities.
 - Add opt-in isolated multi-world implicit MPM with capacity-bounded rebuildable sparse grids, selective world resets, outer graph capture, and asynchronous overflow reporting; legacy shared topology remains the default.
-- Add Kamino DVI solver options to additional basic, contact, rigid-body, robot, selection, and sensor examples.
 - Add contact examples for Newton's cradle, a balance bird, and a domino spiral
 - Document geometry-pair contact behavior and clarify that MuJoCo Warp currently produces a single contact for cylinder--box pairs even with MultiCCD enabled.
 - Add `ViewerUSD(points_as_spheres=...)` to render `log_points` particles as a `UsdGeom.PointInstancer` of sphere prototypes; enabled by default (opt out with `points_as_spheres=False` for flat `UsdGeom.Points` splats)
@@ -37,7 +36,7 @@
 - Add opt-in MuJoCo Warp sleeping support to `SolverMuJoCo` with MJCF sleep configuration, initial tree policies, `sleep_tolerance`, compact `nvmax` storage, and a launchable `mujoco_sleeping` example. (#3731; fixes #3725)
 - Add `forward_depth_image` output support to `SensorTiledCamera.update()` and `SensorTiledCamera.utils.create_forward_depth_image_output()` for native forward-depth rendering without post-processing `depth_image`.
 - Add a single-kernel sparse fused Conjugate Residual linear solver for the Kamino PADMM solver (`linear_solver_type="CRF"`): a matrix-free Delassus solve that runs the full CR iteration in one Warp kernel per world, with optional inexact-ADMM inner-tolerance scheduling via `linear_solver_tolerance_ratio`.
-- Add the `basic_conveyor_forces` example: a multi-belt conveyor circuit that transports rigid boxes with per-belt velocity fields, applying Coulomb-limited tangential body forces from reported per-contact normal forces across `SolverXPBD`, `SolverVBD`, `SolverMuJoCo`, and `SolverKamino`.
+- Add the `basic_conveyor_forces` example: a multi-belt conveyor circuit that transports rigid boxes with per-belt velocity fields, applying Coulomb-limited tangential body forces from reported per-contact normal forces across `SolverXPBD`, `SolverVBD`, and `SolverMuJoCo`.
 - Add optional `shear_stiffness`/`shear_damping` and `twist_stiffness`/`twist_damping` controls to `ModelBuilder.add_joint_cable()`, `ModelBuilder.add_rod()`, and `ModelBuilder.add_rod_graph()`; omitted shear defaults to stretch and omitted twist defaults to bend for compatibility.
 - Add `newton.utils.CableStiffness` and extend `newton.utils.create_cable_stiffness_from_elastic_moduli()` with `poissons_ratio`/`shear_modulus` inputs that include torsional `GJ/L` stiffness.
 - Add VBD cable validation examples covering bend stiffness, analytical bend/twist response, torsion material mapping, routed twist transfer, twist-buckling link verification, Michell/Zajac threshold behavior, and Dahl hysteresis.
@@ -66,7 +65,6 @@
 - Change experimental `SolverVBD` cable constraint slots from `[STRETCH=0, BEND=1]` to `[STRETCH=0, SHEAR=1, BEND=2, TWIST=3]`, allowing each stiffness and constraint mode to be configured independently while preserving the pre-split world-form parent solve Hessian for the common isotropic component of stretch/shear elasticity. Existing cable calls using raw `slot=1` or `JointSlot.ANGULAR` now select shear; use `JointSlot.BEND` (now slot 2) to select bending.
 - Map `shape_material_kf` to per-contact MuJoCo `solreffriction` in `SolverMuJoCo` (elliptic friction cones with Newton contacts); resolve `kf` with priority/`solmix`, treat a resolved `kf = 0` as frictionless, and use native MuJoCo contacts or a pyramidal cone to preserve the previous solref-inherited friction.
 - Load visual-only USD geometry outside rigid-body hierarchies as static shapes by default; pass `load_static_visual_shapes=False` to retain the previous body-associated-visuals-only behavior.
-- Tune Kamino DVI example step and iteration budgets for improved throughput.
 - Speed up `Mesh.create_heightfield()` and `Mesh.create_terrain()` by building the vertex and index buffers in place, substantially reducing construction time and peak memory for large terrain grids such as those used by Isaac Lab.
 - Load solver backends lazily on first access to speed up `import newton`; access solver classes through `newton.solvers` as before, and import solver modules explicitly if module-level side effects are required.
 - Reduce `SolverKamino` kernel compilation time. (#3564)
@@ -99,7 +97,6 @@
 
 ### Fixed
 
-- Fix `SolverKamino` integrating zero-inverse-mass bodies and constructing singular joint constraints between immovable bodies.
 - Fix MPR returning scale-dependent, excessively deep contacts for small convex shapes on large mesh triangles while preserving triangle-specific shared-edge manifold witnesses. (#3766)
 - Make deterministic collision pipelines cover hydroelastic contact generation and reduction, including unique reduced-contact sort keys and overflow-safe fixed-point pressure accumulation. (#3661)
 - Fix `SolverMuJoCo` retaining an invalid external-contact cache when its first step is captured in a CUDA graph. (#3768; fixes #3767)

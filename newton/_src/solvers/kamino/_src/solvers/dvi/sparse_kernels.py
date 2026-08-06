@@ -402,8 +402,10 @@ def _solve_dvi_sparse_inequalities_pgs(
     col_start = bsm_col_start[wid]
     matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
     sweep_count = cfg.inequality_sweeps_per_iteration
+    first_tangent_sweep = int32(0)
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
         sweep_count *= cfg.max_alternating_iterations
+        first_tangent_sweep = sweep_count / int32(2)
     for _sweep in range(sweep_count):
         phase_count = int32(2)
         if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and _sweep < sweep_count / int32(2):
@@ -564,7 +566,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     diagonal_t1 = wp.abs(problem_diag[vec_idx + int32(1)]) * P_t1 * P_t1
                                     lambda_t_old = wp.vec2f(lambda_t0_old, lambda_t1_old)
                                     off_diagonal = inequality_tangent_cross[uio + uid]
-                                    if _sweep == int32(0):
+                                    if _sweep == first_tangent_sweep:
                                         off_diagonal = float32(0.0)
                                         body_group = int32(0)
                                         while body_group < block_count:

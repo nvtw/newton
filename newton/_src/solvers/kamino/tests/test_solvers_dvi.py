@@ -1038,6 +1038,36 @@ class TestDVISolver(unittest.TestCase):
         expected_sliding = 0.1 * scalar_candidate / np.linalg.norm(scalar_candidate)
         np.testing.assert_allclose(sliding, expected_sliding, atol=1.0e-6, rtol=0.0)
 
+    def test_03j2_sparse_dvi_refreshes_tangent_cross_cache(self):
+        """Refresh tangent coupling before the fused friction phase."""
+        model, problem, setup = self._make_box_on_plane_setup(sparse=True)
+        solver = DVISolver(
+            model=model,
+            data=setup.data,
+            limits=setup.limits,
+            contacts=setup.contacts,
+            jacobians=setup.jacobians,
+            config=kamino_config.DVISolverConfig(
+                max_alternating_iterations=4,
+                inequality_sweeps_per_iteration=1,
+                tolerance=0.0,
+                regularization=1.0e-6,
+            ),
+        )
+        solver.reset()
+        solver.coldstart()
+        solver.data.state.inequality_tangent_cross.fill_(float("nan"))
+        solver.solve(problem)
+
+        uio = int(problem.data.uio.numpy()[0])
+        limit_count = int(problem.data.nl.numpy()[0])
+        contact_count = int(problem.data.nc.numpy()[0])
+        contact_cross = solver.data.state.inequality_tangent_cross.numpy()[
+            uio + limit_count : uio + limit_count + contact_count
+        ]
+        self.assertGreater(contact_count, 0)
+        self.assertTrue(np.all(np.isfinite(contact_cross)))
+
     def test_03k_dvi_inequality_only_status_reports_the_sweep_budget(self):
         """Fuse inequality-only sweeps while reporting their full budget."""
         max_alternating_iterations = 17

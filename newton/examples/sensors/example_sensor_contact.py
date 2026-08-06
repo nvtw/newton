@@ -40,11 +40,11 @@ class Example:
         self.solver_type = getattr(args, "solver", "mujoco")
 
         builder = newton.ModelBuilder()
-        builder.add_usd(newton.examples.get_asset("sensor_contact_scene.usda"))
         if self.solver_type == "kamino":
             newton.solvers.SolverKamino.register_custom_attributes(builder)
         else:
             newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        builder.add_usd(newton.examples.get_asset("sensor_contact_scene.usda"))
 
         builder.add_ground_plane()
 
