@@ -2822,6 +2822,7 @@ def test_static_empty_gjk_specialization_under_graph_capture(test, device):
         rigid_contact_max=64,
     )
     test.assertFalse(specialized.narrow_phase.has_generic_convex_pairs)
+    test.assertFalse(specialized.narrow_phase.all_pairs_generic_convex)
     reference.narrow_phase.has_generic_convex_pairs = True
 
     state = model.state()
@@ -2864,10 +2865,44 @@ def test_static_empty_gjk_specialization_under_graph_capture(test, device):
         deterministic=True,
         rigid_contact_max=16,
     )
+    generic_reference = newton.CollisionPipeline(
+        generic_model,
+        broad_phase="explicit",
+        deterministic=True,
+        rigid_contact_max=16,
+    )
+    generic_reference.narrow_phase.all_pairs_generic_convex = False
     test.assertTrue(generic_pipeline.narrow_phase.has_generic_convex_pairs)
+    test.assertTrue(generic_pipeline.narrow_phase.all_pairs_generic_convex)
+    test.assertTrue(generic_reference.narrow_phase.has_generic_convex_pairs)
+    test.assertFalse(generic_reference.narrow_phase.all_pairs_generic_convex)
     generic_contacts = generic_pipeline.contacts()
-    generic_pipeline.collide(generic_model.state(), generic_contacts)
-    test.assertGreater(int(generic_contacts.rigid_contact_count.numpy()[0]), 0)
+    generic_reference_contacts = generic_reference.contacts()
+    generic_state = generic_model.state()
+    with wp.ScopedCapture(device=device) as capture:
+        generic_pipeline.collide(generic_state, generic_contacts)
+        generic_reference.collide(generic_state, generic_reference_contacts)
+    for _ in range(2):
+        wp.capture_launch(capture.graph)
+
+    active = int(generic_contacts.rigid_contact_count.numpy()[0])
+    test.assertGreater(active, 0)
+    test.assertEqual(active, int(generic_reference_contacts.rigid_contact_count.numpy()[0]))
+    for name in (
+        "rigid_contact_shape0",
+        "rigid_contact_shape1",
+        "rigid_contact_point0",
+        "rigid_contact_point1",
+        "rigid_contact_normal",
+        "rigid_contact_offset0",
+        "rigid_contact_offset1",
+        "rigid_contact_margin0",
+        "rigid_contact_margin1",
+    ):
+        np.testing.assert_array_equal(
+            getattr(generic_contacts, name).numpy()[:active],
+            getattr(generic_reference_contacts, name).numpy()[:active],
+        )
 
 
 add_function_test(

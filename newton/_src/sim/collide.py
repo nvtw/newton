@@ -106,6 +106,38 @@ def _has_generic_convex_pairs(
     )
 
 
+def _all_pairs_require_generic_convex_narrow_phase(
+    model: Model,
+    *,
+    broad_phase_mode: str,
+    shape_pairs_filtered: wp.array[wp.vec2i] | None,
+) -> bool:
+    """Conservatively prove that every broad-phase pair requires GJK/MPR."""
+    shape_types_array = getattr(model, "shape_type", None)
+    if shape_types_array is None:
+        return False
+
+    shape_types = shape_types_array.numpy()
+    if broad_phase_mode == "explicit":
+        if shape_pairs_filtered is None:
+            return False
+        pairs = shape_pairs_filtered.numpy()
+        if pairs.size == 0:
+            return False
+        pair_types = shape_types[pairs.reshape(-1, 2)]
+        return all(
+            _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b)) for type_a, type_b in pair_types
+        )
+
+    colliding_types = shape_types[_shape_collide_mask(model, len(shape_types))]
+    unique_types = np.unique(colliding_types)
+    return bool(unique_types.size) and all(
+        _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b))
+        for index, type_a in enumerate(unique_types)
+        for type_b in unique_types[index:]
+    )
+
+
 @wp.struct
 class ContactWriterData:
     """Contact writer data for collide write_contact function."""
@@ -1179,6 +1211,17 @@ class CollisionPipeline:
                 broad_phase_mode=self.broad_phase_mode,
                 shape_pairs_filtered=self.shape_pairs_filtered,
             )
+            all_pairs_generic_convex = (
+                has_generic_convex_pairs
+                and not has_meshes
+                and model.heightfield_count == 0
+                and hydroelastic_sdf is None
+                and _all_pairs_require_generic_convex_narrow_phase(
+                    model,
+                    broad_phase_mode=self.broad_phase_mode,
+                    shape_pairs_filtered=self.shape_pairs_filtered,
+                )
+            )
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
             # Pass write_contact as custom writer to write directly to final Contacts format
@@ -1204,6 +1247,7 @@ class CollisionPipeline:
                 has_heightfields=model.heightfield_count > 0,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
                 has_generic_convex_pairs=has_generic_convex_pairs,
+                all_pairs_generic_convex=all_pairs_generic_convex,
                 mesh_sdf_identity_scale_only=mesh_sdf_identity_scale_only,
                 mesh_sdf_texture_only=mesh_sdf_texture_only,
                 deterministic=deterministic,

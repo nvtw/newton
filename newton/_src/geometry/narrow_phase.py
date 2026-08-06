@@ -639,23 +639,30 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
 
 
 def create_narrow_phase_kernel_gjk_mpr(
-    external_aabb: bool, writer_func: Any, support_func: Any = None, post_process_contact: Any = None
+    external_aabb: bool,
+    writer_func: Any,
+    support_func: Any = None,
+    post_process_contact: Any = None,
+    sort_pairs: bool = False,
 ):
     """
     Create a GJK/MPR narrow phase kernel for complex convex shape collisions.
 
-    This kernel is called AFTER the primitive kernel has already:
+    Normally this kernel is called after the primitive kernel has already:
     - Sorted pairs by type (type_a <= type_b)
     - Routed mesh pairs to specialized buffers
     - Routed hydroelastic pairs to SDF-SDF buffer
     - Handled primitive collisions analytically
+
+    The direct variant locally sorts pairs when scene topology proves that
+    every candidate requires GJK/MPR.
 
     The remaining pairs are complex convex-convex (plane-box, plane-cylinder,
     plane-cone, box-box, cylinder-cylinder, etc.) that need GJK/MPR.
     """
     _sf = support_func.__name__ if support_func is not None else "default"
     _ppc = post_process_contact.__name__ if post_process_contact is not None else "default"
-    _module = f"narrow_phase_gjk_mpr_{external_aabb}_{writer_func.__name__}_{_sf}_{_ppc}"
+    _module = f"narrow_phase_gjk_mpr_{external_aabb}_{writer_func.__name__}_{_sf}_{_ppc}_{sort_pairs}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_kernel_gjk_mpr(
@@ -677,8 +684,8 @@ def create_narrow_phase_kernel_gjk_mpr(
         """
         GJK/MPR collision detection for complex convex pairs.
 
-        Pairs arrive pre-sorted (type_a <= type_b) and pre-filtered
-        (no meshes, no hydroelastic, no simple primitives).
+        Pairs are pre-filtered (no meshes, no hydroelastic, no simple
+        primitives) and are either pre-sorted or locally sorted.
         """
         tid = wp.tid()
 
@@ -689,7 +696,7 @@ def create_narrow_phase_kernel_gjk_mpr(
             return
 
         for t in range(tid, num_work_items, total_num_threads):
-            # Get shape pair (already sorted by primitive kernel)
+            # Get a pre-routed pair or a direct broad-phase pair.
             pair = candidate_pair[t]
             shape_a = pair[0]
             shape_b = pair[1]
@@ -698,9 +705,12 @@ def create_narrow_phase_kernel_gjk_mpr(
             if shape_a == shape_b or shape_a < 0 or shape_b < 0:
                 continue
 
-            # Get shape types (already sorted: type_a <= type_b)
+            # Direct broad-phase pairs require local type sorting.
             type_a = shape_types[shape_a]
             type_b = shape_types[shape_b]
+            if wp.static(sort_pairs) and type_a > type_b:
+                shape_a, shape_b = shape_b, shape_a
+                type_a, type_b = type_b, type_a
 
             # Extract shape data
             pos_a, quat_a, shape_data_a, scale_a, margin_offset_a = extract_shape_data(
@@ -1496,6 +1506,7 @@ class NarrowPhase:
         has_heightfields: bool = False,
         use_lean_gjk_mpr: bool = False,
         has_generic_convex_pairs: bool = True,
+        all_pairs_generic_convex: bool = False,
         mesh_sdf_texture_only: bool = False,
         mesh_sdf_identity_scale_only: bool = False,
         deterministic: bool = False,
@@ -1527,7 +1538,10 @@ class NarrowPhase:
                 heightfield collision buffers and kernels are allocated. Defaults to False.
             has_generic_convex_pairs: Whether any candidate pair can require
                 generic GJK/MPR processing. Set to False only from a complete
+            all_pairs_generic_convex: Whether every candidate pair can go
                 scene-topology proof; this omits the GJK/MPR launch entirely.
+                directly to generic GJK/MPR after local type sorting. Defaults
+                to False so expert callers retain primitive routing.
             mesh_sdf_texture_only: Whether every participating mesh SDF has a texture representation,
                 allowing BVH fallback branches to be removed from mesh/SDF kernels.
             mesh_sdf_identity_scale_only: Whether every participating texture SDF is queried with
@@ -1570,6 +1584,7 @@ class NarrowPhase:
         self.mesh_sdf_texture_only = mesh_sdf_texture_only
         self.has_generic_convex_pairs = has_generic_convex_pairs
         self.mesh_sdf_identity_scale_only = mesh_sdf_identity_scale_only
+        self.all_pairs_generic_convex = all_pairs_generic_convex
         self.deterministic = deterministic
         self.verify_buffers = verify_buffers
         device_obj = wp.get_device(device)
@@ -1639,6 +1654,22 @@ class NarrowPhase:
             )
         else:
             self.narrow_phase_kernel = create_narrow_phase_kernel_gjk_mpr(self.external_aabb, writer_func)
+
+        if self.all_pairs_generic_convex:
+            if use_lean_gjk_mpr:
+                self.narrow_phase_kernel_direct = create_narrow_phase_kernel_gjk_mpr(
+                    self.external_aabb,
+                    writer_func,
+                    support_func=support_map_lean,
+                    post_process_contact=post_process_minkowski_only,
+                    sort_pairs=True,
+                )
+            else:
+                self.narrow_phase_kernel_direct = create_narrow_phase_kernel_gjk_mpr(
+                    self.external_aabb, writer_func, sort_pairs=True
+                )
+        else:
+            self.narrow_phase_kernel_direct = None
         # Create triangle contacts kernel when meshes or heightfields are present
         if has_meshes or has_heightfields:
             self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
@@ -1903,7 +1934,7 @@ class NarrowPhase:
 
         # Clear all counters with a single kernel launch (consolidated counter array)
         if (
-            self.has_generic_convex_pairs
+            (not self.all_pairs_generic_convex and self.has_generic_convex_pairs)
             or self.has_meshes
             or self.has_heightfields
             or self.hydroelastic_sdf is not None
@@ -1913,51 +1944,52 @@ class NarrowPhase:
         # Stage 1: Launch primitive kernel for fast analytical collisions
         # This handles sphere-sphere, sphere-capsule, capsule-capsule, plane-sphere, plane-capsule
         # and routes remaining pairs to gjk_candidate_pairs and mesh buffers
-        wp.launch(
-            kernel=self.primitive_kernel,
-            dim=self.total_num_threads,
-            inputs=[
-                candidate_pair,
-                candidate_pair_count,
-                shape_types,
-                shape_data,
-                shape_transform,
-                shape_source,
-                shape_gap,
-                shape_flags,
-                shape_sdf_index,
-                shape_edge_range,
-                writer_data,
-                self.total_num_threads,
-            ],
-            outputs=[
-                self.gjk_candidate_pairs,
-                self.gjk_candidate_pairs_count,
-                self.shape_pairs_mesh,
-                self.shape_pairs_mesh_count,
-                self.shape_pairs_mesh_plane,
-                self.shape_pairs_mesh_plane_cumsum,
-                self.shape_pairs_mesh_plane_count,
-                self.mesh_plane_vertex_total_count,
-                self.shape_pairs_mesh_mesh,
-                self.shape_pairs_mesh_mesh_count,
-                self.shape_pairs_sdf_sdf,
-                self.shape_pairs_sdf_sdf_count,
-            ],
-            device=device,
-            block_dim=self.block_dim,
-            record_tape=False,
-        )
+        if not self.all_pairs_generic_convex:
+            wp.launch(
+                kernel=self.primitive_kernel,
+                dim=self.total_num_threads,
+                inputs=[
+                    candidate_pair,
+                    candidate_pair_count,
+                    shape_types,
+                    shape_data,
+                    shape_transform,
+                    shape_source,
+                    shape_gap,
+                    shape_flags,
+                    shape_sdf_index,
+                    shape_edge_range,
+                    writer_data,
+                    self.total_num_threads,
+                ],
+                outputs=[
+                    self.gjk_candidate_pairs,
+                    self.gjk_candidate_pairs_count,
+                    self.shape_pairs_mesh,
+                    self.shape_pairs_mesh_count,
+                    self.shape_pairs_mesh_plane,
+                    self.shape_pairs_mesh_plane_cumsum,
+                    self.shape_pairs_mesh_plane_count,
+                    self.mesh_plane_vertex_total_count,
+                    self.shape_pairs_mesh_mesh,
+                    self.shape_pairs_mesh_mesh_count,
+                    self.shape_pairs_sdf_sdf,
+                    self.shape_pairs_sdf_sdf_count,
+                ],
+                device=device,
+                block_dim=self.block_dim,
+                record_tape=False,
+            )
 
         # Stage 2: Launch GJK/MPR only when complete scene topology can produce
         # generic convex pairs, so graph capture contains no empty stage.
         if self.has_generic_convex_pairs:
             wp.launch(
-                kernel=self.narrow_phase_kernel,
+                kernel=self.narrow_phase_kernel_direct if self.all_pairs_generic_convex else self.narrow_phase_kernel,
                 dim=self.total_num_threads,
                 inputs=[
-                    self.gjk_candidate_pairs,
-                    self.gjk_candidate_pairs_count,
+                    candidate_pair if self.all_pairs_generic_convex else self.gjk_candidate_pairs,
+                    candidate_pair_count if self.all_pairs_generic_convex else self.gjk_candidate_pairs_count,
                     shape_types,
                     shape_data,
                     shape_transform,
