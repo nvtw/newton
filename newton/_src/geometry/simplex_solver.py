@@ -390,7 +390,7 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
             # Use BtoA directly (Minkowski difference)
             w_v = w.BtoA
             delta_dist = wp.dot(v, v - w_v)
-            if delta_dist < COLLIDE_EPSILON * wp.sqrt(dist_sq):
+            if delta_dist <= 0.0 or delta_dist * delta_dist < (COLLIDE_EPSILON * COLLIDE_EPSILON * dist_sq):
                 break
 
             # Check for duplicate vertex (numerical stalling)
