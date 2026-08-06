@@ -1490,7 +1490,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # but contacts are written directly to global buffer + hashtable.
     # =========================================================================
 
-    @wp.kernel(enable_backward=False, module=_module)
+    @wp.kernel(enable_backward=False, launch_bounds=(256, 2), module=_module)
     def mesh_sdf_collision_global_reduce_kernel(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],

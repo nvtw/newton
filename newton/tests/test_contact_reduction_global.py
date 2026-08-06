@@ -145,7 +145,9 @@ def test_basic_contact_storage(test, device):
     test.assertEqual(get_contact_count(reducer), 1)
 
     # Check stored data
-    pd = reducer.position_depth.numpy()[0]
+    position_depth = reducer.position_depth.numpy()
+    test.assertTrue(np.array_equal(position_depth[0], np.zeros(4)), "Contact ID zero must remain reserved")
+    pd = position_depth[1]
     test.assertAlmostEqual(pd[0], 1.0)
     test.assertAlmostEqual(pd[1], 2.0)
     test.assertAlmostEqual(pd[2], 3.0)
@@ -576,6 +578,11 @@ def test_export_reduced_contacts_kernel(test, device):
             make_contact_key(10, 110, 0), reducer_data.ht_keys, reducer_data.ht_active_slots
         )
         reducer_data.ht_values[entry_idx] = _make_contact_value_fast(1.0, 30, contact_a)
+
+        sentinel_entry_idx = hashtable_find_or_insert(
+            make_contact_key(11, 111, 0), reducer_data.ht_keys, reducer_data.ht_active_slots
+        )
+        reducer_data.ht_values[sentinel_entry_idx] = _make_contact_value_fast(2.0, 0, 0)
         reducer_data.ht_values[reducer_data.ht_capacity + entry_idx] = _make_contact_value_fast(1.0, 20, contact_b)
         reducer_data.ht_values[2 * reducer_data.ht_capacity + entry_idx] = _make_contact_value_fast(1.0, 10, contact_c)
         reducer_data.ht_values[3 * reducer_data.ht_capacity + entry_idx] = _make_contact_value_fast(1.0, 30, contact_a)
@@ -639,8 +646,8 @@ def test_export_reduced_contacts_kernel(test, device):
         block_dim=EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
     )
 
-    # Verify output: five distinct pairs plus one representative from the
-    # numerically equivalent winner pair.
+    # Verify output: ID zero is skipped, leaving five distinct pairs plus one
+    # representative from the numerically equivalent winner pair.
     num_exported = int(contact_count_out.numpy()[0])
     test.assertEqual(num_exported, 6)
     pairs = contact_pair_out.numpy()[:num_exported]

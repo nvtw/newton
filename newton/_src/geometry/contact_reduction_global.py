@@ -215,6 +215,21 @@ def reduction_update_slot(
 
 
 @wp.func
+def reduction_try_update_slot(
+    entry_idx: int,
+    slot_id: int,
+    value: wp.uint64,
+    values: wp.array[wp.uint64],
+    capacity: int,
+) -> bool:
+    """Atomically update a slot and report whether this thread improved it."""
+    value_idx = slot_id * capacity + entry_idx
+    if values[value_idx] >= value:
+        return False
+    return wp.atomic_max(values, value_idx, value) < value
+
+
+@wp.func
 def reduction_insert_slot(
     key: wp.uint64,
     slot_id: int,
@@ -869,9 +884,9 @@ class GlobalContactReducer:
             raise ValueError(f"hashtable_size_factor must be > 0.0, got {hashtable_size_factor}")
 
         max_det_contacts = 1 << int(CONTACT_ID_BITS)
-        if deterministic and capacity > max_det_contacts:
+        if deterministic and capacity >= max_det_contacts:
             raise ValueError(
-                f"Deterministic contact packing supports at most {max_det_contacts} "
+                f"Deterministic contact packing supports at most {max_det_contacts - 1} "
                 f"buffered contacts ({int(CONTACT_ID_BITS)}-bit contact_id), "
                 f"but capacity={capacity}. Reduce max_triangle_pairs or disable "
                 f"deterministic mode."
@@ -885,22 +900,25 @@ class GlobalContactReducer:
         self.values_per_key = NUM_SPATIAL_DIRECTIONS + 1
 
         # Contact buffer (struct of arrays)
-        self.position_depth = wp.zeros(capacity, dtype=wp.vec4, device=device)
-        self.normal = wp.zeros(capacity, dtype=wp.vec2, device=device)  # Octahedral-encoded normals
-        self.shape_pairs = wp.zeros(capacity, dtype=wp.vec2i, device=device)
-        self.contact_fingerprints = wp.zeros(capacity, dtype=wp.int32, device=device)
+        # ID zero is reserved for provisional winners; real contacts use the
+        # remaining ``capacity`` elements with one-based IDs.
+        buffer_size = capacity + 1
+        self.position_depth = wp.zeros(buffer_size, dtype=wp.vec4, device=device)
+        self.normal = wp.zeros(buffer_size, dtype=wp.vec2, device=device)  # Octahedral-encoded normals
+        self.shape_pairs = wp.zeros(buffer_size, dtype=wp.vec2i, device=device)
+        self.contact_fingerprints = wp.zeros(buffer_size, dtype=wp.int32, device=device)
 
         # Optional hydroelastic data arrays
         if store_hydroelastic_data:
-            self.contact_area = wp.zeros(capacity, dtype=wp.float32, device=device)
-            self.contact_nbin_entry = wp.zeros(capacity, dtype=wp.int32, device=device)
+            self.contact_area = wp.zeros(buffer_size, dtype=wp.float32, device=device)
+            self.contact_nbin_entry = wp.zeros(buffer_size, dtype=wp.int32, device=device)
         else:
             self.contact_area = wp.zeros(0, dtype=wp.float32, device=device)
             self.contact_nbin_entry = wp.zeros(0, dtype=wp.int32, device=device)
 
         # Generic reduction deduplicates cross-entry winners during export.
         # Hydroelastic reduction intentionally preserves and source-tags them.
-        self.exported_flags = wp.zeros(0 if store_hydroelastic_data else capacity, dtype=wp.int32, device=device)
+        self.exported_flags = wp.zeros(0 if store_hydroelastic_data else buffer_size, dtype=wp.int32, device=device)
 
         # Atomic counter for contact allocation
         self.contact_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -1071,9 +1089,10 @@ def export_contact_to_buffer(
     """
     # Allocate contact slot.  On overflow, contact_count keeps incrementing
     # past capacity so (contact_count - capacity) gives the drop count.
-    contact_id = wp.atomic_add(reducer_data.contact_count, 0, 1)
-    if contact_id >= reducer_data.capacity:
+    buffer_idx = wp.atomic_add(reducer_data.contact_count, 0, 1)
+    if buffer_idx >= reducer_data.capacity:
         return -1
+    contact_id = buffer_idx + 1  # ID zero is reserved for provisional winners.
 
     # Store contact data (packed into vec4, normal octahedral-encoded into vec2)
     reducer_data.position_depth[contact_id] = wp.vec4(position[0], position[1], position[2], depth)
@@ -1440,6 +1459,69 @@ def export_and_reduce_contact_centered_two_spatial_depths(
     if not might_win:
         return -1
 
+    # Compete with reserved ID zero before materializing contact geometry, so
+    # stale pre-prune survivors consume no buffer space.
+    if use_inner and voxel_entry_idx < 0:
+        voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+
+    won_any = False
+    if use_inner and entry_idx >= 0:
+        for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
+            dir_2d = get_spatial_direction_2d(dir_i)
+            score = wp.dot(pos_2d, dir_2d)
+            provisional_value = make_spatial_contact_value(score, True, fingerprint, 0, reducer_data.deterministic)
+            if reduction_try_update_slot(entry_idx, dir_i, provisional_value, reducer_data.ht_values, ht_capacity):
+                won_any = True
+
+        provisional_value = make_contact_value(-depth, fingerprint, 0, reducer_data.deterministic)
+        if reduction_try_update_slot(
+            entry_idx,
+            wp.static(NUM_SPATIAL_DIRECTIONS),
+            provisional_value,
+            reducer_data.ht_values,
+            ht_capacity,
+        ):
+            won_any = True
+    elif entry_idx >= 0:
+        for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
+            dir_2d = get_spatial_direction_2d(dir_i)
+            score = wp.dot(pos_2d, dir_2d)
+            provisional_value = make_spatial_contact_value(score, False, fingerprint, 0, reducer_data.deterministic)
+            if reduction_try_update_slot(entry_idx, dir_i, provisional_value, reducer_data.ht_values, ht_capacity):
+                won_any = True
+
+    if use_inner and voxel_entry_idx >= 0:
+        provisional_value = make_contact_value(-depth, fingerprint, 0, reducer_data.deterministic)
+        if reduction_try_update_slot(
+            voxel_entry_idx, voxel_local_slot, provisional_value, reducer_data.ht_values, ht_capacity
+        ):
+            won_any = True
+
+    if not won_any:
+        return -1
+
+    # Avoid allocating candidates superseded during their own slot updates.
+    still_wins = False
+    if entry_idx >= 0:
+        for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
+            dir_2d = get_spatial_direction_2d(dir_i)
+            score = wp.dot(pos_2d, dir_2d)
+            provisional_value = make_spatial_contact_value(score, use_inner, fingerprint, 0, reducer_data.deterministic)
+            if reducer_data.ht_values[dir_i * ht_capacity + entry_idx] == provisional_value:
+                still_wins = True
+
+        if use_inner:
+            provisional_value = make_contact_value(-depth, fingerprint, 0, reducer_data.deterministic)
+            if reducer_data.ht_values[wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + entry_idx] == provisional_value:
+                still_wins = True
+
+    if use_inner and voxel_entry_idx >= 0:
+        provisional_value = make_contact_value(-depth, fingerprint, 0, reducer_data.deterministic)
+        if reducer_data.ht_values[voxel_local_slot * ht_capacity + voxel_entry_idx] == provisional_value:
+            still_wins = True
+
+    if not still_wins:
+        return -1
     contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, fingerprint, reducer_data)
     if contact_id < 0:
         return -1
@@ -1503,7 +1585,7 @@ def reduce_buffered_contacts_kernel(
     # Grid stride loop over contacts
     for i in range(tid, num_contacts, total_num_threads):
         reduce_contact_in_hashtable(
-            i,
+            i + 1,
             reducer_data,
             wp.static(BETA_THRESHOLD),
             shape_transform,
@@ -1698,6 +1780,8 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                         continue
 
                     contact_id = unpack_contact_id(value, deterministic)
+                    if contact_id == 0:
+                        continue
                     if is_contact_already_exported(contact_id, exported_ids, num_exported):
                         continue
                     exported_ids[num_exported] = contact_id
