@@ -179,7 +179,8 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         # the non-primary components are zero; any vertex on that face
         # is an equally valid support point, so biasing toward +1 is
         # correct and keeps MPR's initial portal construction stable.
-        threshold = BOX_SUPPORT_DEADBAND * wp.length(direction)
+        direction_scale = wp.max(wp.abs(direction[0]), wp.max(wp.abs(direction[1]), wp.abs(direction[2])))
+        threshold = BOX_SUPPORT_DEADBAND * direction_scale
         sx = 1.0 if direction[0] >= -threshold else -1.0
         sy = 1.0 if direction[1] >= -threshold else -1.0
         sz = 1.0 if direction[2] >= -threshold else -1.0
@@ -329,7 +330,8 @@ def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: 
         result = wp.cw_mul(mesh.points[best_idx], geom.scale)
 
     elif geom.shape_type == GeoType.BOX:
-        threshold = BOX_SUPPORT_DEADBAND * wp.length(direction)
+        direction_scale = wp.max(wp.abs(direction[0]), wp.max(wp.abs(direction[1]), wp.abs(direction[2])))
+        threshold = BOX_SUPPORT_DEADBAND * direction_scale
         sx = 1.0 if direction[0] >= -threshold else -1.0
         sy = 1.0 if direction[1] >= -threshold else -1.0
         sz = 1.0 if direction[2] >= -threshold else -1.0
