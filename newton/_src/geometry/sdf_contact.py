@@ -64,6 +64,18 @@ MESH_SDF_BLOCK_DIM = 256
 STACK_CAPACITY = 2 * MESH_SDF_BLOCK_DIM
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __frsqrt_rn(value);
+#else
+return 1.0f / sqrtf(value);
+#endif
+""")
+def _sdf_rsqrt_rn(value: float) -> float:
+    """Return a round-to-nearest reciprocal square root."""
+    ...
+
+
 @wp.func
 def mesh_sdf_contact_search_precision(
     inner_contact_threshold: float,
@@ -1383,14 +1395,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 point_world = wp.transform_point(X_sdf_ws, point)
 
                                 direction_world = wp.transform_vector(X_sdf_ws, direction)
-                                direction_len = wp.length(direction_world)
-                                if direction_len > 0.0:
-                                    direction_world = direction_world / direction_len
+                                direction_len_sq = wp.length_sq(direction_world)
+                                if direction_len_sq > 0.0:
+                                    direction_world = direction_world * _sdf_rsqrt_rn(direction_len_sq)
                                 else:
                                     fallback_dir = point_world - wp.transform_get_translation(X_sdf_ws)
-                                    fallback_len = wp.length(fallback_dir)
-                                    if fallback_len > 0.0:
-                                        direction_world = fallback_dir / fallback_len
+                                    fallback_len_sq = wp.length_sq(fallback_dir)
+                                    if fallback_len_sq > 0.0:
+                                        direction_world = fallback_dir * _sdf_rsqrt_rn(fallback_len_sq)
                                     else:
                                         direction_world = wp.vec3(0.0, 1.0, 0.0)
 
@@ -1804,14 +1816,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 point_world = wp.transform_point(X_sdf_ws, point)
 
                                 direction_world = wp.transform_vector(X_sdf_ws, direction)
-                                direction_len = wp.length(direction_world)
-                                if direction_len > 0.0:
-                                    direction_world = direction_world / direction_len
+                                direction_len_sq = wp.length_sq(direction_world)
+                                if direction_len_sq > 0.0:
+                                    direction_world = direction_world * _sdf_rsqrt_rn(direction_len_sq)
                                 else:
                                     fallback_dir = point_world - wp.transform_get_translation(X_sdf_ws)
-                                    fallback_len = wp.length(fallback_dir)
-                                    if fallback_len > 0.0:
-                                        direction_world = fallback_dir / fallback_len
+                                    fallback_len_sq = wp.length_sq(fallback_dir)
+                                    if fallback_len_sq > 0.0:
+                                        direction_world = fallback_dir * _sdf_rsqrt_rn(fallback_len_sq)
                                     else:
                                         direction_world = wp.vec3(0.0, 1.0, 0.0)
 

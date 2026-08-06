@@ -128,9 +128,7 @@ def filter_fully_inward_edges(mesh: Mesh, edge_indices: np.ndarray) -> np.ndarra
         if not topology_valid or len(neighbors) < 3:
             continue
         if any(
-            len(link[neighbor]) != 2
-            or previous_count.get(neighbor) != 1
-            or next_count.get(neighbor) != 1
+            len(link[neighbor]) != 2 or previous_count.get(neighbor) != 1 or next_count.get(neighbor) != 1
             for neighbor in neighbors
         ):
             continue
@@ -171,14 +169,10 @@ def filter_fully_inward_edges(mesh: Mesh, edge_indices: np.ndarray) -> np.ndarra
         edge = orig_edges[slots[0]]
         canonical_a, canonical_b = sorted((int(canonical[edge[0]]), int(canonical[edge[1]])))
         opposite_a = [
-            int(vertex)
-            for vertex in triangles[tri_a]
-            if int(canonical[vertex]) not in (canonical_a, canonical_b)
+            int(vertex) for vertex in triangles[tri_a] if int(canonical[vertex]) not in (canonical_a, canonical_b)
         ]
         opposite_b = [
-            int(vertex)
-            for vertex in triangles[tri_b]
-            if int(canonical[vertex]) not in (canonical_a, canonical_b)
+            int(vertex) for vertex in triangles[tri_b] if int(canonical[vertex]) not in (canonical_a, canonical_b)
         ]
         if len(opposite_a) != 1 or len(opposite_b) != 1:
             continue
