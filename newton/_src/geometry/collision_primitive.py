@@ -276,6 +276,24 @@ def collide_capsule_capsule(
 
 
 @wp.func
+def _collide_plane_capsule_contacts(
+    plane_normal: wp.vec3,
+    plane_pos: wp.vec3,
+    capsule_pos: wp.vec3,
+    capsule_axis: wp.vec3,
+    capsule_radius: float,
+    capsule_half_length: float,
+) -> tuple[float, wp.vec3, float, wp.vec3]:
+    """Compute scalar contacts shared by pipeline and public aggregate APIs."""
+    segment = capsule_axis * capsule_half_length
+
+    dist0, pos0 = collide_plane_sphere(plane_normal, plane_pos, capsule_pos + segment, capsule_radius)
+    dist1, pos1 = collide_plane_sphere(plane_normal, plane_pos, capsule_pos - segment, capsule_radius)
+
+    return dist0, pos0, dist1, pos1
+
+
+@wp.func
 def collide_plane_capsule(
     # In:
     plane_normal: wp.vec3,
@@ -316,13 +334,14 @@ def collide_plane_capsule(
 
     c = wp.cross(n, b)
     frame = wp.mat33(n[0], n[1], n[2], b[0], b[1], b[2], c[0], c[1], c[2])
-    segment = axis * capsule_half_length
-
-    # First contact (positive end of capsule)
-    dist1, pos1 = collide_plane_sphere(n, plane_pos, capsule_pos + segment, capsule_radius)
-
-    # Second contact (negative end of capsule)
-    dist2, pos2 = collide_plane_sphere(n, plane_pos, capsule_pos - segment, capsule_radius)
+    dist1, pos1, dist2, pos2 = _collide_plane_capsule_contacts(
+        n,
+        plane_pos,
+        capsule_pos,
+        axis,
+        capsule_radius,
+        capsule_half_length,
+    )
 
     dist = wp.vec2(dist1, dist2)
     pos = _mat23f(pos1[0], pos1[1], pos1[2], pos2[0], pos2[1], pos2[2])

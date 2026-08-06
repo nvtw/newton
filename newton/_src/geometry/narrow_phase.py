@@ -20,9 +20,9 @@ from ..geometry.collision_core import (
     post_process_minkowski_only,
 )
 from ..geometry.collision_primitive import (
+    _collide_plane_capsule_contacts,
     collide_capsule_capsule,
     collide_plane_box,
-    collide_plane_capsule,
     collide_plane_cylinder,
     collide_plane_ellipsoid,
     collide_plane_sphere,
@@ -446,14 +446,15 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                 capsule_radius = scale_b[0]
                 capsule_half_length = scale_b[1]
 
-                dists, positions, _frame = collide_plane_capsule(
-                    plane_normal, pos_a, pos_b, capsule_axis, capsule_radius, capsule_half_length
+                contact_dist_0, contact_pos_0, contact_dist_1, contact_pos_1 = _collide_plane_capsule_contacts(
+                    plane_normal,
+                    pos_a,
+                    pos_b,
+                    capsule_axis,
+                    capsule_radius,
+                    capsule_half_length,
                 )
 
-                contact_dist_0 = dists[0]
-                contact_dist_1 = dists[1]
-                contact_pos_0 = wp.vec3(positions[0, 0], positions[0, 1], positions[0, 2])
-                contact_pos_1 = wp.vec3(positions[1, 0], positions[1, 1], positions[1, 2])
                 contact_normal = plane_normal
 
             # -----------------------------------------------------------------
