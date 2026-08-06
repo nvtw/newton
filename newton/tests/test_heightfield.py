@@ -482,6 +482,10 @@ class TestHeightfield(unittest.TestCase):
 
         contact_count = int(contacts.rigid_contact_count.numpy()[0])
         self.assertGreater(contact_count, 0, "No contacts between SDF mesh and heightfield")
+        normals = contacts.rigid_contact_normal.numpy()[:contact_count]
+        self.assertTrue(np.isfinite(normals).all())
+        np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1.0, rtol=0.0, atol=1.0e-6)
+        self.assertGreater(np.min(normals[:, 2]), 0.99)
 
     @unittest.skipUnless(_cuda_available, "mesh-heightfield collision requires CUDA")
     def test_non_convex_mesh_vs_heightfield_no_contact(self):
