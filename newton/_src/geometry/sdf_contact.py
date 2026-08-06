@@ -795,6 +795,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
             use_parabolic = False
             p_num = float(0.0)
             q_denom = float(0.0)
+            trial = float(0.0)
 
             if wp.abs(e_step) > tol:
                 r = (x - w) * (fx - fv)
@@ -815,7 +816,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
 
             if use_parabolic:
                 e_step = d_step
-                d_step = p_num / q_denom
+                d_step = trial
             else:
                 # Golden section step
                 if x >= m:
