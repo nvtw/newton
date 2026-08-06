@@ -2830,7 +2830,8 @@ def test_static_empty_gjk_specialization_under_graph_capture(test, device):
     with wp.ScopedCapture(device=device) as capture:
         specialized.collide(state, contacts)
         reference.collide(state, reference_contacts)
-    wp.capture_launch(capture.graph)
+    for _ in range(2):
+        wp.capture_launch(capture.graph)
 
     active = int(contacts.rigid_contact_count.numpy()[0])
     test.assertGreater(active, 0)

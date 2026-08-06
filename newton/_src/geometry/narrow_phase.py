@@ -1902,7 +1902,13 @@ class NarrowPhase:
             shape_edge_range = self._empty_edge_range
 
         # Clear all counters with a single kernel launch (consolidated counter array)
-        self._counter_array.zero_()
+        if (
+            self.has_generic_convex_pairs
+            or self.has_meshes
+            or self.has_heightfields
+            or self.hydroelastic_sdf is not None
+        ):
+            self._counter_array.zero_()
 
         # Stage 1: Launch primitive kernel for fast analytical collisions
         # This handles sphere-sphere, sphere-capsule, capsule-capsule, plane-sphere, plane-capsule
