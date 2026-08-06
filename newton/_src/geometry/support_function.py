@@ -262,7 +262,7 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Suppo
         dir_xy_len_sq = wp.length_sq(dir_xy)
 
         if dir_xy_len_sq > eps:
-            n_xy = wp.normalize(dir_xy)
+            n_xy = dir_xy * _support_rsqrt_rn(dir_xy_len_sq)
             lateral_point = wp.vec3(n_xy[0] * radius, n_xy[1] * radius, 0.0)
         else:
             lateral_point = wp.vec3(radius, 0.0, 0.0)
