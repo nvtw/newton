@@ -273,6 +273,7 @@ def compute_shape_aabbs(
             geom_scale = wp.vec3(scale[0] * 0.5, scale[1] * 0.5, 0.0)
         shape_data.scale = geom_scale
         shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+        shape_data.center = wp.vec3(0.0, 0.0, 0.0)
 
         # For CONVEX_MESH, pack the mesh pointer
         if geo_type == GeoType.CONVEX_MESH:

@@ -654,6 +654,8 @@ def create_narrow_phase_kernel_gjk_mpr(
         shape_collision_radius: wp.array[float],
         shape_aabb_lower: wp.array[wp.vec3],
         shape_aabb_upper: wp.array[wp.vec3],
+        shape_collision_aabb_lower: wp.array[wp.vec3],
+        shape_collision_aabb_upper: wp.array[wp.vec3],
         writer_data: Any,
         total_num_threads: int,
     ):
@@ -692,6 +694,10 @@ def create_narrow_phase_kernel_gjk_mpr(
             pos_b, quat_b, shape_data_b, scale_b, margin_offset_b = extract_shape_data(
                 shape_b, shape_transform, shape_types, shape_data, shape_source
             )
+            if type_a == GeoType.CONVEX_MESH:
+                shape_data_a.center = 0.5 * (shape_collision_aabb_lower[shape_a] + shape_collision_aabb_upper[shape_a])
+            if type_b == GeoType.CONVEX_MESH:
+                shape_data_b.center = 0.5 * (shape_collision_aabb_lower[shape_b] + shape_collision_aabb_upper[shape_b])
 
             # Check for infinite planes
             is_infinite_plane_a = (type_a == GeoType.PLANE) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
@@ -1934,6 +1940,8 @@ class NarrowPhase:
                 shape_collision_radius,
                 self.shape_aabb_lower,
                 self.shape_aabb_upper,
+                shape_collision_aabb_lower,
+                shape_collision_aabb_upper,
                 writer_data,
                 self.total_num_threads,
             ],
