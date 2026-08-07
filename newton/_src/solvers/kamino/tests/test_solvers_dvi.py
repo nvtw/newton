@@ -31,6 +31,9 @@ from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     _solve_dvi_inequalities_colored_pgs,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.projections import (
+    contact_friction_normal_load as _contact_friction_normal_load,
+)
+from newton._src.solvers.kamino._src.solvers.dvi.projections import (
     project_contact_tangent_update as _project_contact_tangent_update,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
@@ -71,6 +74,25 @@ def _project_contact_tangent_for_test(
         wp.float32(0.0),
         wp.float32(1.0),
         lambda_max,
+    )
+
+
+@wp.kernel
+def _contact_friction_normal_load_for_test(
+    lambda_n: wp.float32,
+    bias_n: wp.float32,
+    preconditioner_n: wp.float32,
+    diagonal_n: wp.float32,
+    result: wp.array[wp.float32],
+):
+    """Evaluate the unbiased DVI friction load in a test kernel."""
+    result[0] = _contact_friction_normal_load(
+        lambda_n,
+        bias_n,
+        preconditioner_n,
+        diagonal_n,
+        wp.float32(0.0),
+        wp.float32(1.0),
     )
 
 
@@ -775,6 +797,7 @@ class TestDVISolver(unittest.TestCase):
                     float_array([0.0]),  # problem_mu
                     float_array([1.0]),  # problem_P
                     float_array([-1.0]),  # problem_v_f
+                    float_array([0.0]),  # problem_v_b
                     float_array([1.0]),  # problem_diag
                     float_array([0.0]),  # eta
                     int32_array([1]),  # inequality_num_colors
@@ -969,6 +992,29 @@ class TestDVISolver(unittest.TestCase):
         repeated_lambdas = solver.data.solution.lambdas.numpy()
         actual_repeated_lambdas = np.stack([repeated_lambdas[offset : offset + 3] for offset in contact_offsets])
         np.testing.assert_allclose(actual_repeated_lambdas, expected_lambdas, atol=1.0e-7, rtol=1.0e-6)
+
+    def test_03ic_dvi_excludes_penetration_recovery_from_friction_load(self):
+        """Exclude penetration-recovery impulses from the Coulomb friction load."""
+        result = wp.empty(1, dtype=wp.float32, device=self.device)
+
+        def evaluate(bias: float) -> float:
+            wp.launch(
+                kernel=_contact_friction_normal_load_for_test,
+                dim=1,
+                inputs=[
+                    wp.float32(3.0),
+                    wp.float32(bias),
+                    wp.float32(0.5),
+                    wp.float32(2.0),
+                    result,
+                ],
+                device=self.device,
+            )
+            return float(result.numpy()[0])
+
+        self.assertAlmostEqual(evaluate(-2.0), 2.5)
+        self.assertAlmostEqual(evaluate(2.0), 3.0)
+        self.assertAlmostEqual(evaluate(-20.0), 0.0)
 
     def test_03j_dvi_omega_scales_projected_updates_without_moving_the_solution(self):
         """Relax projected updates by `omega` while preserving the fixed point.
@@ -2592,6 +2638,55 @@ class TestDVISolver(unittest.TestCase):
                 self.assertGreater(int(solver_dvi.data.state.inequality_num_colors.numpy()[0]), 0)
                 np.testing.assert_allclose(velocities, initial_speed, rtol=0.0, atol=1.0e-6)
                 self.assertLessEqual(max_tangent_impulse, 1.0e-8)
+
+    def test_08ca_dvi_penetration_recovery_does_not_lock_tangent_motion(self):
+        """Keep penetration recovery from creating artificial static friction."""
+        friction = 0.5
+        dt = 1.0e-3
+        applied_force = 300.0
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(mu=friction, gap=0.0, margin=0.0)
+        body = builder.add_link(
+            xform=wp.transformf((0.0, 0.0, 0.05), wp.quat_identity()),
+            mass=1.0,
+        )
+        builder.add_shape_sphere(body=body, radius=0.1, cfg=shape_cfg)
+        joint = builder.add_joint_free(parent=-1, child=body)
+        builder.add_articulation([joint])
+        builder.add_ground_plane(cfg=shape_cfg)
+        model = builder.finalize(device=self.device)
+        body_force = np.zeros((model.body_count, 6), dtype=np.float32)
+        body_force[body, 0] = applied_force
+
+        slips = []
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    use_collision_detector=True,
+                    sparse_dynamics=sparse,
+                    sparse_jacobian=sparse,
+                    collision_detector=kamino_config.CollisionDetectorConfig(
+                        max_contacts=16,
+                        max_contacts_per_world=16,
+                        max_contacts_per_pair=8,
+                    ),
+                )
+                solver = SolverKamino(model, config=config)
+                state_0 = model.state()
+                state_1 = model.state()
+                state_0.body_f.assign(body_force)
+                solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+
+                self.assertEqual(int(solver._contacts_kamino.world_active_contacts.numpy()[0]), 1)
+                body_qd = state_1.body_qd.numpy()[body]
+                slip = float(body_qd[0] - 0.1 * body_qd[4])
+                slips.append(slip)
+                self.assertGreater(slip, 0.02)
+
+        self.assertAlmostEqual(slips[0], slips[1], delta=1.0e-6)
 
     def test_08d_dvi_kinetic_friction_matches_coulomb_deceleration(self):
         """Match analytic Coulomb deceleration for a sliding box."""

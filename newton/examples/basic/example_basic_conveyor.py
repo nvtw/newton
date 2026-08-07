@@ -157,7 +157,7 @@ class Example:
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 2 if solver_type == "kamino" else 10
+        self.sim_substeps = 4 if solver_type == "kamino" else 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.viewer = viewer
@@ -272,25 +272,24 @@ class Example:
         )
         self.belt_collision_shapes = [self.belt_shape]
         if solver_type == "kamino":
+            # A union of box segments exposes internal side faces at its seams;
+            # the rails keep bags on the annulus, so one plane is the exact
+            # collision surface needed for the belt top.
             belt_collision_cfg = belt_cfg.copy()
             belt_collision_cfg.is_visible = False
-            belt_collision_segments = 24
-            belt_segment_half_length = 1.05 * math.pi * BELT_RING_RADIUS / belt_collision_segments
-            self.belt_collision_shapes = []
-            for segment in range(belt_collision_segments):
-                angle = 2.0 * math.pi * segment / belt_collision_segments
-                belt_collision_shape = builder.add_shape_box(
-                    self.belt_body,
-                    hx=belt_segment_half_length,
-                    hy=BELT_HALF_WIDTH,
-                    hz=BELT_HALF_THICKNESS,
+            self.belt_collision_shapes = [
+                builder.add_shape_plane(
+                    body=self.belt_body,
                     xform=wp.transform(
-                        p=wp.vec3(BELT_RING_RADIUS * math.cos(angle), BELT_RING_RADIUS * math.sin(angle), 0.0),
-                        q=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), angle + 0.5 * math.pi),
+                        p=wp.vec3(0.0, 0.0, BELT_HALF_THICKNESS),
+                        q=wp.quat_identity(),
                     ),
+                    width=0.0,
+                    length=0.0,
                     cfg=belt_collision_cfg,
+                    label="conveyor_belt_collision_plane",
                 )
-                self.belt_collision_shapes.append(belt_collision_shape)
+            ]
         self.belt_joint = builder.add_joint_revolute(
             parent=-1,
             child=self.belt_body,
@@ -480,7 +479,7 @@ class Example:
             y = float(body_q[body_idx][1])
             z = float(body_q[body_idx][2])
             assert np.isfinite(x) and np.isfinite(y) and np.isfinite(z), f"Bag {body_idx} has non-finite pose values."
-            assert z > -0.5, f"Bag body {body_idx} fell through the floor: z={z:.4f}"
+            assert z > BELT_CENTER_Z, f"Bag body {body_idx} fell through the conveyor: z={z:.4f}"
             assert abs(x) < 4.0 and abs(y) < 4.0, f"Bag body {body_idx} left the scene bounds: ({x:.3f}, {y:.3f})"
 
 

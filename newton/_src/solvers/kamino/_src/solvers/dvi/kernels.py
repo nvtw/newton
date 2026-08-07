@@ -10,6 +10,9 @@ import warp as wp
 from ...core.math import FLOAT32_EPS
 from ..padmm.math import project_to_coulomb_cone, project_to_coulomb_dual_cone
 from .projections import (
+    contact_friction_normal_load as _contact_friction_normal_load,
+)
+from .projections import (
     project_contact_normal_update as _project_contact_normal_update,
 )
 from .projections import (
@@ -409,6 +412,8 @@ def _solve_dvi_inequalities_colored_pgs(
     problem_uio: wp.array[int32],
     problem_mu: wp.array[float32],
     problem_D: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_b: wp.array[float32],
     block_iteration: int32,
     inequality_num_colors: wp.array[int32],
     inequality_ids_by_color: wp.array[int32],
@@ -514,7 +519,15 @@ def _solve_dvi_inequalities_colored_pgs(
                                 problem_D[mio + ncts * column + column + int32(1)],
                                 cfg.regularization,
                                 cfg.omega,
-                                problem_mu[cio + cid] * solution_lambdas[vec_idx + int32(2)],
+                                problem_mu[cio + cid]
+                                * _contact_friction_normal_load(
+                                    solution_lambdas[vec_idx + int32(2)],
+                                    problem_v_b[vec_idx + int32(2)],
+                                    problem_P[vec_idx + int32(2)],
+                                    wp.abs(problem_D[mio + ncts * (column + int32(2)) + column + int32(2)]),
+                                    cfg.regularization,
+                                    cfg.omega,
+                                ),
                             )
                             solution_lambdas[vec_idx] = lambda_t_new.x
                             solution_lambdas[vec_idx + int32(1)] = lambda_t_new.y

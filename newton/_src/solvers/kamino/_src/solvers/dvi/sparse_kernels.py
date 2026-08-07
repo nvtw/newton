@@ -11,6 +11,9 @@ from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from .kernels import _FUSED_INEQUALITY_BLOCK, _sync_threads
 from .projections import (
+    contact_friction_normal_load as _contact_friction_normal_load,
+)
+from .projections import (
     project_contact_normal_update as _project_contact_normal_update,
 )
 from .projections import (
@@ -365,6 +368,7 @@ def _solve_dvi_sparse_inequalities_pgs(
     problem_mu: wp.array[float32],
     problem_P: wp.array[float32],
     problem_v_f: wp.array[float32],
+    problem_v_b: wp.array[float32],
     problem_diag: wp.array[float32],
     eta: wp.array[float32],
     inequality_num_colors: wp.array[int32],
@@ -585,7 +589,17 @@ def _solve_dvi_sparse_inequalities_pgs(
                                         off_diagonal,
                                         cfg.regularization,
                                         cfg.omega,
-                                        problem_mu[cio + cid] * solution_lambdas[vec_idx + int32(2)],
+                                        problem_mu[cio + cid]
+                                        * _contact_friction_normal_load(
+                                            solution_lambdas[vec_idx + int32(2)],
+                                            problem_v_b[vec_idx + int32(2)],
+                                            problem_P[vec_idx + int32(2)],
+                                            wp.abs(problem_diag[vec_idx + int32(2)])
+                                            * problem_P[vec_idx + int32(2)]
+                                            * problem_P[vec_idx + int32(2)],
+                                            cfg.regularization,
+                                            cfg.omega,
+                                        ),
                                     )
                                     solution_lambdas[vec_idx] = lambda_t_new.x
                                     solution_lambdas[vec_idx + int32(1)] = lambda_t_new.y

@@ -220,6 +220,7 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             problem.data.mu,
             problem.data.P,
             problem.data.v_f,
+            problem.data.v_b,
             state.scratch,
             delassus.regularization,
             state.inequality_num_colors,
