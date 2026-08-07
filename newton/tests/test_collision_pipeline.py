@@ -2912,6 +2912,33 @@ add_function_test(
     devices=get_cuda_test_devices(),
     check_output=False,
 )
+
+
+def test_separated_analytic_pair_skips_gjk_queue(test, device):
+    """Keep separated analytic pairs out of the generic-convex queue."""
+    builder = newton.ModelBuilder()
+    body = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 5.0)))
+    builder.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
+    builder.add_ground_plane()
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="explicit", verify_buffers=False)
+    test.assertFalse(pipeline.narrow_phase.has_generic_convex_pairs)
+
+    state = model.state()
+    contacts = pipeline.contacts()
+    for _ in range(3):
+        pipeline.collide(state, contacts)
+
+    test.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 0)
+    test.assertEqual(int(pipeline.narrow_phase.gjk_candidate_pairs_count.numpy()[0]), 0)
+
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_separated_analytic_pair_skips_gjk_queue",
+    test_separated_analytic_pair_skips_gjk_queue,
+    devices=get_test_devices(),
+)
 add_function_test(
     TestDeterministicPipeline,
     "test_deterministic_pipeline_500_steps",

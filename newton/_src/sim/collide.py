@@ -188,9 +188,8 @@ def write_contact(
     offset_mag_a = contact_data.radius_eff_a + contact_data.margin_a
     offset_mag_b = contact_data.radius_eff_b + contact_data.margin_b
 
-    # Contact producers guarantee unit normals; normalizing again shifts
-    # witness points by roundoff and adds a square root per contact.
-    contact_normal_a_to_b = contact_data.contact_normal_a_to_b
+    # Distance calculation matching box_plane_collision
+    contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
 
     a_contact_world = contact_data.contact_point_center - contact_normal_a_to_b * (
         0.5 * contact_data.contact_distance + contact_data.radius_eff_a

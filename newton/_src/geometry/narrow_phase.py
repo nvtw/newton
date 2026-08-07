@@ -96,9 +96,7 @@ def write_contact_simple(
         contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.margin_a + contact_data.margin_b
     )
 
-    # Contact producers guarantee unit normals; normalizing again shifts
-    # witness points by roundoff and adds a square root per contact.
-    contact_normal_a_to_b = contact_data.contact_normal_a_to_b
+    contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
 
     a_contact_world = contact_data.contact_point_center - contact_normal_a_to_b * (
         0.5 * contact_data.contact_distance + contact_data.radius_eff_a
@@ -387,11 +385,13 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             contact_pos_2 = wp.vec3()
             contact_pos_3 = wp.vec3()
             contact_normal = wp.vec3()
+            handled_analytically = False
 
             # -----------------------------------------------------------------
             # Plane-Sphere collision (type_a=PLANE=0, type_b=SPHERE=2)
             # -----------------------------------------------------------------
             if is_plane_a and is_sphere_b:
+                handled_analytically = True
                 plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
                 sphere_radius = scale_b[0]
                 contact_dist_0, contact_pos_0 = collide_plane_sphere(plane_normal, pos_a, pos_b, sphere_radius)
@@ -402,6 +402,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Produces 1 contact
             # -----------------------------------------------------------------
             elif is_plane_a and is_ellipsoid_b:
+                handled_analytically = True
                 plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
                 ellipsoid_rot = wp.quat_to_matrix(quat_b)
                 ellipsoid_size = scale_b
@@ -414,6 +415,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Produces up to 4 contacts
             # -----------------------------------------------------------------
             elif is_plane_a and is_box_b:
+                handled_analytically = True
                 plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
                 box_rot = wp.quat_to_matrix(quat_b)
                 box_size = scale_b
@@ -435,6 +437,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Sphere-Sphere collision (type_a=SPHERE=2, type_b=SPHERE=2)
             # -----------------------------------------------------------------
             elif is_sphere_a and is_sphere_b:
+                handled_analytically = True
                 radius_a = scale_a[0]
                 radius_b = scale_b[0]
                 contact_dist_0, contact_pos_0, contact_normal = collide_sphere_sphere(pos_a, radius_a, pos_b, radius_b)
@@ -444,6 +447,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Produces 2 contacts (both share same normal)
             # -----------------------------------------------------------------
             elif is_plane_a and is_capsule_b:
+                handled_analytically = True
                 plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
                 capsule_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
                 capsule_radius = scale_b[0]
@@ -465,6 +469,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Produces up to 4 contacts
             # -----------------------------------------------------------------
             elif is_plane_a and is_cylinder_b:
+                handled_analytically = True
                 plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
                 cylinder_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
                 cylinder_radius = scale_b[0]
@@ -487,6 +492,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Sphere-Capsule collision (type_a=SPHERE=2, type_b=CAPSULE=3)
             # -----------------------------------------------------------------
             elif is_sphere_a and is_capsule_b:
+                handled_analytically = True
                 sphere_radius = scale_a[0]
                 capsule_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
                 capsule_radius = scale_b[0]
@@ -500,6 +506,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Produces 1 contact (non-parallel) or 2 contacts (parallel axes)
             # -----------------------------------------------------------------
             elif is_capsule_a and is_capsule_b:
+                handled_analytically = True
                 axis_a = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
                 axis_b = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
                 radius_a = scale_a[0]
@@ -520,6 +527,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Sphere-Cylinder collision (type_a=SPHERE=2, type_b=CYLINDER=5)
             # -----------------------------------------------------------------
             elif is_sphere_a and is_cylinder_b:
+                handled_analytically = True
                 sphere_radius = scale_a[0]
                 cylinder_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
                 cylinder_radius = scale_b[0]
@@ -532,6 +540,7 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
             # Sphere-Box collision (type_a=SPHERE=2, type_b=BOX=6)
             # -----------------------------------------------------------------
             elif is_sphere_a and is_box_b:
+                handled_analytically = True
                 sphere_radius = scale_a[0]
                 box_rot = wp.quat_to_matrix(quat_b)
                 box_size = scale_b
@@ -626,6 +635,9 @@ def create_narrow_phase_primitive_kernel(writer_func: Any):
                         contact_data.sort_sub_key = 3
                         writer_func(contact_data, writer_data, base_index)
 
+                continue
+
+            if handled_analytically:
                 continue
 
             # =====================================================================
