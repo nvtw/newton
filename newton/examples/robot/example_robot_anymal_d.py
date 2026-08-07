@@ -15,7 +15,7 @@ import warp as wp
 import newton
 import newton.examples
 import newton.utils
-from newton import JointTargetMode
+from newton import JointTargetMode, JointType
 
 
 class Example:
@@ -60,14 +60,29 @@ class Example:
         if len(articulation_builder.joint_q) > 6:
             articulation_builder.joint_q[3:7] = [0.0, 0.0, 0.0, 1.0]
 
-        for i in range(articulation_builder.joint_dof_count):
-            articulation_builder.joint_target_ke[i] = 150
-            articulation_builder.joint_target_kd[i] = 5
-            articulation_builder.joint_target_mode[i] = int(JointTargetMode.POSITION)
+        for joint_id, joint_type in enumerate(articulation_builder.joint_type):
+            if joint_type != JointType.REVOLUTE:
+                continue
+            dof_start = articulation_builder.joint_qd_start[joint_id]
+            dof_end = (
+                articulation_builder.joint_qd_start[joint_id + 1]
+                if joint_id + 1 < articulation_builder.joint_count
+                else articulation_builder.joint_dof_count
+            )
+            for dof_id in range(dof_start, dof_end):
+                articulation_builder.joint_target_ke[dof_id] = 150
+                articulation_builder.joint_target_kd[dof_id] = 5
+                articulation_builder.joint_target_mode[dof_id] = int(JointTargetMode.POSITION)
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         for _ in range(self.world_count):
             builder.add_world(articulation_builder)
+
+        self.root_dof_indices = []
+        for root_joint_id in builder.articulation_start:
+            root_dof_start = builder.joint_qd_start[root_joint_id]
+            root_dof_end = builder.joint_qd_start[root_joint_id + 1]
+            self.root_dof_indices.extend(range(root_dof_start, root_dof_end))
 
         builder.default_shape_cfg.ke = 1.0e3
         builder.default_shape_cfg.kd = 1.0e2
@@ -154,6 +169,16 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
+        """Verify the robot settles without actuating its floating base."""
+        target_mode = self.model.joint_target_mode.numpy()
+        target_ke = self.model.joint_target_ke.numpy()
+        target_kd = self.model.joint_target_kd.numpy()
+        if any(
+            target_mode[dof_id] != int(JointTargetMode.NONE) or target_ke[dof_id] != 0.0 or target_kd[dof_id] != 0.0
+            for dof_id in self.root_dof_indices
+        ):
+            raise AssertionError("floating-base DOFs must remain unactuated")
+
         newton.examples.test_body_state(
             self.model,
             self.state_0,
