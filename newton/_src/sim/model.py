@@ -935,7 +935,11 @@ class Model:
         self.mesh_edge_centers: wp.array[wp.vec4] | None = None
         """Packed shape-scaled collision-edge centers and radii, shape [total_edge_count, 4] [m]."""
         self.mesh_edge_halves: wp.array[wp.vec4] | None = None
-        """Packed shape-scaled half-vectors with alignment padding, shape [total_edge_count, 4] [m]."""
+        """Packed collision-edge half-vectors and corner ownership, shape [total_edge_count, 4].
+
+        Components ``xyz`` are shape-scaled half-vectors [m]. Component ``w``
+        is a unitless internal endpoint-ownership code.
+        """
         self.shape_edge_range: wp.array[wp.vec2i] | None = None
         """Per-shape (start, count) into mesh edge arrays, shape [shape_count]. (-1,0) if no edges."""
         self._shape_mesh_properties: wp.array[wp.int32] | None = None
