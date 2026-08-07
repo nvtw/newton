@@ -16,6 +16,7 @@ from ...kinematics.jacobians import SparseSystemJacobians
 from ...kinematics.limits import LimitsKamino
 from ...linalg import LLTBlockedRCMSolver
 from .kernels import (
+    _FUSED_BILATERAL_BLOCK,
     _FUSED_INEQUALITY_BLOCK,
     _initialize_dvi_status,
     _scatter_bilateral_solution,
@@ -556,8 +557,8 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         device=path.device,
         block_dim=64 if path.device.is_cuda else 1,
     )
-    for block_iteration in range(path.max_alternating_iterations):
-        _launch_sparse_inequality_pgs(path, problem, block_iteration)
+    # The bilateral response is fixed here, so block-local barriers preserve colored GS across all sweeps.
+    _launch_sparse_inequality_pgs(path, problem, _FUSED_BILATERAL_BLOCK)
 
     path.set_bilateral_active_dim(problem, -1)
     _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)

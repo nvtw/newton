@@ -9,7 +9,7 @@ import warp as wp
 
 from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
-from .kernels import _FUSED_INEQUALITY_BLOCK, _sync_threads
+from .kernels import _FUSED_BILATERAL_BLOCK, _FUSED_INEQUALITY_BLOCK, _sync_threads
 from .projections import (
     contact_friction_normal_load as _contact_friction_normal_load,
 )
@@ -460,6 +460,8 @@ def _solve_dvi_sparse_inequalities_pgs(
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
         sweep_count *= cfg.max_alternating_iterations
         first_tangent_sweep = sweep_count / int32(2)
+    elif block_iteration == int32(_FUSED_BILATERAL_BLOCK):
+        sweep_count *= cfg.max_alternating_iterations
     for _sweep in range(sweep_count):
         phase_count = int32(2)
         if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and _sweep < sweep_count / int32(2):
@@ -467,7 +469,10 @@ def _solve_dvi_sparse_inequalities_pgs(
             phase_count = int32(1)
         for phase in range(phase_count):
             # Symmetric tangent ordering reduces load bias in redundant sticking patches.
-            reverse_colors = phase == int32(1) and _sweep % int32(2) != int32(0)
+            schedule_sweep = _sweep
+            if block_iteration == int32(_FUSED_BILATERAL_BLOCK):
+                schedule_sweep = _sweep % cfg.inequality_sweeps_per_iteration
+            reverse_colors = phase == int32(1) and schedule_sweep % int32(2) != int32(0)
             num_colors = inequality_num_colors[wid]
             for color_index in range(num_colors):
                 color = color_index

@@ -27,6 +27,7 @@ int32 = wp.int32
 vec3f = wp.vec3f
 
 _FUSED_INEQUALITY_BLOCK = -2
+_FUSED_BILATERAL_BLOCK = -3
 
 
 @wp.func
