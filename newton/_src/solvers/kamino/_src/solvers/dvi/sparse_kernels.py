@@ -470,13 +470,14 @@ def _solve_dvi_sparse_inequalities_pgs(
     sweep_count = cfg.inequality_sweeps_per_iteration
     first_tangent_sweep = int32(0)
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
-        sweep_count *= cfg.max_alternating_iterations
-        first_tangent_sweep = sweep_count / int32(2)
+        tangent_sweep_count = sweep_count * cfg.max_alternating_iterations / int32(2)
+        sweep_count = (sweep_count + int32(1)) * cfg.max_alternating_iterations
+        first_tangent_sweep = sweep_count - tangent_sweep_count
     elif block_iteration == int32(_FUSED_BILATERAL_BLOCK):
         sweep_count *= cfg.max_alternating_iterations
     for _sweep in range(sweep_count):
         phase_count = int32(2)
-        if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and _sweep < sweep_count / int32(2):
+        if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and _sweep < first_tangent_sweep:
             # Match the dense path's inequality-only normal-load warmup.
             phase_count = int32(1)
         for phase in range(phase_count):

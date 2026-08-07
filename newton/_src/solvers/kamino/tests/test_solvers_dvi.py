@@ -343,11 +343,11 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(default_config.integrator, "euler")
         self.assertEqual(default_config.dynamics.linear_solver_type, "LLTBRCM")
         self.assertEqual(default_config.dynamics.linear_solver_kwargs, {})
-        self.assertEqual(default_config.dvi.omega, 1.0)
+        self.assertEqual(default_config.dvi.omega, 1.2)
         self.assertEqual(default_config.dvi.max_alternating_iterations, 24)
         self.assertEqual(default_config.dvi.inequality_sweeps_per_iteration, 2)
         self.assertEqual(default_config.dvi.tangential_warmstart_scale, 0.97)
-        self.assertEqual(default_config.dvi.bilateral_solve_interval, 1)
+        self.assertEqual(default_config.dvi.bilateral_solve_interval, 24)
         self.assertEqual(default_config.dvi.bilateral_solver_type, "LLTB")
         self.assertEqual(default_config.dvi.bilateral_solver_kwargs, {})
 
@@ -374,7 +374,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dynamics_solver, "dvi")
         self.assertEqual(config.dvi.max_alternating_iterations, 32)
         self.assertEqual(config.dvi.inequality_sweeps_per_iteration, 2)
-        self.assertEqual(config.dvi.bilateral_solve_interval, 1)
+        self.assertEqual(config.dvi.bilateral_solve_interval, 24)
         self.assertEqual(
             config.dvi.contact_warmstart_method,
             "key_and_position_with_net_force_backup_and_tangential_net_force",
@@ -384,7 +384,7 @@ class TestDVISolver(unittest.TestCase):
         sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
         self.assertTrue(sparse_config.sparse_dynamics)
         self.assertTrue(sparse_config.sparse_jacobian)
-        self.assertEqual(sparse_config.dvi.omega, 1.0)
+        self.assertEqual(sparse_config.dvi.omega, 1.2)
         self.assertEqual(sparse_config.dynamics.linear_solver_type, "CR")
         self.assertEqual(sparse_config.dynamics.linear_solver_kwargs, {"maxiter": 9})
         with self.assertRaises(ValueError):
@@ -788,6 +788,7 @@ class TestDVISolver(unittest.TestCase):
                             inequality_sweeps_per_iteration=1,
                             tolerance=0.0,
                             regularization=1e-6,
+                            omega=1.0,
                         )
                     )
                 ],

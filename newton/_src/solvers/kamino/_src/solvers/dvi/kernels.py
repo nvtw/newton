@@ -562,11 +562,14 @@ def _solve_dvi_inequalities_colored_pgs(
     schedule_offset = uio + wid
     contact_end = ccgo + int32(3) * nc
     sweep_count = cfg.inequality_sweeps_per_iteration
+    first_tangent_sweep = int32(0)
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
-        sweep_count *= cfg.max_alternating_iterations
+        tangent_sweep_count = sweep_count * cfg.max_alternating_iterations / int32(2)
+        sweep_count = (sweep_count + int32(1)) * cfg.max_alternating_iterations
+        first_tangent_sweep = sweep_count - tangent_sweep_count
     for _sweep in range(sweep_count):
         phase_count = int32(2)
-        if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and _sweep < sweep_count / int32(2):
+        if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and _sweep < first_tangent_sweep:
             # Establish the support load before friction in inequality-only solves.
             phase_count = int32(1)
         for phase in range(phase_count):

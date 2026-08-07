@@ -2,3 +2,4 @@ Fix `SolverKamino` integrating zero-inverse-mass bodies and constructing singula
 Fix Kamino DVI contact convergence for articulated bodies by including the bilateral constraint response in colored inequality sweeps.
 Fix Kamino DVI conveyor support and exclude penetration recovery from Coulomb friction loads to reduce resting-contact drift.
 Fix Kamino DVI collision timing and preserve contact warm starts across changing manifolds to reduce fast-impact overlap.
+Improve Kamino DVI contact convergence with over-relaxed normal sweeps while retaining fused colored-GS scheduling by default.
