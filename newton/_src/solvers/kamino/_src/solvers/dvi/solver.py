@@ -377,7 +377,12 @@ class DVISolver:
     def _allocate_projection_workspace(self, problem: DualProblem) -> None:
         with wp.ScopedDevice(self.device):
             if problem.sparse:
-                self._data.state.allocate_sparse_projection(self._size)
+                bilateral_vector_size = (
+                    self._data.bilateral_operator.info.total_vec_size
+                    if self._data.bilateral_operator is not None
+                    else 0
+                )
+                self._data.state.allocate_sparse_projection(self._size, bilateral_vector_size)
             else:
                 self._data.state.allocate_dense_projection(self._size)
 
@@ -825,6 +830,10 @@ class DVISolver:
                 device=self.device,
                 block_dim=threads_per_world,
             )
+
+            if self._should_solve_bilateral_after_block(block_iteration):
+                self._set_bilateral_active_dim(problem, block_iteration)
+                self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
 
         self._set_bilateral_active_dim(problem, -1)
         self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)

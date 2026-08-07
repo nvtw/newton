@@ -47,6 +47,18 @@ def _zero_bilateral_lambdas(
 
 
 @wp.kernel
+def _reset_active_bilateral_delta(
+    active_dim: wp.array[int32],
+    bilateral_vio: wp.array[int32],
+    bilateral_delta: wp.array[float32],
+):
+    """Reset the implicit bilateral response materialized by a direct solve."""
+    wid, row = wp.tid()
+    if row < active_dim[wid]:
+        bilateral_delta[bilateral_vio[wid] + row] = 0.0
+
+
+@wp.kernel
 def _build_sparse_bilateral_rhs(
     # Inputs:
     problem_vio: wp.array[int32],

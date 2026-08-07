@@ -46,7 +46,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _group_mapped_dvi_inequalities,
     _solve_dvi_sparse_inequalities_pgs,
 )
-from newton._src.solvers.kamino._src.solvers.dvi.types import DVIConfigStruct, convert_config_to_struct
+from newton._src.solvers.kamino._src.solvers.dvi.types import DVIConfigStruct, DVIState, convert_config_to_struct
 from newton._src.solvers.kamino._src.solvers.metrics import SolutionMetrics
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton._src.solvers.kamino.tests import setup_tests, test_context
@@ -522,6 +522,26 @@ class TestDVISolver(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ValueError, "All worlds must use the same"):
             solver._allocate_bilateral_solver(make_model([3, 3]))
+
+    def test_00c_sparse_projection_uses_padded_bilateral_vector_size(self):
+        """Allocate sparse response state for padded zero-constraint worlds."""
+        size = SimpleNamespace(
+            num_worlds=2,
+            max_of_num_joint_cts=3,
+            max_of_max_limits=0,
+            max_of_max_contacts=1,
+        )
+        solver = DVISolver()
+        solver._device = self.device
+        solver._size = size
+        solver._data = SimpleNamespace(
+            state=DVIState(),
+            bilateral_operator=SimpleNamespace(info=SimpleNamespace(total_vec_size=4)),
+        )
+
+        solver._allocate_projection_workspace(SimpleNamespace(sparse=True))
+
+        self.assertEqual(solver.data.state.bilateral_delta.shape[0], 4)
 
     def test_00a_multiworld_status_reduction_requires_all_worlds_converged(self):
         """Require every world to converge when reducing DVI status."""
@@ -1242,8 +1262,12 @@ class TestDVISolver(unittest.TestCase):
             solver.reset()
             solver.coldstart()
             solver.solve(problem)
-            self.assertEqual([block_iteration for block_iteration, _ in active_dim_updates], [-1])
-            np.testing.assert_array_equal(active_dim_updates[0][1], joint_dims)
+            self.assertEqual([block_iteration for block_iteration, _ in active_dim_updates], [1, -1])
+            np.testing.assert_array_equal(
+                active_dim_updates[0][1],
+                np.array([0, joint_dims[1], 0], dtype=np.int32),
+            )
+            np.testing.assert_array_equal(active_dim_updates[1][1], joint_dims)
             status = solver.data.status.numpy()
             self.assertEqual([int(status[wid]["iterations"]) for wid in range(3)], [1, 3, 3])
             self.assertTrue(np.all(solver.data.state.inequality_num_colors.numpy() > 0))
@@ -1323,6 +1347,9 @@ class TestDVISolver(unittest.TestCase):
         )
         np.testing.assert_array_equal(active_dim_updates[1][1], active_dim_updates[0][1])
         np.testing.assert_array_equal(active_dim_updates[2][1], joint_dims)
+
+        lambdas = extract_problem_vector(problem.delassus, solver.data.solution.lambdas.numpy(), only_active_dims=True)
+        np.testing.assert_allclose(lambdas[0], lambdas[1], rtol=1e-5, atol=1e-6)
 
     def test_03d2_dvi_direct_block_finishes_with_bilateral_solve(self):
         builder = basics.build_boxes_hinged()

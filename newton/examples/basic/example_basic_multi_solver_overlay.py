@@ -95,7 +95,7 @@ def _create_kamino_solver(model: newton.Model) -> newton.solvers.SolverKamino:
     config.use_collision_detector = True
     config.integrator = "moreau"
     config.dvi.max_alternating_iterations = 8
-    config.dvi.bilateral_solve_interval = 2
+    config.dvi.bilateral_solve_interval = 8
     return newton.solvers.SolverKamino(model, config=config)
 
 

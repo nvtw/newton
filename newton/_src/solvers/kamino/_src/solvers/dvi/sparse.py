@@ -31,6 +31,7 @@ from .sparse_kernels import (
     _group_mapped_dvi_inequalities,
     _map_active_contacts,
     _map_active_limits,
+    _reset_active_bilateral_delta,
     _set_sparse_bilateral_diagonal,
     _solve_dvi_sparse_inequalities_pgs,
     _sparse_delassus_gemv_rows,
@@ -557,8 +558,30 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         device=path.device,
         block_dim=64 if path.device.is_cuda else 1,
     )
-    # The bilateral response is fixed here, so block-local barriers preserve colored GS across all sweeps.
-    _launch_sparse_inequality_pgs(path, problem, _FUSED_BILATERAL_BLOCK)
+    has_intermediate_bilateral_solve = any(
+        path.should_solve_bilateral_after_block(block_iteration)
+        for block_iteration in range(path.max_alternating_iterations)
+    )
+    if not has_intermediate_bilateral_solve:
+        # A fixed bilateral response lets block-local barriers preserve colored GS across all sweeps.
+        _launch_sparse_inequality_pgs(path, problem, _FUSED_BILATERAL_BLOCK)
+    else:
+        for block_iteration in range(path.max_alternating_iterations):
+            _launch_sparse_inequality_pgs(path, problem, block_iteration)
+            if not path.should_solve_bilateral_after_block(block_iteration):
+                continue
+            path.set_bilateral_active_dim(problem, block_iteration)
+            _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
+            wp.launch(
+                kernel=_reset_active_bilateral_delta,
+                dim=(path.size.num_worlds, path.size.max_of_num_joint_cts),
+                inputs=[
+                    state.bilateral_active_dim,
+                    path.data.bilateral_operator.info.vio,
+                    state.bilateral_delta,
+                ],
+                device=path.device,
+            )
 
     path.set_bilateral_active_dim(problem, -1)
     _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)

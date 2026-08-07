@@ -143,14 +143,14 @@ class DVIState:
             projected_stride = size.max_of_max_total_cts * size.max_of_max_total_cts
             self.projected_D = wp.zeros(max(1, size.num_worlds * projected_stride), dtype=float32)
 
-    def allocate_sparse_projection(self, size: SizeKamino) -> None:
+    def allocate_sparse_projection(self, size: SizeKamino, bilateral_vector_size: int) -> None:
         if self.bilateral_coupling is None:
             max_unilateral_rows = size.max_of_max_limits + 3 * size.max_of_max_contacts
             response_size = size.num_worlds * size.max_of_num_joint_cts * max(1, max_unilateral_rows)
             self.bilateral_coupling = wp.zeros(max(1, response_size), dtype=float32)
             self.bilateral_response_factor = wp.zeros(max(1, response_size), dtype=float32)
             self.bilateral_response = wp.zeros(max(1, response_size), dtype=float32)
-            self.bilateral_delta = wp.zeros(max(1, size.sum_of_num_joint_cts), dtype=float32)
+            self.bilateral_delta = wp.zeros(max(1, bilateral_vector_size), dtype=float32)
 
     def reset(self):
         """Reset scratch arrays to zero."""

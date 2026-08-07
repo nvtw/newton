@@ -25,6 +25,7 @@ BELT_RING_RADIUS = 1.8
 BELT_HALF_WIDTH = 0.24
 BELT_HALF_THICKNESS = 0.04
 BELT_MESH_SEGMENTS = 96
+BELT_COLLISION_SEGMENTS = 16
 RAIL_WALL_THICKNESS = 0.035
 RAIL_HEIGHT = 0.16
 RAIL_BASE_OVERLAP = 0.01
@@ -272,24 +273,32 @@ class Example:
         )
         self.belt_collision_shapes = [self.belt_shape]
         if solver_type == "kamino":
-            # A union of box segments exposes internal side faces at its seams;
-            # the rails keep bags on the annulus, so one plane is the exact
-            # collision surface needed for the belt top.
             belt_collision_cfg = belt_cfg.copy()
             belt_collision_cfg.is_visible = False
-            self.belt_collision_shapes = [
-                builder.add_shape_plane(
-                    body=self.belt_body,
-                    xform=wp.transform(
-                        p=wp.vec3(0.0, 0.0, BELT_HALF_THICKNESS),
-                        q=wp.quat_identity(),
-                    ),
-                    width=0.0,
-                    length=0.0,
-                    cfg=belt_collision_cfg,
-                    label="conveyor_belt_collision_plane",
+            collision_half_angle = math.pi / BELT_COLLISION_SEGMENTS
+            collision_half_tangent = belt_outer_radius * math.tan(collision_half_angle)
+            # Include the inner-arc sagitta so adjacent finite patches do not leave collision gaps.
+            collision_half_radial = BELT_HALF_WIDTH + belt_inner_radius * (1.0 - math.cos(collision_half_angle))
+            self.belt_collision_shapes = []
+            for segment in range(BELT_COLLISION_SEGMENTS):
+                angle = 2.0 * math.pi * segment / BELT_COLLISION_SEGMENTS
+                self.belt_collision_shapes.append(
+                    builder.add_shape_plane(
+                        body=self.belt_body,
+                        xform=wp.transform(
+                            p=wp.vec3(
+                                BELT_RING_RADIUS * math.cos(angle),
+                                BELT_RING_RADIUS * math.sin(angle),
+                                BELT_HALF_THICKNESS,
+                            ),
+                            q=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), angle + 0.5 * math.pi),
+                        ),
+                        width=collision_half_tangent,
+                        length=collision_half_radial,
+                        cfg=belt_collision_cfg,
+                        label=f"conveyor_belt_collision_plane_{segment}",
+                    )
                 )
-            ]
         self.belt_joint = builder.add_joint_revolute(
             parent=-1,
             child=self.belt_body,
@@ -388,7 +397,7 @@ class Example:
             solver_config.collision_detector.max_triangle_pairs = 16384
             solver_config.integrator = "moreau"
             solver_config.dvi.max_alternating_iterations = 8
-            solver_config.dvi.bilateral_solve_interval = 2
+            solver_config.dvi.bilateral_solve_interval = 8
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverXPBD(self.model)
@@ -471,8 +480,13 @@ class Example:
 
     def test_final(self):
         body_q = self.state_0.body_q.numpy()
+        shape_scale = self.model.shape_scale.numpy()
         belt_z = float(body_q[self.belt_body][2])
         assert abs(belt_z - BELT_CENTER_Z) < 0.15, f"Belt body drifted off the conveyor plane: z={belt_z:.4f}"
+        for shape_idx in self.belt_collision_shapes:
+            assert shape_scale[shape_idx][0] > 0.0 and shape_scale[shape_idx][1] > 0.0, (
+                f"Belt collision shape {shape_idx} must have finite extents."
+            )
 
         for body_idx in self.bag_bodies:
             x = float(body_q[body_idx][0])
@@ -480,7 +494,10 @@ class Example:
             z = float(body_q[body_idx][2])
             assert np.isfinite(x) and np.isfinite(y) and np.isfinite(z), f"Bag {body_idx} has non-finite pose values."
             assert z > BELT_CENTER_Z, f"Bag body {body_idx} fell through the conveyor: z={z:.4f}"
-            assert abs(x) < 4.0 and abs(y) < 4.0, f"Bag body {body_idx} left the scene bounds: ({x:.3f}, {y:.3f})"
+            radius = math.hypot(x, y)
+            assert BELT_RING_RADIUS - 0.5 < radius < BELT_RING_RADIUS + 0.5, (
+                f"Bag body {body_idx} left the conveyor annulus: radius={radius:.3f}"
+            )
 
 
 if __name__ == "__main__":
