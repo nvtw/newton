@@ -348,8 +348,8 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(default_config.dvi.inequality_sweeps_per_iteration, 2)
         self.assertEqual(default_config.dvi.tangential_warmstart_scale, 0.97)
         self.assertEqual(default_config.dvi.bilateral_solve_interval, 24)
-        self.assertEqual(default_config.dvi.bilateral_solver_type, "LLTB")
-        self.assertEqual(default_config.dvi.bilateral_solver_kwargs, {})
+        self.assertEqual(default_config.dvi.bilateral_solver_type, "LLTBRCM")
+        self.assertEqual(default_config.dvi.bilateral_solver_kwargs, {"parallel_factorization": True})
 
         dense_config = SolverKamino.Config(
             dynamics_solver="dvi",
