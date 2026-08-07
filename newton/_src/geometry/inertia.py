@@ -178,9 +178,9 @@ def compute_inertia_cylinder(
 
         radius_sq = radius_profile * radius_profile
         radius_fourth = radius_sq * radius_sq
-        mass = density * np.pi * np.dot(weights, radius_sq)
-        inertia_axial = 0.5 * density * np.pi * np.dot(weights, radius_fourth)
-        inertia_radial = density * np.pi * np.dot(weights, 0.25 * radius_fourth + radius_sq * z * z)
+        mass = float(density * np.pi * np.dot(weights, radius_sq))
+        inertia_axial = float(0.5 * density * np.pi * np.dot(weights, radius_fourth))
+        inertia_radial = float(density * np.pi * np.dot(weights, 0.25 * radius_fourth + radius_sq * z * z))
     else:
         height = 2.0 * half_height
         mass = density * wp.pi * radius * radius * height

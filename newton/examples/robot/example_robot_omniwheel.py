@@ -1,0 +1,327 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Four-wheel warehouse robot with passive barrel rollers."""
+
+import math
+
+import numpy as np
+import warp as wp
+
+import newton
+
+
+@wp.kernel
+def set_mecanum_targets(
+    target_qd: wp.array[float],
+    drive_dofs: wp.array[int],
+    command: wp.vec3,
+    wheel_radius: float,
+    turn_radius: float,
+):
+    """Map a chassis velocity command to four wheel speeds."""
+    wheel = wp.tid()
+    linear_speed = 0.0
+    if wheel == 0:
+        linear_speed = command[0] - command[1] - turn_radius * command[2]
+    elif wheel == 1:
+        linear_speed = command[0] + command[1] + turn_radius * command[2]
+    elif wheel == 2:
+        linear_speed = command[0] + command[1] - turn_radius * command[2]
+    else:
+        linear_speed = command[0] - command[1] + turn_radius * command[2]
+
+    # Positive rotation about the common +Y axle moves the wheel toward -X.
+    target_qd[drive_dofs[wheel]] = -linear_speed / wheel_radius
+
+
+def add_mecanum_wheel(
+    builder: newton.ModelBuilder,
+    chassis: int,
+    position: wp.vec3,
+    handedness: float,
+    label: str,
+    *,
+    roller_count: int = 12,
+    hub_radius: float = 0.14,
+    hub_half_width: float = 0.045,
+    roller_radius: float = 0.026,
+    roller_half_height: float = 0.06,
+    roller_barrel_radius: float = 0.30,
+    roller_clearance: float = 0.003,
+) -> tuple[int, list[int], float]:
+    """Add a driven 45-degree mecanum wheel with passive barrel rollers.
+
+    Args:
+        builder: Model builder receiving the wheel.
+        chassis: Parent chassis body.
+        position: Wheel center in the chassis frame [m].
+        handedness: Roller tilt sign, either `-1.0` or `1.0`.
+        label: Label prefix for generated bodies, joints, and shapes.
+        roller_count: Number of passive rollers around the hub.
+        hub_radius: Radius of the central wheel cylinder [m].
+        hub_half_width: Half-width of the central wheel cylinder [m].
+        roller_radius: Barrel end radius [m].
+        roller_half_height: Barrel half-length [m].
+        roller_barrel_radius: Radius of the barrel side-profile arc [m].
+        roller_clearance: Radial clearance between hub and rollers [m].
+
+    Returns:
+        The driven hub joint, passive roller joints, and wheel outer radius [m].
+    """
+    if handedness not in (-1.0, 1.0):
+        raise ValueError("handedness must be -1.0 or 1.0")
+
+    roller_equatorial_radius = roller_radius + (roller_half_height * roller_half_height) / (
+        roller_barrel_radius
+        + math.sqrt(roller_barrel_radius * roller_barrel_radius - roller_half_height * roller_half_height)
+    )
+    roller_center_radius = hub_radius + roller_equatorial_radius + roller_clearance
+    wheel_outer_radius = roller_center_radius + roller_equatorial_radius
+
+    hub_cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=1.0, gap=0.01)
+    roller_cfg = newton.ModelBuilder.ShapeConfig(density=700.0, mu=2.0, gap=0.01)
+
+    hub = builder.add_link(label=f"{label}_hub")
+    hub_rotation = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -0.5 * wp.pi)
+    builder.add_shape_cylinder(
+        hub,
+        xform=wp.transform(q=hub_rotation),
+        radius=hub_radius,
+        half_height=hub_half_width,
+        cfg=hub_cfg,
+        color=(0.12, 0.14, 0.18),
+        label=f"{label}_hub",
+    )
+    drive_joint = builder.add_joint_revolute(
+        parent=chassis,
+        child=hub,
+        parent_xform=wp.transform(p=position, q=wp.quat_identity()),
+        child_xform=wp.transform(),
+        axis=newton.Axis.Y,
+        target_vel=0.0,
+        target_kd=40.0,
+        damping=0.05,
+        armature=0.02,
+        effort_limit=80.0,
+        actuator_mode=newton.JointTargetMode.VELOCITY,
+        label=f"{label}_drive",
+    )
+
+    roller_joints = []
+    inv_sqrt_two = 1.0 / math.sqrt(2.0)
+    for roller_index in range(roller_count):
+        angle = 2.0 * math.pi * roller_index / roller_count
+        radial = wp.vec3(math.cos(angle), 0.0, math.sin(angle))
+        tangent = wp.vec3(-math.sin(angle), 0.0, math.cos(angle))
+        roller_axis = tangent * inv_sqrt_two + wp.vec3(0.0, handedness * inv_sqrt_two, 0.0)
+        roller_rotation = newton.math.quat_between_vectors_robust(wp.vec3(0.0, 0.0, 1.0), roller_axis)
+
+        roller = builder.add_link(label=f"{label}_roller_{roller_index}")
+        builder.add_shape_cylinder(
+            roller,
+            radius=roller_radius,
+            half_height=roller_half_height,
+            barrel_radius=roller_barrel_radius,
+            cfg=roller_cfg,
+            color=(0.85, 0.38, 0.08),
+            label=f"{label}_roller_{roller_index}",
+        )
+        roller_joints.append(
+            builder.add_joint_revolute(
+                parent=hub,
+                child=roller,
+                parent_xform=wp.transform(p=radial * roller_center_radius, q=roller_rotation),
+                child_xform=wp.transform(),
+                axis=newton.Axis.Z,
+                damping=0.01,
+                armature=0.001,
+                label=f"{label}_roller_{roller_index}",
+            )
+        )
+
+    return drive_joint, roller_joints, wheel_outer_radius
+
+
+class Example:
+    """Drive a flat warehouse robot with four mecanum wheels."""
+
+    def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
+        self.fps = 60
+        self.frame_dt = 1.0 / self.fps
+        self.sim_substeps = 8
+        self.sim_dt = self.frame_dt / self.sim_substeps
+        self.sim_time = 0.0
+        self.viewer = viewer
+
+        builder = newton.ModelBuilder()
+        builder.default_joint_cfg.damping = 0.01
+
+        chassis_half_length = 0.42
+        chassis_half_width = 0.30
+        chassis_half_height = 0.06
+        wheel_x = 0.32
+        wheel_y = 0.40
+        wheel_mount_z = -0.04
+
+        # The helper dimensions give a 0.207 m outer wheel radius.
+        wheel_outer_radius = 0.207
+        chassis_start_z = wheel_outer_radius - wheel_mount_z
+        self.chassis_start = np.array([0.0, 0.0, chassis_start_z], dtype=np.float32)
+
+        chassis = builder.add_link(
+            xform=wp.transform(p=wp.vec3(*self.chassis_start), q=wp.quat_identity()),
+            label="warehouse_robot",
+        )
+        chassis_cfg = newton.ModelBuilder.ShapeConfig(density=120.0, mu=0.8, gap=0.01)
+        builder.add_shape_box(
+            chassis,
+            hx=chassis_half_length,
+            hy=chassis_half_width,
+            hz=chassis_half_height,
+            cfg=chassis_cfg,
+            color=(0.12, 0.42, 0.72),
+            label="warehouse_robot",
+        )
+
+        joints = [builder.add_joint_free(chassis, label="warehouse_robot_free")]
+        drive_joints = []
+        wheel_specs = (
+            ("front_left", wp.vec3(wheel_x, wheel_y, wheel_mount_z), -1.0),
+            ("front_right", wp.vec3(wheel_x, -wheel_y, wheel_mount_z), 1.0),
+            ("rear_left", wp.vec3(-wheel_x, wheel_y, wheel_mount_z), 1.0),
+            ("rear_right", wp.vec3(-wheel_x, -wheel_y, wheel_mount_z), -1.0),
+        )
+        for label, position, handedness in wheel_specs:
+            drive_joint, roller_joints, wheel_outer_radius = add_mecanum_wheel(
+                builder,
+                chassis,
+                position,
+                handedness,
+                label,
+            )
+            drive_joints.append(drive_joint)
+            joints.append(drive_joint)
+            joints.extend(roller_joints)
+
+        builder.add_articulation(joints, label="warehouse_robot")
+        builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=1.5, gap=0.01))
+
+        self.model = builder.finalize()
+        self.chassis = chassis
+        self.wheel_outer_radius = wheel_outer_radius
+        joint_qd_start = self.model.joint_qd_start.numpy()
+        self.drive_dof_indices = np.array([joint_qd_start[joint] for joint in drive_joints], dtype=np.int32)
+        self.drive_dofs = wp.array(self.drive_dof_indices, dtype=int, device=self.model.device)
+
+        self.solver = newton.solvers.SolverMuJoCo(
+            self.model,
+            use_mujoco_contacts=False,
+            disable_sensors=True,
+            solver="newton",
+            integrator="implicitfast",
+            cone="elliptic",
+            iterations=15,
+            ls_iterations=50,
+            njmax=2048,
+            nconmax=1024,
+        )
+        self.state_0 = self.model.state()
+        self.state_1 = self.model.state()
+        self.control = self.model.control()
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
+        self.collision_pipeline = newton.CollisionPipeline(self.model, rigid_contact_max=1024)
+        self.contacts = self.collision_pipeline.contacts()
+
+        self.max_forward_travel = 0.0
+        self.max_lateral_travel = 0.0
+        self.max_yaw = 0.0
+        self.max_drive_speed = 0.0
+
+        self.viewer.set_model(self.model)
+        self.viewer.set_camera(pos=wp.vec3(2.4, -3.2, 2.0), pitch=-24.0, yaw=128.0)
+        self.capture()
+
+    def capture(self):
+        """Capture one simulation frame."""
+        self.graph = None
+        with wp.ScopedCapture() as capture:
+            self.simulate()
+        self.graph = capture.graph
+
+    def simulate(self):
+        """Advance one frame."""
+        for _ in range(self.sim_substeps):
+            self.state_0.clear_forces()
+            self.viewer.apply_forces(self.state_0)
+            self.collision_pipeline.collide(self.state_0, self.contacts)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
+
+    def step(self):
+        """Set the drive command and advance one frame."""
+        if self.sim_time < 1.5:
+            command = wp.vec3(0.35 * min(self.sim_time / 0.5, 1.0), 0.0, 0.0)
+        elif self.sim_time < 3.0:
+            command = wp.vec3(0.0, 0.30, 0.0)
+        elif self.sim_time < 4.5:
+            command = wp.vec3(0.0, 0.0, 0.75)
+        else:
+            command = wp.vec3()
+
+        wp.launch(
+            set_mecanum_targets,
+            dim=4,
+            inputs=[
+                self.control.joint_target_qd,
+                self.drive_dofs,
+                command,
+                self.wheel_outer_radius,
+                0.72,
+            ],
+        )
+        if self.graph:
+            wp.capture_launch(self.graph)
+        else:
+            self.simulate()
+        self.sim_time += self.frame_dt
+
+    def test_post_step(self):
+        """Track achieved chassis motion and wheel speeds."""
+        body_q = self.state_0.body_q.numpy()[self.chassis]
+        assert np.all(np.isfinite(body_q)), f"non-finite chassis pose at t={self.sim_time:.3f} s"
+        self.max_forward_travel = max(self.max_forward_travel, float(body_q[0] - self.chassis_start[0]))
+        self.max_lateral_travel = max(self.max_lateral_travel, abs(float(body_q[1] - self.chassis_start[1])))
+        qx, qy, qz, qw = body_q[3:7]
+        yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        self.max_yaw = max(self.max_yaw, abs(yaw))
+        joint_qd = self.state_0.joint_qd.numpy()
+        self.max_drive_speed = max(self.max_drive_speed, float(np.max(np.abs(joint_qd[self.drive_dof_indices]))))
+
+    def test_final(self):
+        """Verify the robot completes all three commanded motions."""
+        assert self.sim_time >= 4.5, f"run too short to exercise all drive phases: {self.sim_time:.2f} s"
+        body_q = self.state_0.body_q.numpy()[self.chassis]
+        assert np.all(np.isfinite(body_q)), "non-finite chassis pose"
+        assert body_q[2] > 0.05, f"chassis fell through the ground: z={body_q[2]:.3f}"
+        assert self.max_forward_travel > 0.08, (
+            f"insufficient forward travel: {self.max_forward_travel:.3f} m "
+            f"(lateral={self.max_lateral_travel:.3f} m, yaw={self.max_yaw:.3f} rad, "
+            f"drive={self.max_drive_speed:.3f} rad/s)"
+        )
+        assert self.max_lateral_travel > 0.06, f"insufficient lateral travel: {self.max_lateral_travel:.3f} m"
+        assert self.max_yaw > 0.10, f"insufficient rotation: {self.max_yaw:.3f} rad"
+        assert self.max_drive_speed > 0.5, f"wheel drives did not engage: {self.max_drive_speed:.3f} rad/s"
+
+    def render(self):
+        """Render the robot and contacts."""
+        self.viewer.begin_frame(self.sim_time)
+        self.viewer.log_state(self.state_0)
+        self.viewer.log_contacts(self.contacts, self.state_0)
+        self.viewer.end_frame()
+
+
+if __name__ == "__main__":
+    viewer, args = newton.examples.init()
+    newton.examples.run(Example(viewer, args), args)
