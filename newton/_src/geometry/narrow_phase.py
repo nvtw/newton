@@ -2132,7 +2132,7 @@ class NarrowPhase:
                         shape_edge_range=shape_edge_range,
                         shape_heightfield_index=shape_heightfield_index,
                         heightfield_data=heightfield_data,
-                        target_blocks=self.mesh_mesh_target_blocks,
+                        target_blocks=self.num_mesh_mesh_blocks,
                         block_offsets=self.mesh_mesh_block_offsets,
                         block_counts=self.mesh_mesh_block_counts,
                         weight_prefix_sums=self.mesh_mesh_weight_prefix_sums,

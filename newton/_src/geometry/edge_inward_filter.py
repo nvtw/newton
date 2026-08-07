@@ -41,9 +41,11 @@ def filter_fully_inward_edges(mesh: Mesh, edge_indices: np.ndarray) -> np.ndarra
 
     # Winding-number SDF construction uses this volume sign to correct a
     # globally inverted mesh. Apply the same correction to the feature tests.
-    v0 = vertices[triangles[:, 0]]
-    v1 = vertices[triangles[:, 1]]
-    v2 = vertices[triangles[:, 2]]
+    volume_origin = 0.5 * (vertices.min(axis=0) + vertices.max(axis=0))
+    centered_vertices = vertices - volume_origin
+    v0 = centered_vertices[triangles[:, 0]]
+    v1 = centered_vertices[triangles[:, 1]]
+    v2 = centered_vertices[triangles[:, 2]]
     signed_volume = float(np.einsum("ij,ij->i", v0, np.cross(v1, v2)).sum() / 6.0)
     diagonal = max(mesh._aabb_diagonal(), 1.0)
     volume_tolerance = np.finfo(np.float64).eps * diagonal**3 * max(len(triangles), 1)
