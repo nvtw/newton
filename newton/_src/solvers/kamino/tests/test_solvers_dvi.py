@@ -375,7 +375,10 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.max_alternating_iterations, 32)
         self.assertEqual(config.dvi.inequality_sweeps_per_iteration, 2)
         self.assertEqual(config.dvi.bilateral_solve_interval, 1)
-        self.assertEqual(config.dvi.contact_warmstart_method, "key_and_position_with_tangential_net_force")
+        self.assertEqual(
+            config.dvi.contact_warmstart_method,
+            "key_and_position_with_net_force_backup_and_tangential_net_force",
+        )
         self.assertFalse(config.dynamics.preconditioning)
 
         sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
@@ -410,6 +413,7 @@ class TestDVISolver(unittest.TestCase):
             "geom_pair_net_force",
             "key_and_position_with_net_force_backup",
             "key_and_position_with_tangential_net_force",
+            "key_and_position_with_net_force_backup_and_tangential_net_force",
         ):
             self.assertEqual(
                 kamino_config.DVISolverConfig(contact_warmstart_method=method).contact_warmstart_method, method
@@ -2463,6 +2467,65 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(v_plus_after[2], v_plus_before[2])
         np.testing.assert_array_equal(lambdas_after[1], np.zeros_like(lambdas_after[1]))
         np.testing.assert_array_equal(v_plus_after[1], np.zeros_like(v_plus_after[1]))
+
+    def test_11_dvi_detects_contacts_at_moreau_midpoint(self):
+        """Detect fast impacts at the pose used to assemble the DVI problem."""
+        sphere_radius = 1.0
+        box_half = 0.5
+        time_step = 0.01
+
+        builder = newton.ModelBuilder()
+        SolverKamino.register_custom_attributes(builder)
+        builder.gravity = (0.0, 0.0, 0.0)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, gap=0.0, margin=0.0)
+        sphere_body = builder.add_body(
+            xform=wp.transform(p=wp.vec3(-3.05, 0.0, 0.0), q=wp.quat_identity()),
+        )
+        sphere_cfg = newton.ModelBuilder.ShapeConfig(
+            density=10000.0,
+            mu=0.0,
+            gap=0.0,
+            margin=0.0,
+        )
+        builder.add_shape_sphere(sphere_body, radius=sphere_radius, cfg=sphere_cfg)
+        builder.add_shape_box(
+            body=-1,
+            hx=box_half,
+            hy=box_half,
+            hz=box_half,
+            cfg=shape_cfg,
+        )
+        model = builder.finalize(device=self.device)
+
+        config = SolverKamino.Config(
+            dynamics_solver="dvi",
+            sparse_dynamics=True,
+            sparse_jacobian=True,
+            use_collision_detector=True,
+            integrator="moreau",
+            constraints=kamino_config.ConstraintStabilizationConfig(gamma=0.01, delta=0.0),
+            dvi=kamino_config.DVISolverConfig(
+                max_alternating_iterations=8,
+                bilateral_solve_interval=1,
+            ),
+        )
+        solver = SolverKamino(model, config=config)
+        state_0 = model.state()
+        state_1 = model.state()
+        body_qd = state_0.body_qd.numpy()
+        body_qd[sphere_body, 0] = 11.0
+        state_0.body_qd.assign(body_qd)
+
+        max_overlap = 0.0
+        for _ in range(30):
+            solver.step(state_0, state_1, control=None, contacts=None, dt=time_step)
+            state_0, state_1 = state_1, state_0
+            position = state_0.body_q.numpy()[sphere_body, :3]
+            outside = np.maximum(np.abs(position) - box_half, 0.0)
+            overlap = sphere_radius - float(np.linalg.norm(outside))
+            max_overlap = max(max_overlap, overlap)
+
+        self.assertLess(max_overlap, 0.08)
 
     def test_12_dvi_opening_contact_releases_warmstarted_force(self):
         radius = 0.1
