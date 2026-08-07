@@ -348,8 +348,8 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(default_config.dvi.inequality_sweeps_per_iteration, 2)
         self.assertEqual(default_config.dvi.tangential_warmstart_scale, 0.97)
         self.assertEqual(default_config.dvi.bilateral_solve_interval, 24)
-        self.assertEqual(default_config.dvi.bilateral_solver_type, "LLTBRCM")
-        self.assertEqual(default_config.dvi.bilateral_solver_kwargs, {"parallel_factorization": True})
+        self.assertEqual(default_config.dvi.bilateral_solver_type, "LLTB")
+        self.assertEqual(default_config.dvi.bilateral_solver_kwargs, {})
 
         dense_config = SolverKamino.Config(
             dynamics_solver="dvi",
@@ -538,10 +538,24 @@ class TestDVISolver(unittest.TestCase):
             state=DVIState(),
             bilateral_operator=SimpleNamespace(info=SimpleNamespace(total_vec_size=4)),
         )
+        solver._joint_rows_host = [1, 3]
+        solver._unilateral_strides_host = [3, 3]
 
-        solver._allocate_projection_workspace(SimpleNamespace(sparse=True))
+        problem = SimpleNamespace(
+            sparse=True,
+            data=SimpleNamespace(
+                njc=wp.array([1, 3], dtype=wp.int32, device=self.device),
+                maxdim=wp.array([4, 6], dtype=wp.int32, device=self.device),
+            ),
+        )
+        solver._allocate_projection_workspace(problem)
 
         self.assertEqual(solver.data.state.bilateral_delta.shape[0], 4)
+        self.assertEqual(solver.data.state.bilateral_response_mio.numpy().tolist(), [0, 3])
+        self.assertEqual(solver.data.state.bilateral_response_stride.numpy().tolist(), [3, 3])
+        self.assertEqual(solver.data.state.bilateral_coupling.shape[0], 12)
+        self.assertEqual(solver.data.state.bilateral_response_factor.shape[0], 12)
+        self.assertEqual(solver.data.state.bilateral_response.shape[0], 12)
 
     def test_00a_multiworld_status_reduction_requires_all_worlds_converged(self):
         """Require every world to converge when reducing DVI status."""
@@ -827,8 +841,8 @@ class TestDVISolver(unittest.TestCase):
                     float_array([0.0]),  # eta
                     int32_array([0]),  # problem_njc
                     int32_array([0]),  # bilateral_vio
-                    0,  # max_joint_rows
-                    1,  # max_unilateral_rows
+                    int32_array([0]),  # bilateral_response_mio
+                    int32_array([1]),  # bilateral_response_stride
                     float_array([0.0]),  # bilateral_coupling
                     float_array([0.0]),  # bilateral_response
                     float_array([0.0]),  # bilateral_delta

@@ -1,1 +1,0 @@
-Expand Kamino DVI support across additional examples and improve its contact robustness and throughput, including conveyor support, articulated bilateral response, resting stability, fast-impact overlap prevention, persistent contact warm starts, fused colored Gauss-Seidel sweeps, and RCM-factorized articulated solves.

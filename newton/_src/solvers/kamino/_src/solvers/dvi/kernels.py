@@ -436,8 +436,8 @@ def _solve_bilateral_unilateral_response(
     bilateral_L: wp.array[float32],
     bilateral_permutation: wp.array[int32],
     use_permutation: bool,
-    max_joint_rows: int32,
-    max_unilateral_rows: int32,
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
     coupling: wp.array[float32],
     response_factor: wp.array[float32],
     response: wp.array[float32],
@@ -450,31 +450,30 @@ def _solve_bilateral_unilateral_response(
     nu = problem_dim[wid] - njc
     factor = bilateral_mio[wid]
     bvio = bilateral_vio[wid]
-    offset = wid * max_joint_rows * max_unilateral_rows
+    offset = response_mio[wid]
+    unilateral_stride = response_stride[wid]
     for unilateral in range(lane, nu, threads_per_world):
         for row in range(njc):
             original_row = row
             if use_permutation:
                 original_row = bilateral_permutation[bvio + row]
-            value = (
-                bilateral_P[bvio + original_row] * coupling[offset + original_row * max_unilateral_rows + unilateral]
-            )
+            value = bilateral_P[bvio + original_row] * coupling[offset + original_row * unilateral_stride + unilateral]
             for k in range(row):
                 value -= (
-                    bilateral_L[factor + njc * row + k] * response_factor[offset + k * max_unilateral_rows + unilateral]
+                    bilateral_L[factor + njc * row + k] * response_factor[offset + k * unilateral_stride + unilateral]
                 )
-            response_factor[offset + row * max_unilateral_rows + unilateral] = (
+            response_factor[offset + row * unilateral_stride + unilateral] = (
                 value / bilateral_L[factor + njc * row + row]
             )
 
         for reverse_row in range(njc):
             row = njc - int32(1) - reverse_row
-            value = response_factor[offset + row * max_unilateral_rows + unilateral]
+            value = response_factor[offset + row * unilateral_stride + unilateral]
             for k in range(row + int32(1), njc):
                 value -= (
-                    bilateral_L[factor + njc * k + row] * response_factor[offset + k * max_unilateral_rows + unilateral]
+                    bilateral_L[factor + njc * k + row] * response_factor[offset + k * unilateral_stride + unilateral]
                 )
-            response_factor[offset + row * max_unilateral_rows + unilateral] = (
+            response_factor[offset + row * unilateral_stride + unilateral] = (
                 value / bilateral_L[factor + njc * row + row]
             )
 
@@ -482,8 +481,8 @@ def _solve_bilateral_unilateral_response(
             original_row = row
             if use_permutation:
                 original_row = bilateral_permutation[bvio + row]
-            response[offset + original_row * max_unilateral_rows + unilateral] = (
-                bilateral_P[bvio + original_row] * response_factor[offset + row * max_unilateral_rows + unilateral]
+            response[offset + original_row * unilateral_stride + unilateral] = (
+                bilateral_P[bvio + original_row] * response_factor[offset + row * unilateral_stride + unilateral]
             )
 
 

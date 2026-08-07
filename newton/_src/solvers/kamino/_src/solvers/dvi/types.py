@@ -109,6 +109,8 @@ class DVIState:
         self.projected_D: wp.array[float32] | None = None
         self.projected_mio: wp.array[int32] | None = None
         self.bilateral_coupling: wp.array[float32] | None = None
+        self.bilateral_response_mio: wp.array[int32] | None = None
+        self.bilateral_response_stride: wp.array[int32] | None = None
         self.bilateral_response_factor: wp.array[float32] | None = None
         self.bilateral_response: wp.array[float32] | None = None
         self.bilateral_delta: wp.array[float32] | None = None
@@ -143,10 +145,20 @@ class DVIState:
             projected_stride = size.max_of_max_total_cts * size.max_of_max_total_cts
             self.projected_D = wp.zeros(max(1, size.num_worlds * projected_stride), dtype=float32)
 
-    def allocate_sparse_projection(self, size: SizeKamino, bilateral_vector_size: int) -> None:
+    def allocate_sparse_projection(
+        self,
+        joint_rows: list[int],
+        unilateral_strides: list[int],
+        bilateral_vector_size: int,
+    ) -> None:
         if self.bilateral_coupling is None:
-            max_unilateral_rows = size.max_of_max_limits + 3 * size.max_of_max_contacts
-            response_size = size.num_worlds * size.max_of_num_joint_cts * max(1, max_unilateral_rows)
+            response_offsets = []
+            response_size = 0
+            for num_joint_rows, unilateral_stride in zip(joint_rows, unilateral_strides, strict=True):
+                response_offsets.append(response_size)
+                response_size += num_joint_rows * unilateral_stride
+            self.bilateral_response_mio = wp.array(response_offsets, dtype=int32)
+            self.bilateral_response_stride = wp.array(unilateral_strides, dtype=int32)
             self.bilateral_coupling = wp.zeros(max(1, response_size), dtype=float32)
             self.bilateral_response_factor = wp.zeros(max(1, response_size), dtype=float32)
             self.bilateral_response = wp.zeros(max(1, response_size), dtype=float32)

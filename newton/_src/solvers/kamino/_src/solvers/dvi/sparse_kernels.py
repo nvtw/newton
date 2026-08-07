@@ -367,8 +367,8 @@ def _assemble_sparse_bilateral_unilateral_coupling(
     problem_njc: wp.array[int32],
     problem_vio: wp.array[int32],
     problem_P: wp.array[float32],
-    max_joint_rows: int32,
-    max_unilateral_rows: int32,
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
     coupling: wp.array[float32],
 ):
     wid, row, unilateral = wp.tid()
@@ -392,8 +392,8 @@ def _assemble_sparse_bilateral_unilateral_coupling(
                 for component in range(6):
                     value += mass_weighted[component] * jacobian[component]
     value *= problem_P[problem_vio[wid] + col]
-    offset = wid * max_joint_rows * max_unilateral_rows
-    coupling[offset + row * max_unilateral_rows + unilateral] = value
+    offset = response_mio[wid]
+    coupling[offset + row * response_stride[wid] + unilateral] = value
 
 
 @wp.kernel
@@ -425,8 +425,8 @@ def _solve_dvi_sparse_inequalities_pgs(
     eta: wp.array[float32],
     problem_njc: wp.array[int32],
     bilateral_vio: wp.array[int32],
-    max_joint_rows: int32,
-    max_unilateral_rows: int32,
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
     bilateral_coupling: wp.array[float32],
     bilateral_response: wp.array[float32],
     bilateral_delta: wp.array[float32],
@@ -462,7 +462,8 @@ def _solve_dvi_sparse_inequalities_pgs(
     ccgo = problem_ccgo[wid]
     vio = problem_vio[wid]
     njc = problem_njc[wid]
-    bilateral_offset = wid * max_joint_rows * max_unilateral_rows
+    bilateral_offset = response_mio[wid]
+    max_unilateral_rows = response_stride[wid]
     bvio = bilateral_vio[wid]
     row_start = bsm_row_start[wid]
     col_start = bsm_col_start[wid]

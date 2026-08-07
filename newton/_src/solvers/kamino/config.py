@@ -832,17 +832,18 @@ class DVISolverConfig:
     Defaults to `0.97`.
     """
 
-    bilateral_solver_type: Literal["LLTB", "LLTBRCM"] = "LLTBRCM"
+    bilateral_solver_type: Literal["LLTB", "LLTBRCM"] = "LLTB"
     """
     Direct linear solver used for the bilateral constraint block.
-    ``LLTBRCM`` accelerates sparse articulated systems, while ``LLTB`` can
-    remain preferable for small or dense systems. Defaults to ``LLTBRCM``.
+    ``LLTBRCM`` can accelerate large sparse articulated systems, while
+    ``LLTB`` remains preferable for small or dense systems. Defaults to
+    ``LLTB``.
     """
 
-    bilateral_solver_kwargs: dict[str, Any] = field(default_factory=lambda: {"parallel_factorization": True})
+    bilateral_solver_kwargs: dict[str, Any] = field(default_factory=dict)
     """
     Additional keyword arguments passed to the bilateral linear solver.
-    Defaults to enabling parallel factorization.
+    Defaults to an empty dictionary.
     """
 
     warmstart_mode: Literal["none", "internal", "containers"] = "containers"

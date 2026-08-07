@@ -111,6 +111,8 @@ class DVISolver:
         self._sparse_path: SparseDVIPath | None = None
         self._all_worlds_mask: wp.array[wp.bool] | None = None
         self._device: wp.DeviceLike = None
+        self._joint_rows_host: list[int] = []
+        self._unilateral_strides_host: list[int] = []
 
         if model is not None:
             self.finalize(
@@ -190,6 +192,12 @@ class DVISolver:
         self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
         self._data = DVIData(size=self._size, collect_info=self._collect_info, device=self._device)
         self._all_worlds_mask = wp.ones(shape=(self._size.num_worlds,), dtype=wp.bool, device=self._device)
+        self._joint_rows_host = model.info.num_joint_cts.numpy().astype(int).tolist()
+        max_limits = model.info.max_limits.numpy().astype(int).tolist()
+        max_contacts = model.info.max_contacts.numpy().astype(int).tolist()
+        self._unilateral_strides_host = [
+            limit_count + 3 * contact_count for limit_count, contact_count in zip(max_limits, max_contacts, strict=True)
+        ]
         self._allocate_bilateral_solver(model)
         self._sparse_path = SparseDVIPath(
             device=self._device,
@@ -382,7 +390,9 @@ class DVISolver:
                     if self._data.bilateral_operator is not None
                     else 0
                 )
-                self._data.state.allocate_sparse_projection(self._size, bilateral_vector_size)
+                self._data.state.allocate_sparse_projection(
+                    self._joint_rows_host, self._unilateral_strides_host, bilateral_vector_size
+                )
             else:
                 self._data.state.allocate_dense_projection(self._size)
 
