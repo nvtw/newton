@@ -695,7 +695,25 @@ def create_narrow_phase_kernel_gjk_mpr(
         if num_work_items == 0:
             return
 
-        for t in range(tid, num_work_items, total_num_threads):
+        block_dim = wp.block_dim()
+        num_blocks = total_num_threads // block_dim
+        block_index = tid // block_dim
+        lane = tid - block_index * block_dim
+
+        if wp.static(sort_pairs):
+            # Direct pairs already have coherent global-stride ordering.
+            block_dim = total_num_threads
+            num_blocks = 1
+            block_index = 0
+            lane = tid
+
+        items_per_block = (num_work_items + num_blocks - 1) // num_blocks
+        block_start = block_index * items_per_block
+
+        for local_index in range(lane, items_per_block, block_dim):
+            t = block_start + local_index
+            if t >= num_work_items:
+                continue
             # Get a pre-routed pair or a direct broad-phase pair.
             pair = candidate_pair[t]
             shape_a = pair[0]
