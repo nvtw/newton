@@ -800,6 +800,13 @@ class TestDVISolver(unittest.TestCase):
                     float_array([0.0]),  # problem_v_b
                     float_array([1.0]),  # problem_diag
                     float_array([0.0]),  # eta
+                    int32_array([0]),  # problem_njc
+                    int32_array([0]),  # bilateral_vio
+                    0,  # max_joint_rows
+                    1,  # max_unilateral_rows
+                    float_array([0.0]),  # bilateral_coupling
+                    float_array([0.0]),  # bilateral_response
+                    float_array([0.0]),  # bilateral_delta
                     int32_array([1]),  # inequality_num_colors
                     int32_array([0]),  # inequality_ids_by_color
                     int32_array([0, 1]),  # inequality_color_starts
@@ -1231,12 +1238,8 @@ class TestDVISolver(unittest.TestCase):
             solver.reset()
             solver.coldstart()
             solver.solve(problem)
-            self.assertEqual([block_iteration for block_iteration, _ in active_dim_updates], [1, -1])
-            np.testing.assert_array_equal(
-                active_dim_updates[0][1],
-                np.array([0, joint_dims[1], 0], dtype=np.int32),
-            )
-            np.testing.assert_array_equal(active_dim_updates[1][1], joint_dims)
+            self.assertEqual([block_iteration for block_iteration, _ in active_dim_updates], [-1])
+            np.testing.assert_array_equal(active_dim_updates[0][1], joint_dims)
             status = solver.data.status.numpy()
             self.assertEqual([int(status[wid]["iterations"]) for wid in range(3)], [1, 3, 3])
             self.assertTrue(np.all(solver.data.state.inequality_num_colors.numpy() > 0))
@@ -1360,6 +1363,11 @@ class TestDVISolver(unittest.TestCase):
         self.assertGreater(njc, 0)
         self.assertLess(float(np.max(np.abs(v_plus[:njc]))), 1e-6)
         self.assertLess(float(status["r_b"]), 1e-6)
+
+        ncts = int(problem.data.dim.numpy()[0])
+        original = problem.data.D.numpy()[: ncts * ncts].reshape(ncts, ncts)
+        projected = solver.data.state.projected_D.numpy()[: ncts * ncts].reshape(ncts, ncts)
+        self.assertGreater(float(np.max(np.abs(projected[njc:, njc:] - original[njc:, njc:]))), 1e-6)
 
     def test_03e_dvi_direct_block_no_unilateral_rows_reports_single_iteration(self):
         builder = basics.build_box_pendulum(ground=False)
