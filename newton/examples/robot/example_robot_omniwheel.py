@@ -35,6 +35,30 @@ def set_mecanum_targets(
     target_qd[drive_dofs[wheel]] = -linear_speed / wheel_radius
 
 
+@wp.kernel
+def set_ballbot_targets(
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    target_qd: wp.array[float],
+    body: int,
+    drive_dofs: wp.array[int],
+    drive_directions: wp.array[wp.vec3],
+    wheel_radius: float,
+):
+    """Balance the body by driving the ball beneath its center of mass."""
+    rotation = wp.transform_get_rotation(body_q[body])
+    up = wp.quat_rotate(rotation, wp.vec3(0.0, 0.0, 1.0))
+    angular_velocity = wp.spatial_bottom(body_qd[body])
+    correction = wp.vec3(
+        7.0 * up[0] + 1.8 * angular_velocity[1],
+        7.0 * up[1] - 1.8 * angular_velocity[0],
+        0.0,
+    )
+
+    wheel = wp.tid()
+    target_qd[drive_dofs[wheel]] = -wp.dot(correction, drive_directions[wheel]) / wheel_radius
+
+
 def add_mecanum_wheel(
     builder: newton.ModelBuilder,
     chassis: int,
@@ -143,6 +167,112 @@ def add_mecanum_wheel(
     return drive_joint, roller_joints, wheel_outer_radius
 
 
+def add_omniwheel_90(
+    builder: newton.ModelBuilder,
+    parent: int,
+    position: wp.vec3,
+    orientation: wp.quat,
+    label: str,
+    *,
+    roller_count: int = 6,
+    wheel_radius: float = 0.12,
+    hub_radius: float = 0.070,
+    hub_half_width: float = 0.025,
+    roller_radius: float = 0.010,
+    roller_half_height: float = 0.045,
+) -> tuple[int, list[int]]:
+    """Add a driven conventional omniwheel with tangential barrel rollers.
+
+    The barrel profile radius equals the wheel radius so the rollers collectively
+    follow the wheel's circular outer profile.
+
+    Args:
+        builder: Model builder receiving the wheel.
+        parent: Parent carrier body.
+        position: Wheel center in the parent frame [m].
+        orientation: Rotation from the wheel frame to the parent frame.
+        label: Label prefix for generated bodies, joints, and shapes.
+        roller_count: Number of passive rollers around the hub.
+        wheel_radius: Outer wheel and roller barrel-profile radius [m].
+        hub_radius: Radius of the central hub [m].
+        hub_half_width: Half-width of the central hub [m].
+        roller_radius: Roller end radius [m].
+        roller_half_height: Roller half-length [m].
+
+    Returns:
+        The driven hub joint and passive roller joints.
+    """
+    if wheel_radius < roller_half_height:
+        raise ValueError("wheel_radius must be at least roller_half_height")
+
+    roller_equatorial_radius = (
+        roller_radius
+        + wheel_radius
+        - math.sqrt(wheel_radius * wheel_radius - roller_half_height * roller_half_height)
+    )
+    roller_center_radius = wheel_radius - roller_equatorial_radius
+    if hub_radius >= roller_center_radius - roller_equatorial_radius:
+        raise ValueError("hub overlaps the omniwheel rollers")
+
+    hub = builder.add_link(label=f"{label}_hub")
+    hub_cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=1.0, gap=0.01)
+    builder.add_shape_cylinder(
+        hub,
+        radius=hub_radius,
+        half_height=hub_half_width,
+        cfg=hub_cfg,
+        color=(0.72, 0.74, 0.78),
+        label=f"{label}_hub",
+    )
+    drive_joint = builder.add_joint_revolute(
+        parent=parent,
+        child=hub,
+        parent_xform=wp.transform(p=position, q=orientation),
+        child_xform=wp.transform(),
+        axis=newton.Axis.Z,
+        target_vel=0.0,
+        target_kd=180.0,
+        damping=0.1,
+        armature=0.03,
+        effort_limit=300.0,
+        actuator_mode=newton.JointTargetMode.VELOCITY,
+        label=f"{label}_drive",
+    )
+
+    roller_cfg = newton.ModelBuilder.ShapeConfig(density=700.0, mu=2.0, gap=0.01)
+    roller_joints = []
+    for roller_index in range(roller_count):
+        angle = 2.0 * math.pi * roller_index / roller_count
+        radial = wp.vec3(math.cos(angle), math.sin(angle), 0.0)
+        tangent = wp.vec3(-math.sin(angle), math.cos(angle), 0.0)
+        roller_rotation = newton.math.quat_between_vectors_robust(wp.vec3(0.0, 0.0, 1.0), tangent)
+
+        roller = builder.add_link(label=f"{label}_roller_{roller_index}")
+        builder.add_shape_cylinder(
+            roller,
+            radius=roller_radius,
+            half_height=roller_half_height,
+            barrel_radius=wheel_radius,
+            cfg=roller_cfg,
+            color=(0.85, 0.38, 0.08),
+            label=f"{label}_roller_{roller_index}",
+        )
+        roller_joints.append(
+            builder.add_joint_revolute(
+                parent=hub,
+                child=roller,
+                parent_xform=wp.transform(p=radial * roller_center_radius, q=roller_rotation),
+                child_xform=wp.transform(),
+                axis=newton.Axis.Z,
+                damping=0.01,
+                armature=0.001,
+                label=f"{label}_roller_{roller_index}",
+            )
+        )
+
+    return drive_joint, roller_joints
+
+
 class Example:
     """Drive a flat warehouse robot with four mecanum wheels."""
 
@@ -206,14 +336,85 @@ class Example:
             joints.extend(roller_joints)
 
         builder.add_articulation(joints, label="warehouse_robot")
+
+        ballbot_x = -1.4
+        ball_radius = 0.30
+        ball = builder.add_link(
+            xform=wp.transform(p=wp.vec3(ballbot_x, 0.0, ball_radius), q=wp.quat_identity()),
+            label="ballbot_ball",
+        )
+        ball_shape = builder.add_shape_sphere(
+            ball,
+            radius=ball_radius,
+            cfg=newton.ModelBuilder.ShapeConfig(density=80.0, mu=1.8, gap=0.01),
+            color=(0.08, 0.09, 0.11),
+            label="ballbot_ball",
+        )
+        builder.add_articulation([builder.add_joint_free(ball, label="ballbot_ball_free")], label="ballbot_ball")
+
+        ballbot_body_height = 1.05
+        initial_tilt = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), math.radians(2.0))
+        ballbot_body = builder.add_link(
+            xform=wp.transform(p=wp.vec3(ballbot_x, 0.0, ballbot_body_height), q=initial_tilt),
+            label="ballbot_body",
+        )
+        ballbot_body_shape = builder.add_shape_cylinder(
+            ballbot_body,
+            radius=0.22,
+            half_height=0.40,
+            cfg=newton.ModelBuilder.ShapeConfig(density=70.0, mu=0.8, gap=0.01),
+            color=(0.88, 0.30, 0.08),
+            label="ballbot_body",
+        )
+        builder.add_shape_collision_filter_pair(ball_shape, ballbot_body_shape)
+
+        ballbot_joints = [builder.add_joint_free(ballbot_body, label="ballbot_body_free")]
+        ballbot_drive_joints = []
+        ballbot_drive_directions = []
+        wheel_radius_90 = 0.12
+        wheel_center_distance = ball_radius + wheel_radius_90 - 0.02
+        wheel_radial_offset = wheel_center_distance / math.sqrt(2.0)
+        wheel_height = ball_radius + wheel_radial_offset
+        for wheel_index in range(3):
+            angle = 2.0 * math.pi * wheel_index / 3
+            radial = wp.vec3(math.cos(angle), math.sin(angle), 0.0)
+            tangent = wp.vec3(-math.sin(angle), math.cos(angle), 0.0)
+            wheel_position = radial * wheel_radial_offset + wp.vec3(
+                0.0, 0.0, wheel_height - ballbot_body_height
+            )
+            drive_axis = (-radial + wp.vec3(0.0, 0.0, 1.0)) / math.sqrt(2.0)
+            wheel_orientation = newton.math.quat_between_vectors_robust(wp.vec3(0.0, 0.0, 1.0), drive_axis)
+            drive_joint, roller_joints = add_omniwheel_90(
+                builder,
+                ballbot_body,
+                wheel_position,
+                wheel_orientation,
+                f"ballbot_wheel_{wheel_index}",
+                wheel_radius=wheel_radius_90,
+            )
+            ballbot_drive_joints.append(drive_joint)
+            ballbot_drive_directions.append(tangent)
+            ballbot_joints.append(drive_joint)
+            ballbot_joints.extend(roller_joints)
+
+        builder.add_articulation(ballbot_joints, label="ballbot")
         builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=1.5, gap=0.01))
 
         self.model = builder.finalize()
         self.chassis = chassis
+        self.ballbot_body = ballbot_body
         self.wheel_outer_radius = wheel_outer_radius
         joint_qd_start = self.model.joint_qd_start.numpy()
         self.drive_dof_indices = np.array([joint_qd_start[joint] for joint in drive_joints], dtype=np.int32)
         self.drive_dofs = wp.array(self.drive_dof_indices, dtype=int, device=self.model.device)
+        self.ballbot_drive_dof_indices = np.array(
+            [joint_qd_start[joint] for joint in ballbot_drive_joints], dtype=np.int32
+        )
+        self.ballbot_drive_dofs = wp.array(self.ballbot_drive_dof_indices, dtype=int, device=self.model.device)
+        self.ballbot_drive_directions = wp.array(
+            ballbot_drive_directions, dtype=wp.vec3, device=self.model.device
+        )
+        self.ballbot_wheel_radius = wheel_radius_90
 
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
@@ -238,6 +439,8 @@ class Example:
         self.max_lateral_travel = 0.0
         self.max_yaw = 0.0
         self.max_drive_speed = 0.0
+        self.min_ballbot_up = 1.0
+        self.max_ballbot_drive_speed = 0.0
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(2.4, -3.2, 2.0), pitch=-24.0, yaw=128.0)
@@ -281,6 +484,19 @@ class Example:
                 0.72,
             ],
         )
+        wp.launch(
+            set_ballbot_targets,
+            dim=3,
+            inputs=[
+                self.state_0.body_q,
+                self.state_0.body_qd,
+                self.control.joint_target_qd,
+                self.ballbot_body,
+                self.ballbot_drive_dofs,
+                self.ballbot_drive_directions,
+                self.ballbot_wheel_radius,
+            ],
+        )
         if self.graph:
             wp.capture_launch(self.graph)
         else:
@@ -291,13 +507,21 @@ class Example:
         """Track achieved chassis motion and wheel speeds."""
         body_q = self.state_0.body_q.numpy()[self.chassis]
         assert np.all(np.isfinite(body_q)), f"non-finite chassis pose at t={self.sim_time:.3f} s"
-        self.max_forward_travel = max(self.max_forward_travel, float(body_q[0] - self.chassis_start[0]))
+        self.max_forward_travel = max(self.max_forward_travel, abs(float(body_q[0] - self.chassis_start[0])))
         self.max_lateral_travel = max(self.max_lateral_travel, abs(float(body_q[1] - self.chassis_start[1])))
         qx, qy, qz, qw = body_q[3:7]
         yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
         self.max_yaw = max(self.max_yaw, abs(yaw))
         joint_qd = self.state_0.joint_qd.numpy()
         self.max_drive_speed = max(self.max_drive_speed, float(np.max(np.abs(joint_qd[self.drive_dof_indices]))))
+        ballbot_q = self.state_0.body_q.numpy()[self.ballbot_body]
+        ballbot_rotation = wp.quat(*ballbot_q[3:7])
+        ballbot_up = wp.quat_rotate(ballbot_rotation, wp.vec3(0.0, 0.0, 1.0))
+        self.min_ballbot_up = min(self.min_ballbot_up, float(ballbot_up[2]))
+        self.max_ballbot_drive_speed = max(
+            self.max_ballbot_drive_speed,
+            float(np.max(np.abs(joint_qd[self.ballbot_drive_dof_indices]))),
+        )
 
     def test_final(self):
         """Verify the robot completes all three commanded motions."""
@@ -313,6 +537,8 @@ class Example:
         assert self.max_lateral_travel > 0.06, f"insufficient lateral travel: {self.max_lateral_travel:.3f} m"
         assert self.max_yaw > 0.10, f"insufficient rotation: {self.max_yaw:.3f} rad"
         assert self.max_drive_speed > 0.5, f"wheel drives did not engage: {self.max_drive_speed:.3f} rad/s"
+        assert self.min_ballbot_up > 0.85, f"ballbot lost balance: minimum up={self.min_ballbot_up:.3f}"
+        assert self.max_ballbot_drive_speed > 0.1, "ballbot balance drives did not engage"
 
     def render(self):
         """Render the robot and contacts."""
