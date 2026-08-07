@@ -16,7 +16,7 @@ import warp as wp
 import newton
 import newton.examples
 import newton.utils
-from newton import JointTargetMode
+from newton import JointTargetMode, JointType
 
 
 class Example:
@@ -57,13 +57,24 @@ class Example:
         # approximate meshes for faster collision detection
         h1.approximate_meshes("bounding_box")
 
-        for i in range(len(h1.joint_target_ke)):
-            h1.joint_target_ke[i] = 150
-            h1.joint_target_kd[i] = 5
-            h1.joint_target_mode[i] = int(JointTargetMode.POSITION)
+        for joint_id, joint_type in enumerate(h1.joint_type):
+            if joint_type != JointType.REVOLUTE:
+                continue
+            dof_start = h1.joint_qd_start[joint_id]
+            dof_end = h1.joint_qd_start[joint_id + 1] if joint_id + 1 < h1.joint_count else h1.joint_dof_count
+            for dof_id in range(dof_start, dof_end):
+                h1.joint_target_ke[dof_id] = 150
+                h1.joint_target_kd[dof_id] = 5
+                h1.joint_target_mode[dof_id] = int(JointTargetMode.POSITION)
 
         builder = newton.ModelBuilder()
         builder.replicate(h1, self.world_count)
+
+        self.root_dof_indices = []
+        for root_joint_id in builder.articulation_start:
+            root_dof_start = builder.joint_qd_start[root_joint_id]
+            root_dof_end = builder.joint_qd_start[root_joint_id + 1]
+            self.root_dof_indices.extend(range(root_dof_start, root_dof_end))
 
         builder.default_shape_cfg.ke = 1.0e3
         builder.default_shape_cfg.kd = 1.0e2
@@ -147,6 +158,16 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
+        """Verify the robot settles without actuating its floating base."""
+        target_mode = self.model.joint_target_mode.numpy()
+        target_ke = self.model.joint_target_ke.numpy()
+        target_kd = self.model.joint_target_kd.numpy()
+        if any(
+            target_mode[dof_id] != int(JointTargetMode.NONE) or target_ke[dof_id] != 0.0 or target_kd[dof_id] != 0.0
+            for dof_id in self.root_dof_indices
+        ):
+            raise AssertionError("floating-base DOFs must remain unactuated")
+
         velocity_limit = 0.15 if self.solver_type == "kamino" else 5e-3
         newton.examples.test_body_state(
             self.model,
