@@ -537,7 +537,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
     permutation = path.bilateral_solver.P if use_permutation else state.projected_mio
     wp.launch(
         kernel=_solve_bilateral_unilateral_response,
-        dim=(path.size.num_worlds, max_unilateral_rows),
+        dim=path.size.num_worlds * (64 if path.device.is_cuda else 1),
         inputs=[
             problem.data.dim,
             problem.data.njc,
@@ -554,6 +554,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
             state.bilateral_response,
         ],
         device=path.device,
+        block_dim=64 if path.device.is_cuda else 1,
     )
     for block_iteration in range(path.max_alternating_iterations):
         _launch_sparse_inequality_pgs(path, problem, block_iteration)

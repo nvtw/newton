@@ -441,42 +441,49 @@ def _solve_bilateral_unilateral_response(
     response_factor: wp.array[float32],
     response: wp.array[float32],
 ):
-    wid, unilateral = wp.tid()
+    tid = wp.tid()
+    threads_per_world = int32(wp.block_dim())
+    lane = tid % threads_per_world
+    wid = tid / threads_per_world
     njc = problem_njc[wid]
     nu = problem_dim[wid] - njc
-    if unilateral >= nu:
-        return
-
     factor = bilateral_mio[wid]
     bvio = bilateral_vio[wid]
     offset = wid * max_joint_rows * max_unilateral_rows
-    for row in range(njc):
-        original_row = row
-        if use_permutation:
-            original_row = bilateral_permutation[bvio + row]
-        value = bilateral_P[bvio + original_row] * coupling[offset + original_row * max_unilateral_rows + unilateral]
-        for k in range(row):
-            value -= (
-                bilateral_L[factor + njc * row + k] * response_factor[offset + k * max_unilateral_rows + unilateral]
+    for unilateral in range(lane, nu, threads_per_world):
+        for row in range(njc):
+            original_row = row
+            if use_permutation:
+                original_row = bilateral_permutation[bvio + row]
+            value = (
+                bilateral_P[bvio + original_row] * coupling[offset + original_row * max_unilateral_rows + unilateral]
             )
-        response_factor[offset + row * max_unilateral_rows + unilateral] = value / bilateral_L[factor + njc * row + row]
-
-    for reverse_row in range(njc):
-        row = njc - int32(1) - reverse_row
-        value = response_factor[offset + row * max_unilateral_rows + unilateral]
-        for k in range(row + int32(1), njc):
-            value -= (
-                bilateral_L[factor + njc * k + row] * response_factor[offset + k * max_unilateral_rows + unilateral]
+            for k in range(row):
+                value -= (
+                    bilateral_L[factor + njc * row + k] * response_factor[offset + k * max_unilateral_rows + unilateral]
+                )
+            response_factor[offset + row * max_unilateral_rows + unilateral] = (
+                value / bilateral_L[factor + njc * row + row]
             )
-        response_factor[offset + row * max_unilateral_rows + unilateral] = value / bilateral_L[factor + njc * row + row]
 
-    for row in range(njc):
-        original_row = row
-        if use_permutation:
-            original_row = bilateral_permutation[bvio + row]
-        response[offset + original_row * max_unilateral_rows + unilateral] = (
-            bilateral_P[bvio + original_row] * response_factor[offset + row * max_unilateral_rows + unilateral]
-        )
+        for reverse_row in range(njc):
+            row = njc - int32(1) - reverse_row
+            value = response_factor[offset + row * max_unilateral_rows + unilateral]
+            for k in range(row + int32(1), njc):
+                value -= (
+                    bilateral_L[factor + njc * k + row] * response_factor[offset + k * max_unilateral_rows + unilateral]
+                )
+            response_factor[offset + row * max_unilateral_rows + unilateral] = (
+                value / bilateral_L[factor + njc * row + row]
+            )
+
+        for row in range(njc):
+            original_row = row
+            if use_permutation:
+                original_row = bilateral_permutation[bvio + row]
+            response[offset + original_row * max_unilateral_rows + unilateral] = (
+                bilateral_P[bvio + original_row] * response_factor[offset + row * max_unilateral_rows + unilateral]
+            )
 
 
 @wp.kernel
