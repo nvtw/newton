@@ -657,6 +657,7 @@ class GlobalContactReducerData:
     normal: wp.array[wp.vec2]  # Octahedral-encoded unit normal (see encode_oct/decode_oct)
     shape_pairs: wp.array[wp.vec2i]
     contact_count: wp.array[wp.int32]
+    exported_flags: wp.array[wp.int32]
     capacity: int
 
     # Deterministic fingerprint per contact (triangle/edge/vertex index).
@@ -1067,6 +1068,7 @@ class GlobalContactReducer:
         data.normal = self.normal
         data.shape_pairs = self.shape_pairs
         data.contact_count = self.contact_count
+        data.exported_flags = self.exported_flags
         data.capacity = self.capacity
         data.contact_fingerprints = self.contact_fingerprints
         data.contact_area = self.contact_area
@@ -1118,6 +1120,8 @@ def export_contact_to_buffer(
     if buffer_idx >= reducer_data.capacity:
         return -1
     contact_id = buffer_idx + 1  # ID zero is reserved for provisional winners.
+    if reducer_data.exported_flags.shape[0] > 0:
+        reducer_data.exported_flags[contact_id] = 0
 
     # Store contact data (packed into vec4, normal octahedral-encoded into vec2)
     reducer_data.position_depth[contact_id] = wp.vec4(position[0], position[1], position[2], depth)

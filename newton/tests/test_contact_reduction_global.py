@@ -574,8 +574,9 @@ def test_clear_active_coalesced(test, device):
 
 
 def test_export_reduced_contacts_kernel(test, device):
-    """Test the export_reduced_contacts_kernel with a custom writer."""
+    """Reset reused export flags while storing reduced contacts."""
     reducer = GlobalContactReducer(capacity=100, device=device)
+    reducer.exported_flags.fill_(1)
 
     # Create dummy arrays for the required parameters
     num_shapes = 200
@@ -713,7 +714,6 @@ def test_export_reduced_contacts_kernel(test, device):
 
     # Launch export kernel
     total_blocks = 128
-    reducer.exported_flags.zero_()
     wp.launch_tiled(
         export_kernel,
         dim=total_blocks,
