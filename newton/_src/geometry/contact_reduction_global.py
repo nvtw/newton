@@ -91,6 +91,10 @@ PAIRS_PER_KEY = VALUES_PER_KEY * (VALUES_PER_KEY - 1) // 2
 EXPORT_REDUCED_CONTACTS_BLOCK_DIM = 32
 EXPORT_REDUCED_CONTACTS_THREAD_BUDGET_MULTIPLIER = 4
 
+# Preserve slot-level parallelism below one full clear launch; larger active
+# sets have enough entry-level work to favor coalesced slot-major stores.
+CLEAR_ACTIVE_ENTRY_PARALLEL_THRESHOLD = 1024
+
 # Open-addressed linear probing gets expensive at high load and failed inserts
 # scan the whole table.
 HASHTABLE_WARN_LOAD_PERCENT = 80
@@ -738,8 +742,11 @@ def _clear_active_kernel(
 ):
     """Clear active hashtable entries, values, hydroelastic aggregates, and counters.
 
-    Uses grid-stride loop for efficient thread utilization.
-    Each thread handles one value slot, with key and aggregate clearing done once per entry.
+    Small active sets assign one thread per value slot to expose enough work for
+    the GPU. Large active sets assign one thread per entry so adjacent threads
+    write adjacent elements of each slot-major value array. The active count is
+    shared by the launch, so every thread follows the same branch.
+
     Thread 0 also zeros contact_count and ht_insert_failures (no other thread in this
     kernel reads them, so there is no race). The active-slots count stored at
     ``ht_active_slots[ht_capacity]`` must NOT be reset here: every thread reads it
@@ -759,21 +766,38 @@ def _clear_active_kernel(
     # All threads read this before it is modified by the follow-up zeroing kernel.
     count = ht_active_slots[ht_capacity]
 
-    # Total work items: count entries * values_per_key slots per entry
-    total_work = count * values_per_key
+    if count < wp.static(CLEAR_ACTIVE_ENTRY_PARALLEL_THRESHOLD):
+        total_work = count * values_per_key
+        i = tid
+        while i < total_work:
+            active_idx = i / values_per_key
+            local_idx = i % values_per_key
+            entry_idx = ht_active_slots[active_idx]
 
-    # Grid-stride loop: each thread processes one value slot
-    i = tid
-    while i < total_work:
-        # Compute which entry and which slot within that entry
-        active_idx = i / values_per_key
-        local_idx = i % values_per_key
-        entry_idx = ht_active_slots[active_idx]
+            if local_idx == 0:
+                ht_keys[entry_idx] = HASHTABLE_EMPTY_KEY
+                if agg_force.shape[0] > 0:
+                    agg_force[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
+                    agg_depth_volume[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
+                    weighted_pos_sum[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
+                    weight_sum[entry_idx] = 0.0
+                    entry_k_eff[entry_idx] = 0.0
+                    total_depth_reduced[entry_idx] = 0.0
+                    total_normal_reduced[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
+                    if agg_moment_unreduced.shape[0] > 0:
+                        agg_moment_unreduced[entry_idx] = 0.0
+                        agg_moment_reduced[entry_idx] = 0.0
+                        agg_moment2_reduced[entry_idx] = 0.0
 
-        # Clear keys and hydroelastic aggregates only once per entry (when processing slot 0)
-        if local_idx == 0:
+            value_idx = local_idx * ht_capacity + entry_idx
+            ht_values[value_idx] = wp.uint64(0)
+            i += num_threads
+    else:
+        active_idx = tid
+        while active_idx < count:
+            entry_idx = ht_active_slots[active_idx]
+
             ht_keys[entry_idx] = HASHTABLE_EMPTY_KEY
-            # Clear hydroelastic aggregates if arrays are not empty
             if agg_force.shape[0] > 0:
                 agg_force[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 agg_depth_volume[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
@@ -787,10 +811,11 @@ def _clear_active_kernel(
                     agg_moment_reduced[entry_idx] = 0.0
                     agg_moment2_reduced[entry_idx] = 0.0
 
-        # Clear this value slot (slot-major layout)
-        value_idx = local_idx * ht_capacity + entry_idx
-        ht_values[value_idx] = wp.uint64(0)
-        i += num_threads
+            for local_idx in range(values_per_key):
+                value_idx = local_idx * ht_capacity + entry_idx
+                ht_values[value_idx] = wp.uint64(0)
+
+            active_idx += num_threads
 
 
 @wp.kernel(enable_backward=False)

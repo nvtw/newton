@@ -11,6 +11,7 @@ import warp as wp
 from newton._src.geometry.contact_data import ContactData, make_contact_sort_key
 from newton._src.geometry.contact_reduction import float_flip
 from newton._src.geometry.contact_reduction_global import (
+    CLEAR_ACTIVE_ENTRY_PARALLEL_THRESHOLD,
     EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
     SCORE_SHIFT,
     GlobalContactReducer,
@@ -408,8 +409,13 @@ def test_stress_many_contacts(test, device):
 
 
 def test_clear_active(test, device):
-    """Test that clear_active only clears used slots."""
-    reducer = GlobalContactReducer(capacity=100, device=device)
+    """Verify clear_active resets active entries and permits reuse."""
+    reducer = GlobalContactReducer(
+        capacity=100,
+        device=device,
+        store_hydroelastic_data=True,
+        store_moment_data=True,
+    )
 
     # Create dummy arrays for the required parameters
     num_shapes = 200
@@ -457,12 +463,39 @@ def test_clear_active(test, device):
     )
 
     test.assertEqual(get_contact_count(reducer), 1)
-    test.assertGreater(get_active_slot_count(reducer), 0)
+    active_slots = reducer.hashtable.active_slots.numpy()
+    active_count = int(active_slots[reducer.hashtable.capacity])
+    test.assertGreater(active_count, 0)
+    active_entries = active_slots[:active_count]
+
+    reducer.agg_force.fill_(wp.vec3(1.0))
+    reducer.agg_depth_volume.fill_(wp.vec3(1.0))
+    reducer.weighted_pos_sum.fill_(wp.vec3(1.0))
+    reducer.weight_sum.fill_(1.0)
+    reducer.entry_k_eff.fill_(1.0)
+    reducer.total_depth_reduced.fill_(1.0)
+    reducer.total_normal_reduced.fill_(wp.vec3(1.0))
+    reducer.agg_moment_unreduced.fill_(1.0)
+    reducer.agg_moment_reduced.fill_(1.0)
+    reducer.agg_moment2_reduced.fill_(1.0)
 
     # Clear active and verify
     reducer.clear_active()
     test.assertEqual(get_contact_count(reducer), 0)
     test.assertEqual(get_active_slot_count(reducer), 0)
+    for values in (
+        reducer.agg_force,
+        reducer.agg_depth_volume,
+        reducer.weighted_pos_sum,
+        reducer.weight_sum,
+        reducer.entry_k_eff,
+        reducer.total_depth_reduced,
+        reducer.total_normal_reduced,
+        reducer.agg_moment_unreduced,
+        reducer.agg_moment_reduced,
+        reducer.agg_moment2_reduced,
+    ):
+        np.testing.assert_array_equal(values.numpy()[active_entries], 0.0)
 
     # Store again should work
     wp.launch(
@@ -479,6 +512,65 @@ def test_clear_active(test, device):
     )
 
     test.assertEqual(get_contact_count(reducer), 1)
+
+
+def test_clear_active_coalesced(test, device):
+    """Verify the coalesced branch resets directly seeded active entries."""
+    active_count = CLEAR_ACTIVE_ENTRY_PARALLEL_THRESHOLD
+    reducer = GlobalContactReducer(
+        capacity=4 * active_count,
+        device=device,
+        store_hydroelastic_data=True,
+        store_moment_data=True,
+    )
+    ht_capacity = reducer.hashtable.capacity
+    test.assertGreaterEqual(ht_capacity, active_count)
+
+    active_entries = np.arange(active_count, dtype=np.int32)
+    keys = np.full(ht_capacity, np.iinfo(np.uint64).max, dtype=np.uint64)
+    keys[active_entries] = np.arange(1, active_count + 1, dtype=np.uint64)
+    active_slots = np.zeros(ht_capacity + 1, dtype=np.int32)
+    active_slots[:active_count] = active_entries
+    active_slots[ht_capacity] = active_count
+    reducer.hashtable.keys.assign(keys)
+    reducer.hashtable.active_slots.assign(active_slots)
+    reducer.ht_values.fill_(wp.uint64(1))
+    reducer.contact_count.fill_(7)
+    reducer.ht_insert_failures.fill_(3)
+
+    vector_entry_arrays = (
+        reducer.agg_force,
+        reducer.agg_depth_volume,
+        reducer.weighted_pos_sum,
+        reducer.total_normal_reduced,
+    )
+    scalar_entry_arrays = (
+        reducer.weight_sum,
+        reducer.entry_k_eff,
+        reducer.total_depth_reduced,
+        reducer.agg_moment_unreduced,
+        reducer.agg_moment_reduced,
+        reducer.agg_moment2_reduced,
+    )
+    for values in vector_entry_arrays:
+        values.fill_(wp.vec3(1.0))
+    for values in scalar_entry_arrays:
+        values.fill_(1.0)
+    entry_arrays = vector_entry_arrays + scalar_entry_arrays
+
+    reducer.clear_active()
+
+    test.assertEqual(get_contact_count(reducer), 0)
+    test.assertEqual(int(reducer.ht_insert_failures.numpy()[0]), 0)
+    test.assertEqual(get_active_slot_count(reducer), 0)
+    np.testing.assert_array_equal(
+        reducer.hashtable.keys.numpy()[active_entries],
+        np.full(active_count, np.iinfo(np.uint64).max, dtype=np.uint64),
+    )
+    cleared_values = reducer.ht_values.numpy().reshape(reducer.values_per_key, ht_capacity)[:, active_entries]
+    np.testing.assert_array_equal(cleared_values, 0)
+    for values in entry_arrays:
+        np.testing.assert_array_equal(values.numpy()[active_entries], 0.0)
 
 
 def test_export_reduced_contacts_kernel(test, device):
@@ -1451,6 +1543,7 @@ add_function_test(TestGlobalContactReducer, "test_different_shape_pairs", test_d
 add_function_test(TestGlobalContactReducer, "test_clear", test_clear, devices=devices)
 add_function_test(TestGlobalContactReducer, "test_stress_many_contacts", test_stress_many_contacts, devices=devices)
 add_function_test(TestGlobalContactReducer, "test_clear_active", test_clear_active, devices=devices)
+add_function_test(TestGlobalContactReducer, "test_clear_active_coalesced", test_clear_active_coalesced, devices=devices)
 add_function_test(
     TestGlobalContactReducer,
     "test_export_reduced_contacts_kernel",
