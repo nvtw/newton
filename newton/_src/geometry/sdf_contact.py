@@ -1168,11 +1168,12 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 use_bvh_for_sdf = False
                 if not sdf_is_hfield:
                     sdf_idx = shape_sdf_index[sdf_shape]
-                    use_bvh_for_sdf = sdf_idx < 0 or sdf_idx >= texture_sdf_table.shape[0]
-                    if not use_bvh_for_sdf:
-                        use_bvh_for_sdf = texture_sdf_table[sdf_idx].coarse_texture.width == 0
-                    if use_bvh_for_sdf and mesh_id_sdf == wp.uint64(0):
-                        continue
+                    if wp.static(not use_texture_sdf_only):
+                        use_bvh_for_sdf = sdf_idx < 0 or sdf_idx >= texture_sdf_table.shape[0]
+                        if not use_bvh_for_sdf:
+                            use_bvh_for_sdf = texture_sdf_table[sdf_idx].coarse_texture.width == 0
+                        if use_bvh_for_sdf and mesh_id_sdf == wp.uint64(0):
+                            continue
 
                 scale_data_tri = shape_data[tri_shape]
                 scale_data_sdf = shape_data[sdf_shape]
@@ -1626,11 +1627,12 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 use_bvh_for_sdf = False
                 if not sdf_is_hfield:
                     sdf_idx = shape_sdf_index[sdf_shape]
-                    use_bvh_for_sdf = sdf_idx < 0 or sdf_idx >= texture_sdf_table.shape[0]
-                    if not use_bvh_for_sdf:
-                        use_bvh_for_sdf = texture_sdf_table[sdf_idx].coarse_texture.width == 0
-                    if use_bvh_for_sdf and mesh_id_sdf == wp.uint64(0):
-                        continue
+                    if wp.static(not use_texture_sdf_only):
+                        use_bvh_for_sdf = sdf_idx < 0 or sdf_idx >= texture_sdf_table.shape[0]
+                        if not use_bvh_for_sdf:
+                            use_bvh_for_sdf = texture_sdf_table[sdf_idx].coarse_texture.width == 0
+                        if use_bvh_for_sdf and mesh_id_sdf == wp.uint64(0):
+                            continue
 
                 scale_data_tri = shape_data[tri_shape]
                 scale_data_sdf = shape_data[sdf_shape]
