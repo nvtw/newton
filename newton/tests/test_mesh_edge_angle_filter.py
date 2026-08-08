@@ -452,6 +452,15 @@ class TestBuildCollisionEdges(unittest.TestCase):
 
         self.assertEqual(len(filtered), 48)
 
+    def test_inward_filter_handles_translated_mesh(self):
+        """Classify the same inward features far from the local origin."""
+        mesh = _dimpled_box_mesh()
+        translated = newton.Mesh(mesh.vertices + 1.0e6, mesh.indices.copy(), compute_inertia=False)
+
+        filtered = self._build(translated)
+
+        self.assertEqual(len(filtered), 48)
+
     def test_inward_filter_preserves_convex_edges(self):
         """Preserve every non-coplanar edge of a convex closed mesh."""
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)

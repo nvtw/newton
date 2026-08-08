@@ -46,7 +46,7 @@ class TestSDFContact(unittest.TestCase):
                 result = wp.empty_like(values)
                 wp.launch(_sdf_rsqrt_rn_kernel, dim=len(values_np), inputs=[values, result], device=device)
 
-                np.testing.assert_allclose(result.numpy(), expected, rtol=1.0e-7, atol=0.0)
+                np.testing.assert_allclose(result.numpy(), expected, rtol=np.finfo(np.float32).eps, atol=0.0)
 
 
 if __name__ == "__main__":

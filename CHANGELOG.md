@@ -62,9 +62,7 @@
 - Make `CollisionPipeline` the sole owner of rigid-contact geometry for `SolverVBD`: `"latest"` supplies fresh geometry and `"sticky"` supplies replayed geometry. `SolverVBD(rigid_contact_history=True)` uses either mode's match indices only to warm-start its numeric lambda/penalty state.
 - Upgrade `mujoco` and `mujoco-warp` to 3.11.0. (#3725)
 - Optimize raycast/raytrace queries by restructuring ray-shape intersection into local-space primitives and compile specialized depth/shadow variants that skip unused surface-normal work (mesh shadows also use any-hit queries).
-- Filter fully inward manifold mesh edges by default when building mesh SDFs to reduce redundant contacts; pass `edge_inward_filter=False` to `Mesh.build_sdf()` to retain them.
-- Cache packed mesh-SDF collision edge centers and half-vectors and specialize their contact kernels, removing repeated mesh-index and vertex fetches without changing contact generation.
-- Change experimental `SolverVBD` cable constraint slots from `[STRETCH=0, BEND=1]` to `[STRETCH=0, SHEAR=1, BEND=2, TWIST=3]`, allowing each stiffness and constraint mode to be configured independently. Existing cable calls using raw `slot=1` or `JointSlot.ANGULAR` now select shear; use `JointSlot.BEND` (now slot 2) to select bending.
+- Change experimental `SolverVBD` cable constraint slots from `[STRETCH=0, BEND=1]` to `[STRETCH=0, SHEAR=1, BEND=2, TWIST=3]`, allowing each stiffness and constraint mode to be configured independently while preserving the pre-split world-form parent solve Hessian for the common isotropic component of stretch/shear elasticity. Existing cable calls using raw `slot=1` or `JointSlot.ANGULAR` now select shear; use `JointSlot.BEND` (now slot 2) to select bending.
 - Map `shape_material_kf` to per-contact MuJoCo `solreffriction` in `SolverMuJoCo` (elliptic friction cones with Newton contacts); resolve `kf` with priority/`solmix`, treat a resolved `kf = 0` as frictionless, and use native MuJoCo contacts or a pyramidal cone to preserve the previous solref-inherited friction.
 - Load visual-only USD geometry outside rigid-body hierarchies as static shapes by default; pass `load_static_visual_shapes=False` to retain the previous body-associated-visuals-only behavior.
 - Speed up `Mesh.create_heightfield()` and `Mesh.create_terrain()` by building the vertex and index buffers in place, substantially reducing construction time and peak memory for large terrain grids such as those used by Isaac Lab.
@@ -119,7 +117,6 @@
 - Fix incorrect hydroelastic contact surfaces for primitive shapes. (#3150, #3239)
 - Fix masked `SolverCoupledProxy.reset()` calls clearing proxy feedback history for unselected worlds.
 - Fix masked solver resets modifying unselected worlds or discarding their coupling and contact history.
-- Preserve reduced mesh-SDF contacts in dense batched scenes when speculative candidates would otherwise exhaust the intermediate contact buffer.
 - Fix MJCF, URDF, and USD imports rendering collision-only bodies as visuals when the asset authors visual geometry elsewhere. (#3291)
 - Fix fully locked XPBD joints becoming permanently separated after large transient anchor errors.
 - Fix `SchemaResolverPhysx` reading every D6 translational limit gain from the `linear` instance instead of its `transX`, `transY`, or `transZ` instance.
