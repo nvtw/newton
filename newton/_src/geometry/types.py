@@ -998,9 +998,26 @@ class Mesh:
             self._collision_edges = None
             return
 
-        full_edges, full_angles, full_avg_normals, full_area_sums = self._filter_edges_by_dihedral_angle(
-            lower_angle_threshold_rad, return_diagnostics=True
-        )
+        canonical = None
+        topology = None
+        run_inward_filter = enable_inward_filter and sign_method != "normal" and self._indices.size > 0
+        if run_inward_filter:
+            canonical = self._canonical_vertex_ids()
+            topology = self._build_edge_slot_topology(canonical)
+
+        if enable_box_absorption:
+            full_edges, full_angles, full_avg_normals, full_area_sums = self._filter_edges_by_dihedral_angle(
+                lower_angle_threshold_rad,
+                return_diagnostics=True,
+                _canonical=canonical,
+                _topology=topology,
+            )
+        else:
+            full_edges = self._filter_edges_by_dihedral_angle(
+                lower_angle_threshold_rad,
+                _canonical=canonical,
+                _topology=topology,
+            )
 
         if enable_box_absorption and len(full_edges) > 0:
             from .edge_redundancy import find_redundant_edges, resolve_edge_removals  # noqa: PLC0415
@@ -1026,10 +1043,15 @@ class Mesh:
 
         # Pseudo-normal SDFs define a sided sheet rather than a closed solid,
         # so they have no unambiguous fully inward features to remove.
-        if enable_inward_filter and sign_method != "normal" and len(full_edges) > 0:
+        if run_inward_filter and len(full_edges) > 0:
             from .edge_inward_filter import filter_fully_inward_edges  # noqa: PLC0415
 
-            full_edges = filter_fully_inward_edges(self, full_edges)
+            full_edges = filter_fully_inward_edges(
+                self,
+                full_edges,
+                canonical_vertex_ids=canonical,
+                edge_slot_topology=topology,
+            )
 
         self._collision_edges = np.ascontiguousarray(full_edges, dtype=np.int32)
 
@@ -1128,6 +1150,7 @@ class Mesh:
 
     def _build_edge_slot_topology(
         self,
+        canonical: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return shared per-slot edge topology and per-triangle face normals.
 
@@ -1151,7 +1174,8 @@ class Mesh:
         """
         tris = self._indices.reshape(-1, 3)
         n = len(tris)
-        canonical = self._canonical_vertex_ids()
+        if canonical is None:
+            canonical = self._canonical_vertex_ids()
 
         c = canonical[tris]
         canon_edges = np.empty((n * 3, 2), dtype=np.int64)
@@ -1221,6 +1245,8 @@ class Mesh:
         lower_angle_threshold_rad: float,
         *,
         return_diagnostics: bool = False,
+        _canonical: np.ndarray | None = None,
+        _topology: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
     ) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return unique edge vertex pairs, dropping near-coplanar internal edges.
 
@@ -1247,14 +1273,16 @@ class Mesh:
             edges = self.edges
             if not return_diagnostics:
                 return edges
-            return self._compute_edge_dihedral_diagnostics(edges)
+            return self._compute_edge_dihedral_diagnostics(edges, canonical=_canonical, topology=_topology)
 
         if lower_angle_threshold_rad <= 0.0:
             return _full_with_optional_diagnostics()
         if self._indices.size == 0 or self._vertices.size == 0:
             return _full_with_optional_diagnostics()
 
-        orig_edges, _slot_keys, order, keys_sorted, face_normals, face_norms = self._build_edge_slot_topology()
+        if _topology is None:
+            _topology = self._build_edge_slot_topology(_canonical)
+        orig_edges, _slot_keys, order, keys_sorted, face_normals, face_norms = _topology
         n_slots = orig_edges.shape[0]
 
         # Group boundaries via change points in the sorted keys.
@@ -1315,7 +1343,11 @@ class Mesh:
         return kept_edges, kept_angles, kept_avg_normals, kept_area_sums
 
     def _compute_edge_dihedral_diagnostics(
-        self, edges: np.ndarray
+        self,
+        edges: np.ndarray,
+        *,
+        canonical: np.ndarray | None = None,
+        topology: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Per-edge dihedral angle, averaged adjacent-face normal, and area sum.
 
@@ -1331,9 +1363,12 @@ class Mesh:
         if n_edges == 0 or self._indices.size == 0 or self._vertices.size == 0:
             return edges, angles, avg_normals, area_sums
 
-        _orig_edges, _slot_keys, order, keys_sorted, face_normals, face_norms = self._build_edge_slot_topology()
+        if topology is None:
+            topology = self._build_edge_slot_topology(canonical)
+        _orig_edges, _slot_keys, order, keys_sorted, face_normals, face_norms = topology
 
-        canonical = self._canonical_vertex_ids()
+        if canonical is None:
+            canonical = self._canonical_vertex_ids()
         edge_canon0 = np.minimum(canonical[edges[:, 0]], canonical[edges[:, 1]])
         edge_canon1 = np.maximum(canonical[edges[:, 0]], canonical[edges[:, 1]])
         edge_keys = (edge_canon0.astype(np.int64) << 32) | edge_canon1.astype(np.int64)
