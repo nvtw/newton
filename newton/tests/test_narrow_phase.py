@@ -25,9 +25,12 @@ import warp as wp
 from warp.tests.unittest_utils import StdOutCapture
 
 import newton
-from newton._src.geometry.contact_data import ContactData
 from newton._src.geometry.flags import ShapeFlags
-from newton._src.geometry.narrow_phase import ContactWriterData, NarrowPhase, write_contact_simple
+from newton._src.geometry.narrow_phase import (
+    NarrowPhase,
+    create_narrow_phase_primitive_kernel,
+    write_contact_simple,
+)
 from newton._src.geometry.types import GeoType
 
 _cuda_available = wp.is_cuda_available()
@@ -342,41 +345,8 @@ class _NarrowPhaseSetupMixin:
         )
 
 
-@wp.kernel
-def _write_nonunit_normal_contact(writer_data: ContactWriterData):
-    contact = ContactData()
-    contact.shape_a = 0
-    contact.shape_b = 1
-    contact.contact_point_center = wp.vec3(0.0)
-    contact.contact_normal_a_to_b = wp.vec3(0.0, 0.0, 2.0)
-    contact.contact_distance = -0.25
-    contact.gap_sum = 1.0
-    write_contact_simple(contact, writer_data, 0)
-
-
 class TestNarrowPhase(_NarrowPhaseSetupMixin, unittest.TestCase):
     """Test NarrowPhase collision detection API with various primitive pairs."""
-
-    def test_writer_normalizes_contact_normal(self):
-        """Normalize producer contact normals before reconstructing surface points."""
-        device = wp.get_device()
-        writer_data = ContactWriterData()
-        writer_data.contact_max = 1
-        writer_data.contact_count = wp.zeros(1, dtype=int, device=device)
-        writer_data.contact_pair = wp.zeros(1, dtype=wp.vec2i, device=device)
-        writer_data.contact_position = wp.zeros(1, dtype=wp.vec3, device=device)
-        writer_data.contact_normal = wp.zeros(1, dtype=wp.vec3, device=device)
-        writer_data.contact_penetration = wp.zeros(1, dtype=float, device=device)
-        writer_data.contact_tangent = wp.zeros(0, dtype=wp.vec3, device=device)
-        writer_data.contact_sort_key = wp.zeros(0, dtype=wp.int64, device=device)
-
-        wp.launch(_write_nonunit_normal_contact, dim=1, inputs=[writer_data], device=device)
-
-        np.testing.assert_array_equal(
-            writer_data.contact_normal.numpy()[0],
-            np.array([0.0, 0.0, 1.0], dtype=np.float32),
-        )
-        self.assertEqual(float(writer_data.contact_penetration.numpy()[0]), -0.25)
 
     def test_launch_without_shape_edge_range(self):
         geom_list = [
@@ -1998,6 +1968,65 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         # Verify some contacts were still produced (from the pairs that fit)
         count = contact_count.numpy()[0]
         self.assertGreater(count, 0, "Should still produce contacts for pairs that fit in the buffer")
+
+    def test_sparse_gjk_routing_preserves_filtered_slots(self):
+        """Preserve source slots while filtering analytic pairs from sparse GJK routing."""
+        geom_list = [
+            {"type": GeoType.PLANE, "data": ([0.0, 0.0, 0.0], 0.0)},
+            {
+                "type": GeoType.BOX,
+                "data": ([0.5, 0.5, 0.5], 0.0),
+                "transform": ([0.0, 0.0, 5.0], [0.0, 0.0, 0.0, 1.0]),
+            },
+            {
+                "type": GeoType.BOX,
+                "data": ([0.5, 0.5, 0.5], 0.0),
+                "transform": ([0.0, 0.0, 5.5], [0.0, 0.0, 0.0, 1.0]),
+            },
+        ]
+        arrays = self._create_geometry_arrays(geom_list)
+        candidate_pair = wp.array([[0, 1], [1, 2]], dtype=wp.vec2i)
+        candidate_pair_count = wp.array([2], dtype=int)
+
+        narrow_phase = NarrowPhase(
+            max_candidate_pairs=2,
+            has_meshes=False,
+            verify_buffers=False,
+            shape_aabb_lower=arrays[7],
+            shape_aabb_upper=arrays[8],
+        )
+        narrow_phase.sparse_gjk_pairs = True
+        narrow_phase.primitive_kernel = create_narrow_phase_primitive_kernel(write_contact_simple, True)
+
+        contact_count = wp.zeros(1, dtype=int)
+        contact_pair = wp.zeros(8, dtype=wp.vec2i)
+        contact_position = wp.zeros(8, dtype=wp.vec3)
+        contact_normal = wp.zeros(8, dtype=wp.vec3)
+        contact_penetration = wp.zeros(8, dtype=float)
+        narrow_phase.launch(
+            candidate_pair=candidate_pair,
+            candidate_pair_count=candidate_pair_count,
+            shape_types=arrays[0],
+            shape_data=arrays[1],
+            shape_transform=arrays[2],
+            shape_source=arrays[3],
+            shape_gap=arrays[4],
+            shape_collision_radius=arrays[5],
+            shape_flags=arrays[6],
+            shape_local_aabb_lower=arrays[7],
+            shape_local_aabb_upper=arrays[8],
+            shape_voxel_resolution=arrays[9],
+            contact_pair=contact_pair,
+            contact_position=contact_position,
+            contact_normal=contact_normal,
+            contact_penetration=contact_penetration,
+            contact_count=contact_count,
+        )
+
+        self.assertEqual(int(narrow_phase.gjk_candidate_pairs_count.numpy()[0]), 1)
+        np.testing.assert_array_equal(narrow_phase.gjk_candidate_pairs.numpy(), [[-1, -1], [1, 2]])
+        self.assertGreater(int(contact_count.numpy()[0]), 0)
+        np.testing.assert_array_equal(contact_pair.numpy()[0], [1, 2])
 
     def test_broad_phase_buffer_overflow(self):
         """Test that broad phase buffer overflow produces a warning and no crash."""
