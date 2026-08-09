@@ -35,7 +35,14 @@ from typing import Any
 
 import warp as wp
 
-from .support_function import GeoTypeEx, closest_point_on_triangle, unpack_mesh_ptr
+from .support_function import (
+    BOX_SUPPORT_DEADBAND,
+    GeoTypeEx,
+    closest_point_on_triangle,
+    support_map,
+    support_map_lean,
+    unpack_mesh_ptr,
+)
 from .types import GeoType
 
 MPR_BOX_SUPPORT_TIE_EPSILON = 1.0e-6
@@ -311,20 +318,45 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
     else:
         _support_map_b, _minkowski_support, geometric_center = create_support_map_function(support_func)
 
+    fuse_builtin_box_support = support_func is support_map or support_func is support_map_lean
+
     @wp.func
     def centered_box_support(geom: Any, direction: wp.vec3, data_provider: Any) -> wp.vec3:
-        result = support_func(geom, direction, data_provider)
-        if geom.shape_type == GeoType.BOX:
-            # A nearly tied box face has infinitely many valid support points. Its center
-            # avoids feeding solver-scale rotation noise into MPR's portal topology.
-            contribution = wp.cw_mul(wp.abs(direction), geom.scale)
-            threshold = MPR_BOX_SUPPORT_TIE_EPSILON * (contribution[0] + contribution[1] + contribution[2])
-            if contribution[0] <= threshold:
-                result[0] = 0.0
-            if contribution[1] <= threshold:
-                result[1] = 0.0
-            if contribution[2] <= threshold:
-                result[2] = 0.0
+        result = wp.vec3(0.0, 0.0, 0.0)
+        if wp.static(fuse_builtin_box_support):
+            if geom.shape_type == GeoType.BOX:
+                # Reuse the absolute direction for the built-in box support and MPR's tie policy.
+                abs_direction = wp.vec3(wp.abs(direction[0]), wp.abs(direction[1]), wp.abs(direction[2]))
+                direction_scale = wp.max(abs_direction[0], wp.max(abs_direction[1], abs_direction[2]))
+                support_threshold = BOX_SUPPORT_DEADBAND * direction_scale
+                sx = 1.0 if direction[0] >= -support_threshold else -1.0
+                sy = 1.0 if direction[1] >= -support_threshold else -1.0
+                sz = 1.0 if direction[2] >= -support_threshold else -1.0
+                result = wp.vec3(sx * geom.scale[0], sy * geom.scale[1], sz * geom.scale[2])
+
+                contribution = wp.cw_mul(abs_direction, geom.scale)
+                threshold = MPR_BOX_SUPPORT_TIE_EPSILON * (contribution[0] + contribution[1] + contribution[2])
+                if contribution[0] <= threshold:
+                    result[0] = 0.0
+                if contribution[1] <= threshold:
+                    result[1] = 0.0
+                if contribution[2] <= threshold:
+                    result[2] = 0.0
+            else:
+                result = support_func(geom, direction, data_provider)
+        else:
+            result = support_func(geom, direction, data_provider)
+            if geom.shape_type == GeoType.BOX:
+                # A nearly tied box face has infinitely many valid support points. Its center
+                # avoids feeding solver-scale rotation noise into MPR's portal topology.
+                contribution = wp.cw_mul(wp.abs(direction), geom.scale)
+                threshold = MPR_BOX_SUPPORT_TIE_EPSILON * (contribution[0] + contribution[1] + contribution[2])
+                if contribution[0] <= threshold:
+                    result[0] = 0.0
+                if contribution[1] <= threshold:
+                    result[1] = 0.0
+                if contribution[2] <= threshold:
+                    result[2] = 0.0
         return result
 
     _, mpr_support, _ = create_support_map_function(centered_box_support)
