@@ -1350,41 +1350,64 @@ def test_translational_friction_invariance(test, device):
             )
 
 
-def test_entry_k_eff_matches_shape_harmonic_mean(test, device):
-    """Validate entry_k_eff uses the pairwise harmonic-mean stiffness formula."""
-    expected_k_eff = 0.5 * 1.0e10  # k_a == k_b == default kh for these shapes
+def test_exported_margin_stiffness_matches_shape_harmonic_mean(test, device):
+    """Verify exported margin stiffness uses the pairwise harmonic mean."""
+    margin_contact_area = 0.0125
     config = HydroelasticSDF.Config(
         reduce_contacts=True,
         pre_prune_contacts=False,
+        anchor_contact=False,
+        margin_contact_area=margin_contact_area,
         buffer_fraction=1.0,
         buffer_mult_contact=2,
     )
     model, _, state_0, _, _, pipeline, _, _ = build_stacked_cubes_scene(
         device=device,
         solver_fn=solvers["xpbd"],
-        shape_type=ShapeType.MESH,
+        shape_type=ShapeType.PRIMITIVE,
         cube_half=CUBE_HALF_SMALL,
         reduce_contacts=True,
         sdf_hydroelastic_config=config,
     )
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+    top_body = 2
     contacts = pipeline.contacts()
     pipeline.collide(state_0, contacts)
 
-    hydro = pipeline.hydroelastic_sdf
-    reducer = hydro.contact_reduction.reducer
-    active_slots = reducer.hashtable.active_slots.numpy()
-    ht_capacity = reducer.hashtable.capacity
-    active_count = int(active_slots[ht_capacity])
-    test.assertGreater(active_count, 0, "Expected at least one active reduction hashtable entry")
+    count = int(contacts.rigid_contact_count.numpy()[0])
+    test.assertGreater(count, 0, "Expected exported hydroelastic contacts")
 
-    active_indices = active_slots[:active_count]
-    entry_k_eff = reducer.entry_k_eff.numpy()[active_indices]
-    nonzero_k_eff = entry_k_eff[entry_k_eff > 0.0]
-    test.assertGreater(len(nonzero_k_eff), 0, "Expected non-zero entry_k_eff values")
-    test.assertTrue(
-        np.allclose(nonzero_k_eff, expected_k_eff, rtol=1.0e-4, atol=1.0e-3),
-        f"Expected entry_k_eff to match harmonic mean ({expected_k_eff:.6e})",
+    shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+    shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+    shape_body = model.shape_body.numpy()
+    lower_shape = int(np.flatnonzero(shape_body == top_body - 1)[0])
+    top_shape = int(np.flatnonzero(shape_body == top_body)[0])
+    pair_mask = ((shape0 == lower_shape) & (shape1 == top_shape)) | ((shape0 == top_shape) & (shape1 == lower_shape))
+    test.assertTrue(np.any(pair_mask), "Expected contacts for the touching top-cube pair")
+
+    point0 = contacts.rigid_contact_point0.numpy()[:count]
+    point1 = contacts.rigid_contact_point1.numpy()[:count]
+    normal = contacts.rigid_contact_normal.numpy()[:count]
+    body_q = state_0.body_q.numpy()
+    body0 = shape_body[shape0]
+    body1 = shape_body[shape1]
+    point0_world = point0 + np.where((body0 != -1)[:, None], body_q[np.maximum(body0, 0), :3], 0.0)
+    point1_world = point1 + np.where((body1 != -1)[:, None], body_q[np.maximum(body1, 0), :3], 0.0)
+    contact_distance = np.einsum("ij,ij->i", point1_world - point0_world, normal)
+    margin_mask = pair_mask & (contact_distance >= 0.0)
+    test.assertTrue(np.any(margin_mask), "Expected nonpenetrating margin contacts for the touching pair")
+
+    stiffness = contacts.rigid_contact_stiffness.numpy()[:count]
+    shape_kh = model.shape_material_kh.numpy()
+    k_a = shape_kh[shape0[margin_mask]]
+    k_b = shape_kh[shape1[margin_mask]]
+    expected_stiffness = margin_contact_area * (k_a * k_b) / (k_a + k_b)
+    np.testing.assert_allclose(
+        stiffness[margin_mask],
+        expected_stiffness,
+        rtol=1.0e-5,
+        atol=1.0e-3,
+        err_msg="Exported margin stiffness must use the pairwise harmonic mean",
     )
 
 
@@ -1854,8 +1877,8 @@ add_function_test(
 )
 add_function_test(
     TestHydroelastic,
-    "test_entry_k_eff_matches_shape_harmonic_mean",
-    test_entry_k_eff_matches_shape_harmonic_mean,
+    "test_exported_margin_stiffness_matches_shape_harmonic_mean",
+    test_exported_margin_stiffness_matches_shape_harmonic_mean,
     devices=cuda_devices,
 )
 
