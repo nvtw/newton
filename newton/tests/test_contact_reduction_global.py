@@ -14,6 +14,7 @@ from newton._src.geometry.contact_reduction_global import (
     CLEAR_ACTIVE_ENTRY_PARALLEL_THRESHOLD,
     EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
     SCORE_SHIFT,
+    VALUES_PER_KEY,
     GlobalContactReducer,
     GlobalContactReducerData,
     _make_contact_value_det,
@@ -680,6 +681,23 @@ def test_export_reduced_contacts_kernel(test, device):
         reducer_data.ht_values[2 * reducer_data.ht_capacity + entry_idx] = _make_contact_value_fast(1.0, 10, contact_c)
         reducer_data.ht_values[3 * reducer_data.ht_capacity + entry_idx] = _make_contact_value_fast(1.0, 30, contact_a)
 
+        distinct_entry_idx = hashtable_find_or_insert(
+            make_contact_key(12, 112, 0), reducer_data.ht_keys, reducer_data.ht_active_slots
+        )
+        for slot in range(wp.static(VALUES_PER_KEY)):
+            contact_id = export_contact_to_buffer(
+                shape_a=12,
+                shape_b=112,
+                position=wp.vec3(20.0 + float(slot), 0.0, 0.0),
+                normal=wp.vec3(0.0, 1.0, 0.0),
+                depth=-0.01,
+                fingerprint=100 + slot,
+                reducer_data=reducer_data,
+            )
+            reducer_data.ht_values[slot * reducer_data.ht_capacity + distinct_entry_idx] = _make_contact_value_fast(
+                1.0, 100 + slot, contact_id
+            )
+
     wp.launch(store_roundoff_duplicate_winners_kernel, dim=1, inputs=[reducer_data], device=device)
 
     # Prepare output buffers
@@ -739,14 +757,19 @@ def test_export_reduced_contacts_kernel(test, device):
     )
 
     # Verify output: ID zero is skipped, leaving five distinct pairs plus one
-    # representative from the numerically equivalent winner pair.
+    # representative from the numerically equivalent winner pair and all seven
+    # geometrically distinct contacts from one hashtable entry.
     num_exported = int(contact_count_out.numpy()[0])
-    test.assertEqual(num_exported, 6)
+    test.assertEqual(num_exported, 13)
     pairs = contact_pair_out.numpy()[:num_exported]
     positions = contact_position_out.numpy()[:num_exported]
     duplicate_pair = np.nonzero((pairs[:, 0] == 10) & (pairs[:, 1] == 110))[0]
     test.assertEqual(len(duplicate_pair), 1)
     test.assertEqual(positions[duplicate_pair[0], 0], np.float32(0.010000004433095455))
+
+    distinct_pair = np.nonzero((pairs[:, 0] == 12) & (pairs[:, 1] == 112))[0]
+    test.assertEqual(len(distinct_pair), VALUES_PER_KEY)
+    np.testing.assert_array_equal(np.sort(positions[distinct_pair, 0]), np.arange(20.0, 27.0, dtype=np.float32))
 
 
 def test_key_uniqueness(test, device):

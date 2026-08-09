@@ -1743,11 +1743,53 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
 
     One thread block processes each active hashtable entry. Its first 21 lanes
     compare the seven possible winner pairs in parallel, preserving the
-    lower-fingerprint representative for roundoff-equivalent geometry. Lane
-    zero then streams the surviving unique contacts to the writer.
+    lower-fingerprint representative for roundoff-equivalent geometry. CUDA
+    lanes export the seven surviving slots concurrently in fast mode; CPU and
+    deterministic paths stream them serially from lane zero.
     """
     exported_ids_vec = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
     _module = f"export_reduced_contacts_{writer_func.__name__}"
+
+    @wp.func
+    def export_contact_id(
+        contact_id: int,
+        position_depth: wp.array[wp.vec4],
+        normal: wp.array[wp.vec2],
+        shape_pairs: wp.array[wp.vec2i],
+        contact_fingerprints: wp.array[wp.int32],
+        exported_flags: wp.array[wp.int32],
+        shape_types: wp.array[int],
+        shape_data: wp.array[wp.vec4],
+        shape_gap: wp.array[float],
+        writer_data: Any,
+    ):
+        old_flag = wp.atomic_add(exported_flags, contact_id, 1)
+        if old_flag > 0:
+            return
+
+        position, contact_normal, depth = unpack_contact(contact_id, position_depth, normal)
+        pair = shape_pairs[contact_id]
+        shape_a = pair[0]
+        shape_b = pair[1]
+        margin_offset_a = shape_data[shape_a][3]
+        margin_offset_b = shape_data[shape_b][3]
+        radius_eff_a = compute_effective_radius(shape_types[shape_a], shape_data[shape_a])
+        radius_eff_b = compute_effective_radius(shape_types[shape_b], shape_data[shape_b])
+        gap_sum = shape_gap[shape_a] + shape_gap[shape_b]
+
+        contact_data = ContactData()
+        contact_data.contact_point_center = position
+        contact_data.contact_normal_a_to_b = contact_normal
+        contact_data.contact_distance = depth
+        contact_data.radius_eff_a = radius_eff_a
+        contact_data.radius_eff_b = radius_eff_b
+        contact_data.margin_a = margin_offset_a
+        contact_data.margin_b = margin_offset_b
+        contact_data.shape_a = shape_a
+        contact_data.shape_b = shape_b
+        contact_data.gap_sum = gap_sum
+        contact_data.sort_sub_key = contact_fingerprints[contact_id]
+        writer_func(contact_data, writer_data, -1)
 
     @wp.kernel(enable_backward=False, module=_module)
     def export_reduced_contacts_kernel(
@@ -1804,7 +1846,25 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
             wp.tile_scatter_masked(duplicate_bits, lane, duplicate_bit, True)
             duplicate_mask = wp.tile_reduce(wp.bit_or, duplicate_bits)[0]
 
-            if lane == 0:
+            if parallel_pairs != 0 and deterministic == 0:
+                if lane < wp.static(VALUES_PER_KEY) and duplicate_mask & (1 << lane) == 0:
+                    value = ht_values[lane * ht_capacity + entry_idx]
+                    if value != wp.uint64(0):
+                        contact_id = unpack_contact_id(value, deterministic)
+                        if contact_id != 0:
+                            export_contact_id(
+                                contact_id,
+                                position_depth,
+                                normal,
+                                shape_pairs,
+                                contact_fingerprints,
+                                exported_flags,
+                                shape_types,
+                                shape_data,
+                                shape_gap,
+                                writer_data,
+                            )
+            elif lane == 0:
                 exported_ids = exported_ids_vec()
                 num_exported = int(0)
 
@@ -1823,33 +1883,18 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                     exported_ids[num_exported] = contact_id
                     num_exported = num_exported + 1
 
-                    old_flag = wp.atomic_add(exported_flags, contact_id, 1)
-                    if old_flag > 0:
-                        continue
-
-                    position, contact_normal, depth = unpack_contact(contact_id, position_depth, normal)
-                    pair = shape_pairs[contact_id]
-                    shape_a = pair[0]
-                    shape_b = pair[1]
-                    margin_offset_a = shape_data[shape_a][3]
-                    margin_offset_b = shape_data[shape_b][3]
-                    radius_eff_a = compute_effective_radius(shape_types[shape_a], shape_data[shape_a])
-                    radius_eff_b = compute_effective_radius(shape_types[shape_b], shape_data[shape_b])
-                    gap_sum = shape_gap[shape_a] + shape_gap[shape_b]
-
-                    contact_data = ContactData()
-                    contact_data.contact_point_center = position
-                    contact_data.contact_normal_a_to_b = contact_normal
-                    contact_data.contact_distance = depth
-                    contact_data.radius_eff_a = radius_eff_a
-                    contact_data.radius_eff_b = radius_eff_b
-                    contact_data.margin_a = margin_offset_a
-                    contact_data.margin_b = margin_offset_b
-                    contact_data.shape_a = shape_a
-                    contact_data.shape_b = shape_b
-                    contact_data.gap_sum = gap_sum
-                    contact_data.sort_sub_key = contact_fingerprints[contact_id]
-                    writer_func(contact_data, writer_data, -1)
+                    export_contact_id(
+                        contact_id,
+                        position_depth,
+                        normal,
+                        shape_pairs,
+                        contact_fingerprints,
+                        exported_flags,
+                        shape_types,
+                        shape_data,
+                        shape_gap,
+                        writer_data,
+                    )
 
             # Keep lanes together before the shared tile is reused.
             _sync = wp.tile_extract(duplicate_bits, lane)
