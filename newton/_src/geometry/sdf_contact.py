@@ -150,7 +150,6 @@ class EdgeCullResult:
 
     edge_idx: int
     midpoint_sdf: float
-    center_scaled: wp.vec3
 
 
 @wp.func
@@ -461,18 +460,21 @@ def get_edge_from_mesh(
 
 @wp.func
 def get_edge_from_mesh_precomputed(
+    mesh_edge_centers: wp.array[wp.vec4],
     mesh_edge_halves: wp.array[wp.vec4],
     edge_range: wp.vec2i,
     X_mesh_ws: wp.transform,
     edge_idx: int,
-    center: wp.vec3,
 ) -> tuple[wp.vec3, wp.vec3, int]:
-    """Extract an edge and endpoint ownership while reusing its transformed center.
+    """Extract an edge and endpoint ownership from precomputed data.
 
     A zero ownership code preserves legacy packed arrays by allowing both
     endpoints. Builder-generated codes use bits zero and one for the first and
     second endpoint, respectively, plus bit two to mark the encoding explicit.
     """
+    packed_center = mesh_edge_centers[edge_range[0] + edge_idx]
+    center_local = wp.vec3(packed_center[0], packed_center[1], packed_center[2])
+    center = wp.transform_point(X_mesh_ws, center_local)
     packed_half = mesh_edge_halves[edge_range[0] + edge_idx]
     half_local = wp.vec3(packed_half[0], packed_half[1], packed_half[2])
     half = wp.transform_vector(X_mesh_ws, half_local)
@@ -492,10 +494,9 @@ def _create_get_edge_from_mesh_func(use_precomputed_edge_data: bool):
         mesh_scale: wp.vec3,
         X_mesh_ws: wp.transform,
         edge_idx: int,
-        center_scaled: wp.vec3,
     ) -> tuple[wp.vec3, wp.vec3, int]:
         if wp.static(use_precomputed_edge_data):
-            return get_edge_from_mesh_precomputed(mesh_edge_halves, edge_range, X_mesh_ws, edge_idx, center_scaled)
+            return get_edge_from_mesh_precomputed(mesh_edge_centers, mesh_edge_halves, edge_range, X_mesh_ws, edge_idx)
         v0, v1 = get_edge_from_mesh(mesh_id, mesh_edge_indices, edge_range, mesh_scale, X_mesh_ws, edge_idx)
         return v0, v1, 0
 
@@ -613,17 +614,17 @@ def _create_get_mesh_edge_bounding_sphere_func(use_precomputed_edge_data: bool):
         inv_sdf_scale: wp.vec3,
         radius_scale: float,
         edge_idx: int,
-    ) -> tuple[wp.vec3, float, wp.vec3]:
+    ) -> tuple[wp.vec3, float]:
         if wp.static(use_precomputed_edge_data):
             center_radius = mesh_edge_centers[edge_range[0] + edge_idx]
             center_local = wp.vec3(center_radius[0], center_radius[1], center_radius[2])
             center_scaled = wp.transform_point(X_mesh_ws, center_local)
             center = wp.cw_mul(center_scaled, inv_sdf_scale)
-            return center, center_radius[3] * radius_scale, center_scaled
+            return center, center_radius[3] * radius_scale
 
         v0, v1 = get_edge_from_mesh(mesh_id, mesh_edge_indices, edge_range, mesh_scale, X_mesh_ws, edge_idx)
         center, radius = get_edge_bounding_sphere(wp.cw_mul(v0, inv_sdf_scale), wp.cw_mul(v1, inv_sdf_scale))
-        return center, radius, wp.vec3(0.0)
+        return center, radius
 
     return get_mesh_edge_bounding_sphere_func
 
@@ -1266,7 +1267,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         edge_idx = base_edge_idx + t
                         add_edge = False
                         midpoint_sdf = float(0.0)
-                        center_scaled = wp.vec3(0.0)
 
                         if edge_idx < num_edges:
                             if wp.static(enable_heightfields):
@@ -1278,22 +1278,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
                                     bsphere_center, bsphere_radius = get_edge_bounding_sphere(v0_cull, v1_cull)
                                 else:
-                                    bsphere_center, bsphere_radius, center_scaled = (
-                                        get_mesh_edge_bounding_sphere_specialized(
-                                            mesh_id_tri,
-                                            mesh_edge_indices,
-                                            mesh_edge_centers,
-                                            edge_range_tri,
-                                            mesh_scale_tri,
-                                            X_mesh_to_sdf,
-                                            inv_sdf_scale,
-                                            edge_radius_scale,
-                                            edge_idx,
-                                        )
-                                    )
-                            else:
-                                bsphere_center, bsphere_radius, center_scaled = (
-                                    get_mesh_edge_bounding_sphere_specialized(
+                                    bsphere_center, bsphere_radius = get_mesh_edge_bounding_sphere_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
@@ -1304,6 +1289,17 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         edge_radius_scale,
                                         edge_idx,
                                     )
+                            else:
+                                bsphere_center, bsphere_radius = get_mesh_edge_bounding_sphere_specialized(
+                                    mesh_id_tri,
+                                    mesh_edge_indices,
+                                    mesh_edge_centers,
+                                    edge_range_tri,
+                                    mesh_scale_tri,
+                                    X_mesh_to_sdf,
+                                    inv_sdf_scale,
+                                    edge_radius_scale,
+                                    edge_idx,
                                 )
 
                             threshold = bsphere_radius + contact_threshold_unscaled
@@ -1335,7 +1331,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         cull_result = EdgeCullResult()
                         cull_result.edge_idx = edge_idx
                         cull_result.midpoint_sdf = midpoint_sdf
-                        cull_result.center_scaled = center_scaled
                         wp.tile_stack_push(edge_stack, cull_result, add_edge)
                         wp.tile_scatter_masked(progress, 0, base_edge_idx + capacity, t == 0)
 
@@ -1351,7 +1346,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         popped, edge_slot = wp.tile_stack_pop(edge_stack)
                         my_edge_idx = popped.edge_idx
                         cached_sdf_val = popped.midpoint_sdf
-                        cached_center_scaled = popped.center_scaled
                         has_edge = edge_slot >= 0
 
                         if has_edge:
@@ -1374,7 +1368,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         my_edge_idx,
-                                        cached_center_scaled,
                                     )
                             else:
                                 v0s, v1s, corner_ownership = get_edge_from_mesh_specialized(
@@ -1386,7 +1379,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
                                     my_edge_idx,
-                                    cached_center_scaled,
                                 )
                             v0 = wp.cw_mul(v0s, inv_sdf_scale)
                             v1 = wp.cw_mul(v1s, inv_sdf_scale)
@@ -1711,7 +1703,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         edge_idx = base_edge_idx + t
                         add_edge = False
                         midpoint_sdf = float(0.0)
-                        center_scaled = wp.vec3(0.0)
 
                         if edge_idx < edge_end:
                             if wp.static(enable_heightfields):
@@ -1723,22 +1714,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     v1_cull = wp.cw_mul(v1_scaled, inv_sdf_scale)
                                     bsphere_center, bsphere_radius = get_edge_bounding_sphere(v0_cull, v1_cull)
                                 else:
-                                    bsphere_center, bsphere_radius, center_scaled = (
-                                        get_mesh_edge_bounding_sphere_specialized(
-                                            mesh_id_tri,
-                                            mesh_edge_indices,
-                                            mesh_edge_centers,
-                                            edge_range_tri,
-                                            mesh_scale_tri,
-                                            X_mesh_to_sdf,
-                                            inv_sdf_scale,
-                                            edge_radius_scale,
-                                            edge_idx,
-                                        )
-                                    )
-                            else:
-                                bsphere_center, bsphere_radius, center_scaled = (
-                                    get_mesh_edge_bounding_sphere_specialized(
+                                    bsphere_center, bsphere_radius = get_mesh_edge_bounding_sphere_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
@@ -1749,6 +1725,17 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         edge_radius_scale,
                                         edge_idx,
                                     )
+                            else:
+                                bsphere_center, bsphere_radius = get_mesh_edge_bounding_sphere_specialized(
+                                    mesh_id_tri,
+                                    mesh_edge_indices,
+                                    mesh_edge_centers,
+                                    edge_range_tri,
+                                    mesh_scale_tri,
+                                    X_mesh_to_sdf,
+                                    inv_sdf_scale,
+                                    edge_radius_scale,
+                                    edge_idx,
                                 )
 
                             threshold = bsphere_radius + contact_threshold_unscaled
@@ -1780,7 +1767,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         cull_result = EdgeCullResult()
                         cull_result.edge_idx = edge_idx
                         cull_result.midpoint_sdf = midpoint_sdf
-                        cull_result.center_scaled = center_scaled
                         wp.tile_stack_push(edge_stack, cull_result, add_edge)
                         wp.tile_scatter_masked(progress, 0, base_edge_idx + capacity, t == 0)
 
@@ -1793,7 +1779,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         popped, edge_slot = wp.tile_stack_pop(edge_stack)
                         my_edge_idx = popped.edge_idx
                         cached_sdf_val = popped.midpoint_sdf
-                        cached_center_scaled = popped.center_scaled
                         has_edge = edge_slot >= 0
 
                         if has_edge:
@@ -1816,7 +1801,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         mesh_scale_tri,
                                         X_mesh_to_sdf,
                                         my_edge_idx,
-                                        cached_center_scaled,
                                     )
                             else:
                                 v0s, v1s, corner_ownership = get_edge_from_mesh_specialized(
@@ -1828,7 +1812,6 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     mesh_scale_tri,
                                     X_mesh_to_sdf,
                                     my_edge_idx,
-                                    cached_center_scaled,
                                 )
                             v0 = wp.cw_mul(v0s, inv_sdf_scale)
                             v1 = wp.cw_mul(v1s, inv_sdf_scale)
