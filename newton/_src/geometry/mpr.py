@@ -38,6 +38,7 @@ import warp as wp
 from .support_function import (
     BOX_SUPPORT_DEADBAND,
     GeoTypeEx,
+    _support_map_box,
     closest_point_on_triangle,
     support_map,
     support_map_lean,
@@ -80,6 +81,20 @@ def create_support_map_function(support_func: Any, use_precomputed_center: bool 
         - geometric_center: Computes geometric center of Minkowski difference
     """
 
+    fuse_builtin_box_support = support_func is support_map or support_func is support_map_lean
+
+    @wp.func
+    def shape_support(geom: Any, direction: wp.vec3, data_provider: Any) -> wp.vec3:
+        result = wp.vec3(0.0, 0.0, 0.0)
+        if wp.static(fuse_builtin_box_support):
+            if geom.shape_type == GeoType.BOX:
+                result = _support_map_box(geom, direction)
+            else:
+                result = support_func(geom, direction, data_provider)
+        else:
+            result = support_func(geom, direction, data_provider)
+        return result
+
     # Support mapping functions (these replace the MinkowskiDiff struct methods)
     @wp.func
     def support_map_b(
@@ -106,7 +121,7 @@ def create_support_map_function(support_func: Any, use_precomputed_center: bool 
         tmp = wp.quat_rotate_inv(orientation_b, direction)
 
         # Get support point in local space
-        result = support_func(geom_b, tmp, data_provider)
+        result = shape_support(geom_b, tmp, data_provider)
 
         # Transform result to world space
         result = wp.quat_rotate(orientation_b, result)
@@ -142,7 +157,7 @@ def create_support_map_function(support_func: Any, use_precomputed_center: bool 
         v = Vert()
 
         # Support point on A in positive direction
-        point_a = support_func(geom_a, direction, data_provider)
+        point_a = shape_support(geom_a, direction, data_provider)
 
         # Support point on B in negative direction
         tmp_direction = -direction
