@@ -140,7 +140,9 @@ def write_contact_simple(
         )
 
 
-def create_narrow_phase_primitive_kernel(writer_func: Any, sparse_gjk_pairs: bool = False):
+def create_narrow_phase_primitive_kernel(
+    writer_func: Any, sparse_gjk_pairs: bool = False, hydroelastic_enabled: bool = False
+):
     """
     Create a kernel for fast analytical collision detection of primitive shapes.
 
@@ -152,11 +154,12 @@ def create_narrow_phase_primitive_kernel(writer_func: Any, sparse_gjk_pairs: boo
     Args:
         writer_func: Contact writer function (e.g., write_contact_simple).
         sparse_gjk_pairs: Preserve broad-phase pair indices in the GJK buffer.
+        hydroelastic_enabled: Route hydroelastic pairs to the SDF-SDF pipeline.
 
     Returns:
         A warp kernel for primitive collision detection
     """
-    _module = f"narrow_phase_primitive_{writer_func.__name__}_{sparse_gjk_pairs}"
+    _module = f"narrow_phase_primitive_{writer_func.__name__}_{sparse_gjk_pairs}_{hydroelastic_enabled}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_primitive_kernel(
@@ -227,13 +230,14 @@ def create_narrow_phase_primitive_kernel(writer_func: Any, sparse_gjk_pairs: boo
                 type_a, type_b = type_b, type_a
 
             # Check if both shapes are hydroelastic - route to SDF-SDF pipeline
-            is_hydro_a = (shape_flags[shape_a] & ShapeFlags.HYDROELASTIC) != 0
-            is_hydro_b = (shape_flags[shape_b] & ShapeFlags.HYDROELASTIC) != 0
-            if is_hydro_a and is_hydro_b and shape_pairs_sdf_sdf:
-                idx = wp.atomic_add(shape_pairs_sdf_sdf_count, 0, 1)
-                if idx < shape_pairs_sdf_sdf.shape[0]:
-                    shape_pairs_sdf_sdf[idx] = wp.vec2i(shape_a, shape_b)
-                continue
+            if wp.static(hydroelastic_enabled):
+                is_hydro_a = (shape_flags[shape_a] & ShapeFlags.HYDROELASTIC) != 0
+                is_hydro_b = (shape_flags[shape_b] & ShapeFlags.HYDROELASTIC) != 0
+                if is_hydro_a and is_hydro_b and shape_pairs_sdf_sdf:
+                    idx = wp.atomic_add(shape_pairs_sdf_sdf_count, 0, 1)
+                    if idx < shape_pairs_sdf_sdf.shape[0]:
+                        shape_pairs_sdf_sdf[idx] = wp.vec2i(shape_a, shape_b)
+                    continue
 
             # Get shape data
             data_a = shape_data[shape_a]
@@ -1678,7 +1682,9 @@ class NarrowPhase:
 
         # Create the appropriate kernel variants
         # Primitive kernel handles lightweight primitives and routes remaining pairs
-        self.primitive_kernel = create_narrow_phase_primitive_kernel(writer_func, self.sparse_gjk_pairs)
+        self.primitive_kernel = create_narrow_phase_primitive_kernel(
+            writer_func, self.sparse_gjk_pairs, hydroelastic_sdf is not None
+        )
         # GJK/MPR kernel handles remaining convex-convex pairs
         if use_lean_gjk_mpr:
             # Use lean support function (CONVEX_MESH, BOX, SPHERE only) and lean post-processing
