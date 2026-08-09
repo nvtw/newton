@@ -48,13 +48,14 @@ from .contact_reduction_global import (
     VALUES_PER_KEY,
     GlobalContactReducer,
     GlobalContactReducerData,
+    _make_contact_value_det,
+    _make_contact_value_fast,
     _unpack_contact_id_det,
     _unpack_contact_id_fast,
     decode_oct,
     export_contact_to_buffer,
     is_contact_already_exported,
     make_contact_key,
-    make_contact_value,
     reduction_update_slot,
     unpack_contact_id,
 )
@@ -245,6 +246,11 @@ def _read_fixed_vec(
 def _unpack_contact_id_variant(deterministic: bool):
     """Select the contact-id unpacking function matching the active packing."""
     return _unpack_contact_id_det if deterministic else _unpack_contact_id_fast
+
+
+def _make_contact_value_variant(deterministic: bool):
+    """Select the contact-value packing function matching the reducer variant."""
+    return _make_contact_value_det if deterministic else _make_contact_value_fast
 
 
 @wp.func
@@ -630,19 +636,17 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any, deterministic: b
                     for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
                         dir_2d = get_spatial_direction_2d(dir_i)
                         score = wp.dot(pos_2d_centered, dir_2d) * pen_weight
-                        value = make_contact_value(
+                        value = wp.static(_make_contact_value_variant(deterministic))(
                             score,
                             reducer_data.contact_fingerprints[contact_id],
                             contact_id,
-                            reducer_data.deterministic,
                         )
                         reduction_update_slot(entry_idx, dir_i, value, reducer_data.ht_values, ht_capacity)
 
-                max_depth_value = make_contact_value(
+                max_depth_value = wp.static(_make_contact_value_variant(deterministic))(
                     -depth,
                     reducer_data.contact_fingerprints[contact_id],
                     contact_id,
-                    reducer_data.deterministic,
                 )
                 reduction_update_slot(
                     entry_idx,
@@ -681,11 +685,10 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any, deterministic: b
 
             voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
             if voxel_entry_idx >= 0:
-                voxel_value = make_contact_value(
+                voxel_value = wp.static(_make_contact_value_variant(deterministic))(
                     -depth,
                     reducer_data.contact_fingerprints[contact_id],
                     contact_id,
-                    reducer_data.deterministic,
                 )
                 reduction_update_slot(
                     voxel_entry_idx,
