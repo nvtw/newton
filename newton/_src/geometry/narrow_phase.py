@@ -240,19 +240,6 @@ def create_narrow_phase_primitive_kernel(writer_func: Any, sparse_gjk_pairs: boo
             data_b = shape_data[shape_b]
             scale_a = wp.vec3(data_a[0], data_a[1], data_a[2])
             scale_b = wp.vec3(data_b[0], data_b[1], data_b[2])
-            margin_offset_a = data_a[3]
-            margin_offset_b = data_b[3]
-
-            # Get transforms
-            X_a = shape_transform[shape_a]
-            X_b = shape_transform[shape_b]
-            pos_a = wp.transform_get_translation(X_a)
-            pos_b = wp.transform_get_translation(X_b)
-            quat_a = wp.transform_get_rotation(X_a)
-            quat_b = wp.transform_get_rotation(X_b)
-            gap_a = shape_gap[shape_a]
-            gap_b = shape_gap[shape_b]
-            gap_sum = gap_a + gap_b
 
             # =====================================================================
             # Route heightfield pairs.
@@ -361,6 +348,20 @@ def create_narrow_phase_primitive_kernel(writer_func: Any, sparse_gjk_pairs: boo
                 if idx < gjk_candidate_pairs.shape[0]:
                     gjk_candidate_pairs[idx] = wp.vec2i(shape_a, shape_b)
                 continue
+
+            margin_offset_a = data_a[3]
+            margin_offset_b = data_b[3]
+
+            # Get transforms
+            X_a = shape_transform[shape_a]
+            X_b = shape_transform[shape_b]
+            pos_a = wp.transform_get_translation(X_a)
+            pos_b = wp.transform_get_translation(X_b)
+            quat_a = wp.transform_get_rotation(X_a)
+            quat_b = wp.transform_get_rotation(X_b)
+            gap_a = shape_gap[shape_a]
+            gap_b = shape_gap[shape_b]
+            gap_sum = gap_a + gap_b
 
             # =====================================================================
             # Handle lightweight primitives analytically
