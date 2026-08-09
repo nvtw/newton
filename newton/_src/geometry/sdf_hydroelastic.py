@@ -1005,7 +1005,6 @@ class HydroelasticSDF:
                 self.iso_voxel_count,
                 shape_sdf_data,
                 shape_transform,
-                self.shape_material_kh,
                 self.pressure_data,
                 self.iso_voxel_coords,
                 self.iso_voxel_shape_pair,
@@ -1632,7 +1631,6 @@ def get_generate_contacts_kernel(
         iso_voxel_count: wp.array[wp.int32],
         shape_sdf_data: wp.array[TextureSDFData],
         shape_transform: wp.array[wp.transform],
-        shape_material_kh: wp.array[float],
         pressure_data: Any,
         iso_voxel_coords: wp.array[wp.vec3us],
         iso_voxel_shape_pair: wp.array[wp.vec2i],
@@ -1670,9 +1668,6 @@ def get_generate_contacts_kernel(
             gap_b = shape_gap[shape_b]
             gap_sum = gap_a + gap_b
 
-            k_a = shape_material_kh[shape_a]
-            k_b = shape_material_kh[shape_b]
-
             x_id = wp.int32(iso_coords.x)
             y_id = wp.int32(iso_coords.y)
             z_id = wp.int32(iso_coords.z)
@@ -1704,9 +1699,6 @@ def get_generate_contacts_kernel(
 
             if num_faces == 0:
                 continue
-
-            # Compute effective stiffness coefficient
-            k_eff = get_effective_stiffness(k_a, k_b)
 
             X_ws_b = transform_b
 
@@ -1775,10 +1767,6 @@ def get_generate_contacts_kernel(
                         # Pressure-law-agnostic geometric depth-volume used for the
                         # direction-reliability gate during reduction/export.
                         wp.atomic_add(reducer_data.agg_depth_volume, entry_idx, (area * (-pen_depth)) * normal)
-                        # ``entry_k_eff`` is retained as the linear-law slope used
-                        # for margin (non-penetrating) contact regularization, where
-                        # the user pressure law is documented as undefined.
-                        reducer_data.entry_k_eff[entry_idx] = k_eff
                     else:
                         wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
 
