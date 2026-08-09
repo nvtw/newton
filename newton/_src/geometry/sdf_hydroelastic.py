@@ -865,8 +865,6 @@ class HydroelasticSDF:
         shape_pairs_sdf_sdf_count: wp.array[wp.int32],
     ) -> None:
         # Test collisions between OBB of SDFs
-        self.num_blocks_per_pair.zero_()
-
         wp.launch(
             kernel=broadphase_collision_pairs_count,
             dim=[self.max_num_shape_pairs],
@@ -1120,6 +1118,7 @@ def broadphase_collision_pairs_count(
 ):
     tid = wp.tid()
     if tid >= shape_pairs_sdf_sdf_count[0]:
+        thread_num_blocks[tid] = 0
         return
 
     pair = shape_pairs_sdf_sdf[tid]
