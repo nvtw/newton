@@ -1230,10 +1230,8 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                 position = wp.vec3(pd[0], pd[1], pd[2])
                 contact_normal = wp.vec3(cached_nx[idx], cached_ny[idx], cached_nz[idx])
 
-                # Get shape pair
-                pair = shape_pairs[contact_id]
-                shape_a = pair[0]
-                shape_b = pair[1]
+                shape_a = shape_a_first
+                shape_b = shape_b_first
 
                 # Apply normal matching rotation for penetrating contacts (depth < 0)
                 final_normal = contact_normal
