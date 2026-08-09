@@ -333,12 +333,13 @@ def _match_contacts_kernel(data: _MatchData):
         old_pos = data.prev_pos_world[old_idx]
         diff = new_pos_w - old_pos
         dist_sq = wp.dot(diff, diff)
-        old_n = data.prev_normal[old_idx]
-        ndot = wp.dot(new_n, old_n)
 
-        if dist_sq <= best_dist_sq and ndot >= data.normal_dot_threshold:
-            best_dist_sq = dist_sq
-            best_idx = old_idx
+        if dist_sq <= best_dist_sq:
+            old_n = data.prev_normal[old_idx]
+            ndot = wp.dot(new_n, old_n)
+            if ndot >= data.normal_dot_threshold:
+                best_dist_sq = dist_sq
+                best_idx = old_idx
 
     if best_idx >= 0:
         data.match_index[tid] = wp.int32(best_idx)
