@@ -602,6 +602,9 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any, deterministic: b
             depth = pd[3]
             shape_a = pair[0]
             shape_b = pair[1]
+            k_a = shape_material_k_hydro[shape_a]
+            k_b = shape_material_k_hydro[shape_b]
+            k_eff = _effective_stiffness(k_a, k_b)
 
             aabb_lower = shape_collision_aabb_lower[shape_b]
             aabb_upper = shape_collision_aabb_upper[shape_b]
@@ -626,10 +629,7 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any, deterministic: b
                 reducer_data.contact_nbin_entry[contact_id] = entry_idx
 
             if entry_idx >= 0:
-                # k_eff is constant for a shape pair, so redundant writes are safe.
-                reducer_data.entry_k_eff[entry_idx] = _effective_stiffness(
-                    shape_material_k_hydro[shape_a], shape_material_k_hydro[shape_b]
-                )
+                reducer_data.entry_k_eff[entry_idx] = k_eff
                 aabb_size = wp.length(aabb_upper - aabb_lower)
                 use_beta = depth < wp.static(BETA_THRESHOLD) * aabb_size
                 if use_beta:
@@ -691,9 +691,7 @@ def get_reduce_hydroelastic_contacts_kernel(pressure_func: Any, deterministic: b
 
             voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
             if voxel_entry_idx >= 0:
-                reducer_data.entry_k_eff[voxel_entry_idx] = _effective_stiffness(
-                    shape_material_k_hydro[shape_a], shape_material_k_hydro[shape_b]
-                )
+                reducer_data.entry_k_eff[voxel_entry_idx] = k_eff
                 voxel_value = make_contact_value(
                     -depth,
                     reducer_data.contact_fingerprints[contact_id],
