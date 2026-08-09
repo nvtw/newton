@@ -1397,8 +1397,6 @@ def _texture_sample_sdf_grad_hw_impl(
             return diff / diff_mag
 
     h_x = 0.5 / sdf.inv_sdf_dx[0]
-    h_y = 0.5 / sdf.inv_sdf_dx[1]
-    h_z = 0.5 / sdf.inv_sdf_dx[2]
     x_pos0 = local_pos + wp.vec3(h_x, 0.0, 0.0)
     x_pos1 = local_pos - wp.vec3(h_x, 0.0, 0.0)
     x_coord0 = wp.clamp(x_pos0[0], sdf.sdf_box_lower[0], sdf.sdf_box_upper[0])
@@ -1411,6 +1409,7 @@ def _texture_sample_sdf_grad_hw_impl(
         _axis_extrapolation_magnitude(x_pos1[0], x_coord1),
     )
     gx = (x_values[0] - x_values[1]) * sdf.inv_sdf_dx[0]
+    h_y = 0.5 / sdf.inv_sdf_dx[1]
     y_pos0 = local_pos + wp.vec3(0.0, h_y, 0.0)
     y_pos1 = local_pos - wp.vec3(0.0, h_y, 0.0)
     y_coord0 = wp.clamp(y_pos0[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1])
@@ -1423,6 +1422,7 @@ def _texture_sample_sdf_grad_hw_impl(
         _axis_extrapolation_magnitude(y_pos1[1], y_coord1),
     )
     gy = (y_values[0] - y_values[1]) * sdf.inv_sdf_dx[1]
+    h_z = 0.5 / sdf.inv_sdf_dx[2]
     z_pos0 = local_pos + wp.vec3(0.0, 0.0, h_z)
     z_pos1 = local_pos - wp.vec3(0.0, 0.0, h_z)
     z_coord0 = wp.clamp(z_pos0[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2])
