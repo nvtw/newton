@@ -1375,47 +1375,42 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 
             # Process this block's chunk of vertices — write contacts directly
             # to the global reducer buffer (no per-block shared memory reduction).
-            chunk_len = vert_end - vert_start
-            num_iterations = (chunk_len + wp.block_dim() - 1) // wp.block_dim()
-            for i in range(num_iterations):
-                vertex_idx = vert_start + i * wp.block_dim() + t
+            for vertex_idx in range(vert_start + t, vert_end, wp.block_dim()):
+                # Get vertex position in mesh local space and transform to world space
+                vertex_local = wp.cw_mul(mesh_obj.points[vertex_idx], mesh_scale)
+                vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
 
-                if vertex_idx < vert_end:
-                    # Get vertex position in mesh local space and transform to world space
-                    vertex_local = wp.cw_mul(mesh_obj.points[vertex_idx], mesh_scale)
-                    vertex_world = wp.transform_point(X_mesh_ws, vertex_local)
+                # Project vertex onto plane to get closest point
+                vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
+                point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
+                point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
 
-                    # Project vertex onto plane to get closest point
-                    vertex_in_plane_space = wp.transform_point(X_plane_sw, vertex_world)
-                    point_on_plane_local = wp.vec3(vertex_in_plane_space[0], vertex_in_plane_space[1], 0.0)
-                    point_on_plane = wp.transform_point(X_plane_ws, point_on_plane_local)
+                # Compute distance
+                diff = vertex_world - point_on_plane
+                distance = wp.dot(diff, plane_normal)
 
-                    # Compute distance
-                    diff = vertex_world - point_on_plane
-                    distance = wp.dot(diff, plane_normal)
+                # Check if this vertex generates a contact
+                if distance < gap_sum + total_margin_offset:
+                    # Contact position is the midpoint
+                    contact_pos = (vertex_world + point_on_plane) * 0.5
 
-                    # Check if this vertex generates a contact
-                    if distance < gap_sum + total_margin_offset:
-                        # Contact position is the midpoint
-                        contact_pos = (vertex_world + point_on_plane) * 0.5
+                    # Normal points from mesh to plane
+                    contact_normal = -plane_normal
 
-                        # Normal points from mesh to plane
-                        contact_normal = -plane_normal
+                    contact_data = ContactData()
+                    contact_data.contact_point_center = contact_pos
+                    contact_data.contact_normal_a_to_b = contact_normal
+                    contact_data.contact_distance = distance
+                    contact_data.radius_eff_a = 0.0
+                    contact_data.radius_eff_b = 0.0
+                    contact_data.margin_a = margin_offset_mesh
+                    contact_data.margin_b = margin_offset_plane
+                    contact_data.shape_a = mesh_shape
+                    contact_data.shape_b = plane_shape
+                    contact_data.gap_sum = gap_sum
+                    contact_data.sort_sub_key = vertex_idx
 
-                        contact_data = ContactData()
-                        contact_data.contact_point_center = contact_pos
-                        contact_data.contact_normal_a_to_b = contact_normal
-                        contact_data.contact_distance = distance
-                        contact_data.radius_eff_a = 0.0
-                        contact_data.radius_eff_b = 0.0
-                        contact_data.margin_a = margin_offset_mesh
-                        contact_data.margin_b = margin_offset_plane
-                        contact_data.shape_a = mesh_shape
-                        contact_data.shape_b = plane_shape
-                        contact_data.gap_sum = gap_sum
-                        contact_data.sort_sub_key = vertex_idx
-
-                        writer_func(contact_data, writer_data, -1)
+                    writer_func(contact_data, writer_data, -1)
 
     return narrow_phase_process_mesh_plane_contacts_reduce_kernel
 
