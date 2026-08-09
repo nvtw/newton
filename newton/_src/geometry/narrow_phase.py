@@ -1364,7 +1364,7 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
             mesh_scale = wp.vec3(scale_data[0], scale_data[1], scale_data[2])
 
             # Extract per-shape margin offsets (stored in shape_data.w)
-            margin_offset_mesh = shape_data[mesh_shape][3]
+            margin_offset_mesh = scale_data[3]
             margin_offset_plane = shape_data[plane_shape][3]
             total_margin_offset = margin_offset_mesh + margin_offset_plane
 
