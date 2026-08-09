@@ -203,6 +203,36 @@ class TestBroadPhase(unittest.TestCase):
         )
         self.assertEqual(int(candidate_pair_count.numpy()[0]), 1)
 
+    def test_sap_adaptive_chunk_enumerates_dense_pairs(self):
+        """Verify adaptive SAP chunks enumerate every overlapping pair exactly once."""
+        device = wp.get_device()
+        shape_count = 32
+        expected_count = shape_count * (shape_count - 1) // 2
+        shape_lower = wp.full(shape_count, wp.vec3(-1.0), dtype=wp.vec3, device=device)
+        shape_upper = wp.full(shape_count, wp.vec3(1.0), dtype=wp.vec3, device=device)
+        shape_group = wp.ones(shape_count, dtype=wp.int32, device=device)
+        shape_world = wp.zeros(shape_count, dtype=wp.int32, device=device)
+        candidate_pair = wp.zeros(expected_count, dtype=wp.vec2i, device=device)
+        candidate_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+        BroadPhaseSAP(shape_world, device=device).launch(
+            shape_lower,
+            shape_upper,
+            None,
+            shape_group,
+            shape_world,
+            shape_count,
+            candidate_pair,
+            candidate_pair_count,
+            device=device,
+        )
+
+        count = int(candidate_pair_count.numpy()[0])
+        self.assertEqual(count, expected_count)
+        actual_pairs = {tuple(pair) for pair in candidate_pair.numpy()[:count]}
+        expected_pairs = {(i, j) for i in range(shape_count) for j in range(i + 1, shape_count)}
+        self.assertEqual(actual_pairs, expected_pairs)
+
     def test_nxn_broadphase(self):
         verbose = False
 
