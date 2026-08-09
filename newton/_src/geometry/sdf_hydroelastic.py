@@ -123,6 +123,16 @@ def int_to_vec3f(x: wp.int32, y: wp.int32, z: wp.int32):
 
 
 @wp.func
+def _mc_corner_offset(corner_idx: int) -> wp.vec3i:
+    """Return the canonical marching-cubes offset for a corner index."""
+    lower_idx = corner_idx & 3
+    x = (lower_idx ^ (lower_idx >> 1)) & 1
+    y = (corner_idx >> 1) & 1
+    z = (corner_idx >> 2) & 1
+    return wp.vec3i(x, y, z)
+
+
+@wp.func
 def get_effective_stiffness(k_a: wp.float32, k_b: wp.float32) -> wp.float32:
     """Compute effective stiffness for two materials in series."""
     denom = k_a + k_b
@@ -160,7 +170,6 @@ def linear_pressure(signed_depth: wp.float32, shape_idx: wp.int32, data: LinearP
 @wp.func
 def mc_calc_face_texture(
     flat_edge_verts_table: wp.array[wp.vec2ub],
-    corner_offsets_table: wp.array[wp.vec3ub],
     tri_range_start: wp.int32,
     corner_vals: vec8f,
     corner_sdf_vals: vec8f,
@@ -197,8 +206,8 @@ def mc_calc_face_texture(
         val_0 = wp.float32(corner_vals[v_idx_from])
         val_1 = wp.float32(corner_vals[v_idx_to])
 
-        p_0 = wp.vec3f(corner_offsets_table[v_idx_from])
-        p_1 = wp.vec3f(corner_offsets_table[v_idx_to])
+        p_0 = wp.vec3f(_mc_corner_offset(v_idx_from))
+        p_1 = wp.vec3f(_mc_corner_offset(v_idx_to))
         val_diff = wp.float32(val_1 - val_0)
         if wp.abs(val_diff) < MC_EDGE_VAL_DIFF_EPS:
             t = float(0.5)
@@ -1004,7 +1013,6 @@ class HydroelasticSDF:
                 self.iso_voxel_shape_pair,
                 self.mc_tables[0],
                 self.mc_tables[4],
-                self.mc_tables[3],
                 shape_gap,
                 self.max_num_iso_voxels,
                 reducer_data,
@@ -1366,7 +1374,6 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any):
         x_id: wp.int32,
         y_id: wp.int32,
         z_id: wp.int32,
-        corner_offsets_table: wp.array[wp.vec3ub],
         sdf_data: TextureSDFData,
         sdf_other_data: TextureSDFData,
         X_ws: wp.transform,
@@ -1385,7 +1392,7 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any):
         X_a_to_b = wp.transform_multiply(wp.transform_inverse(X_ws_other), X_ws)
 
         for i in range(8):
-            corner_offset = wp.vec3i(corner_offsets_table[i])
+            corner_offset = _mc_corner_offset(i)
             x = x_id + corner_offset.x
             y = y_id + corner_offset.y
             z = z_id + corner_offset.z
@@ -1632,7 +1639,6 @@ def get_generate_contacts_kernel(
         iso_voxel_shape_pair: wp.array[wp.vec2i],
         tri_range_table: wp.array[wp.int32],
         flat_edge_verts_table: wp.array[wp.vec2ub],
-        corner_offsets_table: wp.array[wp.vec3ub],
         shape_gap: wp.array[wp.float32],
         max_num_iso_voxels: int,
         reducer_data: GlobalContactReducerData,
@@ -1677,7 +1683,6 @@ def get_generate_contacts_kernel(
                 x_id,
                 y_id,
                 z_id,
-                corner_offsets_table,
                 sdf_data_b,
                 sdf_data_a,
                 transform_b,
@@ -1739,7 +1744,6 @@ def get_generate_contacts_kernel(
             for fi in range(num_faces):
                 area, normal, face_center, pen_depth, face_verts = mc_calc_face_texture(
                     flat_edge_verts_table,
-                    corner_offsets_table,
                     tri_range_start + 3 * fi,
                     corner_vals,
                     corner_sdf_vals,

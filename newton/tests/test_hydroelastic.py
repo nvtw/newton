@@ -15,6 +15,7 @@ from newton._src.geometry.contact_reduction_hydroelastic import (
     _from_fixed,
     _to_fixed,
 )
+from newton._src.geometry.sdf_hydroelastic import _mc_corner_offset
 from newton.geometry import HydroelasticSDF
 from newton.tests.unittest_utils import (
     add_function_test,
@@ -73,6 +74,21 @@ def _test_fixed_point_extreme_exponents(
     tid = wp.tid()
     fixed_values[tid] = _to_fixed(values[tid], exponents[tid], mantissa_bits)
     roundtrip_values[tid] = _from_fixed(fixed_values[tid], exponents[tid], mantissa_bits)
+
+
+@wp.kernel
+def _test_mc_corner_offsets(offsets: wp.array[wp.vec3i]):
+    """Store each canonical marching-cubes corner offset."""
+    corner_idx = wp.tid()
+    offsets[corner_idx] = _mc_corner_offset(corner_idx)
+
+
+def test_mc_corner_offsets_match_canonical(test, device):
+    """Verify canonical marching-cubes corner offsets."""
+    offsets = wp.empty(8, dtype=wp.vec3i, device=device)
+    wp.launch(_test_mc_corner_offsets, dim=8, inputs=[offsets], device=device)
+    expected = np.asarray(wp.MarchingCubes.CUBE_CORNER_OFFSETS, dtype=np.int32)
+    np.testing.assert_array_equal(offsets.numpy(), expected)
 
 
 # --- Helper functions ---
@@ -1865,6 +1881,13 @@ add_function_test(
     test_reduced_vs_unreduced_contact_forces_deterministic,
     devices=cuda_devices,
     check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_mc_corner_offsets_match_canonical",
+    test_mc_corner_offsets_match_canonical,
+    devices=cuda_devices,
 )
 
 add_function_test(
