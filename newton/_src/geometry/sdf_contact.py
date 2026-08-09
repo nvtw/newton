@@ -941,6 +941,7 @@ def compute_mesh_mesh_edge_counts(
     shape_heightfield_index: wp.array[wp.int32],
     heightfield_data: wp.array[HeightfieldData],
     edge_counts: wp.array[wp.int32],
+    total_edge_count: wp.array[wp.int32],
 ):
     """Compute per-pair edge counts for mesh-mesh (or heightfield-mesh) pairs.
 
@@ -968,11 +969,12 @@ def compute_mesh_mesh_edge_counts(
         else:
             pair_edges += shape_edge_range[shape_idx][1]
     edge_counts[i] = wp.int32(pair_edges)
+    wp.atomic_add(total_edge_count, 0, pair_edges)
 
 
 @wp.kernel(enable_backward=False)
 def compute_block_counts_from_weights(
-    weight_prefix_sums: wp.array[wp.int32],
+    total_weight_arr: wp.array[wp.int32],
     weights: wp.array[wp.int32],
     pair_count_arr: wp.array[int],
     max_pairs: int,
@@ -981,10 +983,10 @@ def compute_block_counts_from_weights(
 ):
     """Convert per-pair weights to block counts using adaptive load balancing.
 
-    Reads the total weight from the inclusive prefix sum to compute the
-    adaptive ``weight_per_block`` threshold, then assigns each pair a
-    block count proportional to its weight.  Slots beyond ``pair_count``
-    are zeroed for a subsequent exclusive ``array_scan``.
+    Reads the scalar total weight to compute the adaptive
+    ``weight_per_block`` threshold, then assigns each pair a block count
+    proportional to its weight. Slots beyond ``pair_count`` are zeroed for
+    a subsequent exclusive ``array_scan``.
     """
     i = wp.tid()
     pair_count = wp.min(pair_count_arr[0], max_pairs)
@@ -992,8 +994,7 @@ def compute_block_counts_from_weights(
         block_counts[i] = 0
         return
 
-    # Read total from inclusive prefix sum
-    total_weight = weight_prefix_sums[pair_count - 1]
+    total_weight = total_weight_arr[0]
     weight_per_block = int(total_weight)
     if target_blocks > 0 and total_weight > 0:
         weight_per_block = wp.max(256, total_weight // target_blocks)
@@ -1015,15 +1016,14 @@ def compute_mesh_mesh_block_offsets_scan(
     target_blocks: int,
     block_offsets: wp.array,
     block_counts: wp.array,
-    weight_prefix_sums: wp.array,
+    total_edge_count: wp.array,
     device: str | None = None,
     record_tape: bool = True,
 ):
     """Compute mesh-mesh block offsets using parallel kernels and array_scan.
 
-    Runs a four-stage parallel pipeline: per-pair edge counts →
-    inclusive scan → adaptive block counts → exclusive scan into
-    ``block_offsets``.
+    Runs a three-stage parallel pipeline: per-pair edge counts and their scalar
+    total → adaptive block counts → exclusive scan into ``block_offsets``.
     """
     n = block_counts.shape[0]
     # Step 1: compute per-pair edge counts in parallel
@@ -1037,18 +1037,17 @@ def compute_mesh_mesh_block_offsets_scan(
             shape_heightfield_index,
             heightfield_data,
             block_counts,  # reuse as temp storage for edge counts
+            total_edge_count,
         ],
         device=device,
         record_tape=record_tape,
     )
-    # Step 2: inclusive scan to get total in last element
-    wp.utils.array_scan(block_counts, weight_prefix_sums, inclusive=True)
-    # Step 3: compute per-pair block counts using adaptive threshold
+    # Step 2: compute per-pair block counts using the scalar total.
     wp.launch(
         kernel=compute_block_counts_from_weights,
         dim=n,
         inputs=[
-            weight_prefix_sums,
+            total_edge_count,
             block_counts,  # still holds tri counts
             shape_pairs_mesh_mesh_count,
             shape_pairs_mesh_mesh.shape[0],
@@ -1058,7 +1057,7 @@ def compute_mesh_mesh_block_offsets_scan(
         device=device,
         record_tape=record_tape,
     )
-    # Step 4: exclusive scan of block counts → block_offsets
+    # Step 3: exclusive scan of block counts → block_offsets
     wp.utils.array_scan(block_offsets, block_offsets, inclusive=False)
 
 
