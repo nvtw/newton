@@ -31,7 +31,12 @@ from ..geometry.collision_primitive import (
     collide_sphere_cylinder,
     collide_sphere_sphere,
 )
-from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, ContactData, contact_passes_gap_check, make_contact_sort_key
+from ..geometry.contact_data import (
+    SHAPE_PAIR_HFIELD_BIT,
+    ContactData,
+    _contact_passes_gap_check_precomputed,
+    make_contact_sort_key,
+)
 from ..geometry.contact_reduction_global import (
     EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
     EXPORT_REDUCED_CONTACTS_THREAD_BUDGET_MULTIPLIER,
@@ -572,30 +577,41 @@ def create_narrow_phase_primitive_kernel(
                 contact_data.shape_b = shape_b
                 contact_data.gap_sum = gap_sum
 
+                total_separation_needed = radius_eff_a + radius_eff_b + margin_offset_a + margin_offset_b
+                normalized_contact_normal = wp.normalize(contact_normal)
+
                 # Check margin for all possible contacts
                 contact_0_valid = False
                 if contact_dist_0 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_0
                     contact_data.contact_distance = contact_dist_0
-                    contact_0_valid = contact_passes_gap_check(contact_data)
+                    contact_0_valid = _contact_passes_gap_check_precomputed(
+                        contact_data, normalized_contact_normal, total_separation_needed
+                    )
 
                 contact_1_valid = False
                 if contact_dist_1 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_1
                     contact_data.contact_distance = contact_dist_1
-                    contact_1_valid = contact_passes_gap_check(contact_data)
+                    contact_1_valid = _contact_passes_gap_check_precomputed(
+                        contact_data, normalized_contact_normal, total_separation_needed
+                    )
 
                 contact_2_valid = False
                 if contact_dist_2 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_2
                     contact_data.contact_distance = contact_dist_2
-                    contact_2_valid = contact_passes_gap_check(contact_data)
+                    contact_2_valid = _contact_passes_gap_check_precomputed(
+                        contact_data, normalized_contact_normal, total_separation_needed
+                    )
 
                 contact_3_valid = False
                 if contact_dist_3 < MAXVAL:
                     contact_data.contact_point_center = contact_pos_3
                     contact_data.contact_distance = contact_dist_3
-                    contact_3_valid = contact_passes_gap_check(contact_data)
+                    contact_3_valid = _contact_passes_gap_check_precomputed(
+                        contact_data, normalized_contact_normal, total_separation_needed
+                    )
 
                 # Count valid contacts and allocate consecutive indices
                 num_valid = int(contact_0_valid) + int(contact_1_valid) + int(contact_2_valid) + int(contact_3_valid)
