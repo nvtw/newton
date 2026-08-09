@@ -1226,7 +1226,6 @@ def create_export_hydroelastic_reduced_contacts_kernel(
 
                 # Apply normal matching rotation for penetrating contacts (depth < 0)
                 final_normal = contact_normal
-                area_i = contact_area[contact_id]
 
                 c_friction_scale = float(1.0)
 
@@ -1242,7 +1241,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                         # stays on the linear law (k_eff_first = harmonic mean).
                         if depth < 0.0:
                             p_i = wp.static(pressure_func)(depth, shape_b, pressure_data)
-                            c_stiffness = area_i * p_i / (2.0 * wp.max(-depth, wp.static(EPS_SMALL)))
+                            c_stiffness = contact_area[contact_id] * p_i / (2.0 * wp.max(-depth, wp.static(EPS_SMALL)))
                         else:
                             c_stiffness = wp.static(margin_contact_area) * k_eff_first
 
@@ -1307,7 +1306,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                             c_stiffness = nbin_agg_mag / (2.0 * nbin_effective_depth)
                         else:
                             p_i = wp.static(pressure_func)(depth, shape_b, pressure_data)
-                            c_stiffness = area_i * p_i / (2.0 * wp.max(-depth, wp.static(EPS_SMALL)))
+                            c_stiffness = contact_area[contact_id] * p_i / (2.0 * wp.max(-depth, wp.static(EPS_SMALL)))
 
                         # Moment matching friction adjustment (voxel entry)
                         if wp.static(moment_matching):
@@ -1351,7 +1350,7 @@ def create_export_hydroelastic_reduced_contacts_kernel(
                         # via solver multiplying by 2*|depth| (contact_distance
                         # = 2*depth), so c_stiffness = area * p / (2*|d|).
                         p_i = wp.static(pressure_func)(depth, shape_b, pressure_data)
-                        c_stiffness = area_i * p_i / (2.0 * wp.max(-depth, wp.static(EPS_SMALL)))
+                        c_stiffness = contact_area[contact_id] * p_i / (2.0 * wp.max(-depth, wp.static(EPS_SMALL)))
                     else:
                         # Non-penetrating margin contact: linear-law regularization.
                         c_stiffness = wp.static(margin_contact_area) * k_eff_first
