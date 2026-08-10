@@ -91,11 +91,11 @@ def _validate_primitive_sdf_inputs(
 # Two pairs of trilinear samplers are provided -- pick at the call site:
 #
 # * :func:`texture_sample_sdf` / :func:`texture_sample_sdf_grad` --
-#   ``"software"`` path. 8 point-sampled corner reads + float32 trilinear
-#   blend. Most accurate; avoids the 8-bit fixed-point interpolation weights
-#   the texture unit's hardware filter uses. Default for hydroelastic
-#   contact, where contact-force precision feeds back into the stress
-#   integration over the volume.
+#   ``"software"`` path. Four point-sampled reads, each returning adjacent
+#   X samples, followed by a float32 trilinear blend. Most accurate; avoids
+#   the 8-bit fixed-point interpolation weights the texture unit's hardware
+#   filter uses. Default for hydroelastic contact, where contact-force
+#   precision feeds back into the stress integration over the volume.
 #
 # * :func:`texture_sample_sdf_hw` / :func:`texture_sample_sdf_grad_hw` --
 #   ``"hardware"`` path. One ``wp.texture_sample`` for the value, six
@@ -104,10 +104,10 @@ def _validate_primitive_sdf_inputs(
 #   (8-bit fixed-point interpolation weights). Used by the mesh-SDF
 #   narrow phase, where the small extra jitter is absorbed by PGS.
 #
-# Both paths read from the same underlying ``LINEAR``-filtered textures
-# (sampling at ``int + 0.5`` resolves to the exact texel value under any
-# filter mode), so the choice only affects the kernel that inlines the
-# sampler.
+# Both paths read from the same underlying two-channel, ``LINEAR``-filtered
+# textures. Channel zero stores the sample at X and channel one stores its
+# +X neighbor. Sampling at ``int + 0.5`` resolves to the exact texel value,
+# so the choice only affects the kernel that inlines the sampler.
 
 # ============================================================================
 # Texture SDF Data Structure
@@ -748,6 +748,12 @@ def apply_subgrid_sdf_scale(raw_value: float, min_value: float, value_range: flo
     return raw_value * value_range + min_value
 
 
+@wp.func
+def _texture_sample_sdf_x0(texture: wp.Texture3D, uvw: wp.vec3f) -> float:
+    """Sample the original SDF value from channel zero."""
+    return wp.texture_sample(texture, uvw, dtype=wp.vec2)[0]
+
+
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
 
 
@@ -884,14 +890,14 @@ def _read_cell_corners(
         tx = coarse_f[0] - cx
         ty = coarse_f[1] - cy
         tz = coarse_f[2] - cz
-        v000 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 0.5), dtype=float)
-        v100 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 0.5, cz + 0.5), dtype=float)
-        v010 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 0.5), dtype=float)
-        v110 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 1.5, cz + 0.5), dtype=float)
-        v001 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 1.5), dtype=float)
-        v101 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 0.5, cz + 1.5), dtype=float)
-        v011 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 1.5), dtype=float)
-        v111 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 1.5, cz + 1.5), dtype=float)
+        v000 = _texture_sample_sdf_x0(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 0.5))
+        v100 = _texture_sample_sdf_x0(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 0.5, cz + 0.5))
+        v010 = _texture_sample_sdf_x0(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 0.5))
+        v110 = _texture_sample_sdf_x0(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 1.5, cz + 0.5))
+        v001 = _texture_sample_sdf_x0(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 1.5))
+        v101 = _texture_sample_sdf_x0(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 0.5, cz + 1.5))
+        v011 = _texture_sample_sdf_x0(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 1.5))
+        v111 = _texture_sample_sdf_x0(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 1.5, cz + 1.5))
     else:
         block_x = float(loc.start_slot & wp.uint32(0x3FF))
         block_y = float((loc.start_slot >> wp.uint32(10)) & wp.uint32(0x3FF))
@@ -902,14 +908,14 @@ def _read_cell_corners(
         ox = block_x * sdf.subgrid_samples_f + lx + 0.5
         oy = block_y * sdf.subgrid_samples_f + ly + 0.5
         oz = block_z * sdf.subgrid_samples_f + lz + 0.5
-        v000 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz), dtype=float)
-        v100 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy, oz), dtype=float)
-        v010 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz), dtype=float)
-        v110 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz), dtype=float)
-        v001 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz + 1.0), dtype=float)
-        v101 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy, oz + 1.0), dtype=float)
-        v011 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz + 1.0), dtype=float)
-        v111 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz + 1.0), dtype=float)
+        v000 = _texture_sample_sdf_x0(sdf.subgrid_texture, wp.vec3f(ox, oy, oz))
+        v100 = _texture_sample_sdf_x0(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy, oz))
+        v010 = _texture_sample_sdf_x0(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz))
+        v110 = _texture_sample_sdf_x0(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz))
+        v001 = _texture_sample_sdf_x0(sdf.subgrid_texture, wp.vec3f(ox, oy, oz + 1.0))
+        v101 = _texture_sample_sdf_x0(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy, oz + 1.0))
+        v011 = _texture_sample_sdf_x0(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz + 1.0))
+        v111 = _texture_sample_sdf_x0(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz + 1.0))
         v000 = apply_subgrid_sdf_scale(v000, sdf.subgrids_min_sdf_value, sdf.subgrids_sdf_value_range)
         v100 = apply_subgrid_sdf_scale(v100, sdf.subgrids_min_sdf_value, sdf.subgrids_sdf_value_range)
         v010 = apply_subgrid_sdf_scale(v010, sdf.subgrids_min_sdf_value, sdf.subgrids_sdf_value_range)
@@ -983,7 +989,7 @@ def texture_sample_sdf_at_voxel(
         oy = block_y * sdf.subgrid_samples_f + ly + 0.5
         oz = block_z * sdf.subgrid_samples_f + lz + 0.5
 
-        raw = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz), dtype=float)
+        raw = _texture_sample_sdf_x0(sdf.subgrid_texture, wp.vec3f(ox, oy, oz))
         return raw * sdf.subgrids_sdf_value_range + sdf.subgrids_min_sdf_value
 
     local_pos = sdf.sdf_box_lower + wp.cw_mul(
@@ -1000,13 +1006,11 @@ def texture_sample_sdf(
 ) -> float:
     """Sample SDF value (software trilinear).
 
-    8 point-sampled corner reads at ``int + 0.5`` coordinates followed by
-    a float32 trilinear blend. Reads through a ``LINEAR``-filtered texture
-    but the ``int + 0.5`` sampling positions collapse the trilinear
-    weights to ``(1, 0, ...)`` so the corner values are returned
-    bit-exactly (modulo a ~1/256 weight-quantisation that's far below
-    contact precision). Used by paths that prefer accuracy over fetch
-    count -- e.g. hydroelastic stress integration.
+    Four point-sampled reads return the eight corners as adjacent X pairs,
+    followed by a float32 trilinear blend. Sampling at ``int + 0.5``
+    collapses the texture-filter weights so the packed texel values are
+    returned exactly. Used by paths that prefer accuracy over fetch count,
+    such as hydroelastic stress integration.
 
     Fuses cell lookup, texel reads, trilinear blend, and quantization
     de-scale into a single pass for the value-only path.
@@ -1051,14 +1055,14 @@ def texture_sample_sdf(
         tx = coarse_f[0] - cx
         ty = coarse_f[1] - cy
         tz = coarse_f[2] - cz
-        v000 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 0.5), dtype=float)
-        v100 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 0.5, cz + 0.5), dtype=float)
-        v010 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 0.5), dtype=float)
-        v110 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 1.5, cz + 0.5), dtype=float)
-        v001 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 1.5), dtype=float)
-        v101 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 0.5, cz + 1.5), dtype=float)
-        v011 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 1.5), dtype=float)
-        v111 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 1.5, cz + 1.5), dtype=float)
+        v00 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 0.5), dtype=wp.vec2)
+        v10 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 0.5), dtype=wp.vec2)
+        v01 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 1.5), dtype=wp.vec2)
+        v11 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 1.5), dtype=wp.vec2)
+        v000, v100 = v00[0], v00[1]
+        v010, v110 = v10[0], v10[1]
+        v001, v101 = v01[0], v01[1]
+        v011, v111 = v11[0], v11[1]
     else:
         needs_scale = True
         block_x = float(loc.start_slot & wp.uint32(0x3FF))
@@ -1070,14 +1074,14 @@ def texture_sample_sdf(
         ox = block_x * sdf.subgrid_samples_f + lx + 0.5
         oy = block_y * sdf.subgrid_samples_f + ly + 0.5
         oz = block_z * sdf.subgrid_samples_f + lz + 0.5
-        v000 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz), dtype=float)
-        v100 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy, oz), dtype=float)
-        v010 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz), dtype=float)
-        v110 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz), dtype=float)
-        v001 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz + 1.0), dtype=float)
-        v101 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy, oz + 1.0), dtype=float)
-        v011 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz + 1.0), dtype=float)
-        v111 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz + 1.0), dtype=float)
+        v00 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz), dtype=wp.vec2)
+        v10 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz), dtype=wp.vec2)
+        v01 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz + 1.0), dtype=wp.vec2)
+        v11 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz + 1.0), dtype=wp.vec2)
+        v000, v100 = v00[0], v00[1]
+        v010, v110 = v10[0], v10[1]
+        v001, v101 = v01[0], v01[1]
+        v011, v111 = v11[0], v11[1]
 
     # Cover texture latency with the independent extrapolation root.
     diff_mag = wp.sqrt(diff_sq)
@@ -1103,8 +1107,8 @@ def _texture_sample_pair(
     uvw1: wp.vec3f,
 ) -> wp.vec2f:
     """Issue two independent hardware texture samples before consuming either."""
-    value0 = wp.texture_sample(texture0, uvw0, dtype=float)
-    value1 = wp.texture_sample(texture1, uvw1, dtype=float)
+    value0 = _texture_sample_sdf_x0(texture0, uvw0)
+    value1 = _texture_sample_sdf_x0(texture1, uvw1)
     return wp.vec2f(value0, value1)
 
 
@@ -1244,14 +1248,13 @@ def _texture_sample_sdf_hw_clamped(
         cy = float(loc.y_base)
         cz = float(loc.z_base)
         coarse_f = wp.vec3(float(loc.ix) + loc.tx, float(loc.iy) + loc.ty, float(loc.iz) + loc.tz) * sdf.fine_to_coarse
-        sdf_val = wp.texture_sample(
+        sdf_val = _texture_sample_sdf_x0(
             sdf.coarse_texture,
             wp.vec3f(
                 cx + (coarse_f[0] - cx) + 0.5,
                 cy + (coarse_f[1] - cy) + 0.5,
                 cz + (coarse_f[2] - cz) + 0.5,
             ),
-            dtype=float,
         )
     else:
         block_x = float(loc.start_slot & wp.uint32(0x3FF))
@@ -1263,10 +1266,9 @@ def _texture_sample_sdf_hw_clamped(
         ox = block_x * sdf.subgrid_samples_f + lx + 0.5
         oy = block_y * sdf.subgrid_samples_f + ly + 0.5
         oz = block_z * sdf.subgrid_samples_f + lz + 0.5
-        raw = wp.texture_sample(
+        raw = _texture_sample_sdf_x0(
             sdf.subgrid_texture,
             wp.vec3f(ox + loc.tx, oy + loc.ty, oz + loc.tz),
-            dtype=float,
         )
         sdf_val = raw * sdf.subgrids_sdf_value_range + sdf.subgrids_min_sdf_value
 
@@ -1979,6 +1981,15 @@ def build_sparse_sdf_from_primitive(
     )
 
 
+def _pack_sdf_x_pairs(data: np.ndarray) -> np.ndarray:
+    """Pack each SDF sample with its clamped positive-X neighbor."""
+    pairs = np.empty((*data.shape, 2), dtype=data.dtype)
+    pairs[..., 0] = data
+    pairs[..., :-1, 1] = data[..., 1:]
+    pairs[..., -1, 1] = data[..., -1]
+    return pairs
+
+
 def create_sparse_sdf_textures(
     sparse_data: dict,
     device: str = "cuda",
@@ -1993,17 +2004,12 @@ def create_sparse_sdf_textures(
         Tuple of ``(texture_sdf, coarse_texture, subgrid_texture)``.
         Caller must keep texture references alive to prevent GC.
     """
-    # Always create the texture with ``LINEAR`` filter mode -- both the
-    # software (:func:`texture_sample_sdf`) and hardware
-    # (:func:`texture_sample_sdf_hw`) paths share the same underlying
-    # texture. Under LINEAR, sampling at an exact texel centre
-    # (``integer + 0.5``) still resolves to that texel's value -- the
-    # trilinear weights collapse to ``(1, 0, ...)`` -- so the software
-    # path's 8-corner reads remain effectively bit-exact (modulo a
-    # ~1/256 weight-quantisation error that is far below any physically
-    # meaningful contact precision).
+    # Pair adjacent X samples so the software sampler obtains eight corners
+    # with four reads. Channel zero preserves the original scalar field for
+    # hardware filtering. At an exact texel center, LINEAR filtering returns
+    # the stored values exactly, preserving the software interpolation path.
     coarse_tex = wp.Texture3D(
-        sparse_data["coarse_sdf"],
+        _pack_sdf_x_pairs(sparse_data["coarse_sdf"]),
         filter_mode=wp.TextureFilterMode.LINEAR,
         address_mode=wp.TextureAddressMode.CLAMP,
         normalized_coords=False,
@@ -2011,7 +2017,7 @@ def create_sparse_sdf_textures(
     )
 
     subgrid_tex = wp.Texture3D(
-        sparse_data["subgrid_data"],
+        _pack_sdf_x_pairs(sparse_data["subgrid_data"]),
         filter_mode=wp.TextureFilterMode.LINEAR,
         address_mode=wp.TextureAddressMode.CLAMP,
         normalized_coords=False,
