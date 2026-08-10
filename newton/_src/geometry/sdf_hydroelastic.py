@@ -84,6 +84,21 @@ MAX_MC_FACES_PER_VOXEL = 5
 # Keep the texture-heavy count kernel small enough for multiple resident blocks.
 HYDRO_COUNT_BLOCK_DIM = 128
 
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+float result;
+asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(result) : "f"(value));
+return result;
+#else
+return 1.0f / sqrtf(value);
+#endif
+""")
+def _hydro_rsqrt_approx(value: float) -> float:
+    """Return a fast approximate reciprocal square root."""
+    ...
+
+
 # Contact sort sub-keys reserve bit 22 for hydroelastic anchor contacts and bit
 # 0 for the normal/voxel reduction source. Face fingerprints are shifted left
 # by one during export, so they must stay below bit 21.
@@ -314,9 +329,9 @@ def mc_calc_face_texture(
         area = 0.0
         normal = wp.vec3(0.0, 0.0, 1.0)
     else:
-        n_len = wp.sqrt(n_sq)
-        normal = n / n_len
-        area = n_len / 2.0
+        inv_n_len = _hydro_rsqrt_approx(n_sq)
+        normal = n * inv_n_len
+        area = (n_sq * inv_n_len) * 0.5
     center = (face_verts[0] + face_verts[1] + face_verts[2]) / 3.0
     pen_depth = (vert_depths[0] + vert_depths[1] + vert_depths[2]) / 3.0
     area *= get_triangle_fraction(vert_depths, num_inside)
