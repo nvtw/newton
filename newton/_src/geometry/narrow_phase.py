@@ -1546,6 +1546,8 @@ class NarrowPhase:
         *,
         max_candidate_pairs: int,
         max_triangle_pairs: int = 1000000,
+        max_mesh_mesh_pairs: int | None = None,
+        max_mesh_plane_pairs: int | None = None,
         reduce_contacts: bool = True,
         device: Devicelike | None = None,
         shape_aabb_lower: wp.array[wp.vec3] | None = None,
@@ -1572,6 +1574,10 @@ class NarrowPhase:
             max_candidate_pairs: Maximum number of candidate pairs from broad phase
             max_triangle_pairs: Maximum number of triangle pairs for mesh and
                 heightfield collisions (conservative estimate).
+            max_mesh_mesh_pairs: Maximum number of routed mesh-SDF pairs. Defaults
+                to ``max_candidate_pairs``.
+            max_mesh_plane_pairs: Maximum number of routed mesh-plane pairs. Defaults
+                to ``max_candidate_pairs``.
             reduce_contacts: Whether to reduce contacts for mesh-mesh and mesh-plane collisions.
                 When True, uses shared memory contact reduction to select representative contacts.
                 This improves performance and stability for meshes with many vertices. Defaults to True.
@@ -1628,6 +1634,18 @@ class NarrowPhase:
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
+        if max_mesh_mesh_pairs is not None and max_mesh_mesh_pairs < 0:
+            raise ValueError("max_mesh_mesh_pairs must be non-negative or None")
+        if max_mesh_plane_pairs is not None and max_mesh_plane_pairs < 0:
+            raise ValueError("max_mesh_plane_pairs must be non-negative or None")
+        self.max_mesh_mesh_pairs = min(
+            max_candidate_pairs,
+            max_candidate_pairs if max_mesh_mesh_pairs is None else max_mesh_mesh_pairs,
+        )
+        self.max_mesh_plane_pairs = min(
+            max_candidate_pairs,
+            max_candidate_pairs if max_mesh_plane_pairs is None else max_mesh_plane_pairs,
+        )
         self.device = device
         self.reduce_contacts = reduce_contacts
         self.has_meshes = has_meshes
@@ -1843,13 +1861,13 @@ class NarrowPhase:
                 wp.zeros(max_triangle_pairs, dtype=wp.vec3i, device=device) if has_meshes or has_heightfields else None
             )
             self.shape_pairs_mesh_plane = (
-                wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_meshes else None
+                wp.zeros(self.max_mesh_plane_pairs, dtype=wp.vec2i, device=device) if has_meshes else None
             )
             self.shape_pairs_mesh_plane_cumsum = (
-                wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device) if has_meshes else None
+                wp.zeros(self.max_mesh_plane_pairs, dtype=wp.int32, device=device) if has_meshes else None
             )
             self.shape_pairs_mesh_mesh = (
-                wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_meshes else None
+                wp.zeros(self.max_mesh_mesh_pairs, dtype=wp.vec2i, device=device) if has_meshes else None
             )
 
             self.empty_tangent = None
@@ -1910,17 +1928,18 @@ class NarrowPhase:
         # over-subscribing on small scenes.
         if self.reduce_contacts:
             target_blocks = device_obj.sm_count * 4 if device_obj.is_cuda else 64
-            n = max_candidate_pairs + 1
             # Mesh-mesh
             self.num_mesh_mesh_blocks = target_blocks * 2 if device_obj.is_cuda else target_blocks
             self.mesh_mesh_target_blocks = target_blocks
-            self.mesh_mesh_block_offsets = wp.zeros(n, dtype=wp.int32, device=device)
-            self.mesh_mesh_block_counts = wp.zeros(n, dtype=wp.int32, device=device)
+            mesh_mesh_scan_size = self.max_mesh_mesh_pairs + 1
+            self.mesh_mesh_block_offsets = wp.zeros(mesh_mesh_scan_size, dtype=wp.int32, device=device)
+            self.mesh_mesh_block_counts = wp.zeros(mesh_mesh_scan_size, dtype=wp.int32, device=device)
             # Mesh-plane
             self.num_mesh_plane_blocks = target_blocks
             self.mesh_plane_target_blocks = target_blocks
-            self.mesh_plane_block_offsets = wp.zeros(n, dtype=wp.int32, device=device)
-            self.mesh_plane_block_counts = wp.zeros(n, dtype=wp.int32, device=device)
+            mesh_plane_scan_size = self.max_mesh_plane_pairs + 1
+            self.mesh_plane_block_offsets = wp.zeros(mesh_plane_scan_size, dtype=wp.int32, device=device)
+            self.mesh_plane_block_counts = wp.zeros(mesh_plane_scan_size, dtype=wp.int32, device=device)
         else:
             self.num_mesh_mesh_blocks = self.num_tile_blocks
             self.mesh_mesh_target_blocks = self.num_tile_blocks

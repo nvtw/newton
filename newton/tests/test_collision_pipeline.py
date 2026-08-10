@@ -36,6 +36,7 @@ from newton._src.sim.collide import (
     _build_soft_edge_rigid_contact_pairs,
     _build_soft_face_rigid_contact_pairs,
     _build_soft_particle_rigid_contact_pairs,
+    _compute_per_world_mask_pair_max,
     _compute_per_world_shape_pairs_max,
     _count_soft_particle_rigid_contact_pairs,
     _estimate_rigid_contact_max,
@@ -2024,6 +2025,38 @@ class TestShapePairsMaxScaling(unittest.TestCase):
             flags = np.full(total, int(ShapeFlags.COLLIDE_SHAPES), dtype=np.int32)
         model.shape_flags = wp.array(flags, dtype=wp.int32)
         return model
+
+    def test_mask_pair_bounds_respect_world_segments(self):
+        """Count selected pair categories across local and global world segments."""
+        model = self._make_model(num_worlds=2, shapes_per_world=2, num_global=2)
+        same_mask = np.array([True, False, True, False, True, True])
+        first_mask = np.array([True, False, True, False, True, False])
+        second_mask = np.array([False, True, False, True, False, True])
+
+        self.assertEqual(_compute_per_world_mask_pair_max(model, same_mask), 7)
+        self.assertEqual(_compute_per_world_mask_pair_max(model, first_mask, second_mask), 9)
+
+    def test_mesh_work_buffers_use_category_bounds(self):
+        """Size mesh work buffers from exact routed shape categories."""
+        builder = newton.ModelBuilder()
+        mesh = newton.Mesh.create_box(0.1, 0.1, 0.1)
+        for x in (-0.5, 0.5):
+            body = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.0)))
+            builder.add_shape_mesh(body, mesh=mesh)
+        for x in range(6):
+            body = builder.add_body(xform=wp.transform(wp.vec3(float(x), 2.0, 0.0)))
+            builder.add_shape_box(body)
+        builder.add_ground_plane()
+        model = builder.finalize()
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", reduce_contacts=True)
+        narrow_phase = pipeline.narrow_phase
+
+        self.assertEqual(narrow_phase.max_mesh_mesh_pairs, 1)
+        self.assertEqual(narrow_phase.shape_pairs_mesh_mesh.shape[0], 1)
+        self.assertEqual(narrow_phase.mesh_mesh_block_offsets.shape[0], 2)
+        self.assertEqual(narrow_phase.max_mesh_plane_pairs, 2)
+        self.assertEqual(narrow_phase.shape_pairs_mesh_plane.shape[0], 2)
+        self.assertEqual(narrow_phase.mesh_plane_block_offsets.shape[0], 3)
 
     def test_single_world_matches_global_formula(self):
         """Single world should give the same result as the naive N*(N-1)/2."""
