@@ -16,9 +16,11 @@ from newton._src.geometry.contact_reduction_hydroelastic import (
     _to_fixed,
 )
 from newton._src.geometry.sdf_hydroelastic import (
+    _extract_mc_corner_pair,
     _mc_corner_offset,
     pack_hydro_voxel_record,
     unpack_hydro_voxel_coords,
+    vec8f,
 )
 from newton._src.geometry.sdf_mc import get_triangle_fraction
 from newton.geometry import HydroelasticSDF
@@ -86,6 +88,19 @@ def _test_mc_corner_offsets(offsets: wp.array[wp.vec3i]):
     """Store each canonical marching-cubes corner offset."""
     corner_idx = wp.tid()
     offsets[corner_idx] = _mc_corner_offset(corner_idx)
+
+
+@wp.kernel
+def _test_mc_corner_pair_selection(
+    values: wp.array[wp.float32],
+    depths: wp.array[wp.float32],
+    selected: wp.array[wp.vec2f],
+):
+    """Select every marching-cubes value/depth pair from register vectors."""
+    corner_idx = wp.tid()
+    corner_vals = vec8f(values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7])
+    corner_depths = vec8f(depths[0], depths[1], depths[2], depths[3], depths[4], depths[5], depths[6], depths[7])
+    selected[corner_idx] = _extract_mc_corner_pair(corner_vals, corner_depths, corner_idx)
 
 
 @wp.kernel
@@ -183,6 +198,24 @@ def test_mc_corner_offsets_match_canonical(test, device):
     wp.launch(_test_mc_corner_offsets, dim=8, inputs=[offsets], device=device)
     expected = np.asarray(wp.MarchingCubes.CUBE_CORNER_OFFSETS, dtype=np.int32)
     np.testing.assert_array_equal(offsets.numpy(), expected)
+
+
+def test_mc_corner_pair_selection(test, device):
+    """Preserve every marching-cubes corner value and depth during selection."""
+    values_np = np.arange(8, dtype=np.float32) + 0.25
+    depths_np = -np.arange(8, dtype=np.float32) - 0.5
+    selected = wp.empty(8, dtype=wp.vec2f, device=device)
+    wp.launch(
+        _test_mc_corner_pair_selection,
+        dim=8,
+        inputs=[
+            wp.array(values_np, dtype=wp.float32, device=device),
+            wp.array(depths_np, dtype=wp.float32, device=device),
+            selected,
+        ],
+        device=device,
+    )
+    np.testing.assert_array_equal(selected.numpy(), np.column_stack((values_np, depths_np)))
 
 
 # --- Helper functions ---
@@ -2060,6 +2093,13 @@ add_function_test(
     TestHydroelastic,
     "test_mc_corner_offsets_match_canonical",
     test_mc_corner_offsets_match_canonical,
+    devices=cuda_devices,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_mc_corner_pair_selection",
+    test_mc_corner_pair_selection,
     devices=cuda_devices,
 )
 

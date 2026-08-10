@@ -205,6 +205,37 @@ def linear_pressure(signed_depth: wp.float32, shape_idx: wp.int32, data: LinearP
 
 
 @wp.func
+def _extract_mc_corner_pair(corner_vals: vec8f, corner_sdf_vals: vec8f, corner_idx: int) -> wp.vec2f:
+    """Select one marching-cubes value/depth pair without local-memory indexing."""
+    select_low = (corner_idx & 1) == 0
+    select_mid = (corner_idx & 2) == 0
+    select_high = (corner_idx & 4) == 0
+    pair_01 = wp.where(
+        select_low,
+        wp.vec2f(corner_vals[0], corner_sdf_vals[0]),
+        wp.vec2f(corner_vals[1], corner_sdf_vals[1]),
+    )
+    pair_23 = wp.where(
+        select_low,
+        wp.vec2f(corner_vals[2], corner_sdf_vals[2]),
+        wp.vec2f(corner_vals[3], corner_sdf_vals[3]),
+    )
+    pair_45 = wp.where(
+        select_low,
+        wp.vec2f(corner_vals[4], corner_sdf_vals[4]),
+        wp.vec2f(corner_vals[5], corner_sdf_vals[5]),
+    )
+    pair_67 = wp.where(
+        select_low,
+        wp.vec2f(corner_vals[6], corner_sdf_vals[6]),
+        wp.vec2f(corner_vals[7], corner_sdf_vals[7]),
+    )
+    pair_03 = wp.where(select_mid, pair_01, pair_23)
+    pair_47 = wp.where(select_mid, pair_45, pair_67)
+    return wp.where(select_high, pair_03, pair_47)
+
+
+@wp.func
 def mc_calc_face_texture(
     flat_edge_verts_table: wp.array[wp.vec2ub],
     tri_range_start: wp.int32,
@@ -240,8 +271,10 @@ def mc_calc_face_texture(
         edge_verts = wp.vec2i(flat_edge_verts_table[tri_range_start + vi])
         v_idx_from = edge_verts[0]
         v_idx_to = edge_verts[1]
-        val_0 = wp.float32(corner_vals[v_idx_from])
-        val_1 = wp.float32(corner_vals[v_idx_to])
+        corner_from = _extract_mc_corner_pair(corner_vals, corner_sdf_vals, v_idx_from)
+        corner_to = _extract_mc_corner_pair(corner_vals, corner_sdf_vals, v_idx_to)
+        val_0 = corner_from[0]
+        val_1 = corner_to[0]
 
         p_0 = wp.vec3f(_mc_corner_offset(v_idx_from))
         p_1 = wp.vec3f(_mc_corner_offset(v_idx_to))
@@ -260,8 +293,8 @@ def mc_calc_face_texture(
         local_pos = sdf_a.sdf_box_lower + wp.cw_mul(vol_idx, sdf_a.voxel_size)
         face_verts[vi] = local_pos
         # Interpolate SDF depth from cached corner values (avoids texture lookup)
-        sdf_from = wp.float32(corner_sdf_vals[v_idx_from])
-        sdf_to = wp.float32(corner_sdf_vals[v_idx_to])
+        sdf_from = corner_from[1]
+        sdf_to = corner_to[1]
         depth = sdf_from + t * (sdf_to - sdf_from) - thickness
         vert_depths[vi] = depth
         if depth < 0.0:
