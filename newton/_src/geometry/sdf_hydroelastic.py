@@ -642,8 +642,11 @@ class HydroelasticSDF:
                 self.pressure_func = self.config.pressure_func
                 self.pressure_data = self.config.pressure_data
 
-            self.count_iso_voxels_block_kernel = create_count_iso_voxels_block_kernel(self.pressure_func, False)
             self.count_iso_voxels_block_integer_kernel = create_count_iso_voxels_block_kernel(self.pressure_func, True)
+            self.count_iso_voxel_children_kernel = create_count_iso_voxel_children_kernel(self.pressure_func, False)
+            self.count_iso_voxel_children_integer_kernel = create_count_iso_voxel_children_kernel(
+                self.pressure_func, True
+            )
 
             self.generate_contacts_kernel = get_generate_contacts_kernel(
                 output_vertices=self.config.output_contact_surface,
@@ -1013,17 +1016,36 @@ class HydroelasticSDF:
         # We do this by computing the difference between sdfs at the voxel/subblock center and comparing it to the voxel/subblock radius.
         # The check is first performed for subblocks of size (8 x 8 x 8), then (4 x 4 x 4), then (2 x 2 x 2), and finally for each voxel.
         for i, (subblock_size, n_blocks) in enumerate([(8, 1), (4, 2), (2, 2), (1, 2)]):
-            # Even-width stages are centered on stored voxels; odd-width stages are centered between voxels.
-            count_kernel = (
-                self.count_iso_voxels_block_integer_kernel
-                if subblock_size % 2 == 0
-                else self.count_iso_voxels_block_kernel
-            )
-            wp.launch(
-                kernel=count_kernel,
-                dim=[self.grid_size],
-                inputs=[
-                    self.grid_size,
+            if n_blocks == 2:
+                # Eight lanes evaluate one parent's children while retaining the
+                # existing parent mask, prefix scan, and ordered scatter.
+                count_kernel = (
+                    self.count_iso_voxel_children_integer_kernel
+                    if subblock_size % 2 == 0
+                    else self.count_iso_voxel_children_kernel
+                )
+                count_grid_size = max(
+                    HYDRO_COUNT_BLOCK_DIM,
+                    (self.grid_size // HYDRO_COUNT_BLOCK_DIM) * HYDRO_COUNT_BLOCK_DIM,
+                )
+                count_inputs = [
+                    count_grid_size,
+                    self.iso_buffer_counts[i],
+                    shape_sdf_data,
+                    shape_transform,
+                    shape_transform_inverse,
+                    self.pressure_data,
+                    self.iso_buffer_records[i],
+                    self.normalized_shape_pairs,
+                    shape_gap,
+                    subblock_size,
+                    self.input_sizes[i],
+                ]
+            else:
+                count_kernel = self.count_iso_voxels_block_integer_kernel
+                count_grid_size = self.grid_size
+                count_inputs = [
+                    count_grid_size,
                     self.iso_buffer_counts[i],
                     shape_sdf_data,
                     shape_transform,
@@ -1035,7 +1057,11 @@ class HydroelasticSDF:
                     subblock_size,
                     n_blocks,
                     self.input_sizes[i],
-                ],
+                ]
+            wp.launch(
+                kernel=count_kernel,
+                dim=[count_grid_size],
+                inputs=count_inputs,
                 outputs=[
                     self.iso_buffer_num_scratch[i],
                     self.iso_subblock_idx_scratch[i],
@@ -1451,6 +1477,91 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: boo
             iso_subblock_idx[tid] = subblock_idx
 
     return count_iso_voxels_block
+
+
+def create_count_iso_voxel_children_kernel(pressure_func: Any, integer_center: bool):
+    """Create a kernel that evaluates each parent's eight children cooperatively."""
+
+    @wp.kernel(enable_backward=False)
+    def count_iso_voxel_children(
+        grid_size: int,
+        in_buffer_collide_count: wp.array[int],
+        shape_sdf_data: wp.array[TextureSDFData],
+        shape_transform: wp.array[wp.transform],
+        shape_transform_inverse: wp.array[wp.transform],
+        pressure_data: Any,
+        in_buffer_collide_records: wp.array[wp.vec3ui],
+        normalized_shape_pairs: wp.array[wp.vec2i],
+        shape_gap: wp.array[wp.float32],
+        subblock_size: int,
+        max_input_buffer_size: int,
+        iso_subblock_counts: wp.array[wp.int32],
+        iso_subblock_idx: wp.array[wp.uint8],
+    ):
+        lane = wp.tid() % wp.block_dim()
+        child_idx = lane & 7
+        parent_lane = lane >> 3
+        parents_per_block = wp.block_dim() >> 3
+        parent_base = (wp.tid() // wp.block_dim()) * parents_per_block
+        parent_stride = (grid_size // wp.block_dim()) * parents_per_block
+        num_items = wp.min(in_buffer_collide_count[0], max_input_buffer_size)
+        child_kept = wp.tile_zeros(shape=(HYDRO_COUNT_BLOCK_DIM,), dtype=wp.int32, storage="shared")
+
+        while parent_base < num_items:
+            tid = parent_base + parent_lane
+            keep = False
+            if tid < num_items:
+                record = in_buffer_collide_records[tid]
+                pair_idx = wp.int32(record[2])
+                pair = normalized_shape_pairs[pair_idx]
+                shape_a = pair[0]
+                shape_b = pair[1]
+                sdf_data_a = shape_sdf_data[shape_a]
+                sdf_data_b = shape_sdf_data[shape_b]
+                X_ws_b = shape_transform[shape_b]
+                gap_a = shape_gap[shape_a]
+                gap_b = shape_gap[shape_b]
+                voxel_radius = sdf_data_b.voxel_radius
+                r = float(subblock_size) * voxel_radius
+                bc = unpack_hydro_voxel_coords(record)
+                X_b_to_a = wp.transform_multiply(shape_transform_inverse[shape_a], X_ws_b)
+
+                x_local = child_idx & 1
+                y_local = (child_idx >> 1) & 1
+                z_local = (child_idx >> 2) & 1
+                x_global = wp.vec3i(bc) + wp.vec3i(x_local, y_local, z_local) * subblock_size
+                x_center = wp.vec3f(x_global) + wp.vec3f(0.5 * float(subblock_size))
+                local_pos_b = sdf_data_b.sdf_box_lower + wp.cw_mul(x_center, sdf_data_b.voxel_size)
+                point_a = wp.transform_point(X_b_to_a, local_pos_b)
+                if wp.static(integer_center):
+                    center_i = x_global + wp.vec3i(subblock_size // 2)
+                    vb = texture_sample_sdf_at_voxel(sdf_data_b, center_i[0], center_i[1], center_i[2])
+                else:
+                    vb = texture_sample_sdf(sdf_data_b, local_pos_b)
+                va = texture_sample_sdf(sdf_data_a, point_a)
+                is_valid = not (wp.isnan(vb) or wp.isnan(va))
+                if is_valid and va <= r + gap_a and vb <= r + gap_b:
+                    pa_lo = pressure_func(va + r, shape_a, pressure_data)
+                    pa_hi = pressure_func(va - r, shape_a, pressure_data)
+                    pb_lo = pressure_func(vb + r, shape_b, pressure_data)
+                    pb_hi = pressure_func(vb - r, shape_b, pressure_data)
+                    keep = not (pa_hi < pb_lo or pb_hi < pa_lo)
+
+            wp.tile_scatter_masked(child_kept, lane, wp.int32(keep), True)
+
+            if child_idx == 0 and tid < num_items:
+                count = wp.int32(0)
+                mask = wp.uint8(0)
+                for i in range(8):
+                    if wp.tile_extract(child_kept, lane + i) != 0:
+                        count += 1
+                        mask |= wp.uint8(1) << wp.uint8(i)
+                iso_subblock_counts[tid] = count
+                iso_subblock_idx[tid] = mask
+
+            parent_base += parent_stride
+
+    return count_iso_voxel_children
 
 
 @wp.kernel(enable_backward=False)
