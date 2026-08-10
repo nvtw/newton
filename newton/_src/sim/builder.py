@@ -6425,7 +6425,7 @@ class ModelBuilder:
             GeoType.GAUSSIAN,
         ):
             scale = (abs(float(scale[0])), abs(float(scale[1])), abs(float(scale[2])))
-            if type == GeoType.CYLINDER and scale[2] != 0.0 and scale[2] < scale[1]:
+            if type == GeoType.CYLINDER and not cfg.is_site and scale[2] != 0.0 and scale[2] < scale[1]:
                 raise ValueError(f"Cylinder barrel radius must be zero or at least the half-height; got scale={scale}.")
         elif type == GeoType.CONE:
             if float(scale[1]) < 0.0:

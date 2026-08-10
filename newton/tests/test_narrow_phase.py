@@ -1252,6 +1252,26 @@ class TestNarrowPhase(_NarrowPhaseSetupMixin, unittest.TestCase):
         self.assertGreater(count, 0)
         self.assertLess(penetrations[0], 0.0)
 
+    def test_plane_barrel_cylinder_cap_manifold(self):
+        """Generate a stable contact manifold for a barrel cylinder resting on its cap."""
+        geom_list = [
+            {
+                "type": GeoType.PLANE,
+                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.0, 0.0, 0.0], 0.0),
+            },
+            {
+                "type": GeoType.CYLINDER,
+                "transform": ([0.0, 0.0, 0.99], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 1.0, 1.5], 0.0),
+            },
+        ]
+
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+
+        self.assertGreaterEqual(count, 3)
+        self.assertTrue(np.all(penetrations[:count] < 0.0))
+
     def test_no_self_collision(self):
         """Test that narrow phase doesn't generate self-collisions."""
         geom_list = [
