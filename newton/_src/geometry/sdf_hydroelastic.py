@@ -74,6 +74,9 @@ PRE_PRUNE_MAX_PENETRATING = 2
 # reduction fingerprint and as the contact sort sub-key.
 MAX_MC_FACES_PER_VOXEL = 5
 
+# Keep the texture-heavy count kernel small enough for multiple resident blocks.
+HYDRO_COUNT_BLOCK_DIM = 128
+
 # Contact sort sub-keys reserve bit 22 for hydroelastic anchor contacts and bit
 # 0 for the normal/voxel reduction source. Face fingerprints are shifted left
 # by one during export, so they must stay below bit 21.
@@ -942,6 +945,7 @@ class HydroelasticSDF:
                     self.iso_subblock_idx_scratch[i],
                 ],
                 device=self.device,
+                block_dim=HYDRO_COUNT_BLOCK_DIM,
                 record_tape=False,
             )
 
