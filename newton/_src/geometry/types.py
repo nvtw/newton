@@ -778,6 +778,7 @@ class Mesh:
         texture_format: str = "uint16",
         sign_method: "SignMethod" = "auto",
         cache_dir: str | os.PathLike[str] | None = None,
+        paired_samples: bool = True,
         edge_lower_angle_threshold_rad: float = math.radians(0.1),
         edge_upper_angle_threshold_rad: float = math.radians(10.0),
         edge_inward_filter: bool = True,
@@ -822,6 +823,9 @@ class Mesh:
                 sparse SDF. Keyed by mesh content and build parameters
                 (``shape_margin`` is applied at sample time and is *not*
                 part of the cache key). Defaults to no caching.
+            paired_samples: Store each SDF sample with its positive-X
+                neighbor for faster software interpolation. Disable to halve
+                texture memory at the cost of slower hydroelastic sampling.
             edge_lower_angle_threshold_rad: Drop internal edges whose
                 dihedral angle is below this value [rad]. Set to 0 to keep
                 every manifold edge. A negative value opts out of edge
@@ -893,6 +897,7 @@ class Mesh:
             texture_format=texture_format,
             sign_method=sign_method,
             cache_dir=cache_dir,
+            paired_samples=paired_samples,
         )
 
         try:

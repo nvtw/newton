@@ -1812,6 +1812,46 @@ def test_convex_mesh_hydroelastic_contacts(test, device):
     test.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
 
 
+def test_scalar_sdf_texture_hydroelastic_contacts(test, device):
+    """Preserve hydroelastic contacts with scalar SDF texture storage."""
+    cube_mesh = newton.Mesh.create_box(
+        0.5,
+        0.5,
+        0.5,
+        duplicate_vertices=False,
+        compute_normals=False,
+        compute_uvs=False,
+        compute_inertia=False,
+    )
+    cube_mesh.build_sdf(
+        max_resolution=32,
+        narrow_band_range=(-0.1, 0.1),
+        margin=0.02,
+        paired_samples=False,
+        device=device,
+    )
+
+    cfg = newton.ModelBuilder.ShapeConfig(is_hydroelastic=True, gap=0.02)
+    builder = newton.ModelBuilder(sdf_texture_paired_samples=False)
+    body_a = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()))
+    body_b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.9), wp.quat_identity()))
+    builder.add_shape_convex_hull(body=body_a, mesh=cube_mesh, cfg=cfg)
+    builder.add_shape_convex_hull(body=body_b, mesh=cube_mesh, cfg=cfg)
+
+    model = builder.finalize(device=device)
+    collision_pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="sap",
+        rigid_contact_max=256,
+        sdf_hydroelastic_config=HydroelasticSDF.Config(buffer_mult_contact=2),
+    )
+    contacts = collision_pipeline.contacts()
+    collision_pipeline.collide(model.state(), contacts)
+
+    test.assertEqual(cube_mesh.sdf._coarse_texture.num_channels, 1)
+    test.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
+
 def test_fixed_point_extreme_exponents(test, device):
     """Handle sentinel and high finite pressure contributions without overflow."""
     mantissa_bits = _fixed_mantissa_bits(1024)
@@ -1976,6 +2016,14 @@ add_function_test(
     TestHydroelastic,
     "test_convex_mesh_hydroelastic_contacts",
     test_convex_mesh_hydroelastic_contacts,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_scalar_sdf_texture_hydroelastic_contacts",
+    test_scalar_sdf_texture_hydroelastic_contacts,
     devices=cuda_devices,
     check_output=False,
 )

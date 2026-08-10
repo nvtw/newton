@@ -2441,6 +2441,28 @@ def test_mesh_convex_with_sdf_routes_to_sdf_contact(test, device):
     test.assertGreater(contact_count, 0)
 
 
+def test_scalar_sdf_texture_routes_to_sdf_contact(test, device):
+    """Preserve mesh-SDF contacts with scalar texture storage."""
+    mesh = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=False, compute_inertia=False)
+    convex = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=False, compute_inertia=False)
+    mesh.build_sdf(max_resolution=32, paired_samples=False, device=device)
+    convex.build_sdf(max_resolution=32, paired_samples=False, device=device)
+
+    builder = newton.ModelBuilder(sdf_texture_paired_samples=False)
+    body_mesh = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()))
+    body_convex = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.9), wp.quat_identity()))
+    builder.add_shape_mesh(body=body_mesh, mesh=mesh)
+    builder.add_shape_convex_hull(body=body_convex, mesh=convex)
+
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="sap", rigid_contact_max=256)
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+
+    test.assertEqual(mesh.sdf._coarse_texture.num_channels, 1)
+    test.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
+
 def test_mesh_convex_one_sdf_keeps_existing_route(test, device):
     """Avoid SDF routing when it would require expensive BVH fallback on one side."""
     mesh = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=False, compute_inertia=False)
@@ -3131,6 +3153,14 @@ add_function_test(
     TestPlanarSDFRouting,
     "test_mesh_convex_with_sdf_routes_to_sdf_contact",
     test_mesh_convex_with_sdf_routes_to_sdf_contact,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestPlanarSDFRouting,
+    "test_scalar_sdf_texture_routes_to_sdf_contact",
+    test_scalar_sdf_texture_routes_to_sdf_contact,
     devices=get_cuda_test_devices(),
     check_output=False,
 )

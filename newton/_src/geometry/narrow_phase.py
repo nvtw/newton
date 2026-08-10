@@ -1562,6 +1562,7 @@ class NarrowPhase:
         all_pairs_generic_convex: bool = False,
         mesh_sdf_texture_only: bool = False,
         mesh_sdf_identity_scale_only: bool = False,
+        sdf_texture_paired_samples: bool = True,
         deterministic: bool = False,
         contact_max: int | None = None,
         verify_buffers: bool = True,
@@ -1603,6 +1604,8 @@ class NarrowPhase:
                 allowing BVH fallback branches to be removed from mesh/SDF kernels.
             mesh_sdf_identity_scale_only: Whether every participating texture SDF is queried with
                 identity scale, allowing scale conversion branches to be removed.
+            sdf_texture_paired_samples: Whether texture SDFs store adjacent x samples together.
+                This is model-wide so mesh-SDF kernels require only two bounded static variants.
             deterministic: Make contact generation and ordering independent of
                 GPU thread scheduling. Adds deterministic hydroelastic atomics
                 and a radix sort + gather pass.
@@ -1652,6 +1655,7 @@ class NarrowPhase:
         self.has_heightfields = has_heightfields
         self.mesh_sdf_texture_only = mesh_sdf_texture_only
         self.has_generic_convex_pairs = has_generic_convex_pairs
+        self.sdf_texture_paired_samples = sdf_texture_paired_samples
         self.mesh_sdf_identity_scale_only = mesh_sdf_identity_scale_only
         self.all_pairs_generic_convex = all_pairs_generic_convex
         self.deterministic = deterministic
@@ -1768,6 +1772,7 @@ class NarrowPhase:
                     enable_heightfields=has_heightfields,
                     reduce_contacts=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
+                    paired_samples=self.sdf_texture_paired_samples,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
                 self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
@@ -1776,6 +1781,7 @@ class NarrowPhase:
                     reduce_contacts=True,
                     use_precomputed_edge_data=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
+                    paired_samples=self.sdf_texture_paired_samples,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
             else:
@@ -1783,6 +1789,7 @@ class NarrowPhase:
                     writer_func,
                     enable_heightfields=has_heightfields,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
+                    paired_samples=self.sdf_texture_paired_samples,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
                 self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
@@ -1790,6 +1797,7 @@ class NarrowPhase:
                     enable_heightfields=has_heightfields,
                     use_precomputed_edge_data=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
+                    paired_samples=self.sdf_texture_paired_samples,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
         else:

@@ -8,12 +8,14 @@ import warp as wp
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, SHAPE_PAIR_INDEX_MASK, ContactData
 from ..geometry.sdf_texture import (
     TextureSDFData,
-    _texture_sample_sdf_hw_clamped,
-    _texture_sample_sdf_hw_pair,
-    texture_sample_sdf_grad_only_hw,
-)
-from ..geometry.sdf_texture import (
-    texture_sample_sdf_hw as texture_sample_sdf,
+    _texture_sample_sdf_grad_only_hw_paired,
+    _texture_sample_sdf_grad_only_hw_scalar,
+    _texture_sample_sdf_hw_clamped_paired,
+    _texture_sample_sdf_hw_clamped_scalar,
+    _texture_sample_sdf_hw_pair_paired,
+    _texture_sample_sdf_hw_pair_scalar,
+    _texture_sample_sdf_hw_paired,
+    _texture_sample_sdf_hw_scalar,
 )
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
@@ -649,7 +651,12 @@ def get_edge_count(shape_type: int, edge_range: wp.vec2i, hfd: HeightfieldData) 
     return edge_range[1]
 
 
-def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: bool = False):
+def _create_sdf_contact_funcs(
+    enable_heightfields: bool,
+    use_texture_sdf_only: bool,
+    sample_sdf: Any,
+    sample_pair: Any,
+):
     """Generate SDF contact functions with heightfield branches eliminated at compile time.
 
     When ``enable_heightfields`` is False, ``wp.static`` strips all heightfield code
@@ -683,18 +690,18 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
             if sdf_is_heightfield:
                 return sample_sdf_heightfield(hfd_sdf, elevation_data, pp)
             elif wp.static(use_texture_sdf_only):
-                return texture_sample_sdf(texture_sdf, pp)
+                return wp.static(sample_sdf)(texture_sdf, pp)
             elif use_bvh_for_sdf:
                 return sample_sdf_using_mesh(sdf_mesh_id, pp, _MESH_QUERY_MAX_DIST, sdf_mesh_query_type)
             else:
-                return texture_sample_sdf(texture_sdf, pp)
+                return wp.static(sample_sdf)(texture_sdf, pp)
         else:
             if wp.static(use_texture_sdf_only):
-                return texture_sample_sdf(texture_sdf, pp)
+                return wp.static(sample_sdf)(texture_sdf, pp)
             elif use_bvh_for_sdf:
                 return sample_sdf_using_mesh(sdf_mesh_id, pp, _MESH_QUERY_MAX_DIST, sdf_mesh_query_type)
             else:
-                return texture_sample_sdf(texture_sdf, pp)
+                return wp.static(sample_sdf)(texture_sdf, pp)
 
     @wp.func
     def do_edge_sdf_collision_func(
@@ -765,7 +772,7 @@ def _create_sdf_contact_funcs(enable_heightfields: bool, use_texture_sdf_only: b
             offset = 0.5 * golden
             left = 0.5 - offset
             right = 0.5 + offset
-            pair_values = _texture_sample_sdf_hw_pair(
+            pair_values = wp.static(sample_pair)(
                 texture_sdf,
                 v0 + edge_dir * left,
                 v0 + edge_dir * right,
@@ -1067,10 +1074,23 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     use_precomputed_edge_data: bool = False,
     use_texture_sdf_only: bool = False,
     use_identity_sdf_scale: bool = False,
+    paired_samples: bool = True,
 ):
     if use_identity_sdf_scale and not use_texture_sdf_only:
         raise ValueError("identity SDF scale specialization requires texture-only SDFs")
-    do_edge_sdf_collision = _create_sdf_contact_funcs(enable_heightfields, use_texture_sdf_only)
+    if paired_samples:
+        sample_sdf = _texture_sample_sdf_hw_paired
+        sample_pair = _texture_sample_sdf_hw_pair_paired
+        sample_clamped = _texture_sample_sdf_hw_clamped_paired
+        sample_grad = _texture_sample_sdf_grad_only_hw_paired
+    else:
+        sample_sdf = _texture_sample_sdf_hw_scalar
+        sample_pair = _texture_sample_sdf_hw_pair_scalar
+        sample_clamped = _texture_sample_sdf_hw_clamped_scalar
+        sample_grad = _texture_sample_sdf_grad_only_hw_scalar
+    do_edge_sdf_collision = _create_sdf_contact_funcs(
+        enable_heightfields, use_texture_sdf_only, sample_sdf, sample_pair
+    )
     get_edge_from_mesh_specialized = _create_get_edge_from_mesh_func(use_precomputed_edge_data)
     get_mesh_edge_bounding_sphere_specialized = _create_get_mesh_edge_bounding_sphere_func(use_precomputed_edge_data)
 
@@ -1083,7 +1103,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # different floating-point results, breaking bit-exact reproducibility.
     _module = (
         f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_"
-        f"{use_precomputed_edge_data}_{use_texture_sdf_only}_{use_identity_sdf_scale}"
+        f"{use_precomputed_edge_data}_{use_texture_sdf_only}_{use_identity_sdf_scale}_{paired_samples}"
     )
 
     @wp.kernel(enable_backward=False, module=_module)
@@ -1323,7 +1343,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     diff_mag = float(0.0)
                                     if aabb_dist_sq > 0.0:
                                         diff_mag = wp.sqrt(aabb_dist_sq)
-                                    midpoint_sdf = _texture_sample_sdf_hw_clamped(texture_sdf, clamped, diff_mag)
+                                    midpoint_sdf = wp.static(sample_clamped)(texture_sdf, clamped, diff_mag)
                                     add_edge = midpoint_sdf <= culling_radius
 
                         cull_result = EdgeCullResult()
@@ -1435,9 +1455,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         # ``point_unscaled``; skip the redundant value
                                         # sample inside the gradient call and reuse
                                         # ``dist_unscaled`` from Brent.
-                                        direction_unscaled = texture_sample_sdf_grad_only_hw(
-                                            texture_sdf, point_unscaled
-                                        )
+                                        direction_unscaled = wp.static(sample_grad)(texture_sdf, point_unscaled)
                                 else:
                                     if wp.static(not use_texture_sdf_only) and use_bvh_for_sdf:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_using_mesh(
@@ -1451,9 +1469,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         # ``point_unscaled``; skip the redundant value
                                         # sample inside the gradient call and reuse
                                         # ``dist_unscaled`` from Brent.
-                                        direction_unscaled = texture_sample_sdf_grad_only_hw(
-                                            texture_sdf, point_unscaled
-                                        )
+                                        direction_unscaled = wp.static(sample_grad)(texture_sdf, point_unscaled)
 
                                 if wp.static(use_identity_sdf_scale):
                                     dist = dist_unscaled
@@ -1759,7 +1775,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     diff_mag = float(0.0)
                                     if aabb_dist_sq > 0.0:
                                         diff_mag = wp.sqrt(aabb_dist_sq)
-                                    midpoint_sdf = _texture_sample_sdf_hw_clamped(texture_sdf, clamped, diff_mag)
+                                    midpoint_sdf = wp.static(sample_clamped)(texture_sdf, clamped, diff_mag)
                                     add_edge = midpoint_sdf <= culling_radius
 
                         cull_result = EdgeCullResult()
@@ -1868,9 +1884,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         # ``point_unscaled``; skip the redundant value
                                         # sample inside the gradient call and reuse
                                         # ``dist_unscaled`` from Brent.
-                                        direction_unscaled = texture_sample_sdf_grad_only_hw(
-                                            texture_sdf, point_unscaled
-                                        )
+                                        direction_unscaled = wp.static(sample_grad)(texture_sdf, point_unscaled)
                                 else:
                                     if wp.static(not use_texture_sdf_only) and use_bvh_for_sdf:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_using_mesh(
@@ -1884,9 +1898,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         # ``point_unscaled``; skip the redundant value
                                         # sample inside the gradient call and reuse
                                         # ``dist_unscaled`` from Brent.
-                                        direction_unscaled = texture_sample_sdf_grad_only_hw(
-                                            texture_sdf, point_unscaled
-                                        )
+                                        direction_unscaled = wp.static(sample_grad)(texture_sdf, point_unscaled)
 
                                 if wp.static(use_identity_sdf_scale):
                                     dist = dist_unscaled

@@ -63,7 +63,13 @@ from .sdf_mc import (
     get_mc_tables,
     get_triangle_fraction,
 )
-from .sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_at_voxel
+from .sdf_texture import (
+    TextureSDFData,
+    _texture_sample_sdf_at_voxel_scalar,
+    _texture_sample_sdf_scalar,
+    texture_sample_sdf,
+    texture_sample_sdf_at_voxel,
+)
 from .utils import scan_with_total
 
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
@@ -516,6 +522,7 @@ class HydroelasticSDF:
         device: Devicelike | None = None,
         writer_func: Any = None,
         deterministic: bool = False,
+        paired_samples: bool = True,
     ) -> None:
         if config is None:
             config = HydroelasticSDF.Config()
@@ -534,6 +541,7 @@ class HydroelasticSDF:
         self.device = device
 
         self.shape_material_kh = shape_material_kh
+        self.paired_samples = paired_samples
 
         self.n_shapes = n_shapes
         self.max_num_shape_pairs = num_shape_pairs
@@ -642,10 +650,14 @@ class HydroelasticSDF:
                 self.pressure_func = self.config.pressure_func
                 self.pressure_data = self.config.pressure_data
 
-            self.count_iso_voxels_block_integer_kernel = create_count_iso_voxels_block_kernel(self.pressure_func, True)
-            self.count_iso_voxel_children_kernel = create_count_iso_voxel_children_kernel(self.pressure_func, False)
+            self.count_iso_voxels_block_integer_kernel = create_count_iso_voxels_block_kernel(
+                self.pressure_func, True, self.paired_samples
+            )
+            self.count_iso_voxel_children_kernel = create_count_iso_voxel_children_kernel(
+                self.pressure_func, False, self.paired_samples
+            )
             self.count_iso_voxel_children_integer_kernel = create_count_iso_voxel_children_kernel(
-                self.pressure_func, True
+                self.pressure_func, True, self.paired_samples
             )
 
             self.generate_contacts_kernel = get_generate_contacts_kernel(
@@ -654,6 +666,7 @@ class HydroelasticSDF:
                 deterministic_reduction=self.deterministic and self.config.reduce_contacts,
                 pressure_func=self.pressure_func,
                 mc_edge_clamp_min=self.config.mc_edge_clamp_min,
+                paired_samples=self.paired_samples,
             )
 
             if self.config.reduce_contacts:
@@ -817,6 +830,7 @@ class HydroelasticSDF:
             device=model.device,
             writer_func=writer_func,
             deterministic=deterministic,
+            paired_samples=model._sdf_texture_paired_samples,
         )
 
     def get_contact_surface(self) -> ContactSurfaceData | None:
@@ -1365,7 +1379,7 @@ def decode_coords_8(bit_pos: wp.uint8) -> wp.vec3ub:
     )
 
 
-def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: bool):
+def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: bool, paired_samples: bool):
     """Specialize voxel counting to a pressure callback and center sampling mode.
 
     The subblock prune uses interval arithmetic on the user-supplied
@@ -1380,6 +1394,9 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: boo
         pressure_func: Monotonic pressure callback to evaluate.
         integer_center: Whether every subblock center lies on an integer voxel.
     """
+
+    sample_sdf = texture_sample_sdf if paired_samples else _texture_sample_sdf_scalar
+    sample_sdf_at_voxel = texture_sample_sdf_at_voxel if paired_samples else _texture_sample_sdf_at_voxel_scalar
 
     @wp.kernel(enable_backward=False)
     def count_iso_voxels_block(
@@ -1439,15 +1456,15 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: boo
                         point_a = wp.transform_point(X_b_to_a, local_pos_b)
                         if wp.static(integer_center):
                             center_i = x_global + wp.vec3i(subblock_size // 2)
-                            vb = texture_sample_sdf_at_voxel(
+                            vb = wp.static(sample_sdf_at_voxel)(
                                 sdf_data_b,
                                 center_i[0],
                                 center_i[1],
                                 center_i[2],
                             )
                         else:
-                            vb = texture_sample_sdf(sdf_data_b, local_pos_b)
-                        va = texture_sample_sdf(sdf_data_a, point_a)
+                            vb = wp.static(sample_sdf)(sdf_data_b, local_pos_b)
+                        va = wp.static(sample_sdf)(sdf_data_a, point_a)
                         is_valid = not (wp.isnan(vb) or wp.isnan(va))
                         if not is_valid or va > r + gap_a or vb > r + gap_b:
                             continue
@@ -1479,8 +1496,10 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: boo
     return count_iso_voxels_block
 
 
-def create_count_iso_voxel_children_kernel(pressure_func: Any, integer_center: bool):
+def create_count_iso_voxel_children_kernel(pressure_func: Any, integer_center: bool, paired_samples: bool):
     """Create a kernel that evaluates each parent's eight children cooperatively."""
+    sample_sdf = texture_sample_sdf if paired_samples else _texture_sample_sdf_scalar
+    sample_sdf_at_voxel = texture_sample_sdf_at_voxel if paired_samples else _texture_sample_sdf_at_voxel_scalar
 
     @wp.kernel(enable_backward=False)
     def count_iso_voxel_children(
@@ -1535,10 +1554,10 @@ def create_count_iso_voxel_children_kernel(pressure_func: Any, integer_center: b
                 point_a = wp.transform_point(X_b_to_a, local_pos_b)
                 if wp.static(integer_center):
                     center_i = x_global + wp.vec3i(subblock_size // 2)
-                    vb = texture_sample_sdf_at_voxel(sdf_data_b, center_i[0], center_i[1], center_i[2])
+                    vb = wp.static(sample_sdf_at_voxel)(sdf_data_b, center_i[0], center_i[1], center_i[2])
                 else:
-                    vb = texture_sample_sdf(sdf_data_b, local_pos_b)
-                va = texture_sample_sdf(sdf_data_a, point_a)
+                    vb = wp.static(sample_sdf)(sdf_data_b, local_pos_b)
+                va = wp.static(sample_sdf)(sdf_data_a, point_a)
                 is_valid = not (wp.isnan(vb) or wp.isnan(va))
                 if is_valid and va <= r + gap_a and vb <= r + gap_b:
                     pa_lo = pressure_func(va + r, shape_a, pressure_data)
@@ -1596,8 +1615,10 @@ def scatter_iso_subblock(
                 write_idx += 1
 
 
-def create_mc_iterate_voxel_vertices_func(pressure_func: Any):
+def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bool):
     """Factory specializing :func:`mc_iterate_voxel_vertices` to a pressure callback."""
+    sample_sdf = texture_sample_sdf if paired_samples else _texture_sample_sdf_scalar
+    sample_sdf_at_voxel = texture_sample_sdf_at_voxel if paired_samples else _texture_sample_sdf_at_voxel_scalar
 
     @wp.func
     def mc_iterate_voxel_vertices(
@@ -1629,8 +1650,8 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any):
 
             local_pos_a = sdf_data.sdf_box_lower + wp.cw_mul(wp.vec3(float(x), float(y), float(z)), sdf_data.voxel_size)
             point_b = wp.transform_point(X_a_to_b, local_pos_a)
-            valA = texture_sample_sdf_at_voxel(sdf_data, x, y, z)
-            valB = texture_sample_sdf(sdf_other_data, point_b)
+            valA = wp.static(sample_sdf_at_voxel)(sdf_data, x, y, z)
+            valB = wp.static(sample_sdf)(sdf_other_data, point_b)
 
             is_valid = not (wp.isnan(valA) or wp.isnan(valB))
             if not is_valid:
@@ -1815,6 +1836,7 @@ def get_generate_contacts_kernel(
     deterministic_reduction: bool = False,
     pressure_func: Any = None,
     mc_edge_clamp_min: float = 0.02,
+    paired_samples: bool = True,
 ):
     """Create kernel for hydroelastic contact generation.
 
@@ -1853,7 +1875,7 @@ def get_generate_contacts_kernel(
     if pressure_func is None:
         raise ValueError("get_generate_contacts_kernel requires a non-None pressure_func.")
 
-    mc_iterate = create_mc_iterate_voxel_vertices_func(pressure_func)
+    mc_iterate = create_mc_iterate_voxel_vertices_func(pressure_func, paired_samples)
     edge_clamp_min = float(mc_edge_clamp_min)
     edge_clamp_max = float(1.0 - mc_edge_clamp_min)
 
