@@ -502,9 +502,10 @@ class HydroelasticSDF:
             self.iso_buffer_prefix_scratch = [wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes]
             self.iso_buffer_num_scratch = [wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes]
             self.iso_subblock_idx_scratch = [wp.zeros(level_input, dtype=wp.uint8) for level_input in self.input_sizes]
-            self.iso_buffer_records = [wp.empty((self.max_num_blocks_broad,), dtype=wp.vec4ui)] + [
-                wp.empty((self.iso_max_dims[i],), dtype=wp.vec4ui) for i in range(4)
+            self.iso_buffer_records = [wp.empty((self.max_num_blocks_broad,), dtype=wp.vec3ui)] + [
+                wp.empty((self.iso_max_dims[i],), dtype=wp.vec3ui) for i in range(4)
             ]
+            self.normalized_shape_pairs = wp.empty((self.max_num_shape_pairs,), dtype=wp.vec2i)
 
             # Aliases for commonly accessed final buffers
             self.block_broad_collide_count = self.iso_buffer_counts[0]
@@ -876,6 +877,7 @@ class HydroelasticSDF:
             ],
             outputs=[
                 self.num_blocks_per_pair,
+                self.normalized_shape_pairs,
             ],
             device=self.device,
             record_tape=False,
@@ -895,7 +897,7 @@ class HydroelasticSDF:
                 self.grid_size,
                 self.block_broad_collide_count,
                 self.block_start_prefix,
-                shape_pairs_sdf_sdf,
+                self.normalized_shape_pairs,
                 shape_pairs_sdf_sdf_count,
                 shape_sdf_data,
                 self.max_num_blocks_broad,
@@ -929,6 +931,7 @@ class HydroelasticSDF:
                     shape_transform_inverse,
                     self.pressure_data,
                     self.iso_buffer_records[i],
+                    self.normalized_shape_pairs,
                     shape_gap,
                     subblock_size,
                     n_blocks,
@@ -1007,6 +1010,7 @@ class HydroelasticSDF:
                 shape_transform_inverse,
                 self.pressure_data,
                 self.iso_voxel_records,
+                self.normalized_shape_pairs,
                 self.mc_tables[0],
                 self.mc_tables[4],
                 shape_gap,
@@ -1106,23 +1110,18 @@ def shape_subgrid_dims(sdf: TextureSDFData) -> wp.vec3i:
 
 
 @wp.func
-def pack_hydro_voxel_record(coords: wp.vec3us, shape_a: wp.int32, shape_b: wp.int32) -> wp.vec4ui:
+def pack_hydro_voxel_record(coords: wp.vec3us, pair_idx: wp.int32) -> wp.vec3ui:
     packed_xy = wp.uint32(coords[0]) | (wp.uint32(coords[1]) << wp.uint32(16))
-    return wp.vec4ui(packed_xy, wp.uint32(coords[2]), wp.uint32(shape_a), wp.uint32(shape_b))
+    return wp.vec3ui(packed_xy, wp.uint32(coords[2]), wp.uint32(pair_idx))
 
 
 @wp.func
-def unpack_hydro_voxel_coords(record: wp.vec4ui) -> wp.vec3us:
+def unpack_hydro_voxel_coords(record: wp.vec3ui) -> wp.vec3us:
     return wp.vec3us(
         wp.uint16(record[0] & wp.uint32(0xFFFF)),
         wp.uint16(record[0] >> wp.uint32(16)),
         wp.uint16(record[1]),
     )
-
-
-@wp.func
-def unpack_hydro_voxel_pair(record: wp.vec4ui) -> wp.vec2i:
-    return wp.vec2i(wp.int32(record[2]), wp.int32(record[3]))
 
 
 @wp.kernel(enable_backward=False)
@@ -1133,6 +1132,7 @@ def broadphase_collision_pairs_count(
     shape_pairs_sdf_sdf_count: wp.array[wp.int32],
     # outputs
     thread_num_blocks: wp.array[wp.int32],
+    normalized_shape_pairs: wp.array[wp.vec2i],
 ):
     tid = wp.tid()
     if tid >= shape_pairs_sdf_sdf_count[0]:
@@ -1159,10 +1159,11 @@ def broadphase_collision_pairs_count(
 
     does_collide = sat_box_intersection(centered_transform_a, half_extents_a, centered_transform_b, half_extents_b)
 
-    # Count only needs the smaller-voxel dims, so overwrite the local sdf_b
-    # without swapping shape indices.
+    # Keep the finer SDF as shape B for all traversal records.
     if sdf_b.voxel_radius > sdf_a.voxel_radius:
+        shape_a, shape_b = shape_b, shape_a
         sdf_b = sdf_a
+    normalized_shape_pairs[tid] = wp.vec2i(shape_a, shape_b)
 
     dims_b = shape_subgrid_dims(sdf_b)
     num_blocks = dims_b[0] * dims_b[1] * dims_b[2]
@@ -1178,12 +1179,12 @@ def broadphase_collision_pairs_scatter(
     grid_size: int,
     block_broad_collide_count: wp.array[wp.int32],
     block_start_prefix: wp.array[wp.int32],
-    shape_pairs_sdf_sdf: wp.array[wp.vec2i],
+    normalized_shape_pairs: wp.array[wp.vec2i],
     shape_pairs_sdf_sdf_count: wp.array[wp.int32],
     shape_sdf_data: wp.array[TextureSDFData],
     max_num_blocks_broad: int,
     # outputs
-    block_broad_collide_records: wp.array[wp.vec4ui],
+    block_broad_collide_records: wp.array[wp.vec3ui],
 ):
     offset = wp.tid()
     total_blocks = wp.min(block_broad_collide_count[0], max_num_blocks_broad)
@@ -1203,16 +1204,9 @@ def broadphase_collision_pairs_scatter(
                 hi = mid - 1
         pair_idx = lo
 
-        pair = shape_pairs_sdf_sdf[pair_idx]
-        shape_a = pair[0]
+        pair = normalized_shape_pairs[pair_idx]
         shape_b = pair[1]
-
-        # Sort shapes so the one with smaller voxel size is shape_b
-        sdf_a = shape_sdf_data[shape_a]
         sdf_b = shape_sdf_data[shape_b]
-        if sdf_b.voxel_radius > sdf_a.voxel_radius:
-            shape_a, shape_b = shape_b, shape_a
-            sdf_a, sdf_b = sdf_b, sdf_a
 
         block_in_pair = block_tid - block_start_prefix[pair_idx]
 
@@ -1228,7 +1222,7 @@ def broadphase_collision_pairs_scatter(
         sgs = wp.int32(sdf_b.subgrid_size)
 
         coords = wp.vec3us(wp.uint16(bx * sgs), wp.uint16(by * sgs), wp.uint16(bz * sgs))
-        block_broad_collide_records[block_tid] = pack_hydro_voxel_record(coords, shape_a, shape_b)
+        block_broad_collide_records[block_tid] = pack_hydro_voxel_record(coords, pair_idx)
 
 
 @wp.func
@@ -1265,7 +1259,8 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any):
         shape_transform: wp.array[wp.transform],
         shape_transform_inverse: wp.array[wp.transform],
         pressure_data: Any,
-        in_buffer_collide_records: wp.array[wp.vec4ui],
+        in_buffer_collide_records: wp.array[wp.vec3ui],
+        normalized_shape_pairs: wp.array[wp.vec2i],
         shape_gap: wp.array[wp.float32],
         subblock_size: int,
         n_blocks: int,
@@ -1280,7 +1275,8 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any):
         num_items = wp.min(in_buffer_collide_count[0], max_input_buffer_size)
         for tid in range(offset, num_items, grid_size):
             record = in_buffer_collide_records[tid]
-            pair = unpack_hydro_voxel_pair(record)
+            pair_idx = wp.int32(record[2])
+            pair = normalized_shape_pairs[pair_idx]
             shape_a = pair[0]
             shape_b = pair[1]
 
@@ -1350,12 +1346,12 @@ def scatter_iso_subblock(
     in_iso_subblock_count: wp.array[int],
     in_iso_subblock_prefix: wp.array[int],
     in_iso_subblock_idx: wp.array[wp.uint8],
-    in_iso_subblock_records: wp.array[wp.vec4ui],
+    in_iso_subblock_records: wp.array[wp.vec3ui],
     subblock_size: int,
     max_input_buffer_size: int,
     max_num_iso_subblocks: int,
     # outputs
-    out_iso_subblock_records: wp.array[wp.vec4ui],
+    out_iso_subblock_records: wp.array[wp.vec3ui],
 ):
     offset = wp.tid()
     num_items = wp.min(in_iso_subblock_count[0], max_input_buffer_size)
@@ -1363,7 +1359,7 @@ def scatter_iso_subblock(
         write_idx = in_iso_subblock_prefix[tid]
         subblock_idx = in_iso_subblock_idx[tid]
         record = in_iso_subblock_records[tid]
-        pair = unpack_hydro_voxel_pair(record)
+        pair_idx = wp.int32(record[2])
         bc = unpack_hydro_voxel_coords(record)
         if write_idx >= max_num_iso_subblocks:
             continue
@@ -1372,7 +1368,7 @@ def scatter_iso_subblock(
             if (subblock_idx >> bit_pos) & wp.uint8(1) and not write_idx >= max_num_iso_subblocks:
                 local_coords = wp.vec3us(decode_coords_8(bit_pos))
                 global_coords = bc + local_coords * wp.uint16(subblock_size)
-                out_iso_subblock_records[write_idx] = pack_hydro_voxel_record(global_coords, pair[0], pair[1])
+                out_iso_subblock_records[write_idx] = pack_hydro_voxel_record(global_coords, pair_idx)
                 write_idx += 1
 
 
@@ -1645,7 +1641,8 @@ def get_generate_contacts_kernel(
         shape_transform: wp.array[wp.transform],
         shape_transform_inverse: wp.array[wp.transform],
         pressure_data: Any,
-        iso_voxel_records: wp.array[wp.vec4ui],
+        iso_voxel_records: wp.array[wp.vec3ui],
+        normalized_shape_pairs: wp.array[wp.vec2i],
         tri_range_table: wp.array[wp.int32],
         flat_edge_verts_table: wp.array[wp.vec2ub],
         shape_gap: wp.array[wp.float32],
@@ -1665,7 +1662,8 @@ def get_generate_contacts_kernel(
         num_voxels = wp.min(iso_voxel_count[0], max_num_iso_voxels)
         for tid in range(offset, num_voxels, grid_size):
             record = iso_voxel_records[tid]
-            pair = unpack_hydro_voxel_pair(record)
+            pair_idx = wp.int32(record[2])
+            pair = normalized_shape_pairs[pair_idx]
             shape_a = pair[0]
             shape_b = pair[1]
 

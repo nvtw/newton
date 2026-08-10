@@ -19,7 +19,6 @@ from newton._src.geometry.sdf_hydroelastic import (
     _mc_corner_offset,
     pack_hydro_voxel_record,
     unpack_hydro_voxel_coords,
-    unpack_hydro_voxel_pair,
 )
 from newton._src.geometry.sdf_mc import get_triangle_fraction
 from newton.geometry import HydroelasticSDF
@@ -104,16 +103,16 @@ def _test_triangle_fraction_rotations(
 def _test_hydro_voxel_record_roundtrip(
     coords: wp.array[wp.vec3us],
     pairs: wp.array[wp.vec2i],
-    records: wp.array[wp.vec4ui],
+    records: wp.array[wp.vec3ui],
     decoded_coords: wp.array[wp.vec3us],
     decoded_pairs: wp.array[wp.vec2i],
 ):
     """Pack and unpack one hydroelastic octree record."""
     tid = wp.tid()
-    record = pack_hydro_voxel_record(coords[tid], pairs[tid][0], pairs[tid][1])
+    record = pack_hydro_voxel_record(coords[tid], tid)
     records[tid] = record
     decoded_coords[tid] = unpack_hydro_voxel_coords(record)
-    decoded_pairs[tid] = unpack_hydro_voxel_pair(record)
+    decoded_pairs[tid] = pairs[wp.int32(record[2])]
 
 
 def test_triangle_fraction_rotations(test, device):
@@ -160,12 +159,12 @@ def test_triangle_fraction_rotations(test, device):
 
 
 def test_hydro_voxel_record_roundtrip(test, device):
-    """Verify packed hydroelastic octree records preserve coordinates and shape pairs."""
+    """Verify packed hydroelastic octree records preserve coordinates and pair indices."""
     coords_np = np.array([[0, 0, 0], [1, 255, 256], [65535, 32768, 17]], dtype=np.uint16)
     pairs_np = np.array([[0, 1], [12345, 67890], [2**27 - 1, 2**27]], dtype=np.int32)
     coords = wp.array(coords_np, dtype=wp.vec3us, device=device)
     pairs = wp.array(pairs_np, dtype=wp.vec2i, device=device)
-    records = wp.empty(len(coords_np), dtype=wp.vec4ui, device=device)
+    records = wp.empty(len(coords_np), dtype=wp.vec3ui, device=device)
     decoded_coords = wp.empty_like(coords)
     decoded_pairs = wp.empty_like(pairs)
     wp.launch(
