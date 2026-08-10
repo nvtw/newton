@@ -21,6 +21,7 @@ from newton._src.geometry.sdf_hydroelastic import (
     unpack_hydro_voxel_coords,
     unpack_hydro_voxel_pair,
 )
+from newton._src.geometry.sdf_mc import get_triangle_fraction
 from newton.geometry import HydroelasticSDF
 from newton.tests.unittest_utils import (
     add_function_test,
@@ -89,6 +90,17 @@ def _test_mc_corner_offsets(offsets: wp.array[wp.vec3i]):
 
 
 @wp.kernel
+def _test_triangle_fraction_rotations(
+    depths: wp.array[wp.vec3f],
+    num_inside: wp.array[wp.int32],
+    fractions: wp.array[wp.float32],
+):
+    """Evaluate each triangle-depth rotation used for partial coverage."""
+    tid = wp.tid()
+    fractions[tid] = get_triangle_fraction(depths[tid], num_inside[tid])
+
+
+@wp.kernel
 def _test_hydro_voxel_record_roundtrip(
     coords: wp.array[wp.vec3us],
     pairs: wp.array[wp.vec2i],
@@ -102,6 +114,49 @@ def _test_hydro_voxel_record_roundtrip(
     records[tid] = record
     decoded_coords[tid] = unpack_hydro_voxel_coords(record)
     decoded_pairs[tid] = unpack_hydro_voxel_pair(record)
+
+
+def test_triangle_fraction_rotations(test, device):
+    """Verify triangle coverage is invariant to the distinct vertex rotation."""
+    depths_np = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [-1.0, -2.0, -3.0],
+            [-1.0, 2.0, 3.0],
+            [2.0, -1.0, 3.0],
+            [2.0, 3.0, -1.0],
+            [1.0, -2.0, -3.0],
+            [-2.0, 1.0, -3.0],
+            [-2.0, -3.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    num_inside_np = np.array([0, 3, 1, 1, 1, 2, 2, 2], dtype=np.int32)
+    expected = np.array(
+        [
+            0.0,
+            1.0,
+            1.0 / 12.0,
+            1.0 / 12.0,
+            1.0 / 12.0,
+            11.0 / 12.0,
+            11.0 / 12.0,
+            11.0 / 12.0,
+        ]
+    )
+
+    fractions = wp.empty(len(depths_np), dtype=wp.float32, device=device)
+    wp.launch(
+        _test_triangle_fraction_rotations,
+        dim=len(depths_np),
+        inputs=[
+            wp.array(depths_np, dtype=wp.vec3f, device=device),
+            wp.array(num_inside_np, dtype=wp.int32, device=device),
+            fractions,
+        ],
+        device=device,
+    )
+    np.testing.assert_allclose(fractions.numpy(), expected, rtol=1.0e-6, atol=0.0)
 
 
 def test_hydro_voxel_record_roundtrip(test, device):
@@ -1882,6 +1937,14 @@ add_function_test(
     "test_fixed_point_extreme_exponents_cuda",
     test_fixed_point_extreme_exponents,
     devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_triangle_fraction_rotations",
+    test_triangle_fraction_rotations,
+    devices=["cpu", *cuda_devices],
     check_output=False,
 )
 
