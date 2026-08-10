@@ -936,6 +936,53 @@ def transform_normal_with_scale(
 
 
 @wp.func
+def _compute_mesh_vs_convex_query_aabb(
+    mesh_shape: int,
+    non_mesh_shape: int,
+    X_mesh_ws: wp.transform,
+    X_ws: wp.transform,
+    shape_type: wp.array[int],
+    shape_data: wp.array[wp.vec4],
+    shape_source_ptr: wp.array[wp.uint64],
+    contact_threshold: float,
+) -> tuple[wp.vec3, wp.vec3]:
+    """Compute unscaled mesh-BVH bounds for a convex shape."""
+    X_mesh_sw = wp.transform_inverse(X_mesh_ws)
+    X_mesh_shape = wp.transform_multiply(X_mesh_sw, X_ws)
+    pos_in_mesh = wp.transform_get_translation(X_mesh_shape)
+    orientation_in_mesh = wp.transform_get_rotation(X_mesh_shape)
+
+    geo_type = shape_type[non_mesh_shape]
+    data_vec4 = shape_data[non_mesh_shape]
+    scale = wp.vec3(data_vec4[0], data_vec4[1], data_vec4[2])
+
+    generic_shape_data = GenericShapeData()
+    generic_shape_data.shape_type = geo_type
+    generic_shape_data.scale = scale
+    generic_shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+    generic_shape_data.center = wp.vec3(0.0, 0.0, 0.0)
+    if geo_type == GeoType.CONVEX_MESH:
+        generic_shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[non_mesh_shape])
+
+    data_provider = SupportMapDataProvider()
+    # Support bounds use the scaled mesh-local frame.
+    aabb_lower, aabb_upper = compute_tight_aabb_from_support(
+        generic_shape_data, orientation_in_mesh, pos_in_mesh, data_provider
+    )
+
+    # Convert the bounds and world-space threshold to the unscaled BVH frame.
+    mesh_scale_vec4 = shape_data[mesh_shape]
+    mesh_scale = wp.vec3(mesh_scale_vec4[0], mesh_scale_vec4[1], mesh_scale_vec4[2])
+    aabb_lower_bvh, aabb_upper_bvh = aabb_to_unscaled(aabb_lower, aabb_upper, mesh_scale)
+    margin_vec = wp.vec3(
+        contact_threshold / wp.max(wp.abs(mesh_scale[0]), 1.0e-12),
+        contact_threshold / wp.max(wp.abs(mesh_scale[1]), 1.0e-12),
+        contact_threshold / wp.max(wp.abs(mesh_scale[2]), 1.0e-12),
+    )
+    return aabb_lower_bvh - margin_vec, aabb_upper_bvh + margin_vec
+
+
+@wp.func
 def mesh_vs_convex_midphase(
     idx_in_thread_block: int,
     mesh_shape: int,
@@ -970,59 +1017,38 @@ def mesh_vs_convex_midphase(
         triangle_pairs: Output array for triangle pairs (mesh_shape, non_mesh_shape, tri_index)
         triangle_pairs_count: Counter for triangle pairs
     """
-    # Get inverse mesh transform (world to mesh local space)
-    X_mesh_sw = wp.transform_inverse(X_mesh_ws)
-
-    # Compute transform from non-mesh shape local space to mesh local space
-    # X_mesh_shape = X_mesh_sw * X_ws
-    X_mesh_shape = wp.transform_multiply(X_mesh_sw, X_ws)
-    pos_in_mesh = wp.transform_get_translation(X_mesh_shape)
-    orientation_in_mesh = wp.transform_get_rotation(X_mesh_shape)
-
-    # Create generic shape data for non-mesh shape
-    geo_type = shape_type[non_mesh_shape]
-    data_vec4 = shape_data[non_mesh_shape]
-    scale = wp.vec3(data_vec4[0], data_vec4[1], data_vec4[2])
-
-    generic_shape_data = GenericShapeData()
-    generic_shape_data.shape_type = geo_type
-    generic_shape_data.scale = scale
-    generic_shape_data.auxiliary = wp.vec3(0.0, 0.0, 0.0)
-    generic_shape_data.center = wp.vec3(0.0, 0.0, 0.0)
-
-    # For CONVEX_MESH, pack the mesh pointer
-    if geo_type == GeoType.CONVEX_MESH:
-        generic_shape_data.auxiliary = pack_mesh_ptr(shape_source_ptr[non_mesh_shape])
-
-    data_provider = SupportMapDataProvider()
-
-    # Compute tight AABB in the mesh's *scaled* local frame (the same frame in which
-    # ``pos_in_mesh`` lives, i.e. the frame in which scaled mesh triangles are placed
-    # before being transformed by ``X_mesh_ws``).
-    aabb_lower, aabb_upper = compute_tight_aabb_from_support(
-        generic_shape_data, orientation_in_mesh, pos_in_mesh, data_provider
-    )
-
-    # The mesh's own BVH was built over the *unscaled* ``mesh.points``: the world
-    # position of vertex v is ``X_mesh_ws * (mesh_scale ⊙ v)``. Therefore we must
-    # convert both the AABB and the contact threshold from scaled mesh-local
-    # space to unscaled (BVH) space before querying. With non-uniform scale
-    # this is a per-axis division; the threshold, isotropic in world space,
-    # becomes anisotropic.
-    mesh_scale_vec4 = shape_data[mesh_shape]
-    mesh_scale = wp.vec3(mesh_scale_vec4[0], mesh_scale_vec4[1], mesh_scale_vec4[2])
-    aabb_lower_bvh, aabb_upper_bvh = aabb_to_unscaled(aabb_lower, aabb_upper, mesh_scale)
-
-    # Per-axis margin in BVH (unscaled) units. ``contact_threshold`` is a world-space
-    # distance; in unscaled mesh-local space that is ``contact_threshold / |mesh_scale_i|``
-    # along each axis.
-    margin_vec = wp.vec3(
-        contact_threshold / wp.max(wp.abs(mesh_scale[0]), 1.0e-12),
-        contact_threshold / wp.max(wp.abs(mesh_scale[1]), 1.0e-12),
-        contact_threshold / wp.max(wp.abs(mesh_scale[2]), 1.0e-12),
-    )
-    aabb_lower = aabb_lower_bvh - margin_vec
-    aabb_upper = aabb_upper_bvh + margin_vec
+    aabb_lower = wp.vec3(0.0)
+    aabb_upper = wp.vec3(0.0)
+    if wp.static(ENABLE_TILE_BVH_QUERY):
+        # All lanes query the same pair, so compute the bounds once per block.
+        if idx_in_thread_block == 0:
+            aabb_lower, aabb_upper = _compute_mesh_vs_convex_query_aabb(
+                mesh_shape,
+                non_mesh_shape,
+                X_mesh_ws,
+                X_ws,
+                shape_type,
+                shape_data,
+                shape_source_ptr,
+                contact_threshold,
+            )
+        bounds = wp.spatial_vector(aabb_lower, aabb_upper)
+        bounds_tile = wp.tile_zeros(shape=(1,), dtype=wp.spatial_vector, storage="shared")
+        wp.tile_scatter_masked(bounds_tile, 0, bounds, idx_in_thread_block == 0)
+        bounds = wp.tile_extract(bounds_tile, 0)
+        aabb_lower = wp.vec3(bounds[0], bounds[1], bounds[2])
+        aabb_upper = wp.vec3(bounds[3], bounds[4], bounds[5])
+    else:
+        aabb_lower, aabb_upper = _compute_mesh_vs_convex_query_aabb(
+            mesh_shape,
+            non_mesh_shape,
+            X_mesh_ws,
+            X_ws,
+            shape_type,
+            shape_data,
+            shape_source_ptr,
+            contact_threshold,
+        )
 
     if wp.static(ENABLE_TILE_BVH_QUERY):
         # Query mesh BVH for overlapping triangles in mesh local space using tiled version
