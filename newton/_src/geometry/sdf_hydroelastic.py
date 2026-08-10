@@ -67,6 +67,7 @@ from .sdf_texture import (
     TextureSDFData,
     _texture_sample_sdf_at_voxel_scalar,
     _texture_sample_sdf_scalar,
+    _texture_sample_sdf_zfiltered,
     texture_sample_sdf,
     texture_sample_sdf_at_voxel,
 )
@@ -1395,7 +1396,7 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: boo
         integer_center: Whether every subblock center lies on an integer voxel.
     """
 
-    sample_sdf = texture_sample_sdf if paired_samples else _texture_sample_sdf_scalar
+    sample_sdf = _texture_sample_sdf_zfiltered if paired_samples else _texture_sample_sdf_scalar
     sample_sdf_at_voxel = texture_sample_sdf_at_voxel if paired_samples else _texture_sample_sdf_at_voxel_scalar
 
     @wp.kernel(enable_backward=False)
@@ -1498,7 +1499,7 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: boo
 
 def create_count_iso_voxel_children_kernel(pressure_func: Any, integer_center: bool, paired_samples: bool):
     """Create a kernel that evaluates each parent's eight children cooperatively."""
-    sample_sdf = texture_sample_sdf if paired_samples else _texture_sample_sdf_scalar
+    sample_sdf = _texture_sample_sdf_zfiltered if paired_samples else _texture_sample_sdf_scalar
     sample_sdf_at_voxel = texture_sample_sdf_at_voxel if paired_samples else _texture_sample_sdf_at_voxel_scalar
 
     @wp.kernel(enable_backward=False)

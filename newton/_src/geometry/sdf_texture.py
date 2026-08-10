@@ -1133,6 +1133,69 @@ def texture_sample_sdf(
 
 
 @wp.func
+def _texture_sample_sdf_zfiltered(
+    sdf: TextureSDFData,
+    local_pos: wp.vec3,
+) -> float:
+    """Sample a paired SDF with hardware Z filtering and float32 X/Y blends."""
+    clamped = wp.vec3(
+        wp.clamp(local_pos[0], sdf.sdf_box_lower[0], sdf.sdf_box_upper[0]),
+        wp.clamp(local_pos[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1]),
+        wp.clamp(local_pos[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
+    )
+    diff = local_pos - clamped
+    diff_sq = wp.dot(diff, diff)
+
+    f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
+    loc = _locate_cell(sdf, f)
+    tx = loc.tx
+    ty = loc.ty
+    tz = loc.tz
+    needs_scale = False
+
+    texture = sdf.coarse_texture
+    x = float(0.0)
+    y0 = float(0.0)
+    y1 = float(0.0)
+    z = float(0.0)
+    if loc.start_slot >= SLOT_LINEAR:
+        cx = float(loc.x_base)
+        cy = float(loc.y_base)
+        cz = float(loc.z_base)
+        coarse_f = wp.vec3(float(loc.ix) + loc.tx, float(loc.iy) + loc.ty, float(loc.iz) + loc.tz) * sdf.fine_to_coarse
+        tx = coarse_f[0] - cx
+        ty = coarse_f[1] - cy
+        tz = coarse_f[2] - cz
+        x = cx + 0.5
+        y0 = cy + 0.5
+        y1 = cy + 1.5
+        z = cz + tz + 0.5
+    else:
+        needs_scale = True
+        texture = sdf.subgrid_texture
+        block_x = float(loc.start_slot & wp.uint32(0x3FF))
+        block_y = float((loc.start_slot >> wp.uint32(10)) & wp.uint32(0x3FF))
+        block_z = float((loc.start_slot >> wp.uint32(20)) & wp.uint32(0x3FF))
+        lx = float(loc.ix) - float(loc.x_base) * sdf.subgrid_size_f
+        ly = float(loc.iy) - float(loc.y_base) * sdf.subgrid_size_f
+        lz = float(loc.iz) - float(loc.z_base) * sdf.subgrid_size_f
+        x = block_x * sdf.subgrid_samples_f + lx + 0.5
+        y0 = block_y * sdf.subgrid_samples_f + ly + 0.5
+        y1 = y0 + 1.0
+        z = block_z * sdf.subgrid_samples_f + lz + tz + 0.5
+
+    x_values_y0 = wp.texture_sample(texture, wp.vec3f(x, y0, z), dtype=wp.vec2)
+    x_values_y1 = wp.texture_sample(texture, wp.vec3f(x, y1, z), dtype=wp.vec2)
+    x0 = x_values_y0[0] + (x_values_y1[0] - x_values_y0[0]) * ty
+    x1 = x_values_y0[1] + (x_values_y1[1] - x_values_y0[1]) * ty
+    sdf_val = x0 + (x1 - x0) * tx
+    if needs_scale:
+        sdf_val = sdf_val * sdf.subgrids_sdf_value_range + sdf.subgrids_min_sdf_value
+
+    return sdf_val + wp.sqrt(diff_sq)
+
+
+@wp.func
 def _texture_sample_sdf_scalar(
     sdf: TextureSDFData,
     local_pos: wp.vec3,
