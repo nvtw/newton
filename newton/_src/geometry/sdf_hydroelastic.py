@@ -609,7 +609,8 @@ class HydroelasticSDF:
                 self.pressure_func = self.config.pressure_func
                 self.pressure_data = self.config.pressure_data
 
-            self.count_iso_voxels_block_kernel = create_count_iso_voxels_block_kernel(self.pressure_func)
+            self.count_iso_voxels_block_kernel = create_count_iso_voxels_block_kernel(self.pressure_func, False)
+            self.count_iso_voxels_block_integer_kernel = create_count_iso_voxels_block_kernel(self.pressure_func, True)
 
             self.generate_contacts_kernel = get_generate_contacts_kernel(
                 output_vertices=self.config.output_contact_surface,
@@ -979,8 +980,14 @@ class HydroelasticSDF:
         # We do this by computing the difference between sdfs at the voxel/subblock center and comparing it to the voxel/subblock radius.
         # The check is first performed for subblocks of size (8 x 8 x 8), then (4 x 4 x 4), then (2 x 2 x 2), and finally for each voxel.
         for i, (subblock_size, n_blocks) in enumerate([(8, 1), (4, 2), (2, 2), (1, 2)]):
+            # Even-width stages are centered on stored voxels; odd-width stages are centered between voxels.
+            count_kernel = (
+                self.count_iso_voxels_block_integer_kernel
+                if subblock_size % 2 == 0
+                else self.count_iso_voxels_block_kernel
+            )
             wp.launch(
-                kernel=self.count_iso_voxels_block_kernel,
+                kernel=count_kernel,
                 dim=[self.grid_size],
                 inputs=[
                     self.grid_size,
@@ -1299,8 +1306,8 @@ def decode_coords_8(bit_pos: wp.uint8) -> wp.vec3ub:
     )
 
 
-def create_count_iso_voxels_block_kernel(pressure_func: Any):
-    """Factory specializing :func:`count_iso_voxels_block` to a pressure callback.
+def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: bool):
+    """Specialize voxel counting to a pressure callback and center sampling mode.
 
     The subblock prune uses interval arithmetic on the user-supplied
     ``pressure_func`` to bound how much ``p_a - p_b`` can change across a
@@ -1309,6 +1316,10 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any):
     non-increasing in ``signed_depth`` (deeper penetration => higher pressure),
     the per-shape pressure interval is ``[p(phi_c + r), p(phi_c - r)]``. We
     skip subblocks where these intervals can't overlap.
+
+    Args:
+        pressure_func: Monotonic pressure callback to evaluate.
+        integer_center: Whether every subblock center lies on an integer voxel.
     """
 
     @wp.kernel(enable_backward=False)
@@ -1367,7 +1378,16 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any):
                         x_center = wp.vec3f(x_global) + wp.vec3f(0.5 * float(subblock_size))
                         local_pos_b = sdf_data_b.sdf_box_lower + wp.cw_mul(x_center, sdf_data_b.voxel_size)
                         point_a = wp.transform_point(X_b_to_a, local_pos_b)
-                        vb = texture_sample_sdf(sdf_data_b, local_pos_b)
+                        if wp.static(integer_center):
+                            center_i = x_global + wp.vec3i(subblock_size // 2)
+                            vb = texture_sample_sdf_at_voxel(
+                                sdf_data_b,
+                                center_i[0],
+                                center_i[1],
+                                center_i[2],
+                            )
+                        else:
+                            vb = texture_sample_sdf(sdf_data_b, local_pos_b)
                         va = texture_sample_sdf(sdf_data_a, point_a)
                         is_valid = not (wp.isnan(vb) or wp.isnan(va))
                         if not is_valid or va > r + gap_a or vb > r + gap_b:
