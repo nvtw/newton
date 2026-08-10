@@ -2154,7 +2154,7 @@ class NarrowPhase:
                 reducer_data = self.global_contact_reducer.get_data_struct()
 
                 # Mesh-plane contacts → global reducer (meshes only)
-                if self.has_meshes:
+                if self.has_meshes and self.max_mesh_plane_pairs > 0:
                     compute_mesh_plane_block_offsets_scan(
                         shape_pairs_mesh_plane=self.shape_pairs_mesh_plane,
                         shape_pairs_mesh_plane_count=self.shape_pairs_mesh_plane_count,
@@ -2269,7 +2269,7 @@ class NarrowPhase:
             if shape_edge_range is None:
                 shape_edge_range = self._empty_edge_range
 
-            if self.mesh_mesh_contacts_kernel is not None:
+            if self.mesh_mesh_contacts_kernel is not None and self.max_mesh_mesh_pairs > 0:
                 mesh_mesh_contacts_kernel = (
                     self.mesh_mesh_contacts_kernel_precomputed
                     if has_precomputed_edge_data

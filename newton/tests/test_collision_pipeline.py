@@ -2058,6 +2058,24 @@ class TestShapePairsMaxScaling(unittest.TestCase):
         self.assertEqual(narrow_phase.shape_pairs_mesh_plane.shape[0], 2)
         self.assertEqual(narrow_phase.mesh_plane_block_offsets.shape[0], 3)
 
+    def test_zero_capacity_mesh_stages_preserve_mesh_convex_contacts(self):
+        """Keep mesh-convex contacts when unrelated mesh stages have zero capacity."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        mesh_body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()))
+        builder.add_shape_mesh(mesh_body, mesh=newton.Mesh.create_box(0.5, 0.5, 0.5))
+        box_body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.9), wp.quat_identity()))
+        builder.add_shape_box(box_body, hx=0.5, hy=0.5, hz=0.5)
+        model = builder.finalize()
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", reduce_contacts=True)
+        contacts = pipeline.contacts()
+
+        self.assertEqual(pipeline.narrow_phase.max_mesh_mesh_pairs, 0)
+        self.assertEqual(pipeline.narrow_phase.max_mesh_plane_pairs, 0)
+        pipeline.collide(state, contacts)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
     def test_single_world_matches_global_formula(self):
         """Single world should give the same result as the naive N*(N-1)/2."""
         model = self._make_model(num_worlds=1, shapes_per_world=20)
