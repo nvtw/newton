@@ -1459,11 +1459,11 @@ class ViewerBase(ABC):
             name: Instance path/name (e.g., "/world/spheres").
             geo_type: Geometry type value from :class:`newton.GeoType`.
             geo_scale: Geometry scale parameters:
-                - Sphere: float radius
-                - Capsule/Cone: (radius, half-height)
-                - Cylinder: (end radius, half-height, barrel radius)
-                - Plane: (width, length) or float for both
-                - Box: (x_extent, y_extent, z_extent) or float for all
+                - Sphere: float radius [m]
+                - Capsule/Cone: (radius [m], half-height [m])
+                - Cylinder: (end radius [m], half-height [m], barrel radius [m])
+                - Plane: (width [m], length [m]) or float [m] for both
+                - Box: (x_extent [m], y_extent [m], z_extent [m]) or float [m] for all
             xforms: wp.array[wp.transform] of instance transforms
             colors: wp.array[wp.vec3] or None (broadcasted if length 1)
             materials: wp.array[wp.vec4] or None (broadcasted if length 1)

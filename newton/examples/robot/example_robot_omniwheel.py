@@ -505,9 +505,10 @@ class Example:
     def capture(self):
         """Capture one simulation frame."""
         self.graph = None
-        with wp.ScopedCapture() as capture:
-            self.simulate()
-        self.graph = capture.graph
+        if self.device.is_cuda:
+            with wp.ScopedCapture() as capture:
+                self.simulate()
+            self.graph = capture.graph
 
     def simulate(self):
         """Advance one frame."""

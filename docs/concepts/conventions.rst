@@ -594,7 +594,7 @@ The following tables compare how different engines and formats define common col
      - **Parameter Convention**
      - **Notes**
    * - **Newton**
-     - ``radius``, ``half_height``
+     - ``radius``, ``half_height``, optional ``barrel_radius``
      - Extends along Z-axis
    * - **MuJoCo**
      - ``size[0]`` = radius, ``size[1]`` = half-length
