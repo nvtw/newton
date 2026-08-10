@@ -562,23 +562,11 @@ def _replay_matched_kernel(data: _ReplayData):
 
 
 @wp.kernel(enable_backward=False)
-def _collect_new_contacts_kernel(
+def _collect_contact_report_kernel(
     match_index: wp.array[wp.int32],
     contact_count: wp.array[wp.int32],
     new_indices: wp.array[wp.int32],
     new_count: wp.array[wp.int32],
-):
-    """Collect indices of new or broken contacts (match_index < 0) after sorting."""
-    i = wp.tid()
-    if i >= contact_count[0]:
-        return
-    if match_index[i] < wp.int32(0):
-        slot = wp.atomic_add(new_count, 0, wp.int32(1))
-        new_indices[slot] = wp.int32(i)
-
-
-@wp.kernel(enable_backward=False)
-def _collect_broken_contacts_kernel(
     prev_was_matched: wp.array[wp.int32],
     prev_keys: wp.array[wp.int64],
     prev_count: wp.array[wp.int32],
@@ -588,20 +576,22 @@ def _collect_broken_contacts_kernel(
     broken_indices: wp.array[wp.int32],
     broken_count: wp.array[wp.int32],
 ):
-    """Collect indices of old contacts that were not matched by any new contact."""
+    """Collect new and broken contact indices after matching and sorting."""
     i = wp.tid()
-    if i >= prev_count[0]:
-        return
-    key = prev_keys[i]
-    shape0 = wp.int32((key >> wp.int64(43)) & wp.int64(0xFFFFF))
-    shape1 = wp.int32((key >> wp.int64(23)) & wp.int64(0xFFFFF))
-    if reset_world_selected(shape_world[shape0], reset_world_mask, world_count) or reset_world_selected(
-        shape_world[shape1], reset_world_mask, world_count
-    ):
-        return
-    if prev_was_matched[i] == wp.int32(0):
-        slot = wp.atomic_add(broken_count, 0, wp.int32(1))
-        broken_indices[slot] = wp.int32(i)
+    if i < contact_count[0] and match_index[i] < wp.int32(0):
+        new_slot = wp.atomic_add(new_count, 0, wp.int32(1))
+        new_indices[new_slot] = wp.int32(i)
+
+    if i < prev_count[0]:
+        key = prev_keys[i]
+        shape0 = wp.int32((key >> wp.int64(43)) & wp.int64(0xFFFFF))
+        shape1 = wp.int32((key >> wp.int64(23)) & wp.int64(0xFFFFF))
+        reset_selected = reset_world_selected(
+            shape_world[shape0], reset_world_mask, world_count
+        ) or reset_world_selected(shape_world[shape1], reset_world_mask, world_count)
+        if not reset_selected and prev_was_matched[i] == wp.int32(0):
+            broken_slot = wp.atomic_add(broken_count, 0, wp.int32(1))
+            broken_indices[broken_slot] = wp.int32(i)
 
 
 # ------------------------------------------------------------------
@@ -1045,15 +1035,13 @@ class ContactMatcher:
         broken_count.zero_()
 
         wp.launch(
-            _collect_new_contacts_kernel,
-            dim=self._capacity,
-            inputs=[match_index, contact_count, new_indices, new_count],
-            device=device,
-        )
-        wp.launch(
-            _collect_broken_contacts_kernel,
+            _collect_contact_report_kernel,
             dim=self._capacity,
             inputs=[
+                match_index,
+                contact_count,
+                new_indices,
+                new_count,
                 self._prev_was_matched,
                 self._prev_sorted_keys,
                 self._prev_count,
