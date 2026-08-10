@@ -355,24 +355,6 @@ def _match_contacts_kernel(data: _MatchData):
 
 
 @wp.kernel(enable_backward=False)
-def _clear_prev_claim_kernel(
-    prev_claim: wp.array[wp.int64],
-    prev_count: wp.array[wp.int32],
-):
-    """Reset only the active prefix of the claim buffer to ``_CLAIM_SENTINEL``.
-
-    Launched with ``capacity`` threads so the per-frame launch fits a
-    static CUDA graph, but each thread guards on ``prev_count[0]`` so we
-    only touch the (typically much smaller) range of slots that ``match``
-    will actually race on.  Slots beyond ``prev_count`` are never read
-    by either kernel, so leaving them stale is safe.
-    """
-    i = wp.tid()
-    if i < prev_count[0]:
-        prev_claim[i] = _CLAIM_SENTINEL
-
-
-@wp.kernel(enable_backward=False)
 def _resolve_claims_kernel(
     match_index: wp.array[wp.int32],
     sort_keys: wp.array[wp.int64],
@@ -449,9 +431,12 @@ class _SaveStateData:
     # ``sort_full`` and the next ``save_sorted_state``) is not reading the
     # sorter's ``scratch_normal`` after the sort has clobbered it.
     dst_normal_sticky: wp.array[wp.vec3]
+    dst_claim: wp.array[wp.int64]
+    dst_prev_was_matched: wp.array[wp.int32]
     dst_count: wp.array[wp.int32]
 
     has_sticky: int
+    has_report: int
 
 
 @wp.kernel(enable_backward=False)
@@ -467,6 +452,9 @@ def _save_sorted_state_kernel(data: _SaveStateData):
         data.dst_count[0] = data.src_count[0]
     if i < data.src_count[0]:
         data.dst_keys[i] = data.src_keys[i]
+        data.dst_claim[i] = _CLAIM_SENTINEL
+        if data.has_report != 0:
+            data.dst_prev_was_matched[i] = wp.int32(0)
 
         p0 = data.src_point0[i]
         bid0 = data.shape_body[data.src_shape0[i]]
@@ -703,14 +691,11 @@ class ContactMatcher:
             self._prev_sorted_keys = wp.full(capacity, SORT_KEY_SENTINEL, dtype=wp.int64)
             self._prev_count = wp.zeros(1, dtype=wp.int32)
 
-            # Per-prev claim word for the atomic_min race that keeps the
-            # new→prev mapping injective (see module docstring).  Reset
-            # to _CLAIM_SENTINEL each frame; the low 32 bits of the
-            # surviving value identify the winning new contact by the low
-            # 32 bits of its sort key (deterministic, invariant under
-            # non-deterministic narrow-phase slot assignment -- see
-            # ``_pack_claim``).
-            self._prev_claim = wp.empty(capacity, dtype=wp.int64)
+            # Per-prev claim word for the atomic_min race that keeps the new→prev
+            # mapping injective (see module docstring). The save-state pass resets
+            # each active slot for the next frame; initialize the allocation for
+            # the first frame before any state has been saved.
+            self._prev_claim = wp.full(capacity, _CLAIM_SENTINEL, dtype=wp.int64)
 
             # Contact report (optional).
             self._has_report = contact_report
@@ -829,21 +814,6 @@ class ContactMatcher:
                 Written directly (no intermediate copy).
             device: Device to launch on.
         """
-        if self._has_report:
-            self._prev_was_matched.zero_()
-
-        # Reset only the active prefix of the claim buffer.  Launching
-        # ``capacity`` threads keeps the call shape constant for graph
-        # capture, but the kernel guards on ``prev_count`` so we touch
-        # the minimum bytes — important for sparsely-loaded pipelines
-        # where ``capacity >> prev_count``.
-        wp.launch(
-            _clear_prev_claim_kernel,
-            dim=self._capacity,
-            inputs=[self._prev_claim, self._prev_count],
-            device=device,
-        )
-
         data = _MatchData()
         data.prev_keys = self._prev_sorted_keys
         # Reuse sorter scratch buffers for prev-frame world-space data.
@@ -940,7 +910,10 @@ class ContactMatcher:
         data.dst_pos_world = self._sorter.scratch_pos_world
         data.dst_normal = self._sorter.scratch_normal
         data.dst_count = self._prev_count
+        data.dst_claim = self._prev_claim
 
+        data.dst_prev_was_matched = self._prev_was_matched
+        data.has_report = 1 if self._has_report else 0
         if self._sticky:
             if sorted_offset0 is None or sorted_offset1 is None:
                 raise ValueError("save_sorted_state requires sorted_offset0/offset1 when sticky is enabled")
