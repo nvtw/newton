@@ -473,7 +473,6 @@ def test_clear_active(test, device):
     reducer.agg_depth_volume.fill_(wp.vec3(1.0))
     reducer.weighted_pos_sum.fill_(wp.vec3(1.0))
     reducer.weight_sum.fill_(1.0)
-    reducer.entry_k_eff.fill_(1.0)
     reducer.total_depth_reduced.fill_(1.0)
     reducer.total_normal_reduced.fill_(wp.vec3(1.0))
     reducer.agg_moment_unreduced.fill_(1.0)
@@ -489,7 +488,6 @@ def test_clear_active(test, device):
         reducer.agg_depth_volume,
         reducer.weighted_pos_sum,
         reducer.weight_sum,
-        reducer.entry_k_eff,
         reducer.total_depth_reduced,
         reducer.total_normal_reduced,
         reducer.agg_moment_unreduced,
@@ -547,7 +545,6 @@ def test_clear_active_coalesced(test, device):
     )
     scalar_entry_arrays = (
         reducer.weight_sum,
-        reducer.entry_k_eff,
         reducer.total_depth_reduced,
         reducer.agg_moment_unreduced,
         reducer.agg_moment_reduced,

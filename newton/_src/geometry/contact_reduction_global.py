@@ -672,10 +672,6 @@ class GlobalContactReducerData:
     # Cached normal-bin hashtable entry index per contact
     contact_nbin_entry: wp.array[wp.int32]
 
-    # Effective stiffness coefficient k_a*k_b/(k_a+k_b) per hashtable entry
-    # Constant for a given shape pair, stored once per entry instead of per contact
-    entry_k_eff: wp.array[wp.float32]
-
     # Aggregate force per hashtable entry (indexed by ht_capacity)
     # Used for hydroelastic stiffness calculation: c_stiffness = k_eff * |agg_force| / total_depth
     # Accumulates sum(area * pressure_func(depth) * normal) for all penetrating contacts per entry
@@ -728,7 +724,6 @@ def _clear_active_kernel(
     agg_depth_volume: wp.array[wp.vec3],
     weighted_pos_sum: wp.array[wp.vec3],
     weight_sum: wp.array[wp.float32],
-    entry_k_eff: wp.array[wp.float32],
     total_depth_reduced: wp.array[wp.float32],
     total_normal_reduced: wp.array[wp.vec3],
     agg_moment_unreduced: wp.array[wp.float32],
@@ -782,7 +777,6 @@ def _clear_active_kernel(
                     agg_depth_volume[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                     weighted_pos_sum[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                     weight_sum[entry_idx] = 0.0
-                    entry_k_eff[entry_idx] = 0.0
                     total_depth_reduced[entry_idx] = 0.0
                     total_normal_reduced[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                     if agg_moment_unreduced.shape[0] > 0:
@@ -804,7 +798,6 @@ def _clear_active_kernel(
                 agg_depth_volume[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 weighted_pos_sum[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 weight_sum[entry_idx] = 0.0
-                entry_k_eff[entry_idx] = 0.0
                 total_depth_reduced[entry_idx] = 0.0
                 total_normal_reduced[entry_idx] = wp.vec3(0.0, 0.0, 0.0)
                 if agg_moment_unreduced.shape[0] > 0:
@@ -876,7 +869,6 @@ class GlobalContactReducer:
         normal: vec2 array storing octahedral-encoded contact normal
         shape_pairs: vec2i array storing (shape_a, shape_b) per contact
         contact_area: float array storing contact area per contact (for hydroelastic)
-        entry_k_eff: float array storing effective stiffness per hashtable entry (for hydroelastic)
         contact_count: Atomic counter for allocated contacts
         hashtable: HashTable for tracking best contacts (keys only)
         ht_values: Values array for hashtable (managed here, not by HashTable)
@@ -896,7 +888,7 @@ class GlobalContactReducer:
         Args:
             capacity: Maximum number of contacts to store
             device: Warp device (e.g., "cuda:0", "cpu")
-            store_hydroelastic_data: If True, allocate arrays for contact_area and entry_k_eff
+            store_hydroelastic_data: If True, allocate hydroelastic contact and aggregate arrays.
             store_moment_data: If True, allocate moment accumulator arrays for friction
                 moment matching. Only needed when ``moment_matching=True``.
             deterministic: If True, use deterministic fingerprint-based tiebreaking
@@ -968,8 +960,6 @@ class GlobalContactReducer:
             self.agg_depth_volume = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
             self.weighted_pos_sum = wp.zeros(self.hashtable.capacity, dtype=wp.vec3, device=device)
             self.weight_sum = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
-            # k_eff per entry (constant per shape pair, set once on first insert)
-            self.entry_k_eff = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
             # Total depth of reduced contacts per normal bin (accumulated from all winning contacts)
             self.total_depth_reduced = wp.zeros(self.hashtable.capacity, dtype=wp.float32, device=device)
             # Total depth-weighted normal of reduced contacts per normal bin
@@ -988,7 +978,6 @@ class GlobalContactReducer:
             self.agg_depth_volume = wp.zeros(0, dtype=wp.vec3, device=device)
             self.weighted_pos_sum = wp.zeros(0, dtype=wp.vec3, device=device)
             self.weight_sum = wp.zeros(0, dtype=wp.float32, device=device)
-            self.entry_k_eff = wp.zeros(0, dtype=wp.float32, device=device)
             self.total_depth_reduced = wp.zeros(0, dtype=wp.float32, device=device)
             self.total_normal_reduced = wp.zeros(0, dtype=wp.vec3, device=device)
             self.agg_moment_unreduced = wp.zeros(0, dtype=wp.float32, device=device)
@@ -1033,7 +1022,6 @@ class GlobalContactReducer:
                 self.agg_depth_volume,
                 self.weighted_pos_sum,
                 self.weight_sum,
-                self.entry_k_eff,
                 self.total_depth_reduced,
                 self.total_normal_reduced,
                 self.agg_moment_unreduced,
@@ -1073,7 +1061,6 @@ class GlobalContactReducer:
         data.contact_fingerprints = self.contact_fingerprints
         data.contact_area = self.contact_area
         data.contact_nbin_entry = self.contact_nbin_entry
-        data.entry_k_eff = self.entry_k_eff
         data.agg_force = self.agg_force
         data.agg_depth_volume = self.agg_depth_volume
         data.weighted_pos_sum = self.weighted_pos_sum
