@@ -873,7 +873,7 @@ def aabb_to_unscaled(
     aabb_lower: wp.vec3,
     aabb_upper: wp.vec3,
     scale: wp.vec3,
-) -> tuple[wp.vec3, wp.vec3]:
+) -> tuple[wp.vec3, wp.vec3, wp.vec3]:
     """Convert an axis-aligned bounding box from scaled local space to unscaled local space.
 
     Given an AABB ``[aabb_lower, aabb_upper]`` expressed in a frame where geometry has been
@@ -896,7 +896,7 @@ def aabb_to_unscaled(
 
     out_lower = wp.vec3(wp.min(lx0, lx1), wp.min(ly0, ly1), wp.min(lz0, lz1))
     out_upper = wp.vec3(wp.max(lx0, lx1), wp.max(ly0, ly1), wp.max(lz0, lz1))
-    return out_lower, out_upper
+    return out_lower, out_upper, wp.vec3(inv_x, inv_y, inv_z)
 
 
 @wp.func
@@ -945,7 +945,7 @@ def _compute_mesh_vs_convex_query_aabb(
     shape_data: wp.array[wp.vec4],
     shape_source_ptr: wp.array[wp.uint64],
     contact_threshold: float,
-) -> tuple[wp.vec3, wp.vec3]:
+) -> tuple[wp.vec3, wp.vec3, wp.vec3]:
     """Compute unscaled mesh-BVH bounds for a convex shape."""
     X_mesh_sw = wp.transform_inverse(X_mesh_ws)
     X_mesh_shape = wp.transform_multiply(X_mesh_sw, X_ws)
@@ -973,13 +973,34 @@ def _compute_mesh_vs_convex_query_aabb(
     # Convert the bounds and world-space threshold to the unscaled BVH frame.
     mesh_scale_vec4 = shape_data[mesh_shape]
     mesh_scale = wp.vec3(mesh_scale_vec4[0], mesh_scale_vec4[1], mesh_scale_vec4[2])
-    aabb_lower_bvh, aabb_upper_bvh = aabb_to_unscaled(aabb_lower, aabb_upper, mesh_scale)
+    aabb_lower_bvh, aabb_upper_bvh, inv_scale = aabb_to_unscaled(aabb_lower, aabb_upper, mesh_scale)
     margin_vec = wp.vec3(
         contact_threshold / wp.max(wp.abs(mesh_scale[0]), 1.0e-12),
         contact_threshold / wp.max(wp.abs(mesh_scale[1]), 1.0e-12),
         contact_threshold / wp.max(wp.abs(mesh_scale[2]), 1.0e-12),
     )
-    return aabb_lower_bvh - margin_vec, aabb_upper_bvh + margin_vec
+    center_in_bvh = wp.cw_mul(pos_in_mesh, inv_scale)
+    return aabb_lower_bvh - margin_vec, aabb_upper_bvh + margin_vec, center_in_bvh
+
+
+@wp.func
+def _mesh_triangle_is_front_facing_local(
+    mesh_id: wp.uint64,
+    center_in_bvh: wp.vec3,
+    tri_idx: int,
+) -> bool:
+    """Check triangle winding against a point in unscaled mesh-local space."""
+    mesh = wp.mesh_get(mesh_id)
+    idx0 = mesh.indices[tri_idx * 3 + 0]
+    idx1 = mesh.indices[tri_idx * 3 + 1]
+    idx2 = mesh.indices[tri_idx * 3 + 2]
+
+    v0 = mesh.points[idx0]
+    v1 = mesh.points[idx1]
+    v2 = mesh.points[idx2]
+    face_normal = wp.cross(v1 - v0, v2 - v0)
+    center_dist = wp.dot(face_normal, center_in_bvh - v0)
+    return not (center_dist < 0.0)
 
 
 @wp.func
@@ -1019,10 +1040,11 @@ def mesh_vs_convex_midphase(
     """
     aabb_lower = wp.vec3(0.0)
     aabb_upper = wp.vec3(0.0)
+    center_in_bvh = wp.vec3(0.0)
     if wp.static(ENABLE_TILE_BVH_QUERY):
         # All lanes query the same pair, so compute the bounds once per block.
         if idx_in_thread_block == 0:
-            aabb_lower, aabb_upper = _compute_mesh_vs_convex_query_aabb(
+            aabb_lower, aabb_upper, center_in_bvh = _compute_mesh_vs_convex_query_aabb(
                 mesh_shape,
                 non_mesh_shape,
                 X_mesh_ws,
@@ -1032,14 +1054,25 @@ def mesh_vs_convex_midphase(
                 shape_source_ptr,
                 contact_threshold,
             )
-        bounds = wp.spatial_vector(aabb_lower, aabb_upper)
-        bounds_tile = wp.tile_zeros(shape=(1,), dtype=wp.spatial_vector, storage="shared")
+        bounds = wp.mat33(
+            aabb_lower[0],
+            aabb_lower[1],
+            aabb_lower[2],
+            aabb_upper[0],
+            aabb_upper[1],
+            aabb_upper[2],
+            center_in_bvh[0],
+            center_in_bvh[1],
+            center_in_bvh[2],
+        )
+        bounds_tile = wp.tile_zeros(shape=(1,), dtype=wp.mat33, storage="shared")
         wp.tile_scatter_masked(bounds_tile, 0, bounds, idx_in_thread_block == 0)
         bounds = wp.tile_extract(bounds_tile, 0)
-        aabb_lower = wp.vec3(bounds[0], bounds[1], bounds[2])
-        aabb_upper = wp.vec3(bounds[3], bounds[4], bounds[5])
+        aabb_lower = wp.vec3(bounds[0, 0], bounds[0, 1], bounds[0, 2])
+        aabb_upper = wp.vec3(bounds[1, 0], bounds[1, 1], bounds[1, 2])
+        center_in_bvh = wp.vec3(bounds[2, 0], bounds[2, 1], bounds[2, 2])
     else:
-        aabb_lower, aabb_upper = _compute_mesh_vs_convex_query_aabb(
+        aabb_lower, aabb_upper, center_in_bvh = _compute_mesh_vs_convex_query_aabb(
             mesh_shape,
             non_mesh_shape,
             X_mesh_ws,
@@ -1057,6 +1090,8 @@ def mesh_vs_convex_midphase(
         while wp.tile_query_valid(query):
             result_tile = wp.tile_mesh_query_aabb_next(query)
             tri_index = wp.untile(result_tile)
+            if tri_index >= 0 and not _mesh_triangle_is_front_facing_local(mesh_id, center_in_bvh, tri_index):
+                tri_index = -1
 
             # Add this triangle pair to the output buffer if valid
             # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
@@ -1081,7 +1116,7 @@ def mesh_vs_convex_midphase(
         while wp.mesh_query_aabb_next(query, tri_index):
             # Add this triangle pair to the output buffer if valid
             # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
-            if tri_index >= 0:
+            if tri_index >= 0 and _mesh_triangle_is_front_facing_local(mesh_id, center_in_bvh, tri_index):
                 out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
                 if out_idx < triangle_pairs.shape[0]:
                     triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)
