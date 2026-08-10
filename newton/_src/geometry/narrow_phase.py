@@ -1772,7 +1772,6 @@ class NarrowPhase:
                     enable_heightfields=has_heightfields,
                     reduce_contacts=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
-                    paired_samples=self.sdf_texture_paired_samples,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
                 self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
@@ -1781,7 +1780,6 @@ class NarrowPhase:
                     reduce_contacts=True,
                     use_precomputed_edge_data=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
-                    paired_samples=self.sdf_texture_paired_samples,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
             else:
@@ -1789,7 +1787,6 @@ class NarrowPhase:
                     writer_func,
                     enable_heightfields=has_heightfields,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
-                    paired_samples=self.sdf_texture_paired_samples,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
                 self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
@@ -1797,7 +1794,6 @@ class NarrowPhase:
                     enable_heightfields=has_heightfields,
                     use_precomputed_edge_data=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
-                    paired_samples=self.sdf_texture_paired_samples,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
         else:

@@ -1316,6 +1316,7 @@ def _texture_sample_sdf_hw_pair_variant(
 @wp.func
 def _texture_sample_sdf_hw_pair(
     sdf: TextureSDFData,
+    local_pos0: wp.vec3,
     local_pos1: wp.vec3,
 ) -> wp.vec2f:
     """Sample two SDF positions using their stored texture layout."""

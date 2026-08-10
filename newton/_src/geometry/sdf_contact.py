@@ -8,14 +8,10 @@ import warp as wp
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, SHAPE_PAIR_INDEX_MASK, ContactData
 from ..geometry.sdf_texture import (
     TextureSDFData,
-    _texture_sample_sdf_grad_only_hw_paired,
-    _texture_sample_sdf_grad_only_hw_scalar,
-    _texture_sample_sdf_hw_clamped_paired,
-    _texture_sample_sdf_hw_clamped_scalar,
-    _texture_sample_sdf_hw_pair_paired,
-    _texture_sample_sdf_hw_pair_scalar,
-    _texture_sample_sdf_hw_paired,
-    _texture_sample_sdf_hw_scalar,
+    _texture_sample_sdf_hw_clamped,
+    _texture_sample_sdf_hw_pair,
+    texture_sample_sdf_grad_only_hw,
+    texture_sample_sdf_hw,
 )
 from ..geometry.types import GeoType
 from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield, sample_sdf_heightfield
@@ -1074,23 +1070,14 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     use_precomputed_edge_data: bool = False,
     use_texture_sdf_only: bool = False,
     use_identity_sdf_scale: bool = False,
-    paired_samples: bool = True,
 ):
     if use_identity_sdf_scale and not use_texture_sdf_only:
         raise ValueError("identity SDF scale specialization requires texture-only SDFs")
-    if paired_samples:
-        sample_sdf = _texture_sample_sdf_hw_paired
-        sample_pair = _texture_sample_sdf_hw_pair_paired
-        sample_clamped = _texture_sample_sdf_hw_clamped_paired
-        sample_grad = _texture_sample_sdf_grad_only_hw_paired
-    else:
-        sample_sdf = _texture_sample_sdf_hw_scalar
-        sample_pair = _texture_sample_sdf_hw_pair_scalar
-        sample_clamped = _texture_sample_sdf_hw_clamped_scalar
-        sample_grad = _texture_sample_sdf_grad_only_hw_scalar
     do_edge_sdf_collision = _create_sdf_contact_funcs(
-        enable_heightfields, use_texture_sdf_only, sample_sdf, sample_pair
+        enable_heightfields, use_texture_sdf_only, texture_sample_sdf_hw, _texture_sample_sdf_hw_pair
     )
+    sample_clamped = _texture_sample_sdf_hw_clamped
+    sample_grad = texture_sample_sdf_grad_only_hw
     get_edge_from_mesh_specialized = _create_get_edge_from_mesh_func(use_precomputed_edge_data)
     get_mesh_edge_bounding_sphere_specialized = _create_get_mesh_edge_bounding_sphere_func(use_precomputed_edge_data)
 
@@ -1103,7 +1090,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # different floating-point results, breaking bit-exact reproducibility.
     _module = (
         f"sdf_contact_{writer_func.__name__}_{enable_heightfields}_{reduce_contacts}_"
-        f"{use_precomputed_edge_data}_{use_texture_sdf_only}_{use_identity_sdf_scale}_{paired_samples}"
+        f"{use_precomputed_edge_data}_{use_texture_sdf_only}_{use_identity_sdf_scale}"
     )
 
     @wp.kernel(enable_backward=False, module=_module)
