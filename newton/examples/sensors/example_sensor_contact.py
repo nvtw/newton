@@ -113,6 +113,7 @@ class Example:
         }
 
         self.state_0 = self.model.state()
+        self.state_1 = self.model.state() if self.solver_type == "kamino" else None
 
         self.control = self.model.control()
         hinge_joint_idx = self.model.joint_label.index("/env/Hinge")
@@ -133,7 +134,9 @@ class Example:
     def capture(self):
         self.graph = None
 
-        if not wp.get_device().is_cuda:
+        # Kamino's solver caches are reset periodically, which is not compatible
+        # with replaying a graph captured before the reset.
+        if not wp.get_device().is_cuda or self.solver_type == "kamino":
             return
 
         with wp.ScopedCapture() as capture:
@@ -143,7 +146,11 @@ class Example:
     def simulate(self):
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
-        self.solver.step(self.state_0, self.state_0, self.control, None, self.sim_dt)
+        if self.state_1 is None:
+            self.solver.step(self.state_0, self.state_0, self.control, None, self.sim_dt)
+        else:
+            self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
         self.solver.update_contacts(self.contacts, self.state_0)
 
     def step(self):
@@ -196,6 +203,11 @@ class Example:
         self.state_0.joint_qd.assign(self.initial_joint_qd)
         # Recompute forward kinematics to refresh derived state.
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+        if self.solver_type == "kamino":
+            # Synchronize joint history and clear solver caches without requiring
+            # Kamino's optional iterative FK solver.
+            reset_config = newton.solvers.SolverKamino.ResetConfig.preserve()
+            self.solver.reset(self.state_0, config=reset_config)
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
