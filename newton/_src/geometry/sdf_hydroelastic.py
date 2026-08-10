@@ -1657,6 +1657,14 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bo
         corner_sdf_vals = vec8f()
 
         X_a_to_b = wp.transform_multiply(X_sw_other, X_ws)
+        # Reuse the affine base and axis steps instead of rotating all eight corners.
+        voxel_base_a = sdf_data.sdf_box_lower + wp.cw_mul(
+            wp.vec3(float(x_id), float(y_id), float(z_id)), sdf_data.voxel_size
+        )
+        point_b_base = wp.transform_point(X_a_to_b, voxel_base_a)
+        point_b_step_x = wp.transform_vector(X_a_to_b, wp.vec3(sdf_data.voxel_size[0], 0.0, 0.0))
+        point_b_step_y = wp.transform_vector(X_a_to_b, wp.vec3(0.0, sdf_data.voxel_size[1], 0.0))
+        point_b_step_z = wp.transform_vector(X_a_to_b, wp.vec3(0.0, 0.0, sdf_data.voxel_size[2]))
 
         for i in range(8):
             corner_offset = _mc_corner_offset(i)
@@ -1664,8 +1672,12 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bo
             y = y_id + corner_offset.y
             z = z_id + corner_offset.z
 
-            local_pos_a = sdf_data.sdf_box_lower + wp.cw_mul(wp.vec3(float(x), float(y), float(z)), sdf_data.voxel_size)
-            point_b = wp.transform_point(X_a_to_b, local_pos_a)
+            point_b = (
+                point_b_base
+                + float(corner_offset.x) * point_b_step_x
+                + float(corner_offset.y) * point_b_step_y
+                + float(corner_offset.z) * point_b_step_z
+            )
             valA = wp.static(sample_sdf_at_voxel)(sdf_data, x, y, z)
             valB = wp.static(sample_sdf)(sdf_other_data, point_b)
 
