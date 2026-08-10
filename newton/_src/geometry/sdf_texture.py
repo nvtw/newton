@@ -1023,7 +1023,8 @@ def texture_sample_sdf(
         wp.clamp(local_pos[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1]),
         wp.clamp(local_pos[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2]),
     )
-    diff_mag = wp.length(local_pos - clamped)
+    diff = local_pos - clamped
+    diff_sq = wp.dot(diff, diff)
 
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
     loc = _locate_cell(sdf, f)
@@ -1078,6 +1079,8 @@ def texture_sample_sdf(
         v011 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz + 1.0), dtype=float)
         v111 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz + 1.0), dtype=float)
 
+    # Cover texture latency with the independent extrapolation root.
+    diff_mag = wp.sqrt(diff_sq)
     c00 = v000 + (v100 - v000) * tx
     c10 = v010 + (v110 - v010) * tx
     c01 = v001 + (v101 - v001) * tx
