@@ -11279,12 +11279,16 @@ class ModelBuilder:
 
                 return nx, ny, nz
 
-            for _shape_idx, (shape_type, shape_src, shape_scale) in enumerate(
-                zip(self.shape_type, self.shape_source, self.shape_scale, strict=True)
+            for _shape_idx, (shape_type, shape_src, shape_scale, shape_flags) in enumerate(
+                zip(self.shape_type, self.shape_source, self.shape_scale, self.shape_flags, strict=True)
             ):
                 # Create cache key based on shape type and parameters
                 if (shape_type == GeoType.MESH or shape_type == GeoType.CONVEX_MESH) and shape_src is not None:
                     cache_key = (shape_type, id(shape_src), tuple(shape_scale))
+                elif shape_type == GeoType.CYLINDER and shape_flags & ShapeFlags.SITE:
+                    # MuJoCo cylinder sites may carry an unused third display-size component.
+                    # It is not Newton's barrel radius and does not affect their bounds.
+                    cache_key = (shape_type, (shape_scale[0], shape_scale[1], 0.0))
                 else:
                     cache_key = (shape_type, tuple(shape_scale))
 
@@ -11343,6 +11347,8 @@ class ModelBuilder:
                     elif shape_type == GeoType.CYLINDER:
                         # Cylinder: shape_scale = (end_radius, half_height, barrel_radius)
                         r, half_height, barrel_radius = shape_scale
+                        if shape_flags & ShapeFlags.SITE:
+                            barrel_radius = 0.0
                         radial_extent = r
                         if barrel_radius > 0.0:
                             radial_extent += (half_height * half_height) / (
