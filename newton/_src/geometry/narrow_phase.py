@@ -1111,25 +1111,23 @@ def compute_mesh_plane_vert_counts(
     shape_source: wp.array[wp.uint64],
     vert_counts: wp.array[wp.int32],
     total_vert_count: wp.array[wp.int32],
+    total_num_threads: int,
 ):
     """Compute per-pair vertex counts in parallel for mesh-plane pairs.
 
-    Slots beyond ``pair_count`` are zeroed for correct ``array_scan`` results.
+    Threads stride over the active pair prefix. Values beyond ``pair_count``
+    cannot affect the consumed prefix of the subsequent exclusive scan.
     """
-    i = wp.tid()
     pair_count = wp.min(shape_pairs_mesh_plane_count[0], shape_pairs_mesh_plane.shape[0])
-    if i >= pair_count:
-        vert_counts[i] = 0
-        return
-
-    pair = shape_pairs_mesh_plane[i]
-    mesh_shape = pair[0]
-    mesh_id = shape_source[mesh_shape]
-    pair_verts = int(0)
-    if mesh_id != wp.uint64(0):
-        pair_verts = wp.mesh_get(mesh_id).points.shape[0]
-    vert_counts[i] = wp.int32(pair_verts)
-    wp.atomic_add(total_vert_count, 0, pair_verts)
+    for i in range(wp.tid(), pair_count, total_num_threads):
+        pair = shape_pairs_mesh_plane[i]
+        mesh_shape = pair[0]
+        mesh_id = shape_source[mesh_shape]
+        pair_verts = int(0)
+        if mesh_id != wp.uint64(0):
+            pair_verts = wp.mesh_get(mesh_id).points.shape[0]
+        vert_counts[i] = wp.int32(pair_verts)
+        wp.atomic_add(total_vert_count, 0, pair_verts)
 
 
 def compute_mesh_plane_block_offsets_scan(
@@ -1140,21 +1138,24 @@ def compute_mesh_plane_block_offsets_scan(
     block_offsets: wp.array,
     block_counts: wp.array,
     total_vert_count: wp.array,
+    total_num_threads: int,
     device: str | None = None,
     record_tape: bool = True,
 ):
     """Compute mesh-plane block offsets using parallel kernels and array_scan."""
     n = block_counts.shape[0]
+    launch_threads = min(n, total_num_threads)
     # Step 1: compute per-pair vertex counts in parallel
     wp.launch(
         kernel=compute_mesh_plane_vert_counts,
-        dim=n,
+        dim=launch_threads,
         inputs=[
             shape_pairs_mesh_plane,
             shape_pairs_mesh_plane_count,
             shape_source,
             block_counts,  # reuse as temp storage for vert counts
             total_vert_count,
+            launch_threads,
         ],
         device=device,
         record_tape=record_tape,
@@ -1162,7 +1163,7 @@ def compute_mesh_plane_block_offsets_scan(
     # Step 2: compute per-pair block counts using the scalar total.
     wp.launch(
         kernel=compute_block_counts_from_weights,
-        dim=n,
+        dim=launch_threads,
         inputs=[
             total_vert_count,
             block_counts,  # still holds vert counts
@@ -1170,6 +1171,7 @@ def compute_mesh_plane_block_offsets_scan(
             shape_pairs_mesh_plane.shape[0],
             target_blocks,
             block_offsets,  # reuse as temp for block counts
+            launch_threads,
         ],
         device=device,
         record_tape=record_tape,
@@ -2142,6 +2144,7 @@ class NarrowPhase:
                         block_offsets=self.mesh_plane_block_offsets,
                         block_counts=self.mesh_plane_block_counts,
                         total_vert_count=self.mesh_plane_total_weight,
+                        total_num_threads=self.total_num_threads,
                         device=device,
                         record_tape=False,
                     )
@@ -2265,6 +2268,7 @@ class NarrowPhase:
                         block_offsets=self.mesh_mesh_block_offsets,
                         block_counts=self.mesh_mesh_block_counts,
                         total_edge_count=self.mesh_mesh_total_weight,
+                        total_num_threads=self.total_num_threads,
                         device=device,
                         record_tape=False,
                     )
