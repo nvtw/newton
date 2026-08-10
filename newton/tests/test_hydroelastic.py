@@ -15,7 +15,12 @@ from newton._src.geometry.contact_reduction_hydroelastic import (
     _from_fixed,
     _to_fixed,
 )
-from newton._src.geometry.sdf_hydroelastic import _mc_corner_offset
+from newton._src.geometry.sdf_hydroelastic import (
+    _mc_corner_offset,
+    pack_hydro_voxel_record,
+    unpack_hydro_voxel_coords,
+    unpack_hydro_voxel_pair,
+)
 from newton.geometry import HydroelasticSDF
 from newton.tests.unittest_utils import (
     add_function_test,
@@ -81,6 +86,41 @@ def _test_mc_corner_offsets(offsets: wp.array[wp.vec3i]):
     """Store each canonical marching-cubes corner offset."""
     corner_idx = wp.tid()
     offsets[corner_idx] = _mc_corner_offset(corner_idx)
+
+
+@wp.kernel
+def _test_hydro_voxel_record_roundtrip(
+    coords: wp.array[wp.vec3us],
+    pairs: wp.array[wp.vec2i],
+    records: wp.array[wp.vec4ui],
+    decoded_coords: wp.array[wp.vec3us],
+    decoded_pairs: wp.array[wp.vec2i],
+):
+    """Pack and unpack one hydroelastic octree record."""
+    tid = wp.tid()
+    record = pack_hydro_voxel_record(coords[tid], pairs[tid][0], pairs[tid][1])
+    records[tid] = record
+    decoded_coords[tid] = unpack_hydro_voxel_coords(record)
+    decoded_pairs[tid] = unpack_hydro_voxel_pair(record)
+
+
+def test_hydro_voxel_record_roundtrip(test, device):
+    """Verify packed hydroelastic octree records preserve coordinates and shape pairs."""
+    coords_np = np.array([[0, 0, 0], [1, 255, 256], [65535, 32768, 17]], dtype=np.uint16)
+    pairs_np = np.array([[0, 1], [12345, 67890], [2**27 - 1, 2**27]], dtype=np.int32)
+    coords = wp.array(coords_np, dtype=wp.vec3us, device=device)
+    pairs = wp.array(pairs_np, dtype=wp.vec2i, device=device)
+    records = wp.empty(len(coords_np), dtype=wp.vec4ui, device=device)
+    decoded_coords = wp.empty_like(coords)
+    decoded_pairs = wp.empty_like(pairs)
+    wp.launch(
+        _test_hydro_voxel_record_roundtrip,
+        dim=len(coords_np),
+        inputs=[coords, pairs, records, decoded_coords, decoded_pairs],
+        device=device,
+    )
+    np.testing.assert_array_equal(decoded_coords.numpy(), coords_np)
+    np.testing.assert_array_equal(decoded_pairs.numpy(), pairs_np)
 
 
 def test_mc_corner_offsets_match_canonical(test, device):
@@ -1841,6 +1881,14 @@ add_function_test(
     TestHydroelastic,
     "test_fixed_point_extreme_exponents_cuda",
     test_fixed_point_extreme_exponents,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_hydro_voxel_record_roundtrip",
+    test_hydro_voxel_record_roundtrip,
     devices=cuda_devices,
     check_output=False,
 )
