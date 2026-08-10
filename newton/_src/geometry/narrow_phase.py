@@ -1896,6 +1896,9 @@ class NarrowPhase:
         num_blocks = max(min_blocks, min(candidate_blocks, max_blocks_limit))
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
+        # One-warp blocks spread sparse, serial-per-lane triangle solves across
+        # more SMs without reducing the total number of launched threads.
+        self.mesh_triangle_block_dim = 32 if device_obj.is_cuda else self.block_dim
 
         # Dynamic block allocation for mesh-mesh and mesh-plane contacts.
         # On CUDA we partition toward ~4 blocks per SM and launch twice as many
@@ -2181,7 +2184,7 @@ class NarrowPhase:
                         self.total_num_threads,
                     ],
                     device=device,
-                    block_dim=self.block_dim,
+                    block_dim=self.mesh_triangle_block_dim,
                     record_tape=False,
                 )
             else:
@@ -2204,7 +2207,7 @@ class NarrowPhase:
                         self.total_num_threads,
                     ],
                     device=device,
-                    block_dim=self.block_dim,
+                    block_dim=self.mesh_triangle_block_dim,
                     record_tape=False,
                 )
 
