@@ -520,6 +520,38 @@ def test_deterministic_hydroelastic_contacts_moment_matching(test, device):
     test_deterministic_hydroelastic_contacts(test, device, moment_matching=True)
 
 
+def test_cached_shape_sdf_data_matches_fallback(test, device):
+    """Keep cached and per-frame SDF descriptor mapping bit-identical."""
+    model, _, state, _, _, pipeline, _, _ = build_stacked_cubes_scene(
+        device=device,
+        solver_fn=lambda model: None,
+        shape_type=ShapeType.PRIMITIVE,
+        deterministic=True,
+    )
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    contacts = pipeline.contacts()
+    test.assertTrue(pipeline._hydro_shape_sdf_data_prepared)
+
+    fields = (
+        "rigid_contact_shape0",
+        "rigid_contact_shape1",
+        "rigid_contact_point0",
+        "rigid_contact_point1",
+        "rigid_contact_normal",
+        "rigid_contact_stiffness",
+    )
+    pipeline.collide(state, contacts)
+    cached_count = int(contacts.rigid_contact_count.numpy()[0])
+    cached = tuple(getattr(contacts, name).numpy()[:cached_count].copy() for name in fields)
+
+    pipeline._hydro_shape_sdf_data_prepared = False
+    pipeline.collide(state, contacts)
+    fallback_count = int(contacts.rigid_contact_count.numpy()[0])
+    test.assertEqual(fallback_count, cached_count)
+    for name, expected in zip(fields, cached, strict=True):
+        np.testing.assert_array_equal(getattr(contacts, name).numpy()[:fallback_count], expected, err_msg=name)
+
+
 def test_deterministic_hydroelastic_contacts_unreduced(test, device):
     """Produce bit-identical hydroelastic contacts with contact reduction disabled.
 
@@ -1927,6 +1959,14 @@ add_function_test(
     TestHydroelastic,
     "test_deterministic_hydroelastic_contacts",
     test_deterministic_hydroelastic_contacts,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_cached_shape_sdf_data_matches_fallback",
+    test_cached_shape_sdf_data_matches_fallback,
     devices=cuda_devices,
     check_output=False,
 )

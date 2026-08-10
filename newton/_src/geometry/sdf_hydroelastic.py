@@ -101,6 +101,24 @@ def _validate_deterministic_fingerprint_range(max_num_iso_voxels: int) -> None:
         )
 
 
+@wp.func
+def _map_shape_texture_sdf_data(
+    sdf_data: wp.array[TextureSDFData],
+    shape_sdf_index: wp.array[wp.int32],
+    out_shape_sdf_data: wp.array[TextureSDFData],
+    shape_idx: int,
+):
+    sdf_idx = shape_sdf_index[shape_idx]
+    if sdf_idx < 0:
+        out_shape_sdf_data[shape_idx].sdf_box_lower = wp.vec3(0.0, 0.0, 0.0)
+        out_shape_sdf_data[shape_idx].sdf_box_upper = wp.vec3(0.0, 0.0, 0.0)
+        out_shape_sdf_data[shape_idx].voxel_size = wp.vec3(0.0, 0.0, 0.0)
+        out_shape_sdf_data[shape_idx].voxel_radius = 0.0
+        out_shape_sdf_data[shape_idx].scale_baked = False
+    else:
+        out_shape_sdf_data[shape_idx] = sdf_data[sdf_idx]
+
+
 @wp.kernel(enable_backward=False)
 def map_shape_texture_sdf_data_kernel(
     sdf_data: wp.array[TextureSDFData],
@@ -111,15 +129,28 @@ def map_shape_texture_sdf_data_kernel(
 ):
     """Map texture SDF data and cache inverse world transforms per shape."""
     shape_idx = wp.tid()
-    sdf_idx = shape_sdf_index[shape_idx]
-    if sdf_idx < 0:
-        out_shape_sdf_data[shape_idx].sdf_box_lower = wp.vec3(0.0, 0.0, 0.0)
-        out_shape_sdf_data[shape_idx].sdf_box_upper = wp.vec3(0.0, 0.0, 0.0)
-        out_shape_sdf_data[shape_idx].voxel_size = wp.vec3(0.0, 0.0, 0.0)
-        out_shape_sdf_data[shape_idx].voxel_radius = 0.0
-        out_shape_sdf_data[shape_idx].scale_baked = False
-    else:
-        out_shape_sdf_data[shape_idx] = sdf_data[sdf_idx]
+    _map_shape_texture_sdf_data(sdf_data, shape_sdf_index, out_shape_sdf_data, shape_idx)
+    out_shape_transform_inverse[shape_idx] = wp.transform_inverse(shape_transform[shape_idx])
+
+
+@wp.kernel(enable_backward=False)
+def cache_shape_texture_sdf_data_kernel(
+    sdf_data: wp.array[TextureSDFData],
+    shape_sdf_index: wp.array[wp.int32],
+    out_shape_sdf_data: wp.array[TextureSDFData],
+):
+    """Map finalized texture SDF descriptors to shapes."""
+    shape_idx = wp.tid()
+    _map_shape_texture_sdf_data(sdf_data, shape_sdf_index, out_shape_sdf_data, shape_idx)
+
+
+@wp.kernel(enable_backward=False)
+def cache_shape_transform_inverse_kernel(
+    shape_transform: wp.array[wp.transform],
+    out_shape_transform_inverse: wp.array[wp.transform],
+):
+    """Cache inverse world transforms per shape."""
+    shape_idx = wp.tid()
     out_shape_transform_inverse[shape_idx] = wp.transform_inverse(shape_transform[shape_idx])
 
 
@@ -631,6 +662,19 @@ class HydroelasticSDF:
         self._host_warning_poll_interval = 120
         self._launch_counter = 0
 
+    def _prepare_shape_sdf_data(
+        self, texture_sdf_data: wp.array[TextureSDFData], shape_sdf_index: wp.array[wp.int32]
+    ) -> None:
+        """Cache finalized per-shape texture SDF descriptors."""
+        wp.launch(
+            kernel=cache_shape_texture_sdf_data_kernel,
+            dim=shape_sdf_index.shape[0],
+            inputs=[texture_sdf_data, shape_sdf_index],
+            outputs=[self._shape_sdf_data],
+            device=self.device,
+            record_tape=False,
+        )
+
     def _validate_deterministic(self, deterministic: bool) -> None:
         """Raise if ``deterministic`` disagrees with the mode chosen at construction.
 
@@ -767,6 +811,7 @@ class HydroelasticSDF:
         shape_pairs_sdf_sdf: wp.array[wp.vec2i],
         shape_pairs_sdf_sdf_count: wp.array[wp.int32],
         writer_data: Any,
+        shape_sdf_data_prepared: bool = False,
     ) -> None:
         """Run the full hydroelastic collision pipeline.
 
@@ -784,17 +829,28 @@ class HydroelasticSDF:
             shape_pairs_sdf_sdf: Pairs of shape indices to check for collision.
             shape_pairs_sdf_sdf_count: Number of valid shape pairs.
             writer_data: Contact data writer for output.
+            shape_sdf_data_prepared: Whether finalized per-shape SDF descriptors were cached upstream.
         """
         shape_sdf_data = self._shape_sdf_data
         shape_transform_inverse = self._shape_transform_inverse
-        wp.launch(
-            kernel=map_shape_texture_sdf_data_kernel,
-            dim=shape_sdf_index.shape[0],
-            inputs=[texture_sdf_data, shape_sdf_index, shape_transform],
-            outputs=[shape_sdf_data, shape_transform_inverse],
-            device=self.device,
-            record_tape=False,
-        )
+        if shape_sdf_data_prepared:
+            wp.launch(
+                kernel=cache_shape_transform_inverse_kernel,
+                dim=shape_transform.shape[0],
+                inputs=[shape_transform],
+                outputs=[shape_transform_inverse],
+                device=self.device,
+                record_tape=False,
+            )
+        else:
+            wp.launch(
+                kernel=map_shape_texture_sdf_data_kernel,
+                dim=shape_sdf_index.shape[0],
+                inputs=[texture_sdf_data, shape_sdf_index, shape_transform],
+                outputs=[shape_sdf_data, shape_transform_inverse],
+                device=self.device,
+                record_tape=False,
+            )
 
         self._broadphase_sdfs(
             shape_sdf_data,
