@@ -37,71 +37,58 @@ def set_mecanum_targets(
 
 @wp.kernel
 def set_ballbot_torques(
-    accelerometer: wp.array[wp.vec3],
-    gyroscope: wp.array[wp.vec3],
-    estimated_up: wp.array[wp.vec3],
-    filtered_lean_target: wp.array[wp.vec3],
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
+    body_f: wp.array[wp.spatial_vector],
     joint_qd: wp.array[float],
     joint_f: wp.array[float],
     body: int,
     ball: int,
-    target_position: wp.vec3,
+    target_position: wp.array[wp.vec3],
     command: wp.array[wp.vec3],
+    disturbance: wp.array[wp.vec3],
     drive_dofs: wp.array[int],
     drive_directions: wp.array[wp.vec3],
     gains: wp.array[float],
-    dt: float,
 ):
-    """Estimate tilt and apply torque through the three physical wheel joints."""
-    up = estimated_up[0]
-    angular_velocity = gyroscope[0]
-    up = wp.normalize(up - dt * wp.cross(angular_velocity, up))
-
-    acceleration = accelerometer[0]
-    if wp.length(acceleration) > 1.0:
-        gravity_up = wp.normalize(acceleration)
-        up = wp.normalize(0.999 * up + 0.001 * gravity_up)
-    estimated_up[0] = up
+    """Apply full-state feedback through the three physical wheel joints."""
+    rotation = wp.transform_get_rotation(body_q[body])
+    up = wp.quat_rotate_inv(rotation, wp.vec3(0.0, 0.0, 1.0))
+    angular_velocity = wp.quat_rotate_inv(rotation, wp.spatial_bottom(body_qd[body]))
+    body_f[body] += wp.spatial_vector(disturbance[0], wp.vec3())
 
     body_position = wp.transform_get_translation(body_q[body])
     ball_position = wp.transform_get_translation(body_q[ball])
     relative_position = body_position - ball_position
     horizontal_offset = wp.length(wp.vec3(relative_position[0], relative_position[1], 0.0))
     if up[2] < 0.85 or relative_position[2] < 0.25 or horizontal_offset > 0.25:
-        filtered_lean_target[0] = wp.vec3()
         for wheel in range(3):
             joint_f[drive_dofs[wheel]] = 0.0
         return
 
-    rotation = wp.transform_get_rotation(body_q[body])
     body_velocity = wp.spatial_top(body_qd[body])
-    position_error = body_position - target_position
+    position_error = body_position - target_position[0]
     position_local = wp.quat_rotate_inv(rotation, wp.vec3(position_error[0], position_error[1], 0.0))
     velocity_local = wp.quat_rotate_inv(rotation, wp.vec3(body_velocity[0], body_velocity[1], 0.0))
-    target_velocity = command[0]
+    target_velocity_world = command[0]
+    target_velocity = wp.quat_rotate_inv(rotation, wp.vec3(target_velocity_world[0], target_velocity_world[1], 0.0))
     lean = wp.vec3(-up[0], -up[1], 0.0)
     lean_rate = wp.vec3(angular_velocity[1], -angular_velocity[0], 0.0)
-    position_command = position_local
-    if wp.length(wp.vec3(target_velocity[0], target_velocity[1], 0.0)) > 0.001:
-        position_command = wp.vec3()
     velocity_error = velocity_local - wp.vec3(target_velocity[0], target_velocity[1], 0.0)
-    lean_target = -gains[4] * position_command - gains[5] * velocity_error
-    lean_target_length = wp.length(lean_target)
-    if lean_target_length > 0.08:
-        lean_target *= 0.08 / lean_target_length
-    lean_target_alpha = dt / (0.03 + dt)
-    lean_target = filtered_lean_target[0] + lean_target_alpha * (lean_target - filtered_lean_target[0])
-    filtered_lean_target[0] = lean_target
-    planar_command = gains[0] * (lean - lean_target) + gains[1] * lean_rate
-    yaw_command = gains[3] * (angular_velocity[2] - target_velocity[2])
+    planar_command = gains[0] * position_local + gains[1] * velocity_error
+    planar_command += gains[2] * lean + gains[3] * lean_rate
+    yaw_command = gains[5] * (angular_velocity[2] - target_velocity_world[2])
 
     for wheel in range(3):
         dof = drive_dofs[wheel]
         # Differential torque drives XY; the common mode drives yaw.
+        wheel_speed = joint_qd[dof]
+        overspeed_damping = wp.sign(wheel_speed) * 2.0 * wp.max(wp.abs(wheel_speed) - 12.0, 0.0)
         torque = (
-            (2.0 / 3.0) * wp.dot(planar_command, drive_directions[wheel]) + yaw_command / 3.0 - gains[2] * joint_qd[dof]
+            (2.0 / 3.0) * wp.dot(planar_command, drive_directions[wheel])
+            + yaw_command / 3.0
+            - gains[4] * wheel_speed
+            - overspeed_damping
         )
         joint_f[dof] = wp.clamp(torque, -12.0, 12.0)
 
@@ -325,7 +312,7 @@ class Example:
         newton.use_coord_layout_targets = True
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
-        self.sim_substeps = 8
+        self.sim_substeps = 6
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
         self.viewer = viewer
@@ -413,8 +400,6 @@ class Example:
             label="ballbot_body",
         )
         builder.add_shape_collision_filter_pair(ball_shape, ballbot_body_shape)
-        ballbot_imu_site = builder.add_site(ballbot_body, label="ballbot_imu")
-
         ballbot_body_free_joint = builder.add_joint_free(ballbot_body, label="ballbot_body_free")
         ballbot_body_qd_start = builder.joint_qd_start[ballbot_body_free_joint]
         builder.joint_qd[ballbot_body_qd_start] = 0.05
@@ -453,8 +438,18 @@ class Example:
         self.chassis = chassis
         self.ballbot_ball = ball
         self.ballbot_body = ballbot_body
-        self.ballbot_target_position = wp.vec3(ballbot_x, 0.0, ballbot_body_height)
+        self.ballbot_target_position = wp.array(
+            [wp.vec3(ballbot_x, 0.0, ballbot_body_height)], dtype=wp.vec3, device=self.model.device
+        )
+        self.ballbot_target_radius = wp.array([0.05], dtype=float, device=self.model.device)
+        self.ballbot_target_color = wp.array([wp.vec3(0.1, 0.9, 0.2)], dtype=wp.vec3, device=self.model.device)
         self.ballbot_command = wp.zeros(1, dtype=wp.vec3, device=self.model.device)
+        self.ballbot_disturbance = wp.zeros(1, dtype=wp.vec3, device=self.model.device)
+        self.ballbot_circle_center = wp.vec3(ballbot_x - 1.0, 0.0, ballbot_body_height)
+        self.ballbot_circle_radius = 1.0
+        self.ballbot_circle_speed = 0.40
+        self.ballbot_velocity_feedforward = 0.75
+        self.ballbot_target_velocity = np.zeros(2, dtype=np.float32)
         self.wheel_outer_radius = wheel_outer_radius
         joint_qd_start = self.model.joint_qd_start.numpy()
         self.drive_dof_indices = np.array([joint_qd_start[joint] for joint in drive_joints], dtype=np.int32)
@@ -464,20 +459,12 @@ class Example:
         )
         self.ballbot_drive_dofs = wp.array(self.ballbot_drive_dof_indices, dtype=int, device=self.model.device)
         self.ballbot_drive_directions = wp.array(ballbot_drive_directions, dtype=wp.vec3, device=self.model.device)
-        # Tilt P/D, wheel damping, yaw-rate P, position P, and velocity P.
+        # Full-state position, velocity, lean, and lean-rate gains; wheel and yaw damping.
         self.ballbot_controller_gains = wp.array(
-            [-60.0, -45.0, 0.75, -15.0, 0.10, 1.00],
+            [-90.0, -130.0, -75.0, -55.0, 1.25, -15.0],
             dtype=float,
             device=self.model.device,
         )
-        self.ballbot_filtered_lean_target = wp.zeros(1, dtype=wp.vec3, device=self.model.device)
-        self.ballbot_estimated_up = wp.array(
-            [wp.quat_rotate_inv(initial_tilt, wp.vec3(0.0, 0.0, 1.0))],
-            dtype=wp.vec3,
-            device=self.model.device,
-        )
-        self.ballbot_imu = newton.sensors.SensorIMU(self.model, [ballbot_imu_site])
-
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
             use_mujoco_contacts=False,
@@ -485,8 +472,8 @@ class Example:
             solver="newton",
             integrator="implicitfast",
             cone="elliptic",
-            iterations=15,
-            ls_iterations=50,
+            iterations=10,
+            ls_iterations=20,
             njmax=2048,
             nconmax=1024,
         )
@@ -494,7 +481,6 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-        self.ballbot_imu.update(self.state_0)
         self.collision_pipeline = newton.CollisionPipeline(self.model, rigid_contact_max=1024)
         self.contacts = self.collision_pipeline.contacts()
 
@@ -506,6 +492,11 @@ class Example:
         self.min_ballbot_height = math.inf
         self.max_ballbot_offset = 0.0
         self.max_ballbot_drive_speed = 0.0
+        self.ballbot_position_error = math.inf
+        self.ballbot_velocity_error = math.inf
+        self.ballbot_velocity_error_ema = 0.0
+        self.max_ballbot_velocity_error = 0.0
+        self.ballbot_yaw_rate = math.inf
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(pos=wp.vec3(2.4, -3.2, 2.0), pitch=-24.0, yaw=128.0)
@@ -527,28 +518,24 @@ class Example:
                 set_ballbot_torques,
                 dim=1,
                 inputs=[
-                    self.ballbot_imu.accelerometer,
-                    self.ballbot_imu.gyroscope,
-                    self.ballbot_estimated_up,
-                    self.ballbot_filtered_lean_target,
                     self.state_0.body_q,
                     self.state_0.body_qd,
+                    self.state_0.body_f,
                     self.state_0.joint_qd,
                     self.control.joint_f,
                     self.ballbot_body,
                     self.ballbot_ball,
                     self.ballbot_target_position,
                     self.ballbot_command,
+                    self.ballbot_disturbance,
                     self.ballbot_drive_dofs,
                     self.ballbot_drive_directions,
                     self.ballbot_controller_gains,
-                    self.sim_dt,
                 ],
             )
             self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
-            self.ballbot_imu.update(self.state_0)
 
     def step(self):
         """Set the drive command and advance one frame."""
@@ -566,17 +553,41 @@ class Example:
                 2.00 * math.sin(0.6 * pattern_time),
             )
 
+        circle_time = max(self.sim_time - 2.0, 0.0)
+        circle_angle = self.ballbot_circle_speed * circle_time / self.ballbot_circle_radius
+        circle_cos = math.cos(circle_angle)
+        circle_sin = math.sin(circle_angle)
+        self.ballbot_target_position.fill_(
+            self.ballbot_circle_center
+            + wp.vec3(self.ballbot_circle_radius * circle_cos, self.ballbot_circle_radius * circle_sin, 0.0)
+        )
         if self.sim_time < 2.0:
-            ballbot_command = wp.vec3()
-        elif self.sim_time < 6.0:
-            ballbot_command = wp.vec3(0.20, 0.0, 0.0)
-        elif self.sim_time < 10.0:
-            ballbot_command = wp.vec3(0.0, 0.20, 0.0)
-        elif self.sim_time < 14.0:
-            ballbot_command = wp.vec3(0.0, 0.0, 0.40)
+            self.ballbot_target_velocity.fill(0.0)
         else:
-            ballbot_command = wp.vec3()
-        self.ballbot_command.fill_(ballbot_command)
+            self.ballbot_target_velocity[:] = (
+                -self.ballbot_circle_speed * circle_sin,
+                self.ballbot_circle_speed * circle_cos,
+            )
+        self.ballbot_command.fill_(
+            wp.vec3(
+                self.ballbot_velocity_feedforward * float(self.ballbot_target_velocity[0]),
+                self.ballbot_velocity_feedforward * float(self.ballbot_target_velocity[1]),
+                0.0,
+            )
+        )
+
+        disturbance_phase = self.sim_time % 8.0
+        if self.sim_time >= 8.0 and disturbance_phase < 0.15:
+            disturbance_index = int(self.sim_time / 8.0) % 4
+            disturbance_directions = (
+                wp.vec3(1.0, 0.0, 0.0),
+                wp.vec3(0.0, 1.0, 0.0),
+                wp.vec3(-1.0, 0.0, 0.0),
+                wp.vec3(0.0, -1.0, 0.0),
+            )
+            self.ballbot_disturbance.fill_(12.0 * disturbance_directions[disturbance_index])
+        else:
+            self.ballbot_disturbance.fill_(wp.vec3())
 
         wp.launch(
             set_mecanum_targets,
@@ -607,6 +618,7 @@ class Example:
         joint_qd = self.state_0.joint_qd.numpy()
         self.max_drive_speed = max(self.max_drive_speed, float(np.max(np.abs(joint_qd[self.drive_dof_indices]))))
         ballbot_q = self.state_0.body_q.numpy()[self.ballbot_body]
+        ballbot_qd = self.state_0.body_qd.numpy()[self.ballbot_body]
         ball_q = self.state_0.body_q.numpy()[self.ballbot_ball]
         ballbot_rotation = wp.quat(*ballbot_q[3:7])
         ballbot_up = wp.quat_rotate(ballbot_rotation, wp.vec3(0.0, 0.0, 1.0))
@@ -620,6 +632,15 @@ class Example:
             self.max_ballbot_drive_speed,
             float(np.max(np.abs(joint_qd[self.ballbot_drive_dof_indices]))),
         )
+        target_position = self.ballbot_target_position.numpy()[0]
+        self.ballbot_position_error = float(np.linalg.norm(ballbot_q[:2] - target_position[:2]))
+        self.ballbot_velocity_error = float(np.linalg.norm(ballbot_qd[:2] - self.ballbot_target_velocity))
+        if self.sim_time >= 2.0:
+            self.ballbot_velocity_error_ema = (
+                0.98 * self.ballbot_velocity_error_ema + 0.02 * self.ballbot_velocity_error
+            )
+            self.max_ballbot_velocity_error = max(self.max_ballbot_velocity_error, self.ballbot_velocity_error)
+        self.ballbot_yaw_rate = abs(float(ballbot_qd[5]))
 
     def test_final(self):
         """Verify the robot completes all three commanded motions."""
@@ -639,12 +660,30 @@ class Example:
         assert self.min_ballbot_height > 0.60, f"ballbot pod lost support: minimum z={self.min_ballbot_height:.3f} m"
         assert self.max_ballbot_offset < 0.20, f"ballbot lost the ball: maximum offset={self.max_ballbot_offset:.3f} m"
         assert self.max_ballbot_drive_speed > 0.1, "ballbot balance drives did not engage"
+        assert self.ballbot_position_error < 0.30, (
+            f"ballbot failed to follow its target: position error={self.ballbot_position_error:.3f} m"
+        )
+        assert self.ballbot_velocity_error_ema < 0.20, (
+            f"ballbot velocity tracking is not converging: filtered error={self.ballbot_velocity_error_ema:.3f} m/s"
+        )
+        assert self.max_ballbot_velocity_error < 0.40, (
+            f"ballbot velocity tracking became unbounded: maximum error={self.max_ballbot_velocity_error:.3f} m/s"
+        )
+        assert self.ballbot_yaw_rate < 0.10, (
+            f"ballbot failed to stop rotating: yaw rate={self.ballbot_yaw_rate:.3f} rad/s"
+        )
 
     def render(self):
         """Render the robot and contacts."""
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         self.viewer.log_contacts(self.contacts, self.state_0)
+        self.viewer.log_points(
+            "ballbot_target",
+            self.ballbot_target_position,
+            self.ballbot_target_radius,
+            self.ballbot_target_color,
+        )
         self.viewer.end_frame()
 
 
