@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import warp as wp
 
 from ..core import MAXVAL
+from .kernels import _sdf_barrel_cylinder_grad_z, _sdf_barrel_cylinder_z
 from .types import GeoType
 
 if TYPE_CHECKING:
@@ -379,7 +380,9 @@ def ray_intersect_capsule(ray_origin: wp.vec3, ray_direction: wp.vec3, r: float,
 
 
 @wp.func
-def ray_intersect_cylinder(ray_origin: wp.vec3, ray_direction: wp.vec3, r: float, h: float) -> tuple[float, wp.vec3]:
+def ray_intersect_cylinder(
+    ray_origin: wp.vec3, ray_direction: wp.vec3, r: float, h: float, barrel_radius: float = 0.0
+) -> tuple[float, wp.vec3]:
     """Computes ray-cylinder intersection in the cylinder's local frame.
 
     The cylinder is centered at the local origin with its axis along local Z.
@@ -389,10 +392,39 @@ def ray_intersect_cylinder(ray_origin: wp.vec3, ray_direction: wp.vec3, r: float
         ray_direction: The direction of the ray in the cylinder's local frame.
         r: The radius of the cylinder.
         h: The half-height of the cylinder.
+        barrel_radius: Radius of the circular side profile. Zero creates straight sides.
 
     Returns:
         The distance and local-space normal of the intersection point along the ray, or -1.0 and a zero vector if there is no intersection.
     """
+    if barrel_radius > 0.0:
+        direction_length = wp.length(ray_direction)
+        if direction_length <= MINVAL:
+            return -1.0, wp.vec3(0.0)
+        direction = ray_direction / direction_length
+        distance_along_ray = float(0.0)
+        radial_extent = r + barrel_radius - wp.sqrt(barrel_radius * barrel_radius - h * h)
+        bounds = wp.vec3(radial_extent, radial_extent, h)
+        if not (
+            wp.abs(ray_origin[0]) <= bounds[0]
+            and wp.abs(ray_origin[1]) <= bounds[1]
+            and wp.abs(ray_origin[2]) <= bounds[2]
+        ):
+            distance_along_ray, _ = ray_intersect_box(ray_origin, direction, bounds)
+            if distance_along_ray < 0.0:
+                return -1.0, wp.vec3(0.0)
+        max_distance = distance_along_ray + 2.0 * wp.length(bounds)
+        tolerance = 1.0e-5 * wp.max(1.0, r + h)
+        for _ in range(64):
+            point = ray_origin + distance_along_ray * direction
+            distance = _sdf_barrel_cylinder_z(point, r, h, barrel_radius)
+            if wp.abs(distance) <= tolerance:
+                return distance_along_ray / direction_length, _sdf_barrel_cylinder_grad_z(point, r, h, barrel_radius)
+            distance_along_ray += wp.max(wp.abs(distance), tolerance)
+            if distance_along_ray > max_distance:
+                break
+        return -1.0, wp.vec3(0.0)
+
     t_hit = -1.0
     normal = wp.vec3(0.0)
     min_t = 1.0e10
@@ -737,7 +769,9 @@ def _make_ray_intersect_shape(compute_normal: bool):
         elif geomtype == GeoType.CAPSULE:
             t_hit, normal_local = ray_intersect_capsule(ray_origin_local, ray_direction_local, size[0], size[1])
         elif geomtype == GeoType.CYLINDER:
-            t_hit, normal_local = ray_intersect_cylinder(ray_origin_local, ray_direction_local, size[0], size[1])
+            t_hit, normal_local = ray_intersect_cylinder(
+                ray_origin_local, ray_direction_local, size[0], size[1], size[2]
+            )
         elif geomtype == GeoType.CONE:
             t_hit, normal_local = ray_intersect_cone(ray_origin_local, ray_direction_local, size[0], size[1])
         elif geomtype == GeoType.ELLIPSOID:
