@@ -1110,8 +1110,8 @@ def _texture_sample_sdf_hw_clamped_pair(
     sdf: TextureSDFData,
     clamped0: wp.vec3,
     clamped1: wp.vec3,
-    diff_mag0: float,
-    diff_mag1: float,
+    diff_sq0: float,
+    diff_sq1: float,
 ) -> wp.vec2f:
     """Sample two already-clamped SDF positions while overlapping texture latency."""
 
@@ -1177,6 +1177,13 @@ def _texture_sample_sdf_hw_clamped_pair(
         )
 
     values = _texture_sample_pair(texture0, uvw0, texture1, uvw1)
+    # Cover texture latency with the independent extrapolation roots.
+    diff_mag0 = float(0.0)
+    diff_mag1 = float(0.0)
+    if diff_sq0 != 0.0:
+        diff_mag0 = wp.sqrt(diff_sq0)
+    if diff_sq1 != 0.0:
+        diff_mag1 = wp.sqrt(diff_sq1)
     value0 = values[0]
     value1 = values[1]
     if loc0.start_slot < SLOT_LINEAR:
@@ -1205,22 +1212,13 @@ def _texture_sample_sdf_hw_pair(
     )
     diff0 = local_pos0 - clamped0
     diff1 = local_pos1 - clamped1
-    diff_mag0 = float(0.0)
-    diff_mag1 = float(0.0)
+    diff_sq0 = float(0.0)
+    diff_sq1 = float(0.0)
     if diff0[0] != 0.0 or diff0[1] != 0.0 or diff0[2] != 0.0:
-        diff_mag0 = wp.length(diff0)
+        diff_sq0 = wp.dot(diff0, diff0)
     if diff1[0] != 0.0 or diff1[1] != 0.0 or diff1[2] != 0.0:
-        diff_mag1 = wp.length(diff1)
-    return _texture_sample_sdf_hw_clamped_pair(sdf, clamped0, clamped1, diff_mag0, diff_mag1)
-
-
-@wp.func
-def _axis_extrapolation_magnitude(value: float, clamped: float) -> float:
-    """Return the one-axis distance from a clamped SDF sample."""
-    delta = value - clamped
-    if delta != 0.0:
-        return wp.sqrt(delta * delta)
-    return 0.0
+        diff_sq1 = wp.dot(diff1, diff1)
+    return _texture_sample_sdf_hw_clamped_pair(sdf, clamped0, clamped1, diff_sq0, diff_sq1)
 
 
 @wp.func
@@ -1401,12 +1399,14 @@ def _texture_sample_sdf_grad_hw_impl(
     x_pos1 = local_pos - wp.vec3(h_x, 0.0, 0.0)
     x_coord0 = wp.clamp(x_pos0[0], sdf.sdf_box_lower[0], sdf.sdf_box_upper[0])
     x_coord1 = wp.clamp(x_pos1[0], sdf.sdf_box_lower[0], sdf.sdf_box_upper[0])
+    x_delta0 = x_pos0[0] - x_coord0
+    x_delta1 = x_pos1[0] - x_coord1
     x_values = _texture_sample_sdf_hw_clamped_pair(
         sdf,
         wp.vec3(x_coord0, x_pos0[1], x_pos0[2]),
         wp.vec3(x_coord1, x_pos1[1], x_pos1[2]),
-        _axis_extrapolation_magnitude(x_pos0[0], x_coord0),
-        _axis_extrapolation_magnitude(x_pos1[0], x_coord1),
+        x_delta0 * x_delta0,
+        x_delta1 * x_delta1,
     )
     gx = (x_values[0] - x_values[1]) * sdf.inv_sdf_dx[0]
     h_y = 0.5 / sdf.inv_sdf_dx[1]
@@ -1414,12 +1414,14 @@ def _texture_sample_sdf_grad_hw_impl(
     y_pos1 = local_pos - wp.vec3(0.0, h_y, 0.0)
     y_coord0 = wp.clamp(y_pos0[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1])
     y_coord1 = wp.clamp(y_pos1[1], sdf.sdf_box_lower[1], sdf.sdf_box_upper[1])
+    y_delta0 = y_pos0[1] - y_coord0
+    y_delta1 = y_pos1[1] - y_coord1
     y_values = _texture_sample_sdf_hw_clamped_pair(
         sdf,
         wp.vec3(y_pos0[0], y_coord0, y_pos0[2]),
         wp.vec3(y_pos1[0], y_coord1, y_pos1[2]),
-        _axis_extrapolation_magnitude(y_pos0[1], y_coord0),
-        _axis_extrapolation_magnitude(y_pos1[1], y_coord1),
+        y_delta0 * y_delta0,
+        y_delta1 * y_delta1,
     )
     gy = (y_values[0] - y_values[1]) * sdf.inv_sdf_dx[1]
     h_z = 0.5 / sdf.inv_sdf_dx[2]
@@ -1427,12 +1429,14 @@ def _texture_sample_sdf_grad_hw_impl(
     z_pos1 = local_pos - wp.vec3(0.0, 0.0, h_z)
     z_coord0 = wp.clamp(z_pos0[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2])
     z_coord1 = wp.clamp(z_pos1[2], sdf.sdf_box_lower[2], sdf.sdf_box_upper[2])
+    z_delta0 = z_pos0[2] - z_coord0
+    z_delta1 = z_pos1[2] - z_coord1
     z_values = _texture_sample_sdf_hw_clamped_pair(
         sdf,
         wp.vec3(z_pos0[0], z_pos0[1], z_coord0),
         wp.vec3(z_pos1[0], z_pos1[1], z_coord1),
-        _axis_extrapolation_magnitude(z_pos0[2], z_coord0),
-        _axis_extrapolation_magnitude(z_pos1[2], z_coord1),
+        z_delta0 * z_delta0,
+        z_delta1 * z_delta1,
     )
     gz = (z_values[0] - z_values[1]) * sdf.inv_sdf_dx[2]
     return wp.vec3(gx, gy, gz)
