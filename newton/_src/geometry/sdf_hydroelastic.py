@@ -102,9 +102,11 @@ def _validate_deterministic_fingerprint_range(max_num_iso_voxels: int) -> None:
 def map_shape_texture_sdf_data_kernel(
     sdf_data: wp.array[TextureSDFData],
     shape_sdf_index: wp.array[wp.int32],
+    shape_transform: wp.array[wp.transform],
     out_shape_sdf_data: wp.array[TextureSDFData],
+    out_shape_transform_inverse: wp.array[wp.transform],
 ):
-    """Map compact texture SDF table entries to per-shape TextureSDFData."""
+    """Map texture SDF data and cache inverse world transforms per shape."""
     shape_idx = wp.tid()
     sdf_idx = shape_sdf_index[shape_idx]
     if sdf_idx < 0:
@@ -115,6 +117,7 @@ def map_shape_texture_sdf_data_kernel(
         out_shape_sdf_data[shape_idx].scale_baked = False
     else:
         out_shape_sdf_data[shape_idx] = sdf_data[sdf_idx]
+    out_shape_transform_inverse[shape_idx] = wp.transform_inverse(shape_transform[shape_idx])
 
 
 @wp.func
@@ -557,6 +560,7 @@ class HydroelasticSDF:
             # Pre-allocate per-shape SDF data buffer used in launch() so that
             # no wp.empty() call occurs during CUDA graph capture (#1616).
             self._shape_sdf_data = wp.empty(n_shapes, dtype=TextureSDFData, device=device)
+            self._shape_transform_inverse = wp.empty(n_shapes, dtype=wp.transform, device=device)
 
             # Resolve the pressure callback. Defaults to the linear hydroelastic
             # law backed by ``shape_material_kh`` so behavior is unchanged when
@@ -783,11 +787,12 @@ class HydroelasticSDF:
             writer_data: Contact data writer for output.
         """
         shape_sdf_data = self._shape_sdf_data
+        shape_transform_inverse = self._shape_transform_inverse
         wp.launch(
             kernel=map_shape_texture_sdf_data_kernel,
             dim=shape_sdf_index.shape[0],
-            inputs=[texture_sdf_data, shape_sdf_index],
-            outputs=[shape_sdf_data],
+            inputs=[texture_sdf_data, shape_sdf_index, shape_transform],
+            outputs=[shape_sdf_data, shape_transform_inverse],
             device=self.device,
             record_tape=False,
         )
@@ -799,9 +804,9 @@ class HydroelasticSDF:
             shape_pairs_sdf_sdf_count,
         )
 
-        self._find_iso_voxels(shape_sdf_data, shape_transform, shape_gap)
+        self._find_iso_voxels(shape_sdf_data, shape_transform, shape_transform_inverse, shape_gap)
 
-        self._generate_contacts(shape_sdf_data, shape_transform, shape_gap)
+        self._generate_contacts(shape_sdf_data, shape_transform, shape_transform_inverse, shape_gap)
 
         if self.config.reduce_contacts:
             self._reduce_decode_contacts(
@@ -912,6 +917,7 @@ class HydroelasticSDF:
         self,
         shape_sdf_data: wp.array[TextureSDFData],
         shape_transform: wp.array[wp.transform],
+        shape_transform_inverse: wp.array[wp.transform],
         shape_gap: wp.array[wp.float32],
     ) -> None:
         # Find voxels which contain the isosurface between the shapes using octree-like pruning.
@@ -926,6 +932,7 @@ class HydroelasticSDF:
                     self.iso_buffer_counts[i],
                     shape_sdf_data,
                     shape_transform,
+                    shape_transform_inverse,
                     self.pressure_data,
                     self.iso_buffer_coords[i],
                     self.iso_buffer_shape_pairs[i],
@@ -975,6 +982,7 @@ class HydroelasticSDF:
         self,
         shape_sdf_data: wp.array[TextureSDFData],
         shape_transform: wp.array[wp.transform],
+        shape_transform_inverse: wp.array[wp.transform],
         shape_gap: wp.array[wp.float32],
         shape_local_aabb_lower: wp.array | None = None,
         shape_local_aabb_upper: wp.array | None = None,
@@ -1005,6 +1013,7 @@ class HydroelasticSDF:
                 self.iso_voxel_count,
                 shape_sdf_data,
                 shape_transform,
+                shape_transform_inverse,
                 self.pressure_data,
                 self.iso_voxel_coords,
                 self.iso_voxel_shape_pair,
@@ -1249,6 +1258,7 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any):
         in_buffer_collide_count: wp.array[int],
         shape_sdf_data: wp.array[TextureSDFData],
         shape_transform: wp.array[wp.transform],
+        shape_transform_inverse: wp.array[wp.transform],
         pressure_data: Any,
         in_buffer_collide_coords: wp.array[wp.vec3us],
         in_buffer_collide_shape_pair: wp.array[wp.vec2i],
@@ -1272,7 +1282,6 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any):
             sdf_data_a = shape_sdf_data[shape_a]
             sdf_data_b = shape_sdf_data[shape_b]
 
-            X_ws_a = shape_transform[shape_a]
             X_ws_b = shape_transform[shape_b]
 
             gap_a = shape_gap[shape_a]
@@ -1284,7 +1293,7 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any):
             # get global voxel coordinates
             bc = in_buffer_collide_coords[tid]
 
-            X_b_to_a = wp.transform_multiply(wp.transform_inverse(X_ws_a), X_ws_b)
+            X_b_to_a = wp.transform_multiply(shape_transform_inverse[shape_a], X_ws_b)
 
             num_iso_subblocks = wp.int32(0)
             subblock_idx = wp.uint8(0)
@@ -1375,7 +1384,7 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any):
         sdf_data: TextureSDFData,
         sdf_other_data: TextureSDFData,
         X_ws: wp.transform,
-        X_ws_other: wp.transform,
+        X_sw_other: wp.transform,
         shape_self: wp.int32,
         shape_other: wp.int32,
         pressure_data: Any,
@@ -1387,7 +1396,7 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any):
         corner_vals = vec8f()
         corner_sdf_vals = vec8f()
 
-        X_a_to_b = wp.transform_multiply(wp.transform_inverse(X_ws_other), X_ws)
+        X_a_to_b = wp.transform_multiply(X_sw_other, X_ws)
 
         for i in range(8):
             corner_offset = _mc_corner_offset(i)
@@ -1631,6 +1640,7 @@ def get_generate_contacts_kernel(
         iso_voxel_count: wp.array[wp.int32],
         shape_sdf_data: wp.array[TextureSDFData],
         shape_transform: wp.array[wp.transform],
+        shape_transform_inverse: wp.array[wp.transform],
         pressure_data: Any,
         iso_voxel_coords: wp.array[wp.vec3us],
         iso_voxel_shape_pair: wp.array[wp.vec2i],
@@ -1659,7 +1669,7 @@ def get_generate_contacts_kernel(
             sdf_data_a = shape_sdf_data[shape_a]
             sdf_data_b = shape_sdf_data[shape_b]
 
-            transform_a = shape_transform[shape_a]
+            transform_inverse_a = shape_transform_inverse[shape_a]
             transform_b = shape_transform[shape_b]
 
             iso_coords = iso_voxel_coords[tid]
@@ -1680,7 +1690,7 @@ def get_generate_contacts_kernel(
                 sdf_data_b,
                 sdf_data_a,
                 transform_b,
-                transform_a,
+                transform_inverse_a,
                 shape_b,
                 shape_a,
                 pressure_data,
