@@ -1717,11 +1717,13 @@ def get_generate_contacts_kernel(
 
             # Generate faces and locally compact candidates before writing to the
             # global contact buffer (reduces atomics and downstream reduction load).
+            # Retain encoded normals because export writes that representation
+            # directly, shortening each winner by one long-lived scalar.
             best_pen0_valid = int(0)
             best_pen0_score = float(-MAXVAL)
             best_pen0_depth = float(0.0)
             best_pen0_area = float(0.0)
-            best_pen0_normal = wp.vec3(0.0, 0.0, 1.0)
+            best_pen0_normal = wp.vec2(0.0, 0.0)
             best_pen0_center = wp.vec3(0.0, 0.0, 0.0)
             best_pen0_v0 = wp.vec3(0.0, 0.0, 0.0)
             best_pen0_v1 = wp.vec3(0.0, 0.0, 0.0)
@@ -1731,7 +1733,7 @@ def get_generate_contacts_kernel(
             best_pen1_score = float(-MAXVAL)
             best_pen1_depth = float(0.0)
             best_pen1_area = float(0.0)
-            best_pen1_normal = wp.vec3(0.0, 0.0, 1.0)
+            best_pen1_normal = wp.vec2(0.0, 0.0)
             best_pen1_center = wp.vec3(0.0, 0.0, 0.0)
             best_pen1_v0 = wp.vec3(0.0, 0.0, 0.0)
             best_pen1_v1 = wp.vec3(0.0, 0.0, 0.0)
@@ -1740,7 +1742,7 @@ def get_generate_contacts_kernel(
             best_nonpen_valid = int(0)
             best_nonpen_depth = float(MAXVAL)
             best_nonpen_area = float(0.0)
-            best_nonpen_normal = wp.vec3(0.0, 0.0, 1.0)
+            best_nonpen_normal = wp.vec2(0.0, 0.0)
             best_nonpen_center = wp.vec3(0.0, 0.0, 0.0)
             best_nonpen_v0 = wp.vec3(0.0, 0.0, 0.0)
             best_nonpen_v1 = wp.vec3(0.0, 0.0, 0.0)
@@ -1824,7 +1826,7 @@ def get_generate_contacts_kernel(
                         best_pen0_score = score
                         best_pen0_depth = pen_depth
                         best_pen0_area = area
-                        best_pen0_normal = normal
+                        best_pen0_normal = encode_oct(normal)
                         best_pen0_center = face_center
                         best_pen0_v0 = face_verts[0]
                         best_pen0_v1 = face_verts[1]
@@ -1835,7 +1837,7 @@ def get_generate_contacts_kernel(
                             best_pen1_score = score
                             best_pen1_depth = pen_depth
                             best_pen1_area = area
-                            best_pen1_normal = normal
+                            best_pen1_normal = encode_oct(normal)
                             best_pen1_center = face_center
                             best_pen1_v0 = face_verts[0]
                             best_pen1_v1 = face_verts[1]
@@ -1846,7 +1848,7 @@ def get_generate_contacts_kernel(
                         best_nonpen_valid = int(1)
                         best_nonpen_depth = pen_depth
                         best_nonpen_area = area
-                        best_nonpen_normal = normal
+                        best_nonpen_normal = encode_oct(normal)
                         best_nonpen_center = face_center
                         best_nonpen_v0 = face_verts[0]
                         best_nonpen_v1 = face_verts[1]
@@ -1873,7 +1875,7 @@ def get_generate_contacts_kernel(
                             reducer_data.position_depth[contact_id] = wp.vec4(
                                 best_pen0_center[0], best_pen0_center[1], best_pen0_center[2], best_pen0_depth
                             )
-                            reducer_data.normal[contact_id] = encode_oct(best_pen0_normal)
+                            reducer_data.normal[contact_id] = best_pen0_normal
                             reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
                             reducer_data.contact_area[contact_id] = best_pen0_area
                             if wp.static(output_vertices):
@@ -1890,7 +1892,7 @@ def get_generate_contacts_kernel(
                                 reducer_data.position_depth[contact_id] = wp.vec4(
                                     best_pen1_center[0], best_pen1_center[1], best_pen1_center[2], best_pen1_depth
                                 )
-                                reducer_data.normal[contact_id] = encode_oct(best_pen1_normal)
+                                reducer_data.normal[contact_id] = best_pen1_normal
                                 reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
                                 reducer_data.contact_area[contact_id] = best_pen1_area
                                 if wp.static(output_vertices):
@@ -1906,7 +1908,7 @@ def get_generate_contacts_kernel(
                             reducer_data.position_depth[contact_id] = wp.vec4(
                                 best_nonpen_center[0], best_nonpen_center[1], best_nonpen_center[2], best_nonpen_depth
                             )
-                            reducer_data.normal[contact_id] = encode_oct(best_nonpen_normal)
+                            reducer_data.normal[contact_id] = best_nonpen_normal
                             reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
                             reducer_data.contact_area[contact_id] = best_nonpen_area
                             if wp.static(output_vertices):
