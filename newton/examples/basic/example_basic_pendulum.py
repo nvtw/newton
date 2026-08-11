@@ -99,7 +99,12 @@ class Example:
 
         if self.solver_type == "kamino":
             self.collision_pipeline = None
-            self.contacts = None
+            self.contacts = newton.Contacts(
+                self.model.rigid_contact_max,
+                0,
+                device=self.model.device,
+                requested_attributes=self.model.get_requested_contact_attributes(),
+            )
         else:
             self.collision_pipeline = newton.CollisionPipeline(self.model)
             self.contacts = self.collision_pipeline.contacts()
@@ -114,6 +119,7 @@ class Example:
         self.graph = capture.graph
 
     def simulate(self):
+        contacts = None if self.solver_type == "kamino" else self.contacts
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
@@ -122,7 +128,7 @@ class Example:
 
             if self.collision_pipeline is not None:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.solver.step(self.state_0, self.state_1, self.control, contacts, self.sim_dt)
 
             # swap states
             self.state_0, self.state_1 = self.state_1, self.state_0
@@ -164,6 +170,8 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         if self.contacts is not None:
+            if self.solver_type == "kamino" and self.viewer.show_contacts:
+                self.solver.update_contacts(self.contacts, self.state_0)
             self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 

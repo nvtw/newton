@@ -158,10 +158,20 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
 
         solver.compute(matrix_wp)
         permutation_1 = solver.P.numpy()
+        reorder_calls = 0
+        reorder = solver._reorder_callback
+
+        def count_reorders():
+            nonlocal reorder_calls
+            reorder_calls += 1
+            reorder()
+
+        solver._reorder_callback = count_reorders
         matrix_wp.assign(matrix_2.reshape(-1))
         solver.compute(matrix_wp)
         solver.solve(rhs_wp, result_wp)
 
+        self.assertEqual(reorder_calls, 0)
         np.testing.assert_array_equal(solver.P.numpy(), permutation_1)
         expected = np.linalg.solve(matrix_2, rhs_np)
         np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-3, atol=1.0e-4)
@@ -191,8 +201,24 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
         solver.compute(matrix_wp)
         solver.solve(rhs_wp, result_wp)
 
+        self.assertFalse(solver._use_parallel_factorization)
         expected = np.linalg.solve(matrix, rhs)
         np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-4, atol=1.0e-5)
+
+    def test_parallel_factorization_remains_enabled_for_large_panels(self):
+        """Keep panel parallelism enabled when a factor has enough tiles."""
+        n = 97
+        info = DenseSquareMultiLinearInfo()
+        info.finalize(dimensions=[n], dtype=wp.float32, device=self.default_device)
+        matrix_wp = wp.array(np.eye(n, dtype=np.float32).reshape(-1), device=self.default_device)
+        solver = LLTBlockedRCMSolver(
+            operator=DenseLinearOperatorData(info=info, mat=matrix_wp),
+            block_size=32,
+            parallel_factorization=True,
+            device=self.default_device,
+        )
+
+        self.assertTrue(solver._use_parallel_factorization)
 
     def test_cached_permutation_on_cpu_fallback(self):
         """Verify the CPU fallback reuses a cached permutation."""

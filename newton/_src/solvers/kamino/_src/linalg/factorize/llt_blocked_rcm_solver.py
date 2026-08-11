@@ -159,6 +159,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         # pointer changes.
         self._reorder_callback = None
         self._reorder_attached_to: wp.array[dtype] | None = None
+        self._permutation_initialized = False
 
         # Cache the fixed block/tile dimensions
         self._block_size: int = block_size
@@ -170,6 +171,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._rcm_max_bfs_iters = rcm_max_bfs_iters
         self._reuse_permutation = reuse_permutation
         self._parallel_factorization = parallel_factorization
+        self._use_parallel_factorization = False
 
         # Build kernels (cached by block_size / max_dim at allocate time).
         self._factorize_kernel = make_llt_blocked_rcm_factorize_kernel(block_size)
@@ -242,6 +244,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
 
         info = self._operator.info
         self._max_dim = int(info.max_dimension)
+        self._permutation_initialized = False
 
         # Resolve auxiliary kernels now that max_dim is known.
         self._permute_vector_kernel = make_llt_blocked_rcm_permute_vector_kernel(self._max_dim)
@@ -249,6 +252,10 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             self._block_size, self._max_dim
         )
         max_n_tiles = (self._max_dim + self._block_size - 1) // self._block_size
+        # Panel parallelism adds two launches per panel. Small factorizations
+        # expose too little panel work to recover that overhead, even when the
+        # caller requests the generally faster parallel implementation.
+        self._use_parallel_factorization = self._parallel_factorization and max_n_tiles > 3
         self._symbolic_fill_in_kernel = make_llt_blocked_rcm_symbolic_fill_in_kernel(max_n_tiles)
 
         # Per-block tile-pattern layout: n_tiles_i^2 entries per block.
@@ -304,6 +311,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._rcm_scratch["permutation_valid"].zero_()
         self._rcm_scratch["permutation_dim"].zero_()
         self._inv_P.zero_()
+        self._permutation_initialized = False
         self._tile_pattern.zero_()
         self._has_factors = False
 
@@ -347,7 +355,11 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         # Compute per-block P via the batched RCM callback. The callback is a
         # set of recorded Warp launches and is safe to replay under CUDA graph
         # capture initiated by the caller.
-        self._reorder_callback()
+        if not self._reuse_permutation or not self._permutation_initialized:
+            self._reorder_callback()
+            # Later calls are ordered behind these launches on the same stream,
+            # including calls recorded later in the same CUDA graph capture.
+            self._permutation_initialized = True
 
         # 2. Fused: build inv_P, permute A -> A_hat, and reduce |A_hat| into the
         #    raw tile pattern in a single launch. Each thread writes only its
@@ -383,7 +395,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         )
 
         # 4. Numeric factorization with tile-pattern skips.
-        if self._parallel_factorization:
+        if self._use_parallel_factorization:
             llt_blocked_rcm_factorize_parallel(
                 kernels=self._parallel_factorize_kernels,
                 dim=info.dim,

@@ -154,6 +154,7 @@ def _map_active_limits(
     limits_wid: wp.array[int32],
     limits_lid: wp.array[int32],
     limits_bids: wp.array[wp.vec2i],
+    model_body_inv_mass: wp.array[float32],
     problem_lio: wp.array[int32],
     problem_uio: wp.array[int32],
     limit_indices: wp.array[int32],
@@ -165,7 +166,14 @@ def _map_active_limits(
         wid = limits_wid[limit_id]
         lid = limits_lid[limit_id]
         limit_indices[problem_lio[wid] + lid] = limit_id
-        inequality_bodies[problem_uio[wid] + lid] = limits_bids[limit_id]
+        bids = limits_bids[limit_id]
+        bid_a = bids[0]
+        bid_b = bids[1]
+        if bid_a >= int32(0) and model_body_inv_mass[bid_a] <= float32(0.0):
+            bid_a = int32(-1)
+        if bid_b >= int32(0) and model_body_inv_mass[bid_b] <= float32(0.0):
+            bid_b = int32(-1)
+        inequality_bodies[problem_uio[wid] + lid] = wp.vec2i(bid_a, bid_b)
 
 
 @wp.kernel
@@ -174,6 +182,7 @@ def _map_active_contacts(
     contacts_wid: wp.array[int32],
     contacts_cid: wp.array[int32],
     contacts_bid_AB: wp.array[wp.vec2i],
+    model_body_inv_mass: wp.array[float32],
     problem_nl: wp.array[int32],
     problem_cio: wp.array[int32],
     problem_uio: wp.array[int32],
@@ -186,7 +195,14 @@ def _map_active_contacts(
         wid = contacts_wid[contact_id]
         cid = contacts_cid[contact_id]
         contact_indices[problem_cio[wid] + cid] = contact_id
-        inequality_bodies[problem_uio[wid] + problem_nl[wid] + cid] = contacts_bid_AB[contact_id]
+        bids = contacts_bid_AB[contact_id]
+        bid_a = bids[0]
+        bid_b = bids[1]
+        if bid_a >= int32(0) and model_body_inv_mass[bid_a] <= float32(0.0):
+            bid_a = int32(-1)
+        if bid_b >= int32(0) and model_body_inv_mass[bid_b] <= float32(0.0):
+            bid_b = int32(-1)
+        inequality_bodies[problem_uio[wid] + problem_nl[wid] + cid] = wp.vec2i(bid_a, bid_b)
 
 
 @wp.func_native("""

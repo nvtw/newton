@@ -44,6 +44,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _color_mapped_dvi_inequalities,
     _group_mapped_dvi_inequalities,
+    _map_active_contacts,
     _solve_dvi_sparse_inequalities_pgs,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.types import DVIConfigStruct, DVIState, convert_config_to_struct
@@ -1368,6 +1369,7 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_allclose(lambdas[0], lambdas[1], rtol=1e-5, atol=1e-6)
 
     def test_03d2_dvi_direct_block_finishes_with_bilateral_solve(self):
+        """Recover a consistent bilateral solution after fused inequality iterations."""
         builder = basics.build_boxes_hinged()
         model, data, state, limits, detector, jacobians = make_containers(
             builder=builder,
@@ -1395,7 +1397,7 @@ class TestDVISolver(unittest.TestCase):
             config=kamino_config.DVISolverConfig(
                 tolerance=0.0,
                 regularization=1e-5,
-                max_alternating_iterations=1,
+                max_alternating_iterations=3,
                 inequality_sweeps_per_iteration=1,
             ),
             warmstart=WarmStartMode.NONE,
@@ -1698,6 +1700,75 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(inequality_color_starts.numpy()[:2], [0, 4])
         np.testing.assert_array_equal(inequality_group_starts.numpy()[:5], [0, 1, 3, 4, 6])
 
+    def test_03g4_dvi_inequality_coloring_ignores_immovable_bodies(self):
+        """Color contacts sharing an immovable body in parallel."""
+        contact_count = 3
+        contacts_model_active = wp.array([contact_count], dtype=wp.int32, device=self.device)
+        contacts_wid = wp.zeros(contact_count, dtype=wp.int32, device=self.device)
+        contacts_cid = wp.array([0, 1, 2], dtype=wp.int32, device=self.device)
+        contacts_bid_ab = wp.array(
+            [wp.vec2i(0, 1), wp.vec2i(0, 2), wp.vec2i(0, 3)],
+            dtype=wp.vec2i,
+            device=self.device,
+        )
+        body_inv_mass = wp.array([0.0, 1.0, 1.0, 1.0], dtype=wp.float32, device=self.device)
+        problem_nl = wp.array([0], dtype=wp.int32, device=self.device)
+        problem_nc = wp.array([contact_count], dtype=wp.int32, device=self.device)
+        problem_cio = wp.array([0], dtype=wp.int32, device=self.device)
+        problem_uio = wp.array([0], dtype=wp.int32, device=self.device)
+        contact_indices = wp.full(contact_count, value=-1, dtype=wp.int32, device=self.device)
+        inequality_bodies = wp.full(contact_count, value=wp.vec2i(-1, -1), dtype=wp.vec2i, device=self.device)
+
+        wp.launch(
+            kernel=_map_active_contacts,
+            dim=contact_count,
+            inputs=[
+                contacts_model_active,
+                contacts_wid,
+                contacts_cid,
+                contacts_bid_ab,
+                body_inv_mass,
+                problem_nl,
+                problem_cio,
+                problem_uio,
+                contact_indices,
+                inequality_bodies,
+            ],
+            device=self.device,
+        )
+
+        body_color_masks = wp.zeros(shape=4, dtype=wp.uint64, device=self.device)
+        inequality_colors = wp.full(contact_count, value=-1, dtype=wp.int32, device=self.device)
+        inequality_num_colors = wp.zeros(shape=1, dtype=wp.int32, device=self.device)
+        inequality_ids_by_color = wp.full(contact_count, value=-1, dtype=wp.int32, device=self.device)
+        inequality_color_starts = wp.zeros(shape=contact_count + 1, dtype=wp.int32, device=self.device)
+        inequality_group_starts = wp.zeros(shape=contact_count + 1, dtype=wp.int32, device=self.device)
+
+        wp.launch(
+            kernel=_group_mapped_dvi_inequalities,
+            dim=1,
+            inputs=[
+                problem_nl,
+                problem_nc,
+                problem_uio,
+                inequality_bodies,
+                body_color_masks,
+                inequality_colors,
+                inequality_num_colors,
+                inequality_ids_by_color,
+                inequality_color_starts,
+                inequality_group_starts,
+            ],
+            device=self.device,
+        )
+
+        np.testing.assert_array_equal(
+            inequality_bodies.numpy(),
+            [wp.vec2i(-1, 1), wp.vec2i(-1, 2), wp.vec2i(-1, 3)],
+        )
+        np.testing.assert_array_equal(inequality_colors.numpy(), [0, 0, 0])
+        self.assertEqual(int(inequality_num_colors.numpy()[0]), 1)
+
     def test_03i_dvi_coldstart_is_repeatable(self):
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
@@ -1924,6 +1995,30 @@ class TestDVISolver(unittest.TestCase):
                     self.assertTrue(np.all(np.isfinite(body_q)))
                     self.assertTrue(np.all(np.isfinite(body_qd)))
                     self.assertEqual(int(solver._solver_kamino.solver_fd.data.status.numpy()[0]["converged"]), 1)
+
+    def test_08ab_public_solver_treats_kinematic_bodies_as_immovable(self):
+        """Treat flagged kinematic bodies as having infinite effective mass."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        body = builder.add_body(is_kinematic=True)
+        builder.add_shape_box(body, hx=0.5, hy=0.5, hz=0.5)
+        model = builder.finalize(device=self.device)
+
+        solver = SolverKamino(
+            model,
+            config=SolverKamino.Config(
+                dynamics_solver="dvi",
+                sparse_dynamics=True,
+                sparse_jacobian=True,
+            ),
+        )
+
+        self.assertGreater(float(model.body_inv_mass.numpy()[body]), 0.0)
+        self.assertEqual(float(solver._model_kamino.bodies.inv_m_i.numpy()[body]), 0.0)
+        np.testing.assert_array_equal(
+            solver._model_kamino.bodies.inv_i_I_i.numpy()[body],
+            np.zeros((3, 3), dtype=np.float32),
+        )
 
     def test_08a_public_solver_heterogeneous_contact_rollout_with_dvi(self):
         """Use Cholesky for heterogeneous dense and sparse DVI rollouts."""

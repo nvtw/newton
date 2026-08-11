@@ -160,6 +160,12 @@ class Example:
             solver_config.dvi.max_alternating_iterations = 8
             solver_config.dvi.bilateral_solve_interval = 8
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+            self.contacts = newton.Contacts(
+                self.model.rigid_contact_max,
+                0,
+                device=self.model.device,
+                requested_attributes=self.model.get_requested_contact_attributes(),
+            )
         else:
             raise ValueError(f"Unknown solver: {self.solver_name}")
         self.state_0 = self.model.state()
@@ -212,7 +218,9 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        if self.solver_name not in NATIVE_CONTACT_SOLVERS:
+        if self.solver_name == "kamino" and self.viewer.show_contacts:
+            self.solver.update_contacts(self.contacts, self.state_0)
+        if self.contacts is not None:
             self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 

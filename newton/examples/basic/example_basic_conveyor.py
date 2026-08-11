@@ -154,6 +154,7 @@ def advance_time(sim_time: wp.array[wp.float32], dt: float):
 class Example:
     def __init__(self, viewer, args=None):
         solver_type = getattr(args, "solver", "xpbd") if args is not None else "xpbd"
+        self.solver_type = solver_type
         newton.use_coord_layout_targets = True
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
@@ -407,7 +408,12 @@ class Example:
         self.control = self.model.control()
         if solver_type == "kamino":
             self.collision_pipeline = None
-            self.contacts = None
+            self.contacts = newton.Contacts(
+                self.model.rigid_contact_max,
+                0,
+                device=self.model.device,
+                requested_attributes=self.model.get_requested_contact_attributes(),
+            )
         else:
             self.collision_pipeline = newton.CollisionPipeline(self.model)
             self.contacts = self.collision_pipeline.contacts()
@@ -426,11 +432,15 @@ class Example:
         self.capture()
 
     def capture(self):
-        with wp.ScopedCapture() as capture:
-            self.simulate()
-        self.graph = capture.graph
+        if wp.get_device().is_cuda and not wp.config.verify_cuda:
+            with wp.ScopedCapture() as capture:
+                self.simulate()
+            self.graph = capture.graph
+        else:
+            self.graph = None
 
     def simulate(self):
+        contacts = None if self.solver_type == "kamino" else self.contacts
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
@@ -459,7 +469,7 @@ class Example:
 
             if self.collision_pipeline is not None:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.solver.step(self.state_0, self.state_1, self.control, contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
             wp.launch(advance_time, dim=1, inputs=[self.sim_time_wp, self.sim_dt], device=self.model.device)
@@ -475,6 +485,8 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         if self.contacts is not None:
+            if self.solver_type == "kamino" and self.viewer.show_contacts:
+                self.solver.update_contacts(self.contacts, self.state_0)
             self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 

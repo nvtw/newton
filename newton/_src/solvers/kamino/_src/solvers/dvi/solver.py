@@ -24,6 +24,7 @@ from ..common import (
     warmstart_limit_constraints,
 )
 from .kernels import (
+    _FUSED_BILATERAL_BLOCK,
     _FUSED_INEQUALITY_BLOCK,
     _build_bilateral_rhs,
     _compute_dvi_desaxce_corrections,
@@ -571,6 +572,7 @@ class DVISolver:
                     limits.wid,
                     limits.lid,
                     limits.bids,
+                    self._sparse_path.model.bodies.inv_m_i,
                     problem.data.lio,
                     problem.data.uio,
                     state.limit_indices,
@@ -588,6 +590,7 @@ class DVISolver:
                     contacts.wid,
                     contacts.cid,
                     contacts.bid_AB,
+                    self._sparse_path.model.bodies.inv_m_i,
                     problem.data.nl,
                     problem.data.cio,
                     problem.data.uio,
@@ -811,7 +814,11 @@ class DVISolver:
             ],
             device=self.device,
         )
-        for block_iteration in range(self._max_alternating_iterations):
+        has_intermediate_bilateral_solve = any(self._bilateral_solve_after_block)
+        block_iterations = (
+            range(self._max_alternating_iterations) if has_intermediate_bilateral_solve else (_FUSED_BILATERAL_BLOCK,)
+        )
+        for block_iteration in block_iterations:
             wp.launch(
                 kernel=_solve_dvi_inequalities_colored_pgs,
                 dim=self._size.num_worlds * threads_per_world,
@@ -841,7 +848,7 @@ class DVISolver:
                 block_dim=threads_per_world,
             )
 
-            if self._should_solve_bilateral_after_block(block_iteration):
+            if has_intermediate_bilateral_solve and self._should_solve_bilateral_after_block(block_iteration):
                 self._set_bilateral_active_dim(problem, block_iteration)
                 self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
 

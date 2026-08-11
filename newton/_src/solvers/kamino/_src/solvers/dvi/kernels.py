@@ -562,7 +562,9 @@ def _solve_dvi_inequalities_colored_pgs(
     contact_end = ccgo + int32(3) * nc
     sweep_count = cfg.inequality_sweeps_per_iteration
     first_tangent_sweep = int32(0)
-    if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
+    if block_iteration == int32(_FUSED_BILATERAL_BLOCK):
+        sweep_count *= cfg.max_alternating_iterations
+    elif block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
         tangent_sweep_count = sweep_count * cfg.max_alternating_iterations / int32(2)
         sweep_count = (sweep_count + int32(1)) * cfg.max_alternating_iterations
         first_tangent_sweep = sweep_count - tangent_sweep_count

@@ -130,13 +130,19 @@ class _SolverLayer:
             for s in link_shape_indices:
                 self.model.shape_color[s : s + 1].fill_(color_vec)
         self.solver = solver_factory(self.model)
+        self.native_contacts = native_contacts
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         if native_contacts:
             self.collision_pipeline = None
-            self.contacts = None
+            self.contacts = newton.Contacts(
+                self.model.rigid_contact_max,
+                0,
+                device=self.model.device,
+                requested_attributes=self.model.get_requested_contact_attributes(),
+            )
         else:
             self.collision_pipeline = newton.CollisionPipeline(self.model)
             self.contacts = self.collision_pipeline.contacts()
@@ -147,12 +153,13 @@ class _SolverLayer:
         self.graph: wp.Graph | None = self._capture()
 
     def _simulate(self) -> None:
+        contacts = None if self.native_contacts else self.contacts
         for _ in range(self._sim_substeps):
             self.state_0.clear_forces()
             self._viewer.apply_forces(self.state_0)
             if self.collision_pipeline is not None:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self._sim_dt)
+            self.solver.step(self.state_0, self.state_1, self.control, contacts, self._sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def _capture(self) -> wp.Graph | None:
@@ -261,6 +268,8 @@ class Example:
             self.viewer.activate(layer.layer_id)
             self.viewer.log_state(layer.state_0)
             if layer.contacts is not None:
+                if layer.native_contacts and self.viewer.show_contacts:
+                    layer.solver.update_contacts(layer.contacts, layer.state_0)
                 self.viewer.log_contacts(layer.contacts, layer.state_0)
         self.viewer.end_frame()
 

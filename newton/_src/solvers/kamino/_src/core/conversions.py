@@ -12,6 +12,7 @@ import numpy as np
 import warp as wp
 
 from .....geometry import ShapeFlags
+from .....sim import BodyFlags
 from .....sim.model import Model
 from ....coupled.model_view import ModelView
 from ..utils import logger as msg
@@ -75,6 +76,24 @@ class JointUpdateViolation(IntEnum):
 ###
 # Kernels
 ###
+
+
+@wp.kernel
+def effective_body_inverse_mass_kernel(
+    body_flags: wp.array[wp.int32],
+    body_inv_mass: wp.array[wp.float32],
+    body_inv_inertia: wp.array[wp.mat33f],
+    effective_inv_mass: wp.array[wp.float32],
+    effective_inv_inertia: wp.array[wp.mat33f],
+):
+    """Copy inverse mass properties while masking kinematic bodies."""
+    body_id = wp.tid()
+    if (body_flags[body_id] & int(BodyFlags.KINEMATIC)) != 0:
+        effective_inv_mass[body_id] = 0.0
+        effective_inv_inertia[body_id] = wp.mat33f(0.0)
+    else:
+        effective_inv_mass[body_id] = body_inv_mass[body_id]
+        effective_inv_inertia[body_id] = body_inv_inertia[body_id]
 
 
 @wp.func
@@ -395,6 +414,7 @@ def joint_conversion_kernel(
     joint_limit_lower: wp.array[wp.float32],
     joint_limit_upper: wp.array[wp.float32],
     model_body_inv_mass: wp.array[wp.float32],
+    model_body_flags: wp.array[wp.int32],
     # Outputs:
     joint_jid: wp.array[wp.int32],
     joint_dof_type: wp.array[wp.int32],
@@ -449,9 +469,13 @@ def joint_conversion_kernel(
     # structurally singular Delassus rows.
     parent_bid = model_joint_parent[joint_id]
     child_bid = model_joint_child[joint_id]
-    has_dynamic_body = model_body_inv_mass[child_bid] > 0.0
+    has_dynamic_body = (
+        model_body_inv_mass[child_bid] > 0.0 and (model_body_flags[child_bid] & int(BodyFlags.KINEMATIC)) == 0
+    )
     if parent_bid >= 0:
-        has_dynamic_body = has_dynamic_body or model_body_inv_mass[parent_bid] > 0.0
+        has_dynamic_body = has_dynamic_body or (
+            model_body_inv_mass[parent_bid] > 0.0 and (model_body_flags[parent_bid] & int(BodyFlags.KINEMATIC)) == 0
+        )
 
     # Infer if the joint requires dynamic constraints
     is_dynamic_j = joint_requires_dynamic_constraints(
@@ -1222,6 +1246,20 @@ def convert_rigid_bodies(
     # COM world poses (joint attachment vectors are COM-relative).
     q_i_0 = wp.empty((model.body_count,), dtype=wp.transformf, device=model.device)
     convert_body_origin_to_com(model.body_com, model.body_q, q_i_0)
+    effective_inv_mass = wp.empty_like(model.body_inv_mass)
+    effective_inv_inertia = wp.empty_like(model.body_inv_inertia)
+    wp.launch(
+        kernel=effective_body_inverse_mass_kernel,
+        dim=model.body_count,
+        inputs=[
+            model.body_flags,
+            model.body_inv_mass,
+            model.body_inv_inertia,
+            effective_inv_mass,
+            effective_inv_inertia,
+        ],
+        device=model.device,
+    )
 
     # Fill in size data for bodies
     model_size.sum_of_num_bodies = model.body_count
@@ -1253,10 +1291,10 @@ def convert_rigid_bodies(
         wid=model.body_world,
         bid=body_bid,  # TODO: Remove
         m_i=model.body_mass,
-        inv_m_i=model.body_inv_mass,
+        inv_m_i=effective_inv_mass,
         i_r_com_i=model.body_com,
         i_I_i=model.body_inertia,
-        inv_i_I_i=model.body_inv_inertia,
+        inv_i_I_i=effective_inv_inertia,
         q_i_0=q_i_0,
         u_i_0=model.body_qd,
     )
@@ -1323,6 +1361,7 @@ def convert_joints(
             model.joint_limit_lower,
             model.joint_limit_upper,
             model.body_inv_mass,
+            model.body_flags,
             # Outputs:
             joint_jid,
             joint_dof_type,
