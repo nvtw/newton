@@ -1290,10 +1290,13 @@ def convert_rigid_bodies(
         wid=model.body_world,
         bid=body_bid,  # TODO: Remove
         m_i=model.body_mass,
-        inv_m_i=effective_inv_mass,
+        inv_m_i=model.body_inv_mass,
+        effective_inv_m_i=effective_inv_mass,
         i_r_com_i=model.body_com,
         i_I_i=model.body_inertia,
-        inv_i_I_i=effective_inv_inertia,
+        inv_i_I_i=model.body_inv_inertia,
+        effective_inv_i_I_i=effective_inv_inertia,
+        flags=model.body_flags,
         q_i_0=q_i_0,
         u_i_0=model.body_qd,
     )

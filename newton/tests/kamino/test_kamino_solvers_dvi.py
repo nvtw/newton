@@ -2014,10 +2014,24 @@ class TestDVISolver(unittest.TestCase):
         )
 
         self.assertGreater(float(model.body_inv_mass.numpy()[body]), 0.0)
-        self.assertEqual(float(solver._model_kamino.bodies.inv_m_i.numpy()[body]), 0.0)
+        self.assertEqual(solver._model_kamino.bodies.inv_m_i.ptr, model.body_inv_mass.ptr)
+        self.assertEqual(solver._model_kamino.bodies.inv_i_I_i.ptr, model.body_inv_inertia.ptr)
+        self.assertEqual(float(solver._model_kamino.bodies.effective_inv_m_i.numpy()[body]), 0.0)
         np.testing.assert_array_equal(
-            solver._model_kamino.bodies.inv_i_I_i.numpy()[body],
+            solver._model_kamino.bodies.effective_inv_i_I_i.numpy()[body],
             np.zeros((3, 3), dtype=np.float32),
+        )
+
+        updated_inv_mass = model.body_inv_mass.numpy() * np.float32(0.5)
+        updated_inv_inertia = model.body_inv_inertia.numpy() * np.float32(0.5)
+        model.body_flags.assign([0])
+        model.body_inv_mass.assign(updated_inv_mass)
+        model.body_inv_inertia.assign(updated_inv_inertia)
+        solver.step(model.state(), model.state(), control=None, contacts=None, dt=1.0e-3)
+        np.testing.assert_array_equal(solver._model_kamino.bodies.effective_inv_m_i.numpy(), updated_inv_mass)
+        np.testing.assert_array_equal(
+            solver._model_kamino.bodies.effective_inv_i_I_i.numpy(),
+            updated_inv_inertia,
         )
 
     def test_08a_public_solver_heterogeneous_contact_rollout_with_dvi(self):

@@ -1001,7 +1001,7 @@ class DelassusOperator:
                 inputs=[
                     # Inputs:
                     model.info.bodies_offset,
-                    model.bodies.inv_m_i,
+                    model.bodies.effective_inv_m_i,
                     data.bodies.inv_I_i,
                     jacobians.data.J_cts_offsets,
                     jacobians.data.J_cts_data,
@@ -1020,7 +1020,7 @@ class DelassusOperator:
                 inputs=[
                     # Inputs:
                     model.info.bodies_offset,
-                    model.bodies.inv_m_i,
+                    model.bodies.effective_inv_m_i,
                     data.bodies.inv_I_i,
                     jacobian_cts.num_nzb,
                     jacobian_cts.nzb_start,
@@ -1473,7 +1473,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
             inputs=[
                 # Inputs:
                 self._model.info.bodies_offset,
-                self._model.bodies.inv_m_i,
+                self._model.bodies.effective_inv_m_i,
                 self._data.bodies.inv_I_i,
                 self.bsm.num_nzb,
                 self.bsm.nzb_start,
@@ -1630,7 +1630,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
             dim=(self._model.size.num_worlds, self.constraint_jacobian.max_of_num_nzb),
             inputs=[
                 self._model.info.bodies_offset,
-                self._model.bodies.inv_m_i,
+                self._model.bodies.effective_inv_m_i,
                 self._data.bodies.inv_I_i,
                 self.constraint_jacobian.nzb_start,
                 self.constraint_jacobian.num_nzb,

@@ -1506,7 +1506,7 @@ class DualProblem:
                 model.gravity.vector,
                 model.bodies.wid,
                 model.bodies.m_i,
-                model.bodies.inv_m_i,
+                model.bodies.effective_inv_m_i,
                 data.bodies.u_i,
                 data.bodies.I_i,
                 data.bodies.inv_I_i,
