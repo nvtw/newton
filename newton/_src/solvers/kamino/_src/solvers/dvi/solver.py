@@ -26,6 +26,7 @@ from ..common import (
 from .kernels import (
     _FUSED_BILATERAL_BLOCK,
     _FUSED_INEQUALITY_BLOCK,
+    _assemble_bilateral_contact_response,
     _build_bilateral_rhs,
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
@@ -673,6 +674,7 @@ class DVISolver:
                     state.inequality_ids_by_color,
                     state.inequality_color_starts,
                     self._data.config,
+                    state.scratch,
                     state.v_aug,
                     self._data.solution.lambdas,
                 ],
@@ -783,6 +785,27 @@ class DVISolver:
             ],
             device=self.device,
         )
+        wp.launch(
+            kernel=_assemble_bilateral_contact_response,
+            dim=(
+                self._size.num_worlds,
+                self._size.max_of_max_total_cts,
+                self._size.max_of_max_total_cts,
+            ),
+            inputs=[
+                problem.data.dim,
+                problem.data.mio,
+                problem.data.njc,
+                operator.info.vio,
+                self._data.state.bilateral_preconditioner,
+                self._data.state.projected_mio,
+                problem.data.D,
+                permutation,
+                use_permutation,
+                self._data.state.projected_D,
+            ],
+            device=self.device,
+        )
 
         wp.launch(
             kernel=_initialize_dvi_status,
@@ -841,6 +864,7 @@ class DVISolver:
                     self._data.state.inequality_ids_by_color,
                     self._data.state.inequality_color_starts,
                     self._data.config,
+                    self._data.state.scratch,
                     self._data.state.v_aug,
                     self._data.solution.lambdas,
                 ],

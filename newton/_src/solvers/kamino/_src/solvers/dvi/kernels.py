@@ -415,15 +415,39 @@ def _solve_bilateral_contact_response(
             value -= bilateral_L[factor + njc * k + row] * projected_D[target + ncts * k + unilateral]
         projected_D[target + ncts * row + unilateral] = value / bilateral_L[factor + njc * row + row]
 
-    for unilateral_row in range(njc, ncts):
-        value = problem_D[source + ncts * unilateral_row + unilateral]
-        for row in range(njc):
-            original_row = row
-            if use_permutation:
-                original_row = bilateral_permutation[bvio + row]
-            response = bilateral_P[bvio + original_row] * projected_D[target + ncts * row + unilateral]
-            value -= problem_D[source + ncts * unilateral_row + original_row] * response
-        projected_D[target + ncts * unilateral_row + unilateral] = value
+
+@wp.kernel
+def _assemble_bilateral_contact_response(
+    problem_dim: wp.array[int32],
+    problem_mio: wp.array[int32],
+    problem_njc: wp.array[int32],
+    bilateral_vio: wp.array[int32],
+    bilateral_P: wp.array[float32],
+    projected_mio: wp.array[int32],
+    problem_D: wp.array[float32],
+    bilateral_permutation: wp.array[int32],
+    use_permutation: bool,
+    projected_D: wp.array[float32],
+):
+    wid, unilateral_row_local, unilateral_column_local = wp.tid()
+    ncts = problem_dim[wid]
+    njc = problem_njc[wid]
+    unilateral_row = njc + unilateral_row_local
+    unilateral_column = njc + unilateral_column_local
+    if unilateral_row >= ncts or unilateral_column >= ncts:
+        return
+
+    source = problem_mio[wid]
+    bvio = bilateral_vio[wid]
+    target = projected_mio[wid]
+    value = problem_D[source + ncts * unilateral_row + unilateral_column]
+    for row in range(njc):
+        original_row = row
+        if use_permutation:
+            original_row = bilateral_permutation[bvio + row]
+        response = bilateral_P[bvio + original_row] * projected_D[target + ncts * row + unilateral_column]
+        value -= problem_D[source + ncts * unilateral_row + original_row] * response
+    projected_D[target + ncts * unilateral_row + unilateral_column] = value
 
 
 @wp.kernel
@@ -534,6 +558,7 @@ def _solve_dvi_inequalities_colored_pgs(
     inequality_ids_by_color: wp.array[int32],
     inequality_color_starts: wp.array[int32],
     solver_config: wp.array[DVIConfigStruct],
+    state_delta: wp.array[float32],
     state_v_aug: wp.array[float32],
     solution_lambdas: wp.array[float32],
 ):
@@ -655,15 +680,41 @@ def _solve_dvi_inequalities_colored_pgs(
                             delta_1 = lambda_t_new.y - lambda_t_old.y
 
                     if active != int32(0):
-                        row = lcgo
-                        while row < contact_end:
-                            row_mio = mio + ncts * row
-                            dv = problem_D[row_mio + column] * delta_0
-                            if column_count == int32(2):
-                                dv += problem_D[row_mio + column + int32(1)] * delta_1
-                            wp.atomic_add(state_v_aug, vio + row, dv)
-                            row += int32(1)
+                        state_delta[vio + column] = delta_0
+                        if column_count == int32(2):
+                            state_delta[vio + column + int32(1)] = delta_1
                     color_slot += threads_per_world
+
+                # The projected updates above have one owner per inequality.
+                # Spread their dense velocity updates across the whole block;
+                # small contact colors would otherwise leave most lanes idle.
+                _sync_threads()
+                row_count = contact_end - lcgo
+                color_size = color_end - color_start
+                update_task = lane
+                while update_task < color_size * row_count:
+                    local_color_slot = update_task / row_count
+                    row = lcgo + update_task - local_color_slot * row_count
+                    uid = inequality_ids_by_color[uio + color_start + local_color_slot]
+                    active = int32(0)
+                    if uid >= nl or phase == int32(0):
+                        active = int32(1)
+                    if active != int32(0):
+                        column = lcgo + uid
+                        column_count = int32(1)
+                        if uid >= nl:
+                            cid = uid - nl
+                            column = ccgo + int32(3) * cid
+                            if phase == int32(0):
+                                column += int32(2)
+                            else:
+                                column_count = int32(2)
+                        row_mio = mio + ncts * row
+                        dv = problem_D[row_mio + column] * state_delta[vio + column]
+                        if column_count == int32(2):
+                            dv += problem_D[row_mio + column + int32(1)] * state_delta[vio + column + int32(1)]
+                        wp.atomic_add(state_v_aug, vio + row, dv)
+                    update_task += threads_per_world
                 _sync_threads()
 
 
