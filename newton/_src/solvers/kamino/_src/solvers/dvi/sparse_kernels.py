@@ -413,6 +413,238 @@ def _assemble_sparse_bilateral_unilateral_coupling(
 
 
 @wp.kernel
+def _solve_dvi_sparse_contacts_pgs(
+    bsm_num_nzb: wp.array[int32],
+    bsm_nzb_start: wp.array[int32],
+    bsm_nzb_coords: wp.array2d[int32],
+    bsm_nzb_values: wp.array[vec6f],
+    jacobian_nzb_values: wp.array[vec6f],
+    bsm_row_start: wp.array[int32],
+    bsm_col_start: wp.array[int32],
+    contact_nzb_offsets: wp.array[int32],
+    contact_indices: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_uio: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    problem_v_b: wp.array[float32],
+    problem_diag: wp.array[float32],
+    eta: wp.array[float32],
+    inequality_num_colors: wp.array[int32],
+    inequality_ids_by_color: wp.array[int32],
+    inequality_color_starts: wp.array[int32],
+    inequality_group_starts: wp.array[int32],
+    inequality_tangent_cross: wp.array[float32],
+    block_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
+    body_space: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+):
+    """Apply sparse PGS specialized for contact-only body-space systems."""
+    tid = wp.tid()
+    threads_per_world = int32(wp.block_dim())
+    lane = tid % threads_per_world
+    wid = tid / threads_per_world
+    cfg = solver_config[wid]
+    if block_iteration >= int32(0) and block_iteration >= cfg.max_alternating_iterations:
+        return
+    nc = problem_nc[wid]
+    if nc == 0:
+        return
+    cio = problem_cio[wid]
+    uio = problem_uio[wid]
+    schedule_offset = uio + wid
+    ccgo = problem_ccgo[wid]
+    vio = problem_vio[wid]
+    row_start = bsm_row_start[wid]
+    col_start = bsm_col_start[wid]
+    matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
+    sweep_count = cfg.inequality_sweeps_per_iteration
+    first_tangent_sweep = int32(0)
+    if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
+        tangent_sweep_count = sweep_count * cfg.max_alternating_iterations / int32(2)
+        sweep_count = (sweep_count + int32(1)) * cfg.max_alternating_iterations
+        first_tangent_sweep = sweep_count - tangent_sweep_count
+        # Contact-block sweeps are cheaper than separate normal/tangent phases,
+        # so spend the saved body reload on a full frictional pass budget. One
+        # final polishing sweep preserves the legacy stack convergence budget.
+        sweep_count += tangent_sweep_count
+        sweep_count += int32(1)
+    elif block_iteration == int32(_FUSED_BILATERAL_BLOCK):
+        sweep_count *= cfg.max_alternating_iterations
+    for sweep in range(sweep_count):
+        reverse_colors = sweep % int32(2) != int32(0)
+        num_colors = inequality_num_colors[wid]
+        for color_index in range(num_colors):
+            color = color_index
+            if reverse_colors:
+                color = num_colors - int32(1) - color_index
+            group_start = inequality_color_starts[schedule_offset + color]
+            group_end = inequality_color_starts[schedule_offset + color + int32(1)]
+            group = group_start + lane
+            while group < group_end:
+                color_start = inequality_group_starts[schedule_offset + group]
+                color_end = inequality_group_starts[schedule_offset + group + int32(1)]
+                color_slot = color_start
+                color_step = int32(1)
+                if reverse_colors:
+                    color_slot = color_end - int32(1)
+                    color_step = int32(-1)
+                local_x_idx_0 = int32(-1)
+                local_x_idx_1 = int32(-1)
+                local_body_0 = vec6f(0.0)
+                local_body_1 = vec6f(0.0)
+                first_cid = inequality_ids_by_color[uio + color_slot]
+                first_contact_id = contact_indices[cio + first_cid]
+                if first_contact_id >= int32(0):
+                    first_row = ccgo + int32(3) * first_cid
+                    first_nzb_offset = contact_nzb_offsets[first_contact_id]
+                    local_x_idx_0 = col_start + bsm_nzb_coords[first_nzb_offset, 1]
+                    for j in range(6):
+                        local_body_0[j] = body_space[local_x_idx_0 + j]
+                    second_body_offset = first_nzb_offset + int32(3)
+                    if second_body_offset < matrix_end and bsm_nzb_coords[second_body_offset, 0] == first_row:
+                        local_x_idx_1 = col_start + bsm_nzb_coords[second_body_offset, 1]
+                        for j in range(6):
+                            local_body_1[j] = body_space[local_x_idx_1 + j]
+                while color_slot >= color_start and color_slot < color_end:
+                    cid = inequality_ids_by_color[uio + color_slot]
+                    contact_id = contact_indices[cio + cid]
+                    if contact_id >= int32(0):
+                        row = ccgo + int32(3) * cid
+                        vec_idx = vio + row
+                        nzb_offset = contact_nzb_offsets[contact_id]
+                        block_count = int32(3)
+                        second_body_offset = nzb_offset + int32(3)
+                        if second_body_offset < matrix_end and bsm_nzb_coords[second_body_offset, 0] == row:
+                            block_count = int32(6)
+
+                        normal_value = eta[row_start + row + int32(2)] * solution_lambdas[vec_idx + int32(2)]
+                        local_block = int32(2)
+                        while local_block < block_count:
+                            nzb_idx = nzb_offset + local_block
+                            block_n = bsm_nzb_values[nzb_idx]
+                            x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
+                            body_values = local_body_0
+                            if x_idx_base == local_x_idx_1:
+                                body_values = local_body_1
+                            for j in range(6):
+                                normal_value += block_n[j] * body_values[j]
+                            local_block += int32(3)
+                        normal_value += problem_v_f[vec_idx + int32(2)]
+                        lambda_n_old = solution_lambdas[vec_idx + int32(2)]
+                        P_n = problem_P[vec_idx + int32(2)]
+                        diagonal_n = wp.abs(problem_diag[vec_idx + int32(2)]) * P_n * P_n
+                        lambda_n_new = _project_contact_normal_update(
+                            lambda_n_old, normal_value, diagonal_n, cfg.regularization, cfg.omega
+                        )
+                        solution_lambdas[vec_idx + int32(2)] = lambda_n_new
+                        normal_delta_body = P_n * (lambda_n_new - lambda_n_old)
+                        body_group = int32(0)
+                        while body_group < block_count:
+                            nzb_idx = nzb_offset + body_group
+                            x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
+                            row_n = jacobian_nzb_values[nzb_idx + int32(2)]
+                            for j in range(6):
+                                body_delta = row_n[j] * normal_delta_body
+                                if x_idx_base == local_x_idx_0:
+                                    local_body_0[j] += body_delta
+                                else:
+                                    local_body_1[j] += body_delta
+                            body_group += int32(3)
+
+                        if sweep < first_tangent_sweep:
+                            color_slot += color_step
+                            continue
+
+                        tangent_value = wp.vec2f(
+                            eta[row_start + row] * solution_lambdas[vec_idx],
+                            eta[row_start + row + int32(1)] * solution_lambdas[vec_idx + int32(1)],
+                        )
+                        local_block = int32(0)
+                        while local_block < block_count:
+                            nzb_idx = nzb_offset + local_block
+                            block_t0 = bsm_nzb_values[nzb_idx]
+                            block_t1 = bsm_nzb_values[nzb_idx + int32(1)]
+                            x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
+                            body_values = local_body_0
+                            if x_idx_base == local_x_idx_1:
+                                body_values = local_body_1
+                            for j in range(6):
+                                tangent_value[0] += block_t0[j] * body_values[j]
+                                tangent_value[1] += block_t1[j] * body_values[j]
+                            local_block += int32(3)
+                        tangent_value += wp.vec2f(problem_v_f[vec_idx], problem_v_f[vec_idx + int32(1)])
+                        lambda_t_old = wp.vec2f(solution_lambdas[vec_idx], solution_lambdas[vec_idx + int32(1)])
+                        P_t0 = problem_P[vec_idx]
+                        P_t1 = problem_P[vec_idx + int32(1)]
+                        diagonal_t0 = wp.abs(problem_diag[vec_idx]) * P_t0 * P_t0
+                        diagonal_t1 = wp.abs(problem_diag[vec_idx + int32(1)]) * P_t1 * P_t1
+                        off_diagonal = inequality_tangent_cross[uio + cid]
+                        if sweep == int32(0):
+                            off_diagonal = float32(0.0)
+                            body_group = int32(0)
+                            while body_group < block_count:
+                                nzb_idx = nzb_offset + body_group
+                                mass_weighted_t0 = bsm_nzb_values[nzb_idx]
+                                jacobian_t1 = jacobian_nzb_values[nzb_idx + int32(1)]
+                                for j in range(6):
+                                    off_diagonal += mass_weighted_t0[j] * jacobian_t1[j]
+                                body_group += int32(3)
+                            off_diagonal *= P_t1
+                            inequality_tangent_cross[uio + cid] = off_diagonal
+                        lambda_t_new = _project_contact_tangent_update(
+                            lambda_t_old,
+                            tangent_value,
+                            wp.vec2f(diagonal_t0, diagonal_t1),
+                            off_diagonal,
+                            cfg.regularization,
+                            cfg.omega,
+                            problem_mu[cio + cid]
+                            * _contact_friction_normal_load(
+                                lambda_n_new,
+                                problem_v_b[vec_idx + int32(2)],
+                                P_n,
+                                diagonal_n,
+                                cfg.regularization,
+                                cfg.omega,
+                            ),
+                        )
+                        solution_lambdas[vec_idx] = lambda_t_new.x
+                        solution_lambdas[vec_idx + int32(1)] = lambda_t_new.y
+                        tangent_delta_body = wp.vec2f(
+                            P_t0 * (lambda_t_new.x - lambda_t_old.x),
+                            P_t1 * (lambda_t_new.y - lambda_t_old.y),
+                        )
+                        body_group = int32(0)
+                        while body_group < block_count:
+                            nzb_idx = nzb_offset + body_group
+                            x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
+                            row_t0 = jacobian_nzb_values[nzb_idx]
+                            row_t1 = jacobian_nzb_values[nzb_idx + int32(1)]
+                            for j in range(6):
+                                body_delta = row_t0[j] * tangent_delta_body[0] + row_t1[j] * tangent_delta_body[1]
+                                if x_idx_base == local_x_idx_0:
+                                    local_body_0[j] += body_delta
+                                else:
+                                    local_body_1[j] += body_delta
+                            body_group += int32(3)
+                    color_slot += color_step
+                if local_x_idx_0 >= int32(0):
+                    for j in range(6):
+                        body_space[local_x_idx_0 + j] = local_body_0[j]
+                if local_x_idx_1 >= int32(0):
+                    for j in range(6):
+                        body_space[local_x_idx_1 + j] = local_body_1[j]
+                group += threads_per_world
+            _sync_threads()
+
+
+@wp.kernel
 def _solve_dvi_sparse_inequalities_pgs(
     bsm_num_nzb: wp.array[int32],
     bsm_nzb_start: wp.array[int32],

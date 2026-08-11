@@ -397,8 +397,8 @@ class Example:
             solver_config.collision_detector.max_contacts_per_pair = 4
             solver_config.collision_detector.max_triangle_pairs = 16384
             solver_config.integrator = "moreau"
-            solver_config.dvi.max_alternating_iterations = 8
-            solver_config.dvi.bilateral_solve_interval = 8
+            solver_config.dvi.max_alternating_iterations = 4
+            solver_config.dvi.bilateral_solve_interval = 4
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverXPBD(self.model)

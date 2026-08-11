@@ -33,6 +33,7 @@ from .sparse_kernels import (
     _map_active_limits,
     _reset_active_bilateral_delta,
     _set_sparse_bilateral_diagonal,
+    _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
     _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
@@ -204,17 +205,46 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
     )
     delassus.apply_jacobian_transpose(path.data.solution.lambdas, path.body_space, path.all_worlds_mask)
     threads_per_world = 64 if path.device.is_cuda else 1
-    wp.launch(
-        kernel=_solve_dvi_sparse_inequalities_pgs,
-        dim=path.size.num_worlds * threads_per_world,
-        inputs=[
-            bsm.num_nzb,
-            bsm.nzb_start,
-            bsm.nzb_coords,
-            bsm.nzb_values,
-            delassus.constraint_jacobian.nzb_values,
-            bsm.row_start,
-            bsm.col_start,
+    contact_only = path.size.max_of_max_limits == 0 and path.bilateral_solver is None
+    kernel = _solve_dvi_sparse_contacts_pgs if contact_only else _solve_dvi_sparse_inequalities_pgs
+    common_inputs = [
+        bsm.num_nzb,
+        bsm.nzb_start,
+        bsm.nzb_coords,
+        bsm.nzb_values,
+        delassus.constraint_jacobian.nzb_values,
+        bsm.row_start,
+        bsm.col_start,
+    ]
+    if contact_only:
+        kernel_inputs = [
+            *common_inputs,
+            jacobians.contact_constraint_nzb_offsets,
+            state.contact_indices,
+            problem.data.nc,
+            problem.data.cio,
+            problem.data.uio,
+            problem.data.ccgo,
+            problem.data.vio,
+            problem.data.mu,
+            problem.data.P,
+            problem.data.v_f,
+            problem.data.v_b,
+            state.scratch,
+            delassus.regularization,
+            state.inequality_num_colors,
+            state.inequality_ids_by_color,
+            state.inequality_color_starts,
+            state.inequality_group_starts,
+            state.inequality_tangent_cross,
+            block_iteration,
+            path.data.config,
+            path.body_space,
+            path.data.solution.lambdas,
+        ]
+    else:
+        kernel_inputs = [
+            *common_inputs,
             jacobians.limit_constraint_nzb_offsets,
             jacobians.contact_constraint_nzb_offsets,
             state.limit_indices,
@@ -249,7 +279,11 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             path.data.config,
             path.body_space,
             path.data.solution.lambdas,
-        ],
+        ]
+    wp.launch(
+        kernel=kernel,
+        dim=path.size.num_worlds * threads_per_world,
+        inputs=kernel_inputs,
         device=path.device,
         block_dim=threads_per_world,
     )
