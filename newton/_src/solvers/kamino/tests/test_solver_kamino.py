@@ -371,17 +371,25 @@ class TestSolverKaminoConfig(unittest.TestCase):
         self.assertEqual(config.rotation_correction, "twopi")
         self.assertEqual(config.dynamics.linear_solver_type, "LLTB")
         self.assertEqual(config.padmm.warmstart_mode, "containers")
+        self.assertEqual(config.padmm.warmstart_scale, 0.9)
 
     def test_01_make_explicit(self):
         config = SolverKaminoImpl.Config(
             dynamics=kamino_config.ConstrainedDynamicsConfig(linear_solver_type="CR"),
-            padmm=kamino_config.PADMMSolverConfig(warmstart_mode="internal"),
+            padmm=kamino_config.PADMMSolverConfig(warmstart_mode="internal", warmstart_scale=0.5),
             rotation_correction="continuous",
         )
         assert_solver_config(self, config)
         self.assertEqual(config.rotation_correction, "continuous")
         self.assertEqual(config.dynamics.linear_solver_type, "CR")
         self.assertEqual(config.padmm.warmstart_mode, "internal")
+        self.assertEqual(config.padmm.warmstart_scale, 0.5)
+
+    def test_02_validate_warmstart_scale(self):
+        """Reject PADMM warmstart scales outside the supported range."""
+        for scale in (-0.1, 1.1):
+            with self.assertRaises(ValueError):
+                kamino_config.PADMMSolverConfig(warmstart_scale=scale)
 
 
 class TestCollisionCapacityInitialization(unittest.TestCase):
@@ -420,6 +428,16 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
 
         # Kamino's capacity should be at least as large as the pipeline's capacity. Due to rounding up to the nearest multiple of the world count.
         self.assertGreaterEqual(solver._contacts_kamino.model_max_contacts_host, pipeline.rigid_contact_max)
+
+    def test_internal_collision_capacity_updates_model(self):
+        """Verify internal collision capacity updates the Newton model."""
+        model = self._make_three_world_model()
+
+        solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=True))
+        pipeline = newton.CollisionPipeline(model)
+
+        self.assertEqual(model.rigid_contact_max, solver._contacts_kamino.model_max_contacts_host)
+        self.assertEqual(pipeline.rigid_contact_max, solver._contacts_kamino.model_max_contacts_host)
 
     def test_external_collisions_preserve_explicit_rigid_contact_max(self):
         """Verify external collisions preserve an explicit contact capacity."""
