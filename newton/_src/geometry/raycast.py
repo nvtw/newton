@@ -439,6 +439,25 @@ def ray_intersect_cylinder(
             if t_side >= 0.0 and wp.abs(z_side) <= h:
                 min_t = t_side
 
+    # Refine the ellipsoid hit against the circular profile. One Newton step
+    # removes most of the approximation error without a quartic torus solver.
+    if barrel_radius > 0.0 and min_t < 1.0e10:
+        hit_side = ray_origin + min_t * ray_direction
+        radial_side = wp.sqrt(hit_side[0] * hit_side[0] + hit_side[1] * hit_side[1])
+        circle_sq = barrel_radius * barrel_radius - hit_side[2] * hit_side[2]
+        if radial_side > MINVAL and circle_sq > MINVAL:
+            circle_side = wp.sqrt(circle_sq)
+            end_radial_offset = wp.sqrt(barrel_radius * barrel_radius - h * h)
+            residual = radial_side - r - circle_side + end_radial_offset
+            radial_derivative = (hit_side[0] * ray_direction[0] + hit_side[1] * ray_direction[1]) / radial_side
+            axial_derivative = hit_side[2] * ray_direction[2] / circle_side
+            derivative = radial_derivative + axial_derivative
+            if wp.abs(derivative) > MINVAL:
+                refined_t = min_t - residual / derivative
+                refined_z = ray_origin[2] + refined_t * ray_direction[2]
+                if refined_t >= 0.0 and wp.abs(refined_z) <= h:
+                    min_t = refined_t
+
     # Intersection with caps
     if wp.abs(ray_direction[2]) > MINVAL:
         inv_d_z = 1.0 / ray_direction[2]
@@ -466,6 +485,14 @@ def ray_intersect_cylinder(
         z_clamped = wp.min(h, wp.max(-h, hit_local[2]))
         if z_clamped >= (h - EPSILON) or z_clamped <= (-h + EPSILON):
             normal_local = wp.vec3(0.0, 0.0, z_clamped)
+        elif barrel_radius > 0.0:
+            radial_length = wp.sqrt(hit_local[0] * hit_local[0] + hit_local[1] * hit_local[1])
+            circle_height = wp.sqrt(barrel_radius * barrel_radius - hit_local[2] * hit_local[2])
+            normal_local = wp.vec3(
+                hit_local[0] / radial_length,
+                hit_local[1] / radial_length,
+                hit_local[2] / circle_height,
+            )
         else:
             normal_local = wp.vec3(hit_local[0], hit_local[1], axial_scale * hit_local[2])
         normal = wp.normalize(normal_local)

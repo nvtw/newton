@@ -172,9 +172,12 @@ def test_ray_intersect_barrel_cylinder(test: TestRaycast, device: str):
     half_height = 1.0
     barrel_radius = 2.0
     equator_radius = radius + barrel_radius - np.sqrt(barrel_radius**2 - half_height**2)
-    axial_scale = (equator_radius**2 - radius**2) / half_height**2
     off_equator_z = 0.5
-    off_equator_radius = np.sqrt(equator_radius**2 - axial_scale * off_equator_z**2)
+    off_equator_radius = (
+        radius + np.sqrt(barrel_radius**2 - off_equator_z**2) - np.sqrt(barrel_radius**2 - half_height**2)
+    )
+    oblique_z = 0.35
+    oblique_radius = radius + np.sqrt(barrel_radius**2 - oblique_z**2) - np.sqrt(barrel_radius**2 - half_height**2)
     size = wp.vec3(radius, half_height, barrel_radius)
 
     cases = [
@@ -184,6 +187,12 @@ def test_ray_intersect_barrel_cylinder(test: TestRaycast, device: str):
             wp.vec3(-2.0, 0.0, off_equator_z),
             wp.vec3(1.0, 0.0, 0.0),
             2.0 - off_equator_radius,
+        ),
+        (
+            "oblique_side",
+            wp.vec3(-oblique_radius - 0.75, 0.0, oblique_z + 0.15),
+            wp.vec3(1.0, 0.0, -0.2),
+            0.75,
         ),
         ("cap", wp.vec3(0.0, 0.0, -2.0), wp.vec3(0.0, 0.0, 1.0), 1.0),
         ("cap_before_side", wp.vec3(0.0, 0.0, -2.0), wp.vec3(0.2, 0.0, 1.0), 1.0),
