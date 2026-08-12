@@ -982,17 +982,21 @@ def _solve_dvi_sparse_contacts_pgs(
                         vec_idx = vio + row
                         nzb_offset = contact_nzb_offsets[contact_id]
 
+                        # Contact rows are B(t0, t1, n), optionally followed by A.
+                        # Keep the fixed topology explicit so Jacobian rows load with
+                        # their mass-weighted rows and remain live through the update.
                         normal_value = eta[row_start + row + int32(2)] * solution_lambdas[vec_idx + int32(2)]
-                        local_block = int32(2)
-                        while local_block < block_count:
-                            nzb_idx = nzb_offset + local_block
-                            block_n = bsm_nzb_values[nzb_idx]
-                            body_values = local_body_0
-                            if local_block >= int32(3):
-                                body_values = local_body_1
+                        block_n_0 = bsm_nzb_values[nzb_offset + int32(2)]
+                        row_n_0 = jacobian_nzb_values[nzb_offset + int32(2)]
+                        for j in range(6):
+                            normal_value += block_n_0[j] * local_body_0[j]
+                        block_n_1 = vec6f(0.0)
+                        row_n_1 = vec6f(0.0)
+                        if block_count == int32(6):
+                            block_n_1 = bsm_nzb_values[nzb_offset + int32(5)]
+                            row_n_1 = jacobian_nzb_values[nzb_offset + int32(5)]
                             for j in range(6):
-                                normal_value += block_n[j] * body_values[j]
-                            local_block += int32(3)
+                                normal_value += block_n_1[j] * local_body_1[j]
                         normal_bias = problem_v_b[vec_idx + int32(2)]
                         normal_value += problem_v_f[vec_idx + int32(2)]
                         if split_contact_recovery:
@@ -1005,17 +1009,11 @@ def _solve_dvi_sparse_contacts_pgs(
                         )
                         solution_lambdas[vec_idx + int32(2)] = lambda_n_new
                         normal_delta_body = P_n * (lambda_n_new - lambda_n_old)
-                        body_group = int32(0)
-                        while body_group < block_count:
-                            nzb_idx = nzb_offset + body_group
-                            row_n = jacobian_nzb_values[nzb_idx + int32(2)]
+                        for j in range(6):
+                            local_body_0[j] += row_n_0[j] * normal_delta_body
+                        if block_count == int32(6):
                             for j in range(6):
-                                body_delta = row_n[j] * normal_delta_body
-                                if body_group == int32(0):
-                                    local_body_0[j] += body_delta
-                                else:
-                                    local_body_1[j] += body_delta
-                            body_group += int32(3)
+                                local_body_1[j] += row_n_1[j] * normal_delta_body
 
                         if sweep < first_tangent_sweep:
                             color_slot += color_step
@@ -1025,18 +1023,25 @@ def _solve_dvi_sparse_contacts_pgs(
                             eta[row_start + row] * solution_lambdas[vec_idx],
                             eta[row_start + row + int32(1)] * solution_lambdas[vec_idx + int32(1)],
                         )
-                        local_block = int32(0)
-                        while local_block < block_count:
-                            nzb_idx = nzb_offset + local_block
-                            block_t0 = bsm_nzb_values[nzb_idx]
-                            block_t1 = bsm_nzb_values[nzb_idx + int32(1)]
-                            body_values = local_body_0
-                            if local_block >= int32(3):
-                                body_values = local_body_1
+                        block_t0_0 = bsm_nzb_values[nzb_offset]
+                        block_t1_0 = bsm_nzb_values[nzb_offset + int32(1)]
+                        row_t0_0 = jacobian_nzb_values[nzb_offset]
+                        row_t1_0 = jacobian_nzb_values[nzb_offset + int32(1)]
+                        for j in range(6):
+                            tangent_value[0] += block_t0_0[j] * local_body_0[j]
+                            tangent_value[1] += block_t1_0[j] * local_body_0[j]
+                        block_t0_1 = vec6f(0.0)
+                        block_t1_1 = vec6f(0.0)
+                        row_t0_1 = vec6f(0.0)
+                        row_t1_1 = vec6f(0.0)
+                        if block_count == int32(6):
+                            block_t0_1 = bsm_nzb_values[nzb_offset + int32(3)]
+                            block_t1_1 = bsm_nzb_values[nzb_offset + int32(4)]
+                            row_t0_1 = jacobian_nzb_values[nzb_offset + int32(3)]
+                            row_t1_1 = jacobian_nzb_values[nzb_offset + int32(4)]
                             for j in range(6):
-                                tangent_value[0] += block_t0[j] * body_values[j]
-                                tangent_value[1] += block_t1[j] * body_values[j]
-                            local_block += int32(3)
+                                tangent_value[0] += block_t0_1[j] * local_body_1[j]
+                                tangent_value[1] += block_t1_1[j] * local_body_1[j]
                         tangent_value += wp.vec2f(problem_v_f[vec_idx], problem_v_f[vec_idx + int32(1)])
                         lambda_t_old = wp.vec2f(solution_lambdas[vec_idx], solution_lambdas[vec_idx + int32(1)])
                         P_t0 = problem_P[vec_idx]
@@ -1046,14 +1051,11 @@ def _solve_dvi_sparse_contacts_pgs(
                         off_diagonal = inequality_tangent_cross[uio + cid]
                         if sweep == first_tangent_sweep:
                             off_diagonal = float32(0.0)
-                            body_group = int32(0)
-                            while body_group < block_count:
-                                nzb_idx = nzb_offset + body_group
-                                mass_weighted_t0 = bsm_nzb_values[nzb_idx]
-                                jacobian_t1 = jacobian_nzb_values[nzb_idx + int32(1)]
+                            for j in range(6):
+                                off_diagonal += block_t0_0[j] * row_t1_0[j]
+                            if block_count == int32(6):
                                 for j in range(6):
-                                    off_diagonal += mass_weighted_t0[j] * jacobian_t1[j]
-                                body_group += int32(3)
+                                    off_diagonal += block_t0_1[j] * row_t1_1[j]
                             off_diagonal *= P_t1
                             inequality_tangent_cross[uio + cid] = off_diagonal
                         friction = problem_mu[cio + cid]
@@ -1085,18 +1087,13 @@ def _solve_dvi_sparse_contacts_pgs(
                             P_t0 * (lambda_t_new.x - lambda_t_old.x),
                             P_t1 * (lambda_t_new.y - lambda_t_old.y),
                         )
-                        body_group = int32(0)
-                        while body_group < block_count:
-                            nzb_idx = nzb_offset + body_group
-                            row_t0 = jacobian_nzb_values[nzb_idx]
-                            row_t1 = jacobian_nzb_values[nzb_idx + int32(1)]
+                        for j in range(6):
+                            local_body_0[j] += row_t0_0[j] * tangent_delta_body[0] + row_t1_0[j] * tangent_delta_body[1]
+                        if block_count == int32(6):
                             for j in range(6):
-                                body_delta = row_t0[j] * tangent_delta_body[0] + row_t1[j] * tangent_delta_body[1]
-                                if body_group == int32(0):
-                                    local_body_0[j] += body_delta
-                                else:
-                                    local_body_1[j] += body_delta
-                            body_group += int32(3)
+                                local_body_1[j] += (
+                                    row_t0_1[j] * tangent_delta_body[0] + row_t1_1[j] * tangent_delta_body[1]
+                                )
                     color_slot += color_step
                 if local_x_idx_0 >= int32(0):
                     for j in range(6):
