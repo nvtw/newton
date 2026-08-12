@@ -303,6 +303,80 @@ def _compute_dvi_status_residuals(
 
 
 @wp.kernel
+def _compute_dvi_status_residuals_parallel(
+    problem_dim: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_njc: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_lcgo: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    solver_config: wp.array[DVIConfigStruct],
+    state_v_aug: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+    solver_status: wp.array[DVIStatus],
+):
+    """Classify one world's terminal DVI residuals cooperatively."""
+    tid = wp.tid()
+    lane = tid % int32(wp.block_dim())
+    wid = tid / int32(wp.block_dim())
+    ncts = problem_dim[wid]
+    vio = problem_vio[wid]
+    njc = problem_njc[wid]
+    nl = problem_nl[wid]
+    nc = problem_nc[wid]
+    lcgo = problem_lcgo[wid]
+    ccgo = problem_ccgo[wid]
+    cio = problem_cio[wid]
+
+    r_b_local = float32(0.0)
+    r_p_local = float32(0.0)
+    r_d_local = float32(0.0)
+    r_c_local = float32(0.0)
+    for jid in range(lane, njc, int32(wp.block_dim())):
+        r_b_local = wp.max(r_b_local, wp.abs(state_v_aug[vio + jid]))
+    for lid in range(lane, nl, int32(wp.block_dim())):
+        lcio = vio + lcgo + lid
+        lambda_l = solution_lambdas[lcio]
+        v_l = state_v_aug[lcio]
+        r_p_local = wp.max(r_p_local, wp.abs(lambda_l - wp.max(0.0, lambda_l)))
+        r_d_local = wp.max(r_d_local, wp.abs(v_l - wp.max(0.0, v_l)))
+        r_c_local = wp.max(r_c_local, wp.abs(lambda_l * v_l))
+    for cid in range(lane, nc, int32(wp.block_dim())):
+        ccio = vio + ccgo + int32(3) * cid
+        mu_c = problem_mu[cio + cid]
+        lambda_c = vec3f(solution_lambdas[ccio], solution_lambdas[ccio + 1], solution_lambdas[ccio + 2])
+        v_c = vec3f(state_v_aug[ccio], state_v_aug[ccio + 1], state_v_aug[ccio + 2])
+        lambda_proj = project_to_coulomb_cone(lambda_c, mu_c)
+        v_proj = project_to_coulomb_dual_cone(v_c, mu_c)
+        r_p_local = wp.max(r_p_local, wp.max(wp.abs(lambda_c - lambda_proj)))
+        r_d_local = wp.max(r_d_local, wp.max(wp.abs(v_c - v_proj)))
+        r_c_local = wp.max(r_c_local, wp.abs(wp.dot(lambda_c, v_c)))
+
+    r_b = wp.tile_max(wp.tile(r_b_local))[0]
+    r_p = wp.tile_max(wp.tile(r_p_local))[0]
+    r_d = wp.tile_max(wp.tile(r_d_local))[0]
+    r_c = wp.tile_max(wp.tile(r_c_local))[0]
+    if lane == int32(0):
+        cfg = solver_config[wid]
+        status = solver_status[wid]
+        if status.iterations == int32(0):
+            status.iterations = int32(1)
+        status.r_b = r_b
+        status.r_p = r_p
+        status.r_d = wp.max(r_d, r_b)
+        status.r_c = r_c
+        status.converged = int32(0)
+        if ncts == int32(0) or (
+            r_b <= cfg.tolerance and r_p <= cfg.tolerance and r_d <= cfg.tolerance and r_c <= cfg.tolerance
+        ):
+            status.converged = int32(1)
+        solver_status[wid] = status
+
+
+@wp.kernel
 def _initialize_dvi_status(
     # Inputs:
     solver_config: wp.array[DVIConfigStruct],

@@ -31,6 +31,7 @@ from .kernels import (
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
     _compute_dvi_status_residuals,
+    _compute_dvi_status_residuals_parallel,
     _compute_dvi_unilateral_velocities,
     _copy_bilateral_block,
     _initialize_dvi_status,
@@ -509,9 +510,10 @@ class DVISolver:
         # Classify the final iterate using all DVI conditions. This replaces
         # provisional iterate-change convergence from the dense fallback;
         # direct and sparse paths reach this check after fixed iteration counts.
+        parallel_status = self.device.is_cuda
         wp.launch(
-            kernel=_compute_dvi_status_residuals,
-            dim=self._size.num_worlds,
+            kernel=_compute_dvi_status_residuals_parallel if parallel_status else _compute_dvi_status_residuals,
+            dim=self._size.num_worlds * 256 if parallel_status else self._size.num_worlds,
             inputs=[
                 problem.data.dim,
                 problem.data.vio,
@@ -528,6 +530,7 @@ class DVISolver:
                 self._data.status,
             ],
             device=self.device,
+            block_dim=256 if parallel_status else 0,
         )
 
         if self._collect_info:
