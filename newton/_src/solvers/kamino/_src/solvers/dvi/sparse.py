@@ -22,6 +22,7 @@ from .kernels import (
     _scatter_bilateral_solution,
     _set_dvi_direct_status_iterations,
     _solve_bilateral_unilateral_response,
+    _solve_bilateral_unilateral_response_cooperative,
 )
 from .sparse_kernels import (
     _assemble_sparse_bilateral_unilateral_coupling,
@@ -581,10 +582,18 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
     )
     use_permutation = isinstance(path.bilateral_solver, LLTBlockedRCMSolver)
     permutation = path.bilateral_solver.P if use_permutation else state.projected_mio
-    response_threads_per_world = 256 if path.device.is_cuda else 1
+    response_kernel = _solve_bilateral_unilateral_response
+    response_block_dim = 1
+    response_tasks_per_world = 0
+    response_dim = path.size.num_worlds
+    if path.device.is_cuda:
+        response_kernel = _solve_bilateral_unilateral_response_cooperative
+        response_block_dim = 32
+        response_tasks_per_world = (max_unilateral_rows + 1) // 2
+        response_dim = path.size.num_worlds * response_tasks_per_world * response_block_dim
     wp.launch(
-        kernel=_solve_bilateral_unilateral_response,
-        dim=path.size.num_worlds * response_threads_per_world,
+        kernel=response_kernel,
+        dim=response_dim,
         inputs=[
             problem.data.dim,
             problem.data.njc,
@@ -599,9 +608,10 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
             state.bilateral_coupling,
             state.bilateral_response_factor,
             state.bilateral_response,
+            *([response_tasks_per_world] if path.device.is_cuda else []),
         ],
         device=path.device,
-        block_dim=response_threads_per_world,
+        block_dim=response_block_dim,
     )
     has_intermediate_bilateral_solve = any(
         path.should_solve_bilateral_after_block(block_iteration)

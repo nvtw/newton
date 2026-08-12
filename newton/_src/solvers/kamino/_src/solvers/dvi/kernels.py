@@ -450,6 +450,105 @@ def _assemble_bilateral_contact_response(
     projected_D[target + ncts * unilateral_row + unilateral_column] = value
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    float r = value;
+    #pragma unroll
+    for (int offset = 8; offset > 0; offset >>= 1)
+        r += __shfl_xor_sync(0xffffffffu, r, offset, 16);
+    return r;
+#else
+    return value;
+#endif
+    """
+)
+def _subgroup_sum_16(value: float32) -> float32: ...
+
+
+@wp.kernel
+def _solve_bilateral_unilateral_response_cooperative(
+    problem_dim: wp.array[int32],
+    problem_njc: wp.array[int32],
+    bilateral_mio: wp.array[int32],
+    bilateral_vio: wp.array[int32],
+    bilateral_P: wp.array[float32],
+    bilateral_L: wp.array[float32],
+    bilateral_permutation: wp.array[int32],
+    use_permutation: bool,
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    coupling: wp.array[float32],
+    response_factor: wp.array[float32],
+    response: wp.array[float32],
+    tasks_per_world: int32,
+):
+    """Solve two bilateral-response right-hand sides per cooperative warp."""
+    tid = wp.tid()
+    lane = tid % int32(32)
+    task = tid / int32(32)
+    wid = task / tasks_per_world
+    task_in_world = task - wid * tasks_per_world
+    local_lane = lane % int32(16)
+    unilateral = int32(2) * task_in_world + lane / int32(16)
+
+    njc = problem_njc[wid]
+    nu = problem_dim[wid] - njc
+    if int32(2) * task_in_world >= nu:
+        return
+    active = unilateral < nu
+    factor = bilateral_mio[wid]
+    bvio = bilateral_vio[wid]
+    offset = response_mio[wid]
+    unilateral_stride = response_stride[wid]
+
+    for row in range(njc):
+        partial = float32(0.0)
+        if active:
+            for k in range(local_lane, row, int32(16)):
+                partial += bilateral_L[factor + njc * row + k] * response_factor[
+                    offset + k * unilateral_stride + unilateral
+                ]
+        total = _subgroup_sum_16(partial)
+        if local_lane == int32(0) and active:
+            original_row = row
+            if use_permutation:
+                original_row = bilateral_permutation[bvio + row]
+            value = bilateral_P[bvio + original_row] * coupling[
+                offset + original_row * unilateral_stride + unilateral
+            ]
+            response_factor[offset + row * unilateral_stride + unilateral] = (
+                value - total
+            ) / bilateral_L[factor + njc * row + row]
+        _sync_threads()
+
+    for reverse_row in range(njc):
+        row = njc - int32(1) - reverse_row
+        partial = float32(0.0)
+        if active:
+            for k in range(row + int32(1) + local_lane, njc, int32(16)):
+                partial += bilateral_L[factor + njc * k + row] * response_factor[
+                    offset + k * unilateral_stride + unilateral
+                ]
+        total = _subgroup_sum_16(partial)
+        if local_lane == int32(0) and active:
+            value = response_factor[offset + row * unilateral_stride + unilateral]
+            response_factor[offset + row * unilateral_stride + unilateral] = (
+                value - total
+            ) / bilateral_L[factor + njc * row + row]
+        _sync_threads()
+
+    if active:
+        for row in range(local_lane, njc, int32(16)):
+            original_row = row
+            if use_permutation:
+                original_row = bilateral_permutation[bvio + row]
+            response[offset + original_row * unilateral_stride + unilateral] = (
+                bilateral_P[bvio + original_row]
+                * response_factor[offset + row * unilateral_stride + unilateral]
+            )
+
+
 @wp.kernel
 def _solve_bilateral_unilateral_response(
     problem_dim: wp.array[int32],
