@@ -433,7 +433,12 @@ def create_narrow_phase_primitive_kernel(
                 box_size = scale_b
 
                 dists4_box, positions4_box, contact_normal = collide_plane_box(
-                    plane_normal, pos_a, pos_b, box_rot, box_size, gap_sum
+                    plane_normal,
+                    pos_a,
+                    pos_b,
+                    box_rot,
+                    box_size,
+                    gap_sum + margin_offset_a + margin_offset_b,
                 )
 
                 contact_dist_0 = dists4_box[0]
