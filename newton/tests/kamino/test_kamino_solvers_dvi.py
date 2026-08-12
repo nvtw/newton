@@ -1995,7 +1995,7 @@ class TestDVISolver(unittest.TestCase):
         )
 
         expected = coupling_np.T @ response_np
-        np.testing.assert_allclose(compact_schur.numpy().reshape(2, 2), expected, rtol=1.0e-6)
+        np.testing.assert_allclose(compact_schur.numpy().reshape(2, 2), expected.T, rtol=1.0e-6)
         np.testing.assert_array_equal(compact_q.numpy(), [9.0, 9.0, 0.0, 0.0])
 
         deltas = np.array([0.25, -0.5], dtype=np.float32)

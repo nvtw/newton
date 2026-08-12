@@ -1450,13 +1450,15 @@ def _assemble_compact_unilateral_schur(
     stride = response_stride[wid]
     for unilateral in range(lane, nu, threads_per_world):
         compact_q[problem_vio[wid] + njc + unilateral] = float32(0.0)
+    # Store the Schur matrix transposed so a warp updating consecutive target
+    # rows reads consecutive values for a fixed source constraint.
     for entry in range(lane, nu * nu, threads_per_world):
-        row = entry / nu
-        column = entry - row * nu
+        column = entry / nu
+        row = entry - column * nu
         value = float32(0.0)
         for bilateral in range(njc):
             value += coupling[offset + bilateral * stride + row] * response[offset + bilateral * stride + column]
-        compact_schur[offset + row * stride + column] = value
+        compact_schur[offset + column * stride + row] = value
 
 
 @wp.func
@@ -1800,9 +1802,8 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                     if uid >= nl and phase != int32(0):
                                         projected_cross = compact_schur[
                                             response_offset
-                                            + unilateral_row * response_row_stride
+                                            + (unilateral_row + int32(1)) * response_row_stride
                                             + unilateral_row
-                                            + int32(1)
                                         ]
                             else:
                                 partial_0 = float32(0.0)
@@ -1915,7 +1916,9 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                 for target in range(lane, num_unilateral_rows, int32(32)):
                                     value = (
                                         compact_schur[
-                                            response_offset + target * response_row_stride + unilateral_row + component
+                                            response_offset
+                                            + (unilateral_row + component) * response_row_stride
+                                            + target
                                         ]
                                         * delta_0
                                     )
@@ -1923,9 +1926,8 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                         value += (
                                             compact_schur[
                                                 response_offset
-                                                + target * response_row_stride
-                                                + unilateral_row
-                                                + int32(1)
+                                                + (unilateral_row + int32(1)) * response_row_stride
+                                                + target
                                             ]
                                             * delta_1
                                         )
