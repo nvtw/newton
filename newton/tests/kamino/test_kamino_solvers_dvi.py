@@ -48,6 +48,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _map_active_contacts,
     _map_ordered_active_contacts,
     _prefix_active_contacts_by_world,
+    _prepare_contact_pair_sort,
     _prepare_contact_world_sort,
     _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
@@ -1723,8 +1724,7 @@ class TestDVISolver(unittest.TestCase):
         inequality_num_colors = wp.zeros(shape=1, dtype=wp.int32, device=self.device)
         inequality_ids_by_color = wp.full(shape=5, value=-1, dtype=wp.int32, device=self.device)
         inequality_color_starts = wp.zeros(shape=6, dtype=wp.int32, device=self.device)
-        inequality_group_starts = wp.zeros(shape=6, dtype=wp.int32, device=self.device)
-        inequality_order = wp.array([0, 1, 3, 2, 4, -1], dtype=wp.int32, device=self.device)
+        inequality_group_starts = wp.array([0, 1, 3, 2, 4, -1], dtype=wp.int32, device=self.device)
 
         wp.launch(
             kernel=_group_mapped_dvi_inequalities,
@@ -1740,7 +1740,7 @@ class TestDVISolver(unittest.TestCase):
                 inequality_ids_by_color,
                 inequality_color_starts,
                 inequality_group_starts,
-                inequality_order,
+                inequality_group_starts,
                 wp.bool(True),
             ],
             device=self.device,
@@ -1761,11 +1761,19 @@ class TestDVISolver(unittest.TestCase):
             dtype=wp.vec2i,
             device=self.device,
         )
-        pair_a = 1
-        pair_b = 2
-        contact_keys = wp.array([pair_a, pair_b, pair_b, pair_a, pair_b, pair_a], dtype=wp.uint64, device=self.device)
+        contacts_gid_ab = wp.array(
+            [wp.vec2i(0, 1), wp.vec2i(0, 2), wp.vec2i(0, 2), wp.vec2i(0, 1), wp.vec2i(0, 2), wp.vec2i(0, 1)],
+            dtype=wp.vec2i,
+            device=self.device,
+        )
         sorter = KeySorter(max_num_keys=contact_count, device=self.device)
-        sorter.sort(contacts_model_active, contact_keys)
+        wp.launch(
+            kernel=_prepare_contact_pair_sort,
+            dim=contact_count,
+            inputs=[contacts_model_active, contacts_gid_ab, sorter.sorted_keys, sorter.sorted_to_unsorted_map],
+            device=self.device,
+        )
+        wp.utils.radix_sort_pairs(sorter.sorted_keys_int64, sorter.sorted_to_unsorted_map, contact_count)
         wp.launch(
             kernel=_prepare_contact_world_sort,
             dim=contact_count,

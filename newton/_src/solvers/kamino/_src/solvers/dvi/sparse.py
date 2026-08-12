@@ -36,6 +36,7 @@ from .sparse_kernels import (
     _map_active_limits,
     _map_ordered_active_contacts,
     _prefix_active_contacts_by_world,
+    _prepare_contact_pair_sort,
     _prepare_contact_world_sort,
     _reset_active_bilateral_delta,
     _set_sparse_bilateral_diagonal,
@@ -167,7 +168,22 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
     if contacts is not None and contacts.model_max_contacts_host > 0:
         if use_contact_order:
             sorter = path.contact_sorter
-            sorter.sort(contacts.model_active_contacts, contacts.key)
+            wp.launch(
+                kernel=_prepare_contact_pair_sort,
+                dim=contacts.model_max_contacts_host,
+                inputs=[
+                    contacts.model_active_contacts,
+                    contacts.gid_AB,
+                    sorter.sorted_keys,
+                    sorter.sorted_to_unsorted_map,
+                ],
+                device=path.device,
+            )
+            wp.utils.radix_sort_pairs(
+                sorter.sorted_keys_int64,
+                sorter.sorted_to_unsorted_map,
+                contacts.model_max_contacts_host,
+            )
             wp.launch(
                 kernel=_prepare_contact_world_sort,
                 dim=contacts.model_max_contacts_host,

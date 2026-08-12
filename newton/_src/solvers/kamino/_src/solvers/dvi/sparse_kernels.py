@@ -207,6 +207,23 @@ def _map_active_contacts(
 
 
 @wp.kernel
+def _prepare_contact_pair_sort(
+    contacts_model_active: wp.array[int32],
+    contacts_gid_AB: wp.array[wp.vec2i],
+    sorted_keys: wp.array[wp.uint64],
+    sorted_to_unsorted_map: wp.array[int32],
+):
+    """Prepare explicit geometry-pair keys and source indices for radix sort."""
+    contact_id = wp.tid()
+    if contact_id < contacts_model_active[0]:
+        gids = contacts_gid_AB[contact_id]
+        sorted_keys[contact_id] = build_pair_key2(wp.uint32(gids[0]), wp.uint32(gids[1]))
+        sorted_to_unsorted_map[contact_id] = contact_id
+    else:
+        sorted_keys[contact_id] = uint64_sentinel_value()
+
+
+@wp.kernel
 def _prepare_contact_world_sort(
     contacts_model_active: wp.array[int32],
     contacts_wid: wp.array[int32],
