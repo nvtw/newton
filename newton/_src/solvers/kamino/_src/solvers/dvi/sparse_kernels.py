@@ -655,6 +655,25 @@ def _assemble_sparse_bilateral_unilateral_coupling(
 
 
 @wp.kernel
+def _cache_sparse_contact_diagonal(
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_P: wp.array[float32],
+    problem_diag: wp.array[float32],
+    projected_diag: wp.array[float32],
+):
+    """Cache the invariant projected diagonal of contact rows."""
+    wid, cid = wp.tid()
+    if cid >= problem_nc[wid]:
+        return
+    vec_idx = problem_vio[wid] + problem_ccgo[wid] + int32(3) * cid
+    for component in range(3):
+        P_i = problem_P[vec_idx + component]
+        projected_diag[vec_idx + component] = wp.abs(problem_diag[vec_idx + component]) * P_i * P_i
+
+
+@wp.kernel
 def _cache_sparse_projected_diagonal(
     problem_dim: wp.array[int32],
     problem_njc: wp.array[int32],
@@ -707,7 +726,7 @@ def _solve_dvi_sparse_contacts_pgs(
     problem_P: wp.array[float32],
     problem_v_f: wp.array[float32],
     problem_v_b: wp.array[float32],
-    problem_diag: wp.array[float32],
+    projected_diag: wp.array[float32],
     eta: wp.array[float32],
     inequality_num_colors: wp.array[int32],
     inequality_ids_by_color: wp.array[int32],
@@ -775,6 +794,7 @@ def _solve_dvi_sparse_contacts_pgs(
                 local_body_1 = vec6f(0.0)
                 first_cid = inequality_ids_by_color[uio + color_slot]
                 first_contact_id = contact_indices[cio + first_cid]
+                block_count = int32(3)
                 if first_contact_id >= int32(0):
                     # Contact Jacobians store B's three rows first, followed by A's when present.
                     first_bids = contact_bid_AB[first_contact_id]
@@ -782,6 +802,7 @@ def _solve_dvi_sparse_contacts_pgs(
                     for j in range(6):
                         local_body_0[j] = body_space[local_x_idx_0 + j]
                     if first_bids[0] >= int32(0):
+                        block_count = int32(6)
                         local_x_idx_1 = col_start + int32(6) * (first_bids[0] - bodies_offset)
                         for j in range(6):
                             local_body_1[j] = body_space[local_x_idx_1 + j]
@@ -791,11 +812,7 @@ def _solve_dvi_sparse_contacts_pgs(
                     if contact_id >= int32(0):
                         row = ccgo + int32(3) * cid
                         vec_idx = vio + row
-                        bids = contact_bid_AB[contact_id]
                         nzb_offset = contact_nzb_offsets[contact_id]
-                        block_count = int32(3)
-                        if bids[0] >= int32(0):
-                            block_count = int32(6)
 
                         normal_value = eta[row_start + row + int32(2)] * solution_lambdas[vec_idx + int32(2)]
                         local_block = int32(2)
@@ -811,7 +828,7 @@ def _solve_dvi_sparse_contacts_pgs(
                         normal_value += problem_v_f[vec_idx + int32(2)]
                         lambda_n_old = solution_lambdas[vec_idx + int32(2)]
                         P_n = problem_P[vec_idx + int32(2)]
-                        diagonal_n = wp.abs(problem_diag[vec_idx + int32(2)]) * P_n * P_n
+                        diagonal_n = projected_diag[vec_idx + int32(2)]
                         lambda_n_new = _project_contact_normal_update(
                             lambda_n_old, normal_value, diagonal_n, cfg.regularization, cfg.omega
                         )
@@ -853,8 +870,8 @@ def _solve_dvi_sparse_contacts_pgs(
                         lambda_t_old = wp.vec2f(solution_lambdas[vec_idx], solution_lambdas[vec_idx + int32(1)])
                         P_t0 = problem_P[vec_idx]
                         P_t1 = problem_P[vec_idx + int32(1)]
-                        diagonal_t0 = wp.abs(problem_diag[vec_idx]) * P_t0 * P_t0
-                        diagonal_t1 = wp.abs(problem_diag[vec_idx + int32(1)]) * P_t1 * P_t1
+                        diagonal_t0 = projected_diag[vec_idx]
+                        diagonal_t1 = projected_diag[vec_idx + int32(1)]
                         off_diagonal = inequality_tangent_cross[uio + cid]
                         if sweep == first_tangent_sweep:
                             off_diagonal = float32(0.0)

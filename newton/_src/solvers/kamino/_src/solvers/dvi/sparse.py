@@ -29,6 +29,7 @@ from .sparse_kernels import (
     _assemble_sparse_bilateral_unilateral_coupling,
     _build_sparse_bilateral_block,
     _build_sparse_bilateral_rhs,
+    _cache_sparse_contact_diagonal,
     _cache_sparse_projected_diagonal,
     _color_compact_contact_groups,
     _compact_contact_group_starts,
@@ -400,6 +401,20 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             threads_per_world = 512
     contact_only = path.size.max_of_max_limits == 0 and path.bilateral_solver is None
     kernel = _solve_dvi_sparse_contacts_pgs if contact_only else _solve_dvi_sparse_inequalities_pgs
+    if contact_only:
+        wp.launch(
+            kernel=_cache_sparse_contact_diagonal,
+            dim=(path.size.num_worlds, path.size.max_of_max_contacts),
+            inputs=[
+                problem.data.nc,
+                problem.data.ccgo,
+                problem.data.vio,
+                problem.data.P,
+                state.scratch,
+                state.inequality_projected_diagonal,
+            ],
+            device=path.device,
+        )
     cooperative_articulation = (
         path.device.is_cuda and path.bilateral_solver is not None and path.size.max_of_num_joint_cts >= 64
     )
@@ -431,7 +446,7 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             problem.data.P,
             problem.data.v_f,
             problem.data.v_b,
-            state.scratch,
+            state.inequality_projected_diagonal,
             delassus.regularization,
             state.inequality_num_colors,
             state.inequality_ids_by_color,
