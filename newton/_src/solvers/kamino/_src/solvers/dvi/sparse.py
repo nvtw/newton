@@ -69,6 +69,19 @@ _CONTACT_PAIR_SORT_MIN_CAPACITY = 4096
 _SPARSE_INEQUALITY_TOPOLOGY_ERROR = "Sparse DVI inequalities require limit/contact topology and sparse Jacobians."
 
 
+def _split_contact_threads_per_world(num_worlds: int, max_contacts: int, is_cuda: bool) -> int:
+    """Choose wider split-recovery blocks only for a contact-rich single world."""
+    if not is_cuda:
+        return 1
+    if num_worlds != 1:
+        return 64
+    if max_contacts >= 4096:
+        return 512
+    if max_contacts >= 2048:
+        return 256
+    return 64
+
+
 class SparseDVIPath:
     """Own workspace and operations for the sparse Kamino DVI solve path."""
 
@@ -178,7 +191,11 @@ class SparseDVIPath:
         state = self.data.state
         state.scratch.zero_()
         self.body_space.zero_()
-        threads_per_world = 1 if not self.device.is_cuda else 64
+        threads_per_world = _split_contact_threads_per_world(
+            self.size.num_worlds,
+            self.size.max_of_max_contacts,
+            self.device.is_cuda,
+        )
         wp.launch(
             kernel=_solve_split_contact_pose_correction,
             dim=self.size.num_worlds * threads_per_world,

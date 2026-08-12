@@ -42,6 +42,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_JOINTS,
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
     _sparse_delassus_matvec_rows,
+    _split_contact_threads_per_world,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _assemble_compact_unilateral_schur,
@@ -533,6 +534,20 @@ class TestDVISolver(unittest.TestCase):
         if not test_context.setup_done:
             setup_tests(clear_cache=False)
         self.device = wp.get_device(test_context.device)
+
+    def test_00_split_contact_launch_width_policy(self):
+        """Widen only contact-rich single-world CUDA split recovery."""
+        self.assertEqual(_split_contact_threads_per_world(1, 2047, True), 64)
+        self.assertEqual(_split_contact_threads_per_world(1, 2048, True), 256)
+        self.assertEqual(_split_contact_threads_per_world(1, 4095, True), 256)
+        self.assertEqual(_split_contact_threads_per_world(1, 4096, True), 512)
+
+        for world_count in (2, 8, 128):
+            with self.subTest(world_count=world_count):
+                self.assertEqual(_split_contact_threads_per_world(world_count, 8192, True), 64)
+
+        self.assertEqual(_split_contact_threads_per_world(1, 8192, False), 1)
+        self.assertEqual(_split_contact_threads_per_world(128, 8192, False), 1)
 
     def test_00_config_selection(self):
         default_config = SolverKamino.Config(dynamics_solver="dvi")
