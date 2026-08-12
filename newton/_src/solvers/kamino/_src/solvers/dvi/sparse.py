@@ -204,7 +204,13 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
         path.data.bilateral_operator.info.vio if path.data.bilateral_operator is not None else problem.data.vio
     )
     delassus.apply_jacobian_transpose(path.data.solution.lambdas, path.body_space, path.all_worlds_mask)
-    threads_per_world = 64 if path.device.is_cuda else 1
+    threads_per_world = 1
+    if path.device.is_cuda:
+        threads_per_world = 64
+        if path.size.max_of_max_contacts >= 2048:
+            threads_per_world = 256
+        if path.size.max_of_max_contacts >= 4096:
+            threads_per_world = 512
     contact_only = path.size.max_of_max_limits == 0 and path.bilateral_solver is None
     kernel = _solve_dvi_sparse_contacts_pgs if contact_only else _solve_dvi_sparse_inequalities_pgs
     common_inputs = [
@@ -573,9 +579,10 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
     )
     use_permutation = isinstance(path.bilateral_solver, LLTBlockedRCMSolver)
     permutation = path.bilateral_solver.P if use_permutation else state.projected_mio
+    response_threads_per_world = 256 if path.device.is_cuda else 1
     wp.launch(
         kernel=_solve_bilateral_unilateral_response,
-        dim=path.size.num_worlds * (64 if path.device.is_cuda else 1),
+        dim=path.size.num_worlds * response_threads_per_world,
         inputs=[
             problem.data.dim,
             problem.data.njc,
@@ -592,7 +599,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
             state.bilateral_response,
         ],
         device=path.device,
-        block_dim=64 if path.device.is_cuda else 1,
+        block_dim=response_threads_per_world,
     )
     has_intermediate_bilateral_solve = any(
         path.should_solve_bilateral_after_block(block_iteration)
