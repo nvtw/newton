@@ -372,6 +372,14 @@ __syncthreads();
 def _sync_threads(): ...
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncwarp(0xffffffffu);
+#endif
+""")
+def _sync_warp(): ...
+
+
 @wp.kernel
 def _solve_bilateral_contact_response(
     problem_dim: wp.array[int32],
@@ -506,37 +514,35 @@ def _solve_bilateral_unilateral_response_cooperative(
         partial = float32(0.0)
         if active:
             for k in range(local_lane, row, int32(16)):
-                partial += bilateral_L[factor + njc * row + k] * response_factor[
-                    offset + k * unilateral_stride + unilateral
-                ]
+                partial += (
+                    bilateral_L[factor + njc * row + k] * response_factor[offset + k * unilateral_stride + unilateral]
+                )
         total = _subgroup_sum_16(partial)
         if local_lane == int32(0) and active:
             original_row = row
             if use_permutation:
                 original_row = bilateral_permutation[bvio + row]
-            value = bilateral_P[bvio + original_row] * coupling[
-                offset + original_row * unilateral_stride + unilateral
+            value = bilateral_P[bvio + original_row] * coupling[offset + original_row * unilateral_stride + unilateral]
+            response_factor[offset + row * unilateral_stride + unilateral] = (value - total) / bilateral_L[
+                factor + njc * row + row
             ]
-            response_factor[offset + row * unilateral_stride + unilateral] = (
-                value - total
-            ) / bilateral_L[factor + njc * row + row]
-        _sync_threads()
+        _sync_warp()
 
     for reverse_row in range(njc):
         row = njc - int32(1) - reverse_row
         partial = float32(0.0)
         if active:
             for k in range(row + int32(1) + local_lane, njc, int32(16)):
-                partial += bilateral_L[factor + njc * k + row] * response_factor[
-                    offset + k * unilateral_stride + unilateral
-                ]
+                partial += (
+                    bilateral_L[factor + njc * k + row] * response_factor[offset + k * unilateral_stride + unilateral]
+                )
         total = _subgroup_sum_16(partial)
         if local_lane == int32(0) and active:
             value = response_factor[offset + row * unilateral_stride + unilateral]
-            response_factor[offset + row * unilateral_stride + unilateral] = (
-                value - total
-            ) / bilateral_L[factor + njc * row + row]
-        _sync_threads()
+            response_factor[offset + row * unilateral_stride + unilateral] = (value - total) / bilateral_L[
+                factor + njc * row + row
+            ]
+        _sync_warp()
 
     if active:
         for row in range(local_lane, njc, int32(16)):
@@ -544,8 +550,7 @@ def _solve_bilateral_unilateral_response_cooperative(
             if use_permutation:
                 original_row = bilateral_permutation[bvio + row]
             response[offset + original_row * unilateral_stride + unilateral] = (
-                bilateral_P[bvio + original_row]
-                * response_factor[offset + row * unilateral_stride + unilateral]
+                bilateral_P[bvio + original_row] * response_factor[offset + row * unilateral_stride + unilateral]
             )
 
 
