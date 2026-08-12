@@ -37,6 +37,7 @@ from .sparse_kernels import (
     _set_sparse_bilateral_diagonal,
     _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
+    _solve_dvi_sparse_inequalities_pgs_cooperative,
     _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
 )
@@ -215,6 +216,12 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             threads_per_world = 512
     contact_only = path.size.max_of_max_limits == 0 and path.bilateral_solver is None
     kernel = _solve_dvi_sparse_contacts_pgs if contact_only else _solve_dvi_sparse_inequalities_pgs
+    cooperative_articulation = (
+        path.device.is_cuda and path.bilateral_solver is not None and path.size.max_of_num_joint_cts >= 128
+    )
+    if cooperative_articulation:
+        kernel = _solve_dvi_sparse_inequalities_pgs_cooperative
+        threads_per_world = 32
     common_inputs = [
         bsm.num_nzb,
         bsm.nzb_start,
@@ -289,8 +296,10 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             block_iteration,
             path.data.config,
             path.body_space,
-            path.data.solution.lambdas,
         ]
+        if cooperative_articulation:
+            kernel_inputs.append(state.s)
+        kernel_inputs.append(path.data.solution.lambdas)
     wp.launch(
         kernel=kernel,
         dim=path.size.num_worlds * threads_per_world,

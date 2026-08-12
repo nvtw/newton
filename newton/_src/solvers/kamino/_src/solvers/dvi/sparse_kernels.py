@@ -411,6 +411,7 @@ def _assemble_sparse_bilateral_unilateral_coupling(
     offset = response_mio[wid]
     coupling[offset + row * response_stride[wid] + unilateral] = value
 
+
 @wp.kernel
 def _cache_sparse_projected_diagonal(
     problem_dim: wp.array[int32],
@@ -440,7 +441,6 @@ def _cache_sparse_projected_diagonal(
         index = offset + bilateral_row * stride + unilateral_row
         value -= bilateral_coupling[index] * bilateral_response[index]
     projected_diag[vec_idx] = value
-
 
 
 @wp.kernel
@@ -1057,6 +1057,473 @@ def _solve_dvi_sparse_inequalities_pgs(
                             body_space[local_x_idx_1 + j] = local_body_1[j]
                     group += threads_per_world
                 _sync_threads()
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    float r = value;
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        r += __shfl_xor_sync(0xffffffffu, r, offset, 32);
+    return r;
+#else
+    return value;
+#endif
+    """
+)
+def _subgroup_sum_32(value: float32) -> float32: ...
+
+
+@wp.func
+def _cooperative_sparse_limit_update(
+    mapped_id: int32,
+    row: int32,
+    vec_idx: int32,
+    row_start: int32,
+    col_start: int32,
+    matrix_end: int32,
+    bilateral_value: float32,
+    cfg: DVIConfigStruct,
+    bsm_nzb_coords: wp.array2d[int32],
+    bsm_nzb_values: wp.array[vec6f],
+    jacobian_nzb_values: wp.array[vec6f],
+    limit_nzb_offsets: wp.array[int32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    projected_diag: wp.array[float32],
+    eta: wp.array[float32],
+    body_space: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+) -> float32:
+    nzb_offset = limit_nzb_offsets[mapped_id]
+    value = eta[row_start + row] * solution_lambdas[vec_idx] + bilateral_value
+    for k in range(2):
+        nzb_idx = nzb_offset + k
+        if nzb_idx < matrix_end and bsm_nzb_coords[nzb_idx, 0] == row:
+            block = bsm_nzb_values[nzb_idx]
+            x_idx = col_start + bsm_nzb_coords[nzb_idx, 1]
+            for j in range(6):
+                value += block[j] * body_space[x_idx + j]
+    value += problem_v_f[vec_idx]
+    old_lambda = solution_lambdas[vec_idx]
+    new_lambda = old_lambda
+    diagonal = projected_diag[vec_idx]
+    if diagonal > FLOAT32_EPS:
+        new_lambda = wp.max(
+            float32(0.0),
+            old_lambda - cfg.omega * value / (diagonal + cfg.regularization + FLOAT32_EPS),
+        )
+    lambda_delta = new_lambda - old_lambda
+    solution_lambdas[vec_idx] = new_lambda
+    body_delta = problem_P[vec_idx] * lambda_delta
+    for k in range(2):
+        nzb_idx = nzb_offset + k
+        if nzb_idx < matrix_end and bsm_nzb_coords[nzb_idx, 0] == row:
+            x_idx = col_start + bsm_nzb_coords[nzb_idx, 1]
+            jacobian_row = jacobian_nzb_values[nzb_idx]
+            for j in range(6):
+                body_space[x_idx + j] += jacobian_row[j] * body_delta
+    return lambda_delta
+
+
+@wp.func
+def _cooperative_sparse_contact_normal_update(
+    mapped_id: int32,
+    row: int32,
+    vec_idx: int32,
+    row_start: int32,
+    col_start: int32,
+    matrix_end: int32,
+    bilateral_value: float32,
+    cfg: DVIConfigStruct,
+    bsm_nzb_coords: wp.array2d[int32],
+    bsm_nzb_values: wp.array[vec6f],
+    jacobian_nzb_values: wp.array[vec6f],
+    contact_nzb_offsets: wp.array[int32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    projected_diag: wp.array[float32],
+    eta: wp.array[float32],
+    body_space: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+) -> float32:
+    nzb_offset = contact_nzb_offsets[mapped_id]
+    block_count = int32(3)
+    if nzb_offset + int32(3) < matrix_end and bsm_nzb_coords[nzb_offset + int32(3), 0] == row:
+        block_count = int32(6)
+    value = eta[row_start + row + int32(2)] * solution_lambdas[vec_idx + int32(2)] + bilateral_value
+    block_offset = int32(2)
+    while block_offset < block_count:
+        nzb_idx = nzb_offset + block_offset
+        block = bsm_nzb_values[nzb_idx]
+        x_idx = col_start + bsm_nzb_coords[nzb_idx, 1]
+        for j in range(6):
+            value += block[j] * body_space[x_idx + j]
+        block_offset += int32(3)
+    value += problem_v_f[vec_idx + int32(2)]
+    old_lambda = solution_lambdas[vec_idx + int32(2)]
+    new_lambda = _project_contact_normal_update(
+        old_lambda, value, projected_diag[vec_idx + int32(2)], cfg.regularization, cfg.omega
+    )
+    lambda_delta = new_lambda - old_lambda
+    solution_lambdas[vec_idx + int32(2)] = new_lambda
+    body_delta = problem_P[vec_idx + int32(2)] * lambda_delta
+    block_offset = int32(2)
+    while block_offset < block_count:
+        nzb_idx = nzb_offset + block_offset
+        x_idx = col_start + bsm_nzb_coords[nzb_idx, 1]
+        jacobian_row = jacobian_nzb_values[nzb_idx]
+        for j in range(6):
+            body_space[x_idx + j] += jacobian_row[j] * body_delta
+        block_offset += int32(3)
+    return lambda_delta
+
+
+@wp.func
+def _cooperative_sparse_contact_tangent_update(
+    mapped_id: int32,
+    cid: int32,
+    uid: int32,
+    row: int32,
+    vec_idx: int32,
+    row_start: int32,
+    col_start: int32,
+    matrix_end: int32,
+    value_correction_0: float32,
+    value_correction_1: float32,
+    projected_cross: float32,
+    first_tangent_sweep: bool,
+    uio: int32,
+    cio: int32,
+    cfg: DVIConfigStruct,
+    bsm_nzb_coords: wp.array2d[int32],
+    bsm_nzb_values: wp.array[vec6f],
+    jacobian_nzb_values: wp.array[vec6f],
+    contact_nzb_offsets: wp.array[int32],
+    problem_mu: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    problem_v_b: wp.array[float32],
+    problem_diag: wp.array[float32],
+    projected_diag: wp.array[float32],
+    eta: wp.array[float32],
+    inequality_tangent_cross: wp.array[float32],
+    body_space: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+) -> vec3f:
+    nzb_offset = contact_nzb_offsets[mapped_id]
+    block_count = int32(3)
+    if nzb_offset + int32(3) < matrix_end and bsm_nzb_coords[nzb_offset + int32(3), 0] == row:
+        block_count = int32(6)
+    value_0 = eta[row_start + row] * solution_lambdas[vec_idx] + value_correction_0
+    value_1 = eta[row_start + row + int32(1)] * solution_lambdas[vec_idx + int32(1)] + value_correction_1
+    block_offset = int32(0)
+    while block_offset < block_count:
+        nzb_idx = nzb_offset + block_offset
+        block_0 = bsm_nzb_values[nzb_idx]
+        block_1 = bsm_nzb_values[nzb_idx + int32(1)]
+        x_idx = col_start + bsm_nzb_coords[nzb_idx, 1]
+        for j in range(6):
+            body_value = body_space[x_idx + j]
+            value_0 += block_0[j] * body_value
+            value_1 += block_1[j] * body_value
+        block_offset += int32(3)
+    value_0 += problem_v_f[vec_idx]
+    value_1 += problem_v_f[vec_idx + int32(1)]
+    old_lambda = wp.vec2f(solution_lambdas[vec_idx], solution_lambdas[vec_idx + int32(1)])
+    off_diagonal = inequality_tangent_cross[uio + uid]
+    if first_tangent_sweep:
+        off_diagonal = float32(0.0)
+        block_offset = int32(0)
+        while block_offset < block_count:
+            nzb_idx = nzb_offset + block_offset
+            mass_weighted_t0 = bsm_nzb_values[nzb_idx]
+            jacobian_t1 = jacobian_nzb_values[nzb_idx + int32(1)]
+            for j in range(6):
+                off_diagonal += mass_weighted_t0[j] * jacobian_t1[j]
+            block_offset += int32(3)
+        off_diagonal *= problem_P[vec_idx + int32(1)]
+        inequality_tangent_cross[uio + uid] = off_diagonal
+    off_diagonal -= projected_cross
+    new_lambda = _project_contact_tangent_update(
+        old_lambda,
+        wp.vec2f(value_0, value_1),
+        wp.vec2f(projected_diag[vec_idx], projected_diag[vec_idx + int32(1)]),
+        off_diagonal,
+        cfg.regularization,
+        cfg.omega,
+        problem_mu[cio + cid]
+        * _contact_friction_normal_load(
+            solution_lambdas[vec_idx + int32(2)],
+            problem_v_b[vec_idx + int32(2)],
+            problem_P[vec_idx + int32(2)],
+            wp.abs(problem_diag[vec_idx + int32(2)]) * problem_P[vec_idx + int32(2)] * problem_P[vec_idx + int32(2)],
+            cfg.regularization,
+            cfg.omega,
+        ),
+    )
+    delta_0 = new_lambda.x - old_lambda.x
+    delta_1 = new_lambda.y - old_lambda.y
+    solution_lambdas[vec_idx] = new_lambda.x
+    solution_lambdas[vec_idx + int32(1)] = new_lambda.y
+    body_delta_0 = problem_P[vec_idx] * delta_0
+    body_delta_1 = problem_P[vec_idx + int32(1)] * delta_1
+    block_offset = int32(0)
+    while block_offset < block_count:
+        nzb_idx = nzb_offset + block_offset
+        x_idx = col_start + bsm_nzb_coords[nzb_idx, 1]
+        jacobian_0 = jacobian_nzb_values[nzb_idx]
+        jacobian_1 = jacobian_nzb_values[nzb_idx + int32(1)]
+        for j in range(6):
+            body_space[x_idx + j] += jacobian_0[j] * body_delta_0 + jacobian_1[j] * body_delta_1
+        block_offset += int32(3)
+    return vec3f(delta_0, delta_1, 0.0)
+
+
+@wp.kernel
+def _solve_dvi_sparse_inequalities_pgs_cooperative(
+    bsm_num_nzb: wp.array[int32],
+    bsm_nzb_start: wp.array[int32],
+    bsm_nzb_coords: wp.array2d[int32],
+    bsm_nzb_values: wp.array[vec6f],
+    jacobian_nzb_values: wp.array[vec6f],
+    bsm_row_start: wp.array[int32],
+    bsm_col_start: wp.array[int32],
+    limit_nzb_offsets: wp.array[int32],
+    contact_nzb_offsets: wp.array[int32],
+    limit_indices: wp.array[int32],
+    contact_indices: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_lio: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_uio: wp.array[int32],
+    problem_lcgo: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    problem_v_b: wp.array[float32],
+    problem_diag: wp.array[float32],
+    projected_diag: wp.array[float32],
+    eta: wp.array[float32],
+    problem_njc: wp.array[int32],
+    bilateral_vio: wp.array[int32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    bilateral_coupling: wp.array[float32],
+    bilateral_response: wp.array[float32],
+    bilateral_delta: wp.array[float32],
+    inequality_num_colors: wp.array[int32],
+    inequality_ids_by_color: wp.array[int32],
+    inequality_color_starts: wp.array[int32],
+    inequality_group_starts: wp.array[int32],
+    inequality_tangent_cross: wp.array[float32],
+    block_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
+    body_space: wp.array[float32],
+    update_scratch: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+):
+    """Apply sparse PGS with one warp cooperating on each articulated world."""
+    tid = wp.tid()
+    lane = tid % int32(32)
+    wid = tid / int32(32)
+    cfg = solver_config[wid]
+    if block_iteration >= int32(0) and block_iteration >= cfg.max_alternating_iterations:
+        return
+    nl = problem_nl[wid]
+    nc = problem_nc[wid]
+    if nl + nc == int32(0):
+        return
+    lio = problem_lio[wid]
+    cio = problem_cio[wid]
+    uio = problem_uio[wid]
+    schedule_offset = uio + wid
+    lcgo = problem_lcgo[wid]
+    ccgo = problem_ccgo[wid]
+    vio = problem_vio[wid]
+    njc = problem_njc[wid]
+    response_offset = response_mio[wid]
+    response_row_stride = response_stride[wid]
+    bvio = bilateral_vio[wid]
+    row_start = bsm_row_start[wid]
+    col_start = bsm_col_start[wid]
+    matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
+    sweep_count = cfg.inequality_sweeps_per_iteration
+    first_tangent_sweep = int32(0)
+    if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
+        tangent_sweep_count = sweep_count * cfg.max_alternating_iterations / int32(2)
+        sweep_count = (sweep_count + int32(1)) * cfg.max_alternating_iterations
+        first_tangent_sweep = sweep_count - tangent_sweep_count
+    elif block_iteration == int32(_FUSED_BILATERAL_BLOCK):
+        sweep_count *= cfg.max_alternating_iterations
+
+    for sweep in range(sweep_count):
+        phase_count = int32(2)
+        if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and sweep < first_tangent_sweep:
+            phase_count = int32(1)
+        for phase in range(phase_count):
+            schedule_sweep = sweep
+            if block_iteration == int32(_FUSED_BILATERAL_BLOCK):
+                schedule_sweep = sweep % cfg.inequality_sweeps_per_iteration
+            reverse_colors = phase == int32(1) and schedule_sweep % int32(2) != int32(0)
+            num_colors = inequality_num_colors[wid]
+            for color_index in range(num_colors):
+                color = color_index
+                if reverse_colors:
+                    color = num_colors - int32(1) - color_index
+                group_start = inequality_color_starts[schedule_offset + color]
+                group_end = inequality_color_starts[schedule_offset + color + int32(1)]
+                for group in range(group_start, group_end):
+                    slot_start = inequality_group_starts[schedule_offset + group]
+                    slot_end = inequality_group_starts[schedule_offset + group + int32(1)]
+                    for slot_iteration in range(slot_end - slot_start):
+                        slot = slot_start + slot_iteration
+                        if reverse_colors:
+                            slot = slot_end - int32(1) - slot_iteration
+                        uid = inequality_ids_by_color[uio + slot]
+                        mapped_id = int32(-1)
+                        if uid < nl and phase != int32(0):
+                            continue
+                        if uid < nl:
+                            mapped_id = limit_indices[lio + uid]
+                        else:
+                            mapped_id = contact_indices[cio + uid - nl]
+
+                        row = lcgo + uid
+                        if uid >= nl:
+                            row = ccgo + int32(3) * (uid - nl)
+                        vec_idx = vio + row
+                        unilateral_row = row - njc
+                        partial_0 = float32(0.0)
+                        partial_1 = float32(0.0)
+                        partial_cross = float32(0.0)
+                        if mapped_id >= int32(0):
+                            for bilateral_row in range(lane, njc, int32(32)):
+                                index = response_offset + bilateral_row * response_row_stride + unilateral_row
+                                bilateral_value = bilateral_delta[bvio + bilateral_row]
+                                if uid < nl or phase == int32(0):
+                                    component = int32(0)
+                                    if uid >= nl:
+                                        component = int32(2)
+                                    partial_0 += bilateral_coupling[index + component] * bilateral_value
+                                else:
+                                    partial_0 += bilateral_coupling[index] * bilateral_value
+                                    partial_1 += bilateral_coupling[index + int32(1)] * bilateral_value
+                                    partial_cross += bilateral_coupling[index] * bilateral_response[index + int32(1)]
+                        correction_0 = _subgroup_sum_32(partial_0)
+                        correction_1 = _subgroup_sum_32(partial_1)
+                        projected_cross = _subgroup_sum_32(partial_cross)
+
+                        if lane == int32(0):
+                            delta_0 = float32(0.0)
+                            delta_1 = float32(0.0)
+                            if mapped_id >= int32(0):
+                                if uid < nl:
+                                    if phase == int32(0):
+                                        delta_0 = _cooperative_sparse_limit_update(
+                                            mapped_id,
+                                            row,
+                                            vec_idx,
+                                            row_start,
+                                            col_start,
+                                            matrix_end,
+                                            correction_0,
+                                            cfg,
+                                            bsm_nzb_coords,
+                                            bsm_nzb_values,
+                                            jacobian_nzb_values,
+                                            limit_nzb_offsets,
+                                            problem_P,
+                                            problem_v_f,
+                                            projected_diag,
+                                            eta,
+                                            body_space,
+                                            solution_lambdas,
+                                        )
+                                elif phase == int32(0):
+                                    delta_0 = _cooperative_sparse_contact_normal_update(
+                                        mapped_id,
+                                        row,
+                                        vec_idx,
+                                        row_start,
+                                        col_start,
+                                        matrix_end,
+                                        correction_0,
+                                        cfg,
+                                        bsm_nzb_coords,
+                                        bsm_nzb_values,
+                                        jacobian_nzb_values,
+                                        contact_nzb_offsets,
+                                        problem_P,
+                                        problem_v_f,
+                                        projected_diag,
+                                        eta,
+                                        body_space,
+                                        solution_lambdas,
+                                    )
+                                else:
+                                    tangent_delta = _cooperative_sparse_contact_tangent_update(
+                                        mapped_id,
+                                        uid - nl,
+                                        uid,
+                                        row,
+                                        vec_idx,
+                                        row_start,
+                                        col_start,
+                                        matrix_end,
+                                        correction_0,
+                                        correction_1,
+                                        projected_cross,
+                                        sweep == first_tangent_sweep,
+                                        uio,
+                                        cio,
+                                        cfg,
+                                        bsm_nzb_coords,
+                                        bsm_nzb_values,
+                                        jacobian_nzb_values,
+                                        contact_nzb_offsets,
+                                        problem_mu,
+                                        problem_P,
+                                        problem_v_f,
+                                        problem_v_b,
+                                        problem_diag,
+                                        projected_diag,
+                                        eta,
+                                        inequality_tangent_cross,
+                                        body_space,
+                                        solution_lambdas,
+                                    )
+                                    delta_0 = tangent_delta.x
+                                    delta_1 = tangent_delta.y
+                            update_scratch[vec_idx] = delta_0
+                            if uid >= nl:
+                                update_scratch[vec_idx + int32(1)] = delta_1
+                        _sync_threads()
+
+                        delta_0 = update_scratch[vec_idx]
+                        delta_1 = float32(0.0)
+                        if uid >= nl:
+                            delta_1 = update_scratch[vec_idx + int32(1)]
+                        if mapped_id >= int32(0) and (delta_0 != float32(0.0) or delta_1 != float32(0.0)):
+                            for bilateral_row in range(lane, njc, int32(32)):
+                                index = response_offset + bilateral_row * response_row_stride + unilateral_row
+                                if uid < nl:
+                                    if phase == int32(0):
+                                        bilateral_delta[bvio + bilateral_row] -= bilateral_response[index] * delta_0
+                                elif phase == int32(0):
+                                    bilateral_delta[bvio + bilateral_row] -= (
+                                        bilateral_response[index + int32(2)] * delta_0
+                                    )
+                                else:
+                                    bilateral_delta[bvio + bilateral_row] -= (
+                                        bilateral_response[index] * delta_0
+                                        + bilateral_response[index + int32(1)] * delta_1
+                                    )
+                        _sync_threads()
 
 
 @wp.kernel

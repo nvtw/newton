@@ -840,6 +840,7 @@ class TestDVISolver(unittest.TestCase):
                     float_array([-1.0]),  # problem_v_f
                     float_array([0.0]),  # problem_v_b
                     float_array([1.0]),  # problem_diag
+                    float_array([1.0]),  # projected_diag
                     float_array([0.0]),  # eta
                     int32_array([0]),  # problem_njc
                     int32_array([0]),  # bilateral_vio
