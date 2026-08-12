@@ -210,6 +210,8 @@ class DVISolver:
         self._sparse_path = SparseDVIPath(
             device=self._device,
             size=self._size,
+            joint_rows_host=self._joint_rows_host,
+            unilateral_strides_host=self._unilateral_strides_host,
             data=self._data,
             model=model,
             model_data=data,
