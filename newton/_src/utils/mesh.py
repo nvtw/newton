@@ -1802,8 +1802,6 @@ def create_mesh_cylinder(
                 ring_indices.append(add_vertex(position, side_normal, side_uv))
             side_ring_indices.append(ring_indices)
 
-        side_bottom_indices = side_ring_indices[0]
-        side_top_indices = side_ring_indices[-1]
     else:
         side_radial_component = 2.0 * half_height
         side_axial_component = radius - top_radius

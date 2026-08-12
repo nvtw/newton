@@ -432,7 +432,8 @@ def sdf_cylinder(
         half_height [m]: Half-height along the cylinder axis.
         up_axis: Cylinder long axis as ``int(newton.Axis.*)``.
         top_radius [m]: Top radius. Negative values use ``radius``.
-        barrel_radius [m]: Radius of the circular side profile. Zero creates straight sides.
+        barrel_radius [m]: Radius of the circular side profile. Zero creates straight sides. Nonzero
+            values must be at least ``half_height`` and take precedence over ``top_radius``.
 
     Returns:
         Signed distance [m], negative inside, zero on surface, positive outside.
@@ -464,7 +465,8 @@ def sdf_cylinder_grad(
         half_height [m]: Half-height along the cylinder axis.
         up_axis: Cylinder long axis as ``int(newton.Axis.*)``.
         top_radius [m]: Top radius. Negative values use ``radius``.
-        barrel_radius [m]: Radius of the circular side profile. Zero creates straight sides.
+        barrel_radius [m]: Radius of the circular side profile. Zero creates straight sides. Nonzero
+            values must be at least ``half_height`` and take precedence over ``top_radius``.
 
     Returns:
         Unit-length outward gradient direction in local frame.

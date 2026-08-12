@@ -101,6 +101,27 @@ class TestViewerGeometryBatching(unittest.TestCase):
         radial_distances = np.linalg.norm(viewer.points[:, :2], axis=1)
         self.assertAlmostEqual(float(np.max(radial_distances)), expected_equatorial_radius, places=6)
 
+    def test_cylinder_site_ignores_display_size(self):
+        """Treat a cylinder site's third size component as display metadata."""
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(
+            """
+            <mujoco>
+                <worldbody>
+                    <body>
+                        <geom type="cylinder" size="0.02 0.1"/>
+                        <site type="cylinder" size="0.02 0.1"/>
+                    </body>
+                </worldbody>
+            </mujoco>
+            """
+        )
+
+        viewer = _ViewerGeometryBatchingProbe()
+        viewer.set_model(builder.finalize())
+
+        self.assertEqual(len(viewer._geometry_cache), 1)
+
     def test_capsule_geometry_is_batched_across_scales(self):
         """Varying capsule dimensions should share one cached capsule geometry."""
         builder = newton.ModelBuilder()

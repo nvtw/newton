@@ -397,7 +397,7 @@ class Mesh:
             up_axis: Long axis as a ``newton.Axis`` value.
             segments: Circumferential tessellation resolution.
             top_radius [m]: Optional top radius. If ``None``, equals ``radius``.
-            barrel_radius [m]: Radius of the symmetric circular side-profile arc. Use `0.0` for
+            barrel_radius [m]: Radius of the symmetric circular side-profile arc. Use ``0.0`` for
                 straight sides. Nonzero values must be at least ``half_height`` and cannot be
                 combined with a different ``top_radius``.
             compute_normals: If ``True``, generate per-vertex normals.

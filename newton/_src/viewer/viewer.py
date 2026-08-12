@@ -2304,6 +2304,11 @@ class ViewerBase(ABC):
             geo_is_solid = bool(shape_geo_is_solid[s])
             geo_src = shape_geo_src[s]
 
+            # MuJoCo uses the third cylinder-site size component only for display.
+            # Normalize it so sites use and share straight-cylinder geometry.
+            if geo_type == newton.GeoType.CYLINDER and shape_flags[s] & int(newton.ShapeFlags.SITE):
+                geo_scale[2] = 0.0
+
             # Mesh-class shapes can carry signed scale. When det(scale) < 0 the GPU
             # mirrors the geometry, which reverses screen-space triangle winding;
             # cache a single winding-flipped variant per source mesh so back-face
