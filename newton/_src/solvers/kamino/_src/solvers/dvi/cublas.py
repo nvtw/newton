@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import os
 import threading
+from pathlib import Path
 
 import warp as wp
 
@@ -18,12 +20,83 @@ _CUBLAS_OP_T = 1
 _CUBLAS_DIAG_NON_UNIT = 0
 
 
-class _Cublas:
-    def __init__(self):
+def _windows_cublas_candidates() -> tuple[list[Path], list[str]]:
+    """Return DLL directories and cuBLAS candidates in preferred order."""
+    search_dirs: list[Path] = []
+    for name in ("CUDA_PATH", "CUDA_HOME"):
+        root = os.environ.get(name)
+        if root:
+            search_dirs.append(Path(root) / "bin")
+
+    # Python 3.8+ no longer uses PATH to resolve dependent DLLs for ctypes.
+    # Inspect it explicitly so a system CUDA installation still works when
+    # CUDA_PATH is unavailable.
+    search_dirs.extend(Path(value) for value in os.environ.get("PATH", "").split(os.pathsep) if value)
+
+    unique_dirs: list[Path] = []
+    candidates: list[str] = []
+    seen_dirs: set[Path] = set()
+    seen_candidates: set[str] = set()
+    for directory in search_dirs:
+        if directory in seen_dirs or not directory.is_dir():
+            continue
+        seen_dirs.add(directory)
+        libraries = sorted(directory.glob("cublas64_*.dll"), reverse=True)
+        if not libraries:
+            continue
+        unique_dirs.append(directory)
+        for library in libraries:
+            value = str(library)
+            if value not in seen_candidates:
+                candidates.append(value)
+                seen_candidates.add(value)
+
+    discovered = ctypes.util.find_library("cublas")
+    if discovered and discovered not in seen_candidates:
+        candidates.append(discovered)
+        seen_candidates.add(discovered)
+    for major in range(20, 9, -1):
+        name = f"cublas64_{major}.dll"
+        if name not in seen_candidates:
+            candidates.append(name)
+            seen_candidates.add(name)
+    return unique_dirs, candidates
+
+
+def _load_cublas_library() -> tuple[ctypes.CDLL, list[object]]:
+    if os.name != "nt":
         path = ctypes.util.find_library("cublas")
         if path is None:
             raise OSError("cuBLAS library was not found")
-        self.lib = ctypes.CDLL(path)
+        return ctypes.CDLL(path), []
+
+    directories, candidates = _windows_cublas_candidates()
+    directory_handles: list[object] = []
+    for directory in directories:
+        try:
+            directory_handles.append(os.add_dll_directory(str(directory)))
+        except (FileNotFoundError, OSError):
+            pass
+
+    loader = ctypes.WinDLL
+    errors: list[OSError] = []
+    for candidate in candidates:
+        try:
+            # cuBLAS uses CUBLASWINAPI (__stdcall) on Windows.
+            return loader(candidate), directory_handles
+        except OSError as error:
+            errors.append(error)
+    for handle in directory_handles:
+        close = getattr(handle, "close", None)
+        if close is not None:
+            close()
+    detail = f": {errors[-1]}" if errors else ""
+    raise OSError(f"cuBLAS library was not found{detail}")
+
+
+class _Cublas:
+    def __init__(self):
+        self.lib, self._directory_handles = _load_cublas_library()
         self.lib.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
         self.lib.cublasCreate_v2.restype = ctypes.c_int
         self.lib.cublasSetStream_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]

@@ -6,12 +6,17 @@
 from __future__ import annotations
 
 import importlib
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import warp as wp
 
 import newton.examples
+from newton._src.solvers.kamino._src.solvers.dvi import cublas as cublas_module
 from newton._src.solvers.kamino._src.solvers.dvi.cublas import is_batched_trsm_available, solve_llt_batched
 from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     _pack_batched_bilateral_response,
@@ -20,6 +25,46 @@ from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
 )
 from newton.tests.kamino import setup_tests, test_context
 from newton.viewer import ViewerNull
+
+
+class TestCublasLibraryDiscovery(unittest.TestCase):
+    def test_windows_candidates_use_cuda_bin_and_versioned_fallbacks(self):
+        with tempfile.TemporaryDirectory() as root:
+            bin_path = Path(root) / "bin"
+            bin_path.mkdir()
+            for name in ("cublas64_12.dll", "cublas64_13.dll"):
+                (bin_path / name).touch()
+            with (
+                mock.patch.dict(os.environ, {"CUDA_PATH": root, "CUDA_HOME": "", "PATH": ""}),
+                mock.patch.object(cublas_module.ctypes.util, "find_library", return_value=None),
+            ):
+                directories, candidates = cublas_module._windows_cublas_candidates()
+
+        self.assertEqual(directories, [bin_path])
+        self.assertEqual([Path(value).name for value in candidates[:2]], ["cublas64_13.dll", "cublas64_12.dll"])
+        self.assertIn("cublas64_20.dll", candidates)
+        self.assertIn("cublas64_10.dll", candidates)
+
+    def test_windows_loader_uses_stdcall_and_retains_dll_directory(self):
+        directory = mock.Mock()
+        directory_handle = mock.Mock()
+        library = mock.Mock()
+        with (
+            mock.patch.object(cublas_module.os, "name", "nt"),
+            mock.patch.object(
+                cublas_module, "_windows_cublas_candidates", return_value=([directory], ["cublas64_13.dll"])
+            ),
+            mock.patch.object(
+                cublas_module.os, "add_dll_directory", return_value=directory_handle, create=True
+            ) as add_directory,
+            mock.patch.object(cublas_module.ctypes, "WinDLL", return_value=library, create=True) as load_library,
+        ):
+            actual_library, handles = cublas_module._load_cublas_library()
+
+        add_directory.assert_called_once_with(str(directory))
+        load_library.assert_called_once_with("cublas64_13.dll")
+        self.assertIs(actual_library, library)
+        self.assertEqual(handles, [directory_handle])
 
 
 class TestDVICublas(unittest.TestCase):
