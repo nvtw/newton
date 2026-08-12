@@ -97,6 +97,15 @@ def _use_parallel_contact_colors(num_worlds: int, max_limits: int, max_contacts:
     return is_cuda and num_worlds == 1 and max_limits == 0 and max_contacts >= _PARALLEL_CONTACT_MIN_CAPACITY
 
 
+def _parallel_contact_group_width(sm_count: int, group_capacity: int) -> int:
+    """Trade idle SIMD lanes for enough independent warps on low-world contact solves."""
+    # A color commonly occupies about half the body-derived group capacity. Aim
+    # for one useful warp per SM, retain at least two lanes/group to amortize the
+    # runtime mapping, and cap the deliberate SIMD underfill.
+    required = max(2, (2 * sm_count * 32 + group_capacity - 1) // group_capacity)
+    return min(16, 1 << (required - 1).bit_length())
+
+
 class SparseDVIPath:
     """Own workspace and operations for the sparse Kamino DVI solve path."""
 
@@ -604,6 +613,7 @@ def _launch_sparse_inequality_pgs(
                 int32(-1),
                 int32(-1),
                 threads_per_world,
+                int32(1),
                 block_iteration,
                 path.data.config,
                 wp.bool(path.split_contact_recovery_enabled),
@@ -681,6 +691,7 @@ def _launch_sparse_inequality_pgs(
         tangent_sweeps = base_sweeps * alternating_iterations // 2
         total_sweeps = (base_sweeps + 1) * alternating_iterations + tangent_sweeps + 1
         group_dim = path.size.max_of_num_bodies + 1
+        group_width = _parallel_contact_group_width(path.device.sm_count, group_dim)
         for sweep in range(total_sweeps):
             for color_ordinal in range(_PARALLEL_CONTACT_MAX_COLORS):
                 node_inputs = kernel_inputs.copy()
@@ -688,9 +699,10 @@ def _launch_sparse_inequality_pgs(
                 node_inputs[parallel_mode_offset + 2] = int32(sweep)
                 node_inputs[parallel_mode_offset + 3] = int32(color_ordinal)
                 node_inputs[parallel_mode_offset + 4] = group_dim
+                node_inputs[parallel_mode_offset + 5] = int32(group_width)
                 wp.launch(
                     kernel=kernel,
-                    dim=group_dim,
+                    dim=group_dim * group_width,
                     inputs=node_inputs,
                     device=path.device,
                     block_dim=64,

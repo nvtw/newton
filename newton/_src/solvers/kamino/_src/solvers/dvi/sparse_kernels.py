@@ -877,6 +877,7 @@ def _solve_dvi_sparse_contacts_pgs(
     selected_sweep: int32,
     selected_color_ordinal: int32,
     parallel_group_stride: int32,
+    parallel_group_width: int32,
     block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
     split_contact_recovery: bool,
@@ -893,7 +894,9 @@ def _solve_dvi_sparse_contacts_pgs(
             return
         # A color node is one-world only; global thread ids own disjoint groups.
         wid = int32(0)
-        lane = tid
+        if tid % parallel_group_width != int32(0):
+            return
+        lane = tid / parallel_group_width
         threads_per_world = parallel_group_stride
     elif parallel_contact_colors[0] != int32(0):
         return
@@ -1102,7 +1105,8 @@ def _solve_dvi_sparse_contacts_pgs(
                     for j in range(6):
                         body_space[local_x_idx_1 + j] = local_body_1[j]
                 group += threads_per_world
-            _sync_threads()
+            if not parallel_color_node:
+                _sync_threads()
 
 
 @wp.kernel

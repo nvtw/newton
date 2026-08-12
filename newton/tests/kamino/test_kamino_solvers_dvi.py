@@ -41,6 +41,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.projections import (
 from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_JOINTS,
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
+    _parallel_contact_group_width,
     _sparse_delassus_matvec_rows,
     _split_contact_threads_per_world,
     _use_parallel_contact_colors,
@@ -558,6 +559,13 @@ class TestDVISolver(unittest.TestCase):
         self.assertFalse(_use_parallel_contact_colors(2, 0, 45210, True))
         self.assertFalse(_use_parallel_contact_colors(1, 1, 45210, True))
         self.assertFalse(_use_parallel_contact_colors(1, 0, 45210, False))
+
+    def test_00a_parallel_contact_group_width_policy(self):
+        self.assertEqual(_parallel_contact_group_width(20, 821), 2)
+        self.assertEqual(_parallel_contact_group_width(60, 821), 8)
+        self.assertEqual(_parallel_contact_group_width(108, 821), 16)
+        self.assertEqual(_parallel_contact_group_width(188, 821), 16)
+        self.assertEqual(_parallel_contact_group_width(188, 100_000), 2)
 
     def test_00_config_selection(self):
         default_config = SolverKamino.Config(dynamics_solver="dvi")
