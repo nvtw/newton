@@ -894,9 +894,14 @@ def _solve_dvi_sparse_contacts_pgs(
             return
         # A color node is one-world only; global thread ids own disjoint groups.
         wid = int32(0)
-        if tid % parallel_group_width != int32(0):
+        # Keep the width-selected useful-warp count, but pack each warp's
+        # independent group owners into adjacent lanes so their schedule and
+        # contact-row reads can share memory transactions.
+        warp_lane = tid % int32(32)
+        groups_per_warp = int32(32) / parallel_group_width
+        if warp_lane >= groups_per_warp:
             return
-        lane = tid / parallel_group_width
+        lane = (tid / int32(32)) * groups_per_warp + warp_lane
         threads_per_world = parallel_group_stride
     elif parallel_contact_colors[0] != int32(0):
         return
