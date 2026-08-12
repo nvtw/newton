@@ -100,10 +100,10 @@ def _use_parallel_contact_colors(num_worlds: int, max_limits: int, max_contacts:
 def _parallel_contact_group_width(sm_count: int, group_capacity: int) -> int:
     """Trade idle SIMD lanes for enough independent warps on low-world contact solves."""
     # A color commonly occupies about half the body-derived group capacity. Aim
-    # for one useful warp per SM, retain at least two lanes/group to amortize the
-    # runtime mapping, and cap the deliberate SIMD underfill.
-    required = max(2, (2 * sm_count * 32 + group_capacity - 1) // group_capacity)
-    return min(16, 1 << (required - 1).bit_length())
+    # for two useful warps per SM, retain at least two lanes/group to amortize
+    # the runtime mapping, and cap the deliberate SIMD underfill.
+    required = max(2, (4 * sm_count * 32 + group_capacity - 1) // group_capacity)
+    return min(32, 1 << (required - 1).bit_length())
 
 
 class SparseDVIPath:
