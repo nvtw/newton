@@ -18,6 +18,7 @@ from newton._src.solvers.kamino._src.core import ModelBuilderKamino, inertia
 from newton._src.solvers.kamino._src.core.shapes import BoxShape, SphereShape
 from newton._src.solvers.kamino._src.core.types import vec6f
 from newton._src.solvers.kamino._src.dynamics.dual import DualProblem
+from newton._src.solvers.kamino._src.geometry.keying import KeySorter
 from newton._src.solvers.kamino._src.integrators.euler import integrate_euler_semi_implicit
 from newton._src.solvers.kamino._src.kinematics.constraints import unpack_constraint_solutions, update_constraints_info
 from newton._src.solvers.kamino._src.kinematics.jacobians import DenseSystemJacobians
@@ -45,6 +46,9 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _color_mapped_dvi_inequalities,
     _group_mapped_dvi_inequalities,
     _map_active_contacts,
+    _map_ordered_active_contacts,
+    _prefix_active_contacts_by_world,
+    _prepare_contact_world_sort,
     _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
 )
@@ -1692,6 +1696,8 @@ class TestDVISolver(unittest.TestCase):
                 inequality_ids_by_color,
                 inequality_color_starts,
                 inequality_group_starts,
+                inequality_group_starts,
+                wp.bool(False),
             ],
             device=self.device,
         )
@@ -1701,6 +1707,109 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(inequality_ids_by_color.numpy(), np.arange(6))
         np.testing.assert_array_equal(inequality_color_starts.numpy()[:2], [0, 4])
         np.testing.assert_array_equal(inequality_group_starts.numpy()[:5], [0, 1, 3, 4, 6])
+
+    def test_03g3b_dvi_groups_contacts_in_private_pair_order(self):
+        """Group geometry-pair contacts without changing their constraint indices."""
+        problem_nl = wp.array([1], dtype=wp.int32, device=self.device)
+        problem_nc = wp.array([4], dtype=wp.int32, device=self.device)
+        problem_uio = wp.array([0], dtype=wp.int32, device=self.device)
+        inequality_bodies = wp.array(
+            [wp.vec2i(0, -1), wp.vec2i(1, -1), wp.vec2i(2, -1), wp.vec2i(1, -1), wp.vec2i(2, -1)],
+            dtype=wp.vec2i,
+            device=self.device,
+        )
+        body_color_masks = wp.zeros(shape=3, dtype=wp.uint64, device=self.device)
+        inequality_colors = wp.full(shape=5, value=-1, dtype=wp.int32, device=self.device)
+        inequality_num_colors = wp.zeros(shape=1, dtype=wp.int32, device=self.device)
+        inequality_ids_by_color = wp.full(shape=5, value=-1, dtype=wp.int32, device=self.device)
+        inequality_color_starts = wp.zeros(shape=6, dtype=wp.int32, device=self.device)
+        inequality_group_starts = wp.zeros(shape=6, dtype=wp.int32, device=self.device)
+        inequality_order = wp.array([0, 1, 3, 2, 4, -1], dtype=wp.int32, device=self.device)
+
+        wp.launch(
+            kernel=_group_mapped_dvi_inequalities,
+            dim=1,
+            inputs=[
+                problem_nl,
+                problem_nc,
+                problem_uio,
+                inequality_bodies,
+                body_color_masks,
+                inequality_colors,
+                inequality_num_colors,
+                inequality_ids_by_color,
+                inequality_color_starts,
+                inequality_group_starts,
+                inequality_order,
+                wp.bool(True),
+            ],
+            device=self.device,
+        )
+
+        np.testing.assert_array_equal(inequality_ids_by_color.numpy(), [0, 1, 3, 2, 4])
+        np.testing.assert_array_equal(inequality_group_starts.numpy()[:4], [0, 1, 3, 5])
+        np.testing.assert_array_equal(inequality_bodies.numpy(), [[0, -1], [1, -1], [2, -1], [1, -1], [2, -1]])
+
+    def test_03g3c_dvi_contact_pair_order_is_world_major(self):
+        """Sort interleaved contacts by world and geometry pair without moving contact data."""
+        contact_count = 6
+        contacts_model_active = wp.array([contact_count], dtype=wp.int32, device=self.device)
+        contacts_wid = wp.array([1, 0, 1, 0, 0, 1], dtype=wp.int32, device=self.device)
+        contacts_cid = wp.array([0, 1, 2, 0, 2, 1], dtype=wp.int32, device=self.device)
+        contacts_bid_ab = wp.array(
+            [wp.vec2i(-1, 3), wp.vec2i(-1, 2), wp.vec2i(-1, 4), wp.vec2i(-1, 1), wp.vec2i(-1, 2), wp.vec2i(-1, 3)],
+            dtype=wp.vec2i,
+            device=self.device,
+        )
+        pair_a = 1
+        pair_b = 2
+        contact_keys = wp.array([pair_a, pair_b, pair_b, pair_a, pair_b, pair_a], dtype=wp.uint64, device=self.device)
+        sorter = KeySorter(max_num_keys=contact_count, device=self.device)
+        sorter.sort(contacts_model_active, contact_keys)
+        wp.launch(
+            kernel=_prepare_contact_world_sort,
+            dim=contact_count,
+            inputs=[contacts_model_active, contacts_wid, sorter.sorted_to_unsorted_map, sorter.sorted_keys],
+            device=self.device,
+        )
+        wp.utils.radix_sort_pairs(sorter.sorted_keys_int64, sorter.sorted_to_unsorted_map, contact_count)
+
+        problem_nc = wp.array([3, 3], dtype=wp.int32, device=self.device)
+        world_starts = wp.zeros(3, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=_prefix_active_contacts_by_world,
+            dim=1,
+            inputs=[2, problem_nc, world_starts],
+            device=self.device,
+        )
+        contact_indices = wp.full(contact_count, -1, dtype=wp.int32, device=self.device)
+        inequality_bodies = wp.full(contact_count, wp.vec2i(-1, -1), dtype=wp.vec2i, device=self.device)
+        inequality_order = wp.full(contact_count + 2, -1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=_map_ordered_active_contacts,
+            dim=contact_count,
+            inputs=[
+                contacts_model_active,
+                contacts_wid,
+                contacts_cid,
+                contacts_bid_ab,
+                sorter.sorted_to_unsorted_map,
+                world_starts,
+                wp.ones(5, dtype=wp.float32, device=self.device),
+                wp.zeros(2, dtype=wp.int32, device=self.device),
+                wp.array([0, 3], dtype=wp.int32, device=self.device),
+                wp.array([0, 3], dtype=wp.int32, device=self.device),
+                contact_indices,
+                inequality_bodies,
+                inequality_order,
+            ],
+            device=self.device,
+        )
+
+        np.testing.assert_array_equal(sorter.sorted_to_unsorted_map.numpy()[:contact_count], [3, 1, 4, 0, 5, 2])
+        np.testing.assert_array_equal(contact_indices.numpy(), [3, 1, 4, 0, 5, 2])
+        np.testing.assert_array_equal(inequality_order.numpy(), [0, 1, 2, -1, 0, 1, 2, -1])
+        np.testing.assert_array_equal(contacts_wid.numpy(), [1, 0, 1, 0, 0, 1])
 
     def test_03g4_dvi_inequality_coloring_ignores_immovable_bodies(self):
         """Color contacts sharing an immovable body in parallel."""
@@ -1760,6 +1869,8 @@ class TestDVISolver(unittest.TestCase):
                 inequality_ids_by_color,
                 inequality_color_starts,
                 inequality_group_starts,
+                inequality_group_starts,
+                wp.bool(False),
             ],
             device=self.device,
         )

@@ -9,6 +9,7 @@ import warp as wp
 
 from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
+from ...geometry.keying import build_pair_key2, uint64_sentinel_value
 from .kernels import _FUSED_BILATERAL_BLOCK, _FUSED_INEQUALITY_BLOCK, _sync_threads
 from .projections import (
     contact_friction_normal_load as _contact_friction_normal_load,
@@ -205,6 +206,73 @@ def _map_active_contacts(
         inequality_bodies[problem_uio[wid] + problem_nl[wid] + cid] = wp.vec2i(bid_a, bid_b)
 
 
+@wp.kernel
+def _prepare_contact_world_sort(
+    contacts_model_active: wp.array[int32],
+    contacts_wid: wp.array[int32],
+    sorted_to_unsorted_map: wp.array[int32],
+    sorted_keys: wp.array[wp.uint64],
+):
+    """Make a second stable contact sort world-major without losing pair order."""
+    sorted_id = wp.tid()
+    if sorted_id < contacts_model_active[0]:
+        contact_id = sorted_to_unsorted_map[sorted_id]
+        sorted_keys[sorted_id] = build_pair_key2(wp.uint32(contacts_wid[contact_id]), wp.uint32(sorted_id))
+    else:
+        sorted_keys[sorted_id] = uint64_sentinel_value()
+
+
+@wp.kernel
+def _prefix_active_contacts_by_world(
+    num_worlds: int32,
+    problem_nc: wp.array[int32],
+    contact_world_starts: wp.array[int32],
+):
+    """Compute model-active contact offsets after sorting contacts by world."""
+    if wp.tid() == 0:
+        contact_world_starts[0] = int32(0)
+        for wid in range(num_worlds):
+            contact_world_starts[wid + int32(1)] = contact_world_starts[wid] + problem_nc[wid]
+
+
+@wp.kernel
+def _map_ordered_active_contacts(
+    contacts_model_active: wp.array[int32],
+    contacts_wid: wp.array[int32],
+    contacts_cid: wp.array[int32],
+    contacts_bid_AB: wp.array[wp.vec2i],
+    sorted_to_unsorted_map: wp.array[int32],
+    contact_world_starts: wp.array[int32],
+    model_body_inv_mass: wp.array[float32],
+    problem_nl: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_uio: wp.array[int32],
+    contact_indices: wp.array[int32],
+    inequality_bodies: wp.array[wp.vec2i],
+    inequality_order: wp.array[int32],
+):
+    """Map contacts while retaining geometry-pair order in private schedule scratch."""
+    sorted_id = wp.tid()
+    if sorted_id < contacts_model_active[0]:
+        contact_id = sorted_to_unsorted_map[sorted_id]
+        wid = contacts_wid[contact_id]
+        cid = contacts_cid[contact_id]
+        contact_indices[problem_cio[wid] + cid] = contact_id
+        bids = contacts_bid_AB[contact_id]
+        bid_a = bids[0]
+        bid_b = bids[1]
+        if bid_a >= int32(0) and model_body_inv_mass[bid_a] <= float32(0.0):
+            bid_a = int32(-1)
+        if bid_b >= int32(0) and model_body_inv_mass[bid_b] <= float32(0.0):
+            bid_b = int32(-1)
+        nl = problem_nl[wid]
+        uio = problem_uio[wid]
+        uid = nl + cid
+        inequality_bodies[uio + uid] = wp.vec2i(bid_a, bid_b)
+        local_sorted_id = sorted_id - contact_world_starts[wid]
+        inequality_order[uio + wid + nl + local_sorted_id] = uid
+
+
 @wp.func_native("""
 #if defined(__CUDA_ARCH__)
 return ((int)__ffsll((long long)mask)) - 1;
@@ -298,6 +366,8 @@ def _group_mapped_dvi_inequalities(
     inequality_ids_by_color: wp.array[int32],
     inequality_color_starts: wp.array[int32],
     inequality_group_starts: wp.array[int32],
+    inequality_order: wp.array[int32],
+    use_contact_order: wp.bool,
 ):
     """Color consecutive contact groups and emit group ranges for sparse PGS."""
     wid = wp.tid()
@@ -307,9 +377,13 @@ def _group_mapped_dvi_inequalities(
     num_colors = int32(0)
     previous_color = int32(-1)
     previous_pair = wp.vec2i(-1, -1)
-    for uid in range(nu):
+    order_offset = uio + wid
+    for ordered_id in range(nu):
+        uid = ordered_id
+        if use_contact_order and ordered_id >= nl:
+            uid = inequality_order[order_offset + ordered_id]
         pair = inequality_bodies[uio + uid]
-        grouped = uid > nl and pair[0] == previous_pair[0] and pair[1] == previous_pair[1]
+        grouped = ordered_id > nl and pair[0] == previous_pair[0] and pair[1] == previous_pair[1]
         color = previous_color
         if not grouped:
             forbidden = wp.uint64(0)
@@ -334,12 +408,18 @@ def _group_mapped_dvi_inequalities(
     schedule_offset = uio + wid
     for color in range(num_colors + int32(1)):
         inequality_color_starts[schedule_offset + color] = int32(0)
-    for uid in range(nu):
+    for ordered_id in range(nu):
+        uid = ordered_id
+        if use_contact_order and ordered_id >= nl:
+            uid = inequality_order[order_offset + ordered_id]
         color = inequality_colors[uio + uid]
         inequality_color_starts[schedule_offset + color + int32(1)] += int32(1)
     for color in range(num_colors):
         inequality_color_starts[schedule_offset + color + int32(1)] += inequality_color_starts[schedule_offset + color]
-    for uid in range(nu):
+    for ordered_id in range(nu):
+        uid = ordered_id
+        if use_contact_order and ordered_id >= nl:
+            uid = inequality_order[order_offset + ordered_id]
         color = inequality_colors[uio + uid]
         slot = inequality_color_starts[schedule_offset + color]
         inequality_ids_by_color[uio + slot] = uid

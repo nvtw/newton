@@ -12,6 +12,7 @@ from ...core.model import ModelKamino
 from ...dynamics.delassus import BlockSparseMatrixFreeDelassusOperator
 from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
+from ...geometry.keying import KeySorter
 from ...kinematics.jacobians import SparseSystemJacobians
 from ...kinematics.limits import LimitsKamino
 from ...linalg import LLTBlockedRCMSolver
@@ -33,6 +34,9 @@ from .sparse_kernels import (
     _group_mapped_dvi_inequalities,
     _map_active_contacts,
     _map_active_limits,
+    _map_ordered_active_contacts,
+    _prefix_active_contacts_by_world,
+    _prepare_contact_world_sort,
     _reset_active_bilateral_delta,
     _set_sparse_bilateral_diagonal,
     _solve_dvi_sparse_contacts_pgs,
@@ -49,6 +53,7 @@ int32 = wp.int32
 
 _SPARSE_DELASSUS_ROWS_JOINTS = 0
 _SPARSE_DELASSUS_ROWS_UNILATERAL = 1
+_CONTACT_PAIR_SORT_MIN_CAPACITY = 4096
 
 _SPARSE_INEQUALITY_TOPOLOGY_ERROR = "Sparse DVI inequalities require limit/contact topology and sparse Jacobians."
 
@@ -100,6 +105,11 @@ class SparseDVIPath:
             ]
             | None
         ) = None
+        self.contact_sorter: KeySorter | None = None
+        self.contact_world_starts: wp.array[wp.int32] | None = None
+        if device.is_cuda and size.max_of_max_contacts >= _CONTACT_PAIR_SORT_MIN_CAPACITY:
+            self.contact_sorter = KeySorter(max_num_keys=size.sum_of_max_contacts, device=device)
+            self.contact_world_starts = wp.zeros(size.num_worlds + 1, dtype=int32, device=device)
 
     def prepare(self, problem: DualProblem) -> None:
         """Precompute host-derived sparse topology before the first solve."""
@@ -153,24 +163,71 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
             device=path.device,
         )
     contacts = path.contacts
+    use_contact_order = path.contact_sorter is not None and contacts is not None
     if contacts is not None and contacts.model_max_contacts_host > 0:
-        wp.launch(
-            kernel=_map_active_contacts,
-            dim=contacts.model_max_contacts_host,
-            inputs=[
-                contacts.model_active_contacts,
-                contacts.wid,
-                contacts.cid,
-                contacts.bid_AB,
-                path.model.bodies.effective_inv_m_i,
-                problem.data.nl,
-                problem.data.cio,
-                problem.data.uio,
-                state.contact_indices,
-                state.inequality_bodies,
-            ],
-            device=path.device,
-        )
+        if use_contact_order:
+            sorter = path.contact_sorter
+            sorter.sort(contacts.model_active_contacts, contacts.key)
+            wp.launch(
+                kernel=_prepare_contact_world_sort,
+                dim=contacts.model_max_contacts_host,
+                inputs=[
+                    contacts.model_active_contacts,
+                    contacts.wid,
+                    sorter.sorted_to_unsorted_map,
+                    sorter.sorted_keys,
+                ],
+                device=path.device,
+            )
+            wp.utils.radix_sort_pairs(
+                sorter.sorted_keys_int64,
+                sorter.sorted_to_unsorted_map,
+                contacts.model_max_contacts_host,
+            )
+            wp.launch(
+                kernel=_prefix_active_contacts_by_world,
+                dim=1,
+                inputs=[path.size.num_worlds, problem.data.nc, path.contact_world_starts],
+                device=path.device,
+            )
+            wp.launch(
+                kernel=_map_ordered_active_contacts,
+                dim=contacts.model_max_contacts_host,
+                inputs=[
+                    contacts.model_active_contacts,
+                    contacts.wid,
+                    contacts.cid,
+                    contacts.bid_AB,
+                    sorter.sorted_to_unsorted_map,
+                    path.contact_world_starts,
+                    path.model.bodies.effective_inv_m_i,
+                    problem.data.nl,
+                    problem.data.cio,
+                    problem.data.uio,
+                    state.contact_indices,
+                    state.inequality_bodies,
+                    state.inequality_group_starts,
+                ],
+                device=path.device,
+            )
+        else:
+            wp.launch(
+                kernel=_map_active_contacts,
+                dim=contacts.model_max_contacts_host,
+                inputs=[
+                    contacts.model_active_contacts,
+                    contacts.wid,
+                    contacts.cid,
+                    contacts.bid_AB,
+                    path.model.bodies.effective_inv_m_i,
+                    problem.data.nl,
+                    problem.data.cio,
+                    problem.data.uio,
+                    state.contact_indices,
+                    state.inequality_bodies,
+                ],
+                device=path.device,
+            )
     state.inequality_body_color_masks.zero_()
     wp.launch(
         kernel=_group_mapped_dvi_inequalities,
@@ -186,6 +243,8 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
             state.inequality_ids_by_color,
             state.inequality_color_starts,
             state.inequality_group_starts,
+            state.inequality_group_starts,
+            wp.bool(use_contact_order),
         ],
         device=path.device,
     )
