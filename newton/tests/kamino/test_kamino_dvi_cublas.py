@@ -17,10 +17,12 @@ import warp as wp
 
 import newton.examples
 from newton._src.solvers.kamino._src.solvers.dvi import cublas as cublas_module
+from newton._src.solvers.kamino._src.solvers.dvi import solver as dvi_solver_module
 from newton._src.solvers.kamino._src.solvers.dvi.cublas import is_batched_trsm_available, solve_llt_batched
 from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     _pack_batched_bilateral_response,
     _scatter_batched_bilateral_response,
+    _solve_bilateral_contact_response,
     _solve_bilateral_unilateral_response_cooperative,
 )
 from newton.tests.kamino import setup_tests, test_context
@@ -164,6 +166,8 @@ class TestDVICublas(unittest.TestCase):
                     True,
                     response_offsets,
                     response_stride,
+                    False,
+                    response_offsets,
                     coupling_array,
                     response_factor,
                 ],
@@ -181,7 +185,10 @@ class TestDVICublas(unittest.TestCase):
                     permutation,
                     True,
                     response_offsets,
+                    response_offsets,
                     response_stride,
+                    False,
+                    True,
                     response_factor,
                     response,
                 ],
@@ -224,6 +231,175 @@ class TestDVICublas(unittest.TestCase):
             nu = int(active_rhs[wid])
             np.testing.assert_allclose(actual[wid, :, :nu], expected[wid, :, :nu], rtol=3.0e-4, atol=3.0e-4)
             np.testing.assert_array_equal(actual[wid, :, nu:], 0.0)
+
+    def test_basic_urdf_dense_production_path_matches_scalar_response(self):
+        if not self.device.is_cuda or not is_batched_trsm_available(self.device):
+            self.skipTest("cuBLAS batched DVI response test requires CUDA")
+
+        module = importlib.import_module(newton.examples.get_examples()["basic_urdf"])
+        parser = (
+            module.Example.create_parser()
+            if hasattr(module.Example, "create_parser")
+            else newton.examples.create_parser()
+        )
+
+        def run(min_worlds: int):
+            args = newton.examples.default_args(parser)
+            args.solver = "kamino"
+            args.num_frames = 1
+            args.quiet = True
+            with mock.patch.object(dvi_solver_module, "_BATCHED_DENSE_RESPONSE_MIN_WORLDS", min_worlds):
+                example = module.Example(ViewerNull(num_frames=1), args)
+            solver = example.solver._solver_kamino.solver_fd
+            enabled = solver._dense_response_factor_ptrs is not None
+            example.step()
+            wp.synchronize_device(self.device)
+            return (
+                enabled,
+                example.state_0.body_q.numpy(),
+                example.state_0.body_qd.numpy(),
+                solver.data.solution.lambdas.numpy(),
+            )
+
+        scalar = run(10_000)
+        batched = run(16)
+        self.assertFalse(scalar[0])
+        self.assertTrue(batched[0])
+        for scalar_value, batched_value in zip(scalar[1:], batched[1:], strict=True):
+            self.assertTrue(np.all(np.isfinite(batched_value)))
+            np.testing.assert_allclose(batched_value, scalar_value, rtol=5.0e-4, atol=5.0e-5)
+
+    def test_dense_batched_response_matches_scalar_layout_with_tail_and_graph(self):
+        if not self.device.is_cuda or not is_batched_trsm_available(self.device):
+            self.skipTest("cuBLAS batched DVI response test requires CUDA")
+
+        rng = np.random.default_rng(51173)
+        worlds = 16
+        rows = 9
+        batched_rhs = 64
+        total_rhs = 70
+        dim = rows + total_rhs
+        matrix_size = dim * dim
+
+        problem_mio = np.arange(worlds, dtype=np.int32) * matrix_size
+        bilateral_mio = np.arange(worlds, dtype=np.int32) * rows * rows
+        bilateral_vio = np.arange(worlds, dtype=np.int32) * rows
+        factor_mio = np.arange(worlds, dtype=np.int32) * rows * batched_rhs
+        factors = np.empty((worlds, rows, rows), dtype=np.float32)
+        permutations = np.empty((worlds, rows), dtype=np.int32)
+        preconditioner = rng.uniform(0.5, 1.5, size=(worlds, rows)).astype(np.float32)
+        dense_operator = np.zeros((worlds, dim, dim), dtype=np.float32)
+        expected = np.zeros_like(dense_operator)
+        for wid in range(worlds):
+            matrix = rng.normal(size=(rows, rows)).astype(np.float32)
+            factor = np.linalg.cholesky(matrix @ matrix.T + rows * np.eye(rows, dtype=np.float32)).astype(np.float32)
+            permutation = rng.permutation(rows).astype(np.int32)
+            coupling = rng.normal(size=(rows, total_rhs)).astype(np.float32)
+            factors[wid] = factor
+            permutations[wid] = permutation
+            dense_operator[wid, :rows, rows:] = coupling
+            for unilateral in range(total_rhs):
+                rhs = preconditioner[wid, permutation] * coupling[permutation, unilateral]
+                solved = np.linalg.solve(factor.T, np.linalg.solve(factor, rhs))
+                expected[wid, :rows, rows + unilateral] = solved
+
+        problem_dim = wp.array(np.full(worlds, dim, dtype=np.int32), dtype=wp.int32, device=self.device)
+        problem_njc = wp.array(np.full(worlds, rows, dtype=np.int32), dtype=wp.int32, device=self.device)
+        problem_offsets = wp.array(problem_mio, dtype=wp.int32, device=self.device)
+        bilateral_offsets = wp.array(bilateral_mio, dtype=wp.int32, device=self.device)
+        bilateral_vector_offsets = wp.array(bilateral_vio, dtype=wp.int32, device=self.device)
+        factor_offsets = wp.array(factor_mio, dtype=wp.int32, device=self.device)
+        preconditioner_array = wp.array(preconditioner.reshape(-1), dtype=wp.float32, device=self.device)
+        factor_array = wp.array(factors.reshape(-1), dtype=wp.float32, device=self.device)
+        permutation_array = wp.array(permutations.reshape(-1), dtype=wp.int32, device=self.device)
+        dense_operator_array = wp.array(dense_operator.reshape(-1), dtype=wp.float32, device=self.device)
+        response_factor = wp.zeros(worlds * rows * batched_rhs, dtype=wp.float32, device=self.device)
+        projected = wp.zeros(worlds * matrix_size, dtype=wp.float32, device=self.device)
+        scalar_bytes = wp.types.type_size_in_bytes(wp.float32)
+        factor_ptrs = wp.array(
+            [factor_array.ptr + scalar_bytes * int(offset) for offset in bilateral_mio],
+            dtype=wp.uint64,
+            device=self.device,
+        )
+        rhs_ptrs = wp.array(
+            [response_factor.ptr + scalar_bytes * int(offset) for offset in factor_mio],
+            dtype=wp.uint64,
+            device=self.device,
+        )
+
+        def launch_response():
+            wp.launch(
+                _pack_batched_bilateral_response,
+                dim=(worlds, batched_rhs, rows),
+                inputs=[
+                    problem_dim,
+                    problem_njc,
+                    bilateral_vector_offsets,
+                    preconditioner_array,
+                    permutation_array,
+                    True,
+                    problem_offsets,
+                    problem_dim,
+                    True,
+                    factor_offsets,
+                    dense_operator_array,
+                    response_factor,
+                ],
+                device=self.device,
+            )
+            solve_llt_batched(factor_ptrs, rhs_ptrs, rows, batched_rhs, worlds)
+            wp.launch(
+                _scatter_batched_bilateral_response,
+                dim=(worlds, batched_rhs, rows),
+                inputs=[
+                    problem_dim,
+                    problem_njc,
+                    bilateral_vector_offsets,
+                    preconditioner_array,
+                    permutation_array,
+                    True,
+                    factor_offsets,
+                    problem_offsets,
+                    problem_dim,
+                    True,
+                    False,
+                    response_factor,
+                    projected,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                _solve_bilateral_contact_response,
+                dim=(worlds, total_rhs - batched_rhs),
+                inputs=[
+                    problem_dim,
+                    problem_offsets,
+                    problem_njc,
+                    bilateral_offsets,
+                    bilateral_vector_offsets,
+                    preconditioner_array,
+                    problem_offsets,
+                    dense_operator_array,
+                    factor_array,
+                    permutation_array,
+                    True,
+                    batched_rhs,
+                    projected,
+                ],
+                device=self.device,
+            )
+
+        launch_response()
+        wp.synchronize_device(self.device)
+        projected.zero_()
+        with wp.ScopedCapture(self.device) as capture:
+            launch_response()
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(self.device)
+
+        actual = projected.numpy().reshape(worlds, dim, dim)
+        np.testing.assert_allclose(actual[:, :rows, rows:], expected[:, :rows, rows:], rtol=3.0e-4, atol=3.0e-4)
+        np.testing.assert_array_equal(actual[:, rows:, :], 0.0)
 
 
 if __name__ == "__main__":

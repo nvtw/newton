@@ -467,12 +467,13 @@ def _solve_bilateral_contact_response(
     bilateral_L: wp.array[float32],
     bilateral_permutation: wp.array[int32],
     use_permutation: bool,
+    unilateral_begin: int32,
     projected_D: wp.array[float32],
 ):
     wid, unilateral_local = wp.tid()
     ncts = problem_dim[wid]
     njc = problem_njc[wid]
-    unilateral = njc + unilateral_local
+    unilateral = njc + unilateral_begin + unilateral_local
     if njc == int32(0) or unilateral >= ncts:
         return
 
@@ -556,8 +557,10 @@ def _pack_batched_bilateral_response(
     bilateral_P: wp.array[float32],
     bilateral_permutation: wp.array[int32],
     use_permutation: bool,
+    coupling_mio: wp.array[int32],
+    coupling_stride: wp.array[int32],
+    coupling_has_bilateral_columns: bool,
     response_mio: wp.array[int32],
-    response_stride: wp.array[int32],
     coupling: wp.array[float32],
     response_factor: wp.array[float32],
 ):
@@ -567,7 +570,9 @@ def _pack_batched_bilateral_response(
     if row >= njc:
         return
     nu = problem_dim[wid] - njc
-    offset = response_mio[wid]
+    coupling_column = unilateral
+    if coupling_has_bilateral_columns:
+        coupling_column += njc
     value = float32(0.0)
     if unilateral < nu:
         original_row = row
@@ -575,9 +580,9 @@ def _pack_batched_bilateral_response(
             original_row = bilateral_permutation[bilateral_vio[wid] + row]
         value = (
             bilateral_P[bilateral_vio[wid] + original_row]
-            * coupling[offset + original_row * response_stride[wid] + unilateral]
+            * coupling[coupling_mio[wid] + original_row * coupling_stride[wid] + coupling_column]
         )
-    response_factor[offset + unilateral * njc + row] = value
+    response_factor[response_mio[wid] + unilateral * njc + row] = value
 
 
 @wp.kernel
@@ -588,8 +593,11 @@ def _scatter_batched_bilateral_response(
     bilateral_P: wp.array[float32],
     bilateral_permutation: wp.array[int32],
     use_permutation: bool,
+    factor_mio: wp.array[int32],
     response_mio: wp.array[int32],
     response_stride: wp.array[int32],
+    response_has_bilateral_columns: bool,
+    scale_and_unpermute_rows: bool,
     response_factor: wp.array[float32],
     response: wp.array[float32],
 ):
@@ -599,13 +607,20 @@ def _scatter_batched_bilateral_response(
     nu = problem_dim[wid] - njc
     if row >= njc or unilateral >= nu:
         return
-    original_row = row
-    if use_permutation:
-        original_row = bilateral_permutation[bilateral_vio[wid] + row]
-    offset = response_mio[wid]
-    response[offset + original_row * response_stride[wid] + unilateral] = (
-        bilateral_P[bilateral_vio[wid] + original_row] * response_factor[offset + unilateral * njc + row]
-    )
+    factor_offset = factor_mio[wid]
+    response_offset = response_mio[wid]
+    response_column = unilateral
+    if response_has_bilateral_columns:
+        response_column += njc
+    response_row = row
+    value = response_factor[factor_offset + unilateral * njc + row]
+    if scale_and_unpermute_rows:
+        original_row = row
+        if use_permutation:
+            original_row = bilateral_permutation[bilateral_vio[wid] + row]
+        response_row = original_row
+        value *= bilateral_P[bilateral_vio[wid] + original_row]
+    response[response_offset + response_row * response_stride[wid] + response_column] = value
 
 
 @wp.kernel
