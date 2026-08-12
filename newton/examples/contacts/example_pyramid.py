@@ -130,6 +130,9 @@ class Example:
             )
             solver_config.use_collision_detector = True
             solver_config.integrator = "moreau"
+            # The wrecking ball creates a roughly 6500:1 mass-ratio impact;
+            # pose-only split recovery can safely use a strong stabilization gain.
+            solver_config.constraints.gamma = 0.6
             solver_config.collision_detector.broadphase = args.broad_phase
             solver_config.dvi.bilateral_solver_type = "LLTBRCM"
             solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}

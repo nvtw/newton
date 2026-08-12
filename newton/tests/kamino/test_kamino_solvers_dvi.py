@@ -304,6 +304,67 @@ def _cube_ground_penetration(body_q: np.ndarray, cube_bodies: list[int], half_ex
     return float(np.maximum(0.0, -np.min(lowest_corner)))
 
 
+def _run_split_contact_sphere(
+    device: wp.Device,
+    *,
+    center_z: float,
+    velocity: tuple[float, float, float],
+    friction: float,
+    restitution: float,
+    gamma: float,
+    delta: float,
+    gap: float,
+    dt: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Run one sparse Moreau-DVI sphere/ground contact step."""
+    radius = 0.1
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    SolverKamino.register_custom_attributes(builder)
+    builder.gravity = (0.0, 0.0, 0.0)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(
+        mu=friction,
+        restitution=restitution,
+        gap=gap,
+        margin=0.0,
+    )
+    body = builder.add_body(xform=wp.transformf((0.0, 0.0, center_z), wp.quat_identity()))
+    builder.add_shape_sphere(body, radius=radius, cfg=shape_cfg)
+    builder.add_ground_plane(cfg=shape_cfg)
+    model = builder.finalize(device=device)
+    config = SolverKamino.Config(
+        dynamics_solver="dvi",
+        integrator="moreau",
+        use_collision_detector=True,
+        sparse_dynamics=True,
+        sparse_jacobian=True,
+        collision_detector=kamino_config.CollisionDetectorConfig(
+            max_contacts=4,
+            max_contacts_per_world=4,
+            max_contacts_per_pair=4,
+        ),
+    )
+    config.constraints.gamma = gamma
+    config.constraints.delta = delta
+    solver = SolverKamino(model, config=config)
+    state_0 = model.state()
+    state_1 = model.state()
+    body_qd = state_0.body_qd.numpy()
+    body_qd[body, :3] = velocity
+    state_0.body_qd.assign(body_qd)
+    solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
+
+    contacts = solver._contacts_kamino
+    count = int(contacts.world_active_contacts.numpy()[0])
+    if count != 1:
+        raise AssertionError(f"Expected one sphere-ground contact, got {count}.")
+    return (
+        state_1.body_q.numpy()[body].copy(),
+        state_1.body_qd.numpy()[body].copy(),
+        contacts.reaction.numpy()[0].copy(),
+        float(contacts.gapfunc.numpy()[0, 3]),
+    )
+
+
 def _reduce_solver_status(status: np.ndarray) -> dict[str, object]:
     """Reduce per-world status while requiring every world to converge."""
     return {
@@ -2984,6 +3045,66 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_allclose(reaction_with, reaction_without, rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_array_equal(status_with, status_without)
         self.assertGreater(float(reaction_with[0, 2]), 0.0)
+
+    def test_05b5_dvi_split_recovery_preserves_speculative_contact(self):
+        """Cap speculative closing speed without early friction or restitution."""
+        results = []
+        for restitution in (0.0, 0.8):
+            results.append(
+                _run_split_contact_sphere(
+                    self.device,
+                    center_z=0.11,
+                    velocity=(1.0, 0.0, -1.0),
+                    friction=1.0,
+                    restitution=restitution,
+                    gamma=0.6,
+                    delta=0.0,
+                    gap=0.02,
+                    dt=0.01,
+                )
+            )
+
+        for _pose, velocity, reaction, contact_gap in results:
+            self.assertGreater(contact_gap, 0.0)
+            self.assertLess(float(velocity[2]), 0.0)
+            self.assertAlmostEqual(float(velocity[2]), -contact_gap / 0.01, places=3)
+            self.assertAlmostEqual(float(velocity[0]), 1.0, places=6)
+            np.testing.assert_allclose(reaction[:2], 0.0, rtol=0.0, atol=1.0e-7)
+            self.assertGreater(float(reaction[2]), 0.0)
+
+        np.testing.assert_allclose(results[0][1], results[1][1], rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(results[0][2], results[1][2], rtol=1.0e-6, atol=1.0e-6)
+
+    def test_05b6_dvi_split_recovery_respects_stabilization_config(self):
+        """Honor stabilization gain, dead zone, and their disabled cases."""
+
+        def run(gamma: float, delta: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+            return _run_split_contact_sphere(
+                self.device,
+                center_z=0.096,
+                velocity=(0.0, 0.0, 0.0),
+                friction=0.0,
+                restitution=0.0,
+                gamma=gamma,
+                delta=delta,
+                gap=0.0,
+                dt=0.001,
+            )
+
+        disabled = run(0.0, 0.0)
+        inside_deadzone = run(0.6, 0.005)
+        relaxed = run(0.6, 0.001)
+        full = run(0.6, 0.0)
+
+        self.assertLess(disabled[3], 0.0)
+        self.assertLess(inside_deadzone[3], 0.0)
+        self.assertAlmostEqual(float(disabled[0][2]), 0.096, places=7)
+        self.assertAlmostEqual(float(inside_deadzone[0][2]), 0.096, places=7)
+        self.assertGreater(float(relaxed[0][2]), float(inside_deadzone[0][2]) + 1.0e-4)
+        self.assertGreater(float(full[0][2]), float(relaxed[0][2]))
+        for result in (disabled, inside_deadzone, relaxed, full):
+            np.testing.assert_allclose(result[1], 0.0, rtol=0.0, atol=1.0e-7)
+            np.testing.assert_allclose(result[2], 0.0, rtol=0.0, atol=1.0e-7)
 
     def test_05c_dvi_high_mass_ratio_stack_supports_weight(self):
         """Support a 100:1 sphere stack accurately in dense and sparse modes."""

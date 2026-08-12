@@ -48,7 +48,6 @@ from .sparse_kernels import (
     _prepare_contact_world_sort,
     _reset_active_bilateral_delta,
     _set_sparse_bilateral_diagonal,
-    _shift_contact_bias_in_free_velocity,
     _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
     _solve_dvi_sparse_inequalities_pgs_cooperative,
@@ -157,25 +156,6 @@ class SparseDVIPath:
 
     def solve(self, problem: DualProblem) -> None:
         """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
-        if (
-            self.split_contact_recovery_enabled
-            and self.bilateral_solver is None
-            and self.size.max_of_max_limits == 0
-            and self.contacts is not None
-        ):
-            wp.launch(
-                kernel=_shift_contact_bias_in_free_velocity,
-                dim=(self.size.num_worlds, self.size.max_of_max_contacts),
-                inputs=[
-                    problem.data.nc,
-                    problem.data.ccgo,
-                    problem.data.vio,
-                    problem.data.v_b,
-                    wp.float32(-1.0),
-                    problem.data.v_f,
-                ],
-                device=self.device,
-            )
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _solve_sparse_with_bilateral_direct_block(self, problem)
         elif _can_use_sparse_colored_inequalities(self):
@@ -184,25 +164,6 @@ class SparseDVIPath:
             raise RuntimeError(_SPARSE_INEQUALITY_TOPOLOGY_ERROR)
         else:
             _compute_sparse_solution_vectors(self, problem)
-        if (
-            self.split_contact_recovery_enabled
-            and self.bilateral_solver is None
-            and self.size.max_of_max_limits == 0
-            and self.contacts is not None
-        ):
-            wp.launch(
-                kernel=_shift_contact_bias_in_free_velocity,
-                dim=(self.size.num_worlds, self.size.max_of_max_contacts),
-                inputs=[
-                    problem.data.nc,
-                    problem.data.ccgo,
-                    problem.data.vio,
-                    problem.data.v_b,
-                    wp.float32(1.0),
-                    problem.data.v_f,
-                ],
-                device=self.device,
-            )
 
     def correct_contact_poses(self, problem: DualProblem) -> None:
         """Apply an experimental pose-only split recovery for free rigid contacts."""
@@ -223,15 +184,17 @@ class SparseDVIPath:
             inputs=[
                 state.contact_indices,
                 self.contacts.bid_AB,
-                self.contacts.gapfunc,
                 self.contacts.frame,
+                self.contacts.gapfunc,
                 self.model.time.dt,
                 self.model.bodies.effective_inv_m_i,
+                problem.data.config,
                 problem.data.nc,
                 problem.data.cio,
                 problem.data.uio,
                 problem.data.ccgo,
                 problem.data.vio,
+                problem.data.v_b,
                 self.data.solution.v_plus,
                 state.inequality_num_colors,
                 state.inequality_ids_by_color,
@@ -652,6 +615,8 @@ def _compute_sparse_solution_vectors(path: SparseDVIPath, problem: DualProblem) 
             problem.data.dim,
             problem.data.vio,
             problem.data.v_f,
+            problem.data.v_b,
+            wp.bool(path.split_contact_recovery_enabled),
             state.s,
             state.v_aug,
             path.data.solution.v_plus,
