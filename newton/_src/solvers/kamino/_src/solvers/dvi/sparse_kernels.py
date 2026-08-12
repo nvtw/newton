@@ -1389,24 +1389,24 @@ def _assemble_compact_unilateral_schur(
 ):
     """Assemble ``C.T * response`` for worlds with no more unilateral than bilateral rows."""
     tid = wp.tid()
-    lane = tid % int32(32)
-    wid = tid / int32(32)
+    threads_per_world = int32(wp.block_dim())
+    lane = tid % threads_per_world
+    wid = tid / threads_per_world
     njc = problem_njc[wid]
     nu = problem_dim[wid] - njc
     if nu > njc:
         return
     offset = response_mio[wid]
     stride = response_stride[wid]
-    for unilateral in range(lane, nu, int32(32)):
+    for unilateral in range(lane, nu, threads_per_world):
         compact_q[problem_vio[wid] + njc + unilateral] = float32(0.0)
-    for row in range(nu):
-        for column in range(nu):
-            partial = float32(0.0)
-            for bilateral in range(lane, njc, int32(32)):
-                partial += coupling[offset + bilateral * stride + row] * response[offset + bilateral * stride + column]
-            value = _subgroup_sum_32(partial)
-            if lane == int32(0):
-                compact_schur[offset + row * stride + column] = value
+    for entry in range(lane, nu * nu, threads_per_world):
+        row = entry / nu
+        column = entry - row * nu
+        value = float32(0.0)
+        for bilateral in range(njc):
+            value += coupling[offset + bilateral * stride + row] * response[offset + bilateral * stride + column]
+        compact_schur[offset + row * stride + column] = value
 
 
 @wp.func

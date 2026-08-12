@@ -846,7 +846,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
     if enable_compact_schur:
         wp.launch(
             kernel=_assemble_compact_unilateral_schur,
-            dim=path.size.num_worlds * 32,
+            dim=path.size.num_worlds * 256,
             inputs=[
                 problem.data.dim,
                 problem.data.njc,
@@ -859,7 +859,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
                 state.s,
             ],
             device=path.device,
-            block_dim=32,
+            block_dim=256,
         )
     wp.launch(
         kernel=_cache_sparse_projected_diagonal,

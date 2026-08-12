@@ -1734,13 +1734,13 @@ class TestDVISolver(unittest.TestCase):
 
     def test_03g3a_dvi_compact_schur_matches_bilateral_correction(self):
         """Preserve row/column orientation in the compact bilateral correction."""
-        coupling_np = np.array([[2.0, 3.0], [0.0, 0.0]], dtype=np.float32)
+        coupling_np = np.array([[2.0, 3.0], [17.0, 19.0]], dtype=np.float32)
         response_np = np.array([[5.0, 7.0], [11.0, 13.0]], dtype=np.float32)
         compact_schur = wp.full(4, -1.0, dtype=wp.float32, device=self.device)
         compact_q = wp.full(4, 9.0, dtype=wp.float32, device=self.device)
         wp.launch(
             kernel=_assemble_compact_unilateral_schur,
-            dim=32,
+            dim=1,
             inputs=[
                 wp.array([4], dtype=wp.int32, device=self.device),
                 wp.array([2], dtype=wp.int32, device=self.device),
@@ -1753,7 +1753,7 @@ class TestDVISolver(unittest.TestCase):
                 compact_q,
             ],
             device=self.device,
-            block_dim=32,
+            block_dim=1,
         )
 
         expected = coupling_np.T @ response_np
@@ -1784,7 +1784,7 @@ class TestDVISolver(unittest.TestCase):
         compact_q = wp.full(3, 9.0, dtype=wp.float32, device=self.device)
         wp.launch(
             kernel=_assemble_compact_unilateral_schur,
-            dim=32,
+            dim=1,
             inputs=[
                 wp.array([3], dtype=wp.int32, device=self.device),
                 wp.array([1], dtype=wp.int32, device=self.device),
@@ -1797,7 +1797,7 @@ class TestDVISolver(unittest.TestCase):
                 compact_q,
             ],
             device=self.device,
-            block_dim=32,
+            block_dim=1,
         )
 
         np.testing.assert_array_equal(compact_schur.numpy(), [-1.0, -1.0, -1.0])
