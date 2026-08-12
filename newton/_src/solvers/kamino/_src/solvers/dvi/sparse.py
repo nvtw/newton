@@ -35,6 +35,7 @@ from .sparse_kernels import (
     _cache_sparse_projected_diagonal,
     _color_compact_contact_groups,
     _compact_contact_group_starts,
+    _compare_compact_contact_topology,
     _compute_dvi_sparse_solution_vectors,
     _expand_colored_contact_groups,
     _group_mapped_dvi_inequalities,
@@ -162,13 +163,14 @@ class SparseDVIPath:
                 device=device,
                 copy=False,
             )
-            self.contact_groups_by_color = wp.array(
-                ptr=self.contact_sorter.sorted_keys.ptr + num_contacts * wp.types.type_size_in_bytes(int32),
-                shape=num_contacts,
-                dtype=int32,
-                device=device,
-                copy=False,
-            )
+            if size.num_worlds == 1 and size.max_of_max_limits == 0:
+                self.contact_groups_by_color = wp.empty(num_contacts, dtype=int32, device=device)
+                self.cached_contact_group_pairs = wp.empty(num_contacts, dtype=wp.vec2i, device=device)
+                self.cached_contact_group_count = wp.zeros(1, dtype=int32, device=device)
+                self.cached_contact_num_colors = wp.zeros(1, dtype=int32, device=device)
+                self.cached_contact_color_starts = wp.empty(num_contacts + 1, dtype=int32, device=device)
+                self.contact_topology_cache_valid = wp.zeros(1, dtype=int32, device=device)
+                self.contact_topology_changed = wp.zeros(1, dtype=int32, device=device)
 
     def prepare(self, problem: DualProblem) -> None:
         """Precompute host-derived sparse topology before the first solve."""
@@ -411,6 +413,25 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
         ],
         device=path.device,
     )
+    path.contact_topology_changed.zero_()
+    wp.launch(
+        kernel=_compare_compact_contact_topology,
+        dim=contacts.model_max_contacts_host,
+        inputs=[
+            contacts.model_active_contacts,
+            state.inequality_colors,
+            problem.data.uio,
+            sorter.sorted_to_unsorted_map,
+            contacts.cid,
+            state.inequality_bodies,
+            path.contact_group_starts,
+            path.cached_contact_group_pairs,
+            path.cached_contact_group_count,
+            path.contact_topology_cache_valid,
+            path.contact_topology_changed,
+        ],
+        device=path.device,
+    )
     wp.launch(
         kernel=_color_compact_contact_groups,
         dim=1,
@@ -428,6 +449,12 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
             path.contact_world_starts,
             state.inequality_color_starts,
             path.contact_groups_by_color,
+            path.cached_contact_group_pairs,
+            path.cached_contact_group_count,
+            path.cached_contact_num_colors,
+            path.cached_contact_color_starts,
+            path.contact_topology_cache_valid,
+            path.contact_topology_changed,
         ],
         device=path.device,
     )

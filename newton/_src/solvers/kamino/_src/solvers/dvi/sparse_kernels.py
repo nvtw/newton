@@ -365,6 +365,35 @@ def _compact_contact_group_starts(
 
 
 @wp.kernel
+def _compare_compact_contact_topology(
+    contacts_model_active: wp.array[int32],
+    group_prefix: wp.array[int32],
+    problem_uio: wp.array[int32],
+    sorted_to_unsorted_map: wp.array[int32],
+    contacts_cid: wp.array[int32],
+    inequality_bodies: wp.array[wp.vec2i],
+    compact_group_starts: wp.array[int32],
+    cached_group_pairs: wp.array[wp.vec2i],
+    cached_group_count: wp.array[int32],
+    cache_valid: wp.array[int32],
+    topology_changed: wp.array[int32],
+):
+    group = wp.tid()
+    nc = contacts_model_active[0]
+    num_groups = group_prefix[wp.max(nc - int32(1), int32(0))]
+    if nc == int32(0):
+        num_groups = int32(0)
+    if group == int32(0) and (cache_valid[0] == int32(0) or cached_group_count[0] != num_groups):
+        wp.atomic_max(topology_changed, 0, int32(1))
+    if cache_valid[0] != int32(0) and cached_group_count[0] == num_groups and group < num_groups:
+        contact_id = sorted_to_unsorted_map[compact_group_starts[group]]
+        pair = inequality_bodies[problem_uio[0] + contacts_cid[contact_id]]
+        cached = cached_group_pairs[group]
+        if pair[0] != cached[0] or pair[1] != cached[1]:
+            wp.atomic_max(topology_changed, 0, int32(1))
+
+
+@wp.kernel
 def _color_compact_contact_groups(
     contacts_model_active: wp.array[int32],
     group_prefix: wp.array[int32],
@@ -379,6 +408,12 @@ def _color_compact_contact_groups(
     contact_group_count: wp.array[int32],
     inequality_color_starts: wp.array[int32],
     groups_by_color: wp.array[int32],
+    cached_group_pairs: wp.array[wp.vec2i],
+    cached_group_count: wp.array[int32],
+    cached_num_colors: wp.array[int32],
+    cached_color_starts: wp.array[int32],
+    cache_valid: wp.array[int32],
+    topology_changed: wp.array[int32],
 ):
     if wp.tid() != 0:
         return
@@ -387,10 +422,17 @@ def _color_compact_contact_groups(
         num_groups = int32(0)
     contact_group_count[0] = num_groups
     uio = problem_uio[0]
+    if cache_valid[0] != int32(0) and topology_changed[0] == int32(0):
+        num_colors = cached_num_colors[0]
+        inequality_num_colors[0] = num_colors
+        for color in range(num_colors + int32(1)):
+            inequality_color_starts[uio + color] = cached_color_starts[color]
+        return
     num_colors = int32(0)
     for group in range(num_groups):
         contact_id = sorted_to_unsorted_map[compact_group_starts[group]]
         pair = inequality_bodies[uio + contacts_cid[contact_id]]
+        cached_group_pairs[group] = pair
         forbidden = wp.uint64(0)
         if pair[0] >= int32(0):
             forbidden |= body_color_masks[pair[0]]
@@ -423,7 +465,11 @@ def _color_compact_contact_groups(
     for color in range(num_colors + int32(1)):
         cursor = inequality_color_starts[uio + color]
         inequality_color_starts[uio + color] = previous
+        cached_color_starts[color] = previous
         previous = cursor
+    cached_group_count[0] = num_groups
+    cached_num_colors[0] = num_colors
+    cache_valid[0] = int32(1)
 
 
 @wp.kernel

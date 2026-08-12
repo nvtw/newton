@@ -52,6 +52,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _color_mapped_dvi_inequalities,
     _compact_contact_group_starts,
     _compact_unilateral_correction,
+    _compare_compact_contact_topology,
     _cooperative_pgs_pair_converged,
     _expand_colored_contact_groups,
     _group_mapped_dvi_inequalities,
@@ -2361,6 +2362,12 @@ class TestDVISolver(unittest.TestCase):
                 group_count,
                 color_starts,
                 groups_by_color,
+                wp.empty(contact_count, dtype=wp.vec2i, device=self.device),
+                wp.zeros(1, dtype=wp.int32, device=self.device),
+                wp.zeros(1, dtype=wp.int32, device=self.device),
+                wp.empty(contact_count + 1, dtype=wp.int32, device=self.device),
+                wp.zeros(1, dtype=wp.int32, device=self.device),
+                wp.zeros(1, dtype=wp.int32, device=self.device),
             ],
             device=self.device,
         )
@@ -2397,6 +2404,155 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(color_starts.numpy()[:3], [0, 2, 3])
         np.testing.assert_array_equal(ids_by_color.numpy(), [0, 2, 1, 4, 3, 5])
         np.testing.assert_array_equal(final_group_starts.numpy()[:4], [0, 2, 4, 6])
+
+    def test_03g3e_dvi_compact_contact_topology_cache(self):
+        """Reuse only exact effective-body topology while rebuilding manifold expansion."""
+        capacity = 6
+        active = wp.array([4], dtype=wp.int32, device=self.device)
+        group_prefix = wp.array([1, 1, 2, 3, 0, 0], dtype=wp.int32, device=self.device)
+        group_starts = wp.array([0, 2, 3, 0, 0, 0], dtype=wp.int32, device=self.device)
+        sorter = KeySorter(max_num_keys=capacity, device=self.device)
+        sorter.sorted_to_unsorted_map.assign([0, 1, 2, 3, 4, 5])
+        cids = wp.array([0, 1, 2, 3, 4, 5], dtype=wp.int32, device=self.device)
+        bodies = wp.array(
+            [wp.vec2i(0, 1), wp.vec2i(0, 1), wp.vec2i(1, 2), wp.vec2i(3, -1), wp.vec2i(3, -1), wp.vec2i(0, 1)],
+            dtype=wp.vec2i,
+            device=self.device,
+        )
+        uio = wp.zeros(1, dtype=wp.int32, device=self.device)
+        body_masks = wp.zeros(5, dtype=wp.uint64, device=self.device)
+        group_colors = wp.zeros(capacity, dtype=wp.int32, device=self.device)
+        num_colors = wp.zeros(1, dtype=wp.int32, device=self.device)
+        group_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        color_starts = wp.zeros(capacity + 1, dtype=wp.int32, device=self.device)
+        groups_by_color = wp.empty(capacity, dtype=wp.int32, device=self.device)
+        cached_pairs = wp.empty(capacity, dtype=wp.vec2i, device=self.device)
+        cached_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        cached_num_colors = wp.zeros(1, dtype=wp.int32, device=self.device)
+        cached_color_starts = wp.empty(capacity + 1, dtype=wp.int32, device=self.device)
+        valid = wp.zeros(1, dtype=wp.int32, device=self.device)
+        changed = wp.zeros(1, dtype=wp.int32, device=self.device)
+
+        def compare():
+            changed.zero_()
+            wp.launch(
+                _compare_compact_contact_topology,
+                dim=capacity,
+                inputs=[
+                    active,
+                    group_prefix,
+                    uio,
+                    sorter.sorted_to_unsorted_map,
+                    cids,
+                    bodies,
+                    group_starts,
+                    cached_pairs,
+                    cached_count,
+                    valid,
+                    changed,
+                ],
+                device=self.device,
+            )
+
+        def color():
+            body_masks.zero_()
+            wp.launch(
+                _color_compact_contact_groups,
+                dim=1,
+                inputs=[
+                    active,
+                    group_prefix,
+                    uio,
+                    sorter.sorted_to_unsorted_map,
+                    cids,
+                    bodies,
+                    body_masks,
+                    group_starts,
+                    group_colors,
+                    num_colors,
+                    group_count,
+                    color_starts,
+                    groups_by_color,
+                    cached_pairs,
+                    cached_count,
+                    cached_num_colors,
+                    cached_color_starts,
+                    valid,
+                    changed,
+                ],
+                device=self.device,
+            )
+
+        compare()
+        self.assertEqual(int(changed.numpy()[0]), 1)
+        color()
+        self.assertEqual(int(valid.numpy()[0]), 1)
+        self.assertEqual(int(cached_count.numpy()[0]), 3)
+        np.testing.assert_array_equal(groups_by_color.numpy()[:3], [0, 2, 1])
+
+        # The first manifold grows, but its ordered effective-body groups do not change.
+        active.assign([5])
+        group_prefix.assign([1, 1, 1, 2, 3, 0])
+        group_starts.assign([0, 3, 4, 0, 0, 0])
+        sorter.sorted_keys.fill_(12345)
+        cids.assign([5, 0, 1, 2, 4, 3])
+        compare()
+        self.assertEqual(int(changed.numpy()[0]), 0)
+        groups_before = groups_by_color.numpy().copy()
+        color()
+        np.testing.assert_array_equal(groups_by_color.numpy(), groups_before)
+        sizes = wp.zeros(capacity + 1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            _prepare_colored_contact_group_sizes,
+            dim=capacity + 1,
+            inputs=[active, group_count, group_starts, groups_by_color, sizes],
+            device=self.device,
+        )
+        wp.utils.array_scan(sizes, sizes, inclusive=True)
+        ids = wp.full(capacity, -1, dtype=wp.int32, device=self.device)
+        expanded_starts = wp.zeros(capacity + 1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            _expand_colored_contact_groups,
+            dim=capacity + 1,
+            inputs=[
+                active,
+                group_count,
+                uio,
+                sorter.sorted_to_unsorted_map,
+                cids,
+                group_starts,
+                groups_by_color,
+                sizes,
+                ids,
+                expanded_starts,
+            ],
+            device=self.device,
+        )
+        np.testing.assert_array_equal(ids.numpy()[:5], [5, 0, 1, 4, 2])
+        np.testing.assert_array_equal(expanded_starts.numpy()[:4], [0, 3, 4, 5])
+
+        # A changed effective pair must rebuild the exact greedy schedule.
+        bodies.assign(
+            [wp.vec2i(0, 1), wp.vec2i(0, 1), wp.vec2i(4, 2), wp.vec2i(3, -1), wp.vec2i(3, -1), wp.vec2i(0, 1)]
+        )
+        compare()
+        self.assertEqual(int(changed.numpy()[0]), 1)
+        color()
+        self.assertEqual(int(cached_count.numpy()[0]), 3)
+        np.testing.assert_array_equal(groups_by_color.numpy()[:3], [0, 1, 2])
+
+        active.assign([0])
+        compare()
+        self.assertEqual(int(changed.numpy()[0]), 1)
+        color()
+        self.assertEqual(int(cached_count.numpy()[0]), 0)
+        active.assign([5])
+        compare()
+        self.assertEqual(int(changed.numpy()[0]), 1)
+
+        self.assertNotEqual(
+            groups_by_color.ptr, sorter.sorted_keys.ptr + capacity * wp.types.type_size_in_bytes(wp.int32)
+        )
 
     def test_03g4_dvi_inequality_coloring_ignores_immovable_bodies(self):
         """Color contacts sharing an immovable body in parallel."""
