@@ -735,6 +735,7 @@ def _solve_dvi_sparse_contacts_pgs(
     inequality_tangent_cross: wp.array[float32],
     block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
+    split_contact_recovery: bool,
     body_space: wp.array[float32],
     solution_lambdas: wp.array[float32],
 ):
@@ -895,7 +896,7 @@ def _solve_dvi_sparse_contacts_pgs(
                             problem_mu[cio + cid]
                             * _contact_friction_normal_load(
                                 lambda_n_new,
-                                problem_v_b[vec_idx + int32(2)],
+                                wp.where(split_contact_recovery, float32(0.0), problem_v_b[vec_idx + int32(2)]),
                                 P_n,
                                 diagonal_n,
                                 cfg.regularization,
@@ -1998,3 +1999,113 @@ def _compute_dvi_sparse_solution_vectors(
     solution_v_plus[v_i] = v_plus
     state_v_aug[v_i] = v_plus
     state_s[v_i] = 0.0
+
+
+@wp.kernel
+def _shift_contact_bias_in_free_velocity(
+    problem_nc: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_v_b: wp.array[float32],
+    scale: float32,
+    problem_v_f: wp.array[float32],
+):
+    wid, cid = wp.tid()
+    if cid < problem_nc[wid]:
+        normal = problem_vio[wid] + problem_ccgo[wid] + int32(3) * cid + int32(2)
+        problem_v_f[normal] += scale * problem_v_b[normal]
+
+
+@wp.kernel
+def _solve_split_contact_pose_correction(
+    contact_indices: wp.array[int32],
+    contact_bid_AB: wp.array[wp.vec2i],
+    contact_gapfunc: wp.array[wp.vec4f],
+    contact_frame: wp.array[wp.quatf],
+    model_dt: wp.array[float32],
+    model_body_inv_mass: wp.array[float32],
+    problem_nc: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_uio: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_vio: wp.array[int32],
+    solution_v_plus: wp.array[float32],
+    inequality_num_colors: wp.array[int32],
+    inequality_ids_by_color: wp.array[int32],
+    inequality_color_starts: wp.array[int32],
+    inequality_group_starts: wp.array[int32],
+    pseudo_lambdas: wp.array[float32],
+    body_space: wp.array[float32],
+):
+    """Solve a translation-only split impulse without changing physical velocities."""
+    tid = wp.tid()
+    threads_per_world = int32(wp.block_dim())
+    lane = tid % threads_per_world
+    wid = tid / threads_per_world
+    dt = model_dt[wid]
+    vio = problem_vio[wid]
+    cio = problem_cio[wid]
+    uio = problem_uio[wid]
+    ccgo = problem_ccgo[wid]
+    schedule_offset = uio + wid
+    for _sweep in range(4):
+        for color in range(inequality_num_colors[wid]):
+            group_start = inequality_color_starts[schedule_offset + color]
+            group_end = inequality_color_starts[schedule_offset + color + int32(1)]
+            for group in range(group_start + lane, group_end, threads_per_world):
+                start = inequality_group_starts[schedule_offset + group]
+                end = inequality_group_starts[schedule_offset + group + int32(1)]
+                for slot in range(start, end):
+                    cid = inequality_ids_by_color[uio + slot]
+                    contact_id = contact_indices[cio + cid]
+                    if contact_id < int32(0):
+                        continue
+                    bids = contact_bid_AB[contact_id]
+                    inv_a = float32(0.0)
+                    inv_b = model_body_inv_mass[bids[1]]
+                    if bids[0] >= int32(0):
+                        inv_a = model_body_inv_mass[bids[0]]
+                    diagonal = inv_a + inv_b
+                    if diagonal <= FLOAT32_EPS:
+                        continue
+                    normal = wp.quat_rotate(contact_frame[contact_id], wp.vec3f(0.0, 0.0, 1.0))
+                    relative = float32(0.0)
+                    if bids[0] >= int32(0):
+                        xa = int32(6) * bids[0]
+                        relative -= wp.dot(normal, wp.vec3f(body_space[xa], body_space[xa + 1], body_space[xa + 2]))
+                    xb = int32(6) * bids[1]
+                    relative += wp.dot(normal, wp.vec3f(body_space[xb], body_space[xb + 1], body_space[xb + 2]))
+                    vec_idx = vio + ccgo + int32(3) * cid + int32(2)
+                    predicted_gap = contact_gapfunc[contact_id][3] + float32(0.5) * dt * solution_v_plus[vec_idx]
+                    value = relative + float32(0.6) * wp.min(float32(0.0), predicted_gap) / dt
+                    old_lambda = pseudo_lambdas[vec_idx]
+                    new_lambda = wp.max(float32(0.0), old_lambda - value / diagonal)
+                    pseudo_lambdas[vec_idx] = new_lambda
+                    delta = new_lambda - old_lambda
+                    if bids[0] >= int32(0):
+                        for j in range(3):
+                            body_space[xa + j] -= inv_a * normal[j] * delta
+                    for j in range(3):
+                        body_space[xb + j] += inv_b * normal[j] * delta
+            _sync_threads()
+
+
+@wp.kernel
+def _apply_split_contact_translation(
+    model_dt: wp.array[float32],
+    model_bodies_wid: wp.array[int32],
+    model_bodies_inv_mass: wp.array[float32],
+    body_space: wp.array[float32],
+    body_q: wp.array[wp.transformf],
+):
+    bid = wp.tid()
+    if model_bodies_inv_mass[bid] <= float32(0.0):
+        return
+    wid = model_bodies_wid[bid]
+    x = int32(6) * bid
+    correction = model_dt[wid] * wp.vec3f(body_space[x], body_space[x + 1], body_space[x + 2])
+    length = wp.length(correction)
+    if length > float32(0.02):
+        correction *= float32(0.02) / length
+    q = body_q[bid]
+    body_q[bid] = wp.transformf(wp.transform_get_translation(q) + correction, wp.transform_get_rotation(q))

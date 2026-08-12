@@ -130,6 +130,11 @@ class DVISolver:
                 collect_info=collect_info,
             )
 
+    def set_split_contact_recovery_enabled(self, enabled: bool) -> None:
+        """Enable pose-only split recovery for its supported sparse contact path."""
+        if self._sparse_path is not None:
+            self._sparse_path.split_contact_recovery_enabled = enabled
+
     @property
     def config(self) -> list[DVISolver.Config]:
         """Host-side per-world DVI configs."""
@@ -550,6 +555,11 @@ class DVISolver:
             ],
             device=self.device,
         )
+
+    def correct_contact_poses(self, problem: DualProblem) -> None:
+        """Apply pose-only contact recovery after integration when supported."""
+        if self._sparse_path is not None:
+            self._sparse_path.correct_contact_poses(problem)
 
     def _validate_inequality_topology(self) -> None:
         """Require the topology that graph-colored inequality solves consume.

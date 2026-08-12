@@ -220,6 +220,50 @@ def _build_reduced_kapla_tower(layer_count: int = 6) -> tuple[newton.ModelBuilde
     return builder, bodies, np.asarray(initial_positions, dtype=np.float32)
 
 
+def _build_high_mass_pyramid_impact() -> tuple[newton.ModelBuilder, list[int], int, float]:
+    """Build a small cube pyramid struck by a much heavier sphere."""
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    SolverKamino.register_custom_attributes(builder)
+    half_extent = 0.1
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.5, gap=0.0, margin=0.0)
+    cube_positions = (
+        (-0.21, 0.0, 0.10),
+        (0.0, 0.0, 0.10),
+        (0.21, 0.0, 0.10),
+        (-0.105, 0.0, 0.305),
+        (0.105, 0.0, 0.305),
+        (0.0, 0.0, 0.510),
+    )
+    cubes = []
+    for position in cube_positions:
+        cube = builder.add_body(xform=wp.transformf(position, wp.quat_identity()))
+        builder.add_shape_box(cube, hx=half_extent, hy=half_extent, hz=half_extent, cfg=shape_cfg)
+        cubes.append(cube)
+
+    projectile = builder.add_body(xform=wp.transformf((-0.8, 0.0, 0.31), wp.quat_identity()))
+    projectile_cfg = newton.ModelBuilder.ShapeConfig(density=100000.0, mu=0.5, gap=0.0, margin=0.0)
+    builder.add_shape_sphere(projectile, radius=0.25, cfg=projectile_cfg)
+    builder.add_ground_plane(cfg=shape_cfg)
+    return builder, cubes, projectile, half_extent
+
+
+def _cube_ground_penetration(body_q: np.ndarray, cube_bodies: list[int], half_extent: float) -> float:
+    """Return the deepest exact OBB corner penetration below the z=0 plane."""
+    poses = body_q[cube_bodies]
+    qx, qy, qz, qw = poses[:, 3], poses[:, 4], poses[:, 5], poses[:, 6]
+    rotation_row_z = np.stack(
+        (
+            2.0 * (qx * qz - qw * qy),
+            2.0 * (qy * qz + qw * qx),
+            1.0 - 2.0 * (qx * qx + qy * qy),
+        ),
+        axis=1,
+    )
+    projected_half_extent = half_extent * np.sum(np.abs(rotation_row_z), axis=1)
+    lowest_corner = poses[:, 2] - projected_half_extent
+    return float(np.maximum(0.0, -np.min(lowest_corner)))
+
+
 def _reduce_solver_status(status: np.ndarray) -> dict[str, object]:
     """Reduce per-world status while requiring every world to converge."""
     return {
@@ -2701,6 +2745,112 @@ class TestDVISolver(unittest.TestCase):
 
         if len(final_positions) == 2:
             np.testing.assert_allclose(final_positions[0], final_positions[1], rtol=0.0, atol=2.0e-3)
+
+    def test_05b3_dvi_high_mass_pyramid_impact_limits_ground_penetration(self):
+        """Keep exact cube OBBs above the ground during a high-mass impact."""
+        builder, cubes, projectile, half_extent = _build_high_mass_pyramid_impact()
+        model = builder.finalize(device=self.device)
+        config = SolverKamino.Config(
+            dynamics_solver="dvi",
+            integrator="moreau",
+            use_collision_detector=True,
+            sparse_dynamics=True,
+            sparse_jacobian=True,
+            collision_detector=kamino_config.CollisionDetectorConfig(
+                max_contacts=128,
+                max_contacts_per_world=128,
+                max_contacts_per_pair=8,
+            ),
+        )
+        solver = SolverKamino(model, config=config)
+        state_0 = model.state()
+        state_1 = model.state()
+        body_qd = state_0.body_qd.numpy()
+        body_qd[projectile, 0] = 6.0
+        state_0.body_qd.assign(body_qd)
+
+        projectile_contact_seen = False
+        max_penetration = 0.0
+        cube_set = set(cubes)
+        for _ in range(30):
+            solver.step(state_0, state_1, control=None, contacts=None, dt=5.0e-3)
+            state_0, state_1 = state_1, state_0
+
+            body_q = state_0.body_q.numpy()
+            body_qd = state_0.body_qd.numpy()
+            self.assertTrue(np.all(np.isfinite(body_q)))
+            self.assertTrue(np.all(np.isfinite(body_qd)))
+            max_penetration = max(max_penetration, _cube_ground_penetration(body_q, cubes, half_extent))
+
+            contacts = solver._contacts_kamino
+            contact_count = int(contacts.world_active_contacts.numpy()[0])
+            for body_a, body_b in contacts.bid_AB.numpy()[:contact_count]:
+                pair = {int(body_a), int(body_b)}
+                if projectile in pair and pair & cube_set:
+                    projectile_contact_seen = True
+
+        self.assertTrue(projectile_contact_seen)
+        self.assertLessEqual(max_penetration, 0.005)
+
+    def test_05b4_dvi_split_recovery_isolates_physical_contact_solution(self):
+        """Correct an overlapping pose without changing physical velocity or reaction."""
+
+        def run(apply_pose_recovery: bool):
+            radius = 0.1
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+            SolverKamino.register_custom_attributes(builder)
+            builder.gravity = (0.0, 0.0, 0.0)
+            shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, gap=0.0, margin=0.0)
+            body = builder.add_body(xform=wp.transformf((0.0, 0.0, radius - 0.005), wp.quat_identity()))
+            builder.add_shape_sphere(body, radius=radius, cfg=shape_cfg)
+            builder.add_ground_plane(cfg=shape_cfg)
+            model = builder.finalize(device=self.device)
+            solver = SolverKamino(
+                model,
+                config=SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    integrator="moreau",
+                    use_collision_detector=True,
+                    sparse_dynamics=True,
+                    sparse_jacobian=True,
+                    collision_detector=kamino_config.CollisionDetectorConfig(
+                        max_contacts=4,
+                        max_contacts_per_world=4,
+                        max_contacts_per_pair=4,
+                    ),
+                ),
+            )
+            state_0 = model.state()
+            state_1 = model.state()
+            body_qd = state_0.body_qd.numpy()
+            body_qd[body, 2] = -1.0
+            state_0.body_qd.assign(body_qd)
+
+            solver_fd = solver._solver_kamino.solver_fd
+            solver_fd.set_split_contact_recovery_enabled(True)
+            original_pose_recovery = solver_fd.correct_contact_poses
+            if not apply_pose_recovery:
+                solver_fd.correct_contact_poses = lambda _problem: None
+            try:
+                solver.step(state_0, state_1, control=None, contacts=None, dt=1.0e-3)
+            finally:
+                solver_fd.correct_contact_poses = original_pose_recovery
+
+            contacts = solver._contacts_kamino
+            count = int(contacts.world_active_contacts.numpy()[0])
+            self.assertEqual(count, 1)
+            reaction = contacts.reaction.numpy()[:count].copy()
+            status = solver_fd.data.status.numpy().copy()
+            return state_1.body_q.numpy()[body].copy(), state_1.body_qd.numpy()[body].copy(), reaction, status
+
+        pose_without, velocity_without, reaction_without, status_without = run(False)
+        pose_with, velocity_with, reaction_with, status_with = run(True)
+
+        self.assertGreater(float(pose_with[2]), float(pose_without[2]))
+        np.testing.assert_allclose(velocity_with, velocity_without, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(reaction_with, reaction_without, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_array_equal(status_with, status_without)
+        self.assertGreater(float(reaction_with[0, 2]), 0.0)
 
     def test_05c_dvi_high_mass_ratio_stack_supports_weight(self):
         """Support a 100:1 sphere stack accurately in dense and sparse modes."""
