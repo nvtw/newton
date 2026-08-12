@@ -43,9 +43,11 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _sparse_delassus_matvec_rows,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
+    _assemble_compact_unilateral_schur,
     _color_compact_contact_groups,
     _color_mapped_dvi_inequalities,
     _compact_contact_group_starts,
+    _compact_unilateral_correction,
     _expand_colored_contact_groups,
     _group_mapped_dvi_inequalities,
     _map_active_contacts,
@@ -66,6 +68,22 @@ from newton.tests.kamino.test_kamino_solvers_padmm import TestSetup
 from newton.tests.kamino.utils.extract import extract_delassus, extract_problem_vector
 from newton.tests.kamino.utils.make import make_containers, make_test_problem_fourbar, update_containers
 from newton.tests.utils import basics as public_basics
+
+
+@wp.kernel
+def _compact_unilateral_correction_for_test(
+    compact_q: wp.array[wp.float32],
+    result: wp.array[wp.vec2f],
+):
+    result[0] = _compact_unilateral_correction(
+        compact_q, wp.int32(0), wp.int32(0), wp.int32(0), wp.int32(1), wp.int32(0)
+    )
+    result[1] = _compact_unilateral_correction(
+        compact_q, wp.int32(0), wp.int32(0), wp.int32(1), wp.int32(1), wp.int32(0)
+    )
+    result[2] = _compact_unilateral_correction(
+        compact_q, wp.int32(0), wp.int32(0), wp.int32(1), wp.int32(1), wp.int32(1)
+    )
 
 
 @wp.kernel
@@ -1713,6 +1731,77 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(inequality_ids_by_color.numpy(), np.arange(6))
         np.testing.assert_array_equal(inequality_color_starts.numpy()[:2], [0, 4])
         np.testing.assert_array_equal(inequality_group_starts.numpy()[:5], [0, 1, 3, 4, 6])
+
+    def test_03g3a_dvi_compact_schur_matches_bilateral_correction(self):
+        """Preserve row/column orientation in the compact bilateral correction."""
+        coupling_np = np.array([[2.0, 3.0], [0.0, 0.0]], dtype=np.float32)
+        response_np = np.array([[5.0, 7.0], [11.0, 13.0]], dtype=np.float32)
+        compact_schur = wp.full(4, -1.0, dtype=wp.float32, device=self.device)
+        compact_q = wp.full(4, 9.0, dtype=wp.float32, device=self.device)
+        wp.launch(
+            kernel=_assemble_compact_unilateral_schur,
+            dim=32,
+            inputs=[
+                wp.array([4], dtype=wp.int32, device=self.device),
+                wp.array([2], dtype=wp.int32, device=self.device),
+                wp.array([0], dtype=wp.int32, device=self.device),
+                wp.array([0], dtype=wp.int32, device=self.device),
+                wp.array([2], dtype=wp.int32, device=self.device),
+                wp.array(coupling_np.ravel(), dtype=wp.float32, device=self.device),
+                wp.array(response_np.ravel(), dtype=wp.float32, device=self.device),
+                compact_schur,
+                compact_q,
+            ],
+            device=self.device,
+            block_dim=32,
+        )
+
+        expected = coupling_np.T @ response_np
+        np.testing.assert_allclose(compact_schur.numpy().reshape(2, 2), expected, rtol=1.0e-6)
+        np.testing.assert_array_equal(compact_q.numpy(), [9.0, 9.0, 0.0, 0.0])
+
+        deltas = np.array([0.25, -0.5], dtype=np.float32)
+        recurrence_q = -(expected[:, 0] * deltas[0] + expected[:, 1] * deltas[1])
+        bilateral_delta = -(response_np[:, 0] * deltas[0] + response_np[:, 1] * deltas[1])
+        np.testing.assert_allclose(recurrence_q, coupling_np.T @ bilateral_delta, rtol=1.0e-6)
+
+        component_q = wp.array([11.0, 22.0, 33.0], dtype=wp.float32, device=self.device)
+        component_corrections = wp.empty(3, dtype=wp.vec2f, device=self.device)
+        wp.launch(
+            kernel=_compact_unilateral_correction_for_test,
+            dim=1,
+            inputs=[component_q, component_corrections],
+            device=self.device,
+        )
+        np.testing.assert_array_equal(
+            component_corrections.numpy(),
+            [[11.0, 0.0], [33.0, 0.0], [11.0, 22.0]],
+        )
+
+    def test_03g3aa_dvi_compact_schur_skips_unprofitable_world(self):
+        """Leave scratch untouched when unilateral rows outnumber bilateral rows."""
+        compact_schur = wp.full(3, -1.0, dtype=wp.float32, device=self.device)
+        compact_q = wp.full(3, 9.0, dtype=wp.float32, device=self.device)
+        wp.launch(
+            kernel=_assemble_compact_unilateral_schur,
+            dim=32,
+            inputs=[
+                wp.array([3], dtype=wp.int32, device=self.device),
+                wp.array([1], dtype=wp.int32, device=self.device),
+                wp.array([0], dtype=wp.int32, device=self.device),
+                wp.array([0], dtype=wp.int32, device=self.device),
+                wp.array([2], dtype=wp.int32, device=self.device),
+                wp.ones(2, dtype=wp.float32, device=self.device),
+                wp.ones(2, dtype=wp.float32, device=self.device),
+                compact_schur,
+                compact_q,
+            ],
+            device=self.device,
+            block_dim=32,
+        )
+
+        np.testing.assert_array_equal(compact_schur.numpy(), [-1.0, -1.0, -1.0])
+        np.testing.assert_array_equal(compact_q.numpy(), [9.0, 9.0, 9.0])
 
     def test_03g3b_dvi_groups_contacts_in_private_pair_order(self):
         """Group geometry-pair contacts without changing their constraint indices."""

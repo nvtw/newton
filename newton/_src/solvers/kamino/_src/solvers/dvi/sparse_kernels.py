@@ -1357,6 +1357,59 @@ def _sync_warp_32(): ...
 
 
 @wp.func
+def _cooperative_unilateral_component(uid: int32, nl: int32, phase: int32) -> int32:
+    component = int32(0)
+    if uid >= nl and phase == int32(0):
+        component = int32(2)
+    return component
+
+
+@wp.func
+def _compact_unilateral_correction(
+    compact_q: wp.array[float32], offset: int32, unilateral_row: int32, uid: int32, nl: int32, phase: int32
+) -> wp.vec2f:
+    component = _cooperative_unilateral_component(uid, nl, phase)
+    correction = wp.vec2f(compact_q[offset + unilateral_row + component], float32(0.0))
+    if uid >= nl and phase != int32(0):
+        correction.y = compact_q[offset + unilateral_row + int32(1)]
+    return correction
+
+
+@wp.kernel
+def _assemble_compact_unilateral_schur(
+    problem_dim: wp.array[int32],
+    problem_njc: wp.array[int32],
+    problem_vio: wp.array[int32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    coupling: wp.array[float32],
+    response: wp.array[float32],
+    compact_schur: wp.array[float32],
+    compact_q: wp.array[float32],
+):
+    """Assemble ``C.T * response`` for worlds with no more unilateral than bilateral rows."""
+    tid = wp.tid()
+    lane = tid % int32(32)
+    wid = tid / int32(32)
+    njc = problem_njc[wid]
+    nu = problem_dim[wid] - njc
+    if nu > njc:
+        return
+    offset = response_mio[wid]
+    stride = response_stride[wid]
+    for unilateral in range(lane, nu, int32(32)):
+        compact_q[problem_vio[wid] + njc + unilateral] = float32(0.0)
+    for row in range(nu):
+        for column in range(nu):
+            partial = float32(0.0)
+            for bilateral in range(lane, njc, int32(32)):
+                partial += coupling[offset + bilateral * stride + row] * response[offset + bilateral * stride + column]
+            value = _subgroup_sum_32(partial)
+            if lane == int32(0):
+                compact_schur[offset + row * stride + column] = value
+
+
+@wp.func
 def _cooperative_sparse_limit_update(
     mapped_id: int32,
     row: int32,
@@ -1597,6 +1650,9 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     bilateral_coupling: wp.array[float32],
     bilateral_response: wp.array[float32],
     bilateral_delta: wp.array[float32],
+    compact_schur: wp.array[float32],
+    compact_q: wp.array[float32],
+    enable_compact_schur: wp.bool,
     inequality_num_colors: wp.array[int32],
     inequality_ids_by_color: wp.array[int32],
     inequality_color_starts: wp.array[int32],
@@ -1628,6 +1684,8 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     njc = problem_njc[wid]
     response_offset = response_mio[wid]
     response_row_stride = response_stride[wid]
+    num_unilateral_rows = nl + int32(3) * nc
+    use_compact_schur = enable_compact_schur and num_unilateral_rows <= njc
     bvio = bilateral_vio[wid]
     row_start = bsm_row_start[wid]
     col_start = bsm_col_start[wid]
@@ -1678,25 +1736,45 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                             row = ccgo + int32(3) * (uid - nl)
                         vec_idx = vio + row
                         unilateral_row = row - njc
-                        partial_0 = float32(0.0)
-                        partial_1 = float32(0.0)
-                        partial_cross = float32(0.0)
+                        correction_0 = float32(0.0)
+                        correction_1 = float32(0.0)
+                        projected_cross = float32(0.0)
                         if mapped_id >= int32(0):
-                            for bilateral_row in range(lane, njc, int32(32)):
-                                index = response_offset + bilateral_row * response_row_stride + unilateral_row
-                                bilateral_value = bilateral_delta[bvio + bilateral_row]
-                                if uid < nl or phase == int32(0):
-                                    component = int32(0)
-                                    if uid >= nl:
-                                        component = int32(2)
-                                    partial_0 += bilateral_coupling[index + component] * bilateral_value
-                                else:
-                                    partial_0 += bilateral_coupling[index] * bilateral_value
-                                    partial_1 += bilateral_coupling[index + int32(1)] * bilateral_value
-                                    partial_cross += bilateral_coupling[index] * bilateral_response[index + int32(1)]
-                        correction_0 = _subgroup_sum_32(partial_0)
-                        correction_1 = _subgroup_sum_32(partial_1)
-                        projected_cross = _subgroup_sum_32(partial_cross)
+                            if use_compact_schur:
+                                if lane == int32(0):
+                                    correction = _compact_unilateral_correction(
+                                        compact_q, vio + njc, unilateral_row, uid, nl, phase
+                                    )
+                                    correction_0 = correction.x
+                                    correction_1 = correction.y
+                                    if uid >= nl and phase != int32(0):
+                                        projected_cross = compact_schur[
+                                            response_offset
+                                            + unilateral_row * response_row_stride
+                                            + unilateral_row
+                                            + int32(1)
+                                        ]
+                            else:
+                                partial_0 = float32(0.0)
+                                partial_1 = float32(0.0)
+                                partial_cross = float32(0.0)
+                                for bilateral_row in range(lane, njc, int32(32)):
+                                    index = response_offset + bilateral_row * response_row_stride + unilateral_row
+                                    bilateral_value = bilateral_delta[bvio + bilateral_row]
+                                    if uid < nl or phase == int32(0):
+                                        component = int32(0)
+                                        if uid >= nl:
+                                            component = int32(2)
+                                        partial_0 += bilateral_coupling[index + component] * bilateral_value
+                                    else:
+                                        partial_0 += bilateral_coupling[index] * bilateral_value
+                                        partial_1 += bilateral_coupling[index + int32(1)] * bilateral_value
+                                        partial_cross += (
+                                            bilateral_coupling[index] * bilateral_response[index + int32(1)]
+                                        )
+                                correction_0 = _subgroup_sum_32(partial_0)
+                                correction_1 = _subgroup_sum_32(partial_1)
+                                projected_cross = _subgroup_sum_32(partial_cross)
 
                         delta_0 = float32(0.0)
                         delta_1 = float32(0.0)
@@ -1782,20 +1860,41 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                         delta_0 = _broadcast_lane_0_32(delta_0)
                         delta_1 = _broadcast_lane_0_32(delta_1)
                         if mapped_id >= int32(0) and (delta_0 != float32(0.0) or delta_1 != float32(0.0)):
-                            for bilateral_row in range(lane, njc, int32(32)):
-                                index = response_offset + bilateral_row * response_row_stride + unilateral_row
-                                if uid < nl:
-                                    if phase == int32(0):
-                                        bilateral_delta[bvio + bilateral_row] -= bilateral_response[index] * delta_0
-                                elif phase == int32(0):
-                                    bilateral_delta[bvio + bilateral_row] -= (
-                                        bilateral_response[index + int32(2)] * delta_0
+                            component = _cooperative_unilateral_component(uid, nl, phase)
+                            if use_compact_schur:
+                                for target in range(lane, num_unilateral_rows, int32(32)):
+                                    value = (
+                                        compact_schur[
+                                            response_offset + target * response_row_stride + unilateral_row + component
+                                        ]
+                                        * delta_0
                                     )
-                                else:
-                                    bilateral_delta[bvio + bilateral_row] -= (
-                                        bilateral_response[index] * delta_0
-                                        + bilateral_response[index + int32(1)] * delta_1
-                                    )
+                                    if uid >= nl and phase != int32(0):
+                                        value += (
+                                            compact_schur[
+                                                response_offset
+                                                + target * response_row_stride
+                                                + unilateral_row
+                                                + int32(1)
+                                            ]
+                                            * delta_1
+                                        )
+                                    compact_q[vio + njc + target] -= value
+                            else:
+                                for bilateral_row in range(lane, njc, int32(32)):
+                                    index = response_offset + bilateral_row * response_row_stride + unilateral_row
+                                    if uid < nl:
+                                        if phase == int32(0):
+                                            bilateral_delta[bvio + bilateral_row] -= bilateral_response[index] * delta_0
+                                    elif phase == int32(0):
+                                        bilateral_delta[bvio + bilateral_row] -= (
+                                            bilateral_response[index + int32(2)] * delta_0
+                                        )
+                                    else:
+                                        bilateral_delta[bvio + bilateral_row] -= (
+                                            bilateral_response[index] * delta_0
+                                            + bilateral_response[index + int32(1)] * delta_1
+                                        )
                         _sync_warp_32()
 
 
