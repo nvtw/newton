@@ -26,6 +26,7 @@ from .kernels import (
     _solve_bilateral_unilateral_response_cooperative,
 )
 from .sparse_kernels import (
+    _assemble_compact_unilateral_schur,
     _assemble_sparse_bilateral_unilateral_coupling,
     _build_sparse_bilateral_block,
     _build_sparse_bilateral_rhs,
@@ -376,7 +377,12 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
     )
 
 
-def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, block_iteration: int) -> None:
+def _launch_sparse_inequality_pgs(
+    path: SparseDVIPath,
+    problem: DualProblem,
+    block_iteration: int,
+    enable_compact_schur: bool = False,
+) -> None:
     """Apply colored sparse PGS from the current full dual iterate."""
     state = path.data.state
     jacobians = path.jacobians
@@ -487,16 +493,22 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             state.bilateral_coupling,
             state.bilateral_response,
             state.bilateral_delta,
-            state.inequality_num_colors,
-            state.inequality_ids_by_color,
-            state.inequality_color_starts,
-            state.inequality_group_starts,
-            state.inequality_tangent_cross,
-            block_iteration,
-            path.data.config,
-            path.body_space,
         ]
-        kernel_inputs.append(path.data.solution.lambdas)
+        if cooperative_articulation:
+            kernel_inputs.extend([state.bilateral_response_factor, state.s, wp.bool(enable_compact_schur)])
+        kernel_inputs.extend(
+            [
+                state.inequality_num_colors,
+                state.inequality_ids_by_color,
+                state.inequality_color_starts,
+                state.inequality_group_starts,
+                state.inequality_tangent_cross,
+                block_iteration,
+                path.data.config,
+                path.body_space,
+                path.data.solution.lambdas,
+            ]
+        )
     wp.launch(
         kernel=kernel,
         dim=path.size.num_worlds * threads_per_world,
@@ -790,6 +802,16 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
     )
     use_permutation = isinstance(path.bilateral_solver, LLTBlockedRCMSolver)
     permutation = path.bilateral_solver.P if use_permutation else state.projected_mio
+    has_intermediate_bilateral_solve = any(
+        path.should_solve_bilateral_after_block(block_iteration)
+        for block_iteration in range(path.max_alternating_iterations)
+    )
+    enable_compact_schur = (
+        path.device.is_cuda
+        and path.size.max_of_num_joint_cts >= 64
+        and path.max_alternating_iterations >= 4
+        and not has_intermediate_bilateral_solve
+    )
     response_kernel = _solve_bilateral_unilateral_response
     response_block_dim = 1
     response_tasks_per_world = 0
@@ -821,6 +843,24 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         device=path.device,
         block_dim=response_block_dim,
     )
+    if enable_compact_schur:
+        wp.launch(
+            kernel=_assemble_compact_unilateral_schur,
+            dim=path.size.num_worlds * 32,
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                problem.data.vio,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_coupling,
+                state.bilateral_response,
+                state.bilateral_response_factor,
+                state.s,
+            ],
+            device=path.device,
+            block_dim=32,
+        )
     wp.launch(
         kernel=_cache_sparse_projected_diagonal,
         dim=(path.size.num_worlds, max_unilateral_rows),
@@ -838,13 +878,9 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         ],
         device=path.device,
     )
-    has_intermediate_bilateral_solve = any(
-        path.should_solve_bilateral_after_block(block_iteration)
-        for block_iteration in range(path.max_alternating_iterations)
-    )
     if not has_intermediate_bilateral_solve:
         # A fixed bilateral response lets block-local barriers preserve colored GS across all sweeps.
-        _launch_sparse_inequality_pgs(path, problem, _FUSED_BILATERAL_BLOCK)
+        _launch_sparse_inequality_pgs(path, problem, _FUSED_BILATERAL_BLOCK, enable_compact_schur=enable_compact_schur)
     else:
         for block_iteration in range(path.max_alternating_iterations):
             _launch_sparse_inequality_pgs(path, problem, block_iteration)
