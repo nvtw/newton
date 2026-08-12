@@ -1158,7 +1158,9 @@ class ModelBuilder:
             sdf_texture_paired_samples: Store adjacent X samples together in
                 SDF textures for faster software interpolation. Disable to
                 halve SDF texture memory at the cost of slower hydroelastic
-                sampling.
+                sampling. Every prebuilt mesh SDF added to this builder must
+                use the same layout, selected by the ``paired_samples``
+                argument to :meth:`Mesh.build_sdf`.
         """
         self.world_count: int = 0
         """Number of worlds accumulated for :attr:`Model.world_count`."""
@@ -11546,7 +11548,10 @@ class ModelBuilder:
                         )
                         mesh_sdf = deferred_mesh_sdf_cache.get(deferred_key)
                         if mesh_sdf is None:
-                            mesh_copy = shape_src.copy()
+                            # Convex collision geometry is deduplicated before finalization,
+                            # so build its deferred SDF edges against that same topology.
+                            sdf_source = generated_shape_sources[i] if shape_type == GeoType.CONVEX_MESH else shape_src
+                            mesh_copy = sdf_source.copy()
                             mesh_copy.build_sdf(**sdf_kwargs)
                             mesh_sdf = mesh_copy.sdf
                             deferred_mesh_sdf_cache[deferred_key] = mesh_sdf

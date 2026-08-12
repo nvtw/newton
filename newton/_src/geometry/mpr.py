@@ -73,6 +73,7 @@ def create_support_map_function(support_func: Any, use_precomputed_center: bool 
     Args:
         support_func: Support mapping function for individual shapes that takes
                      (geometry, direction, data_provider) and returns a support point
+        use_precomputed_center: Whether the geometry data supplies a cached center.
 
     Returns:
         Tuple of three functions:

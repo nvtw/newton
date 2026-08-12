@@ -2435,6 +2435,7 @@ def create_texture_sdf_from_mesh(
             :data:`SIGN_MODE_PARITY` uses parity ray-casts (cheaper,
             requires a closed manifold mesh); :data:`SIGN_MODE_NORMAL`
             uses the angle-weighted pseudo-normal (for open meshes).
+        paired_samples: Store adjacent X samples together for faster software interpolation.
         device: Warp device string. ``None`` uses the mesh's device.
         return_sparse_data: when ``True``, also return the raw cooked
             ``sparse_data`` dict produced by
@@ -2511,6 +2512,7 @@ def create_texture_sdf_from_primitive(
         subgrid_size: cells per subgrid.
         quantization_mode: :class:`QuantizationMode` value.
         scale_baked: whether shape scale was baked into the SDF values.
+        paired_samples: Store adjacent X samples together for faster software interpolation.
         device: Warp device string.
 
     Returns:
@@ -2576,6 +2578,7 @@ def create_texture_sdf_from_volume(
             which an occupied subgrid is considered linear and its high-res
             data is omitted.  ``None`` auto-computes from domain extents,
             ``0.0`` disables the optimization.
+        paired_samples: Store adjacent X samples together for faster software interpolation.
         device: Warp device string.
 
     Returns:

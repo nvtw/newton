@@ -727,46 +727,54 @@ def test_export_reduced_contacts_kernel(test, device):
     writer_data.contact_penetration = contact_penetration_out
     writer_data.contact_tangent = contact_tangent_out
 
-    # Launch export kernel
-    total_blocks = 128
-    wp.launch_tiled(
-        export_kernel,
-        dim=total_blocks,
-        inputs=[
-            reducer.hashtable.keys,
-            reducer.ht_values,  # Values are now managed by GlobalContactReducer
-            reducer.hashtable.active_slots,
-            reducer.position_depth,
-            reducer.normal,
-            reducer.shape_pairs,
-            reducer.contact_fingerprints,
-            reducer.exported_flags,
-            shape_types,
-            shape_data,
-            shape_gap,
-            writer_data,
-            total_blocks,
-            int(not device.is_cpu),
-            0,  # deterministic=0 (fast packing)
-        ],
-        device=device,
-        block_dim=EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
-    )
+    # One block must reuse its shared duplicate-bit tile for every active entry.
+    total_blocks = 1
 
-    # Verify output: ID zero is skipped, leaving five distinct pairs plus one
-    # representative from the numerically equivalent winner pair and all seven
-    # geometrically distinct contacts from one hashtable entry.
-    num_exported = int(contact_count_out.numpy()[0])
-    test.assertEqual(num_exported, 13)
-    pairs = contact_pair_out.numpy()[:num_exported]
-    positions = contact_position_out.numpy()[:num_exported]
-    duplicate_pair = np.nonzero((pairs[:, 0] == 10) & (pairs[:, 1] == 110))[0]
-    test.assertEqual(len(duplicate_pair), 1)
-    test.assertEqual(positions[duplicate_pair[0], 0], np.float32(0.010000004433095455))
+    def launch_and_verify():
+        wp.launch_tiled(
+            export_kernel,
+            dim=total_blocks,
+            inputs=[
+                reducer.hashtable.keys,
+                reducer.ht_values,  # Values are now managed by GlobalContactReducer
+                reducer.hashtable.active_slots,
+                reducer.position_depth,
+                reducer.normal,
+                reducer.shape_pairs,
+                reducer.contact_fingerprints,
+                reducer.exported_flags,
+                shape_types,
+                shape_data,
+                shape_gap,
+                writer_data,
+                total_blocks,
+                int(not device.is_cpu),
+                0,  # deterministic=0 (fast packing)
+            ],
+            device=device,
+            block_dim=EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
+        )
 
-    distinct_pair = np.nonzero((pairs[:, 0] == 12) & (pairs[:, 1] == 112))[0]
-    test.assertEqual(len(distinct_pair), VALUES_PER_KEY)
-    np.testing.assert_array_equal(np.sort(positions[distinct_pair, 0]), np.arange(20.0, 27.0, dtype=np.float32))
+        # ID zero is skipped, leaving five distinct pairs plus one representative
+        # from the numerically equivalent winner pair and all seven geometrically
+        # distinct contacts from one hashtable entry.
+        num_exported = int(contact_count_out.numpy()[0])
+        test.assertEqual(num_exported, 13)
+        pairs = contact_pair_out.numpy()[:num_exported]
+        positions = contact_position_out.numpy()[:num_exported]
+        duplicate_pair = np.nonzero((pairs[:, 0] == 10) & (pairs[:, 1] == 110))[0]
+        test.assertEqual(len(duplicate_pair), 1)
+        test.assertEqual(positions[duplicate_pair[0], 0], np.float32(0.010000004433095455))
+
+        distinct_pair = np.nonzero((pairs[:, 0] == 12) & (pairs[:, 1] == 112))[0]
+        test.assertEqual(len(distinct_pair), VALUES_PER_KEY)
+        np.testing.assert_array_equal(np.sort(positions[distinct_pair, 0]), np.arange(20.0, 27.0, dtype=np.float32))
+
+    launch_and_verify()
+    for _ in range(10):
+        reducer.exported_flags.zero_()
+        contact_count_out.zero_()
+        launch_and_verify()
 
 
 def test_key_uniqueness(test, device):

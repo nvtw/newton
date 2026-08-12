@@ -373,6 +373,14 @@ def _process_sap_work_package(
         )
 
 
+@wp.func
+def _advance_sap_chunk_base(chunk_base: int, chunk_stride: int, total_work_packages: int) -> int:
+    """Advance a dense SAP chunk without overflowing signed int32 arithmetic."""
+    if total_work_packages - chunk_base <= chunk_stride:
+        return total_work_packages
+    return chunk_base + chunk_stride
+
+
 @wp.kernel(enable_backward=False)
 def _sap_broadphase_kernel(
     # Input arrays
@@ -473,7 +481,7 @@ def _sap_broadphase_kernel(
                 candidate_pair_count,
                 max_candidate_pair,
             )
-        chunk_base += chunk_stride
+        chunk_base = _advance_sap_chunk_base(chunk_base, chunk_stride, total_work_packages)
 
 
 class BroadPhaseSAP:

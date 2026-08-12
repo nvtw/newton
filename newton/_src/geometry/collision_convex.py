@@ -29,7 +29,17 @@ def create_solve_convex_multi_contact(
     post_process_contact: Any,
     use_precomputed_center: bool = False,
 ):
-    """Factory: fused MPR+GJK multi-contact solver with shared support code."""
+    """Create a fused MPR/GJK multi-contact solver.
+
+    Args:
+        support_func: Support mapping function for individual shapes.
+        writer_func: Function that writes generated contacts.
+        post_process_contact: Function that post-processes generated contacts.
+        use_precomputed_center: Whether the geometry data supplies a cached center.
+
+    Returns:
+        The specialized contact solver.
+    """
 
     # Create support functions ONCE — shared between MPR and GJK.
     support_funcs = create_support_map_function(support_func, use_precomputed_center)
@@ -146,7 +156,17 @@ def create_solve_convex_single_contact(
     post_process_contact: Any,
     use_precomputed_center: bool = False,
 ):
-    """Factory: fused MPR+GJK single-contact solver with shared support code."""
+    """Create a fused MPR/GJK single-contact solver.
+
+    Args:
+        support_func: Support mapping function for individual shapes.
+        writer_func: Function that writes generated contacts.
+        post_process_contact: Function that post-processes generated contacts.
+        use_precomputed_center: Whether the geometry data supplies a cached center.
+
+    Returns:
+        The specialized contact solver.
+    """
 
     # Create support functions ONCE — shared between MPR and GJK.
     support_funcs = create_support_map_function(support_func, use_precomputed_center)

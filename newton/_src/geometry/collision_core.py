@@ -288,6 +288,7 @@ def create_compute_gjk_mpr_contacts(
         writer_func: Function to write contact data (signature: (ContactData, writer_data) -> None)
         post_process_contact: Function to post-process contact data
         support_func: Support mapping function (defaults to support_map)
+        use_precomputed_center: Whether the geometry data supplies a cached center.
 
     Returns:
         A compute_gjk_mpr_contacts function with the writer function baked in

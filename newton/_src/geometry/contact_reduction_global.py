@@ -1883,8 +1883,9 @@ def create_export_reduced_contacts_kernel(writer_func: Any):
                         writer_data,
                     )
 
-            # Keep lanes together before the shared tile is reused.
-            _sync = wp.tile_extract(duplicate_bits, lane)
+            # Clear cooperatively so lane 0 finishes exporting before any warp
+            # can reuse the shared tile for the next active entry.
+            wp.tile_scatter_masked(duplicate_bits, lane, int(0), True)
 
     return export_reduced_contacts_kernel
 

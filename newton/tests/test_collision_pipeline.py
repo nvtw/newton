@@ -2441,6 +2441,19 @@ def test_mesh_convex_with_sdf_routes_to_sdf_contact(test, device):
     test.assertGreater(contact_count, 0)
 
 
+def test_deferred_convex_sdf_edges_use_deduplicated_topology(test, device):
+    """Finalize deferred convex SDF edges against deduplicated vertices."""
+    convex = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=True, compute_inertia=False)
+    builder = newton.ModelBuilder()
+    shape = builder.add_shape_convex_hull(body=-1, mesh=convex)
+    builder.shape_sdf_max_resolution[shape] = 16
+
+    model = builder.finalize(device=device)
+
+    test.assertGreater(int(model.shape_edge_range.numpy()[shape][1]), 0)
+    test.assertEqual(model._mesh_keep_alive[0].points.shape[0], 8)
+
+
 def test_scalar_sdf_texture_routes_to_sdf_contact(test, device):
     """Preserve mesh-SDF contacts with scalar texture storage."""
     mesh = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=False, compute_inertia=False)
@@ -3153,6 +3166,14 @@ add_function_test(
     TestPlanarSDFRouting,
     "test_mesh_convex_with_sdf_routes_to_sdf_contact",
     test_mesh_convex_with_sdf_routes_to_sdf_contact,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestPlanarSDFRouting,
+    "test_deferred_convex_sdf_edges_use_deduplicated_topology",
+    test_deferred_convex_sdf_edges_use_deduplicated_topology,
     devices=get_cuda_test_devices(),
     check_output=False,
 )
