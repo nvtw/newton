@@ -45,6 +45,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _parallel_contact_group_width,
     _sparse_delassus_matvec_rows,
     _split_contact_threads_per_world,
+    _supports_split_contact_recovery,
     _use_parallel_contact_colors,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
@@ -538,6 +539,13 @@ class TestDVISolver(unittest.TestCase):
         if not test_context.setup_done:
             setup_tests(clear_cache=False)
         self.device = wp.get_device(test_context.device)
+
+    def test_00_split_contact_recovery_scope(self):
+        """Enable physical bias splitting only when pose recovery can run."""
+        self.assertTrue(_supports_split_contact_recovery(False, 0))
+        self.assertFalse(_supports_split_contact_recovery(True, 0))
+        self.assertFalse(_supports_split_contact_recovery(False, 1))
+        self.assertFalse(_supports_split_contact_recovery(True, 1))
 
     def test_00_split_contact_launch_width_policy(self):
         """Widen only contact-rich single-world CUDA split recovery."""

@@ -79,6 +79,11 @@ _BATCHED_RESPONSE_TAIL_TASKS = 8
 _SPARSE_INEQUALITY_TOPOLOGY_ERROR = "Sparse DVI inequalities require limit/contact topology and sparse Jacobians."
 
 
+def _supports_split_contact_recovery(has_bilateral: bool, max_limits: int) -> bool:
+    """Return whether pose-only recovery has a matching physical split solve."""
+    return not has_bilateral and max_limits == 0
+
+
 def _split_contact_threads_per_world(num_worlds: int, max_contacts: int, is_cuda: bool) -> int:
     """Choose wider split-recovery blocks only for a contact-rich single world."""
     if not is_cuda:

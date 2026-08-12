@@ -48,7 +48,7 @@ from .kernels import (
     _solve_dvi_inequalities_colored_pgs,
     _unprecondition_dvi_solution,
 )
-from .sparse import SparseDVIPath
+from .sparse import SparseDVIPath, _supports_split_contact_recovery
 from .sparse_kernels import (
     _color_mapped_dvi_inequalities,
     _map_active_contacts,
@@ -144,7 +144,10 @@ class DVISolver:
     def set_split_contact_recovery_enabled(self, enabled: bool) -> None:
         """Enable pose-only split recovery for its supported sparse contact path."""
         if self._sparse_path is not None:
-            self._sparse_path.split_contact_recovery_enabled = enabled
+            self._sparse_path.split_contact_recovery_enabled = enabled and _supports_split_contact_recovery(
+                self._sparse_path.bilateral_solver is not None,
+                self._size.max_of_max_limits,
+            )
 
     @property
     def config(self) -> list[DVISolver.Config]:
