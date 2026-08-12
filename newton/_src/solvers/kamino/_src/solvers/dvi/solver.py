@@ -218,6 +218,7 @@ class DVISolver:
             jacobians=jacobians,
             bilateral_solver=self._bilateral_solver,
             max_alternating_iterations=self._max_alternating_iterations,
+            max_inequality_sweeps_per_iteration=max(c.inequality_sweeps_per_iteration for c in self._config),
             has_unilateral_constraints=self._has_unilateral_constraints,
             all_worlds_mask=self._all_worlds_mask,
             should_solve_bilateral_after_block=self._should_solve_bilateral_after_block,

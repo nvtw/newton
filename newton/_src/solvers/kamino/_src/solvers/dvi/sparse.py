@@ -48,6 +48,7 @@ from .sparse_kernels import (
     _prepare_contact_world_sort,
     _reconstruct_fused_bilateral_solution,
     _reset_active_bilateral_delta,
+    _select_parallel_contact_colors,
     _set_sparse_bilateral_diagonal,
     _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
@@ -65,6 +66,8 @@ int32 = wp.int32
 _SPARSE_DELASSUS_ROWS_JOINTS = 0
 _SPARSE_DELASSUS_ROWS_UNILATERAL = 1
 _CONTACT_PAIR_SORT_MIN_CAPACITY = 4096
+_PARALLEL_CONTACT_MAX_COLORS = 8
+_PARALLEL_CONTACT_MIN_CAPACITY = 32768
 
 _SPARSE_INEQUALITY_TOPOLOGY_ERROR = "Sparse DVI inequalities require limit/contact topology and sparse Jacobians."
 
@@ -82,6 +85,11 @@ def _split_contact_threads_per_world(num_worlds: int, max_contacts: int, is_cuda
     return 64
 
 
+def _use_parallel_contact_colors(num_worlds: int, max_limits: int, max_contacts: int, is_cuda: bool) -> bool:
+    """Use fixed color nodes only for contact-rich one-world CUDA capacity."""
+    return is_cuda and num_worlds == 1 and max_limits == 0 and max_contacts >= _PARALLEL_CONTACT_MIN_CAPACITY
+
+
 class SparseDVIPath:
     """Own workspace and operations for the sparse Kamino DVI solve path."""
 
@@ -97,6 +105,7 @@ class SparseDVIPath:
         jacobians: SparseSystemJacobians | None,
         bilateral_solver,
         max_alternating_iterations: int,
+        max_inequality_sweeps_per_iteration: int,
         has_unilateral_constraints: bool,
         all_worlds_mask: wp.array[wp.bool],
         should_solve_bilateral_after_block,
@@ -112,8 +121,10 @@ class SparseDVIPath:
         self.contacts = contacts
         self.jacobians = jacobians
         self.body_space = wp.empty(shape=size.sum_of_num_body_dofs, dtype=wp.float32, device=device)
+        self.parallel_contact_colors = wp.zeros(shape=1, dtype=wp.int32, device=device)
         self.bilateral_solver = bilateral_solver
         self.max_alternating_iterations = max_alternating_iterations
+        self.max_inequality_sweeps_per_iteration = max_inequality_sweeps_per_iteration
         self.has_unilateral_constraints = has_unilateral_constraints
         self.all_worlds_mask = all_worlds_mask
         self.should_solve_bilateral_after_block = should_solve_bilateral_after_block
@@ -483,6 +494,12 @@ def _launch_sparse_inequality_pgs(
         if path.size.max_of_max_contacts >= 4096:
             threads_per_world = 512
     contact_only = path.size.max_of_max_limits == 0 and path.bilateral_solver is None
+    parallel_contact_path = contact_only and _use_parallel_contact_colors(
+        path.size.num_worlds,
+        path.size.max_of_max_limits,
+        path.size.max_of_max_contacts,
+        path.device.is_cuda,
+    )
     kernel = _solve_dvi_sparse_contacts_pgs if contact_only else _solve_dvi_sparse_inequalities_pgs
     if contact_only:
         wp.launch(
@@ -536,12 +553,22 @@ def _launch_sparse_inequality_pgs(
             state.inequality_color_starts,
             state.inequality_group_starts,
             state.inequality_tangent_cross,
-            block_iteration,
-            path.data.config,
-            wp.bool(path.split_contact_recovery_enabled),
-            path.body_space,
-            path.data.solution.lambdas,
         ]
+        parallel_mode_offset = len(kernel_inputs)
+        kernel_inputs.extend(
+            [
+                path.parallel_contact_colors,
+                wp.bool(False),
+                int32(-1),
+                int32(-1),
+                threads_per_world,
+                block_iteration,
+                path.data.config,
+                wp.bool(path.split_contact_recovery_enabled),
+                path.body_space,
+                path.data.solution.lambdas,
+            ]
+        )
     else:
         kernel_inputs = [
             *common_inputs,
@@ -594,6 +621,38 @@ def _launch_sparse_inequality_pgs(
                 path.data.solution.lambdas,
             ]
         )
+    if parallel_contact_path:
+        wp.launch(
+            kernel=_select_parallel_contact_colors,
+            dim=1,
+            inputs=[
+                problem.data.nc,
+                state.inequality_num_colors,
+                _CONTACT_PAIR_SORT_MIN_CAPACITY,
+                _PARALLEL_CONTACT_MAX_COLORS,
+                path.parallel_contact_colors,
+            ],
+            device=path.device,
+        )
+        base_sweeps = path.max_inequality_sweeps_per_iteration
+        alternating_iterations = path.max_alternating_iterations
+        tangent_sweeps = base_sweeps * alternating_iterations // 2
+        total_sweeps = (base_sweeps + 1) * alternating_iterations + tangent_sweeps + 1
+        group_dim = path.size.max_of_num_bodies + 1
+        for sweep in range(total_sweeps):
+            for color_ordinal in range(_PARALLEL_CONTACT_MAX_COLORS):
+                node_inputs = kernel_inputs.copy()
+                node_inputs[parallel_mode_offset + 1] = wp.bool(True)
+                node_inputs[parallel_mode_offset + 2] = int32(sweep)
+                node_inputs[parallel_mode_offset + 3] = int32(color_ordinal)
+                node_inputs[parallel_mode_offset + 4] = group_dim
+                wp.launch(
+                    kernel=kernel,
+                    dim=group_dim,
+                    inputs=node_inputs,
+                    device=path.device,
+                    block_dim=64,
+                )
     wp.launch(
         kernel=kernel,
         dim=path.size.num_worlds * threads_per_world,

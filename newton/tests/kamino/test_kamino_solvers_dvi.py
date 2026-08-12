@@ -43,6 +43,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
     _sparse_delassus_matvec_rows,
     _split_contact_threads_per_world,
+    _use_parallel_contact_colors,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _assemble_compact_unilateral_schur,
@@ -548,6 +549,14 @@ class TestDVISolver(unittest.TestCase):
 
         self.assertEqual(_split_contact_threads_per_world(1, 8192, False), 1)
         self.assertEqual(_split_contact_threads_per_world(128, 8192, False), 1)
+
+    def test_00_parallel_contact_color_policy(self):
+        """Enable fixed color nodes only for measured large-scene capacity."""
+        self.assertFalse(_use_parallel_contact_colors(1, 0, 11660, True))
+        self.assertTrue(_use_parallel_contact_colors(1, 0, 45210, True))
+        self.assertFalse(_use_parallel_contact_colors(2, 0, 45210, True))
+        self.assertFalse(_use_parallel_contact_colors(1, 1, 45210, True))
+        self.assertFalse(_use_parallel_contact_colors(1, 0, 45210, False))
 
     def test_00_config_selection(self):
         default_config = SolverKamino.Config(dynamics_solver="dvi")

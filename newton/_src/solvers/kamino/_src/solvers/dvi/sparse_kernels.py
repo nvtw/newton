@@ -782,6 +782,22 @@ def _cache_sparse_projected_diagonal(
 
 
 @wp.kernel
+def _select_parallel_contact_colors(
+    problem_nc: wp.array[int32],
+    inequality_num_colors: wp.array[int32],
+    min_contacts: int32,
+    max_colors: int32,
+    parallel_contact_colors: wp.array[int32],
+):
+    """Select the bounded multi-block contact schedule without a host readback."""
+    if wp.tid() == 0:
+        num_colors = inequality_num_colors[0]
+        parallel_contact_colors[0] = int32(
+            problem_nc[0] >= min_contacts and num_colors > int32(0) and num_colors <= max_colors
+        )
+
+
+@wp.kernel
 def _solve_dvi_sparse_contacts_pgs(
     bsm_num_nzb: wp.array[int32],
     bsm_nzb_start: wp.array[int32],
@@ -810,6 +826,11 @@ def _solve_dvi_sparse_contacts_pgs(
     inequality_color_starts: wp.array[int32],
     inequality_group_starts: wp.array[int32],
     inequality_tangent_cross: wp.array[float32],
+    parallel_contact_colors: wp.array[int32],
+    parallel_color_node: bool,
+    selected_sweep: int32,
+    selected_color_ordinal: int32,
+    parallel_group_stride: int32,
     block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
     split_contact_recovery: bool,
@@ -821,6 +842,15 @@ def _solve_dvi_sparse_contacts_pgs(
     threads_per_world = int32(wp.block_dim())
     lane = tid % threads_per_world
     wid = tid / threads_per_world
+    if parallel_color_node:
+        if parallel_contact_colors[0] == int32(0):
+            return
+        # A color node is one-world only; global thread ids own disjoint groups.
+        wid = int32(0)
+        lane = tid
+        threads_per_world = parallel_group_stride
+    elif parallel_contact_colors[0] != int32(0):
+        return
     cfg = solver_config[wid]
     if block_iteration >= int32(0) and block_iteration >= cfg.max_alternating_iterations:
         return
@@ -848,13 +878,27 @@ def _solve_dvi_sparse_contacts_pgs(
         sweep_count += int32(1)
     elif block_iteration == int32(_FUSED_BILATERAL_BLOCK):
         sweep_count *= cfg.max_alternating_iterations
-    for sweep in range(sweep_count):
+    sweep_begin = int32(0)
+    sweep_end = sweep_count
+    if parallel_color_node:
+        if selected_sweep >= sweep_count:
+            return
+        sweep_begin = selected_sweep
+        sweep_end = selected_sweep + int32(1)
+    for sweep in range(sweep_begin, sweep_end):
         reverse_colors = sweep % int32(2) != int32(0)
         num_colors = inequality_num_colors[wid]
-        for color_index in range(num_colors):
-            color = color_index
+        color_count = num_colors
+        if parallel_color_node:
+            if selected_color_ordinal >= num_colors:
+                return
+            color_count = int32(1)
+        for local_color_index in range(color_count):
+            color = local_color_index
+            if parallel_color_node:
+                color = selected_color_ordinal
             if reverse_colors:
-                color = num_colors - int32(1) - color_index
+                color = num_colors - int32(1) - color
             group_start = inequality_color_starts[schedule_offset + color]
             group_end = inequality_color_starts[schedule_offset + color + int32(1)]
             group = group_start + lane
