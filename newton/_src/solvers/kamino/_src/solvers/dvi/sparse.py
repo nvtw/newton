@@ -217,7 +217,7 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
     contact_only = path.size.max_of_max_limits == 0 and path.bilateral_solver is None
     kernel = _solve_dvi_sparse_contacts_pgs if contact_only else _solve_dvi_sparse_inequalities_pgs
     cooperative_articulation = (
-        path.device.is_cuda and path.bilateral_solver is not None and path.size.max_of_num_joint_cts >= 128
+        path.device.is_cuda and path.bilateral_solver is not None and path.size.max_of_num_joint_cts >= 64
     )
     if cooperative_articulation:
         kernel = _solve_dvi_sparse_inequalities_pgs_cooperative
