@@ -28,6 +28,7 @@ from .sparse_kernels import (
     _assemble_sparse_bilateral_unilateral_coupling,
     _build_sparse_bilateral_block,
     _build_sparse_bilateral_rhs,
+    _cache_sparse_projected_diagonal,
     _compute_dvi_sparse_solution_vectors,
     _group_mapped_dvi_inequalities,
     _map_active_contacts,
@@ -271,6 +272,7 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             problem.data.v_f,
             problem.data.v_b,
             state.scratch,
+            state.inequality_projected_diagonal,
             delassus.regularization,
             problem.data.njc,
             bilateral_vio,
@@ -612,6 +614,23 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         ],
         device=path.device,
         block_dim=response_block_dim,
+    )
+    wp.launch(
+        kernel=_cache_sparse_projected_diagonal,
+        dim=(path.size.num_worlds, max_unilateral_rows),
+        inputs=[
+            problem.data.dim,
+            problem.data.njc,
+            problem.data.vio,
+            problem.data.P,
+            state.scratch,
+            state.bilateral_response_mio,
+            state.bilateral_response_stride,
+            state.bilateral_coupling,
+            state.bilateral_response,
+            state.inequality_projected_diagonal,
+        ],
+        device=path.device,
     )
     has_intermediate_bilateral_solve = any(
         path.should_solve_bilateral_after_block(block_iteration)

@@ -411,6 +411,37 @@ def _assemble_sparse_bilateral_unilateral_coupling(
     offset = response_mio[wid]
     coupling[offset + row * response_stride[wid] + unilateral] = value
 
+@wp.kernel
+def _cache_sparse_projected_diagonal(
+    problem_dim: wp.array[int32],
+    problem_njc: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_P: wp.array[float32],
+    problem_diag: wp.array[float32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    bilateral_coupling: wp.array[float32],
+    bilateral_response: wp.array[float32],
+    projected_diag: wp.array[float32],
+):
+    """Cache the invariant diagonal of the unilateral Schur complement."""
+    wid, unilateral_row = wp.tid()
+    njc = problem_njc[wid]
+    row = njc + unilateral_row
+    if row >= problem_dim[wid]:
+        return
+    vio = problem_vio[wid]
+    vec_idx = vio + row
+    P_i = problem_P[vec_idx]
+    value = wp.abs(problem_diag[vec_idx]) * P_i * P_i
+    offset = response_mio[wid]
+    stride = response_stride[wid]
+    for bilateral_row in range(njc):
+        index = offset + bilateral_row * stride + unilateral_row
+        value -= bilateral_coupling[index] * bilateral_response[index]
+    projected_diag[vec_idx] = value
+
+
 
 @wp.kernel
 def _solve_dvi_sparse_contacts_pgs(
@@ -667,6 +698,7 @@ def _solve_dvi_sparse_inequalities_pgs(
     problem_v_f: wp.array[float32],
     problem_v_b: wp.array[float32],
     problem_diag: wp.array[float32],
+    projected_diag: wp.array[float32],
     eta: wp.array[float32],
     problem_njc: wp.array[int32],
     bilateral_vio: wp.array[int32],
@@ -800,14 +832,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                         )
                                     limit_value += problem_v_f[vec_idx]
                                     P_i = problem_P[vec_idx]
-                                    diagonal_raw = wp.abs(problem_diag[vec_idx]) * P_i * P_i
-                                    for bilateral_row in range(njc):
-                                        coupling_index = (
-                                            bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
-                                        )
-                                        diagonal_raw -= (
-                                            bilateral_coupling[coupling_index] * bilateral_response[coupling_index]
-                                        )
+                                    diagonal_raw = projected_diag[vec_idx]
                                     lambda_limit_old = solution_lambdas[vec_idx]
                                     lambda_limit_new = lambda_limit_old
                                     if diagonal_raw > FLOAT32_EPS:
@@ -899,17 +924,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     contact_value.z += problem_v_f[vec_idx + int32(2)]
                                     lambda_n_old = solution_lambdas[vec_idx + int32(2)]
                                     P_n = problem_P[vec_idx + int32(2)]
-                                    diagonal_n = wp.abs(problem_diag[vec_idx + int32(2)]) * P_n * P_n
-                                    for bilateral_row in range(njc):
-                                        coupling_index = (
-                                            bilateral_offset
-                                            + bilateral_row * max_unilateral_rows
-                                            + unilateral_row
-                                            + int32(2)
-                                        )
-                                        diagonal_n -= (
-                                            bilateral_coupling[coupling_index] * bilateral_response[coupling_index]
-                                        )
+                                    diagonal_n = projected_diag[vec_idx + int32(2)]
                                     lambda_n_new = _project_contact_normal_update(
                                         lambda_n_old,
                                         contact_value.z,
@@ -947,21 +962,8 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     lambda_t1_old = solution_lambdas[vec_idx + int32(1)]
                                     P_t0 = problem_P[vec_idx]
                                     P_t1 = problem_P[vec_idx + int32(1)]
-                                    diagonal_t0 = wp.abs(problem_diag[vec_idx]) * P_t0 * P_t0
-                                    diagonal_t1 = wp.abs(problem_diag[vec_idx + int32(1)]) * P_t1 * P_t1
-                                    for bilateral_row in range(njc):
-                                        coupling_index_t0 = (
-                                            bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
-                                        )
-                                        coupling_index_t1 = coupling_index_t0 + int32(1)
-                                        diagonal_t0 -= (
-                                            bilateral_coupling[coupling_index_t0]
-                                            * bilateral_response[coupling_index_t0]
-                                        )
-                                        diagonal_t1 -= (
-                                            bilateral_coupling[coupling_index_t1]
-                                            * bilateral_response[coupling_index_t1]
-                                        )
+                                    diagonal_t0 = projected_diag[vec_idx]
+                                    diagonal_t1 = projected_diag[vec_idx + int32(1)]
                                     lambda_t_old = wp.vec2f(lambda_t0_old, lambda_t1_old)
                                     off_diagonal = inequality_tangent_cross[uio + uid]
                                     if _sweep == first_tangent_sweep:

@@ -106,6 +106,7 @@ class DVIState:
         self.inequality_color_starts: wp.array[int32] | None = None
         self.inequality_group_starts: wp.array[int32] | None = None
         self.inequality_tangent_cross: wp.array[float32] | None = None
+        self.inequality_projected_diagonal: wp.array[float32] | None = None
         self.projected_D: wp.array[float32] | None = None
         self.projected_mio: wp.array[int32] | None = None
         self.bilateral_coupling: wp.array[float32] | None = None
@@ -137,6 +138,7 @@ class DVIState:
         self.inequality_color_starts = wp.zeros(max(1, size.sum_of_max_unilaterals + size.num_worlds), dtype=int32)
         self.inequality_group_starts = wp.zeros(max(1, size.sum_of_max_unilaterals + size.num_worlds), dtype=int32)
         self.inequality_tangent_cross = wp.zeros(max(1, size.sum_of_max_unilaterals), dtype=float32)
+        self.inequality_projected_diagonal = wp.zeros(max(1, size.sum_of_max_total_cts), dtype=float32)
         projected_stride = size.max_of_max_total_cts * size.max_of_max_total_cts
         self.projected_mio = wp.array([world * projected_stride for world in range(size.num_worlds)], dtype=int32)
 
@@ -184,6 +186,7 @@ class DVIState:
         self.inequality_color_starts.zero_()
         self.inequality_group_starts.zero_()
         self.inequality_tangent_cross.zero_()
+        self.inequality_projected_diagonal.zero_()
         if self.projected_D is not None:
             self.projected_D.zero_()
         if self.bilateral_coupling is not None:
