@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 import warp as wp
 
 from ..core import MAXVAL
-from .kernels import _sdf_barrel_cylinder_grad_z, _sdf_barrel_cylinder_z
 from .types import GeoType
 
 if TYPE_CHECKING:
@@ -392,63 +391,53 @@ def ray_intersect_cylinder(
         ray_direction: The direction of the ray in the cylinder's local frame.
         r: The radius of the cylinder.
         h: The half-height of the cylinder.
-        barrel_radius: Radius of the circular side profile. Zero creates straight sides.
+        barrel_radius: Radius of the circular side profile. Zero creates straight sides. Ray casting
+            approximates a nonzero circular profile with a truncated ellipsoid that matches its end
+            and equatorial radii.
 
     Returns:
         The distance and local-space normal of the intersection point along the ray, or -1.0 and a zero vector if there is no intersection.
     """
-    if barrel_radius > 0.0:
-        direction_length = wp.length(ray_direction)
-        if direction_length <= MINVAL:
-            return -1.0, wp.vec3(0.0)
-        direction = ray_direction / direction_length
-        distance_along_ray = float(0.0)
-        radial_extent = r + barrel_radius - wp.sqrt(barrel_radius * barrel_radius - h * h)
-        bounds = wp.vec3(radial_extent, radial_extent, h)
-        if not (
-            wp.abs(ray_origin[0]) <= bounds[0]
-            and wp.abs(ray_origin[1]) <= bounds[1]
-            and wp.abs(ray_origin[2]) <= bounds[2]
-        ):
-            distance_along_ray, _ = ray_intersect_box(ray_origin, direction, bounds)
-            if distance_along_ray < 0.0:
-                return -1.0, wp.vec3(0.0)
-        max_distance = distance_along_ray + 2.0 * wp.length(bounds)
-        tolerance = 1.0e-5 * wp.max(1.0, r + h)
-        for _ in range(64):
-            point = ray_origin + distance_along_ray * direction
-            distance = _sdf_barrel_cylinder_z(point, r, h, barrel_radius)
-            if wp.abs(distance) <= tolerance:
-                return distance_along_ray / direction_length, _sdf_barrel_cylinder_grad_z(point, r, h, barrel_radius)
-            distance_along_ray += wp.max(wp.abs(distance), tolerance)
-            if distance_along_ray > max_distance:
-                break
-        return -1.0, wp.vec3(0.0)
-
     t_hit = -1.0
     normal = wp.vec3(0.0)
     min_t = 1.0e10
+    axial_scale = 0.0
+    equatorial_radius = r
 
-    # Intersection with cylinder body
-    a_cyl = ray_direction[0] * ray_direction[0] + ray_direction[1] * ray_direction[1]
-    if a_cyl > MINVAL:
-        b_cyl = 2.0 * (ray_origin[0] * ray_direction[0] + ray_origin[1] * ray_direction[1])
-        c_cyl = ray_origin[0] * ray_origin[0] + ray_origin[1] * ray_origin[1] - r * r
-        delta_cyl = b_cyl * b_cyl - 4.0 * a_cyl * c_cyl
-        if delta_cyl >= 0.0:
-            sqrt_delta_cyl = wp.sqrt(delta_cyl)
-            inv_2a = 1.0 / (2.0 * a_cyl)
-            t1 = (-b_cyl - sqrt_delta_cyl) * inv_2a
-            if t1 >= 0.0:
-                z = ray_origin[2] + t1 * ray_direction[2]
-                if wp.abs(z) <= h:
-                    min_t = wp.min(min_t, t1)
+    if barrel_radius > 0.0 and h > MINVAL:
+        equatorial_radius = r + barrel_radius - wp.sqrt(barrel_radius * barrel_radius - h * h)
+        axial_scale = (equatorial_radius * equatorial_radius - r * r) / (h * h)
 
-            t2 = (-b_cyl + sqrt_delta_cyl) * inv_2a
-            if t2 >= 0.0:
-                z = ray_origin[2] + t2 * ray_direction[2]
-                if wp.abs(z) <= h:
-                    min_t = wp.min(min_t, t2)
+    # A straight cylinder is the axial_scale=0 case. For barrel cylinders this
+    # is a truncated ellipsoid matching the circular profile at its ends and equator.
+    a_side = (
+        ray_direction[0] * ray_direction[0]
+        + ray_direction[1] * ray_direction[1]
+        + axial_scale * ray_direction[2] * ray_direction[2]
+    )
+    if a_side > MINVAL:
+        b_side = 2.0 * (
+            ray_origin[0] * ray_direction[0]
+            + ray_origin[1] * ray_direction[1]
+            + axial_scale * ray_origin[2] * ray_direction[2]
+        )
+        c_side = (
+            ray_origin[0] * ray_origin[0]
+            + ray_origin[1] * ray_origin[1]
+            + axial_scale * ray_origin[2] * ray_origin[2]
+            - equatorial_radius * equatorial_radius
+        )
+        delta_side = b_side * b_side - 4.0 * a_side * c_side
+        if delta_side >= 0.0:
+            sqrt_delta_side = wp.sqrt(delta_side)
+            inv_2a_side = 1.0 / (2.0 * a_side)
+            t_side = (-b_side - sqrt_delta_side) * inv_2a_side
+            z_side = ray_origin[2] + t_side * ray_direction[2]
+            if t_side < 0.0 or wp.abs(z_side) > h:
+                t_side = (-b_side + sqrt_delta_side) * inv_2a_side
+                z_side = ray_origin[2] + t_side * ray_direction[2]
+            if t_side >= 0.0 and wp.abs(z_side) <= h:
+                min_t = t_side
 
     # Intersection with caps
     if wp.abs(ray_direction[2]) > MINVAL:
@@ -478,7 +467,7 @@ def ray_intersect_cylinder(
         if z_clamped >= (h - EPSILON) or z_clamped <= (-h + EPSILON):
             normal_local = wp.vec3(0.0, 0.0, z_clamped)
         else:
-            normal_local = wp.normalize(hit_local - wp.vec3(0.0, 0.0, z_clamped))
+            normal_local = wp.vec3(hit_local[0], hit_local[1], axial_scale * hit_local[2])
         normal = wp.normalize(normal_local)
 
     return t_hit, normal
