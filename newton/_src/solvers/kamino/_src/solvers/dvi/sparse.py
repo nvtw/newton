@@ -46,6 +46,7 @@ from .sparse_kernels import (
     _prepare_colored_contact_group_sizes,
     _prepare_contact_pair_sort,
     _prepare_contact_world_sort,
+    _reconstruct_fused_bilateral_solution,
     _reset_active_bilateral_delta,
     _set_sparse_bilateral_diagonal,
     _solve_dvi_sparse_contacts_pgs,
@@ -984,6 +985,8 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
             state.bilateral_response_stride,
             state.bilateral_coupling,
             state.bilateral_response,
+            path.data.solution.lambdas,
+            state.v_aug,
             state.inequality_projected_diagonal,
         ],
         device=path.device,
@@ -1009,9 +1012,29 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
                 device=path.device,
             )
 
-    path.set_bilateral_active_dim(problem, -1)
-    _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
     cooperative_fused_pgs = path.device.is_cuda and path.size.max_of_num_joint_cts >= 64
+    if has_intermediate_bilateral_solve or not cooperative_fused_pgs:
+        path.set_bilateral_active_dim(problem, -1)
+        _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
+    else:
+        wp.launch(
+            kernel=_reconstruct_fused_bilateral_solution,
+            dim=(path.size.num_worlds, path.size.max_of_num_joint_cts),
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                problem.data.vio,
+                path.data.bilateral_operator.info.vio,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_response,
+                state.v_aug,
+                state.bilateral_delta,
+                wp.bool(enable_compact_schur),
+                path.data.solution.lambdas,
+            ],
+            device=path.device,
+        )
     if has_intermediate_bilateral_solve or not cooperative_fused_pgs:
         wp.launch(
             kernel=_set_dvi_direct_status_iterations,

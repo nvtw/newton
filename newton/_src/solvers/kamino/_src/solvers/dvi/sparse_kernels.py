@@ -66,6 +66,40 @@ def _reset_active_bilateral_delta(
 
 
 @wp.kernel
+def _reconstruct_fused_bilateral_solution(
+    problem_dim: wp.array[int32],
+    problem_njc: wp.array[int32],
+    problem_vio: wp.array[int32],
+    bilateral_vio: wp.array[int32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    bilateral_response: wp.array[float32],
+    initial_unilateral_lambdas: wp.array[float32],
+    bilateral_delta: wp.array[float32],
+    enable_compact_schur: wp.bool,
+    solution_lambdas: wp.array[float32],
+):
+    """Recover the exact final bilateral iterate from a fused unilateral solve."""
+    wid, row = wp.tid()
+    njc = problem_njc[wid]
+    if row >= njc:
+        return
+    vio = problem_vio[wid]
+    bvio = bilateral_vio[wid]
+    nu = problem_dim[wid] - njc
+    value = solution_lambdas[vio + row]
+    if enable_compact_schur and nu <= njc:
+        offset = response_mio[wid]
+        stride = response_stride[wid]
+        for unilateral in range(nu):
+            delta = solution_lambdas[vio + njc + unilateral] - initial_unilateral_lambdas[vio + njc + unilateral]
+            value -= bilateral_response[offset + row * stride + unilateral] * delta
+    else:
+        value += bilateral_delta[bvio + row]
+    solution_lambdas[vio + row] = value
+
+
+@wp.kernel
 def _build_sparse_bilateral_rhs(
     # Inputs:
     problem_vio: wp.array[int32],
@@ -724,9 +758,11 @@ def _cache_sparse_projected_diagonal(
     response_stride: wp.array[int32],
     bilateral_coupling: wp.array[float32],
     bilateral_response: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+    initial_unilateral_lambdas: wp.array[float32],
     projected_diag: wp.array[float32],
 ):
-    """Cache the invariant diagonal of the unilateral Schur complement."""
+    """Cache the Schur diagonal and snapshot the warm-started unilateral iterate."""
     wid, unilateral_row = wp.tid()
     njc = problem_njc[wid]
     row = njc + unilateral_row
@@ -742,6 +778,7 @@ def _cache_sparse_projected_diagonal(
         index = offset + bilateral_row * stride + unilateral_row
         value -= bilateral_coupling[index] * bilateral_response[index]
     projected_diag[vec_idx] = value
+    initial_unilateral_lambdas[vec_idx] = solution_lambdas[vec_idx]
 
 
 @wp.kernel

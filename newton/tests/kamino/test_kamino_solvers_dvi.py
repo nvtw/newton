@@ -29,6 +29,7 @@ from newton._src.solvers.kamino._src.solvers.common import WarmStartMode
 from newton._src.solvers.kamino._src.solvers.dvi import DVISolver
 from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     _initialize_dvi_status,
+    _solve_bilateral_unilateral_response,
     _solve_dvi_inequalities_colored_pgs,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.projections import (
@@ -59,6 +60,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _prepare_colored_contact_group_sizes,
     _prepare_contact_pair_sort,
     _prepare_contact_world_sort,
+    _reconstruct_fused_bilateral_solution,
     _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
 )
@@ -2036,6 +2038,75 @@ class TestDVISolver(unittest.TestCase):
             component_corrections.numpy(),
             [[11.0, 0.0], [33.0, 0.0], [11.0, 22.0]],
         )
+
+    def test_03g3ac_dvi_reconstructs_fused_bilateral_solution(self):
+        """Match a fresh direct solve with warm starts, scaling, and permutation."""
+        bilateral = np.array([[4.0, 1.0], [1.0, 3.0]], dtype=np.float32)
+        coupling = np.array([[0.75, -0.2], [0.35, 0.6]], dtype=np.float32)
+        free = np.array([0.7, -0.4], dtype=np.float32)
+        initial_u = np.array([0.3, -0.2], dtype=np.float32)
+        final_u = np.array([-0.1, 0.5], dtype=np.float32)
+        initial_b = np.linalg.solve(bilateral, -free - coupling @ initial_u)
+        expected_b = np.linalg.solve(bilateral, -free - coupling @ final_u)
+        scaling = np.array([0.5, 1.25], dtype=np.float32)
+        permutation = np.array([1, 0], dtype=np.int32)
+        scaled = scaling[:, None] * bilateral * scaling[None, :]
+        factor = np.linalg.cholesky(scaled[np.ix_(permutation, permutation)]).astype(np.float32)
+
+        def i32(values):
+            return wp.array(values, dtype=wp.int32, device=self.device)
+
+        response = wp.zeros(4, dtype=wp.float32, device=self.device)
+        wp.launch(
+            _solve_bilateral_unilateral_response,
+            dim=1,
+            inputs=[
+                i32([4]),
+                i32([2]),
+                i32([0]),
+                i32([0]),
+                wp.array(scaling, dtype=wp.float32, device=self.device),
+                wp.array(factor.ravel(), dtype=wp.float32, device=self.device),
+                i32(permutation),
+                True,
+                i32([0]),
+                i32([2]),
+                wp.array(coupling.ravel(), dtype=wp.float32, device=self.device),
+                wp.zeros(4, dtype=wp.float32, device=self.device),
+                response,
+            ],
+            device=self.device,
+            block_dim=1,
+        )
+        response_np = response.numpy().reshape(2, 2)
+        np.testing.assert_allclose(response_np, np.linalg.solve(bilateral, coupling), rtol=2.0e-6, atol=2.0e-6)
+
+        def reconstruct(compact):
+            lambdas = wp.array(np.r_[initial_b, final_u], dtype=wp.float32, device=self.device)
+            initial = wp.array(np.r_[np.zeros(2), initial_u], dtype=wp.float32, device=self.device)
+            delta = -(response_np @ (final_u - initial_u))
+            wp.launch(
+                _reconstruct_fused_bilateral_solution,
+                dim=(1, 2),
+                inputs=[
+                    i32([4]),
+                    i32([2]),
+                    i32([0]),
+                    i32([0]),
+                    i32([0]),
+                    i32([2]),
+                    response,
+                    initial,
+                    wp.array(delta, dtype=wp.float32, device=self.device),
+                    wp.bool(compact),
+                    lambdas,
+                ],
+                device=self.device,
+            )
+            return lambdas.numpy()[:2]
+
+        np.testing.assert_allclose(reconstruct(True), expected_b, rtol=3.0e-6, atol=3.0e-6)
+        np.testing.assert_allclose(reconstruct(False), expected_b, rtol=3.0e-6, atol=3.0e-6)
 
     def test_03g3ab_dvi_cooperative_convergence_uses_complete_sweep_pairs(self):
         """Stop easy worlds in pairs while preserving hard, disabled, and tangent-warmup budgets."""
