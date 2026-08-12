@@ -583,7 +583,7 @@ def _solve_dvi_sparse_contacts_pgs(
                         diagonal_t0 = wp.abs(problem_diag[vec_idx]) * P_t0 * P_t0
                         diagonal_t1 = wp.abs(problem_diag[vec_idx + int32(1)]) * P_t1 * P_t1
                         off_diagonal = inequality_tangent_cross[uio + cid]
-                        if sweep == int32(0):
+                        if sweep == first_tangent_sweep:
                             off_diagonal = float32(0.0)
                             body_group = int32(0)
                             while body_group < block_count:

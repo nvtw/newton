@@ -45,6 +45,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _color_mapped_dvi_inequalities,
     _group_mapped_dvi_inequalities,
     _map_active_contacts,
+    _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.types import DVIConfigStruct, DVIState, convert_config_to_struct
@@ -1167,7 +1168,7 @@ class TestDVISolver(unittest.TestCase):
         inequality_sweeps_per_iteration = 3
         for sparse, inequality_kernel in (
             (False, _solve_dvi_inequalities_colored_pgs),
-            (True, _solve_dvi_sparse_inequalities_pgs),
+            (True, _solve_dvi_sparse_contacts_pgs),
         ):
             with self.subTest(sparse=sparse):
                 model, problem, setup = self._make_box_on_plane_setup(sparse=sparse)
