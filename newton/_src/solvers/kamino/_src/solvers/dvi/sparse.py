@@ -116,6 +116,7 @@ class SparseDVIPath:
             ]
             | None
         ) = None
+        self.bilateral_row_nzb_topology: tuple[wp.array[wp.int32], wp.array[wp.int32], wp.array[wp.int32]] | None = None
         self.split_contact_recovery_enabled = False
         self.contact_sorter: KeySorter | None = None
         self.contact_world_starts: wp.array[wp.int32] | None = None
@@ -152,6 +153,7 @@ class SparseDVIPath:
             raise RuntimeError("Sparse DVI requires model data and sparse Jacobians.")
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _build_sparse_bilateral_pairs(self, problem)
+            _build_sparse_bilateral_row_nzb_topology(self, problem)
 
     def solve(self, problem: DualProblem) -> None:
         """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
@@ -794,6 +796,33 @@ def _build_sparse_bilateral_pairs(path: SparseDVIPath, problem: DualProblem) -> 
     )
 
 
+def _build_sparse_bilateral_row_nzb_topology(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Cache joint Jacobian blocks by bilateral row in their original storage order."""
+    jacobian = problem.delassus.constraint_jacobian
+    counts = path.jacobians.joint_constraint_nzb_count.numpy().tolist()
+    matrix_starts = jacobian.nzb_start.numpy().tolist()
+    coords = jacobian.nzb_coords.numpy()
+    joint_counts = problem.data.njc.numpy().tolist()
+
+    world_row_offsets = []
+    row_starts = [0]
+    row_nzb_indices = []
+    row_offset = 0
+    for count, matrix_start, njc in zip(counts, matrix_starts, joint_counts, strict=True):
+        world_row_offsets.append(row_offset)
+        for row in range(njc):
+            for local_block in range(count):
+                block = matrix_start + local_block
+                if int(coords[block, 0]) == row:
+                    row_nzb_indices.append(block)
+            row_starts.append(len(row_nzb_indices))
+        row_offset += njc
+
+    path.bilateral_row_nzb_topology = tuple(
+        wp.array(values, dtype=int32, device=path.device) for values in (world_row_offsets, row_starts, row_nzb_indices)
+    )
+
+
 def _solve_sparse_bilateral_block(
     path: SparseDVIPath, problem: DualProblem, active_dim: wp.array[int32] | None = None
 ) -> None:
@@ -870,6 +899,9 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
 
     delassus = _get_sparse_delassus(problem)
     bsm = delassus.bsm
+    if path.bilateral_row_nzb_topology is None:
+        raise RuntimeError("Sparse DVI topology is not prepared. Call `SparseDVIPath.prepare()` before solving.")
+    world_row_offsets, row_starts, row_nzb_indices = path.bilateral_row_nzb_topology
     max_joint_rows = path.size.max_of_num_joint_cts
     max_unilateral_rows = path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
     state.bilateral_coupling.zero_()
@@ -887,8 +919,19 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
             delassus.constraint_jacobian.nzb_values,
             problem.data.dim,
             problem.data.njc,
+            problem.data.nl,
+            problem.data.nc,
+            problem.data.lio,
+            problem.data.cio,
             problem.data.vio,
             problem.data.P,
+            state.limit_indices,
+            state.contact_indices,
+            path.jacobians.limit_constraint_nzb_offsets,
+            path.jacobians.contact_constraint_nzb_offsets,
+            world_row_offsets,
+            row_starts,
+            row_nzb_indices,
             state.bilateral_response_mio,
             state.bilateral_response_stride,
             state.bilateral_coupling,

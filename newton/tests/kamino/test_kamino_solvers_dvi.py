@@ -44,6 +44,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _assemble_compact_unilateral_schur,
+    _assemble_sparse_bilateral_unilateral_coupling,
     _color_compact_contact_groups,
     _color_mapped_dvi_inequalities,
     _compact_contact_group_starts,
@@ -84,6 +85,45 @@ def _compact_unilateral_correction_for_test(
     result[2] = _compact_unilateral_correction(
         compact_q, wp.int32(0), wp.int32(0), wp.int32(1), wp.int32(1), wp.int32(1)
     )
+
+
+@wp.kernel
+def _assemble_sparse_coupling_reference_for_test(
+    bsm_num_nzb: wp.array[wp.int32],
+    bsm_nzb_start: wp.array[wp.int32],
+    bsm_nzb_coords: wp.array2d[wp.int32],
+    mass_weighted_nzb_values: wp.array[vec6f],
+    jacobian_nzb_values: wp.array[vec6f],
+    problem_dim: wp.array[wp.int32],
+    problem_njc: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    problem_P: wp.array[wp.float32],
+    response_mio: wp.array[wp.int32],
+    response_stride: wp.array[wp.int32],
+    coupling: wp.array[wp.float32],
+):
+    """Retain the legacy full topology scan for an exact-order regression."""
+    wid, row, unilateral = wp.tid()
+    njc = problem_njc[wid]
+    col = njc + unilateral
+    if row >= njc or col >= problem_dim[wid]:
+        return
+    block_start = bsm_nzb_start[wid]
+    block_end = block_start + bsm_num_nzb[wid]
+    value = wp.float32(0.0)
+    for row_block in range(block_start, block_end):
+        row_coord = bsm_nzb_coords[row_block]
+        if row_coord[0] != row:
+            continue
+        for col_block in range(block_start, block_end):
+            col_coord = bsm_nzb_coords[col_block]
+            if col_coord[0] == col and col_coord[1] == row_coord[1]:
+                mass_weighted = mass_weighted_nzb_values[row_block]
+                jacobian = jacobian_nzb_values[col_block]
+                for component in range(6):
+                    value += mass_weighted[component] * jacobian[component]
+    value *= problem_P[problem_vio[wid] + col]
+    coupling[response_mio[wid] + row * response_stride[wid] + unilateral] = value
 
 
 @wp.kernel
@@ -1775,6 +1815,99 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(inequality_ids_by_color.numpy(), np.arange(6))
         np.testing.assert_array_equal(inequality_color_starts.numpy()[:2], [0, 4])
         np.testing.assert_array_equal(inequality_group_starts.numpy()[:5], [0, 1, 3, 4, 6])
+
+    def test_03g3_dvi_cached_sparse_coupling_matches_legacy_scan_exactly(self):
+        """Preserve legacy block summation order for mixed multi-world inequalities."""
+        coords_np = np.array(
+            [
+                (0, 0),
+                (1, 0),
+                (1, 6),
+                (2, 6),
+                (2, 0),
+                (3, 6),
+                (4, 6),
+                (5, 6),
+                (3, 0),
+                (4, 0),
+                (5, 0),
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (3, 0),
+            ],
+            dtype=np.int32,
+        )
+        values_np = (np.arange(90, dtype=np.float32).reshape(15, 6) - 37.0) / 19.0
+        jacobian_np = np.flip(values_np, axis=1).copy() * np.float32(0.37)
+
+        def int_array(values):
+            return wp.array(values, dtype=wp.int32, device=self.device)
+
+        bsm_num_nzb = int_array([11, 4])
+        bsm_nzb_start = int_array([0, 11])
+        bsm_nzb_coords = wp.array(coords_np, dtype=wp.int32, device=self.device)
+        mass_weighted = wp.array(values_np, dtype=vec6f, device=self.device)
+        jacobian = wp.array(jacobian_np, dtype=vec6f, device=self.device)
+        problem_dim = int_array([6, 4])
+        problem_njc = int_array([2, 1])
+        problem_vio = int_array([0, 6])
+        problem_P = wp.array(np.linspace(0.5, 1.4, 10, dtype=np.float32), device=self.device)
+        response_mio = int_array([0, 8])
+        response_stride = int_array([4, 3])
+        reference = wp.full(11, -7.0, dtype=wp.float32, device=self.device)
+        cached = wp.full(11, -7.0, dtype=wp.float32, device=self.device)
+
+        wp.launch(
+            _assemble_sparse_coupling_reference_for_test,
+            dim=(2, 2, 4),
+            inputs=[
+                bsm_num_nzb,
+                bsm_nzb_start,
+                bsm_nzb_coords,
+                mass_weighted,
+                jacobian,
+                problem_dim,
+                problem_njc,
+                problem_vio,
+                problem_P,
+                response_mio,
+                response_stride,
+                reference,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _assemble_sparse_bilateral_unilateral_coupling,
+            dim=(2, 2, 4),
+            inputs=[
+                bsm_num_nzb,
+                bsm_nzb_start,
+                bsm_nzb_coords,
+                mass_weighted,
+                jacobian,
+                problem_dim,
+                problem_njc,
+                int_array([1, 0]),
+                int_array([1, 1]),
+                int_array([0, 1]),
+                int_array([0, 1]),
+                problem_vio,
+                problem_P,
+                int_array([0]),
+                int_array([0, 1]),
+                int_array([3]),
+                int_array([5, 12]),
+                int_array([0, 2]),
+                int_array([0, 1, 3, 4]),
+                int_array([0, 1, 2, 11]),
+                response_mio,
+                response_stride,
+                cached,
+            ],
+            device=self.device,
+        )
+        np.testing.assert_array_equal(cached.numpy(), reference.numpy())
 
     def test_03g3a_dvi_compact_schur_matches_bilateral_correction(self):
         """Preserve row/column orientation in the compact bilateral correction."""
