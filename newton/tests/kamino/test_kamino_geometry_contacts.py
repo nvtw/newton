@@ -24,6 +24,8 @@ from newton._src.solvers.kamino._src.geometry.contacts import (
     make_contact_frame_xnorm,
     make_contact_frame_znorm,
 )
+from newton._src.solvers.kamino._src.geometry.keying import KeySorter
+from newton._src.solvers.kamino._src.solvers.warmstart import _count_current_contacts_by_cached_pair
 from newton._src.solvers.kamino._src.utils import logger as msg
 from newton.tests.kamino import setup_tests, test_context
 
@@ -505,6 +507,34 @@ class TestGeometryContacts(unittest.TestCase):
         self.default_device = None
         if self.verbose:
             msg.reset_log_level()
+
+    def test_current_pair_counts_match_legacy_warmstart_scan(self):
+        """Match legacy fallback pair counts at cached sorted range starts."""
+        old_keys = np.array([9, 4, 9, 7, 4, 12], dtype=np.uint64)
+        current_keys = np.array([9, 4, 9, 9, 12, 5, 4], dtype=np.uint64)
+        old_count = len(old_keys)
+        sorter = KeySorter(max_num_keys=old_count, device=self.default_device)
+        active_old = wp.array([old_count], dtype=wp.int32, device=self.default_device)
+        sorter.sort(active_old, wp.array(old_keys, device=self.default_device))
+        counts = wp.zeros(old_count, dtype=wp.int32, device=self.default_device)
+        wp.launch(
+            kernel=_count_current_contacts_by_cached_pair,
+            dim=len(current_keys),
+            inputs=[
+                sorter.sorted_keys,
+                active_old,
+                wp.array(current_keys, device=self.default_device),
+                wp.array([len(current_keys)], dtype=wp.int32, device=self.default_device),
+                counts,
+            ],
+            device=self.default_device,
+        )
+        sorted_old = np.sort(old_keys)
+        expected = np.zeros(old_count, dtype=np.int32)
+        starts = np.flatnonzero(np.r_[True, sorted_old[1:] != sorted_old[:-1]])
+        for start in starts:
+            expected[start] = np.count_nonzero(current_keys == sorted_old[start])
+        np.testing.assert_array_equal(counts.numpy(), expected)
 
     def test_single_default_allocation(self):
         contacts = ContactsKamino(capacity=0, device=self.default_device, remappable=True)
