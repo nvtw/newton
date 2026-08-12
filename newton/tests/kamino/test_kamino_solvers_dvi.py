@@ -16,6 +16,7 @@ import newton
 import newton._src.solvers.kamino.config as kamino_config
 from newton._src.solvers.kamino._src.core import ModelBuilderKamino, inertia
 from newton._src.solvers.kamino._src.core.shapes import BoxShape, SphereShape
+from newton._src.solvers.kamino._src.core.size import SizeKamino
 from newton._src.solvers.kamino._src.core.types import vec6f
 from newton._src.solvers.kamino._src.dynamics.dual import DualProblem
 from newton._src.solvers.kamino._src.geometry.keying import KeySorter
@@ -566,6 +567,21 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(_parallel_contact_group_width(108, 821), 32)
         self.assertEqual(_parallel_contact_group_width(188, 821), 32)
         self.assertEqual(_parallel_contact_group_width(188, 100_000), 2)
+
+    def test_00b_sparse_state_does_not_allocate_dense_projection_offsets(self):
+        size = SizeKamino(
+            num_worlds=64,
+            sum_of_max_total_cts=1,
+            max_of_max_total_cts=6000,
+        )
+        with wp.ScopedDevice(self.device):
+            state = DVIState(size)
+            np.testing.assert_array_equal(state.projected_mio.numpy(), np.zeros(64, dtype=np.int32))
+            self.assertIsNone(state.projected_D)
+            state.allocate_sparse_projection([0] * 64, [0] * 64, 0)
+            self.assertIsNone(state.projected_D)
+            with self.assertRaisesRegex(ValueError, "int32 index range"):
+                state.allocate_dense_projection(size)
 
     def test_00_config_selection(self):
         default_config = SolverKamino.Config(dynamics_solver="dvi")

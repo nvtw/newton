@@ -139,13 +139,17 @@ class DVIState:
         self.inequality_group_starts = wp.zeros(max(1, size.sum_of_max_unilaterals + size.num_worlds), dtype=int32)
         self.inequality_tangent_cross = wp.zeros(max(1, size.sum_of_max_unilaterals), dtype=float32)
         self.inequality_projected_diagonal = wp.zeros(max(1, size.sum_of_max_total_cts), dtype=float32)
-        projected_stride = size.max_of_max_total_cts * size.max_of_max_total_cts
-        self.projected_mio = wp.array([world * projected_stride for world in range(size.num_worlds)], dtype=int32)
+        # Sparse DVI only needs a harmless dummy permutation when RCM is disabled.
+        self.projected_mio = wp.zeros(max(1, size.num_worlds), dtype=int32)
 
     def allocate_dense_projection(self, size: SizeKamino) -> None:
         if self.projected_D is None:
             projected_stride = size.max_of_max_total_cts * size.max_of_max_total_cts
-            self.projected_D = wp.zeros(max(1, size.num_worlds * projected_stride), dtype=float32)
+            projected_size = size.num_worlds * projected_stride
+            if projected_size > 2**31 - 1:
+                raise ValueError("Dense DVI projection exceeds the supported int32 index range.")
+            self.projected_mio = wp.array([world * projected_stride for world in range(size.num_worlds)], dtype=int32)
+            self.projected_D = wp.zeros(max(1, projected_size), dtype=float32)
 
     def allocate_sparse_projection(
         self,
