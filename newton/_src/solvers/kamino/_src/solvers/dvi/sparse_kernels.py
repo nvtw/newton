@@ -290,6 +290,151 @@ def _map_ordered_active_contacts(
         inequality_order[uio + wid + nl + local_sorted_id] = uid
 
 
+@wp.kernel
+def _mark_contact_group_boundaries(
+    contacts_model_active: wp.array[int32],
+    sorted_to_unsorted_map: wp.array[int32],
+    contacts_cid: wp.array[int32],
+    problem_uio: wp.array[int32],
+    inequality_bodies: wp.array[wp.vec2i],
+    group_flags: wp.array[int32],
+):
+    sorted_id = wp.tid()
+    boundary = int32(0)
+    if sorted_id < contacts_model_active[0]:
+        boundary = int32(1)
+        if sorted_id > int32(0):
+            contact_id = sorted_to_unsorted_map[sorted_id]
+            previous_id = sorted_to_unsorted_map[sorted_id - int32(1)]
+            pair = inequality_bodies[problem_uio[0] + contacts_cid[contact_id]]
+            previous_pair = inequality_bodies[problem_uio[0] + contacts_cid[previous_id]]
+            boundary = int32(pair[0] != previous_pair[0] or pair[1] != previous_pair[1])
+    group_flags[sorted_id] = boundary
+
+
+@wp.kernel
+def _compact_contact_group_starts(
+    contacts_model_active: wp.array[int32],
+    group_flags: wp.array[int32],
+    group_prefix: wp.array[int32],
+    compact_group_starts: wp.array[int32],
+):
+    sorted_id = wp.tid()
+    if sorted_id < contacts_model_active[0] and group_flags[sorted_id] != int32(0):
+        compact_group_starts[group_prefix[sorted_id] - int32(1)] = sorted_id
+
+
+@wp.kernel
+def _color_compact_contact_groups(
+    contacts_model_active: wp.array[int32],
+    group_prefix: wp.array[int32],
+    problem_uio: wp.array[int32],
+    sorted_to_unsorted_map: wp.array[int32],
+    contacts_cid: wp.array[int32],
+    inequality_bodies: wp.array[wp.vec2i],
+    body_color_masks: wp.array[wp.uint64],
+    compact_group_starts: wp.array[int32],
+    group_colors: wp.array[int32],
+    inequality_num_colors: wp.array[int32],
+    contact_group_count: wp.array[int32],
+    inequality_color_starts: wp.array[int32],
+    groups_by_color: wp.array[int32],
+):
+    if wp.tid() != 0:
+        return
+    num_groups = group_prefix[wp.max(contacts_model_active[0] - int32(1), int32(0))]
+    if contacts_model_active[0] == int32(0):
+        num_groups = int32(0)
+    contact_group_count[0] = num_groups
+    uio = problem_uio[0]
+    num_colors = int32(0)
+    for group in range(num_groups):
+        contact_id = sorted_to_unsorted_map[compact_group_starts[group]]
+        pair = inequality_bodies[uio + contacts_cid[contact_id]]
+        forbidden = wp.uint64(0)
+        if pair[0] >= int32(0):
+            forbidden |= body_color_masks[pair[0]]
+        if pair[1] >= int32(0):
+            forbidden |= body_color_masks[pair[1]]
+        color = _lowest_set_color(wp.int64(forbidden) ^ wp.int64(-1))
+        if color < int32(0):
+            color = num_colors
+        group_colors[group] = color
+        num_colors = wp.max(num_colors, color + int32(1))
+        if color < int32(64):
+            color_bit = wp.uint64(1) << wp.uint64(color)
+            if pair[0] >= int32(0):
+                body_color_masks[pair[0]] |= color_bit
+            if pair[1] >= int32(0):
+                body_color_masks[pair[1]] |= color_bit
+    inequality_num_colors[0] = num_colors
+    for color in range(num_colors + int32(1)):
+        inequality_color_starts[uio + color] = int32(0)
+    for group in range(num_groups):
+        inequality_color_starts[uio + group_colors[group] + int32(1)] += int32(1)
+    for color in range(num_colors):
+        inequality_color_starts[uio + color + int32(1)] += inequality_color_starts[uio + color]
+    for group in range(num_groups):
+        color = group_colors[group]
+        slot = inequality_color_starts[uio + color]
+        groups_by_color[slot] = group
+        inequality_color_starts[uio + color] = slot + int32(1)
+    previous = int32(0)
+    for color in range(num_colors + int32(1)):
+        cursor = inequality_color_starts[uio + color]
+        inequality_color_starts[uio + color] = previous
+        previous = cursor
+
+
+@wp.kernel
+def _prepare_colored_contact_group_sizes(
+    contacts_model_active: wp.array[int32],
+    contact_group_count: wp.array[int32],
+    compact_group_starts: wp.array[int32],
+    groups_by_color: wp.array[int32],
+    colored_group_sizes: wp.array[int32],
+):
+    scheduled_group = wp.tid()
+    num_groups = contact_group_count[0]
+    nc = contacts_model_active[0]
+    if scheduled_group < num_groups:
+        group = groups_by_color[scheduled_group]
+        start = compact_group_starts[group]
+        end = compact_group_starts[group + int32(1)] if group + int32(1) < num_groups else nc
+        colored_group_sizes[scheduled_group] = end - start
+
+
+@wp.kernel
+def _expand_colored_contact_groups(
+    contacts_model_active: wp.array[int32],
+    contact_group_count: wp.array[int32],
+    problem_uio: wp.array[int32],
+    sorted_to_unsorted_map: wp.array[int32],
+    contacts_cid: wp.array[int32],
+    compact_group_starts: wp.array[int32],
+    groups_by_color: wp.array[int32],
+    colored_group_prefix: wp.array[int32],
+    inequality_ids_by_color: wp.array[int32],
+    inequality_group_starts: wp.array[int32],
+):
+    scheduled_group = wp.tid()
+    nc = contacts_model_active[0]
+    num_groups = contact_group_count[0]
+    uio = problem_uio[0]
+    if scheduled_group < num_groups:
+        group = groups_by_color[scheduled_group]
+        ordered_start = compact_group_starts[group]
+        ordered_end = compact_group_starts[group + int32(1)] if group + int32(1) < num_groups else nc
+        slot_end = colored_group_prefix[scheduled_group]
+        slot_start = slot_end - (ordered_end - ordered_start)
+        inequality_group_starts[uio + scheduled_group] = slot_start
+        for ordered_id in range(ordered_start, ordered_end):
+            contact_id = sorted_to_unsorted_map[ordered_id]
+            inequality_ids_by_color[uio + slot_start + ordered_id - ordered_start] = contacts_cid[contact_id]
+    if scheduled_group == num_groups:
+        inequality_group_starts[uio + num_groups] = nc
+
+
 @wp.func_native("""
 #if defined(__CUDA_ARCH__)
 return ((int)__ffsll((long long)mask)) - 1;

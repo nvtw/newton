@@ -43,11 +43,16 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _sparse_delassus_matvec_rows,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
+    _color_compact_contact_groups,
     _color_mapped_dvi_inequalities,
+    _compact_contact_group_starts,
+    _expand_colored_contact_groups,
     _group_mapped_dvi_inequalities,
     _map_active_contacts,
     _map_ordered_active_contacts,
+    _mark_contact_group_boundaries,
     _prefix_active_contacts_by_world,
+    _prepare_colored_contact_group_sizes,
     _prepare_contact_pair_sort,
     _prepare_contact_world_sort,
     _solve_dvi_sparse_contacts_pgs,
@@ -1818,6 +1823,106 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(contact_indices.numpy(), [3, 1, 4, 0, 5, 2])
         np.testing.assert_array_equal(inequality_order.numpy(), [0, 1, 2, -1, 0, 1, 2, -1])
         np.testing.assert_array_equal(contacts_wid.numpy(), [1, 0, 1, 0, 0, 1])
+
+    def test_03g3d_dvi_compact_contact_scheduler_matches_pair_order(self):
+        """Expand compact colored manifolds in stable geometry-pair order."""
+        contact_count = 6
+        active = wp.array([contact_count], dtype=wp.int32, device=self.device)
+        gids = wp.array(
+            [wp.vec2i(0, 1), wp.vec2i(0, 2), wp.vec2i(0, 1), wp.vec2i(0, 3), wp.vec2i(0, 2), wp.vec2i(0, 3)],
+            dtype=wp.vec2i,
+            device=self.device,
+        )
+        cids = wp.array([0, 1, 2, 3, 4, 5], dtype=wp.int32, device=self.device)
+        sorter = KeySorter(max_num_keys=contact_count, device=self.device)
+        wp.launch(
+            kernel=_prepare_contact_pair_sort,
+            dim=contact_count,
+            inputs=[active, gids, sorter.sorted_keys, sorter.sorted_to_unsorted_map],
+            device=self.device,
+        )
+        wp.utils.radix_sort_pairs(sorter.sorted_keys_int64, sorter.sorted_to_unsorted_map, contact_count)
+
+        uio = wp.array([0], dtype=wp.int32, device=self.device)
+        bodies = wp.array(
+            [wp.vec2i(1, -1), wp.vec2i(2, -1), wp.vec2i(1, -1), wp.vec2i(1, -1), wp.vec2i(2, -1), wp.vec2i(1, -1)],
+            dtype=wp.vec2i,
+            device=self.device,
+        )
+        flags = wp.zeros(contact_count, dtype=wp.int32, device=self.device)
+        scratch = wp.zeros(contact_count, dtype=wp.int32, device=self.device)
+        group_starts = wp.zeros(contact_count, dtype=wp.int32, device=self.device)
+        groups_by_color = wp.zeros(contact_count, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=_mark_contact_group_boundaries,
+            dim=contact_count,
+            inputs=[active, sorter.sorted_to_unsorted_map, cids, uio, bodies, flags],
+            device=self.device,
+        )
+        wp.utils.array_scan(flags, scratch, inclusive=True)
+        wp.launch(
+            kernel=_compact_contact_group_starts,
+            dim=contact_count,
+            inputs=[active, flags, scratch, group_starts],
+            device=self.device,
+        )
+
+        num_colors = wp.zeros(1, dtype=wp.int32, device=self.device)
+        group_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        color_starts = wp.zeros(contact_count + 1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=_color_compact_contact_groups,
+            dim=1,
+            inputs=[
+                active,
+                scratch,
+                uio,
+                sorter.sorted_to_unsorted_map,
+                cids,
+                bodies,
+                wp.zeros(3, dtype=wp.uint64, device=self.device),
+                group_starts,
+                scratch,
+                num_colors,
+                group_count,
+                color_starts,
+                groups_by_color,
+            ],
+            device=self.device,
+        )
+        scratch.zero_()
+        wp.launch(
+            kernel=_prepare_colored_contact_group_sizes,
+            dim=contact_count + 1,
+            inputs=[active, group_count, group_starts, groups_by_color, scratch],
+            device=self.device,
+        )
+        wp.utils.array_scan(scratch, scratch, inclusive=True)
+        ids_by_color = wp.full(contact_count, -1, dtype=wp.int32, device=self.device)
+        final_group_starts = wp.zeros(contact_count + 1, dtype=wp.int32, device=self.device)
+        wp.launch(
+            kernel=_expand_colored_contact_groups,
+            dim=contact_count + 1,
+            inputs=[
+                active,
+                group_count,
+                uio,
+                sorter.sorted_to_unsorted_map,
+                cids,
+                group_starts,
+                groups_by_color,
+                scratch,
+                ids_by_color,
+                final_group_starts,
+            ],
+            device=self.device,
+        )
+
+        self.assertEqual(int(group_count.numpy()[0]), 3)
+        self.assertEqual(int(num_colors.numpy()[0]), 2)
+        np.testing.assert_array_equal(color_starts.numpy()[:3], [0, 2, 3])
+        np.testing.assert_array_equal(ids_by_color.numpy(), [0, 2, 1, 4, 3, 5])
+        np.testing.assert_array_equal(final_group_starts.numpy()[:4], [0, 2, 4, 6])
 
     def test_03g4_dvi_inequality_coloring_ignores_immovable_bodies(self):
         """Color contacts sharing an immovable body in parallel."""

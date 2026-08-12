@@ -30,12 +30,17 @@ from .sparse_kernels import (
     _build_sparse_bilateral_block,
     _build_sparse_bilateral_rhs,
     _cache_sparse_projected_diagonal,
+    _color_compact_contact_groups,
+    _compact_contact_group_starts,
     _compute_dvi_sparse_solution_vectors,
+    _expand_colored_contact_groups,
     _group_mapped_dvi_inequalities,
     _map_active_contacts,
     _map_active_limits,
     _map_ordered_active_contacts,
+    _mark_contact_group_boundaries,
     _prefix_active_contacts_by_world,
+    _prepare_colored_contact_group_sizes,
     _prepare_contact_pair_sort,
     _prepare_contact_world_sort,
     _reset_active_bilateral_delta,
@@ -109,8 +114,30 @@ class SparseDVIPath:
         self.contact_sorter: KeySorter | None = None
         self.contact_world_starts: wp.array[wp.int32] | None = None
         if device.is_cuda and size.max_of_max_contacts >= _CONTACT_PAIR_SORT_MIN_CAPACITY:
-            self.contact_sorter = KeySorter(max_num_keys=size.sum_of_max_contacts, device=device)
+            num_contacts = size.sum_of_max_contacts
+            self.contact_sorter = KeySorter(max_num_keys=num_contacts, device=device)
             self.contact_world_starts = wp.zeros(size.num_worlds + 1, dtype=int32, device=device)
+            self.contact_group_flags = wp.array(
+                ptr=self.contact_sorter.sorted_to_unsorted_map.ptr + num_contacts * wp.types.type_size_in_bytes(int32),
+                shape=num_contacts,
+                dtype=int32,
+                device=device,
+                copy=False,
+            )
+            self.contact_group_starts = wp.array(
+                ptr=self.contact_sorter.sorted_keys.ptr,
+                shape=num_contacts,
+                dtype=int32,
+                device=device,
+                copy=False,
+            )
+            self.contact_groups_by_color = wp.array(
+                ptr=self.contact_sorter.sorted_keys.ptr + num_contacts * wp.types.type_size_in_bytes(int32),
+                shape=num_contacts,
+                dtype=int32,
+                device=device,
+                copy=False,
+            )
 
     def prepare(self, problem: DualProblem) -> None:
         """Precompute host-derived sparse topology before the first solve."""
@@ -245,22 +272,104 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
                 device=path.device,
             )
     state.inequality_body_color_masks.zero_()
+    use_parallel_groups = use_contact_order and path.size.num_worlds == 1 and path.size.max_of_max_limits == 0
+    if not use_parallel_groups:
+        wp.launch(
+            kernel=_group_mapped_dvi_inequalities,
+            dim=path.size.num_worlds,
+            inputs=[
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.uio,
+                state.inequality_bodies,
+                state.inequality_body_color_masks,
+                state.inequality_colors,
+                state.inequality_num_colors,
+                state.inequality_ids_by_color,
+                state.inequality_color_starts,
+                state.inequality_group_starts,
+                state.inequality_group_starts,
+                wp.bool(use_contact_order),
+            ],
+            device=path.device,
+        )
+        return
+
+    sorter = path.contact_sorter
     wp.launch(
-        kernel=_group_mapped_dvi_inequalities,
-        dim=path.size.num_worlds,
+        kernel=_mark_contact_group_boundaries,
+        dim=contacts.model_max_contacts_host,
         inputs=[
-            problem.data.nl,
-            problem.data.nc,
+            contacts.model_active_contacts,
+            sorter.sorted_to_unsorted_map,
+            contacts.cid,
             problem.data.uio,
             state.inequality_bodies,
+            path.contact_group_flags,
+        ],
+        device=path.device,
+    )
+    wp.utils.array_scan(path.contact_group_flags, state.inequality_colors, inclusive=True)
+    wp.launch(
+        kernel=_compact_contact_group_starts,
+        dim=contacts.model_max_contacts_host,
+        inputs=[
+            contacts.model_active_contacts,
+            path.contact_group_flags,
+            state.inequality_colors,
+            path.contact_group_starts,
+        ],
+        device=path.device,
+    )
+    wp.launch(
+        kernel=_color_compact_contact_groups,
+        dim=1,
+        inputs=[
+            contacts.model_active_contacts,
+            state.inequality_colors,
+            problem.data.uio,
+            sorter.sorted_to_unsorted_map,
+            contacts.cid,
+            state.inequality_bodies,
             state.inequality_body_color_masks,
+            path.contact_group_starts,
             state.inequality_colors,
             state.inequality_num_colors,
-            state.inequality_ids_by_color,
+            path.contact_world_starts,
             state.inequality_color_starts,
+            path.contact_groups_by_color,
+        ],
+        device=path.device,
+    )
+    state.inequality_colors.zero_()
+    group_dim = path.size.max_of_max_contacts + 1
+    wp.launch(
+        kernel=_prepare_colored_contact_group_sizes,
+        dim=group_dim,
+        inputs=[
+            contacts.model_active_contacts,
+            path.contact_world_starts,
+            path.contact_group_starts,
+            path.contact_groups_by_color,
+            state.inequality_colors,
+        ],
+        device=path.device,
+    )
+    wp.utils.array_scan(state.inequality_colors, state.inequality_colors, inclusive=True)
+    wp.launch(
+        kernel=_expand_colored_contact_groups,
+        dim=group_dim,
+        inputs=[
+            contacts.model_active_contacts,
+            path.contact_world_starts,
+            problem.data.uio,
+            sorter.sorted_to_unsorted_map,
+            contacts.cid,
+            path.contact_group_starts,
+            path.contact_groups_by_color,
+            state.inequality_colors,
+            state.inequality_ids_by_color,
             state.inequality_group_starts,
-            state.inequality_group_starts,
-            wp.bool(use_contact_order),
         ],
         device=path.device,
     )
