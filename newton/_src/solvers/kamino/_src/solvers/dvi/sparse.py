@@ -555,7 +555,13 @@ def _launch_sparse_inequality_pgs(
             state.bilateral_delta,
         ]
         if cooperative_articulation:
-            kernel_inputs.extend([state.bilateral_response_factor, state.s, wp.bool(enable_compact_schur)])
+            kernel_inputs.extend(
+                [
+                    state.bilateral_response_factor,
+                    state.s,
+                    wp.bool(enable_compact_schur),
+                ]
+            )
         kernel_inputs.extend(
             [
                 state.inequality_num_colors,
@@ -565,6 +571,7 @@ def _launch_sparse_inequality_pgs(
                 state.inequality_tangent_cross,
                 block_iteration,
                 path.data.config,
+                *([path.data.status] if cooperative_articulation else []),
                 path.body_space,
                 path.data.solution.lambdas,
             ]
@@ -1004,15 +1011,17 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
 
     path.set_bilateral_active_dim(problem, -1)
     _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
-    wp.launch(
-        kernel=_set_dvi_direct_status_iterations,
-        dim=path.size.num_worlds,
-        inputs=[
-            problem.data.nl,
-            problem.data.nc,
-            path.data.config,
-            path.data.status,
-        ],
-        device=path.device,
-    )
+    cooperative_fused_pgs = path.device.is_cuda and path.size.max_of_num_joint_cts >= 64
+    if has_intermediate_bilateral_solve or not cooperative_fused_pgs:
+        wp.launch(
+            kernel=_set_dvi_direct_status_iterations,
+            dim=path.size.num_worlds,
+            inputs=[
+                problem.data.nl,
+                problem.data.nc,
+                path.data.config,
+                path.data.status,
+            ],
+            device=path.device,
+        )
     _compute_sparse_solution_vectors(path, problem)

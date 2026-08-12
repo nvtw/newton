@@ -21,7 +21,7 @@ from .projections import (
 from .projections import (
     project_contact_tangent_update as _project_contact_tangent_update,
 )
-from .types import DVIConfigStruct
+from .types import DVIConfigStruct, DVIStatus
 
 wp.set_module_options({"enable_backward": False})
 
@@ -1415,6 +1415,23 @@ def _cooperative_unilateral_component(uid: int32, nl: int32, phase: int32) -> in
 
 
 @wp.func
+def _cooperative_pgs_pair_converged(
+    sweep: int32,
+    first_tangent_sweep: int32,
+    tolerance: float32,
+    pair_update: float32,
+) -> bool:
+    completed_sweeps = sweep + int32(1)
+    return (
+        tolerance > float32(0.0)
+        and completed_sweeps % int32(2) == int32(0)
+        and sweep >= first_tangent_sweep + int32(1)
+        and wp.isfinite(pair_update)
+        and pair_update <= tolerance
+    )
+
+
+@wp.func
 def _compact_unilateral_correction(
     compact_q: wp.array[float32], offset: int32, unilateral_row: int32, uid: int32, nl: int32, phase: int32
 ) -> wp.vec2f:
@@ -1712,6 +1729,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     inequality_tangent_cross: wp.array[float32],
     block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
+    solver_status: wp.array[DVIStatus],
     body_space: wp.array[float32],
     solution_lambdas: wp.array[float32],
 ):
@@ -1725,6 +1743,10 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     nl = problem_nl[wid]
     nc = problem_nc[wid]
     if nl + nc == int32(0):
+        if lane == int32(0) and block_iteration == int32(_FUSED_BILATERAL_BLOCK):
+            status = solver_status[wid]
+            status.iterations = int32(1)
+            solver_status[wid] = status
         return
     lio = problem_lio[wid]
     cio = problem_cio[wid]
@@ -1751,7 +1773,11 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     elif block_iteration == int32(_FUSED_BILATERAL_BLOCK):
         sweep_count *= cfg.max_alternating_iterations
 
+    adaptive = block_iteration == int32(_FUSED_BILATERAL_BLOCK) and cfg.tolerance > float32(0.0)
+    completed_sweeps = sweep_count
+    pair_update = float32(0.0)
     for sweep in range(sweep_count):
+        sweep_update = float32(0.0)
         phase_count = int32(2)
         if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and sweep < first_tangent_sweep:
             phase_count = int32(1)
@@ -1910,6 +1936,8 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                     delta_1 = tangent_delta.y
                         delta_0 = _broadcast_lane_0_32(delta_0)
                         delta_1 = _broadcast_lane_0_32(delta_1)
+                        if lane == int32(0) and adaptive:
+                            sweep_update = wp.max(sweep_update, wp.max(wp.abs(delta_0), wp.abs(delta_1)))
                         if mapped_id >= int32(0) and (delta_0 != float32(0.0) or delta_1 != float32(0.0)):
                             component = _cooperative_unilateral_component(uid, nl, phase)
                             if use_compact_schur:
@@ -1948,6 +1976,27 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                             + bilateral_response[index + int32(1)] * delta_1
                                         )
                         _sync_warp_32()
+
+        if adaptive:
+            stop = float32(0.0)
+            if lane == int32(0):
+                pair_update = wp.max(pair_update, sweep_update)
+                if _cooperative_pgs_pair_converged(sweep, first_tangent_sweep, cfg.tolerance, pair_update):
+                    completed_sweeps = sweep + int32(1)
+                    stop = float32(1.0)
+                elif (sweep + int32(1)) % int32(2) == int32(0):
+                    pair_update = float32(0.0)
+            stop = _broadcast_lane_0_32(stop)
+            if stop != float32(0.0):
+                break
+
+    if lane == int32(0) and block_iteration == int32(_FUSED_BILATERAL_BLOCK):
+        status = solver_status[wid]
+        status.iterations = wp.min(
+            completed_sweeps,
+            cfg.max_alternating_iterations * cfg.inequality_sweeps_per_iteration,
+        )
+        solver_status[wid] = status
 
 
 @wp.kernel
