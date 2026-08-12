@@ -2271,26 +2271,37 @@ def _solve_split_contact_pose_correction(
             for group in range(group_start + lane, group_end, threads_per_world):
                 start = inequality_group_starts[schedule_offset + group]
                 end = inequality_group_starts[schedule_offset + group + int32(1)]
+                first_cid = inequality_ids_by_color[uio + start]
+                first_contact_id = contact_indices[cio + first_cid]
+                xa = int32(-1)
+                xb = int32(-1)
+                inv_a = float32(0.0)
+                inv_b = float32(0.0)
+                local_a = wp.vec3f(0.0)
+                local_b = wp.vec3f(0.0)
+                if first_contact_id >= int32(0):
+                    first_bids = contact_bid_AB[first_contact_id]
+                    xb = int32(6) * first_bids[1]
+                    inv_b = model_body_inv_mass[first_bids[1]]
+                    local_b = wp.vec3f(body_space[xb], body_space[xb + 1], body_space[xb + 2])
+                    if first_bids[0] >= int32(0):
+                        xa = int32(6) * first_bids[0]
+                        inv_a = model_body_inv_mass[first_bids[0]]
+                        local_a = wp.vec3f(body_space[xa], body_space[xa + 1], body_space[xa + 2])
                 for slot in range(start, end):
                     cid = inequality_ids_by_color[uio + slot]
                     contact_id = contact_indices[cio + cid]
                     if contact_id < int32(0):
                         continue
                     bids = contact_bid_AB[contact_id]
-                    inv_a = float32(0.0)
-                    inv_b = model_body_inv_mass[bids[1]]
-                    if bids[0] >= int32(0):
-                        inv_a = model_body_inv_mass[bids[0]]
                     diagonal = inv_a + inv_b
                     if diagonal <= FLOAT32_EPS:
                         continue
                     normal = wp.quat_rotate(contact_frame[contact_id], wp.vec3f(0.0, 0.0, 1.0))
                     relative = float32(0.0)
                     if bids[0] >= int32(0):
-                        xa = int32(6) * bids[0]
-                        relative -= wp.dot(normal, wp.vec3f(body_space[xa], body_space[xa + 1], body_space[xa + 2]))
-                    xb = int32(6) * bids[1]
-                    relative += wp.dot(normal, wp.vec3f(body_space[xb], body_space[xb + 1], body_space[xb + 2]))
+                        relative -= wp.dot(normal, local_a)
+                    relative += wp.dot(normal, local_b)
                     vec_idx = vio + ccgo + int32(3) * cid + int32(2)
                     if problem_v_b[vec_idx] >= float32(0.0):
                         continue
@@ -2304,9 +2315,15 @@ def _solve_split_contact_pose_correction(
                     delta = new_lambda - old_lambda
                     if bids[0] >= int32(0):
                         for j in range(3):
-                            body_space[xa + j] -= inv_a * normal[j] * delta
+                            local_a[j] -= inv_a * normal[j] * delta
                     for j in range(3):
-                        body_space[xb + j] += inv_b * normal[j] * delta
+                        local_b[j] += inv_b * normal[j] * delta
+                if xa >= int32(0):
+                    for j in range(3):
+                        body_space[xa + j] = local_a[j]
+                if xb >= int32(0):
+                    for j in range(3):
+                        body_space[xb + j] = local_b[j]
             _sync_threads()
 
 
