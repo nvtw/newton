@@ -1054,11 +1054,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                         for j in range(6):
                             body_space[local_x_idx_1 + j] = local_body_1[j]
                     group += threads_per_world
-                # Groups in one color never share dynamic bodies, and the same
-                # lane owns a group in both phases. Only the color boundary
-                # needs a block-wide synchronization.
-                if phase == phase_count - int32(1):
-                    _sync_threads()
+                _sync_threads()
 
 
 @wp.kernel
