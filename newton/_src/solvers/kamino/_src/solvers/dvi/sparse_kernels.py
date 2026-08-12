@@ -423,6 +423,8 @@ def _solve_dvi_sparse_contacts_pgs(
     bsm_col_start: wp.array[int32],
     contact_nzb_offsets: wp.array[int32],
     contact_indices: wp.array[int32],
+    contact_bid_AB: wp.array[wp.vec2i],
+    model_bodies_offset: wp.array[int32],
     problem_nc: wp.array[int32],
     problem_cio: wp.array[int32],
     problem_uio: wp.array[int32],
@@ -462,7 +464,7 @@ def _solve_dvi_sparse_contacts_pgs(
     vio = problem_vio[wid]
     row_start = bsm_row_start[wid]
     col_start = bsm_col_start[wid]
-    matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
+    bodies_offset = model_bodies_offset[wid]
     sweep_count = cfg.inequality_sweeps_per_iteration
     first_tangent_sweep = int32(0)
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
@@ -501,14 +503,13 @@ def _solve_dvi_sparse_contacts_pgs(
                 first_cid = inequality_ids_by_color[uio + color_slot]
                 first_contact_id = contact_indices[cio + first_cid]
                 if first_contact_id >= int32(0):
-                    first_row = ccgo + int32(3) * first_cid
-                    first_nzb_offset = contact_nzb_offsets[first_contact_id]
-                    local_x_idx_0 = col_start + bsm_nzb_coords[first_nzb_offset, 1]
+                    # Contact Jacobians store B's three rows first, followed by A's when present.
+                    first_bids = contact_bid_AB[first_contact_id]
+                    local_x_idx_0 = col_start + int32(6) * (first_bids[1] - bodies_offset)
                     for j in range(6):
                         local_body_0[j] = body_space[local_x_idx_0 + j]
-                    second_body_offset = first_nzb_offset + int32(3)
-                    if second_body_offset < matrix_end and bsm_nzb_coords[second_body_offset, 0] == first_row:
-                        local_x_idx_1 = col_start + bsm_nzb_coords[second_body_offset, 1]
+                    if first_bids[0] >= int32(0):
+                        local_x_idx_1 = col_start + int32(6) * (first_bids[0] - bodies_offset)
                         for j in range(6):
                             local_body_1[j] = body_space[local_x_idx_1 + j]
                 while color_slot >= color_start and color_slot < color_end:
@@ -517,10 +518,10 @@ def _solve_dvi_sparse_contacts_pgs(
                     if contact_id >= int32(0):
                         row = ccgo + int32(3) * cid
                         vec_idx = vio + row
+                        bids = contact_bid_AB[contact_id]
                         nzb_offset = contact_nzb_offsets[contact_id]
                         block_count = int32(3)
-                        second_body_offset = nzb_offset + int32(3)
-                        if second_body_offset < matrix_end and bsm_nzb_coords[second_body_offset, 0] == row:
+                        if bids[0] >= int32(0):
                             block_count = int32(6)
 
                         normal_value = eta[row_start + row + int32(2)] * solution_lambdas[vec_idx + int32(2)]
@@ -528,9 +529,8 @@ def _solve_dvi_sparse_contacts_pgs(
                         while local_block < block_count:
                             nzb_idx = nzb_offset + local_block
                             block_n = bsm_nzb_values[nzb_idx]
-                            x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
                             body_values = local_body_0
-                            if x_idx_base == local_x_idx_1:
+                            if local_block >= int32(3):
                                 body_values = local_body_1
                             for j in range(6):
                                 normal_value += block_n[j] * body_values[j]
@@ -547,11 +547,10 @@ def _solve_dvi_sparse_contacts_pgs(
                         body_group = int32(0)
                         while body_group < block_count:
                             nzb_idx = nzb_offset + body_group
-                            x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
                             row_n = jacobian_nzb_values[nzb_idx + int32(2)]
                             for j in range(6):
                                 body_delta = row_n[j] * normal_delta_body
-                                if x_idx_base == local_x_idx_0:
+                                if body_group == int32(0):
                                     local_body_0[j] += body_delta
                                 else:
                                     local_body_1[j] += body_delta
@@ -570,9 +569,8 @@ def _solve_dvi_sparse_contacts_pgs(
                             nzb_idx = nzb_offset + local_block
                             block_t0 = bsm_nzb_values[nzb_idx]
                             block_t1 = bsm_nzb_values[nzb_idx + int32(1)]
-                            x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
                             body_values = local_body_0
-                            if x_idx_base == local_x_idx_1:
+                            if local_block >= int32(3):
                                 body_values = local_body_1
                             for j in range(6):
                                 tangent_value[0] += block_t0[j] * body_values[j]
@@ -623,12 +621,11 @@ def _solve_dvi_sparse_contacts_pgs(
                         body_group = int32(0)
                         while body_group < block_count:
                             nzb_idx = nzb_offset + body_group
-                            x_idx_base = col_start + bsm_nzb_coords[nzb_idx, 1]
                             row_t0 = jacobian_nzb_values[nzb_idx]
                             row_t1 = jacobian_nzb_values[nzb_idx + int32(1)]
                             for j in range(6):
                                 body_delta = row_t0[j] * tangent_delta_body[0] + row_t1[j] * tangent_delta_body[1]
-                                if x_idx_base == local_x_idx_0:
+                                if body_group == int32(0):
                                     local_body_0[j] += body_delta
                                 else:
                                     local_body_1[j] += body_delta

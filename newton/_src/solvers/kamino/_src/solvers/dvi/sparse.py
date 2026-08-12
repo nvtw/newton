@@ -227,6 +227,8 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             *common_inputs,
             jacobians.contact_constraint_nzb_offsets,
             state.contact_indices,
+            path.contacts.bid_AB,
+            path.model.info.bodies_offset,
             problem.data.nc,
             problem.data.cio,
             problem.data.uio,
