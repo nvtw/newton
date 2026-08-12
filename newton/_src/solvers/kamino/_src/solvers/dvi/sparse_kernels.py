@@ -1075,6 +1075,28 @@ def _solve_dvi_sparse_inequalities_pgs(
 def _subgroup_sum_32(value: float32) -> float32: ...
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    return __shfl_sync(0xffffffffu, value, 0, 32);
+#else
+    return value;
+#endif
+    """
+)
+def _broadcast_lane_0_32(value: float32) -> float32: ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    __syncwarp(0xffffffffu);
+#endif
+    """
+)
+def _sync_warp_32(): ...
+
+
 @wp.func
 def _cooperative_sparse_limit_update(
     mapped_id: int32,
@@ -1324,7 +1346,6 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
     body_space: wp.array[float32],
-    update_scratch: wp.array[float32],
     solution_lambdas: wp.array[float32],
 ):
     """Apply sparse PGS with one warp cooperating on each articulated world."""
@@ -1418,9 +1439,9 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                         correction_1 = _subgroup_sum_32(partial_1)
                         projected_cross = _subgroup_sum_32(partial_cross)
 
+                        delta_0 = float32(0.0)
+                        delta_1 = float32(0.0)
                         if lane == int32(0):
-                            delta_0 = float32(0.0)
-                            delta_1 = float32(0.0)
                             if mapped_id >= int32(0):
                                 if uid < nl:
                                     if phase == int32(0):
@@ -1499,15 +1520,8 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                     )
                                     delta_0 = tangent_delta.x
                                     delta_1 = tangent_delta.y
-                            update_scratch[vec_idx] = delta_0
-                            if uid >= nl:
-                                update_scratch[vec_idx + int32(1)] = delta_1
-                        _sync_threads()
-
-                        delta_0 = update_scratch[vec_idx]
-                        delta_1 = float32(0.0)
-                        if uid >= nl:
-                            delta_1 = update_scratch[vec_idx + int32(1)]
+                        delta_0 = _broadcast_lane_0_32(delta_0)
+                        delta_1 = _broadcast_lane_0_32(delta_1)
                         if mapped_id >= int32(0) and (delta_0 != float32(0.0) or delta_1 != float32(0.0)):
                             for bilateral_row in range(lane, njc, int32(32)):
                                 index = response_offset + bilateral_row * response_row_stride + unilateral_row
@@ -1523,7 +1537,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                         bilateral_response[index] * delta_0
                                         + bilateral_response[index + int32(1)] * delta_1
                                     )
-                        _sync_threads()
+                        _sync_warp_32()
 
 
 @wp.kernel

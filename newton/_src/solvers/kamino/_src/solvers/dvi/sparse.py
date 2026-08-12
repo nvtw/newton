@@ -297,8 +297,6 @@ def _launch_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem, blo
             path.data.config,
             path.body_space,
         ]
-        if cooperative_articulation:
-            kernel_inputs.append(state.s)
         kernel_inputs.append(path.data.solution.lambdas)
     wp.launch(
         kernel=kernel,
