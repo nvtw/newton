@@ -13,6 +13,7 @@ from newton._src.solvers.phoenx.examples.example_marbles_usd import (
     Example,
     _normalize_stage_units_for_newton,
     _physics_ignore_paths,
+    _scale_shape_contact_gaps,
 )
 
 
@@ -54,6 +55,15 @@ class TestMarblesUsd(unittest.TestCase):
         self.assertAlmostEqual(authored_unit, 0.01)
         self.assertAlmostEqual(UsdGeom.GetStageMetersPerUnit(stage), 1.0)
         np.testing.assert_allclose(world.ExtractTranslation(), (1.0, 0.0, 0.0))
+
+    def test_contact_gaps_follow_stage_units(self):
+        """Scale imported contact gaps consistently with collider geometry."""
+        builder = newton.ModelBuilder()
+        builder.shape_gap[:] = [0.1, 2.0]
+
+        _scale_shape_contact_gaps(builder, 0.01)
+
+        np.testing.assert_allclose(builder.shape_gap, (0.001, 0.02))
 
     def test_invalid_and_trigger_colliders_are_skipped(self):
         """Exclude colliders with missing topology or PhysX trigger scripts."""

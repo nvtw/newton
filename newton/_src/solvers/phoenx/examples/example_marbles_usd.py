@@ -142,6 +142,11 @@ def _normalize_stage_units_for_newton(stage) -> float:
     return meters_per_unit
 
 
+def _scale_shape_contact_gaps(builder, scale: float) -> None:
+    """Convert imported shape contact gaps from authored units to meters."""
+    builder.shape_gap[:] = [gap * scale for gap in builder.shape_gap]
+
+
 def _select_authored_camera(viewer, requested_path: str | None = None) -> str:
     """Select the same authored overview-camera convention as the OTK USD example."""
     from pxr import UsdGeom, UsdRender
@@ -293,6 +298,7 @@ class Example:
             schema_resolvers=[newton.usd.SchemaResolverPhysx()],
             ignore_composition_errors=True,
         )
+        _scale_shape_contact_gaps(builder, authored_unit)
         self.physics_result = result
         self._builder = builder
 
