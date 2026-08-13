@@ -58,6 +58,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         events = []
         direct = SimpleNamespace(
             enabled=True,
+            factor_stream=None,
             prepare_and_factor=lambda _idt: events.append("factor"),
             solve=lambda *, use_bias: events.append(("solve", use_bias)),
             resolve_bounded_drives=lambda _idt, *, use_bias: events.append(("bounds", use_bias)),

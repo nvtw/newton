@@ -31,7 +31,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
+from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros, inertia_sym6_pack_np
 from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_RIGID,
@@ -166,7 +166,7 @@ class TestContactEndpointHelpers(unittest.TestCase):
         self.bodies.velocity.assign(self.body_vel)
         self.bodies.angular_velocity.assign(self.body_omega)
         self.bodies.inverse_mass.assign(body_inv_mass)
-        self.bodies.inverse_inertia_world.assign(body_inv_inertia.reshape(2, 9))
+        self.bodies.inverse_inertia_world.assign(inertia_sym6_pack_np(body_inv_inertia))
 
         # Cloth particles 0/1/2: triangle nodes with distinct masses
         # and velocities; these are the cloth side of a contact.

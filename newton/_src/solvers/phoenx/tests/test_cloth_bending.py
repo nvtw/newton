@@ -27,7 +27,7 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
     "PhoenX cloth tests are CUDA-only.",
 )
 class TestClothBending(unittest.TestCase):
-    def _build_cloth(self, *, bending_stiffness: float, dim_x: int = 4, dim_y: int = 4):
+    def _build_cloth(self, *, dim_x: int = 4, dim_y: int = 4):
         device = wp.get_preferred_device()
         builder = newton.ModelBuilder()
         tri_ka, tri_ke = cloth_lame_from_youngs_poisson_plane_stress(5.0e8, 0.3)
@@ -43,7 +43,7 @@ class TestClothBending(unittest.TestCase):
             fix_left=True,  # pin one edge so we don't free-fall
             tri_ke=tri_ke,
             tri_ka=tri_ka,
-            edge_ke=bending_stiffness,
+            edge_ke=0.01,
             edge_kd=0.0,
             particle_radius=0.04,
         )
@@ -76,17 +76,23 @@ class TestClothBending(unittest.TestCase):
         return world, model, device
 
     def test_high_stiffness_resists_deformation(self):
+        """Verify that bending stiffness limits cloth deformation."""
         # With very high bending stiffness, the cloth should stay
         # near-flat (no folding) even under gravity. The dihedral-angle
         # constraint pulls every hinge back toward its rest angle (0
         # for the flat cloth grid here).
-        world_soft, _, _ = self._build_cloth(bending_stiffness=0.01)
-        world_stiff, _, device = self._build_cloth(bending_stiffness=1.0e6)
+        world, model, device = self._build_cloth()
         for _ in range(30):
-            world_soft.step(1.0 / 60.0)
-            world_stiff.step(1.0 / 60.0)
-        p_soft = world_soft.particles.position.numpy()
-        p_stiff = world_stiff.particles.position.numpy()
+            world.step(1.0 / 60.0)
+        p_soft = world.particles.position.numpy()
+
+        stiff_properties = np.tile([1.0e6, 0.0], (int(model.edge_count), 1)).astype(np.float32)
+        model.edge_bending_properties.assign(stiff_properties)
+        world.populate_cloth_triangles_from_model(model)
+        world.populate_cloth_bending_from_model(model)
+        for _ in range(30):
+            world.step(1.0 / 60.0)
+        p_stiff = world.particles.position.numpy()
         self.assertTrue(np.all(np.isfinite(p_soft)))
         self.assertTrue(np.all(np.isfinite(p_stiff)))
 
@@ -103,10 +109,10 @@ class TestClothBending(unittest.TestCase):
         )
 
         with wp.ScopedCapture(device=device) as capture:
-            world_stiff.step(1.0 / 60.0)
+            world.step(1.0 / 60.0)
         for _ in range(5):
             wp.capture_launch(capture.graph)
-        self.assertTrue(np.all(np.isfinite(world_stiff.particles.position.numpy())))
+        self.assertTrue(np.all(np.isfinite(world.particles.position.numpy())))
 
 
 if __name__ == "__main__":
