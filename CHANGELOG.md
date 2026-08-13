@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Add opt-in USD composition-error tolerance and a PhoenX Marbles example that imports standard and PhysX physics metadata while rendering the retained OptiX hierarchy.
+
 <!-- towncrier release notes start -->
 
 ## [1.5.0] - 2026-08-11

@@ -3392,6 +3392,7 @@ class ModelBuilder:
         convert_mjc_equality_constraints: bool = True,
         override_root_xform: bool = False,
         legacy_margin_gap: bool = False,
+        ignore_composition_errors: bool = False,
         return_deformable_results: bool = False,
     ) -> dict[str, Any]:
         """Parses a Universal Scene Description (USD) stage and adds rigid bodies, soft bodies, shapes, and joints to the given ModelBuilder.
@@ -3526,6 +3527,9 @@ class ModelBuilder:
                 where ``shape_margin`` is computed as ``mjc_margin - mjc_gap``.
                 Use for USD files authored against MuJoCo <= 3.8. Defaults to
                 False (identity translation matching MuJoCo 3.9 semantics).
+            ignore_composition_errors: If True, warn and continue when USD composition
+                errors are present. Missing referenced assets may leave incomplete prims,
+                which should be excluded with ``ignore_paths``. Default is False.
 
             return_deformable_results: If True, include the experimental deformable entries in the
                 returned mapping (``path_cable_map`` / ``path_cloth_map`` / ``path_soft_map`` /
@@ -3642,6 +3646,7 @@ class ModelBuilder:
             convert_mjc_equality_constraints=convert_mjc_equality_constraints,
             override_root_xform=override_root_xform,
             legacy_margin_gap=legacy_margin_gap,
+            ignore_composition_errors=ignore_composition_errors,
             return_deformable_results=return_deformable_results,
         )
 

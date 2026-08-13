@@ -262,6 +262,7 @@ def parse_usd(
     convert_mjc_equality_constraints: bool = True,
     override_root_xform: bool = False,
     legacy_margin_gap: bool = False,
+    ignore_composition_errors: bool = False,
     return_deformable_results: bool = False,
 ) -> dict[str, Any]:
     """Parses a Universal Scene Description (USD) stage and adds rigid bodies, soft bodies, shapes, and joints to the given ModelBuilder.
@@ -397,6 +398,9 @@ def parse_usd(
             where ``shape_margin`` is computed as ``mjc_margin - mjc_gap``.
             Use for USD files authored against MuJoCo <= 3.8. Defaults to
             False (identity translation matching MuJoCo 3.9 semantics).
+        ignore_composition_errors: If True, warn and continue when USD composition
+            errors are present. Missing referenced assets may leave incomplete prims,
+            which should be excluded with ``ignore_paths``. Default is False.
 
         return_deformable_results: If True, include the experimental deformable entries in the
             returned mapping (``path_cable_map`` / ``path_cloth_map`` / ``path_soft_map`` /
@@ -547,10 +551,10 @@ def parse_usd(
 
     if isinstance(source, str):
         stage = Usd.Stage.Open(source, Usd.Stage.LoadAll)
-        _raise_on_stage_errors(stage, source)
+        _raise_on_stage_errors(stage, source, ignore=ignore_composition_errors)
     else:
         stage = source
-        _raise_on_stage_errors(stage, "provided stage")
+        _raise_on_stage_errors(stage, "provided stage", ignore=ignore_composition_errors)
 
     DegreesToRadian = float(np.pi / 180)
     mass_unit = 1.0
@@ -5392,7 +5396,7 @@ def resolve_usd_from_url(url: str, target_folder_name: str | None = None, export
     return target_filename
 
 
-def _raise_on_stage_errors(usd_stage, stage_source: str):
+def _raise_on_stage_errors(usd_stage, stage_source: str, *, ignore: bool = False):
     get_errors = getattr(usd_stage, "GetCompositionErrors", None)
     if get_errors is None:
         return
@@ -5406,4 +5410,8 @@ def _raise_on_stage_errors(usd_stage, stage_source: str):
         except Exception:
             messages.append(str(err))
     formatted = "\n".join(f"- {message}" for message in messages)
-    raise RuntimeError(f"USD stage has composition errors while loading {stage_source}:\n{formatted}")
+    message = f"USD stage has composition errors while loading {stage_source}:\n{formatted}"
+    if ignore:
+        warnings.warn(message, stacklevel=_external_stacklevel())
+        return
+    raise RuntimeError(message)
