@@ -126,6 +126,13 @@ class _ControlRecordingSolver(SolverBase, CouplingInterface):
             wp.copy(state_out.joint_qd, state_in.joint_qd)
 
 
+class _FullSurfaceControlRecordingSolver(_ControlRecordingSolver):
+    """Test solver that accepts full-surface soft contacts."""
+
+    def coupling_supports_full_surface_soft_contacts(self) -> bool:
+        return True
+
+
 class _InPlaceRecordingParticleSolver(SolverBase, CouplingInterface):
     """Test solver that records whether it was stepped in-place."""
 
@@ -690,7 +697,8 @@ class TestSolverCoupledContactsAndMPM(unittest.TestCase):
 
         self.assertFalse(hasattr(SolverImplicitMPM, "supports_graph_capture"))
         self.assertFalse(hasattr(SolverImplicitMPM, "prepare_graph_capture"))
-        self.assertTrue(hasattr(SolverImplicitMPM, "check_status"))
+        self.assertFalse(hasattr(SolverImplicitMPM, "check_status"))
+        self.assertTrue(hasattr(SolverImplicitMPM, "check_sparse_grid_rebuild_status"))
 
     def test_implicit_mpm_reset_syncs_namespaced_non_in_place_state(self):
         """Verify coupled reset mirrors MPM history into the non-in-place output state."""
@@ -1114,6 +1122,37 @@ class TestSolverCoupledBasic(unittest.TestCase):
                 entries=[SolverCoupled.Entry(name="unsupported", solver=SolverBase, bodies=[0])],
             )
 
+    def test_entry_contacts_preserves_contact_matching_mode(self):
+        """Preserve matching mode metadata when coupled entry buffers are reused."""
+        coupled = SolverCoupled(
+            model=self.model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="A",
+                    solver=SolverSemiImplicit,
+                    bodies=[0],
+                    shapes=[0],
+                )
+            ],
+        )
+        state = self.model.state()
+        pipeline = newton.CollisionPipeline(self.model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+        filtered = coupled.entry_contacts("A", contacts)
+
+        self.assertEqual(filtered.contact_matching_mode, "latest")
+        for mode in ("sticky", "disabled"):
+            pipeline = newton.CollisionPipeline(
+                self.model,
+                broad_phase="nxn",
+                rigid_contact_max=contacts.rigid_contact_max,
+                contact_matching=mode,
+            )
+            pipeline.collide(state, contacts)
+            reused = coupled.entry_contacts("A", contacts)
+            self.assertIs(reused, filtered)
+            self.assertEqual(reused.contact_matching_mode, mode)
+
     def test_configure_view_applies_after_compaction(self):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         cloth_body = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
@@ -1214,6 +1253,117 @@ class TestSolverCoupledBasic(unittest.TestCase):
         self.assertRegex("\n".join(logs.output), r"entry 'child'.*joint.*outside.*full model layout")
         self.assertEqual(coupled.view("child").body_count, model.body_count)
 
+    @staticmethod
+    def _seeded_full_surface_contacts(model, corners, particle=None):
+        """Build contacts with a face record and an optional particle record."""
+        pipeline = newton.CollisionPipeline(
+            model, broad_phase="nxn", soft_contact_margin=0.1, enable_rigid_soft_full_surface_contact=True
+        )
+        contacts = pipeline.contacts()
+
+        def _set(arr, index, value):
+            a = arr.numpy()
+            a[index] = value
+            arr.assign(a)
+
+        contacts.soft_contact_count.assign([1 + int(particle is not None)])
+        _set(contacts.soft_contact_particle, 0, -1)
+        _set(contacts.soft_contact_indices, 0, list(corners))
+        _set(contacts.soft_contact_barycentric, 0, [0.6, 0.3, 0.1])
+        _set(contacts.soft_contact_shape, 0, 0)
+        _set(contacts.soft_contact_normal, 0, [0.0, 0.0, 1.0])
+        if particle is not None:
+            _set(contacts.soft_contact_particle, 1, particle)
+            _set(contacts.soft_contact_indices, 1, [particle, -1, -1])
+            _set(contacts.soft_contact_barycentric, 1, [1.0, 0.0, 0.0])
+            _set(contacts.soft_contact_shape, 1, 0)
+            _set(contacts.soft_contact_normal, 1, [0.0, 0.0, 1.0])
+        return contacts
+
+    @staticmethod
+    def _build_box_and_triangle():
+        """A free rigid box plus three soft particles forming one triangle."""
+        builder = newton.ModelBuilder()
+        body = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        joint = builder.add_joint_free(child=body)
+        builder.add_articulation([joint])
+        builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1)
+        particles = [builder.add_particle(wp.vec3(0.0, 0.0, 0.6), wp.vec3(0.0), 0.1, radius=0.0) for _ in range(3)]
+        return builder.finalize(device="cpu"), body, joint, particles
+
+    def test_full_surface_records_survive_the_entry_filter(self):
+        """Keep a full-surface record owned by a capable entry."""
+        model, body, joint, particles = self._build_box_and_triangle()
+        contacts = self._seeded_full_surface_contacts(model, particles)
+        coupled = SolverCoupled(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="A",
+                    solver=_FullSurfaceControlRecordingSolver,
+                    bodies=[body],
+                    joints=[joint],
+                    particles=particles,
+                )
+            ],
+        )
+
+        coupled.step(model.state(), model.state(), None, contacts, dt=1.0 / 60.0)
+
+        filtered = coupled._entry_contact_buffers["A"]
+        self.assertEqual(int(filtered.soft_contact_count.numpy()[0]), 1, "face record must survive the filter")
+        np.testing.assert_array_equal(filtered.soft_contact_indices.numpy()[0], particles)
+        np.testing.assert_allclose(filtered.soft_contact_barycentric.numpy()[0], [0.6, 0.3, 0.1])
+        self.assertTrue(filtered._enable_rigid_soft_full_surface_contact, "capability marker must be carried over")
+
+    def test_full_surface_records_straddling_entries_are_dropped(self):
+        """Drop a full-surface record spanning two capable entries."""
+        model, body, joint, particles = self._build_box_and_triangle()
+        contacts = self._seeded_full_surface_contacts(model, particles)
+        coupled = SolverCoupled(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="A",
+                    solver=_FullSurfaceControlRecordingSolver,
+                    bodies=[body],
+                    joints=[joint],
+                    particles=particles[:2],
+                ),
+                SolverCoupled.Entry(name="B", solver=_FullSurfaceControlRecordingSolver, particles=particles[2:]),
+            ],
+        )
+
+        coupled.step(model.state(), model.state(), None, contacts, dt=1.0 / 60.0)
+
+        for name in ("A", "B"):
+            count = int(coupled._entry_contact_buffers[name].soft_contact_count.numpy()[0])
+            self.assertEqual(count, 0, f"entry {name} owns only part of the record and must drop it")
+
+    def test_full_surface_contacts_degrade_per_entry(self):
+        """Keep only particle contacts for an unsupported entry."""
+        model, body, joint, particles = self._build_box_and_triangle()
+        contacts = self._seeded_full_surface_contacts(model, particles, particle=particles[0])
+        coupled = SolverCoupled(
+            model=model,
+            entries=[
+                SolverCoupled.Entry(
+                    name="particle_only",
+                    solver=_ControlRecordingSolver,
+                    bodies=[body],
+                    joints=[joint],
+                    particles=particles,
+                ),
+            ],
+        )
+
+        coupled.step(model.state(), model.state(), None, contacts, dt=1.0 / 60.0)
+
+        particle_only = coupled._entry_contact_buffers["particle_only"]
+        self.assertEqual(int(particle_only.soft_contact_count.numpy()[0]), 1)
+        self.assertEqual(int(particle_only.soft_contact_particle.numpy()[0]), particles[0])
+        self.assertFalse(particle_only._enable_rigid_soft_full_surface_contact)
+
     def test_entry_control_arrays_are_mapped_to_local_dofs(self):
         """Entry solvers should receive control arrays in their local DOF namespace."""
         _ControlRecordingSolver.instances.clear()
@@ -1261,7 +1411,7 @@ class TestSolverCoupledBasic(unittest.TestCase):
         )
         builder.add_articulation([first_joint, second_joint])
         model = builder.finalize(device="cpu")
-        model.joint_target_q.assign(np.arange(model.joint_dof_count, dtype=np.float32))
+        model.joint_target_q.assign(np.arange(model.joint_coord_count, dtype=np.float32))
 
         coupled = SolverCoupled(
             model=model,
@@ -1278,25 +1428,13 @@ class TestSolverCoupledBasic(unittest.TestCase):
 
         np.testing.assert_array_equal(view.joint_ancestor.numpy(), [-1, 0])
         np.testing.assert_array_equal(view.joint_target_q_start.numpy(), [0, 1, 2])
-        np.testing.assert_array_equal(view.joint_target_q.numpy(), [6.0, 7.0])
+        np.testing.assert_array_equal(view.joint_target_q.numpy(), [7.0, 8.0])
 
-        model.joint_target_q.assign(10.0 + np.arange(model.joint_dof_count, dtype=np.float32))
+        model.joint_target_q.assign(10.0 + np.arange(model.joint_coord_count, dtype=np.float32))
         model.joint_target_ke.assign(100.0 + np.arange(model.joint_dof_count, dtype=np.float32))
         coupled.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
-        np.testing.assert_array_equal(view.joint_target_q.numpy(), [16.0, 17.0])
+        np.testing.assert_array_equal(view.joint_target_q.numpy(), [17.0, 18.0])
         np.testing.assert_array_equal(view.joint_target_ke.numpy(), [106.0, 107.0])
-
-        target_pos_spec = model._attribute_spec("joint_target_pos")
-        self.assertTrue(target_pos_spec.deprecated)
-        self.assertEqual(target_pos_spec.alias_of, "joint_target_q")
-        with self.assertWarnsRegex(DeprecationWarning, "Model.joint_target_pos"):
-            legacy_target_pos = view.joint_target_pos
-        np.testing.assert_array_equal(legacy_target_pos.numpy(), [16.0, 17.0])
-
-        legacy_override = wp.array([21.0, 22.0], dtype=float, device=model.device)
-        with self.assertWarnsRegex(DeprecationWarning, "Model.joint_target_pos"):
-            view.joint_target_pos = legacy_override
-        np.testing.assert_array_equal(view.joint_target_q.numpy(), [21.0, 22.0])
 
     def test_custom_control_arrays_are_mapped_to_entries(self):
         """Custom CONTROL attributes should follow their compact frequency map."""
@@ -3599,6 +3737,7 @@ def _coupled_soft_contact_filter_preserves_unified_fields(test, device):
             wp.array([int(ParticleFlags.ACTIVE)], dtype=wp.int32, device=device),  # particle_flags
             int(ShapeFlags.COLLIDE_PARTICLES),
             int(ParticleFlags.ACTIVE),
+            0,  # keep_full_surface_contacts
             wp.zeros(1, dtype=wp.int32, device=device),  # dst_count
             wp.full(1, -1, dtype=wp.int32, device=device),  # dst_particle
             wp.full(1, -1, dtype=wp.int32, device=device),  # dst_shape

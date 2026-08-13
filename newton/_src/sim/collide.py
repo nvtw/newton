@@ -372,11 +372,31 @@ def compute_shape_aabbs(
     geom_scale = scale
 
     if is_infinite_plane:
-        # Bounding sphere fallback for infinite planes
-        radius = shape_collision_radius[shape_id]
-        half_extents = wp.vec3(radius, radius, radius)
-        aabb_lower[shape_id] = pos - half_extents - margin_vec
-        aabb_upper[shape_id] = pos + half_extents + margin_vec
+        # Clamp to the half space the plane bounds, replacing a bounding-sphere
+        # fallback whose 1e6 m cube made every shape a permanent ground-plane
+        # candidate. A nearly-aligned normal's surface rises by
+        # (|n_j| + |n_k|) * d / |n_i| at lateral offset d from the anchor, so
+        # bounding d by the reach this AABB itself admits keeps the clamp
+        # conservative for every shape it does not already prune laterally; a
+        # tilted plane's rise exceeds that reach and the bound stays unbounded.
+        normal = wp.quat_rotate(orientation, wp.vec3(0.0, 0.0, 1.0))
+        # Matches compute_shape_radius's infinite-plane radius.
+        HALF_SPACE_EXTENT = 1.0e6
+        half_extents = wp.vec3(HALF_SPACE_EXTENT, HALF_SPACE_EXTENT, HALF_SPACE_EXTENT)
+        lo = pos - half_extents - margin_vec
+        hi = pos + half_extents + margin_vec
+        for i in range(3):
+            n_i = normal[i]
+            # Below this the rise exceeds HALF_SPACE_EXTENT anyway, and the division stays well conditioned.
+            if wp.abs(n_i) > 0.5:
+                lateral = wp.abs(normal[(i + 1) % 3]) + wp.abs(normal[(i + 2) % 3])
+                rise = lateral * HALF_SPACE_EXTENT / wp.abs(n_i)
+                if n_i > 0.0:
+                    hi[i] = wp.min(hi[i], pos[i] + rise + effective_gap)
+                else:
+                    lo[i] = wp.max(lo[i], pos[i] - rise - effective_gap)
+        aabb_lower[shape_id] = lo
+        aabb_upper[shape_id] = hi
     elif has_local_aabb:
         # Pre-computed local AABB transformed to world space.
         # Scale is already baked into shape_collision_aabb by the builder,
@@ -908,11 +928,11 @@ class CollisionPipeline:
 
     .. experimental::
 
-        Differentiable rigid contacts (the ``rigid_contact_diff_*`` arrays when
-        ``requires_grad`` is enabled) may change without prior notice. The
-        narrow phase stays frozen and gradients are a tangent approximation;
-        validate accuracy and usefulness on your workflow before relying on
-        them in optimization loops.
+        Differentiable rigid-contact kinematics computed by
+        :func:`newton.eval_rigid_contact_kinematics` may change
+        without prior notice. The narrow phase stays frozen and gradients are
+        a tangent approximation; validate accuracy and usefulness on your
+        workflow before relying on them in optimization loops.
     """
 
     def __init__(
@@ -985,7 +1005,11 @@ class CollisionPipeline:
                 :class:`~newton.solvers.SolverVBD`; other solvers raise on such contacts. Records are
                 emitted into :attr:`Contacts.soft_contact_indices`. Defaults to False. Fixed at
                 construction because it sizes the soft-contact buffer headroom.
-            requires_grad: Whether to enable gradient computation. If None, uses model.requires_grad.
+            requires_grad: Whether pipeline-generated soft contacts and the
+                deprecated automatic rigid-contact outputs require gradients.
+                If None, uses ``model.requires_grad``. Explicit calls to
+                :func:`newton.eval_rigid_contact_kinematics` do not
+                depend on this flag.
             broad_phase:
                 Either a broad phase mode string ("explicit", "nxn", "sap") or
                 a prebuilt broad phase instance for expert usage.
@@ -1079,10 +1103,9 @@ class CollisionPipeline:
 
         .. experimental::
 
-            When ``requires_grad`` is true (explicitly or via
-            ``model.requires_grad``), rigid-contact autodiff via
-            ``rigid_contact_diff_*`` may change without prior notice; see
-            :meth:`collide`.
+            Rigid-contact autodiff via
+            :func:`newton.eval_rigid_contact_kinematics` may change
+            without prior notice; see :meth:`collide`.
         """
         if contact_matching not in ("disabled", "latest", "sticky"):
             raise ValueError(
@@ -1342,6 +1365,31 @@ class CollisionPipeline:
                         np.any(colliding_mask & (shape_sdf_index >= 0) & (shape_edge_range[:, 1] > 0))
                     )
                     has_meshes = has_meshes or has_planar_sdf_shapes
+                    mesh_sdf_shapes = colliding_mask & (
+                        (shape_types != int(GeoType.HFIELD))
+                        & ((shape_types == int(GeoType.MESH)) | (shape_edge_range[:, 1] > 0))
+                    )
+                    coarse_textures = getattr(model, "_texture_sdf_coarse_textures", None)
+                    has_texture_sdf = np.array(
+                        [
+                            sdf_idx >= 0
+                            and coarse_textures is not None
+                            and sdf_idx < len(coarse_textures)
+                            and coarse_textures[sdf_idx] is not None
+                            for sdf_idx in shape_sdf_index
+                        ],
+                        dtype=bool,
+                    )
+                    mesh_sdf_texture_only = bool(np.any(mesh_sdf_shapes) and np.all(has_texture_sdf[mesh_sdf_shapes]))
+                    if mesh_sdf_texture_only:
+                        texture_sdf_data = model._texture_sdf_data.numpy()
+                        scale_baked = texture_sdf_data["scale_baked"]
+                        shape_scale = model.shape_scale.numpy()
+                        identity_shape_scale = np.all(shape_scale == np.float32(1.0), axis=1)
+                        mesh_sdf_identity_scale_only = all(
+                            bool(scale_baked[shape_sdf_index[shape_idx]]) or identity_shape_scale[shape_idx]
+                            for shape_idx in np.flatnonzero(mesh_sdf_shapes)
+                        )
                 # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
                 # cylinders, or cones (which need full support function and axial
                 # rolling post-processing). The lean support function handles
@@ -1590,9 +1638,10 @@ class CollisionPipeline:
 
         .. experimental::
 
-            If ``requires_grad`` is true, ``rigid_contact_diff_*`` arrays may be
-            allocated; rigid-contact differentiability may change without prior
-            notice (see :meth:`collide`).
+            If ``requires_grad`` is true, deprecated rigid-contact distance and
+            point compatibility arrays are allocated. New code should allocate
+            only the outputs it needs and pass them to
+            :func:`newton.eval_rigid_contact_kinematics`.
         """
         contacts = Contacts(
             self.rigid_contact_max,
@@ -1609,6 +1658,7 @@ class CollisionPipeline:
             contact_matching=self._matching_enabled,
             contact_report=self.contact_report,
         )
+        contacts._contact_matching_mode = self.contact_matching
         # Flag the buffer so solvers that only consume particle contacts can refuse it (see
         # Contacts._enable_rigid_soft_full_surface_contact); edge/face records appear only when this is set.
         contacts._enable_rigid_soft_full_surface_contact = self.enable_rigid_soft_full_surface_contact
@@ -1750,10 +1800,11 @@ class CollisionPipeline:
         the tape so that gradients flow through ``state.body_q`` and
         ``state.particle_q``.
 
-        When ``requires_grad=True``, the differentiable rigid-contact arrays
-        (``contacts.rigid_contact_diff_*``) are populated by a lightweight
-        augmentation kernel that reconstructs world-space contact points from
-        the frozen narrow-phase output through the body transforms.
+        For backward compatibility, when ``requires_grad=True`` the deprecated
+        ``contacts.rigid_contact_diff_*`` arrays are populated by a lightweight
+        augmentation kernel. New code should call
+        :func:`newton.eval_rigid_contact_kinematics` explicitly
+        after collision detection to reconstruct only the quantities it needs.
 
         .. experimental::
 
@@ -2134,7 +2185,7 @@ class CollisionPipeline:
 
         # Differentiable contact augmentation: reconstruct world-space contact
         # quantities through body_q so that gradients flow via wp.Tape.
-        if self.requires_grad and contacts.rigid_contact_diff_distance is not None:
+        if self.requires_grad and contacts._rigid_contact_diff_distance is not None:
             launch_differentiable_contact_augment(
                 contacts=contacts,
                 body_q=state.body_q,

@@ -33,6 +33,8 @@ from ..geometry.collision_primitive import (
 )
 from ..geometry.contact_data import SHAPE_PAIR_HFIELD_BIT, ContactData, contact_passes_gap_check, make_contact_sort_key
 from ..geometry.contact_reduction_global import (
+    EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
+    EXPORT_REDUCED_CONTACTS_THREAD_BUDGET_MULTIPLIER,
     HASHTABLE_WARN_LOAD_PERCENT,
     GlobalContactReducer,
     create_export_reduced_contacts_kernel,
@@ -1795,7 +1797,8 @@ class NarrowPhase:
         self.num_tile_blocks = num_blocks
 
         # Dynamic block allocation for mesh-mesh and mesh-plane contacts.
-        # On CUDA we target ~4 blocks per SM for good occupancy; on CPU
+        # On CUDA we partition toward ~4 blocks per SM and launch twice as many
+        # mesh-mesh blocks to reduce serial work in long per-pair queues. On CPU
         # there is no SM notion so we pick 64 as a modest parallelism
         # target that splits pair work across OpenMP threads without
         # over-subscribing on small scenes.
@@ -1803,7 +1806,7 @@ class NarrowPhase:
             target_blocks = device_obj.sm_count * 4 if device_obj.is_cuda else 64
             n = max_candidate_pairs + 1
             # Mesh-mesh
-            self.num_mesh_mesh_blocks = target_blocks
+            self.num_mesh_mesh_blocks = target_blocks * 2 if device_obj.is_cuda else target_blocks
             self.mesh_mesh_target_blocks = target_blocks
             self.mesh_mesh_block_offsets = wp.zeros(n, dtype=wp.int32, device=device)
             self.mesh_mesh_block_counts = wp.zeros(n, dtype=wp.int32, device=device)
@@ -2146,7 +2149,7 @@ class NarrowPhase:
                         shape_edge_range=shape_edge_range,
                         shape_heightfield_index=shape_heightfield_index,
                         heightfield_data=heightfield_data,
-                        target_blocks=self.mesh_mesh_target_blocks,
+                        target_blocks=self.num_mesh_mesh_blocks,
                         block_offsets=self.mesh_mesh_block_offsets,
                         block_counts=self.mesh_mesh_block_counts,
                         weight_prefix_sums=self.mesh_mesh_weight_prefix_sums,
@@ -2220,12 +2223,18 @@ class NarrowPhase:
 
             # Export reduced contacts from hashtable
             if self.reduce_contacts:
-                # Advance export epoch for cross-entry deduplication without
-                # clearing the full capacity-sized flag array.
-                self.global_contact_reducer.advance_export_epoch()
-                wp.launch(
+                # Zero exported_flags for cross-entry deduplication
+                self.global_contact_reducer.exported_flags.zero_()
+                # Export has only one writer lane per block, so use a wider grid than
+                # the contact-generation kernels. On CPU, tiled kernels expose one lane.
+                effective_block_dim = min(self.block_dim, EXPORT_REDUCED_CONTACTS_BLOCK_DIM)
+                export_num_blocks = max(
+                    1,
+                    EXPORT_REDUCED_CONTACTS_THREAD_BUDGET_MULTIPLIER * self.total_num_threads // effective_block_dim,
+                )
+                wp.launch_tiled(
                     kernel=self.export_reduced_contacts_kernel,
-                    dim=self.total_num_threads,
+                    dim=export_num_blocks,
                     inputs=[
                         self.global_contact_reducer.hashtable.keys,
                         self.global_contact_reducer.ht_values,
@@ -2235,16 +2244,16 @@ class NarrowPhase:
                         self.global_contact_reducer.shape_pairs,
                         self.global_contact_reducer.contact_fingerprints,
                         self.global_contact_reducer.exported_flags,
-                        self.global_contact_reducer.export_epoch,
                         shape_types,
                         shape_data,
                         shape_gap,
                         writer_data,
-                        self.total_num_threads,
+                        export_num_blocks,
+                        int(self.block_dim > 1),
                         int(self.global_contact_reducer.deterministic),
                     ],
                     device=device,
-                    block_dim=self.block_dim,
+                    block_dim=EXPORT_REDUCED_CONTACTS_BLOCK_DIM,
                     record_tape=False,
                 )
         if self.hydroelastic_sdf is not None:

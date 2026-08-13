@@ -65,6 +65,18 @@ MESH_SDF_BLOCK_DIM = 64
 STACK_CAPACITY = 2 * MESH_SDF_BLOCK_DIM
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __frsqrt_rn(value);
+#else
+return 1.0f / sqrtf(value);
+#endif
+""")
+def _sdf_rsqrt_rn(value: float) -> float:
+    """Return a round-to-nearest reciprocal square root."""
+    ...
+
+
 @wp.func
 def mesh_sdf_contact_search_precision(
     inner_contact_threshold: float,
@@ -1787,7 +1799,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     point_world - midpoint,
                                     inner_spatial_depth,
                                     margin_sum + gap_sum,
-                                    X_ws_tri,
+                                    wp.transform_point(X_ws_tri, point_world),
                                     aabb_lower_tri,
                                     aabb_upper_tri,
                                     voxel_res_tri,
