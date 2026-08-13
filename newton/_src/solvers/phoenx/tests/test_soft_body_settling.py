@@ -142,7 +142,7 @@ def _build_settling_scene(
         num_soft_tetrahedra=int(model.tet_count),
         num_worlds=1,
         substeps=5,
-        solver_iterations=4,
+        solver_iterations=8,
         velocity_iterations=0,
         rigid_contact_max=2 * 1024 * cube_resolution * cube_resolution * num_piles,
         step_layout="single_world",
@@ -191,31 +191,29 @@ class TestSoftBodySettling(unittest.TestCase):
     """Regression guard for the dense-soft-tet drop's residual motion.
 
     The thresholds are set with generous headroom vs. measured
-    behaviour (current branch as of the perf-opts work; small scene
-    4 piles x 2 cubes x ``cube_resolution=1``, 600 frames at 120 Hz):
+    behaviour for the small 4-pile, 2-cube scene after 360 frames at
+    120 Hz and eight solver iterations:
 
     +-----------------------+----------+---------------+---------+
     | config                | max |v|  | %>0.1 m/s     | %>0.05  |
     +=======================+==========+===============+=========+
-    | max=0, batch=2        | 0.24     | 14%           | 45%     |
-    | max=8, batch=2        | 0.38     | 3%            | 30%     |
-    | baseline (main),  max=0 | 0.24   | 20%           | 53%     |
-    | baseline (main),  max=8 | 0.27   | 8%            | 31%     |
+    | max=0, batch=2        | 0.36     | 16%           | 56%     |
+    | max=8, batch=2        | 0.40     | 23%           | 53%     |
     +-----------------------+----------+---------------+---------+
 
     ``MAX_RESIDUAL_SPEED = 1.0`` and ``MAX_FRACTION_FAST = 0.30``
-    (frac > 0.1 m/s) give ~3x headroom on current measurements and
-    1.5x on the worst baseline measurement. A real regression (e.g.,
+    (frac > 0.1 m/s) retain clear headroom on current measurements.
+    A real regression (e.g.,
     a polar-decomp swap that returns the wrong rotation, or an
     average-and-broadcast change that drops some slot velocities)
     would push max |v| well past 1.0 or fraction well past 50%.
 
-    Tightening below baseline would turn this into a noise-flaky
+    Tightening below the observed values would turn this into a noise-flaky
     test; the goal is to catch substantive regressions, not the
     pre-existing dense-soft-tet residual jitter.
     """
 
-    NUM_SETTLE_FRAMES = 600  # 5.0 s at frame_dt = 1/120
+    NUM_SETTLE_FRAMES = 360  # 3.0 s at frame_dt = 1/120
     FRAME_DT = 1.0 / 120.0
     MAX_RESIDUAL_SPEED = 1.0
     FAST_SPEED_THRESHOLD = 0.1

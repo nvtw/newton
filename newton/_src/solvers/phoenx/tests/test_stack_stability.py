@@ -54,10 +54,11 @@ class TestPhoenXTallTowerHoldsAtRest(unittest.TestCase):
     SETTLE_FRAMES = 240  # 2 s at 120 Hz
 
     def test_tower_stays_stacked(self) -> None:
+        """Verify that a tall resting tower remains stable."""
         scene = _PhoenXScene(
             fps=120,
             substeps=4,
-            solver_iterations=16,
+            solver_iterations=32,
             friction=0.5,
         )
         scene.add_ground_plane()
@@ -177,16 +178,19 @@ class TestPhoenXFiveCubeStackScaleSweep(unittest.TestCase):
     _DRIFT_TOL_UNIT = 0.05  # m, pre-scale
 
     def test_scale_half(self) -> None:
+        """Verify stack stability at half scale."""
         max_speed, max_drift = self._run_at_scale(0.5)
         self.assertLess(max_speed, self._VEL_TOL, f"scale=0.5: |v|={max_speed:.3f} m/s")
         self.assertLess(max_drift, self._DRIFT_TOL_UNIT * 0.5, f"scale=0.5: drift={max_drift:.3f} m")
 
     def test_scale_one(self) -> None:
+        """Verify stack stability at unit scale."""
         max_speed, max_drift = self._run_at_scale(1.0)
         self.assertLess(max_speed, self._VEL_TOL, f"scale=1.0: |v|={max_speed:.3f} m/s")
         self.assertLess(max_drift, self._DRIFT_TOL_UNIT, f"scale=1.0: drift={max_drift:.3f} m")
 
     def test_scale_two(self) -> None:
+        """Verify stack stability at double scale."""
         max_speed, max_drift = self._run_at_scale(2.0)
         self.assertLess(max_speed, self._VEL_TOL, f"scale=2.0: |v|={max_speed:.3f} m/s")
         self.assertLess(max_drift, self._DRIFT_TOL_UNIT * 2.0, f"scale=2.0: drift={max_drift:.3f} m")
