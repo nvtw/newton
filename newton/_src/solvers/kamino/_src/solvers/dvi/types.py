@@ -136,9 +136,6 @@ class DVIState:
         self.inequality_num_colors = wp.zeros(max(1, size.num_worlds), dtype=int32)
         self.inequality_ids_by_color = wp.full(max(1, size.sum_of_max_unilaterals), -1, dtype=int32)
         self.inequality_color_starts = wp.zeros(max(1, size.sum_of_max_unilaterals + size.num_worlds), dtype=int32)
-        self.inequality_group_starts = wp.zeros(max(1, size.sum_of_max_unilaterals + size.num_worlds), dtype=int32)
-        self.inequality_tangent_cross = wp.zeros(max(1, size.sum_of_max_unilaterals), dtype=float32)
-        self.inequality_projected_diagonal = wp.zeros(max(1, size.sum_of_max_total_cts), dtype=float32)
         # Sparse DVI only needs a harmless dummy permutation when RCM is disabled.
         self.projected_mio = wp.zeros(max(1, size.num_worlds), dtype=int32)
 
@@ -153,10 +150,15 @@ class DVIState:
 
     def allocate_sparse_projection(
         self,
+        size: SizeKamino,
         joint_rows: list[int],
         unilateral_strides: list[int],
         bilateral_vector_size: int,
     ) -> None:
+        if self.inequality_group_starts is None:
+            self.inequality_group_starts = wp.zeros(max(1, size.sum_of_max_unilaterals + size.num_worlds), dtype=int32)
+            self.inequality_tangent_cross = wp.zeros(max(1, size.sum_of_max_unilaterals), dtype=float32)
+            self.inequality_projected_diagonal = wp.zeros(max(1, size.sum_of_max_total_cts), dtype=float32)
         if self.bilateral_coupling is None:
             response_offsets = []
             response_size = 0
@@ -188,9 +190,10 @@ class DVIState:
         self.inequality_num_colors.zero_()
         self.inequality_ids_by_color.fill_(-1)
         self.inequality_color_starts.zero_()
-        self.inequality_group_starts.zero_()
-        self.inequality_tangent_cross.zero_()
-        self.inequality_projected_diagonal.zero_()
+        if self.inequality_group_starts is not None:
+            self.inequality_group_starts.zero_()
+            self.inequality_tangent_cross.zero_()
+            self.inequality_projected_diagonal.zero_()
         if self.projected_D is not None:
             self.projected_D.zero_()
         if self.bilateral_coupling is not None:

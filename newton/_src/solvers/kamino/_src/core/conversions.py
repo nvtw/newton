@@ -82,18 +82,14 @@ class StructuralUpdateViolation(IntEnum):
 def effective_body_inverse_mass_kernel(
     body_flags: wp.array[wp.int32],
     body_inv_mass: wp.array[wp.float32],
-    body_inv_inertia: wp.array[wp.mat33f],
     effective_inv_mass: wp.array[wp.float32],
-    effective_inv_inertia: wp.array[wp.mat33f],
 ):
-    """Copy inverse mass properties while masking kinematic bodies."""
+    """Copy inverse mass while masking kinematic bodies."""
     body_id = wp.tid()
     if (body_flags[body_id] & int(BodyFlags.KINEMATIC)) != 0:
         effective_inv_mass[body_id] = 0.0
-        effective_inv_inertia[body_id] = wp.mat33f(0.0)
     else:
         effective_inv_mass[body_id] = body_inv_mass[body_id]
-        effective_inv_inertia[body_id] = body_inv_inertia[body_id]
 
 
 @wp.func
@@ -1298,16 +1294,13 @@ def convert_rigid_bodies(
     q_i_0 = wp.empty((model.body_count,), dtype=wp.transformf, device=model.device)
     convert_body_origin_to_com(model.body_com, model.body_q, q_i_0)
     effective_inv_mass = wp.empty_like(model.body_inv_mass)
-    effective_inv_inertia = wp.empty_like(model.body_inv_inertia)
     wp.launch(
         kernel=effective_body_inverse_mass_kernel,
         dim=model.body_count,
         inputs=[
             model.body_flags,
             model.body_inv_mass,
-            model.body_inv_inertia,
             effective_inv_mass,
-            effective_inv_inertia,
         ],
         device=model.device,
     )
@@ -1347,7 +1340,6 @@ def convert_rigid_bodies(
         i_r_com_i=model.body_com,
         i_I_i=model.body_inertia,
         inv_i_I_i=model.body_inv_inertia,
-        effective_inv_i_I_i=effective_inv_inertia,
         flags=model.body_flags,
         q_i_0=q_i_0,
         u_i_0=model.body_qd,

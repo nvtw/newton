@@ -588,7 +588,7 @@ class TestDVISolver(unittest.TestCase):
             state = DVIState(size)
             np.testing.assert_array_equal(state.projected_mio.numpy(), np.zeros(64, dtype=np.int32))
             self.assertIsNone(state.projected_D)
-            state.allocate_sparse_projection([0] * 64, [0] * 64, 0)
+            state.allocate_sparse_projection(size, [0] * 64, [0] * 64, 0)
             self.assertIsNone(state.projected_D)
             with self.assertRaisesRegex(ValueError, "int32 index range"):
                 state.allocate_dense_projection(size)

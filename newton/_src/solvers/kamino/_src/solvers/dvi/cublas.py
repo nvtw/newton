@@ -94,11 +94,34 @@ def _load_cublas_library() -> tuple[ctypes.CDLL, list[object]]:
     raise OSError(f"cuBLAS library was not found{detail}")
 
 
+class _ThreadHandles:
+    """Own the cuBLAS handles created by one host thread."""
+
+    def __init__(self, library: ctypes.CDLL):
+        self.library = library
+        self.handles: dict[int, tuple[wp.context.Device, ctypes.c_void_p]] = {}
+
+    def close(self) -> None:
+        handles, self.handles = self.handles, {}
+        for device, handle in handles.values():
+            try:
+                with wp.ScopedDevice(device):
+                    self.library.cublasDestroy_v2(handle)
+            except Exception:
+                # Thread teardown can race interpreter or CUDA shutdown.
+                pass
+
+    def __del__(self):
+        self.close()
+
+
 class _Cublas:
     def __init__(self):
         self.lib, self._directory_handles = _load_cublas_library()
         self.lib.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
         self.lib.cublasCreate_v2.restype = ctypes.c_int
+        self.lib.cublasDestroy_v2.argtypes = [ctypes.c_void_p]
+        self.lib.cublasDestroy_v2.restype = ctypes.c_int
         self.lib.cublasSetStream_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         self.lib.cublasSetStream_v2.restype = ctypes.c_int
         self.lib.cublasStrsmBatched.argtypes = [
@@ -120,20 +143,21 @@ class _Cublas:
         self.local = threading.local()
 
     def handle(self, device: wp.context.Device) -> ctypes.c_void_p:
-        handles = getattr(self.local, "handles", None)
-        if handles is None:
-            handles = {}
-            self.local.handles = handles
+        owner = getattr(self.local, "owner", None)
+        if owner is None:
+            owner = _ThreadHandles(self.lib)
+            self.local.owner = owner
         key = int(device.ordinal)
-        handle = handles.get(key)
-        if handle is None:
+        entry = owner.handles.get(key)
+        if entry is None:
             handle = ctypes.c_void_p()
             with wp.ScopedDevice(device):
                 status = self.lib.cublasCreate_v2(ctypes.byref(handle))
             if status != 0:
                 raise RuntimeError(f"cublasCreate_v2 failed with status {status}")
-            handles[key] = handle
-        return handle
+            entry = (device, handle)
+            owner.handles[key] = entry
+        return entry[1]
 
 
 _cache: list[_Cublas | bool] = []

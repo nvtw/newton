@@ -202,9 +202,6 @@ class RigidBodiesModel:
     Shape of ``(num_bodies,)``.
     """
 
-    effective_inv_i_I_i: wp.array[wp.mat33f] | None = None
-    """Inverse inertia used by dynamics after applying body motion flags."""
-
     flags: wp.array[wp.int32] | None = None
     """Newton body motion flags, when the model was converted from Newton."""
 
@@ -392,7 +389,6 @@ def _update_body_inertias(
     state_bodies_q_i_in: wp.array[wp.transformf],
     # Outputs:
     model_bodies_effective_inv_m_i_out: wp.array[wp.float32],
-    model_bodies_effective_inv_i_I_i_out: wp.array[wp.mat33f],
     state_bodies_I_i_out: wp.array[wp.mat33f],
     state_bodies_inv_I_i_out: wp.array[wp.mat33f],
 ):
@@ -413,7 +409,6 @@ def _update_body_inertias(
 
     # Store results in the output arrays
     model_bodies_effective_inv_m_i_out[bid] = inv_m_i
-    model_bodies_effective_inv_i_I_i_out[bid] = inv_i_I_i
     state_bodies_I_i_out[bid] = I_i
     state_bodies_inv_I_i_out[bid] = inv_I_i
 
@@ -579,7 +574,6 @@ def update_body_inertias(model: RigidBodiesModel, data: RigidBodiesData):
             data.q_i,
             # Outputs:
             model.effective_inv_m_i,
-            model.effective_inv_i_I_i,
             data.I_i,
             data.inv_I_i,
         ],

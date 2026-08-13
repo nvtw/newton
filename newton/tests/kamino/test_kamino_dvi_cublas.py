@@ -70,6 +70,21 @@ class TestCublasLibraryDiscovery(unittest.TestCase):
         self.assertIs(actual_library, library)
         self.assertEqual(handles, [directory_handle])
 
+    def test_thread_handles_are_destroyed_once(self):
+        """Destroy each thread-owned cuBLAS handle exactly once."""
+        library = mock.Mock()
+        device = mock.Mock()
+        owner = cublas_module._ThreadHandles(library)
+        handle = cublas_module.ctypes.c_void_p(7)
+        owner.handles[0] = (device, handle)
+
+        with mock.patch.object(cublas_module.wp, "ScopedDevice"):
+            owner.close()
+            owner.close()
+
+        library.cublasDestroy_v2.assert_called_once_with(handle)
+        self.assertEqual(owner.handles, {})
+
 
 class TestDVICublas(unittest.TestCase):
     def setUp(self):

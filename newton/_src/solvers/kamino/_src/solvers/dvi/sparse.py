@@ -1134,9 +1134,8 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
     world_row_offsets, row_starts, row_nzb_indices = path.bilateral_row_nzb_topology
     max_joint_rows = path.size.max_of_num_joint_cts
     max_unilateral_rows = path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
-    state.bilateral_coupling.zero_()
-    state.bilateral_response_factor.zero_()
-    state.bilateral_response.zero_()
+    # Coupling and response kernels overwrite every active entry; only the
+    # accumulated bilateral correction must start from zero.
     state.bilateral_delta.zero_()
     wp.launch(
         kernel=_assemble_sparse_bilateral_unilateral_coupling,

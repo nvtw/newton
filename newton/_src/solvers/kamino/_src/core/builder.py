@@ -1375,7 +1375,6 @@ class ModelBuilderKamino:
                 u_i_0=wp.array(bodies_u_i_0, dtype=wp.spatial_vectorf, requires_grad=requires_grad),
             )
             model_bodies.effective_inv_m_i = model_bodies.inv_m_i
-            model_bodies.effective_inv_i_I_i = model_bodies.inv_i_I_i
 
             # Create the joints model
             model_joints = JointsModel(
