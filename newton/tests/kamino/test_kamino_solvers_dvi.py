@@ -56,7 +56,6 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _compact_contact_group_starts,
     _compact_unilateral_correction,
     _compare_compact_contact_topology,
-    _cooperative_pgs_pair_converged,
     _expand_colored_contact_groups,
     _group_mapped_dvi_inequalities,
     _map_active_contacts,
@@ -94,26 +93,6 @@ def _compact_unilateral_correction_for_test(
     result[2] = _compact_unilateral_correction(
         compact_q, wp.int32(0), wp.int32(0), wp.int32(1), wp.int32(1), wp.int32(1)
     )
-
-
-@wp.kernel
-def _cooperative_pgs_convergence_sequence_for_test(
-    updates: wp.array[wp.float32],
-    sweep_count: wp.int32,
-    first_tangent_sweep: wp.int32,
-    tolerance: wp.float32,
-    result: wp.array[wp.int32],
-):
-    pair_update = wp.float32(0.0)
-    completed_sweeps = sweep_count
-    for sweep in range(sweep_count):
-        pair_update = wp.max(pair_update, updates[sweep])
-        if _cooperative_pgs_pair_converged(sweep, first_tangent_sweep, tolerance, pair_update):
-            completed_sweeps = sweep + wp.int32(1)
-            break
-        if (sweep + wp.int32(1)) % wp.int32(2) == wp.int32(0):
-            pair_update = wp.float32(0.0)
-    result[0] = completed_sweeps
 
 
 @wp.kernel
@@ -787,6 +766,8 @@ class TestDVISolver(unittest.TestCase):
             max_of_num_joint_cts=3,
             max_of_max_limits=0,
             max_of_max_contacts=1,
+            sum_of_max_unilaterals=6,
+            sum_of_max_total_cts=10,
         )
         solver = DVISolver()
         solver._device = self.device
@@ -1403,6 +1384,7 @@ class TestDVISolver(unittest.TestCase):
                 tolerance=0.0,
                 regularization=1.0e-6,
             ),
+            problem=problem,
         )
         solver.reset()
         solver.coldstart()
@@ -2166,37 +2148,6 @@ class TestDVISolver(unittest.TestCase):
 
         np.testing.assert_allclose(reconstruct(True), expected_b, rtol=3.0e-6, atol=3.0e-6)
         np.testing.assert_allclose(reconstruct(False), expected_b, rtol=3.0e-6, atol=3.0e-6)
-
-    def test_03g3ab_dvi_cooperative_convergence_uses_complete_sweep_pairs(self):
-        """Stop easy worlds in pairs while preserving hard, disabled, and tangent-warmup budgets."""
-
-        def completed_sweeps(updates, tolerance=1.0e-5, first_tangent_sweep=0):
-            updates = np.asarray(updates, dtype=np.float32)
-            result = wp.empty(1, dtype=wp.int32, device=self.device)
-            wp.launch(
-                kernel=_cooperative_pgs_convergence_sequence_for_test,
-                dim=1,
-                inputs=[
-                    wp.array(updates, dtype=wp.float32, device=self.device),
-                    updates.size,
-                    first_tangent_sweep,
-                    tolerance,
-                    result,
-                ],
-                device=self.device,
-            )
-            return int(result.numpy()[0])
-
-        with self.subTest(case="easy"):
-            self.assertEqual(completed_sweeps([0.0] * 8), 2)
-        with self.subTest(case="hard"):
-            self.assertEqual(completed_sweeps([2.0e-5] * 8), 8)
-        with self.subTest(case="delayed"):
-            self.assertEqual(completed_sweeps([0.0, 2.0e-5, 0.0, 0.0]), 4)
-        with self.subTest(case="tolerance-disabled"):
-            self.assertEqual(completed_sweeps([0.0] * 8, tolerance=0.0), 8)
-        with self.subTest(case="tangent-warmup"):
-            self.assertEqual(completed_sweeps([0.0] * 8, first_tangent_sweep=4), 6)
 
     def test_03g3aa_dvi_compact_schur_skips_unprofitable_world(self):
         """Leave scratch untouched when unilateral rows outnumber bilateral rows."""
@@ -2990,7 +2941,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(solver._model_kamino.bodies.inv_i_I_i.ptr, model.body_inv_inertia.ptr)
         self.assertEqual(float(solver._model_kamino.bodies.effective_inv_m_i.numpy()[body]), 0.0)
         np.testing.assert_array_equal(
-            solver._model_kamino.bodies.effective_inv_i_I_i.numpy()[body],
+            solver._solver_kamino.data.bodies.inv_I_i.numpy()[body],
             np.zeros((3, 3), dtype=np.float32),
         )
 
@@ -3002,7 +2953,7 @@ class TestDVISolver(unittest.TestCase):
         solver.step(model.state(), model.state(), control=None, contacts=None, dt=1.0e-3)
         np.testing.assert_array_equal(solver._model_kamino.bodies.effective_inv_m_i.numpy(), updated_inv_mass)
         np.testing.assert_array_equal(
-            solver._model_kamino.bodies.effective_inv_i_I_i.numpy(),
+            solver._solver_kamino.data.bodies.inv_I_i.numpy(),
             updated_inv_inertia,
         )
 
