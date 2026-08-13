@@ -4,7 +4,8 @@
 """Convenience entry point for running every PhoenX unit test.
 
 Discovers and runs every ``test_*.py`` module in this directory plus the
-nested mass-splitting unit tests in a single ``unittest`` invocation.
+nested mass-splitting unit tests. Direct execution isolates each module in a
+subprocess so CUDA capture and generated-kernel state cannot leak between modules.
 Intended for local development -- ``uv run --extra dev -m unittest
 newton._src.solvers.phoenx.tests.test_run_all`` is much faster than
 ``newton.tests`` because it skips the rest of the project's test
@@ -14,7 +15,7 @@ Run as::
 
     uv run --extra dev -m unittest newton._src.solvers.phoenx.tests.test_run_all
 
-or directly (preferred -- this branch enables the timing report)::
+or directly (preferred -- this enables module isolation and the timing report)::
 
     uv run --extra dev python -m newton._src.solvers.phoenx.tests.test_run_all
 
@@ -36,7 +37,9 @@ stepping -- are caught at a glance. Sample report row::
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -44,6 +47,7 @@ from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_ca
 
 _REPORT_PATH_ENV = "NEWTON_PHOENX_TIMING_REPORT"
 _DEFAULT_REPORT_FILENAME = "test_run_all_report.txt"
+_CHILD_MODULE_ENV = "NEWTON_PHOENX_TEST_CHILD_MODULE"
 
 #: Defensive guard: any future test module added here is skipped by
 #: ``test_run_all``. Use it to exclude tests that instantiate phoenx
@@ -265,6 +269,28 @@ def _write_timing_report(path: str, timings: list[tuple[str, float, str]]) -> No
             f.write(f"{elapsed:8.3f}  {outcome:6s}  {tid}\n")
 
 
+def _read_timing_report(path: str) -> list[tuple[str, float, str]]:
+    """Read the chronological rows from a child timing report."""
+    timings: list[tuple[str, float, str]] = []
+    in_chronological_section = False
+    with open(path, encoding="utf-8") as report:
+        for line in report:
+            if line.startswith("# --- All tests in run order ---"):
+                timings.clear()
+                in_chronological_section = True
+                continue
+            if line.startswith("# --- Slowest"):
+                in_chronological_section = False
+                continue
+            if line.startswith("#") or not line.strip():
+                continue
+            if not in_chronological_section and timings:
+                continue
+            elapsed, outcome, test_id = line.split(maxsplit=2)
+            timings.append((test_id.strip(), float(elapsed), outcome))
+    return timings
+
+
 def _resolve_report_path() -> str:
     """Honor ``$NEWTON_PHOENX_TIMING_REPORT`` so CI can route the
     report to a tracked artifact dir without code changes; default to
@@ -274,27 +300,47 @@ def _resolve_report_path() -> str:
 
 
 def main() -> None:
-    """Run all PhoenX ``test_*.py`` modules with :class:`_TimingTestRunner`.
-
-    Invoked when this module is run as a script (``python -m
-    newton._src.solvers.phoenx.tests.test_run_all``). The unittest
-    ``-m unittest ... test_run_all`` form goes through stock
-    ``unittest.main`` instead and skips the timing report -- intended:
-    that path is for IDE / pre-commit integration where we don't want
-    to clobber the working dir with a report file.
-    """
+    """Run PhoenX modules in isolated processes and combine their timings."""
     _require_cuda_graph_capture()
 
     self_stem = os.path.splitext(os.path.basename(__file__))[0]
+    child_module = os.environ.get(_CHILD_MODULE_ENV)
+    if child_module:
+        suite = unittest.TestLoader().loadTestsFromName(child_module)
+        runner = _TimingTestRunner(verbosity=2, report_path=_resolve_report_path())
+        result = runner.run(suite)
+        sys.exit(0 if result.wasSuccessful() else 1)
 
-    loader = unittest.TestLoader()
-    suite = unittest.TestSuite()
-    for module_name in _iter_test_module_names(self_stem):
-        suite.addTests(loader.loadTestsFromName(module_name))
+    modules = _iter_test_module_names(self_stem)
+    report_path = _resolve_report_path()
+    timings: list[tuple[str, float, str]] = []
+    successful = True
+    with tempfile.TemporaryDirectory(prefix="newton-phoenx-tests-") as temp_dir:
+        for index, module_name in enumerate(modules, start=1):
+            child_report = os.path.join(temp_dir, f"{index:04d}.txt")
+            child_env = os.environ.copy()
+            child_env[_CHILD_MODULE_ENV] = module_name
+            child_env[_REPORT_PATH_ENV] = child_report
+            completed = subprocess.run(
+                [sys.executable, "-m", __name__],
+                env=child_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            if os.path.exists(child_report):
+                timings.extend(_read_timing_report(child_report))
+                _write_timing_report(report_path, timings)
+            module_ok = completed.returncode == 0
+            successful = successful and module_ok
+            status = "ok" if module_ok else "FAILED"
+            print(f"[{index:03d}/{len(modules):03d}] {status:6s} {module_name}", flush=True)
+            if not module_ok:
+                print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
 
-    runner = _TimingTestRunner(verbosity=2, report_path=_resolve_report_path())
-    result = runner.run(suite)
-    sys.exit(0 if result.wasSuccessful() else 1)
+    print(f"\nTiming report: {report_path}")
+    sys.exit(0 if successful else 1)
 
 
 if __name__ == "__main__":
