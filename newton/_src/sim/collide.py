@@ -1327,6 +1327,27 @@ class CollisionPipeline:
                     shape_pairs_filtered=self.shape_pairs_filtered,
                 )
             )
+            replicated_world_count = 0
+            shapes_per_replicated_world = 0
+            replicated_global_shape_count = 0
+            candidate_pair_work_estimate = min(self.shape_pairs_max, _compute_per_world_shape_pairs_max(model))
+            if self.broad_phase_mode == "explicit":
+                candidate_pair_work_estimate = self.shape_pairs_max
+            if shape_world is not None and model.world_count >= 32:
+                shape_world_np = shape_world.numpy()
+                global_indices = np.flatnonzero(shape_world_np < 0)
+                local_shape_count = int(global_indices[0]) if len(global_indices) else shape_count
+                global_shape_count = shape_count - local_shape_count
+                trailing_globals = not global_shape_count or np.all(shape_world_np[local_shape_count:] == -1)
+                if trailing_globals and local_shape_count % model.world_count == 0:
+                    shapes_per_world = local_shape_count // model.world_count
+                    expected_worlds = np.repeat(
+                        np.arange(model.world_count, dtype=shape_world_np.dtype), shapes_per_world
+                    )
+                    if shapes_per_world > 0 and np.array_equal(shape_world_np[:local_shape_count], expected_worlds):
+                        replicated_world_count = model.world_count
+                        shapes_per_replicated_world = shapes_per_world
+                        replicated_global_shape_count = global_shape_count
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
             # Pass write_contact as custom writer to write directly to final Contacts format
@@ -1355,6 +1376,10 @@ class CollisionPipeline:
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
                 has_generic_convex_pairs=has_generic_convex_pairs,
                 all_pairs_generic_convex=all_pairs_generic_convex,
+                candidate_pair_work_estimate=candidate_pair_work_estimate,
+                replicated_world_count=replicated_world_count,
+                shapes_per_replicated_world=shapes_per_replicated_world,
+                replicated_global_shape_count=replicated_global_shape_count,
                 mesh_sdf_identity_scale_only=mesh_sdf_identity_scale_only,
                 mesh_sdf_texture_only=mesh_sdf_texture_only,
                 sdf_texture_paired_samples=model._sdf_texture_paired_samples,

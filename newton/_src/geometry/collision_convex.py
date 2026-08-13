@@ -23,6 +23,77 @@ from .multicontact import create_build_manifold
 from .simplex_solver import create_solve_closest_distance
 
 
+@wp.struct
+class ConvexQueryResult:
+    """Intermediate local-frame result shared by split convex-contact passes."""
+
+    point_a: wp.vec3
+    point_b: wp.vec3
+    normal: wp.vec3
+    signed_distance: float
+
+
+def create_write_convex_query_result(
+    support_func: Any,
+    writer_func: Any,
+    post_process_contact: Any,
+    use_precomputed_center: bool = False,
+):
+    """Create the manifold/write tail used after a convex distance query."""
+    support_funcs = create_support_map_function(support_func, use_precomputed_center)
+
+    @wp.func
+    def write_convex_query_result(
+        geom_a: Any,
+        geom_b: Any,
+        orientation_a: wp.quat,
+        orientation_b: wp.quat,
+        position_a: wp.vec3,
+        position_b: wp.vec3,
+        relative_orientation_b: wp.quat,
+        relative_position_b: wp.vec3,
+        result: ConvexQueryResult,
+        data_provider: Any,
+        skip_multi_contact: bool,
+        writer_data: Any,
+        contact_template: ContactData,
+    ) -> int:
+        if skip_multi_contact:
+            point = 0.5 * (result.point_a + result.point_b)
+            point = wp.quat_rotate(orientation_a, point) + position_a
+            normal_ws = wp.quat_rotate(orientation_a, result.normal)
+
+            contact_data = contact_template
+            contact_data.contact_point_center = point
+            contact_data.contact_normal_a_to_b = normal_ws
+            contact_data.contact_distance = result.signed_distance
+            contact_data.sort_sub_key = contact_template.sort_sub_key << 3
+            contact_data = post_process_contact(
+                contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b
+            )
+            writer_func(contact_data, writer_data, -1)
+            return 1
+
+        return wp.static(
+            create_build_manifold(support_func, writer_func, post_process_contact, _support_funcs=support_funcs)
+        )(
+            geom_a,
+            geom_b,
+            orientation_a,
+            position_a,
+            relative_orientation_b,
+            relative_position_b,
+            result.point_a,
+            result.point_b,
+            result.normal,
+            data_provider,
+            writer_data,
+            contact_template,
+        )
+
+    return write_convex_query_result
+
+
 def create_solve_convex_multi_contact(
     support_func: Any,
     writer_func: Any,
