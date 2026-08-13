@@ -401,16 +401,18 @@ def _set_dvi_direct_status_iterations(
     problem_nl: wp.array[int32],
     problem_nc: wp.array[int32],
     solver_config: wp.array[DVIConfigStruct],
+    preserve_reported: wp.bool,
     # Outputs:
     solver_status: wp.array[DVIStatus],
 ):
     wid = wp.tid()
     cfg = solver_config[wid]
     status = solver_status[wid]
-    if problem_nl[wid] == int32(0) and problem_nc[wid] == int32(0):
-        status.iterations = int32(1)
-    else:
-        status.iterations = cfg.max_alternating_iterations * cfg.inequality_sweeps_per_iteration
+    if not preserve_reported or status.iterations <= int32(0):
+        if problem_nl[wid] == int32(0) and problem_nc[wid] == int32(0):
+            status.iterations = int32(1)
+        else:
+            status.iterations = cfg.max_alternating_iterations * cfg.inequality_sweeps_per_iteration
     solver_status[wid] = status
 
 
@@ -787,6 +789,51 @@ def _compute_dvi_unilateral_velocities(
     state_v_aug[vio + row] = _compute_row_velocity(ncts, mio, vio, row, problem_D, problem_v_f, solution_lambdas)
 
 
+@wp.func
+def _dense_unilateral_terminal_residuals(
+    nl: int32,
+    nc: int32,
+    lcgo: int32,
+    ccgo: int32,
+    cio: int32,
+    vio: int32,
+    lane: int32,
+    threads_per_world: int32,
+    problem_mu: wp.array[float32],
+    problem_P: wp.array[float32],
+    state_v_aug: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+) -> vec3f:
+    """Return physical unilateral cone/complementarity residuals owned by one lane."""
+    r_p = float32(0.0)
+    r_d = float32(0.0)
+    r_c = float32(0.0)
+    for lid in range(lane, nl, threads_per_world):
+        row = vio + lcgo + lid
+        scale = problem_P[row]
+        lambda_l = scale * solution_lambdas[row]
+        velocity_l = state_v_aug[row] / scale
+        r_p = wp.max(r_p, wp.abs(lambda_l - wp.max(float32(0.0), lambda_l)))
+        r_d = wp.max(r_d, wp.abs(velocity_l - wp.max(float32(0.0), velocity_l)))
+        r_c = wp.max(r_c, wp.abs(lambda_l * velocity_l))
+    for cid in range(lane, nc, threads_per_world):
+        row = vio + ccgo + int32(3) * cid
+        lambda_c = vec3f(0.0)
+        velocity_c = vec3f(0.0)
+        for component in range(3):
+            scale = problem_P[row + component]
+            lambda_c[component] = scale * solution_lambdas[row + component]
+            velocity_c[component] = state_v_aug[row + component] / scale
+        mu_c = problem_mu[cio + cid]
+        velocity_c[2] += mu_c * wp.sqrt(velocity_c[0] * velocity_c[0] + velocity_c[1] * velocity_c[1])
+        lambda_projected = project_to_coulomb_cone(lambda_c, mu_c)
+        velocity_projected = project_to_coulomb_dual_cone(velocity_c, mu_c)
+        r_p = wp.max(r_p, wp.max(wp.abs(lambda_c - lambda_projected)))
+        r_d = wp.max(r_d, wp.max(wp.abs(velocity_c - velocity_projected)))
+        r_c = wp.max(r_c, wp.abs(wp.dot(lambda_c, velocity_c)))
+    return vec3f(r_p, r_d, r_c)
+
+
 @wp.kernel
 def _solve_dvi_inequalities_colored_pgs(
     problem_dim: wp.array[int32],
@@ -807,6 +854,8 @@ def _solve_dvi_inequalities_colored_pgs(
     inequality_ids_by_color: wp.array[int32],
     inequality_color_starts: wp.array[int32],
     solver_config: wp.array[DVIConfigStruct],
+    enable_adaptive: wp.bool,
+    solver_status: wp.array[DVIStatus],
     state_delta: wp.array[float32],
     state_v_aug: wp.array[float32],
     solution_lambdas: wp.array[float32],
@@ -824,6 +873,10 @@ def _solve_dvi_inequalities_colored_pgs(
     nc = problem_nc[wid]
     nu = nl + nc
     if nu == 0:
+        if enable_adaptive and lane == int32(0):
+            status = solver_status[wid]
+            status.iterations = int32(1)
+            solver_status[wid] = status
         return
     ncts = problem_dim[wid]
     mio = problem_mio[wid]
@@ -842,7 +895,11 @@ def _solve_dvi_inequalities_colored_pgs(
         tangent_sweep_count = sweep_count * cfg.max_alternating_iterations / int32(2)
         sweep_count = (sweep_count + int32(1)) * cfg.max_alternating_iterations
         first_tangent_sweep = sweep_count - tangent_sweep_count
+    adaptive = enable_adaptive and cfg.tolerance > float32(0.0)
+    completed_sweeps = sweep_count
+    pair_update = float32(0.0)
     for _sweep in range(sweep_count):
+        sweep_update = float32(0.0)
         phase_count = int32(2)
         if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and _sweep < first_tangent_sweep:
             # Establish the support load before friction in inequality-only solves.
@@ -929,6 +986,8 @@ def _solve_dvi_inequalities_colored_pgs(
                             delta_1 = lambda_t_new.y - lambda_t_old.y
 
                     if active != int32(0):
+                        if adaptive:
+                            sweep_update = wp.max(sweep_update, wp.max(wp.abs(delta_0), wp.abs(delta_1)))
                         state_delta[vio + column] = delta_0
                         if column_count == int32(2):
                             state_delta[vio + column + int32(1)] = delta_1
@@ -965,6 +1024,38 @@ def _solve_dvi_inequalities_colored_pgs(
                         wp.atomic_add(state_v_aug, vio + row, dv)
                     update_task += threads_per_world
                 _sync_threads()
+
+        if adaptive:
+            sweep_update_max = wp.tile_max(wp.tile(sweep_update))[0]
+            pair_update = wp.max(pair_update, sweep_update_max)
+            if (_sweep + int32(1)) % int32(2) == int32(0):
+                if pair_update <= cfg.tolerance:
+                    local_residuals = _dense_unilateral_terminal_residuals(
+                        nl,
+                        nc,
+                        lcgo,
+                        ccgo,
+                        cio,
+                        vio,
+                        lane,
+                        threads_per_world,
+                        problem_mu,
+                        problem_P,
+                        state_v_aug,
+                        solution_lambdas,
+                    )
+                    r_p = wp.tile_max(wp.tile(local_residuals[0]))[0]
+                    r_d = wp.tile_max(wp.tile(local_residuals[1]))[0]
+                    r_c = wp.tile_max(wp.tile(local_residuals[2]))[0]
+                    if r_p <= cfg.tolerance and r_d <= cfg.tolerance and r_c <= cfg.tolerance:
+                        completed_sweeps = _sweep + int32(1)
+                        break
+                pair_update = float32(0.0)
+
+    if enable_adaptive and lane == int32(0):
+        status = solver_status[wid]
+        status.iterations = completed_sweeps
+        solver_status[wid] = status
 
 
 @wp.kernel

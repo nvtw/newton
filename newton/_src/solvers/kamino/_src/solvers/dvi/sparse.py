@@ -732,7 +732,7 @@ def _solve_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) -> N
     wp.launch(
         kernel=_set_dvi_direct_status_iterations,
         dim=path.size.num_worlds,
-        inputs=[problem.data.nl, problem.data.nc, path.data.config, path.data.status],
+        inputs=[problem.data.nl, problem.data.nc, path.data.config, False, path.data.status],
         device=path.device,
     )
 
@@ -1303,6 +1303,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
                 problem.data.nl,
                 problem.data.nc,
                 path.data.config,
+                False,
                 path.data.status,
             ],
             device=path.device,

@@ -2694,6 +2694,87 @@ class TestDVISolver(unittest.TestCase):
                 for residual in ("r_p", "r_d", "r_c", "r_b"):
                     np.testing.assert_allclose(status[residual], first_status[residual], rtol=1e-5, atol=1e-8)
 
+    def test_03i1_dense_dvi_adaptive_pgs_matches_full_basic_urdf(self):
+        """Match full PGS quality while stopping converged unilateral sweeps."""
+        if not self.device.is_cuda:
+            self.skipTest("Dense adaptive PGS is a CUDA-only optimization")
+
+        from newton.examples.basic.example_basic_urdf import Example  # noqa: PLC0415
+        from newton.viewer import ViewerNull  # noqa: PLC0415
+
+        world_count = 16
+        frame_count = 40
+        full_sweep_count = 16
+
+        def run(tolerance):
+            original_solver = newton.solvers.SolverKamino
+
+            class SolverProxy(original_solver):
+                def __init__(self, model, *args, **kwargs):
+                    kwargs["config"].dvi.tolerance = tolerance
+                    super().__init__(model, *args, **kwargs)
+
+            args = SimpleNamespace(solver="kamino", world_count=world_count)
+            with mock.patch.object(newton.solvers, "SolverKamino", SolverProxy):
+                example = Example(ViewerNull(num_frames=frame_count), args)
+
+            poses = []
+            velocities = []
+            reaction_l1 = []
+            penetration = []
+            active_counts = []
+            iterations = []
+            residuals = []
+            contacts = example.solver._contacts_kamino
+            status_array = example.solver._solver_kamino.solver_fd.data.status
+            for _ in range(frame_count):
+                example.step()
+                wp.synchronize_device(self.device)
+                poses.append(example.state_0.body_q.numpy().copy())
+                velocities.append(example.state_0.body_qd.numpy().copy())
+                active = int(contacts.model_active_contacts.numpy()[0])
+                reaction = contacts.reaction.numpy()[:active]
+                gaps = contacts.gapfunc.numpy()[:active, 3]
+                active_counts.append(active)
+                reaction_l1.append(float(np.sum(np.linalg.norm(reaction, axis=1))))
+                penetration.append(float(np.max(np.maximum(-gaps, 0.0))) if active else 0.0)
+                status = status_array.numpy()
+                iterations.append(status["iterations"].copy())
+                residuals.append(np.maximum.reduce([status[name] for name in ("r_p", "r_d", "r_c", "r_b")]))
+            return SimpleNamespace(
+                poses=np.asarray(poses),
+                velocities=np.asarray(velocities),
+                reaction_l1=np.asarray(reaction_l1),
+                penetration=np.asarray(penetration),
+                active_counts=np.asarray(active_counts),
+                iterations=np.asarray(iterations),
+                residuals=np.asarray(residuals),
+            )
+
+        full = run(0.0)
+        adaptive = run(1.0e-5)
+
+        active_frames = full.active_counts > 0
+        np.testing.assert_array_equal(full.iterations[active_frames], full_sweep_count)
+        np.testing.assert_array_equal(full.iterations[~active_frames], 1)
+        self.assertTrue(np.any(adaptive.iterations[active_frames] < full_sweep_count))
+        self.assertTrue(
+            np.all((adaptive.iterations[active_frames] >= 2) & (adaptive.iterations[active_frames] <= full_sweep_count))
+        )
+        np.testing.assert_array_equal(adaptive.iterations[~active_frames], 1)
+        self.assertTrue(np.all(adaptive.iterations[active_frames] % 2 == 0))
+        # The final direct equality solve may hit its FP32 floor independently
+        # of PGS. Terminal status remains authoritative and must not materially
+        # worsen relative to the full-budget reference.
+        self.assertLessEqual(float(np.max(adaptive.residuals)), float(np.max(full.residuals)) * 1.1 + 1.0e-7)
+
+        self.assertLess(float(np.max(np.abs(adaptive.poses - full.poses))), 1.0e-5)
+        self.assertLess(float(np.max(np.abs(adaptive.velocities - full.velocities))), 1.0e-3)
+        self.assertLess(float(np.max(adaptive.penetration)), 1.0e-6)
+        self.assertLess(float(np.max(full.penetration)), 1.0e-6)
+        reaction_scale = max(float(np.mean(full.reaction_l1)), 1.0)
+        self.assertLess(float(np.mean(np.abs(adaptive.reaction_l1 - full.reaction_l1))) / reaction_scale, 5.0e-4)
+
     def test_04_dvi_solve_active_joint_limit(self):
         """Resolve an active joint limit through the inequality solver."""
         builder = testing.build_unary_revolute_joint_test(limits=True, ground=False)

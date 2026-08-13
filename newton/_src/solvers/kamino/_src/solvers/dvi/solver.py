@@ -808,6 +808,8 @@ class DVISolver:
                     state.inequality_ids_by_color,
                     state.inequality_color_starts,
                     self._data.config,
+                    False,
+                    self._data.status,
                     state.scratch,
                     state.v_aug,
                     self._data.solution.lambdas,
@@ -818,7 +820,7 @@ class DVISolver:
         wp.launch(
             kernel=_set_dvi_direct_status_iterations,
             dim=self._size.num_worlds,
-            inputs=[problem.data.nl, problem.data.nc, self._data.config, self._data.status],
+            inputs=[problem.data.nl, problem.data.nc, self._data.config, False, self._data.status],
             device=self.device,
         )
 
@@ -1005,6 +1007,8 @@ class DVISolver:
                     self._data.state.inequality_ids_by_color,
                     self._data.state.inequality_color_starts,
                     self._data.config,
+                    wp.bool(self.device.is_cuda and not has_intermediate_bilateral_solve),
+                    self._data.status,
                     self._data.state.scratch,
                     self._data.state.v_aug,
                     self._data.solution.lambdas,
@@ -1027,6 +1031,7 @@ class DVISolver:
                 problem.data.nl,
                 problem.data.nc,
                 self._data.config,
+                wp.bool(self.device.is_cuda and not has_intermediate_bilateral_solve),
                 self._data.status,
             ],
             device=self.device,
