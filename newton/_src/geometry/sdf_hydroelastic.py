@@ -1409,6 +1409,7 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: boo
     Args:
         pressure_func: Monotonic pressure callback to evaluate.
         integer_center: Whether every subblock center lies on an integer voxel.
+        paired_samples: Whether the generated kernel reads paired-X or scalar SDF texture storage.
     """
 
     sample_sdf = _texture_sample_sdf_zfiltered if paired_samples else _texture_sample_sdf_scalar
@@ -1895,6 +1896,7 @@ def get_generate_contacts_kernel(
         mc_edge_clamp_min: Lower bound for the marching-cubes edge
             interpolation parameter; see
             :attr:`HydroelasticSDF.Config.mc_edge_clamp_min`.
+        paired_samples: Whether the generated kernel reads paired-X or scalar SDF texture storage.
 
     Returns:
         generate_contacts_kernel: Warp kernel for contact generation.

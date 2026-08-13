@@ -2000,6 +2000,10 @@ class NarrowPhase:
             shape_collision_aabb_upper: Local-space AABB upper bounds for each shape (for voxel binning)
             shape_voxel_resolution: Voxel grid resolution for each shape (for voxel binning)
             mesh_edge_indices: Packed array of mesh edge vertex pairs for all shapes.
+            mesh_edge_centers: Packed precomputed edge centers and radii paired with
+                ``mesh_edge_halves``. Omitting either array selects the raw mesh-index fallback.
+            mesh_edge_halves: Packed precomputed edge half-vectors and corner ownership paired with
+                ``mesh_edge_centers``. Omitting either array selects the raw mesh-index fallback.
             shape_edge_range: Per-shape (start, count) into mesh_edge_indices.
             hydroelastic_shape_sdf_data_prepared: Whether finalized hydroelastic SDF descriptors were cached upstream.
             writer_data: Custom struct instance for contact writing (type must match the custom writer function)

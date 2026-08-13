@@ -11537,8 +11537,11 @@ class ModelBuilder:
                         sdf_kwargs["scale"] = tuple(shape_scale)
                         sdf_kwargs["texture_format"] = sdf_tex_fmt
                         sdf_kwargs["paired_samples"] = self.sdf_texture_paired_samples
+                        # Convex collision geometry is deduplicated before finalization,
+                        # so build and cache its deferred SDF against that same topology.
+                        sdf_source = generated_shape_sources[i] if shape_type == GeoType.CONVEX_MESH else shape_src
                         deferred_key = (
-                            id(shape_src),
+                            id(sdf_source),
                             tuple(shape_scale),
                             tuple(sdf_narrow_band_range),
                             sdf_target_voxel_size,
@@ -11548,9 +11551,6 @@ class ModelBuilder:
                         )
                         mesh_sdf = deferred_mesh_sdf_cache.get(deferred_key)
                         if mesh_sdf is None:
-                            # Convex collision geometry is deduplicated before finalization,
-                            # so build its deferred SDF edges against that same topology.
-                            sdf_source = generated_shape_sources[i] if shape_type == GeoType.CONVEX_MESH else shape_src
                             mesh_copy = sdf_source.copy()
                             mesh_copy.build_sdf(**sdf_kwargs)
                             mesh_sdf = mesh_copy.sdf
