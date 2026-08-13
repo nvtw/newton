@@ -32,7 +32,7 @@ import newton
 from newton._src.solvers.phoenx.solver import SolverPhoenX
 from newton._src.solvers.phoenx.solver_phoenx import _choose_initial_threads_per_world
 from newton._src.solvers.phoenx.tests._test_helpers import make_solver_graph_stepper
-from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
+from newton._src.solvers.phoenx.tests.test_multi_world import _build_direct_pendulums, _make_direct_solver
 
 
 def _settle_pos(num_worlds: int, tpw, frames: int = 30) -> np.ndarray:
@@ -115,7 +115,8 @@ class TestThreadsPerWorldPicker(unittest.TestCase):
         sm_count = getattr(device, "sm_count", 0) or 1
         for num_worlds, expected_tpw in ((2 * sm_count, 16), (4 * sm_count, 8)):
             with self.subTest(num_worlds=num_worlds):
-                world, _ = _build_n_pendulums(num_worlds=int(num_worlds), device=device)
+                model, _ = _build_direct_pendulums(world_count=int(num_worlds))
+                world = _make_direct_solver(model).world
                 self.assertFalse(world._tpw_auto)
                 self.assertEqual(int(world._tpw_choice.numpy()[0]), expected_tpw)
 
