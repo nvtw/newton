@@ -1163,6 +1163,11 @@ add_contact_example_test(
     test_options={"num-frames": 120, "world-count": 1, "solver": "kamino"},
     use_viewer=True,
     test_suffix="kamino",
+    expect_output_regexes=[
+        (_NUT_BOLT_DOWNLOAD_START_OUTPUT_RE, "stdout"),
+        (_NUT_BOLT_DOWNLOAD_DONE_OUTPUT_RE, "stdout"),
+    ],
+    allow_output_regexes=[(_ISAACGYM_ASSET_DOWNLOAD_OUTPUT_RE, "stdout")],
 )
 add_contact_example_test(
     name="contacts.example_nut_bolt_hydro",
@@ -1181,6 +1186,11 @@ add_contact_example_test(
     test_options={"num-frames": 120, "world-count": 1, "solver": "kamino"},
     use_viewer=True,
     test_suffix="kamino",
+    expect_output_regexes=[
+        (_NUT_BOLT_DOWNLOAD_START_OUTPUT_RE, "stdout"),
+        (_NUT_BOLT_DOWNLOAD_DONE_OUTPUT_RE, "stdout"),
+    ],
+    allow_output_regexes=[(_ISAACGYM_ASSET_DOWNLOAD_OUTPUT_RE, "stdout")],
 )
 add_contact_example_test(
     name="contacts.example_brick_stacking",
