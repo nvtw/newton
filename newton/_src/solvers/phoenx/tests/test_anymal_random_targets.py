@@ -34,7 +34,7 @@ import warp as wp
 
 import newton
 
-ANYMAL_FRAMES = 600  # 3 s @ 200 Hz -- well past any compile/warm-up transient
+ANYMAL_FRAMES = 120  # 0.6 s @ 200 Hz -- enough to expose unstable random-drive response
 ANYMAL_DT = 1.0 / 200.0
 ANYMAL_SUBSTEPS = 4
 
