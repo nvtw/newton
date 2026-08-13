@@ -1838,6 +1838,7 @@ class NarrowPhase:
         mesh_edge_centers: wp.array[wp.vec4] | None = None,
         mesh_edge_halves: wp.array[wp.vec4] | None = None,
         shape_edge_range: wp.array[wp.vec2i] | None = None,
+        hydroelastic_shape_sdf_data_prepared: bool = False,
         writer_data: Any,
         device: Devicelike | None = None,  # Device to launch on
     ) -> None:
@@ -1865,6 +1866,7 @@ class NarrowPhase:
             shape_voxel_resolution: Voxel grid resolution for each shape (for voxel binning)
             mesh_edge_indices: Packed array of mesh edge vertex pairs for all shapes.
             shape_edge_range: Per-shape (start, count) into mesh_edge_indices.
+            hydroelastic_shape_sdf_data_prepared: Whether finalized hydroelastic SDF descriptors were cached upstream.
             writer_data: Custom struct instance for contact writing (type must match the custom writer function)
             device: Device to launch on
         """
@@ -2251,6 +2253,7 @@ class NarrowPhase:
                 self.shape_pairs_sdf_sdf,
                 self.shape_pairs_sdf_sdf_count,
                 writer_data,
+                hydroelastic_shape_sdf_data_prepared,
             )
 
         # Verify no collision pipeline buffers overflowed

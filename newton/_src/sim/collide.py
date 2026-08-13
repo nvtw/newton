@@ -1168,6 +1168,11 @@ class CollisionPipeline:
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
+        self._hydro_shape_sdf_data_prepared = self.hydroelastic_sdf is not None
+        if self.hydroelastic_sdf is not None:
+            # Model SDF descriptors are finalized here; only shape transforms change per frame.
+            self.hydroelastic_sdf._prepare_shape_sdf_data(model._texture_sdf_data, model._shape_sdf_index)
+
         # Allocate buffers
         with wp.ScopedDevice(device):
             self.broad_phase_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -1546,6 +1551,7 @@ class CollisionPipeline:
             mesh_edge_halves=model.mesh_edge_halves,
             shape_edge_range=model.shape_edge_range,
             writer_data=writer_data,
+            hydroelastic_shape_sdf_data_prepared=self._hydro_shape_sdf_data_prepared,
             device=self.device,
         )
 
