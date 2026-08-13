@@ -26,12 +26,31 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _STRAGGLER_BLOCK_DIM,
     get_fast_tail_kernel,
     get_singleworld_kernel,
 )
-from newton._src.solvers.phoenx.tests.test_multi_world import _build_n_pendulums
+from newton._src.solvers.phoenx.tests.test_multi_world import _build_direct_pendulums
+
+
+def _build_n_pendulums(*, num_worlds: int, pendulums_per_world: int = 1, multi_world_scheduler: str = "auto"):
+    """Build a public-model PGS fixture for launch inspection."""
+    model, bodies = _build_direct_pendulums(world_count=num_worlds, mechanisms_per_world=pendulums_per_world)
+    solver = newton.solvers.SolverPhoenX(
+        model,
+        substeps=5,
+        solver_iterations=1,
+        velocity_iterations=1,
+        articulation_mode="maximal",
+        step_layout="multi_world",
+        multi_world_scheduler=multi_world_scheduler,
+    )
+    solver._direct_equality_system = None
+    solver.world._direct_equality_system = None
+    solver.world.set_joint_pgs_ownership(np.ones(solver.world.num_joints, dtype=np.int32))
+    return solver.world, bodies
 
 
 def _main_solve_kernel_launch_bounds(world) -> dict[str, int]:
@@ -187,7 +206,6 @@ class TestPhoenXBlockWorldGraphCapture(unittest.TestCase):
         with wp.ScopedCapture(device=world.device) as capture:
             world.step(dt=1.0 / 60.0, contacts=None, shape_body=None)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(world.device)
 
         self.assertTrue(np.isfinite(world.bodies.position.numpy()).all())
 
@@ -202,7 +220,6 @@ class TestPhoenXBlockWorldGraphCapture(unittest.TestCase):
         with wp.ScopedCapture(device=world.device) as capture:
             world.step(dt=1.0 / 60.0, contacts=None, shape_body=None)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(world.device)
 
         self.assertTrue(np.isfinite(world.bodies.position.numpy()).all())
 
@@ -216,7 +233,6 @@ class TestPhoenXBlockWorldGraphCapture(unittest.TestCase):
         with wp.ScopedCapture(device=world.device) as capture:
             world.step(dt=1.0 / 60.0, contacts=None, shape_body=None)
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(world.device)
 
         self.assertTrue(np.isfinite(world.bodies.position.numpy()).all())
 

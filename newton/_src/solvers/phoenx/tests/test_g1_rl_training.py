@@ -3615,7 +3615,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             if "ankle_roll_link_geom_" in label:
                 self.assertEqual(int(flags[shape_index]) & collide_bit, 0)
         with wp.ScopedCapture(device=device) as capture:
-            env.model.collide(env.state_0, env.contacts)
+            env.collision_pipeline.collide(env.state_0, env.contacts)
         wp.capture_launch(capture.graph)
         self.assertGreater(int(env.contacts.rigid_contact_count.numpy()[0]), 0)
         self.assertEqual(train_config.hidden_layers, g1_recipe.HIDDEN_LAYERS)
@@ -3991,8 +3991,9 @@ class TestG1PhoenXRL(unittest.TestCase):
                 ),
                 device=device,
             )
+            actions = wp.zeros((1, env.action_dim), dtype=wp.float32, device=device)
+            env.step(actions)
             env.episode_steps.assign(np.array([10], dtype=np.int32))
-            env.model.collide(env.state_0, env.contacts)
             with wp.ScopedCapture(device=device) as capture:
                 env.observe()
             wp.capture_launch(capture.graph)
@@ -4034,7 +4035,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 self.assertEqual(int(flags[shape_index]) & visible_bit, 0)
 
         with wp.ScopedCapture(device=device) as capture:
-            env.model.collide(env.state_0, env.contacts)
+            env.collision_pipeline.collide(env.state_0, env.contacts)
         wp.capture_launch(capture.graph)
         self.assertGreater(int(env.contacts.rigid_contact_count.numpy()[0]), 0)
 
@@ -4092,7 +4093,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                     self.assertIn(tuple(sorted((foot_shape, int(robot_shape)))), filtered_pairs)
 
         with wp.ScopedCapture(device=device) as capture:
-            env.model.collide(env.state_0, env.contacts)
+            env.collision_pipeline.collide(env.state_0, env.contacts)
         wp.capture_launch(capture.graph)
         self.assertGreater(int(env.contacts.rigid_contact_count.numpy()[0]), 0)
 
@@ -4123,7 +4124,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertAlmostEqual(float(shape_mu[ground_shape]), 0.6, places=6)
 
         with wp.ScopedCapture(device=device) as capture:
-            env.model.collide(env.state_0, env.contacts)
+            env.collision_pipeline.collide(env.state_0, env.contacts)
         wp.capture_launch(capture.graph)
 
         self.assertGreater(int(env.contacts.rigid_contact_count.numpy()[0]), 0)
@@ -4221,7 +4222,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                         outputs=[env.state_0.body_f],
                         device=env.device,
                     )
-                    env.model.collide(env.state_0, env.contacts)
+                    env.collision_pipeline.collide(env.state_0, env.contacts)
                     env.solver.step(
                         env.state_0,
                         env.state_1,
@@ -6141,7 +6142,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         )
         env = rl.EnvG1PhoenX(env_config, device=device)
         actions = wp.zeros((env.world_count, env.action_dim), dtype=wp.float32, device=device)
-        original_collide = env.model.collide
+        original_collide = env.collision_pipeline.collide
         collide_calls = 0
 
         def counted_collide(state, contacts):
@@ -6149,7 +6150,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             collide_calls += 1
             return original_collide(state, contacts)
 
-        env.model.collide = counted_collide
+        env.collision_pipeline.collide = counted_collide
         with wp.ScopedCapture(device=device) as capture:
             env.step(actions)
         self.assertEqual(collide_calls, 1)

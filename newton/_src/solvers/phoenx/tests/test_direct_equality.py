@@ -329,8 +329,8 @@ class TestDirectEquality(unittest.TestCase):
         self.assertGreaterEqual(int(roots[0]), 0)
         self.assertEqual(int(roots[0]), int(roots[1]))
 
-    def test_large_mechanism_uses_panel_parallel_factorization(self):
-        """Solve a large mechanism with compact panel-parallel tasks."""
+    def test_large_mechanism_uses_cooperative_factorization(self):
+        """Solve a large narrow mechanism with cooperative factorization."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
@@ -347,8 +347,7 @@ class TestDirectEquality(unittest.TestCase):
         self.assertEqual(direct.solver.symbolic.tile_counts, (9,))
         self.assertGreater(direct.solver.symbolic.panel_count, 9)
         self.assertLess(direct.matrix.size, 130 * 130)
-        schedule = direct.solver._persistent_schedule
-        self.assertTrue(np.any(schedule.task_panel.numpy() != schedule.task_diagonal_panel.numpy()))
+        np.testing.assert_array_equal(direct.solver.cooperative_factor_mechanism.numpy(), np.array([0], dtype=np.int32))
 
         state = model.state()
         _run_captured_steps(solver, state, model.control(), 1)
@@ -586,17 +585,7 @@ class TestDirectEquality(unittest.TestCase):
         symbolic = direct.solver.symbolic
         self.assertEqual(direct.matrix.size, symbolic.panel_count * direct.solver.block_size**2)
         self.assertLess(direct.matrix.size, 10 * 10 + 40 * 40 + 130 * 130)
-        persistent = direct.solver._persistent_schedule
-        self.assertEqual(persistent.task_panel.size, symbolic.panel_count)
-        self.assertEqual(persistent.initial_task.size, 3)
-        task_panel = persistent.task_panel.numpy()
-        task_diagonal_panel = persistent.task_diagonal_panel.numpy()
-        self.assertEqual(
-            int(np.count_nonzero(task_panel != task_diagonal_panel)),
-            symbolic.panel_count - sum(symbolic.tile_counts),
-        )
-        np.testing.assert_array_equal(np.sort(task_panel), np.arange(symbolic.panel_count, dtype=np.int32))
-        self.assertEqual(int(np.count_nonzero(task_panel == task_diagonal_panel)), sum(symbolic.tile_counts))
+        np.testing.assert_array_equal(direct.solver.cooperative_factor_mechanism.numpy(), np.arange(3, dtype=np.int32))
 
         state = model.state()
         _run_captured_steps(solver, state, model.control(), 20)

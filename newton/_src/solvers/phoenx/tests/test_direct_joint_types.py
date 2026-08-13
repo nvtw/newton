@@ -201,7 +201,9 @@ def _build_closed_loop_contact_model() -> tuple[newton.Model, tuple[int, ...], i
     builder.add_articulation([root, *joints[:3]])
     builder.joint_articulation[joints[3]] = -1
     builder.color()
-    return builder.finalize(device=wp.get_preferred_device()), tuple(bodies), joints[3]
+    model = builder.finalize(device=wp.get_preferred_device())
+    newton.eval_ik(model, model.state(), model.joint_q, model.joint_qd)
+    return model, tuple(bodies), joints[3]
 
 
 def _build_mechanism_free_body_contact_model() -> tuple[newton.Model, int, int]:
