@@ -222,7 +222,7 @@ class SparseDVIPath:
             _compute_sparse_solution_vectors(self, problem)
 
     def correct_contact_poses(self, problem: DualProblem) -> None:
-        """Apply an experimental pose-only split recovery for free rigid contacts."""
+        """Apply experimental opt-in pose-only recovery for free rigid contacts."""
         if (
             not self.split_contact_recovery_enabled
             or self.bilateral_solver is not None

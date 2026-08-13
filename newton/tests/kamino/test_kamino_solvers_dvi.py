@@ -353,6 +353,7 @@ def _run_split_contact_sphere(
     )
     config.constraints.gamma = gamma
     config.constraints.delta = delta
+    config.dvi.split_contact_recovery = True
     solver = SolverKamino(model, config=config)
     state_0 = model.state()
     state_1 = model.state()
@@ -525,6 +526,27 @@ class TestDVISolver(unittest.TestCase):
         self.assertFalse(_supports_split_contact_recovery(True, 0))
         self.assertFalse(_supports_split_contact_recovery(False, 1))
         self.assertFalse(_supports_split_contact_recovery(True, 1))
+
+    def test_00_split_contact_recovery_config(self):
+        """Expose recovery as a documented construction-time DVI choice."""
+        self.assertFalse(DVISolver.Config().split_contact_recovery)
+        self.assertTrue(DVISolver.Config(split_contact_recovery=True).split_contact_recovery)
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        body = builder.add_body(xform=wp.transformf((0.0, 0.0, 0.1), wp.quat_identity()))
+        builder.add_shape_sphere(body, radius=0.1)
+        builder.add_ground_plane()
+        model = builder.finalize(device=self.device)
+        config = SolverKamino.Config(
+            dynamics_solver="dvi",
+            integrator="moreau",
+            sparse_dynamics=True,
+            sparse_jacobian=True,
+        )
+        config.dvi.split_contact_recovery = True
+        solver = SolverKamino(model, config=config)
+        self.assertTrue(solver._solver_kamino.solver_fd._sparse_path.split_contact_recovery_enabled)
 
     def test_00_split_contact_launch_width_policy(self):
         """Widen only contact-rich single-world CUDA split recovery."""
@@ -3326,6 +3348,7 @@ class TestDVISolver(unittest.TestCase):
                 max_contacts_per_pair=8,
             ),
         )
+        config.dvi.split_contact_recovery = True
         solver = SolverKamino(model, config=config)
         state_0 = model.state()
         state_1 = model.state()

@@ -294,7 +294,9 @@ class SolverKaminoImpl(SolverBase):
                 f"Unsupported integrator type: Expected 'euler' or 'moreau', but got {self._config.integrator}."
             )
         if isinstance(self._solver_fd, DVISolver):
-            self._solver_fd.set_split_contact_recovery_enabled(isinstance(self._integrator, IntegratorMoreauJean))
+            self._solver_fd.set_split_contact_recovery_enabled(
+                self._config.dvi.split_contact_recovery and isinstance(self._integrator, IntegratorMoreauJean)
+            )
 
         # Allocate additional internal data for reset operations
         with wp.ScopedDevice(self._model.device):
