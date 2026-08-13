@@ -662,7 +662,7 @@ class GeneralMaximalTreeProjector:
                         locked_linear,
                         locked_angular,
                     )
-                    if reduced_mode is None:
+                    if reduced_mode not in ("FIXED", "BALL", "UNIVERSAL", "REVOLUTE", "PRISMATIC"):
                         return False
                 if kind != int(JointType.REVOLUTE) and np.any(armature[qd_start : qd_start + dof_count] > 0.0):
                     return False
@@ -682,6 +682,13 @@ class GeneralMaximalTreeProjector:
                     return False
                 bodies.add(child)
             claimed_bodies.update(bodies)
+        for joint in range(int(model.joint_count)):
+            if joint_enabled is not None and not bool(joint_enabled[joint]):
+                continue
+            if int(joint_articulation[joint]) >= 0:
+                continue
+            if int(joint_parent[joint]) in claimed_bodies or int(joint_child[joint]) in claimed_bodies:
+                return False
         return True
 
     def __init__(

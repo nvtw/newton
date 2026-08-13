@@ -388,7 +388,7 @@ def _make_d6_universal_tree(device):
     return builder.finalize(device=device)
 
 
-def _make_generic_d6_tree(device):
+def _make_cylindrical_d6_tree(device):
     builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
     body = builder.add_link(mass=1.0)
     builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
@@ -2247,12 +2247,12 @@ class TestReducedArticulation(unittest.TestCase):
                             self.assertLess(float(np.max(np.abs(basis.T @ reaction[body]))), 3.0e-5)
                         self.assertLess(float(np.linalg.norm(delta)), 3.0e-5)
 
-    def test_maximal_projected_generic_d6_uses_pure_reduced_fallback_inside_graph(self):
+    def test_maximal_projected_cylindrical_d6_uses_reduced_fallback_inside_graph(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
             self.skipTest("projected articulation tests require CUDA graph capture")
 
-        model = _make_generic_d6_tree(device)
+        model = _make_cylindrical_d6_tree(device)
         state0 = model.state()
         state1 = model.state()
         qd = np.array([0.4, 0.7], dtype=np.float32)
@@ -2574,11 +2574,9 @@ class TestReducedArticulation(unittest.TestCase):
             solver_iterations=4,
             velocity_iterations=1,
         )
-        self.assertIsInstance(solver._maximal_tree_projector, MaximalTreeProjector)
-        self.assertIsNone(solver._reduced_articulation)
-        loop_cid = int(solver._joint_constraints.joint_idx_to_cid.numpy()[loop_joint])
-        self.assertGreaterEqual(loop_cid, 0)
-        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[loop_cid]), 1)
+        self.assertIsNone(solver._maximal_tree_projector)
+        self.assertIsNotNone(solver._reduced_articulation)
+        self.assertTrue(solver._reduced_articulation.owned_joint_mask_np[loop_joint])
 
         with wp.ScopedCapture(device=device) as capture:
             solver.step(state, output, None, None, 1.0 / 2000.0)
@@ -2788,11 +2786,9 @@ class TestReducedArticulation(unittest.TestCase):
             solver_iterations=8,
             velocity_iterations=1,
         )
-        self.assertIsInstance(solver._maximal_tree_projector, GeneralMaximalTreeProjector)
-        self.assertIsNone(solver._reduced_articulation)
-        loop_cid = int(solver._joint_constraints.joint_idx_to_cid.numpy()[loop_joint])
-        self.assertGreaterEqual(loop_cid, 0)
-        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[loop_cid]), 1)
+        self.assertIsNone(solver._maximal_tree_projector)
+        self.assertIsNotNone(solver._reduced_articulation)
+        self.assertTrue(solver._reduced_articulation.owned_joint_mask_np[loop_joint])
 
         contacts = model.contacts()
         control = model.control()
