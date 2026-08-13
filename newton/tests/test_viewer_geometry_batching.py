@@ -117,7 +117,11 @@ class TestViewerGeometryBatching(unittest.TestCase):
             """
         )
 
-        site = next(i for i, flags in enumerate(builder.shape_flags) if flags & newton.ShapeFlags.SITE)
+        sites = [i for i, flags in enumerate(builder.shape_flags) if flags & newton.ShapeFlags.SITE]
+        self.assertEqual(builder.shape_count, 2)
+        self.assertEqual(len(sites), 1)
+
+        site = sites[0]
         self.assertEqual(builder.shape_scale[site][2], 0.0)
 
         viewer = _ViewerGeometryBatchingProbe()
