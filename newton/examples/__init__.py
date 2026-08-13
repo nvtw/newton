@@ -546,6 +546,12 @@ def run(example, args):
             continue
 
         if browser is not None and browser._reset_requested:
+            reset_in_place = getattr(example, "reset_in_place", None)
+            if callable(reset_in_place):
+                browser._reset_requested = False
+                reset_in_place()
+                continue
+
             # Drop our reference and force cycle collection so the old
             # example's destructors finish before reset() enters the new
             # CUDA graph capture; otherwise late texture/array __del__

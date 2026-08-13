@@ -29,6 +29,7 @@ DEFAULT_USD_PATH = Path("/home/twidmer/Documents/Meshes/Marbles/Marbles_Assets_w
 LOAD_USD_ENVIRONMENT = False
 ENABLE_PHYSICS = True
 PRINT_PHYSICS_DATA = True
+START_PAUSED = True
 
 _RENDERER_FROM_PHYSICS = np.array(
     (
@@ -334,6 +335,8 @@ class Example:
         self.state = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.model.body_q.assign(self.state.body_q)
+        self.initial_state = self.model.state()
+        self.initial_state.assign(self.state)
         self.control = self.model.control()
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
@@ -408,6 +411,16 @@ class Example:
         else:
             wp.capture_launch(self.graph)
         self.sim_time += self.frame_dt
+
+    def reset_in_place(self) -> None:
+        """Restore simulation state without rebuilding the retained USD scene."""
+        self.sim_time = 0.0
+        if not self.physics_enabled:
+            return
+        self.state.assign(self.initial_state)
+        self.state.clear_forces()
+        self.collision_pipeline.reset_contact_matching()
+        self._sync_dynamic_render_transforms()
 
     def _sync_dynamic_render_transforms(self) -> None:
         if not self._dynamic_bindings:
@@ -488,7 +501,7 @@ if __name__ == "__main__":
         default=PRINT_PHYSICS_DATA,
         help="Print all authored physics schemas, properties, and import mappings.",
     )
-    parser.set_defaults(viewer="optix")
+    parser.set_defaults(viewer="optix", paused=START_PAUSED)
     viewer, args = newton.examples.init(parser)
     if args.usd_max_texture_size == 0:
         args.usd_max_texture_size = None

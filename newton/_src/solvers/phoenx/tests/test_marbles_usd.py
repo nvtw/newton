@@ -10,6 +10,7 @@ import numpy as np
 
 import newton
 from newton._src.solvers.phoenx.examples.example_marbles_usd import (
+    Example,
     _normalize_stage_units_for_newton,
     _physics_ignore_paths,
 )
@@ -74,6 +75,45 @@ class TestMarblesUsd(unittest.TestCase):
         self.assertIn("/Trigger", ignored)
         self.assertIn("topology", ignored["/Missing"])
         self.assertIn("trigger", ignored["/Trigger"].lower())
+
+    def test_reset_in_place_reuses_loaded_scene(self):
+        """Restore PhoenX state without reconstructing the USD example."""
+
+        class StateStub:
+            def __init__(self):
+                self.assigned_from = None
+                self.forces_cleared = False
+
+            def assign(self, other):
+                self.assigned_from = other
+
+            def clear_forces(self):
+                self.forces_cleared = True
+
+        class CollisionPipelineStub:
+            def __init__(self):
+                self.reset_count = 0
+
+            def reset_contact_matching(self):
+                self.reset_count += 1
+
+        example = Example.__new__(Example)
+        example.sim_time = 12.0
+        example.physics_enabled = True
+        example.state = StateStub()
+        example.initial_state = StateStub()
+        example.collision_pipeline = CollisionPipelineStub()
+        sync_count = []
+        example._sync_dynamic_render_transforms = lambda: sync_count.append(1)
+
+        example.reset_in_place()
+
+        self.assertEqual(example.sim_time, 0.0)
+        self.assertIs(example.state.assigned_from, example.initial_state)
+        self.assertTrue(example.state.forces_cleared)
+        self.assertEqual(example.collision_pipeline.reset_count, 1)
+
+        self.assertEqual(sync_count, [1])
 
 
 if __name__ == "__main__":
