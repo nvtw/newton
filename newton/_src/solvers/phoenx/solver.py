@@ -530,10 +530,19 @@ class SolverPhoenX(SolverBase):
         if model.body_count:
             self._launch_init_phoenx_bodies(model)
 
-        # Reduced/projected backends initialize authored generalized
-        # coordinates through Newton FK. Full coordinates take body poses as
-        # authoritative and must not depend on articulation ranges.
-        if articulation_mode != "maximal" and int(model.body_count) > 0 and int(model.joint_count) > 0:
+        # Initialize authored generalized coordinates when the model declares
+        # an articulation. Metadata-free full-coordinate models keep authored
+        # body poses authoritative.
+        has_articulation_metadata = (
+            int(model.articulation_count) > 0
+            and model.articulation_start is not None
+            and model.joint_articulation is not None
+        )
+        if (
+            int(model.body_count) > 0
+            and int(model.joint_count) > 0
+            and (articulation_mode != "maximal" or has_articulation_metadata)
+        ):
             newton.eval_fk(model, model.joint_q, model.joint_qd, model)
 
         self._joint_constraints: JointInitArrays = build_joint_init_arrays(
