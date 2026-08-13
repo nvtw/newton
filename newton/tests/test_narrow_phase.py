@@ -1969,6 +1969,7 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         count = contact_count.numpy()[0]
         self.assertGreater(count, 0, "Should still produce contacts for pairs that fit in the buffer")
 
+    @unittest.skipUnless(_cuda_available, "Sparse GJK routing is enabled only on CUDA")
     def test_sparse_gjk_routing_preserves_filtered_slots(self):
         """Preserve source slots while filtering analytic pairs from sparse GJK routing."""
         geom_list = [

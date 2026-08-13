@@ -1020,8 +1020,9 @@ def _texture_sample_sdf_variant(
     de-scale into a single pass for the value-only path.
 
     Args:
-        sdf: texture SDF data
-        local_pos: query position in local SDF space [m]
+        sdf: Texture SDF data.
+        local_pos: Query position in local SDF space [m].
+        paired_samples: Whether to read paired-X or scalar texture storage.
 
     Returns:
         Signed distance value [m].
@@ -1503,8 +1504,9 @@ def _texture_sample_sdf_hw_variant(
     avoided in stress-integration paths like hydroelastic contact.
 
     Args:
-        sdf: texture SDF data
-        local_pos: query position in local SDF space [m]
+        sdf: Texture SDF data.
+        local_pos: Query position in local SDF space [m].
+        paired_samples: Whether to read paired-X or scalar texture storage.
 
     Returns:
         Signed distance value [m].

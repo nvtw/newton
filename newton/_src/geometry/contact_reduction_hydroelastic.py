@@ -1491,7 +1491,13 @@ class HydroelasticContactReduction:
             # export_hydroelastic_contact_to_buffer(..., reduction.get_data_struct())
 
             reduction.reduce(shape_material_k_hydro, shape_transform, aabb_lower, aabb_upper, voxel_res, grid_size)
-            reduction.export(shape_gap, shape_transform, writer_data, grid_size)
+            reduction.export(
+                shape_material_k_hydro,
+                shape_gap,
+                shape_transform,
+                writer_data,
+                grid_size,
+            )
 
     Attributes:
         reducer: The underlying ``GlobalContactReducer`` instance.
@@ -1542,8 +1548,6 @@ class HydroelasticContactReduction:
         self.device = device
         self.pressure_data = pressure_data
         self.deterministic = deterministic
-        self._shape_material_k_hydro = wp.zeros(0, dtype=wp.float32, device=device)
-
         # Create the underlying reducer with hydroelastic data storage enabled
         self.reducer = GlobalContactReducer(
             capacity=capacity,
@@ -1720,7 +1724,6 @@ class HydroelasticContactReduction:
                         device=self.device,
                         record_tape=False,
                     )
-        self._shape_material_k_hydro = shape_material_k_hydro
         wp.launch(
             kernel=self._reduce_kernel,
             dim=[grid_size],
@@ -1740,6 +1743,7 @@ class HydroelasticContactReduction:
 
     def export(
         self,
+        shape_material_k_hydro: wp.array,
         shape_gap: wp.array,
         shape_transform: wp.array,
         writer_data: Any,
@@ -1754,6 +1758,7 @@ class HydroelasticContactReduction:
         global memory barrier).
 
         Args:
+            shape_material_k_hydro: Per-shape hydroelastic material stiffness (dtype: float).
             shape_gap: Per-shape contact gap (detection threshold) (dtype: float).
             shape_transform: Per-shape world transforms (dtype: wp.transform).
             writer_data: Data struct for the writer function.
@@ -1832,7 +1837,7 @@ class HydroelasticContactReduction:
                 self.reducer.shape_pairs,
                 self.reducer.contact_fingerprints,
                 self.reducer.contact_area,
-                self._shape_material_k_hydro,
+                shape_material_k_hydro,
                 self.reducer.contact_nbin_entry,
                 self.reducer.total_depth_reduced,
                 self.reducer.total_normal_reduced,
@@ -1883,4 +1888,4 @@ class HydroelasticContactReduction:
             shape_voxel_resolution,
             grid_size,
         )
-        self.export(shape_gap, shape_transform, writer_data, grid_size)
+        self.export(shape_material_k_hydro, shape_gap, shape_transform, writer_data, grid_size)

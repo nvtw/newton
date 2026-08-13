@@ -39,7 +39,17 @@ def create_write_convex_query_result(
     post_process_contact: Any,
     use_precomputed_center: bool = False,
 ):
-    """Create the manifold/write tail used after a convex distance query."""
+    """Create the manifold/write tail used after a convex distance query.
+
+    Args:
+        support_func: Support mapping function for individual shapes.
+        writer_func: Function that writes generated contacts.
+        post_process_contact: Function that post-processes generated contacts.
+        use_precomputed_center: Whether the geometry data supplies a cached center.
+
+    Returns:
+        The specialized manifold and contact writer.
+    """
     support_funcs = create_support_map_function(support_func, use_precomputed_center)
 
     @wp.func

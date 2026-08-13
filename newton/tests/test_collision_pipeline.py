@@ -2474,25 +2474,57 @@ def test_deferred_sdf_cache_distinguishes_mesh_topology(test, device):
 
 
 def test_scalar_sdf_texture_routes_to_sdf_contact(test, device):
-    """Preserve mesh-SDF contacts with scalar texture storage."""
-    mesh = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=False, compute_inertia=False)
-    convex = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=False, compute_inertia=False)
-    mesh.build_sdf(max_resolution=32, paired_samples=False, device=device)
-    convex.build_sdf(max_resolution=32, paired_samples=False, device=device)
+    """Preserve mesh-SDF contacts across paired and scalar texture storage."""
 
-    builder = newton.ModelBuilder(sdf_texture_paired_samples=False)
-    body_mesh = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()))
-    body_convex = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.9), wp.quat_identity()))
-    builder.add_shape_mesh(body=body_mesh, mesh=mesh)
-    builder.add_shape_convex_hull(body=body_convex, mesh=convex)
+    def collide(paired_samples):
+        mesh = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=False, compute_inertia=False)
+        convex = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=False, compute_inertia=False)
+        mesh.build_sdf(max_resolution=32, paired_samples=paired_samples, device=device)
+        convex.build_sdf(max_resolution=32, paired_samples=paired_samples, device=device)
 
-    model = builder.finalize(device=device)
-    pipeline = newton.CollisionPipeline(model, broad_phase="sap", rigid_contact_max=256)
-    contacts = pipeline.contacts()
-    pipeline.collide(model.state(), contacts)
+        builder = newton.ModelBuilder(sdf_texture_paired_samples=paired_samples)
+        body_mesh = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()))
+        body_convex = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.9), wp.quat_identity()))
+        builder.add_shape_mesh(body=body_mesh, mesh=mesh)
+        builder.add_shape_convex_hull(body=body_convex, mesh=convex)
 
-    test.assertEqual(mesh.sdf._coarse_texture.num_channels, 1)
-    test.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+        model = builder.finalize(device=device)
+        state = model.state()
+        pipeline = newton.CollisionPipeline(model, broad_phase="sap", rigid_contact_max=256)
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        test.assertGreater(count, 0)
+        shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+        shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+        point0 = contacts.rigid_contact_point0.numpy()[:count]
+        point1 = contacts.rigid_contact_point1.numpy()[:count]
+        normal = contacts.rigid_contact_normal.numpy()[:count]
+        order = np.lexsort(
+            (point1[:, 2], point1[:, 1], point1[:, 0], point0[:, 2], point0[:, 1], point0[:, 0], shape1, shape0)
+        )
+        body_q = state.body_q.numpy()
+        body0 = model.shape_body.numpy()[shape0]
+        body1 = model.shape_body.numpy()[shape1]
+        point0_world = point0 + body_q[body0, :3]
+        point1_world = point1 + body_q[body1, :3]
+        penetration = np.einsum("ij,ij->i", point1_world - point0_world, normal)
+        return mesh.sdf._coarse_texture.num_channels, tuple(
+            values[order] for values in (shape0, shape1, point0, point1, normal, penetration)
+        )
+
+    paired_channels, paired = collide(True)
+    scalar_channels, scalar = collide(False)
+    test.assertEqual(paired_channels, 2)
+    test.assertEqual(scalar_channels, 1)
+    for name, paired_values, scalar_values in zip(
+        ("shape0", "shape1", "point0", "point1", "normal", "penetration"), paired, scalar, strict=True
+    ):
+        if name.startswith("shape"):
+            np.testing.assert_array_equal(scalar_values, paired_values, err_msg=name)
+        else:
+            np.testing.assert_allclose(scalar_values, paired_values, rtol=1.0e-5, atol=1.0e-6, err_msg=name)
 
 
 def test_mesh_convex_one_sdf_keeps_existing_route(test, device):

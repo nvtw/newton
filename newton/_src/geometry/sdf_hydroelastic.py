@@ -1242,6 +1242,7 @@ class HydroelasticSDF:
             grid_size=self.grid_size,
         )
         self.contact_reduction.export(
+            shape_material_k_hydro=self.shape_material_kh,
             shape_gap=shape_gap,
             shape_transform=shape_transform,
             writer_data=writer_data,
@@ -1514,7 +1515,16 @@ def create_count_iso_voxels_block_kernel(pressure_func: Any, integer_center: boo
 
 
 def create_count_iso_voxel_children_kernel(pressure_func: Any, integer_center: bool, paired_samples: bool):
-    """Create a kernel that evaluates each parent's eight children cooperatively."""
+    """Create a kernel that evaluates each parent's eight children cooperatively.
+
+    Args:
+        pressure_func: Monotonic pressure callback to evaluate.
+        integer_center: Whether every subblock center lies on an integer voxel.
+        paired_samples: Whether the generated kernel reads paired-X or scalar SDF texture storage.
+
+    Returns:
+        The specialized child-evaluation kernel.
+    """
     sample_sdf = _texture_sample_sdf_zfiltered if paired_samples else _texture_sample_sdf_scalar
     sample_sdf_at_voxel = texture_sample_sdf_at_voxel if paired_samples else _texture_sample_sdf_at_voxel_scalar
 
@@ -1633,7 +1643,15 @@ def scatter_iso_subblock(
 
 
 def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bool):
-    """Factory specializing :func:`mc_iterate_voxel_vertices` to a pressure callback."""
+    """Specialize voxel iteration to a pressure callback and texture layout.
+
+    Args:
+        pressure_func: Pressure callback used to locate the iso-pressure surface.
+        paired_samples: Whether the generated function reads paired-X or scalar SDF texture storage.
+
+    Returns:
+        The specialized voxel-iteration function.
+    """
     sample_sdf = texture_sample_sdf if paired_samples else _texture_sample_sdf_scalar
     sample_sdf_at_voxel = texture_sample_sdf_at_voxel if paired_samples else _texture_sample_sdf_at_voxel_scalar
 
