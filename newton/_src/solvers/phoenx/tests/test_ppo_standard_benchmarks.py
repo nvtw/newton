@@ -15,6 +15,7 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     TANH_EPS,
     gaussian_log_prob_kernel,
     ppo_actor_loss_backward_kernel,
+    ppo_log_std_grad_partials_kernel,
     reduce_ppo_log_std_grad_kernel,
     sample_gaussian_actions_kernel,
     zero_ppo_actor_stats_kernel,
@@ -131,6 +132,7 @@ class TestPPOStandardBenchmarks(unittest.TestCase):
         clip_fraction = wp.zeros(1, dtype=wp.float32, device=device)
         ratios = wp.zeros(rows, dtype=wp.float32, device=device)
         policy_out_grad = wp.zeros_like(policy_out)
+        d_log_prob_rows = wp.zeros(rows, dtype=wp.float32, device=device)
         partial_count = (rows + PPO_LOG_STD_PARTIAL_BATCH - 1) // PPO_LOG_STD_PARTIAL_BATCH
         log_std_grad_partials = wp.zeros((partial_count, action_dim), dtype=wp.float32, device=device)
         log_std_grad = wp.zeros(action_dim, dtype=wp.float32, device=device)
@@ -162,7 +164,25 @@ class TestPPOStandardBenchmarks(unittest.TestCase):
                     2.0,
                     rows,
                 ],
-                outputs=[loss, approx_kl, clip_fraction, ratios, policy_out_grad, log_std_grad_partials],
+                outputs=[loss, approx_kl, clip_fraction, ratios, policy_out_grad, d_log_prob_rows],
+                device=device,
+            )
+            wp.launch(
+                ppo_log_std_grad_partials_kernel,
+                dim=(partial_count, action_dim),
+                inputs=[
+                    policy_out,
+                    log_std,
+                    actions,
+                    d_log_prob_rows,
+                    entropy_coeff_buf,
+                    action_dim,
+                    1,
+                    -20.0,
+                    2.0,
+                    rows,
+                ],
+                outputs=[log_std_grad_partials],
                 device=device,
             )
             wp.launch(
