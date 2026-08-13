@@ -48,6 +48,7 @@ from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_ca
 _REPORT_PATH_ENV = "NEWTON_PHOENX_TIMING_REPORT"
 _DEFAULT_REPORT_FILENAME = "test_run_all_report.txt"
 _CHILD_MODULE_ENV = "NEWTON_PHOENX_TEST_CHILD_MODULE"
+_RUNNER_MODULE = "newton._src.solvers.phoenx.tests.test_run_all"
 
 #: Defensive guard: any future test module added here is skipped by
 #: ``test_run_all``. Use it to exclude tests that instantiate phoenx
@@ -322,7 +323,7 @@ def main() -> None:
             child_env[_CHILD_MODULE_ENV] = module_name
             child_env[_REPORT_PATH_ENV] = child_report
             completed = subprocess.run(
-                [sys.executable, "-m", __name__],
+                [sys.executable, "-m", _RUNNER_MODULE],
                 env=child_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
