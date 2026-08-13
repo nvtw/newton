@@ -31,6 +31,7 @@ from newton.viewer import ViewerNull
 
 class TestCublasLibraryDiscovery(unittest.TestCase):
     def test_windows_candidates_use_cuda_bin_and_versioned_fallbacks(self):
+        """Discover versioned cuBLAS DLLs from configured CUDA directories."""
         with tempfile.TemporaryDirectory() as root:
             bin_path = Path(root) / "bin"
             bin_path.mkdir()
@@ -48,6 +49,7 @@ class TestCublasLibraryDiscovery(unittest.TestCase):
         self.assertIn("cublas64_10.dll", candidates)
 
     def test_windows_loader_uses_stdcall_and_retains_dll_directory(self):
+        """Load cuBLAS with the Windows ABI and retain dependency paths."""
         directory = mock.Mock()
         directory_handle = mock.Mock()
         library = mock.Mock()
@@ -76,6 +78,7 @@ class TestDVICublas(unittest.TestCase):
         self.device = wp.get_device(test_context.device)
 
     def test_g1_production_path_is_enabled_and_finite(self):
+        """Enable the batched G1 response path and keep its state finite."""
         if not self.device.is_cuda or not is_batched_trsm_available(self.device):
             self.skipTest("cuBLAS batched DVI response test requires CUDA")
 
@@ -96,12 +99,12 @@ class TestDVICublas(unittest.TestCase):
 
         for _ in range(args.num_frames):
             example.step()
-        wp.synchronize_device(self.device)
         self.assertTrue(np.all(np.isfinite(example.state_0.body_q.numpy())))
         self.assertTrue(np.all(np.isfinite(example.state_0.body_qd.numpy())))
         self.assertTrue(np.all(np.isfinite(example.solver._solver_kamino.solver_fd.data.solution.lambdas.numpy())))
 
     def test_batched_response_matches_reference_with_graph_and_tail(self):
+        """Match the batched sparse response to its captured reference."""
         if not self.device.is_cuda or not is_batched_trsm_available(self.device):
             self.skipTest("cuBLAS batched DVI response test requires CUDA")
 
@@ -224,7 +227,6 @@ class TestDVICublas(unittest.TestCase):
         with wp.ScopedCapture(self.device) as capture:
             launch_response()
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(self.device)
 
         actual = response.numpy().reshape(worlds, rows, stride)
         for wid in range(worlds):
@@ -233,6 +235,7 @@ class TestDVICublas(unittest.TestCase):
             np.testing.assert_array_equal(actual[wid, :, nu:], 0.0)
 
     def test_basic_urdf_dense_production_path_matches_scalar_response(self):
+        """Match the dense basic URDF production path to the scalar response."""
         if not self.device.is_cuda or not is_batched_trsm_available(self.device):
             self.skipTest("cuBLAS batched DVI response test requires CUDA")
 
@@ -253,7 +256,6 @@ class TestDVICublas(unittest.TestCase):
             solver = example.solver._solver_kamino.solver_fd
             enabled = solver._dense_response_factor_ptrs is not None
             example.step()
-            wp.synchronize_device(self.device)
             return (
                 enabled,
                 example.state_0.body_q.numpy(),
@@ -270,6 +272,7 @@ class TestDVICublas(unittest.TestCase):
             np.testing.assert_allclose(batched_value, scalar_value, rtol=5.0e-4, atol=5.0e-5)
 
     def test_dense_batched_response_matches_scalar_layout_with_tail_and_graph(self):
+        """Match captured dense batched responses including inactive tail rows."""
         if not self.device.is_cuda or not is_batched_trsm_available(self.device):
             self.skipTest("cuBLAS batched DVI response test requires CUDA")
 
@@ -395,7 +398,6 @@ class TestDVICublas(unittest.TestCase):
         with wp.ScopedCapture(self.device) as capture:
             launch_response()
         wp.capture_launch(capture.graph)
-        wp.synchronize_device(self.device)
 
         actual = projected.numpy().reshape(worlds, dim, dim)
         np.testing.assert_allclose(actual[:, :rows, rows:], expected[:, :rows, rows:], rtol=3.0e-4, atol=3.0e-4)

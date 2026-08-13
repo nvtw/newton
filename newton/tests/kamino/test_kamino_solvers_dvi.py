@@ -570,6 +570,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertFalse(_use_parallel_contact_colors(1, 0, 45210, False))
 
     def test_00a_parallel_contact_group_width_policy(self):
+        """Select contact-group widths from occupancy and capacity limits."""
         self.assertEqual(_parallel_contact_group_width(20, 821), 4)
         self.assertEqual(_parallel_contact_group_width(60, 821), 16)
         self.assertEqual(_parallel_contact_group_width(108, 821), 32)
@@ -577,6 +578,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(_parallel_contact_group_width(188, 100_000), 2)
 
     def test_00b_sparse_state_does_not_allocate_dense_projection_offsets(self):
+        """Keep dense projection storage out of sparse DVI state."""
         size = SizeKamino(
             num_worlds=64,
             sum_of_max_total_cts=1,
@@ -2729,7 +2731,6 @@ class TestDVISolver(unittest.TestCase):
             status_array = example.solver._solver_kamino.solver_fd.data.status
             for _ in range(frame_count):
                 example.step()
-                wp.synchronize_device(self.device)
                 poses.append(example.state_0.body_q.numpy().copy())
                 velocities.append(example.state_0.body_qd.numpy().copy())
                 active = int(contacts.model_active_contacts.numpy()[0])
