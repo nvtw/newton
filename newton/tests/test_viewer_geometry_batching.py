@@ -101,8 +101,8 @@ class TestViewerGeometryBatching(unittest.TestCase):
         radial_distances = np.linalg.norm(viewer.points[:, :2], axis=1)
         self.assertAlmostEqual(float(np.max(radial_distances)), expected_equatorial_radius, places=6)
 
-    def test_mjcf_cylinder_site_normalizes_unused_size(self):
-        """Normalize an MJCF cylinder site's unused third size component."""
+    def test_mjcf_cylinder_site_ignores_display_size(self):
+        """Treat an MJCF cylinder site's third size component as display metadata."""
         builder = newton.ModelBuilder()
         builder.add_mjcf(
             """
@@ -122,7 +122,7 @@ class TestViewerGeometryBatching(unittest.TestCase):
         self.assertEqual(len(sites), 1)
 
         site = sites[0]
-        self.assertEqual(builder.shape_scale[site][2], 0.0)
+        self.assertAlmostEqual(builder.shape_scale[site][2], 0.005)
 
         viewer = _ViewerGeometryBatchingProbe()
         viewer.set_model(builder.finalize())

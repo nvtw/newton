@@ -1512,11 +1512,6 @@ def parse_mjcf(
                 if incoming_xform is not None:
                     site_xform = incoming_xform * site_xform
 
-            # MuJoCo cylinder sites use only radius and half-height. Newton reserves
-            # the third cylinder scale component for the barrel radius.
-            if site_type == "cylinder":
-                site_size[2] = 0.0
-
             site_size = wp.vec3(site_size)
 
             # Map MuJoCo site types to Newton GeoType
@@ -1548,6 +1543,7 @@ def parse_mjcf(
                 scale=site_size,
                 label=site_label,
                 visible=visible,
+                custom_attributes={"mujoco:site_size_is_display": True} if site_type == "cylinder" else None,
             )
             site_shapes.append(s)
             site_name_to_idx[site_name] = s

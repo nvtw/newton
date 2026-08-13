@@ -862,6 +862,16 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         # region geom attributes
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
+                name="site_size_is_display",
+                frequency=AttributeFrequency.SHAPE,
+                assignment=AttributeAssignment.MODEL,
+                dtype=wp.bool,
+                default=False,
+                namespace="mujoco",
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
                 name="contype",
                 frequency=AttributeFrequency.SHAPE,
                 assignment=AttributeAssignment.MODEL,
