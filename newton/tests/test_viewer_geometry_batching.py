@@ -101,8 +101,8 @@ class TestViewerGeometryBatching(unittest.TestCase):
         radial_distances = np.linalg.norm(viewer.points[:, :2], axis=1)
         self.assertAlmostEqual(float(np.max(radial_distances)), expected_equatorial_radius, places=6)
 
-    def test_cylinder_site_ignores_display_size(self):
-        """Treat a cylinder site's third size component as display metadata."""
+    def test_mjcf_cylinder_site_normalizes_unused_size(self):
+        """Normalize an MJCF cylinder site's unused third size component."""
         builder = newton.ModelBuilder()
         builder.add_mjcf(
             """
@@ -117,10 +117,36 @@ class TestViewerGeometryBatching(unittest.TestCase):
             """
         )
 
+        site = next(i for i, flags in enumerate(builder.shape_flags) if flags & newton.ShapeFlags.SITE)
+        self.assertEqual(builder.shape_scale[site][2], 0.0)
+
         viewer = _ViewerGeometryBatchingProbe()
         viewer.set_model(builder.finalize())
 
         self.assertEqual(len(viewer._geometry_cache), 1)
+
+    def test_native_cylinder_site_uses_barrel_radius(self):
+        """Honor an explicitly authored barrel radius on a cylinder site."""
+        radius = 0.5
+        half_height = 1.0
+        barrel_radius = 2.0
+
+        builder = newton.ModelBuilder()
+        builder.add_shape_cylinder(-1, radius=radius, half_height=half_height)
+        site = builder.add_shape_cylinder(
+            -1,
+            radius=radius,
+            half_height=half_height,
+            barrel_radius=barrel_radius,
+            as_site=True,
+        )
+
+        self.assertEqual(builder.shape_scale[site][2], barrel_radius)
+
+        viewer = _ViewerGeometryBatchingProbe()
+        viewer.set_model(builder.finalize())
+
+        self.assertEqual(len(viewer._geometry_cache), 2)
 
     def test_capsule_geometry_is_batched_across_scales(self):
         """Varying capsule dimensions should share one cached capsule geometry."""

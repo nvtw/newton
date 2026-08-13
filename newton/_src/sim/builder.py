@@ -6425,7 +6425,7 @@ class ModelBuilder:
             GeoType.GAUSSIAN,
         ):
             scale = (abs(float(scale[0])), abs(float(scale[1])), abs(float(scale[2])))
-            if type == GeoType.CYLINDER and not cfg.is_site and scale[2] != 0.0 and scale[2] < scale[1]:
+            if type == GeoType.CYLINDER and scale[2] != 0.0 and scale[2] < scale[1]:
                 raise ValueError(f"Cylinder barrel radius must be zero or at least the half-height; got scale={scale}.")
         elif type == GeoType.CONE:
             if float(scale[1]) < 0.0:
@@ -11279,16 +11279,12 @@ class ModelBuilder:
 
                 return nx, ny, nz
 
-            for _shape_idx, (shape_type, shape_src, shape_scale, shape_flags) in enumerate(
-                zip(self.shape_type, self.shape_source, self.shape_scale, self.shape_flags, strict=True)
+            for _shape_idx, (shape_type, shape_src, shape_scale) in enumerate(
+                zip(self.shape_type, self.shape_source, self.shape_scale, strict=True)
             ):
                 # Create cache key based on shape type and parameters
                 if (shape_type == GeoType.MESH or shape_type == GeoType.CONVEX_MESH) and shape_src is not None:
                     cache_key = (shape_type, id(shape_src), tuple(shape_scale))
-                elif shape_type == GeoType.CYLINDER and shape_flags & ShapeFlags.SITE:
-                    # MuJoCo cylinder sites may carry an unused third display-size component.
-                    # It is not Newton's barrel radius and does not affect their bounds.
-                    cache_key = (shape_type, (shape_scale[0], shape_scale[1], 0.0))
                 else:
                     cache_key = (shape_type, tuple(shape_scale))
 
@@ -11347,8 +11343,6 @@ class ModelBuilder:
                     elif shape_type == GeoType.CYLINDER:
                         # Cylinder: shape_scale = (end_radius, half_height, barrel_radius)
                         r, half_height, barrel_radius = shape_scale
-                        if shape_flags & ShapeFlags.SITE:
-                            barrel_radius = 0.0
                         radial_extent = r
                         if barrel_radius > 0.0:
                             radial_extent += (half_height * half_height) / (
