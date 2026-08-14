@@ -1209,16 +1209,12 @@ class ViewerBase(ABC):
             self.log_arrows(self._qualify("/contacts/forces"), None, None, None)
             return
 
-        # Buffer-size cap (counter may exceed max on overflow). The
-        # kernel writes ``vec3(nan, nan, nan)`` for slots beyond the
-        # active count or filtered-out worlds; NaN endpoints don't
-        # rasterize, so we can pass the full ``max_contacts`` slice
-        # without first reading the count back to host. This drops one
-        # device-to-host sync from the per-frame render path — under
-        # graph-captured stepping that sync was a stall point.
+        # Contact debugging may synchronize to avoid allocating renderer
+        # instances for the much larger collision-buffer capacity.
         max_contacts = contacts.rigid_contact_max
+        num_contacts = min(int(contacts.rigid_contact_count.numpy()[0]), max_contacts)
 
-        if max_contacts == 0:
+        if num_contacts == 0:
             self.log_arrows(self._qualify("/contacts/normals"), None, None, None)
             if self._contact_disk_mesh is not None:
                 self.log_instances(
@@ -1238,7 +1234,7 @@ class ViewerBase(ABC):
 
             wp.launch(
                 kernel=compute_contact_lines,
-                dim=max_contacts,
+                dim=num_contacts,
                 inputs=[
                     state.body_q,
                     self.model.shape_body,
@@ -1262,8 +1258,8 @@ class ViewerBase(ABC):
             )
             self.log_arrows(
                 self._qualify("/contacts/normals"),
-                self._contact_points0[:max_contacts],
-                self._contact_points1[:max_contacts],
+                self._contact_points0[:num_contacts],
+                self._contact_points1[:num_contacts],
                 (1.0, 0.0, 0.0),
             )
         else:
@@ -1287,7 +1283,7 @@ class ViewerBase(ABC):
 
             wp.launch(
                 kernel=compute_contact_disk_transforms,
-                dim=max_contacts,
+                dim=num_contacts,
                 inputs=[
                     state.body_q,
                     state.body_qd,
@@ -1319,9 +1315,9 @@ class ViewerBase(ABC):
             self.log_instances(
                 self._qualify("/contacts/modes"),
                 self._contact_disk_mesh,
-                self._contact_disk_xforms[:max_contacts],
-                self._contact_disk_scales[:max_contacts],
-                self._contact_disk_colors[:max_contacts],
+                self._contact_disk_xforms[:num_contacts],
+                self._contact_disk_scales[:num_contacts],
+                self._contact_disk_colors[:num_contacts],
                 None,
                 hidden=False,
             )
@@ -1340,7 +1336,7 @@ class ViewerBase(ABC):
 
             wp.launch(
                 kernel=compute_contact_force_arrows,
-                dim=max_contacts,
+                dim=num_contacts,
                 inputs=[
                     state.body_q,
                     self.model.shape_body,
@@ -1361,8 +1357,8 @@ class ViewerBase(ABC):
 
             self.log_arrows(
                 self._qualify("/contacts/forces"),
-                self._contact_force_starts[:max_contacts],
-                self._contact_force_ends[:max_contacts],
+                self._contact_force_starts[:num_contacts],
+                self._contact_force_ends[:num_contacts],
                 (1.0, 0.0, 1.0),  # magenta
             )
         else:

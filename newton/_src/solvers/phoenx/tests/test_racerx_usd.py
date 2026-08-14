@@ -17,6 +17,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.examples import example_racerx_usd as racerx
 from newton._src.solvers.phoenx.examples import racerx_track
+from newton._src.viewer.viewer import ViewerBase
 
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
@@ -241,8 +242,8 @@ class TestRacerXUsd(unittest.TestCase):
 
         np.testing.assert_allclose(builder.shape_material_mu, (0.4, 1.2, 0.0, 1.2, 0.0, 1.2))
 
-    def test_looped_vehicle_ground_collides_only_with_wheels(self) -> None:
-        """Filter generated-ground contacts against every non-wheel vehicle shape."""
+    def test_looped_vehicle_ground_uses_graph_captured_tire_forces(self) -> None:
+        """Filter generated-ground contacts against every looped-vehicle shape."""
 
         class Builder:
             def __init__(self):
@@ -264,7 +265,7 @@ class TestRacerXUsd(unittest.TestCase):
 
         racerx._filter_vehicle_ground_contacts(builder, parts, ground_shape=6)
 
-        self.assertEqual(builder.pairs, [(2, 6), (4, 6)])
+        self.assertEqual(builder.pairs, [(0, 6), (1, 6), (2, 6), (3, 6), (4, 6), (5, 6)])
 
     def test_coaxial_hard_limit_and_spring_merge_to_one_dof(self) -> None:
         """Merge stacked travel and spring joints into one driven coordinate."""
@@ -684,6 +685,129 @@ class TestRacerXUsd(unittest.TestCase):
 
         wrenches = body_f.numpy()
         self.assertTrue(np.all(wrenches[:, 2] > 9.81))
+
+    def test_wheel_lateral_force_follows_steered_axis_in_cuda_graph(self) -> None:
+        """Generate lateral tire force from moving steered-wheel slip in a CUDA graph."""
+        device = wp.get_device()
+        steering = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), math.radians(20.0))
+        cylinder_axis = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.5 * math.pi)
+        body_q = wp.array(
+            [
+                wp.transform((0.0, 0.0, 0.02), steering),
+                wp.transform((0.0, 0.0, 0.02), wp.quat_identity()),
+                wp.transform((0.0, 0.0, 0.02), wp.quat_identity()),
+                wp.transform((0.0, 0.0, 0.02), wp.quat_identity()),
+            ],
+            dtype=wp.transform,
+            device=device,
+        )
+        body_qd = wp.array(
+            [wp.spatial_vector(1.0, 0.0, 0.0, 0.0, 0.0, 0.0)] + [wp.spatial_vector()] * 3,
+            dtype=wp.spatial_vector,
+            device=device,
+        )
+        body_f = wp.zeros(4, dtype=wp.spatial_vector, device=device)
+        wheel_bodies = wp.array((0, 1, 2, 3), dtype=wp.int32, device=device)
+        wheel_xforms = wp.array(
+            [wp.transform((0.0, 0.0, 0.0), cylinder_axis) for _ in range(4)],
+            dtype=wp.transform,
+            device=device,
+        )
+        wheel_neutral_forwards = wp.full(4, wp.vec3(1.0, 0.0, 0.0), dtype=wp.vec3, device=device)
+        wheel_radii = wp.full(4, 0.02, dtype=float, device=device)
+        steering_command = wp.array((racerx.STEERING_TRAVEL,), dtype=float, device=device)
+
+        def launch():
+            wp.launch(
+                racerx._apply_wheel_lateral_forces,
+                dim=4,
+                inputs=[
+                    wheel_bodies,
+                    wheel_xforms,
+                    wheel_neutral_forwards,
+                    wheel_radii,
+                    4.0,
+                    1,
+                    wp.vec3(1.0, 0.0, 0.0),
+                    steering_command,
+                    body_q,
+                    body_qd,
+                    body_f,
+                ],
+                device=device,
+            )
+
+        graph = None
+        if device.is_cuda:
+            with wp.ScopedCapture() as capture:
+                launch()
+            graph = capture.graph
+        launch() if graph is None else wp.capture_launch(graph)
+
+        forces = body_f.numpy()
+        self.assertGreater(float(forces[0, 1]), 0.0)
+        np.testing.assert_allclose(forces[1:], 0.0, atol=1.0e-6)
+
+        body_f.zero_()
+        steering_command.zero_()
+        launch() if graph is None else wp.capture_launch(graph)
+        np.testing.assert_allclose(body_f.numpy(), 0.0, atol=1.0e-6)
+
+    def test_contact_visualization_uses_active_contact_count(self) -> None:
+        """Submit only active contacts from an oversized collision buffer."""
+
+        class ContactViewer:
+            show_contacts = True
+            show_contact_normals = True
+            show_contact_disks = False
+            show_contact_forces = False
+            contact_viz_scale = 0.1
+            _contact_points0 = None
+            _contact_points1 = None
+            _contact_disk_mesh = None
+
+            def __init__(self, device):
+                self.device = device
+                self.model = SimpleNamespace(
+                    shape_body=wp.array((0, -1), dtype=wp.int32, device=device),
+                    shape_world=wp.zeros(2, dtype=wp.int32, device=device),
+                )
+                self.world_offsets = wp.zeros(1, dtype=wp.vec3, device=device)
+                self.layer = SimpleNamespace(xform=wp.transform_identity())
+                self._visible_worlds_mask = wp.array((), dtype=wp.int32, device=device)
+                self.arrow_counts = []
+
+            def _layer_force_hidden(self):
+                return False
+
+            def _qualify(self, name):
+                return name
+
+            def log_arrows(self, _name, starts, _ends, _colors):
+                if starts is not None:
+                    self.arrow_counts.append(len(starts))
+
+            def log_instances(self, *_args, **_kwargs):
+                pass
+
+        device = wp.get_device()
+        capacity = 4096
+        contacts = SimpleNamespace(
+            rigid_contact_max=capacity,
+            rigid_contact_count=wp.array((2,), dtype=wp.int32, device=device),
+            rigid_contact_shape0=wp.zeros(capacity, dtype=wp.int32, device=device),
+            rigid_contact_shape1=wp.ones(capacity, dtype=wp.int32, device=device),
+            rigid_contact_point0=wp.zeros(capacity, dtype=wp.vec3, device=device),
+            rigid_contact_offset0=wp.zeros(capacity, dtype=wp.vec3, device=device),
+            rigid_contact_normal=wp.full(capacity, wp.vec3(0.0, 0.0, 1.0), dtype=wp.vec3, device=device),
+            force=None,
+        )
+        state = SimpleNamespace(body_q=wp.array((wp.transform_identity(),), dtype=wp.transform, device=device))
+        viewer = ContactViewer(device)
+
+        ViewerBase.log_contacts(viewer, contacts, state)
+
+        self.assertEqual(viewer.arrow_counts, [2])
 
     def test_self_filtered_collision_group_excludes_member_pair(self) -> None:
         """Translate a self-filtered USD collision group into shape exclusions."""

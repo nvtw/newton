@@ -74,10 +74,12 @@ TIRE_TOP_SPEED = 3.0
 TIRE_SPEED_RESPONSE = 12.0
 TIRE_MAX_ACCELERATION = 20.0
 TIRE_LATERAL_RESPONSE = 8.0
+TIRE_CORNERING_RESPONSE = 16.0
 TIRE_MAX_LATERAL_ACCELERATION = 8.0
+TIRE_STEERING_DEADZONE_SIN = 0.087
 TIRE_SUPPORT_ACTIVATION_HEIGHT = 0.01
-TIRE_VERTICAL_FREQUENCY = 60.0
-TIRE_VERTICAL_DAMPING_RATIO = 1.0
+TIRE_VERTICAL_FREQUENCY = 45.0
+TIRE_VERTICAL_DAMPING_RATIO = 0.75
 TIRE_MAX_NORMAL_LOAD_SCALE = 3.0
 TIRE_STEERING_ANGLE = 0.35
 TIRE_YAW_RESPONSE = 8.0
@@ -249,6 +251,64 @@ def _apply_wheel_ground_support(
         normal_force = 0.0
     normal_force = wp.clamp(normal_force, 0.0, TIRE_MAX_NORMAL_LOAD_SCALE * load_per_wheel)
     body_f[body] += wp.spatial_vector(wp.vec3(0.0, 0.0, normal_force), wp.vec3(0.0))
+
+
+@wp.kernel
+def _apply_wheel_lateral_forces(
+    wheel_bodies: wp.array[wp.int32],
+    wheel_shape_transforms: wp.array[wp.transform],
+    wheel_neutral_forwards_local: wp.array[wp.vec3],
+    wheel_radii: wp.array[float],
+    vehicle_mass: float,
+    chassis_body: wp.int32,
+    chassis_forward_local: wp.vec3,
+    steering_command: wp.array[float],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_f: wp.array[wp.spatial_vector],
+):
+    wheel_index = wp.tid()
+    body = wheel_bodies[wheel_index]
+    if wp.abs(steering_command[0]) < 0.05 * STEERING_TRAVEL:
+        return
+    wheel_pose = wp.transform_multiply(body_q[body], wheel_shape_transforms[wheel_index])
+    wheel_rotation = wp.transform_get_rotation(wheel_pose)
+    axle = wp.quat_rotate(wheel_rotation, wp.vec3(0.0, 0.0, 1.0))
+    forward = wp.normalize(wp.cross(axle, wp.vec3(0.0, 0.0, 1.0)))
+
+    chassis_rotation = wp.transform_get_rotation(body_q[chassis_body])
+    chassis_forward = wp.quat_rotate(chassis_rotation, chassis_forward_local)
+    chassis_forward[2] = 0.0
+    chassis_forward = wp.normalize(chassis_forward)
+    if wp.dot(forward, chassis_forward) < 0.0:
+        forward = -forward
+    neutral_forward = wp.quat_rotate(chassis_rotation, wheel_neutral_forwards_local[wheel_index])
+    neutral_forward[2] = 0.0
+    neutral_forward = wp.normalize(neutral_forward)
+    steering_cos = wp.dot(neutral_forward, forward)
+    steering_sin = wp.dot(wp.cross(neutral_forward, forward), wp.vec3(0.0, 0.0, 1.0))
+    if wp.abs(steering_sin) < TIRE_STEERING_DEADZONE_SIN:
+        steering_cos = 1.0
+        steering_sin = 0.0
+    chassis_lateral = wp.vec3(-chassis_forward[1], chassis_forward[0], 0.0)
+    forward = wp.normalize(steering_cos * chassis_forward + steering_sin * chassis_lateral)
+    lateral = wp.vec3(-forward[1], forward[0], 0.0)
+
+    center = wp.transform_get_translation(wheel_pose)
+    bottom = center[2] - wheel_radii[wheel_index]
+    velocity = wp.spatial_top(body_qd[body])
+    load_per_wheel = vehicle_mass * 9.81 / 4.0
+    stiffness = 0.25 * vehicle_mass * TIRE_VERTICAL_FREQUENCY * TIRE_VERTICAL_FREQUENCY
+    damping = 0.5 * vehicle_mass * TIRE_VERTICAL_DAMPING_RATIO * TIRE_VERTICAL_FREQUENCY
+    normal_force = load_per_wheel + stiffness * (GROUND_HEIGHT - bottom) - damping * velocity[2]
+    if bottom > GROUND_HEIGHT + TIRE_SUPPORT_ACTIVATION_HEIGHT:
+        normal_force = 0.0
+    normal_force = wp.clamp(normal_force, 0.0, TIRE_MAX_NORMAL_LOAD_SCALE * load_per_wheel)
+
+    desired_force = -0.25 * vehicle_mass * TIRE_CORNERING_RESPONSE * wp.dot(velocity, lateral)
+    friction_limit = WHEEL_FRICTION * normal_force
+    lateral_force = wp.clamp(desired_force, -friction_limit, friction_limit) * lateral
+    body_f[body] += wp.spatial_vector(lateral_force, wp.vec3(0.0))
 
 
 @wp.kernel
@@ -542,6 +602,31 @@ def _replace_wheel_mesh_colliders(builder, parts: _VehicleParts) -> None:
         builder.shape_material_mu[shape] = C3_WHEEL_FRICTION if parts.variant == "c3" else WHEEL_FRICTION
 
 
+def _wheel_neutral_forwards_local(builder, parts: _VehicleParts, chassis_forward_local: wp.vec3) -> list[wp.vec3]:
+    """Return each authored wheel direction relative to the neutral chassis."""
+    chassis_rotation = wp.transform_get_rotation(builder.body_q[parts.chassis_body])
+    chassis_inverse = wp.quat_inverse(chassis_rotation)
+    chassis_forward = np.asarray(wp.quat_rotate(chassis_rotation, chassis_forward_local), dtype=np.float32)
+    chassis_forward[2] = 0.0
+    chassis_forward /= np.linalg.norm(chassis_forward)
+
+    directions = []
+    for shape in parts.wheel_shapes:
+        body = int(builder.shape_body[shape])
+        wheel_pose = wp.transform_multiply(builder.body_q[body], builder.shape_transform[shape])
+        axle = np.asarray(
+            wp.quat_rotate(wp.transform_get_rotation(wheel_pose), wp.vec3(0.0, 0.0, 1.0)),
+            dtype=np.float32,
+        )
+        forward = np.cross(axle, np.asarray((0.0, 0.0, 1.0), dtype=np.float32))
+        forward /= np.linalg.norm(forward)
+        if float(np.dot(forward, chassis_forward)) < 0.0:
+            forward = -forward
+        local = wp.quat_rotate(chassis_inverse, wp.vec3(*forward))
+        directions.append(wp.vec3(local[0], local[1], 0.0))
+    return directions
+
+
 def _configure_vehicle_ground_friction(builder, parts: _VehicleParts) -> None:
     """Keep underside contacts slippery while preserving tire grip."""
     if parts.variant not in TIRE_FORCE_VARIANTS:
@@ -553,13 +638,11 @@ def _configure_vehicle_ground_friction(builder, parts: _VehicleParts) -> None:
 
 
 def _filter_vehicle_ground_contacts(builder, parts: _VehicleParts, ground_shape: int) -> None:
-    """Make the generated ground support looped vehicles through their tires."""
+    """Route looped-vehicle ground interaction through graph-captured tire forces."""
     if parts.variant not in TIRE_FORCE_VARIANTS:
         return
-    wheel_shapes = set(parts.wheel_shapes)
     for shape in range(ground_shape):
-        if shape not in wheel_shapes:
-            builder.add_shape_collision_filter_pair(shape, ground_shape)
+        builder.add_shape_collision_filter_pair(shape, ground_shape)
 
 
 def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[list[int], int, int]:
@@ -855,6 +938,9 @@ class Example:
         _replace_wheel_mesh_colliders(builder, vehicle_parts)
         self._wheel_bodies_host = [int(builder.shape_body[shape]) for shape in vehicle_parts.wheel_shapes]
         self._wheel_shape_transforms_host = [builder.shape_transform[shape] for shape in vehicle_parts.wheel_shapes]
+        self._wheel_neutral_forwards_host = _wheel_neutral_forwards_local(
+            builder, vehicle_parts, self._vehicle_forward_local
+        )
         self._wheel_radii_host = [float(builder.shape_scale[shape][0]) for shape in vehicle_parts.wheel_shapes]
         _configure_vehicle_ground_friction(builder, vehicle_parts)
         # The source PhysicsScene stores 981 in cm/s^2; stage-root scaling
@@ -939,6 +1025,7 @@ class Example:
         self._wheel_shape_transforms = wp.array(
             self._wheel_shape_transforms_host, dtype=wp.transform, device=self.device
         )
+        self._wheel_neutral_forwards = wp.array(self._wheel_neutral_forwards_host, dtype=wp.vec3, device=self.device)
         self._wheel_radii = wp.array(self._wheel_radii_host, dtype=float, device=self.device)
         self._drive_input_device = wp.zeros(2, dtype=float, device=self.device)
         self._wheel_dofs_device = wp.array(self._wheel_dofs, dtype=wp.int32, device=self.device)
@@ -1160,6 +1247,25 @@ class Example:
                 self._wheel_shape_transforms,
                 self._wheel_radii,
                 self._vehicle_mass,
+                self.state.body_q,
+                self.state.body_qd,
+                self.state.body_f,
+            ],
+            device=self.device,
+        )
+
+        wp.launch(
+            _apply_wheel_lateral_forces,
+            dim=4,
+            inputs=[
+                self._wheel_bodies,
+                self._wheel_shape_transforms,
+                self._wheel_neutral_forwards,
+                self._wheel_radii,
+                self._vehicle_mass,
+                self._chassis_body,
+                self._vehicle_forward_local,
+                self._steering_command,
                 self.state.body_q,
                 self.state.body_qd,
                 self.state.body_f,
