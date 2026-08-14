@@ -44,12 +44,14 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertNotIn("ImportError", result.stderr)
 
     def test_track_follows_closed_uniform_spline(self) -> None:
-        """Build uniformly spaced road and barrier rows around a closed spline."""
-        half_width = 0.75
-        layout = racerx_track.build_track_layout(spacing=0.5, half_width=half_width)
+        """Build a clear, technical circuit with uniformly spaced barriers."""
+        half_width = racerx.TRACK_HALF_WIDTH
+        spacing = racerx.TRACK_BARRIER_SPACING
+        layout = racerx_track.build_track_layout(spacing=spacing, half_width=half_width)
         road_count = len(layout.centerline)
 
-        self.assertGreater(layout.length, 200.0)
+        self.assertGreater(layout.length, 100.0)
+        self.assertLess(layout.length, 125.0)
         self.assertEqual(layout.road_poses.shape, (road_count, 7))
         self.assertEqual(layout.barrier_poses.shape, (2 * road_count, 7))
         self.assertEqual(layout.barrier_colors.shape, (2 * road_count, 3))
@@ -58,8 +60,22 @@ class TestRacerXUsd(unittest.TestCase):
 
         closed_segments = np.roll(layout.centerline, -1, axis=0) - layout.centerline
         segment_lengths = np.linalg.norm(closed_segments, axis=1)
-        self.assertLess(float(segment_lengths.max()), 0.55)
-        self.assertGreater(float(segment_lengths.min()), 0.4)
+        self.assertLess(float(segment_lengths.max()), 1.1 * spacing)
+        self.assertGreater(float(segment_lengths.min()), 0.79 * spacing)
+
+        tangent_angles = np.arctan2(layout.tangents[:, 1], layout.tangents[:, 0])
+        angle_deltas = np.abs(np.angle(np.exp(1j * (np.roll(tangent_angles, -1) - tangent_angles))))
+        turn_radii = segment_lengths / np.maximum(angle_deltas, 1.0e-8)
+        self.assertLess(float(np.percentile(turn_radii, 10.0)), 1.7)
+
+        indices = np.arange(road_count)
+        index_separation = np.abs(indices[:, None] - indices[None, :])
+        index_separation = np.minimum(index_separation, road_count - index_separation)
+        centerline_distances = np.linalg.norm(layout.centerline[:, None, :] - layout.centerline[None, :, :], axis=2)
+        centerline_distances[index_separation <= 10] = np.inf
+        barrier_half_width = racerx.TRACK_BARRIER_HALF_EXTENTS[1]
+        required_clearance = 2.0 * (half_width + barrier_half_width)
+        self.assertGreater(float(centerline_distances.min()), required_clearance)
 
         left_offsets = layout.barrier_poses[:road_count, :2] - layout.centerline
         right_offsets = layout.barrier_poses[road_count:, :2] - layout.centerline
@@ -89,7 +105,7 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertTrue(all(flag == int(newton.BodyFlags.DYNAMIC) for flag in builder.body_flags))
         self.assertEqual(racerx.DRIVE_SPEED, 140.0)
         self.assertEqual((racerx.STEERING_TRAVEL, racerx.STEERING_LIMIT), (0.00125, 0.0015))
-        self.assertEqual(racerx.STEERING_RATE, 0.003)
+        self.assertEqual(racerx.STEERING_RATE, 0.006)
         self.assertEqual((racerx.SIM_SUBSTEPS, racerx.SOLVER_ITERATIONS), (4, 6))
 
     def test_wheel_mesh_colliders_become_symmetric_cylinders(self) -> None:
@@ -197,7 +213,7 @@ class TestRacerXUsd(unittest.TestCase):
 
         self.assertEqual(wheel_dofs, [0, 1, 2, 3])
         self.assertEqual(racerx.SUSPENSION_STIFFNESS_SCALE, 0.16)
-        self.assertEqual(racerx.STEERING_RATE, 0.003)
+        self.assertEqual(racerx.STEERING_RATE, 0.006)
         self.assertEqual(racerx.STEERING_STIFFNESS, 64000.0)
         self.assertEqual(racerx.STEERING_DAMPING, 240.0)
         self.assertEqual(racerx.STEERING_FORCE_LIMIT, 320.0)
@@ -257,7 +273,12 @@ class TestRacerXUsd(unittest.TestCase):
 
         first_steering_command = racerx.STEERING_RATE / 60.0
         self.assertAlmostEqual(float(target_q.numpy()[9]), first_steering_command, places=7)
-        for _ in range(59):
+        steering_frames = math.ceil(racerx.STEERING_TRAVEL / first_steering_command)
+        self.assertLessEqual(steering_frames, 13)
+        for _ in range(steering_frames - 1):
+            launch() if graph is None else wp.capture_launch(graph)
+        self.assertAlmostEqual(float(target_q.numpy()[9]), racerx.STEERING_TRAVEL, places=5)
+        for _ in range(60 - steering_frames):
             launch() if graph is None else wp.capture_launch(graph)
 
         self.assertAlmostEqual(float(wheel_command.numpy()[0]), racerx.DRIVE_SPEED, places=4)
