@@ -43,6 +43,7 @@ LOAD_USD_EMISSIVE_MATERIALS = False
 ENABLE_PHYSICS = True
 ENABLE_CHASE_CAMERA = True
 ENABLE_TRACK = True
+ENABLE_MASS_SPLITTING = True
 PRINT_PHYSICS_DATA = True
 START_PAUSED = True
 USD_MAX_TEXTURE_SIZE = 4096
@@ -68,22 +69,10 @@ DRIVE_TORQUE_LIMIT = 3.0
 SUSPENSION_STIFFNESS_SCALE = 0.16
 C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER = 5.0
 C3_WHEEL_FRICTION = 1.2
-ENABLE_LOOPED_VEHICLE_TIRE_FORCES = True
-TIRE_FORCE_VARIANTS = frozenset(("b3", "c3"))
-TIRE_TOP_SPEED = 3.0
-TIRE_SPEED_RESPONSE = 12.0
-TIRE_MAX_ACCELERATION = 20.0
-TIRE_LATERAL_RESPONSE = 8.0
-TIRE_CORNERING_RESPONSE = 16.0
-TIRE_MAX_LATERAL_ACCELERATION = 8.0
-TIRE_STEERING_DEADZONE_SIN = 0.087
-TIRE_SUPPORT_ACTIVATION_HEIGHT = 0.01
-TIRE_VERTICAL_FREQUENCY = 45.0
-TIRE_VERTICAL_DAMPING_RATIO = 0.75
-TIRE_MAX_NORMAL_LOAD_SCALE = 3.0
-TIRE_STEERING_ANGLE = 0.35
-TIRE_YAW_RESPONSE = 8.0
-TIRE_INERTIA_RADIUS = 0.08
+LOOPED_VEHICLE_VARIANTS = frozenset(("b3", "c3"))
+A3_SUSPENSION_STIFFNESS_MULTIPLIER = 6.25
+B3_SUSPENSION_STIFFNESS_MULTIPLIER = 6.25
+C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER = 4.0
 STEERING_TRAVEL = 0.00125
 STEERING_LIMIT = 0.0015
 STEERING_RATE = 0.015
@@ -175,140 +164,6 @@ def _update_vehicle_controls(
     )
     steering_command[0] += steering_delta
     joint_target_q[steering_target_index] = steering_command[0]
-
-
-@wp.kernel
-def _apply_looped_vehicle_tire_forces(
-    vehicle_body_indices: wp.array[wp.int32],
-    vehicle_body_masses: wp.array[float],
-    chassis_body: wp.int32,
-    forward_local: wp.vec3,
-    wheel_speed_command: wp.array[float],
-    steering_command: wp.array[float],
-    body_q: wp.array[wp.transform],
-    body_qd: wp.array[wp.spatial_vector],
-    body_f: wp.array[wp.spatial_vector],
-):
-    body_index = wp.tid()
-    body = vehicle_body_indices[body_index]
-    pose = body_q[chassis_body]
-    rotation = wp.transform_get_rotation(pose)
-    forward = wp.quat_rotate(rotation, forward_local)
-    forward[2] = 0.0
-    forward = wp.normalize(forward)
-    lateral = wp.vec3(-forward[1], forward[0], 0.0)
-
-    velocity = wp.spatial_top(body_qd[chassis_body])
-    angular_velocity = wp.spatial_bottom(body_qd[chassis_body])
-    forward_speed = wp.dot(velocity, forward)
-    lateral_speed = wp.dot(velocity, lateral)
-    desired_speed = wheel_speed_command[0] * (TIRE_TOP_SPEED / DRIVE_SPEED)
-    forward_acceleration = wp.clamp(
-        (desired_speed - forward_speed) * TIRE_SPEED_RESPONSE,
-        -TIRE_MAX_ACCELERATION,
-        TIRE_MAX_ACCELERATION,
-    )
-    lateral_acceleration = wp.clamp(
-        -lateral_speed * TIRE_LATERAL_RESPONSE,
-        -TIRE_MAX_LATERAL_ACCELERATION,
-        TIRE_MAX_LATERAL_ACCELERATION,
-    )
-    force = vehicle_body_masses[body_index] * (forward_acceleration * forward + lateral_acceleration * lateral)
-
-    steering = steering_command[0] / STEERING_TRAVEL
-    desired_yaw_rate = steering * forward_speed * wp.tan(TIRE_STEERING_ANGLE) / TIRE_INERTIA_RADIUS
-    yaw_acceleration = TIRE_YAW_RESPONSE * (desired_yaw_rate - angular_velocity[2])
-    chassis_position = wp.transform_get_translation(pose)
-    body_position = wp.transform_get_translation(body_q[body])
-    offset = body_position - chassis_position
-    force += vehicle_body_masses[body_index] * yaw_acceleration * wp.cross(wp.vec3(0.0, 0.0, 1.0), offset)
-    body_f[body] += wp.spatial_vector(force, wp.vec3(0.0))
-
-
-@wp.kernel
-def _apply_wheel_ground_support(
-    wheel_bodies: wp.array[wp.int32],
-    wheel_shape_transforms: wp.array[wp.transform],
-    wheel_radii: wp.array[float],
-    vehicle_mass: float,
-    body_q: wp.array[wp.transform],
-    body_qd: wp.array[wp.spatial_vector],
-    body_f: wp.array[wp.spatial_vector],
-):
-    wheel_index = wp.tid()
-    body = wheel_bodies[wheel_index]
-    wheel_pose = wp.transform_multiply(body_q[body], wheel_shape_transforms[wheel_index])
-    center = wp.transform_get_translation(wheel_pose)
-    bottom = center[2] - wheel_radii[wheel_index]
-
-    velocity = wp.spatial_top(body_qd[body])
-    load_per_wheel = vehicle_mass * 9.81 / 4.0
-    stiffness = 0.25 * vehicle_mass * TIRE_VERTICAL_FREQUENCY * TIRE_VERTICAL_FREQUENCY
-    damping = 0.5 * vehicle_mass * TIRE_VERTICAL_DAMPING_RATIO * TIRE_VERTICAL_FREQUENCY
-    penetration = GROUND_HEIGHT - bottom
-    normal_force = load_per_wheel + stiffness * penetration - damping * velocity[2]
-    if bottom > GROUND_HEIGHT + TIRE_SUPPORT_ACTIVATION_HEIGHT:
-        normal_force = 0.0
-    normal_force = wp.clamp(normal_force, 0.0, TIRE_MAX_NORMAL_LOAD_SCALE * load_per_wheel)
-    body_f[body] += wp.spatial_vector(wp.vec3(0.0, 0.0, normal_force), wp.vec3(0.0))
-
-
-@wp.kernel
-def _apply_wheel_lateral_forces(
-    wheel_bodies: wp.array[wp.int32],
-    wheel_shape_transforms: wp.array[wp.transform],
-    wheel_neutral_forwards_local: wp.array[wp.vec3],
-    wheel_radii: wp.array[float],
-    vehicle_mass: float,
-    chassis_body: wp.int32,
-    chassis_forward_local: wp.vec3,
-    steering_command: wp.array[float],
-    body_q: wp.array[wp.transform],
-    body_qd: wp.array[wp.spatial_vector],
-    body_f: wp.array[wp.spatial_vector],
-):
-    wheel_index = wp.tid()
-    body = wheel_bodies[wheel_index]
-    if wp.abs(steering_command[0]) < 0.05 * STEERING_TRAVEL:
-        return
-    wheel_pose = wp.transform_multiply(body_q[body], wheel_shape_transforms[wheel_index])
-    wheel_rotation = wp.transform_get_rotation(wheel_pose)
-    axle = wp.quat_rotate(wheel_rotation, wp.vec3(0.0, 0.0, 1.0))
-    forward = wp.normalize(wp.cross(axle, wp.vec3(0.0, 0.0, 1.0)))
-
-    chassis_rotation = wp.transform_get_rotation(body_q[chassis_body])
-    chassis_forward = wp.quat_rotate(chassis_rotation, chassis_forward_local)
-    chassis_forward[2] = 0.0
-    chassis_forward = wp.normalize(chassis_forward)
-    if wp.dot(forward, chassis_forward) < 0.0:
-        forward = -forward
-    neutral_forward = wp.quat_rotate(chassis_rotation, wheel_neutral_forwards_local[wheel_index])
-    neutral_forward[2] = 0.0
-    neutral_forward = wp.normalize(neutral_forward)
-    steering_cos = wp.dot(neutral_forward, forward)
-    steering_sin = wp.dot(wp.cross(neutral_forward, forward), wp.vec3(0.0, 0.0, 1.0))
-    if wp.abs(steering_sin) < TIRE_STEERING_DEADZONE_SIN:
-        steering_cos = 1.0
-        steering_sin = 0.0
-    chassis_lateral = wp.vec3(-chassis_forward[1], chassis_forward[0], 0.0)
-    forward = wp.normalize(steering_cos * chassis_forward + steering_sin * chassis_lateral)
-    lateral = wp.vec3(-forward[1], forward[0], 0.0)
-
-    center = wp.transform_get_translation(wheel_pose)
-    bottom = center[2] - wheel_radii[wheel_index]
-    velocity = wp.spatial_top(body_qd[body])
-    load_per_wheel = vehicle_mass * 9.81 / 4.0
-    stiffness = 0.25 * vehicle_mass * TIRE_VERTICAL_FREQUENCY * TIRE_VERTICAL_FREQUENCY
-    damping = 0.5 * vehicle_mass * TIRE_VERTICAL_DAMPING_RATIO * TIRE_VERTICAL_FREQUENCY
-    normal_force = load_per_wheel + stiffness * (GROUND_HEIGHT - bottom) - damping * velocity[2]
-    if bottom > GROUND_HEIGHT + TIRE_SUPPORT_ACTIVATION_HEIGHT:
-        normal_force = 0.0
-    normal_force = wp.clamp(normal_force, 0.0, TIRE_MAX_NORMAL_LOAD_SCALE * load_per_wheel)
-
-    desired_force = -0.25 * vehicle_mass * TIRE_CORNERING_RESPONSE * wp.dot(velocity, lateral)
-    friction_limit = WHEEL_FRICTION * normal_force
-    lateral_force = wp.clamp(desired_force, -friction_limit, friction_limit) * lateral
-    body_f[body] += wp.spatial_vector(lateral_force, wp.vec3(0.0))
 
 
 @wp.kernel
@@ -602,34 +457,9 @@ def _replace_wheel_mesh_colliders(builder, parts: _VehicleParts) -> None:
         builder.shape_material_mu[shape] = C3_WHEEL_FRICTION if parts.variant == "c3" else WHEEL_FRICTION
 
 
-def _wheel_neutral_forwards_local(builder, parts: _VehicleParts, chassis_forward_local: wp.vec3) -> list[wp.vec3]:
-    """Return each authored wheel direction relative to the neutral chassis."""
-    chassis_rotation = wp.transform_get_rotation(builder.body_q[parts.chassis_body])
-    chassis_inverse = wp.quat_inverse(chassis_rotation)
-    chassis_forward = np.asarray(wp.quat_rotate(chassis_rotation, chassis_forward_local), dtype=np.float32)
-    chassis_forward[2] = 0.0
-    chassis_forward /= np.linalg.norm(chassis_forward)
-
-    directions = []
-    for shape in parts.wheel_shapes:
-        body = int(builder.shape_body[shape])
-        wheel_pose = wp.transform_multiply(builder.body_q[body], builder.shape_transform[shape])
-        axle = np.asarray(
-            wp.quat_rotate(wp.transform_get_rotation(wheel_pose), wp.vec3(0.0, 0.0, 1.0)),
-            dtype=np.float32,
-        )
-        forward = np.cross(axle, np.asarray((0.0, 0.0, 1.0), dtype=np.float32))
-        forward /= np.linalg.norm(forward)
-        if float(np.dot(forward, chassis_forward)) < 0.0:
-            forward = -forward
-        local = wp.quat_rotate(chassis_inverse, wp.vec3(*forward))
-        directions.append(wp.vec3(local[0], local[1], 0.0))
-    return directions
-
-
 def _configure_vehicle_ground_friction(builder, parts: _VehicleParts) -> None:
     """Keep underside contacts slippery while preserving tire grip."""
-    if parts.variant not in TIRE_FORCE_VARIANTS:
+    if parts.variant not in LOOPED_VEHICLE_VARIANTS:
         return
     wheel_shapes = set(parts.wheel_shapes)
     for shape in range(builder.shape_count):
@@ -638,11 +468,13 @@ def _configure_vehicle_ground_friction(builder, parts: _VehicleParts) -> None:
 
 
 def _filter_vehicle_ground_contacts(builder, parts: _VehicleParts, ground_shape: int) -> None:
-    """Route looped-vehicle ground interaction through graph-captured tire forces."""
-    if parts.variant not in TIRE_FORCE_VARIANTS:
+    """Keep the generated ground in contact with only the vehicle wheels."""
+    if parts.variant not in LOOPED_VEHICLE_VARIANTS:
         return
+    wheel_shapes = set(parts.wheel_shapes)
     for shape in range(ground_shape):
-        builder.add_shape_collision_filter_pair(shape, ground_shape)
+        if shape not in wheel_shapes:
+            builder.add_shape_collision_filter_pair(shape, ground_shape)
 
 
 def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[list[int], int, int]:
@@ -661,12 +493,19 @@ def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[li
         for path, joint_index in result["path_joint_map"].items()
         if path.endswith("/Slider_Suspension")
     }
-    # A3's authored gains barely move its suspension, while C3's rear carries
-    # its motor and needs a much firmer model-specific tune.
+    # C3 authors a much softer front axle and carries its motor over the rear.
+    # Tune each axle independently while retaining the authored damping ratio.
     for joint_index, path in suspension_joints.items():
         stiffness_scale = SUSPENSION_STIFFNESS_SCALE
-        if parts.variant == "c3" and ("/RR/" in path or "/RL/" in path):
-            stiffness_scale *= C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER
+        if parts.variant == "a3":
+            stiffness_scale *= A3_SUSPENSION_STIFFNESS_MULTIPLIER
+        if parts.variant == "b3":
+            stiffness_scale *= B3_SUSPENSION_STIFFNESS_MULTIPLIER
+        if parts.variant == "c3":
+            if "/RR/" in path or "/RL/" in path:
+                stiffness_scale *= C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER
+            else:
+                stiffness_scale *= C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER
         dof = int(builder.joint_qd_start[joint_index])
         builder.joint_target_ke[dof] *= stiffness_scale
         builder.joint_target_kd[dof] *= math.sqrt(stiffness_scale)
@@ -925,23 +764,10 @@ class Example:
         )
         vehicle_parts = _resolve_vehicle_parts(builder, result)
         self._vehicle_variant = vehicle_parts.variant
-        self._use_tire_forces = ENABLE_LOOPED_VEHICLE_TIRE_FORCES and vehicle_parts.variant in TIRE_FORCE_VARIANTS
-        self._vehicle_body_indices_host = [
-            body for body, flags in enumerate(builder.body_flags) if not int(flags) & int(newton.BodyFlags.KINEMATIC)
-        ]
-        self._vehicle_body_masses_host = [builder.body_mass[body] for body in self._vehicle_body_indices_host]
-        self._vehicle_mass = float(sum(self._vehicle_body_masses_host))
+        self._looped_vehicle = vehicle_parts.variant in LOOPED_VEHICLE_VARIANTS
         self._sim_substeps = C3_SIM_SUBSTEPS if vehicle_parts.variant == "c3" else SIM_SUBSTEPS
-        chassis_rotation = wp.transform_get_rotation(builder.body_q[vehicle_parts.chassis_body])
-        self._vehicle_forward_local = wp.quat_rotate(wp.quat_inverse(chassis_rotation), wp.vec3(1.0, 0.0, 0.0))
         _scale_shape_contact_gaps(builder, authored_unit)
         _replace_wheel_mesh_colliders(builder, vehicle_parts)
-        self._wheel_bodies_host = [int(builder.shape_body[shape]) for shape in vehicle_parts.wheel_shapes]
-        self._wheel_shape_transforms_host = [builder.shape_transform[shape] for shape in vehicle_parts.wheel_shapes]
-        self._wheel_neutral_forwards_host = _wheel_neutral_forwards_local(
-            builder, vehicle_parts, self._vehicle_forward_local
-        )
-        self._wheel_radii_host = [float(builder.shape_scale[shape][0]) for shape in vehicle_parts.wheel_shapes]
         _configure_vehicle_ground_friction(builder, vehicle_parts)
         # The source PhysicsScene stores 981 in cm/s^2; stage-root scaling
         # does not transform scalar physics attributes.
@@ -1021,16 +847,8 @@ class Example:
         self.initial_state.assign(self.state)
         self.control = self.model.control()
         self._drive_input_host = np.zeros(2, dtype=np.float32)
-        self._wheel_bodies = wp.array(self._wheel_bodies_host, dtype=wp.int32, device=self.device)
-        self._wheel_shape_transforms = wp.array(
-            self._wheel_shape_transforms_host, dtype=wp.transform, device=self.device
-        )
-        self._wheel_neutral_forwards = wp.array(self._wheel_neutral_forwards_host, dtype=wp.vec3, device=self.device)
-        self._wheel_radii = wp.array(self._wheel_radii_host, dtype=float, device=self.device)
         self._drive_input_device = wp.zeros(2, dtype=float, device=self.device)
         self._wheel_dofs_device = wp.array(self._wheel_dofs, dtype=wp.int32, device=self.device)
-        self._vehicle_body_indices = wp.array(self._vehicle_body_indices_host, dtype=wp.int32, device=self.device)
-        self._vehicle_body_masses = wp.array(self._vehicle_body_masses_host, dtype=float, device=self.device)
         self._wheel_speed_command = wp.zeros(1, dtype=float, device=self.device)
         self._steering_command = wp.zeros(1, dtype=float, device=self.device)
         if self.chase_camera_enabled:
@@ -1046,8 +864,10 @@ class Example:
             solver_iterations=SOLVER_ITERATIONS,
             velocity_iterations=1,
             default_friction=0.9,
-            friction_combine_mode="min" if self._use_tire_forces else "average",
-            step_layout="multi_world",
+            friction_combine_mode="min" if self._looped_vehicle else "average",
+            mass_splitting=ENABLE_MASS_SPLITTING,
+            mass_splitting_unrolled=ENABLE_MASS_SPLITTING,
+            step_layout="single_world" if ENABLE_MASS_SPLITTING else "multi_world",
             articulation_mode="maximal",
         )
 
@@ -1218,64 +1038,8 @@ class Example:
         if self.chase_camera_enabled:
             self._update_chase_camera()
 
-    def _apply_tire_forces(self) -> None:
-        """Apply stable graph-captured traction for multiply-looped RacerX models."""
-        if not self._use_tire_forces:
-            return
-        wp.launch(
-            _apply_looped_vehicle_tire_forces,
-            dim=len(self._vehicle_body_indices_host),
-            inputs=[
-                self._vehicle_body_indices,
-                self._vehicle_body_masses,
-                self._chassis_body,
-                self._vehicle_forward_local,
-                self._wheel_speed_command,
-                self._steering_command,
-                self.state.body_q,
-                self.state.body_qd,
-                self.state.body_f,
-            ],
-            device=self.device,
-        )
-
-        wp.launch(
-            _apply_wheel_ground_support,
-            dim=4,
-            inputs=[
-                self._wheel_bodies,
-                self._wheel_shape_transforms,
-                self._wheel_radii,
-                self._vehicle_mass,
-                self.state.body_q,
-                self.state.body_qd,
-                self.state.body_f,
-            ],
-            device=self.device,
-        )
-
-        wp.launch(
-            _apply_wheel_lateral_forces,
-            dim=4,
-            inputs=[
-                self._wheel_bodies,
-                self._wheel_shape_transforms,
-                self._wheel_neutral_forwards,
-                self._wheel_radii,
-                self._vehicle_mass,
-                self._chassis_body,
-                self._vehicle_forward_local,
-                self._steering_command,
-                self.state.body_q,
-                self.state.body_qd,
-                self.state.body_f,
-            ],
-            device=self.device,
-        )
-
     def _simulate(self) -> None:
         self.state.clear_forces()
-        self._apply_tire_forces()
         self.viewer.apply_forces(self.state)
         self.collision_pipeline.collide(self.state, self.contacts)
         self.solver.step(

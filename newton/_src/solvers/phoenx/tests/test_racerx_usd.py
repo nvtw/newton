@@ -157,6 +157,7 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertEqual((racerx.STEERING_TRAVEL, racerx.STEERING_LIMIT), (0.00125, 0.0015))
         self.assertEqual(racerx.STEERING_RATE, 0.015)
         self.assertEqual((racerx.SIM_SUBSTEPS, racerx.SOLVER_ITERATIONS), (4, 6))
+        self.assertTrue(racerx.ENABLE_MASS_SPLITTING)
 
     def test_wheel_mesh_colliders_become_symmetric_cylinders(self) -> None:
         """Replace faceted wheel hulls with equally configured smooth cylinders."""
@@ -242,8 +243,8 @@ class TestRacerXUsd(unittest.TestCase):
 
         np.testing.assert_allclose(builder.shape_material_mu, (0.4, 1.2, 0.0, 1.2, 0.0, 1.2))
 
-    def test_looped_vehicle_ground_uses_graph_captured_tire_forces(self) -> None:
-        """Filter generated-ground contacts against every looped-vehicle shape."""
+    def test_looped_vehicle_ground_collides_only_with_wheels(self) -> None:
+        """Filter generated-ground contacts against every non-wheel vehicle shape."""
 
         class Builder:
             def __init__(self):
@@ -265,7 +266,7 @@ class TestRacerXUsd(unittest.TestCase):
 
         racerx._filter_vehicle_ground_contacts(builder, parts, ground_shape=6)
 
-        self.assertEqual(builder.pairs, [(0, 6), (1, 6), (2, 6), (3, 6), (4, 6), (5, 6)])
+        self.assertEqual(builder.pairs, [(2, 6), (4, 6)])
 
     def test_coaxial_hard_limit_and_spring_merge_to_one_dof(self) -> None:
         """Merge stacked travel and spring joints into one driven coordinate."""
@@ -308,8 +309,8 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertAlmostEqual(builder.joint_target_kd[0], 600.0)
         self.assertEqual(builder.joint_target_mode[0], newton.JointTargetMode.POSITION)
 
-    def test_vehicle_controls_bound_steering_and_soften_suspension(self) -> None:
-        """Configure finite steering effort and visible suspension travel."""
+    def test_a3_restores_authored_suspension_gains(self) -> None:
+        """Restore A3 suspension gains while configuring finite steering effort."""
         dof_count = 10
         builder = SimpleNamespace(
             joint_qd_start=list(range(9)),
@@ -347,14 +348,16 @@ class TestRacerXUsd(unittest.TestCase):
         for dof in wheel_dofs:
             self.assertEqual(builder.joint_target_mode[dof], newton.JointTargetMode.VELOCITY)
             self.assertEqual(builder.joint_effort_limit[dof], racerx.DRIVE_TORQUE_LIMIT)
+        suspension_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.A3_SUSPENSION_STIFFNESS_MULTIPLIER
+        self.assertEqual(suspension_scale, 1.0)
         for dof in range(4, 8):
             self.assertAlmostEqual(
                 builder.joint_target_ke[dof],
-                80000.0 * racerx.SUSPENSION_STIFFNESS_SCALE,
+                80000.0 * suspension_scale,
             )
             self.assertAlmostEqual(
                 builder.joint_target_kd[dof],
-                600.0 * math.sqrt(racerx.SUSPENSION_STIFFNESS_SCALE),
+                600.0 * math.sqrt(suspension_scale),
             )
         self.assertEqual(steering_joint, 8)
         self.assertEqual(steering_dof, 9)
@@ -393,19 +396,21 @@ class TestRacerXUsd(unittest.TestCase):
 
         racerx._configure_vehicle_joints(builder, {"path_joint_map": path_joint_map}, parts)
 
+        front_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER
         rear_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER
+        self.assertEqual(racerx.C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER, 4.0)
         self.assertEqual(racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER, 5.0)
         self.assertEqual(racerx.C3_WHEEL_FRICTION, 1.2)
         self.assertEqual(racerx.C3_SIM_SUBSTEPS, 4)
         for dof in (4, 5):
-            self.assertAlmostEqual(builder.joint_target_ke[dof], 10000.0 * racerx.SUSPENSION_STIFFNESS_SCALE)
-            self.assertAlmostEqual(builder.joint_target_kd[dof], 1000.0 * math.sqrt(racerx.SUSPENSION_STIFFNESS_SCALE))
+            self.assertAlmostEqual(builder.joint_target_ke[dof], 10000.0 * front_scale)
+            self.assertAlmostEqual(builder.joint_target_kd[dof], 1000.0 * math.sqrt(front_scale))
         for dof in (6, 7):
             self.assertAlmostEqual(builder.joint_target_ke[dof], 100000.0 * rear_scale)
             self.assertAlmostEqual(builder.joint_target_kd[dof], 1000.0 * math.sqrt(rear_scale))
 
-    def test_b3_normalizes_asymmetric_suspension_gains(self) -> None:
-        """Normalize B3's anomalous rear-left spring to its other corners."""
+    def test_b3_restores_authored_suspension_gains(self) -> None:
+        """Restore and normalize B3 suspension gains to prevent bump steer."""
         dof_count = 10
         builder = SimpleNamespace(
             joint_qd_start=list(range(9)),
@@ -433,8 +438,10 @@ class TestRacerXUsd(unittest.TestCase):
 
         racerx._configure_vehicle_joints(builder, {"path_joint_map": path_joint_map}, parts)
 
-        expected_ke = 80000.0 * racerx.SUSPENSION_STIFFNESS_SCALE
-        expected_kd = 600.0 * math.sqrt(racerx.SUSPENSION_STIFFNESS_SCALE)
+        suspension_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.B3_SUSPENSION_STIFFNESS_MULTIPLIER
+        self.assertEqual(suspension_scale, 1.0)
+        expected_ke = 80000.0 * suspension_scale
+        expected_kd = 600.0 * math.sqrt(suspension_scale)
         for dof in range(4, 8):
             self.assertAlmostEqual(builder.joint_target_ke[dof], expected_ke)
             self.assertAlmostEqual(builder.joint_target_kd[dof], expected_kd)
@@ -592,166 +599,6 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertEqual(camera_path, "<generated RacerX overview>")
         self.assertIsNotNone(viewer.camera)
         self.assertTrue(car.GetPrim().IsValid())
-
-    def test_looped_vehicle_tire_forces_run_inside_cuda_graph(self) -> None:
-        """Apply forward traction and oppose lateral slip inside a CUDA graph."""
-        device = wp.get_device()
-        body_q = wp.array(
-            [wp.transform((0.0, 0.0, 0.0), wp.quat_identity())],
-            dtype=wp.transform,
-            device=device,
-        )
-        body_qd = wp.array(
-            [wp.spatial_vector(0.0, 1.0, 0.0, 0.0, 0.0, 0.0)],
-            dtype=wp.spatial_vector,
-            device=device,
-        )
-        body_f = wp.zeros(1, dtype=wp.spatial_vector, device=device)
-        body_indices = wp.array([0], dtype=wp.int32, device=device)
-        body_masses = wp.array([2.0], dtype=float, device=device)
-        wheel_speed = wp.array([racerx.DRIVE_SPEED], dtype=float, device=device)
-        steering = wp.array([racerx.STEERING_TRAVEL], dtype=float, device=device)
-
-        def launch():
-            wp.launch(
-                racerx._apply_looped_vehicle_tire_forces,
-                dim=1,
-                inputs=[
-                    body_indices,
-                    body_masses,
-                    0,
-                    wp.vec3(1.0, 0.0, 0.0),
-                    wheel_speed,
-                    steering,
-                    body_q,
-                    body_qd,
-                    body_f,
-                ],
-                device=device,
-            )
-
-        graph = None
-        if device.is_cuda:
-            with wp.ScopedCapture() as capture:
-                launch()
-            graph = capture.graph
-        launch() if graph is None else wp.capture_launch(graph)
-
-        wrench = body_f.numpy()[0]
-        self.assertGreater(float(wrench[0]), 0.0)
-        self.assertLess(float(wrench[1]), 0.0)
-        self.assertAlmostEqual(float(wrench[5]), 0.0, places=6)
-
-    def test_wheel_ground_support_runs_inside_cuda_graph(self) -> None:
-        """Support four penetrating tire cylinders inside a CUDA graph."""
-        device = wp.get_device()
-        body_q = wp.array(
-            [wp.transform((0.0, 0.0, 0.01), wp.quat_identity()) for _ in range(4)],
-            dtype=wp.transform,
-            device=device,
-        )
-        body_qd = wp.zeros(4, dtype=wp.spatial_vector, device=device)
-        body_f = wp.zeros(4, dtype=wp.spatial_vector, device=device)
-        wheel_bodies = wp.array((0, 1, 2, 3), dtype=wp.int32, device=device)
-        wheel_xforms = wp.array(
-            [wp.transform_identity() for _ in range(4)],
-            dtype=wp.transform,
-            device=device,
-        )
-        wheel_radii = wp.full(4, 0.02, dtype=float, device=device)
-
-        def launch():
-            wp.launch(
-                racerx._apply_wheel_ground_support,
-                dim=4,
-                inputs=[
-                    wheel_bodies,
-                    wheel_xforms,
-                    wheel_radii,
-                    4.0,
-                    body_q,
-                    body_qd,
-                    body_f,
-                ],
-                device=device,
-            )
-
-        graph = None
-        if device.is_cuda:
-            with wp.ScopedCapture() as capture:
-                launch()
-            graph = capture.graph
-        launch() if graph is None else wp.capture_launch(graph)
-
-        wrenches = body_f.numpy()
-        self.assertTrue(np.all(wrenches[:, 2] > 9.81))
-
-    def test_wheel_lateral_force_follows_steered_axis_in_cuda_graph(self) -> None:
-        """Generate lateral tire force from moving steered-wheel slip in a CUDA graph."""
-        device = wp.get_device()
-        steering = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), math.radians(20.0))
-        cylinder_axis = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.5 * math.pi)
-        body_q = wp.array(
-            [
-                wp.transform((0.0, 0.0, 0.02), steering),
-                wp.transform((0.0, 0.0, 0.02), wp.quat_identity()),
-                wp.transform((0.0, 0.0, 0.02), wp.quat_identity()),
-                wp.transform((0.0, 0.0, 0.02), wp.quat_identity()),
-            ],
-            dtype=wp.transform,
-            device=device,
-        )
-        body_qd = wp.array(
-            [wp.spatial_vector(1.0, 0.0, 0.0, 0.0, 0.0, 0.0)] + [wp.spatial_vector()] * 3,
-            dtype=wp.spatial_vector,
-            device=device,
-        )
-        body_f = wp.zeros(4, dtype=wp.spatial_vector, device=device)
-        wheel_bodies = wp.array((0, 1, 2, 3), dtype=wp.int32, device=device)
-        wheel_xforms = wp.array(
-            [wp.transform((0.0, 0.0, 0.0), cylinder_axis) for _ in range(4)],
-            dtype=wp.transform,
-            device=device,
-        )
-        wheel_neutral_forwards = wp.full(4, wp.vec3(1.0, 0.0, 0.0), dtype=wp.vec3, device=device)
-        wheel_radii = wp.full(4, 0.02, dtype=float, device=device)
-        steering_command = wp.array((racerx.STEERING_TRAVEL,), dtype=float, device=device)
-
-        def launch():
-            wp.launch(
-                racerx._apply_wheel_lateral_forces,
-                dim=4,
-                inputs=[
-                    wheel_bodies,
-                    wheel_xforms,
-                    wheel_neutral_forwards,
-                    wheel_radii,
-                    4.0,
-                    1,
-                    wp.vec3(1.0, 0.0, 0.0),
-                    steering_command,
-                    body_q,
-                    body_qd,
-                    body_f,
-                ],
-                device=device,
-            )
-
-        graph = None
-        if device.is_cuda:
-            with wp.ScopedCapture() as capture:
-                launch()
-            graph = capture.graph
-        launch() if graph is None else wp.capture_launch(graph)
-
-        forces = body_f.numpy()
-        self.assertGreater(float(forces[0, 1]), 0.0)
-        np.testing.assert_allclose(forces[1:], 0.0, atol=1.0e-6)
-
-        body_f.zero_()
-        steering_command.zero_()
-        launch() if graph is None else wp.capture_launch(graph)
-        np.testing.assert_allclose(body_f.numpy(), 0.0, atol=1.0e-6)
 
     def test_contact_visualization_uses_active_contact_count(self) -> None:
         """Submit only active contacts from an oversized collision buffer."""

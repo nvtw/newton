@@ -1,1 +1,1 @@
-Stabilize RacerX C3 tire support, add friction-limited steered-wheel cornering, and prevent oversized OptiX contact-debug batches.
+Stabilize RacerX vehicles with physical wheel contacts, safe multiply redundant contact coupling, per-model suspension tuning, and mass-splitting support, and prevent oversized OptiX contact-debug batches.

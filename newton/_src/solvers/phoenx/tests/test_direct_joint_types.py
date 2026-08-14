@@ -240,6 +240,29 @@ def _build_two_mechanism_contact_model() -> newton.Model:
     return builder.finalize(device=wp.get_preferred_device())
 
 
+def _build_two_grounded_mechanisms() -> tuple[newton.Model, tuple[int, ...]]:
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    builder.add_ground_plane()
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.8)
+    bodies = []
+    for x in (-0.5, 0.5):
+        lower = builder.add_link(xform=wp.transform(wp.vec3(x, 0.0, 0.1), wp.quat_identity()))
+        upper = builder.add_link(xform=wp.transform(wp.vec3(x, 0.0, 0.3), wp.quat_identity()))
+        builder.add_shape_box(lower, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+        builder.add_shape_box(upper, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+        root = builder.add_joint_free(parent=-1, child=lower)
+        fixed = builder.add_joint_fixed(
+            parent=lower,
+            child=upper,
+            parent_xform=wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(0.0, 0.0, -0.1), wp.quat_identity()),
+        )
+        builder.add_articulation([root, fixed])
+        bodies.extend((lower, upper))
+    builder.color()
+    return builder.finalize(device=wp.get_preferred_device()), tuple(bodies)
+
+
 def _joint_anchor_error(model: newton.Model, state: newton.State, joint: int) -> float:
     body_q = state.body_q.numpy()
     parent = int(model.joint_parent.numpy()[joint])
@@ -259,13 +282,21 @@ def _joint_anchor_error(model: newton.Model, state: newton.State, joint: int) ->
     return float(np.linalg.norm(parent_anchor - child_anchor))
 
 
-def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
+def _make_solver(
+    model: newton.Model,
+    *,
+    mass_splitting: bool = False,
+    mass_splitting_unrolled: bool = False,
+) -> newton.solvers.SolverPhoenX:
     return newton.solvers.SolverPhoenX(
         model,
         substeps=5,
         solver_iterations=1,
         velocity_iterations=1,
         articulation_mode="maximal",
+        mass_splitting=mass_splitting,
+        mass_splitting_unrolled=mass_splitting_unrolled,
+        step_layout="single_world" if mass_splitting else "auto",
     )
 
 
@@ -287,11 +318,47 @@ class TestDirectJointTypes(unittest.TestCase):
 
     def test_shared_world_mechanisms_keep_contacts_in_coupled_pgs(self) -> None:
         """Keep cross-mechanism contacts in the coupled colored solve."""
-        solver = _make_solver(_build_two_mechanism_contact_model())
+        model = _build_two_mechanism_contact_model()
+        solver = _make_solver(model)
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        pipeline = model._collision_pipeline
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+        solver.step(state, state, model.control(), contacts, 1.0 / 60.0)
 
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (6, 6))
-        self.assertIsNone(solver._direct_contact_response)
-        self.assertIsNone(solver._direct_contact_schedule)
+        self.assertIsNotNone(solver._direct_contact_response)
+        self.assertEqual(solver._direct_contact_response.active_mechanisms, (True, True))
+        count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+        self.assertGreater(count, 0)
+        owners = solver.world._contact_cols.articulation_owner.numpy()[:count]
+        self.assertTrue(np.all(owners < 0))
+
+    def test_shared_world_mechanisms_own_independent_ground_contacts(self) -> None:
+        """Couple independent same-world mechanisms to ground separately."""
+        model, bodies = _build_two_grounded_mechanisms()
+        solver = _make_solver(model)
+        state = model.state()
+        control = model.control()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        pipeline = model._collision_pipeline
+        contacts = pipeline.contacts()
+        with wp.ScopedCapture(model.device) as capture:
+            state.clear_forces()
+            pipeline.collide(state, contacts)
+            solver.step(state, state, control, contacts, 1.0 / 60.0)
+        for _ in range(60):
+            wp.capture_launch(capture.graph)
+
+        self.assertEqual(solver._direct_contact_response.active_mechanisms, (True, True))
+        count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+        self.assertGreaterEqual(count, 2)
+        owners = solver.world._contact_cols.articulation_owner.numpy()[:count]
+        self.assertTrue(np.all(owners >= 0))
+        body_q = state.body_q.numpy()[list(bodies)]
+        self.assertTrue(np.isfinite(body_q).all())
+        self.assertGreater(float(np.min(body_q[:, 2])), 0.09)
 
     def test_direct_mechanism_contact_with_free_body_uses_schur_response(self) -> None:
         """Own a mechanism-to-free-body contact with the exact Schur response."""
@@ -376,9 +443,9 @@ class TestDirectJointTypes(unittest.TestCase):
                 else:
                     self.assertLess(float(np.max(np.abs(result[body]))), 0.8)
 
-    def test_rank_deficient_loop_uses_iterative_contacts(self) -> None:
-        """Keep regularized equality inverses out of contact Schur response."""
-        model, _bodies, _loop_joint = _build_closed_loop_contact_model(redundant=True)
+    def test_rank_deficient_loop_keeps_contacts_in_pgs(self) -> None:
+        """Keep rank-redundant loop contacts out of the regularized Schur response."""
+        model, bodies, _loop_joint = _build_closed_loop_contact_model(redundant=True)
         solver = _make_solver(model)
 
         self.assertEqual(solver._direct_equality_system.topology.mechanism_requires_rank_floor, (True,))
@@ -387,6 +454,7 @@ class TestDirectJointTypes(unittest.TestCase):
         self.assertIsNone(solver._direct_contact_schedule)
 
         state = model.state()
+        initial_xy = np.mean(state.body_q.numpy()[list(bodies), :2], axis=0)
         control = model.control()
         pipeline = model._collision_pipeline
         contacts = pipeline.contacts()
@@ -394,11 +462,48 @@ class TestDirectJointTypes(unittest.TestCase):
             state.clear_forces()
             pipeline.collide(state, contacts)
             solver.step(state, state, control, contacts, 1.0 / 60.0)
-        for _ in range(30):
+        for _ in range(120):
             wp.capture_launch(capture.graph)
 
-        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        body_q = state.body_q.numpy()
+        self.assertTrue(np.isfinite(body_q).all())
         self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
+        self.assertGreater(float(np.min(body_q[list(bodies), 2])), 0.03)
+        final_xy = np.mean(body_q[list(bodies), :2], axis=0)
+        self.assertLess(float(np.linalg.norm(final_xy - initial_xy)), 0.02)
+
+    def test_rank_deficient_loop_uses_mass_split_pgs_contacts(self) -> None:
+        """Project redundant equalities around mass-split PGS contacts."""
+        for unrolled in (False, True):
+            with self.subTest(unrolled=unrolled):
+                model, bodies, _loop_joint = _build_closed_loop_contact_model(redundant=True)
+                solver = _make_solver(
+                    model,
+                    mass_splitting=True,
+                    mass_splitting_unrolled=unrolled,
+                )
+                self.assertIsNone(solver._direct_contact_response)
+                self.assertIsNone(solver._direct_contact_schedule)
+
+                state = model.state()
+                control = model.control()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                pipeline = model._collision_pipeline
+                contacts = pipeline.contacts()
+                with wp.ScopedCapture(model.device) as capture:
+                    state.clear_forces()
+                    pipeline.collide(state, contacts)
+                    solver.step(state, state, control, contacts, 1.0 / 60.0)
+                for _ in range(120):
+                    wp.capture_launch(capture.graph)
+
+                body_q = state.body_q.numpy()[list(bodies)]
+                body_qd = state.body_qd.numpy()[list(bodies)]
+                self.assertTrue(np.isfinite(body_q).all())
+                self.assertTrue(np.isfinite(body_qd).all())
+                self.assertGreater(float(np.min(body_q[:, 2])), 0.03)
+                self.assertLess(float(np.max(np.abs(body_qd))), 2.0e-3)
+                self.assertGreater(int(solver.world._copy_state.highest_index_in_use.numpy()[0]), 0)
 
     def test_closed_loop_contacts_settle_without_horizontal_drift(self) -> None:
         """Keep a metadata-independent closed loop drift-free on the ground."""

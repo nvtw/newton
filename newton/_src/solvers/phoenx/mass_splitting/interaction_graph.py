@@ -155,6 +155,8 @@ def emit_pair(
 @wp.kernel(enable_backward=False)
 def record_all_interactions_kernel(
     elements: wp.array[ElementInteractionData],
+    contact_articulation_owner: wp.array[wp.int32],
+    contact_offset: wp.int32,
     element_ids_by_color: wp.array[wp.int32],
     color_starts: wp.array[wp.int32],
     num_active_constraints: wp.array[wp.int32],
@@ -193,6 +195,10 @@ def record_all_interactions_kernel(
     XPBD position-level correctness (see
     :mod:`newton._src.solvers.phoenx.constraints.constraint_cloth_triangle`).
 
+    Articulation-owned contact rows are omitted because their Schur or
+    tree response operates on the unsplit body state. Including those rows
+    would create inert copies that dilute unrelated overflow impulses.
+
     One thread per CSR slot in ``[0, num_active_constraints)``. Each
     thread emits up to ``MAX_BODIES`` entries via :func:`emit_pair`
     (which atomic-adds the emit counter and drops past capacity).
@@ -201,6 +207,8 @@ def record_all_interactions_kernel(
     if tid >= num_active_constraints[0]:
         return
     eid = element_ids_by_color[tid]
+    if eid >= contact_offset and contact_articulation_owner[eid - contact_offset] >= wp.int32(0):
+        return
     color = interaction_id_to_partition[eid]
     partition_key = wp.int32(0)
     if color >= max_colored_partitions:

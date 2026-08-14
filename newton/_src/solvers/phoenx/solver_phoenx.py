@@ -3726,6 +3726,8 @@ class PhoenXWorld:
             dim=self._constraint_capacity,
             inputs=[
                 self._elements,
+                self._contact_cols.articulation_owner,
+                wp.int32(self._contact_offset),
                 self._partitioner.element_ids_by_color,
                 self._partitioner.color_starts,
                 self._num_active_constraints,

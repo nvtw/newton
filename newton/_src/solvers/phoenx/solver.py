@@ -483,7 +483,6 @@ class SolverPhoenX(SolverBase):
         direct_tree_contact_candidate = bool(
             articulation_mode == "maximal"
             and contact_friction_model == "point"
-            and not mass_splitting
             and float(sleeping_velocity_threshold) <= 0.0
             and not has_deformables
             and has_rigid_collision_shapes
@@ -881,29 +880,13 @@ class SolverPhoenX(SolverBase):
                         not in tree_joint_sets
                         for mechanism in range(len(topology.dimensions))
                     )
-                    # A single-owner Schur sweep cannot couple two separately factored mechanisms.
-                    row_start = np.asarray(topology.mechanism_row_start[:-1], dtype=np.int32)
-                    representative_joint = np.asarray(topology.row_joint, dtype=np.int32)[row_start]
-                    joint_parent = model.joint_parent.numpy()
-                    representative_body = model.joint_child.numpy()[representative_joint]
-                    representative_body = np.where(
-                        representative_body >= 0,
-                        representative_body,
-                        joint_parent[representative_joint],
-                    )
-                    mechanism_world = model.body_world.numpy()[representative_body]
-                    _, world_inverse, world_counts = np.unique(
-                        mechanism_world,
-                        return_inverse=True,
-                        return_counts=True,
-                    )
-                    # Rank regularization projects equality velocities reliably,
-                    # but multiply redundant loops do not define an accurate
-                    # inverse for the contact Schur complement.
+                    # A multiply redundant factor solves equality rows robustly,
+                    # but is not an accurate inverse for a contact Schur complement.
+                    # Keep those contacts in PGS and project equalities with the
+                    # direct factor after every inequality iteration.
                     active_mechanisms = tuple(
                         np.asarray(active_mechanisms, dtype=bool)
                         & (np.asarray(topology.mechanism_cycle_count, dtype=np.int32) <= 1)
-                        & (world_counts[world_inverse] == 1)
                     )
                     if any(active_mechanisms):
                         self._direct_contact_active_mechanisms = active_mechanisms

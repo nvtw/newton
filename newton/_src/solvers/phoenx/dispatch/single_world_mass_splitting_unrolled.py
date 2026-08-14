@@ -59,8 +59,10 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=True)
                 direct.resolve_bounded_drives(idt, use_bias=True)
+            w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
             if w._maximal_tree_projector is not None:
                 w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
+                w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
             if w._reduced_constraints_active_this_step:
                 w._reduced_articulation.solve_constraints(w, idt, relax=False)
             return
@@ -99,8 +101,10 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.resolve_bounded_drives(idt, use_bias=True)
+        w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
+            w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
         if w._reduced_constraints_active_this_step:
             w._reduced_articulation.solve_constraints(w, idt, relax=False)
 
@@ -114,8 +118,10 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=False)
                 direct.resolve_bounded_drives(idt, use_bias=False)
+            w._solve_direct_contacts(use_bias=False, refresh_mobility=False)
             if w._maximal_tree_projector is not None:
                 w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
+                w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
             if w._reduced_constraints_active_this_step:
                 w._reduced_articulation.solve_constraints(w, idt, relax=True)
             return
@@ -137,8 +143,10 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.resolve_bounded_drives(idt, use_bias=False)
+        w._solve_direct_contacts(use_bias=False, refresh_mobility=False)
         if w._maximal_tree_projector is not None:
             w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
+            w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
         if w._reduced_constraints_active_this_step:
             w._reduced_articulation.solve_constraints(w, idt, relax=True)
 
