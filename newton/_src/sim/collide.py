@@ -65,8 +65,19 @@ _ANALYTIC_PRIMITIVE_PAIRS = frozenset(
     }
 )
 
+_STRAIGHT_CYLINDER_ANALYTIC_PAIRS = frozenset(
+    {
+        (int(GeoType.PLANE), int(GeoType.CYLINDER)),
+        (int(GeoType.SPHERE), int(GeoType.CYLINDER)),
+    }
+)
 
-def _pair_requires_generic_convex_narrow_phase(type_a: int, type_b: int) -> bool:
+
+def _pair_requires_generic_convex_narrow_phase(
+    type_a: int,
+    type_b: int,
+    cylinder_barrel_radius: float | None = None,
+) -> bool:
     """Return whether a sorted shape-type pair can reach GJK/MPR."""
     type_a, type_b = min(type_a, type_b), max(type_a, type_b)
     if type_a in (int(GeoType.HFIELD), int(GeoType.MESH)):
@@ -74,6 +85,8 @@ def _pair_requires_generic_convex_narrow_phase(type_a: int, type_b: int) -> bool
     if type_b in (int(GeoType.HFIELD), int(GeoType.MESH)):
         return False
     if type_a == int(GeoType.PLANE) and type_b == int(GeoType.PLANE):
+        return False
+    if (type_a, type_b) in _STRAIGHT_CYLINDER_ANALYTIC_PAIRS and cylinder_barrel_radius == 0.0:
         return False
     return (type_a, type_b) not in _ANALYTIC_PRIMITIVE_PAIRS
 
@@ -96,8 +109,20 @@ def _generic_convex_pair_requirements(
         pairs = shape_pairs_filtered.numpy()
         if pairs.size == 0:
             return []
-        pair_types = shape_types[pairs.reshape(-1, 2)]
-        return [_pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b)) for type_a, type_b in pair_types]
+        shape_scale_array = getattr(model, "shape_scale", None)
+        shape_scales = shape_scale_array.numpy() if shape_scale_array is not None else None
+        requirements = []
+        for shape_a, shape_b in pairs.reshape(-1, 2):
+            type_a = int(shape_types[shape_a])
+            type_b = int(shape_types[shape_b])
+            cylinder_barrel_radius = None
+            if shape_scales is not None:
+                if type_a == int(GeoType.CYLINDER):
+                    cylinder_barrel_radius = float(shape_scales[shape_a, 2])
+                elif type_b == int(GeoType.CYLINDER):
+                    cylinder_barrel_radius = float(shape_scales[shape_b, 2])
+            requirements.append(_pair_requires_generic_convex_narrow_phase(type_a, type_b, cylinder_barrel_radius))
+        return requirements
 
     colliding_types = shape_types[_shape_collide_mask(model, len(shape_types))]
     unique_types = np.unique(colliding_types)
