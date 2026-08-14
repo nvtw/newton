@@ -52,19 +52,19 @@ CHASE_CAMERA_TARGET_HEIGHT = 0.05
 CHASE_CAMERA_RESPONSE = 10.0
 CHASE_CAMERA_FOV = 55.0
 VEHICLE_CONTACT_GAP = 0.001
-DRIVE_SPEED = 70.0
+DRIVE_SPEED = 140.0
 DRIVE_ACCELERATION = 140.0
 DRIVE_DECELERATION = 280.0
 DRIVE_DAMPING = 0.35
 DRIVE_TORQUE_LIMIT = 3.0
 SUSPENSION_STIFFNESS_SCALE = 0.16
-STEERING_TRAVEL = 0.0025
-STEERING_LIMIT = 0.003
-STEERING_RATE = 0.03
-STEERING_STIFFNESS = 8000.0
-STEERING_DAMPING = 80.0
-STEERING_FORCE_LIMIT = 80.0
-STEERING_ASSIST_FORCE = 400.0
+STEERING_TRAVEL = 0.00125
+STEERING_LIMIT = 0.0015
+STEERING_RATE = 0.003
+STEERING_STIFFNESS = 64000.0
+STEERING_DAMPING = 240.0
+STEERING_FORCE_LIMIT = 320.0
+WHEEL_FRICTION = 1.2
 TRACK_HALF_WIDTH = 0.6
 TRACK_BARRIER_SPACING = 0.32
 TRACK_BARRIER_HALF_EXTENTS = (0.05, 0.05, 0.05)
@@ -77,6 +77,12 @@ WHEEL_JOINT_PATHS = (
     "/World/Joints/FL/Hinge_Wheel_WheelLinkage",
     "/World/Joints/RR/Hinge_Wheel_WheelLinkage",
     "/World/Joints/RL/Hinge_Wheel_WheelLinkage",
+)
+WHEEL_COLLIDER_PATHS = (
+    "/World/RC_Car/SM_RCCar_A1_WheelFrontRight_01",
+    "/World/RC_Car/SM_RCCar_A1_WheelFrontLeft_01",
+    "/World/RC_Car/SM_RCCar_A1_WheelRearRight_01",
+    "/World/RC_Car/SM_RCCar_A1_WheelRearLeft_01",
 )
 STEERING_JOINT_PATH = "/World/Joints/Steering/Steering_Link_Drive"
 CHASSIS_BODY_PATH = "/World/RC_Car/SM_RCCar_A1_Chassis_01"
@@ -111,14 +117,12 @@ def _gather_body_transforms(
 def _update_vehicle_controls(
     drive_input: wp.array[float],
     wheel_dofs: wp.array[wp.int32],
-    steering_dof: wp.int32,
     steering_target_index: wp.int32,
     frame_dt: float,
     wheel_speed_command: wp.array[float],
     steering_command: wp.array[float],
     joint_target_q: wp.array[float],
     joint_target_qd: wp.array[float],
-    joint_f: wp.array[float],
 ):
     target_speed = drive_input[0] * DRIVE_SPEED
     braking = target_speed == 0.0 or wheel_speed_command[0] * target_speed < 0.0
@@ -138,7 +142,6 @@ def _update_vehicle_controls(
     )
     steering_command[0] += steering_delta
     joint_target_q[steering_target_index] = steering_command[0]
-    joint_f[steering_dof] = drive_input[1] * STEERING_ASSIST_FORCE
 
 
 @wp.kernel
@@ -312,6 +315,33 @@ def _scale_linear_joint_units(builder, scale: float) -> None:
             builder.joint_velocity_limit[dof] *= scale
             builder.joint_q[coord] *= scale
             builder.joint_qd[dof] *= scale
+
+
+def _replace_wheel_mesh_colliders(builder, result) -> None:
+    """Use smooth cylinders for the four rendered wheel meshes."""
+    cylinder_rotation = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.5 * math.pi)
+    for path in WHEEL_COLLIDER_PATHS:
+        shape = int(result["path_shape_map"][path])
+        if builder.shape_type[shape] not in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH):
+            raise RuntimeError(f"Expected a mesh-backed RacerX wheel collider at {path}")
+
+        source = builder.shape_source[shape]
+        vertices = np.asarray(source.vertices, dtype=np.float32)
+        scale = np.asarray(builder.shape_scale[shape], dtype=np.float32)
+        scaled_vertices = vertices * scale
+        lower = scaled_vertices.min(axis=0)
+        upper = scaled_vertices.max(axis=0)
+        center = 0.5 * (lower + upper)
+        extent = upper - lower
+        radius = 0.25 * (extent[0] + extent[2])
+        half_width = 0.5 * extent[1]
+
+        cylinder_offset = wp.transform(wp.vec3(*center), cylinder_rotation)
+        builder.shape_transform[shape] = builder.shape_transform[shape] * cylinder_offset
+        builder.shape_type[shape] = newton.GeoType.CYLINDER
+        builder.shape_source[shape] = None
+        builder.shape_scale[shape] = wp.vec3(radius, half_width, 0.0)
+        builder.shape_material_mu[shape] = WHEEL_FRICTION
 
 
 def _configure_vehicle_joints(builder, result) -> tuple[list[int], int, int]:
@@ -571,6 +601,7 @@ class Example:
             ignore_composition_errors=True,
         )
         _scale_shape_contact_gaps(builder, authored_unit)
+        _replace_wheel_mesh_colliders(builder, result)
         # The source PhysicsScene stores 981 in cm/s^2; stage-root scaling
         # does not transform scalar physics attributes.
         builder.gravity = wp.vec3(0.0, 0.0, -9.81)
@@ -795,14 +826,12 @@ class Example:
             inputs=[
                 self._drive_input_device,
                 self._wheel_dofs_device,
-                self._steering_dof,
                 self._steering_target_index,
                 self.frame_dt,
                 self._wheel_speed_command,
                 self._steering_command,
                 self.control.joint_target_q,
                 self.control.joint_target_qd,
-                self.control.joint_f,
             ],
             device=self.device,
         )

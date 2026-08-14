@@ -87,9 +87,46 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertEqual(builder.body_count, len(layout.barrier_poses))
         self.assertEqual(builder.shape_count, len(layout.barrier_poses))
         self.assertTrue(all(flag == int(newton.BodyFlags.DYNAMIC) for flag in builder.body_flags))
-        self.assertEqual(racerx.DRIVE_SPEED, 70.0)
-        self.assertEqual((racerx.STEERING_TRAVEL, racerx.STEERING_LIMIT), (0.0025, 0.003))
+        self.assertEqual(racerx.DRIVE_SPEED, 140.0)
+        self.assertEqual((racerx.STEERING_TRAVEL, racerx.STEERING_LIMIT), (0.00125, 0.0015))
+        self.assertEqual(racerx.STEERING_RATE, 0.003)
         self.assertEqual((racerx.SIM_SUBSTEPS, racerx.SOLVER_ITERATIONS), (4, 6))
+
+    def test_wheel_mesh_colliders_become_symmetric_cylinders(self) -> None:
+        """Replace faceted wheel hulls with equally configured smooth cylinders."""
+        vertices = np.asarray(
+            [
+                (-2.0, -0.5, -2.0),
+                (-2.0, -0.5, 2.0),
+                (-2.0, 0.5, -2.0),
+                (-2.0, 0.5, 2.0),
+                (2.0, -0.5, -2.0),
+                (2.0, -0.5, 2.0),
+                (2.0, 0.5, -2.0),
+                (2.0, 0.5, 2.0),
+            ],
+            dtype=np.float32,
+        )
+        builder = SimpleNamespace(
+            shape_type=[newton.GeoType.CONVEX_MESH] * 4,
+            shape_source=[SimpleNamespace(vertices=vertices) for _ in range(4)],
+            shape_scale=[wp.vec3(0.01, 0.01, 0.01) for _ in range(4)],
+            shape_transform=[wp.transform_identity() for _ in range(4)],
+            shape_material_mu=[float(index) for index in range(4)],
+        )
+        path_shape_map = {path: index for index, path in enumerate(racerx.WHEEL_COLLIDER_PATHS)}
+
+        racerx._replace_wheel_mesh_colliders(builder, {"path_shape_map": path_shape_map})
+
+        self.assertEqual(builder.shape_type, [newton.GeoType.CYLINDER] * 4)
+        self.assertEqual(builder.shape_source, [None] * 4)
+        np.testing.assert_allclose(
+            np.asarray(builder.shape_scale),
+            np.tile((0.02, 0.005, 0.0), (4, 1)),
+            rtol=0.0,
+            atol=1.0e-7,
+        )
+        np.testing.assert_allclose(builder.shape_material_mu, racerx.WHEEL_FRICTION)
 
     def test_coaxial_hard_limit_and_spring_merge_to_one_dof(self) -> None:
         """Merge stacked travel and spring joints into one driven coordinate."""
@@ -160,11 +197,10 @@ class TestRacerXUsd(unittest.TestCase):
 
         self.assertEqual(wheel_dofs, [0, 1, 2, 3])
         self.assertEqual(racerx.SUSPENSION_STIFFNESS_SCALE, 0.16)
-        self.assertEqual(racerx.STEERING_RATE, 0.03)
-        self.assertEqual(racerx.STEERING_STIFFNESS, 8000.0)
-        self.assertEqual(racerx.STEERING_DAMPING, 80.0)
-        self.assertEqual(racerx.STEERING_FORCE_LIMIT, 80.0)
-        self.assertEqual(racerx.STEERING_ASSIST_FORCE, 400.0)
+        self.assertEqual(racerx.STEERING_RATE, 0.003)
+        self.assertEqual(racerx.STEERING_STIFFNESS, 64000.0)
+        self.assertEqual(racerx.STEERING_DAMPING, 240.0)
+        self.assertEqual(racerx.STEERING_FORCE_LIMIT, 320.0)
         for dof in wheel_dofs:
             self.assertEqual(builder.joint_target_mode[dof], newton.JointTargetMode.VELOCITY)
             self.assertEqual(builder.joint_effort_limit[dof], racerx.DRIVE_TORQUE_LIMIT)
@@ -194,7 +230,6 @@ class TestRacerXUsd(unittest.TestCase):
         steering_command = wp.zeros(1, dtype=float, device=device)
         target_q = wp.zeros(10, dtype=float, device=device)
         target_qd = wp.zeros(10, dtype=float, device=device)
-        joint_f = wp.zeros(10, dtype=float, device=device)
 
         def launch():
             wp.launch(
@@ -204,13 +239,11 @@ class TestRacerXUsd(unittest.TestCase):
                     drive_input,
                     wheel_dofs,
                     9,
-                    9,
                     1.0 / 60.0,
                     wheel_command,
                     steering_command,
                     target_q,
                     target_qd,
-                    joint_f,
                 ],
                 device=device,
             )
@@ -220,19 +253,21 @@ class TestRacerXUsd(unittest.TestCase):
             with wp.ScopedCapture() as capture:
                 launch()
             graph = capture.graph
-        for _ in range(30):
+        launch() if graph is None else wp.capture_launch(graph)
+
+        first_steering_command = racerx.STEERING_RATE / 60.0
+        self.assertAlmostEqual(float(target_q.numpy()[9]), first_steering_command, places=7)
+        for _ in range(59):
             launch() if graph is None else wp.capture_launch(graph)
 
         self.assertAlmostEqual(float(wheel_command.numpy()[0]), racerx.DRIVE_SPEED, places=4)
         self.assertAlmostEqual(float(target_q.numpy()[9]), racerx.STEERING_TRAVEL, places=5)
         np.testing.assert_allclose(target_qd.numpy()[:4], racerx.DRIVE_SPEED, rtol=0.0, atol=1.0e-4)
-        self.assertAlmostEqual(float(joint_f.numpy()[9]), racerx.STEERING_ASSIST_FORCE)
 
         drive_input.zero_()
-        for _ in range(15):
+        for _ in range(30):
             launch() if graph is None else wp.capture_launch(graph)
         self.assertAlmostEqual(float(wheel_command.numpy()[0]), 0.0, places=4)
-        self.assertAlmostEqual(float(joint_f.numpy()[9]), 0.0, places=4)
 
     def test_chase_camera_stays_level_behind_chassis(self) -> None:
         """Place the chase camera behind the chassis without inheriting roll."""
