@@ -85,6 +85,19 @@ def _apply_optix_color_palette(
     output[index] = color
 
 
+@wp.kernel
+def _apply_optix_plane_checker_material(
+    source: wp.array[wp.vec4],
+    u_subdiv: float,
+    v_subdiv: float,
+    output: wp.array[wp.vec4],
+):
+    index = wp.tid()
+    source_index = 0 if len(source) == 1 else index
+    material = source[source_index]
+    output[index] = wp.vec4(material[0], material[1], u_subdiv, v_subdiv)
+
+
 class _OptixOverlayRenderer:
     """Rendering controls consumed by the shared Newton GUI."""
 
@@ -234,6 +247,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._optix_ground_meshes: set[str] = set()
         self._optix_ground_subdivisions: dict[str, tuple[float, float]] = {}
         self._ground_color_arrays: dict[int, wp.array[wp.vec3]] = {}
+        self._manual_ground_material_arrays: dict[str, wp.array[wp.vec4]] = {}
         self._optix_default_material_meshes: set[str] = set()
         self._optix_model_shape_batches: dict[str, ViewerBase.ShapeInstances] = {}
         self._optix_palette_metadata: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
@@ -651,6 +665,9 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             self._optix_palette_color_arrays.clear()
             self._optix_palette_array = None
             self._ground_color_arrays.clear()
+            for name in list(self._manual_ground_material_arrays):
+                if owns(name):
+                    del self._manual_ground_material_arrays[name]
             self._material_arrays.clear()
         if self.gui is not None:
             self.gui.clear_example_callbacks()
@@ -718,6 +735,60 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             return 0.0, 0.0
         extents = np.ptp(vertices, axis=0)
         return float(extents[0] / self._ground_checker_size), float(extents[1] / self._ground_checker_size)
+
+    @override
+    def log_shapes(
+        self,
+        name: str,
+        geo_type: int,
+        geo_scale: float | tuple[float, ...],
+        xforms: wp.array[wp.transform],
+        colors: wp.array[wp.vec3] | None = None,
+        materials: wp.array[wp.vec4] | None = None,
+        geo_thickness: float = 0.0,
+        geo_is_solid: bool = True,
+        geo_src: Any = None,
+        hidden: bool = False,
+    ) -> None:
+        """Log shapes, adding metric checker materials to plane geometry."""
+        if int(geo_type) == int(GeoType.PLANE) and self._ground_checker_size is not None:
+            scale = [float(value) for value in geo_scale] if isinstance(geo_scale, tuple | list) else [float(geo_scale)]
+            width = scale[0] if scale[0] > 0.0 else 1000.0
+            length = scale[1] if len(scale) > 1 and scale[1] > 0.0 else width
+            u_subdiv = width / self._ground_checker_size
+            v_subdiv = length / self._ground_checker_size
+            count = len(xforms)
+            qualified_name = self._qualify(name)
+            output = self._manual_ground_material_arrays.get(qualified_name)
+            if output is None or len(output) != count:
+                output = wp.empty(count, dtype=wp.vec4, device=self.device)
+                self._manual_ground_material_arrays[qualified_name] = output
+            if materials is None:
+                output.fill_(wp.vec4(self._ground_roughness, 0.0, u_subdiv, v_subdiv))
+            else:
+                if len(materials) not in (1, count):
+                    raise ValueError(f"Expected 1 or {count} materials, got {len(materials)}")
+                wp.launch(
+                    _apply_optix_plane_checker_material,
+                    dim=count,
+                    inputs=[materials, u_subdiv, v_subdiv],
+                    outputs=[output],
+                    device=self.device,
+                )
+            materials = output
+
+        return super().log_shapes(
+            name,
+            geo_type,
+            geo_scale,
+            xforms,
+            colors,
+            materials,
+            geo_thickness,
+            geo_is_solid,
+            geo_src,
+            hidden,
+        )
 
     def _create_palette_metadata(self, shapes) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         indices = np.fromiter(shapes.model_shapes, dtype=np.intp)

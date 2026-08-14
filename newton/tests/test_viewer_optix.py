@@ -4,6 +4,7 @@
 import inspect
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -128,6 +129,28 @@ class TestViewerOptix(unittest.TestCase):
         self.assertEqual(viewer._checker_subdivisions_for_mesh("ground"), (10.0, 6.0))
         viewer._ground_checker_size = None
         self.assertEqual(viewer._checker_subdivisions_for_mesh("ground"), (0.0, 0.0))
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_manually_logged_plane_uses_metric_checkers(self):
+        """Apply metric checkers to planes logged outside the active model."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
+        try:
+            xforms = wp.array([wp.transform_identity()], dtype=wp.transform, device="cpu")
+            materials = wp.array([wp.vec4(0.8, 0.2, 0.0, 0.0)], dtype=wp.vec4, device="cpu")
+            with mock.patch.object(ViewerBase, "log_shapes", autospec=True) as log_shapes:
+                viewer.log_shapes(
+                    "/manual/ground",
+                    newton.GeoType.PLANE,
+                    (10.0, 6.0),
+                    xforms,
+                    materials=materials,
+                )
+
+            forwarded = log_shapes.call_args.args[6].numpy()[0]
+            np.testing.assert_allclose(forwarded, (0.8, 0.2, 10.0, 6.0))
+        finally:
+            viewer.close()
 
     @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
     def test_set_camera_updates_backend_pose(self):
