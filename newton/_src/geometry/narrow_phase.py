@@ -2833,11 +2833,6 @@ class NarrowPhase:
             shape_base_gap = shape_gap
         if self.speculative and (shape_linear_velocity is None or shape_angular_velocity is None):
             raise ValueError("Speculative NarrowPhase requires per-shape linear/angular velocity arrays")
-        if self.split_gjk_mpr and candidate_pair.shape[0] > self.split_query_results.shape[0]:
-            raise ValueError(
-                "candidate_pair capacity exceeds candidate_pair_work_estimate while split_gjk_mpr is enabled: "
-                f"{candidate_pair.shape[0]} > {self.split_query_results.shape[0]}"
-            )
         if self.speculative:
             for name, value in (
                 ("collision_update_dt", collision_update_dt),
@@ -3385,7 +3380,7 @@ class NarrowPhase:
                 dim=[1],
                 inputs=[
                     candidate_pair_count,
-                    candidate_pair.shape[0],
+                    self.split_query_results.shape[0] if self.split_gjk_mpr else candidate_pair.shape[0],
                     self.gjk_candidate_pairs_count,
                     self.gjk_candidate_pairs.shape[0],
                     self.split_gjk_work_count
