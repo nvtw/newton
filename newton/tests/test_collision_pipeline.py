@@ -2801,6 +2801,89 @@ def test_deterministic_pipeline_500_steps(test, device):
                         test.assertTrue(False, msg)
 
 
+def test_convex_pipeline_specializes_scene_routing(test, device):
+    """Select generic-convex stages from the model's reachable pair types."""
+    analytic_builder = newton.ModelBuilder()
+    body = analytic_builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.15)))
+    analytic_builder.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
+    analytic_builder.add_ground_plane()
+    analytic_model = analytic_builder.finalize(device=device)
+    analytic_pipeline = newton.CollisionPipeline(analytic_model, broad_phase="explicit")
+
+    test.assertFalse(analytic_pipeline.narrow_phase.has_generic_convex_pairs)
+    test.assertFalse(analytic_pipeline.narrow_phase.all_pairs_generic_convex)
+    analytic_contacts = analytic_pipeline.contacts()
+    analytic_pipeline.collide(analytic_model.state(), analytic_contacts)
+    test.assertGreater(int(analytic_contacts.rigid_contact_count.numpy()[0]), 0)
+
+    generic_builder = newton.ModelBuilder()
+    body_a = generic_builder.add_body(xform=wp.transform(p=wp.vec3(-0.1, 0.0, 0.0)))
+    body_b = generic_builder.add_body(xform=wp.transform(p=wp.vec3(0.1, 0.0, 0.0)))
+    generic_builder.add_shape_box(body_a, hx=0.2, hy=0.2, hz=0.2)
+    generic_builder.add_shape_box(body_b, hx=0.2, hy=0.2, hz=0.2)
+    generic_model = generic_builder.finalize(device=device)
+    generic_pipeline = newton.CollisionPipeline(generic_model, broad_phase="explicit")
+
+    test.assertTrue(generic_pipeline.narrow_phase.has_generic_convex_pairs)
+    test.assertTrue(generic_pipeline.narrow_phase.all_pairs_generic_convex)
+    generic_contacts = generic_pipeline.contacts()
+    generic_pipeline.collide(generic_model.state(), generic_contacts)
+    test.assertGreater(int(generic_contacts.rigid_contact_count.numpy()[0]), 0)
+
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_convex_pipeline_specializes_scene_routing",
+    test_convex_pipeline_specializes_scene_routing,
+    devices=get_test_devices(),
+)
+
+
+def test_split_gjk_mpr_uses_natural_pair_bound(test, device):
+    """Keep the fused path when only an oversized pair buffer crosses the split threshold."""
+    builder = newton.ModelBuilder()
+    for x in (-0.2, 0.2):
+        body = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.0)))
+        builder.add_shape_box(body, hx=0.3, hy=0.3, hz=0.3)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="sap", shape_pairs_max=4096)
+
+    test.assertFalse(pipeline.narrow_phase.split_gjk_mpr)
+
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_split_gjk_mpr_uses_natural_pair_bound",
+    test_split_gjk_mpr_uses_natural_pair_bound,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+
+def test_split_gjk_mpr_recognizes_replicated_worlds(test, device):
+    """Enable replicated-world pair ordering for sufficiently large convex workloads."""
+    world_builder = newton.ModelBuilder()
+    for x in range(17):
+        body = world_builder.add_body(xform=wp.transform(wp.vec3(float(x), 0.0, 0.0)))
+        world_builder.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
+    builder = newton.ModelBuilder()
+    builder.replicate(world_builder, world_count=32)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="sap", shape_pairs_max=8192)
+
+    test.assertTrue(pipeline.narrow_phase.split_gjk_mpr)
+    test.assertTrue(pipeline.narrow_phase.reorder_replicated_pairs)
+
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_split_gjk_mpr_recognizes_replicated_worlds",
+    test_split_gjk_mpr_recognizes_replicated_worlds,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+
 add_function_test(
     TestDeterministicPipeline,
     "test_deterministic_pipeline_500_steps",
