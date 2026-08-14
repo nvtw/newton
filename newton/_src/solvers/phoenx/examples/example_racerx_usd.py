@@ -39,7 +39,13 @@ VEHICLE_CONTACT_GAP = 0.001
 DRIVE_SPEED = 70.0
 DRIVE_DAMPING = 0.35
 DRIVE_TORQUE_LIMIT = 3.0
-STEERING_TRAVEL = 0.08
+SUSPENSION_STIFFNESS_SCALE = 0.02
+STEERING_TRAVEL = 0.005
+STEERING_LIMIT = 0.006
+STEERING_RATE = 0.02
+STEERING_STIFFNESS = 2000.0
+STEERING_DAMPING = 40.0
+STEERING_FORCE_LIMIT = 20.0
 
 WHEEL_JOINT_PATHS = (
     "/World/Joints/FR/Hinge_Wheel_WheelLinkage",
@@ -200,6 +206,18 @@ def _configure_vehicle_joints(builder, result) -> tuple[list[int], int, int]:
         builder.joint_effort_limit[dof] = DRIVE_TORQUE_LIMIT
         wheel_dofs.append(dof)
 
+    suspension_joints = {
+        int(joint_index)
+        for path, joint_index in result["path_joint_map"].items()
+        if path.endswith("/Slider_Suspension")
+    }
+    # The authored gains settle this 3.24 kg car by less than 0.2 mm. Reduce
+    # stiffness for visible travel and scale damping to preserve damping ratio.
+    for joint_index in suspension_joints:
+        dof = int(builder.joint_qd_start[joint_index])
+        builder.joint_target_ke[dof] *= SUSPENSION_STIFFNESS_SCALE
+        builder.joint_target_kd[dof] *= math.sqrt(SUSPENSION_STIFFNESS_SCALE)
+
     steering_joint = int(result["path_joint_map"][STEERING_JOINT_PATH])
     steering_dof_start = int(builder.joint_qd_start[steering_joint])
     linear_count, _angular_count = builder.joint_dof_dim[steering_joint]
@@ -212,9 +230,12 @@ def _configure_vehicle_joints(builder, result) -> tuple[list[int], int, int]:
     builder.joint_limit_lower[steering_dof_start] = 1.0
     builder.joint_limit_upper[steering_dof_start] = -1.0
     steering_dof = steering_dof_start + 1
-    builder.joint_limit_lower[steering_dof] = -STEERING_TRAVEL
-    builder.joint_limit_upper[steering_dof] = STEERING_TRAVEL
+    builder.joint_limit_lower[steering_dof] = -STEERING_LIMIT
+    builder.joint_limit_upper[steering_dof] = STEERING_LIMIT
     builder.joint_target_mode[steering_dof] = newton.JointTargetMode.POSITION
+    builder.joint_target_ke[steering_dof] = STEERING_STIFFNESS
+    builder.joint_target_kd[steering_dof] = STEERING_DAMPING
+    builder.joint_effort_limit[steering_dof] = STEERING_FORCE_LIMIT
     return wheel_dofs, steering_joint, steering_dof
 
 
@@ -462,6 +483,7 @@ class Example:
         self.control = self.model.control()
         self._target_q_host = self.control.joint_target_q.numpy()
         self._target_qd_host = self.control.joint_target_qd.numpy()
+        self._steering_command = float(self._target_q_host[self._steering_target_index])
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
             collision_pipeline=self.collision_pipeline,
@@ -481,8 +503,8 @@ class Example:
             dtype=wp.transform,
             device=self.device,
         )
-        self._ground_visual_colors = wp.array([wp.vec3(0.32, 0.34, 0.38)], dtype=wp.vec3, device=self.device)
-        self._ground_visual_materials = wp.array([wp.vec4(0.82, 0.0, 0.0, 0.0)], dtype=wp.vec4, device=self.device)
+        self._ground_visual_colors = wp.array([wp.vec3(0.7, 0.7, 0.7)], dtype=wp.vec3, device=self.device)
+        self._ground_visual_materials = wp.array([wp.vec4(0.8, 0.0, 0.0, 0.0)], dtype=wp.vec4, device=self.device)
 
         self.graph = None
         if self.device.is_cuda:
@@ -532,7 +554,10 @@ class Example:
         wheel_speed = throttle * DRIVE_SPEED
         for dof in self._wheel_dofs:
             self._target_qd_host[dof] = wheel_speed
-        self._target_q_host[self._steering_target_index] = steering * STEERING_TRAVEL
+        steering_target = steering * STEERING_TRAVEL
+        max_delta = STEERING_RATE * self.frame_dt
+        self._steering_command += float(np.clip(steering_target - self._steering_command, -max_delta, max_delta))
+        self._target_q_host[self._steering_target_index] = self._steering_command
         self.control.joint_target_q.assign(self._target_q_host)
         self.control.joint_target_qd.assign(self._target_qd_host)
 
@@ -569,6 +594,7 @@ class Example:
         self.state.clear_forces()
         self.collision_pipeline.reset_contact_matching()
         self._target_q_host.fill(0.0)
+        self._steering_command = 0.0
         self._target_qd_host.fill(0.0)
         self.control.joint_target_q.assign(self._target_q_host)
         self.control.joint_target_qd.assign(self._target_qd_host)

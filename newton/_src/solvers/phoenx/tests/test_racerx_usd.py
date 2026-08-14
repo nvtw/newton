@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import math
 import unittest
+from types import SimpleNamespace
 
 import newton
+from newton._src.solvers.phoenx.examples import example_racerx_usd as racerx
 
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
@@ -61,6 +64,53 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertAlmostEqual(builder.joint_target_ke[0], 80000.0)
         self.assertAlmostEqual(builder.joint_target_kd[0], 600.0)
         self.assertEqual(builder.joint_target_mode[0], newton.JointTargetMode.POSITION)
+
+    def test_vehicle_controls_bound_steering_and_soften_suspension(self) -> None:
+        """Configure finite steering effort and visible suspension travel."""
+        dof_count = 10
+        builder = SimpleNamespace(
+            joint_qd_start=list(range(9)),
+            joint_dof_dim=[(1, 0)] * 8 + [(2, 0)],
+            joint_target_mode=[newton.JointTargetMode.NONE] * dof_count,
+            joint_target_ke=[0.0] * 4 + [80000.0] * 4 + [0.0, 200000.0],
+            joint_target_kd=[0.0] * 4 + [600.0] * 4 + [0.0, 0.0],
+            joint_effort_limit=[float("inf")] * dof_count,
+            joint_limit_lower=[-1.0] * dof_count,
+            joint_limit_upper=[1.0] * dof_count,
+        )
+        path_joint_map = {path: index for index, path in enumerate(racerx.WHEEL_JOINT_PATHS)}
+        path_joint_map.update(
+            {
+                f"/World/Joints/{corner}/Slider_Suspension": 4 + index
+                for index, corner in enumerate(("FR", "FL", "RR", "RL"))
+            }
+        )
+        path_joint_map[racerx.STEERING_JOINT_PATH] = 8
+
+        wheel_dofs, steering_joint, steering_dof = racerx._configure_vehicle_joints(
+            builder, {"path_joint_map": path_joint_map}
+        )
+
+        self.assertEqual(wheel_dofs, [0, 1, 2, 3])
+        for dof in wheel_dofs:
+            self.assertEqual(builder.joint_target_mode[dof], newton.JointTargetMode.VELOCITY)
+            self.assertEqual(builder.joint_effort_limit[dof], racerx.DRIVE_TORQUE_LIMIT)
+        for dof in range(4, 8):
+            self.assertAlmostEqual(
+                builder.joint_target_ke[dof],
+                80000.0 * racerx.SUSPENSION_STIFFNESS_SCALE,
+            )
+            self.assertAlmostEqual(
+                builder.joint_target_kd[dof],
+                600.0 * math.sqrt(racerx.SUSPENSION_STIFFNESS_SCALE),
+            )
+        self.assertEqual(steering_joint, 8)
+        self.assertEqual(steering_dof, 9)
+        self.assertEqual(builder.joint_target_ke[steering_dof], racerx.STEERING_STIFFNESS)
+        self.assertEqual(builder.joint_target_kd[steering_dof], racerx.STEERING_DAMPING)
+        self.assertEqual(builder.joint_effort_limit[steering_dof], racerx.STEERING_FORCE_LIMIT)
+        self.assertEqual(builder.joint_limit_lower[steering_dof], -racerx.STEERING_LIMIT)
+        self.assertEqual(builder.joint_limit_upper[steering_dof], racerx.STEERING_LIMIT)
 
     def test_self_filtered_collision_group_excludes_member_pair(self) -> None:
         """Translate a self-filtered USD collision group into shape exclusions."""
