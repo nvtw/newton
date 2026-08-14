@@ -50,6 +50,7 @@ OPTIX_DLSS_QUALITY = "quality"
 GROUND_HEIGHT = 0.0
 GROUND_VISUAL_SIZE = 1000.0
 SIM_SUBSTEPS = 4
+C3_SIM_SUBSTEPS = 8
 SOLVER_ITERATIONS = 6
 CHASE_CAMERA_DISTANCE = 0.45
 CHASE_CAMERA_HEIGHT = 0.18
@@ -64,6 +65,8 @@ DRIVE_DECELERATION = 280.0
 DRIVE_DAMPING = 0.35
 DRIVE_TORQUE_LIMIT = 3.0
 SUSPENSION_STIFFNESS_SCALE = 0.16
+C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER = 5.0
+C3_WHEEL_FRICTION = 0.8
 STEERING_TRAVEL = 0.00125
 STEERING_LIMIT = 0.0015
 STEERING_RATE = 0.015
@@ -96,6 +99,7 @@ class _VehicleParts:
     steering_joint: int
     chassis_body: int
     chassis_body_path: str
+    variant: str = "a3"
 
 
 NON_PHYSICAL_RIGID_BODY_PATHS = {
@@ -401,6 +405,7 @@ def _resolve_vehicle_parts(builder, result) -> _VehicleParts:
         wheel_shapes=tuple(wheel_shapes),
         wheel_shape_paths=tuple(wheel_shape_paths),
         steering_joint=steering_joint,
+        variant="c3" if body_path[chassis_body].endswith("_Body_01") else "a3",
         chassis_body=chassis_body,
         chassis_body_path=body_path[chassis_body],
     )
@@ -429,7 +434,7 @@ def _replace_wheel_mesh_colliders(builder, parts: _VehicleParts) -> None:
         builder.shape_type[shape] = newton.GeoType.CYLINDER
         builder.shape_source[shape] = None
         builder.shape_scale[shape] = wp.vec3(radius, half_width, 0.0)
-        builder.shape_material_mu[shape] = WHEEL_FRICTION
+        builder.shape_material_mu[shape] = C3_WHEEL_FRICTION if parts.variant == "c3" else WHEEL_FRICTION
 
 
 def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[list[int], int, int]:
@@ -444,16 +449,19 @@ def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[li
         wheel_dofs.append(dof)
 
     suspension_joints = {
-        int(joint_index)
+        int(joint_index): path
         for path, joint_index in result["path_joint_map"].items()
         if path.endswith("/Slider_Suspension")
     }
-    # The authored gains settle this 3.24 kg car by less than 0.2 mm. Reduce
-    # stiffness for visible travel and scale damping to preserve damping ratio.
-    for joint_index in suspension_joints:
+    # A3's authored gains barely move its suspension, while C3's rear carries
+    # its motor and needs a much firmer model-specific tune.
+    for joint_index, path in suspension_joints.items():
+        stiffness_scale = SUSPENSION_STIFFNESS_SCALE
+        if parts.variant == "c3" and ("/RR/" in path or "/RL/" in path):
+            stiffness_scale *= C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER
         dof = int(builder.joint_qd_start[joint_index])
-        builder.joint_target_ke[dof] *= SUSPENSION_STIFFNESS_SCALE
-        builder.joint_target_kd[dof] *= math.sqrt(SUSPENSION_STIFFNESS_SCALE)
+        builder.joint_target_ke[dof] *= stiffness_scale
+        builder.joint_target_kd[dof] *= math.sqrt(stiffness_scale)
 
     steering_joint = parts.steering_joint
     steering_dof_start = int(builder.joint_qd_start[steering_joint])
@@ -694,6 +702,7 @@ class Example:
             ignore_composition_errors=True,
         )
         vehicle_parts = _resolve_vehicle_parts(builder, result)
+        self._sim_substeps = C3_SIM_SUBSTEPS if vehicle_parts.variant == "c3" else SIM_SUBSTEPS
         _scale_shape_contact_gaps(builder, authored_unit)
         _replace_wheel_mesh_colliders(builder, vehicle_parts)
         # The source PhysicsScene stores 981 in cm/s^2; stage-root scaling
@@ -784,7 +793,7 @@ class Example:
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
             collision_pipeline=self.collision_pipeline,
-            substeps=SIM_SUBSTEPS,
+            substeps=self._sim_substeps,
             solver_iterations=SOLVER_ITERATIONS,
             velocity_iterations=1,
             default_friction=0.9,

@@ -89,6 +89,7 @@ class TestRacerXUsd(unittest.TestCase):
                 self.assertEqual(parts.steering_joint, 4)
                 self.assertEqual(parts.chassis_body, 4)
                 self.assertEqual(parts.chassis_body_path, chassis_path)
+                self.assertEqual(parts.variant, "c3" if model == "C1" else "a3")
 
     def test_track_follows_closed_uniform_spline(self) -> None:
         """Build a clear, technical circuit with uniformly spaced barriers."""
@@ -198,6 +199,24 @@ class TestRacerXUsd(unittest.TestCase):
             atol=1.0e-7,
         )
         np.testing.assert_allclose(builder.shape_material_mu, racerx.WHEEL_FRICTION)
+        builder.shape_type = [newton.GeoType.CONVEX_MESH] * 4
+        builder.shape_source = [SimpleNamespace(vertices=vertices) for _ in range(4)]
+        builder.shape_scale = [wp.vec3(0.01, 0.01, 0.01) for _ in range(4)]
+        builder.shape_transform = [wp.transform_identity() for _ in range(4)]
+        builder.shape_material_mu = [racerx.WHEEL_FRICTION] * 4
+        c3_parts = racerx._VehicleParts(
+            wheel_joints=(0, 1, 2, 3),
+            wheel_shapes=(0, 1, 2, 3),
+            wheel_shape_paths=wheel_shape_paths,
+            steering_joint=4,
+            chassis_body=4,
+            chassis_body_path="/World/Car/Body",
+            variant="c3",
+        )
+
+        racerx._replace_wheel_mesh_colliders(builder, c3_parts)
+
+        np.testing.assert_allclose(builder.shape_material_mu, racerx.C3_WHEEL_FRICTION)
 
     def test_coaxial_hard_limit_and_spring_merge_to_one_dof(self) -> None:
         """Merge stacked travel and spring joints into one driven coordinate."""
@@ -295,6 +314,46 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertEqual(builder.joint_effort_limit[steering_dof], racerx.STEERING_FORCE_LIMIT)
         self.assertEqual(builder.joint_limit_lower[steering_dof], -racerx.STEERING_LIMIT)
         self.assertEqual(builder.joint_limit_upper[steering_dof], racerx.STEERING_LIMIT)
+
+    def test_c3_uses_its_own_rear_suspension_tune(self) -> None:
+        """Stiffen only C3's rear suspension while preserving damping ratio."""
+        dof_count = 10
+        builder = SimpleNamespace(
+            joint_qd_start=list(range(9)),
+            joint_dof_dim=[(1, 0)] * 8 + [(2, 0)],
+            joint_target_mode=[newton.JointTargetMode.NONE] * dof_count,
+            joint_target_ke=[0.0] * 4 + [10000.0, 10000.0, 100000.0, 100000.0] + [0.0, 200000.0],
+            joint_target_kd=[0.0] * 4 + [1000.0] * 4 + [0.0, 0.0],
+            joint_effort_limit=[float("inf")] * dof_count,
+            joint_limit_lower=[-1.0] * dof_count,
+            joint_limit_upper=[1.0] * dof_count,
+        )
+        path_joint_map = {
+            f"/World/Joints/{corner}/Slider_Suspension": 4 + index
+            for index, corner in enumerate(("FR", "FL", "RR", "RL"))
+        }
+        parts = racerx._VehicleParts(
+            wheel_joints=(0, 1, 2, 3),
+            wheel_shapes=(0, 1, 2, 3),
+            wheel_shape_paths=("FR", "FL", "RR", "RL"),
+            steering_joint=8,
+            chassis_body=0,
+            chassis_body_path="/World/Car/Body",
+            variant="c3",
+        )
+
+        racerx._configure_vehicle_joints(builder, {"path_joint_map": path_joint_map}, parts)
+
+        rear_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER
+        self.assertEqual(racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER, 5.0)
+        self.assertEqual(racerx.C3_WHEEL_FRICTION, 0.8)
+        self.assertEqual(racerx.C3_SIM_SUBSTEPS, 8)
+        for dof in (4, 5):
+            self.assertAlmostEqual(builder.joint_target_ke[dof], 10000.0 * racerx.SUSPENSION_STIFFNESS_SCALE)
+            self.assertAlmostEqual(builder.joint_target_kd[dof], 1000.0 * math.sqrt(racerx.SUSPENSION_STIFFNESS_SCALE))
+        for dof in (6, 7):
+            self.assertAlmostEqual(builder.joint_target_ke[dof], 100000.0 * rear_scale)
+            self.assertAlmostEqual(builder.joint_target_kd[dof], 1000.0 * math.sqrt(rear_scale))
 
     def test_vehicle_control_kernel_ramps_inside_cuda_graph(self) -> None:
         """Ramp motor and steering targets inside a reusable CUDA graph."""
