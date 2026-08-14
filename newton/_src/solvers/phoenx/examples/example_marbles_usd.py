@@ -30,6 +30,9 @@ LOAD_USD_ENVIRONMENT = False
 ENABLE_PHYSICS = True
 PRINT_PHYSICS_DATA = True
 START_PAUSED = True
+USD_MAX_TEXTURE_SIZE = 4096
+MAX_CONTACT_GAP = 0.01
+OPTIX_DLSS_QUALITY = "quality"
 
 _RENDERER_FROM_PHYSICS = np.array(
     (
@@ -143,8 +146,18 @@ def _normalize_stage_units_for_newton(stage) -> float:
 
 
 def _scale_shape_contact_gaps(builder, scale: float) -> None:
-    """Convert imported shape contact gaps from authored units to meters."""
-    builder.shape_gap[:] = [gap * scale for gap in builder.shape_gap]
+    """Convert imported contact gaps to meters and cap their detection shell."""
+    builder.shape_gap[:] = [min(gap * scale, MAX_CONTACT_GAP) for gap in builder.shape_gap]
+
+
+def _create_collision_pipeline(model):
+    """Create a pipeline that ignores contacts between immovable props."""
+    return newton.CollisionPipeline(
+        model,
+        broad_phase="sap",
+        contact_matching="sticky",
+        include_static_kinematic_pairs=False,
+    )
 
 
 def _select_authored_camera(viewer, requested_path: str | None = None) -> str:
@@ -331,12 +344,8 @@ class Example:
             f"colliders={builder.shape_count} joints={builder.joint_count}"
         )
 
-        self.model = builder.finalize()
-        self.collision_pipeline = newton.CollisionPipeline(
-            self.model,
-            broad_phase="sap",
-            contact_matching="sticky",
-        )
+        self.model = builder.finalize(skip_shape_contact_pairs=True)
+        self.collision_pipeline = _create_collision_pipeline(self.model)
         self.contacts = self.collision_pipeline.contacts()
         self.state = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
@@ -474,8 +483,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--usd-max-texture-size",
         type=int,
-        default=1024,
-        help="Maximum loaded texture dimension; use 0 for the source resolution.",
+        default=USD_MAX_TEXTURE_SIZE,
+        help="Maximum source texture dimension before adaptive atlas fitting; use 0 for no per-texture cap.",
     )
     parser.add_argument(
         "--usd-environment",
@@ -507,7 +516,7 @@ if __name__ == "__main__":
         default=PRINT_PHYSICS_DATA,
         help="Print all authored physics schemas, properties, and import mappings.",
     )
-    parser.set_defaults(viewer="optix", paused=START_PAUSED)
+    parser.set_defaults(viewer="optix", paused=START_PAUSED, optix_dlss_quality=OPTIX_DLSS_QUALITY)
     viewer, args = newton.examples.init(parser)
     if args.usd_max_texture_size == 0:
         args.usd_max_texture_size = None

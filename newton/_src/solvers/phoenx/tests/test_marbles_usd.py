@@ -5,12 +5,17 @@
 
 import unittest
 import warnings
+from unittest.mock import patch
 
 import numpy as np
 
 import newton
 from newton._src.solvers.phoenx.examples.example_marbles_usd import (
+    MAX_CONTACT_GAP,
+    OPTIX_DLSS_QUALITY,
+    USD_MAX_TEXTURE_SIZE,
     Example,
+    _create_collision_pipeline,
     _normalize_stage_units_for_newton,
     _physics_ignore_paths,
     _scale_shape_contact_gaps,
@@ -63,7 +68,28 @@ class TestMarblesUsd(unittest.TestCase):
 
         _scale_shape_contact_gaps(builder, 0.01)
 
-        np.testing.assert_allclose(builder.shape_gap, (0.001, 0.02))
+        np.testing.assert_allclose(builder.shape_gap, (0.001, MAX_CONTACT_GAP))
+
+    def test_collision_pipeline_filters_immovable_pairs(self):
+        """Exclude contacts between static and kinematic scene props."""
+        model = object()
+        with patch.object(newton, "CollisionPipeline") as constructor:
+            _create_collision_pipeline(model)
+
+        constructor.assert_called_once_with(
+            model,
+            broad_phase="sap",
+            contact_matching="sticky",
+            include_static_kinematic_pairs=False,
+        )
+
+    def test_texture_cap_preserves_source_detail(self):
+        """Allow the Marbles scene's 4K textures into adaptive fitting."""
+        self.assertEqual(USD_MAX_TEXTURE_SIZE, 4096)
+
+    def test_dlss_defaults_to_quality_rendering(self):
+        """Prefer texture detail over performance-mode upscaling."""
+        self.assertEqual(OPTIX_DLSS_QUALITY, "quality")
 
     def test_invalid_and_trigger_colliders_are_skipped(self):
         """Exclude colliders with missing topology or PhysX trigger scripts."""
