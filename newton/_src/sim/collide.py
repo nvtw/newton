@@ -78,6 +78,36 @@ def _pair_requires_generic_convex_narrow_phase(type_a: int, type_b: int) -> bool
     return (type_a, type_b) not in _ANALYTIC_PRIMITIVE_PAIRS
 
 
+def _generic_convex_pair_requirements(
+    model: Model,
+    *,
+    broad_phase_mode: str,
+    shape_pairs_filtered: wp.array[wp.vec2i] | None,
+) -> list[bool] | None:
+    """Collect generic-convex requirements for possible shape-type pairs."""
+    shape_types_array = getattr(model, "shape_type", None)
+    if shape_types_array is None:
+        return None
+
+    shape_types = shape_types_array.numpy()
+    if broad_phase_mode == "explicit":
+        if shape_pairs_filtered is None:
+            return None
+        pairs = shape_pairs_filtered.numpy()
+        if pairs.size == 0:
+            return []
+        pair_types = shape_types[pairs.reshape(-1, 2)]
+        return [_pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b)) for type_a, type_b in pair_types]
+
+    colliding_types = shape_types[_shape_collide_mask(model, len(shape_types))]
+    unique_types = np.unique(colliding_types)
+    return [
+        _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b))
+        for index, type_a in enumerate(unique_types)
+        for type_b in unique_types[index:]
+    ]
+
+
 def _has_generic_convex_pairs(
     model: Model,
     *,
@@ -85,29 +115,12 @@ def _has_generic_convex_pairs(
     shape_pairs_filtered: wp.array[wp.vec2i] | None,
 ) -> bool:
     """Conservatively prove whether any broad-phase pair can reach GJK/MPR."""
-    shape_types_array = getattr(model, "shape_type", None)
-    if shape_types_array is None:
-        return True
-
-    shape_types = shape_types_array.numpy()
-    if broad_phase_mode == "explicit":
-        if shape_pairs_filtered is None:
-            return True
-        pairs = shape_pairs_filtered.numpy()
-        if pairs.size == 0:
-            return False
-        pair_types = shape_types[pairs.reshape(-1, 2)]
-        return any(
-            _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b)) for type_a, type_b in pair_types
-        )
-
-    colliding_types = shape_types[_shape_collide_mask(model, len(shape_types))]
-    unique_types = np.unique(colliding_types)
-    return any(
-        _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b))
-        for index, type_a in enumerate(unique_types)
-        for type_b in unique_types[index:]
+    requirements = _generic_convex_pair_requirements(
+        model,
+        broad_phase_mode=broad_phase_mode,
+        shape_pairs_filtered=shape_pairs_filtered,
     )
+    return True if requirements is None else any(requirements)
 
 
 def _all_pairs_require_generic_convex_narrow_phase(
@@ -117,29 +130,12 @@ def _all_pairs_require_generic_convex_narrow_phase(
     shape_pairs_filtered: wp.array[wp.vec2i] | None,
 ) -> bool:
     """Conservatively prove that every broad-phase pair requires GJK/MPR."""
-    shape_types_array = getattr(model, "shape_type", None)
-    if shape_types_array is None:
-        return False
-
-    shape_types = shape_types_array.numpy()
-    if broad_phase_mode == "explicit":
-        if shape_pairs_filtered is None:
-            return False
-        pairs = shape_pairs_filtered.numpy()
-        if pairs.size == 0:
-            return False
-        pair_types = shape_types[pairs.reshape(-1, 2)]
-        return all(
-            _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b)) for type_a, type_b in pair_types
-        )
-
-    colliding_types = shape_types[_shape_collide_mask(model, len(shape_types))]
-    unique_types = np.unique(colliding_types)
-    return bool(unique_types.size) and all(
-        _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b))
-        for index, type_a in enumerate(unique_types)
-        for type_b in unique_types[index:]
+    requirements = _generic_convex_pair_requirements(
+        model,
+        broad_phase_mode=broad_phase_mode,
+        shape_pairs_filtered=shape_pairs_filtered,
     )
+    return requirements is not None and bool(requirements) and all(requirements)
 
 
 @wp.struct

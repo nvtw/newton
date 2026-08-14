@@ -295,12 +295,14 @@ def create_prepare_convex_pair(external_aabb: bool, sort_pairs: bool, speculativ
 
             center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
             center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
+            overlap_radius_a = bsphere_radius_a
+            overlap_radius_b = bsphere_radius_b
             if wp.static(external_aabb and speculative):
                 pair_search_extension = rigid_gap
                 if is_infinite_plane_a:
-                    bsphere_radius_b += pair_search_extension
+                    overlap_radius_b += pair_search_extension
                 else:
-                    bsphere_radius_a += pair_search_extension
+                    overlap_radius_a += pair_search_extension
             if not check_infinite_plane_bsphere_overlap(
                 geom_a,
                 geom_b,
@@ -310,8 +312,8 @@ def create_prepare_convex_pair(external_aabb: bool, sort_pairs: bool, speculativ
                 quat_b,
                 center_a,
                 center_b,
-                bsphere_radius_a,
-                bsphere_radius_b,
+                overlap_radius_a,
+                overlap_radius_b,
             ):
                 return False, result
 
@@ -1231,15 +1233,17 @@ def create_narrow_phase_kernel_gjk_mpr(
                 # Compute bounding spheres and check for overlap (early rejection)
                 bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
                 bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
+                overlap_radius_a = bsphere_radius_a
+                overlap_radius_b = bsphere_radius_b
 
                 # External AABBs describe the current geometry. Include both shapes' search
                 # extensions so relative translational motion cannot be culled before GJK.
                 if wp.static(external_aabb and speculative):
                     pair_search_extension = shape_gap[shape_a] + shape_gap[shape_b]
                     if is_infinite_plane_a:
-                        bsphere_radius_b += pair_search_extension
+                        overlap_radius_b += pair_search_extension
                     else:
-                        bsphere_radius_a += pair_search_extension
+                        overlap_radius_a += pair_search_extension
 
                 if not check_infinite_plane_bsphere_overlap(
                     shape_data_a,
@@ -1250,8 +1254,8 @@ def create_narrow_phase_kernel_gjk_mpr(
                     quat_b,
                     bsphere_center_a,
                     bsphere_center_b,
-                    bsphere_radius_a,
-                    bsphere_radius_b,
+                    overlap_radius_a,
+                    overlap_radius_b,
                 ):
                     continue
 
@@ -2073,6 +2077,8 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 def verify_narrow_phase_buffers(
     broad_phase_count: wp.array[int],
     max_broad_phase: int,
+    split_query_count: wp.array[int],
+    max_split_query: int,
     gjk_count: wp.array[int],
     max_gjk: int,
     split_gjk_count: wp.array[int],
@@ -2102,6 +2108,12 @@ def verify_narrow_phase_buffers(
             "Warning: Broad phase pair buffer overflowed %d > %d.\n",
             broad_phase_count[0],
             max_broad_phase,
+        )
+    if max_split_query >= 0 and split_query_count[0] > max_split_query:
+        wp.printf(
+            "Warning: Split query-result buffer overflowed %d > %d.\n",
+            split_query_count[0],
+            max_split_query,
         )
     if gjk_count[0] > max_gjk:
         wp.printf(
@@ -3343,12 +3355,26 @@ class NarrowPhase:
                 reduction_ht_capacity = 0
                 reduction_ht_insert_failures = self.gjk_candidate_pairs_count
 
+            if self.split_gjk_mpr:
+                if self.reorder_replicated_pairs:
+                    split_query_count = self.reordered_replicated_pair_count
+                elif self.all_pairs_generic_convex or self.sparse_gjk_pairs:
+                    split_query_count = candidate_pair_count
+                else:
+                    split_query_count = self.gjk_candidate_pairs_count
+                max_split_query = self.split_query_results.shape[0]
+            else:
+                split_query_count = self.gjk_candidate_pairs_count
+                max_split_query = -1
+
             wp.launch(
                 kernel=verify_narrow_phase_buffers,
                 dim=[1],
                 inputs=[
                     candidate_pair_count,
-                    self.split_query_results.shape[0] if self.split_gjk_mpr else candidate_pair.shape[0],
+                    candidate_pair.shape[0],
+                    split_query_count,
+                    max_split_query,
                     self.gjk_candidate_pairs_count,
                     self.gjk_candidate_pairs.shape[0],
                     self.split_gjk_work_count
