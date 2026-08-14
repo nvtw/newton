@@ -44,8 +44,8 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertNotIn("ImportError", result.stderr)
 
     def test_vehicle_parts_resolve_across_racerx_models(self) -> None:
-        """Resolve A-series and C-series vehicles from semantic USD names."""
-        for model, chassis_name in (("A1", "Chassis_01"), ("C1", "Body_01")):
+        """Resolve A-series, B-series, and C-series vehicles from semantic USD names."""
+        for model, chassis_name in (("A1", "Chassis_01"), ("B1", "Chassis_01"), ("C1", "Body_01")):
             with self.subTest(model=model):
                 wheel_names = (
                     f"SM_RCCar_{model}_WheelFrontRight_01",
@@ -89,7 +89,8 @@ class TestRacerXUsd(unittest.TestCase):
                 self.assertEqual(parts.steering_joint, 4)
                 self.assertEqual(parts.chassis_body, 4)
                 self.assertEqual(parts.chassis_body_path, chassis_path)
-                self.assertEqual(parts.variant, "c3" if model == "C1" else "a3")
+                expected_variant = {"A1": "a3", "B1": "b3", "C1": "c3"}[model]
+                self.assertEqual(parts.variant, expected_variant)
 
     def test_track_follows_closed_uniform_spline(self) -> None:
         """Build a clear, technical circuit with uniformly spaced barriers."""
@@ -217,6 +218,23 @@ class TestRacerXUsd(unittest.TestCase):
         racerx._replace_wheel_mesh_colliders(builder, c3_parts)
 
         np.testing.assert_allclose(builder.shape_material_mu, racerx.C3_WHEEL_FRICTION)
+
+    def test_looped_vehicle_keeps_friction_only_on_wheels(self) -> None:
+        """Keep chassis contacts slippery without removing wheel friction."""
+        builder = SimpleNamespace(shape_count=6, shape_material_mu=[0.4, 1.2, 0.6, 1.2, 0.8, 1.2])
+        parts = racerx._VehicleParts(
+            wheel_joints=(0, 1, 2, 3),
+            wheel_shapes=(1, 3, 5, 0),
+            wheel_shape_paths=("FR", "FL", "RR", "RL"),
+            steering_joint=4,
+            chassis_body=4,
+            chassis_body_path="/World/RC_Car_B/Body",
+            variant="b3",
+        )
+
+        racerx._configure_vehicle_ground_friction(builder, parts)
+
+        np.testing.assert_allclose(builder.shape_material_mu, (0.4, 1.2, 0.0, 1.2, 0.0, 1.2))
 
     def test_coaxial_hard_limit_and_spring_merge_to_one_dof(self) -> None:
         """Merge stacked travel and spring joints into one driven coordinate."""
@@ -346,14 +364,49 @@ class TestRacerXUsd(unittest.TestCase):
 
         rear_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER
         self.assertEqual(racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER, 5.0)
-        self.assertEqual(racerx.C3_WHEEL_FRICTION, 0.8)
-        self.assertEqual(racerx.C3_SIM_SUBSTEPS, 8)
+        self.assertEqual(racerx.C3_WHEEL_FRICTION, 1.2)
+        self.assertEqual(racerx.C3_SIM_SUBSTEPS, 4)
         for dof in (4, 5):
             self.assertAlmostEqual(builder.joint_target_ke[dof], 10000.0 * racerx.SUSPENSION_STIFFNESS_SCALE)
             self.assertAlmostEqual(builder.joint_target_kd[dof], 1000.0 * math.sqrt(racerx.SUSPENSION_STIFFNESS_SCALE))
         for dof in (6, 7):
             self.assertAlmostEqual(builder.joint_target_ke[dof], 100000.0 * rear_scale)
             self.assertAlmostEqual(builder.joint_target_kd[dof], 1000.0 * math.sqrt(rear_scale))
+
+    def test_b3_normalizes_asymmetric_suspension_gains(self) -> None:
+        """Normalize B3's anomalous rear-left spring to its other corners."""
+        dof_count = 10
+        builder = SimpleNamespace(
+            joint_qd_start=list(range(9)),
+            joint_dof_dim=[(1, 0)] * 8 + [(2, 0)],
+            joint_target_mode=[newton.JointTargetMode.NONE] * dof_count,
+            joint_target_ke=[0.0] * 4 + [80000.0, 80000.0, 80000.0, 20000.0] + [0.0, 200000.0],
+            joint_target_kd=[0.0] * 4 + [600.0, 600.0, 600.0, 200.0] + [0.0, 0.0],
+            joint_effort_limit=[float("inf")] * dof_count,
+            joint_limit_lower=[-1.0] * dof_count,
+            joint_limit_upper=[1.0] * dof_count,
+        )
+        path_joint_map = {
+            f"/World/Joints_B/{corner}/Slider_Suspension": 4 + index
+            for index, corner in enumerate(("FR", "FL", "RR", "RL"))
+        }
+        parts = racerx._VehicleParts(
+            wheel_joints=(0, 1, 2, 3),
+            wheel_shapes=(0, 1, 2, 3),
+            wheel_shape_paths=("FR", "FL", "RR", "RL"),
+            steering_joint=8,
+            chassis_body=0,
+            chassis_body_path="/World/RC_Car_B/Body",
+            variant="b3",
+        )
+
+        racerx._configure_vehicle_joints(builder, {"path_joint_map": path_joint_map}, parts)
+
+        expected_ke = 80000.0 * racerx.SUSPENSION_STIFFNESS_SCALE
+        expected_kd = 600.0 * math.sqrt(racerx.SUSPENSION_STIFFNESS_SCALE)
+        for dof in range(4, 8):
+            self.assertAlmostEqual(builder.joint_target_ke[dof], expected_ke)
+            self.assertAlmostEqual(builder.joint_target_kd[dof], expected_kd)
 
     def test_vehicle_control_kernel_ramps_inside_cuda_graph(self) -> None:
         """Ramp motor and steering targets inside a reusable CUDA graph."""
@@ -479,6 +532,84 @@ class TestRacerXUsd(unittest.TestCase):
             targets.numpy()[0],
             (10.0 + racerx.CHASE_CAMERA_LOOK_AHEAD, 2.0, 3.0 + racerx.CHASE_CAMERA_TARGET_HEIGHT),
         )
+
+    def test_generated_camera_discovers_variant_vehicle_root(self) -> None:
+        """Frame a RacerX variant whose vehicle root has a model suffix."""
+        stage = Usd.Stage.CreateInMemory()
+        world = UsdGeom.Xform.Define(stage, "/World")
+        stage.SetDefaultPrim(world.GetPrim())
+        car = UsdGeom.Scope.Define(stage, "/World/RC_Car_B")
+        cube = UsdGeom.Cube.Define(stage, "/World/RC_Car_B/Body")
+        cube.GetSizeAttr().Set(2.0)
+
+        class Scene:
+            def __init__(self):
+                self.stage = stage
+                self.cameras = []
+
+        class Viewer:
+            def __init__(self):
+                self.usd_scene = Scene()
+                self.camera = None
+
+            def set_camera_look_at(self, position, target, **kwargs):
+                self.camera = (position, target, kwargs)
+
+        viewer = Viewer()
+        camera_path = racerx._select_authored_camera(viewer, None)
+
+        self.assertEqual(camera_path, "<generated RacerX overview>")
+        self.assertIsNotNone(viewer.camera)
+        self.assertTrue(car.GetPrim().IsValid())
+
+    def test_looped_vehicle_tire_forces_run_inside_cuda_graph(self) -> None:
+        """Apply forward traction and oppose lateral slip inside a CUDA graph."""
+        device = wp.get_device()
+        body_q = wp.array(
+            [wp.transform((0.0, 0.0, 0.0), wp.quat_identity())],
+            dtype=wp.transform,
+            device=device,
+        )
+        body_qd = wp.array(
+            [wp.spatial_vector(0.0, 1.0, 0.0, 0.0, 0.0, 0.0)],
+            dtype=wp.spatial_vector,
+            device=device,
+        )
+        body_f = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+        body_indices = wp.array([0], dtype=wp.int32, device=device)
+        body_masses = wp.array([2.0], dtype=float, device=device)
+        wheel_speed = wp.array([racerx.DRIVE_SPEED], dtype=float, device=device)
+        steering = wp.array([racerx.STEERING_TRAVEL], dtype=float, device=device)
+
+        def launch():
+            wp.launch(
+                racerx._apply_looped_vehicle_tire_forces,
+                dim=1,
+                inputs=[
+                    body_indices,
+                    body_masses,
+                    0,
+                    wp.vec3(1.0, 0.0, 0.0),
+                    wheel_speed,
+                    steering,
+                    body_q,
+                    body_qd,
+                    body_f,
+                ],
+                device=device,
+            )
+
+        graph = None
+        if device.is_cuda:
+            with wp.ScopedCapture() as capture:
+                launch()
+            graph = capture.graph
+        launch() if graph is None else wp.capture_launch(graph)
+
+        wrench = body_f.numpy()[0]
+        self.assertGreater(float(wrench[0]), 0.0)
+        self.assertLess(float(wrench[1]), 0.0)
+        self.assertAlmostEqual(float(wrench[5]), 0.0, places=6)
 
     def test_self_filtered_collision_group_excludes_member_pair(self) -> None:
         """Translate a self-filtered USD collision group into shape exclusions."""

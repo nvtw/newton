@@ -251,6 +251,7 @@ class SolverPhoenX(SolverBase):
         joint_friction_model: str = "hard",
         contact_friction_model: str = "point",
         default_friction: float = 0.5,
+        friction_combine_mode: str = "average",
         step_layout: str = "auto",
         threads_per_world: int | str = "auto",
         multi_world_scheduler: str = "auto",
@@ -297,6 +298,9 @@ class SolverPhoenX(SolverBase):
                 to ``1`` when cached prepare is unsupported. Pass ``1``
                 to force exact per-substep rebuilds.
             default_friction: Fallback when Contacts/shapes carry no material.
+            friction_combine_mode: Rule used to combine per-shape friction.
+                Supported values are ``"average"``, ``"min"``, ``"multiply"``,
+                and ``"max"``. Defaults to ``"average"``.
             step_layout: ``"auto"`` keeps the multi-world scheduler except
                 for one rigid contact-only world with at least 2,048 bodies,
                 where it selects ``"single_world"``. Explicit
@@ -424,6 +428,12 @@ class SolverPhoenX(SolverBase):
             and reduced_articulation_path != "reference"
         ):
             raise ValueError("reduced_articulation_path requires articulation_mode='hybrid' or 'reduced'")
+        valid_combine_modes = ("average", "min", "multiply", "max")
+        if friction_combine_mode not in valid_combine_modes:
+            raise ValueError(
+                f"friction_combine_mode must be one of {valid_combine_modes}, got {friction_combine_mode!r}"
+            )
+        self.friction_combine_mode = friction_combine_mode
         if contact_friction_model not in ("point", "patch"):
             raise ValueError(f"contact_friction_model must be 'point' or 'patch', got {contact_friction_model!r}")
         if contact_friction_model == "patch" and articulation_mode not in ("maximal", "reduced"):
@@ -955,12 +965,19 @@ class SolverPhoenX(SolverBase):
             if self.model.shape_material_restitution is not None
             else np.zeros_like(mu_np)
         )
+        combine_modes = {
+            "average": CombineMode.AVERAGE,
+            "min": CombineMode.MIN,
+            "multiply": CombineMode.MULTIPLY,
+            "max": CombineMode.MAX,
+        }
+        combine_mode = combine_modes[self.friction_combine_mode]
         materials = [
             Material(
                 static_friction=float(mu_np[i]),
                 dynamic_friction=float(mu_np[i]),
                 restitution=float(restitution[i]),
-                friction_combine_mode=CombineMode.AVERAGE,
+                friction_combine_mode=combine_mode,
                 restitution_combine_mode=CombineMode.AVERAGE,
             )
             for i in range(self.model.shape_count)

@@ -31,6 +31,7 @@ except ImportError:
 
 RACERX_USD_PATHS = {
     "a3": Path("/home/twidmer/Documents/Meshes/RacerX/Collected_A3_physics/A3_physics.usda"),
+    "b3": Path("/home/twidmer/Documents/Meshes/RacerX/Collected_B3_physics/B3_physics.usda"),
     "c3": Path("/home/twidmer/Documents/Meshes/RacerX/Collected_C3_physics/C3_physics.usda"),
 }
 DEFAULT_RC_MODEL = "a3"
@@ -50,7 +51,7 @@ OPTIX_DLSS_QUALITY = "quality"
 GROUND_HEIGHT = 0.0
 GROUND_VISUAL_SIZE = 1000.0
 SIM_SUBSTEPS = 4
-C3_SIM_SUBSTEPS = 8
+C3_SIM_SUBSTEPS = 4
 SOLVER_ITERATIONS = 6
 CHASE_CAMERA_DISTANCE = 0.45
 CHASE_CAMERA_HEIGHT = 0.18
@@ -66,7 +67,17 @@ DRIVE_DAMPING = 0.35
 DRIVE_TORQUE_LIMIT = 3.0
 SUSPENSION_STIFFNESS_SCALE = 0.16
 C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER = 5.0
-C3_WHEEL_FRICTION = 0.8
+C3_WHEEL_FRICTION = 1.2
+ENABLE_LOOPED_VEHICLE_TIRE_FORCES = True
+TIRE_FORCE_VARIANTS = frozenset(("b3", "c3"))
+TIRE_TOP_SPEED = 3.0
+TIRE_SPEED_RESPONSE = 12.0
+TIRE_MAX_ACCELERATION = 20.0
+TIRE_LATERAL_RESPONSE = 8.0
+TIRE_MAX_LATERAL_ACCELERATION = 8.0
+TIRE_STEERING_ANGLE = 0.35
+TIRE_YAW_RESPONSE = 8.0
+TIRE_INERTIA_RADIUS = 0.08
 STEERING_TRAVEL = 0.00125
 STEERING_LIMIT = 0.0015
 STEERING_RATE = 0.015
@@ -158,6 +169,54 @@ def _update_vehicle_controls(
     )
     steering_command[0] += steering_delta
     joint_target_q[steering_target_index] = steering_command[0]
+
+
+@wp.kernel
+def _apply_looped_vehicle_tire_forces(
+    vehicle_body_indices: wp.array[wp.int32],
+    vehicle_body_masses: wp.array[float],
+    chassis_body: wp.int32,
+    forward_local: wp.vec3,
+    wheel_speed_command: wp.array[float],
+    steering_command: wp.array[float],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_f: wp.array[wp.spatial_vector],
+):
+    body_index = wp.tid()
+    body = vehicle_body_indices[body_index]
+    pose = body_q[chassis_body]
+    rotation = wp.transform_get_rotation(pose)
+    forward = wp.quat_rotate(rotation, forward_local)
+    forward[2] = 0.0
+    forward = wp.normalize(forward)
+    lateral = wp.vec3(-forward[1], forward[0], 0.0)
+
+    velocity = wp.spatial_top(body_qd[chassis_body])
+    angular_velocity = wp.spatial_bottom(body_qd[chassis_body])
+    forward_speed = wp.dot(velocity, forward)
+    lateral_speed = wp.dot(velocity, lateral)
+    desired_speed = wheel_speed_command[0] * (TIRE_TOP_SPEED / DRIVE_SPEED)
+    forward_acceleration = wp.clamp(
+        (desired_speed - forward_speed) * TIRE_SPEED_RESPONSE,
+        -TIRE_MAX_ACCELERATION,
+        TIRE_MAX_ACCELERATION,
+    )
+    lateral_acceleration = wp.clamp(
+        -lateral_speed * TIRE_LATERAL_RESPONSE,
+        -TIRE_MAX_LATERAL_ACCELERATION,
+        TIRE_MAX_LATERAL_ACCELERATION,
+    )
+    force = vehicle_body_masses[body_index] * (forward_acceleration * forward + lateral_acceleration * lateral)
+
+    steering = steering_command[0] / STEERING_TRAVEL
+    desired_yaw_rate = steering * forward_speed * wp.tan(TIRE_STEERING_ANGLE) / TIRE_INERTIA_RADIUS
+    yaw_acceleration = TIRE_YAW_RESPONSE * (desired_yaw_rate - angular_velocity[2])
+    chassis_position = wp.transform_get_translation(pose)
+    body_position = wp.transform_get_translation(body_q[body])
+    offset = body_position - chassis_position
+    force += vehicle_body_masses[body_index] * yaw_acceleration * wp.cross(wp.vec3(0.0, 0.0, 1.0), offset)
+    body_f[body] += wp.spatial_vector(force, wp.vec3(0.0))
 
 
 @wp.kernel
@@ -400,12 +459,20 @@ def _resolve_vehicle_parts(builder, result) -> _VehicleParts:
         raise RuntimeError(f"Expected two dynamic RacerX steering bodies, found {steering_bodies}")
     chassis_body = max(dynamic_steering_bodies, key=lambda body: float(builder.body_mass[body]))
 
+    chassis_name = body_path[chassis_body].rsplit("/", 1)[-1].lower()
+    if "_c1_" in chassis_name:
+        variant = "c3"
+    elif "_b1_" in chassis_name:
+        variant = "b3"
+    else:
+        variant = "a3"
+
     return _VehicleParts(
         wheel_joints=tuple(wheel_joints),
         wheel_shapes=tuple(wheel_shapes),
         wheel_shape_paths=tuple(wheel_shape_paths),
         steering_joint=steering_joint,
-        variant="c3" if body_path[chassis_body].endswith("_Body_01") else "a3",
+        variant=variant,
         chassis_body=chassis_body,
         chassis_body_path=body_path[chassis_body],
     )
@@ -435,6 +502,16 @@ def _replace_wheel_mesh_colliders(builder, parts: _VehicleParts) -> None:
         builder.shape_source[shape] = None
         builder.shape_scale[shape] = wp.vec3(radius, half_width, 0.0)
         builder.shape_material_mu[shape] = C3_WHEEL_FRICTION if parts.variant == "c3" else WHEEL_FRICTION
+
+
+def _configure_vehicle_ground_friction(builder, parts: _VehicleParts) -> None:
+    """Keep underside contacts slippery while preserving tire grip."""
+    if parts.variant not in TIRE_FORCE_VARIANTS:
+        return
+    wheel_shapes = set(parts.wheel_shapes)
+    for shape in range(builder.shape_count):
+        if shape not in wheel_shapes:
+            builder.shape_material_mu[shape] = 0.0
 
 
 def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[list[int], int, int]:
@@ -468,6 +545,14 @@ def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[li
     linear_count, _angular_count = builder.joint_dof_dim[steering_joint]
     if linear_count != 2:
         raise RuntimeError(f"Expected two RacerX steering translations, found {linear_count}")
+
+    if parts.variant == "b3":
+        suspension_dofs = [int(builder.joint_qd_start[joint]) for joint in suspension_joints]
+        stiffness = max(builder.joint_target_ke[dof] for dof in suspension_dofs)
+        damping = max(builder.joint_target_kd[dof] for dof in suspension_dofs)
+        for dof in suspension_dofs:
+            builder.joint_target_ke[dof] = stiffness
+            builder.joint_target_kd[dof] = damping
 
     # The source leaves both X/Y translations finite, but PhoenX currently
     # supports finite bounds after reducing D6 to a one-axis prismatic joint.
@@ -572,7 +657,12 @@ def _select_authored_camera(viewer, requested_path: str | None = None) -> str:
 
     if requested_path:
         raise ValueError(f"USD camera is missing, invisible, or unsupported: {requested_path}")
-    car_prim = stage.GetPrimAtPath("/World/RC_Car")
+    car_candidates = [prim for prim in stage.Traverse() if prim.GetName().lower().startswith("rc_car")]
+    if len(car_candidates) != 1:
+        raise RuntimeError(
+            f"Expected one RacerX vehicle root, found {[str(prim.GetPath()) for prim in car_candidates]}"
+        )
+    car_prim = car_candidates[0]
     bounds = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_]).ComputeWorldBound(car_prim).ComputeAlignedRange()
     lower = np.asarray(bounds.GetMin(), dtype=np.float32)
     upper = np.asarray(bounds.GetMax(), dtype=np.float32)
@@ -702,9 +792,18 @@ class Example:
             ignore_composition_errors=True,
         )
         vehicle_parts = _resolve_vehicle_parts(builder, result)
+        self._vehicle_variant = vehicle_parts.variant
+        self._use_tire_forces = ENABLE_LOOPED_VEHICLE_TIRE_FORCES and vehicle_parts.variant in TIRE_FORCE_VARIANTS
+        self._vehicle_body_indices_host = [
+            body for body, flags in enumerate(builder.body_flags) if not int(flags) & int(newton.BodyFlags.KINEMATIC)
+        ]
+        self._vehicle_body_masses_host = [builder.body_mass[body] for body in self._vehicle_body_indices_host]
         self._sim_substeps = C3_SIM_SUBSTEPS if vehicle_parts.variant == "c3" else SIM_SUBSTEPS
+        chassis_rotation = wp.transform_get_rotation(builder.body_q[vehicle_parts.chassis_body])
+        self._vehicle_forward_local = wp.quat_rotate(wp.quat_inverse(chassis_rotation), wp.vec3(1.0, 0.0, 0.0))
         _scale_shape_contact_gaps(builder, authored_unit)
         _replace_wheel_mesh_colliders(builder, vehicle_parts)
+        _configure_vehicle_ground_friction(builder, vehicle_parts)
         # The source PhysicsScene stores 981 in cm/s^2; stage-root scaling
         # does not transform scalar physics attributes.
         builder.gravity = wp.vec3(0.0, 0.0, -9.81)
@@ -782,6 +881,8 @@ class Example:
         self._drive_input_host = np.zeros(2, dtype=np.float32)
         self._drive_input_device = wp.zeros(2, dtype=float, device=self.device)
         self._wheel_dofs_device = wp.array(self._wheel_dofs, dtype=wp.int32, device=self.device)
+        self._vehicle_body_indices = wp.array(self._vehicle_body_indices_host, dtype=wp.int32, device=self.device)
+        self._vehicle_body_masses = wp.array(self._vehicle_body_masses_host, dtype=float, device=self.device)
         self._wheel_speed_command = wp.zeros(1, dtype=float, device=self.device)
         self._steering_command = wp.zeros(1, dtype=float, device=self.device)
         if self.chase_camera_enabled:
@@ -797,6 +898,7 @@ class Example:
             solver_iterations=SOLVER_ITERATIONS,
             velocity_iterations=1,
             default_friction=0.9,
+            friction_combine_mode="min" if self._use_tire_forces else "average",
             step_layout="multi_world",
             articulation_mode="maximal",
         )
@@ -968,8 +1070,30 @@ class Example:
         if self.chase_camera_enabled:
             self._update_chase_camera()
 
+    def _apply_tire_forces(self) -> None:
+        """Apply stable graph-captured traction for multiply-looped RacerX models."""
+        if not self._use_tire_forces:
+            return
+        wp.launch(
+            _apply_looped_vehicle_tire_forces,
+            dim=len(self._vehicle_body_indices_host),
+            inputs=[
+                self._vehicle_body_indices,
+                self._vehicle_body_masses,
+                self._chassis_body,
+                self._vehicle_forward_local,
+                self._wheel_speed_command,
+                self._steering_command,
+                self.state.body_q,
+                self.state.body_qd,
+                self.state.body_f,
+            ],
+            device=self.device,
+        )
+
     def _simulate(self) -> None:
         self.state.clear_forces()
+        self._apply_tire_forces()
         self.viewer.apply_forces(self.state)
         self.collision_pipeline.collide(self.state, self.contacts)
         self.solver.step(

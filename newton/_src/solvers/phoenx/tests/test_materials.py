@@ -17,6 +17,7 @@ import unittest
 
 import warp as wp
 
+import newton
 from newton._src.solvers.phoenx.materials import (
     COMBINE_AVERAGE,
     COMBINE_MAX,
@@ -71,6 +72,17 @@ class TestCombineModes(unittest.TestCase):
             Material(restitution=1.5)
         with self.assertRaises(ValueError):
             Material(friction_combine_mode=99)
+
+
+class TestSolverMaterialConfiguration(unittest.TestCase):
+    """Verify public PhoenX material configuration."""
+
+    def test_reject_unknown_friction_combine_mode(self) -> None:
+        """Reject an unknown per-shape friction combine mode."""
+        model = newton.ModelBuilder().finalize()
+
+        with self.assertRaisesRegex(ValueError, "friction_combine_mode"):
+            newton.solvers.SolverPhoenX(model, friction_combine_mode="fastest")
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "Material integration test requires CUDA")
