@@ -519,6 +519,38 @@ def test_texture_sdf_software_sampling_honors_layout(test, device):
     np.testing.assert_allclose(scalar_values.numpy(), paired_values.numpy(), rtol=0.0, atol=2.0e-6)
 
 
+def test_texture_sdf_scalar_extract_isomesh(test, device):
+    """Match public isomesh extraction across paired and scalar texture layouts."""
+    paired_mesh = _create_box_mesh(half_extents=(0.3, 0.3, 0.3))
+    scalar_mesh = _create_box_mesh(half_extents=(0.3, 0.3, 0.3))
+    paired_sdf = paired_mesh.build_sdf(max_resolution=64, paired_samples=True, device=device)
+    scalar_sdf = scalar_mesh.build_sdf(max_resolution=64, paired_samples=False, device=device)
+
+    paired_isomesh = paired_sdf.extract_isomesh(device=device)
+    scalar_isomesh = scalar_sdf.extract_isomesh(device=device)
+    test.assertIsNotNone(paired_isomesh)
+    test.assertIsNotNone(scalar_isomesh)
+    test.assertGreater(len(scalar_isomesh.vertices), 0)
+    test.assertEqual(len(scalar_isomesh.vertices), len(paired_isomesh.vertices))
+
+    paired_vertices = paired_isomesh.vertices
+    scalar_vertices = scalar_isomesh.vertices
+    np.testing.assert_allclose(
+        np.max(np.abs(scalar_vertices), axis=0),
+        np.max(np.abs(paired_vertices), axis=0),
+        rtol=0.0,
+        atol=1.0e-5,
+    )
+    paired_order = np.lexsort((paired_vertices[:, 2], paired_vertices[:, 1], paired_vertices[:, 0]))
+    scalar_order = np.lexsort((scalar_vertices[:, 2], scalar_vertices[:, 1], scalar_vertices[:, 0]))
+    np.testing.assert_allclose(
+        scalar_vertices[scalar_order],
+        paired_vertices[paired_order],
+        rtol=0.0,
+        atol=1.0e-5,
+    )
+
+
 def _compare_texture_vs_nanovdb(test, tex_sdf, nanovdb_data, query_points, narrow_band, device):
     """Shared helper: sample both SDFs and compute contact-zone error statistics.
 
@@ -1621,6 +1653,36 @@ def test_create_texture_sdf_from_primitive_validates_inputs(test, device):
                 create_texture_sdf_from_primitive(GeoType.SPHERE, invalid_scale, max_resolution=8, device=device)
 
 
+def test_create_texture_sdf_from_barrel_cylinder(test, device):
+    """Preserve the barrel bulge in a primitive texture SDF."""
+    radius = 0.5
+    half_height = 1.0
+    barrel_radius = 2.0
+    equator_radius = radius + barrel_radius - np.sqrt(barrel_radius**2 - half_height**2)
+    texture_sdf, coarse_texture, subgrid_texture = create_texture_sdf_from_primitive(
+        GeoType.CYLINDER,
+        (radius, half_height, barrel_radius),
+        margin=0.1,
+        max_resolution=48,
+        scale_baked=True,
+        device=device,
+    )
+    query_points = wp.array([[equator_radius, 0.0, 0.0], [0.6, 0.0, 0.0]], dtype=wp.vec3, device=device)
+    results = wp.empty(2, dtype=float, device=device)
+    wp.launch(
+        _sample_texture_sdf_kernel,
+        dim=2,
+        inputs=[texture_sdf, query_points],
+        outputs=[results],
+        device=device,
+    )
+    distances = results.numpy()
+    test.assertAlmostEqual(float(distances[0]), 0.0, delta=0.06)
+    test.assertLess(float(distances[1]), -0.05)
+    test.assertIsNotNone(coarse_texture)
+    test.assertIsNotNone(subgrid_texture)
+
+
 def test_build_sparse_sdf_from_primitive_validates_inputs(test, device):
     """Low-level primitive sparse-SDF construction must reject invalid inputs."""
     cell_size = np.array([0.1, 0.1, 0.1], dtype=float)
@@ -1729,6 +1791,12 @@ add_function_test(
     devices=devices,
 )
 add_function_test(
+    TestTextureSDF,
+    "test_texture_sdf_scalar_extract_isomesh",
+    test_texture_sdf_scalar_extract_isomesh,
+    devices=devices,
+)
+add_function_test(
     TestTextureSDF, "test_texture_sdf_values_match_nanovdb", test_texture_sdf_values_match_nanovdb, devices=devices
 )
 add_function_test(
@@ -1804,6 +1872,12 @@ add_function_test(
     TestTextureSDF,
     "test_create_texture_sdf_from_primitive_validates_inputs",
     test_create_texture_sdf_from_primitive_validates_inputs,
+    devices=devices,
+)
+add_function_test(
+    TestTextureSDF,
+    "test_create_texture_sdf_from_barrel_cylinder",
+    test_create_texture_sdf_from_barrel_cylinder,
     devices=devices,
 )
 add_function_test(
