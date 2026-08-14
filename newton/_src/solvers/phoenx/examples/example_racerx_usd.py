@@ -125,6 +125,7 @@ def _update_chase_camera_device(
     frame_dt: float,
     snap: wp.int32,
     initialized: wp.array[wp.int32],
+    camera_forwards: wp.array[wp.vec3],
     camera_positions: wp.array[wp.vec3],
     camera_targets: wp.array[wp.vec3],
 ):
@@ -136,16 +137,16 @@ def _update_chase_camera_device(
         forward = wp.vec3(1.0, 0.0, 0.0)
     else:
         forward = wp.normalize(forward)
-    desired_eye = position - CHASE_CAMERA_DISTANCE * forward + wp.vec3(0.0, 0.0, CHASE_CAMERA_HEIGHT)
-    desired_target = position + CHASE_CAMERA_LOOK_AHEAD * forward + wp.vec3(0.0, 0.0, CHASE_CAMERA_TARGET_HEIGHT)
     if snap != 0 or initialized[0] == 0:
-        camera_positions[0] = desired_eye
-        camera_targets[0] = desired_target
+        camera_forwards[0] = forward
         initialized[0] = 1
     else:
         blend = 1.0 - wp.exp(-CHASE_CAMERA_RESPONSE * frame_dt)
-        camera_positions[0] += blend * (desired_eye - camera_positions[0])
-        camera_targets[0] += blend * (desired_target - camera_targets[0])
+        camera_forwards[0] = wp.normalize(camera_forwards[0] + blend * (forward - camera_forwards[0]))
+    camera_positions[0] = position - CHASE_CAMERA_DISTANCE * camera_forwards[0] + wp.vec3(0.0, 0.0, CHASE_CAMERA_HEIGHT)
+    camera_targets[0] = (
+        position + CHASE_CAMERA_LOOK_AHEAD * camera_forwards[0] + wp.vec3(0.0, 0.0, CHASE_CAMERA_TARGET_HEIGHT)
+    )
 
 
 @wp.kernel
@@ -611,13 +612,9 @@ class Example:
         if self.chase_camera_enabled:
             self._chase_camera_initialized = wp.zeros(1, dtype=wp.int32, device=self.device)
             self._chase_camera_positions = wp.empty(1, dtype=wp.vec3, device=self.device)
+            self._chase_camera_forwards = wp.empty(1, dtype=wp.vec3, device=self.device)
             self._chase_camera_targets = wp.empty(1, dtype=wp.vec3, device=self.device)
             self._update_chase_camera(snap=True)
-            self.viewer.set_camera_look_at_device(
-                self._chase_camera_positions,
-                self._chase_camera_targets,
-                fov=CHASE_CAMERA_FOV,
-            )
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
             collision_pipeline=self.collision_pipeline,
@@ -630,6 +627,12 @@ class Example:
         )
 
         self.viewer.set_model(self.model)
+        if self.chase_camera_enabled:
+            self.viewer.set_camera_look_at_device(
+                self._chase_camera_positions,
+                self._chase_camera_targets,
+                fov=CHASE_CAMERA_FOV,
+            )
         self._build_dynamic_bindings(dynamic_paths)
 
         self._ground_visual_xforms = wp.array(
@@ -731,7 +734,11 @@ class Example:
                 int(snap),
                 self._chase_camera_initialized,
             ],
-            outputs=[self._chase_camera_positions, self._chase_camera_targets],
+            outputs=[
+                self._chase_camera_forwards,
+                self._chase_camera_positions,
+                self._chase_camera_targets,
+            ],
             device=self.device,
         )
 

@@ -194,6 +194,7 @@ class TestRacerXUsd(unittest.TestCase):
             device=device,
         )
         initialized = wp.zeros(1, dtype=wp.int32, device=device)
+        forwards = wp.empty(1, dtype=wp.vec3, device=device)
         positions = wp.empty(1, dtype=wp.vec3, device=device)
         targets = wp.empty(1, dtype=wp.vec3, device=device)
 
@@ -202,7 +203,7 @@ class TestRacerXUsd(unittest.TestCase):
                 racerx._update_chase_camera_device,
                 dim=1,
                 inputs=[body_q, 0, 1.0 / 60.0, 0, initialized],
-                outputs=[positions, targets],
+                outputs=[forwards, positions, targets],
                 device=device,
             )
 
@@ -220,6 +221,17 @@ class TestRacerXUsd(unittest.TestCase):
         np.testing.assert_allclose(
             targets.numpy()[0],
             (1.0 + racerx.CHASE_CAMERA_LOOK_AHEAD, 2.0, 3.0 + racerx.CHASE_CAMERA_TARGET_HEIGHT),
+        )
+
+        body_q.assign(np.asarray(((10.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0),), dtype=np.float32))
+        launch() if graph is None else wp.capture_launch(graph)
+        np.testing.assert_allclose(
+            positions.numpy()[0],
+            (10.0 - racerx.CHASE_CAMERA_DISTANCE, 2.0, 3.0 + racerx.CHASE_CAMERA_HEIGHT),
+        )
+        np.testing.assert_allclose(
+            targets.numpy()[0],
+            (10.0 + racerx.CHASE_CAMERA_LOOK_AHEAD, 2.0, 3.0 + racerx.CHASE_CAMERA_TARGET_HEIGHT),
         )
 
     def test_self_filtered_collision_group_excludes_member_pair(self) -> None:
