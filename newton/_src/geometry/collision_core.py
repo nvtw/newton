@@ -639,6 +639,10 @@ def create_find_contacts(writer_func: Any, support_func: Any = None, post_proces
     """
     Factory function to create a find_contacts function with a specific writer function.
 
+    The generated function uses precomputed centers. Callers must populate
+    :attr:`GenericShapeData.center` for every ``CONVEX_MESH`` shape before
+    invoking it.
+
     Args:
         writer_func: Function to write contact data (signature: (ContactData, writer_data) -> None)
         support_func: Support mapping function (defaults to support_map)
@@ -882,6 +886,11 @@ def aabb_to_unscaled(
     frame (i.e. divided component-wise). Negative scale components flip the axis, so per-axis
     min/max are swapped to keep ``lower <= upper``. Zero/near-zero components are guarded with
     a small epsilon, but in practice ``scale`` should be non-zero whenever this is called.
+
+    Returns:
+        The unscaled lower bounds, unscaled upper bounds, and component-wise
+        inverse scale. Zero or near-zero scale components use the epsilon-guarded
+        reciprocal applied by this function.
     """
     eps = float(1.0e-12)
     inv_x = 1.0 / wp.where(wp.abs(scale[0]) > eps, scale[0], wp.where(scale[0] >= 0.0, eps, -eps))

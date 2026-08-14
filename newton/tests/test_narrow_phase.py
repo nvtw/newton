@@ -28,12 +28,61 @@ import newton
 from newton._src.geometry.flags import ShapeFlags
 from newton._src.geometry.narrow_phase import (
     NarrowPhase,
-    create_narrow_phase_primitive_kernel,
-    write_contact_simple,
+    _append_pair_warp_aggregated,
+    _append_work_index_warp_aggregated,
 )
 from newton._src.geometry.types import GeoType
 
 _cuda_available = wp.is_cuda_available()
+
+
+@wp.kernel(enable_backward=False)
+def append_warp_aggregated_test_kernel(
+    work_items: wp.array[int],
+    work_count: wp.array[int],
+    pair_items: wp.array[wp.vec2i],
+    pair_count: wp.array[int],
+):
+    """Append matching scalar and pair values from a partially active launch."""
+    tid = wp.tid()
+    predicate = tid % 3 != 1
+    _append_work_index_warp_aggregated(predicate, tid, work_items, work_count)
+    _append_pair_warp_aggregated(predicate, wp.vec2i(tid, -tid), pair_items, pair_count)
+
+
+class TestWarpAggregatedAppend(unittest.TestCase):
+    """Test compacted work-queue appends across supported devices."""
+
+    def test_warp_aggregated_append_matches_cpu_and_cuda(self):
+        """Preserve all selected values through CPU and CUDA append paths."""
+        launch_size = 257
+        expected = np.array([i for i in range(launch_size) if i % 3 != 1], dtype=np.int32)
+        devices = ["cpu"]
+        if _cuda_available:
+            devices.append("cuda:0")
+
+        for device in devices:
+            with self.subTest(device=device):
+                work_items = wp.zeros(launch_size, dtype=int, device=device)
+                work_count = wp.zeros(1, dtype=int, device=device)
+                pair_items = wp.zeros(launch_size, dtype=wp.vec2i, device=device)
+                pair_count = wp.zeros(1, dtype=int, device=device)
+
+                wp.launch(
+                    append_warp_aggregated_test_kernel,
+                    dim=launch_size,
+                    inputs=[work_items, work_count, pair_items, pair_count],
+                    device=device,
+                )
+
+                self.assertEqual(int(work_count.numpy()[0]), expected.size)
+                self.assertEqual(int(pair_count.numpy()[0]), expected.size)
+                np.testing.assert_array_equal(np.sort(work_items.numpy()[: expected.size]), expected)
+
+                pairs = pair_items.numpy()[: expected.size]
+                pairs = pairs[np.argsort(pairs[:, 0])]
+                np.testing.assert_array_equal(pairs[:, 0], expected)
+                np.testing.assert_array_equal(pairs[:, 1], -expected)
 
 
 def check_normal_direction(pos_a, pos_b, normal, tolerance=1e-5):
@@ -1215,6 +1264,67 @@ class TestNarrowPhase(_NarrowPhaseSetupMixin, unittest.TestCase):
             # If contact generated, should have positive penetration (separation)
             self.assertGreater(penetrations[0], 0.0, "Separated should have positive penetration")
 
+    def test_barrel_cylinder_sphere(self):
+        """Verify a sphere contacts the curved barrel through GJK/MPR."""
+        geom_list = [
+            {
+                "type": GeoType.CYLINDER,
+                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 1.0, 1.0], 0.0),
+            },
+            {
+                "type": GeoType.SPHERE,
+                "transform": ([1.7, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.25, 0.0, 0.0], 0.0),
+            },
+        ]
+
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+
+        self.assertGreater(count, 0)
+        self.assertLess(penetrations[0], 0.0)
+
+    def test_plane_barrel_cylinder(self):
+        """Verify a plane contacts the curved barrel through GJK/MPR."""
+        sin_half_angle = np.sqrt(0.5)
+        geom_list = [
+            {
+                "type": GeoType.PLANE,
+                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.0, 0.0, 0.0], 0.0),
+            },
+            {
+                "type": GeoType.CYLINDER,
+                "transform": ([0.0, 0.0, 1.45], [0.0, sin_half_angle, 0.0, sin_half_angle]),
+                "data": ([0.5, 1.0, 1.0], 0.0),
+            },
+        ]
+
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+
+        self.assertGreater(count, 0)
+        self.assertLess(penetrations[0], 0.0)
+
+    def test_plane_barrel_cylinder_cap_manifold(self):
+        """Generate a stable contact manifold for a barrel cylinder resting on its cap."""
+        geom_list = [
+            {
+                "type": GeoType.PLANE,
+                "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.0, 0.0, 0.0], 0.0),
+            },
+            {
+                "type": GeoType.CYLINDER,
+                "transform": ([0.0, 0.0, 0.99], [0.0, 0.0, 0.0, 1.0]),
+                "data": ([0.5, 1.0, 1.5], 0.0),
+            },
+        ]
+
+        count, _pairs, _positions, _normals, penetrations, _tangents = self._run_narrow_phase(geom_list, [(0, 1)])
+
+        self.assertGreaterEqual(count, 3)
+        self.assertTrue(np.all(penetrations[:count] < 0.0))
+
     def test_no_self_collision(self):
         """Test that narrow phase doesn't generate self-collisions."""
         geom_list = [
@@ -1982,7 +2092,7 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             {
                 "type": GeoType.BOX,
                 "data": ([0.5, 0.5, 0.5], 0.0),
-                "transform": ([0.0, 0.0, 5.5], [0.0, 0.0, 0.0, 1.0]),
+                "transform": ([0.0, 0.0, 5.49], [0.0, 0.0, 0.0, 1.0]),
             },
         ]
         arrays = self._create_geometry_arrays(geom_list)
@@ -1995,9 +2105,8 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             verify_buffers=False,
             shape_aabb_lower=arrays[7],
             shape_aabb_upper=arrays[8],
+            sparse_gjk_pairs=True,
         )
-        narrow_phase.sparse_gjk_pairs = True
-        narrow_phase.primitive_kernel = create_narrow_phase_primitive_kernel(write_contact_simple, True)
 
         contact_count = wp.zeros(1, dtype=int)
         contact_pair = wp.zeros(8, dtype=wp.vec2i)
@@ -2028,6 +2137,21 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         np.testing.assert_array_equal(narrow_phase.gjk_candidate_pairs.numpy(), [[-1, -1], [1, 2]])
         self.assertGreater(int(contact_count.numpy()[0]), 0)
         np.testing.assert_array_equal(contact_pair.numpy()[0], [1, 2])
+
+    @unittest.skipUnless(_cuda_available, "Split GJK/MPR is enabled only on CUDA")
+    def test_split_buffers_use_candidate_work_estimate(self):
+        """Size split GJK/MPR buffers from the candidate work estimate."""
+        narrow_phase = NarrowPhase(
+            max_candidate_pairs=5000,
+            candidate_pair_work_estimate=4096,
+            has_meshes=False,
+            device="cuda:0",
+        )
+
+        self.assertTrue(narrow_phase.split_gjk_mpr)
+        self.assertEqual(narrow_phase.split_query_results.shape[0], 4096)
+        self.assertEqual(narrow_phase.split_gjk_work_items.shape[0], 4096)
+        self.assertEqual(narrow_phase.split_manifold_work_items.shape[0], 4096)
 
     def test_broad_phase_buffer_overflow(self):
         """Test that broad phase buffer overflow produces a warning and no crash."""
@@ -2111,7 +2235,7 @@ class TestExtremeMeshTriangles(unittest.TestCase):
         (GeoType.SPHERE, [0.3, 0.3, 0.3], "sphere"),
         (GeoType.BOX, [0.2, 0.2, 0.2], "box"),
         (GeoType.CAPSULE, [0.15, 0.2, 0.15], "capsule"),
-        (GeoType.CYLINDER, [0.15, 0.25, 0.15], "cylinder"),
+        (GeoType.CYLINDER, [0.15, 0.25, 0.0], "cylinder"),
         (GeoType.CONE, [0.15, 0.25, 0.15], "cone"),
         (GeoType.ELLIPSOID, [0.25, 0.15, 0.2], "ellipsoid"),
     ]
@@ -2472,6 +2596,10 @@ class TestMeshNonUniformScaling(_NarrowPhaseSetupMixin, unittest.TestCase):
     def test_nonuniform_scale_z_thin(self):
         """Non-uniform scale (1, 1, 0.1): a thin pancake along Z."""
         self._assert_sphere_above_quad_contacts((1.0, 1.0, 0.1), (0.0, 0.0), "non-uniform 1x1x0.1")
+
+    def test_mirrored_scale_x_preserves_front_face(self):
+        """Preserve the front face when mesh scale mirrors one in-plane axis."""
+        self._assert_sphere_above_quad_contacts((-1.0, 1.0, 1.0), (0.2, 0.0), "mirrored x")
 
     def test_nonuniform_scale_extreme(self):
         """Extreme non-uniform scale (50, 0.5, 1): a long thin strip in X."""

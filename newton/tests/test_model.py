@@ -329,6 +329,20 @@ class TestModelMesh(unittest.TestCase):
         )
         indices = np.arange(6, dtype=np.int32)
         mesh = newton.Mesh(vertices, indices, compute_inertia=False)
+        mesh._build_collision_edges(
+            lower_angle_threshold_rad=0.0,
+            upper_angle_threshold_rad=np.pi,
+            enable_box_absorption=False,
+            enable_inward_filter=False,
+            sign_method="normal",
+            half_normal=0.0,
+            half_lateral=0.0,
+        )
+        # Exercise defensive remapping of cached edges from duplicate source vertices.
+        mesh._collision_edges = np.concatenate(
+            (mesh._collision_edges, np.array([[3, 0], [3, 1]], dtype=np.int32)),
+            axis=0,
+        )
 
         builder = ModelBuilder()
         builder.add_shape_convex_hull(body=-1, mesh=mesh)
@@ -354,6 +368,14 @@ class TestModelMesh(unittest.TestCase):
             collision_mesh.indices.numpy(),
             np.array([0, 1, 2, 0, 2, 3], dtype=np.int32),
         )
+        edge_start, edge_count = model.shape_edge_range.numpy()[0]
+        collision_edges = model.mesh_edge_indices.numpy()[edge_start : edge_start + edge_count]
+        np.testing.assert_array_equal(
+            collision_edges,
+            np.array([[0, 1], [1, 2], [0, 2], [2, 3], [0, 3]], dtype=np.int32),
+        )
+        self.assertTrue(np.all(collision_edges[:, 0] != collision_edges[:, 1]))
+        self.assertEqual(len(np.unique(collision_edges, axis=0)), len(collision_edges))
 
     def test_finalize_does_not_deduplicate_different_mesh_layouts(self):
         vertices_a = np.array(
@@ -450,6 +472,54 @@ class TestModelMesh(unittest.TestCase):
         assert_np_equal(np.array(builder1.tri_poses), np.array(builder2.tri_poses), tol=1.0e-6)
         assert_np_equal(np.array(builder1.tri_activations), np.array(builder2.tri_activations))
         assert_np_equal(np.array(builder1.tri_materials), np.array(builder2.tri_materials))
+
+    def test_add_triangles_filters_degenerate_metadata(self):
+        builder = ModelBuilder()
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="triangle_id",
+                frequency=newton.Model.AttributeFrequency.TRIANGLE,
+                dtype=wp.int32,
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="triangle_group",
+                frequency=newton.Model.AttributeFrequency.TRIANGLE,
+                dtype=wp.int32,
+            )
+        )
+        for pos in ((0, 0, 0), (1, 0, 0), (0, 1, 0), (2, 0, 0), (0, 2, 0)):
+            builder.add_particle(pos, (0, 0, 0), 1.0)
+
+        with self.assertRaisesRegex(ValueError, "Expected 3 values, got 2"):
+            builder.add_triangles(
+                [0, 0, 0],
+                [1, 1, 3],
+                [2, 1, 4],
+                custom_attributes={"triangle_id": [10, 20]},
+            )
+        self.assertEqual(builder.tri_indices, [])
+        self.assertEqual(builder.tri_areas, [])
+
+        areas = builder.add_triangles(
+            [0, 0, 0],
+            [1, 1, 3],
+            [2, 1, 4],
+            custom_attributes={"triangle_id": [10, 20, 30], "triangle_group": 7},
+        )
+
+        np.testing.assert_allclose(areas, [0.5, 0.0, 2.0])
+        self.assertEqual(builder.tri_indices, [[0, 1, 2], [0, 3, 4]])
+        np.testing.assert_allclose(builder.tri_areas, [0.5, 2.0])
+        self.assertEqual(len(builder.tri_poses), 2)
+        self.assertEqual(len(builder.tri_materials), 2)
+        self.assertEqual(builder.custom_attributes["triangle_id"].values, {0: 10, 1: 30})
+        self.assertEqual(builder.custom_attributes["triangle_group"].values, {0: 7, 1: 7})
+
+        model = builder.finalize(device="cpu")
+        self.assertEqual(model.tri_count, 2)
+        self.assertEqual(model.tri_areas.shape, (2,))
 
     def test_add_edges(self):
         rng = np.random.default_rng(123)

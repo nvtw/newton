@@ -36,7 +36,6 @@ from typing import Any
 import warp as wp
 
 from .support_function import (
-    BOX_SUPPORT_DEADBAND,
     GeoTypeEx,
     _support_map_box,
     closest_point_on_triangle,
@@ -193,14 +192,13 @@ def create_support_map_function(support_func: Any, use_precomputed_center: bool 
         because the chosen ray direction can produce supports that all
         collapse onto a single vertex of the partner.
 
-        For most primitives the local origin is already a sensible
-        interior point, but for ``CONVEX_MESH`` (an arbitrary convex
-        hull) the authoring origin is not guaranteed to lie inside the
-        hull — many assets place hulls far from their body frame.  For
-        those shapes we compute the AABB of the (scaled) hull vertices
-        on the fly and use the AABB center, which is always inside the
-        hull's bounding box and typically very close to the hull
-        interior.
+        For most primitives the local origin is already a sensible interior
+        point. For ``CONVEX_MESH``, the uncached mode computes the scaled hull
+        AABB and uses its center. When ``use_precomputed_center`` is enabled,
+        this scan is skipped and ``geom.center`` is used for both shapes.
+        Callers selecting that mode must populate each convex mesh center with
+        a valid interior-point approximation rather than relying on the default
+        zero vector.
 
         For triangles (and triangle prisms) on shape A the center on
         shape A is replaced by the closest point on the triangle to
@@ -343,12 +341,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
             if geom.shape_type == GeoType.BOX:
                 # Reuse the absolute direction for the built-in box support and MPR's tie policy.
                 abs_direction = wp.vec3(wp.abs(direction[0]), wp.abs(direction[1]), wp.abs(direction[2]))
-                direction_scale = wp.max(abs_direction[0], wp.max(abs_direction[1], abs_direction[2]))
-                support_threshold = BOX_SUPPORT_DEADBAND * direction_scale
-                sx = 1.0 if direction[0] >= -support_threshold else -1.0
-                sy = 1.0 if direction[1] >= -support_threshold else -1.0
-                sz = 1.0 if direction[2] >= -support_threshold else -1.0
-                result = wp.vec3(sx * geom.scale[0], sy * geom.scale[1], sz * geom.scale[2])
+                result = _support_map_box(geom, direction)
 
                 contribution = wp.cw_mul(abs_direction, geom.scale)
                 threshold = MPR_BOX_SUPPORT_TIE_EPSILON * (contribution[0] + contribution[1] + contribution[2])
