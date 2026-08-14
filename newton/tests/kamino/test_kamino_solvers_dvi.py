@@ -2660,9 +2660,10 @@ class TestDVISolver(unittest.TestCase):
                 solver.solve(test.problem)
 
                 np.testing.assert_allclose(solver.data.solution.lambdas.numpy(), first_lambdas, rtol=0.0, atol=1e-6)
-                # Dense CUDA accumulation can select either of two results separated by two float32 ULPs.
-                # Keep the absolute near-zero gate while allowing that scale-relative roundoff.
-                np.testing.assert_allclose(solver.data.solution.v_plus.numpy(), first_v_plus, rtol=2e-7, atol=1e-6)
+                # Dense CUDA matrix-vector accumulation can vary by a few float32 ULPs with
+                # thread scheduling. Keep this tight enough to catch solver-state leakage while
+                # allowing the two-ULP variation observed around velocities of magnitude 10.
+                np.testing.assert_allclose(solver.data.solution.v_plus.numpy(), first_v_plus, rtol=0.0, atol=3e-6)
                 status = solver.data.status.numpy()
                 np.testing.assert_array_equal(status["converged"], first_status["converged"])
                 np.testing.assert_array_equal(status["iterations"], first_status["iterations"])
