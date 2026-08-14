@@ -369,6 +369,7 @@ class TestDirectEquality(unittest.TestCase):
         )
         direct = solver._direct_equality_system
         self.assertEqual(direct.topology.dimensions, (36,))
+        self.assertEqual(direct.topology.mechanism_has_repeated_pair, (True,))
         self.assertTrue(solver.world._skip_all_joint_pgs())
 
         state = model.state()

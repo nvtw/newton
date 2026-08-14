@@ -52,10 +52,13 @@ _MAX_ROWS = 6
 
 # Dynamic rows retain a conservative pivot floor. Full-rank structural rows
 # use a near-epsilon floor for accuracy, while symbolically redundant systems
-# use sqrt(epsilon) constraint-force mixing to stay reliable in FP32.
+# use a smaller floor that preserves the pseudoinverse-limit contact response.
+# Repeated body-pair constraints can be inconsistent, so they retain the
+# stronger sqrt(epsilon) floor needed for reliable FP32 Cholesky.
 _FP32_BASE_REGULARIZATION = 3.0e-6
 _FP32_STRUCTURAL_REGULARIZATION = 3.0e-7
-_FP32_RANK_REGULARIZATION = float(np.sqrt(np.finfo(np.float32).eps))
+_FP32_RANK_REGULARIZATION = 1.0e-5
+_FP32_REPEATED_PAIR_REGULARIZATION = float(np.sqrt(np.finfo(np.float32).eps))
 _DIRECT_BAUMGARTE = 0.2
 _DIRECT_RELAX_RESIDUAL_TOLERANCE = 1.0e-4
 _PANEL_BLOCK_SIZE = 16
@@ -77,6 +80,7 @@ class DirectEqualityTopology:
     permutation: np.ndarray
     mechanism_row_start: np.ndarray
     mechanism_requires_rank_floor: tuple[bool, ...]
+    mechanism_has_repeated_pair: tuple[bool, ...]
     mechanism_cycle_count: tuple[int, ...]
     mechanism_has_cycle: tuple[bool, ...]
     body_row_start: np.ndarray
@@ -429,6 +433,7 @@ def build_direct_equality_topology(
 
     ordered_mechanisms = sorted(mechanisms.values(), key=min)
     mechanism_requires_rank_floor: list[bool] = []
+    mechanism_has_repeated_pair: list[bool] = []
     mechanism_cycle_count: list[int] = []
     mechanism_has_cycle: list[bool] = []
     for joints in ordered_mechanisms:
@@ -455,6 +460,7 @@ def build_direct_equality_topology(
         tree_edges = max(0, len(dynamic_bodies) - (0 if anchored else 1))
         cycle_count = max(0, len(joints) - tree_edges)
         mechanism_requires_rank_floor.append(repeated_pair or structural_rows > maximum_rank)
+        mechanism_has_repeated_pair.append(repeated_pair)
         mechanism_cycle_count.append(cycle_count)
         mechanism_has_cycle.append(cycle_count > 0)
 
@@ -558,6 +564,7 @@ def build_direct_equality_topology(
         permutation=np.asarray(permutation, dtype=np.int32),
         mechanism_row_start=np.asarray(mechanism_row_start, dtype=np.int32),
         mechanism_requires_rank_floor=tuple(mechanism_requires_rank_floor),
+        mechanism_has_repeated_pair=tuple(mechanism_has_repeated_pair),
         mechanism_cycle_count=tuple(mechanism_cycle_count),
         mechanism_has_cycle=tuple(mechanism_has_cycle),
         body_row_start=np.asarray(body_row_start, dtype=np.int32),
@@ -1900,9 +1907,10 @@ class DirectEqualitySystem:
         )
         self.regularization = float(regularization)
         row_regularization = np.full(len(self.topology.row_joint), self.regularization, dtype=np.float32)
-        for mechanism, (needs_rank_floor, has_cycle) in enumerate(
+        for mechanism, (needs_rank_floor, repeated_pair, has_cycle) in enumerate(
             zip(
                 self.topology.mechanism_requires_rank_floor,
+                self.topology.mechanism_has_repeated_pair,
                 self.topology.mechanism_has_cycle,
                 strict=True,
             )
@@ -1912,7 +1920,10 @@ class DirectEqualitySystem:
             mechanism_regularization = row_regularization[start:end]
             structural_rows = ~self.topology.row_dynamic[start:end]
             mechanism_regularization[structural_rows] = (
-                max(self.regularization, _FP32_RANK_REGULARIZATION)
+                max(
+                    self.regularization,
+                    _FP32_REPEATED_PAIR_REGULARIZATION if repeated_pair else _FP32_RANK_REGULARIZATION,
+                )
                 if needs_rank_floor
                 else (self.regularization if has_cycle else min(self.regularization, _FP32_STRUCTURAL_REGULARIZATION))
             )

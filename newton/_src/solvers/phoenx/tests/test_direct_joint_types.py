@@ -216,6 +216,56 @@ def _build_closed_loop_contact_model(*, redundant: bool = False) -> tuple[newton
     return model, tuple(bodies), joints[3]
 
 
+def _build_redundant_high_mass_ratio_support() -> tuple[newton.Model, tuple[int, int]]:
+    """Build a heavy mechanism supported through one light contacting body."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+    identity = wp.quat_identity()
+    positions = (
+        (0.0, 0.0, 0.4),
+        (0.0, 0.0, 0.1),
+        (0.1, 0.0, 0.4),
+        (0.0, 0.1, 0.4),
+        (-0.1, 0.0, 0.4),
+    )
+    bodies = []
+    for index, position in enumerate(positions):
+        mass = 1000.0 if index == 0 else 1.0
+        inertia = 20.0 if index == 0 else 0.01
+        bodies.append(
+            builder.add_link(
+                xform=wp.transform(wp.vec3(*position), identity),
+                mass=mass,
+                inertia=((inertia, 0.0, 0.0), (0.0, inertia, 0.0), (0.0, 0.0, inertia)),
+            )
+        )
+    chassis, foot = bodies[:2]
+    builder.add_shape_box(
+        foot,
+        hx=0.2,
+        hy=0.2,
+        hz=0.1,
+        cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.7),
+    )
+    root = builder.add_joint_free(parent=-1, child=chassis)
+    fixed = []
+    for parent in range(len(bodies)):
+        for child in range(parent + 1, len(bodies)):
+            offset = np.asarray(positions[child]) - np.asarray(positions[parent])
+            fixed.append(
+                builder.add_joint_fixed(
+                    parent=bodies[parent],
+                    child=bodies[child],
+                    parent_xform=wp.transform(wp.vec3(*offset), identity),
+                )
+            )
+    builder.add_articulation([root, *fixed[:4]])
+    for joint in fixed[4:]:
+        builder.joint_articulation[joint] = -1
+    builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.7))
+    builder.color()
+    return builder.finalize(device=wp.get_preferred_device()), (chassis, foot)
+
+
 def _build_mechanism_free_body_contact_model() -> tuple[newton.Model, int, int]:
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     shape_cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.8)
@@ -287,6 +337,7 @@ def _make_solver(
     *,
     mass_splitting: bool = False,
     mass_splitting_unrolled: bool = False,
+    sleeping_velocity_threshold: float = 0.0,
 ) -> newton.solvers.SolverPhoenX:
     return newton.solvers.SolverPhoenX(
         model,
@@ -297,6 +348,7 @@ def _make_solver(
         mass_splitting=mass_splitting,
         mass_splitting_unrolled=mass_splitting_unrolled,
         step_layout="single_world" if mass_splitting else "auto",
+        sleeping_velocity_threshold=sleeping_velocity_threshold,
     )
 
 
@@ -443,15 +495,15 @@ class TestDirectJointTypes(unittest.TestCase):
                 else:
                     self.assertLess(float(np.max(np.abs(result[body]))), 0.8)
 
-    def test_rank_deficient_loop_keeps_contacts_in_pgs(self) -> None:
-        """Keep rank-redundant loop contacts out of the regularized Schur response."""
+    def test_rank_deficient_loop_uses_direct_contact_response(self) -> None:
+        """Couple rank-redundant loop contacts through the direct response."""
         model, bodies, _loop_joint = _build_closed_loop_contact_model(redundant=True)
         solver = _make_solver(model)
 
         self.assertEqual(solver._direct_equality_system.topology.mechanism_requires_rank_floor, (True,))
         self.assertEqual(solver._direct_equality_system.topology.mechanism_cycle_count, (2,))
-        self.assertIsNone(solver._direct_contact_response)
-        self.assertIsNone(solver._direct_contact_schedule)
+        self.assertIsNotNone(solver._direct_contact_response)
+        self.assertEqual(solver._direct_contact_response.active_mechanisms, (True,))
 
         state = model.state()
         initial_xy = np.mean(state.body_q.numpy()[list(bodies), :2], axis=0)
@@ -472,8 +524,8 @@ class TestDirectJointTypes(unittest.TestCase):
         final_xy = np.mean(body_q[list(bodies), :2], axis=0)
         self.assertLess(float(np.linalg.norm(final_xy - initial_xy)), 0.02)
 
-    def test_rank_deficient_loop_uses_mass_split_pgs_contacts(self) -> None:
-        """Project redundant equalities around mass-split PGS contacts."""
+    def test_rank_deficient_loop_uses_mass_split_direct_contacts(self) -> None:
+        """Couple redundant equalities to mass-split contacts."""
         for unrolled in (False, True):
             with self.subTest(unrolled=unrolled):
                 model, bodies, _loop_joint = _build_closed_loop_contact_model(redundant=True)
@@ -482,8 +534,8 @@ class TestDirectJointTypes(unittest.TestCase):
                     mass_splitting=True,
                     mass_splitting_unrolled=unrolled,
                 )
-                self.assertIsNone(solver._direct_contact_response)
-                self.assertIsNone(solver._direct_contact_schedule)
+                self.assertIsNotNone(solver._direct_contact_response)
+                self.assertEqual(solver._direct_contact_response.active_mechanisms, (True,))
 
                 state = model.state()
                 control = model.control()
@@ -503,7 +555,50 @@ class TestDirectJointTypes(unittest.TestCase):
                 self.assertTrue(np.isfinite(body_qd).all())
                 self.assertGreater(float(np.min(body_q[:, 2])), 0.03)
                 self.assertLess(float(np.max(np.abs(body_qd))), 2.0e-3)
-                self.assertGreater(int(solver.world._copy_state.highest_index_in_use.numpy()[0]), 0)
+
+    def test_redundant_high_mass_ratio_mechanism_stays_supported(self) -> None:
+        """Support a heavy redundant mechanism through a light contact body."""
+        variants = (
+            (False, False, 0.0),
+            (False, False, 0.05),
+            (True, False, 0.0),
+            (True, True, 0.0),
+        )
+        for mass_splitting, unrolled, sleeping_threshold in variants:
+            with self.subTest(mass_splitting=mass_splitting, unrolled=unrolled, sleeping_threshold=sleeping_threshold):
+                model, bodies = _build_redundant_high_mass_ratio_support()
+                solver = _make_solver(
+                    model,
+                    mass_splitting=mass_splitting,
+                    mass_splitting_unrolled=unrolled,
+                    sleeping_velocity_threshold=sleeping_threshold,
+                )
+                topology = solver._direct_equality_system.topology
+                self.assertEqual(topology.mechanism_requires_rank_floor, (True,))
+                self.assertEqual(topology.mechanism_has_repeated_pair, (False,))
+                self.assertEqual(topology.mechanism_cycle_count, (6,))
+                self.assertIsNotNone(solver._direct_contact_response)
+                self.assertEqual(solver._direct_contact_response.active_mechanisms, (True,))
+
+                state = model.state()
+                control = model.control()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                pipeline = model._collision_pipeline
+                contacts = pipeline.contacts()
+                with wp.ScopedCapture(model.device) as capture:
+                    state.clear_forces()
+                    pipeline.collide(state, contacts)
+                    solver.step(state, state, control, contacts, 1.0 / 60.0)
+                for _ in range(120):
+                    wp.capture_launch(capture.graph)
+
+                body_q = state.body_q.numpy()[list(bodies)]
+                body_qd = state.body_qd.numpy()[list(bodies)]
+                self.assertTrue(np.isfinite(body_q).all())
+                self.assertTrue(np.isfinite(body_qd).all())
+                self.assertGreater(float(body_q[1, 2]), 0.08)
+                self.assertGreater(float(body_q[0, 2]), 0.37)
+                self.assertLess(float(np.max(np.abs(body_qd))), 5.0e-3)
 
     def test_closed_loop_contacts_settle_without_horizontal_drift(self) -> None:
         """Keep a metadata-independent closed loop drift-free on the ground."""
