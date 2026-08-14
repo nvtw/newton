@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import math
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +29,12 @@ try:
 except ImportError:
     from racerx_track import add_track_barriers, build_track_layout
 
-DEFAULT_USD_PATH = Path("/home/twidmer/Documents/Meshes/RacerX/Collected_A3_physics/A3_physics.usda")
+RACERX_USD_PATHS = {
+    "a3": Path("/home/twidmer/Documents/Meshes/RacerX/Collected_A3_physics/A3_physics.usda"),
+    "c3": Path("/home/twidmer/Documents/Meshes/RacerX/Collected_C3_physics/C3_physics.usda"),
+}
+DEFAULT_RC_MODEL = "a3"
+DEFAULT_USD_PATH = RACERX_USD_PATHS[DEFAULT_RC_MODEL]
 
 # Easy-to-find example switches. Command-line flags can still override them.
 LOAD_USD_ENVIRONMENT = False
@@ -60,7 +66,7 @@ DRIVE_TORQUE_LIMIT = 3.0
 SUSPENSION_STIFFNESS_SCALE = 0.16
 STEERING_TRAVEL = 0.00125
 STEERING_LIMIT = 0.0015
-STEERING_RATE = 0.006
+STEERING_RATE = 0.015
 STEERING_STIFFNESS = 64000.0
 STEERING_DAMPING = 240.0
 STEERING_FORCE_LIMIT = 320.0
@@ -72,20 +78,26 @@ TRACK_BARRIER_DENSITY = 450.0
 TRACK_ROAD_HALF_THICKNESS = 0.002
 
 
-WHEEL_JOINT_PATHS = (
-    "/World/Joints/FR/Hinge_Wheel_WheelLinkage",
-    "/World/Joints/FL/Hinge_Wheel_WheelLinkage",
-    "/World/Joints/RR/Hinge_Wheel_WheelLinkage",
-    "/World/Joints/RL/Hinge_Wheel_WheelLinkage",
+_VEHICLE_CORNERS = (
+    ("FR", "front", "right"),
+    ("FL", "front", "left"),
+    ("RR", "rear", "right"),
+    ("RL", "rear", "left"),
 )
-WHEEL_COLLIDER_PATHS = (
-    "/World/RC_Car/SM_RCCar_A1_WheelFrontRight_01",
-    "/World/RC_Car/SM_RCCar_A1_WheelFrontLeft_01",
-    "/World/RC_Car/SM_RCCar_A1_WheelRearRight_01",
-    "/World/RC_Car/SM_RCCar_A1_WheelRearLeft_01",
-)
-STEERING_JOINT_PATH = "/World/Joints/Steering/Steering_Link_Drive"
-CHASSIS_BODY_PATH = "/World/RC_Car/SM_RCCar_A1_Chassis_01"
+
+
+@dataclass(frozen=True)
+class _VehicleParts:
+    """Store model-specific bodies, joints, and collider shapes."""
+
+    wheel_joints: tuple[int, int, int, int]
+    wheel_shapes: tuple[int, int, int, int]
+    wheel_shape_paths: tuple[str, str, str, str]
+    steering_joint: int
+    chassis_body: int
+    chassis_body_path: str
+
+
 NON_PHYSICAL_RIGID_BODY_PATHS = {
     "/World/FX_wheel_dust_flow_01": "VFX helper has no collider",
     "/World/FlowCandleWind": "flow helper has no collider",
@@ -317,11 +329,87 @@ def _scale_linear_joint_units(builder, scale: float) -> None:
             builder.joint_qd[dof] *= scale
 
 
-def _replace_wheel_mesh_colliders(builder, result) -> None:
+def _find_unique_vehicle_path(paths, description: str, predicate) -> str:
+    """Find one semantically identified vehicle path."""
+    matches = [path for path in paths if predicate(path)]
+    if len(matches) != 1:
+        raise RuntimeError(f"Expected one RacerX {description}, found {matches}")
+    return matches[0]
+
+
+def _resolve_vehicle_parts(builder, result) -> _VehicleParts:
+    """Discover model-specific vehicle parts from semantic USD names."""
+    path_joint_map = result["path_joint_map"]
+    path_body_map = result["path_body_map"]
+    path_shape_map = result["path_shape_map"]
+    body_path = {int(body): path for path, body in path_body_map.items()}
+
+    wheel_joints = []
+    wheel_shapes = []
+    wheel_shape_paths = []
+    for corner, longitudinal, lateral in _VEHICLE_CORNERS:
+        joint_path = _find_unique_vehicle_path(
+            path_joint_map,
+            f"{corner} wheel joint",
+            lambda path, corner=corner: f"/{corner}/" in path and path.endswith("/Hinge_Wheel_WheelLinkage"),
+        )
+        joint = int(path_joint_map[joint_path])
+        wheel_body_path = _find_unique_vehicle_path(
+            path_body_map,
+            f"{corner} wheel body",
+            lambda path, longitudinal=longitudinal, lateral=lateral: (
+                "wheel" in path.rsplit("/", 1)[-1].lower()
+                and longitudinal in path.rsplit("/", 1)[-1].lower()
+                and lateral in path.rsplit("/", 1)[-1].lower()
+                and "link" not in path.rsplit("/", 1)[-1].lower()
+                and "connection" not in path.rsplit("/", 1)[-1].lower()
+            ),
+        )
+        wheel_body = int(path_body_map[wheel_body_path])
+        endpoints = (int(builder.joint_parent[joint]), int(builder.joint_child[joint]))
+        if wheel_body not in endpoints:
+            endpoint_paths = tuple(body_path.get(body, "<world>") for body in endpoints)
+            raise RuntimeError(f"RacerX {corner} wheel joint connects {endpoint_paths}, not {wheel_body_path}")
+
+        shape_candidates = [
+            (path, int(shape))
+            for path, shape in path_shape_map.items()
+            if int(builder.shape_body[int(shape)]) == wheel_body
+            and builder.shape_type[int(shape)] in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH)
+        ]
+        if len(shape_candidates) != 1:
+            raise RuntimeError(f"Expected one mesh collider for RacerX {corner} wheel, found {shape_candidates}")
+        shape_path, shape = shape_candidates[0]
+        wheel_joints.append(joint)
+        wheel_shapes.append(shape)
+        wheel_shape_paths.append(shape_path)
+
+    steering_path = _find_unique_vehicle_path(
+        path_joint_map,
+        "steering drive",
+        lambda path: path.endswith("/Steering/Steering_Link_Drive"),
+    )
+    steering_joint = int(path_joint_map[steering_path])
+    steering_bodies = (int(builder.joint_parent[steering_joint]), int(builder.joint_child[steering_joint]))
+    dynamic_steering_bodies = [body for body in steering_bodies if body >= 0]
+    if len(dynamic_steering_bodies) != 2:
+        raise RuntimeError(f"Expected two dynamic RacerX steering bodies, found {steering_bodies}")
+    chassis_body = max(dynamic_steering_bodies, key=lambda body: float(builder.body_mass[body]))
+
+    return _VehicleParts(
+        wheel_joints=tuple(wheel_joints),
+        wheel_shapes=tuple(wheel_shapes),
+        wheel_shape_paths=tuple(wheel_shape_paths),
+        steering_joint=steering_joint,
+        chassis_body=chassis_body,
+        chassis_body_path=body_path[chassis_body],
+    )
+
+
+def _replace_wheel_mesh_colliders(builder, parts: _VehicleParts) -> None:
     """Use smooth cylinders for the four rendered wheel meshes."""
     cylinder_rotation = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.5 * math.pi)
-    for path in WHEEL_COLLIDER_PATHS:
-        shape = int(result["path_shape_map"][path])
+    for path, shape in zip(parts.wheel_shape_paths, parts.wheel_shapes, strict=True):
         if builder.shape_type[shape] not in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH):
             raise RuntimeError(f"Expected a mesh-backed RacerX wheel collider at {path}")
 
@@ -344,11 +432,10 @@ def _replace_wheel_mesh_colliders(builder, result) -> None:
         builder.shape_material_mu[shape] = WHEEL_FRICTION
 
 
-def _configure_vehicle_joints(builder, result) -> tuple[list[int], int, int]:
+def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[list[int], int, int]:
     """Configure wheel velocity drives and a PhoenX-compatible steering slider."""
     wheel_dofs = []
-    for path in WHEEL_JOINT_PATHS:
-        joint_index = int(result["path_joint_map"][path])
+    for joint_index in parts.wheel_joints:
         dof = int(builder.joint_qd_start[joint_index])
         builder.joint_target_mode[dof] = newton.JointTargetMode.VELOCITY
         builder.joint_target_ke[dof] = 0.0
@@ -368,7 +455,7 @@ def _configure_vehicle_joints(builder, result) -> tuple[list[int], int, int]:
         builder.joint_target_ke[dof] *= SUSPENSION_STIFFNESS_SCALE
         builder.joint_target_kd[dof] *= math.sqrt(SUSPENSION_STIFFNESS_SCALE)
 
-    steering_joint = int(result["path_joint_map"][STEERING_JOINT_PATH])
+    steering_joint = parts.steering_joint
     steering_dof_start = int(builder.joint_qd_start[steering_joint])
     linear_count, _angular_count = builder.joint_dof_dim[steering_joint]
     if linear_count != 2:
@@ -391,9 +478,15 @@ def _configure_vehicle_joints(builder, result) -> tuple[list[int], int, int]:
 
 def _add_closed_loop_joint_metadata(builder) -> None:
     """Register imported closed-loop joints for maximal-coordinate validation."""
-    # The source has no articulation root and its suspension is a closed graph.
-    # Singleton metadata keeps every joint addressable without inventing an
-    # invalid reduced-coordinate tree; PhoenX solves all rows maximally.
+    # RC stages may contain partial articulation metadata that cannot be mixed
+    # monotonically with the loop joints. Rebuild a canonical singleton layout
+    # without inventing an invalid reduced-coordinate tree; PhoenX still solves
+    # the connected equality rows as one maximal mechanism.
+    builder.articulation_start.clear()
+    builder.articulation_end.clear()
+    builder.articulation_label.clear()
+    builder.articulation_world.clear()
+    builder.joint_articulation[:] = [-1] * len(builder.joint_articulation)
     for joint_index, label in enumerate(builder.joint_label):
         builder.add_articulation([joint_index], label=label)
 
@@ -600,13 +693,16 @@ class Example:
             schema_resolvers=[newton.usd.SchemaResolverPhysx()],
             ignore_composition_errors=True,
         )
+        vehicle_parts = _resolve_vehicle_parts(builder, result)
         _scale_shape_contact_gaps(builder, authored_unit)
-        _replace_wheel_mesh_colliders(builder, result)
+        _replace_wheel_mesh_colliders(builder, vehicle_parts)
         # The source PhysicsScene stores 981 in cm/s^2; stage-root scaling
         # does not transform scalar physics attributes.
         builder.gravity = wp.vec3(0.0, 0.0, -9.81)
         _scale_linear_joint_units(builder, authored_unit)
-        self._wheel_dofs, self._steering_joint, self._steering_dof = _configure_vehicle_joints(builder, result)
+        self._wheel_dofs, self._steering_joint, self._steering_dof = _configure_vehicle_joints(
+            builder, result, vehicle_parts
+        )
         self._steering_target_index = builder.joint_q_start[self._steering_joint] + 1
         _add_closed_loop_joint_metadata(builder)
         builder.add_ground_plane(
@@ -631,7 +727,7 @@ class Example:
             )
 
         self.physics_result = result
-        self._chassis_body = int(result["path_body_map"][CHASSIS_BODY_PATH])
+        self._chassis_body = vehicle_parts.chassis_body
         self._builder = builder
 
         for path, reason in sorted(ignored.items()):
@@ -984,10 +1080,16 @@ class Example:
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
     parser.add_argument(
+        "--rc-model",
+        choices=tuple(RACERX_USD_PATHS),
+        default=DEFAULT_RC_MODEL,
+        help="Bundled RacerX model to load when --usd-path is not specified.",
+    )
+    parser.add_argument(
         "--usd-path",
         type=str,
-        default=str(DEFAULT_USD_PATH),
-        help="Composed USD stage to render and simulate.",
+        default=None,
+        help="Composed USD stage to render and simulate; overrides --rc-model.",
     )
     parser.add_argument(
         "--usd-max-texture-size",
@@ -1039,6 +1141,8 @@ if __name__ == "__main__":
     )
     parser.set_defaults(viewer="optix", paused=START_PAUSED, optix_dlss_quality=OPTIX_DLSS_QUALITY)
     viewer, args = newton.examples.init(parser)
+    if args.usd_path is None:
+        args.usd_path = str(RACERX_USD_PATHS[args.rc_model])
     if args.usd_max_texture_size == 0:
         args.usd_max_texture_size = None
     example = Example(viewer, args)

@@ -43,6 +43,53 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("ImportError", result.stderr)
 
+    def test_vehicle_parts_resolve_across_racerx_models(self) -> None:
+        """Resolve A-series and C-series vehicles from semantic USD names."""
+        for model, chassis_name in (("A1", "Chassis_01"), ("C1", "Body_01")):
+            with self.subTest(model=model):
+                wheel_names = (
+                    f"SM_RCCar_{model}_WheelFrontRight_01",
+                    f"SM_RCCar_{model}_WheelFrontLeft_01",
+                    f"SM_RCCar_{model}_WheelRearRight_01",
+                    f"SM_RCCar_{model}_WheelRearLeft_01",
+                )
+                wheel_paths = tuple(f"/World/RC_Car/{name}" for name in wheel_names)
+                chassis_path = f"/World/RC_Car/SM_RCCar_{model}_{chassis_name}"
+                servo_path = f"/World/RC_Car/SM_RCCar_{model}_SteeringServo_01"
+                wheel_joint_paths = tuple(
+                    f"/World/Joints/{corner}/Hinge_Wheel_WheelLinkage" for corner in ("FR", "FL", "RR", "RL")
+                )
+                steering_path = "/World/Joints/Steering/Steering_Link_Drive"
+                shape_paths = tuple(f"{path}/Collision" for path in wheel_paths)
+                builder = SimpleNamespace(
+                    joint_parent=[4, 4, 4, 4, 5],
+                    joint_child=[0, 1, 2, 3, 4],
+                    shape_body=[0, 1, 2, 3],
+                    shape_type=[newton.GeoType.CONVEX_MESH] * 4,
+                    body_mass=[0.05, 0.05, 0.05, 0.05, 3.2, 0.05],
+                )
+                result = {
+                    "path_joint_map": {
+                        **dict(zip(wheel_joint_paths, range(4), strict=True)),
+                        steering_path: 4,
+                    },
+                    "path_body_map": {
+                        **dict(zip(wheel_paths, range(4), strict=True)),
+                        chassis_path: 4,
+                        servo_path: 5,
+                    },
+                    "path_shape_map": dict(zip(shape_paths, range(4), strict=True)),
+                }
+
+                parts = racerx._resolve_vehicle_parts(builder, result)
+
+                self.assertEqual(parts.wheel_joints, (0, 1, 2, 3))
+                self.assertEqual(parts.wheel_shapes, (0, 1, 2, 3))
+                self.assertEqual(parts.wheel_shape_paths, shape_paths)
+                self.assertEqual(parts.steering_joint, 4)
+                self.assertEqual(parts.chassis_body, 4)
+                self.assertEqual(parts.chassis_body_path, chassis_path)
+
     def test_track_follows_closed_uniform_spline(self) -> None:
         """Build a clear, technical circuit with uniformly spaced barriers."""
         half_width = racerx.TRACK_HALF_WIDTH
@@ -105,7 +152,7 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertTrue(all(flag == int(newton.BodyFlags.DYNAMIC) for flag in builder.body_flags))
         self.assertEqual(racerx.DRIVE_SPEED, 140.0)
         self.assertEqual((racerx.STEERING_TRAVEL, racerx.STEERING_LIMIT), (0.00125, 0.0015))
-        self.assertEqual(racerx.STEERING_RATE, 0.006)
+        self.assertEqual(racerx.STEERING_RATE, 0.015)
         self.assertEqual((racerx.SIM_SUBSTEPS, racerx.SOLVER_ITERATIONS), (4, 6))
 
     def test_wheel_mesh_colliders_become_symmetric_cylinders(self) -> None:
@@ -130,9 +177,17 @@ class TestRacerXUsd(unittest.TestCase):
             shape_transform=[wp.transform_identity() for _ in range(4)],
             shape_material_mu=[float(index) for index in range(4)],
         )
-        path_shape_map = {path: index for index, path in enumerate(racerx.WHEEL_COLLIDER_PATHS)}
+        wheel_shape_paths = tuple(f"/World/Car/Wheel{index}" for index in range(4))
+        parts = racerx._VehicleParts(
+            wheel_joints=(0, 1, 2, 3),
+            wheel_shapes=(0, 1, 2, 3),
+            wheel_shape_paths=wheel_shape_paths,
+            steering_joint=4,
+            chassis_body=4,
+            chassis_body_path="/World/Car/Body",
+        )
 
-        racerx._replace_wheel_mesh_colliders(builder, {"path_shape_map": path_shape_map})
+        racerx._replace_wheel_mesh_colliders(builder, parts)
 
         self.assertEqual(builder.shape_type, [newton.GeoType.CYLINDER] * 4)
         self.assertEqual(builder.shape_source, [None] * 4)
@@ -198,22 +253,26 @@ class TestRacerXUsd(unittest.TestCase):
             joint_limit_lower=[-1.0] * dof_count,
             joint_limit_upper=[1.0] * dof_count,
         )
-        path_joint_map = {path: index for index, path in enumerate(racerx.WHEEL_JOINT_PATHS)}
-        path_joint_map.update(
-            {
-                f"/World/Joints/{corner}/Slider_Suspension": 4 + index
-                for index, corner in enumerate(("FR", "FL", "RR", "RL"))
-            }
+        path_joint_map = {
+            f"/World/Joints/{corner}/Slider_Suspension": 4 + index
+            for index, corner in enumerate(("FR", "FL", "RR", "RL"))
+        }
+        parts = racerx._VehicleParts(
+            wheel_joints=(0, 1, 2, 3),
+            wheel_shapes=(0, 1, 2, 3),
+            wheel_shape_paths=("FR", "FL", "RR", "RL"),
+            steering_joint=8,
+            chassis_body=0,
+            chassis_body_path="/World/Car/Body",
         )
-        path_joint_map[racerx.STEERING_JOINT_PATH] = 8
 
         wheel_dofs, steering_joint, steering_dof = racerx._configure_vehicle_joints(
-            builder, {"path_joint_map": path_joint_map}
+            builder, {"path_joint_map": path_joint_map}, parts
         )
 
         self.assertEqual(wheel_dofs, [0, 1, 2, 3])
         self.assertEqual(racerx.SUSPENSION_STIFFNESS_SCALE, 0.16)
-        self.assertEqual(racerx.STEERING_RATE, 0.006)
+        self.assertEqual(racerx.STEERING_RATE, 0.015)
         self.assertEqual(racerx.STEERING_STIFFNESS, 64000.0)
         self.assertEqual(racerx.STEERING_DAMPING, 240.0)
         self.assertEqual(racerx.STEERING_FORCE_LIMIT, 320.0)
@@ -273,16 +332,24 @@ class TestRacerXUsd(unittest.TestCase):
 
         first_steering_command = racerx.STEERING_RATE / 60.0
         self.assertAlmostEqual(float(target_q.numpy()[9]), first_steering_command, places=7)
-        steering_frames = math.ceil(racerx.STEERING_TRAVEL / first_steering_command)
-        self.assertLessEqual(steering_frames, 13)
-        for _ in range(steering_frames - 1):
+        center_to_lock_frames = math.ceil(racerx.STEERING_TRAVEL / first_steering_command)
+        for _ in range(center_to_lock_frames - 1):
             launch() if graph is None else wp.capture_launch(graph)
         self.assertAlmostEqual(float(target_q.numpy()[9]), racerx.STEERING_TRAVEL, places=5)
-        for _ in range(60 - steering_frames):
+
+        drive_input.assign(np.asarray((1.0, -1.0), dtype=np.float32))
+        lock_to_lock_frames = math.ceil(2.0 * racerx.STEERING_TRAVEL / first_steering_command)
+        self.assertLessEqual(lock_to_lock_frames, 10)
+        for _ in range(lock_to_lock_frames):
+            launch() if graph is None else wp.capture_launch(graph)
+        self.assertAlmostEqual(float(target_q.numpy()[9]), -racerx.STEERING_TRAVEL, places=5)
+
+        elapsed_frames = center_to_lock_frames + lock_to_lock_frames
+        for _ in range(60 - elapsed_frames):
             launch() if graph is None else wp.capture_launch(graph)
 
         self.assertAlmostEqual(float(wheel_command.numpy()[0]), racerx.DRIVE_SPEED, places=4)
-        self.assertAlmostEqual(float(target_q.numpy()[9]), racerx.STEERING_TRAVEL, places=5)
+        self.assertAlmostEqual(float(target_q.numpy()[9]), -racerx.STEERING_TRAVEL, places=5)
         np.testing.assert_allclose(target_qd.numpy()[:4], racerx.DRIVE_SPEED, rtol=0.0, atol=1.0e-4)
 
         drive_input.zero_()
