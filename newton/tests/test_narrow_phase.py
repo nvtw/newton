@@ -28,8 +28,8 @@ import newton
 from newton._src.geometry.flags import ShapeFlags
 from newton._src.geometry.narrow_phase import (
     NarrowPhase,
-    _append_pair_warp_aggregated,
-    _append_work_index_warp_aggregated,
+    _append_pair_compacted,
+    _append_work_index_compacted,
 )
 from newton._src.geometry.types import GeoType
 
@@ -37,7 +37,7 @@ _cuda_available = wp.is_cuda_available()
 
 
 @wp.kernel(enable_backward=False)
-def append_warp_aggregated_test_kernel(
+def append_compacted_test_kernel(
     work_items: wp.array[int],
     work_count: wp.array[int],
     pair_items: wp.array[wp.vec2i],
@@ -46,15 +46,15 @@ def append_warp_aggregated_test_kernel(
     """Append matching scalar and pair values from a partially active launch."""
     tid = wp.tid()
     predicate = tid % 3 != 1
-    _append_work_index_warp_aggregated(predicate, tid, work_items, work_count)
-    _append_pair_warp_aggregated(predicate, wp.vec2i(tid, -tid), pair_items, pair_count)
+    _append_work_index_compacted(predicate, tid, work_items, work_count)
+    _append_pair_compacted(predicate, wp.vec2i(tid, -tid), pair_items, pair_count)
 
 
-class TestWarpAggregatedAppend(unittest.TestCase):
+class TestCompactedAppend(unittest.TestCase):
     """Test compacted work-queue appends across supported devices."""
 
-    def test_warp_aggregated_append_matches_cpu_and_cuda(self):
-        """Preserve all selected values through CPU and CUDA append paths."""
+    def test_compacted_append_matches_cpu_and_cuda(self):
+        """Preserve all selected values through CPU and CUDA compacted queues."""
         launch_size = 257
         expected = np.array([i for i in range(launch_size) if i % 3 != 1], dtype=np.int32)
         devices = ["cpu"]
@@ -69,7 +69,7 @@ class TestWarpAggregatedAppend(unittest.TestCase):
                 pair_count = wp.zeros(1, dtype=int, device=device)
 
                 wp.launch(
-                    append_warp_aggregated_test_kernel,
+                    append_compacted_test_kernel,
                     dim=launch_size,
                     inputs=[work_items, work_count, pair_items, pair_count],
                     device=device,

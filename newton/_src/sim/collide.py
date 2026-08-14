@@ -416,6 +416,12 @@ def compute_shape_aabbs(
     elif geo_type == GeoType.CYLINDER:
         radius = scale[0]
         half_height = scale[1]
+        barrel_radius = scale[2]
+        # Imported MuJoCo site display sizes may use scale[2] without barrel semantics.
+        if barrel_radius >= half_height and barrel_radius > 0.0:
+            radius += (half_height * half_height) / (
+                barrel_radius + wp.sqrt(barrel_radius * barrel_radius - half_height * half_height)
+            )
         r0 = wp.quat_rotate(orientation, wp.vec3(1.0, 0.0, 0.0))
         r1 = wp.quat_rotate(orientation, wp.vec3(0.0, 1.0, 0.0))
         r2 = wp.quat_rotate(orientation, wp.vec3(0.0, 0.0, 1.0))

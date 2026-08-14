@@ -84,57 +84,36 @@ _SPARSE_GJK_PAIR_CAPACITY_THRESHOLD = 1_000_000
 _SPLIT_GJK_MPR_PAIR_CAPACITY_THRESHOLD = 4096
 
 
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
-const unsigned int mask = __ballot_sync(__activemask(), predicate != 0);
-if (predicate == 0) {
-    return -1;
-}
-
-const int lane = threadIdx.x & 31;
-const int leader = __ffs(mask) - 1;
-const int count = __popc(mask);
-int base = 0;
-if (lane == leader) {
-    base = atomic_add(work_count, 0, count);
-}
-base = __shfl_sync(mask, base, leader);
-const unsigned int lower_mask = mask & ((1u << lane) - 1u);
-return base + __popc(lower_mask);
-#else
-if (predicate == 0) {
-    return -1;
-}
-return atomic_add(work_count, 0, 1);
-#endif
-""")
-def _reserve_warp_aggregated(predicate: int, work_count: wp.array[int]) -> int:
-    """Reserve one compacted output slot, aggregating atomics per CUDA warp."""
-    ...
+@wp.func
+def _reserve_compacted_slot(predicate: int, work_count: wp.array[int]) -> int:
+    """Reserve one compacted output slot for a selected work item."""
+    if predicate == 0:
+        return -1
+    return wp.atomic_add(work_count, 0, 1)
 
 
 @wp.func
-def _append_work_index_warp_aggregated(
+def _append_work_index_compacted(
     predicate: bool,
     value: int,
     work_items: wp.array[int],
     work_count: wp.array[int],
 ):
-    """Append one work item using a single atomic reservation per active warp."""
-    index = _reserve_warp_aggregated(int(predicate), work_count)
+    """Append one selected work item to a compacted queue."""
+    index = _reserve_compacted_slot(int(predicate), work_count)
     if index >= 0 and index < work_items.shape[0]:
         work_items[index] = value
 
 
 @wp.func
-def _append_pair_warp_aggregated(
+def _append_pair_compacted(
     predicate: bool,
     value: wp.vec2i,
     work_items: wp.array[wp.vec2i],
     work_count: wp.array[int],
 ):
-    """Append one pair using a single atomic reservation per active warp."""
-    index = _reserve_warp_aggregated(int(predicate), work_count)
+    """Append one selected pair to a compacted queue."""
+    index = _reserve_compacted_slot(int(predicate), work_count)
     if index >= 0 and index < work_items.shape[0]:
         work_items[index] = value
 
@@ -727,7 +706,7 @@ def create_narrow_phase_primitive_kernel(
                     if t < gjk_candidate_pairs.shape[0]:
                         gjk_candidate_pairs[t] = wp.vec2i(shape_a, shape_b)
                 else:
-                    _append_pair_warp_aggregated(
+                    _append_pair_compacted(
                         True, wp.vec2i(shape_a, shape_b), gjk_candidate_pairs, gjk_candidate_pairs_count
                     )
                 continue
@@ -1087,9 +1066,7 @@ def create_narrow_phase_primitive_kernel(
                 if t < gjk_candidate_pairs.shape[0]:
                     gjk_candidate_pairs[t] = wp.vec2i(shape_a, shape_b)
             else:
-                _append_pair_warp_aggregated(
-                    True, wp.vec2i(shape_a, shape_b), gjk_candidate_pairs, gjk_candidate_pairs_count
-                )
+                _append_pair_compacted(True, wp.vec2i(shape_a, shape_b), gjk_candidate_pairs, gjk_candidate_pairs_count)
 
     return narrow_phase_primitive_kernel
 
@@ -1414,8 +1391,8 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                 else:
                     needs_gjk = True
 
-            _append_work_index_warp_aggregated(needs_gjk, pair_index, gjk_work_items, gjk_work_count)
-            _append_work_index_warp_aggregated(needs_manifold, pair_index, manifold_work_items, manifold_work_count)
+            _append_work_index_compacted(needs_gjk, pair_index, gjk_work_items, gjk_work_count)
+            _append_work_index_compacted(needs_manifold, pair_index, manifold_work_items, manifold_work_count)
 
     @wp.kernel(enable_backward=False, module=f"narrow_phase_gjk_{suffix}")
     def narrow_phase_gjk_kernel(
@@ -1473,7 +1450,7 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                     result.signed_distance = signed_distance
                     query_results[pair_index] = result
                     needs_manifold = True
-            _append_work_index_warp_aggregated(needs_manifold, pair_index, manifold_work_items, manifold_work_count)
+            _append_work_index_compacted(needs_manifold, pair_index, manifold_work_items, manifold_work_count)
 
     @wp.kernel(enable_backward=False, module=f"narrow_phase_manifold_{suffix}")
     def narrow_phase_manifold_kernel(
@@ -1769,24 +1746,24 @@ def compute_mesh_plane_vert_counts(
     shape_pairs_mesh_plane_count: wp.array[int],
     shape_source: wp.array[wp.uint64],
     vert_counts: wp.array[wp.int32],
-    total_vert_count: wp.array[wp.int32],
-    total_num_threads: int,
 ):
     """Compute per-pair vertex counts in parallel for mesh-plane pairs.
 
-    Threads stride over the active pair prefix. Values beyond ``pair_count``
-    cannot affect the consumed prefix of the subsequent exclusive scan.
+    Slots beyond ``pair_count`` are zeroed for correct ``array_scan`` results.
     """
+    i = wp.tid()
     pair_count = wp.min(shape_pairs_mesh_plane_count[0], shape_pairs_mesh_plane.shape[0])
-    for i in range(wp.tid(), pair_count, total_num_threads):
-        pair = shape_pairs_mesh_plane[i]
-        mesh_shape = pair[0]
-        mesh_id = shape_source[mesh_shape]
-        pair_verts = int(0)  # noqa: RUF046, RUF100 - explicit cast required by Warp codegen
-        if mesh_id != wp.uint64(0):
-            pair_verts = wp.mesh_get(mesh_id).points.shape[0]
-        vert_counts[i] = wp.int32(pair_verts)
-        wp.atomic_add(total_vert_count, 0, pair_verts)
+    if i >= pair_count:
+        vert_counts[i] = 0
+        return
+
+    pair = shape_pairs_mesh_plane[i]
+    mesh_shape = pair[0]
+    mesh_id = shape_source[mesh_shape]
+    pair_verts = int(0)  # noqa: RUF046, RUF100 - explicit cast required by Warp codegen
+    if mesh_id != wp.uint64(0):
+        pair_verts = wp.mesh_get(mesh_id).points.shape[0]
+    vert_counts[i] = wp.int32(pair_verts)
 
 
 def compute_mesh_plane_block_offsets_scan(
@@ -1796,41 +1773,38 @@ def compute_mesh_plane_block_offsets_scan(
     target_blocks: int,
     block_offsets: wp.array,
     block_counts: wp.array,
-    total_vert_count: wp.array,
-    total_num_threads: int,
+    weight_prefix_sums: wp.array,
     device: str | None = None,
     record_tape: bool = True,
 ):
     """Compute mesh-plane block offsets using parallel kernels and array_scan."""
     n = block_counts.shape[0]
-    launch_threads = min(n, total_num_threads)
     # Step 1: compute per-pair vertex counts in parallel
     wp.launch(
         kernel=compute_mesh_plane_vert_counts,
-        dim=launch_threads,
+        dim=n,
         inputs=[
             shape_pairs_mesh_plane,
             shape_pairs_mesh_plane_count,
             shape_source,
             block_counts,  # reuse as temp storage for vert counts
-            total_vert_count,
-            launch_threads,
         ],
         device=device,
         record_tape=record_tape,
     )
-    # Step 2: compute per-pair block counts using the scalar total.
+    # Step 2: inclusive scan to get total
+    wp.utils.array_scan(block_counts, weight_prefix_sums, inclusive=True)
+    # Step 3: compute per-pair block counts using adaptive threshold
     wp.launch(
         kernel=compute_block_counts_from_weights,
-        dim=launch_threads,
+        dim=n,
         inputs=[
-            total_vert_count,
+            weight_prefix_sums,
             block_counts,  # still holds vert counts
             shape_pairs_mesh_plane_count,
             shape_pairs_mesh_plane.shape[0],
             target_blocks,
             block_offsets,  # reuse as temp for block counts
-            launch_threads,
         ],
         device=device,
         record_tape=record_tape,
@@ -2609,8 +2583,6 @@ class NarrowPhase:
             n += 2 if has_mesh_like else 0  # mesh_like pairs, triangle pairs
             mesh_only_idx = n if has_meshes else None
             n += 3 if has_meshes else 0  # mesh_plane, mesh_plane_vtx, mesh_mesh
-            mesh_weight_idx = n if has_meshes and self.reduce_contacts else None
-            n += 2 if mesh_weight_idx is not None else 0  # mesh-plane vertices, mesh-mesh edges
             c = wp.zeros(n, dtype=wp.int32, device=device)
             self._counter_array = c
 
@@ -2622,12 +2594,6 @@ class NarrowPhase:
             self.triangle_pairs_count = c[mesh_like_idx + 1 : mesh_like_idx + 2] if has_mesh_like else None
             self.shape_pairs_mesh_plane_count = c[mesh_only_idx : mesh_only_idx + 1] if has_meshes else None
             self.mesh_plane_vertex_total_count = c[mesh_only_idx + 1 : mesh_only_idx + 2] if has_meshes else None
-            self.mesh_plane_total_weight = (
-                c[mesh_weight_idx : mesh_weight_idx + 1] if mesh_weight_idx is not None else None
-            )
-            self.mesh_mesh_total_weight = (
-                c[mesh_weight_idx + 1 : mesh_weight_idx + 2] if mesh_weight_idx is not None else None
-            )
             self.shape_pairs_mesh_mesh_count = c[mesh_only_idx + 2 : mesh_only_idx + 3] if has_meshes else None
 
             # Pair and work buffers
@@ -2735,21 +2701,25 @@ class NarrowPhase:
             mesh_mesh_scan_size = self.max_mesh_mesh_pairs + 1
             self.mesh_mesh_block_offsets = wp.zeros(mesh_mesh_scan_size, dtype=wp.int32, device=device)
             self.mesh_mesh_block_counts = wp.zeros(mesh_mesh_scan_size, dtype=wp.int32, device=device)
+            self.mesh_mesh_weight_prefix_sums = wp.zeros(mesh_mesh_scan_size, dtype=wp.int32, device=device)
             # Mesh-plane
             self.num_mesh_plane_blocks = target_blocks
             self.mesh_plane_target_blocks = target_blocks
             mesh_plane_scan_size = self.max_mesh_plane_pairs + 1
             self.mesh_plane_block_offsets = wp.zeros(mesh_plane_scan_size, dtype=wp.int32, device=device)
             self.mesh_plane_block_counts = wp.zeros(mesh_plane_scan_size, dtype=wp.int32, device=device)
+            self.mesh_plane_weight_prefix_sums = wp.zeros(mesh_plane_scan_size, dtype=wp.int32, device=device)
         else:
             self.num_mesh_mesh_blocks = self.num_tile_blocks
             self.mesh_mesh_target_blocks = self.num_tile_blocks
             self.mesh_mesh_block_offsets = None
             self.mesh_mesh_block_counts = None
+            self.mesh_mesh_weight_prefix_sums = None
             self.num_mesh_plane_blocks = self.num_tile_blocks
             self.mesh_plane_target_blocks = self.num_tile_blocks
             self.mesh_plane_block_offsets = None
             self.mesh_plane_block_counts = None
+            self.mesh_plane_weight_prefix_sums = None
 
     def launch_custom_write(
         self,
@@ -3088,8 +3058,7 @@ class NarrowPhase:
                         target_blocks=self.mesh_plane_target_blocks,
                         block_offsets=self.mesh_plane_block_offsets,
                         block_counts=self.mesh_plane_block_counts,
-                        total_vert_count=self.mesh_plane_total_weight,
-                        total_num_threads=self.total_num_threads,
+                        weight_prefix_sums=self.mesh_plane_weight_prefix_sums,
                         device=device,
                         record_tape=False,
                     )
@@ -3236,8 +3205,7 @@ class NarrowPhase:
                         target_blocks=self.num_mesh_mesh_blocks,
                         block_offsets=self.mesh_mesh_block_offsets,
                         block_counts=self.mesh_mesh_block_counts,
-                        total_edge_count=self.mesh_mesh_total_weight,
-                        total_num_threads=self.total_num_threads,
+                        weight_prefix_sums=self.mesh_mesh_weight_prefix_sums,
                         device=device,
                         record_tape=False,
                     )
