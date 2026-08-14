@@ -887,8 +887,13 @@ class SolverPhoenX(SolverBase):
                         return_inverse=True,
                         return_counts=True,
                     )
+                    # Rank regularization projects equality velocities reliably,
+                    # but multiply redundant loops do not define an accurate
+                    # inverse for the contact Schur complement.
                     active_mechanisms = tuple(
-                        np.asarray(active_mechanisms, dtype=bool) & (world_counts[world_inverse] == 1)
+                        np.asarray(active_mechanisms, dtype=bool)
+                        & (np.asarray(topology.mechanism_cycle_count, dtype=np.int32) <= 1)
+                        & (world_counts[world_inverse] == 1)
                     )
                     if any(active_mechanisms):
                         self._direct_contact_active_mechanisms = active_mechanisms

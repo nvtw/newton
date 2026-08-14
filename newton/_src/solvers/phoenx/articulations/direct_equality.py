@@ -77,6 +77,7 @@ class DirectEqualityTopology:
     permutation: np.ndarray
     mechanism_row_start: np.ndarray
     mechanism_requires_rank_floor: tuple[bool, ...]
+    mechanism_cycle_count: tuple[int, ...]
     mechanism_has_cycle: tuple[bool, ...]
     body_row_start: np.ndarray
     body_rows: np.ndarray
@@ -428,6 +429,7 @@ def build_direct_equality_topology(
 
     ordered_mechanisms = sorted(mechanisms.values(), key=min)
     mechanism_requires_rank_floor: list[bool] = []
+    mechanism_cycle_count: list[int] = []
     mechanism_has_cycle: list[bool] = []
     for joints in ordered_mechanisms:
         dynamic_bodies: set[int] = set()
@@ -451,9 +453,10 @@ def build_direct_equality_topology(
         # their nominal row count remains below the rigid-body rank.
         maximum_rank = max(0, 6 * len(dynamic_bodies) - (0 if anchored else 6))
         tree_edges = max(0, len(dynamic_bodies) - (0 if anchored else 1))
-        has_cycle = len(joints) > tree_edges
+        cycle_count = max(0, len(joints) - tree_edges)
         mechanism_requires_rank_floor.append(repeated_pair or structural_rows > maximum_rank)
-        mechanism_has_cycle.append(has_cycle)
+        mechanism_cycle_count.append(cycle_count)
+        mechanism_has_cycle.append(cycle_count > 0)
 
     row_joint: list[int] = []
     row_local: list[int] = []
@@ -555,6 +558,7 @@ def build_direct_equality_topology(
         permutation=np.asarray(permutation, dtype=np.int32),
         mechanism_row_start=np.asarray(mechanism_row_start, dtype=np.int32),
         mechanism_requires_rank_floor=tuple(mechanism_requires_rank_floor),
+        mechanism_cycle_count=tuple(mechanism_cycle_count),
         mechanism_has_cycle=tuple(mechanism_has_cycle),
         body_row_start=np.asarray(body_row_start, dtype=np.int32),
         body_rows=np.asarray(body_rows, dtype=np.int32),

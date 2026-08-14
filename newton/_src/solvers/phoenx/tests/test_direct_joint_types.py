@@ -160,7 +160,7 @@ def _build_all_joint_types() -> tuple[newton.Model, dict[str, tuple[int, int]]]:
     return builder.finalize(device=wp.get_device("cuda:0")), joints
 
 
-def _build_closed_loop_contact_model() -> tuple[newton.Model, tuple[int, ...], int]:
+def _build_closed_loop_contact_model(*, redundant: bool = False) -> tuple[newton.Model, tuple[int, ...], int]:
     builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
     builder.add_ground_plane()
     identity = wp.quat_identity()
@@ -199,6 +199,16 @@ def _build_closed_loop_contact_model() -> tuple[newton.Model, tuple[int, ...], i
             )
         )
     builder.add_articulation([root, *joints[:3]])
+    if redundant:
+        builder.add_joint_revolute(
+            parent=bodies[0],
+            child=bodies[2],
+            axis=newton.Axis.Z,
+            parent_xform=wp.transform(wp.vec3(0.0, 0.5, 0.0), identity),
+            child_xform=wp.transform(wp.vec3(0.0, -0.5, 0.0), identity),
+            limit_lower=-np.inf,
+            limit_upper=np.inf,
+        )
     builder.joint_articulation[joints[3]] = -1
     builder.color()
     model = builder.finalize(device=wp.get_preferred_device())
@@ -365,6 +375,30 @@ class TestDirectJointTypes(unittest.TestCase):
                     np.testing.assert_allclose(result[body], expected_velocity[kind], rtol=2.0e-3, atol=2.0e-3)
                 else:
                     self.assertLess(float(np.max(np.abs(result[body]))), 0.8)
+
+    def test_rank_deficient_loop_uses_iterative_contacts(self) -> None:
+        """Keep regularized equality inverses out of contact Schur response."""
+        model, _bodies, _loop_joint = _build_closed_loop_contact_model(redundant=True)
+        solver = _make_solver(model)
+
+        self.assertEqual(solver._direct_equality_system.topology.mechanism_requires_rank_floor, (True,))
+        self.assertEqual(solver._direct_equality_system.topology.mechanism_cycle_count, (2,))
+        self.assertIsNone(solver._direct_contact_response)
+        self.assertIsNone(solver._direct_contact_schedule)
+
+        state = model.state()
+        control = model.control()
+        pipeline = model._collision_pipeline
+        contacts = pipeline.contacts()
+        with wp.ScopedCapture(model.device) as capture:
+            state.clear_forces()
+            pipeline.collide(state, contacts)
+            solver.step(state, state, control, contacts, 1.0 / 60.0)
+        for _ in range(30):
+            wp.capture_launch(capture.graph)
+
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
     def test_closed_loop_contacts_settle_without_horizontal_drift(self) -> None:
         """Keep a metadata-independent closed loop drift-free on the ground."""
