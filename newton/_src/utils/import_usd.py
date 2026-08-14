@@ -2287,6 +2287,9 @@ def parse_usd(
                     existing.target_vel = ax.target_vel
                     existing.target_ke = max(existing.target_ke, ax.limit_ke)
                     existing.target_kd = max(existing.target_kd, ax.limit_kd)
+                    existing.actuator_mode = JointTargetMode.from_gains(
+                        existing.target_ke, existing.target_kd, force_position_velocity_actuation, has_drive=True
+                    )
                 else:
                     existing.limit_lower = max(existing.limit_lower, ax.limit_lower)
                     existing.limit_upper = min(existing.limit_upper, ax.limit_upper)

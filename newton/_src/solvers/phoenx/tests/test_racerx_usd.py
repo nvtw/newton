@@ -60,6 +60,7 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertAlmostEqual(builder.joint_target_q[0], 0.005)
         self.assertAlmostEqual(builder.joint_target_ke[0], 80000.0)
         self.assertAlmostEqual(builder.joint_target_kd[0], 600.0)
+        self.assertEqual(builder.joint_target_mode[0], newton.JointTargetMode.POSITION)
 
     def test_self_filtered_collision_group_excludes_member_pair(self) -> None:
         """Translate a self-filtered USD collision group into shape exclusions."""

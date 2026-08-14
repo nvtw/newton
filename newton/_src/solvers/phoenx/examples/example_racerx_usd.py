@@ -34,6 +34,7 @@ USD_MAX_TEXTURE_SIZE = 4096
 MAX_CONTACT_GAP = 0.01
 OPTIX_DLSS_QUALITY = "quality"
 GROUND_HEIGHT = 0.0
+GROUND_SIZE = 100.0
 VEHICLE_CONTACT_GAP = 0.001
 DRIVE_SPEED = 70.0
 DRIVE_DAMPING = 0.35
@@ -411,9 +412,12 @@ class Example:
         self._wheel_dofs, self._steering_joint, self._steering_dof = _configure_vehicle_joints(builder, result)
         self._steering_target_index = builder.joint_q_start[self._steering_joint] + 1
         _add_closed_loop_joint_metadata(builder)
-        builder.add_ground_plane(
-            height=GROUND_HEIGHT,
+        builder.add_shape_plane(
+            plane=(0.0, 0.0, 1.0, -GROUND_HEIGHT),
+            width=GROUND_SIZE,
+            length=GROUND_SIZE,
             cfg=newton.ModelBuilder.ShapeConfig(mu=0.9, gap=VEHICLE_CONTACT_GAP),
+            label="ground_plane",
         )
 
         self.physics_result = result
