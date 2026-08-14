@@ -87,7 +87,8 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertEqual(builder.body_count, len(layout.barrier_poses))
         self.assertEqual(builder.shape_count, len(layout.barrier_poses))
         self.assertTrue(all(flag == int(newton.BodyFlags.DYNAMIC) for flag in builder.body_flags))
-        self.assertEqual(racerx.DRIVE_SPEED, 35.0)
+        self.assertEqual(racerx.DRIVE_SPEED, 70.0)
+        self.assertEqual((racerx.STEERING_TRAVEL, racerx.STEERING_LIMIT), (0.0025, 0.003))
         self.assertEqual((racerx.SIM_SUBSTEPS, racerx.SOLVER_ITERATIONS), (4, 6))
 
     def test_coaxial_hard_limit_and_spring_merge_to_one_dof(self) -> None:
