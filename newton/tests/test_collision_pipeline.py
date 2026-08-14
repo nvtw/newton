@@ -2441,6 +2441,38 @@ def test_mesh_convex_with_sdf_routes_to_sdf_contact(test, device):
     test.assertGreater(contact_count, 0)
 
 
+def test_deferred_convex_sdf_edges_use_deduplicated_topology(test, device):
+    """Finalize deferred convex SDF edges against deduplicated vertices."""
+    convex = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=True, compute_inertia=False)
+    builder = newton.ModelBuilder()
+    shape = builder.add_shape_convex_hull(body=-1, mesh=convex)
+    builder.shape_sdf_max_resolution[shape] = 16
+
+    model = builder.finalize(device=device)
+
+    test.assertGreater(int(model.shape_edge_range.numpy()[shape][1]), 0)
+    test.assertEqual(model._mesh_keep_alive[0].points.shape[0], 8)
+
+
+def test_deferred_sdf_cache_distinguishes_mesh_topology(test, device):
+    """Keep deferred SDFs separate for regular and convex mesh topology."""
+    for regular_first in (True, False):
+        source = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=True, compute_inertia=False)
+        builder = newton.ModelBuilder()
+        add_shapes = (builder.add_shape_mesh, builder.add_shape_convex_hull)
+        if not regular_first:
+            add_shapes = tuple(reversed(add_shapes))
+
+        shapes = [add_shape(body=-1, mesh=source) for add_shape in add_shapes]
+        for shape in shapes:
+            builder.shape_sdf_max_resolution[shape] = 16
+
+        model = builder.finalize(device=device)
+        sdf_indices = model._shape_sdf_index.numpy()
+
+        test.assertNotEqual(int(sdf_indices[shapes[0]]), int(sdf_indices[shapes[1]]))
+
+
 def test_scalar_sdf_texture_routes_to_sdf_contact(test, device):
     """Preserve mesh-SDF contacts across paired and scalar texture storage."""
 
@@ -3372,6 +3404,22 @@ add_function_test(
     TestPlanarSDFRouting,
     "test_mesh_convex_with_sdf_routes_to_sdf_contact",
     test_mesh_convex_with_sdf_routes_to_sdf_contact,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestPlanarSDFRouting,
+    "test_deferred_convex_sdf_edges_use_deduplicated_topology",
+    test_deferred_convex_sdf_edges_use_deduplicated_topology,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestPlanarSDFRouting,
+    "test_deferred_sdf_cache_distinguishes_mesh_topology",
+    test_deferred_sdf_cache_distinguishes_mesh_topology,
     devices=get_cuda_test_devices(),
     check_output=False,
 )
