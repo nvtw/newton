@@ -86,52 +86,31 @@ _SPLIT_GJK_MPR_PAIR_CAPACITY_THRESHOLD = 4096
 
 @wp.func_native("""
 #if defined(__CUDA_ARCH__)
-return __ballot_sync(__activemask(), predicate != 0);
+const unsigned int mask = __ballot_sync(__activemask(), predicate != 0);
+if (predicate == 0) {
+    return -1;
+}
+
+const int lane = threadIdx.x & 31;
+const int leader = __ffs(mask) - 1;
+const int count = __popc(mask);
+int base = 0;
+if (lane == leader) {
+    base = atomic_add(work_count, 0, count);
+}
+base = __shfl_sync(mask, base, leader);
+const unsigned int lower_mask = mask & ((1u << lane) - 1u);
+return base + __popc(lower_mask);
 #else
-return predicate != 0 ? 1u : 0u;
+if (predicate == 0) {
+    return -1;
+}
+return atomic_add(work_count, 0, 1);
 #endif
 """)
-def _warp_ballot(predicate: int) -> wp.uint32: ...
-
-
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
-return threadIdx.x & 31;
-#else
-return 0;
-#endif
-""")
-def _warp_lane_id() -> int: ...
-
-
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
-return __ffs(mask) - 1;
-#else
-return 0;
-#endif
-""")
-def _warp_first_lane(mask: wp.uint32) -> int: ...
-
-
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
-return __popc(mask);
-#else
-return mask != 0u ? 1 : 0;
-#endif
-""")
-def _warp_population_count(mask: wp.uint32) -> int: ...
-
-
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
-return __shfl_sync(mask, value, source_lane);
-#else
-return value;
-#endif
-""")
-def _warp_shuffle_int(mask: wp.uint32, value: int, source_lane: int) -> int: ...
+def _reserve_warp_aggregated(predicate: int, work_count: wp.array[int]) -> int:
+    """Reserve one compacted output slot, aggregating atomics per CUDA warp."""
+    ...
 
 
 @wp.func
@@ -142,20 +121,9 @@ def _append_work_index_warp_aggregated(
     work_count: wp.array[int],
 ):
     """Append one work item using a single atomic reservation per active warp."""
-    mask = _warp_ballot(int(predicate))
-    if predicate:
-        lane = _warp_lane_id()
-        leader = _warp_first_lane(mask)
-        count = _warp_population_count(mask)
-        lower_mask = mask & ((wp.uint32(1) << wp.uint32(lane)) - wp.uint32(1))
-        rank = _warp_population_count(lower_mask)
-        base = int(0)
-        if lane == leader:
-            base = wp.atomic_add(work_count, 0, count)
-        base = _warp_shuffle_int(mask, base, leader)
-        index = base + rank
-        if index < work_items.shape[0]:
-            work_items[index] = value
+    index = _reserve_warp_aggregated(int(predicate), work_count)
+    if index >= 0 and index < work_items.shape[0]:
+        work_items[index] = value
 
 
 @wp.func
@@ -166,20 +134,9 @@ def _append_pair_warp_aggregated(
     work_count: wp.array[int],
 ):
     """Append one pair using a single atomic reservation per active warp."""
-    mask = _warp_ballot(int(predicate))
-    if predicate:
-        lane = _warp_lane_id()
-        leader = _warp_first_lane(mask)
-        count = _warp_population_count(mask)
-        lower_mask = mask & ((wp.uint32(1) << wp.uint32(lane)) - wp.uint32(1))
-        rank = _warp_population_count(lower_mask)
-        base = int(0)
-        if lane == leader:
-            base = wp.atomic_add(work_count, 0, count)
-        base = _warp_shuffle_int(mask, base, leader)
-        index = base + rank
-        if index < work_items.shape[0]:
-            work_items[index] = value
+    index = _reserve_warp_aggregated(int(predicate), work_count)
+    if index >= 0 and index < work_items.shape[0]:
+        work_items[index] = value
 
 
 @wp.kernel(enable_backward=False)
