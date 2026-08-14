@@ -141,6 +141,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         max_instances: int = 16384,
         ground_color: tuple[float, float, float] = (0.7, 0.7, 0.7),
         ground_roughness: float = 0.8,
+        ground_checker_size: float | None = 1.0,
         default_roughness: float = 0.42,
         default_ior: float = 1.46,
         default_specular: float = 0.75,
@@ -180,6 +181,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             max_instances: Maximum number of OptiX scene instances.
             ground_color: Display-sRGB color used for plane geometry.
             ground_roughness: Roughness used for plane geometry.
+            ground_checker_size: Checker size [m] used for plane geometry.
+                ``None`` disables the checker overlay.
             default_roughness: Roughness used for primitive geometry without
                 authored material properties.
             default_ior: Index of refraction used for un-authored dielectrics.
@@ -217,6 +220,9 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         if len(self._ground_color) != 3 or not all(0.0 <= channel <= 1.0 for channel in self._ground_color):
             raise ValueError("ground_color must contain three values in the range [0, 1]")
         self._ground_roughness = float(ground_roughness)
+        self._ground_checker_size = None if ground_checker_size is None else float(ground_checker_size)
+        if self._ground_checker_size is not None and self._ground_checker_size <= 0.0:
+            raise ValueError("ground_checker_size must be positive or None")
         self._default_roughness = float(default_roughness)
         for name, value in (
             ("ground_roughness", self._ground_roughness),
@@ -226,6 +232,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
                 raise ValueError(f"{name} must be in the range [0, 1]")
 
         self._optix_ground_meshes: set[str] = set()
+        self._optix_ground_subdivisions: dict[str, tuple[float, float]] = {}
         self._ground_color_arrays: dict[int, wp.array[wp.vec3]] = {}
         self._optix_default_material_meshes: set[str] = set()
         self._optix_model_shape_batches: dict[str, ViewerBase.ShapeInstances] = {}
@@ -240,7 +247,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._sky_intensity = self._validate_sky_intensity(sky_intensity)
         self._grayscale_sky = bool(grayscale_sky)
         self.lines = {}
-        self._material_arrays: dict[tuple[int, float], wp.array[wp.vec4]] = {}
+        self._material_arrays: dict[tuple[int, float, float, float], wp.array[wp.vec4]] = {}
         self.arrows = {}
         self.renderer: _OptixOverlayRenderer | None = None
         self._overlay_line_shader = None
@@ -635,6 +642,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
                     batches.pop(name).destroy()
         if hasattr(self, "_optix_ground_meshes"):
             self._optix_ground_meshes.clear()
+        if hasattr(self, "_optix_ground_subdivisions"):
+            self._optix_ground_subdivisions.clear()
             self._optix_default_material_meshes.clear()
             self._optix_model_shape_batches.clear()
             self._optix_palette_metadata.clear()
@@ -675,6 +684,9 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._optix_ground_meshes = {
             shapes.mesh for shapes in self._shape_instances.values() if int(shapes.geo_type) == int(GeoType.PLANE)
         }
+        self._optix_ground_subdivisions = {
+            mesh: self._checker_subdivisions_for_mesh(mesh) for mesh in self._optix_ground_meshes
+        }
         self._optix_default_material_meshes = {
             shapes.mesh
             for shapes in self._shape_instances.values()
@@ -692,8 +704,20 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
                 wp.array(metadata[2].astype(np.int32), dtype=wp.int32, device=self.device),
             )
         self._optix_palette_color_arrays.clear()
-
         self._camera_dirty = True
+
+    def _checker_subdivisions_for_mesh(self, mesh: str) -> tuple[float, float]:
+        """Return subdivisions that produce world-meter checkers on a plane mesh."""
+        if self._ground_checker_size is None:
+            return 0.0, 0.0
+        mesh_id = self._mesh_ids.get(mesh)
+        if mesh_id is None:
+            return 0.0, 0.0
+        vertices = np.asarray(self._api.scene._meshes[mesh_id].vertices, dtype=np.float32)
+        if len(vertices) == 0:
+            return 0.0, 0.0
+        extents = np.ptp(vertices, axis=0)
+        return float(extents[0] / self._ground_checker_size), float(extents[1] / self._ground_checker_size)
 
     def _create_palette_metadata(self, shapes) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         indices = np.fromiter(shapes.model_shapes, dtype=np.intp)
@@ -1002,16 +1026,19 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             colors = self._ground_color_arrays[count]
 
         roughness = None
+        u_subdiv = 0.0
+        v_subdiv = 0.0
         if is_ground:
             roughness = self._ground_roughness
+            u_subdiv, v_subdiv = self._optix_ground_subdivisions.get(mesh, (0.0, 0.0))
         elif mesh in self._optix_default_material_meshes:
             roughness = self._default_roughness
         if materials is not None and roughness is not None:
-            key = (count, roughness)
+            key = (count, roughness, u_subdiv, v_subdiv)
             if key not in self._material_arrays:
                 material_array = wp.zeros(count, dtype=wp.vec4, device=self.device)
                 if count > 0:
-                    material_array.fill_(wp.vec4(roughness, 0.0, 0.0, 0.0))
+                    material_array.fill_(wp.vec4(roughness, 0.0, u_subdiv, v_subdiv))
                 self._material_arrays[key] = material_array
             materials = self._material_arrays[key]
         return super().log_instances(name, mesh, xforms, scales, colors, materials, hidden=hidden)

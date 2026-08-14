@@ -105,6 +105,29 @@ class TestViewerOptix(unittest.TestCase):
         self.assertEqual(optix_parameters["max_bounces"].default, 3)
         self.assertEqual(optix_parameters["direct_light_samples"].default, 1)
         self.assertEqual(optix_parameters["samples_per_frame"].default, 1)
+        self.assertEqual(optix_parameters["ground_checker_size"].default, 1.0)
+
+    def test_ground_checker_subdivisions_use_metric_plane_extents(self):
+        """Size plane checker subdivisions in meters and support disabling them."""
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        viewer._ground_checker_size = 1.0
+        viewer._mesh_ids = {"ground": 0}
+        viewer._api = SimpleNamespace(
+            scene=SimpleNamespace(
+                _meshes=[
+                    SimpleNamespace(
+                        vertices=np.asarray(
+                            ((-5.0, -3.0, 0.0), (5.0, -3.0, 0.0), (5.0, 3.0, 0.0), (-5.0, 3.0, 0.0)),
+                            dtype=np.float32,
+                        )
+                    )
+                ]
+            )
+        )
+
+        self.assertEqual(viewer._checker_subdivisions_for_mesh("ground"), (10.0, 6.0))
+        viewer._ground_checker_size = None
+        self.assertEqual(viewer._checker_subdivisions_for_mesh("ground"), (0.0, 0.0))
 
     @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
     def test_set_camera_updates_backend_pose(self):
@@ -210,6 +233,7 @@ class TestViewerOptix(unittest.TestCase):
             self.assertAlmostEqual(viewer.exposure, 0.68)
             self.assertEqual(viewer._ground_color, (0.7, 0.7, 0.7))
             self.assertAlmostEqual(viewer._ground_roughness, 0.8)
+            self.assertAlmostEqual(viewer._ground_checker_size, 1.0)
             self.assertAlmostEqual(viewer._default_roughness, 0.42)
             self.assertAlmostEqual(viewer._default_ior, 1.46)
             self.assertAlmostEqual(viewer._default_specular, 0.75)
