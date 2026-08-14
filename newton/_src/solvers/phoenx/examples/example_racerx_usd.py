@@ -1,0 +1,652 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Simulate RacerX USD physics with PhoenX and render the composed OptiX scene.
+
+Newton imports standard UsdPhysics rigid bodies and colliders, while
+SchemaResolverPhysx retains vendor-specific attributes for diagnostics. OptiX
+keeps the complete visual hierarchy; dynamic body poses are mapped back to that
+hierarchy by their exact USD paths.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+from collections import Counter
+from pathlib import Path
+
+import numpy as np
+import warp as wp
+
+import newton
+import newton.examples
+import newton.usd
+
+DEFAULT_USD_PATH = Path("/home/twidmer/Documents/Meshes/RacerX/Collected_A3_physics/A3_physics.usda")
+
+# Easy-to-find example switches. Command-line flags can still override them.
+LOAD_USD_ENVIRONMENT = False
+ENABLE_PHYSICS = True
+PRINT_PHYSICS_DATA = True
+START_PAUSED = True
+USD_MAX_TEXTURE_SIZE = 4096
+MAX_CONTACT_GAP = 0.01
+OPTIX_DLSS_QUALITY = "quality"
+GROUND_HEIGHT = 0.0
+VEHICLE_CONTACT_GAP = 0.001
+DRIVE_SPEED = 70.0
+DRIVE_DAMPING = 0.35
+DRIVE_TORQUE_LIMIT = 3.0
+STEERING_TRAVEL = 0.08
+
+WHEEL_JOINT_PATHS = (
+    "/World/Joints/FR/Hinge_Wheel_WheelLinkage",
+    "/World/Joints/FL/Hinge_Wheel_WheelLinkage",
+    "/World/Joints/RR/Hinge_Wheel_WheelLinkage",
+    "/World/Joints/RL/Hinge_Wheel_WheelLinkage",
+)
+STEERING_JOINT_PATH = "/World/Joints/Steering/Steering_Link_Drive"
+NON_PHYSICAL_RIGID_BODY_PATHS = {
+    "/World/FX_wheel_dust_flow_01": "VFX helper has no collider",
+    "/World/FlowCandleWind": "flow helper has no collider",
+}
+
+_RENDERER_FROM_PHYSICS = np.array(
+    (
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0, 0.0),
+        (0.0, -1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    ),
+    dtype=np.float32,
+)
+
+
+def _relevant_physics_properties(prim) -> list:
+    """Return authored standard and vendor physics properties on a prim."""
+    return [
+        prop
+        for prop in prim.GetAuthoredProperties()
+        if prop.GetName().startswith(("physics:", "physx")) or prop.GetName() == "physicsVelocityScale"
+    ]
+
+
+def _physics_prims(stage) -> list:
+    """Return composed prims carrying relevant USD physics data."""
+    from pxr import UsdPhysics
+
+    records = []
+    for prim in stage.TraverseAll():
+        schemas = [
+            str(schema) for schema in prim.GetAppliedSchemas() if "Physics" in str(schema) or "Physx" in str(schema)
+        ]
+        properties = _relevant_physics_properties(prim)
+        if schemas or properties or prim.IsA(UsdPhysics.Scene):
+            records.append((prim, schemas, properties))
+    return records
+
+
+def _property_value(prim, prop):
+    """Read an authored USD attribute or relationship for diagnostics."""
+    attribute = prim.GetAttribute(prop.GetName())
+    if attribute:
+        return attribute.Get()
+    relationship = prim.GetRelationship(prop.GetName())
+    return [str(path) for path in relationship.GetTargets()]
+
+
+def _print_physics_inventory(stage) -> None:
+    """Print every composed physics prim and its authored physics properties."""
+    records = _physics_prims(stage)
+    schema_counts = Counter(schema for _prim, schemas, _props in records for schema in schemas)
+    errors = list(stage.GetCompositionErrors())
+
+    print(
+        "[RacerX USD physics] "
+        f"prims={len(records)} schemas={dict(sorted(schema_counts.items()))} "
+        f"composition_errors={len(errors)}"
+    )
+    for error in errors:
+        message = error.GetMessage() if hasattr(error, "GetMessage") else str(error)
+        print(f"[RacerX USD composition error] {message}")
+
+    for prim, schemas, properties in records:
+        print(f"[RacerX USD prim] path={prim.GetPath()} type={prim.GetTypeName() or '<none>'} schemas={schemas}")
+        for prop in properties:
+            print(f"  {prop.GetName()} = {_property_value(prim, prop)!r}")
+
+
+def _physics_ignore_paths(stage) -> dict[str, str]:
+    """Find trigger-only and incomplete collider prims that Newton cannot simulate."""
+    from pxr import UsdGeom, UsdPhysics
+
+    ignored = dict(NON_PHYSICAL_RIGID_BODY_PATHS)
+    for prim in stage.TraverseAll():
+        if not prim.HasAPI(UsdPhysics.CollisionAPI):
+            continue
+        path = str(prim.GetPath())
+        if any(prop.GetName().startswith("physxTrigger:") for prop in prim.GetAuthoredProperties()):
+            ignored[path] = "PhysX trigger scripts are not rigid collision geometry"
+            continue
+        if prim.IsA(UsdGeom.Mesh):
+            mesh = UsdGeom.Mesh(prim)
+            if (
+                mesh.GetPointsAttr().Get() is None
+                or mesh.GetFaceVertexIndicesAttr().Get() is None
+                or mesh.GetFaceVertexCountsAttr().Get() is None
+            ):
+                ignored[path] = "collider mesh has no composed topology"
+    return ignored
+
+
+def _normalize_stage_units_for_newton(stage) -> float:
+    """Author a session-layer root scale so Newton imports the stage in meters."""
+    from pxr import Gf, UsdGeom
+
+    meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage))
+    if math.isclose(meters_per_unit, 1.0):
+        return meters_per_unit
+
+    default_prim = stage.GetDefaultPrim()
+    if not default_prim:
+        raise RuntimeError("A non-meter USD stage needs a default prim for unit normalization")
+
+    stage.SetEditTarget(stage.GetSessionLayer())
+    root = UsdGeom.Xformable(default_prim)
+    scale_op = root.AddScaleOp(
+        UsdGeom.XformOp.PrecisionDouble,
+        "newtonStageUnits",
+    )
+    scale_op.Set(Gf.Vec3d(meters_per_unit))
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    return meters_per_unit
+
+
+def _scale_shape_contact_gaps(builder, scale: float) -> None:
+    """Convert imported contact gaps to meters and cap their detection shell."""
+    builder.shape_gap[:] = [min(gap * scale, MAX_CONTACT_GAP, VEHICLE_CONTACT_GAP) for gap in builder.shape_gap]
+
+
+def _scale_linear_joint_units(builder, scale: float) -> None:
+    """Convert imported linear joint coordinates from stage units to meters."""
+    if math.isclose(scale, 1.0):
+        return
+    for joint_index, (linear_count, _angular_count) in enumerate(builder.joint_dof_dim):
+        dof_start = builder.joint_qd_start[joint_index]
+        coord_start = builder.joint_q_start[joint_index]
+        for axis_offset in range(linear_count):
+            dof = dof_start + axis_offset
+            coord = coord_start + axis_offset
+            builder.joint_limit_lower[dof] *= scale
+            builder.joint_limit_upper[dof] *= scale
+            builder.joint_target_q[dof] *= scale
+            builder.joint_target_qd[dof] *= scale
+            builder.joint_velocity_limit[dof] *= scale
+            builder.joint_q[coord] *= scale
+            builder.joint_qd[dof] *= scale
+
+
+def _configure_vehicle_joints(builder, result) -> tuple[list[int], int, int]:
+    """Configure wheel velocity drives and a PhoenX-compatible steering slider."""
+    wheel_dofs = []
+    for path in WHEEL_JOINT_PATHS:
+        joint_index = int(result["path_joint_map"][path])
+        dof = int(builder.joint_qd_start[joint_index])
+        builder.joint_target_mode[dof] = newton.JointTargetMode.VELOCITY
+        builder.joint_target_ke[dof] = 0.0
+        builder.joint_target_kd[dof] = DRIVE_DAMPING
+        builder.joint_effort_limit[dof] = DRIVE_TORQUE_LIMIT
+        wheel_dofs.append(dof)
+
+    steering_joint = int(result["path_joint_map"][STEERING_JOINT_PATH])
+    steering_dof_start = int(builder.joint_qd_start[steering_joint])
+    linear_count, _angular_count = builder.joint_dof_dim[steering_joint]
+    if linear_count != 2:
+        raise RuntimeError(f"Expected two RacerX steering translations, found {linear_count}")
+
+    # The source leaves both X/Y translations finite, but PhoenX currently
+    # supports finite bounds after reducing D6 to a one-axis prismatic joint.
+    # X has no authored drive, so lock it and retain the driven Y coordinate.
+    builder.joint_limit_lower[steering_dof_start] = 1.0
+    builder.joint_limit_upper[steering_dof_start] = -1.0
+    steering_dof = steering_dof_start + 1
+    builder.joint_limit_lower[steering_dof] = -STEERING_TRAVEL
+    builder.joint_limit_upper[steering_dof] = STEERING_TRAVEL
+    builder.joint_target_mode[steering_dof] = newton.JointTargetMode.POSITION
+    return wheel_dofs, steering_joint, steering_dof
+
+
+def _add_closed_loop_joint_metadata(builder) -> None:
+    """Register imported closed-loop joints for maximal-coordinate validation."""
+    # The source has no articulation root and its suspension is a closed graph.
+    # Singleton metadata keeps every joint addressable without inventing an
+    # invalid reduced-coordinate tree; PhoenX solves all rows maximally.
+    for joint_index, label in enumerate(builder.joint_label):
+        builder.add_articulation([joint_index], label=label)
+
+
+def _create_collision_pipeline(model):
+    """Create a pipeline that ignores contacts between immovable props."""
+    return newton.CollisionPipeline(
+        model,
+        broad_phase="sap",
+        contact_matching="sticky",
+        include_static_kinematic_pairs=False,
+    )
+
+
+def _select_authored_camera(viewer, requested_path: str | None = None) -> str:
+    """Select the same authored overview-camera convention as the OTK USD example."""
+    from pxr import UsdGeom, UsdRender
+
+    usd_scene = viewer.usd_scene
+    stage = usd_scene.stage
+    camera_paths = []
+    if requested_path:
+        camera_paths.append(requested_path)
+    else:
+        settings = UsdRender.Settings.GetStageRenderSettings(stage)
+        if settings:
+            camera_paths.extend(str(path) for path in settings.GetCameraRel().GetTargets())
+        custom_data = stage.GetPseudoRoot().GetMetadata("customLayerData") or {}
+        bound_camera = custom_data.get("cameraSettings", {}).get("boundCamera")
+        if bound_camera:
+            camera_paths.append(str(bound_camera))
+
+        unsuitable = ("follow", "velocity", "physics", "collision", "debug")
+        authored = [
+            str(prim.GetPath())
+            for prim in stage.TraverseAll()
+            if prim.IsA(UsdGeom.Camera)
+            and str(UsdGeom.Imageable(prim).ComputeVisibility()) != "invisible"
+            and not any(token in prim.GetName().lower() for token in unsuitable)
+        ]
+        camera_paths.extend(
+            sorted(
+                authored,
+                key=lambda path: (
+                    0 if "overview" in Path(path).name.lower() else 1,
+                    path,
+                ),
+            )
+        )
+
+    for camera_path in dict.fromkeys(camera_paths):
+        prim = stage.GetPrimAtPath(camera_path)
+        handle = usd_scene.get_transform(camera_path)
+        if not prim or handle is None or not prim.IsA(UsdGeom.Camera):
+            continue
+        camera = UsdGeom.Camera(prim)
+        if str(camera.GetProjectionAttr().Get()) != "perspective":
+            continue
+        focal_length = float(camera.GetFocalLengthAttr().Get() or 0.0)
+        aperture = float(camera.GetVerticalApertureAttr().Get() or 0.0)
+        if focal_length <= 0.0 or aperture <= 0.0:
+            continue
+
+        world = usd_scene.get_world_transform(handle)
+        position = world[:3, 3]
+        target = position - world[:3, 2]
+        fov = math.degrees(2.0 * math.atan(aperture / (2.0 * focal_length)))
+        viewer.set_camera_look_at(
+            position,
+            target,
+            fov=float(np.clip(fov, 5.0, 120.0)),
+            renderer_space=True,
+        )
+        return camera_path
+
+    if requested_path:
+        raise ValueError(f"USD camera is missing, invisible, or unsupported: {requested_path}")
+    car_prim = stage.GetPrimAtPath("/World/RC_Car")
+    bounds = UsdGeom.BBoxCache(0.0, [UsdGeom.Tokens.default_]).ComputeWorldBound(car_prim).ComputeAlignedRange()
+    lower = np.asarray(bounds.GetMin(), dtype=np.float32)
+    upper = np.asarray(bounds.GetMax(), dtype=np.float32)
+    center = 0.5 * (lower + upper)
+    radius = max(float(np.linalg.norm(upper - lower)), 0.25)
+    position = center + radius * np.array((1.2, -1.2, 0.65), dtype=np.float32)
+    position_renderer = (_RENDERER_FROM_PHYSICS @ np.append(position, 1.0))[:3]
+    target_renderer = (_RENDERER_FROM_PHYSICS @ np.append(center, 1.0))[:3]
+    viewer.set_camera_look_at(
+        position_renderer,
+        target_renderer,
+        fov=45.0,
+        renderer_space=True,
+    )
+    return "<generated RacerX overview>"
+
+
+def _pose_matrix(pose) -> np.ndarray:
+    """Convert one Warp transform NumPy row to a homogeneous matrix."""
+    px, py, pz, x, y, z, w = (float(value) for value in pose)
+    rotation = np.array(
+        (
+            (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)),
+            (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)),
+            (2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)),
+        ),
+        dtype=np.float32,
+    )
+    matrix = np.eye(4, dtype=np.float32)
+    matrix[:3, :3] = rotation
+    matrix[:3, 3] = (px, py, pz)
+    return matrix
+
+
+def _nearest_transform_parent(usd_scene, path: str):
+    """Return the nearest transformable ancestor handle for a USD path."""
+    prim = usd_scene.get_prim(path).GetParent()
+    while prim:
+        handle = usd_scene.get_transform(str(prim.GetPath()))
+        if handle is not None:
+            return handle
+        prim = prim.GetParent()
+    return None
+
+
+class Example:
+    """Run imported RacerX rigid-body physics with PhoenX and OptiX."""
+
+    def __init__(self, viewer, args):
+        if not hasattr(viewer, "load_scene_from_usd") or not hasattr(viewer, "set_camera_look_at"):
+            raise RuntimeError("The RacerX USD example requires the latest --viewer optix")
+
+        self.viewer = viewer
+        self.device = wp.get_device()
+        self.frame_dt = 1.0 / 60.0
+        self.sim_time = 0.0
+
+        usd_path = Path(args.usd_path).expanduser().resolve()
+        if not usd_path.is_file():
+            raise FileNotFoundError(f"RacerX USD stage not found: {usd_path}")
+
+        if not viewer.load_scene_from_usd(
+            str(usd_path),
+            max_texture_size=args.usd_max_texture_size,
+            load_usd_environment=args.usd_environment,
+            usd_environment_scale=args.usd_environment_scale,
+        ):
+            raise RuntimeError(f"OptiX failed to load USD stage: {usd_path}")
+
+        stage = viewer.usd_scene.stage
+        if args.print_physics_data:
+            _print_physics_inventory(stage)
+
+        self.physics_enabled = bool(args.physics)
+        self.physics_result = None
+        self._dynamic_bindings = []
+        if self.physics_enabled:
+            self._build_physics(stage)
+        else:
+            self.state = None
+            self.graph = None
+
+        camera_path = _select_authored_camera(viewer, args.usd_camera)
+        print(
+            f"[PhoenX RacerX USD] loaded {usd_path} "
+            f"({viewer.usd_scene.transform_count} retained transforms, camera={camera_path})"
+        )
+
+    def _build_physics(self, stage) -> None:
+        ignored = _physics_ignore_paths(stage)
+        authored_unit = _normalize_stage_units_for_newton(stage)
+
+        newton.use_coord_layout_targets = True
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
+        result = builder.add_usd(
+            stage,
+            only_load_enabled_rigid_bodies=True,
+            load_visual_shapes=False,
+            load_static_visual_shapes=False,
+            ignore_paths=list(ignored),
+            schema_resolvers=[newton.usd.SchemaResolverPhysx()],
+            ignore_composition_errors=True,
+        )
+        _scale_shape_contact_gaps(builder, authored_unit)
+        # The source PhysicsScene stores 981 in cm/s^2; stage-root scaling
+        # does not transform scalar physics attributes.
+        builder.gravity = wp.vec3(0.0, 0.0, -9.81)
+        _scale_linear_joint_units(builder, authored_unit)
+        self._wheel_dofs, self._steering_joint, self._steering_dof = _configure_vehicle_joints(builder, result)
+        self._steering_target_index = builder.joint_q_start[self._steering_joint] + 1
+        _add_closed_loop_joint_metadata(builder)
+        builder.add_ground_plane(
+            height=GROUND_HEIGHT,
+            cfg=newton.ModelBuilder.ShapeConfig(mu=0.9, gap=VEHICLE_CONTACT_GAP),
+        )
+
+        self.physics_result = result
+        self._builder = builder
+
+        for path, reason in sorted(ignored.items()):
+            print(f"[RacerX USD skipped] path={path} reason={reason}")
+
+        dynamic_paths = []
+        kinematic_paths = []
+        for path, body_index in sorted(result["path_body_map"].items()):
+            if int(builder.body_flags[body_index]) & int(newton.BodyFlags.KINEMATIC):
+                motion = "kinematic"
+                kinematic_paths.append(path)
+            else:
+                motion = "dynamic"
+                dynamic_paths.append(path)
+            print(f"[RacerX USD body] id={body_index} motion={motion} path={path}")
+
+        for path, shape_index in sorted(result["path_shape_map"].items()):
+            body_index = int(builder.shape_body[shape_index])
+            print(f"[RacerX USD collider] id={shape_index} body={body_index} path={path}")
+
+        for namespace, paths in sorted(result["schema_attrs"].items()):
+            for path, attributes in sorted(paths.items()):
+                print(f"[RacerX USD {namespace}] path={path} attributes={attributes}")
+
+        print(
+            "[RacerX USD import] "
+            f"authored_meters_per_unit={authored_unit:g} bodies={builder.body_count} "
+            f"dynamic={len(dynamic_paths)} kinematic={len(kinematic_paths)} "
+            f"colliders={builder.shape_count} joints={builder.joint_count} "
+            f"filtered_pairs={len(builder.shape_collision_filter_pairs)}"
+        )
+        print("[RacerX controls] I/K throttle, J/L steering, release throttle to brake")
+
+        self.model = builder.finalize()
+        self.collision_pipeline = _create_collision_pipeline(self.model)
+        self.contacts = self.collision_pipeline.contacts()
+        self.state = self.model.state()
+        self.state.body_q.assign(self.model.body_q)
+        self.state.body_qd.assign(self.model.body_qd)
+        self.initial_state = self.model.state()
+        self.initial_state.assign(self.state)
+        self.control = self.model.control()
+        self._target_q_host = self.control.joint_target_q.numpy()
+        self._target_qd_host = self.control.joint_target_qd.numpy()
+        self.solver = newton.solvers.SolverPhoenX(
+            self.model,
+            collision_pipeline=self.collision_pipeline,
+            substeps=4,
+            solver_iterations=8,
+            velocity_iterations=1,
+            default_friction=0.9,
+            step_layout="multi_world",
+            articulation_mode="maximal",
+        )
+
+        self.viewer.set_model(self.model)
+        self._build_dynamic_bindings(dynamic_paths)
+
+        self.graph = None
+        if self.device.is_cuda:
+            with wp.ScopedCapture() as capture:
+                self._simulate()
+            self.graph = capture.graph
+
+    def _build_dynamic_bindings(self, dynamic_paths: list[str]) -> None:
+        usd_scene = self.viewer.usd_scene
+        world_device = usd_scene.world_transforms_device
+        render_worlds = (
+            world_device.numpy()
+            if world_device is not None
+            else np.stack([usd_scene.get_world_transform(handle) for handle in usd_scene.transforms])
+        )
+        physics_poses = self.state.body_q.numpy()
+        physics_from_renderer = np.linalg.inv(_RENDERER_FROM_PHYSICS)
+
+        for path in dynamic_paths:
+            handle = usd_scene.get_transform(path)
+            if handle is None:
+                print(f"[RacerX USD transform] no render transform for dynamic body {path}")
+                continue
+            body_index = int(self.physics_result["path_body_map"][path])
+            rigid_physics = _pose_matrix(physics_poses[body_index])
+            rigid_renderer = _RENDERER_FROM_PHYSICS @ rigid_physics @ physics_from_renderer
+            original_world = render_worlds[handle.index]
+            geometry_offset = np.linalg.inv(rigid_renderer) @ original_world
+
+            parent = _nearest_transform_parent(usd_scene, path)
+            parent_world = np.eye(4, dtype=np.float32) if parent is None else render_worlds[parent.index]
+            parent_world_inverse = np.linalg.inv(parent_world)
+            self._dynamic_bindings.append((body_index, handle, parent_world_inverse, geometry_offset))
+            print(
+                f"[RacerX USD transform] body={body_index} handle={handle.index} "
+                f"path={path} parent={None if parent is None else parent.path}"
+            )
+
+    def _key_down(self, key: str) -> bool:
+        """Return whether an interactive drive key is held."""
+        return bool(hasattr(self.viewer, "is_key_down") and self.viewer.is_key_down(key))
+
+    def _update_drive_controls(self) -> None:
+        """Upload wheel velocity and steering-position commands."""
+        throttle = float(self._key_down("i")) - float(self._key_down("k"))
+        steering = float(self._key_down("j")) - float(self._key_down("l"))
+        wheel_speed = throttle * DRIVE_SPEED
+        for dof in self._wheel_dofs:
+            self._target_qd_host[dof] = wheel_speed
+        self._target_q_host[self._steering_target_index] = steering * STEERING_TRAVEL
+        self.control.joint_target_q.assign(self._target_q_host)
+        self.control.joint_target_qd.assign(self._target_qd_host)
+
+    def _simulate(self) -> None:
+        self.state.clear_forces()
+        self.viewer.apply_forces(self.state)
+        self.collision_pipeline.collide(self.state, self.contacts)
+        self.solver.step(
+            self.state,
+            self.state,
+            self.control,
+            self.contacts,
+            self.frame_dt,
+        )
+
+    def step(self) -> None:
+        """Advance the imported rigid bodies with PhoenX."""
+        if not self.physics_enabled:
+            self.sim_time += self.frame_dt
+            return
+        self._update_drive_controls()
+        if self.graph is None:
+            self._simulate()
+        else:
+            wp.capture_launch(self.graph)
+        self.sim_time += self.frame_dt
+
+    def reset_in_place(self) -> None:
+        """Restore simulation state without rebuilding the retained USD scene."""
+        self.sim_time = 0.0
+        if not self.physics_enabled:
+            return
+        self.state.assign(self.initial_state)
+        self.state.clear_forces()
+        self.collision_pipeline.reset_contact_matching()
+        self._target_q_host.fill(0.0)
+        self._target_qd_host.fill(0.0)
+        self.control.joint_target_q.assign(self._target_q_host)
+        self.control.joint_target_qd.assign(self._target_qd_host)
+        self._sync_dynamic_render_transforms()
+
+    def _sync_dynamic_render_transforms(self) -> None:
+        if not self._dynamic_bindings:
+            return
+        poses = self.state.body_q.numpy()
+        physics_from_renderer = np.linalg.inv(_RENDERER_FROM_PHYSICS)
+        handles = []
+        local_matrices = []
+        for body_index, handle, parent_inverse, geometry_offset in self._dynamic_bindings:
+            rigid_physics = _pose_matrix(poses[body_index])
+            rigid_renderer = _RENDERER_FROM_PHYSICS @ rigid_physics @ physics_from_renderer
+            handles.append(handle)
+            local_matrices.append(parent_inverse @ rigid_renderer @ geometry_offset)
+        self.viewer.usd_scene.update_local_transforms(
+            handles,
+            np.asarray(local_matrices, dtype=np.float32),
+        )
+
+    def render(self) -> None:
+        """Render the retained USD hierarchy after applying PhoenX poses."""
+        if self.physics_enabled:
+            self._sync_dynamic_render_transforms()
+        self.viewer.begin_frame(self.sim_time)
+        self.viewer.end_frame()
+
+    def test_final(self) -> None:
+        """Verify the imported physics and retained rendering hierarchy."""
+        assert self.viewer.usd_scene is not None
+        assert self.viewer.usd_scene.transform_count > 0
+        if self.physics_enabled:
+            assert self.physics_result is not None
+            assert len(self.physics_result["path_body_map"]) > 0
+            assert len(self._dynamic_bindings) > 0
+            assert np.isfinite(self.state.body_q.numpy()).all()
+
+
+if __name__ == "__main__":
+    parser = newton.examples.create_parser()
+    parser.add_argument(
+        "--usd-path",
+        type=str,
+        default=str(DEFAULT_USD_PATH),
+        help="Composed USD stage to render and simulate.",
+    )
+    parser.add_argument(
+        "--usd-max-texture-size",
+        type=int,
+        default=USD_MAX_TEXTURE_SIZE,
+        help="Maximum source texture dimension before adaptive atlas fitting; use 0 for no per-texture cap.",
+    )
+    parser.add_argument(
+        "--usd-environment",
+        action=argparse.BooleanOptionalAction,
+        default=LOAD_USD_ENVIRONMENT,
+        help="Load a supported USD DomeLight texture into the OptiX environment.",
+    )
+    parser.add_argument(
+        "--usd-environment-scale",
+        type=float,
+        default=1.0,
+        help="Brightness multiplier for the USD DomeLight environment texture.",
+    )
+    parser.add_argument(
+        "--usd-camera",
+        type=str,
+        default=None,
+        help="Authored perspective camera path; defaults to the overview camera.",
+    )
+    parser.add_argument(
+        "--physics",
+        action=argparse.BooleanOptionalAction,
+        default=ENABLE_PHYSICS,
+        help="Import UsdPhysics/PhysX data and simulate it with PhoenX.",
+    )
+    parser.add_argument(
+        "--print-physics-data",
+        action=argparse.BooleanOptionalAction,
+        default=PRINT_PHYSICS_DATA,
+        help="Print all authored physics schemas, properties, and import mappings.",
+    )
+    parser.set_defaults(viewer="optix", paused=START_PAUSED, optix_dlss_quality=OPTIX_DLSS_QUALITY)
+    viewer, args = newton.examples.init(parser)
+    if args.usd_max_texture_size == 0:
+        args.usd_max_texture_size = None
+    example = Example(viewer, args)
+    newton.examples.run(example, args)
