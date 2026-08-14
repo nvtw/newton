@@ -1051,7 +1051,7 @@ def compute_mesh_mesh_block_offsets_scan(
         dim=launch_threads,
         inputs=[
             total_edge_count,
-            block_counts,  # still holds tri counts
+            block_counts,  # still holds per-pair edge counts, including heightfield edges
             shape_pairs_mesh_mesh_count,
             shape_pairs_mesh_mesh.shape[0],
             target_blocks,

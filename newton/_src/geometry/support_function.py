@@ -47,7 +47,7 @@ return 1.0f / sqrtf(value);
 #endif
 """)
 def _support_rsqrt_rn(value: float) -> float:
-    """Return a round-to-nearest reciprocal square root."""
+    """Return a round-to-nearest reciprocal square root of a positive value."""
     ...
 
 

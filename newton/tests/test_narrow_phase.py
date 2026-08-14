@@ -30,8 +30,6 @@ from newton._src.geometry.narrow_phase import (
     NarrowPhase,
     _append_pair_warp_aggregated,
     _append_work_index_warp_aggregated,
-    create_narrow_phase_primitive_kernel,
-    write_contact_simple,
 )
 from newton._src.geometry.types import GeoType
 
@@ -2094,7 +2092,7 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             {
                 "type": GeoType.BOX,
                 "data": ([0.5, 0.5, 0.5], 0.0),
-                "transform": ([0.0, 0.0, 5.5], [0.0, 0.0, 0.0, 1.0]),
+                "transform": ([0.0, 0.0, 5.49], [0.0, 0.0, 0.0, 1.0]),
             },
         ]
         arrays = self._create_geometry_arrays(geom_list)
@@ -2107,10 +2105,6 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             verify_buffers=False,
             shape_aabb_lower=arrays[7],
             shape_aabb_upper=arrays[8],
-        )
-        narrow_phase.sparse_gjk_pairs = True
-        narrow_phase.primitive_kernel = create_narrow_phase_primitive_kernel(
-            write_contact_simple,
             sparse_gjk_pairs=True,
         )
 
@@ -2143,6 +2137,21 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         np.testing.assert_array_equal(narrow_phase.gjk_candidate_pairs.numpy(), [[-1, -1], [1, 2]])
         self.assertGreater(int(contact_count.numpy()[0]), 0)
         np.testing.assert_array_equal(contact_pair.numpy()[0], [1, 2])
+
+    @unittest.skipUnless(_cuda_available, "Split GJK/MPR is enabled only on CUDA")
+    def test_split_buffers_use_candidate_work_estimate(self):
+        """Size split GJK/MPR buffers from the candidate work estimate."""
+        narrow_phase = NarrowPhase(
+            max_candidate_pairs=5000,
+            candidate_pair_work_estimate=4096,
+            has_meshes=False,
+            device="cuda:0",
+        )
+
+        self.assertTrue(narrow_phase.split_gjk_mpr)
+        self.assertEqual(narrow_phase.split_query_results.shape[0], 4096)
+        self.assertEqual(narrow_phase.split_gjk_work_items.shape[0], 4096)
+        self.assertEqual(narrow_phase.split_manifold_work_items.shape[0], 4096)
 
     def test_broad_phase_buffer_overflow(self):
         """Test that broad phase buffer overflow produces a warning and no crash."""
@@ -2587,6 +2596,10 @@ class TestMeshNonUniformScaling(_NarrowPhaseSetupMixin, unittest.TestCase):
     def test_nonuniform_scale_z_thin(self):
         """Non-uniform scale (1, 1, 0.1): a thin pancake along Z."""
         self._assert_sphere_above_quad_contacts((1.0, 1.0, 0.1), (0.0, 0.0), "non-uniform 1x1x0.1")
+
+    def test_mirrored_scale_x_preserves_front_face(self):
+        """Preserve the front face when mesh scale mirrors one in-plane axis."""
+        self._assert_sphere_above_quad_contacts((-1.0, 1.0, 1.0), (0.2, 0.0), "mirrored x")
 
     def test_nonuniform_scale_extreme(self):
         """Extreme non-uniform scale (50, 0.5, 1): a long thin strip in X."""

@@ -163,7 +163,7 @@ def reorder_replicated_world_pairs_kernel(
         local_global_capacity = world_count * shapes_per_world * global_shape_count
         a_is_global = shape_a >= local_shape_count
         b_is_global = shape_b >= local_shape_count
-        output_index = int(-1)
+        output_index = int(-1)  # noqa: RUF046, RUF100 - explicit cast required by Warp codegen
         if not a_is_global and not b_is_global:
             world_a = shape_a // shapes_per_world
             world_b = shape_b // shapes_per_world
@@ -238,7 +238,7 @@ class ConvexPairQueryData:
     enlarge: float
 
 
-def create_prepare_convex_pair(external_aabb: bool, sort_pairs: bool):
+def create_prepare_convex_pair(external_aabb: bool, sort_pairs: bool, speculative: bool = False):
     """Create pair preparation shared by the split convex-contact kernels."""
 
     @wp.func
@@ -316,6 +316,12 @@ def create_prepare_convex_pair(external_aabb: bool, sort_pairs: bool):
 
             center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
             center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
+            if wp.static(external_aabb and speculative):
+                pair_search_extension = rigid_gap
+                if is_infinite_plane_a:
+                    bsphere_radius_b += pair_search_extension
+                else:
+                    bsphere_radius_a += pair_search_extension
             if not check_infinite_plane_bsphere_overlap(
                 geom_a,
                 geom_b,
@@ -1067,8 +1073,8 @@ def create_narrow_phase_primitive_kernel(
                 continue
 
             if (
-                (is_plane_a and (is_sphere_b or is_capsule_b or is_ellipsoid_b or is_cylinder_b or is_box_b))
-                or (is_sphere_a and (is_sphere_b or is_capsule_b or is_cylinder_b or is_box_b))
+                (is_plane_a and (is_sphere_b or is_capsule_b or is_ellipsoid_b or use_plane_cylinder or is_box_b))
+                or (is_sphere_a and (is_sphere_b or is_capsule_b or (is_cylinder_b and scale_b[2] == 0.0) or is_box_b))
                 or (is_capsule_a and is_capsule_b)
             ):
                 continue
@@ -1307,6 +1313,7 @@ def create_narrow_phase_kernels_gjk_mpr_split(
     writer_func: Any,
     support_func: Any = None,
     post_process_contact: Any = None,
+    speculative: bool = False,
     sort_pairs: bool = False,
 ):
     """Create graph-capturable MPR, GJK, and manifold work-queue kernels."""
@@ -1318,12 +1325,13 @@ def create_narrow_phase_kernels_gjk_mpr_split(
     support_funcs = create_support_map_function(support_func, use_precomputed_center=True)
     solve_mpr = create_solve_mpr(support_func, _support_funcs=support_funcs)
     solve_gjk = create_solve_closest_distance(support_func, _support_funcs=support_funcs)
-    prepare_pair = create_prepare_convex_pair(external_aabb, sort_pairs)
+    prepare_pair = create_prepare_convex_pair(external_aabb, sort_pairs, speculative)
     write_result = create_write_convex_query_result(
         support_func, writer_func, post_process_contact, use_precomputed_center=True
     )
     suffix = (
-        f"{external_aabb}_{writer_func.__name__}_{support_func.__name__}_{post_process_contact.__name__}_{sort_pairs}"
+        f"{external_aabb}_{writer_func.__name__}_{support_func.__name__}_{post_process_contact.__name__}_"
+        f"{speculative}_{sort_pairs}"
     )
 
     @wp.kernel(enable_backward=False, module=f"narrow_phase_mpr_{suffix}")
@@ -1348,7 +1356,7 @@ def create_narrow_phase_kernels_gjk_mpr_split(
         manifold_work_count: wp.array[int],
     ):
         tid = wp.tid()
-        num_work_items = wp.min(candidate_pair.shape[0], candidate_pair_count[0])
+        num_work_items = wp.min(query_results.shape[0], wp.min(candidate_pair.shape[0], candidate_pair_count[0]))
         block_dim = wp.block_dim()
         num_blocks = total_num_threads // block_dim
         block_index = tid // block_dim
@@ -1774,7 +1782,7 @@ def compute_mesh_plane_vert_counts(
         pair = shape_pairs_mesh_plane[i]
         mesh_shape = pair[0]
         mesh_id = shape_source[mesh_shape]
-        pair_verts = int(0)
+        pair_verts = int(0)  # noqa: RUF046, RUF100 - explicit cast required by Warp codegen
         if mesh_id != wp.uint64(0):
             pair_verts = wp.mesh_get(mesh_id).points.shape[0]
         vert_counts[i] = wp.int32(pair_verts)
@@ -2093,6 +2101,10 @@ def verify_narrow_phase_buffers(
     max_broad_phase: int,
     gjk_count: wp.array[int],
     max_gjk: int,
+    split_gjk_count: wp.array[int],
+    max_split_gjk: int,
+    split_manifold_count: wp.array[int],
+    max_split_manifold: int,
     mesh_count: wp.array[int],
     max_mesh: int,
     triangle_count: wp.array[int],
@@ -2122,6 +2134,18 @@ def verify_narrow_phase_buffers(
             "Warning: GJK candidate pair buffer overflowed %d > %d.\n",
             gjk_count[0],
             max_gjk,
+        )
+    if max_split_gjk >= 0 and split_gjk_count[0] > max_split_gjk:
+        wp.printf(
+            "Warning: Split GJK work-item buffer overflowed %d > %d.\n",
+            split_gjk_count[0],
+            max_split_gjk,
+        )
+    if max_split_manifold >= 0 and split_manifold_count[0] > max_split_manifold:
+        wp.printf(
+            "Warning: Split manifold work-item buffer overflowed %d > %d.\n",
+            split_manifold_count[0],
+            max_split_manifold,
         )
     if mesh_count:
         if mesh_count[0] > max_mesh:
@@ -2211,6 +2235,7 @@ class NarrowPhase:
         use_lean_gjk_mpr: bool = False,
         has_generic_convex_pairs: bool = True,
         all_pairs_generic_convex: bool = False,
+        sparse_gjk_pairs: bool | None = None,
         candidate_pair_work_estimate: int | None = None,
         replicated_world_count: int = 0,
         shapes_per_replicated_world: int = 0,
@@ -2257,6 +2282,9 @@ class NarrowPhase:
             all_pairs_generic_convex: Whether every candidate pair can go
                 directly to generic GJK/MPR after local type sorting. Defaults
                 to False so expert callers retain primitive routing.
+            sparse_gjk_pairs: Whether GJK routing preserves broad-phase pair
+                indices instead of compacting its work buffer. Defaults to
+                automatic enablement for large CUDA candidate buffers.
             candidate_pair_work_estimate: Static upper bound on pairs that the
                 broad phase can emit. Defaults to ``max_candidate_pairs``.
             replicated_world_count: Number of equal-size, contiguous replicated
@@ -2282,7 +2310,8 @@ class NarrowPhase:
             verify_buffers: When True (the default), launch a ``dim=[1]``
                 diagnostic kernel (:func:`verify_narrow_phase_buffers`) at the
                 end of :meth:`launch` that compares each public counter on this
-                class (``gjk_candidate_pairs_count``, ``shape_pairs_mesh_count``,
+                class (``gjk_candidate_pairs_count``, ``split_gjk_work_count``,
+                ``split_manifold_work_count``, ``shape_pairs_mesh_count``,
                 ``triangle_pairs_count``, ``shape_pairs_mesh_plane_count``,
                 ``shape_pairs_mesh_mesh_count``, ``shape_pairs_sdf_sdf_count``)
                 and the output ``contact_count`` against the capacity of its
@@ -2391,9 +2420,13 @@ class NarrowPhase:
         # strided-loop and tile-index calculations cannot run past the CPU
         # launch geometry.
         self.block_dim = 1 if device_obj.is_cpu else 128
-        self.sparse_gjk_pairs = device_obj.is_cuda and max_candidate_pairs >= _SPARSE_GJK_PAIR_CAPACITY_THRESHOLD
+        if sparse_gjk_pairs is None:
+            sparse_gjk_pairs = device_obj.is_cuda and max_candidate_pairs >= _SPARSE_GJK_PAIR_CAPACITY_THRESHOLD
+        self.sparse_gjk_pairs = sparse_gjk_pairs
         if candidate_pair_work_estimate is None:
             candidate_pair_work_estimate = max_candidate_pairs
+        if candidate_pair_work_estimate < 0:
+            raise ValueError("candidate_pair_work_estimate must be non-negative or None")
         self.split_gjk_mpr = (
             device_obj.is_cuda
             and has_generic_convex_pairs
@@ -2413,7 +2446,7 @@ class NarrowPhase:
             self.split_gjk_mpr
             and replicated_world_count >= 32
             and shapes_per_replicated_world > 1
-            and replicated_pair_capacity <= max_candidate_pairs
+            and replicated_pair_capacity <= candidate_pair_work_estimate
         )
         self.replicated_pair_capacity = replicated_pair_capacity if self.reorder_replicated_pairs else 0
 
@@ -2472,6 +2505,7 @@ class NarrowPhase:
                 writer_func,
                 support_func=split_support,
                 post_process_contact=split_post_process,
+                speculative=speculative,
                 sort_pairs=self.all_pairs_generic_convex,
             )
         else:
@@ -2599,13 +2633,15 @@ class NarrowPhase:
             # Pair and work buffers
             self.gjk_candidate_pairs = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
             self.split_query_results = (
-                wp.zeros(max_candidate_pairs, dtype=ConvexQueryResult, device=device) if self.split_gjk_mpr else None
+                wp.zeros(candidate_pair_work_estimate, dtype=ConvexQueryResult, device=device)
+                if self.split_gjk_mpr
+                else None
             )
             self.split_gjk_work_items = (
-                wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device) if self.split_gjk_mpr else None
+                wp.zeros(candidate_pair_work_estimate, dtype=wp.int32, device=device) if self.split_gjk_mpr else None
             )
             self.split_manifold_work_items = (
-                wp.zeros(max_candidate_pairs, dtype=wp.int32, device=device) if self.split_gjk_mpr else None
+                wp.zeros(candidate_pair_work_estimate, dtype=wp.int32, device=device) if self.split_gjk_mpr else None
             )
             self.reordered_replicated_pairs = (
                 wp.zeros(self.replicated_pair_capacity, dtype=wp.vec2i, device=device)
@@ -2797,6 +2833,11 @@ class NarrowPhase:
             shape_base_gap = shape_gap
         if self.speculative and (shape_linear_velocity is None or shape_angular_velocity is None):
             raise ValueError("Speculative NarrowPhase requires per-shape linear/angular velocity arrays")
+        if self.split_gjk_mpr and candidate_pair.shape[0] > self.split_query_results.shape[0]:
+            raise ValueError(
+                "candidate_pair capacity exceeds candidate_pair_work_estimate while split_gjk_mpr is enabled: "
+                f"{candidate_pair.shape[0]} > {self.split_query_results.shape[0]}"
+            )
         if self.speculative:
             for name, value in (
                 ("collision_update_dt", collision_update_dt),
@@ -2985,7 +3026,7 @@ class NarrowPhase:
         # Skip mesh/heightfield kernels when no meshes or heightfields are present
         if self.has_meshes or self.has_heightfields:
             # Launch mesh-plane contact processing kernel (meshes only)
-            if self.has_meshes and not self.reduce_contacts:
+            if self.has_meshes and not self.reduce_contacts and self.max_mesh_plane_pairs > 0:
                 wp.launch(
                     kernel=self.mesh_plane_contacts_kernel,
                     dim=self.total_num_threads,
@@ -3347,6 +3388,14 @@ class NarrowPhase:
                     candidate_pair.shape[0],
                     self.gjk_candidate_pairs_count,
                     self.gjk_candidate_pairs.shape[0],
+                    self.split_gjk_work_count
+                    if self.split_gjk_work_count is not None
+                    else self.gjk_candidate_pairs_count,
+                    self.split_gjk_work_items.shape[0] if self.split_gjk_work_items is not None else -1,
+                    self.split_manifold_work_count
+                    if self.split_manifold_work_count is not None
+                    else self.gjk_candidate_pairs_count,
+                    self.split_manifold_work_items.shape[0] if self.split_manifold_work_items is not None else -1,
                     self.shape_pairs_mesh_count,
                     self.shape_pairs_mesh.shape[0] if self.shape_pairs_mesh is not None else 0,
                     self.triangle_pairs_count,
