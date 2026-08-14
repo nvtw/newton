@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import math
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 
@@ -14,6 +16,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.examples import example_racerx_usd as racerx
+from newton._src.solvers.phoenx.examples import racerx_track
 
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
@@ -26,6 +29,66 @@ except ImportError:
 @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
 class TestRacerXUsd(unittest.TestCase):
     """Verify physics patterns required by the RacerX USD stage."""
+
+    def test_example_supports_direct_file_launch(self) -> None:
+        """Allow launching the example by its Python file path."""
+        result = subprocess.run(
+            [sys.executable, racerx.__file__, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("ImportError", result.stderr)
+
+    def test_track_follows_closed_uniform_spline(self) -> None:
+        """Build uniformly spaced road and barrier rows around a closed spline."""
+        half_width = 0.75
+        layout = racerx_track.build_track_layout(spacing=0.5, half_width=half_width)
+        road_count = len(layout.centerline)
+
+        self.assertGreater(layout.length, 200.0)
+        self.assertEqual(layout.road_poses.shape, (road_count, 7))
+        self.assertEqual(layout.barrier_poses.shape, (2 * road_count, 7))
+        self.assertEqual(layout.barrier_colors.shape, (2 * road_count, 3))
+        self.assertGreater(float(layout.tangents[0, 0]), 0.99)
+        self.assertLess(abs(float(layout.tangents[0, 1])), 0.05)
+
+        closed_segments = np.roll(layout.centerline, -1, axis=0) - layout.centerline
+        segment_lengths = np.linalg.norm(closed_segments, axis=1)
+        self.assertLess(float(segment_lengths.max()), 0.55)
+        self.assertGreater(float(segment_lengths.min()), 0.4)
+
+        left_offsets = layout.barrier_poses[:road_count, :2] - layout.centerline
+        right_offsets = layout.barrier_poses[road_count:, :2] - layout.centerline
+        np.testing.assert_allclose(np.linalg.norm(left_offsets, axis=1), half_width, atol=1.0e-5)
+        np.testing.assert_allclose(np.linalg.norm(right_offsets, axis=1), half_width, atol=1.0e-5)
+        np.testing.assert_allclose(left_offsets, -right_offsets, atol=1.0e-5)
+        np.testing.assert_allclose(np.linalg.norm(layout.tangents, axis=1), 1.0, atol=1.0e-5)
+
+    def test_track_adds_independent_dynamic_barriers(self) -> None:
+        """Add each rainbow barrier box as an independent dynamic body."""
+        layout = racerx_track.build_track_layout(
+            control_points=np.asarray(((0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0))),
+            spacing=4.0,
+        )
+        builder = newton.ModelBuilder()
+
+        body_indices = racerx_track.add_track_barriers(
+            builder,
+            layout,
+            half_extents=racerx.TRACK_BARRIER_HALF_EXTENTS,
+            density=racerx.TRACK_BARRIER_DENSITY,
+        )
+
+        self.assertEqual(len(body_indices), len(layout.barrier_poses))
+        self.assertEqual(builder.body_count, len(layout.barrier_poses))
+        self.assertEqual(builder.shape_count, len(layout.barrier_poses))
+        self.assertTrue(all(flag == int(newton.BodyFlags.DYNAMIC) for flag in builder.body_flags))
+        self.assertEqual(racerx.DRIVE_SPEED, 35.0)
+        self.assertEqual((racerx.SIM_SUBSTEPS, racerx.SOLVER_ITERATIONS), (4, 6))
 
     def test_coaxial_hard_limit_and_spring_merge_to_one_dof(self) -> None:
         """Merge stacked travel and spring joints into one driven coordinate."""

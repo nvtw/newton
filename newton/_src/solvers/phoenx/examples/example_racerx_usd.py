@@ -23,6 +23,11 @@ import newton
 import newton.examples
 import newton.usd
 
+try:
+    from .racerx_track import add_track_barriers, build_track_layout
+except ImportError:
+    from racerx_track import add_track_barriers, build_track_layout
+
 DEFAULT_USD_PATH = Path("/home/twidmer/Documents/Meshes/RacerX/Collected_A3_physics/A3_physics.usda")
 
 # Easy-to-find example switches. Command-line flags can still override them.
@@ -30,6 +35,7 @@ LOAD_USD_ENVIRONMENT = False
 LOAD_USD_EMISSIVE_MATERIALS = False
 ENABLE_PHYSICS = True
 ENABLE_CHASE_CAMERA = True
+ENABLE_TRACK = True
 PRINT_PHYSICS_DATA = True
 START_PAUSED = True
 USD_MAX_TEXTURE_SIZE = 4096
@@ -37,7 +43,7 @@ MAX_CONTACT_GAP = 0.01
 OPTIX_DLSS_QUALITY = "quality"
 GROUND_HEIGHT = 0.0
 GROUND_VISUAL_SIZE = 1000.0
-SIM_SUBSTEPS = 3
+SIM_SUBSTEPS = 4
 SOLVER_ITERATIONS = 6
 CHASE_CAMERA_DISTANCE = 0.45
 CHASE_CAMERA_HEIGHT = 0.18
@@ -46,7 +52,7 @@ CHASE_CAMERA_TARGET_HEIGHT = 0.05
 CHASE_CAMERA_RESPONSE = 10.0
 CHASE_CAMERA_FOV = 55.0
 VEHICLE_CONTACT_GAP = 0.001
-DRIVE_SPEED = 70.0
+DRIVE_SPEED = 35.0
 DRIVE_ACCELERATION = 140.0
 DRIVE_DECELERATION = 280.0
 DRIVE_DAMPING = 0.35
@@ -59,6 +65,12 @@ STEERING_STIFFNESS = 8000.0
 STEERING_DAMPING = 80.0
 STEERING_FORCE_LIMIT = 80.0
 STEERING_ASSIST_FORCE = 400.0
+TRACK_HALF_WIDTH = 0.6
+TRACK_BARRIER_SPACING = 0.32
+TRACK_BARRIER_HALF_EXTENTS = (0.05, 0.05, 0.05)
+TRACK_BARRIER_DENSITY = 450.0
+TRACK_ROAD_HALF_THICKNESS = 0.002
+
 
 WHEEL_JOINT_PATHS = (
     "/World/Joints/FR/Hinge_Wheel_WheelLinkage",
@@ -82,6 +94,17 @@ _RENDERER_FROM_PHYSICS = np.array(
     ),
     dtype=np.float32,
 )
+
+
+@wp.kernel
+def _gather_body_transforms(
+    body_q: wp.array[wp.transform],
+    body_indices: wp.array[wp.int32],
+    transforms: wp.array[wp.transform],
+):
+    """Gather track-barrier poses without a host readback."""
+    index = wp.tid()
+    transforms[index] = body_q[body_indices[index]]
 
 
 @wp.kernel
@@ -559,6 +582,22 @@ class Example:
             height=GROUND_HEIGHT,
             cfg=newton.ModelBuilder.ShapeConfig(mu=0.9, gap=VEHICLE_CONTACT_GAP),
         )
+        self._track_layout = None
+        self._track_body_indices = []
+        if ENABLE_TRACK:
+            self._track_layout = build_track_layout(
+                spacing=TRACK_BARRIER_SPACING,
+                half_width=TRACK_HALF_WIDTH,
+                barrier_half_height=TRACK_BARRIER_HALF_EXTENTS[2],
+                road_height=GROUND_HEIGHT + TRACK_ROAD_HALF_THICKNESS,
+            )
+            self._track_body_indices = add_track_barriers(
+                builder,
+                self._track_layout,
+                half_extents=TRACK_BARRIER_HALF_EXTENTS,
+                density=TRACK_BARRIER_DENSITY,
+                contact_gap=VEHICLE_CONTACT_GAP,
+            )
 
         self.physics_result = result
         self._chassis_body = int(result["path_body_map"][CHASSIS_BODY_PATH])
@@ -595,7 +634,7 @@ class Example:
         )
         print("[RacerX controls] I/K throttle, J/L steering, release throttle to brake")
 
-        self.model = builder.finalize()
+        self.model = builder.finalize(skip_shape_contact_pairs=True)
         self.collision_pipeline = _create_collision_pipeline(self.model)
         self.contacts = self.collision_pipeline.contacts()
         self.state = self.model.state()
@@ -642,6 +681,47 @@ class Example:
         )
         self._ground_visual_colors = wp.array([wp.vec3(0.7, 0.7, 0.7)], dtype=wp.vec3, device=self.device)
         self._ground_visual_materials = wp.array([wp.vec4(0.8, 0.0, 0.0, 0.0)], dtype=wp.vec4, device=self.device)
+        if self._track_layout is not None:
+            barrier_count = len(self._track_body_indices)
+            road_count = len(self._track_layout.road_poses)
+            self._track_body_indices_device = wp.array(
+                self._track_body_indices,
+                dtype=wp.int32,
+                device=self.device,
+            )
+            self._track_barrier_xforms = wp.empty(barrier_count, dtype=wp.transform, device=self.device)
+            self._track_barrier_colors = wp.array(
+                self._track_layout.barrier_colors,
+                dtype=wp.vec3,
+                device=self.device,
+            )
+            self._track_barrier_materials = wp.full(
+                barrier_count,
+                wp.vec4(0.65, 0.15, 0.0, 0.0),
+                dtype=wp.vec4,
+                device=self.device,
+            )
+            self._track_road_xforms = wp.array(
+                self._track_layout.road_poses,
+                dtype=wp.transform,
+                device=self.device,
+            )
+            self._track_road_colors = wp.full(
+                road_count,
+                wp.vec3(0.055, 0.06, 0.07),
+                dtype=wp.vec3,
+                device=self.device,
+            )
+            self._track_road_materials = wp.full(
+                road_count,
+                wp.vec4(0.9, 0.05, 0.0, 0.0),
+                dtype=wp.vec4,
+                device=self.device,
+            )
+            print(
+                f"[RacerX track] length={self._track_layout.length:.1f} m "
+                f"barriers={barrier_count} road_segments={road_count}"
+            )
 
         self.graph = None
         if self.device.is_cuda:
@@ -685,6 +765,11 @@ class Example:
             self._dynamic_body_indices = wp.array(body_indices, dtype=wp.int32, device=self.device)
             self._dynamic_handle_indices = wp.array(
                 [handle.index for handle in handles], dtype=wp.int32, device=self.device
+            )
+            self._dynamic_transform_count = wp.array(
+                [len(self._dynamic_bindings)],
+                dtype=wp.int32,
+                device=self.device,
             )
             self._dynamic_parent_inverses = wp.array(parent_inverses, dtype=wp.mat44, device=self.device)
             self._dynamic_geometry_offsets = wp.array(geometry_offsets, dtype=wp.mat44, device=self.device)
@@ -810,6 +895,7 @@ class Example:
             device=self.device,
         )
         self.viewer.usd_scene.update_local_transforms_device(
+            self._dynamic_transform_count,
             self._dynamic_handle_indices,
             self._dynamic_local_transforms,
         )
@@ -818,6 +904,14 @@ class Example:
         """Render the retained USD hierarchy after applying PhoenX poses."""
         if self.physics_enabled:
             self._sync_dynamic_render_transforms()
+            if self._track_layout is not None:
+                wp.launch(
+                    _gather_body_transforms,
+                    dim=len(self._track_body_indices),
+                    inputs=[self.state.body_q, self._track_body_indices_device],
+                    outputs=[self._track_barrier_xforms],
+                    device=self.device,
+                )
         self.viewer.begin_frame(self.sim_time)
         if self.physics_enabled:
             self.viewer.log_shapes(
@@ -828,6 +922,23 @@ class Example:
                 colors=self._ground_visual_colors,
                 materials=self._ground_visual_materials,
             )
+            if self._track_layout is not None:
+                self.viewer.log_shapes(
+                    "/racerx/track/road",
+                    newton.GeoType.BOX,
+                    (0.55 * TRACK_BARRIER_SPACING, TRACK_HALF_WIDTH, TRACK_ROAD_HALF_THICKNESS),
+                    self._track_road_xforms,
+                    colors=self._track_road_colors,
+                    materials=self._track_road_materials,
+                )
+                self.viewer.log_shapes(
+                    "/racerx/track/barriers",
+                    newton.GeoType.BOX,
+                    TRACK_BARRIER_HALF_EXTENTS,
+                    self._track_barrier_xforms,
+                    colors=self._track_barrier_colors,
+                    materials=self._track_barrier_materials,
+                )
         self.viewer.end_frame()
 
     def test_final(self) -> None:
