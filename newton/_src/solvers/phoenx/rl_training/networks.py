@@ -49,6 +49,8 @@ from .kernels import (
     sample_gaussian_actions_kernel,
     soft_update_1d_kernel,
     soft_update_2d_kernel,
+    unit_normalize_weight_columns_kernel,
+    weight_column_sumsq_kernel,
     zero_2d_tail_rows_kernel,
     zero_3d_kernel,
 )
@@ -703,6 +705,25 @@ class WarpMLP:
             wp.launch(soft_update_2d_kernel, dim=dst.shape, inputs=[src, tau], outputs=[dst], device=self.device)
         for src, dst in zip(other.biases, self.biases, strict=True):
             wp.launch(soft_update_1d_kernel, dim=dst.shape[0], inputs=[src, tau], outputs=[dst], device=self.device)
+
+    def normalize_weights(self, eps: float = 1.0e-8) -> None:
+        """Constrain each output's incoming weight vector to unit length."""
+
+        for weight in self.weights:
+            column_sumsq = wp.empty(int(weight.shape[1]), dtype=wp.float32, device=self.device)
+            wp.launch(
+                weight_column_sumsq_kernel,
+                dim=column_sumsq.shape[0],
+                inputs=[weight],
+                outputs=[column_sumsq],
+                device=self.device,
+            )
+            wp.launch(
+                unit_normalize_weight_columns_kernel,
+                dim=weight.shape,
+                inputs=[weight, column_sumsq, float(eps)],
+                device=self.device,
+            )
 
 
 class PufferMinGRUNet:
@@ -1801,6 +1822,11 @@ class GaussianActor:
         if not self.state_dependent_std:
             params.append(self.log_std)
         return params
+
+    def normalize_weights(self, eps: float = 1.0e-8) -> None:
+        """Constrain dense incoming weight vectors to unit length."""
+
+        self.net.normalize_weights(eps)
 
     def forward(self, obs: wp.array, *, requires_grad: bool = True) -> wp.array:
         """Return raw policy outputs for ``obs``."""

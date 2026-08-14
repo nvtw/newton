@@ -25,6 +25,7 @@ from .kernels import (
     sac_critic_loss_kernel,
     sac_distributional_actor_q_backward_kernel,
     sac_distributional_critic_loss_backward_kernel,
+    sac_distributional_min_projection_device_alpha_kernel,
     sac_distributional_projection_device_alpha_kernel,
     sac_distributional_q_value_kernel,
     sac_q_target_device_alpha_kernel,
@@ -42,6 +43,7 @@ class ConfigSAC:
 
     Args:
         gamma: Discount factor.
+        n_step: Number of transitions accumulated into replay returns.
         tau: Target critic Polyak update factor.
         actor_lr: Actor Adam learning rate.
         critic_lr: Critic Adam learning rate.
@@ -56,11 +58,13 @@ class ConfigSAC:
         distributional_atoms: Number of categorical return atoms.
         distributional_v_min: Minimum categorical return support.
         distributional_v_max: Maximum categorical return support.
+        distributional_min_target: Select the lower-expected-value target critic distribution.
         normalize_observations: Normalize observations with automatic running statistics.
         observation_clip: Absolute clipping bound after observation normalization.
     """
 
     gamma: float = 0.99
+    n_step: int = 1
     tau: float = 5.0e-3
     actor_lr: float = 3.0e-4
     critic_lr: float = 3.0e-4
@@ -75,6 +79,7 @@ class ConfigSAC:
     distributional_atoms: int = 101
     distributional_v_min: float = -20.0
     distributional_v_max: float = 20.0
+    distributional_min_target: bool = False
     normalize_observations: bool = True
     observation_clip: float = 10.0
 
@@ -235,7 +240,8 @@ class TrainerSAC:
     Args:
         obs_dim: Observation dimension.
         action_dim: Action dimension.
-        hidden_layers: Hidden layer widths for actor and critics.
+        hidden_layers: Hidden layer widths for the actor and, by default, critics.
+        critic_hidden_layers: Optional hidden layer widths for both critics.
         config: SAC hyperparameters.
         device: Warp device.
         seed: Initializer and update seed.
@@ -247,6 +253,7 @@ class TrainerSAC:
         obs_dim: int,
         action_dim: int,
         hidden_layers: tuple[int, ...] = (256, 256),
+        critic_hidden_layers: tuple[int, ...] | None = None,
         config: ConfigSAC | None = None,
         device: wp.context.Devicelike = None,
         seed: int = 0,
@@ -260,6 +267,8 @@ class TrainerSAC:
         self._gradient_update_count = 0
         if self.config.initial_alpha <= 0.0:
             raise ValueError("initial_alpha must be positive")
+        if self.config.n_step < 1:
+            raise ValueError("n_step must be positive")
         if self.config.update_steps < 1:
             raise ValueError("update_steps must be positive")
         if self.config.policy_frequency < 1:
@@ -284,17 +293,18 @@ class TrainerSAC:
         )
         q_input_dim = self.obs_dim + self.action_dim
         q_output_dim = self.config.distributional_atoms if self.config.distributional_critic else 1
+        critic_layers = hidden_layers if critic_hidden_layers is None else critic_hidden_layers
         self.critic1 = WarpMLP(
-            (q_input_dim, *hidden_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 1
+            (q_input_dim, *critic_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 1
         )
         self.critic2 = WarpMLP(
-            (q_input_dim, *hidden_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 2
+            (q_input_dim, *critic_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 2
         )
         self.target_critic1 = WarpMLP(
-            (q_input_dim, *hidden_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 3
+            (q_input_dim, *critic_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 3
         )
         self.target_critic2 = WarpMLP(
-            (q_input_dim, *hidden_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 4
+            (q_input_dim, *critic_layers, q_output_dim), activation="relu", device=self.device, seed=seed + 4
         )
         self.target_critic1.copy_from(self.critic1)
         self.target_critic2.copy_from(self.critic2)
@@ -487,8 +497,13 @@ class TrainerSAC:
             atoms = int(self.config.distributional_atoms)
             target_distribution1 = wp.zeros((batch.batch_size, atoms), dtype=wp.float32, device=self.device)
             target_distribution2 = wp.zeros_like(target_distribution1)
+            projection_kernel = (
+                sac_distributional_min_projection_device_alpha_kernel
+                if self.config.distributional_min_target
+                else sac_distributional_projection_device_alpha_kernel
+            )
             wp.launch(
-                sac_distributional_projection_device_alpha_kernel,
+                projection_kernel,
                 dim=(batch.batch_size, atoms),
                 inputs=[
                     batch.rewards,
@@ -496,7 +511,7 @@ class TrainerSAC:
                     target_q1,
                     target_q2,
                     next_log_probs,
-                    self.config.gamma,
+                    self.config.gamma**self.config.n_step,
                     self._alpha,
                     atoms,
                     self.config.distributional_v_min,
@@ -530,7 +545,7 @@ class TrainerSAC:
                     target_q1,
                     target_q2,
                     next_log_probs,
-                    self.config.gamma,
+                    self.config.gamma**self.config.n_step,
                     self._alpha,
                     self.config.average_critics,
                 ],

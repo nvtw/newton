@@ -29,6 +29,12 @@ from .env import (
     collect_ppo_rollout_seed_counter,
     make_seed_counter,
 )
+from .flash_sac import (
+    BufferReplayFlashSAC,
+    ConfigFlashSAC,
+    RewardNormalizerFlashSAC,
+    TrainerFlashSAC,
+)
 from .g1 import (
     ACTION_DIM_G1,
     OBS_DIM_G1,
@@ -117,6 +123,7 @@ __all__ = [
     "OBS_DIM_HUMANOID",
     "Adam",
     "BatchSAC",
+    "BufferReplayFlashSAC",
     "BufferReplaySAC",
     "BufferRollout",
     "ConfigEnvAntPhoenX",
@@ -130,6 +137,7 @@ __all__ = [
     "ConfigEvaluateG1GatePPO",
     "ConfigEvaluateG1PPO",
     "ConfigEvaluateG1TargetPPO",
+    "ConfigFlashSAC",
     "ConfigPBT",
     "ConfigPPO",
     "ConfigSAC",
@@ -156,6 +164,7 @@ __all__ = [
     "ResultPBT",
     "ResultTrainAnymalPPO",
     "ResultTrainG1PPO",
+    "RewardNormalizerFlashSAC",
     "StatsEvaluateAnymalTargetPPO",
     "StatsEvaluateG1GateCommandPPO",
     "StatsEvaluateG1GatePPO",
@@ -165,6 +174,7 @@ __all__ = [
     "StatsSACUpdate",
     "StatsTrainAnymalPPO",
     "StatsTrainG1PPO",
+    "TrainerFlashSAC",
     "TrainerPPO",
     "TrainerSAC",
     "WarpMLP",

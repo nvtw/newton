@@ -26,6 +26,7 @@ Warp-only reinforcement learning utilities for Newton.
 
    Adam
    BatchSAC
+   BufferReplayFlashSAC
    BufferReplaySAC
    BufferRollout
    ConfigEnvAntPhoenX
@@ -39,6 +40,7 @@ Warp-only reinforcement learning utilities for Newton.
    ConfigEvaluateG1GatePPO
    ConfigEvaluateG1PPO
    ConfigEvaluateG1TargetPPO
+   ConfigFlashSAC
    ConfigPBT
    ConfigPPO
    ConfigSAC
@@ -65,6 +67,7 @@ Warp-only reinforcement learning utilities for Newton.
    ResultPBT
    ResultTrainAnymalPPO
    ResultTrainG1PPO
+   RewardNormalizerFlashSAC
    StatsEvaluateAnymalTargetPPO
    StatsEvaluateG1GateCommandPPO
    StatsEvaluateG1GatePPO
@@ -74,6 +77,7 @@ Warp-only reinforcement learning utilities for Newton.
    StatsSACUpdate
    StatsTrainAnymalPPO
    StatsTrainG1PPO
+   TrainerFlashSAC
    TrainerPPO
    TrainerSAC
    WarpMLP

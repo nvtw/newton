@@ -2021,6 +2021,67 @@ def sac_distributional_projection_device_alpha_kernel(
 
 
 @wp.kernel
+def sac_distributional_min_projection_device_alpha_kernel(
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    logits1: wp.array2d[wp.float32],
+    logits2: wp.array2d[wp.float32],
+    next_log_probs: wp.array[wp.float32],
+    gamma: wp.float32,
+    alpha: wp.array[wp.float32],
+    num_atoms: wp.int32,
+    v_min: wp.float32,
+    v_max: wp.float32,
+    targets1: wp.array2d[wp.float32],
+    targets2: wp.array2d[wp.float32],
+):
+    row, destination_atom = wp.tid()
+    max_logit1 = logits1[row, 0]
+    max_logit2 = logits2[row, 0]
+    for atom in range(1, num_atoms):
+        max_logit1 = wp.max(max_logit1, logits1[row, atom])
+        max_logit2 = wp.max(max_logit2, logits2[row, atom])
+    normalizer1 = wp.float32(0.0)
+    normalizer2 = wp.float32(0.0)
+    q1 = wp.float32(0.0)
+    q2 = wp.float32(0.0)
+    delta = (v_max - v_min) / wp.float32(num_atoms - wp.int32(1))
+    for atom in range(num_atoms):
+        probability1 = wp.exp(logits1[row, atom] - max_logit1)
+        probability2 = wp.exp(logits2[row, atom] - max_logit2)
+        support = v_min + wp.float32(atom) * delta
+        normalizer1 += probability1
+        normalizer2 += probability2
+        q1 += probability1 * support
+        q2 += probability2 * support
+    use_first = q1 / normalizer1 <= q2 / normalizer2
+
+    bootstrap = wp.float32(1.0) - dones[row]
+    projected = wp.float32(0.0)
+    for source_atom in range(num_atoms):
+        support = v_min + wp.float32(source_atom) * delta
+        target_value = rewards[row] + gamma * bootstrap * (support - alpha[0] * next_log_probs[row])
+        target_value = wp.min(wp.max(target_value, v_min), v_max)
+        position = (target_value - v_min) / delta
+        lower = wp.int32(wp.floor(position))
+        upper = wp.min(lower + wp.int32(1), num_atoms - wp.int32(1))
+        upper_weight = position - wp.float32(lower)
+        weight = wp.float32(0.0)
+        if destination_atom == lower:
+            weight += wp.float32(1.0) - upper_weight
+        if destination_atom == upper and upper != lower:
+            weight += upper_weight
+        probability = wp.float32(0.0)
+        if use_first:
+            probability = wp.exp(logits1[row, source_atom] - max_logit1) / normalizer1
+        else:
+            probability = wp.exp(logits2[row, source_atom] - max_logit2) / normalizer2
+        projected += probability * weight
+    targets1[row, destination_atom] = projected
+    targets2[row, destination_atom] = projected
+
+
+@wp.kernel
 def sac_distributional_critic_loss_backward_kernel(
     logits1: wp.array2d[wp.float32],
     logits2: wp.array2d[wp.float32],
@@ -2394,6 +2455,31 @@ def soft_update_1d_kernel(src: wp.array[wp.float32], tau: wp.float32, dst: wp.ar
 def soft_update_2d_kernel(src: wp.array2d[wp.float32], tau: wp.float32, dst: wp.array2d[wp.float32]):
     i, j = wp.tid()
     dst[i, j] = (wp.float32(1.0) - tau) * dst[i, j] + tau * src[i, j]
+
+
+@wp.kernel
+def weight_column_sumsq_kernel(
+    weight: wp.array2d[wp.float32],
+    column_sumsq: wp.array[wp.float32],
+):
+    """Compute each dense output's incoming squared weight norm."""
+
+    j = wp.tid()
+    sumsq = float(0.0)
+    for i in range(weight.shape[0]):
+        value = weight[i, j]
+        sumsq = sumsq + value * value
+    column_sumsq[j] = sumsq
+
+
+@wp.kernel
+def unit_normalize_weight_columns_kernel(
+    weight: wp.array2d[wp.float32], column_sumsq: wp.array[wp.float32], eps: wp.float32
+):
+    """Normalize each dense output's incoming weights to unit length."""
+
+    i, j = wp.tid()
+    weight[i, j] = weight[i, j] * (wp.float32(1.0) / wp.sqrt(column_sumsq[j] + eps))
 
 
 @wp.kernel
@@ -2972,3 +3058,84 @@ def muon_step_2d_kernel(
     step_lr = lr * lr_scale[0] * pbt_lr_scale[0]
     param[i, j] = param[i, j] * (wp.float32(1.0) - step_lr * weight_decay) - step_lr * scale * update[i, j]
     grad[i, j] = wp.float32(0.0)
+
+
+@wp.kernel
+def flash_sac_n_step_accumulate_kernel(
+    rewards: wp.array[wp.float32],
+    terminateds: wp.array[wp.float32],
+    truncateds: wp.array[wp.float32],
+    next_obs: wp.array2d[wp.float32],
+    gamma: wp.float32,
+    obs_dim: wp.int32,
+    aggregate_rewards: wp.array[wp.float32],
+    aggregate_terminateds: wp.array[wp.float32],
+    aggregate_truncateds: wp.array[wp.float32],
+    aggregate_next_obs: wp.array2d[wp.float32],
+):
+    row, column = wp.tid()
+    done = wp.min(terminateds[row] + truncateds[row], wp.float32(1.0))
+    if column == 0:
+        aggregate_rewards[row] = rewards[row] + gamma * aggregate_rewards[row] * (wp.float32(1.0) - done)
+        if done > wp.float32(0.0):
+            aggregate_terminateds[row] = terminateds[row]
+            aggregate_truncateds[row] = truncateds[row]
+    if column < obs_dim and done > wp.float32(0.0):
+        aggregate_next_obs[row, column] = next_obs[row, column]
+
+
+@wp.kernel
+def flash_sac_return_stats_kernel(
+    rewards: wp.array[wp.float32],
+    terminateds: wp.array[wp.float32],
+    truncateds: wp.array[wp.float32],
+    gamma: wp.float32,
+    returns: wp.array[wp.float32],
+    metrics: wp.array[wp.float32],
+):
+    i = wp.tid()
+    done = wp.min(terminateds[i] + truncateds[i], wp.float32(1.0))
+    value = gamma * (wp.float32(1.0) - done) * returns[i] + rewards[i]
+    returns[i] = value
+    wp.atomic_add(metrics, 0, value)
+    wp.atomic_add(metrics, 1, value * value)
+    wp.atomic_max(metrics, 2, wp.abs(value))
+
+
+@wp.kernel
+def flash_sac_update_return_normalizer_kernel(
+    metrics: wp.array[wp.float32],
+    sample_count: wp.int32,
+    running_mean: wp.array[wp.float32],
+    running_var: wp.array[wp.float32],
+    running_count: wp.array[wp.float32],
+    max_abs_return: wp.array[wp.float32],
+):
+    sample_count_f = wp.float32(sample_count)
+    sample_mean = metrics[0] / sample_count_f
+    sample_var = wp.max(metrics[1] / sample_count_f - sample_mean * sample_mean, wp.float32(0.0))
+    old_count = running_count[0]
+    total_count = old_count + sample_count_f
+    delta = sample_mean - running_mean[0]
+    old_m2 = running_var[0] * old_count
+    sample_m2 = sample_var * sample_count_f
+    combined_m2 = old_m2 + sample_m2 + delta * delta * old_count * sample_count_f / total_count
+    running_mean[0] = running_mean[0] + delta * sample_count_f / total_count
+    running_var[0] = combined_m2 / total_count
+    running_count[0] = total_count
+    max_abs_return[0] = wp.max(max_abs_return[0], metrics[2])
+
+
+@wp.kernel
+def flash_sac_normalize_rewards_kernel(
+    rewards: wp.array[wp.float32],
+    running_var: wp.array[wp.float32],
+    max_abs_return: wp.array[wp.float32],
+    normalized_return_max: wp.float32,
+    eps: wp.float32,
+    normalized_rewards: wp.array[wp.float32],
+):
+    i = wp.tid()
+    variance_denominator = wp.sqrt(running_var[0] + eps)
+    range_denominator = max_abs_return[0] / normalized_return_max
+    normalized_rewards[i] = rewards[i] / wp.max(variance_denominator, range_denominator)
