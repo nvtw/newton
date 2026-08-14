@@ -9,6 +9,9 @@ import math
 import unittest
 from types import SimpleNamespace
 
+import numpy as np
+import warp as wp
+
 import newton
 from newton._src.solvers.phoenx.examples import example_racerx_usd as racerx
 
@@ -92,6 +95,7 @@ class TestRacerXUsd(unittest.TestCase):
         )
 
         self.assertEqual(wheel_dofs, [0, 1, 2, 3])
+        self.assertEqual(racerx.SUSPENSION_STIFFNESS_SCALE, 0.08)
         for dof in wheel_dofs:
             self.assertEqual(builder.joint_target_mode[dof], newton.JointTargetMode.VELOCITY)
             self.assertEqual(builder.joint_effort_limit[dof], racerx.DRIVE_TORQUE_LIMIT)
@@ -111,6 +115,50 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertEqual(builder.joint_effort_limit[steering_dof], racerx.STEERING_FORCE_LIMIT)
         self.assertEqual(builder.joint_limit_lower[steering_dof], -racerx.STEERING_LIMIT)
         self.assertEqual(builder.joint_limit_upper[steering_dof], racerx.STEERING_LIMIT)
+
+    def test_vehicle_control_kernel_ramps_inside_cuda_graph(self) -> None:
+        """Ramp motor and steering targets inside a reusable CUDA graph."""
+        device = wp.get_device()
+        drive_input = wp.array([1.0, 1.0], dtype=float, device=device)
+        wheel_dofs = wp.array([0, 1, 2, 3], dtype=wp.int32, device=device)
+        wheel_command = wp.zeros(1, dtype=float, device=device)
+        steering_command = wp.zeros(1, dtype=float, device=device)
+        target_q = wp.zeros(10, dtype=float, device=device)
+        target_qd = wp.zeros(10, dtype=float, device=device)
+
+        def launch():
+            wp.launch(
+                racerx._update_vehicle_controls,
+                dim=1,
+                inputs=[
+                    drive_input,
+                    wheel_dofs,
+                    9,
+                    1.0 / 60.0,
+                    wheel_command,
+                    steering_command,
+                    target_q,
+                    target_qd,
+                ],
+                device=device,
+            )
+
+        graph = None
+        if device.is_cuda:
+            with wp.ScopedCapture() as capture:
+                launch()
+            graph = capture.graph
+        for _ in range(30):
+            launch() if graph is None else wp.capture_launch(graph)
+
+        self.assertAlmostEqual(float(wheel_command.numpy()[0]), racerx.DRIVE_SPEED, places=4)
+        self.assertAlmostEqual(float(target_q.numpy()[9]), racerx.STEERING_TRAVEL, places=5)
+        np.testing.assert_allclose(target_qd.numpy()[:4], racerx.DRIVE_SPEED, rtol=0.0, atol=1.0e-4)
+
+        drive_input.zero_()
+        for _ in range(15):
+            launch() if graph is None else wp.capture_launch(graph)
+        self.assertAlmostEqual(float(wheel_command.numpy()[0]), 0.0, places=4)
 
     def test_self_filtered_collision_group_excludes_member_pair(self) -> None:
         """Translate a self-filtered USD collision group into shape exclusions."""

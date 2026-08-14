@@ -27,6 +27,7 @@ DEFAULT_USD_PATH = Path("/home/twidmer/Documents/Meshes/RacerX/Collected_A3_phys
 
 # Easy-to-find example switches. Command-line flags can still override them.
 LOAD_USD_ENVIRONMENT = False
+LOAD_USD_EMISSIVE_MATERIALS = False
 ENABLE_PHYSICS = True
 PRINT_PHYSICS_DATA = True
 START_PAUSED = True
@@ -35,11 +36,15 @@ MAX_CONTACT_GAP = 0.01
 OPTIX_DLSS_QUALITY = "quality"
 GROUND_HEIGHT = 0.0
 GROUND_VISUAL_SIZE = 1000.0
+SIM_SUBSTEPS = 3
+SOLVER_ITERATIONS = 6
 VEHICLE_CONTACT_GAP = 0.001
 DRIVE_SPEED = 70.0
+DRIVE_ACCELERATION = 140.0
+DRIVE_DECELERATION = 280.0
 DRIVE_DAMPING = 0.35
 DRIVE_TORQUE_LIMIT = 3.0
-SUSPENSION_STIFFNESS_SCALE = 0.02
+SUSPENSION_STIFFNESS_SCALE = 0.08
 STEERING_TRAVEL = 0.005
 STEERING_LIMIT = 0.006
 STEERING_RATE = 0.02
@@ -68,6 +73,55 @@ _RENDERER_FROM_PHYSICS = np.array(
     ),
     dtype=np.float32,
 )
+
+
+@wp.kernel
+def _update_vehicle_controls(
+    drive_input: wp.array[float],
+    wheel_dofs: wp.array[wp.int32],
+    steering_target_index: wp.int32,
+    frame_dt: float,
+    wheel_speed_command: wp.array[float],
+    steering_command: wp.array[float],
+    joint_target_q: wp.array[float],
+    joint_target_qd: wp.array[float],
+):
+    target_speed = drive_input[0] * DRIVE_SPEED
+    braking = target_speed == 0.0 or wheel_speed_command[0] * target_speed < 0.0
+    acceleration = DRIVE_DECELERATION if braking else DRIVE_ACCELERATION
+    max_speed_delta = acceleration * frame_dt
+    speed_delta = wp.clamp(target_speed - wheel_speed_command[0], -max_speed_delta, max_speed_delta)
+    wheel_speed_command[0] += speed_delta
+    for wheel_index in range(wheel_dofs.shape[0]):
+        joint_target_qd[wheel_dofs[wheel_index]] = wheel_speed_command[0]
+
+    steering_target = drive_input[1] * STEERING_TRAVEL
+    max_steering_delta = STEERING_RATE * frame_dt
+    steering_delta = wp.clamp(
+        steering_target - steering_command[0],
+        -max_steering_delta,
+        max_steering_delta,
+    )
+    steering_command[0] += steering_delta
+    joint_target_q[steering_target_index] = steering_command[0]
+
+
+@wp.kernel
+def _compute_dynamic_local_transforms(
+    body_q: wp.array[wp.transform],
+    body_indices: wp.array[wp.int32],
+    parent_world_inverses: wp.array[wp.mat44],
+    geometry_offsets: wp.array[wp.mat44],
+    renderer_from_physics: wp.array[wp.mat44],
+    physics_from_renderer: wp.array[wp.mat44],
+    local_transforms: wp.array[wp.mat44],
+):
+    binding_index = wp.tid()
+    rigid_physics = wp.transform_to_matrix(body_q[body_indices[binding_index]])
+    rigid_renderer = renderer_from_physics[0] * rigid_physics * physics_from_renderer[0]
+    local_transforms[binding_index] = (
+        parent_world_inverses[binding_index] * rigid_renderer * geometry_offsets[binding_index]
+    )
 
 
 def _relevant_physics_properties(prim) -> list:
@@ -386,6 +440,7 @@ class Example:
         if not viewer.load_scene_from_usd(
             str(usd_path),
             max_texture_size=args.usd_max_texture_size,
+            enable_emissive_materials=args.usd_emissive_materials,
             load_usd_environment=args.usd_environment,
             usd_environment_scale=args.usd_environment_scale,
         ):
@@ -481,14 +536,16 @@ class Example:
         self.initial_state = self.model.state()
         self.initial_state.assign(self.state)
         self.control = self.model.control()
-        self._target_q_host = self.control.joint_target_q.numpy()
-        self._target_qd_host = self.control.joint_target_qd.numpy()
-        self._steering_command = float(self._target_q_host[self._steering_target_index])
+        self._drive_input_host = np.zeros(2, dtype=np.float32)
+        self._drive_input_device = wp.zeros(2, dtype=float, device=self.device)
+        self._wheel_dofs_device = wp.array(self._wheel_dofs, dtype=wp.int32, device=self.device)
+        self._wheel_speed_command = wp.zeros(1, dtype=float, device=self.device)
+        self._steering_command = wp.zeros(1, dtype=float, device=self.device)
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
             collision_pipeline=self.collision_pipeline,
-            substeps=4,
-            solver_iterations=8,
+            substeps=SIM_SUBSTEPS,
+            solver_iterations=SOLVER_ITERATIONS,
             velocity_iterations=1,
             default_friction=0.9,
             step_layout="multi_world",
@@ -509,7 +566,7 @@ class Example:
         self.graph = None
         if self.device.is_cuda:
             with wp.ScopedCapture() as capture:
-                self._simulate()
+                self._simulate_frame()
             self.graph = capture.graph
 
     def _build_dynamic_bindings(self, dynamic_paths: list[str]) -> None:
@@ -543,23 +600,50 @@ class Example:
                 f"path={path} parent={None if parent is None else parent.path}"
             )
 
+        if self._dynamic_bindings:
+            body_indices, handles, parent_inverses, geometry_offsets = zip(*self._dynamic_bindings, strict=True)
+            self._dynamic_body_indices = wp.array(body_indices, dtype=wp.int32, device=self.device)
+            self._dynamic_handle_indices = wp.array(
+                [handle.index for handle in handles], dtype=wp.int32, device=self.device
+            )
+            self._dynamic_parent_inverses = wp.array(parent_inverses, dtype=wp.mat44, device=self.device)
+            self._dynamic_geometry_offsets = wp.array(geometry_offsets, dtype=wp.mat44, device=self.device)
+            self._renderer_from_physics = wp.array([_RENDERER_FROM_PHYSICS], dtype=wp.mat44, device=self.device)
+            self._physics_from_renderer = wp.array([physics_from_renderer], dtype=wp.mat44, device=self.device)
+            self._dynamic_local_transforms = wp.empty(len(self._dynamic_bindings), dtype=wp.mat44, device=self.device)
+
     def _key_down(self, key: str) -> bool:
         """Return whether an interactive drive key is held."""
         return bool(hasattr(self.viewer, "is_key_down") and self.viewer.is_key_down(key))
 
-    def _update_drive_controls(self) -> None:
-        """Upload wheel velocity and steering-position commands."""
-        throttle = float(self._key_down("i")) - float(self._key_down("k"))
-        steering = float(self._key_down("j")) - float(self._key_down("l"))
-        wheel_speed = throttle * DRIVE_SPEED
-        for dof in self._wheel_dofs:
-            self._target_qd_host[dof] = wheel_speed
-        steering_target = steering * STEERING_TRAVEL
-        max_delta = STEERING_RATE * self.frame_dt
-        self._steering_command += float(np.clip(steering_target - self._steering_command, -max_delta, max_delta))
-        self._target_q_host[self._steering_target_index] = self._steering_command
-        self.control.joint_target_q.assign(self._target_q_host)
-        self.control.joint_target_qd.assign(self._target_qd_host)
+    def _update_drive_input(self) -> None:
+        """Upload the two host-polled inputs consumed by the captured control kernel."""
+        self._drive_input_host[0] = float(self._key_down("i")) - float(self._key_down("k"))
+        self._drive_input_host[1] = float(self._key_down("j")) - float(self._key_down("l"))
+        self._drive_input_device.assign(self._drive_input_host)
+
+    def _apply_drive_controls(self) -> None:
+        """Ramp and apply vehicle commands entirely on the simulation device."""
+        wp.launch(
+            _update_vehicle_controls,
+            dim=1,
+            inputs=[
+                self._drive_input_device,
+                self._wheel_dofs_device,
+                self._steering_target_index,
+                self.frame_dt,
+                self._wheel_speed_command,
+                self._steering_command,
+                self.control.joint_target_q,
+                self.control.joint_target_qd,
+            ],
+            device=self.device,
+        )
+
+    def _simulate_frame(self) -> None:
+        """Apply controls and simulate one graph-capturable frame."""
+        self._apply_drive_controls()
+        self._simulate()
 
     def _simulate(self) -> None:
         self.state.clear_forces()
@@ -578,9 +662,9 @@ class Example:
         if not self.physics_enabled:
             self.sim_time += self.frame_dt
             return
-        self._update_drive_controls()
+        self._update_drive_input()
         if self.graph is None:
-            self._simulate()
+            self._simulate_frame()
         else:
             wp.capture_launch(self.graph)
         self.sim_time += self.frame_dt
@@ -593,28 +677,33 @@ class Example:
         self.state.assign(self.initial_state)
         self.state.clear_forces()
         self.collision_pipeline.reset_contact_matching()
-        self._target_q_host.fill(0.0)
-        self._steering_command = 0.0
-        self._target_qd_host.fill(0.0)
-        self.control.joint_target_q.assign(self._target_q_host)
-        self.control.joint_target_qd.assign(self._target_qd_host)
+        self._drive_input_host.fill(0.0)
+        self._drive_input_device.zero_()
+        self._wheel_speed_command.zero_()
+        self._steering_command.zero_()
+        self._apply_drive_controls()
         self._sync_dynamic_render_transforms()
 
     def _sync_dynamic_render_transforms(self) -> None:
         if not self._dynamic_bindings:
             return
-        poses = self.state.body_q.numpy()
-        physics_from_renderer = np.linalg.inv(_RENDERER_FROM_PHYSICS)
-        handles = []
-        local_matrices = []
-        for body_index, handle, parent_inverse, geometry_offset in self._dynamic_bindings:
-            rigid_physics = _pose_matrix(poses[body_index])
-            rigid_renderer = _RENDERER_FROM_PHYSICS @ rigid_physics @ physics_from_renderer
-            handles.append(handle)
-            local_matrices.append(parent_inverse @ rigid_renderer @ geometry_offset)
-        self.viewer.usd_scene.update_local_transforms(
-            handles,
-            np.asarray(local_matrices, dtype=np.float32),
+        wp.launch(
+            _compute_dynamic_local_transforms,
+            dim=len(self._dynamic_bindings),
+            inputs=[
+                self.state.body_q,
+                self._dynamic_body_indices,
+                self._dynamic_parent_inverses,
+                self._dynamic_geometry_offsets,
+                self._renderer_from_physics,
+                self._physics_from_renderer,
+            ],
+            outputs=[self._dynamic_local_transforms],
+            device=self.device,
+        )
+        self.viewer.usd_scene.update_local_transforms_device(
+            self._dynamic_handle_indices,
+            self._dynamic_local_transforms,
         )
 
     def render(self) -> None:
@@ -663,6 +752,12 @@ if __name__ == "__main__":
         action=argparse.BooleanOptionalAction,
         default=LOAD_USD_ENVIRONMENT,
         help="Load a supported USD DomeLight texture into the OptiX environment.",
+    )
+    parser.add_argument(
+        "--usd-emissive-materials",
+        action=argparse.BooleanOptionalAction,
+        default=LOAD_USD_EMISSIVE_MATERIALS,
+        help="Preserve emissive USD material inputs instead of loading them with zero emission.",
     )
     parser.add_argument(
         "--usd-environment-scale",
