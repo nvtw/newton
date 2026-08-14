@@ -36,6 +36,7 @@ from newton._src.sim.collide import (
     _build_soft_edge_rigid_contact_pairs,
     _build_soft_face_rigid_contact_pairs,
     _build_soft_particle_rigid_contact_pairs,
+    _compute_per_world_mask_pair_max,
     _compute_per_world_shape_pairs_max,
     _count_soft_particle_rigid_contact_pairs,
     _estimate_rigid_contact_max,
@@ -2025,6 +2026,56 @@ class TestShapePairsMaxScaling(unittest.TestCase):
         model.shape_flags = wp.array(flags, dtype=wp.int32)
         return model
 
+    def test_mask_pair_bounds_respect_world_segments(self):
+        """Count selected pair categories across local and global world segments."""
+        model = self._make_model(num_worlds=2, shapes_per_world=2, num_global=2)
+        same_mask = np.array([True, False, True, False, True, True])
+        first_mask = np.array([True, False, True, False, True, False])
+        second_mask = np.array([False, True, False, True, False, True])
+
+        self.assertEqual(_compute_per_world_mask_pair_max(model, same_mask), 7)
+        self.assertEqual(_compute_per_world_mask_pair_max(model, first_mask, second_mask), 9)
+
+    def test_mesh_work_buffers_use_category_bounds(self):
+        """Size mesh work buffers from exact routed shape categories."""
+        builder = newton.ModelBuilder()
+        mesh = newton.Mesh.create_box(0.1, 0.1, 0.1)
+        for x in (-0.5, 0.5):
+            body = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.0)))
+            builder.add_shape_mesh(body, mesh=mesh)
+        for x in range(6):
+            body = builder.add_body(xform=wp.transform(wp.vec3(float(x), 2.0, 0.0)))
+            builder.add_shape_box(body)
+        builder.add_ground_plane()
+        model = builder.finalize()
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", reduce_contacts=True)
+        narrow_phase = pipeline.narrow_phase
+
+        self.assertEqual(narrow_phase.max_mesh_mesh_pairs, 1)
+        self.assertEqual(narrow_phase.shape_pairs_mesh_mesh.shape[0], 1)
+        self.assertEqual(narrow_phase.mesh_mesh_block_offsets.shape[0], 2)
+        self.assertEqual(narrow_phase.max_mesh_plane_pairs, 2)
+        self.assertEqual(narrow_phase.shape_pairs_mesh_plane.shape[0], 2)
+        self.assertEqual(narrow_phase.mesh_plane_block_offsets.shape[0], 3)
+
+    def test_zero_capacity_mesh_stages_preserve_mesh_convex_contacts(self):
+        """Keep mesh-convex contacts when unrelated mesh stages have zero capacity."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        mesh_body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()))
+        builder.add_shape_mesh(mesh_body, mesh=newton.Mesh.create_box(0.5, 0.5, 0.5))
+        box_body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.9), wp.quat_identity()))
+        builder.add_shape_box(box_body, hx=0.5, hy=0.5, hz=0.5)
+        model = builder.finalize()
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", reduce_contacts=True)
+        contacts = pipeline.contacts()
+
+        self.assertEqual(pipeline.narrow_phase.max_mesh_mesh_pairs, 0)
+        self.assertEqual(pipeline.narrow_phase.max_mesh_plane_pairs, 0)
+        pipeline.collide(state, contacts)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
     def test_single_world_matches_global_formula(self):
         """Single world should give the same result as the naive N*(N-1)/2."""
         model = self._make_model(num_worlds=1, shapes_per_world=20)
@@ -2388,6 +2439,92 @@ def test_mesh_convex_with_sdf_routes_to_sdf_contact(test, device):
     test.assertGreater(sdf_pair_count, 0)
     test.assertEqual(mesh_convex_pair_count, 0)
     test.assertGreater(contact_count, 0)
+
+
+def test_deferred_convex_sdf_edges_use_deduplicated_topology(test, device):
+    """Finalize deferred convex SDF edges against deduplicated vertices."""
+    convex = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=True, compute_inertia=False)
+    builder = newton.ModelBuilder()
+    shape = builder.add_shape_convex_hull(body=-1, mesh=convex)
+    builder.shape_sdf_max_resolution[shape] = 16
+
+    model = builder.finalize(device=device)
+
+    test.assertGreater(int(model.shape_edge_range.numpy()[shape][1]), 0)
+    test.assertEqual(model._mesh_keep_alive[0].points.shape[0], 8)
+
+
+def test_deferred_sdf_cache_distinguishes_mesh_topology(test, device):
+    """Keep deferred SDFs separate for regular and convex mesh topology."""
+    for regular_first in (True, False):
+        source = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=True, compute_inertia=False)
+        builder = newton.ModelBuilder()
+        add_shapes = (builder.add_shape_mesh, builder.add_shape_convex_hull)
+        if not regular_first:
+            add_shapes = tuple(reversed(add_shapes))
+
+        shapes = [add_shape(body=-1, mesh=source) for add_shape in add_shapes]
+        for shape in shapes:
+            builder.shape_sdf_max_resolution[shape] = 16
+
+        model = builder.finalize(device=device)
+        sdf_indices = model._shape_sdf_index.numpy()
+
+        test.assertNotEqual(int(sdf_indices[shapes[0]]), int(sdf_indices[shapes[1]]))
+
+
+def test_scalar_sdf_texture_routes_to_sdf_contact(test, device):
+    """Preserve mesh-SDF contacts across paired and scalar texture storage."""
+
+    def collide(paired_samples):
+        mesh = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=False, compute_inertia=False)
+        convex = newton.Mesh.create_box(0.5, 0.5, 0.5, duplicate_vertices=False, compute_inertia=False)
+        mesh.build_sdf(max_resolution=32, paired_samples=paired_samples, device=device)
+        convex.build_sdf(max_resolution=32, paired_samples=paired_samples, device=device)
+
+        builder = newton.ModelBuilder(sdf_texture_paired_samples=paired_samples)
+        body_mesh = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()))
+        body_convex = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.9), wp.quat_identity()))
+        builder.add_shape_mesh(body=body_mesh, mesh=mesh)
+        builder.add_shape_convex_hull(body=body_convex, mesh=convex)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+        pipeline = newton.CollisionPipeline(model, broad_phase="sap", rigid_contact_max=256)
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        test.assertGreater(count, 0)
+        shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+        shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+        point0 = contacts.rigid_contact_point0.numpy()[:count]
+        point1 = contacts.rigid_contact_point1.numpy()[:count]
+        normal = contacts.rigid_contact_normal.numpy()[:count]
+        order = np.lexsort(
+            (point1[:, 2], point1[:, 1], point1[:, 0], point0[:, 2], point0[:, 1], point0[:, 0], shape1, shape0)
+        )
+        body_q = state.body_q.numpy()
+        body0 = model.shape_body.numpy()[shape0]
+        body1 = model.shape_body.numpy()[shape1]
+        point0_world = point0 + body_q[body0, :3]
+        point1_world = point1 + body_q[body1, :3]
+        penetration = np.einsum("ij,ij->i", point1_world - point0_world, normal)
+        return mesh.sdf._coarse_texture.num_channels, tuple(
+            values[order] for values in (shape0, shape1, point0, point1, normal, penetration)
+        )
+
+    paired_channels, paired = collide(True)
+    scalar_channels, scalar = collide(False)
+    test.assertEqual(paired_channels, 2)
+    test.assertEqual(scalar_channels, 1)
+    for name, paired_values, scalar_values in zip(
+        ("shape0", "shape1", "point0", "point1", "normal", "penetration"), paired, scalar, strict=True
+    ):
+        if name.startswith("shape"):
+            np.testing.assert_array_equal(scalar_values, paired_values, err_msg=name)
+        else:
+            np.testing.assert_allclose(scalar_values, paired_values, rtol=1.0e-5, atol=1.0e-6, err_msg=name)
 
 
 def test_mesh_convex_one_sdf_keeps_existing_route(test, device):
@@ -3267,6 +3404,30 @@ add_function_test(
     TestPlanarSDFRouting,
     "test_mesh_convex_with_sdf_routes_to_sdf_contact",
     test_mesh_convex_with_sdf_routes_to_sdf_contact,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestPlanarSDFRouting,
+    "test_deferred_convex_sdf_edges_use_deduplicated_topology",
+    test_deferred_convex_sdf_edges_use_deduplicated_topology,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestPlanarSDFRouting,
+    "test_deferred_sdf_cache_distinguishes_mesh_topology",
+    test_deferred_sdf_cache_distinguishes_mesh_topology,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+add_function_test(
+    TestPlanarSDFRouting,
+    "test_scalar_sdf_texture_routes_to_sdf_contact",
+    test_scalar_sdf_texture_routes_to_sdf_contact,
     devices=get_cuda_test_devices(),
     check_output=False,
 )
