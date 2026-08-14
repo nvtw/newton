@@ -2124,6 +2124,8 @@ def parse_usd(
         linear_initial_vel: list[float | None] = []
         angular_initial_pos: list[float | None] = []
         angular_initial_vel: list[float | None] = []
+        linear_alias_offsets: dict[str, int] = {}
+        angular_alias_offsets: dict[str, int] = {}
         enabled_count = 0
         collision_filter_parent = False
 
@@ -2251,18 +2253,45 @@ def parse_usd(
             if _should_write_solreflimit_mode():
                 sibling_dof_attrs[solreflimit_mode_key] = dof.limit_solref_mode
 
-            if is_revolute:
-                angular_axes.append(ax)
-                angular_prim_paths.append(jp)
-                angular_initial_pos.append(initial_position)
-                angular_initial_vel.append(initial_velocity)
-                angular_dof_custom.append(sibling_dof_attrs)
+            axes = angular_axes if is_revolute else linear_axes
+            prim_paths = angular_prim_paths if is_revolute else linear_prim_paths
+            initial_positions = angular_initial_pos if is_revolute else linear_initial_pos
+            initial_velocities = angular_initial_vel if is_revolute else linear_initial_vel
+            dof_custom = angular_dof_custom if is_revolute else linear_dof_custom
+            alias_offsets = angular_alias_offsets if is_revolute else linear_alias_offsets
+
+            duplicate_index = next(
+                (
+                    axis_index
+                    for axis_index, existing in enumerate(axes)
+                    if float(wp.dot(existing.axis, ax.axis)) > 1.0 - 1.0e-6
+                ),
+                None,
+            )
+            if duplicate_index is None:
+                alias_offsets[jp] = len(axes)
+                axes.append(ax)
+                prim_paths.append(jp)
+                initial_positions.append(initial_position)
+                initial_velocities.append(initial_velocity)
+                dof_custom.append(sibling_dof_attrs)
             else:
-                linear_axes.append(ax)
-                linear_prim_paths.append(jp)
-                linear_initial_pos.append(initial_position)
-                linear_initial_vel.append(initial_velocity)
-                linear_dof_custom.append(sibling_dof_attrs)
+                # Some PhysX exporters stack a hard travel joint and a narrow,
+                # soft-limit joint on the same body pair and axis. Represent the
+                # latter as a drive on the single Newton coordinate so D6 axes
+                # remain independent while preserving the suspension spring.
+                existing = axes[duplicate_index]
+                duplicate_is_stiffer = ax.limit_ke > existing.limit_ke or ax.limit_kd > existing.limit_kd
+                if duplicate_is_stiffer and math.isfinite(ax.limit_lower) and math.isfinite(ax.limit_upper):
+                    existing.target_pos = 0.5 * (ax.limit_lower + ax.limit_upper)
+                    existing.target_vel = ax.target_vel
+                    existing.target_ke = max(existing.target_ke, ax.limit_ke)
+                    existing.target_kd = max(existing.target_kd, ax.limit_kd)
+                else:
+                    existing.limit_lower = max(existing.limit_lower, ax.limit_lower)
+                    existing.limit_upper = min(existing.limit_upper, ax.limit_upper)
+                alias_offsets[jp] = duplicate_index
+                dof_custom[duplicate_index].update(sibling_dof_attrs)
 
             enabled_count += 1
 
@@ -2314,8 +2343,10 @@ def parse_usd(
         # Register all original joint prim paths in path_joint_map and track per-path DOF offsets
         for jp in joint_paths:
             path_joint_map[jp] = joint_index
-        for dof_idx, dof_path in enumerate(dof_prim_paths):
-            merged_dof_offset[dof_path] = dof_idx
+            if jp in linear_alias_offsets:
+                merged_dof_offset[jp] = linear_alias_offsets[jp]
+            else:
+                merged_dof_offset[jp] = len(linear_axes) + angular_alias_offsets[jp]
 
         # Apply initial positions/velocities
         q_start = builder.joint_q_start[joint_index]
@@ -4961,6 +4992,39 @@ def parse_usd(
             label=joint_path,
         )
 
+    # Resolve standard USD CollisionGroup collections after all collider paths
+    # are known. In particular, a group that filters itself disables collision
+    # among all of its members, a common vehicle-rig authoring pattern.
+    collision_group_shapes: dict[str, list[int]] = {}
+    collision_groups = []
+    for prim in stage.TraverseAll():
+        if not prim.IsA(UsdPhysics.CollisionGroup):
+            continue
+        group = UsdPhysics.CollisionGroup(prim)
+        collection = Usd.CollectionAPI.Get(prim, "colliders")
+        if not collection:
+            continue
+        included_paths = Usd.CollectionAPI.ComputeIncludedPaths(collection.ComputeMembershipQuery(), stage)
+        shape_indices = {
+            shape_index
+            for shape_path, shape_index in path_shape_map.items()
+            if any(Sdf.Path(shape_path).HasPrefix(included_path) for included_path in included_paths)
+        }
+        group_path = str(prim.GetPath())
+        collision_group_shapes[group_path] = sorted(shape_indices)
+        collision_groups.append(group)
+
+    existing_filter_pairs = set(builder.shape_collision_filter_pairs)
+    for group in collision_groups:
+        source_shapes = collision_group_shapes.get(str(group.GetPath()), [])
+        for target_path in group.GetFilteredGroupsRel().GetTargets():
+            target_shapes = collision_group_shapes.get(str(target_path), [])
+            for shape_a in source_shapes:
+                for shape_b in target_shapes:
+                    pair = (min(shape_a, shape_b), max(shape_a, shape_b))
+                    if shape_a != shape_b and pair not in existing_filter_pairs:
+                        builder.add_shape_collision_filter_pair(*pair)
+                        existing_filter_pairs.add(pair)
     # Parse Newton actuator prims from the USD stage.
     from ..actuators.delay import Delay  # noqa: PLC0415
     from ..actuators.usd_parser import parse_actuator_prim  # noqa: PLC0415
