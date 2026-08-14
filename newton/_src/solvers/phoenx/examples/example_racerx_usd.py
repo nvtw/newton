@@ -34,7 +34,7 @@ USD_MAX_TEXTURE_SIZE = 4096
 MAX_CONTACT_GAP = 0.01
 OPTIX_DLSS_QUALITY = "quality"
 GROUND_HEIGHT = 0.0
-GROUND_SIZE = 100.0
+GROUND_VISUAL_SIZE = 1000.0
 VEHICLE_CONTACT_GAP = 0.001
 DRIVE_SPEED = 70.0
 DRIVE_DAMPING = 0.35
@@ -412,12 +412,9 @@ class Example:
         self._wheel_dofs, self._steering_joint, self._steering_dof = _configure_vehicle_joints(builder, result)
         self._steering_target_index = builder.joint_q_start[self._steering_joint] + 1
         _add_closed_loop_joint_metadata(builder)
-        builder.add_shape_plane(
-            plane=(0.0, 0.0, 1.0, -GROUND_HEIGHT),
-            width=GROUND_SIZE,
-            length=GROUND_SIZE,
+        builder.add_ground_plane(
+            height=GROUND_HEIGHT,
             cfg=newton.ModelBuilder.ShapeConfig(mu=0.9, gap=VEHICLE_CONTACT_GAP),
-            label="ground_plane",
         )
 
         self.physics_result = result
@@ -478,6 +475,14 @@ class Example:
 
         self.viewer.set_model(self.model)
         self._build_dynamic_bindings(dynamic_paths)
+
+        self._ground_visual_xforms = wp.array(
+            [wp.transform((0.0, 0.0, GROUND_HEIGHT), wp.quat_identity())],
+            dtype=wp.transform,
+            device=self.device,
+        )
+        self._ground_visual_colors = wp.array([wp.vec3(0.32, 0.34, 0.38)], dtype=wp.vec3, device=self.device)
+        self._ground_visual_materials = wp.array([wp.vec4(0.82, 0.0, 0.0, 0.0)], dtype=wp.vec4, device=self.device)
 
         self.graph = None
         if self.device.is_cuda:
@@ -591,6 +596,15 @@ class Example:
         if self.physics_enabled:
             self._sync_dynamic_render_transforms()
         self.viewer.begin_frame(self.sim_time)
+        if self.physics_enabled:
+            self.viewer.log_shapes(
+                "/racerx/ground",
+                newton.GeoType.PLANE,
+                (GROUND_VISUAL_SIZE, GROUND_VISUAL_SIZE),
+                self._ground_visual_xforms,
+                colors=self._ground_visual_colors,
+                materials=self._ground_visual_materials,
+            )
         self.viewer.end_frame()
 
     def test_final(self) -> None:
