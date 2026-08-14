@@ -29,6 +29,7 @@ DEFAULT_USD_PATH = Path("/home/twidmer/Documents/Meshes/RacerX/Collected_A3_phys
 LOAD_USD_ENVIRONMENT = False
 LOAD_USD_EMISSIVE_MATERIALS = False
 ENABLE_PHYSICS = True
+ENABLE_CHASE_CAMERA = True
 PRINT_PHYSICS_DATA = True
 START_PAUSED = True
 USD_MAX_TEXTURE_SIZE = 4096
@@ -38,19 +39,25 @@ GROUND_HEIGHT = 0.0
 GROUND_VISUAL_SIZE = 1000.0
 SIM_SUBSTEPS = 3
 SOLVER_ITERATIONS = 6
+CHASE_CAMERA_DISTANCE = 0.45
+CHASE_CAMERA_HEIGHT = 0.18
+CHASE_CAMERA_LOOK_AHEAD = 0.12
+CHASE_CAMERA_TARGET_HEIGHT = 0.05
+CHASE_CAMERA_RESPONSE = 10.0
+CHASE_CAMERA_FOV = 55.0
 VEHICLE_CONTACT_GAP = 0.001
 DRIVE_SPEED = 70.0
 DRIVE_ACCELERATION = 140.0
 DRIVE_DECELERATION = 280.0
 DRIVE_DAMPING = 0.35
 DRIVE_TORQUE_LIMIT = 3.0
-SUSPENSION_STIFFNESS_SCALE = 0.08
+SUSPENSION_STIFFNESS_SCALE = 0.16
 STEERING_TRAVEL = 0.005
 STEERING_LIMIT = 0.006
-STEERING_RATE = 0.02
-STEERING_STIFFNESS = 2000.0
-STEERING_DAMPING = 40.0
-STEERING_FORCE_LIMIT = 20.0
+STEERING_RATE = 0.03
+STEERING_STIFFNESS = 8000.0
+STEERING_DAMPING = 80.0
+STEERING_FORCE_LIMIT = 80.0
 
 WHEEL_JOINT_PATHS = (
     "/World/Joints/FR/Hinge_Wheel_WheelLinkage",
@@ -59,6 +66,7 @@ WHEEL_JOINT_PATHS = (
     "/World/Joints/RL/Hinge_Wheel_WheelLinkage",
 )
 STEERING_JOINT_PATH = "/World/Joints/Steering/Steering_Link_Drive"
+CHASSIS_BODY_PATH = "/World/RC_Car/SM_RCCar_A1_Chassis_01"
 NON_PHYSICAL_RIGID_BODY_PATHS = {
     "/World/FX_wheel_dust_flow_01": "VFX helper has no collider",
     "/World/FlowCandleWind": "flow helper has no collider",
@@ -410,6 +418,24 @@ def _pose_matrix(pose) -> np.ndarray:
     return matrix
 
 
+def _chase_camera_targets(pose) -> tuple[np.ndarray, np.ndarray]:
+    """Return a level chase-camera eye and target from one chassis pose."""
+    chassis_world = _pose_matrix(pose)
+    position = chassis_world[:3, 3]
+    forward = chassis_world[:3, 0].copy()
+    forward[2] = 0.0
+    forward_norm = float(np.linalg.norm(forward))
+    if forward_norm <= 1.0e-6:
+        forward = np.array((1.0, 0.0, 0.0), dtype=np.float32)
+    else:
+        forward /= forward_norm
+    eye = position - CHASE_CAMERA_DISTANCE * forward
+    eye[2] += CHASE_CAMERA_HEIGHT
+    target = position + CHASE_CAMERA_LOOK_AHEAD * forward
+    target[2] += CHASE_CAMERA_TARGET_HEIGHT
+    return eye, target
+
+
 def _nearest_transform_parent(usd_scene, path: str):
     """Return the nearest transformable ancestor handle for a USD path."""
     prim = usd_scene.get_prim(path).GetParent()
@@ -451,6 +477,9 @@ class Example:
             _print_physics_inventory(stage)
 
         self.physics_enabled = bool(args.physics)
+        self.chase_camera_enabled = bool(args.chase_camera and self.physics_enabled)
+        self._chase_camera_position = None
+        self._chase_camera_target = None
         self.physics_result = None
         self._dynamic_bindings = []
         if self.physics_enabled:
@@ -460,6 +489,9 @@ class Example:
             self.graph = None
 
         camera_path = _select_authored_camera(viewer, args.usd_camera)
+        if self.chase_camera_enabled:
+            self._update_chase_camera(snap=True)
+            camera_path = "<RacerX chase camera>"
         print(
             f"[PhoenX RacerX USD] loaded {usd_path} "
             f"({viewer.usd_scene.transform_count} retained transforms, camera={camera_path})"
@@ -494,6 +526,7 @@ class Example:
         )
 
         self.physics_result = result
+        self._chassis_body = int(result["path_body_map"][CHASSIS_BODY_PATH])
         self._builder = builder
 
         for path, reason in sorted(ignored.items()):
@@ -541,6 +574,8 @@ class Example:
         self._wheel_dofs_device = wp.array(self._wheel_dofs, dtype=wp.int32, device=self.device)
         self._wheel_speed_command = wp.zeros(1, dtype=float, device=self.device)
         self._steering_command = wp.zeros(1, dtype=float, device=self.device)
+        self._chassis_pose_device = wp.empty(1, dtype=wp.transform, device=self.device)
+        self._capture_chassis_pose()
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
             collision_pipeline=self.collision_pipeline,
@@ -640,10 +675,38 @@ class Example:
             device=self.device,
         )
 
+    def _capture_chassis_pose(self) -> None:
+        """Copy only the chassis pose needed by the host-side camera controller."""
+        wp.copy(
+            self._chassis_pose_device,
+            self.state.body_q,
+            src_offset=self._chassis_body,
+            count=1,
+        )
+
+    def _update_chase_camera(self, *, snap: bool = False) -> None:
+        """Smoothly fly a level camera behind the current chassis pose."""
+        eye, target = _chase_camera_targets(self._chassis_pose_device.numpy()[0])
+        if snap or self._chase_camera_position is None:
+            self._chase_camera_position = eye
+            self._chase_camera_target = target
+        else:
+            blend = 1.0 - math.exp(-CHASE_CAMERA_RESPONSE * self.frame_dt)
+            self._chase_camera_position += blend * (eye - self._chase_camera_position)
+            self._chase_camera_target += blend * (target - self._chase_camera_target)
+        self.viewer.set_camera_look_at(
+            self._chase_camera_position,
+            self._chase_camera_target,
+            fov=CHASE_CAMERA_FOV,
+            force=True,
+        )
+
     def _simulate_frame(self) -> None:
         """Apply controls and simulate one graph-capturable frame."""
         self._apply_drive_controls()
         self._simulate()
+        if self.chase_camera_enabled:
+            self._capture_chassis_pose()
 
     def _simulate(self) -> None:
         self.state.clear_forces()
@@ -684,6 +747,10 @@ class Example:
         self._apply_drive_controls()
         self._sync_dynamic_render_transforms()
 
+        self._capture_chassis_pose()
+        if self.chase_camera_enabled:
+            self._update_chase_camera(snap=True)
+
     def _sync_dynamic_render_transforms(self) -> None:
         if not self._dynamic_bindings:
             return
@@ -711,6 +778,8 @@ class Example:
         if self.physics_enabled:
             self._sync_dynamic_render_transforms()
         self.viewer.begin_frame(self.sim_time)
+        if self.chase_camera_enabled:
+            self._update_chase_camera()
         if self.physics_enabled:
             self.viewer.log_shapes(
                 "/racerx/ground",
@@ -770,6 +839,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Authored perspective camera path; defaults to the overview camera.",
+    )
+    parser.add_argument(
+        "--chase-camera",
+        action=argparse.BooleanOptionalAction,
+        default=ENABLE_CHASE_CAMERA,
+        help="Fly a game-style camera behind the simulated chassis.",
     )
     parser.add_argument(
         "--physics",

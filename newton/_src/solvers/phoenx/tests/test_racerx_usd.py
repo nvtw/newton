@@ -95,7 +95,11 @@ class TestRacerXUsd(unittest.TestCase):
         )
 
         self.assertEqual(wheel_dofs, [0, 1, 2, 3])
-        self.assertEqual(racerx.SUSPENSION_STIFFNESS_SCALE, 0.08)
+        self.assertEqual(racerx.SUSPENSION_STIFFNESS_SCALE, 0.16)
+        self.assertEqual(racerx.STEERING_RATE, 0.03)
+        self.assertEqual(racerx.STEERING_STIFFNESS, 8000.0)
+        self.assertEqual(racerx.STEERING_DAMPING, 80.0)
+        self.assertEqual(racerx.STEERING_FORCE_LIMIT, 80.0)
         for dof in wheel_dofs:
             self.assertEqual(builder.joint_target_mode[dof], newton.JointTargetMode.VELOCITY)
             self.assertEqual(builder.joint_effort_limit[dof], racerx.DRIVE_TORQUE_LIMIT)
@@ -159,6 +163,21 @@ class TestRacerXUsd(unittest.TestCase):
         for _ in range(15):
             launch() if graph is None else wp.capture_launch(graph)
         self.assertAlmostEqual(float(wheel_command.numpy()[0]), 0.0, places=4)
+
+    def test_chase_camera_stays_level_behind_chassis(self) -> None:
+        """Place the chase camera behind the chassis without inheriting roll."""
+        pose = np.asarray((1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0), dtype=np.float32)
+
+        eye, target = racerx._chase_camera_targets(pose)
+
+        np.testing.assert_allclose(
+            eye,
+            (1.0 - racerx.CHASE_CAMERA_DISTANCE, 2.0, 3.0 + racerx.CHASE_CAMERA_HEIGHT),
+        )
+        np.testing.assert_allclose(
+            target,
+            (1.0 + racerx.CHASE_CAMERA_LOOK_AHEAD, 2.0, 3.0 + racerx.CHASE_CAMERA_TARGET_HEIGHT),
+        )
 
     def test_self_filtered_collision_group_excludes_member_pair(self) -> None:
         """Translate a self-filtered USD collision group into shape exclusions."""
