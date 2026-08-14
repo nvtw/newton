@@ -100,6 +100,7 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertEqual(racerx.STEERING_STIFFNESS, 8000.0)
         self.assertEqual(racerx.STEERING_DAMPING, 80.0)
         self.assertEqual(racerx.STEERING_FORCE_LIMIT, 80.0)
+        self.assertEqual(racerx.STEERING_ASSIST_FORCE, 400.0)
         for dof in wheel_dofs:
             self.assertEqual(builder.joint_target_mode[dof], newton.JointTargetMode.VELOCITY)
             self.assertEqual(builder.joint_effort_limit[dof], racerx.DRIVE_TORQUE_LIMIT)
@@ -129,6 +130,7 @@ class TestRacerXUsd(unittest.TestCase):
         steering_command = wp.zeros(1, dtype=float, device=device)
         target_q = wp.zeros(10, dtype=float, device=device)
         target_qd = wp.zeros(10, dtype=float, device=device)
+        joint_f = wp.zeros(10, dtype=float, device=device)
 
         def launch():
             wp.launch(
@@ -138,11 +140,13 @@ class TestRacerXUsd(unittest.TestCase):
                     drive_input,
                     wheel_dofs,
                     9,
+                    9,
                     1.0 / 60.0,
                     wheel_command,
                     steering_command,
                     target_q,
                     target_qd,
+                    joint_f,
                 ],
                 device=device,
             )
@@ -158,11 +162,13 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertAlmostEqual(float(wheel_command.numpy()[0]), racerx.DRIVE_SPEED, places=4)
         self.assertAlmostEqual(float(target_q.numpy()[9]), racerx.STEERING_TRAVEL, places=5)
         np.testing.assert_allclose(target_qd.numpy()[:4], racerx.DRIVE_SPEED, rtol=0.0, atol=1.0e-4)
+        self.assertAlmostEqual(float(joint_f.numpy()[9]), racerx.STEERING_ASSIST_FORCE)
 
         drive_input.zero_()
         for _ in range(15):
             launch() if graph is None else wp.capture_launch(graph)
         self.assertAlmostEqual(float(wheel_command.numpy()[0]), 0.0, places=4)
+        self.assertAlmostEqual(float(joint_f.numpy()[9]), 0.0, places=4)
 
     def test_chase_camera_stays_level_behind_chassis(self) -> None:
         """Place the chase camera behind the chassis without inheriting roll."""
@@ -176,6 +182,43 @@ class TestRacerXUsd(unittest.TestCase):
         )
         np.testing.assert_allclose(
             target,
+            (1.0 + racerx.CHASE_CAMERA_LOOK_AHEAD, 2.0, 3.0 + racerx.CHASE_CAMERA_TARGET_HEIGHT),
+        )
+
+    def test_chase_camera_kernel_runs_inside_cuda_graph(self) -> None:
+        """Publish the level chase camera from a reusable CUDA graph."""
+        device = wp.get_device()
+        body_q = wp.array(
+            [wp.transform((1.0, 2.0, 3.0), wp.quat_identity())],
+            dtype=wp.transform,
+            device=device,
+        )
+        initialized = wp.zeros(1, dtype=wp.int32, device=device)
+        positions = wp.empty(1, dtype=wp.vec3, device=device)
+        targets = wp.empty(1, dtype=wp.vec3, device=device)
+
+        def launch():
+            wp.launch(
+                racerx._update_chase_camera_device,
+                dim=1,
+                inputs=[body_q, 0, 1.0 / 60.0, 0, initialized],
+                outputs=[positions, targets],
+                device=device,
+            )
+
+        graph = None
+        if device.is_cuda:
+            with wp.ScopedCapture() as capture:
+                launch()
+            graph = capture.graph
+        launch() if graph is None else wp.capture_launch(graph)
+
+        np.testing.assert_allclose(
+            positions.numpy()[0],
+            (1.0 - racerx.CHASE_CAMERA_DISTANCE, 2.0, 3.0 + racerx.CHASE_CAMERA_HEIGHT),
+        )
+        np.testing.assert_allclose(
+            targets.numpy()[0],
             (1.0 + racerx.CHASE_CAMERA_LOOK_AHEAD, 2.0, 3.0 + racerx.CHASE_CAMERA_TARGET_HEIGHT),
         )
 

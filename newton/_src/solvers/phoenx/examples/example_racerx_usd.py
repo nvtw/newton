@@ -58,6 +58,7 @@ STEERING_RATE = 0.03
 STEERING_STIFFNESS = 8000.0
 STEERING_DAMPING = 80.0
 STEERING_FORCE_LIMIT = 80.0
+STEERING_ASSIST_FORCE = 400.0
 
 WHEEL_JOINT_PATHS = (
     "/World/Joints/FR/Hinge_Wheel_WheelLinkage",
@@ -87,12 +88,14 @@ _RENDERER_FROM_PHYSICS = np.array(
 def _update_vehicle_controls(
     drive_input: wp.array[float],
     wheel_dofs: wp.array[wp.int32],
+    steering_dof: wp.int32,
     steering_target_index: wp.int32,
     frame_dt: float,
     wheel_speed_command: wp.array[float],
     steering_command: wp.array[float],
     joint_target_q: wp.array[float],
     joint_target_qd: wp.array[float],
+    joint_f: wp.array[float],
 ):
     target_speed = drive_input[0] * DRIVE_SPEED
     braking = target_speed == 0.0 or wheel_speed_command[0] * target_speed < 0.0
@@ -112,6 +115,37 @@ def _update_vehicle_controls(
     )
     steering_command[0] += steering_delta
     joint_target_q[steering_target_index] = steering_command[0]
+    joint_f[steering_dof] = drive_input[1] * STEERING_ASSIST_FORCE
+
+
+@wp.kernel
+def _update_chase_camera_device(
+    body_q: wp.array[wp.transform],
+    chassis_body: wp.int32,
+    frame_dt: float,
+    snap: wp.int32,
+    initialized: wp.array[wp.int32],
+    camera_positions: wp.array[wp.vec3],
+    camera_targets: wp.array[wp.vec3],
+):
+    pose = body_q[chassis_body]
+    position = wp.transform_get_translation(pose)
+    forward = wp.quat_rotate(wp.transform_get_rotation(pose), wp.vec3(1.0, 0.0, 0.0))
+    forward = wp.vec3(forward[0], forward[1], 0.0)
+    if wp.length(forward) <= 1.0e-6:
+        forward = wp.vec3(1.0, 0.0, 0.0)
+    else:
+        forward = wp.normalize(forward)
+    desired_eye = position - CHASE_CAMERA_DISTANCE * forward + wp.vec3(0.0, 0.0, CHASE_CAMERA_HEIGHT)
+    desired_target = position + CHASE_CAMERA_LOOK_AHEAD * forward + wp.vec3(0.0, 0.0, CHASE_CAMERA_TARGET_HEIGHT)
+    if snap != 0 or initialized[0] == 0:
+        camera_positions[0] = desired_eye
+        camera_targets[0] = desired_target
+        initialized[0] = 1
+    else:
+        blend = 1.0 - wp.exp(-CHASE_CAMERA_RESPONSE * frame_dt)
+        camera_positions[0] += blend * (desired_eye - camera_positions[0])
+        camera_targets[0] += blend * (desired_target - camera_targets[0])
 
 
 @wp.kernel
@@ -451,7 +485,10 @@ class Example:
     """Run imported RacerX rigid-body physics with PhoenX and OptiX."""
 
     def __init__(self, viewer, args):
-        if not hasattr(viewer, "load_scene_from_usd") or not hasattr(viewer, "set_camera_look_at"):
+        if not all(
+            hasattr(viewer, method)
+            for method in ("load_scene_from_usd", "set_camera_look_at", "set_camera_look_at_device")
+        ):
             raise RuntimeError("The RacerX USD example requires the latest --viewer optix")
 
         self.viewer = viewer
@@ -478,8 +515,6 @@ class Example:
 
         self.physics_enabled = bool(args.physics)
         self.chase_camera_enabled = bool(args.chase_camera and self.physics_enabled)
-        self._chase_camera_position = None
-        self._chase_camera_target = None
         self.physics_result = None
         self._dynamic_bindings = []
         if self.physics_enabled:
@@ -490,7 +525,6 @@ class Example:
 
         camera_path = _select_authored_camera(viewer, args.usd_camera)
         if self.chase_camera_enabled:
-            self._update_chase_camera(snap=True)
             camera_path = "<RacerX chase camera>"
         print(
             f"[PhoenX RacerX USD] loaded {usd_path} "
@@ -574,8 +608,16 @@ class Example:
         self._wheel_dofs_device = wp.array(self._wheel_dofs, dtype=wp.int32, device=self.device)
         self._wheel_speed_command = wp.zeros(1, dtype=float, device=self.device)
         self._steering_command = wp.zeros(1, dtype=float, device=self.device)
-        self._chassis_pose_device = wp.empty(1, dtype=wp.transform, device=self.device)
-        self._capture_chassis_pose()
+        if self.chase_camera_enabled:
+            self._chase_camera_initialized = wp.zeros(1, dtype=wp.int32, device=self.device)
+            self._chase_camera_positions = wp.empty(1, dtype=wp.vec3, device=self.device)
+            self._chase_camera_targets = wp.empty(1, dtype=wp.vec3, device=self.device)
+            self._update_chase_camera(snap=True)
+            self.viewer.set_camera_look_at_device(
+                self._chase_camera_positions,
+                self._chase_camera_targets,
+                fov=CHASE_CAMERA_FOV,
+            )
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
             collision_pipeline=self.collision_pipeline,
@@ -665,40 +707,32 @@ class Example:
             inputs=[
                 self._drive_input_device,
                 self._wheel_dofs_device,
+                self._steering_dof,
                 self._steering_target_index,
                 self.frame_dt,
                 self._wheel_speed_command,
                 self._steering_command,
                 self.control.joint_target_q,
                 self.control.joint_target_qd,
+                self.control.joint_f,
             ],
             device=self.device,
         )
 
-    def _capture_chassis_pose(self) -> None:
-        """Copy only the chassis pose needed by the host-side camera controller."""
-        wp.copy(
-            self._chassis_pose_device,
-            self.state.body_q,
-            src_offset=self._chassis_body,
-            count=1,
-        )
-
     def _update_chase_camera(self, *, snap: bool = False) -> None:
-        """Smoothly fly a level camera behind the current chassis pose."""
-        eye, target = _chase_camera_targets(self._chassis_pose_device.numpy()[0])
-        if snap or self._chase_camera_position is None:
-            self._chase_camera_position = eye
-            self._chase_camera_target = target
-        else:
-            blend = 1.0 - math.exp(-CHASE_CAMERA_RESPONSE * self.frame_dt)
-            self._chase_camera_position += blend * (eye - self._chase_camera_position)
-            self._chase_camera_target += blend * (target - self._chase_camera_target)
-        self.viewer.set_camera_look_at(
-            self._chase_camera_position,
-            self._chase_camera_target,
-            fov=CHASE_CAMERA_FOV,
-            force=True,
+        """Update the graph-written chase camera without host readback."""
+        wp.launch(
+            _update_chase_camera_device,
+            dim=1,
+            inputs=[
+                self.state.body_q,
+                self._chassis_body,
+                self.frame_dt,
+                int(snap),
+                self._chase_camera_initialized,
+            ],
+            outputs=[self._chase_camera_positions, self._chase_camera_targets],
+            device=self.device,
         )
 
     def _simulate_frame(self) -> None:
@@ -706,7 +740,7 @@ class Example:
         self._apply_drive_controls()
         self._simulate()
         if self.chase_camera_enabled:
-            self._capture_chassis_pose()
+            self._update_chase_camera()
 
     def _simulate(self) -> None:
         self.state.clear_forces()
@@ -747,8 +781,8 @@ class Example:
         self._apply_drive_controls()
         self._sync_dynamic_render_transforms()
 
-        self._capture_chassis_pose()
         if self.chase_camera_enabled:
+            self._chase_camera_initialized.zero_()
             self._update_chase_camera(snap=True)
 
     def _sync_dynamic_render_transforms(self) -> None:
@@ -778,8 +812,6 @@ class Example:
         if self.physics_enabled:
             self._sync_dynamic_render_transforms()
         self.viewer.begin_frame(self.sim_time)
-        if self.chase_camera_enabled:
-            self._update_chase_camera()
         if self.physics_enabled:
             self.viewer.log_shapes(
                 "/racerx/ground",
