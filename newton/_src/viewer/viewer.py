@@ -1233,7 +1233,7 @@ class ViewerBase(ABC):
                 self._contact_points0 = wp.zeros(max_contacts, dtype=wp.vec3, device=self.device)
                 self._contact_points1 = wp.zeros(max_contacts, dtype=wp.vec3, device=self.device)
 
-        if max_contacts > 0:
+        if self.show_contact_normals:
             from .kernels import compute_contact_lines  # noqa: PLC0415
 
             wp.launch(
@@ -1260,11 +1260,14 @@ class ViewerBase(ABC):
                 ],
                 device=self.device,
             )
-            starts = self._contact_points0
-            ends = self._contact_points1
+            self.log_arrows(
+                self._qualify("/contacts/normals"),
+                self._contact_points0[:max_contacts],
+                self._contact_points1[:max_contacts],
+                (1.0, 0.0, 0.0),
+            )
         else:
-            starts = wp.array([], dtype=wp.vec3, device=self.device)
-            ends = wp.array([], dtype=wp.vec3, device=self.device)
+            self.log_arrows(self._qualify("/contacts/normals"), None, None, None)
 
         # ---- Contact mode disks ----------------------------------
         if self.show_contact_disks:
@@ -1356,15 +1359,12 @@ class ViewerBase(ABC):
                 device=self.device,
             )
 
-            if num_contacts > 0:
-                self.log_arrows(
-                    self._qualify("/contacts/forces"),
-                    self._contact_force_starts[:num_contacts],
-                    self._contact_force_ends[:num_contacts],
-                    (1.0, 0.0, 1.0),  # magenta
-                )
-            else:
-                self.log_arrows(self._qualify("/contacts/forces"), None, None, None)
+            self.log_arrows(
+                self._qualify("/contacts/forces"),
+                self._contact_force_starts[:max_contacts],
+                self._contact_force_ends[:max_contacts],
+                (1.0, 0.0, 1.0),  # magenta
+            )
         else:
             self.log_arrows(self._qualify("/contacts/forces"), None, None, None)
 

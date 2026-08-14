@@ -75,6 +75,10 @@ TIRE_SPEED_RESPONSE = 12.0
 TIRE_MAX_ACCELERATION = 20.0
 TIRE_LATERAL_RESPONSE = 8.0
 TIRE_MAX_LATERAL_ACCELERATION = 8.0
+TIRE_SUPPORT_ACTIVATION_HEIGHT = 0.01
+TIRE_VERTICAL_FREQUENCY = 60.0
+TIRE_VERTICAL_DAMPING_RATIO = 1.0
+TIRE_MAX_NORMAL_LOAD_SCALE = 3.0
 TIRE_STEERING_ANGLE = 0.35
 TIRE_YAW_RESPONSE = 8.0
 TIRE_INERTIA_RADIUS = 0.08
@@ -217,6 +221,34 @@ def _apply_looped_vehicle_tire_forces(
     offset = body_position - chassis_position
     force += vehicle_body_masses[body_index] * yaw_acceleration * wp.cross(wp.vec3(0.0, 0.0, 1.0), offset)
     body_f[body] += wp.spatial_vector(force, wp.vec3(0.0))
+
+
+@wp.kernel
+def _apply_wheel_ground_support(
+    wheel_bodies: wp.array[wp.int32],
+    wheel_shape_transforms: wp.array[wp.transform],
+    wheel_radii: wp.array[float],
+    vehicle_mass: float,
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_f: wp.array[wp.spatial_vector],
+):
+    wheel_index = wp.tid()
+    body = wheel_bodies[wheel_index]
+    wheel_pose = wp.transform_multiply(body_q[body], wheel_shape_transforms[wheel_index])
+    center = wp.transform_get_translation(wheel_pose)
+    bottom = center[2] - wheel_radii[wheel_index]
+
+    velocity = wp.spatial_top(body_qd[body])
+    load_per_wheel = vehicle_mass * 9.81 / 4.0
+    stiffness = 0.25 * vehicle_mass * TIRE_VERTICAL_FREQUENCY * TIRE_VERTICAL_FREQUENCY
+    damping = 0.5 * vehicle_mass * TIRE_VERTICAL_DAMPING_RATIO * TIRE_VERTICAL_FREQUENCY
+    penetration = GROUND_HEIGHT - bottom
+    normal_force = load_per_wheel + stiffness * penetration - damping * velocity[2]
+    if bottom > GROUND_HEIGHT + TIRE_SUPPORT_ACTIVATION_HEIGHT:
+        normal_force = 0.0
+    normal_force = wp.clamp(normal_force, 0.0, TIRE_MAX_NORMAL_LOAD_SCALE * load_per_wheel)
+    body_f[body] += wp.spatial_vector(wp.vec3(0.0, 0.0, normal_force), wp.vec3(0.0))
 
 
 @wp.kernel
@@ -479,11 +511,17 @@ def _resolve_vehicle_parts(builder, result) -> _VehicleParts:
 
 
 def _replace_wheel_mesh_colliders(builder, parts: _VehicleParts) -> None:
-    """Use smooth cylinders for the four rendered wheel meshes."""
+    """Place one axle-aligned cylinder collider at each rendered wheel."""
     cylinder_rotation = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.5 * math.pi)
-    for path, shape in zip(parts.wheel_shape_paths, parts.wheel_shapes, strict=True):
+    for path, joint, shape in zip(parts.wheel_shape_paths, parts.wheel_joints, parts.wheel_shapes, strict=True):
         if builder.shape_type[shape] not in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH):
             raise RuntimeError(f"Expected a mesh-backed RacerX wheel collider at {path}")
+        joint_axis = np.asarray(builder.joint_axis[int(builder.joint_qd_start[joint])], dtype=np.float32)
+        if (
+            abs(float(joint_axis[1])) < 1.0 - 1.0e-5
+            or max(abs(float(joint_axis[0])), abs(float(joint_axis[2]))) > 1.0e-5
+        ):
+            raise RuntimeError(f"Expected a local Y axle for RacerX wheel {path}, found {joint_axis}")
 
         source = builder.shape_source[shape]
         vertices = np.asarray(source.vertices, dtype=np.float32)
@@ -493,7 +531,7 @@ def _replace_wheel_mesh_colliders(builder, parts: _VehicleParts) -> None:
         upper = scaled_vertices.max(axis=0)
         center = 0.5 * (lower + upper)
         extent = upper - lower
-        radius = 0.25 * (extent[0] + extent[2])
+        radius = 0.5 * max(extent[0], extent[2])
         half_width = 0.5 * extent[1]
 
         cylinder_offset = wp.transform(wp.vec3(*center), cylinder_rotation)
@@ -512,6 +550,16 @@ def _configure_vehicle_ground_friction(builder, parts: _VehicleParts) -> None:
     for shape in range(builder.shape_count):
         if shape not in wheel_shapes:
             builder.shape_material_mu[shape] = 0.0
+
+
+def _filter_vehicle_ground_contacts(builder, parts: _VehicleParts, ground_shape: int) -> None:
+    """Make the generated ground support looped vehicles through their tires."""
+    if parts.variant not in TIRE_FORCE_VARIANTS:
+        return
+    wheel_shapes = set(parts.wheel_shapes)
+    for shape in range(ground_shape):
+        if shape not in wheel_shapes:
+            builder.add_shape_collision_filter_pair(shape, ground_shape)
 
 
 def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[list[int], int, int]:
@@ -753,6 +801,7 @@ class Example:
             usd_environment_scale=args.usd_environment_scale,
         ):
             raise RuntimeError(f"OptiX failed to load USD stage: {usd_path}")
+        self._usd_visuals_visible = True
 
         stage = viewer.usd_scene.stage
         if args.print_physics_data:
@@ -798,11 +847,15 @@ class Example:
             body for body, flags in enumerate(builder.body_flags) if not int(flags) & int(newton.BodyFlags.KINEMATIC)
         ]
         self._vehicle_body_masses_host = [builder.body_mass[body] for body in self._vehicle_body_indices_host]
+        self._vehicle_mass = float(sum(self._vehicle_body_masses_host))
         self._sim_substeps = C3_SIM_SUBSTEPS if vehicle_parts.variant == "c3" else SIM_SUBSTEPS
         chassis_rotation = wp.transform_get_rotation(builder.body_q[vehicle_parts.chassis_body])
         self._vehicle_forward_local = wp.quat_rotate(wp.quat_inverse(chassis_rotation), wp.vec3(1.0, 0.0, 0.0))
         _scale_shape_contact_gaps(builder, authored_unit)
         _replace_wheel_mesh_colliders(builder, vehicle_parts)
+        self._wheel_bodies_host = [int(builder.shape_body[shape]) for shape in vehicle_parts.wheel_shapes]
+        self._wheel_shape_transforms_host = [builder.shape_transform[shape] for shape in vehicle_parts.wheel_shapes]
+        self._wheel_radii_host = [float(builder.shape_scale[shape][0]) for shape in vehicle_parts.wheel_shapes]
         _configure_vehicle_ground_friction(builder, vehicle_parts)
         # The source PhysicsScene stores 981 in cm/s^2; stage-root scaling
         # does not transform scalar physics attributes.
@@ -813,10 +866,11 @@ class Example:
         )
         self._steering_target_index = builder.joint_q_start[self._steering_joint] + 1
         _add_closed_loop_joint_metadata(builder)
-        builder.add_ground_plane(
+        ground_shape = builder.add_ground_plane(
             height=GROUND_HEIGHT,
             cfg=newton.ModelBuilder.ShapeConfig(mu=0.9, gap=VEHICLE_CONTACT_GAP),
         )
+        _filter_vehicle_ground_contacts(builder, vehicle_parts, ground_shape)
         self._track_layout = None
         self._track_body_indices = []
         if ENABLE_TRACK:
@@ -867,6 +921,8 @@ class Example:
             f"colliders={builder.shape_count} joints={builder.joint_count} "
             f"filtered_pairs={len(builder.shape_collision_filter_pairs)}"
         )
+        for shape in range(builder.shape_count):
+            builder.shape_flags[shape] &= ~int(newton.ShapeFlags.VISIBLE)
         print("[RacerX controls] I/K throttle, J/L steering, release throttle to brake")
 
         self.model = builder.finalize(skip_shape_contact_pairs=True)
@@ -879,6 +935,11 @@ class Example:
         self.initial_state.assign(self.state)
         self.control = self.model.control()
         self._drive_input_host = np.zeros(2, dtype=np.float32)
+        self._wheel_bodies = wp.array(self._wheel_bodies_host, dtype=wp.int32, device=self.device)
+        self._wheel_shape_transforms = wp.array(
+            self._wheel_shape_transforms_host, dtype=wp.transform, device=self.device
+        )
+        self._wheel_radii = wp.array(self._wheel_radii_host, dtype=float, device=self.device)
         self._drive_input_device = wp.zeros(2, dtype=float, device=self.device)
         self._wheel_dofs_device = wp.array(self._wheel_dofs, dtype=wp.int32, device=self.device)
         self._vehicle_body_indices = wp.array(self._vehicle_body_indices_host, dtype=wp.int32, device=self.device)
@@ -1091,6 +1152,21 @@ class Example:
             device=self.device,
         )
 
+        wp.launch(
+            _apply_wheel_ground_support,
+            dim=4,
+            inputs=[
+                self._wheel_bodies,
+                self._wheel_shape_transforms,
+                self._wheel_radii,
+                self._vehicle_mass,
+                self.state.body_q,
+                self.state.body_qd,
+                self.state.body_f,
+            ],
+            device=self.device,
+        )
+
     def _simulate(self) -> None:
         self.state.clear_forces()
         self._apply_tire_forces()
@@ -1160,6 +1236,10 @@ class Example:
 
     def render(self) -> None:
         """Render the retained USD hierarchy after applying PhoenX poses."""
+        usd_visuals_visible = bool(self.viewer.show_visual)
+        if usd_visuals_visible != self._usd_visuals_visible:
+            self.viewer.usd_scene.set_visible(usd_visuals_visible)
+            self._usd_visuals_visible = usd_visuals_visible
         if self.physics_enabled:
             self._sync_dynamic_render_transforms()
             if self._track_layout is not None:
@@ -1172,6 +1252,8 @@ class Example:
                 )
         self.viewer.begin_frame(self.sim_time)
         if self.physics_enabled:
+            self.viewer.log_state(self.state)
+            self.viewer.log_contacts(self.contacts, self.state)
             self.viewer.log_shapes(
                 "/racerx/ground",
                 newton.GeoType.PLANE,
@@ -1179,6 +1261,7 @@ class Example:
                 self._ground_visual_xforms,
                 colors=self._ground_visual_colors,
                 materials=self._ground_visual_materials,
+                hidden=not self.viewer.show_ground,
             )
             if self._track_layout is not None:
                 self.viewer.log_shapes(
@@ -1188,6 +1271,7 @@ class Example:
                     self._track_road_xforms,
                     colors=self._track_road_colors,
                     materials=self._track_road_materials,
+                    hidden=not self.viewer.show_visual,
                 )
                 self.viewer.log_shapes(
                     "/racerx/track/barriers",
@@ -1196,6 +1280,7 @@ class Example:
                     self._track_barrier_xforms,
                     colors=self._track_barrier_colors,
                     materials=self._track_barrier_materials,
+                    hidden=not self.viewer.show_visual,
                 )
         self.viewer.end_frame()
 

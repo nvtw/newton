@@ -178,6 +178,8 @@ class TestRacerXUsd(unittest.TestCase):
             shape_scale=[wp.vec3(0.01, 0.01, 0.01) for _ in range(4)],
             shape_transform=[wp.transform_identity() for _ in range(4)],
             shape_material_mu=[float(index) for index in range(4)],
+            joint_qd_start=[0, 1, 2, 3],
+            joint_axis=[wp.vec3(0.0, 1.0, 0.0) for _ in range(4)],
         )
         wheel_shape_paths = tuple(f"/World/Car/Wheel{index}" for index in range(4))
         parts = racerx._VehicleParts(
@@ -199,6 +201,9 @@ class TestRacerXUsd(unittest.TestCase):
             rtol=0.0,
             atol=1.0e-7,
         )
+        for transform in builder.shape_transform:
+            cylinder_axis = wp.quat_rotate(transform.q, wp.vec3(0.0, 0.0, 1.0))
+            np.testing.assert_allclose(np.abs(cylinder_axis), (0.0, 1.0, 0.0), atol=1.0e-6)
         np.testing.assert_allclose(builder.shape_material_mu, racerx.WHEEL_FRICTION)
         builder.shape_type = [newton.GeoType.CONVEX_MESH] * 4
         builder.shape_source = [SimpleNamespace(vertices=vertices) for _ in range(4)]
@@ -235,6 +240,31 @@ class TestRacerXUsd(unittest.TestCase):
         racerx._configure_vehicle_ground_friction(builder, parts)
 
         np.testing.assert_allclose(builder.shape_material_mu, (0.4, 1.2, 0.0, 1.2, 0.0, 1.2))
+
+    def test_looped_vehicle_ground_collides_only_with_wheels(self) -> None:
+        """Filter generated-ground contacts against every non-wheel vehicle shape."""
+
+        class Builder:
+            def __init__(self):
+                self.pairs = []
+
+            def add_shape_collision_filter_pair(self, shape_a, shape_b):
+                self.pairs.append((shape_a, shape_b))
+
+        builder = Builder()
+        parts = racerx._VehicleParts(
+            wheel_joints=(0, 1, 2, 3),
+            wheel_shapes=(0, 1, 3, 5),
+            wheel_shape_paths=("FR", "FL", "RR", "RL"),
+            steering_joint=4,
+            chassis_body=4,
+            chassis_body_path="/World/RC_Car/Body",
+            variant="c3",
+        )
+
+        racerx._filter_vehicle_ground_contacts(builder, parts, ground_shape=6)
+
+        self.assertEqual(builder.pairs, [(2, 6), (4, 6)])
 
     def test_coaxial_hard_limit_and_spring_merge_to_one_dof(self) -> None:
         """Merge stacked travel and spring joints into one driven coordinate."""
@@ -610,6 +640,50 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertGreater(float(wrench[0]), 0.0)
         self.assertLess(float(wrench[1]), 0.0)
         self.assertAlmostEqual(float(wrench[5]), 0.0, places=6)
+
+    def test_wheel_ground_support_runs_inside_cuda_graph(self) -> None:
+        """Support four penetrating tire cylinders inside a CUDA graph."""
+        device = wp.get_device()
+        body_q = wp.array(
+            [wp.transform((0.0, 0.0, 0.01), wp.quat_identity()) for _ in range(4)],
+            dtype=wp.transform,
+            device=device,
+        )
+        body_qd = wp.zeros(4, dtype=wp.spatial_vector, device=device)
+        body_f = wp.zeros(4, dtype=wp.spatial_vector, device=device)
+        wheel_bodies = wp.array((0, 1, 2, 3), dtype=wp.int32, device=device)
+        wheel_xforms = wp.array(
+            [wp.transform_identity() for _ in range(4)],
+            dtype=wp.transform,
+            device=device,
+        )
+        wheel_radii = wp.full(4, 0.02, dtype=float, device=device)
+
+        def launch():
+            wp.launch(
+                racerx._apply_wheel_ground_support,
+                dim=4,
+                inputs=[
+                    wheel_bodies,
+                    wheel_xforms,
+                    wheel_radii,
+                    4.0,
+                    body_q,
+                    body_qd,
+                    body_f,
+                ],
+                device=device,
+            )
+
+        graph = None
+        if device.is_cuda:
+            with wp.ScopedCapture() as capture:
+                launch()
+            graph = capture.graph
+        launch() if graph is None else wp.capture_launch(graph)
+
+        wrenches = body_f.numpy()
+        self.assertTrue(np.all(wrenches[:, 2] > 9.81))
 
     def test_self_filtered_collision_group_excludes_member_pair(self) -> None:
         """Translate a self-filtered USD collision group into shape exclusions."""

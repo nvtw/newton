@@ -1112,6 +1112,14 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
                     material_array.fill_(wp.vec4(roughness, 0.0, u_subdiv, v_subdiv))
                 self._material_arrays[key] = material_array
             materials = self._material_arrays[key]
+        if materials is None and isinstance(colors, wp.array) and colors.device.is_cuda:
+            key = (count, self._default_roughness, 0.0, 0.0)
+            if key not in self._material_arrays:
+                material_array = wp.zeros(count, dtype=wp.vec4, device=self.device)
+                if count > 0:
+                    material_array.fill_(wp.vec4(self._default_roughness, 0.0, 0.0, 0.0))
+                self._material_arrays[key] = material_array
+            materials = self._material_arrays[key]
         return super().log_instances(name, mesh, xforms, scales, colors, materials, hidden=hidden)
 
     @override
