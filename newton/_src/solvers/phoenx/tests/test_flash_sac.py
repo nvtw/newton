@@ -367,6 +367,50 @@ class TestTrainerFlashSAC(unittest.TestCase):
         )
         self.assertTrue(replay.can_sample())
 
+    def test_fused_ensemble_matches_separate_reference_update(self) -> None:
+        """Match separate twin critics across one exact fused forward and backward update."""
+
+        device = require_cuda_graph_capture("FlashSAC fused ensemble equivalence")
+        config = ConfigFlashSAC(
+            actor_hidden_dim=8,
+            actor_num_blocks=1,
+            critic_hidden_dim=8,
+            critic_num_blocks=1,
+            distributional_atoms=7,
+            normalize_rewards=False,
+            policy_frequency=1,
+        )
+        fused = TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=901)
+        separate = TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=901)
+        del separate._critic_ensemble, separate._target_critic_ensemble
+        rng = np.random.default_rng(903)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(16, 3)).astype(np.float32), device=device),
+            actions=wp.array(rng.normal(size=(16, 2)).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=16).astype(np.float32), device=device),
+            dones=wp.array((rng.random(16) < 0.2).astype(np.float32), device=device),
+            next_obs=wp.array(rng.normal(size=(16, 3)).astype(np.float32), device=device),
+        )
+        fused_stats = fused.update(batch, seed=907)
+        separate_stats = separate.update(batch, seed=907)
+        np.testing.assert_allclose(
+            tuple(fused_stats.__dict__.values()),
+            tuple(separate_stats.__dict__.values()),
+            rtol=1.0e-6,
+            atol=2.0e-6,
+        )
+        for fused_network, separate_network in (
+            (fused.actor.net, separate.actor.net),
+            (fused.critic1, separate.critic1),
+            (fused.critic2, separate.critic2),
+            (fused.target_critic1, separate.target_critic1),
+            (fused.target_critic2, separate.target_critic2),
+        ):
+            for fused_array, separate_array in zip(
+                fused_network.state_arrays(), separate_network.state_arrays(), strict=True
+            ):
+                np.testing.assert_allclose(fused_array.numpy(), separate_array.numpy(), rtol=1.0e-6, atol=2.0e-6)
+
     def test_reference_backbone_integrated_update(self) -> None:
         """Run a finite update through residual reference actor and critics."""
 

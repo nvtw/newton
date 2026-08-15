@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import warp as wp
 
-from .cublas import gemm_float32, is_cublas_available
+from .cublas import gemm_float32, gemm_float32_strided_batched, is_cublas_available
 from .kernels import copy_1d_kernel, copy_2d_kernel, soft_update_1d_kernel, soft_update_2d_kernel
 
 
@@ -1154,3 +1154,452 @@ class NetworkFlashSAC:
                     outputs=[dst],
                     device=self.device,
                 )
+
+
+class EnsembleNetworkFlashSAC:
+    """Fuse the dense forward contractions of two reference critics."""
+
+    def __init__(self, first: NetworkFlashSAC, second: NetworkFlashSAC):
+        if (
+            first.device != second.device
+            or first.layer_sizes != second.layer_sizes
+            or first.actor_heads
+            or second.actor_heads
+        ):
+            raise ValueError("FlashSAC critic structures do not match")
+        self.networks = (first, second)
+        self.device = first.device
+        self.input_dim = first.input_dim
+        self.hidden_dim = first.hidden_dim
+        self.num_blocks = first.num_blocks
+        self.output_dim = first.output_dim
+        self.embed_weight = self._stack_weights(first.embed_weight, second.embed_weight)
+        first.embed_weight, second.embed_weight = self.embed_weight[0], self.embed_weight[1]
+        self.block_weights: list[tuple[wp.array3d[wp.float32], wp.array3d[wp.float32]]] = []
+        for block_index in range(self.num_blocks):
+            first_w1, first_w2 = first.block_weights[block_index]
+            second_w1, second_w2 = second.block_weights[block_index]
+            w1 = self._stack_weights(first_w1, second_w1)
+            w2 = self._stack_weights(first_w2, second_w2)
+            first.block_weights[block_index] = (w1[0], w2[0])
+            second.block_weights[block_index] = (w1[1], w2[1])
+            self.block_weights.append((w1, w2))
+        self.head_weights: list[wp.array3d[wp.float32]] = []
+        for head_index in range(len(first.head_weights)):
+            weight = self._stack_weights(first.head_weights[head_index], second.head_weights[head_index])
+            first.head_weights[head_index], second.head_weights[head_index] = weight[0], weight[1]
+            self.head_weights.append(weight)
+        for network in self.networks:
+            network.weights = [network.embed_weight]
+            for w1, w2 in network.block_weights:
+                network.weights.extend((w1, w2))
+            network.weights.extend(network.head_weights)
+
+    def _stack_weights(self, first: wp.array2d[wp.float32], second: wp.array2d[wp.float32]) -> wp.array3d[wp.float32]:
+        return wp.array(
+            np.stack((first.numpy(), second.numpy())),
+            dtype=wp.float32,
+            device=self.device,
+            requires_grad=True,
+        )
+
+    def _linear(
+        self,
+        x: wp.array2d[wp.float32] | wp.array3d[wp.float32],
+        weight: wp.array3d[wp.float32],
+        *,
+        broadcast_input: bool = False,
+    ) -> wp.array3d[wp.float32]:
+        rows = int(x.shape[-2])
+        inner = int(weight.shape[1])
+        cols = int(weight.shape[2])
+        out = wp.empty((2, rows, cols), dtype=wp.float32, device=self.device)
+        gemm_float32_strided_batched(
+            x,
+            weight,
+            out,
+            rows,
+            cols,
+            inner,
+            2,
+            broadcast_lhs=broadcast_input,
+        )
+        return out
+
+    def _norm_into(
+        self,
+        x: wp.array2d[wp.float32] | wp.array3d[wp.float32],
+        out: wp.array3d[wp.float32],
+        norms: tuple[_UnitBatchNorm, _UnitBatchNorm],
+        *,
+        training: bool,
+        broadcast_input: bool = False,
+    ) -> None:
+        for ensemble_index, norm in enumerate(norms):
+            source = x if broadcast_input else x[ensemble_index]
+            rows = int(source.shape[0])
+            if training:
+                mean = wp.empty(norm.width, dtype=wp.float32, device=self.device)
+                variance = wp.empty(norm.width, dtype=wp.float32, device=self.device)
+                wp.launch(
+                    _batch_moments_kernel,
+                    dim=norm.width,
+                    inputs=[source, rows],
+                    outputs=[mean, variance],
+                    device=self.device,
+                )
+                wp.launch(
+                    _update_running_moments_kernel,
+                    dim=norm.width,
+                    inputs=[mean, variance, rows, norm.momentum],
+                    outputs=[norm.running_mean, norm.running_variance],
+                    device=self.device,
+                )
+            else:
+                mean = norm.running_mean
+                variance = norm.running_variance
+            wp.launch(
+                _batch_norm_kernel,
+                dim=source.shape,
+                inputs=[source, mean, variance, norm.scale, norm.bias, norm.eps],
+                outputs=[out[ensemble_index]],
+                device=self.device,
+            )
+
+    def _forward(
+        self, x: wp.array2d[wp.float32], *, training: bool, retain_activations: bool
+    ) -> tuple[wp.array2d[wp.float32], wp.array2d[wp.float32]]:
+        first, second = self.networks
+        input_normalized = wp.empty((2, int(x.shape[0]), self.input_dim), dtype=wp.float32, device=self.device)
+        self._norm_into(
+            x,
+            input_normalized,
+            (first.input_norm, second.input_norm),
+            training=training,
+            broadcast_input=True,
+        )
+        hidden = self._linear(input_normalized, self.embed_weight)
+        block_caches: list[list[tuple[wp.array2d[wp.float32], ...]]] = [[], []]
+        pair_block_cache: list[tuple[wp.array3d[wp.float32], ...]] = []
+        for block_index, (w1, w2) in enumerate(self.block_weights):
+            residual = hidden
+            pre1 = self._linear(residual, w1)
+            normed1 = wp.empty_like(pre1)
+            first_norms = first.block_norms[block_index]
+            second_norms = second.block_norms[block_index]
+            self._norm_into(pre1, normed1, (first_norms[0], second_norms[0]), training=training)
+            activated1 = wp.empty_like(normed1)
+            for ensemble_index in range(2):
+                wp.launch(
+                    _relu_kernel,
+                    dim=normed1[ensemble_index].shape,
+                    inputs=[normed1[ensemble_index]],
+                    outputs=[activated1[ensemble_index]],
+                    device=self.device,
+                )
+            pre2 = self._linear(activated1, w2)
+            normed2 = wp.empty_like(pre2)
+            self._norm_into(pre2, normed2, (first_norms[1], second_norms[1]), training=training)
+            activated2 = wp.empty_like(normed2)
+            hidden = wp.empty_like(normed2)
+            for ensemble_index in range(2):
+                wp.launch(
+                    _relu_kernel,
+                    dim=normed2[ensemble_index].shape,
+                    inputs=[normed2[ensemble_index]],
+                    outputs=[activated2[ensemble_index]],
+                    device=self.device,
+                )
+                wp.launch(
+                    _residual_add_kernel,
+                    dim=normed2[ensemble_index].shape,
+                    inputs=[activated2[ensemble_index], residual[ensemble_index]],
+                    outputs=[hidden[ensemble_index]],
+                    device=self.device,
+                )
+                block_caches[ensemble_index].append(
+                    (
+                        residual[ensemble_index],
+                        pre1[ensemble_index],
+                        normed1[ensemble_index],
+                        activated1[ensemble_index],
+                        pre2[ensemble_index],
+                        normed2[ensemble_index],
+                        activated2[ensemble_index],
+                    )
+                )
+            pair_block_cache.append((residual, pre1, normed1, activated1, pre2, normed2, activated2))
+        normalized = wp.empty_like(hidden)
+        for ensemble_index, network in enumerate(self.networks):
+            inv_rms = wp.empty(hidden.shape[1], dtype=wp.float32, device=self.device)
+            wp.launch(
+                _rms_inv_kernel,
+                dim=hidden.shape[1],
+                inputs=[hidden[ensemble_index], 1.0e-6],
+                outputs=[inv_rms],
+                device=self.device,
+            )
+            wp.launch(
+                _rms_norm_kernel,
+                dim=hidden[ensemble_index].shape,
+                inputs=[hidden[ensemble_index], network.rms_scale, inv_rms],
+                outputs=[normalized[ensemble_index]],
+                device=self.device,
+            )
+        head = self._linear(normalized, self.head_weights[0])
+        output = wp.empty_like(head)
+        for ensemble_index, network in enumerate(self.networks):
+            wp.launch(
+                _head_bias_kernel,
+                dim=head[ensemble_index].shape,
+                inputs=[head[ensemble_index], network.head_biases[0], 0],
+                outputs=[output[ensemble_index]],
+                device=self.device,
+            )
+            if retain_activations:
+                network._manual_input = x
+                network._manual_cache = {
+                    "input_normalized": input_normalized[ensemble_index],
+                    "blocks": block_caches[ensemble_index],
+                    "rms_input": hidden[ensemble_index],
+                    "normalized": normalized[ensemble_index],
+                    "heads": [head[ensemble_index]],
+                    "training": training,
+                }
+        if retain_activations:
+            self._manual_cache = {
+                "input": x,
+                "input_normalized": input_normalized,
+                "blocks": pair_block_cache,
+                "rms_input": hidden,
+                "normalized": normalized,
+                "heads": head,
+                "training": training,
+            }
+        return output[0], output[1]
+
+    def forward(
+        self, x: wp.array2d[wp.float32], *, training: bool = True
+    ) -> tuple[wp.array2d[wp.float32], wp.array2d[wp.float32]]:
+        """Evaluate both critics with batched dense contractions."""
+
+        return self._forward(x, training=training, retain_activations=False)
+
+    def forward_manual(
+        self, x: wp.array2d[wp.float32], *, training: bool = True
+    ) -> tuple[wp.array2d[wp.float32], wp.array2d[wp.float32]]:
+        """Evaluate both critics and retain per-member backward activations."""
+
+        return self._forward(x, training=training, retain_activations=True)
+
+    def _linear_backward_pair(
+        self,
+        x: wp.array3d[wp.float32],
+        weight: wp.array3d[wp.float32],
+        output_grad: wp.array3d[wp.float32],
+    ) -> wp.array3d[wp.float32]:
+        rows = int(x.shape[1])
+        input_width = int(weight.shape[1])
+        output_width = int(weight.shape[2])
+        input_grad = wp.empty_like(x)
+        gemm_float32_strided_batched(
+            output_grad,
+            weight,
+            input_grad,
+            rows,
+            input_width,
+            output_width,
+            2,
+            transpose_rhs=True,
+        )
+        gemm_float32_strided_batched(
+            x,
+            output_grad,
+            weight.grad,
+            input_width,
+            output_width,
+            rows,
+            2,
+            transpose_lhs=True,
+        )
+        return input_grad
+
+    def _norm_backward_pair(
+        self,
+        x: wp.array3d[wp.float32],
+        output_grad: wp.array3d[wp.float32],
+        norms: tuple[_UnitBatchNorm, _UnitBatchNorm],
+        *,
+        training: bool,
+    ) -> wp.array3d[wp.float32]:
+        input_grad = wp.empty_like(x)
+        for ensemble_index, (network, norm) in enumerate(zip(self.networks, norms, strict=True)):
+            member_grad = network._batch_norm_backward(
+                norm,
+                x[ensemble_index],
+                output_grad[ensemble_index],
+                training=training,
+            )
+            wp.launch(
+                copy_2d_kernel,
+                dim=member_grad.shape,
+                inputs=[member_grad],
+                outputs=[input_grad[ensemble_index]],
+                device=self.device,
+            )
+        return input_grad
+
+    def backward_manual(
+        self,
+        first_output_grad: wp.array2d[wp.float32],
+        second_output_grad: wp.array2d[wp.float32],
+        *,
+        first_input_grad: wp.array2d[wp.float32] | None = None,
+        second_input_grad: wp.array2d[wp.float32] | None = None,
+    ) -> None:
+        """Backpropagate both critics with batched dense contractions."""
+
+        cache = getattr(self, "_manual_cache", None)
+        if cache is None:
+            raise RuntimeError("forward_manual() must be called before backward_manual()")
+        normalized = cache["normalized"]
+        rms_input = cache["rms_input"]
+        head = cache["heads"]
+        blocks = cache["blocks"]
+        input_normalized = cache["input_normalized"]
+        manual_input = cache["input"]
+        training = bool(cache["training"])
+        output_grad = wp.empty((2, *first_output_grad.shape), dtype=wp.float32, device=self.device)
+        wp.launch(
+            copy_2d_kernel,
+            dim=first_output_grad.shape,
+            inputs=[first_output_grad],
+            outputs=[output_grad[0]],
+            device=self.device,
+        )
+        wp.launch(
+            copy_2d_kernel,
+            dim=second_output_grad.shape,
+            inputs=[second_output_grad],
+            outputs=[output_grad[1]],
+            device=self.device,
+        )
+        head_grad = wp.empty_like(output_grad)
+        for ensemble_index, network in enumerate(self.networks):
+            wp.launch(
+                _head_output_grad_kernel,
+                dim=output_grad[ensemble_index].shape,
+                inputs=[
+                    output_grad[ensemble_index],
+                    head[ensemble_index],
+                    network.head_biases[0],
+                    0,
+                    False,
+                    network.log_std_min,
+                    network.log_std_max,
+                ],
+                outputs=[head_grad[ensemble_index]],
+                device=self.device,
+            )
+            bias = network.head_biases[0]
+            wp.launch(
+                _bias_grad_kernel,
+                dim=bias.shape,
+                inputs=[head_grad[ensemble_index]],
+                outputs=[bias.grad],
+                device=self.device,
+            )
+        hidden_grad = self._linear_backward_pair(normalized, self.head_weights[0], head_grad)
+        rms_grad = wp.empty_like(rms_input)
+        for ensemble_index, network in enumerate(self.networks):
+            inv_rms = wp.empty(rms_input.shape[1], dtype=wp.float32, device=self.device)
+            projection = wp.empty(rms_input.shape[1], dtype=wp.float32, device=self.device)
+            wp.launch(
+                _rms_norm_backward_stats_kernel,
+                dim=rms_input.shape[1],
+                inputs=[rms_input[ensemble_index], hidden_grad[ensemble_index], network.rms_scale, 1.0e-6],
+                outputs=[inv_rms, projection],
+                device=self.device,
+            )
+            wp.launch(
+                _rms_norm_input_grad_kernel,
+                dim=rms_input[ensemble_index].shape,
+                inputs=[rms_input[ensemble_index], hidden_grad[ensemble_index], network.rms_scale, inv_rms, projection],
+                outputs=[rms_grad[ensemble_index]],
+                device=self.device,
+            )
+            wp.launch(
+                _rms_norm_scale_grad_kernel,
+                dim=network.rms_scale.shape,
+                inputs=[rms_input[ensemble_index], hidden_grad[ensemble_index], inv_rms],
+                outputs=[network.rms_scale.grad],
+                device=self.device,
+            )
+        hidden_grad = rms_grad
+        first, second = self.networks
+        for block_index in reversed(range(self.num_blocks)):
+            residual, pre1, _normed1, activated1, pre2, _normed2, activated2 = blocks[block_index]
+            norm2_grad = wp.empty_like(hidden_grad)
+            for ensemble_index in range(2):
+                wp.launch(
+                    _relu_grad_kernel,
+                    dim=activated2[ensemble_index].shape,
+                    inputs=[activated2[ensemble_index], hidden_grad[ensemble_index]],
+                    outputs=[norm2_grad[ensemble_index]],
+                    device=self.device,
+                )
+            first_norms = first.block_norms[block_index]
+            second_norms = second.block_norms[block_index]
+            pre2_grad = self._norm_backward_pair(
+                pre2,
+                norm2_grad,
+                (first_norms[1], second_norms[1]),
+                training=training,
+            )
+            activated1_grad = self._linear_backward_pair(activated1, self.block_weights[block_index][1], pre2_grad)
+            norm1_grad = wp.empty_like(activated1_grad)
+            for ensemble_index in range(2):
+                wp.launch(
+                    _relu_grad_kernel,
+                    dim=activated1[ensemble_index].shape,
+                    inputs=[activated1[ensemble_index], activated1_grad[ensemble_index]],
+                    outputs=[norm1_grad[ensemble_index]],
+                    device=self.device,
+                )
+            pre1_grad = self._norm_backward_pair(
+                pre1,
+                norm1_grad,
+                (first_norms[0], second_norms[0]),
+                training=training,
+            )
+            branch_grad = self._linear_backward_pair(residual, self.block_weights[block_index][0], pre1_grad)
+            combined = wp.empty_like(hidden_grad)
+            for ensemble_index in range(2):
+                wp.launch(
+                    _add_kernel,
+                    dim=hidden_grad[ensemble_index].shape,
+                    inputs=[hidden_grad[ensemble_index], branch_grad[ensemble_index]],
+                    outputs=[combined[ensemble_index]],
+                    device=self.device,
+                )
+            hidden_grad = combined
+        input_normalized_grad = self._linear_backward_pair(input_normalized, self.embed_weight, hidden_grad)
+        for ensemble_index, (network, destination) in enumerate(
+            zip(self.networks, (first_input_grad, second_input_grad), strict=True)
+        ):
+            member_grad = network._batch_norm_backward(
+                network.input_norm,
+                manual_input,
+                input_normalized_grad[ensemble_index],
+                training=training,
+            )
+            if destination is not None:
+                wp.launch(
+                    copy_2d_kernel,
+                    dim=destination.shape,
+                    inputs=[member_grad],
+                    outputs=[destination],
+                    device=self.device,
+                )
+            network._manual_cache = None
+        self._manual_cache = None

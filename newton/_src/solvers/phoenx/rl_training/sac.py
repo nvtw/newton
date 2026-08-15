@@ -554,12 +554,20 @@ class TrainerSAC:
         reference_batch_norm = bool(getattr(self.critic1, "reference_batch_norm", False))
         if reference_batch_norm:
             combined_q_input = self._concat_rows(q_input, next_q_input)
-            target_q1_all = self.target_critic1.forward(combined_q_input, requires_grad=False)
-            target_q2_all = self.target_critic2.forward(combined_q_input, requires_grad=False)
+            critic_ensemble = getattr(self, "_critic_ensemble", None)
+            target_critic_ensemble = getattr(self, "_target_critic_ensemble", None)
+            if critic_ensemble is not None and target_critic_ensemble is not None:
+                target_q1_all, target_q2_all = target_critic_ensemble.forward(combined_q_input, training=True)
+            else:
+                target_q1_all = self.target_critic1.forward(combined_q_input, requires_grad=False)
+                target_q2_all = self.target_critic2.forward(combined_q_input, requires_grad=False)
             target_q1 = self._slice_rows(target_q1_all, offset=batch.batch_size, row_count=batch.batch_size)
             target_q2 = self._slice_rows(target_q2_all, offset=batch.batch_size, row_count=batch.batch_size)
-            q1_all = self.critic1.forward_manual(combined_q_input, training=True)
-            q2_all = self.critic2.forward_manual(combined_q_input, training=True)
+            if critic_ensemble is not None:
+                q1_all, q2_all = critic_ensemble.forward_manual(combined_q_input, training=True)
+            else:
+                q1_all = self.critic1.forward_manual(combined_q_input, training=True)
+                q2_all = self.critic2.forward_manual(combined_q_input, training=True)
             q1 = self._slice_rows(q1_all, offset=0, row_count=batch.batch_size)
             q2 = self._slice_rows(q2_all, offset=0, row_count=batch.batch_size)
         else:
@@ -647,8 +655,11 @@ class TrainerSAC:
         if reference_batch_norm:
             q1_grad = self._expand_first_row_grad(q1_grad, total_rows=batch.batch_size * 2)
             q2_grad = self._expand_first_row_grad(q2_grad, total_rows=batch.batch_size * 2)
-            self.critic1.backward_manual(q1_grad)
-            self.critic2.backward_manual(q2_grad)
+            if critic_ensemble is not None:
+                critic_ensemble.backward_manual(q1_grad, q2_grad)
+            else:
+                self.critic1.backward_manual(q1_grad)
+                self.critic2.backward_manual(q2_grad)
         else:
             self.critic1.backward_manual(q1_grad)
             self.critic2.backward_manual(q2_grad)
@@ -704,8 +715,12 @@ class TrainerSAC:
 
         q_input = self._concat(batch.obs, actions, requires_grad=False)
         if reference_batch_norm:
-            q1 = self.critic1.forward_manual(q_input, training=False)
-            q2 = self.critic2.forward_manual(q_input, training=False)
+            critic_ensemble = getattr(self, "_critic_ensemble", None)
+            if critic_ensemble is not None:
+                q1, q2 = critic_ensemble.forward_manual(q_input, training=False)
+            else:
+                q1 = self.critic1.forward_manual(q_input, training=False)
+                q2 = self.critic2.forward_manual(q_input, training=False)
         else:
             q1 = self.critic1.forward_manual(q_input)
             q2 = self.critic2.forward_manual(q_input)
@@ -757,8 +772,16 @@ class TrainerSAC:
             )
         q_input_grad1 = wp.empty_like(q_input)
         q_input_grad2 = wp.empty_like(q_input)
-        self.critic1.backward_manual(q1_grad, input_grad=q_input_grad1)
-        self.critic2.backward_manual(q2_grad, input_grad=q_input_grad2)
+        if reference_batch_norm and critic_ensemble is not None:
+            critic_ensemble.backward_manual(
+                q1_grad,
+                q2_grad,
+                first_input_grad=q_input_grad1,
+                second_input_grad=q_input_grad2,
+            )
+        else:
+            self.critic1.backward_manual(q1_grad, input_grad=q_input_grad1)
+            self.critic2.backward_manual(q2_grad, input_grad=q_input_grad2)
         self.critic1_optimizer.zero_grad()
         self.critic2_optimizer.zero_grad()
 

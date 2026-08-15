@@ -13,7 +13,7 @@ from typing import Protocol
 import numpy as np
 import warp as wp
 
-from .flash_sac_networks import NetworkFlashSAC
+from .flash_sac_networks import EnsembleNetworkFlashSAC, NetworkFlashSAC
 from .kernels import (
     flash_sac_graph_n_step_finalize_kernel,
     flash_sac_graph_n_step_store_kernel,
@@ -763,6 +763,8 @@ class TrainerFlashSAC(TrainerSAC):
             self.target_critic2.default_training = True
             self.target_critic1.copy_from(self.critic1)
             self.target_critic2.copy_from(self.critic2)
+            self._critic_ensemble = EnsembleNetworkFlashSAC(self.critic1, self.critic2)
+            self._target_critic_ensemble = EnsembleNetworkFlashSAC(self.target_critic1, self.target_critic2)
             self.actor_optimizer = Adam(self.actor.parameters(), lr=flash_config.actor_lr)
             self.critic1_optimizer = Adam(self.critic1.parameters(), lr=flash_config.critic_lr)
             self.critic2_optimizer = Adam(self.critic2.parameters(), lr=flash_config.critic_lr)
