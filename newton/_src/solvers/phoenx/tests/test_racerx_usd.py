@@ -400,7 +400,7 @@ class TestRacerXUsd(unittest.TestCase):
         rear_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER
         self.assertEqual(racerx.C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER, 16.0)
         self.assertEqual(racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER, 10.0)
-        self.assertEqual(racerx.C3_WHEEL_FRICTION, 0.3)
+        self.assertEqual(racerx.C3_WHEEL_FRICTION, 0.5)
         self.assertEqual((racerx.C3_STEERING_TRAVEL, racerx.C3_STEERING_LIMIT), (0.00475, 0.0057))
         self.assertEqual(builder.joint_limit_lower[9], -racerx.C3_STEERING_LIMIT)
         self.assertEqual(builder.joint_limit_upper[9], racerx.C3_STEERING_LIMIT)
