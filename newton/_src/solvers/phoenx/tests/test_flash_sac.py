@@ -380,6 +380,87 @@ class TestTrainerFlashSAC(unittest.TestCase):
         self.assertTrue(all(math.isfinite(value) for value in ppo_stats.__dict__.values()))
         self.assertTrue(all(math.isfinite(value) for value in flash_stats.__dict__.values()))
 
+    def test_real_g1_flash_sac_and_ppo_workflow_smoke(self) -> None:
+        """Exercise one real G1 collection and update for each trainer workflow."""
+
+        device = require_cuda_graph_capture("real G1 FlashSAC and PPO workflow smoke")
+        env_kwargs = {
+            "world_count": 1,
+            "sim_substeps": 1,
+            "solver_iterations": 1,
+            "max_episode_steps": 1,
+            "auto_reset": True,
+            "randomize_commands_on_reset": False,
+            "command_resample_steps": 0,
+            "parse_visuals": False,
+        }
+        flash_env = EnvG1PhoenX(ConfigEnvG1PhoenX(**env_kwargs), device=device)
+        ppo_env = EnvG1PhoenX(ConfigEnvG1PhoenX(**env_kwargs), device=device)
+        flash_obs = flash_env.reset_noisy(seed=101)
+        ppo_obs = ppo_env.reset_noisy(seed=211)
+        self.assertEqual(flash_obs.shape, (1, OBS_DIM_G1))
+        self.assertEqual(ppo_obs.shape, (1, OBS_DIM_G1))
+
+        flash = TrainerFlashSAC(
+            obs_dim=OBS_DIM_G1,
+            action_dim=ACTION_DIM_G1,
+            hidden_layers=(4,),
+            config=ConfigFlashSAC(
+                buffer_max_length=2,
+                buffer_min_length=1,
+                sample_batch_size=1,
+                normalize_observations=False,
+                normalize_rewards=False,
+            ),
+            device=device,
+            seed=103,
+        )
+        ppo = TrainerPPO(
+            obs_dim=OBS_DIM_G1,
+            action_dim=ACTION_DIM_G1,
+            hidden_layers=(4,),
+            config=ConfigPPO(
+                train_epochs=1,
+                normalize_advantages=False,
+                normalize_observations=False,
+            ),
+            device=device,
+            seed=223,
+        )
+
+        flash_updates = public_rl.train_flash_sac(
+            flash_env,
+            flash,
+            interaction_steps=1,
+            seed=107,
+            reset_at_start=False,
+        )
+        self.assertEqual(len(flash_updates), 1)
+        if flash.replay_buffer is None:
+            self.fail("real G1 FlashSAC collection did not initialize replay")
+        self.assertEqual(flash.replay_buffer.actions.shape, (2, ACTION_DIM_G1))
+        self.assertEqual(flash_env.step_next_obs.shape, (1, OBS_DIM_G1))
+        np.testing.assert_allclose(flash.replay_buffer.next_obs.numpy()[:1], flash_env.step_next_obs.numpy())
+        np.testing.assert_array_equal(flash_env.step_terminateds.numpy(), [0.0])
+        np.testing.assert_array_equal(flash_env.step_truncateds.numpy(), [1.0])
+        np.testing.assert_array_equal(flash.replay_buffer.dones.numpy()[:1], [0.0])
+
+        rollout = BufferRollout(
+            num_steps=1,
+            num_envs=1,
+            obs_dim=OBS_DIM_G1,
+            action_dim=ACTION_DIM_G1,
+            device=device,
+        )
+        ppo_env.collect_ppo_rollout(ppo, rollout, seed=227)
+        self.assertEqual(rollout.obs.shape, (1, OBS_DIM_G1))
+        self.assertEqual(rollout.actions.shape, (1, ACTION_DIM_G1))
+        ppo_stats = ppo.update(rollout)
+        self.assertTrue(all(math.isfinite(value) for value in flash_updates[0].__dict__.values()))
+        self.assertTrue(all(math.isfinite(value) for value in ppo_stats.__dict__.values()))
+        self.assertTrue(np.isfinite(rollout.obs.numpy()).all())
+        self.assertTrue(np.isfinite(rollout.actions.numpy()).all())
+
 
 if __name__ == "__main__":
     wp.init()
