@@ -367,8 +367,8 @@ class TestRacerXUsd(unittest.TestCase):
         self.assertEqual(builder.joint_limit_lower[steering_dof], -racerx.STEERING_LIMIT)
         self.assertEqual(builder.joint_limit_upper[steering_dof], racerx.STEERING_LIMIT)
 
-    def test_c3_uses_its_own_rear_suspension_tune(self) -> None:
-        """Stiffen only C3's rear suspension while preserving damping ratio."""
+    def test_c3_uses_its_own_physics_tune(self) -> None:
+        """Calibrate C3 suspension, friction, and steering independently."""
         dof_count = 10
         builder = SimpleNamespace(
             joint_qd_start=list(range(9)),
@@ -398,9 +398,12 @@ class TestRacerXUsd(unittest.TestCase):
 
         front_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER
         rear_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER
-        self.assertEqual(racerx.C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER, 4.0)
+        self.assertEqual(racerx.C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER, 16.0)
         self.assertEqual(racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER, 5.0)
-        self.assertEqual(racerx.C3_WHEEL_FRICTION, 1.2)
+        self.assertEqual(racerx.C3_WHEEL_FRICTION, 0.3)
+        self.assertEqual((racerx.C3_STEERING_TRAVEL, racerx.C3_STEERING_LIMIT), (0.0015, 0.0018))
+        self.assertEqual(builder.joint_limit_lower[9], -racerx.C3_STEERING_LIMIT)
+        self.assertEqual(builder.joint_limit_upper[9], racerx.C3_STEERING_LIMIT)
         self.assertEqual(racerx.C3_SIM_SUBSTEPS, 4)
         for dof in (4, 5):
             self.assertAlmostEqual(builder.joint_target_ke[dof], 10000.0 * front_scale)
@@ -465,6 +468,7 @@ class TestRacerXUsd(unittest.TestCase):
                     wheel_dofs,
                     9,
                     1.0 / 60.0,
+                    racerx.STEERING_TRAVEL,
                     wheel_command,
                     steering_command,
                     target_q,

@@ -68,13 +68,15 @@ DRIVE_DAMPING = 0.35
 DRIVE_TORQUE_LIMIT = 3.0
 SUSPENSION_STIFFNESS_SCALE = 0.16
 C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER = 5.0
-C3_WHEEL_FRICTION = 1.2
+C3_WHEEL_FRICTION = 0.3
 LOOPED_VEHICLE_VARIANTS = frozenset(("b3", "c3"))
 A3_SUSPENSION_STIFFNESS_MULTIPLIER = 6.25
 B3_SUSPENSION_STIFFNESS_MULTIPLIER = 6.25
-C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER = 4.0
+C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER = 16.0
 STEERING_TRAVEL = 0.00125
 STEERING_LIMIT = 0.0015
+C3_STEERING_TRAVEL = 0.0015
+C3_STEERING_LIMIT = 0.0018
 STEERING_RATE = 0.015
 STEERING_STIFFNESS = 64000.0
 STEERING_DAMPING = 240.0
@@ -141,6 +143,7 @@ def _update_vehicle_controls(
     wheel_dofs: wp.array[wp.int32],
     steering_target_index: wp.int32,
     frame_dt: float,
+    steering_travel: float,
     wheel_speed_command: wp.array[float],
     steering_command: wp.array[float],
     joint_target_q: wp.array[float],
@@ -155,7 +158,7 @@ def _update_vehicle_controls(
     for wheel_index in range(wheel_dofs.shape[0]):
         joint_target_qd[wheel_dofs[wheel_index]] = wheel_speed_command[0]
 
-    steering_target = drive_input[1] * STEERING_TRAVEL
+    steering_target = drive_input[1] * steering_travel
     max_steering_delta = STEERING_RATE * frame_dt
     steering_delta = wp.clamp(
         steering_target - steering_command[0],
@@ -530,8 +533,9 @@ def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[li
     builder.joint_limit_lower[steering_dof_start] = 1.0
     builder.joint_limit_upper[steering_dof_start] = -1.0
     steering_dof = steering_dof_start + 1
-    builder.joint_limit_lower[steering_dof] = -STEERING_LIMIT
-    builder.joint_limit_upper[steering_dof] = STEERING_LIMIT
+    steering_limit = C3_STEERING_LIMIT if parts.variant == "c3" else STEERING_LIMIT
+    builder.joint_limit_lower[steering_dof] = -steering_limit
+    builder.joint_limit_upper[steering_dof] = steering_limit
     builder.joint_target_mode[steering_dof] = newton.JointTargetMode.POSITION
     builder.joint_target_ke[steering_dof] = STEERING_STIFFNESS
     builder.joint_target_kd[steering_dof] = STEERING_DAMPING
@@ -765,6 +769,7 @@ class Example:
         vehicle_parts = _resolve_vehicle_parts(builder, result)
         self._vehicle_variant = vehicle_parts.variant
         self._looped_vehicle = vehicle_parts.variant in LOOPED_VEHICLE_VARIANTS
+        self._steering_travel = C3_STEERING_TRAVEL if vehicle_parts.variant == "c3" else STEERING_TRAVEL
         self._sim_substeps = C3_SIM_SUBSTEPS if vehicle_parts.variant == "c3" else SIM_SUBSTEPS
         _scale_shape_contact_gaps(builder, authored_unit)
         _replace_wheel_mesh_colliders(builder, vehicle_parts)
@@ -1003,6 +1008,7 @@ class Example:
                 self._wheel_dofs_device,
                 self._steering_target_index,
                 self.frame_dt,
+                self._steering_travel,
                 self._wheel_speed_command,
                 self._steering_command,
                 self.control.joint_target_q,
