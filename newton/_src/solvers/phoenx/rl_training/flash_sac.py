@@ -20,6 +20,7 @@ from .kernels import (
     flash_sac_return_stats_kernel,
     flash_sac_update_return_normalizer_kernel,
     sac_refresh_alpha_kernel,
+    seed_counter_increment_kernel,
     zero_scalar_kernel,
 )
 from .optim import Adam
@@ -46,6 +47,46 @@ def _flash_sac_alpha_loss_kernel(
     wp.atomic_add(loss, 0, alpha * (entropy - target_entropy) / wp.float32(batch_size))
 
 
+@wp.kernel
+def _prepare_flash_sac_graph_update_kernel(
+    gradient_update_count: wp.array[wp.int32],
+    update_count: wp.array[wp.int32],
+    seed_base: wp.int32,
+    policy_frequency: wp.int32,
+    warmup_steps: wp.int32,
+    decay_steps: wp.int32,
+    peak_lr: wp.float32,
+    end_lr: wp.float32,
+    actor_base_lr: wp.float32,
+    critic_base_lr: wp.float32,
+    alpha_base_lr: wp.float32,
+    actor_condition: wp.array[wp.int32],
+    actor_skip_condition: wp.array[wp.int32],
+    update_seed: wp.array[wp.int32],
+    actor_lr_scale: wp.array[wp.float32],
+    critic1_lr_scale: wp.array[wp.float32],
+    critic2_lr_scale: wp.array[wp.float32],
+    alpha_lr_scale: wp.array[wp.float32],
+):
+    step = gradient_update_count[0]
+    actor_condition[0] = wp.int32(step % policy_frequency == 0)
+    actor_skip_condition[0] = wp.int32(step % policy_frequency != 0)
+    seed64 = wp.int64(seed_base) + wp.int64(update_count[0]) * wp.int64(9973)
+    update_seed[0] = wp.int32(seed64 % wp.int64(2147483647))
+    lr = peak_lr
+    if warmup_steps > 0 and step < warmup_steps:
+        lr = peak_lr * wp.float32(step + 1) / wp.float32(warmup_steps)
+    else:
+        decay_step = wp.min(wp.max(step - warmup_steps, 0), decay_steps)
+        progress = wp.float32(decay_step) / wp.float32(decay_steps)
+        cosine = wp.float32(0.5) * (wp.float32(1.0) + wp.cos(wp.pi * progress))
+        lr = end_lr + (peak_lr - end_lr) * cosine
+    actor_lr_scale[0] = lr / actor_base_lr
+    critic1_lr_scale[0] = lr / critic_base_lr
+    critic2_lr_scale[0] = lr / critic_base_lr
+    alpha_lr_scale[0] = lr / alpha_base_lr
+
+
 class EnvFlashSAC(Protocol):
     """Vectorized environment interface consumed by :func:`train_flash_sac`."""
 
@@ -65,9 +106,9 @@ class EnvFlashSAC(Protocol):
 class ConfigFlashSAC(ConfigSAC):
     """Configuration for :class:`TrainerFlashSAC`.
 
-    These defaults follow the upstream FlashSAC configuration. The Warp port
-    uses the existing PhoenX MLP implementation in place of upstream's
-    batch-normalized residual blocks.
+    These defaults follow the upstream FlashSAC configuration. With the default
+    architecture, the Warp port uses upstream-equivalent batch-normalized
+    residual actor and critic backbones.
 
     Args:
         target_sigma: Standard deviation used to derive the target entropy.
@@ -496,6 +537,11 @@ class TrainerFlashSAC(TrainerSAC):
         self._noise_repeat_count = 0
         self._noise_repeat_steps = 0
         self._exploration_seed = int(seed)
+        self._device_update_count = wp.array([0], dtype=wp.int32, device=self.device)
+        self._device_gradient_update_count = wp.array([0], dtype=wp.int32, device=self.device)
+        self._device_update_seed = wp.array([int(seed)], dtype=wp.int32, device=self.device)
+        self._device_actor_condition = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._device_actor_skip_condition = wp.zeros(1, dtype=wp.int32, device=self.device)
         if self.config.normalize_weights:
             self._normalize_online_weights()
             self.target_critic1.copy_from(self.critic1)
@@ -665,6 +711,8 @@ class TrainerFlashSAC(TrainerSAC):
             trainer._obs_count.assign(data["obs_count"])
             trainer._update_count = int(data["update_count"])
             trainer._gradient_update_count = int(data["gradient_update_count"])
+            trainer._device_update_count.assign(np.asarray([trainer._update_count], dtype=np.int32))
+            trainer._device_gradient_update_count.assign(np.asarray([trainer._gradient_update_count], dtype=np.int32))
             if "noise_rng_state" in data:
                 trainer._noise_repeat_count = int(data["noise_repeat_count"])
                 trainer._noise_repeat_steps = int(data["noise_repeat_steps"])
@@ -678,6 +726,108 @@ class TrainerFlashSAC(TrainerSAC):
             ):
                 _unpack_optimizer(data, prefix, optimizer)
             return trainer
+
+    def capture_update_graph(
+        self,
+        batch: BatchSAC,
+        *,
+        seed: int | None = None,
+    ) -> GraphFlashSACUpdate:
+        """Capture one algorithmically complete update for repeated CUDA replay.
+
+        The leapfrog graphs advance learning-rate, optimizer, and stochastic-seed
+        state on the device. A host-mirrored counter selects the delayed actor
+        graph without a device synchronization. ``batch`` arrays must retain
+        their addresses; callers may overwrite their contents between launches.
+        """
+
+        if not self.device.is_cuda or not self.device.is_mempool_enabled:
+            raise RuntimeError("FlashSAC update graphs require CUDA with memory pools enabled")
+        if int(self.config.update_steps) != 1:
+            raise ValueError("FlashSAC update graph capture requires update_steps=1")
+        if self.config.normalize_observations:
+            raise ValueError("FlashSAC update graph capture requires reference internal observation normalization")
+        if int(batch.obs.shape[1]) != self.obs_dim or int(batch.next_obs.shape[1]) != self.obs_dim:
+            raise ValueError("Batch observation dimensions do not match trainer")
+        if int(batch.actions.shape[1]) != self.action_dim:
+            raise ValueError("Batch action dimensions do not match trainer")
+        if min(self.config.actor_lr, self.config.critic_lr, self.config.alpha_lr) <= 0.0:
+            raise ValueError("FlashSAC update graph capture requires positive optimizer learning rates")
+
+        self._device_update_count.assign(np.asarray([self._update_count], dtype=np.int32))
+        self._device_gradient_update_count.assign(np.asarray([self._gradient_update_count], dtype=np.int32))
+        seed_base = self.seed if seed is None else int(seed)
+        self.actor_optimizer.lr = float(self.config.actor_lr)
+        self.critic1_optimizer.lr = float(self.config.critic_lr)
+        self.critic2_optimizer.lr = float(self.config.critic_lr)
+        self.alpha_optimizer.lr = float(self.config.alpha_lr)
+
+        def capture_one_update(*, include_actor: bool) -> object:
+            with wp.ScopedCapture(device=self.device) as capture:
+                wp.launch(
+                    _prepare_flash_sac_graph_update_kernel,
+                    dim=1,
+                    inputs=[
+                        self._device_gradient_update_count,
+                        self._device_update_count,
+                        seed_base,
+                        int(self.config.policy_frequency),
+                        int(self.config.learning_rate_warmup_steps),
+                        int(self.config.learning_rate_decay_steps),
+                        float(self.config.actor_lr),
+                        float(self.config.learning_rate_end),
+                        float(self.config.actor_lr),
+                        float(self.config.critic_lr),
+                        float(self.config.alpha_lr),
+                    ],
+                    outputs=[
+                        self._device_actor_condition,
+                        self._device_actor_skip_condition,
+                        self._device_update_seed,
+                        self.actor_optimizer.lr_scale,
+                        self.critic1_optimizer.lr_scale,
+                        self.critic2_optimizer.lr_scale,
+                        self.alpha_optimizer.lr_scale,
+                    ],
+                    device=self.device,
+                )
+                wp.launch(zero_scalar_kernel, dim=1, outputs=[self._actor_loss], device=self.device)
+                wp.launch(zero_scalar_kernel, dim=1, outputs=[self._alpha_loss], device=self.device)
+                if include_actor:
+                    self._update_actor(batch, seed=0, seed_counter=self._device_update_seed, seed_offset=0)
+                    if self.config.auto_alpha:
+                        self._update_alpha(batch, seed=0)
+                self._update_critics(
+                    batch,
+                    seed=0,
+                    seed_counter=self._device_update_seed,
+                    seed_offset=2,
+                )
+                self.target_critic1.soft_update_from(self.critic1, self.config.tau)
+                self.target_critic2.soft_update_from(self.critic2, self.config.tau)
+                wp.launch(
+                    seed_counter_increment_kernel,
+                    dim=1,
+                    inputs=[self._device_gradient_update_count, 1],
+                    device=self.device,
+                )
+                wp.launch(
+                    seed_counter_increment_kernel,
+                    dim=1,
+                    inputs=[self._device_update_count, 1],
+                    device=self.device,
+                )
+            return capture.graph
+
+        actor_graph = capture_one_update(include_actor=True)
+        critic_graph = capture_one_update(include_actor=False)
+        return GraphFlashSACUpdate(
+            trainer=self,
+            actor_graph=actor_graph,
+            critic_graph=critic_graph,
+            batch=batch,
+            policy_frequency=int(self.config.policy_frequency),
+        )
 
     def reserve_buffers(self, batch_size: int) -> None:
         """Reserve graph-replay-safe interaction buffers for a fixed batch size."""
@@ -795,6 +945,18 @@ class TrainerFlashSAC(TrainerSAC):
             self.target_critic2.soft_update_from(self.critic2, self.config.tau)
             self._gradient_update_count += 1
         self._update_count += 1
+        wp.launch(
+            seed_counter_increment_kernel,
+            dim=1,
+            inputs=[self._device_gradient_update_count, int(self.config.update_steps)],
+            device=self.device,
+        )
+        wp.launch(
+            seed_counter_increment_kernel,
+            dim=1,
+            inputs=[self._device_update_count, 1],
+            device=self.device,
+        )
         if read_stats:
             return self._read_update_stats()
         return StatsSACUpdate(actor_loss=0.0, critic_loss=0.0, alpha_loss=0.0, alpha=0.0)
@@ -824,16 +986,54 @@ class TrainerFlashSAC(TrainerSAC):
         self.critic1.normalize_weights()
         self.critic2.normalize_weights()
 
-    def _update_actor(self, batch: BatchSAC, *, seed: int) -> None:
-        super()._update_actor(batch, seed=seed)
+    def _update_actor(
+        self,
+        batch: BatchSAC,
+        *,
+        seed: int,
+        seed_counter: wp.array[wp.int32] | None = None,
+        seed_offset: int = 0,
+    ) -> None:
+        super()._update_actor(batch, seed=seed, seed_counter=seed_counter, seed_offset=seed_offset)
         if self.config.normalize_weights:
             self.actor.normalize_weights()
 
-    def _update_critics(self, batch: BatchSAC, *, seed: int) -> None:
-        super()._update_critics(batch, seed=seed)
+    def _update_critics(
+        self,
+        batch: BatchSAC,
+        *,
+        seed: int,
+        seed_counter: wp.array[wp.int32] | None = None,
+        seed_offset: int = 0,
+    ) -> None:
+        super()._update_critics(batch, seed=seed, seed_counter=seed_counter, seed_offset=seed_offset)
         if self.config.normalize_weights:
             self.critic1.normalize_weights()
             self.critic2.normalize_weights()
+
+
+@dataclass
+class GraphFlashSACUpdate:
+    """Captured one-step FlashSAC learner update bound to fixed batch arrays."""
+
+    trainer: TrainerFlashSAC
+    actor_graph: object
+    critic_graph: object
+    batch: BatchSAC
+    policy_frequency: int
+
+    def launch(self, *, read_stats: bool = False) -> StatsSACUpdate:
+        """Replay one update and advance host-visible checkpoint counters."""
+
+        graph = (
+            self.actor_graph if self.trainer._gradient_update_count % self.policy_frequency == 0 else self.critic_graph
+        )
+        wp.capture_launch(graph)
+        self.trainer._gradient_update_count += 1
+        self.trainer._update_count += 1
+        if read_stats:
+            return self.trainer._read_update_stats()
+        return StatsSACUpdate(actor_loss=0.0, critic_loss=0.0, alpha_loss=0.0, alpha=0.0)
 
 
 def train_flash_sac(

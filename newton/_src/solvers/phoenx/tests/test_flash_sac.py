@@ -18,6 +18,7 @@ import newton.rl as public_rl
 from newton._src.solvers.phoenx.rl_training.flash_sac import (
     BufferReplayFlashSAC,
     ConfigFlashSAC,
+    RewardNormalizerFlashSAC,
     TrainerFlashSAC,
     _flash_sac_alpha_loss_kernel,
 )
@@ -773,6 +774,160 @@ class TestTrainerFlashSAC(unittest.TestCase):
         np.testing.assert_allclose(replay.rewards.numpy()[:2], [2.75, 10.0], rtol=0.0, atol=1.0e-6)
         np.testing.assert_array_equal(replay.dones.numpy()[:2], [0.0, 0.0])
         np.testing.assert_allclose(replay.next_obs.numpy()[:2, 0], [3.0, 1.0], rtol=0.0, atol=0.0)
+
+    def test_reference_distributional_policy_learns_continuous_optimum(self) -> None:
+        """Reduce deterministic policy error on a fixed continuous-control optimum."""
+
+        device = require_cuda_graph_capture("FlashSAC deterministic learning regression")
+        seed = 3
+        rng = np.random.default_rng(seed)
+        world_count = 512
+        trainer = TrainerFlashSAC(
+            obs_dim=2,
+            action_dim=1,
+            config=ConfigFlashSAC(
+                gamma=0.0,
+                initial_alpha=0.01,
+                target_entropy=0.0,
+                actor_lr=1.0e-3,
+                critic_lr=1.0e-3,
+                alpha_lr=1.0e-3,
+                learning_rate_end=1.0e-3,
+                learning_rate_decay_steps=1000,
+                actor_hidden_dim=32,
+                critic_hidden_dim=32,
+                actor_num_blocks=1,
+                critic_num_blocks=1,
+                distributional_atoms=51,
+                normalize_rewards=False,
+                buffer_min_length=1,
+                sample_batch_size=1024,
+            ),
+            device=device,
+            seed=seed,
+        )
+        replay = BufferReplayFlashSAC(
+            minimum_size=1,
+            capacity=65536,
+            obs_dim=2,
+            action_dim=1,
+            batch_size=1024,
+            normalize_rewards=False,
+            device=device,
+        )
+        eval_obs_np = rng.uniform(-1.0, 1.0, (1024, 2)).astype(np.float32)
+        eval_target = np.tanh(1.2 * eval_obs_np[:, 0] - 0.7 * eval_obs_np[:, 1])
+        eval_obs = wp.array(eval_obs_np, device=device)
+        initial_actions = trainer.act(eval_obs, seed=0, deterministic=True)[0].numpy()[:, 0]
+        initial_mse = float(np.mean((initial_actions - eval_target) ** 2))
+
+        for update in range(200):
+            obs_np = rng.uniform(-1.0, 1.0, (world_count, 2)).astype(np.float32)
+            obs = wp.array(obs_np, device=device)
+            if update < 4:
+                actions_np = rng.uniform(-1.0, 1.0, (world_count, 1)).astype(np.float32)
+            else:
+                actions_np = trainer.act(obs, seed=seed * 1000 + update)[0].numpy()
+            target = np.tanh(1.2 * obs_np[:, 0] - 0.7 * obs_np[:, 1])
+            rewards_np = -((actions_np[:, 0] - target) ** 2)
+            replay.add_batch(
+                obs,
+                wp.array(actions_np, device=device),
+                wp.array(rewards_np.astype(np.float32), device=device),
+                wp.ones(world_count, dtype=wp.float32, device=device),
+                obs,
+            )
+            trainer.update(replay.sample(seed=update), seed=10000 + update, read_stats=False)
+
+        learned_actions = trainer.act(eval_obs, seed=0, deterministic=True)[0].numpy()[:, 0]
+        learned_mse = float(np.mean((learned_actions - eval_target) ** 2))
+        self.assertGreater(initial_mse, 0.2)
+        self.assertLess(learned_mse, 0.05)
+
+    def test_captured_update_matches_eager_state_progression(self) -> None:
+        """Match eager state across delayed-actor CUDA graph replays."""
+
+        device = require_cuda_graph_capture("FlashSAC full update graph replay")
+
+        def make_trainer() -> TrainerFlashSAC:
+            return TrainerFlashSAC(
+                obs_dim=2,
+                action_dim=1,
+                config=ConfigFlashSAC(
+                    actor_hidden_dim=4,
+                    critic_hidden_dim=4,
+                    actor_num_blocks=1,
+                    critic_num_blocks=1,
+                    distributional_atoms=5,
+                    normalize_rewards=False,
+                    learning_rate_warmup_steps=1,
+                    learning_rate_decay_steps=8,
+                ),
+                device=device,
+                seed=241,
+            )
+
+        rng = np.random.default_rng(239)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(4, 2)).astype(np.float32), device=device),
+            actions=wp.array(rng.uniform(-1.0, 1.0, size=(4, 1)).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=4).astype(np.float32), device=device),
+            dones=wp.zeros(4, dtype=wp.float32, device=device),
+            next_obs=wp.array(rng.normal(size=(4, 2)).astype(np.float32), device=device),
+        )
+        eager = make_trainer()
+        captured = make_trainer()
+        update_graph = captured.capture_update_graph(batch)
+        for _ in range(4):
+            eager.update(batch, read_stats=False)
+            update_graph.launch()
+
+        eager_arrays: list[wp.array] = []
+        captured_arrays: list[wp.array] = []
+        for name in ("actor", "critic1", "critic2", "target_critic1", "target_critic2"):
+            eager_network = getattr(eager, name)
+            captured_network = getattr(captured, name)
+            if name == "actor":
+                eager_network = eager_network.net
+                captured_network = captured_network.net
+            eager_arrays.extend(eager_network.state_arrays())
+            captured_arrays.extend(captured_network.state_arrays())
+        eager_arrays.extend((eager.log_alpha, eager._alpha))
+        captured_arrays.extend((captured.log_alpha, captured._alpha))
+        for eager_optimizer, captured_optimizer in zip(
+            (eager.actor_optimizer, eager.critic1_optimizer, eager.critic2_optimizer, eager.alpha_optimizer),
+            (
+                captured.actor_optimizer,
+                captured.critic1_optimizer,
+                captured.critic2_optimizer,
+                captured.alpha_optimizer,
+            ),
+            strict=True,
+        ):
+            eager_arrays.extend((*eager_optimizer.m, *eager_optimizer.v, eager_optimizer._step_count))
+            captured_arrays.extend((*captured_optimizer.m, *captured_optimizer.v, captured_optimizer._step_count))
+        for eager_array, captured_array in zip(eager_arrays, captured_arrays, strict=True):
+            np.testing.assert_allclose(captured_array.numpy(), eager_array.numpy(), rtol=2.0e-6, atol=2.0e-7)
+        self.assertEqual(captured._update_count, 4)
+        self.assertEqual(captured._gradient_update_count, 4)
+        np.testing.assert_array_equal(captured._device_update_count.numpy(), [4])
+        np.testing.assert_array_equal(captured._device_gradient_update_count.numpy(), [4])
+        self.assertEqual(captured.actor_optimizer.step_count, 2)
+        self.assertEqual(captured.critic1_optimizer.step_count, 4)
+
+    def test_reward_normalizer_matches_upstream_initial_epsilon(self) -> None:
+        """Include upstream RunningMeanStd epsilon in the initial variance merge."""
+
+        device = require_cuda_graph_capture("FlashSAC reward normalizer epsilon")
+        normalizer = RewardNormalizerFlashSAC(gamma=0.0, normalized_return_max=5.0, device=device)
+        normalizer.update(
+            wp.array([1.0, 3.0], dtype=wp.float32, device=device),
+            wp.zeros(2, dtype=wp.float32, device=device),
+            wp.zeros(2, dtype=wp.float32, device=device),
+        )
+        np.testing.assert_allclose(normalizer.running_mean.numpy(), [2.0], rtol=0.0, atol=1.0e-7)
+        np.testing.assert_allclose(normalizer.running_var.numpy(), [1.00005], rtol=0.0, atol=1.0e-7)
+        np.testing.assert_allclose(normalizer.running_count.numpy(), [2.0], rtol=0.0, atol=0.0)
 
     def test_reward_normalizer_bounds_discounted_return(self) -> None:
         """Bound normalized rewards by the configured return range."""

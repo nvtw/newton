@@ -1840,6 +1840,8 @@ class GaussianActor:
             obs: Observation batch.
             actions: Action batch.
             requires_grad: Whether outputs should record gradients.
+            seed_counter: Optional graph-safe device seed counter.
+            seed_offset: Offset added to ``seed_counter``.
 
         Returns:
             Tuple ``(policy_out, log_probs)``.
@@ -1892,8 +1894,10 @@ class GaussianActor:
         seed: int,
         deterministic: bool = False,
         requires_grad: bool = True,
+        seed_counter: wp.array[wp.int32] | None = None,
+        seed_offset: int = 0,
     ) -> tuple[wp.array, wp.array, wp.array]:
-        """Sample actions with fixed Warp RNG seed.
+        """Sample actions with a host seed or graph-safe device seed.
 
         Args:
             obs: Observation batch.
@@ -1913,13 +1917,22 @@ class GaussianActor:
         log_probs = wp.empty(batch_size, dtype=wp.float32, device=self.device, requires_grad=requires_grad)
         eps = wp.empty((batch_size, self.action_dim), dtype=wp.float32, device=self.device, requires_grad=False)
         if not deterministic:
-            wp.launch(
-                fill_eps_kernel,
-                dim=(batch_size, self.action_dim),
-                inputs=[int(seed)],
-                outputs=[eps],
-                device=self.device,
-            )
+            if seed_counter is None:
+                wp.launch(
+                    fill_eps_kernel,
+                    dim=(batch_size, self.action_dim),
+                    inputs=[int(seed)],
+                    outputs=[eps],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    fill_eps_seed_counter_kernel,
+                    dim=(batch_size, self.action_dim),
+                    inputs=[seed_counter, int(seed_offset)],
+                    outputs=[eps],
+                    device=self.device,
+                )
         wp.launch(
             sample_gaussian_actions_kernel,
             dim=batch_size,

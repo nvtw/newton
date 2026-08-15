@@ -3117,7 +3117,7 @@ def flash_sac_update_return_normalizer_kernel(
     old_count = running_count[0]
     total_count = old_count + sample_count_f
     delta = sample_mean - running_mean[0]
-    old_m2 = running_var[0] * old_count
+    old_m2 = running_var[0] * (old_count + wp.float32(1.0e-4))
     sample_m2 = sample_var * sample_count_f
     combined_m2 = old_m2 + sample_m2 + delta * delta * old_count * sample_count_f / total_count
     running_mean[0] = running_mean[0] + delta * sample_count_f / total_count

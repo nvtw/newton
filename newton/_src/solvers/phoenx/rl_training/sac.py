@@ -11,6 +11,7 @@ import warp as wp
 from .kernels import (
     concat_obs_action_kernel,
     fill_eps_kernel,
+    fill_eps_seed_counter_kernel,
     normalize_observations_kernel,
     observation_count_update_kernel,
     observation_moments_partial_kernel,
@@ -532,9 +533,21 @@ class TrainerSAC:
         )
         return out
 
-    def _update_critics(self, batch: BatchSAC, *, seed: int) -> None:
+    def _update_critics(
+        self,
+        batch: BatchSAC,
+        *,
+        seed: int,
+        seed_counter: wp.array[wp.int32] | None = None,
+        seed_offset: int = 0,
+    ) -> None:
         next_actions, next_log_probs, _policy_out = self.actor.sample(
-            batch.next_obs, seed=seed, deterministic=False, requires_grad=False
+            batch.next_obs,
+            seed=seed,
+            deterministic=False,
+            requires_grad=False,
+            seed_counter=seed_counter,
+            seed_offset=seed_offset,
         )
         next_q_input = self._concat(batch.next_obs, next_actions, requires_grad=False)
         q_input = self._concat(batch.obs, batch.actions, requires_grad=False)
@@ -642,7 +655,14 @@ class TrainerSAC:
         self.critic1_optimizer.step()
         self.critic2_optimizer.step()
 
-    def _update_actor(self, batch: BatchSAC, *, seed: int) -> None:
+    def _update_actor(
+        self,
+        batch: BatchSAC,
+        *,
+        seed: int,
+        seed_counter: wp.array[wp.int32] | None = None,
+        seed_offset: int = 0,
+    ) -> None:
         reference_batch_norm = bool(getattr(self.actor.net, "reference_batch_norm", False))
         if reference_batch_norm:
             actor_observations = self._concat_rows(batch.obs, batch.next_obs)
@@ -653,7 +673,16 @@ class TrainerSAC:
         actions = wp.empty((batch.batch_size, self.action_dim), dtype=wp.float32, device=self.device)
         log_probs = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
         eps = wp.empty((batch.batch_size, self.action_dim), dtype=wp.float32, device=self.device)
-        wp.launch(fill_eps_kernel, dim=eps.shape, inputs=[int(seed)], outputs=[eps], device=self.device)
+        if seed_counter is None:
+            wp.launch(fill_eps_kernel, dim=eps.shape, inputs=[int(seed)], outputs=[eps], device=self.device)
+        else:
+            wp.launch(
+                fill_eps_seed_counter_kernel,
+                dim=eps.shape,
+                inputs=[seed_counter, int(seed_offset)],
+                outputs=[eps],
+                device=self.device,
+            )
         wp.launch(
             sample_gaussian_actions_kernel,
             dim=batch.batch_size,
