@@ -679,6 +679,38 @@ class TrainerFlashSAC(TrainerSAC):
                 _unpack_optimizer(data, prefix, optimizer)
             return trainer
 
+    def reserve_buffers(self, batch_size: int) -> None:
+        """Reserve graph-replay-safe interaction buffers for a fixed batch size."""
+
+        rows = int(batch_size)
+        if rows <= 0:
+            raise ValueError("batch_size must be positive")
+        self.actor.reserve_reuse_buffers(rows)
+
+    def act_reuse_seed_counter(
+        self,
+        obs: wp.array2d[wp.float32],
+        *,
+        seed_counter: wp.array[wp.int32],
+        seed_offset: int = 0,
+        deterministic: bool = False,
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32]]:
+        """Sample into persistent buffers using a device-resident seed.
+
+        This path is suitable for CUDA graph replay. The caller controls
+        temporally correlated exploration by retaining a seed-counter value
+        for the desired number of environment steps.
+        """
+
+        normalized_obs = self._normalize_observations(obs)
+        actions, log_probs, _policy_out = self.actor.sample_reuse_seed_counter(
+            normalized_obs,
+            seed_counter=seed_counter,
+            seed_offset=int(seed_offset),
+            deterministic=deterministic,
+        )
+        return actions, log_probs
+
     def act(
         self,
         obs: wp.array,
@@ -836,8 +868,9 @@ def train_flash_sac(
         raise ValueError("updates_per_step must be non-negative")
     if stats_interval < 0:
         raise ValueError("stats_interval must be non-negative")
-    if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
-        raise ValueError("FlashSAC trainer dimensions do not match environment")
+    policy_action_dim = int(getattr(env, "policy_action_dim", env.action_dim))
+    if trainer.obs_dim != env.obs_dim or trainer.action_dim != policy_action_dim:
+        raise ValueError("FlashSAC trainer dimensions do not match environment policy interface")
 
     obs = env.reset() if reset_at_start else env.observe()
     stats: list[StatsSACUpdate] = []

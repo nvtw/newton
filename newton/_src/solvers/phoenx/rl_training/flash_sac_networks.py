@@ -536,6 +536,8 @@ class NetworkFlashSAC:
         self.biases = self.head_biases
         self._manual_input: wp.array2d[wp.float32] | None = None
         self._manual_cache: dict[str, object] | None = None
+        self._forward_rows = 0
+        self._forward_buffers: dict[str, object] = {}
         self.normalize_parameters()
 
     def _weight(self, input_dim: int, output_dim: int, rng: np.random.Generator) -> wp.array2d[wp.float32]:
@@ -579,6 +581,154 @@ class NetworkFlashSAC:
             gemm_float32(x, weight, out, int(x.shape[0]), int(weight.shape[1]), int(weight.shape[0]))
         else:
             wp.launch(_unit_linear_kernel, dim=out.shape, inputs=[x, weight], outputs=[out], device=self.device)
+        return out
+
+    def _linear_into(
+        self,
+        x: wp.array2d[wp.float32],
+        weight: wp.array2d[wp.float32],
+        out: wp.array2d[wp.float32],
+    ) -> None:
+        if self._use_cublas:
+            gemm_float32(x, weight, out, int(x.shape[0]), int(weight.shape[1]), int(weight.shape[0]))
+        else:
+            wp.launch(_unit_linear_kernel, dim=out.shape, inputs=[x, weight], outputs=[out], device=self.device)
+
+    def reserve_forward_buffers(self, batch_size: int) -> None:
+        """Reserve persistent inference buffers for one fixed batch size."""
+
+        rows = int(batch_size)
+        if rows <= 0:
+            raise ValueError("batch_size must be positive")
+        if rows == self._forward_rows:
+            return
+        blocks: list[tuple[wp.array2d[wp.float32], ...]] = []
+        for _ in range(self.num_blocks):
+            blocks.append(
+                (
+                    wp.empty((rows, self.hidden_dim * 4), dtype=wp.float32, device=self.device),
+                    wp.empty((rows, self.hidden_dim * 4), dtype=wp.float32, device=self.device),
+                    wp.empty((rows, self.hidden_dim * 4), dtype=wp.float32, device=self.device),
+                    wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
+                    wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
+                    wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
+                    wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
+                )
+            )
+        head_width = self.output_dim // 2 if self.actor_heads else self.output_dim
+        head_count = 2 if self.actor_heads else 1
+        self._forward_buffers = {
+            "input_normalized": wp.empty((rows, self.input_dim), dtype=wp.float32, device=self.device),
+            "embed": wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
+            "blocks": blocks,
+            "inv_rms": wp.empty(rows, dtype=wp.float32, device=self.device),
+            "normalized": wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
+            "heads": [wp.empty((rows, head_width), dtype=wp.float32, device=self.device) for _ in range(head_count)],
+            "output": wp.empty((rows, self.output_dim), dtype=wp.float32, device=self.device),
+        }
+        self._forward_rows = rows
+
+    def reserve_buffers(self, batch_size: int) -> None:
+        """Reserve reusable inference buffers for actor sampling."""
+
+        self.reserve_forward_buffers(batch_size)
+
+    def _forward_reuse(self, x: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+        self.reserve_forward_buffers(int(x.shape[0]))
+        buffers = self._forward_buffers
+        input_normalized = buffers["input_normalized"]
+        hidden = buffers["embed"]
+        blocks = buffers["blocks"]
+        inv_rms = buffers["inv_rms"]
+        normalized = buffers["normalized"]
+        heads = buffers["heads"]
+        out = buffers["output"]
+        if not isinstance(input_normalized, wp.array) or not isinstance(hidden, wp.array):
+            raise RuntimeError("FlashSAC forward buffers are invalid")
+        if not isinstance(inv_rms, wp.array) or not isinstance(normalized, wp.array) or not isinstance(out, wp.array):
+            raise RuntimeError("FlashSAC forward buffers are invalid")
+        if not isinstance(blocks, list) or not isinstance(heads, list):
+            raise RuntimeError("FlashSAC forward buffers are invalid")
+        wp.launch(
+            _batch_norm_kernel,
+            dim=input_normalized.shape,
+            inputs=[
+                x,
+                self.input_norm.running_mean,
+                self.input_norm.running_variance,
+                self.input_norm.scale,
+                self.input_norm.bias,
+                self.input_norm.eps,
+            ],
+            outputs=[input_normalized],
+            device=self.device,
+        )
+        self._linear_into(input_normalized, self.embed_weight, hidden)
+        for block_index, ((w1, w2), (norm1, norm2)) in enumerate(
+            zip(self.block_weights, self.block_norms, strict=True)
+        ):
+            residual = hidden
+            pre1, normed1, activated1, pre2, normed2, activated2, block_out = blocks[block_index]
+            self._linear_into(residual, w1, pre1)
+            wp.launch(
+                _batch_norm_kernel,
+                dim=pre1.shape,
+                inputs=[pre1, norm1.running_mean, norm1.running_variance, norm1.scale, norm1.bias, norm1.eps],
+                outputs=[normed1],
+                device=self.device,
+            )
+            wp.launch(_relu_kernel, dim=normed1.shape, inputs=[normed1], outputs=[activated1], device=self.device)
+            self._linear_into(activated1, w2, pre2)
+            wp.launch(
+                _batch_norm_kernel,
+                dim=pre2.shape,
+                inputs=[pre2, norm2.running_mean, norm2.running_variance, norm2.scale, norm2.bias, norm2.eps],
+                outputs=[normed2],
+                device=self.device,
+            )
+            wp.launch(_relu_kernel, dim=normed2.shape, inputs=[normed2], outputs=[activated2], device=self.device)
+            wp.launch(
+                _residual_add_kernel,
+                dim=block_out.shape,
+                inputs=[activated2, residual],
+                outputs=[block_out],
+                device=self.device,
+            )
+            hidden = block_out
+        wp.launch(
+            _rms_inv_kernel,
+            dim=hidden.shape[0],
+            inputs=[hidden, 1.0e-6],
+            outputs=[inv_rms],
+            device=self.device,
+        )
+        wp.launch(
+            _rms_norm_kernel,
+            dim=hidden.shape,
+            inputs=[hidden, self.rms_scale, inv_rms],
+            outputs=[normalized],
+            device=self.device,
+        )
+        offset = 0
+        for head_index, (head, weight, bias) in enumerate(zip(heads, self.head_weights, self.head_biases, strict=True)):
+            self._linear_into(normalized, weight, head)
+            if self.actor_heads and head_index == 1:
+                wp.launch(
+                    _head_bias_log_std_kernel,
+                    dim=head.shape,
+                    inputs=[head, bias, offset, self.log_std_min, self.log_std_max],
+                    outputs=[out],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    _head_bias_kernel,
+                    dim=head.shape,
+                    inputs=[head, bias, offset],
+                    outputs=[out],
+                    device=self.device,
+                )
+            offset += int(head.shape[1])
         return out
 
     def _forward(
@@ -663,7 +813,7 @@ class NetworkFlashSAC:
         return self._forward(x, training=training, requires_grad=requires_grad)
 
     def forward_reuse(self, x: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
-        return self._forward(x, training=False, requires_grad=False)
+        return self._forward_reuse(x)
 
     def _linear_backward(
         self,

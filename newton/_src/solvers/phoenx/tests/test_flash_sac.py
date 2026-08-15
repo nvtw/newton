@@ -64,6 +64,128 @@ class _G1SmokeEnv:
 
 
 class TestTrainerFlashSAC(unittest.TestCase):
+    def test_authoritative_pytorch_actor_fixture(self) -> None:
+        """Match a fixed actor forward/backward fixture from upstream PyTorch."""
+
+        # Generated from FlashSAC 87edc9061150ae9e962dd84e6544e27a1554b3ab
+        # FlashSACActor with the explicit parameters below, training=False, and
+        # loss=sum(mean + 0.3 * log_std). Runtime validation uses only NumPy/Warp.
+        device = require_cuda_graph_capture("authoritative FlashSAC actor fixture")
+        network = NetworkFlashSAC(
+            input_dim=2,
+            hidden_dim=2,
+            num_blocks=1,
+            output_dim=2,
+            actor_heads=True,
+            device=device,
+            seed=5,
+        )
+        network.input_norm.running_mean.assign(np.asarray([0.2, -0.4], dtype=np.float32))
+        network.input_norm.running_variance.assign(np.asarray([1.5, 0.7], dtype=np.float32))
+        network.input_norm.scale.assign(np.asarray([1.1, 0.8], dtype=np.float32))
+        network.input_norm.bias.assign(np.asarray([-0.1, 0.3], dtype=np.float32))
+        network.embed_weight.assign(np.asarray([[0.6, 0.4], [-0.2, 0.7]], dtype=np.float32))
+        w1, w2 = network.block_weights[0]
+        w1.assign(
+            np.asarray(
+                [
+                    [0.2, 0.3, -0.5, 0.1, 0.7, -0.2, 0.4, -0.6],
+                    [-0.1, 0.4, 0.2, 0.6, -0.3, 0.5, 0.1, -0.2],
+                ],
+                dtype=np.float32,
+            )
+        )
+        norm1, norm2 = network.block_norms[0]
+        norm1.running_mean.assign(np.asarray([0.1, -0.2, 0.0, 0.3, -0.1, 0.2, 0.05, -0.15], dtype=np.float32))
+        norm1.running_variance.assign(np.asarray([0.8, 1.2, 0.9, 1.4, 0.7, 1.1, 1.3, 0.6], dtype=np.float32))
+        norm1.scale.assign(np.asarray([0.9, 1.1, 0.8, 1.2, 0.7, 1.0, 1.3, 0.6], dtype=np.float32))
+        norm1.bias.assign(np.asarray([0.0, 0.1, -0.1, 0.2, 0.05, -0.05, 0.15, -0.2], dtype=np.float32))
+        w2.assign(
+            np.asarray(
+                [
+                    [0.2, -0.4],
+                    [-0.1, 0.2],
+                    [0.3, 0.1],
+                    [0.4, -0.2],
+                    [-0.2, 0.3],
+                    [0.1, 0.6],
+                    [0.5, -0.1],
+                    [-0.3, 0.4],
+                ],
+                dtype=np.float32,
+            )
+        )
+        norm2.running_mean.assign(np.asarray([0.25, -0.35], dtype=np.float32))
+        norm2.running_variance.assign(np.asarray([1.25, 0.85], dtype=np.float32))
+        norm2.scale.assign(np.asarray([1.2, 0.75], dtype=np.float32))
+        norm2.bias.assign(np.asarray([-0.05, 0.2], dtype=np.float32))
+        network.rms_scale.assign(np.asarray([0.9, 1.1], dtype=np.float32))
+        network.head_weights[0].assign(np.asarray([[0.3], [-0.7]], dtype=np.float32))
+        network.head_biases[0].assign(np.asarray([0.15], dtype=np.float32))
+        network.head_weights[1].assign(np.asarray([[-0.4], [0.5]], dtype=np.float32))
+        network.head_biases[1].assign(np.asarray([-0.2], dtype=np.float32))
+        x = wp.array(np.asarray([[0.5, -1.2], [1.7, 0.3]], dtype=np.float32), device=device)
+        output = network.forward_manual(x, training=False)
+        expected_output = np.asarray([[-0.5968491, -2.73498], [-0.7396883, -1.9618626]], dtype=np.float32)
+        np.testing.assert_allclose(output.numpy(), expected_output, rtol=2.0e-6, atol=2.0e-6)
+
+        output_grad = wp.array(np.asarray([[1.0, 0.3], [1.0, 0.3]], dtype=np.float32), device=device)
+        input_grad = wp.empty_like(x)
+        network.backward_manual(output_grad, input_grad=input_grad)
+        np.testing.assert_allclose(
+            input_grad.numpy(),
+            np.asarray([[-0.34714878, 0.6968381], [-0.12745747, 0.050784227]], dtype=np.float32),
+            rtol=2.0e-5,
+            atol=2.0e-5,
+        )
+        np.testing.assert_allclose(
+            network.embed_weight.grad.numpy(),
+            np.asarray([[-0.49126515, 0.13067824], [0.28889334, -0.3279666]], dtype=np.float32),
+            rtol=2.0e-5,
+            atol=2.0e-5,
+        )
+
+    def test_graph_replays_reusable_reference_actor(self) -> None:
+        """Replay reference actor sampling with persistent buffers and device seeds."""
+
+        device = require_cuda_graph_capture("FlashSAC reusable actor graph replay")
+        trainer = TrainerFlashSAC(
+            obs_dim=3,
+            action_dim=2,
+            config=ConfigFlashSAC(actor_hidden_dim=4, actor_num_blocks=1, critic_hidden_dim=4, critic_num_blocks=1),
+            device=device,
+            seed=17,
+        )
+        obs = wp.array(
+            np.asarray([[0.1, -0.2, 0.3], [0.4, 0.5, -0.6], [-0.7, 0.8, 0.9]], dtype=np.float32),
+            device=device,
+        )
+        seed_counter = wp.array(np.asarray([11], dtype=np.int32), dtype=wp.int32, device=device)
+        trainer.reserve_buffers(3)
+        trainer.act_reuse_seed_counter(obs, seed_counter=seed_counter)
+        with wp.ScopedCapture(device=device) as capture:
+            actions, log_probs = trainer.act_reuse_seed_counter(obs, seed_counter=seed_counter)
+
+        seed_counter.assign(np.asarray([31], dtype=np.int32))
+        wp.capture_launch(capture.graph)
+        first_actions = actions.numpy().copy()
+        first_log_probs = log_probs.numpy().copy()
+        seed_counter.assign(np.asarray([47], dtype=np.int32))
+        wp.capture_launch(capture.graph)
+        second_actions = actions.numpy().copy()
+        seed_counter.assign(np.asarray([31], dtype=np.int32))
+        wp.capture_launch(capture.graph)
+        repeated_actions = actions.numpy().copy()
+        repeated_log_probs = log_probs.numpy().copy()
+
+        self.assertEqual(actions.shape, (3, 2))
+        self.assertEqual(log_probs.shape, (3,))
+        self.assertTrue(np.isfinite(first_actions).all())
+        self.assertTrue(np.isfinite(first_log_probs).all())
+        self.assertFalse(np.array_equal(first_actions, second_actions))
+        np.testing.assert_array_equal(repeated_actions, first_actions)
+        np.testing.assert_array_equal(repeated_log_probs, first_log_probs)
+
     def test_reference_backbone_forward_equations_and_initialization(self) -> None:
         """Match reference normalization, residual, head, and orthogonal equations."""
 
@@ -717,6 +839,36 @@ class TestTrainerFlashSAC(unittest.TestCase):
                 stats_interval=-1,
             )
 
+    def test_training_prefers_compact_policy_action_dimension(self) -> None:
+        """Validate and store actions against an environment policy interface."""
+
+        device = require_cuda_graph_capture("FlashSAC compact policy action interface")
+        obs = wp.zeros((2, 3), dtype=wp.float32, device=device)
+        next_obs = wp.ones((2, 3), dtype=wp.float32, device=device)
+        env = _G1SmokeEnv(obs, next_obs)
+        env.policy_action_dim = 2
+        trainer = TrainerFlashSAC(
+            obs_dim=3,
+            action_dim=2,
+            hidden_layers=(4,),
+            config=ConfigFlashSAC(
+                buffer_max_length=4,
+                buffer_min_length=4,
+                sample_batch_size=2,
+                normalize_observations=False,
+            ),
+            device=device,
+            seed=229,
+        )
+        stats = public_rl.train_flash_sac(env, trainer, interaction_steps=1, updates_per_step=0, seed=233)
+        self.assertEqual(stats, [])
+        if trainer.replay_buffer is None:
+            self.fail("compact-action collection did not initialize replay")
+        self.assertEqual(trainer.replay_buffer.actions.shape, (4, 2))
+        with self.assertRaisesRegex(ValueError, "policy interface"):
+            incompatible = TrainerFlashSAC(obs_dim=3, action_dim=3, hidden_layers=(4,), device=device)
+            public_rl.train_flash_sac(env, incompatible, interaction_steps=1, updates_per_step=0)
+
     def test_update_uses_upstream_network_order(self) -> None:
         """Update actor and temperature before critic and target networks."""
 
@@ -865,7 +1017,7 @@ class TestTrainerFlashSAC(unittest.TestCase):
 
         flash = TrainerFlashSAC(
             obs_dim=OBS_DIM_G1,
-            action_dim=ACTION_DIM_G1,
+            action_dim=flash_env.policy_action_dim,
             hidden_layers=(4,),
             config=ConfigFlashSAC(
                 buffer_max_length=2,
@@ -900,7 +1052,7 @@ class TestTrainerFlashSAC(unittest.TestCase):
         self.assertEqual(len(flash_updates), 1)
         if flash.replay_buffer is None:
             self.fail("real G1 FlashSAC collection did not initialize replay")
-        self.assertEqual(flash.replay_buffer.actions.shape, (2, ACTION_DIM_G1))
+        self.assertEqual(flash.replay_buffer.actions.shape, (2, flash_env.policy_action_dim))
         self.assertEqual(flash_env.step_next_obs.shape, (1, OBS_DIM_G1))
         np.testing.assert_allclose(flash.replay_buffer.next_obs.numpy()[:1], flash_env.step_next_obs.numpy())
         np.testing.assert_array_equal(flash_env.step_terminateds.numpy(), [0.0])
