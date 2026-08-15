@@ -1035,6 +1035,8 @@ def g1_observe_reward_kernel(
     obs: wp.array2d[wp.float32],
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
+    terminateds: wp.array[wp.float32],
+    truncateds: wp.array[wp.float32],
     successes: wp.array[wp.float32],
 ):
     world, col = wp.tid()
@@ -1493,15 +1495,18 @@ def g1_observe_reward_kernel(
         rewards[world] = reward
         successes[world] = success_metric
 
-        done = wp.float32(0.0)
+        terminated = wp.float32(0.0)
         if fall > wp.float32(0.5):
-            done = wp.float32(1.0)
+            terminated = wp.float32(1.0)
         if (reward_mode == wp.int32(2) or reward_mode == wp.int32(4)) and target_success > wp.float32(0.5):
-            done = wp.float32(1.0)
+            terminated = wp.float32(1.0)
+        truncated = wp.float32(0.0)
         if max_episode_steps > wp.int32(0):
             if episode_steps[world] >= max_episode_steps:
-                done = wp.float32(1.0)
-        dones[world] = done
+                truncated = wp.float32(1.0)
+        terminateds[world] = terminated
+        truncateds[world] = truncated
+        dones[world] = wp.max(terminated, truncated)
 
 
 @wp.kernel
@@ -2328,12 +2333,17 @@ class EnvG1PhoenX:
         self.command_scale = wp.array(np.ones(1, dtype=np.float32), dtype=wp.float32, device=self.device)
         self.episode_steps = wp.zeros(self.world_count, dtype=wp.int32, device=self.device)
         self.obs = wp.zeros((self.world_count, self.obs_dim), dtype=wp.float32, device=self.device)
+        self.terminateds = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.truncateds = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self._reset_articulation_mask = wp.zeros(self.world_count, dtype=wp.bool, device=self.device)
         self.successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.step_terminateds = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.step_truncateds = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.step_next_obs = wp.zeros_like(self.obs)
         self.step_successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self._reset_seed = 0
         self._reset_seed_counter: wp.array[wp.int32] | None = None
@@ -2837,6 +2847,8 @@ class EnvG1PhoenX:
                 self.obs,
                 self.rewards,
                 self.dones,
+                self.terminateds,
+                self.truncateds,
                 self.successes,
             ],
             device=self.device,
@@ -3023,9 +3035,14 @@ class EnvG1PhoenX:
         self._clear_reset_solver_state()
         self._sample_done_commands()
         self.dones.zero_()
+        self.terminateds.zero_()
+        self.truncateds.zero_()
         self.successes.zero_()
         self.step_rewards.zero_()
         self.step_dones.zero_()
+        self.step_terminateds.zero_()
+        self.step_truncateds.zero_()
+        self.step_next_obs.zero_()
         self.step_successes.zero_()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         self.sim_time = 0.0
@@ -3213,8 +3230,11 @@ class EnvG1PhoenX:
             device=self.device,
         )
         self.observe()
+        wp.copy(self.step_next_obs, self.obs)
         wp.copy(self.step_rewards, self.rewards)
         wp.copy(self.step_dones, self.dones)
+        wp.copy(self.step_terminateds, self.terminateds)
+        wp.copy(self.step_truncateds, self.truncateds)
         wp.copy(self.step_successes, self.successes)
         wp.copy(self.previous_actions, self.current_actions)
         reset_observation = False

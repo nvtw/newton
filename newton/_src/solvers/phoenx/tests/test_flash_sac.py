@@ -17,7 +17,12 @@ from newton._src.solvers.phoenx.rl_training.flash_sac import (
     ConfigFlashSAC,
     TrainerFlashSAC,
 )
-from newton._src.solvers.phoenx.rl_training.g1 import ACTION_DIM_G1, OBS_DIM_G1
+from newton._src.solvers.phoenx.rl_training.g1 import (
+    ACTION_DIM_G1,
+    OBS_DIM_G1,
+    ConfigEnvG1PhoenX,
+    EnvG1PhoenX,
+)
 from newton._src.solvers.phoenx.rl_training.kernels import (
     sac_distributional_min_projection_device_alpha_kernel,
 )
@@ -37,6 +42,9 @@ class _G1SmokeEnv:
         self._next_obs = next_obs
         self._rewards = wp.array(np.linspace(-0.2, 0.3, self.world_count, dtype=np.float32), device=self.device)
         self._dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.step_next_obs = next_obs
+        self.step_terminateds = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.step_truncateds = wp.ones(self.world_count, dtype=wp.float32, device=self.device)
 
     def reset(self) -> wp.array2d[wp.float32]:
         self._obs = self._initial_obs
@@ -46,8 +54,8 @@ class _G1SmokeEnv:
         return self._obs
 
     def step(self, actions: wp.array2d[wp.float32]) -> tuple[wp.array, wp.array, wp.array]:
-        self._obs = self._next_obs
-        return self._obs, self._rewards, self._dones
+        self._obs = self._initial_obs
+        return self._obs, self._rewards, wp.ones_like(self._dones)
 
 
 class TestTrainerFlashSAC(unittest.TestCase):
@@ -229,6 +237,31 @@ class TestTrainerFlashSAC(unittest.TestCase):
         self.assertEqual(TrainerFlashSAC._expanded_block_layers(128, 2), (128, 512, 128, 512, 128))
         self.assertEqual(TrainerFlashSAC._expanded_block_layers(256, 2), (256, 1024, 256, 1024, 256))
 
+    def test_g1_timeout_preserves_flash_sac_transition(self) -> None:
+        """Expose timeout truncation and pre-reset next observations for FlashSAC."""
+
+        device = require_cuda_graph_capture("G1 FlashSAC timeout transition test")
+        env = EnvG1PhoenX(
+            ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=1,
+                max_episode_steps=1,
+                auto_reset=True,
+                randomize_commands_on_reset=False,
+                command_resample_steps=0,
+                parse_visuals=False,
+            ),
+            device=device,
+        )
+        actions = wp.zeros((1, ACTION_DIM_G1), dtype=wp.float32, device=device)
+        returned_obs, _rewards, dones = env.step(actions)
+        np.testing.assert_array_equal(dones.numpy(), [1.0])
+        np.testing.assert_array_equal(env.step_truncateds.numpy(), [1.0])
+        np.testing.assert_array_equal(env.step_terminateds.numpy(), [0.0])
+        self.assertEqual(env.step_next_obs.shape, returned_obs.shape)
+        self.assertTrue(np.isfinite(env.step_next_obs.numpy()).all())
+
     def test_g1_flash_sac_and_ppo_trainer_workflows_smoke(self) -> None:
         """Exercise one PPO and FlashSAC update with G1-sized synthetic transitions."""
 
@@ -276,6 +309,10 @@ class TestTrainerFlashSAC(unittest.TestCase):
 
         flash_updates = public_rl.train_flash_sac(_G1SmokeEnv(obs, next_obs), flash, interaction_steps=1, seed=97)
         self.assertTrue(flash.can_start_training())
+        if flash.replay_buffer is None:
+            self.fail("public FlashSAC workflow did not initialize replay")
+        np.testing.assert_allclose(flash.replay_buffer.next_obs.numpy()[:world_count], next_obs.numpy())
+        np.testing.assert_array_equal(flash.replay_buffer.dones.numpy()[:world_count], 0.0)
 
         buffer = BufferRollout(
             num_steps=1, num_envs=world_count, obs_dim=OBS_DIM_G1, action_dim=ACTION_DIM_G1, device=device

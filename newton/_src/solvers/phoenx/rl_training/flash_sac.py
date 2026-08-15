@@ -552,6 +552,7 @@ def train_flash_sac(
     for step in range(int(interaction_steps)):
         actions, _log_probs = trainer.act(obs, seed=int(seed) + step)
         next_obs, rewards, dones = env.step(actions)
+        replay_next_obs = getattr(env, "step_next_obs", next_obs)
         truncateds = getattr(env, "step_truncateds", zero_truncateds)
         terminateds = getattr(env, "step_terminateds", dones)
         trainer.process_transition(
@@ -559,7 +560,7 @@ def train_flash_sac(
             actions,
             rewards,
             terminateds,
-            next_obs,
+            replay_next_obs,
             truncateds=truncateds,
         )
         for update_index in range(int(updates_per_step)):
