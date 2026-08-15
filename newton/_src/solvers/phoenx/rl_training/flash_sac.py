@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -17,6 +18,12 @@ from .kernels import (
     flash_sac_return_stats_kernel,
     flash_sac_update_return_normalizer_kernel,
     zero_scalar_kernel,
+)
+from .ppo import (
+    _pack_optimizer,
+    _pack_policy_network,
+    _unpack_optimizer,
+    _unpack_policy_network,
 )
 from .sac import BatchSAC, BufferReplaySAC, ConfigSAC, StatsSACUpdate, TrainerSAC
 
@@ -417,6 +424,115 @@ class TrainerFlashSAC(TrainerSAC):
 
         return self._replay_buffer is not None and self._replay_buffer.can_sample()
 
+    def save_checkpoint(self, path: str | Path) -> None:
+        """Save complete trainer state except the potentially large replay buffer.
+
+        Replay serialization is intentionally separate from trainer checkpoints.
+        """
+
+        data: dict[str, np.ndarray] = {
+            "obs_dim": np.asarray(self.obs_dim, dtype=np.int64),
+            "action_dim": np.asarray(self.action_dim, dtype=np.int64),
+            "seed": np.asarray(self.seed, dtype=np.int64),
+            "actor_hidden_layers": np.asarray(self.actor.net.layer_sizes[1:-1], dtype=np.int64),
+            "critic_hidden_layers": np.asarray(self.critic1.layer_sizes[1:-1], dtype=np.int64),
+            "actor_log_std": self.actor.log_std.numpy(),
+            "log_alpha": self.log_alpha.numpy(),
+            "alpha": self._alpha.numpy(),
+            "update_count": np.asarray(self._update_count, dtype=np.int64),
+            "gradient_update_count": np.asarray(self._gradient_update_count, dtype=np.int64),
+            "obs_mean": self._obs_mean.numpy(),
+            "obs_m2": self._obs_m2.numpy(),
+            "obs_count": self._obs_count.numpy(),
+        }
+        for key, value in asdict(self.config).items():
+            none_key = f"config_{key}_is_none"
+            if value is None:
+                data[none_key] = np.asarray(True, dtype=np.bool_)
+            else:
+                data[none_key] = np.asarray(False, dtype=np.bool_)
+                data[f"config_{key}"] = np.asarray(value)
+        for prefix, network in (
+            ("actor", self.actor.net),
+            ("critic1", self.critic1),
+            ("critic2", self.critic2),
+            ("target_critic1", self.target_critic1),
+            ("target_critic2", self.target_critic2),
+        ):
+            _pack_policy_network(data, prefix, network)
+        for prefix, optimizer in (
+            ("actor_optimizer", self.actor_optimizer),
+            ("critic1_optimizer", self.critic1_optimizer),
+            ("critic2_optimizer", self.critic2_optimizer),
+            ("alpha_optimizer", self.alpha_optimizer),
+        ):
+            _pack_optimizer(data, prefix, optimizer)
+        checkpoint_path = Path(path)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(checkpoint_path, **data)
+
+    @classmethod
+    def load_checkpoint(
+        cls,
+        path: str | Path,
+        *,
+        config: ConfigFlashSAC | None = None,
+        device: wp.context.Devicelike = None,
+    ) -> TrainerFlashSAC:
+        """Restore networks, targets, optimizers, temperature, and counters.
+
+        Args:
+            path: Input ``.npz`` checkpoint path.
+            config: Optional optimizer configuration override.
+            device: Warp device for restored arrays.
+
+        Returns:
+            Restored FlashSAC trainer without replay contents.
+        """
+
+        with np.load(Path(path), allow_pickle=False) as data:
+            saved_config = config or _config_from_flash_sac_checkpoint(data)
+            actor_hidden = tuple(int(width) for width in data["actor_hidden_layers"])
+            critic_hidden = tuple(int(width) for width in data["critic_hidden_layers"])
+            hidden_layers = actor_hidden if actor_hidden == critic_hidden else None
+            trainer = cls(
+                obs_dim=int(data["obs_dim"]),
+                action_dim=int(data["action_dim"]),
+                hidden_layers=hidden_layers,
+                config=saved_config,
+                device=device,
+                seed=int(data["seed"]),
+            )
+            if (
+                tuple(trainer.actor.net.layer_sizes[1:-1]) != actor_hidden
+                or tuple(trainer.critic1.layer_sizes[1:-1]) != critic_hidden
+            ):
+                raise ValueError("Checkpoint network architecture does not match configuration")
+            for prefix, network in (
+                ("actor", trainer.actor.net),
+                ("critic1", trainer.critic1),
+                ("critic2", trainer.critic2),
+                ("target_critic1", trainer.target_critic1),
+                ("target_critic2", trainer.target_critic2),
+            ):
+                _unpack_policy_network(data, prefix, network)
+            trainer.actor.log_std.assign(data["actor_log_std"])
+            trainer.log_alpha.assign(data["log_alpha"])
+            trainer._alpha.assign(data["alpha"])
+            trainer._obs_mean.assign(data["obs_mean"])
+            trainer._obs_m2.assign(data["obs_m2"])
+            trainer._obs_count.assign(data["obs_count"])
+            trainer._update_count = int(data["update_count"])
+            trainer._gradient_update_count = int(data["gradient_update_count"])
+            for prefix, optimizer in (
+                ("actor_optimizer", trainer.actor_optimizer),
+                ("critic1_optimizer", trainer.critic1_optimizer),
+                ("critic2_optimizer", trainer.critic2_optimizer),
+                ("alpha_optimizer", trainer.alpha_optimizer),
+            ):
+                _unpack_optimizer(data, prefix, optimizer)
+            return trainer
+
     def act(
         self,
         obs: wp.array,
@@ -569,3 +685,37 @@ def train_flash_sac(
             stats.append(trainer.update(seed=int(seed) + step * max(updates_per_step, 1) + update_index))
         obs = next_obs
     return stats
+
+
+def _config_from_flash_sac_checkpoint(data: np.lib.npyio.NpzFile) -> ConfigFlashSAC:
+    """Restore scalar FlashSAC configuration fields from an archive."""
+
+    kwargs: dict[str, object] = {}
+    for config_field in fields(ConfigFlashSAC):
+        none_key = f"config_{config_field.name}_is_none"
+        if none_key in data and bool(data[none_key]):
+            kwargs[config_field.name] = None
+        elif f"config_{config_field.name}" in data:
+            kwargs[config_field.name] = data[f"config_{config_field.name}"].item()
+    return ConfigFlashSAC(**kwargs)
+
+
+def save_flash_sac_checkpoint(trainer: TrainerFlashSAC, path: str | Path) -> None:
+    """Save a FlashSAC trainer checkpoint without replay contents."""
+
+    trainer.save_checkpoint(path)
+
+
+def load_flash_sac_checkpoint(
+    path: str | Path,
+    *,
+    config: ConfigFlashSAC | None = None,
+    device: wp.context.Devicelike = None,
+) -> TrainerFlashSAC:
+    """Load a FlashSAC trainer checkpoint without replay contents."""
+
+    return TrainerFlashSAC.load_checkpoint(
+        path,
+        config=config,
+        device=device,
+    )

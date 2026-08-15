@@ -103,12 +103,14 @@ Warp-only reinforcement learning utilities for Newton.
    evaluate_g1_target_ppo
    g1_mirror_map_ppo
    insert_ppo_checkpoint_inputs
+   load_flash_sac_checkpoint
    load_ppo_checkpoint
    make_seed_counter
    population_based_train
    population_based_train_anymal
    population_based_train_g1
    resize_ppo_checkpoint_inputs
+   save_flash_sac_checkpoint
    save_ppo_checkpoint
    train_anymal_ppo
    train_flash_sac

@@ -35,6 +35,8 @@ from .flash_sac import (
     EnvFlashSAC,
     RewardNormalizerFlashSAC,
     TrainerFlashSAC,
+    load_flash_sac_checkpoint,
+    save_flash_sac_checkpoint,
     train_flash_sac,
 )
 from .g1 import (
@@ -195,6 +197,7 @@ __all__ = [
     "evaluate_g1_target_ppo",
     "g1_mirror_map_ppo",
     "insert_ppo_checkpoint_inputs",
+    "load_flash_sac_checkpoint",
     "load_ppo_checkpoint",
     "make_seed_counter",
     "population_based_train",
@@ -202,6 +205,7 @@ __all__ = [
     "population_based_train_g1",
     "resize_ppo_checkpoint_inputs",
     "reward_functions",
+    "save_flash_sac_checkpoint",
     "save_ppo_checkpoint",
     "train_anymal_ppo",
     "train_flash_sac",

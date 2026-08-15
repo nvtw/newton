@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+import tempfile
 import unittest
 
 import numpy as np
@@ -112,6 +113,56 @@ class TestTrainerFlashSAC(unittest.TestCase):
         for network in (trainer.actor.net, trainer.critic1, trainer.critic2):
             for weight in network.weights:
                 np.testing.assert_allclose(np.linalg.norm(weight.numpy(), axis=0), 1.0, rtol=0.0, atol=2.0e-6)
+
+    def test_flash_sac_checkpoint_round_trip(self) -> None:
+        """Restore networks, targets, temperature, optimizers, counters, and config."""
+
+        device = require_cuda_graph_capture("FlashSAC checkpoint tests")
+        rng = np.random.default_rng(131)
+        config = ConfigFlashSAC(normalize_observations=False, normalize_rewards=False)
+        trainer = TrainerFlashSAC(obs_dim=3, action_dim=2, hidden_layers=(8,), config=config, device=device, seed=137)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device),
+            actions=wp.array(np.tanh(rng.normal(size=(8, 2))).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=8).astype(np.float32), device=device),
+            dones=wp.zeros(8, dtype=wp.float32, device=device),
+            next_obs=wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device),
+        )
+        trainer.update(batch, seed=139)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/flash_sac.npz"
+            public_rl.save_flash_sac_checkpoint(trainer, path)
+            restored = public_rl.load_flash_sac_checkpoint(path, device=device)
+
+        self.assertEqual(restored._update_count, trainer._update_count)
+        self.assertEqual(restored._gradient_update_count, trainer._gradient_update_count)
+        self.assertEqual(restored.config, trainer.config)
+        self.assertIsNone(restored.replay_buffer)
+        np.testing.assert_array_equal(restored.log_alpha.numpy(), trainer.log_alpha.numpy())
+        np.testing.assert_array_equal(restored._alpha.numpy(), trainer._alpha.numpy())
+
+        for expected_network, actual_network in (
+            (trainer.actor.net, restored.actor.net),
+            (trainer.critic1, restored.critic1),
+            (trainer.critic2, restored.critic2),
+            (trainer.target_critic1, restored.target_critic1),
+            (trainer.target_critic2, restored.target_critic2),
+        ):
+            for expected, actual in zip(expected_network.parameters(), actual_network.parameters(), strict=True):
+                np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+        for expected_optimizer, actual_optimizer in (
+            (trainer.actor_optimizer, restored.actor_optimizer),
+            (trainer.critic1_optimizer, restored.critic1_optimizer),
+            (trainer.critic2_optimizer, restored.critic2_optimizer),
+            (trainer.alpha_optimizer, restored.alpha_optimizer),
+        ):
+            self.assertEqual(actual_optimizer.step_count, expected_optimizer.step_count)
+            for expected, actual in zip(expected_optimizer.m, actual_optimizer.m, strict=True):
+                np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+            for expected, actual in zip(expected_optimizer.v, actual_optimizer.v, strict=True):
+                np.testing.assert_array_equal(actual.numpy(), expected.numpy())
 
     def test_flash_sac_reuses_exploration_noise(self) -> None:
         """Reuse sampled Gaussian noise for the configured repeat duration."""
