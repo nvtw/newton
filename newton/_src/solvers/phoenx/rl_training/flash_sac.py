@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections import deque
 from dataclasses import asdict, dataclass, fields
@@ -307,6 +308,88 @@ class BufferReplayFlashSAC(BufferReplaySAC):
 
         return self.size >= self.minimum_size
 
+    def save(self, path: str | Path) -> None:
+        """Save replay storage, normalization state, and pending n-step rows."""
+
+        data: dict[str, np.ndarray] = {
+            "capacity": np.asarray(self.capacity, dtype=np.int64),
+            "minimum_size": np.asarray(self.minimum_size, dtype=np.int64),
+            "obs_dim": np.asarray(self.obs_dim, dtype=np.int64),
+            "action_dim": np.asarray(self.action_dim, dtype=np.int64),
+            "batch_size": np.asarray(self.batch_size, dtype=np.int64),
+            "n_step": np.asarray(self.n_step, dtype=np.int64),
+            "gamma": np.asarray(self.gamma, dtype=np.float32),
+            "normalize_rewards": np.asarray(self.normalize_rewards, dtype=np.bool_),
+            "normalized_return_max": np.asarray(self.reward_normalizer.normalized_return_max, dtype=np.float32),
+            "size": np.asarray(self.size, dtype=np.int64),
+            "position": np.asarray(self.position, dtype=np.int64),
+            "obs": self.obs.numpy(),
+            "actions": self.actions.numpy(),
+            "rewards": self.rewards.numpy(),
+            "dones": self.dones.numpy(),
+            "next_obs": self.next_obs.numpy(),
+            "return_running_mean": self.reward_normalizer.running_mean.numpy(),
+            "return_running_var": self.reward_normalizer.running_var.numpy(),
+            "return_running_count": self.reward_normalizer.running_count.numpy(),
+            "return_max_abs": self.reward_normalizer.max_abs_return.numpy(),
+            "return_values_present": np.asarray(self.reward_normalizer.returns is not None, dtype=np.bool_),
+            "pending_count": np.asarray(len(self._n_step_transitions), dtype=np.int64),
+        }
+        if self.reward_normalizer.returns is not None:
+            data["return_values"] = self.reward_normalizer.returns.numpy()
+        names = ("obs", "actions", "rewards", "dones", "truncateds", "next_obs")
+        for index, transition in enumerate(self._n_step_transitions):
+            for name, value in zip(names, transition, strict=True):
+                data[f"pending_{index}_{name}"] = value.numpy()
+        checkpoint_path = Path(path)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(checkpoint_path, **data)
+
+    @classmethod
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        device: wp.context.Devicelike = None,
+    ) -> BufferReplayFlashSAC:
+        """Restore replay storage, normalization state, and pending n-step rows."""
+
+        with np.load(Path(path), allow_pickle=False) as data:
+            replay = cls(
+                minimum_size=int(data["minimum_size"]),
+                capacity=int(data["capacity"]),
+                obs_dim=int(data["obs_dim"]),
+                action_dim=int(data["action_dim"]),
+                batch_size=int(data["batch_size"]),
+                n_step=int(data["n_step"]),
+                gamma=float(data["gamma"]),
+                normalize_rewards=bool(data["normalize_rewards"]),
+                normalized_return_max=float(data["normalized_return_max"]),
+                device=device,
+            )
+            replay.obs.assign(data["obs"])
+            replay.actions.assign(data["actions"])
+            replay.rewards.assign(data["rewards"])
+            replay.dones.assign(data["dones"])
+            replay.next_obs.assign(data["next_obs"])
+            replay.size = int(data["size"])
+            replay.position = int(data["position"])
+            replay.reward_normalizer.running_mean.assign(data["return_running_mean"])
+            replay.reward_normalizer.running_var.assign(data["return_running_var"])
+            replay.reward_normalizer.running_count.assign(data["return_running_count"])
+            replay.reward_normalizer.max_abs_return.assign(data["return_max_abs"])
+            if bool(data["return_values_present"]):
+                replay.reward_normalizer.returns = wp.array(
+                    data["return_values"], dtype=wp.float32, device=replay.device
+                )
+            names = ("obs", "actions", "rewards", "dones", "truncateds", "next_obs")
+            for index in range(int(data["pending_count"])):
+                transition = tuple(
+                    wp.array(data[f"pending_{index}_{name}"], dtype=wp.float32, device=replay.device) for name in names
+                )
+                replay._n_step_transitions.append(transition)
+            return replay
+
 
 class TrainerFlashSAC(TrainerSAC):
     """FlashSAC training preset implemented entirely with Warp.
@@ -490,6 +573,10 @@ class TrainerFlashSAC(TrainerSAC):
             "alpha": self._alpha.numpy(),
             "update_count": np.asarray(self._update_count, dtype=np.int64),
             "gradient_update_count": np.asarray(self._gradient_update_count, dtype=np.int64),
+            "noise_repeat_count": np.asarray(self._noise_repeat_count, dtype=np.int64),
+            "noise_repeat_steps": np.asarray(self._noise_repeat_steps, dtype=np.int64),
+            "exploration_seed": np.asarray(self._exploration_seed, dtype=np.int64),
+            "noise_rng_state": np.asarray(json.dumps(self._noise_rng.bit_generator.state)),
             "obs_mean": self._obs_mean.numpy(),
             "obs_m2": self._obs_m2.numpy(),
             "obs_count": self._obs_count.numpy(),
@@ -578,6 +665,11 @@ class TrainerFlashSAC(TrainerSAC):
             trainer._obs_count.assign(data["obs_count"])
             trainer._update_count = int(data["update_count"])
             trainer._gradient_update_count = int(data["gradient_update_count"])
+            if "noise_rng_state" in data:
+                trainer._noise_repeat_count = int(data["noise_repeat_count"])
+                trainer._noise_repeat_steps = int(data["noise_repeat_steps"])
+                trainer._exploration_seed = int(data["exploration_seed"])
+                trainer._noise_rng.bit_generator.state = json.loads(str(data["noise_rng_state"].item()))
             for prefix, optimizer in (
                 ("actor_optimizer", trainer.actor_optimizer),
                 ("critic1_optimizer", trainer.critic1_optimizer),

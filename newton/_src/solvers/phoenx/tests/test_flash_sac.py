@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import ast
 import math
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import warp as wp
@@ -400,6 +402,186 @@ class TestTrainerFlashSAC(unittest.TestCase):
         ):
             for expected, actual in zip(expected_network.state_arrays(), actual_network.state_arrays(), strict=True):
                 np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+    def test_reference_checkpoint_continues_exact_update(self) -> None:
+        """Continue a reference trainer with identical update and action results."""
+
+        device = require_cuda_graph_capture("FlashSAC exact checkpoint continuation")
+        rng = np.random.default_rng(157)
+        config = ConfigFlashSAC(
+            actor_hidden_dim=4,
+            actor_num_blocks=1,
+            critic_hidden_dim=4,
+            critic_num_blocks=1,
+            distributional_atoms=7,
+            normalize_rewards=False,
+            policy_frequency=1,
+        )
+        trainer = TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=163)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device),
+            actions=wp.array(np.tanh(rng.normal(size=(8, 2))).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=8).astype(np.float32), device=device),
+            dones=wp.zeros(8, dtype=wp.float32, device=device),
+            next_obs=wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device),
+        )
+        trainer.update(batch, seed=167)
+        for seed in (168, 169, 170):
+            trainer.act(batch.obs, seed=seed)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/continuation.npz"
+            trainer.save_checkpoint(path)
+            restored = TrainerFlashSAC.load_checkpoint(path, device=device)
+
+        for seed in range(171, 187):
+            for actual, expected in zip(
+                restored.act(batch.obs, seed=seed), trainer.act(batch.obs, seed=seed), strict=True
+            ):
+                np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        expected_stats = trainer.update(batch, seed=173)
+        actual_stats = restored.update(batch, seed=173)
+        self.assertEqual(actual_stats, expected_stats)
+        deterministic_expected = trainer.act(batch.obs, seed=179, deterministic=True)
+        deterministic_actual = restored.act(batch.obs, seed=181, deterministic=True)
+        for actual, expected in zip(deterministic_actual, deterministic_expected, strict=True):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        for expected_network, actual_network in (
+            (trainer.actor.net, restored.actor.net),
+            (trainer.critic1, restored.critic1),
+            (trainer.critic2, restored.critic2),
+            (trainer.target_critic1, restored.target_critic1),
+            (trainer.target_critic2, restored.target_critic2),
+        ):
+            for expected, actual in zip(expected_network.state_arrays(), actual_network.state_arrays(), strict=True):
+                np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+    def test_same_seed_produces_identical_actions_and_updates(self) -> None:
+        """Produce bitwise-identical stochastic actions and updates from one seed."""
+
+        device = require_cuda_graph_capture("FlashSAC deterministic seed behavior")
+        config = ConfigFlashSAC(
+            actor_hidden_dim=4,
+            actor_num_blocks=1,
+            critic_hidden_dim=4,
+            critic_num_blocks=1,
+            distributional_atoms=7,
+            normalize_rewards=False,
+            policy_frequency=1,
+        )
+        first = TrainerFlashSAC(obs_dim=2, action_dim=1, config=config, device=device, seed=191)
+        second = TrainerFlashSAC(obs_dim=2, action_dim=1, config=config, device=device, seed=191)
+        obs = wp.array(
+            np.asarray([[-1.0, 0.25], [0.5, 1.0], [1.5, -0.75], [0.0, 0.5]], dtype=np.float32), device=device
+        )
+        for actual, expected in zip(first.act(obs, seed=193), second.act(obs, seed=193), strict=True):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        batch = BatchSAC(
+            obs=obs,
+            actions=wp.array(np.asarray([[-0.5], [0.25], [0.75], [0.0]], dtype=np.float32), device=device),
+            rewards=wp.array(np.asarray([-1.0, 0.5, 1.0, 0.25], dtype=np.float32), device=device),
+            dones=wp.zeros(4, dtype=wp.float32, device=device),
+            next_obs=wp.array(obs.numpy() * 0.9, device=device),
+        )
+        self.assertEqual(first.update(batch, seed=197), second.update(batch, seed=197))
+        for expected_network, actual_network in (
+            (first.actor.net, second.actor.net),
+            (first.critic1, second.critic1),
+            (first.critic2, second.critic2),
+        ):
+            for expected, actual in zip(expected_network.state_arrays(), actual_network.state_arrays(), strict=True):
+                np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+    def test_replay_wrap_determinism_n_step_and_round_trip(self) -> None:
+        """Preserve circular replay, deterministic samples, and pending multi-world n-step state."""
+
+        device = require_cuda_graph_capture("FlashSAC replay persistence")
+        replay = BufferReplayFlashSAC(
+            minimum_size=0,
+            capacity=4,
+            obs_dim=1,
+            action_dim=1,
+            batch_size=4,
+            n_step=2,
+            gamma=0.5,
+            normalize_rewards=True,
+            device=device,
+        )
+
+        def add_step(
+            target: BufferReplayFlashSAC, step: int, *, terminated: bool = False, truncated: bool = False
+        ) -> None:
+            target.add_batch(
+                wp.array([[float(step)], [100.0 + step]], dtype=wp.float32, device=device),
+                wp.array([[step * 0.1], [-step * 0.1]], dtype=wp.float32, device=device),
+                wp.array([float(step + 1), float((step + 1) * 10)], dtype=wp.float32, device=device),
+                wp.array([float(terminated), 0.0], dtype=wp.float32, device=device),
+                wp.array([[float(step + 1)], [101.0 + step]], dtype=wp.float32, device=device),
+                truncateds=wp.array([0.0, float(truncated)], dtype=wp.float32, device=device),
+            )
+
+        add_step(replay, 0, truncated=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/replay.npz"
+            replay.save(path)
+            restored = BufferReplayFlashSAC.load(path, device=device)
+        add_step(replay, 1, terminated=True)
+        add_step(restored, 1, terminated=True)
+        np.testing.assert_allclose(replay.rewards.numpy()[:2], [2.0, 10.0], rtol=0.0, atol=1.0e-6)
+        np.testing.assert_array_equal(replay.dones.numpy()[:2], [1.0, 0.0])
+        np.testing.assert_array_equal(replay.next_obs.numpy()[:2, 0], [2.0, 101.0])
+        for step in (2, 3):
+            add_step(replay, step)
+            add_step(restored, step)
+        self.assertEqual((replay.size, replay.position), (4, 2))
+        self.assertEqual((restored.size, restored.position), (4, 2))
+        for expected, actual in (
+            (replay.obs, restored.obs),
+            (replay.actions, restored.actions),
+            (replay.rewards, restored.rewards),
+            (replay.dones, restored.dones),
+            (replay.next_obs, restored.next_obs),
+        ):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        expected_sample = replay.sample(seed=211)
+        actual_sample = restored.sample(seed=211)
+        for actual, expected in zip(actual_sample.__dict__.values(), expected_sample.__dict__.values(), strict=True):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+    def test_config_and_shape_failures_are_explicit(self) -> None:
+        """Reject invalid FlashSAC configuration, replay, and update shapes."""
+
+        device = require_cuda_graph_capture("FlashSAC failure cases")
+        with self.assertRaisesRegex(ValueError, "target_sigma"):
+            TrainerFlashSAC(obs_dim=2, action_dim=1, config=ConfigFlashSAC(target_sigma=0.0), device=device)
+        with self.assertRaisesRegex(ValueError, "block"):
+            TrainerFlashSAC(obs_dim=2, action_dim=1, config=ConfigFlashSAC(actor_num_blocks=0), device=device)
+        with self.assertRaisesRegex(ValueError, "distributional_atoms"):
+            TrainerFlashSAC(obs_dim=2, action_dim=1, config=ConfigFlashSAC(distributional_atoms=1), device=device)
+        replay = BufferReplayFlashSAC(minimum_size=0, capacity=2, obs_dim=2, action_dim=1, batch_size=1, device=device)
+        with self.assertRaisesRegex(ValueError, "empty"):
+            replay.sample(seed=1)
+        with self.assertRaisesRegex(ValueError, "Observation dimensions"):
+            replay.add_batch(
+                wp.zeros((1, 3), dtype=wp.float32, device=device),
+                wp.zeros((1, 1), dtype=wp.float32, device=device),
+                wp.zeros(1, dtype=wp.float32, device=device),
+                wp.zeros(1, dtype=wp.float32, device=device),
+                wp.zeros((1, 3), dtype=wp.float32, device=device),
+            )
+
+    def test_flash_sac_runtime_has_no_torch_imports(self) -> None:
+        """Keep the pure-Warp FlashSAC runtime free of PyTorch imports."""
+
+        runtime = Path(__file__).parents[1] / "rl_training"
+        for filename in ("flash_sac.py", "flash_sac_networks.py", "sac.py", "kernels.py", "optim.py"):
+            tree = ast.parse((runtime / filename).read_text(encoding="utf-8"), filename=filename)
+            imported = {
+                alias.name.split(".", maxsplit=1)[0]
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import | ast.ImportFrom)
+                for alias in node.names
+            }
+            self.assertNotIn("torch", imported, filename)
 
     def test_flash_sac_reuses_exploration_noise(self) -> None:
         """Reuse sampled Gaussian noise for the configured repeat duration."""
