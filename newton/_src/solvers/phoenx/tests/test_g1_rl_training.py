@@ -925,6 +925,32 @@ class TestG1PhoenXRL(unittest.TestCase):
             actual_target = target_q[6 : 6 + rl.ACTION_DIM_G1]
         np.testing.assert_allclose(actual_target, expected_target, rtol=0.0, atol=1.0e-6)
 
+    def test_g1_compact_policy_actions_zero_uncontrolled_joints(self) -> None:
+        """Apply only the effective G1 policy actions inside a CUDA graph."""
+
+        env = rl.EnvG1PhoenX(
+            rl.ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=1,
+                velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
+                max_episode_steps=0,
+                auto_reset=False,
+            ),
+            device=require_cuda_graph_capture("PhoenX compact G1 action tests"),
+        )
+        self.assertEqual(env.policy_action_dim, g1_recipe.CONTROLLED_ACTION_COUNT)
+        raw_actions = np.linspace(-1.5, 1.5, env.policy_action_dim, dtype=np.float32).reshape(1, env.policy_action_dim)
+        actions = wp.array(raw_actions, dtype=wp.float32, device=env.device)
+
+        with wp.ScopedCapture(device=env.device) as capture:
+            env.step(actions)
+        wp.capture_launch(capture.graph)
+
+        expected = np.zeros((1, rl.ACTION_DIM_G1), dtype=np.float32)
+        expected[:, : env.policy_action_dim] = np.clip(raw_actions, -1.0, 1.0)
+        np.testing.assert_allclose(env.current_actions.numpy(), expected, rtol=0.0, atol=0.0)
+
     def test_ppo_reuse_buffers_return_active_batch_views_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX PPO reuse buffer shape tests")
         trainer = rl.TrainerPPO(

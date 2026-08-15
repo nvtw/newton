@@ -942,9 +942,9 @@ def g1_apply_actions_kernel(
     joint_target_q: wp.array[wp.float32],
 ):
     world, action = wp.tid()
-    value = _clip_float(actions[world, action], wp.float32(-1.0), wp.float32(1.0))
-    if action >= controlled_action_count:
-        value = wp.float32(0.0)
+    value = wp.float32(0.0)
+    if action < actions.shape[1] and action < controlled_action_count:
+        value = _clip_float(actions[world, action], wp.float32(-1.0), wp.float32(1.0))
     current_actions[world, action] = value
 
     target = default_joint_pos[action] + action_scale * value
@@ -2206,6 +2206,7 @@ class EnvG1PhoenX:
 
     obs_dim = OBS_DIM_G1
     action_dim = ACTION_DIM_G1
+    policy_action_dim = ACTION_DIM_G1
 
     def __init__(self, config: ConfigEnvG1PhoenX | None = None, *, device: wp.context.Devicelike = None):
         self.config = config or ConfigEnvG1PhoenX()
@@ -2215,6 +2216,7 @@ class EnvG1PhoenX:
             raise ValueError("world_count must be positive")
         if not 0 < int(self.config.controlled_action_count) <= ACTION_DIM_G1:
             raise ValueError("controlled_action_count must be in [1, ACTION_DIM_G1]")
+        self.policy_action_dim = int(self.config.controlled_action_count)
         if int(self.config.phase_period) <= 0:
             raise ValueError("phase_period must be positive")
         if int(self.config.rigid_contact_max_per_world) < 0:
