@@ -551,10 +551,22 @@ class TestTrainerFlashSAC(unittest.TestCase):
         trainer.update(batch, seed=167)
         for seed in (168, 169, 170):
             trainer.act(batch.obs, seed=seed)
+        trainer._device_noise_repeat_count.assign(np.asarray([2], dtype=np.int32))
+        trainer._device_noise_repeat_steps.assign(np.asarray([5], dtype=np.int32))
+        trainer._device_exploration_seed.assign(np.asarray([181], dtype=np.int32))
+        trainer._device_interaction_seed.assign(np.asarray([191], dtype=np.int32))
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/continuation.npz"
             trainer.save_checkpoint(path)
             restored = TrainerFlashSAC.load_checkpoint(path, device=device)
+
+        for expected, actual in (
+            (trainer._device_noise_repeat_count, restored._device_noise_repeat_count),
+            (trainer._device_noise_repeat_steps, restored._device_noise_repeat_steps),
+            (trainer._device_exploration_seed, restored._device_exploration_seed),
+            (trainer._device_interaction_seed, restored._device_interaction_seed),
+        ):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
 
         for seed in range(171, 187):
             for actual, expected in zip(
@@ -928,6 +940,175 @@ class TestTrainerFlashSAC(unittest.TestCase):
         np.testing.assert_allclose(normalizer.running_mean.numpy(), [2.0], rtol=0.0, atol=1.0e-7)
         np.testing.assert_allclose(normalizer.running_var.numpy(), [1.00005], rtol=0.0, atol=1.0e-7)
         np.testing.assert_allclose(normalizer.running_count.numpy(), [2.0], rtol=0.0, atol=0.0)
+
+    def test_graph_replay_matches_eager_n_step_wrap_and_sampling(self) -> None:
+        """Match eager n-step replay across truncation, termination, wrap, and sampling."""
+
+        device = require_cuda_graph_capture("FlashSAC device n-step replay")
+        kwargs = {
+            "minimum_size": 0,
+            "capacity": 5,
+            "obs_dim": 1,
+            "action_dim": 1,
+            "batch_size": 3,
+            "n_step": 3,
+            "gamma": 0.5,
+            "normalize_rewards": False,
+            "device": device,
+        }
+        eager = BufferReplayFlashSAC(**kwargs)
+        captured = BufferReplayFlashSAC(**kwargs)
+        captured.reserve_graph_buffers(2)
+        obs = wp.zeros((2, 1), dtype=wp.float32, device=device)
+        actions = wp.zeros((2, 1), dtype=wp.float32, device=device)
+        rewards = wp.zeros(2, dtype=wp.float32, device=device)
+        terminateds = wp.zeros(2, dtype=wp.float32, device=device)
+        truncateds = wp.zeros(2, dtype=wp.float32, device=device)
+        next_obs = wp.zeros((2, 1), dtype=wp.float32, device=device)
+        with wp.ScopedCapture(device=device) as store_capture:
+            captured.add_batch_graph(
+                obs,
+                actions,
+                rewards,
+                terminateds,
+                next_obs,
+                truncateds=truncateds,
+            )
+        for step in range(5):
+            obs.assign(np.asarray([[step], [step + 0.25]], dtype=np.float32))
+            actions.assign(np.asarray([[step * 0.1], [-step * 0.1]], dtype=np.float32))
+            rewards.assign(np.asarray([step + 1.0, (step + 1.0) * 10.0], dtype=np.float32))
+            terminateds.assign(np.asarray([float(step == 1), 0.0], dtype=np.float32))
+            truncateds.assign(np.asarray([0.0, float(step == 0)], dtype=np.float32))
+            next_obs.assign(np.asarray([[step + 1.0], [step + 1.25]], dtype=np.float32))
+            eager.add_batch(obs, actions, rewards, terminateds, next_obs, truncateds=truncateds)
+            wp.capture_launch(store_capture.graph)
+            captured.advance_graph_host_state()
+
+        self.assertEqual(captured.size, eager.size)
+        self.assertEqual(captured.position, eager.position)
+        for captured_array, eager_array in zip(
+            (captured.obs, captured.actions, captured.rewards, captured.dones, captured.next_obs),
+            (eager.obs, eager.actions, eager.rewards, eager.dones, eager.next_obs),
+            strict=True,
+        ):
+            np.testing.assert_allclose(captured_array.numpy(), eager_array.numpy(), rtol=0.0, atol=1.0e-6)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/graph_replay.npz"
+            captured.save(path)
+            restored = BufferReplayFlashSAC.load(path, device=device)
+        self.assertEqual((restored.size, restored.position), (captured.size, captured.position))
+        self.assertEqual(restored._graph_pending_count_host, captured._graph_pending_count_host)
+        for expected, actual in (
+            (captured._graph_pending_obs, restored._graph_pending_obs),
+            (captured._graph_pending_actions, restored._graph_pending_actions),
+            (captured._graph_pending_rewards, restored._graph_pending_rewards),
+            (captured._graph_pending_terminateds, restored._graph_pending_terminateds),
+            (captured._graph_pending_truncateds, restored._graph_pending_truncateds),
+            (captured._graph_pending_next_obs, restored._graph_pending_next_obs),
+            (captured._graph_pending_cursor, restored._graph_pending_cursor),
+            (captured._graph_pending_count, restored._graph_pending_count),
+        ):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+        seed_counter = wp.array([17], dtype=wp.int32, device=device)
+        with wp.ScopedCapture(device=device) as sample_capture:
+            graph_batch = captured.sample_graph_seed_counter(seed_counter)
+        wp.capture_launch(sample_capture.graph)
+        eager_batch = eager.sample(seed=17)
+        for graph_array, eager_array in zip(
+            (graph_batch.obs, graph_batch.actions, graph_batch.rewards, graph_batch.dones, graph_batch.next_obs),
+            (eager_batch.obs, eager_batch.actions, eager_batch.rewards, eager_batch.dones, eager_batch.next_obs),
+            strict=True,
+        ):
+            np.testing.assert_array_equal(graph_array.numpy(), eager_array.numpy())
+
+    def test_real_g1_end_to_end_training_graph(self) -> None:
+        """Capture real G1 interaction, pre-reset replay, sampling, and learner updates."""
+
+        device = require_cuda_graph_capture("real G1 end-to-end FlashSAC graph")
+        env = EnvG1PhoenX(
+            ConfigEnvG1PhoenX(
+                world_count=1,
+                sim_substeps=1,
+                solver_iterations=1,
+                max_episode_steps=1,
+                auto_reset=True,
+                randomize_commands_on_reset=False,
+                command_resample_steps=0,
+                parse_visuals=False,
+            ),
+            device=device,
+        )
+        obs = env.reset_noisy(seed=251)
+        trainer = TrainerFlashSAC(
+            obs_dim=OBS_DIM_G1,
+            action_dim=env.policy_action_dim,
+            config=ConfigFlashSAC(
+                buffer_max_length=8,
+                buffer_min_length=1,
+                sample_batch_size=1,
+                n_step=1,
+                normalize_rewards=False,
+                actor_hidden_dim=4,
+                critic_hidden_dim=4,
+                actor_num_blocks=1,
+                critic_num_blocks=1,
+                distributional_atoms=5,
+            ),
+            device=device,
+            seed=257,
+        )
+        replay = BufferReplayFlashSAC(
+            minimum_size=1,
+            capacity=8,
+            obs_dim=OBS_DIM_G1,
+            action_dim=env.policy_action_dim,
+            batch_size=1,
+            n_step=1,
+            normalize_rewards=False,
+            device=device,
+        )
+        replay.reserve_graph_buffers(1)
+        warm_actions, _ = trainer.act(obs, seed=263)
+        pre_step_obs = wp.clone(obs)
+        env.step(warm_actions)
+        replay.add_batch_graph(
+            pre_step_obs,
+            warm_actions,
+            env.step_rewards,
+            env.step_terminateds,
+            env.step_next_obs,
+            truncateds=env.step_truncateds,
+        )
+        training_graph = trainer.capture_training_graph(
+            env,
+            replay,
+            updates_per_step=2,
+            interactions_per_graph=2,
+            seed=269,
+        )
+        batch_ptr = replay.reserve_graph_buffers(1).obs.ptr
+        sim_time_before = env.sim_time
+        stats = training_graph.run(1, stats_interval=1)
+
+        self.assertEqual(len(stats), 1)
+        self.assertTrue(all(np.isfinite(value) for value in stats[0].__dict__.values()))
+        self.assertEqual(replay.size, 3)
+        self.assertEqual(trainer._update_count, 4)
+        self.assertEqual(trainer._gradient_update_count, 4)
+        self.assertEqual(replay.reserve_graph_buffers(1).obs.ptr, batch_ptr)
+        self.assertAlmostEqual(env.sim_time, sim_time_before + 2.0 * env.config.frame_dt)
+        np.testing.assert_array_equal(env.step_terminateds.numpy(), [0.0])
+        np.testing.assert_array_equal(env.step_truncateds.numpy(), [1.0])
+        np.testing.assert_array_equal(replay.dones.numpy()[:3], [0.0, 0.0, 0.0])
+        np.testing.assert_allclose(replay.next_obs.numpy()[2:3], env.step_next_obs.numpy(), rtol=0.0, atol=0.0)
+        np.testing.assert_array_equal(trainer._device_update_count.numpy(), [4])
+        np.testing.assert_array_equal(trainer._device_interaction_seed.numpy(), [271])
+        repeat_count = int(trainer._device_noise_repeat_count.numpy()[0])
+        repeat_steps = int(trainer._device_noise_repeat_steps.numpy()[0])
+        self.assertGreaterEqual(repeat_count, 1)
+        self.assertLessEqual(repeat_count, repeat_steps)
 
     def test_reward_normalizer_bounds_discounted_return(self) -> None:
         """Bound normalized rewards by the configured return range."""

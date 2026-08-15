@@ -15,6 +15,9 @@ import warp as wp
 
 from .flash_sac_networks import NetworkFlashSAC
 from .kernels import (
+    flash_sac_graph_n_step_finalize_kernel,
+    flash_sac_graph_n_step_store_kernel,
+    flash_sac_graph_replay_sample_kernel,
     flash_sac_n_step_accumulate_kernel,
     flash_sac_normalize_rewards_kernel,
     flash_sac_return_stats_kernel,
@@ -85,6 +88,28 @@ def _prepare_flash_sac_graph_update_kernel(
     critic1_lr_scale[0] = lr / critic_base_lr
     critic2_lr_scale[0] = lr / critic_base_lr
     alpha_lr_scale[0] = lr / alpha_base_lr
+
+
+@wp.kernel
+def _prepare_flash_sac_exploration_kernel(
+    seed_counter: wp.array[wp.int32],
+    noise_cdf: wp.array[wp.float32],
+    repeat_count: wp.array[wp.int32],
+    repeat_steps: wp.array[wp.int32],
+    exploration_seed: wp.array[wp.int32],
+):
+    if repeat_count[0] >= repeat_steps[0]:
+        seed = seed_counter[0]
+        rng = wp.rand_init(seed, 0)
+        uniform = wp.randf(rng)
+        duration = wp.int32(noise_cdf.shape[0])
+        for index in range(noise_cdf.shape[0]):
+            if uniform <= noise_cdf[index] and duration == noise_cdf.shape[0]:
+                duration = index + 1
+        exploration_seed[0] = seed
+        repeat_steps[0] = duration
+        repeat_count[0] = wp.int32(0)
+    repeat_count[0] = repeat_count[0] + 1
 
 
 class EnvFlashSAC(Protocol):
@@ -182,6 +207,28 @@ class RewardNormalizerFlashSAC:
         self.max_abs_return = wp.zeros(1, dtype=wp.float32, device=self.device)
         self._metrics = wp.zeros(3, dtype=wp.float32, device=self.device)
 
+    def reserve(self, world_count: int) -> None:
+        """Reserve fixed discounted-return state for graph replay."""
+
+        count = int(world_count)
+        if count <= 0:
+            raise ValueError("world_count must be positive")
+        if self.returns is None:
+            self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
+        elif int(self.returns.shape[0]) != count:
+            raise ValueError("Reward normalizer environment count cannot change")
+
+    def normalize_into(self, rewards: wp.array[wp.float32], normalized_rewards: wp.array[wp.float32]) -> None:
+        """Normalize rewards into a fixed-address output buffer."""
+
+        wp.launch(
+            flash_sac_normalize_rewards_kernel,
+            dim=rewards.shape[0],
+            inputs=[rewards, self.running_var, self.max_abs_return, self.normalized_return_max, 1.0e-8],
+            outputs=[normalized_rewards],
+            device=self.device,
+        )
+
     def update(
         self,
         rewards: wp.array[wp.float32],
@@ -191,10 +238,7 @@ class RewardNormalizerFlashSAC:
         """Update discounted returns and their running scale."""
 
         count = int(rewards.shape[0])
-        if self.returns is None:
-            self.returns = wp.zeros(count, dtype=wp.float32, device=self.device)
-        elif int(self.returns.shape[0]) != count:
-            raise ValueError("Reward normalizer environment count cannot change")
+        self.reserve(count)
         self._metrics.zero_()
         wp.launch(
             flash_sac_return_stats_kernel,
@@ -215,13 +259,7 @@ class RewardNormalizerFlashSAC:
         """Scale rewards using running return variance and range bounds."""
 
         normalized = wp.empty_like(rewards)
-        wp.launch(
-            flash_sac_normalize_rewards_kernel,
-            dim=rewards.shape[0],
-            inputs=[rewards, self.running_var, self.max_abs_return, self.normalized_return_max, 1.0e-8],
-            outputs=[normalized],
-            device=self.device,
-        )
+        self.normalize_into(rewards, normalized)
         return normalized
 
 
@@ -283,6 +321,175 @@ class BufferReplayFlashSAC(BufferReplaySAC):
                 wp.array2d[wp.float32],
             ]
         ] = deque(maxlen=self.n_step)
+        self._graph_world_count = 0
+        self._graph_pending_obs: wp.array3d[wp.float32] | None = None
+        self._graph_pending_actions: wp.array3d[wp.float32] | None = None
+        self._graph_pending_rewards: wp.array2d[wp.float32] | None = None
+        self._graph_pending_terminateds: wp.array2d[wp.float32] | None = None
+        self._graph_pending_truncateds: wp.array2d[wp.float32] | None = None
+        self._graph_pending_next_obs: wp.array3d[wp.float32] | None = None
+        self._graph_pending_cursor: wp.array[wp.int32] | None = None
+        self._graph_pending_count: wp.array[wp.int32] | None = None
+        self._graph_position: wp.array[wp.int32] | None = None
+        self._graph_size: wp.array[wp.int32] | None = None
+        self._graph_sample_raw_rewards: wp.array[wp.float32] | None = None
+        self._graph_batch: BatchSAC | None = None
+        self._graph_pending_count_host = 0
+
+    def reserve_graph_buffers(self, world_count: int) -> BatchSAC:
+        """Reserve fixed-address n-step and sampled-batch buffers for graph replay."""
+
+        worlds = int(world_count)
+        if worlds <= 0 or worlds > self.capacity:
+            raise ValueError("world_count must be positive and no larger than replay capacity")
+        if self._graph_world_count not in (0, worlds):
+            raise ValueError("graph replay world_count cannot change after reservation")
+        if self._graph_world_count == worlds and self._graph_batch is not None:
+            return self._graph_batch
+        if self._n_step_transitions:
+            raise RuntimeError("reserve graph buffers before adding eager n-step transitions")
+        self._graph_world_count = worlds
+        self._graph_pending_obs = wp.empty((self.n_step, worlds, self.obs_dim), dtype=wp.float32, device=self.device)
+        self._graph_pending_actions = wp.empty(
+            (self.n_step, worlds, self.action_dim), dtype=wp.float32, device=self.device
+        )
+        self._graph_pending_rewards = wp.empty((self.n_step, worlds), dtype=wp.float32, device=self.device)
+        self._graph_pending_terminateds = wp.empty_like(self._graph_pending_rewards)
+        self._graph_pending_truncateds = wp.empty_like(self._graph_pending_rewards)
+        self._graph_pending_next_obs = wp.empty_like(self._graph_pending_obs)
+        self._graph_pending_cursor = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._graph_pending_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._graph_position = wp.array([self.position], dtype=wp.int32, device=self.device)
+        self._graph_size = wp.array([self.size], dtype=wp.int32, device=self.device)
+        self.reward_normalizer.reserve(worlds)
+        sample_obs = wp.empty((self.batch_size, self.obs_dim), dtype=wp.float32, device=self.device)
+        sample_actions = wp.empty((self.batch_size, self.action_dim), dtype=wp.float32, device=self.device)
+        sample_rewards = wp.empty(self.batch_size, dtype=wp.float32, device=self.device)
+        self._graph_sample_raw_rewards = wp.empty_like(sample_rewards)
+        sample_dones = wp.empty(self.batch_size, dtype=wp.float32, device=self.device)
+        sample_next_obs = wp.empty_like(sample_obs)
+        self._graph_batch = BatchSAC(
+            obs=sample_obs,
+            actions=sample_actions,
+            rewards=sample_rewards,
+            dones=sample_dones,
+            next_obs=sample_next_obs,
+        )
+        return self._graph_batch
+
+    def advance_graph_host_state(self, step_count: int = 1) -> None:
+        """Advance replay host mirrors after known graph launches without a readback."""
+
+        for _ in range(int(step_count)):
+            self._graph_pending_count_host = min(self._graph_pending_count_host + 1, self.n_step)
+            if self._graph_pending_count_host >= self.n_step:
+                self.position = (self.position + self._graph_world_count) % self.capacity
+                self.size = min(self.size + self._graph_world_count, self.capacity)
+
+    def sync_graph_host_state(self) -> None:
+        """Synchronize replay counters for explicit persistence or diagnostics."""
+
+        if self._graph_size is None or self._graph_position is None or self._graph_pending_count is None:
+            return
+        self.size = int(self._graph_size.numpy()[0])
+        self.position = int(self._graph_position.numpy()[0])
+        self._graph_pending_count_host = int(self._graph_pending_count.numpy()[0])
+
+    def add_batch_graph(
+        self,
+        obs: wp.array2d[wp.float32],
+        actions: wp.array2d[wp.float32],
+        rewards: wp.array[wp.float32],
+        terminateds: wp.array[wp.float32],
+        next_obs: wp.array2d[wp.float32],
+        *,
+        truncateds: wp.array[wp.float32],
+    ) -> None:
+        """Insert one vectorized transition step without allocation or host state."""
+
+        worlds = int(rewards.shape[0])
+        self.reserve_graph_buffers(worlds)
+        if self.normalize_rewards:
+            self.reward_normalizer.update(rewards, terminateds, truncateds)
+        max_cols = max(self.obs_dim, self.action_dim, 1)
+        wp.launch(
+            flash_sac_graph_n_step_store_kernel,
+            dim=(worlds, max_cols),
+            inputs=[
+                obs,
+                actions,
+                rewards,
+                terminateds,
+                truncateds,
+                next_obs,
+                self._graph_pending_obs,
+                self._graph_pending_actions,
+                self._graph_pending_rewards,
+                self._graph_pending_terminateds,
+                self._graph_pending_truncateds,
+                self._graph_pending_next_obs,
+                self._graph_pending_cursor,
+                self._graph_pending_count,
+                self._graph_position,
+                self.capacity,
+                self.n_step,
+                self.gamma,
+                self.obs_dim,
+                self.action_dim,
+            ],
+            outputs=[self.obs, self.actions, self.rewards, self.dones, self.next_obs],
+            device=self.device,
+        )
+        wp.launch(
+            flash_sac_graph_n_step_finalize_kernel,
+            dim=1,
+            inputs=[worlds, self.capacity, self.n_step],
+            outputs=[
+                self._graph_pending_cursor,
+                self._graph_pending_count,
+                self._graph_position,
+                self._graph_size,
+            ],
+            device=self.device,
+        )
+
+        if not self.device.is_capturing:
+            self.advance_graph_host_state()
+
+    def sample_graph_seed_counter(
+        self,
+        seed_counter: wp.array[wp.int32],
+        *,
+        seed_offset: int = 0,
+    ) -> BatchSAC:
+        """Sample into fixed buffers using device replay size and RNG state."""
+
+        if self._graph_batch is None or self._graph_sample_raw_rewards is None:
+            raise RuntimeError("reserve_graph_buffers() must be called before graph sampling")
+        batch = self._graph_batch
+        max_cols = max(self.obs_dim, self.action_dim, 1)
+        reward_output = self._graph_sample_raw_rewards if self.normalize_rewards else batch.rewards
+        wp.launch(
+            flash_sac_graph_replay_sample_kernel,
+            dim=(self.batch_size, max_cols),
+            inputs=[
+                self.obs,
+                self.actions,
+                self.rewards,
+                self.dones,
+                self.next_obs,
+                self._graph_size,
+                seed_counter,
+                int(seed_offset),
+                self.obs_dim,
+                self.action_dim,
+            ],
+            outputs=[batch.obs, batch.actions, reward_output, batch.dones, batch.next_obs],
+            device=self.device,
+        )
+        if self.normalize_rewards:
+            self.reward_normalizer.normalize_into(reward_output, batch.rewards)
+        return batch
 
     def add_batch(
         self,
@@ -352,6 +559,7 @@ class BufferReplayFlashSAC(BufferReplaySAC):
     def save(self, path: str | Path) -> None:
         """Save replay storage, normalization state, and pending n-step rows."""
 
+        self.sync_graph_host_state()
         data: dict[str, np.ndarray] = {
             "capacity": np.asarray(self.capacity, dtype=np.int64),
             "minimum_size": np.asarray(self.minimum_size, dtype=np.int64),
@@ -375,6 +583,7 @@ class BufferReplayFlashSAC(BufferReplaySAC):
             "return_max_abs": self.reward_normalizer.max_abs_return.numpy(),
             "return_values_present": np.asarray(self.reward_normalizer.returns is not None, dtype=np.bool_),
             "pending_count": np.asarray(len(self._n_step_transitions), dtype=np.int64),
+            "graph_world_count": np.asarray(self._graph_world_count, dtype=np.int64),
         }
         if self.reward_normalizer.returns is not None:
             data["return_values"] = self.reward_normalizer.returns.numpy()
@@ -382,6 +591,21 @@ class BufferReplayFlashSAC(BufferReplaySAC):
         for index, transition in enumerate(self._n_step_transitions):
             for name, value in zip(names, transition, strict=True):
                 data[f"pending_{index}_{name}"] = value.numpy()
+        if self._graph_world_count:
+            graph_arrays = {
+                "pending_obs": self._graph_pending_obs,
+                "pending_actions": self._graph_pending_actions,
+                "pending_rewards": self._graph_pending_rewards,
+                "pending_terminateds": self._graph_pending_terminateds,
+                "pending_truncateds": self._graph_pending_truncateds,
+                "pending_next_obs": self._graph_pending_next_obs,
+                "pending_cursor": self._graph_pending_cursor,
+                "pending_count": self._graph_pending_count,
+                "position": self._graph_position,
+                "size": self._graph_size,
+            }
+            for name, value in graph_arrays.items():
+                data[f"graph_{name}"] = value.numpy()
         checkpoint_path = Path(path)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(checkpoint_path, **data)
@@ -429,6 +653,24 @@ class BufferReplayFlashSAC(BufferReplaySAC):
                     wp.array(data[f"pending_{index}_{name}"], dtype=wp.float32, device=replay.device) for name in names
                 )
                 replay._n_step_transitions.append(transition)
+            graph_world_count = int(data["graph_world_count"]) if "graph_world_count" in data else 0
+            if graph_world_count:
+                replay.reserve_graph_buffers(graph_world_count)
+                graph_arrays = {
+                    "pending_obs": replay._graph_pending_obs,
+                    "pending_actions": replay._graph_pending_actions,
+                    "pending_rewards": replay._graph_pending_rewards,
+                    "pending_terminateds": replay._graph_pending_terminateds,
+                    "pending_truncateds": replay._graph_pending_truncateds,
+                    "pending_next_obs": replay._graph_pending_next_obs,
+                    "pending_cursor": replay._graph_pending_cursor,
+                    "pending_count": replay._graph_pending_count,
+                    "position": replay._graph_position,
+                    "size": replay._graph_size,
+                }
+                for name, value in graph_arrays.items():
+                    value.assign(data[f"graph_{name}"])
+                replay._graph_pending_count_host = int(data["graph_pending_count"][0])
             return replay
 
 
@@ -534,6 +776,11 @@ class TrainerFlashSAC(TrainerSAC):
         ranks = np.arange(1, flash_config.noise_zeta_max + 1, dtype=np.float64)
         probabilities = ranks ** (-float(flash_config.noise_zeta_mu))
         self._noise_cdf = np.cumsum(probabilities / probabilities.sum())
+        self._noise_cdf_device = wp.array(self._noise_cdf.astype(np.float32), device=self.device)
+        self._device_noise_repeat_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._device_noise_repeat_steps = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._device_exploration_seed = wp.array([int(seed)], dtype=wp.int32, device=self.device)
+        self._device_interaction_seed = wp.array([int(seed)], dtype=wp.int32, device=self.device)
         self._noise_repeat_count = 0
         self._noise_repeat_steps = 0
         self._exploration_seed = int(seed)
@@ -622,6 +869,10 @@ class TrainerFlashSAC(TrainerSAC):
             "noise_repeat_count": np.asarray(self._noise_repeat_count, dtype=np.int64),
             "noise_repeat_steps": np.asarray(self._noise_repeat_steps, dtype=np.int64),
             "exploration_seed": np.asarray(self._exploration_seed, dtype=np.int64),
+            "device_noise_repeat_count": self._device_noise_repeat_count.numpy(),
+            "device_noise_repeat_steps": self._device_noise_repeat_steps.numpy(),
+            "device_exploration_seed": self._device_exploration_seed.numpy(),
+            "device_interaction_seed": self._device_interaction_seed.numpy(),
             "noise_rng_state": np.asarray(json.dumps(self._noise_rng.bit_generator.state)),
             "obs_mean": self._obs_mean.numpy(),
             "obs_m2": self._obs_m2.numpy(),
@@ -718,6 +969,11 @@ class TrainerFlashSAC(TrainerSAC):
                 trainer._noise_repeat_steps = int(data["noise_repeat_steps"])
                 trainer._exploration_seed = int(data["exploration_seed"])
                 trainer._noise_rng.bit_generator.state = json.loads(str(data["noise_rng_state"].item()))
+            if "device_interaction_seed" in data:
+                trainer._device_noise_repeat_count.assign(data["device_noise_repeat_count"])
+                trainer._device_noise_repeat_steps.assign(data["device_noise_repeat_steps"])
+                trainer._device_exploration_seed.assign(data["device_exploration_seed"])
+                trainer._device_interaction_seed.assign(data["device_interaction_seed"])
             for prefix, optimizer in (
                 ("actor_optimizer", trainer.actor_optimizer),
                 ("critic1_optimizer", trainer.critic1_optimizer),
@@ -726,6 +982,69 @@ class TrainerFlashSAC(TrainerSAC):
             ):
                 _unpack_optimizer(data, prefix, optimizer)
             return trainer
+
+    def _graph_update_operations(
+        self,
+        batch: BatchSAC,
+        *,
+        include_actor: bool,
+        seed_base: int,
+    ) -> None:
+        """Record one allocation-stable learner update into an active capture."""
+
+        wp.launch(
+            _prepare_flash_sac_graph_update_kernel,
+            dim=1,
+            inputs=[
+                self._device_gradient_update_count,
+                self._device_update_count,
+                int(seed_base),
+                int(self.config.policy_frequency),
+                int(self.config.learning_rate_warmup_steps),
+                int(self.config.learning_rate_decay_steps),
+                float(self.config.actor_lr),
+                float(self.config.learning_rate_end),
+                float(self.config.actor_lr),
+                float(self.config.critic_lr),
+                float(self.config.alpha_lr),
+            ],
+            outputs=[
+                self._device_actor_condition,
+                self._device_actor_skip_condition,
+                self._device_update_seed,
+                self.actor_optimizer.lr_scale,
+                self.critic1_optimizer.lr_scale,
+                self.critic2_optimizer.lr_scale,
+                self.alpha_optimizer.lr_scale,
+            ],
+            device=self.device,
+        )
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._actor_loss], device=self.device)
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._alpha_loss], device=self.device)
+        if include_actor:
+            self._update_actor(batch, seed=0, seed_counter=self._device_update_seed, seed_offset=0)
+            if self.config.auto_alpha:
+                self._update_alpha(batch, seed=0)
+        self._update_critics(
+            batch,
+            seed=0,
+            seed_counter=self._device_update_seed,
+            seed_offset=2,
+        )
+        self.target_critic1.soft_update_from(self.critic1, self.config.tau)
+        self.target_critic2.soft_update_from(self.critic2, self.config.tau)
+        wp.launch(
+            seed_counter_increment_kernel,
+            dim=1,
+            inputs=[self._device_gradient_update_count, 1],
+            device=self.device,
+        )
+        wp.launch(
+            seed_counter_increment_kernel,
+            dim=1,
+            inputs=[self._device_update_count, 1],
+            device=self.device,
+        )
 
     def capture_update_graph(
         self,
@@ -764,59 +1083,7 @@ class TrainerFlashSAC(TrainerSAC):
 
         def capture_one_update(*, include_actor: bool) -> object:
             with wp.ScopedCapture(device=self.device) as capture:
-                wp.launch(
-                    _prepare_flash_sac_graph_update_kernel,
-                    dim=1,
-                    inputs=[
-                        self._device_gradient_update_count,
-                        self._device_update_count,
-                        seed_base,
-                        int(self.config.policy_frequency),
-                        int(self.config.learning_rate_warmup_steps),
-                        int(self.config.learning_rate_decay_steps),
-                        float(self.config.actor_lr),
-                        float(self.config.learning_rate_end),
-                        float(self.config.actor_lr),
-                        float(self.config.critic_lr),
-                        float(self.config.alpha_lr),
-                    ],
-                    outputs=[
-                        self._device_actor_condition,
-                        self._device_actor_skip_condition,
-                        self._device_update_seed,
-                        self.actor_optimizer.lr_scale,
-                        self.critic1_optimizer.lr_scale,
-                        self.critic2_optimizer.lr_scale,
-                        self.alpha_optimizer.lr_scale,
-                    ],
-                    device=self.device,
-                )
-                wp.launch(zero_scalar_kernel, dim=1, outputs=[self._actor_loss], device=self.device)
-                wp.launch(zero_scalar_kernel, dim=1, outputs=[self._alpha_loss], device=self.device)
-                if include_actor:
-                    self._update_actor(batch, seed=0, seed_counter=self._device_update_seed, seed_offset=0)
-                    if self.config.auto_alpha:
-                        self._update_alpha(batch, seed=0)
-                self._update_critics(
-                    batch,
-                    seed=0,
-                    seed_counter=self._device_update_seed,
-                    seed_offset=2,
-                )
-                self.target_critic1.soft_update_from(self.critic1, self.config.tau)
-                self.target_critic2.soft_update_from(self.critic2, self.config.tau)
-                wp.launch(
-                    seed_counter_increment_kernel,
-                    dim=1,
-                    inputs=[self._device_gradient_update_count, 1],
-                    device=self.device,
-                )
-                wp.launch(
-                    seed_counter_increment_kernel,
-                    dim=1,
-                    inputs=[self._device_update_count, 1],
-                    device=self.device,
-                )
+                self._graph_update_operations(batch, include_actor=include_actor, seed_base=seed_base)
             return capture.graph
 
         actor_graph = capture_one_update(include_actor=True)
@@ -828,6 +1095,123 @@ class TrainerFlashSAC(TrainerSAC):
             batch=batch,
             policy_frequency=int(self.config.policy_frequency),
         )
+
+    def capture_training_graph(
+        self,
+        env: EnvFlashSAC,
+        replay: BufferReplayFlashSAC,
+        *,
+        updates_per_step: int = 2,
+        interactions_per_graph: int = 2,
+        seed: int | None = None,
+    ) -> GraphFlashSACTraining:
+        """Capture steady-state interaction, replay, and learner updates together."""
+
+        updates = int(updates_per_step)
+        interactions = int(interactions_per_graph)
+        if not self.device.is_cuda or not self.device.is_mempool_enabled:
+            raise RuntimeError("FlashSAC training graphs require CUDA with memory pools enabled")
+        if env.device != self.device or replay.device != self.device:
+            raise ValueError("environment, replay, and trainer must use the same device")
+        if self.obs_dim != env.obs_dim or self.action_dim != int(getattr(env, "policy_action_dim", env.action_dim)):
+            raise ValueError("FlashSAC trainer dimensions do not match environment policy interface")
+        if updates <= 0 or interactions <= 0:
+            raise ValueError("updates_per_step and interactions_per_graph must be positive")
+        total_updates = updates * interactions
+        if total_updates % int(self.config.policy_frequency) != 0:
+            raise ValueError("captured updates must span a complete policy-frequency cadence")
+        if interactions % 2 != 0:
+            raise ValueError("interactions_per_graph must be even for environment state-buffer parity")
+        if int(self.config.update_steps) != 1 or self.config.normalize_observations:
+            raise ValueError("training graph requires update_steps=1 and reference internal normalization")
+        if not replay.can_sample():
+            raise RuntimeError("warm replay eagerly before capturing steady-state training")
+
+        replay.reserve_graph_buffers(env.world_count)
+        self.reserve_buffers(env.world_count)
+        pre_step_obs = wp.empty((env.world_count, self.obs_dim), dtype=wp.float32, device=self.device)
+        zero_truncateds = wp.zeros(env.world_count, dtype=wp.float32, device=self.device)
+        env_seed_counter = wp.array([int(self.seed if seed is None else seed)], dtype=wp.int32, device=self.device)
+        if hasattr(env, "use_reset_seed_counter"):
+            env.use_reset_seed_counter(env_seed_counter)
+        if hasattr(env, "use_command_seed_counter"):
+            env.use_command_seed_counter(env_seed_counter)
+        self._device_update_count.assign(np.asarray([self._update_count], dtype=np.int32))
+        self._device_gradient_update_count.assign(np.asarray([self._gradient_update_count], dtype=np.int32))
+        if seed is not None:
+            self._device_interaction_seed.assign(np.asarray([int(seed)], dtype=np.int32))
+        self.actor_optimizer.lr = float(self.config.actor_lr)
+        self.critic1_optimizer.lr = float(self.config.critic_lr)
+        self.critic2_optimizer.lr = float(self.config.critic_lr)
+        self.alpha_optimizer.lr = float(self.config.alpha_lr)
+        seed_base = self.seed if seed is None else int(seed)
+        start_gradient_update = self._gradient_update_count
+        sim_time_before = getattr(env, "sim_time", None)
+
+        with wp.ScopedCapture(device=self.device) as capture:
+            local_update = 0
+            for interaction in range(interactions):
+                wp.copy(pre_step_obs, env.obs)
+                exploration_seed = self.prepare_graph_exploration_seed()
+                actions, _log_probs = self.act_reuse_seed_counter(pre_step_obs, seed_counter=exploration_seed)
+                next_obs, rewards, dones = env.step(actions)
+                replay_next_obs = getattr(env, "step_next_obs", next_obs)
+                truncateds = getattr(env, "step_truncateds", zero_truncateds)
+                terminateds = getattr(env, "step_terminateds", dones)
+                replay.add_batch_graph(
+                    pre_step_obs,
+                    actions,
+                    rewards,
+                    terminateds,
+                    replay_next_obs,
+                    truncateds=truncateds,
+                )
+                for update_index in range(updates):
+                    batch = replay.sample_graph_seed_counter(
+                        self._device_update_count,
+                        seed_offset=interaction * updates + update_index + 101,
+                    )
+                    include_actor = (start_gradient_update + local_update) % int(self.config.policy_frequency) == 0
+                    self._graph_update_operations(
+                        batch,
+                        include_actor=include_actor,
+                        seed_base=seed_base,
+                    )
+                    local_update += 1
+        if sim_time_before is not None:
+            env.sim_time = sim_time_before
+        return GraphFlashSACTraining(
+            trainer=self,
+            replay=replay,
+            env=env,
+            graph=capture.graph,
+            interactions_per_launch=interactions,
+            updates_per_launch=total_updates,
+            retained_arrays=(pre_step_obs, zero_truncateds, env_seed_counter),
+        )
+
+    def prepare_graph_exploration_seed(self) -> wp.array[wp.int32]:
+        """Advance device-resident zeta exploration duration state."""
+
+        wp.launch(
+            _prepare_flash_sac_exploration_kernel,
+            dim=1,
+            inputs=[
+                self._device_interaction_seed,
+                self._noise_cdf_device,
+                self._device_noise_repeat_count,
+                self._device_noise_repeat_steps,
+            ],
+            outputs=[self._device_exploration_seed],
+            device=self.device,
+        )
+        wp.launch(
+            seed_counter_increment_kernel,
+            dim=1,
+            inputs=[self._device_interaction_seed, 1],
+            device=self.device,
+        )
+        return self._device_exploration_seed
 
     def reserve_buffers(self, batch_size: int) -> None:
         """Reserve graph-replay-safe interaction buffers for a fixed batch size."""
@@ -1010,6 +1394,47 @@ class TrainerFlashSAC(TrainerSAC):
         if self.config.normalize_weights:
             self.critic1.normalize_weights()
             self.critic2.normalize_weights()
+
+
+@dataclass
+class GraphFlashSACTraining:
+    """Captured steady-state environment, replay, and learner cadence."""
+
+    trainer: TrainerFlashSAC
+    replay: BufferReplayFlashSAC
+    env: EnvFlashSAC
+    graph: object
+    interactions_per_launch: int
+    updates_per_launch: int
+    retained_arrays: tuple[wp.array, ...]
+
+    def launch(self, *, read_stats: bool = False) -> StatsSACUpdate:
+        """Replay one full cadence and update host mirrors without synchronization."""
+
+        wp.capture_launch(self.graph)
+        self.replay.advance_graph_host_state(self.interactions_per_launch)
+        self.trainer._gradient_update_count += self.updates_per_launch
+        self.trainer._update_count += self.updates_per_launch
+        if hasattr(self.env, "sim_time") and hasattr(self.env, "config"):
+            self.env.sim_time += self.interactions_per_launch * float(self.env.config.frame_dt)
+        if read_stats:
+            return self.trainer._read_update_stats()
+        return StatsSACUpdate(actor_loss=0.0, critic_loss=0.0, alpha_loss=0.0, alpha=0.0)
+
+    def run(self, launch_count: int, *, stats_interval: int = 0) -> list[StatsSACUpdate]:
+        """Replay multiple cadences with diagnostics only at the requested interval."""
+
+        count = int(launch_count)
+        interval = int(stats_interval)
+        if count < 0 or interval < 0:
+            raise ValueError("launch_count and stats_interval must be non-negative")
+        stats: list[StatsSACUpdate] = []
+        for index in range(count):
+            read_stats = interval > 0 and (index + 1) % interval == 0
+            result = self.launch(read_stats=read_stats)
+            if read_stats:
+                stats.append(result)
+        return stats
 
 
 @dataclass

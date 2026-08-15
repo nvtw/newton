@@ -57,6 +57,8 @@ Warp-only reinforcement learning utilities for Newton.
    EnvPPO
    GaussianActor
    GenerationResult
+   GraphFlashSACTraining
+   GraphFlashSACUpdate
    HparamSpec
    MirrorMapPPO
    Muon

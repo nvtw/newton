@@ -3061,6 +3061,133 @@ def muon_step_2d_kernel(
 
 
 @wp.kernel
+def flash_sac_graph_n_step_store_kernel(
+    obs: wp.array2d[wp.float32],
+    actions: wp.array2d[wp.float32],
+    rewards: wp.array[wp.float32],
+    terminateds: wp.array[wp.float32],
+    truncateds: wp.array[wp.float32],
+    next_obs: wp.array2d[wp.float32],
+    pending_obs: wp.array3d[wp.float32],
+    pending_actions: wp.array3d[wp.float32],
+    pending_rewards: wp.array2d[wp.float32],
+    pending_terminateds: wp.array2d[wp.float32],
+    pending_truncateds: wp.array2d[wp.float32],
+    pending_next_obs: wp.array3d[wp.float32],
+    pending_cursor: wp.array[wp.int32],
+    pending_count: wp.array[wp.int32],
+    replay_position: wp.array[wp.int32],
+    capacity: wp.int32,
+    n_step: wp.int32,
+    gamma: wp.float32,
+    obs_dim: wp.int32,
+    action_dim: wp.int32,
+    replay_obs: wp.array2d[wp.float32],
+    replay_actions: wp.array2d[wp.float32],
+    replay_rewards: wp.array[wp.float32],
+    replay_dones: wp.array[wp.float32],
+    replay_next_obs: wp.array2d[wp.float32],
+):
+    world, column = wp.tid()
+    cursor = pending_cursor[0]
+    if column < obs_dim:
+        pending_obs[cursor, world, column] = obs[world, column]
+        pending_next_obs[cursor, world, column] = next_obs[world, column]
+    if column < action_dim:
+        pending_actions[cursor, world, column] = actions[world, column]
+    if column == 0:
+        pending_rewards[cursor, world] = rewards[world]
+        pending_terminateds[cursor, world] = terminateds[world]
+        pending_truncateds[cursor, world] = truncateds[world]
+
+    if pending_count[0] + 1 < n_step:
+        return
+    oldest = wp.int32(0)
+    if pending_count[0] >= n_step - 1:
+        oldest = (cursor + 1) % n_step
+    destination = (replay_position[0] + world) % capacity
+    if column < obs_dim:
+        replay_obs[destination, column] = pending_obs[oldest, world, column]
+        final_slot = oldest
+        active = wp.float32(1.0)
+        for step in range(n_step):
+            slot = (oldest + step) % n_step
+            if active > wp.float32(0.0):
+                final_slot = slot
+                done = wp.min(pending_terminateds[slot, world] + pending_truncateds[slot, world], wp.float32(1.0))
+                active = active * (wp.float32(1.0) - done)
+        replay_next_obs[destination, column] = pending_next_obs[final_slot, world, column]
+    if column < action_dim:
+        replay_actions[destination, column] = pending_actions[oldest, world, column]
+    if column == 0:
+        aggregate_reward = wp.float32(0.0)
+        discount = wp.float32(1.0)
+        aggregate_terminated = wp.float32(0.0)
+        active = wp.float32(1.0)
+        for step in range(n_step):
+            slot = (oldest + step) % n_step
+            if active > wp.float32(0.0):
+                aggregate_reward = aggregate_reward + discount * pending_rewards[slot, world]
+                aggregate_terminated = pending_terminateds[slot, world]
+                done = wp.min(pending_terminateds[slot, world] + pending_truncateds[slot, world], wp.float32(1.0))
+                active = active * (wp.float32(1.0) - done)
+                discount = discount * gamma
+        replay_rewards[destination] = aggregate_reward
+        replay_dones[destination] = aggregate_terminated
+
+
+@wp.kernel
+def flash_sac_graph_n_step_finalize_kernel(
+    world_count: wp.int32,
+    capacity: wp.int32,
+    n_step: wp.int32,
+    pending_cursor: wp.array[wp.int32],
+    pending_count: wp.array[wp.int32],
+    replay_position: wp.array[wp.int32],
+    replay_size: wp.array[wp.int32],
+):
+    old_count = pending_count[0]
+    pending_cursor[0] = (pending_cursor[0] + 1) % n_step
+    pending_count[0] = wp.min(old_count + 1, n_step)
+    if old_count + 1 >= n_step:
+        replay_position[0] = (replay_position[0] + world_count) % capacity
+        replay_size[0] = wp.min(replay_size[0] + world_count, capacity)
+
+
+@wp.kernel
+def flash_sac_graph_replay_sample_kernel(
+    replay_obs: wp.array2d[wp.float32],
+    replay_actions: wp.array2d[wp.float32],
+    replay_rewards: wp.array[wp.float32],
+    replay_dones: wp.array[wp.float32],
+    replay_next_obs: wp.array2d[wp.float32],
+    replay_size: wp.array[wp.int32],
+    seed_counter: wp.array[wp.int32],
+    seed_offset: wp.int32,
+    obs_dim: wp.int32,
+    action_dim: wp.int32,
+    obs: wp.array2d[wp.float32],
+    actions: wp.array2d[wp.float32],
+    rewards: wp.array[wp.float32],
+    dones: wp.array[wp.float32],
+    next_obs: wp.array2d[wp.float32],
+):
+    row, column = wp.tid()
+    seed = wp.int32((wp.int64(seed_counter[0]) + wp.int64(seed_offset)) % wp.int64(2147483647))
+    rng = wp.rand_init(seed, row)
+    source = wp.int32(wp.floor(wp.randf(rng) * wp.float32(replay_size[0])))
+    source = wp.min(source, replay_size[0] - wp.int32(1))
+    if column < obs_dim:
+        obs[row, column] = replay_obs[source, column]
+        next_obs[row, column] = replay_next_obs[source, column]
+    if column < action_dim:
+        actions[row, column] = replay_actions[source, column]
+    if column == 0:
+        rewards[row] = replay_rewards[source]
+        dones[row] = replay_dones[source]
+
+
+@wp.kernel
 def flash_sac_n_step_accumulate_kernel(
     rewards: wp.array[wp.float32],
     terminateds: wp.array[wp.float32],
