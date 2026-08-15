@@ -399,11 +399,14 @@ class TestRacerXUsd(unittest.TestCase):
         front_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER
         rear_scale = racerx.SUSPENSION_STIFFNESS_SCALE * racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER
         self.assertEqual(racerx.C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER, 16.0)
-        self.assertEqual(racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER, 5.0)
+        self.assertEqual(racerx.C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER, 10.0)
         self.assertEqual(racerx.C3_WHEEL_FRICTION, 0.3)
-        self.assertEqual((racerx.C3_STEERING_TRAVEL, racerx.C3_STEERING_LIMIT), (0.0015, 0.0018))
+        self.assertEqual((racerx.C3_STEERING_TRAVEL, racerx.C3_STEERING_LIMIT), (0.00475, 0.0057))
         self.assertEqual(builder.joint_limit_lower[9], -racerx.C3_STEERING_LIMIT)
         self.assertEqual(builder.joint_limit_upper[9], racerx.C3_STEERING_LIMIT)
+        self.assertEqual(builder.joint_target_ke[9], racerx.C3_STEERING_STIFFNESS)
+        self.assertEqual(builder.joint_target_kd[9], racerx.C3_STEERING_DAMPING)
+        self.assertEqual(builder.joint_effort_limit[9], racerx.C3_STEERING_FORCE_LIMIT)
         self.assertEqual(racerx.C3_SIM_SUBSTEPS, 4)
         for dof in (4, 5):
             self.assertAlmostEqual(builder.joint_target_ke[dof], 10000.0 * front_scale)

@@ -197,6 +197,33 @@ def _build_ball_triangle() -> newton.Model:
     return builder.finalize(skip_validation_joints=True)
 
 
+def _rigid_system_momentum(model: newton.Model, state: newton.State) -> tuple[np.ndarray, np.ndarray]:
+    """Return total linear and center-of-mass angular momentum."""
+    poses = state.body_q.numpy()
+    twists = state.body_qd.numpy()
+    masses = model.body_mass.numpy()
+    inertias = model.body_inertia.numpy()
+    local_coms = model.body_com.numpy()
+
+    def rotate(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
+        xyz = quaternion[:3]
+        return vector + 2.0 * np.cross(xyz, np.cross(xyz, vector) + quaternion[3] * vector)
+
+    world_coms = np.asarray(
+        [pose[:3] + rotate(pose[3:], local_com) for pose, local_com in zip(poses, local_coms, strict=True)]
+    )
+    system_com = np.sum(masses[:, None] * world_coms, axis=0) / np.sum(masses)
+    body_momenta = masses[:, None] * twists[:, :3]
+    angular_momentum = np.zeros(3, dtype=np.float64)
+    for pose, twist, inertia, world_com, body_momentum in zip(
+        poses, twists, inertias, world_coms, body_momenta, strict=True
+    ):
+        rotation = np.column_stack([rotate(pose[3:], axis) for axis in np.eye(3)])
+        angular_momentum += rotation @ inertia @ rotation.T @ twist[3:]
+        angular_momentum += np.cross(world_com - system_com, body_momentum)
+    return np.sum(body_momenta, axis=0), angular_momentum
+
+
 class TestDirectEquality(unittest.TestCase):
     def test_panel_size_selector_keeps_trees_narrow_and_widens_dense_loops(self) -> None:
         """Select panel sizes from precomputed mechanism cycle density."""
@@ -423,6 +450,29 @@ class TestDirectEquality(unittest.TestCase):
         _run_captured_steps(solver, state, model.control(), 1)
         self.assertTrue(np.isfinite(state.body_q.numpy()).all())
         self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
+
+    def test_drifted_floating_loop_conserves_momentum(self):
+        """Conserve momentum while correcting separated anchors in a floating loop."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+
+        model = _build_ball_triangle()
+        poses = model.body_q.numpy()
+        poses[1, :3] += np.asarray((0.08, -0.05, 0.03), dtype=np.float32)
+        model.body_q.assign(poses)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=1,
+            solver_iterations=1,
+            velocity_iterations=0,
+            articulation_mode="maximal",
+        )
+        state = model.state()
+        _run_captured_steps(solver, state, model.control(), 1)
+
+        linear_momentum, angular_momentum = _rigid_system_momentum(model, state)
+        self.assertLess(float(np.linalg.norm(linear_momentum)), 1.0e-5)
+        self.assertLess(float(np.linalg.norm(angular_momentum)), 1.0e-5)
 
     def test_direct_driven_hinge_leaves_pgs_when_no_inequality_remains(self):
         """Remove a direct-driven hinge entirely from PGS."""

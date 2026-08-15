@@ -67,7 +67,7 @@ DRIVE_DECELERATION = 280.0
 DRIVE_DAMPING = 0.35
 DRIVE_TORQUE_LIMIT = 3.0
 SUSPENSION_STIFFNESS_SCALE = 0.16
-C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER = 5.0
+C3_REAR_SUSPENSION_STIFFNESS_MULTIPLIER = 10.0
 C3_WHEEL_FRICTION = 0.3
 LOOPED_VEHICLE_VARIANTS = frozenset(("b3", "c3"))
 A3_SUSPENSION_STIFFNESS_MULTIPLIER = 6.25
@@ -75,8 +75,11 @@ B3_SUSPENSION_STIFFNESS_MULTIPLIER = 6.25
 C3_FRONT_SUSPENSION_STIFFNESS_MULTIPLIER = 16.0
 STEERING_TRAVEL = 0.00125
 STEERING_LIMIT = 0.0015
-C3_STEERING_TRAVEL = 0.0015
-C3_STEERING_LIMIT = 0.0018
+C3_STEERING_TRAVEL = 0.00475
+C3_STEERING_LIMIT = 0.0057
+C3_STEERING_STIFFNESS = 3072000.0
+C3_STEERING_DAMPING = 1680.0
+C3_STEERING_FORCE_LIMIT = 3840.0
 STEERING_RATE = 0.015
 STEERING_STIFFNESS = 64000.0
 STEERING_DAMPING = 240.0
@@ -537,9 +540,11 @@ def _configure_vehicle_joints(builder, result, parts: _VehicleParts) -> tuple[li
     builder.joint_limit_lower[steering_dof] = -steering_limit
     builder.joint_limit_upper[steering_dof] = steering_limit
     builder.joint_target_mode[steering_dof] = newton.JointTargetMode.POSITION
-    builder.joint_target_ke[steering_dof] = STEERING_STIFFNESS
-    builder.joint_target_kd[steering_dof] = STEERING_DAMPING
-    builder.joint_effort_limit[steering_dof] = STEERING_FORCE_LIMIT
+    builder.joint_target_ke[steering_dof] = C3_STEERING_STIFFNESS if parts.variant == "c3" else STEERING_STIFFNESS
+    builder.joint_target_kd[steering_dof] = C3_STEERING_DAMPING if parts.variant == "c3" else STEERING_DAMPING
+    builder.joint_effort_limit[steering_dof] = (
+        C3_STEERING_FORCE_LIMIT if parts.variant == "c3" else STEERING_FORCE_LIMIT
+    )
     return wheel_dofs, steering_joint, steering_dof
 
 
