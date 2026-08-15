@@ -49,6 +49,7 @@ Warp-only reinforcement learning utilities for Newton.
    EnvAntPhoenX
    EnvAnymalPhoenX
    EnvDrLegsPhoenX
+   EnvFlashSAC
    EnvG1PhoenX
    EnvGo2PhoenX
    EnvH1PhoenX
@@ -110,6 +111,7 @@ Warp-only reinforcement learning utilities for Newton.
    resize_ppo_checkpoint_inputs
    save_ppo_checkpoint
    train_anymal_ppo
+   train_flash_sac
    train_g1_ppo
 
 .. rubric:: Constants

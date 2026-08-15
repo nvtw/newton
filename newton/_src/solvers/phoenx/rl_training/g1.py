@@ -23,7 +23,10 @@ from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 
 from . import g1_recipe
 from .env import advance_seed_counter, collect_ppo_rollout, collect_ppo_rollout_seed_counter
+from .flash_sac import TrainerFlashSAC
+from .flash_sac import train_flash_sac as train_flash_sac_env
 from .ppo import BufferRollout, MirrorMapPPO, TrainerPPO
+from .sac import StatsSACUpdate
 
 ACTION_DIM_G1 = 29
 OBS_DIM_G1_NANOG1 = 98
@@ -3227,6 +3230,26 @@ class EnvG1PhoenX:
             self.observe(mask=self._reset_articulation_mask)
         self.sim_time += float(self.config.frame_dt)
         return self.obs, self.step_rewards, self.step_dones
+
+    def train_flash_sac(
+        self,
+        trainer: TrainerFlashSAC,
+        *,
+        interaction_steps: int,
+        updates_per_step: int = 1,
+        seed: int = 0,
+        reset_at_start: bool = True,
+    ) -> list[StatsSACUpdate]:
+        """Collect G1 transitions and perform replay-driven FlashSAC updates."""
+
+        return train_flash_sac_env(
+            self,
+            trainer,
+            interaction_steps=interaction_steps,
+            updates_per_step=updates_per_step,
+            seed=seed,
+            reset_at_start=reset_at_start,
+        )
 
     def collect_ppo_rollout(
         self,

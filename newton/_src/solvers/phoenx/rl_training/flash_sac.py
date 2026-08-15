@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 import warp as wp
@@ -18,6 +19,21 @@ from .kernels import (
     zero_scalar_kernel,
 )
 from .sac import BatchSAC, BufferReplaySAC, ConfigSAC, StatsSACUpdate, TrainerSAC
+
+
+class EnvFlashSAC(Protocol):
+    """Vectorized environment interface consumed by :func:`train_flash_sac`."""
+
+    world_count: int
+    obs_dim: int
+    action_dim: int
+    device: wp.context.Device
+
+    def reset(self) -> wp.array2d[wp.float32]: ...
+
+    def observe(self) -> wp.array2d[wp.float32]: ...
+
+    def step(self, actions: wp.array2d[wp.float32]) -> tuple[wp.array, wp.array, wp.array]: ...
 
 
 @dataclass
@@ -39,6 +55,9 @@ class ConfigFlashSAC(ConfigSAC):
         n_step: Number of transitions in replay returns.
         normalize_rewards: Whether replay samples use discounted-return normalization.
         normalized_return_max: Maximum normalized discounted-return magnitude.
+        buffer_max_length: Maximum number of replay transitions.
+        buffer_min_length: Number of replay transitions required before training.
+        sample_batch_size: Number of replay transitions sampled per update.
         actor_num_blocks: Number of expanded actor blocks.
         actor_hidden_dim: Actor feature width.
         critic_num_blocks: Number of expanded critic blocks.
@@ -66,6 +85,9 @@ class ConfigFlashSAC(ConfigSAC):
     n_step: int = 1
     normalize_rewards: bool = True
     normalized_return_max: float = 5.0
+    buffer_max_length: int = 1_000_000
+    buffer_min_length: int = 10_000
+    sample_batch_size: int = 2048
     actor_num_blocks: int = 2
     actor_hidden_dim: int = 128
     critic_num_blocks: int = 2
@@ -324,6 +346,7 @@ class TrainerFlashSAC(TrainerSAC):
             seed=seed,
         )
         self.config = flash_config
+        self._replay_buffer: BufferReplayFlashSAC | None = None
         if flash_config.target_entropy is None:
             sigma_sq = float(flash_config.target_sigma) ** 2
             self.target_entropy = 0.5 * self.action_dim * math.log(2.0 * math.pi * math.e * sigma_sq)
@@ -339,6 +362,60 @@ class TrainerFlashSAC(TrainerSAC):
             self._normalize_online_weights()
             self.target_critic1.copy_from(self.critic1)
             self.target_critic2.copy_from(self.critic2)
+
+    @property
+    def replay_buffer(self) -> BufferReplayFlashSAC | None:
+        """Replay buffer owned by the trainer, if transition collection has started."""
+
+        return self._replay_buffer
+
+    def initialize_replay_buffer(self) -> BufferReplayFlashSAC:
+        """Allocate the configured replay buffer and return it.
+
+        Allocation is lazy because the upstream one-million-row default is
+        substantial for G1-sized observations. Calling :meth:`process_transition`
+        also initializes the buffer on first use.
+        """
+
+        if self._replay_buffer is None:
+            self._replay_buffer = BufferReplayFlashSAC(
+                minimum_size=self.config.buffer_min_length,
+                capacity=self.config.buffer_max_length,
+                obs_dim=self.obs_dim,
+                action_dim=self.action_dim,
+                batch_size=self.config.sample_batch_size,
+                n_step=self.config.n_step,
+                gamma=self.config.gamma,
+                normalize_rewards=self.config.normalize_rewards,
+                normalized_return_max=self.config.normalized_return_max,
+                device=self.device,
+            )
+        return self._replay_buffer
+
+    def process_transition(
+        self,
+        obs: wp.array2d[wp.float32],
+        actions: wp.array2d[wp.float32],
+        rewards: wp.array[wp.float32],
+        terminateds: wp.array[wp.float32],
+        next_obs: wp.array2d[wp.float32],
+        truncateds: wp.array[wp.float32] | None = None,
+    ) -> None:
+        """Add one vectorized environment transition to the owned replay buffer."""
+
+        self.initialize_replay_buffer().add_batch(
+            obs,
+            actions,
+            rewards,
+            terminateds,
+            next_obs,
+            truncateds=truncateds,
+        )
+
+    def can_start_training(self) -> bool:
+        """Return whether the owned replay buffer has completed warmup."""
+
+        return self._replay_buffer is not None and self._replay_buffer.can_sample()
 
     def act(
         self,
@@ -359,9 +436,20 @@ class TrainerFlashSAC(TrainerSAC):
         self._noise_repeat_count += 1
         return super().act(obs, seed=self._exploration_seed, deterministic=False)
 
-    def update(self, batch: BatchSAC, *, seed: int | None = None, read_stats: bool = True) -> StatsSACUpdate:
-        """Update actor, temperature, critic, and target in upstream order."""
+    def update(
+        self,
+        batch: BatchSAC | None = None,
+        *,
+        seed: int | None = None,
+        read_stats: bool = True,
+    ) -> StatsSACUpdate:
+        """Sample owned replay when needed and update networks in upstream order."""
 
+        if batch is None:
+            if not self.can_start_training() or self._replay_buffer is None:
+                raise RuntimeError("FlashSAC replay buffer has not completed warmup")
+            sample_seed = self.seed + self._update_count * 9973 if seed is None else int(seed)
+            batch = self._replay_buffer.sample(seed=sample_seed)
         if int(batch.obs.shape[1]) != self.obs_dim or int(batch.next_obs.shape[1]) != self.obs_dim:
             raise ValueError("Batch observation dimensions do not match trainer")
         if int(batch.actions.shape[1]) != self.action_dim:
@@ -426,3 +514,57 @@ class TrainerFlashSAC(TrainerSAC):
         if self.config.normalize_weights:
             self.critic1.normalize_weights()
             self.critic2.normalize_weights()
+
+
+def train_flash_sac(
+    env: EnvFlashSAC,
+    trainer: TrainerFlashSAC,
+    *,
+    interaction_steps: int,
+    updates_per_step: int = 1,
+    seed: int = 0,
+    reset_at_start: bool = True,
+) -> list[StatsSACUpdate]:
+    """Collect vectorized transitions and perform replay-driven FlashSAC updates.
+
+    Args:
+        env: Vectorized PhoenX environment.
+        trainer: FlashSAC trainer matching the environment dimensions.
+        interaction_steps: Number of environment steps to collect.
+        updates_per_step: Maximum replay updates after each environment step.
+        seed: Base stochastic action and update seed.
+        reset_at_start: Whether to reset all environments before collection.
+
+    Returns:
+        Update statistics produced after replay warmup.
+    """
+
+    if interaction_steps <= 0:
+        raise ValueError("interaction_steps must be positive")
+    if updates_per_step < 0:
+        raise ValueError("updates_per_step must be non-negative")
+    if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
+        raise ValueError("FlashSAC trainer dimensions do not match environment")
+
+    obs = env.reset() if reset_at_start else env.observe()
+    stats: list[StatsSACUpdate] = []
+    zero_truncateds = wp.zeros(env.world_count, dtype=wp.float32, device=env.device)
+    for step in range(int(interaction_steps)):
+        actions, _log_probs = trainer.act(obs, seed=int(seed) + step)
+        next_obs, rewards, dones = env.step(actions)
+        truncateds = getattr(env, "step_truncateds", zero_truncateds)
+        terminateds = getattr(env, "step_terminateds", dones)
+        trainer.process_transition(
+            obs,
+            actions,
+            rewards,
+            terminateds,
+            next_obs,
+            truncateds=truncateds,
+        )
+        for update_index in range(int(updates_per_step)):
+            if not trainer.can_start_training():
+                break
+            stats.append(trainer.update(seed=int(seed) + step * max(updates_per_step, 1) + update_index))
+        obs = next_obs
+    return stats

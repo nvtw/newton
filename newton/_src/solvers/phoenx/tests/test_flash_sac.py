@@ -11,16 +11,43 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton.rl as public_rl
 from newton._src.solvers.phoenx.rl_training.flash_sac import (
     BufferReplayFlashSAC,
     ConfigFlashSAC,
     TrainerFlashSAC,
 )
+from newton._src.solvers.phoenx.rl_training.g1 import ACTION_DIM_G1, OBS_DIM_G1
 from newton._src.solvers.phoenx.rl_training.kernels import (
     sac_distributional_min_projection_device_alpha_kernel,
 )
+from newton._src.solvers.phoenx.rl_training.ppo import BufferRollout, ConfigPPO, TrainerPPO
 from newton._src.solvers.phoenx.rl_training.sac import BatchSAC
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
+
+
+class _G1SmokeEnv:
+    def __init__(self, obs: wp.array2d[wp.float32], next_obs: wp.array2d[wp.float32]):
+        self.world_count = int(obs.shape[0])
+        self.obs_dim = int(obs.shape[1])
+        self.action_dim = ACTION_DIM_G1
+        self.device = obs.device
+        self._initial_obs = obs
+        self._obs = obs
+        self._next_obs = next_obs
+        self._rewards = wp.array(np.linspace(-0.2, 0.3, self.world_count, dtype=np.float32), device=self.device)
+        self._dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+
+    def reset(self) -> wp.array2d[wp.float32]:
+        self._obs = self._initial_obs
+        return self._obs
+
+    def observe(self) -> wp.array2d[wp.float32]:
+        return self._obs
+
+    def step(self, actions: wp.array2d[wp.float32]) -> tuple[wp.array, wp.array, wp.array]:
+        self._obs = self._next_obs
+        return self._obs, self._rewards, self._dones
 
 
 class TestTrainerFlashSAC(unittest.TestCase):
@@ -33,6 +60,9 @@ class TestTrainerFlashSAC(unittest.TestCase):
         self.assertEqual(config.distributional_atoms, 101)
         self.assertEqual(config.policy_frequency, 2)
         self.assertAlmostEqual(config.initial_alpha, 0.01)
+        self.assertEqual(config.buffer_max_length, 1_000_000)
+        self.assertEqual(config.buffer_min_length, 10_000)
+        self.assertEqual(config.sample_batch_size, 2048)
         replay = BufferReplayFlashSAC(
             minimum_size=2,
             capacity=4,
@@ -198,6 +228,69 @@ class TestTrainerFlashSAC(unittest.TestCase):
 
         self.assertEqual(TrainerFlashSAC._expanded_block_layers(128, 2), (128, 512, 128, 512, 128))
         self.assertEqual(TrainerFlashSAC._expanded_block_layers(256, 2), (256, 1024, 256, 1024, 256))
+
+    def test_g1_flash_sac_and_ppo_trainer_workflows_smoke(self) -> None:
+        """Exercise one PPO and FlashSAC update with G1-sized synthetic transitions."""
+
+        device = require_cuda_graph_capture("G1 FlashSAC and PPO trainer smoke test")
+        world_count = 4
+        obs_np = np.linspace(-0.5, 0.5, world_count * OBS_DIM_G1, dtype=np.float32).reshape(world_count, OBS_DIM_G1)
+        obs = wp.array(obs_np, dtype=wp.float32, device=device)
+        next_obs = wp.array(obs_np * 0.9, dtype=wp.float32, device=device)
+
+        flash_config = ConfigFlashSAC(
+            buffer_max_length=8,
+            buffer_min_length=world_count,
+            sample_batch_size=world_count,
+            normalize_observations=False,
+            normalize_rewards=False,
+        )
+        flash = TrainerFlashSAC(
+            obs_dim=OBS_DIM_G1,
+            action_dim=ACTION_DIM_G1,
+            hidden_layers=(8,),
+            config=flash_config,
+            device=device,
+            seed=71,
+        )
+        ppo = TrainerPPO(
+            obs_dim=OBS_DIM_G1,
+            action_dim=ACTION_DIM_G1,
+            hidden_layers=(8,),
+            config=ConfigPPO(
+                train_epochs=1,
+                normalize_advantages=False,
+                normalize_observations=False,
+            ),
+            device=device,
+            seed=73,
+        )
+
+        flash_actions, _flash_log_probs = flash.act(obs, seed=79)
+        ppo_actions, ppo_log_probs, _ppo_values = ppo.act(obs, seed=83)
+        self.assertEqual(flash_actions.shape, (world_count, ACTION_DIM_G1))
+        self.assertEqual(ppo_actions.shape, (world_count, ACTION_DIM_G1))
+        for actions in (flash_actions.numpy(), ppo_actions.numpy()):
+            self.assertTrue(np.isfinite(actions).all())
+            self.assertLessEqual(float(np.max(np.abs(actions))), 1.0)
+
+        flash_updates = public_rl.train_flash_sac(_G1SmokeEnv(obs, next_obs), flash, interaction_steps=1, seed=97)
+        self.assertTrue(flash.can_start_training())
+
+        buffer = BufferRollout(
+            num_steps=1, num_envs=world_count, obs_dim=OBS_DIM_G1, action_dim=ACTION_DIM_G1, device=device
+        )
+        buffer.obs.assign(obs)
+        buffer.actions.assign(ppo_actions)
+        buffer.old_log_probs.assign(ppo_log_probs)
+        buffer.advantages.assign(np.linspace(-0.2, 0.2, world_count, dtype=np.float32))
+        buffer.returns.assign(np.linspace(-0.1, 0.3, world_count, dtype=np.float32))
+        buffer.old_values.zero_()
+
+        ppo_stats = ppo.update(buffer)
+        flash_stats = flash_updates[0]
+        self.assertTrue(all(math.isfinite(value) for value in ppo_stats.__dict__.values()))
+        self.assertTrue(all(math.isfinite(value) for value in flash_stats.__dict__.values()))
 
 
 if __name__ == "__main__":

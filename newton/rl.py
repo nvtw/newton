@@ -53,6 +53,7 @@ from ._src.solvers.phoenx.rl_training import (
     EnvAntPhoenX,
     EnvAnymalPhoenX,
     EnvDrLegsPhoenX,
+    EnvFlashSAC,
     EnvG1PhoenX,
     EnvGo2PhoenX,
     EnvH1PhoenX,
@@ -109,6 +110,7 @@ from ._src.solvers.phoenx.rl_training import (
     reward_functions,
     save_ppo_checkpoint,
     train_anymal_ppo,
+    train_flash_sac,
     train_g1_ppo,
 )
 
@@ -158,6 +160,7 @@ __all__ = [
     "EnvAntPhoenX",
     "EnvAnymalPhoenX",
     "EnvDrLegsPhoenX",
+    "EnvFlashSAC",
     "EnvG1PhoenX",
     "EnvGo2PhoenX",
     "EnvH1PhoenX",
@@ -213,6 +216,7 @@ __all__ = [
     "reward_functions",
     "save_ppo_checkpoint",
     "train_anymal_ppo",
+    "train_flash_sac",
     "train_g1_ppo",
 ]
 

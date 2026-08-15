@@ -32,8 +32,10 @@ from .env import (
 from .flash_sac import (
     BufferReplayFlashSAC,
     ConfigFlashSAC,
+    EnvFlashSAC,
     RewardNormalizerFlashSAC,
     TrainerFlashSAC,
+    train_flash_sac,
 )
 from .g1 import (
     ACTION_DIM_G1,
@@ -146,6 +148,7 @@ __all__ = [
     "EnvAntPhoenX",
     "EnvAnymalPhoenX",
     "EnvDrLegsPhoenX",
+    "EnvFlashSAC",
     "EnvG1PhoenX",
     "EnvGo2PhoenX",
     "EnvH1PhoenX",
@@ -201,5 +204,6 @@ __all__ = [
     "reward_functions",
     "save_ppo_checkpoint",
     "train_anymal_ppo",
+    "train_flash_sac",
     "train_g1_ppo",
 ]
