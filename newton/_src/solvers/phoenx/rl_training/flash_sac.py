@@ -810,6 +810,7 @@ def train_flash_sac(
     *,
     interaction_steps: int,
     updates_per_step: int = 1,
+    stats_interval: int = 1,
     seed: int = 0,
     reset_at_start: bool = True,
 ) -> list[StatsSACUpdate]:
@@ -820,6 +821,8 @@ def train_flash_sac(
         trainer: FlashSAC trainer matching the environment dimensions.
         interaction_steps: Number of environment steps to collect.
         updates_per_step: Maximum replay updates after each environment step.
+        stats_interval: Number of updates between synchronized diagnostic reads.
+            ``0`` disables diagnostic reads.
         seed: Base stochastic action and update seed.
         reset_at_start: Whether to reset all environments before collection.
 
@@ -831,6 +834,8 @@ def train_flash_sac(
         raise ValueError("interaction_steps must be positive")
     if updates_per_step < 0:
         raise ValueError("updates_per_step must be non-negative")
+    if stats_interval < 0:
+        raise ValueError("stats_interval must be non-negative")
     if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
         raise ValueError("FlashSAC trainer dimensions do not match environment")
 
@@ -854,7 +859,13 @@ def train_flash_sac(
         for update_index in range(int(updates_per_step)):
             if not trainer.can_start_training():
                 break
-            stats.append(trainer.update(seed=int(seed) + step * max(updates_per_step, 1) + update_index))
+            read_stats = stats_interval > 0 and (trainer._update_count + 1) % stats_interval == 0
+            update_stats = trainer.update(
+                seed=int(seed) + step * max(updates_per_step, 1) + update_index,
+                read_stats=read_stats,
+            )
+            if read_stats:
+                stats.append(update_stats)
         obs = next_obs
     return stats
 

@@ -674,6 +674,49 @@ class TestTrainerFlashSAC(unittest.TestCase):
         )
         np.testing.assert_allclose(replay.sample(seed=1).rewards.numpy(), [5.0], rtol=0.0, atol=1.0e-6)
 
+    def test_training_stats_interval_avoids_host_readback(self) -> None:
+        """Skip synchronized diagnostics on the configured fast training path."""
+
+        device = require_cuda_graph_capture("FlashSAC stats interval")
+        obs = wp.array(np.asarray([[-0.5, 0.25], [0.75, -0.25]], dtype=np.float32), device=device)
+        next_obs = wp.array(obs.numpy() * 0.9, device=device)
+        trainer = TrainerFlashSAC(
+            obs_dim=2,
+            action_dim=ACTION_DIM_G1,
+            hidden_layers=(4,),
+            config=ConfigFlashSAC(
+                buffer_max_length=4,
+                buffer_min_length=2,
+                sample_batch_size=2,
+                normalize_observations=False,
+                normalize_rewards=False,
+            ),
+            device=device,
+            seed=223,
+        )
+
+        def fail_readback() -> StatsSACUpdate:
+            self.fail("fast FlashSAC path synchronized update diagnostics")
+
+        trainer._read_update_stats = fail_readback
+        stats = public_rl.train_flash_sac(
+            _G1SmokeEnv(obs, next_obs),
+            trainer,
+            interaction_steps=1,
+            stats_interval=0,
+            seed=227,
+        )
+        self.assertEqual(stats, [])
+        self.assertEqual(trainer._update_count, 1)
+        with self.assertRaisesRegex(ValueError, "stats_interval"):
+            public_rl.train_flash_sac(
+                _G1SmokeEnv(obs, next_obs),
+                trainer,
+                interaction_steps=1,
+                updates_per_step=0,
+                stats_interval=-1,
+            )
+
     def test_update_uses_upstream_network_order(self) -> None:
         """Update actor and temperature before critic and target networks."""
 
