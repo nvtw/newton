@@ -20,7 +20,7 @@ import warp as wp
 from ..core.types import Devicelike
 from .broad_phase_common import (
     EmptyFilterData,
-    check_aabb_overlap,
+    check_aabb_overlap_moving,
     is_pair_excluded,
     is_shape_pair_immovable_filtered,
     keep_all_filter,
@@ -48,6 +48,7 @@ def create_nxn_broadphase_precomputed_pairs_kernel(filter_func: Any, filter_data
         shape_bounding_box_lower: wp.array[wp.vec3],
         shape_bounding_box_upper: wp.array[wp.vec3],
         shape_gap: wp.array[float],
+        shape_displacement: wp.array[wp.vec3],
         nxn_shape_pair: wp.array[wp.vec2i],
         shape_body: wp.array[int],
         body_flags: wp.array[int],
@@ -72,13 +73,14 @@ def create_nxn_broadphase_precomputed_pairs_kernel(filter_func: Any, filter_data
             gap1 = shape_gap[shape1]
             gap2 = shape_gap[shape2]
 
-        if check_aabb_overlap(
-            shape_bounding_box_lower[shape1],
-            shape_bounding_box_upper[shape1],
+        if check_aabb_overlap_moving(
+            shape1,
+            shape2,
+            shape_bounding_box_lower,
+            shape_bounding_box_upper,
             gap1,
-            shape_bounding_box_lower[shape2],
-            shape_bounding_box_upper[shape2],
             gap2,
+            shape_displacement,
         ):
             if filter_func(pair, filter_data) == wp.int32(0):
                 return
@@ -169,6 +171,7 @@ def create_nxn_broadphase_kernel(filter_func: Any, filter_data_type: Any):
         shape_bounding_box_lower: wp.array[wp.vec3],
         shape_bounding_box_upper: wp.array[wp.vec3],
         shape_gap: wp.array[float],
+        shape_displacement: wp.array[wp.vec3],
         collision_group: wp.array[int],
         shape_world: wp.array[int],
         shape_body: wp.array[int],
@@ -225,13 +228,14 @@ def create_nxn_broadphase_kernel(filter_func: Any, filter_data_type: Any):
             gap1 = shape_gap[shape1]
             gap2 = shape_gap[shape2]
 
-        if check_aabb_overlap(
-            shape_bounding_box_lower[shape1],
-            shape_bounding_box_upper[shape1],
+        if check_aabb_overlap_moving(
+            shape1,
+            shape2,
+            shape_bounding_box_lower,
+            shape_bounding_box_upper,
             gap1,
-            shape_bounding_box_lower[shape2],
-            shape_bounding_box_upper[shape2],
             gap2,
+            shape_displacement,
         ):
             pair = wp.vec2i(shape1, shape2)
             if num_filter_pairs > 0 and is_pair_excluded(pair, filter_pairs, num_filter_pairs):
@@ -378,6 +382,7 @@ class BroadPhaseAllPairs:
         shape_body: wp.array[int] | None = None,
         body_flags: wp.array[int] | None = None,
         include_static_kinematic_pairs: bool = True,
+        shape_displacement: wp.array[wp.vec3] | None = None,
     ) -> None:
         """Launch the N x N broad phase collision detection.
 
@@ -432,6 +437,11 @@ class BroadPhaseAllPairs:
             shape_body = wp.empty(0, dtype=wp.int32, device=device)
         if body_flags is None:
             body_flags = wp.empty(0, dtype=wp.int32, device=device)
+        if shape_displacement is not None and shape_displacement.shape[0] != shape_lower.shape[0]:
+            raise ValueError(
+                "shape_displacement length must match the shape bounds "
+                f"({shape_lower.shape[0]}), got {shape_displacement.shape[0]}"
+            )
 
         # Exclusion filter: empty array and 0 when not provided or empty
         if filter_pairs is None or filter_pairs.shape[0] == 0:
@@ -458,6 +468,7 @@ class BroadPhaseAllPairs:
                 shape_lower,
                 shape_upper,
                 shape_gap,
+                shape_displacement,
                 shape_collision_group,
                 shape_world,
                 shape_body,
@@ -529,6 +540,7 @@ class BroadPhaseExplicit:
         shape_body: wp.array[int] | None = None,
         body_flags: wp.array[int] | None = None,
         include_static_kinematic_pairs: bool = True,
+        shape_displacement: wp.array[wp.vec3] | None = None,
     ) -> None:
         """Launch the explicit pairs broad phase collision detection.
 
@@ -576,6 +588,11 @@ class BroadPhaseExplicit:
             shape_body = wp.empty(0, dtype=wp.int32, device=device)
         if body_flags is None:
             body_flags = wp.empty(0, dtype=wp.int32, device=device)
+        if shape_displacement is not None and shape_displacement.shape[0] != shape_lower.shape[0]:
+            raise ValueError(
+                "shape_displacement length must match the shape bounds "
+                f"({shape_lower.shape[0]}), got {shape_displacement.shape[0]}"
+            )
 
         if self._has_custom_filter:
             if filter_data is None:
@@ -593,6 +610,7 @@ class BroadPhaseExplicit:
                 shape_lower,
                 shape_upper,
                 shape_gap,
+                shape_displacement,
                 shape_pairs,
                 shape_body,
                 body_flags,

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from typing import Any, Literal
 
@@ -13,7 +14,12 @@ from ..core.reset import normalize_reset_world_mask
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_core import compute_tight_aabb_from_support
-from ..geometry.contact_data import ContactData, make_contact_sort_key
+from ..geometry.contact_data import (
+    ContactData,
+    contact_passes_speculative_gap_check,
+    make_contact_sort_key,
+    prepare_speculative_contact,
+)
 from ..geometry.contact_match import ContactMatcher
 from ..geometry.contact_sort import ContactSorter
 from ..geometry.differentiable_contacts import launch_differentiable_contact_augment
@@ -212,6 +218,56 @@ class ContactWriterData:
     out_damping: wp.array[float]
     out_friction: wp.array[float]
     out_sort_key: wp.array[wp.int64]
+    # Speculative-contact inputs. Empty arrays and zero scalars when disabled.
+    shape_transform: wp.array[wp.transform]
+    shape_linear_velocity: wp.array[wp.vec3]
+    shape_angular_velocity: wp.array[wp.vec3]
+    collision_update_dt: float
+    max_speculative_extension: float
+
+
+@wp.func
+def _write_contact_at_index(
+    contact_data: ContactData,
+    writer_data: ContactWriterData,
+    index: int,
+    point_a_world: wp.vec3,
+    point_b_world: wp.vec3,
+    normal_a_to_b: wp.vec3,
+):
+    """Write a previously accepted contact at a reserved output index."""
+    if index >= writer_data.contact_max:
+        return
+
+    writer_data.out_shape0[index] = contact_data.shape_a
+    writer_data.out_shape1[index] = contact_data.shape_b
+
+    body0 = writer_data.shape_body[contact_data.shape_a]
+    body1 = writer_data.shape_body[contact_data.shape_b]
+    X_bw_a = wp.transform_identity() if body0 == -1 else wp.transform_inverse(writer_data.body_q[body0])
+    X_bw_b = wp.transform_identity() if body1 == -1 else wp.transform_inverse(writer_data.body_q[body1])
+
+    writer_data.out_point0[index] = wp.transform_point(X_bw_a, point_a_world)
+    writer_data.out_point1[index] = wp.transform_point(X_bw_b, point_b_world)
+
+    offset_mag_a = contact_data.radius_eff_a + contact_data.margin_a
+    offset_mag_b = contact_data.radius_eff_b + contact_data.margin_b
+    writer_data.out_offset0[index] = wp.transform_vector(X_bw_a, offset_mag_a * normal_a_to_b)
+    writer_data.out_offset1[index] = wp.transform_vector(X_bw_b, -offset_mag_b * normal_a_to_b)
+    writer_data.out_normal[index] = normal_a_to_b
+    writer_data.out_margin0[index] = offset_mag_a
+    writer_data.out_margin1[index] = offset_mag_b
+    writer_data.out_tids[index] = 0
+
+    if writer_data.out_stiffness.shape[0] > 0:
+        writer_data.out_stiffness[index] = contact_data.contact_stiffness
+        writer_data.out_damping[index] = contact_data.contact_damping
+        writer_data.out_friction[index] = contact_data.contact_friction_scale
+
+    if writer_data.out_sort_key.shape[0] > 0:
+        writer_data.out_sort_key[index] = make_contact_sort_key(
+            contact_data.shape_a, contact_data.shape_b, contact_data.sort_sub_key
+        )
 
 
 @wp.func
@@ -231,9 +287,6 @@ def write_contact(
     total_separation_needed = (
         contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.margin_a + contact_data.margin_b
     )
-
-    offset_mag_a = contact_data.radius_eff_a + contact_data.margin_a
-    offset_mag_b = contact_data.radius_eff_b + contact_data.margin_b
 
     # Distance calculation matching box_plane_collision
     contact_normal_a_to_b = wp.normalize(contact_data.contact_normal_a_to_b)
@@ -261,45 +314,33 @@ def write_contact(
         if d > contact_gap:
             return
         index = wp.atomic_add(writer_data.contact_count, 0, 1)
-    if index >= writer_data.contact_max:
-        return
+    _write_contact_at_index(contact_data, writer_data, index, a_contact_world, b_contact_world, contact_normal_a_to_b)
 
-    writer_data.out_shape0[index] = contact_data.shape_a
-    writer_data.out_shape1[index] = contact_data.shape_b
 
-    # Get body indices for the shapes
-    body0 = writer_data.shape_body[contact_data.shape_a]
-    body1 = writer_data.shape_body[contact_data.shape_b]
+@wp.func
+def write_contact_speculative(
+    contact_data: ContactData,
+    writer_data: ContactWriterData,
+    output_index: int,
+):
+    """Write a present or exactly predicted contact to the output arrays."""
+    contact_data.gap_sum = writer_data.shape_gap[contact_data.shape_a] + writer_data.shape_gap[contact_data.shape_b]
+    normal, point_a_world, point_b_world, _separation = prepare_speculative_contact(contact_data)
 
-    # Compute body inverse transforms
-    X_bw_a = wp.transform_identity() if body0 == -1 else wp.transform_inverse(writer_data.body_q[body0])
-    X_bw_b = wp.transform_identity() if body1 == -1 else wp.transform_inverse(writer_data.body_q[body1])
+    index = output_index
+    if index < 0:
+        if not contact_passes_speculative_gap_check(
+            contact_data,
+            writer_data.shape_transform,
+            writer_data.shape_linear_velocity,
+            writer_data.shape_angular_velocity,
+            writer_data.collision_update_dt,
+            writer_data.max_speculative_extension,
+        ):
+            return
+        index = wp.atomic_add(writer_data.contact_count, 0, 1)
 
-    # Contact points are stored in body frames
-    writer_data.out_point0[index] = wp.transform_point(X_bw_a, a_contact_world)
-    writer_data.out_point1[index] = wp.transform_point(X_bw_b, b_contact_world)
-
-    contact_normal = contact_normal_a_to_b
-
-    # Offsets in body frames (offset0 points toward B, offset1 points toward A)
-    writer_data.out_offset0[index] = wp.transform_vector(X_bw_a, offset_mag_a * contact_normal)
-    writer_data.out_offset1[index] = wp.transform_vector(X_bw_b, -offset_mag_b * contact_normal)
-
-    writer_data.out_normal[index] = contact_normal
-    writer_data.out_margin0[index] = offset_mag_a
-    writer_data.out_margin1[index] = offset_mag_b
-    writer_data.out_tids[index] = 0  # tid not available in this context
-
-    # Write stiffness/damping/friction only if per-contact shape properties are enabled
-    if writer_data.out_stiffness.shape[0] > 0:
-        writer_data.out_stiffness[index] = contact_data.contact_stiffness
-        writer_data.out_damping[index] = contact_data.contact_damping
-        writer_data.out_friction[index] = contact_data.contact_friction_scale
-
-    if writer_data.out_sort_key.shape[0] > 0:
-        writer_data.out_sort_key[index] = make_contact_sort_key(
-            contact_data.shape_a, contact_data.shape_b, contact_data.sort_sub_key
-        )
+    _write_contact_at_index(contact_data, writer_data, index, point_a_world, point_b_world, normal)
 
 
 @wp.kernel(enable_backward=False)
@@ -455,6 +496,76 @@ def compute_shape_aabbs(
     # Narrow-phase geometry data (reuses X_ws and scale already computed above)
     geom_data[shape_id] = wp.vec4(geom_scale[0], geom_scale[1], geom_scale[2], margin)
     geom_xform[shape_id] = X_ws
+
+
+@wp.kernel(enable_backward=False)
+def compute_shape_velocities(
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    shape_body: wp.array[int],
+    shape_transform: wp.array[wp.transform],
+    shape_collision_aabb_lower: wp.array[wp.vec3],
+    shape_collision_aabb_upper: wp.array[wp.vec3],
+    shape_collision_radius: wp.array[float],
+    shape_gap: wp.array[float],
+    collision_update_dt: float,
+    max_speculative_extension: float,
+    # outputs
+    shape_linear_velocity: wp.array[wp.vec3],
+    shape_angular_velocity: wp.array[wp.vec3],
+    shape_search_gap: wp.array[float],
+    shape_displacement: wp.array[wp.vec3],
+    shape_aabb_lower: wp.array[wp.vec3],
+    shape_aabb_upper: wp.array[wp.vec3],
+):
+    """Compute shape motion and expand its AABB over the prediction horizon.
+
+    ``shape_displacement`` is the world-space shape-origin velocity, including
+    the ``angular_velocity x COM_offset`` contribution, multiplied by
+    ``collision_update_dt``. Angular travel expands the AABB separately.
+    ``angular_speed_bound`` is the resulting conservative linear speed [m/s]
+    at the shape bound, not an angular speed [rad/s].
+    """
+    shape_id = wp.tid()
+    body_id = shape_body[shape_id]
+    if body_id == -1:
+        shape_linear_velocity[shape_id] = wp.vec3(0.0)
+        shape_angular_velocity[shape_id] = wp.vec3(0.0)
+        shape_search_gap[shape_id] = shape_gap[shape_id]
+        shape_displacement[shape_id] = wp.vec3(0.0)
+        return
+
+    X_wb = body_q[body_id]
+    X_ws = wp.transform_multiply(X_wb, shape_transform[shape_id])
+    shape_origin_world = wp.transform_get_translation(X_ws)
+    com_world = wp.transform_point(X_wb, body_com[body_id])
+    twist = body_qd[body_id]
+    com_velocity = wp.spatial_top(twist)
+    angular_velocity = wp.spatial_bottom(twist)
+    shape_origin_velocity = com_velocity + wp.cross(angular_velocity, shape_origin_world - com_world)
+    shape_linear_velocity[shape_id] = shape_origin_velocity
+    shape_angular_velocity[shape_id] = angular_velocity
+
+    local_lower = shape_collision_aabb_lower[shape_id]
+    local_upper = shape_collision_aabb_upper[shape_id]
+    furthest = wp.max(wp.abs(local_lower), wp.abs(local_upper))
+    angular_radius = wp.max(wp.length(furthest), shape_collision_radius[shape_id])
+    angular_speed_bound = wp.length(angular_velocity) * angular_radius
+    search_extension = wp.min(
+        (wp.length(shape_origin_velocity) + angular_speed_bound) * collision_update_dt,
+        max_speculative_extension,
+    )
+    shape_search_gap[shape_id] = shape_gap[shape_id] + search_extension
+
+    displacement = shape_origin_velocity * collision_update_dt
+    angular_extension = angular_speed_bound * collision_update_dt
+    cap = wp.vec3(max_speculative_extension)
+    # Preserve absolute motion so pairwise subtraction retains relative velocity.
+    shape_displacement[shape_id] = displacement
+    angular_extension_vec = wp.min(wp.vec3(angular_extension), cap)
+    shape_aabb_lower[shape_id] = shape_aabb_lower[shape_id] - angular_extension_vec
+    shape_aabb_upper[shape_id] = shape_aabb_upper[shape_id] + angular_extension_vec
 
 
 # Primitive pairs (GJK/MPR) produce up to 5 manifold contacts.
@@ -935,6 +1046,24 @@ class CollisionPipeline:
         workflow before relying on them in optimization loops.
     """
 
+    @dataclasses.dataclass(frozen=True)
+    class SpeculativeContactConfig:
+        """Configure velocity-adapted contact gaps for rigid contacts.
+
+        Approaching candidates are retained when their contact points can close
+        the current separation before the next collision update.
+        See :ref:`Speculative contacts <speculative-contacts>`.
+        """
+
+        max_speculative_extension: float = 0.1
+        """Upper bound on the velocity-based contact gap [m]. ``0.0`` disables velocity adaptation."""
+
+        def __post_init__(self):
+            """Validate the finite, non-negative extension limit."""
+            value = self.max_speculative_extension
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"max_speculative_extension must be a non-negative finite number, got {value!r}")
+
     def __init__(
         self,
         model: Model,
@@ -968,6 +1097,7 @@ class CollisionPipeline:
         unified_shape_flags: wp.array[int] | None = None,
         broad_phase_filter: tuple[Any, Any] | None = None,
         contact_reduction_hashtable_size_factor: float = 0.25,
+        speculative_config: SpeculativeContactConfig | None = None,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -1213,6 +1343,9 @@ class CollisionPipeline:
         self.requires_grad = requires_grad
         self.soft_contact_margin = soft_contact_margin
         self.include_static_kinematic_pairs = include_static_kinematic_pairs
+        self.speculative_config = speculative_config
+        self._speculative_enabled = speculative_config is not None
+        contact_writer = write_contact_speculative if self._speculative_enabled else write_contact
 
         # Broad-phase filter callback: forwarded to whichever broad phase
         # we construct below.  ``broad_phase_filter_data`` is set later
@@ -1272,6 +1405,10 @@ class CollisionPipeline:
                     "NarrowPhase. Either omit narrow_phase or construct it with "
                     "deterministic=True."
                 )
+            if bool(getattr(narrow_phase, "speculative", False)) != self._speculative_enabled:
+                raise ValueError(
+                    "Provided narrow_phase speculative mode must match CollisionPipeline(speculative_config=...)."
+                )
             if narrow_phase.max_candidate_pairs < self.shape_pairs_max:
                 raise ValueError(
                     "Provided narrow_phase.max_candidate_pairs is too small for this model and broad phase mode "
@@ -1327,11 +1464,21 @@ class CollisionPipeline:
             else:
                 raise ValueError(f"Unsupported broad phase mode: {self.broad_phase_mode}")
 
+            if self._speculative_enabled:
+                shape_flags_np = model.shape_flags.numpy()
+                is_hydroelastic = (shape_flags_np & int(ShapeFlags.HYDROELASTIC)) != 0
+                if model.shape_contact_pairs is not None:
+                    shape_pairs_np = model.shape_contact_pairs.numpy().reshape(-1, 2)
+                    if np.any(is_hydroelastic[shape_pairs_np[:, 0]] & is_hydroelastic[shape_pairs_np[:, 1]]):
+                        raise NotImplementedError(
+                            "Speculative contact generation does not yet support hydroelastic SDF contacts"
+                        )
+
             # Initialize SDF hydroelastic (returns None if no hydroelastic shape pairs in the model)
             hydroelastic_sdf = HydroelasticSDF._from_model(
                 model,
                 config=sdf_hydroelastic_config,
-                writer_func=write_contact,
+                writer_func=contact_writer,
                 deterministic=deterministic,
             )
 
@@ -1380,16 +1527,7 @@ class CollisionPipeline:
                         ],
                         dtype=bool,
                     )
-                    mesh_sdf_texture_only = bool(np.any(mesh_sdf_shapes) and np.all(has_texture_sdf[mesh_sdf_shapes]))
-                    if mesh_sdf_texture_only:
-                        texture_sdf_data = model._texture_sdf_data.numpy()
-                        scale_baked = texture_sdf_data["scale_baked"]
-                        shape_scale = model.shape_scale.numpy()
-                        identity_shape_scale = np.all(shape_scale == np.float32(1.0), axis=1)
-                        mesh_sdf_identity_scale_only = all(
-                            bool(scale_baked[shape_sdf_index[shape_idx]]) or identity_shape_scale[shape_idx]
-                            for shape_idx in np.flatnonzero(mesh_sdf_shapes)
-                        )
+                    mesh_sdf_uses_texture = bool(np.any(mesh_sdf_shapes) and np.all(has_texture_sdf[mesh_sdf_shapes]))
                 # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
                 # cylinders, or cones (which need full support function and axial
                 # rolling post-processing). The lean support function handles
@@ -1464,7 +1602,7 @@ class CollisionPipeline:
                 device=device,
                 shape_aabb_lower=shape_aabb_lower,
                 shape_aabb_upper=shape_aabb_upper,
-                contact_writer_warp_func=write_contact,
+                contact_writer_warp_func=contact_writer,
                 shape_voxel_resolution=model._shape_voxel_resolution,
                 hydroelastic_sdf=hydroelastic_sdf,
                 has_meshes=has_meshes,
@@ -1476,8 +1614,14 @@ class CollisionPipeline:
                 contact_max=rigid_contact_max,
                 verify_buffers=verify_buffers,
                 contact_reduction_hashtable_size_factor=contact_reduction_hashtable_size_factor,
+                speculative=self._speculative_enabled,
+                contact_writer_supports_speculative=self._speculative_enabled,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
+
+        self._hydro_shape_sdf_data_prepared = self.hydroelastic_sdf is not None
+        if self.hydroelastic_sdf is not None:
+            self.hydroelastic_sdf._prepare_shape_sdf_data(model._texture_sdf_data, model._shape_sdf_index)
 
         # Allocate buffers.  ``geom_data`` / ``geom_transform`` carry
         # the same ``[0, S+E)`` layout as the AABB arrays; the rigid
@@ -1490,6 +1634,16 @@ class CollisionPipeline:
             self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
             self.geom_data = wp.zeros(aabb_count, dtype=wp.vec4, device=device)
             self.geom_transform = wp.zeros(aabb_count, dtype=wp.transform, device=device)
+            if self._speculative_enabled:
+                self._shape_linear_velocity = wp.zeros(shape_count, dtype=wp.vec3, device=device)
+                self._shape_angular_velocity = wp.zeros(shape_count, dtype=wp.vec3, device=device)
+                self._shape_search_gap = wp.zeros(shape_count, dtype=wp.float32, device=device)
+                self._shape_displacement = wp.zeros(shape_count, dtype=wp.vec3, device=device)
+            else:
+                self._shape_linear_velocity = wp.empty(0, dtype=wp.vec3, device=device)
+                self._shape_angular_velocity = wp.empty(0, dtype=wp.vec3, device=device)
+                self._shape_search_gap = wp.empty(0, dtype=wp.float32, device=device)
+                self._shape_displacement = wp.empty(0, dtype=wp.vec3, device=device)
 
         # Pipeline-owned ``S+E`` per-shape arrays consumed by the narrow
         # phase when running :meth:`collide_with_external_aabbs`.  Built
@@ -1790,6 +1944,7 @@ class CollisionPipeline:
         contacts: Contacts,
         *,
         soft_contact_margin: float | None = None,
+        dt: float | None = None,
     ):
         """Run the collision pipeline using NarrowPhase.
 
@@ -1819,6 +1974,10 @@ class CollisionPipeline:
                 If ``None``, uses the value from construction. The effective
                 contact threshold also incorporates per-shape margins from
                 ``model.shape_margin``.
+            dt: Collision-update horizon [s]. Required when speculative
+                contacts are enabled. ``0.0`` disables velocity adaptation for
+                this call. Ignored when speculative contacts are disabled. See
+                :ref:`Speculative contacts <speculative-contacts>`.
         """
         # Keep the buffer's full-surface capability marker in sync with this pipeline on every call.
         # collide() may be handed a Contacts created elsewhere (or by a flag-off pipeline); the edge/
@@ -1837,6 +1996,21 @@ class CollisionPipeline:
         model = self.model
         # update any additional parameters
         soft_contact_margin = soft_contact_margin if soft_contact_margin is not None else self.soft_contact_margin
+        if self._speculative_enabled:
+            config = self.speculative_config
+            if dt is None:
+                raise ValueError("dt must be provided when speculative contacts are enabled")
+            collision_update_dt = dt
+            if not np.isfinite(collision_update_dt) or collision_update_dt < 0.0:
+                raise ValueError(f"dt must be a non-negative finite number, got {collision_update_dt!r}")
+            max_speculative_extension = config.max_speculative_extension
+            speculative_active = collision_update_dt > 0.0 and max_speculative_extension > 0.0
+            search_gap = self._shape_search_gap if speculative_active else model.shape_gap
+        else:
+            collision_update_dt = 0.0
+            max_speculative_extension = 0.0
+            speculative_active = False
+            search_gap = model.shape_gap
 
         # Rigid contact detection -- broad phase + narrow phase.
         # These kernels hardcode record_tape=False internally so they are
@@ -1876,10 +2050,41 @@ class CollisionPipeline:
             record_tape=False,
         )
 
+        if speculative_active:
+            wp.launch(
+                kernel=compute_shape_velocities,
+                dim=model.shape_count,
+                inputs=[
+                    state.body_q,
+                    state.body_qd,
+                    model.body_com,
+                    model.shape_body,
+                    model.shape_transform,
+                    model.shape_collision_aabb_lower,
+                    model.shape_collision_aabb_upper,
+                    model.shape_collision_radius,
+                    model.shape_gap,
+                    collision_update_dt,
+                    max_speculative_extension,
+                ],
+                outputs=[
+                    self._shape_linear_velocity,
+                    self._shape_angular_velocity,
+                    self._shape_search_gap,
+                    self._shape_displacement,
+                    self.narrow_phase.shape_aabb_lower,
+                    self.narrow_phase.shape_aabb_upper,
+                ],
+                device=self.device,
+                record_tape=False,
+            )
+
         self._run_broad_phase(
             shape_collision_group=model.shape_collision_group,
             shape_world=model.shape_world,
             shape_count=model.shape_count,
+            shape_displacement=self._shape_displacement if speculative_active else None,
+            sort_axis_displacement_limit=max_speculative_extension if speculative_active else None,
         )
 
         self._run_narrow_phase_and_post(
@@ -1888,12 +2093,15 @@ class CollisionPipeline:
             shape_type=model.shape_type,
             shape_source_ptr=model.shape_source_ptr,
             shape_sdf_index=model._shape_sdf_index,
-            shape_gap=model.shape_gap,
+            shape_gap=search_gap,
+            shape_base_gap=model.shape_gap,
             shape_collision_radius=model.shape_collision_radius,
             shape_flags=model.shape_flags,
             shape_collision_aabb_lower=model.shape_collision_aabb_lower,
             shape_collision_aabb_upper=model.shape_collision_aabb_upper,
             shape_heightfield_index=model.shape_heightfield_index,
+            collision_update_dt=collision_update_dt,
+            max_speculative_extension=max_speculative_extension,
         )
 
         self._generate_soft_contacts(state, contacts, soft_contact_margin)
@@ -1904,6 +2112,8 @@ class CollisionPipeline:
         shape_collision_group: wp.array[int],
         shape_world: wp.array[int],
         shape_count: int,
+        shape_displacement: wp.array[wp.vec3] | None = None,
+        sort_axis_displacement_limit: float | None = None,
     ) -> None:
         """Dispatch to the configured broad phase.
 
@@ -1933,6 +2143,7 @@ class CollisionPipeline:
                 num_filter_pairs=self.shape_pairs_excluded_count,
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
                 filter_data=self.broad_phase_filter_data,
+                shape_displacement=shape_displacement,
             )
         elif isinstance(self.broad_phase, BroadPhaseSAP):
             self.broad_phase.launch(
@@ -1952,6 +2163,8 @@ class CollisionPipeline:
                 num_filter_pairs=self.shape_pairs_excluded_count,
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
                 filter_data=self.broad_phase_filter_data,
+                shape_displacement=shape_displacement,
+                sort_axis_displacement_limit=sort_axis_displacement_limit,
             )
         else:  # BroadPhaseExplicit
             self.broad_phase.launch(
@@ -1968,6 +2181,7 @@ class CollisionPipeline:
                 device=self.device,
                 skip_count_zero=True,  # Already zeroed by compute_shape_aabbs
                 filter_data=self.broad_phase_filter_data,
+                shape_displacement=shape_displacement,
             )
 
     def _run_narrow_phase_and_post(
@@ -1979,12 +2193,15 @@ class CollisionPipeline:
         shape_source_ptr: wp.array,
         shape_sdf_index: wp.array[int] | None,
         shape_gap: wp.array[float],
+        shape_base_gap: wp.array[float] | None = None,
         shape_collision_radius: wp.array[float],
         shape_flags: wp.array[int] | None,
         shape_collision_aabb_lower: wp.array[wp.vec3],
         shape_collision_aabb_upper: wp.array[wp.vec3],
         shape_heightfield_index: wp.array[int] | None,
         shape_body: wp.array[int] | None = None,
+        collision_update_dt: float = 0.0,
+        max_speculative_extension: float = 0.0,
     ) -> None:
         """Run the narrow phase + contact post-processing.
 
@@ -2000,6 +2217,8 @@ class CollisionPipeline:
         :meth:`_generate_soft_contacts` separately.
         """
         model = self.model
+        if shape_base_gap is None:
+            shape_base_gap = shape_gap
         # Create ContactWriterData struct for custom contact writing
         writer_data = ContactWriterData()
         writer_data.contact_max = contacts.rigid_contact_max
@@ -2009,7 +2228,7 @@ class CollisionPipeline:
         # and :func:`write_contact` falls back to identity transforms
         # for them, leaving contact points in world space.
         writer_data.shape_body = shape_body if shape_body is not None else model.shape_body
-        writer_data.shape_gap = shape_gap
+        writer_data.shape_gap = shape_base_gap
         writer_data.contact_count = contacts.rigid_contact_count
         # Deterministic collision writes the unsorted record directly into the
         # sorter's source buffer. The radix permutation then needs one gather,
@@ -2039,6 +2258,11 @@ class CollisionPipeline:
                 f"or pass matching rigid_contact_max."
             )
         writer_data.out_sort_key = self._sort_key_array
+        writer_data.shape_transform = self.geom_transform
+        writer_data.shape_linear_velocity = self._shape_linear_velocity
+        writer_data.shape_angular_velocity = self._shape_angular_velocity
+        writer_data.collision_update_dt = collision_update_dt
+        writer_data.max_speculative_extension = max_speculative_extension
         # Run narrow phase with custom contact writer (writes directly to Contacts format)
         self.narrow_phase.launch_custom_write(
             candidate_pair=self.broad_phase_shape_pairs,
@@ -2051,6 +2275,7 @@ class CollisionPipeline:
             shape_sdf_index=shape_sdf_index,
             texture_sdf_data=model._texture_sdf_data,
             shape_gap=shape_gap,
+            shape_base_gap=shape_base_gap,
             shape_collision_radius=shape_collision_radius,
             shape_flags=shape_flags,
             shape_collision_aabb_lower=shape_collision_aabb_lower,
@@ -2064,6 +2289,11 @@ class CollisionPipeline:
             mesh_edge_halves=model.mesh_edge_halves,
             shape_edge_range=model.shape_edge_range,
             writer_data=writer_data,
+            hydroelastic_shape_sdf_data_prepared=self._hydro_shape_sdf_data_prepared,
+            shape_linear_velocity=self._shape_linear_velocity,
+            shape_angular_velocity=self._shape_angular_velocity,
+            collision_update_dt=collision_update_dt,
+            max_speculative_extension=max_speculative_extension,
             device=self.device,
         )
 

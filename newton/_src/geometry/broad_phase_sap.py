@@ -21,7 +21,7 @@ from ..core.types import Devicelike
 from .broad_phase_common import (
     EmptyFilterData,
     binary_search,
-    check_aabb_overlap,
+    check_aabb_overlap_moving,
     is_pair_excluded,
     is_shape_pair_immovable_filtered,
     keep_all_filter,
@@ -94,6 +94,8 @@ def _sap_project_aabb(
     shape_bounding_box_lower: wp.array[wp.vec3],
     shape_bounding_box_upper: wp.array[wp.vec3],
     shape_gap: wp.array[float],  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
+    shape_displacement: wp.array[wp.vec3],
+    sort_axis_displacement_limit: float,
 ) -> wp.vec2:
     lower = shape_bounding_box_lower[elementid]
     upper = shape_bounding_box_upper[elementid]
@@ -108,7 +110,17 @@ def _sap_project_aabb(
     abs_direction = wp.vec3(wp.abs(direction[0]), wp.abs(direction[1]), wp.abs(direction[2]))
     radius = wp.dot(abs_direction, half_size)
     center = wp.dot(direction, 0.5 * (lower + upper))
-    return wp.vec2(center - radius, center + radius)
+    projection_lower = center - radius
+    projection_upper = center + radius
+    if shape_displacement.shape[0] > 0:
+        projected_displacement = wp.dot(direction, shape_displacement[elementid])
+        if sort_axis_displacement_limit >= 0.0:
+            projected_displacement = wp.clamp(
+                projected_displacement, -sort_axis_displacement_limit, sort_axis_displacement_limit
+            )
+        projection_lower += wp.min(projected_displacement, 0.0)
+        projection_upper += wp.max(projected_displacement, 0.0)
+    return wp.vec2(projection_lower, projection_upper)
 
 
 @wp.func
@@ -197,6 +209,8 @@ def _sap_project_kernel(
     shape_bounding_box_lower: wp.array[wp.vec3],
     shape_bounding_box_upper: wp.array[wp.vec3],
     shape_gap: wp.array[float],  # Optional per-shape effective gaps (can be empty if AABBs pre-expanded)
+    shape_displacement: wp.array[wp.vec3],
+    sort_axis_displacement_limit: float,
     world_index_map: wp.array[int],
     world_slice_ends: wp.array[int],
     max_shapes_per_world: int,
@@ -234,7 +248,15 @@ def _sap_project_kernel(
     if candidate < 0:
         candidate = active_direction_index[0]
     direction = direction_candidates[candidate]
-    range = _sap_project_aabb(shape_id, direction, shape_bounding_box_lower, shape_bounding_box_upper, shape_gap)
+    range = _sap_project_aabb(
+        shape_id,
+        direction,
+        shape_bounding_box_lower,
+        shape_bounding_box_upper,
+        shape_gap,
+        shape_displacement,
+        sort_axis_displacement_limit,
+    )
 
     sap_projection_lower_out[idx] = range[0]
     sap_projection_upper_out[idx] = range[1]
@@ -393,6 +415,7 @@ def _make_sap_process_pair_func(filter_func: Any):
         shape_bounding_box_lower: wp.array[wp.vec3],
         shape_bounding_box_upper: wp.array[wp.vec3],
         shape_gap: wp.array[float],
+        shape_displacement: wp.array[wp.vec3],
         collision_group: wp.array[int],
         shape_world: wp.array[int],
         filter_pairs: wp.array[wp.vec2i],
@@ -430,13 +453,14 @@ def _make_sap_process_pair_func(filter_func: Any):
         if shape_gap.shape[0] > 0:
             gap1 = shape_gap[shape1]
             gap2 = shape_gap[shape2]
-        if not check_aabb_overlap(
-            shape_bounding_box_lower[shape1],
-            shape_bounding_box_upper[shape1],
+        if not check_aabb_overlap_moving(
+            shape1,
+            shape2,
+            shape_bounding_box_lower,
+            shape_bounding_box_upper,
             gap1,
-            shape_bounding_box_lower[shape2],
-            shape_bounding_box_upper[shape2],
             gap2,
+            shape_displacement,
         ):
             return
         if filter_func(pair, filter_data) != wp.int32(0):
@@ -463,6 +487,7 @@ def create_sap_broadphase_kernel(filter_func: Any, filter_data_type: Any, adapti
         shape_bounding_box_lower: wp.array[wp.vec3],
         shape_bounding_box_upper: wp.array[wp.vec3],
         shape_gap: wp.array[float],
+        shape_displacement: wp.array[wp.vec3],
         collision_group: wp.array[int],
         shape_world: wp.array[int],
         world_index_map: wp.array[int],
@@ -537,6 +562,7 @@ def create_sap_broadphase_kernel(filter_func: Any, filter_data_type: Any, adapti
                 shape_bounding_box_lower,
                 shape_bounding_box_upper,
                 shape_gap,
+                shape_displacement,
                 collision_group,
                 shape_world,
                 filter_pairs,
@@ -565,6 +591,7 @@ def create_sap_chunked_broadphase_kernel(filter_func: Any, filter_data_type: Any
         shape_bounding_box_lower: wp.array[wp.vec3],
         shape_bounding_box_upper: wp.array[wp.vec3],
         shape_gap: wp.array[float],
+        shape_displacement: wp.array[wp.vec3],
         collision_group: wp.array[int],
         shape_world: wp.array[int],
         world_index_map: wp.array[int],
@@ -626,6 +653,7 @@ def create_sap_chunked_broadphase_kernel(filter_func: Any, filter_data_type: Any
                         shape_bounding_box_lower,
                         shape_bounding_box_upper,
                         shape_gap,
+                        shape_displacement,
                         collision_group,
                         shape_world,
                         filter_pairs,
@@ -844,6 +872,8 @@ class BroadPhaseSAP:
         shape_lower: wp.array[wp.vec3],
         shape_upper: wp.array[wp.vec3],
         shape_gap: wp.array[float],
+        shape_displacement: wp.array[wp.vec3],
+        sort_axis_displacement_limit: float,
         device: Devicelike | None,
     ) -> None:
         wp.launch(
@@ -856,6 +886,8 @@ class BroadPhaseSAP:
                 shape_lower,
                 shape_upper,
                 shape_gap,
+                shape_displacement,
+                sort_axis_displacement_limit,
                 self.world_index_map,
                 self.world_slice_ends,
                 self.max_shapes_per_world,
@@ -919,6 +951,8 @@ class BroadPhaseSAP:
         shape_body: wp.array[int] | None = None,
         body_flags: wp.array[int] | None = None,
         include_static_kinematic_pairs: bool = True,
+        shape_displacement: wp.array[wp.vec3] | None = None,
+        sort_axis_displacement_limit: float | None = None,
     ) -> None:
         """Launch the sweep and prune broad phase collision detection with per-world segmented sort.
 
@@ -972,6 +1006,14 @@ class BroadPhaseSAP:
             shape_body = wp.empty(0, dtype=wp.int32, device=device)
         if body_flags is None:
             body_flags = wp.empty(0, dtype=wp.int32, device=device)
+        if shape_displacement is not None and shape_displacement.shape[0] != shape_lower.shape[0]:
+            raise ValueError(
+                "shape_displacement length must match the shape bounds "
+                f"({shape_lower.shape[0]}), got {shape_displacement.shape[0]}"
+            )
+        if shape_displacement is None:
+            shape_displacement = wp.empty(0, dtype=wp.vec3, device=device)
+        displacement_limit = -1.0 if sort_axis_displacement_limit is None else float(sort_axis_displacement_limit)
 
         # Exclusion filter: empty array and 0 when not provided or empty
         if filter_pairs is None or filter_pairs.shape[0] == 0:
@@ -993,6 +1035,8 @@ class BroadPhaseSAP:
             shape_lower=shape_lower,
             shape_upper=shape_upper,
             shape_gap=shape_gap,
+            shape_displacement=shape_displacement,
+            sort_axis_displacement_limit=displacement_limit,
             device=device,
         )
 
@@ -1013,6 +1057,7 @@ class BroadPhaseSAP:
                 shape_lower,
                 shape_upper,
                 shape_gap,
+                shape_displacement,
                 shape_collision_group,
                 shape_world,
                 self.world_index_map,
@@ -1042,6 +1087,7 @@ class BroadPhaseSAP:
                     shape_lower,
                     shape_upper,
                     shape_gap,
+                    shape_displacement,
                     shape_collision_group,
                     shape_world,
                     self.world_index_map,
