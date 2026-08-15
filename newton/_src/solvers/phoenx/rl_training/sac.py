@@ -37,6 +37,30 @@ from .networks import GaussianActor, WarpMLP
 from .optim import Adam
 
 
+@wp.kernel
+def _concat_rows_kernel(
+    first: wp.array2d[wp.float32],
+    second: wp.array2d[wp.float32],
+    out: wp.array2d[wp.float32],
+):
+    row, col = wp.tid()
+    if row < first.shape[0]:
+        out[row, col] = first[row, col]
+    else:
+        out[row, col] = second[row - first.shape[0], col]
+
+
+@wp.kernel
+def _copy_rows_kernel(
+    source: wp.array2d[wp.float32],
+    source_offset: wp.int32,
+    destination_offset: wp.int32,
+    destination: wp.array2d[wp.float32],
+):
+    row, col = wp.tid()
+    destination[row + destination_offset, col] = source[row + source_offset, col]
+
+
 @dataclass
 class ConfigSAC:
     """Configuration for :class:`TrainerSAC`.
@@ -479,18 +503,59 @@ class TrainerSAC:
         )
         return out
 
+    def _concat_rows(self, first: wp.array2d[wp.float32], second: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+        if first.shape != second.shape:
+            raise ValueError("Row-concatenated arrays must have matching shapes")
+        out = wp.empty((int(first.shape[0]) * 2, int(first.shape[1])), dtype=wp.float32, device=self.device)
+        wp.launch(_concat_rows_kernel, dim=out.shape, inputs=[first, second], outputs=[out], device=self.device)
+        return out
+
+    def _slice_rows(self, source: wp.array2d[wp.float32], *, offset: int, row_count: int) -> wp.array2d[wp.float32]:
+        out = wp.empty((int(row_count), int(source.shape[1])), dtype=wp.float32, device=self.device)
+        wp.launch(
+            _copy_rows_kernel,
+            dim=out.shape,
+            inputs=[source, int(offset), 0],
+            outputs=[out],
+            device=self.device,
+        )
+        return out
+
+    def _expand_first_row_grad(self, source: wp.array2d[wp.float32], *, total_rows: int) -> wp.array2d[wp.float32]:
+        out = wp.zeros((int(total_rows), int(source.shape[1])), dtype=wp.float32, device=self.device)
+        wp.launch(
+            _copy_rows_kernel,
+            dim=source.shape,
+            inputs=[source, 0, 0],
+            outputs=[out],
+            device=self.device,
+        )
+        return out
+
     def _update_critics(self, batch: BatchSAC, *, seed: int) -> None:
         next_actions, next_log_probs, _policy_out = self.actor.sample(
             batch.next_obs, seed=seed, deterministic=False, requires_grad=False
         )
         next_q_input = self._concat(batch.next_obs, next_actions, requires_grad=False)
-        target_q1 = self.target_critic1.forward(next_q_input, requires_grad=False)
-        target_q2 = self.target_critic2.forward(next_q_input, requires_grad=False)
+        q_input = self._concat(batch.obs, batch.actions, requires_grad=False)
+        reference_batch_norm = bool(getattr(self.critic1, "reference_batch_norm", False))
+        if reference_batch_norm:
+            combined_q_input = self._concat_rows(q_input, next_q_input)
+            target_q1_all = self.target_critic1.forward(combined_q_input, requires_grad=False)
+            target_q2_all = self.target_critic2.forward(combined_q_input, requires_grad=False)
+            target_q1 = self._slice_rows(target_q1_all, offset=batch.batch_size, row_count=batch.batch_size)
+            target_q2 = self._slice_rows(target_q2_all, offset=batch.batch_size, row_count=batch.batch_size)
+            q1_all = self.critic1.forward_manual(combined_q_input, training=True)
+            q2_all = self.critic2.forward_manual(combined_q_input, training=True)
+            q1 = self._slice_rows(q1_all, offset=0, row_count=batch.batch_size)
+            q2 = self._slice_rows(q2_all, offset=0, row_count=batch.batch_size)
+        else:
+            target_q1 = self.target_critic1.forward(next_q_input, requires_grad=False)
+            target_q2 = self.target_critic2.forward(next_q_input, requires_grad=False)
+            q1 = self.critic1.forward_manual(q_input)
+            q2 = self.critic2.forward_manual(q_input)
 
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._critic_loss], device=self.device)
-        q_input = self._concat(batch.obs, batch.actions, requires_grad=False)
-        q1 = self.critic1.forward_manual(q_input)
-        q2 = self.critic2.forward_manual(q_input)
         q1_grad = wp.empty_like(q1)
         q2_grad = wp.empty_like(q2)
         if self.config.distributional_critic:
@@ -566,13 +631,25 @@ class TrainerSAC:
                 outputs=[q1_grad, q2_grad],
                 device=self.device,
             )
-        self.critic1.backward_manual(q1_grad)
-        self.critic2.backward_manual(q2_grad)
+        if reference_batch_norm:
+            q1_grad = self._expand_first_row_grad(q1_grad, total_rows=batch.batch_size * 2)
+            q2_grad = self._expand_first_row_grad(q2_grad, total_rows=batch.batch_size * 2)
+            self.critic1.backward_manual(q1_grad)
+            self.critic2.backward_manual(q2_grad)
+        else:
+            self.critic1.backward_manual(q1_grad)
+            self.critic2.backward_manual(q2_grad)
         self.critic1_optimizer.step()
         self.critic2_optimizer.step()
 
     def _update_actor(self, batch: BatchSAC, *, seed: int) -> None:
-        policy_out = self.actor.net.forward_manual(batch.obs)
+        reference_batch_norm = bool(getattr(self.actor.net, "reference_batch_norm", False))
+        if reference_batch_norm:
+            actor_observations = self._concat_rows(batch.obs, batch.next_obs)
+            policy_out_all = self.actor.net.forward_manual(actor_observations, training=True)
+            policy_out = self._slice_rows(policy_out_all, offset=0, row_count=batch.batch_size)
+        else:
+            policy_out = self.actor.net.forward_manual(batch.obs)
         actions = wp.empty((batch.batch_size, self.action_dim), dtype=wp.float32, device=self.device)
         log_probs = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
         eps = wp.empty((batch.batch_size, self.action_dim), dtype=wp.float32, device=self.device)
@@ -594,10 +671,15 @@ class TrainerSAC:
             outputs=[actions, log_probs],
             device=self.device,
         )
+        self._actor_update_log_probs = log_probs
 
         q_input = self._concat(batch.obs, actions, requires_grad=False)
-        q1 = self.critic1.forward_manual(q_input)
-        q2 = self.critic2.forward_manual(q_input)
+        if reference_batch_norm:
+            q1 = self.critic1.forward_manual(q_input, training=False)
+            q2 = self.critic2.forward_manual(q_input, training=False)
+        else:
+            q1 = self.critic1.forward_manual(q_input)
+            q2 = self.critic2.forward_manual(q_input)
         q1_grad = wp.empty_like(q1)
         q2_grad = wp.empty_like(q2)
         if self.config.distributional_critic:
@@ -675,6 +757,8 @@ class TrainerSAC:
             outputs=[self._actor_loss, policy_out_grad],
             device=self.device,
         )
+        if reference_batch_norm:
+            policy_out_grad = self._expand_first_row_grad(policy_out_grad, total_rows=batch.batch_size * 2)
         self.actor.net.backward_manual(policy_out_grad)
         self.actor_optimizer.step()
 

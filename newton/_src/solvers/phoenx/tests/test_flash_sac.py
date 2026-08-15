@@ -17,7 +17,9 @@ from newton._src.solvers.phoenx.rl_training.flash_sac import (
     BufferReplayFlashSAC,
     ConfigFlashSAC,
     TrainerFlashSAC,
+    _flash_sac_alpha_loss_kernel,
 )
+from newton._src.solvers.phoenx.rl_training.flash_sac_networks import NetworkFlashSAC
 from newton._src.solvers.phoenx.rl_training.g1 import (
     ACTION_DIM_G1,
     OBS_DIM_G1,
@@ -60,6 +62,156 @@ class _G1SmokeEnv:
 
 
 class TestTrainerFlashSAC(unittest.TestCase):
+    def test_reference_backbone_forward_equations_and_initialization(self) -> None:
+        """Match reference normalization, residual, head, and orthogonal equations."""
+
+        device = require_cuda_graph_capture("FlashSAC reference backbone equations")
+        network = NetworkFlashSAC(
+            input_dim=2,
+            hidden_dim=2,
+            num_blocks=1,
+            output_dim=2,
+            actor_heads=False,
+            device=device,
+            seed=11,
+        )
+        network.input_norm.running_mean.assign(np.asarray([1.0, -1.0], dtype=np.float32))
+        network.input_norm.running_variance.assign(np.asarray([4.0, 9.0], dtype=np.float32))
+        network.input_norm.scale.assign(np.asarray([2.0, 3.0], dtype=np.float32))
+        network.input_norm.bias.assign(np.asarray([0.5, -0.5], dtype=np.float32))
+        network.embed_weight.assign(np.eye(2, dtype=np.float32))
+        for weight in network.block_weights[0]:
+            weight.zero_()
+        network.rms_scale.assign(np.asarray([2.0, 0.5], dtype=np.float32))
+        network.head_weights[0].assign(np.eye(2, dtype=np.float32))
+        network.head_biases[0].assign(np.asarray([0.25, -0.25], dtype=np.float32))
+        x_np = np.asarray([[3.0, 2.0]], dtype=np.float32)
+        output = network.forward(wp.array(x_np, device=device), requires_grad=False).numpy()
+
+        normalized = (x_np - np.asarray([1.0, -1.0], dtype=np.float32)) / np.sqrt(
+            np.asarray([4.0, 9.0], dtype=np.float32) + 1.0e-5
+        )
+        normalized = normalized * np.asarray([2.0, 3.0], dtype=np.float32) + np.asarray([0.5, -0.5], dtype=np.float32)
+        rms = np.sqrt(np.mean(normalized * normalized, axis=-1, keepdims=True) + 1.0e-6)
+        expected = normalized / rms * np.asarray([2.0, 0.5], dtype=np.float32)
+        expected += np.asarray([0.25, -0.25], dtype=np.float32)
+        np.testing.assert_allclose(output, expected, rtol=1.0e-6, atol=1.0e-6)
+
+        square = NetworkFlashSAC(
+            input_dim=4,
+            hidden_dim=4,
+            num_blocks=0,
+            output_dim=2,
+            actor_heads=False,
+            device=device,
+            seed=13,
+        ).embed_weight.numpy()
+        np.testing.assert_allclose(square.T @ square, np.eye(4), rtol=0.0, atol=2.0e-6)
+
+    def test_reference_batch_norm_running_state_and_parameter_ema(self) -> None:
+        """Use unbiased running variance and exclude running state from target EMA."""
+
+        device = require_cuda_graph_capture("FlashSAC reference BatchNorm state")
+        online = NetworkFlashSAC(
+            input_dim=2,
+            hidden_dim=2,
+            num_blocks=0,
+            output_dim=1,
+            actor_heads=False,
+            device=device,
+            seed=17,
+        )
+        target = NetworkFlashSAC(
+            input_dim=2,
+            hidden_dim=2,
+            num_blocks=0,
+            output_dim=1,
+            actor_heads=False,
+            device=device,
+            seed=19,
+        )
+        target.default_training = True
+        values = wp.array(np.asarray([[1.0, 3.0], [3.0, 7.0]], dtype=np.float32), device=device)
+        target.forward(values, requires_grad=False)
+        np.testing.assert_allclose(target.input_norm.running_mean.numpy(), [0.02, 0.05], atol=1.0e-7)
+        np.testing.assert_allclose(target.input_norm.running_variance.numpy(), [1.01, 1.07], atol=1.0e-7)
+
+        running_before = target.input_norm.running_mean.numpy().copy()
+        online.input_norm.running_mean.assign(np.asarray([9.0, 8.0], dtype=np.float32))
+        target.head_biases[0].zero_()
+        online.head_biases[0].fill_(2.0)
+        target.soft_update_from(online, 0.5)
+        np.testing.assert_array_equal(target.input_norm.running_mean.numpy(), running_before)
+        np.testing.assert_allclose(target.head_biases[0].numpy(), [1.0])
+
+    def test_reference_actor_log_std_smooth_mapping(self) -> None:
+        """Map raw actor standard deviations smoothly into upstream bounds."""
+
+        device = require_cuda_graph_capture("FlashSAC smooth log-std mapping")
+        network = NetworkFlashSAC(
+            input_dim=1,
+            hidden_dim=1,
+            num_blocks=0,
+            output_dim=2,
+            actor_heads=True,
+            device=device,
+            seed=23,
+        )
+        network.embed_weight.fill_(1.0)
+        network.head_weights[1].zero_()
+        x = wp.ones((1, 1), dtype=wp.float32, device=device)
+        for raw in (-20.0, 0.0, 20.0):
+            network.head_biases[1].fill_(raw)
+            mapped = float(network.forward(x, requires_grad=False).numpy()[0, 1])
+            expected = -10.0 + 12.0 * 0.5 * (1.0 + math.tanh(raw))
+            self.assertAlmostEqual(mapped, expected, places=5)
+
+    def test_reference_backbone_backward_and_temperature_gradient(self) -> None:
+        """Match a finite-difference network gradient and exact temperature gradient."""
+
+        device = require_cuda_graph_capture("FlashSAC reference gradient equations")
+        network = NetworkFlashSAC(
+            input_dim=2,
+            hidden_dim=2,
+            num_blocks=0,
+            output_dim=1,
+            actor_heads=False,
+            device=device,
+            seed=29,
+        )
+        x_np = np.asarray([[-1.0, 0.5], [0.2, 1.3], [1.4, -0.7]], dtype=np.float32)
+        x = wp.array(x_np, device=device)
+        output = network.forward_manual(x)
+        network.backward_manual(wp.ones(output.shape, dtype=wp.float32, device=device))
+        analytic = float(network.embed_weight.grad.numpy()[0, 0])
+        weights = network.embed_weight.numpy().copy()
+        epsilon = 1.0e-3
+        losses = []
+        for delta in (-epsilon, epsilon):
+            perturbed = weights.copy()
+            perturbed[0, 0] += delta
+            network.embed_weight.assign(perturbed)
+            losses.append(float(network.forward(x, requires_grad=False, training=True).numpy().sum()))
+        network.embed_weight.assign(weights)
+        finite_difference = (losses[1] - losses[0]) / (2.0 * epsilon)
+        self.assertAlmostEqual(analytic, finite_difference, delta=2.0e-2)
+
+        log_probs = wp.array(np.asarray([-2.0, -1.0], dtype=np.float32), device=device)
+        log_alpha = wp.array(np.asarray([math.log(0.25)], dtype=np.float32), device=device, requires_grad=True)
+        loss = wp.zeros(1, dtype=wp.float32, device=device, requires_grad=True)
+        with wp.Tape() as tape:
+            wp.launch(
+                _flash_sac_alpha_loss_kernel,
+                dim=2,
+                inputs=[log_probs, log_alpha, 2, -0.5],
+                outputs=[loss],
+                device=device,
+            )
+        tape.backward(loss)
+        expected = 0.25 * ((2.0 + 0.5) + (1.0 + 0.5)) / 2.0
+        self.assertAlmostEqual(float(loss.numpy()[0]), expected, places=6)
+        self.assertAlmostEqual(float(log_alpha.grad.numpy()[0]), expected, places=6)
+
     def test_flash_sac_defaults_and_replay_warmup(self) -> None:
         """Match upstream defaults and enforce replay warmup."""
 
@@ -89,6 +241,55 @@ class TestTrainerFlashSAC(unittest.TestCase):
             wp.zeros((2, 2), dtype=wp.float32, device=device),
         )
         self.assertTrue(replay.can_sample())
+
+    def test_reference_backbone_integrated_update(self) -> None:
+        """Run a finite update through residual reference actor and critics."""
+
+        device = require_cuda_graph_capture("FlashSAC integrated reference update")
+        rng = np.random.default_rng(31)
+        config = ConfigFlashSAC(
+            actor_hidden_dim=4,
+            actor_num_blocks=1,
+            critic_hidden_dim=4,
+            critic_num_blocks=1,
+            distributional_atoms=7,
+            normalize_observations=True,
+            normalize_rewards=False,
+            policy_frequency=1,
+        )
+        trainer = TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=37)
+        self.assertIsInstance(trainer.actor.net, NetworkFlashSAC)
+        self.assertFalse(trainer.config.normalize_observations)
+        actor_running_before = trainer.actor.net.input_norm.running_mean.numpy().copy()
+        target_running_before = trainer.target_critic1.input_norm.running_mean.numpy().copy()
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device),
+            actions=wp.array(np.tanh(rng.normal(size=(8, 2))).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=8).astype(np.float32), device=device),
+            dones=wp.zeros(8, dtype=wp.float32, device=device),
+            next_obs=wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device),
+        )
+        stats = trainer.update(batch, seed=41)
+
+        self.assertTrue(all(math.isfinite(value) for value in stats.__dict__.values()))
+        expected_actor_running = 0.01 * np.concatenate((batch.obs.numpy(), batch.next_obs.numpy()), axis=0).mean(axis=0)
+        np.testing.assert_allclose(
+            trainer.actor.net.input_norm.running_mean.numpy(), expected_actor_running, atol=1.0e-7
+        )
+        self.assertFalse(np.array_equal(trainer.actor.net.input_norm.running_mean.numpy(), actor_running_before))
+        self.assertFalse(np.array_equal(trainer.target_critic1.input_norm.running_mean.numpy(), target_running_before))
+        for network in (trainer.actor.net, trainer.critic1, trainer.critic2):
+            for weight in network.weights:
+                np.testing.assert_allclose(np.linalg.norm(weight.numpy(), axis=0), 1.0, rtol=0.0, atol=3.0e-6)
+            norms = [network.input_norm]
+            for norm1, norm2 in network.block_norms:
+                norms.extend((norm1, norm2))
+            for norm in norms:
+                affine_squared = np.sum(norm.scale.numpy() ** 2) + np.sum(norm.bias.numpy() ** 2)
+                self.assertAlmostEqual(float(affine_squared), float(norm.width), delta=3.0e-5)
+            self.assertAlmostEqual(
+                float(np.sum(network.rms_scale.numpy() ** 2)), float(network.hidden_dim), delta=3.0e-5
+            )
 
     def test_flash_sac_constraints_survive_update(self) -> None:
         """Keep unit incoming weights after a full FlashSAC update."""
@@ -162,6 +363,42 @@ class TestTrainerFlashSAC(unittest.TestCase):
             for expected, actual in zip(expected_optimizer.m, actual_optimizer.m, strict=True):
                 np.testing.assert_array_equal(actual.numpy(), expected.numpy())
             for expected, actual in zip(expected_optimizer.v, actual_optimizer.v, strict=True):
+                np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+    def test_reference_backbone_checkpoint_round_trip(self) -> None:
+        """Restore reference affine, running-statistic, RMS, and head state."""
+
+        device = require_cuda_graph_capture("FlashSAC reference checkpoint tests")
+        config = ConfigFlashSAC(
+            actor_hidden_dim=4,
+            actor_num_blocks=1,
+            critic_hidden_dim=4,
+            critic_num_blocks=1,
+            distributional_atoms=7,
+            normalize_rewards=False,
+        )
+        trainer = TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=149)
+        values = wp.array(
+            np.asarray([[-1.0, 0.5, 2.0], [0.0, 1.5, -0.5], [2.0, -1.0, 0.25]], dtype=np.float32),
+            device=device,
+        )
+        trainer.actor.net.forward(values, training=True, requires_grad=False)
+        trainer.actor.net.rms_scale.assign(np.asarray([0.5, 1.0, 1.5, 2.0], dtype=np.float32))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/flash_sac_reference.npz"
+            trainer.save_checkpoint(path)
+            restored = TrainerFlashSAC.load_checkpoint(path, device=device)
+
+        self.assertIsInstance(restored.actor.net, NetworkFlashSAC)
+        for expected_network, actual_network in (
+            (trainer.actor.net, restored.actor.net),
+            (trainer.critic1, restored.critic1),
+            (trainer.critic2, restored.critic2),
+            (trainer.target_critic1, restored.target_critic1),
+            (trainer.target_critic2, restored.target_critic2),
+        ):
+            for expected, actual in zip(expected_network.state_arrays(), actual_network.state_arrays(), strict=True):
                 np.testing.assert_array_equal(actual.numpy(), expected.numpy())
 
     def test_flash_sac_reuses_exploration_noise(self) -> None:

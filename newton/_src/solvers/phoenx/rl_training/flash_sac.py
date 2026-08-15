@@ -12,13 +12,16 @@ from typing import Protocol
 import numpy as np
 import warp as wp
 
+from .flash_sac_networks import NetworkFlashSAC
 from .kernels import (
     flash_sac_n_step_accumulate_kernel,
     flash_sac_normalize_rewards_kernel,
     flash_sac_return_stats_kernel,
     flash_sac_update_return_normalizer_kernel,
+    sac_refresh_alpha_kernel,
     zero_scalar_kernel,
 )
+from .optim import Adam
 from .ppo import (
     _pack_optimizer,
     _pack_policy_network,
@@ -26,6 +29,20 @@ from .ppo import (
     _unpack_policy_network,
 )
 from .sac import BatchSAC, BufferReplaySAC, ConfigSAC, StatsSACUpdate, TrainerSAC
+
+
+@wp.kernel
+def _flash_sac_alpha_loss_kernel(
+    log_probs: wp.array[wp.float32],
+    log_alpha: wp.array[wp.float32],
+    batch_size: wp.int32,
+    target_entropy: wp.float32,
+    loss: wp.array[wp.float32],
+):
+    i = wp.tid()
+    alpha = wp.exp(log_alpha[0])
+    entropy = -log_probs[i]
+    wp.atomic_add(loss, 0, alpha * (entropy - target_entropy) / wp.float32(batch_size))
 
 
 class EnvFlashSAC(Protocol):
@@ -337,6 +354,7 @@ class TrainerFlashSAC(TrainerSAC):
             < 1
         ):
             raise ValueError("FlashSAC network dimensions and block counts must be positive")
+        reference_backbone = hidden_layers is None
         if hidden_layers is None:
             actor_layers = self._expanded_block_layers(flash_config.actor_hidden_dim, flash_config.actor_num_blocks)
             critic_layers = self._expanded_block_layers(flash_config.critic_hidden_dim, flash_config.critic_num_blocks)
@@ -352,6 +370,36 @@ class TrainerFlashSAC(TrainerSAC):
             device=device,
             seed=seed,
         )
+        if reference_backbone:
+            flash_config.normalize_observations = False
+            self.actor.net = NetworkFlashSAC(
+                input_dim=obs_dim,
+                hidden_dim=flash_config.actor_hidden_dim,
+                num_blocks=flash_config.actor_num_blocks,
+                output_dim=action_dim * 2,
+                actor_heads=True,
+                device=self.device,
+                seed=seed,
+            )
+            critic_kwargs = {
+                "input_dim": obs_dim + action_dim,
+                "hidden_dim": flash_config.critic_hidden_dim,
+                "num_blocks": flash_config.critic_num_blocks,
+                "output_dim": flash_config.distributional_atoms if flash_config.distributional_critic else 1,
+                "actor_heads": False,
+                "device": self.device,
+            }
+            self.critic1 = NetworkFlashSAC(**critic_kwargs, seed=seed + 1)
+            self.critic2 = NetworkFlashSAC(**critic_kwargs, seed=seed + 2)
+            self.target_critic1 = NetworkFlashSAC(**critic_kwargs, seed=seed + 3)
+            self.target_critic2 = NetworkFlashSAC(**critic_kwargs, seed=seed + 4)
+            self.target_critic1.default_training = True
+            self.target_critic2.default_training = True
+            self.target_critic1.copy_from(self.critic1)
+            self.target_critic2.copy_from(self.critic2)
+            self.actor_optimizer = Adam(self.actor.parameters(), lr=flash_config.actor_lr)
+            self.critic1_optimizer = Adam(self.critic1.parameters(), lr=flash_config.critic_lr)
+            self.critic2_optimizer = Adam(self.critic2.parameters(), lr=flash_config.critic_lr)
         self.config = flash_config
         self._replay_buffer: BufferReplayFlashSAC | None = None
         if flash_config.target_entropy is None:
@@ -434,6 +482,7 @@ class TrainerFlashSAC(TrainerSAC):
             "obs_dim": np.asarray(self.obs_dim, dtype=np.int64),
             "action_dim": np.asarray(self.action_dim, dtype=np.int64),
             "seed": np.asarray(self.seed, dtype=np.int64),
+            "reference_backbone": np.asarray(isinstance(self.actor.net, NetworkFlashSAC), dtype=np.bool_),
             "actor_hidden_layers": np.asarray(self.actor.net.layer_sizes[1:-1], dtype=np.int64),
             "critic_hidden_layers": np.asarray(self.critic1.layer_sizes[1:-1], dtype=np.int64),
             "actor_log_std": self.actor.log_std.numpy(),
@@ -459,7 +508,7 @@ class TrainerFlashSAC(TrainerSAC):
             ("target_critic1", self.target_critic1),
             ("target_critic2", self.target_critic2),
         ):
-            _pack_policy_network(data, prefix, network)
+            _pack_flash_sac_network(data, prefix, network)
         for prefix, optimizer in (
             ("actor_optimizer", self.actor_optimizer),
             ("critic1_optimizer", self.critic1_optimizer),
@@ -494,7 +543,12 @@ class TrainerFlashSAC(TrainerSAC):
             saved_config = config or _config_from_flash_sac_checkpoint(data)
             actor_hidden = tuple(int(width) for width in data["actor_hidden_layers"])
             critic_hidden = tuple(int(width) for width in data["critic_hidden_layers"])
-            hidden_layers = actor_hidden if actor_hidden == critic_hidden else None
+            reference_backbone = (
+                bool(data["reference_backbone"])
+                if "reference_backbone" in data
+                else str(data["actor_network_type"].item()) == "flash_sac_reference"
+            )
+            hidden_layers = None if reference_backbone else actor_hidden
             trainer = cls(
                 obs_dim=int(data["obs_dim"]),
                 action_dim=int(data["action_dim"]),
@@ -515,7 +569,7 @@ class TrainerFlashSAC(TrainerSAC):
                 ("target_critic1", trainer.target_critic1),
                 ("target_critic2", trainer.target_critic2),
             ):
-                _unpack_policy_network(data, prefix, network)
+                _unpack_flash_sac_network(data, prefix, network)
             trainer.actor.log_std.assign(data["actor_log_std"])
             trainer.log_alpha.assign(data["log_alpha"])
             trainer._alpha.assign(data["alpha"])
@@ -551,6 +605,32 @@ class TrainerFlashSAC(TrainerSAC):
             self._noise_repeat_count = 0
         self._noise_repeat_count += 1
         return super().act(obs, seed=self._exploration_seed, deterministic=False)
+
+    def _update_alpha(self, batch: BatchSAC, *, seed: int) -> None:
+        """Update temperature from the actor update's detached entropy sample."""
+
+        del seed
+        log_probs = getattr(self, "_actor_update_log_probs", None)
+        if log_probs is None or int(log_probs.shape[0]) != batch.batch_size:
+            raise RuntimeError("FlashSAC temperature update requires a preceding actor update")
+        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._alpha_loss], device=self.device)
+        with wp.Tape() as tape:
+            wp.launch(
+                _flash_sac_alpha_loss_kernel,
+                dim=batch.batch_size,
+                inputs=[log_probs, self.log_alpha, batch.batch_size, self.target_entropy],
+                outputs=[self._alpha_loss],
+                device=self.device,
+            )
+        tape.backward(self._alpha_loss)
+        self.alpha_optimizer.step()
+        wp.launch(
+            sac_refresh_alpha_kernel,
+            dim=1,
+            inputs=[self.log_alpha],
+            outputs=[self._alpha],
+            device=self.device,
+        )
 
     def update(
         self,
@@ -698,6 +778,38 @@ def _config_from_flash_sac_checkpoint(data: np.lib.npyio.NpzFile) -> ConfigFlash
         elif f"config_{config_field.name}" in data:
             kwargs[config_field.name] = data[f"config_{config_field.name}"].item()
     return ConfigFlashSAC(**kwargs)
+
+
+def _pack_flash_sac_network(
+    data: dict[str, np.ndarray],
+    prefix: str,
+    network: object,
+) -> None:
+    if not isinstance(network, NetworkFlashSAC):
+        _pack_policy_network(data, prefix, network)
+        return
+    arrays = network.state_arrays()
+    data[f"{prefix}_network_type"] = np.asarray("flash_sac_reference")
+    data[f"{prefix}_state_count"] = np.asarray(len(arrays), dtype=np.int64)
+    for index, array in enumerate(arrays):
+        data[f"{prefix}_state_{index}"] = array.numpy()
+
+
+def _unpack_flash_sac_network(
+    data: np.lib.npyio.NpzFile,
+    prefix: str,
+    network: object,
+) -> None:
+    if not isinstance(network, NetworkFlashSAC):
+        _unpack_policy_network(data, prefix, network)
+        return
+    if str(data[f"{prefix}_network_type"].item()) != "flash_sac_reference":
+        raise ValueError(f"Checkpoint {prefix} network type does not match FlashSAC reference backbone")
+    arrays = network.state_arrays()
+    if int(data[f"{prefix}_state_count"]) != len(arrays):
+        raise ValueError(f"Checkpoint {prefix} reference state count does not match trainer")
+    for index, array in enumerate(arrays):
+        array.assign(data[f"{prefix}_state_{index}"])
 
 
 def save_flash_sac_checkpoint(trainer: TrainerFlashSAC, path: str | Path) -> None:
