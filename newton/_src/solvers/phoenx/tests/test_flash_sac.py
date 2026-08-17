@@ -58,6 +58,8 @@ from newton._src.solvers.phoenx.rl_training.g1 import (
 )
 from newton._src.solvers.phoenx.rl_training.kernels import (
     amp_update_scale_kernel,
+    sac_distributional_critic_loss_backward_kernel,
+    sac_distributional_critic_loss_backward_tile_kernel,
     sac_distributional_min_projection_device_alpha_kernel,
 )
 from newton._src.solvers.phoenx.rl_training.networks import WarpMLP
@@ -1317,6 +1319,45 @@ class TestTrainerFlashSAC(unittest.TestCase):
         np.testing.assert_allclose(replay.rewards.numpy()[:2], [2.75, 10.0], rtol=0.0, atol=1.0e-6)
         np.testing.assert_array_equal(replay.dones.numpy()[:2], [0.0, 0.0])
         np.testing.assert_allclose(replay.next_obs.numpy()[:2, 0], [3.0, 1.0], rtol=0.0, atol=0.0)
+
+    def test_distributional_critic_tile_backward_matches_scalar(self) -> None:
+        """Match tile-parallel critic loss and gradients to the scalar oracle."""
+
+        device = require_cuda_graph_capture("FlashSAC tile distributional critic loss")
+        rng = np.random.default_rng(313)
+        for batch_size, atom_count in ((17, 7), (37, 101)):
+            logits1 = wp.array(rng.normal(size=(batch_size, atom_count)).astype(np.float32), device=device)
+            logits2 = wp.array(rng.normal(size=(batch_size, atom_count)).astype(np.float32), device=device)
+            target1_np = rng.uniform(size=(batch_size, atom_count)).astype(np.float32)
+            target2_np = rng.uniform(size=(batch_size, atom_count)).astype(np.float32)
+            target1_np /= target1_np.sum(axis=1, keepdims=True)
+            target2_np /= target2_np.sum(axis=1, keepdims=True)
+            target1 = wp.array(target1_np, device=device)
+            target2 = wp.array(target2_np, device=device)
+            scalar_loss = wp.zeros(1, dtype=wp.float32, device=device)
+            tile_loss = wp.zeros(1, dtype=wp.float32, device=device)
+            scalar_grad1 = wp.empty_like(logits1)
+            scalar_grad2 = wp.empty_like(logits2)
+            tile_grad1 = wp.empty_like(logits1)
+            tile_grad2 = wp.empty_like(logits2)
+            wp.launch(
+                sac_distributional_critic_loss_backward_kernel,
+                dim=batch_size,
+                inputs=[logits1, logits2, target1, target2, batch_size, atom_count],
+                outputs=[scalar_loss, scalar_grad1, scalar_grad2],
+                device=device,
+            )
+            wp.launch(
+                sac_distributional_critic_loss_backward_tile_kernel,
+                dim=(batch_size, 128),
+                inputs=[logits1, logits2, target1, target2, batch_size, atom_count],
+                outputs=[tile_loss, tile_grad1, tile_grad2],
+                block_dim=128,
+                device=device,
+            )
+            np.testing.assert_allclose(tile_grad1.numpy(), scalar_grad1.numpy(), rtol=2.0e-6, atol=2.0e-8)
+            np.testing.assert_allclose(tile_grad2.numpy(), scalar_grad2.numpy(), rtol=2.0e-6, atol=2.0e-8)
+            np.testing.assert_allclose(tile_loss.numpy(), scalar_loss.numpy(), rtol=2.0e-6, atol=2.0e-6)
 
     def test_reference_distributional_policy_learns_continuous_optimum(self) -> None:
         """Reduce deterministic policy error on a fixed continuous-control optimum."""

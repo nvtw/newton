@@ -29,6 +29,7 @@ from .kernels import (
     sac_critic_loss_kernel,
     sac_distributional_actor_q_backward_kernel,
     sac_distributional_critic_loss_backward_kernel,
+    sac_distributional_critic_loss_backward_tile_kernel,
     sac_distributional_min_projection_device_alpha_kernel,
     sac_distributional_projection_device_alpha_kernel,
     sac_distributional_q_value_kernel,
@@ -611,9 +612,14 @@ class TrainerSAC:
                 outputs=[target_distribution1, target_distribution2],
                 device=self.device,
             )
+            loss_backward_kernel = (
+                sac_distributional_critic_loss_backward_tile_kernel
+                if self.device.is_cuda
+                else sac_distributional_critic_loss_backward_kernel
+            )
             wp.launch(
-                sac_distributional_critic_loss_backward_kernel,
-                dim=batch.batch_size,
+                loss_backward_kernel,
+                dim=(batch.batch_size, 128) if self.device.is_cuda else batch.batch_size,
                 inputs=[
                     q1,
                     q2,
@@ -623,6 +629,7 @@ class TrainerSAC:
                     atoms,
                 ],
                 outputs=[self._critic_loss, q1_grad, q2_grad],
+                block_dim=128 if self.device.is_cuda else 256,
                 device=self.device,
             )
         else:

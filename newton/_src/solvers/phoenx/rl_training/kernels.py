@@ -2162,6 +2162,52 @@ def sac_distributional_critic_loss_backward_kernel(
     wp.atomic_add(loss, 0, row_loss * inv_batch)
 
 
+@wp.kernel(enable_backward=False)
+def sac_distributional_critic_loss_backward_tile_kernel(
+    logits1: wp.array2d[wp.float32],
+    logits2: wp.array2d[wp.float32],
+    targets1: wp.array2d[wp.float32],
+    targets2: wp.array2d[wp.float32],
+    batch_size: wp.int32,
+    num_atoms: wp.int32,
+    loss: wp.array[wp.float32],
+    logits1_grad: wp.array2d[wp.float32],
+    logits2_grad: wp.array2d[wp.float32],
+):
+    row, lane = wp.tid()
+    max_logit1 = -wp.float32(3.4028235e38)
+    max_logit2 = -wp.float32(3.4028235e38)
+    for atom in range(lane, num_atoms, wp.block_dim()):
+        max_logit1 = wp.max(max_logit1, logits1[row, atom])
+        max_logit2 = wp.max(max_logit2, logits2[row, atom])
+    max_logit1 = wp.tile_max(wp.tile(max_logit1))[0]
+    max_logit2 = wp.tile_max(wp.tile(max_logit2))[0]
+
+    normalizer1 = wp.float32(0.0)
+    normalizer2 = wp.float32(0.0)
+    for atom in range(lane, num_atoms, wp.block_dim()):
+        normalizer1 += wp.exp(logits1[row, atom] - max_logit1)
+        normalizer2 += wp.exp(logits2[row, atom] - max_logit2)
+    normalizer1 = wp.tile_sum(wp.tile(normalizer1))[0]
+    normalizer2 = wp.tile_sum(wp.tile(normalizer2))[0]
+    log_normalizer1 = wp.log(normalizer1)
+    log_normalizer2 = wp.log(normalizer2)
+    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
+    row_loss = wp.float32(0.0)
+    for atom in range(lane, num_atoms, wp.block_dim()):
+        probability1 = wp.exp(logits1[row, atom] - max_logit1) / normalizer1
+        probability2 = wp.exp(logits2[row, atom] - max_logit2) / normalizer2
+        target1 = targets1[row, atom]
+        target2 = targets2[row, atom]
+        row_loss -= target1 * (logits1[row, atom] - max_logit1 - log_normalizer1)
+        row_loss -= target2 * (logits2[row, atom] - max_logit2 - log_normalizer2)
+        logits1_grad[row, atom] = (probability1 - target1) * inv_batch
+        logits2_grad[row, atom] = (probability2 - target2) * inv_batch
+    row_loss = wp.tile_sum(wp.tile(row_loss))[0]
+    if lane == 0:
+        wp.atomic_add(loss, 0, row_loss * inv_batch)
+
+
 @wp.kernel
 def sac_distributional_actor_q_backward_kernel(
     logits1: wp.array2d[wp.float32],

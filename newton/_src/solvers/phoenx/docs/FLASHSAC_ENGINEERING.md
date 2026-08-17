@@ -234,6 +234,19 @@ Training times including setup were 57.96, 47.49, and 53.13 seconds.  The mode
 remains opt-in so callers explicitly choose the one-cadence replay eligibility
 delay and additional policy/batch storage.
 
+The CUDA distributional critic loss and backward pass assigns one 128-lane
+tile block to each replay row.  The block reduces the two softmax maxima,
+normalizers, and cross-entropy loss in parallel while writing the same
+per-atom gradients; the scalar implementation remains the CPU fallback and
+test oracle.  Multi-shape tests cover 7 and the default 101 atoms.  With AMP
+and overlapped rollout, complete cadence improved from 11.780 ms to 11.365 ms
+(173.8k to 180.2k transitions/s).  Fresh seed-0 quality first passed at 7.096M
+transitions and sustained at 7.596M in 53.52 seconds, with tracking 0.653,
+aligned velocity 0.476 m/s, and zero falls.  A preceding ReLU/BatchNorm
+backward fusion was rejected despite a repeatable 1.4 percent cadence gain:
+its isolated equations passed, but the full-G1 gate failed through 15.09M
+transitions.
+
 ## Reproducible quality evidence
 
 The corrected FP32 seed-0 result is stored in
