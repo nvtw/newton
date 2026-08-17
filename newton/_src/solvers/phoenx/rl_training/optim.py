@@ -167,6 +167,7 @@ class Adam:
         self.lr = float(lr)
         self.lr_scale = wp.ones(1, dtype=wp.float32, device=params[0].device, requires_grad=False)
         self.pbt_lr_scale = wp.ones(1, dtype=wp.float32, device=params[0].device, requires_grad=False)
+        self.step_condition = wp.ones(1, dtype=wp.int32, device=params[0].device, requires_grad=False)
         self.beta1 = float(beta1)
         self.beta2 = float(beta2)
         self.eps = float(eps)
@@ -209,7 +210,7 @@ class Adam:
         wp.launch(
             adam_step_prepare_kernel,
             dim=1,
-            inputs=[self._step_count, self.beta1, self.beta2],
+            inputs=[self._step_count, self.step_condition, self.beta1, self.beta2],
             outputs=[self._step_corrections],
             device=self._step_count.device,
         )
@@ -236,6 +237,7 @@ class Adam:
                         self.lr,
                         self.lr_scale,
                         self.pbt_lr_scale,
+                        self.step_condition,
                         self.beta1,
                         self.beta2,
                         self.eps,
@@ -258,6 +260,7 @@ class Adam:
                         self.lr,
                         self.lr_scale,
                         self.pbt_lr_scale,
+                        self.step_condition,
                         self.beta1,
                         self.beta2,
                         self.eps,
@@ -325,6 +328,7 @@ class Muon:
         self.lr = float(lr)
         self.lr_scale = wp.ones(1, dtype=wp.float32, device=params[0].device, requires_grad=False)
         self.pbt_lr_scale = wp.ones(1, dtype=wp.float32, device=params[0].device, requires_grad=False)
+        self.step_condition = wp.ones(1, dtype=wp.int32, device=params[0].device, requires_grad=False)
         self.momentum_coeff = float(momentum)
         self.eps = float(eps)
         self.weight_decay = float(weight_decay)
@@ -539,6 +543,7 @@ class Muon:
                         self.lr,
                         self.lr_scale,
                         self.pbt_lr_scale,
+                        self.step_condition,
                         self.momentum_coeff,
                         self.weight_decay,
                         max_grad_norm,

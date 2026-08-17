@@ -1,0 +1,204 @@
+# FlashSAC engineering notes
+
+This document records implementation, correctness, and performance findings for
+the pure-Warp PhoenX RL FlashSAC trainer.  Keep unsuccessful experiments here as
+well as retained optimizations: a fast microbenchmark is not sufficient evidence
+that a training change is safe.
+
+## Authorities and acceptance gates
+
+The algorithm reference is the local FlashSAC checkout at
+`/home/twidmer/Documents/git/FlashSAC`, commit
+`87edc9061150ae9e962dd84e6544e27a1554b3ab`.  In particular, its
+`flash_rl/agents/flashSAC/layer.py`, `network.py`, and `update.py` define the
+network equations, autocast scope, and update order.
+
+Performance measurements must use an otherwise idle GPU, warm up CUDA graphs,
+and report repeated windows rather than one launch.  The main throughput
+benchmark uses 1,024 G1 worlds and one captured cadence containing two
+interactions and four learner updates.  Learning quality uses the full 29-action
+G1 recipe, a fixed 0.8 m/s command, deterministic 200-step evaluation, and
+requires two consecutive evaluations satisfying all of:
+
+- tracking score at least 0.30;
+- command-aligned velocity at least 0.4 m/s;
+- fall fraction at most 0.06.
+
+Standing is not locomotion.  The compact 12-action task and tracking score alone
+can reward a stationary policy and must not be used as the quality gate.
+
+## CUDA graph coverage
+
+The steady-state graph includes policy inference and exploration, the PhoenX
+step and auto-reset, n-step replay insertion, reward normalization, replay
+sampling, actor/temperature/critic updates, target EMA, Adam, learning-rate and
+seed progression, and counters.  Graph/eager state equivalence, checkpoint
+continuation, termination/truncation handling, and pre-reset next observations
+have focused regressions in `tests/test_flash_sac.py`.
+
+All graph-owned arrays are allocated during setup/capture.  Replay work is
+negligible compared with the learner; optimize the network before replay.
+
+## Retained FP32 optimizations
+
+The initial captured implementation measured approximately 16.09 ms per mixed
+learner update and 68.39 ms per full cadence, or 29.9k transitions/s.  The
+following exact FP32 changes reduced this to approximately 4.96 ms per update
+and 23.2 ms per cadence, or 88k transitions/s:
+
+- fused twin-critic dense contractions;
+- setup-owned reduction workspaces;
+- packed Warp tile reductions for BatchNorm, RMSNorm, bias, affine, and weight
+  normalization;
+- fused normalization/ReLU forward kernels;
+- cuBLAS contractions with FP32 accumulation;
+- complete learner and collector CUDA graph capture.
+
+Validate every optimization with equation fixtures, finite-difference backward
+checks where applicable, eager/graph state comparison, deterministic learning,
+and the full PhoenX FlashSAC test module.
+
+## Mixed-precision findings
+
+Upstream uses CUDA autocast with `torch.float16` and `GradScaler`.  BF16 is not a
+drop-in substitute on the measured RTX PRO 6000 Blackwell.  Persistent-operand
+FP16 GEMMs are substantially faster and more accurate than BF16 for the dominant
+FlashSAC shapes, while isolated conversion-heavy BF16 forwards were slower than
+FP32.
+
+Autocast is not a uniform whole-network dtype.  A direct PyTorch 2.10 CUDA trace
+of the authoritative source found:
+
+- Autocast is active only in actor and critic learner updates.  Environment
+  interaction and evaluation use FP32.
+- The scalar actor input BatchNorm receives and returns FP32.  Dense block
+  linears return FP16; block BatchNorm/ReLU, residuals, and actor RMSNorm remain
+  FP16.
+- In the fused critic, each ensemble linear returns FP16.  The custom ensemble
+  BatchNorm computes mean and variance with FP16 result dtype, `rsqrt` promotes
+  to FP32 only after the FP16 `variance + epsilon` addition, and the FP32 affine
+  parameters make its output FP32.  The centered subtraction is FP16 before it
+  is multiplied by the FP32 inverse standard deviation.  Critic residuals,
+  RMSNorm, categorical logits, probabilities, values, and losses remain FP32.
+- The actor predictor and critic categorical predictor have different promotion
+  behavior.  Actor mean and raw log standard deviation are FP16; its bias add,
+  tanh, affine log-standard-deviation map, and stored log standard deviation are
+  also FP16, while `exp(log_std)` returns FP32.  The critic head linear is FP16,
+  but adding its FP32 bias promotes categorical logits to FP32.
+- Master parameters, optimizer state, running statistics, and parameter
+  gradients remain FP32.
+
+The first opt-in AMP implementation incorrectly retained the whole critic
+residual branch in FP16.  It was fast (about 3.08 ms/update and 15.57 ms/cadence,
+131.5k transitions/s) but failed the G1 quality gate through 15.1M transitions.
+Correcting the visible critic output boundaries retained a useful speedup (about
+3.39 ms/update and 16.99 ms/cadence, 120.5k transitions/s) but still failed the
+quality gate.  A later arithmetic audit found that the critic moment calculations
+were still retained in FP32 rather than reproducing the upstream FP16 result
+rounding.  Do not enable AMP by default until a fixed PyTorch-versus-Warp fixture
+matches forward values and selected gradients and the full G1 gate passes.
+Forcing only collector/evaluation inference back to the authoritative FP32 path
+did not repair learning: seed 0 still failed through 15.1M transitions (tracking
+0.109, aligned velocity 0.171 m/s, fall fraction 1.0).  A committed NumPy fixture
+must preserve the internal actor-head and ensemble-moment values traced from
+PyTorch without requiring PyTorch at test time; whole-network actor/critic output
+and selected-gradient fixtures remain the stronger acceptance requirement.
+
+The subsequent staged implementation matched the traced actor-head, ensemble
+moment, custom BatchNorm backward, and RMSNorm equations.  On a mapped tiny
+network, the actor forward differed by at most 1.2e-7 and its input and parameter
+gradient directions agreed to floating-point precision.  The critic forward and
+summed input-gradient cosines were 0.9999993 and 0.9999816, respectively;
+isolated custom BatchNorm input gradients matched PyTorch exactly at widths 4
+and 16.  The remaining critic error was consistent with FP16 GEMM/reduction
+ordering.
+
+This closer implementation measured 3.46 ms per update versus 5.01 ms for FP32,
+and 17.14 ms per complete cadence versus 23.08 ms for FP32 (119.5k versus 88.7k
+transitions/s).  It nevertheless failed the seed-0 quality gate through 15.09M
+transitions: the final evaluation had tracking 0.010, aligned velocity 0.038 m/s,
+and fall fraction 1.0.  It must remain opt-in and is not a quality-preserving
+replacement for FP32.  Exact upstream gradient-scaling behavior and accumulated
+FP16 contraction drift remain candidates for the discrepancy.
+
+An authoritative PyTorch oracle at batch size 2,048 confirmed that scaling is
+material even without widespread underflow.  Across three seeds, autocast
+without scaling lost 121--145 actor gradient entries and 4,055--4,104 critic
+entries, compared with 15--20 and 0--1 under `GradScaler(65536)`.  After
+unscaling, the worst per-layer cosine between the two paths was only 0.915 for
+the actor and 0.976 for the critic.  A faithful graph-safe implementation must
+therefore scale before FP16 network backpropagation, unscale FP32 master
+gradients before Adam, and keep overflow detection, skipped steps, and scaler
+state device-resident.
+
+A fixed-scale placement experiment then confirmed causality.  Scaling critic
+logit gradients before critic backpropagation, scaling both Q and entropy paths
+of the actor loss before their first FP16 boundaries, and unscaling FP32 master
+gradients before Adam restored seed-0 learning.  The fixed-scale run first
+passed at 8.096M transitions (tracking 0.796, aligned velocity 0.448 m/s, no
+falls) and sustained at 8.595M (tracking 0.846, aligned velocity 0.796 m/s, no
+falls).  This is evidence for scaler placement, not an accepted implementation:
+dynamic growth/backoff, global overflow detection, skipped optimizer state, and
+checkpointed scaler state still require graph-native coverage.
+
+The retained graph-native scaler starts at 65,536, grows by two after 2,000
+successful optimizer steps, and backs off by one half on overflow.  Actor and
+combined-critic overflow reductions are global: Adam parameters, moments, and
+step count are skipped together, while upstream's parameter normalization,
+learning-rate scheduling, and target EMA still run.  The shared scaler advances
+after the actor and critic optimizer calls exactly as upstream does, and its
+scale and growth tracker are checkpointed.  Forced-overflow, eager/graph
+continuation, checkpoint continuation, and exact growth/backoff equations have
+focused regressions.  The seed-2 sustained checkpoint had scale 16,777,216 and
+growth tracker 1,646, confirming that long captured runs exercise dynamic
+progression rather than retaining the initial scale.
+
+With dynamic scaling, the captured learner measured 3.67 ms per update and the
+complete cadence measured 17.84 ms, or 114.8k transitions/s.  The corresponding
+FP32 cadence was 23.08 ms, or 88.7k transitions/s.  Three independent full-G1
+seeds all first passed at 7.596M transitions and sustained at 8.096M.  Their
+sustained training-only times were 73.38, 71.35, and 70.34 seconds; tracking was
+0.840, 0.742, and 0.838; aligned velocity was 0.664, 0.664, and 0.540 m/s; and
+all had zero falls.  This establishes both quality preservation and a roughly
+23 percent end-to-end throughput improvement for the measured configuration.
+
+Loss scaling should not be assumed to fix a forward mismatch.  The fixed
+PyTorch/NumPy fixtures for actor heads, critic moments, custom BatchNorm
+backward, and RMSNorm remain required even though the end-to-end quality gate
+now passes.
+
+## Profiling history
+
+Before mixed precision, the optimized learner was dominated by GEMMs, followed
+by BatchNorm moments/backward and normalization.  An Nsight Compute report for
+the earlier normalization kernels is stored outside the repository at:
+
+- `/tmp/newton_flash_sac_norm_ncu.ncu-rep`;
+- `/tmp/newton_flash_sac_norm_ncu.txt`;
+- `/tmp/newton_flash_sac_norm_ncu_details.csv`;
+- `/tmp/newton_flash_sac_norm_ncu_raw.csv`.
+
+The report showed severe underfill for narrow per-column BatchNorm reductions
+(roughly 0.09--0.11 waves/SM for widths 98 and 128), while wide elementwise
+normalization was healthy.  A future reduction rewrite should use coalesced
+two-dimensional row/column tiles, setup-owned partial buffers, and measured
+`vec2`/`vec4` packing.  Re-profile with Nsight Systems after AMP quality is
+restored because the hotspot distribution will have changed; request another
+sudo Nsight Compute run only for kernels with meaningful remaining wall share.
+
+## Reproducible quality evidence
+
+The corrected FP32 seed-0 result is stored in
+`/tmp/g1_time_to_gate_20260817/full29_corrected_results.json`.  It first passed
+at 8.595M transitions and 100.56 s of training wall time and sustained the gate
+at 9.095M transitions and 106.53 s.  The same results file contains named phases
+for rejected AMP experiments.  Evaluation overhead is recorded separately from
+training wall time.
+
+The same file contains the three accepted dynamic-scaler phases named
+`full29_amp_dynamic_seed{0,1,2}_0.8`.  Each phase records every deterministic
+evaluation and its checkpoint path.
+
+Do not treat `/tmp` as permanent archival storage.  Promote the final comparison
+configuration and concise results into this document when the AMP implementation
+passes multiple seeds.

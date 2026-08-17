@@ -9,6 +9,9 @@ import numpy as np
 import warp as wp
 
 from .kernels import (
+    amp_finalize_step_kernel,
+    amp_reset_found_inf_kernel,
+    amp_update_scale_kernel,
     concat_obs_action_kernel,
     fill_eps_kernel,
     fill_eps_seed_counter_kernel,
@@ -32,6 +35,7 @@ from .kernels import (
     sac_q_target_device_alpha_kernel,
     sac_refresh_alpha_kernel,
     sample_gaussian_actions_kernel,
+    scale_2d_in_place_kernel,
     zero_scalar_kernel,
 )
 from .networks import GaussianActor, WarpMLP
@@ -349,6 +353,7 @@ class TrainerSAC:
         self._critic_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._alpha_loss = wp.zeros(1, dtype=wp.float32, device=self.device, requires_grad=True)
         self._alpha = wp.array([float(self.config.initial_alpha)], dtype=wp.float32, device=self.device)
+        self._loss_scale = wp.ones(1, dtype=wp.float32, device=self.device)
         self._update_stats = wp.empty(4, dtype=wp.float32, device=self.device)
         self._update_stats_host = wp.empty(4, dtype=wp.float32, device="cpu", pinned=self.device.is_cuda)
         self._obs_mean = wp.zeros(self.obs_dim, dtype=wp.float32, device=self.device)
@@ -652,19 +657,40 @@ class TrainerSAC:
                 outputs=[q1_grad, q2_grad],
                 device=self.device,
             )
+        amp_scale = getattr(self, "_amp_scale", None)
+        found_inf = getattr(self, "_amp_found_inf", None)
+        if amp_scale is not None:
+            wp.launch(amp_reset_found_inf_kernel, dim=1, outputs=[found_inf], device=self.device)
+            wp.launch(scale_2d_in_place_kernel, dim=q1_grad.shape, inputs=[q1_grad, amp_scale], device=self.device)
+            wp.launch(scale_2d_in_place_kernel, dim=q2_grad.shape, inputs=[q2_grad, amp_scale], device=self.device)
         if reference_batch_norm:
             q1_grad = self._expand_first_row_grad(q1_grad, total_rows=batch.batch_size * 2)
             q2_grad = self._expand_first_row_grad(q2_grad, total_rows=batch.batch_size * 2)
             if critic_ensemble is not None:
-                critic_ensemble.backward_manual(q1_grad, q2_grad)
+                critic_ensemble.backward_manual(q1_grad, q2_grad, loss_scale=amp_scale, found_inf=found_inf)
             else:
-                self.critic1.backward_manual(q1_grad)
-                self.critic2.backward_manual(q2_grad)
+                self.critic1.backward_manual(q1_grad, loss_scale=amp_scale, found_inf=found_inf)
+                self.critic2.backward_manual(q2_grad, loss_scale=amp_scale, found_inf=found_inf)
         else:
             self.critic1.backward_manual(q1_grad)
             self.critic2.backward_manual(q2_grad)
+        if amp_scale is not None:
+            wp.launch(
+                amp_finalize_step_kernel,
+                dim=1,
+                inputs=[found_inf],
+                outputs=[self._amp_step_condition],
+                device=self.device,
+            )
         self.critic1_optimizer.step()
         self.critic2_optimizer.step()
+        if amp_scale is not None:
+            wp.launch(
+                amp_update_scale_kernel,
+                dim=1,
+                inputs=[found_inf, self._amp_scale, self._amp_growth_tracker, 2.0, 0.5, 2000],
+                device=self.device,
+            )
 
     def _update_actor(
         self,
@@ -770,6 +796,12 @@ class TrainerSAC:
                 outputs=[q1_grad, q2_grad],
                 device=self.device,
             )
+        amp_scale = getattr(self, "_amp_scale", None)
+        found_inf = getattr(self, "_amp_found_inf", None)
+        if amp_scale is not None:
+            wp.launch(amp_reset_found_inf_kernel, dim=1, outputs=[found_inf], device=self.device)
+            wp.launch(scale_2d_in_place_kernel, dim=q1_grad.shape, inputs=[q1_grad, amp_scale], device=self.device)
+            wp.launch(scale_2d_in_place_kernel, dim=q2_grad.shape, inputs=[q2_grad, amp_scale], device=self.device)
         q_input_grad1 = wp.empty_like(q_input)
         q_input_grad2 = wp.empty_like(q_input)
         if reference_batch_norm and critic_ensemble is not None:
@@ -778,6 +810,8 @@ class TrainerSAC:
                 q2_grad,
                 first_input_grad=q_input_grad1,
                 second_input_grad=q_input_grad2,
+                loss_scale=amp_scale,
+                found_inf=found_inf,
             )
         else:
             self.critic1.backward_manual(q1_grad, input_grad=q_input_grad1)
@@ -805,14 +839,33 @@ class TrainerSAC:
                 self.actor.log_std_min,
                 self.actor.log_std_max,
                 self.config.average_critics,
+                self._loss_scale,
             ],
             outputs=[self._actor_loss, policy_out_grad],
             device=self.device,
         )
         if reference_batch_norm:
             policy_out_grad = self._expand_first_row_grad(policy_out_grad, total_rows=batch.batch_size * 2)
-        self.actor.net.backward_manual(policy_out_grad)
+        if reference_batch_norm:
+            self.actor.net.backward_manual(policy_out_grad, loss_scale=amp_scale, found_inf=found_inf)
+        else:
+            self.actor.net.backward_manual(policy_out_grad)
+        if amp_scale is not None:
+            wp.launch(
+                amp_finalize_step_kernel,
+                dim=1,
+                inputs=[found_inf],
+                outputs=[self._amp_step_condition],
+                device=self.device,
+            )
         self.actor_optimizer.step()
+        if amp_scale is not None:
+            wp.launch(
+                amp_update_scale_kernel,
+                dim=1,
+                inputs=[found_inf, self._amp_scale, self._amp_growth_tracker, 2.0, 0.5, 2000],
+                device=self.device,
+            )
 
     def _update_alpha(self, batch: BatchSAC, *, seed: int) -> None:
         _actions, log_probs, _policy_out = self.actor.sample(

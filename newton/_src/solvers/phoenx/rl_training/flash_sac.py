@@ -796,6 +796,16 @@ class TrainerFlashSAC(TrainerSAC):
         self._device_update_count = wp.array([0], dtype=wp.int32, device=self.device)
         self._device_gradient_update_count = wp.array([0], dtype=wp.int32, device=self.device)
         self._device_update_seed = wp.array([int(seed)], dtype=wp.int32, device=self.device)
+        initial_amp_scale = 65536.0 if flash_config.use_amp else 1.0
+        self._amp_scale = wp.array([initial_amp_scale], dtype=wp.float32, device=self.device)
+        self._loss_scale = self._amp_scale
+        self._amp_growth_tracker = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._amp_found_inf = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._amp_step_condition = wp.ones(1, dtype=wp.int32, device=self.device)
+        if flash_config.use_amp:
+            self.actor_optimizer.step_condition = self._amp_step_condition
+            self.critic1_optimizer.step_condition = self._amp_step_condition
+            self.critic2_optimizer.step_condition = self._amp_step_condition
         self._device_actor_condition = wp.zeros(1, dtype=wp.int32, device=self.device)
         self._device_actor_skip_condition = wp.zeros(1, dtype=wp.int32, device=self.device)
         if self.config.normalize_weights:
@@ -962,6 +972,8 @@ class TrainerFlashSAC(TrainerSAC):
             "obs_mean": self._obs_mean.numpy(),
             "obs_m2": self._obs_m2.numpy(),
             "obs_count": self._obs_count.numpy(),
+            "amp_scale": self._amp_scale.numpy(),
+            "amp_growth_tracker": self._amp_growth_tracker.numpy(),
         }
         for key, value in asdict(self.config).items():
             none_key = f"config_{key}_is_none"
@@ -1049,6 +1061,9 @@ class TrainerFlashSAC(TrainerSAC):
             trainer._gradient_update_count = int(data["gradient_update_count"])
             trainer._device_update_count.assign(np.asarray([trainer._update_count], dtype=np.int32))
             trainer._device_gradient_update_count.assign(np.asarray([trainer._gradient_update_count], dtype=np.int32))
+            if "amp_scale" in data:
+                trainer._amp_scale.assign(data["amp_scale"])
+                trainer._amp_growth_tracker.assign(data["amp_growth_tracker"])
             if "noise_rng_state" in data:
                 trainer._noise_repeat_count = int(data["noise_repeat_count"])
                 trainer._noise_repeat_steps = int(data["noise_repeat_steps"])

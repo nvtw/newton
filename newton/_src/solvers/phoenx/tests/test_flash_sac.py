@@ -27,9 +27,17 @@ from newton._src.solvers.phoenx.rl_training.flash_sac_networks import (
     _TILE_REDUCTION_BLOCK_DIM,
     NetworkFlashSAC,
     _batch_moments_tile_kernel,
+    _batch_norm_backward_amp_tile_kernel,
+    _batch_norm_input_grad_amp_kernel,
+    _batch_norm_inv_std_amp_kernel,
+    _head_bias_amp_kernel,
+    _head_bias_log_std_amp_kernel,
     _launch_rms_backward_stats,
     _launch_rms_inv,
     _launch_rms_scale_grad,
+    _rms_norm_f16_kernel,
+    _rms_norm_input_grad_f16_kernel,
+    _round_batch_moments_f16_kernel,
     _UnitBatchNorm,
 )
 from newton._src.solvers.phoenx.rl_training.g1 import (
@@ -39,6 +47,7 @@ from newton._src.solvers.phoenx.rl_training.g1 import (
     EnvG1PhoenX,
 )
 from newton._src.solvers.phoenx.rl_training.kernels import (
+    amp_update_scale_kernel,
     sac_distributional_min_projection_device_alpha_kernel,
 )
 from newton._src.solvers.phoenx.rl_training.networks import WarpMLP
@@ -806,6 +815,223 @@ class TestTrainerFlashSAC(unittest.TestCase):
         for actual, expected in zip(actual_sample.__dict__.values(), expected_sample.__dict__.values(), strict=True):
             np.testing.assert_array_equal(actual.numpy(), expected.numpy())
 
+    def test_amp_matches_authoritative_autocast_boundaries(self) -> None:
+        """Match traced FlashSAC autocast dtypes without requiring PyTorch."""
+
+        device = require_cuda_graph_capture("FlashSAC autocast dtype boundaries")
+        trainer = TrainerFlashSAC(
+            obs_dim=3,
+            action_dim=2,
+            config=ConfigFlashSAC(
+                actor_hidden_dim=4,
+                actor_num_blocks=1,
+                critic_hidden_dim=4,
+                critic_num_blocks=1,
+                distributional_atoms=5,
+                normalize_rewards=False,
+                use_amp=True,
+            ),
+            device=device,
+            seed=313,
+        )
+        obs = wp.zeros((4, 3), dtype=wp.float32, device=device)
+        trainer.actor.net.forward_manual(obs, training=True)
+        actor_cache = trainer.actor.net._manual_cache
+        self.assertIsNotNone(actor_cache)
+        self.assertEqual(actor_cache["input_normalized"].dtype, wp.float32)
+        actor_block = actor_cache["blocks"][0]
+        for value in actor_block:
+            self.assertEqual(value.dtype, wp.float16)
+        self.assertEqual(actor_cache["rms_input"].dtype, wp.float16)
+        self.assertEqual(actor_cache["normalized"].dtype, wp.float16)
+        self.assertEqual(actor_cache["heads"][0].dtype, wp.float16)
+
+        trainer.actor.net.forward_reuse(obs)
+        interaction_buffers = trainer.actor.net._forward_buffers
+        self.assertEqual(interaction_buffers["input_normalized"].dtype, wp.float32)
+        self.assertEqual(interaction_buffers["embed"].dtype, wp.float32)
+        self.assertEqual(interaction_buffers["normalized"].dtype, wp.float32)
+        for block in interaction_buffers["blocks"]:
+            for value in block:
+                self.assertEqual(value.dtype, wp.float32)
+
+        critic_input = wp.zeros((4, 5), dtype=wp.float32, device=device)
+        trainer._critic_ensemble.forward_manual(critic_input, training=True)
+        critic_cache = trainer._critic_ensemble._manual_cache
+        self.assertEqual(critic_cache["input_normalized"].dtype, wp.float32)
+        residual, pre1, _normed1, activated1, pre2, _normed2, activated2 = critic_cache["blocks"][0]
+        self.assertEqual(residual.dtype, wp.float16)
+        self.assertEqual(pre1.dtype, wp.float16)
+        self.assertEqual(pre2.dtype, wp.float16)
+        self.assertEqual(activated1.dtype, wp.float32)
+        self.assertEqual(activated2.dtype, wp.float32)
+        self.assertEqual(critic_cache["rms_input"].dtype, wp.float32)
+        self.assertEqual(critic_cache["normalized"].dtype, wp.float32)
+        self.assertEqual(critic_cache["heads"].dtype, wp.float16)
+
+    def test_amp_matches_authoritative_pytorch_stage_fixture(self) -> None:
+        """Match fixed autocast values generated from FlashSAC commit 87edc906."""
+
+        device = require_cuda_graph_capture("FlashSAC authoritative autocast values")
+        source = np.asarray(
+            [
+                [-1.2, 0.3, 2.1],
+                [0.7, -0.8, 1.3],
+                [2.4, 0.1, -0.5],
+                [-0.9, 1.7, 0.2],
+                [0.4, -1.1, 1.8],
+                [1.2, 0.6, -2.0],
+                [-0.3, 2.2, 0.9],
+                [1.6, -0.4, 0.5],
+            ],
+            dtype=np.float16,
+        )
+        values = wp.array(source, dtype=wp.float16, device=device)
+        mean = wp.empty(3, dtype=wp.float32, device=device)
+        variance = wp.empty(3, dtype=wp.float32, device=device)
+        inv_std = wp.empty(3, dtype=wp.float32, device=device)
+        wp.launch(
+            _batch_moments_tile_kernel,
+            dim=(3, _TILE_REDUCTION_BLOCK_DIM),
+            inputs=[values, 8, 1.0e-5],
+            outputs=[mean, variance, inv_std],
+            block_dim=_TILE_REDUCTION_BLOCK_DIM,
+            device=device,
+        )
+        wp.launch(
+            _round_batch_moments_f16_kernel,
+            dim=3,
+            inputs=[mean, variance, 1.0e-5],
+            outputs=[inv_std],
+            device=device,
+        )
+        np.testing.assert_array_equal(mean.numpy(), np.asarray([0.48754883, 0.32495117, 0.53759766], dtype=np.float32))
+        np.testing.assert_array_equal(variance.numpy(), np.asarray([1.3564453, 1.1689453, 1.546875], dtype=np.float32))
+        np.testing.assert_allclose(inv_std.numpy(), [0.85861576, 0.9249173, 0.80403024], rtol=1.0e-6)
+        normalized = wp.empty(values.shape, dtype=wp.float32, device=device)
+        wp.launch(
+            _batch_norm_inv_std_amp_kernel,
+            dim=values.shape,
+            inputs=[
+                values,
+                mean,
+                inv_std,
+                wp.ones(3, dtype=wp.float32, device=device),
+                wp.zeros(3, dtype=wp.float32, device=device),
+            ],
+            outputs=[normalized],
+            device=device,
+        )
+        np.testing.assert_allclose(normalized.numpy()[0], [-1.448914, -0.02303261, 1.2562972], rtol=2.0e-6, atol=2.0e-6)
+
+        output_grad = wp.array(np.linspace(-0.8, 1.3, 24, dtype=np.float32).reshape(8, 3), device=device)
+        scale = wp.array(np.asarray([0.7, 1.1, -0.4], dtype=np.float32), device=device)
+        mean_grad = wp.empty(3, dtype=wp.float32, device=device)
+        variance_grad = wp.empty(3, dtype=wp.float32, device=device)
+        scale_grad = wp.empty(3, dtype=wp.float32, device=device)
+        bias_grad = wp.empty(3, dtype=wp.float32, device=device)
+        input_grad = wp.empty(values.shape, dtype=wp.float16, device=device)
+        wp.launch(
+            _batch_norm_backward_amp_tile_kernel,
+            dim=(3, _TILE_REDUCTION_BLOCK_DIM),
+            inputs=[values, output_grad, mean, inv_std, scale],
+            outputs=[mean_grad, variance_grad, scale_grad, bias_grad],
+            block_dim=_TILE_REDUCTION_BLOCK_DIM,
+            device=device,
+        )
+        wp.launch(
+            _batch_norm_input_grad_amp_kernel,
+            dim=values.shape,
+            inputs=[values, output_grad, scale, mean, inv_std, mean_grad, variance_grad],
+            outputs=[input_grad],
+            device=device,
+        )
+        np.testing.assert_array_equal(
+            input_grad.numpy()[[0, 7]],
+            np.asarray(
+                [[-0.41845703, -0.97216797, 0.21887207], [0.47216797, 1.0703125, -0.30615234]],
+                dtype=np.float16,
+            ),
+        )
+        np.testing.assert_allclose(scale_grad.numpy(), [1.4460932, 1.1144105, -1.7731792], rtol=1.0e-6)
+        np.testing.assert_allclose(bias_grad.numpy(), [1.269565, 2.0, 2.7304347], rtol=1.0e-6)
+
+        head = wp.array([[-8.0703125, 9.5390625, -3.498046875]], dtype=wp.float16, device=device)
+        bias = wp.zeros(3, dtype=wp.float32, device=device)
+        output = wp.empty((1, 6), dtype=wp.float32, device=device)
+        wp.launch(_head_bias_amp_kernel, dim=head.shape, inputs=[head, bias, 0], outputs=[output], device=device)
+        wp.launch(
+            _head_bias_log_std_amp_kernel,
+            dim=head.shape,
+            inputs=[head, bias, 3, -10.0, 2.0],
+            outputs=[output],
+            device=device,
+        )
+        np.testing.assert_array_equal(output.numpy()[0], [-8.0703125, 9.5390625, -3.498046875, -10.0, 2.0, -9.984375])
+
+    def test_amp_rms_norm_matches_authoritative_gradient_fixture(self) -> None:
+        """Match authoritative autocast RMSNorm forward and backward values."""
+
+        device = require_cuda_graph_capture("FlashSAC authoritative autocast RMSNorm")
+        values = wp.array(
+            np.asarray([[-1.2, 0.3, 2.1, 0.7], [0.7, -0.8, 1.3, -0.4]], dtype=np.float16),
+            dtype=wp.float16,
+            device=device,
+        )
+        scale = wp.array([0.7, 1.1, -0.4, 0.9], dtype=wp.float32, device=device)
+        output_grad = wp.array(
+            np.asarray([[0.2, -0.6, 0.8, 1.1], [-0.7, 0.3, 0.4, -0.2]], dtype=np.float16),
+            dtype=wp.float16,
+            device=device,
+        )
+        inv_rms = wp.empty(2, dtype=wp.float32, device=device)
+        output = wp.empty(values.shape, dtype=wp.float16, device=device)
+        _launch_rms_inv(values, 1.0e-6, inv_rms)
+        wp.launch(
+            _rms_norm_f16_kernel,
+            dim=values.shape,
+            inputs=[values, scale, inv_rms],
+            outputs=[output],
+            device=device,
+        )
+
+        projection = wp.empty(2, dtype=wp.float32, device=device)
+        input_grad = wp.empty(values.shape, dtype=wp.float16, device=device)
+        scale_grad = wp.empty(4, dtype=wp.float32, device=device)
+        _launch_rms_backward_stats(values, output_grad, scale, 1.0e-6, inv_rms, projection)
+        wp.launch(
+            _rms_norm_input_grad_f16_kernel,
+            dim=values.shape,
+            inputs=[values, output_grad, scale, inv_rms, projection],
+            outputs=[input_grad],
+            device=device,
+        )
+        _launch_rms_scale_grad(values, output_grad, inv_rms, scale_grad)
+
+        np.testing.assert_array_equal(
+            output.numpy(),
+            np.asarray(
+                [
+                    [-0.66259765625, 0.26025390625, -0.66259765625, 0.4970703125],
+                    [0.56787109375, -1.01953125, -0.6025390625, -0.4169921875],
+                ],
+                dtype=np.float16,
+            ),
+        )
+        np.testing.assert_array_equal(
+            input_grad.numpy(),
+            np.asarray(
+                [
+                    [0.05963134765625, -0.5078125, -0.16357421875, 0.81005859375],
+                    [-0.365478515625, 0.1512451171875, 0.1903076171875, -0.323974609375],
+                ],
+                dtype=np.float16,
+            ),
+        )
+        np.testing.assert_allclose(
+            scale_grad.numpy(), [-0.7573656, -0.42008877, 1.9268548, 0.69996125], rtol=2.0e-6, atol=2.0e-6
+        )
+
     def test_config_and_shape_failures_are_explicit(self) -> None:
         """Reject invalid FlashSAC configuration, replay, and update shapes."""
 
@@ -1037,8 +1263,8 @@ class TestTrainerFlashSAC(unittest.TestCase):
                 captured_network = captured_network.net
             eager_arrays.extend(eager_network.state_arrays())
             captured_arrays.extend(captured_network.state_arrays())
-        eager_arrays.extend((eager.log_alpha, eager._alpha))
-        captured_arrays.extend((captured.log_alpha, captured._alpha))
+        eager_arrays.extend((eager.log_alpha, eager._alpha, eager._amp_scale, eager._amp_growth_tracker))
+        captured_arrays.extend((captured.log_alpha, captured._alpha, captured._amp_scale, captured._amp_growth_tracker))
         for eager_optimizer, captured_optimizer in zip(
             (eager.actor_optimizer, eager.critic1_optimizer, eager.critic2_optimizer, eager.alpha_optimizer),
             (
@@ -1057,8 +1283,89 @@ class TestTrainerFlashSAC(unittest.TestCase):
         self.assertEqual(captured._gradient_update_count, 4)
         np.testing.assert_array_equal(captured._device_update_count.numpy(), [4])
         np.testing.assert_array_equal(captured._device_gradient_update_count.numpy(), [4])
-        self.assertEqual(captured.actor_optimizer.step_count, 2)
-        self.assertEqual(captured.critic1_optimizer.step_count, 4)
+        self.assertEqual(captured.actor_optimizer.step_count, eager.actor_optimizer.step_count)
+        self.assertEqual(captured.critic1_optimizer.step_count, eager.critic1_optimizer.step_count)
+        self.assertLessEqual(captured.actor_optimizer.step_count, 2)
+        self.assertLessEqual(captured.critic1_optimizer.step_count, 4)
+
+    def test_amp_overflow_skips_complete_optimizer_step_in_graph(self) -> None:
+        """Skip parameters, moments, and counters globally on AMP overflow."""
+
+        device = require_cuda_graph_capture("FlashSAC GradScaler overflow skip")
+
+        def make_trainer() -> TrainerFlashSAC:
+            trainer = TrainerFlashSAC(
+                obs_dim=2,
+                action_dim=1,
+                config=ConfigFlashSAC(
+                    actor_hidden_dim=4,
+                    critic_hidden_dim=4,
+                    actor_num_blocks=1,
+                    critic_num_blocks=1,
+                    distributional_atoms=5,
+                    normalize_rewards=False,
+                    use_amp=True,
+                ),
+                device=device,
+                seed=271,
+            )
+            trainer._amp_scale.assign(np.asarray([np.finfo(np.float32).max], dtype=np.float32))
+            return trainer
+
+        rng = np.random.default_rng(269)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(4, 2)).astype(np.float32), device=device),
+            actions=wp.array(rng.normal(size=(4, 1)).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=4).astype(np.float32), device=device),
+            dones=wp.zeros(4, dtype=wp.float32, device=device),
+            next_obs=wp.array(rng.normal(size=(4, 2)).astype(np.float32), device=device),
+        )
+        eager = make_trainer()
+        captured = make_trainer()
+        actor_m_before = [value.numpy().copy() for value in captured.actor_optimizer.m]
+        graph = captured.capture_update_graph(batch)
+        eager.update(batch, read_stats=False)
+        graph.launch()
+
+        self.assertEqual(captured.actor_optimizer.step_count, 0)
+        self.assertEqual(captured.critic1_optimizer.step_count, 0)
+        self.assertEqual(captured.critic2_optimizer.step_count, 0)
+        for eager_parameter, captured_parameter in zip(
+            eager.actor.net.parameters(), captured.actor.net.parameters(), strict=True
+        ):
+            np.testing.assert_array_equal(captured_parameter.numpy(), eager_parameter.numpy())
+            self.assertTrue(np.isfinite(captured_parameter.numpy()).all())
+        for before, moment in zip(actor_m_before, captured.actor_optimizer.m, strict=True):
+            np.testing.assert_array_equal(moment.numpy(), before)
+        np.testing.assert_array_equal(captured._amp_scale.numpy(), eager._amp_scale.numpy())
+        np.testing.assert_array_equal(captured._amp_growth_tracker.numpy(), eager._amp_growth_tracker.numpy())
+        self.assertEqual(int(captured._amp_growth_tracker.numpy()[0]), 0)
+
+    def test_amp_scaler_growth_and_backoff_match_upstream(self) -> None:
+        """Match upstream GradScaler growth and overflow backoff equations."""
+
+        device = require_cuda_graph_capture("FlashSAC GradScaler progression")
+        scale = wp.array([65536.0], dtype=wp.float32, device=device)
+        tracker = wp.array([1999], dtype=wp.int32, device=device)
+        found_inf = wp.zeros(1, dtype=wp.int32, device=device)
+        wp.launch(
+            amp_update_scale_kernel,
+            dim=1,
+            inputs=[found_inf, scale, tracker, 2.0, 0.5, 2000],
+            device=device,
+        )
+        np.testing.assert_array_equal(scale.numpy(), [131072.0])
+        np.testing.assert_array_equal(tracker.numpy(), [0])
+
+        found_inf.assign(np.asarray([1], dtype=np.int32))
+        wp.launch(
+            amp_update_scale_kernel,
+            dim=1,
+            inputs=[found_inf, scale, tracker, 2.0, 0.5, 2000],
+            device=device,
+        )
+        np.testing.assert_array_equal(scale.numpy(), [65536.0])
+        np.testing.assert_array_equal(tracker.numpy(), [0])
 
     def test_reward_normalizer_matches_upstream_initial_epsilon(self) -> None:
         """Include upstream RunningMeanStd epsilon in the initial variance merge."""

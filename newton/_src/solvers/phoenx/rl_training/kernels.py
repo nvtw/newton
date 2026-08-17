@@ -150,9 +150,51 @@ def zero_scalar_kernel(x: wp.array[wp.float32]):
 
 
 @wp.kernel
-def adam_step_prepare_kernel(
-    step_count: wp.array[wp.int32], beta1: wp.float32, beta2: wp.float32, corrections: wp.array[wp.float32]
+def scale_2d_in_place_kernel(values: wp.array2d[wp.float32], scale: wp.array[wp.float32]):
+    i, j = wp.tid()
+    values[i, j] *= scale[0]
+
+
+@wp.kernel
+def amp_reset_found_inf_kernel(found_inf: wp.array[wp.int32]):
+    found_inf[0] = wp.int32(0)
+
+
+@wp.kernel
+def amp_finalize_step_kernel(found_inf: wp.array[wp.int32], condition: wp.array[wp.int32]):
+    condition[0] = wp.int32(found_inf[0] == wp.int32(0))
+
+
+@wp.kernel
+def amp_update_scale_kernel(
+    found_inf: wp.array[wp.int32],
+    scale: wp.array[wp.float32],
+    growth_tracker: wp.array[wp.int32],
+    growth_factor: wp.float32,
+    backoff_factor: wp.float32,
+    growth_interval: wp.int32,
 ):
+    if found_inf[0] != wp.int32(0):
+        scale[0] *= backoff_factor
+        growth_tracker[0] = wp.int32(0)
+    else:
+        tracker = growth_tracker[0] + wp.int32(1)
+        if tracker >= growth_interval:
+            scale[0] *= growth_factor
+            tracker = wp.int32(0)
+        growth_tracker[0] = tracker
+
+
+@wp.kernel
+def adam_step_prepare_kernel(
+    step_count: wp.array[wp.int32],
+    condition: wp.array[wp.int32],
+    beta1: wp.float32,
+    beta2: wp.float32,
+    corrections: wp.array[wp.float32],
+):
+    if condition[0] == wp.int32(0):
+        return
     step_count[0] = step_count[0] + wp.int32(1)
     step = wp.float32(step_count[0])
     corrections[0] = wp.float32(1.0) - wp.pow(beta1, step)
@@ -2325,6 +2367,7 @@ def sac_actor_policy_backward_device_alpha_kernel(
     log_std_min: wp.float32,
     log_std_max: wp.float32,
     average_critics: wp.bool,
+    loss_scale: wp.array[wp.float32],
     loss: wp.array[wp.float32],
     policy_out_grad: wp.array2d[wp.float32],
 ):
@@ -2347,11 +2390,12 @@ def sac_actor_policy_backward_device_alpha_kernel(
             * (wp.float32(1.0) - value * value)
             / (wp.float32(1.0) - value * value + wp.float32(TANH_EPS))
         )
-        pre_grad = action_grad * (wp.float32(1.0) - value * value) + alpha[0] * inv_batch * correction_grad
+        pre_grad = action_grad * (wp.float32(1.0) - value * value)
+        pre_grad += loss_scale[0] * alpha[0] * inv_batch * correction_grad
         policy_out_grad[row, action] = pre_grad
         log_std_grad = wp.float32(0.0)
         if raw_log_std >= log_std_min and raw_log_std <= log_std_max:
-            log_std_grad = pre_grad * std_eps - alpha[0] * inv_batch
+            log_std_grad = pre_grad * std_eps - loss_scale[0] * alpha[0] * inv_batch
         policy_out_grad[row, action_dim + action] = log_std_grad
 
 
@@ -2638,6 +2682,7 @@ def adam_step_1d_kernel(
     lr: wp.float32,
     lr_scale: wp.array[wp.float32],
     pbt_lr_scale: wp.array[wp.float32],
+    condition: wp.array[wp.int32],
     beta1: wp.float32,
     beta2: wp.float32,
     eps: wp.float32,
@@ -2645,6 +2690,9 @@ def adam_step_1d_kernel(
     max_grad_norm: wp.float32,
 ):
     i = wp.tid()
+    if condition[0] == wp.int32(0):
+        grad[i] = wp.float32(0.0)
+        return
     beta1_correction = step_corrections[0]
     beta2_correction = step_corrections[1]
     g = _grad_clip_scale(grad_sumsq, max_grad_norm) * grad[i] + weight_decay * param[i]
@@ -2668,6 +2716,7 @@ def adam_step_2d_kernel(
     lr: wp.float32,
     lr_scale: wp.array[wp.float32],
     pbt_lr_scale: wp.array[wp.float32],
+    condition: wp.array[wp.int32],
     beta1: wp.float32,
     beta2: wp.float32,
     eps: wp.float32,
@@ -2675,6 +2724,9 @@ def adam_step_2d_kernel(
     max_grad_norm: wp.float32,
 ):
     i, j = wp.tid()
+    if condition[0] == wp.int32(0):
+        grad[i, j] = wp.float32(0.0)
+        return
     beta1_correction = step_corrections[0]
     beta2_correction = step_corrections[1]
     g = _grad_clip_scale(grad_sumsq, max_grad_norm) * grad[i, j] + weight_decay * param[i, j]
