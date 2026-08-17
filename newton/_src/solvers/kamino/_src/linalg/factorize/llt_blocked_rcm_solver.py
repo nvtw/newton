@@ -173,7 +173,6 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._rcm_max_bfs_iters = rcm_max_bfs_iters
         self._reuse_permutation = reuse_permutation
         self._parallel_factorization = parallel_factorization
-        self._use_parallel_factorization = False
 
         # Build kernels (cached by block_size / max_dim at allocate time).
         self._factorize_kernel = make_llt_blocked_rcm_factorize_kernel(block_size)
@@ -258,10 +257,6 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             self._block_size, self._max_dim
         )
         max_n_tiles = (self._max_dim + self._block_size - 1) // self._block_size
-        # Panel parallelism adds two launches per panel. Small factorizations
-        # expose too little panel work to recover that overhead, even when the
-        # caller requests the generally faster parallel implementation.
-        self._use_parallel_factorization = self._parallel_factorization and max_n_tiles > 3
         self._symbolic_fill_in_kernel = make_llt_blocked_rcm_symbolic_fill_in_kernel(max_n_tiles)
 
         # Per-block tile-pattern layout: n_tiles_i^2 entries per block.
@@ -430,7 +425,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         )
 
         # 4. Numeric factorization with tile-pattern skips.
-        if self._use_parallel_factorization:
+        if self._parallel_factorization:
             llt_blocked_rcm_factorize_parallel(
                 kernels=self._parallel_factorize_kernels,
                 dim=info.dim,

@@ -203,7 +203,6 @@ class Example:
                 sparse_jacobian=True,
             )
             solver_config.dvi.bilateral_solver_type = "LLTBRCM"
-            solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
             solver_config.dvi.max_alternating_iterations = 5
             solver_config.dvi.bilateral_solve_interval = 5
             solver_config.dvi.inequality_sweeps_per_iteration = 1
