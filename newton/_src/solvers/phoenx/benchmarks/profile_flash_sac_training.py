@@ -83,8 +83,14 @@ def _profile_learner(
 
 
 def _profile_full(
-    device: wp.Device, replays: int, warmup_replays: int, worlds: int, use_amp: bool
+    device: wp.Device,
+    replays: int,
+    warmup_replays: int,
+    worlds: int,
+    use_amp: bool,
+    overlap: bool = False,
 ) -> dict[str, float | int | str]:
+    setup_start = time.perf_counter()
     env = rl.EnvG1PhoenX(g1_recipe.default_g1_env_config(world_count=worlds), device=device)
     trainer = rl.TrainerFlashSAC(
         obs_dim=env.obs_dim,
@@ -93,7 +99,14 @@ def _profile_full(
         device=device,
         seed=29,
     )
-    graph = trainer.prepare_training_graph(env, updates_per_step=2, interactions_per_graph=2, seed=31)
+    graph = trainer.prepare_training_graph(
+        env,
+        updates_per_step=2,
+        interactions_per_graph=2,
+        seed=31,
+        overlap=overlap,
+    )
+    setup_seconds = time.perf_counter() - setup_start
     for _ in range(warmup_replays):
         graph.launch()
     wp.synchronize_device(device)
@@ -111,6 +124,8 @@ def _profile_full(
     return {
         "mode": "full",
         "use_amp": use_amp,
+        "overlap": overlap,
+        "setup_seconds": setup_seconds,
         "world_count": worlds,
         "replays": replays,
         "elapsed_seconds": elapsed,
@@ -127,6 +142,7 @@ def main() -> int:
     parser.add_argument("--world-count", type=int, default=1024)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--amp", action="store_true", help="Use FP16 FlashSAC contractions")
+    parser.add_argument("--overlap", action="store_true", help="Overlap rollout and learner graphs")
     args = parser.parse_args()
     if args.replays <= 0 or args.warmup_replays < 0:
         parser.error("replays must be positive and warmup-replays non-negative")
@@ -136,7 +152,7 @@ def main() -> int:
     if args.mode == "learner":
         result = _profile_learner(device, args.replays, args.warmup_replays, args.amp)
     else:
-        result = _profile_full(device, args.replays, args.warmup_replays, args.world_count, args.amp)
+        result = _profile_full(device, args.replays, args.warmup_replays, args.world_count, args.amp, args.overlap)
     print(json.dumps(result, sort_keys=True))
     return 0
 

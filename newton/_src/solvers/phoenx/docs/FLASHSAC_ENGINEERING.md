@@ -219,14 +219,20 @@ snapshot.  The following rollout and learner graphs can therefore overlap
 without concurrent replay reads/writes or learner/collector parameter races.
 The public handle drains all streams explicitly for checkpoints and teardown.
 
-Including phase preparation, batch copies, joins, rollout, and all four learner
-updates, the overlap cadence measured 11.75 ms (174.3k transitions/s), compared
-with 14.12 ms (145.0k transitions/s) for the combined graph in the same process.
-A fresh seed-0 run first passed at 7.596M transitions and sustained at 8.096M,
-with tracking 0.770, aligned velocity 0.458 m/s, and zero falls.  Its recorded
-training times were 55.04 and 57.96 seconds, including 14.11 seconds of cold
-setup through the first 0.600M transitions.  The mode remains opt-in pending
-multi-seed quality evidence.
+After warming both construction paths in one process, combined setup measured
+0.919 s and overlap setup measured 1.165 s.  Including phase preparation, batch
+copies, joins, rollout, and all four learner updates, their cadences measured
+14.136 ms (144.9k transitions/s) and 11.780 ms (173.8k transitions/s),
+respectively.  The additional setup cost breaks even after roughly 105 cadences,
+or 0.215M transitions at 1,024 worlds.
+
+Three fresh seeds preserved the fixed full-G1 quality gate.  Seeds 0 and 1
+first passed at 7.596M transitions and sustained at 8.096M; seed 2 first passed
+at 8.595M and sustained at 9.095M.  Their sustained tracking was 0.770, 0.849,
+and 0.761; aligned velocity was 0.458, 0.696, and 0.921 m/s; all had zero falls.
+Training times including setup were 57.96, 47.49, and 53.13 seconds.  The mode
+remains opt-in so callers explicitly choose the one-cadence replay eligibility
+delay and additional policy/batch storage.
 
 ## Reproducible quality evidence
 
