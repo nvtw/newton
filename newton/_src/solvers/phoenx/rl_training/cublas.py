@@ -16,6 +16,7 @@ _CUBLAS_OP_N = 0
 _CUBLAS_OP_T = 1
 _CUBLAS_COMPUTE_32F = 68
 _CUBLAS_GEMM_DEFAULT = -1
+_CUBLAS_ATOMICS_NOT_ALLOWED = 0
 
 
 class _Cublas:
@@ -27,6 +28,10 @@ class _Cublas:
         self.lib.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
         self.lib.cublasCreate_v2.restype = ctypes.c_int
         self.lib.cublasSetStream_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self.lib.cublasSetAtomicsMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.lib.cublasSetAtomicsMode.restype = ctypes.c_int
+        self.lib.cublasGetAtomicsMode.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+        self.lib.cublasGetAtomicsMode.restype = ctypes.c_int
         self.lib.cublasSetStream_v2.restype = ctypes.c_int
         self.lib.cublasGemmEx.argtypes = [
             ctypes.c_void_p,
@@ -91,6 +96,14 @@ class _Cublas:
                 status = self.lib.cublasCreate_v2(ctypes.byref(handle))
             if status != 0:
                 raise RuntimeError(f"cublasCreate_v2 failed with status {status}")
+            status = self.lib.cublasSetAtomicsMode(handle, _CUBLAS_ATOMICS_NOT_ALLOWED)
+            atomics_mode = ctypes.c_int(-1)
+            if status == 0:
+                status = self.lib.cublasGetAtomicsMode(handle, ctypes.byref(atomics_mode))
+            if status != 0 or atomics_mode.value != _CUBLAS_ATOMICS_NOT_ALLOWED:
+                raise RuntimeError(
+                    f"deterministic cuBLAS atomics setup failed with status {status}, mode {atomics_mode.value}"
+                )
             handles[key] = handle
         return handle
 

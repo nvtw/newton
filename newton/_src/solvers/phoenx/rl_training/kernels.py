@@ -2581,6 +2581,12 @@ def soft_update_2d_kernel(src: wp.array2d[wp.float32], tau: wp.float32, dst: wp.
 
 
 @wp.kernel
+def soft_update_3d_kernel(src: wp.array3d[wp.float32], tau: wp.float32, dst: wp.array3d[wp.float32]):
+    i, j, k = wp.tid()
+    dst[i, j, k] = (wp.float32(1.0) - tau) * dst[i, j, k] + tau * src[i, j, k]
+
+
+@wp.kernel
 def weight_column_sumsq_kernel(
     weight: wp.array2d[wp.float32],
     column_sumsq: wp.array[wp.float32],
@@ -2821,6 +2827,195 @@ def adam_step_2d_kernel(
 @wp.kernel
 def optimizer_step_count_kernel(step_count: wp.array[wp.int32]):
     step_count[0] = step_count[0] + wp.int32(1)
+
+
+@wp.kernel
+def adam_population_step_prepare_kernel(
+    step_count: wp.array[wp.int32],
+    condition: wp.array[wp.int32],
+    beta1: wp.float32,
+    beta2: wp.float32,
+    corrections: wp.array2d[wp.float32],
+):
+    member = wp.tid()
+    if condition[member] == wp.int32(0):
+        return
+    step_count[member] = step_count[member] + wp.int32(1)
+    step = wp.float32(step_count[member])
+    corrections[member, 0] = wp.float32(1.0) - wp.pow(beta1, step)
+    corrections[member, 1] = wp.float32(1.0) - wp.pow(beta2, step)
+
+
+@wp.func
+def _population_grad_clip_scale(
+    grad_sumsq: wp.array[wp.float32], member: wp.int32, max_grad_norm: wp.float32
+) -> wp.float32:
+    scale = wp.float32(1.0)
+    if max_grad_norm > wp.float32(0.0):
+        norm = wp.sqrt(grad_sumsq[member])
+        if norm > max_grad_norm:
+            scale = max_grad_norm / (norm + wp.float32(1.0e-6))
+    return scale
+
+
+@wp.kernel
+def adam_population_step_2d_kernel(
+    param: wp.array2d[wp.float32],
+    grad: wp.array2d[wp.float32],
+    m: wp.array2d[wp.float32],
+    v: wp.array2d[wp.float32],
+    grad_sumsq: wp.array[wp.float32],
+    corrections: wp.array2d[wp.float32],
+    lr: wp.float32,
+    lr_scale: wp.array[wp.float32],
+    pbt_lr_scale: wp.array[wp.float32],
+    condition: wp.array[wp.int32],
+    beta1: wp.float32,
+    beta2: wp.float32,
+    eps: wp.float32,
+    weight_decay: wp.float32,
+    max_grad_norm: wp.float32,
+):
+    member, element = wp.tid()
+    if condition[member] == wp.int32(0):
+        grad[member, element] = wp.float32(0.0)
+        return
+    g = (
+        _population_grad_clip_scale(grad_sumsq, member, max_grad_norm) * grad[member, element]
+        + weight_decay * param[member, element]
+    )
+    mi = beta1 * m[member, element] + (wp.float32(1.0) - beta1) * g
+    vi = beta2 * v[member, element] + (wp.float32(1.0) - beta2) * g * g
+    m[member, element] = mi
+    v[member, element] = vi
+    step_lr = lr * lr_scale[member] * pbt_lr_scale[member]
+    param[member, element] -= step_lr * (mi / corrections[member, 0]) / (wp.sqrt(vi / corrections[member, 1]) + eps)
+    grad[member, element] = wp.float32(0.0)
+
+
+@wp.kernel
+def adam_population_step_3d_kernel(
+    param: wp.array3d[wp.float32],
+    grad: wp.array3d[wp.float32],
+    m: wp.array3d[wp.float32],
+    v: wp.array3d[wp.float32],
+    grad_sumsq: wp.array[wp.float32],
+    corrections: wp.array2d[wp.float32],
+    lr: wp.float32,
+    lr_scale: wp.array[wp.float32],
+    pbt_lr_scale: wp.array[wp.float32],
+    condition: wp.array[wp.int32],
+    beta1: wp.float32,
+    beta2: wp.float32,
+    eps: wp.float32,
+    weight_decay: wp.float32,
+    max_grad_norm: wp.float32,
+):
+    member, row, column = wp.tid()
+    if condition[member] == wp.int32(0):
+        grad[member, row, column] = wp.float32(0.0)
+        return
+    g = (
+        _population_grad_clip_scale(grad_sumsq, member, max_grad_norm) * grad[member, row, column]
+        + weight_decay * param[member, row, column]
+    )
+    mi = beta1 * m[member, row, column] + (wp.float32(1.0) - beta1) * g
+    vi = beta2 * v[member, row, column] + (wp.float32(1.0) - beta2) * g * g
+    m[member, row, column] = mi
+    v[member, row, column] = vi
+    step_lr = lr * lr_scale[member] * pbt_lr_scale[member]
+    param[member, row, column] -= step_lr * (mi / corrections[member, 0]) / (wp.sqrt(vi / corrections[member, 1]) + eps)
+    grad[member, row, column] = wp.float32(0.0)
+
+
+@wp.kernel
+def population_copy_float_1d_kernel(
+    values: wp.array[wp.float32], source_index: wp.array[wp.int32], destination_index: wp.array[wp.int32]
+):
+    values[destination_index[0]] = values[source_index[0]]
+
+
+@wp.kernel
+def population_copy_int_1d_kernel(
+    values: wp.array[wp.int32], source_index: wp.array[wp.int32], destination_index: wp.array[wp.int32]
+):
+    values[destination_index[0]] = values[source_index[0]]
+
+
+@wp.kernel
+def population_copy_float_2d_kernel(
+    values: wp.array2d[wp.float32], source_index: wp.array[wp.int32], destination_index: wp.array[wp.int32]
+):
+    element = wp.tid()
+    values[destination_index[0], element] = values[source_index[0], element]
+
+
+@wp.kernel
+def population_copy_int_2d_kernel(
+    values: wp.array2d[wp.int32], source_index: wp.array[wp.int32], destination_index: wp.array[wp.int32]
+):
+    element = wp.tid()
+    values[destination_index[0], element] = values[source_index[0], element]
+
+
+@wp.kernel
+def population_copy_float_3d_kernel(
+    values: wp.array3d[wp.float32], source_index: wp.array[wp.int32], destination_index: wp.array[wp.int32]
+):
+    row, column = wp.tid()
+    values[destination_index[0], row, column] = values[source_index[0], row, column]
+
+
+@wp.kernel
+def population_copy_float16_3d_kernel(
+    values: wp.array3d[wp.float16], source_index: wp.array[wp.int32], destination_index: wp.array[wp.int32]
+):
+    row, column = wp.tid()
+    values[destination_index[0], row, column] = values[source_index[0], row, column]
+
+
+@wp.kernel
+def population_pair_indices_kernel(
+    source_index: wp.array[wp.int32],
+    destination_index: wp.array[wp.int32],
+    source_first: wp.array[wp.int32],
+    source_second: wp.array[wp.int32],
+    destination_first: wp.array[wp.int32],
+    destination_second: wp.array[wp.int32],
+):
+    source_first[0] = source_index[0] * wp.int32(2)
+    source_second[0] = source_first[0] + wp.int32(1)
+    destination_first[0] = destination_index[0] * wp.int32(2)
+    destination_second[0] = destination_first[0] + wp.int32(1)
+
+
+@wp.kernel
+def population_repeat_pair_kernel(values: wp.array[wp.int32], paired_values: wp.array[wp.int32]):
+    member, pair_member = wp.tid()
+    paired_values[member * wp.int32(2) + pair_member] = values[member]
+
+
+@wp.kernel
+def amp_update_scale_population_kernel(
+    found_inf: wp.array[wp.int32],
+    scale: wp.array[wp.float32],
+    growth_tracker: wp.array[wp.int32],
+    condition: wp.array[wp.int32],
+    growth_factor: wp.float32,
+    backoff_factor: wp.float32,
+    growth_interval: wp.int32,
+):
+    member = wp.tid()
+    condition[member] = wp.int32(found_inf[member] == wp.int32(0))
+    if found_inf[member] != wp.int32(0):
+        scale[member] *= backoff_factor
+        growth_tracker[member] = wp.int32(0)
+    else:
+        tracker = growth_tracker[member] + wp.int32(1)
+        if tracker >= growth_interval:
+            scale[member] *= growth_factor
+            tracker = wp.int32(0)
+        growth_tracker[member] = tracker
 
 
 @wp.kernel

@@ -72,16 +72,23 @@ def _copy_flash_sac_batch(destination: BatchSAC, source: BatchSAC) -> None:
 
 @wp.kernel
 def _flash_sac_alpha_loss_kernel(
-    log_probs: wp.array[wp.float32],
-    log_alpha: wp.array[wp.float32],
+    log_probs: wp.array2d[wp.float32],
+    log_alpha: wp.array2d[wp.float32],
     batch_size: wp.int32,
     target_entropy: wp.float32,
     loss: wp.array[wp.float32],
+    log_alpha_grad: wp.array2d[wp.float32],
 ):
-    i = wp.tid()
-    alpha = wp.exp(log_alpha[0])
-    entropy = -log_probs[i]
-    wp.atomic_add(loss, 0, alpha * (entropy - target_entropy) / wp.float32(batch_size))
+    member, lane = wp.tid()
+    entropy_sum = wp.float32(0.0)
+    for row in range(lane, batch_size, wp.int32(32)):
+        entropy_sum -= log_probs[member, row]
+    entropy_total = wp.tile_sum(wp.tile(entropy_sum))[0]
+    if lane == wp.int32(0):
+        alpha = wp.exp(log_alpha[member, 0])
+        value = alpha * (entropy_total / wp.float32(batch_size) - target_entropy)
+        loss[member] = value
+        log_alpha_grad[member, 0] = value
 
 
 @wp.kernel
@@ -1673,16 +1680,17 @@ class TrainerFlashSAC(TrainerSAC):
         log_probs = getattr(self, "_actor_update_log_probs", None)
         if log_probs is None or int(log_probs.shape[0]) != batch.batch_size:
             raise RuntimeError("FlashSAC temperature update requires a preceding actor update")
-        wp.launch(zero_scalar_kernel, dim=1, outputs=[self._alpha_loss], device=self.device)
-        with wp.Tape() as tape:
-            wp.launch(
-                _flash_sac_alpha_loss_kernel,
-                dim=batch.batch_size,
-                inputs=[log_probs, self.log_alpha, batch.batch_size, self.target_entropy],
-                outputs=[self._alpha_loss],
-                device=self.device,
-            )
-        tape.backward(self._alpha_loss)
+        log_probs_2d = log_probs.reshape((1, batch.batch_size))
+        log_alpha_2d = self.log_alpha.reshape((1, 1))
+        log_alpha_grad_2d = self.log_alpha.grad.reshape((1, 1))
+        wp.launch(
+            _flash_sac_alpha_loss_kernel,
+            dim=(1, 32),
+            inputs=[log_probs_2d, log_alpha_2d, batch.batch_size, self.target_entropy],
+            outputs=[self._alpha_loss, log_alpha_grad_2d],
+            block_dim=32,
+            device=self.device,
+        )
         self.alpha_optimizer.step()
         wp.launch(
             sac_refresh_alpha_kernel,
@@ -1731,7 +1739,11 @@ class TrainerFlashSAC(TrainerSAC):
             self.target_critic1.soft_update_from(self.critic1, self.config.tau)
             self.target_critic2.soft_update_from(self.critic2, self.config.tau)
             if self.config.use_amp:
-                self._target_critic_ensemble.refresh_contraction_weights()
+                if self._target_critic_ensemble is not None:
+                    self._target_critic_ensemble.refresh_contraction_weights()
+                else:
+                    self.target_critic1.refresh_contraction_weights()
+                    self.target_critic2.refresh_contraction_weights()
             self._gradient_update_count += 1
         self._update_count += 1
         wp.launch(
@@ -1806,7 +1818,11 @@ class TrainerFlashSAC(TrainerSAC):
             self.critic1.normalize_weights()
             self.critic2.normalize_weights()
         if self.config.use_amp:
-            self._critic_ensemble.refresh_contraction_weights()
+            if self._critic_ensemble is not None:
+                self._critic_ensemble.refresh_contraction_weights()
+            else:
+                self.critic1.refresh_contraction_weights()
+                self.critic2.refresh_contraction_weights()
 
 
 @dataclass

@@ -12,9 +12,13 @@ from .kernels import (
     MUON_TILE_BLOCK_DIM,
     OPTIMIZER_GRAD_BLOCK_SIZE,
     OPTIMIZER_GRAD_PARTIAL_COUNT,
+    adam_population_step_2d_kernel,
+    adam_population_step_3d_kernel,
+    adam_population_step_prepare_kernel,
     adam_step_1d_kernel,
     adam_step_2d_kernel,
     adam_step_prepare_kernel,
+    amp_update_scale_population_kernel,
     grad_sumsq_blocks_kernel,
     grad_sumsq_partials_1d_kernel,
     grad_sumsq_partials_2d_kernel,
@@ -34,6 +38,10 @@ from .kernels import (
     muon_step_1d_kernel,
     muon_step_2d_kernel,
     optimizer_step_count_kernel,
+    population_copy_float_1d_kernel,
+    population_copy_float_2d_kernel,
+    population_copy_float_3d_kernel,
+    population_copy_int_1d_kernel,
     reduce_grad_sumsq_param_partials_kernel,
     reduce_grad_sumsq_partials_kernel,
 )
@@ -285,6 +293,241 @@ NS_COEFFS = (
     (2.8769, -3.1427, 1.2046),
     (2.8366, -3.0525, 1.2012),
 )
+
+
+class AdamPopulation:
+    """Adam optimizer over setup-owned arrays with a leading population dimension."""
+
+    def __init__(
+        self,
+        params: list[wp.array],
+        *,
+        lr: float = 3.0e-4,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        eps: float = 1.0e-8,
+        weight_decay: float = 0.0,
+        max_grad_norm: float = 0.0,
+    ):
+        if not params:
+            raise ValueError("AdamPopulation requires at least one parameter")
+        if any(param.ndim not in (2, 3) for param in params):
+            raise ValueError("AdamPopulation supports only 2-D and 3-D population arrays")
+        self.population_count = int(params[0].shape[0])
+        if self.population_count <= 0 or any(int(param.shape[0]) != self.population_count for param in params):
+            raise ValueError("AdamPopulation parameters must share a positive leading dimension")
+        if max_grad_norm > 0.0:
+            raise ValueError("AdamPopulation segmented gradient clipping is not implemented")
+        self.params = params
+        self.lr = float(lr)
+        self.beta1 = float(beta1)
+        self.beta2 = float(beta2)
+        self.eps = float(eps)
+        self.weight_decay = float(weight_decay)
+        self.max_grad_norm = float(max_grad_norm)
+        device = params[0].device
+        self.lr_scale = wp.ones(self.population_count, dtype=wp.float32, device=device)
+        self.pbt_lr_scale = wp.ones(self.population_count, dtype=wp.float32, device=device)
+        self.step_condition = wp.ones(self.population_count, dtype=wp.int32, device=device)
+        self._step_count = wp.zeros(self.population_count, dtype=wp.int32, device=device)
+        self._step_corrections = wp.zeros((self.population_count, 2), dtype=wp.float32, device=device)
+        self._grad_sumsq = wp.zeros(self.population_count, dtype=wp.float32, device=device)
+        self.m = [wp.zeros_like(param, requires_grad=False) for param in params]
+        self.v = [wp.zeros_like(param, requires_grad=False) for param in params]
+
+    def step(self) -> None:
+        """Apply one population-batched Adam update and clear gradients."""
+
+        wp.launch(
+            adam_population_step_prepare_kernel,
+            dim=self.population_count,
+            inputs=[self._step_count, self.step_condition, self.beta1, self.beta2],
+            outputs=[self._step_corrections],
+            device=self.params[0].device,
+        )
+        for param, m, v in zip(self.params, self.m, self.v, strict=True):
+            if param.grad is None:
+                continue
+            if param.ndim == 2:
+                wp.launch(
+                    adam_population_step_2d_kernel,
+                    dim=param.shape,
+                    inputs=[
+                        param,
+                        param.grad,
+                        m,
+                        v,
+                        self._grad_sumsq,
+                        self._step_corrections,
+                        self.lr,
+                        self.lr_scale,
+                        self.pbt_lr_scale,
+                        self.step_condition,
+                        self.beta1,
+                        self.beta2,
+                        self.eps,
+                        self.weight_decay,
+                        self.max_grad_norm,
+                    ],
+                    device=param.device,
+                )
+            else:
+                wp.launch(
+                    adam_population_step_3d_kernel,
+                    dim=param.shape,
+                    inputs=[
+                        param,
+                        param.grad,
+                        m,
+                        v,
+                        self._grad_sumsq,
+                        self._step_corrections,
+                        self.lr,
+                        self.lr_scale,
+                        self.pbt_lr_scale,
+                        self.step_condition,
+                        self.beta1,
+                        self.beta2,
+                        self.eps,
+                        self.weight_decay,
+                        self.max_grad_norm,
+                    ],
+                    device=param.device,
+                )
+
+    def set_pbt_lrs(self, learning_rates: np.ndarray) -> None:
+        """Set graph-stable per-member learning-rate multipliers."""
+
+        values = np.asarray(learning_rates, dtype=np.float32)
+        if values.shape != (self.population_count,) or not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+            raise ValueError("learning_rates must contain one positive finite value per population member")
+        self.pbt_lr_scale.assign(values / np.float32(self.lr))
+
+    def copy_member(
+        self,
+        source_index: wp.array[wp.int32],
+        destination_index: wp.array[wp.int32],
+    ) -> None:
+        """Copy one optimizer member entirely using device-resident indices."""
+
+        device = self.params[0].device
+        for values in (
+            self._step_count,
+            self.lr_scale,
+            self.pbt_lr_scale,
+            self.step_condition,
+            self._grad_sumsq,
+        ):
+            wp.launch(
+                population_copy_int_1d_kernel if values.dtype == wp.int32 else population_copy_float_1d_kernel,
+                dim=1,
+                inputs=[values, source_index, destination_index],
+                device=device,
+            )
+        wp.launch(
+            population_copy_float_2d_kernel,
+            dim=2,
+            inputs=[self._step_corrections, source_index, destination_index],
+            device=device,
+        )
+        for values in (*self.m, *self.v):
+            if values.ndim == 2:
+                wp.launch(
+                    population_copy_float_2d_kernel,
+                    dim=values.shape[1],
+                    inputs=[values, source_index, destination_index],
+                    device=device,
+                )
+            else:
+                wp.launch(
+                    population_copy_float_3d_kernel,
+                    dim=values.shape[1:],
+                    inputs=[values, source_index, destination_index],
+                    device=device,
+                )
+
+    def state_arrays(self) -> tuple[wp.array, ...]:
+        """Return all setup-owned optimizer arrays in stable order."""
+
+        return (
+            self._step_count,
+            self._step_corrections,
+            self._grad_sumsq,
+            self.lr_scale,
+            self.pbt_lr_scale,
+            self.step_condition,
+            *self.m,
+            *self.v,
+        )
+
+
+class AMPStatePopulation:
+    """Graph-native dynamic loss-scaler state with one independent member per population."""
+
+    def __init__(
+        self,
+        population_count: int,
+        device: wp.context.Devicelike,
+        *,
+        initial_scale: float = 65536.0,
+        growth_factor: float = 2.0,
+        backoff_factor: float = 0.5,
+        growth_interval: int = 2000,
+    ):
+        if population_count <= 0:
+            raise ValueError("population_count must be positive")
+        self.population_count = int(population_count)
+        self.device = wp.get_device(device)
+        self.growth_factor = float(growth_factor)
+        self.backoff_factor = float(backoff_factor)
+        self.growth_interval = int(growth_interval)
+        self.scale = wp.full(self.population_count, float(initial_scale), dtype=wp.float32, device=self.device)
+        self.growth_tracker = wp.zeros(self.population_count, dtype=wp.int32, device=self.device)
+        self.found_inf = wp.zeros(self.population_count, dtype=wp.int32, device=self.device)
+        self.step_condition = wp.ones(self.population_count, dtype=wp.int32, device=self.device)
+
+    def reset_found_inf(self) -> None:
+        """Clear per-member nonfinite flags without reallocating state."""
+
+        self.found_inf.zero_()
+
+    def update(self) -> None:
+        """Update every member's scale and optimizer-step condition."""
+
+        wp.launch(
+            amp_update_scale_population_kernel,
+            dim=self.population_count,
+            inputs=[
+                self.found_inf,
+                self.scale,
+                self.growth_tracker,
+                self.step_condition,
+                self.growth_factor,
+                self.backoff_factor,
+                self.growth_interval,
+            ],
+            device=self.device,
+        )
+
+    def copy_member(
+        self,
+        source_index: wp.array[wp.int32],
+        destination_index: wp.array[wp.int32],
+    ) -> None:
+        """Copy one scaler member using device-resident indices."""
+
+        for values in self.state_arrays():
+            wp.launch(
+                population_copy_int_1d_kernel if values.dtype == wp.int32 else population_copy_float_1d_kernel,
+                dim=1,
+                inputs=[values, source_index, destination_index],
+                device=self.device,
+            )
+
+    def state_arrays(self) -> tuple[wp.array, ...]:
+        """Return all setup-owned scaler arrays in stable order."""
+
+        return self.scale, self.growth_tracker, self.found_inf, self.step_condition
 
 
 class Muon:

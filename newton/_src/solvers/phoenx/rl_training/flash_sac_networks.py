@@ -22,6 +22,9 @@ from .cublas import (
 from .kernels import (
     copy_1d_kernel,
     copy_2d_kernel,
+    population_copy_float16_3d_kernel,
+    population_copy_float_2d_kernel,
+    population_copy_float_3d_kernel,
     soft_update_1d_kernel,
     soft_update_2d_kernel,
     unit_normalize_weight_columns_tile_kernel,
@@ -2402,6 +2405,16 @@ class EnsembleNetworkFlashSAC:
             for ensemble_index, network in enumerate(self.networks):
                 network.head_weights[head_index] = weight[ensemble_index]
             self.head_weights.append(weight)
+        self.head_biases: list[wp.array2d[wp.float32]] = []
+        for head_index in range(len(first.head_biases)):
+            bias = self._stack_vectors(*(network.head_biases[head_index] for network in self.networks))
+            for ensemble_index, network in enumerate(self.networks):
+                network.head_biases[head_index] = bias[ensemble_index]
+            self.head_biases.append(bias)
+        self.rms_scale = self._stack_vectors(*(network.rms_scale for network in self.networks))
+        for ensemble_index, network in enumerate(self.networks):
+            network.rms_scale = self.rms_scale[ensemble_index]
+            network.biases = network.head_biases
         for network in self.networks:
             network.weights = [network.embed_weight]
             for w1, w2 in network.block_weights:
@@ -2423,6 +2436,14 @@ class EnsembleNetworkFlashSAC:
         for block_index in range(self.num_blocks):
             self._stack_norm_group(tuple(network.block_norms[block_index][0] for network in self.networks))
             self._stack_norm_group(tuple(network.block_norms[block_index][1] for network in self.networks))
+        self._population_parameters = [*self.weights, *self.head_biases]
+        for state in self._population_norm_states.values():
+            self._population_parameters.extend((state["scale"], state["bias"]))
+        self._population_parameters.append(self.rms_scale)
+        self._population_state_arrays = [*self.weights, *self.head_biases]
+        for state in self._population_norm_states.values():
+            self._population_state_arrays.extend(state.values())
+        self._population_state_arrays.append(self.rms_scale)
 
     def _stack_norm_group(self, norms: tuple[_UnitBatchNorm, ...]) -> None:
         state: dict[str, wp.array[Any]] = {}
@@ -2545,6 +2566,54 @@ class EnsembleNetworkFlashSAC:
                 self._contraction_input(source, refresh=False)
         self._workspace_rows = rows
         self.refresh_contraction_weights()
+
+    def _stack_vectors(self, *values: wp.array[wp.float32]) -> wp.array2d[wp.float32]:
+        return wp.array(
+            np.stack(tuple(value.numpy() for value in values)),
+            dtype=wp.float32,
+            device=self.device,
+            requires_grad=True,
+        )
+
+    def population_parameters(self) -> list[wp.array]:
+        """Return setup-owned trainable arrays with a leading population dimension."""
+
+        return list(self._population_parameters)
+
+    def population_state_arrays(self) -> list[wp.array]:
+        """Return complete setup-owned network state with a leading population dimension."""
+
+        return list(self._population_state_arrays)
+
+    def copy_population_member(
+        self,
+        source_index: wp.array[wp.int32],
+        destination_index: wp.array[wp.int32],
+    ) -> None:
+        """Copy one complete network member using device-resident indices."""
+
+        for value in self._population_state_arrays:
+            if value.ndim == 2:
+                wp.launch(
+                    population_copy_float_2d_kernel,
+                    dim=value.shape[1],
+                    inputs=[value, source_index, destination_index],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    population_copy_float_3d_kernel,
+                    dim=value.shape[1:],
+                    inputs=[value, source_index, destination_index],
+                    device=self.device,
+                )
+        for value in self._fp16_weights.values():
+            wp.launch(
+                population_copy_float16_3d_kernel,
+                dim=value.shape[1:],
+                inputs=[value, source_index, destination_index],
+                device=self.device,
+            )
 
     def _stack_weights(self, *weights: wp.array2d[wp.float32]) -> wp.array3d[wp.float32]:
         return wp.array(
@@ -2773,9 +2842,15 @@ class EnsembleNetworkFlashSAC:
         return out_f16
 
     def _forward(
-        self, x: wp.array2d[wp.float32], *, training: bool, retain_activations: bool
+        self,
+        x: wp.array2d[wp.float32] | wp.array3d[wp.float32],
+        *,
+        training: bool,
+        retain_activations: bool,
     ) -> wp.array3d[wp.float32]:
-        self.reserve_buffers(int(x.shape[0]))
+        if x.ndim == 3 and int(x.shape[0]) != self.ensemble_count:
+            raise ValueError("Population input leading dimension must match the ensemble")
+        self.reserve_buffers(int(x.shape[-2]))
         workspace = self._workspace
         input_normalized = workspace["input_normalized"]
         if not isinstance(input_normalized, wp.array):
@@ -2785,7 +2860,7 @@ class EnsembleNetworkFlashSAC:
             input_normalized,
             tuple(network.input_norm for network in self.networks),
             training=training,
-            broadcast_input=True,
+            broadcast_input=x.ndim == 2,
         )
         hidden = self._linear(
             input_normalized, self.embed_weight, contraction_input=input_normalized_f16, out=workspace["embed"]
@@ -2922,7 +2997,9 @@ class EnsembleNetworkFlashSAC:
         output = self._forward(x, training=training, retain_activations=False)
         return output[0], output[1]
 
-    def forward_all(self, x: wp.array2d[wp.float32], *, training: bool = True) -> wp.array3d[wp.float32]:
+    def forward_all(
+        self, x: wp.array2d[wp.float32] | wp.array3d[wp.float32], *, training: bool = True
+    ) -> wp.array3d[wp.float32]:
         """Evaluate every critic with shared-input batched contractions."""
 
         return self._forward(x, training=training, retain_activations=False)
@@ -2937,7 +3014,9 @@ class EnsembleNetworkFlashSAC:
         output = self._forward(x, training=training, retain_activations=True)
         return output[0], output[1]
 
-    def forward_all_manual(self, x: wp.array2d[wp.float32], *, training: bool = True) -> wp.array3d[wp.float32]:
+    def forward_all_manual(
+        self, x: wp.array2d[wp.float32] | wp.array3d[wp.float32], *, training: bool = True
+    ) -> wp.array3d[wp.float32]:
         """Evaluate every critic and retain stacked backward activations."""
 
         return self._forward(x, training=training, retain_activations=True)
@@ -3265,7 +3344,7 @@ class EnsembleNetworkFlashSAC:
         for ensemble_index, (network, destination) in enumerate(zip(self.networks, input_grads, strict=True)):
             member_grad = network._batch_norm_backward(
                 network.input_norm,
-                manual_input,
+                manual_input if manual_input.ndim == 2 else manual_input[ensemble_index],
                 input_normalized_grad[ensemble_index],
                 training=training,
                 input_grad=backward["input_grad"][ensemble_index],

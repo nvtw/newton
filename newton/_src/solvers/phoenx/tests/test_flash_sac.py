@@ -55,6 +55,7 @@ from newton._src.solvers.phoenx.rl_training.flash_sac_networks import (
     _transpose_population_2d_tile_kernel,
     _UnitBatchNorm,
 )
+from newton._src.solvers.phoenx.rl_training.flash_sac_population import StateFlashSACPopulation
 from newton._src.solvers.phoenx.rl_training.g1 import (
     ACTION_DIM_G1,
     OBS_DIM_G1,
@@ -68,6 +69,7 @@ from newton._src.solvers.phoenx.rl_training.kernels import (
     sac_distributional_min_projection_device_alpha_kernel,
 )
 from newton._src.solvers.phoenx.rl_training.networks import WarpMLP
+from newton._src.solvers.phoenx.rl_training.optim import Adam, AdamPopulation, AMPStatePopulation
 from newton._src.solvers.phoenx.rl_training.ppo import BufferRollout, ConfigPPO, TrainerPPO
 from newton._src.solvers.phoenx.rl_training.sac import BatchSAC
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
@@ -654,6 +656,373 @@ class TestTrainerFlashSAC(unittest.TestCase):
             np.testing.assert_allclose(actual.grad.numpy(), expected.grad.numpy(), rtol=3.0e-5, atol=3.0e-5)
         capture.graph = None
 
+    def test_population_optimizer_scaler_and_promotion_match_scalar(self) -> None:
+        """Match P=1/P=2 Adam steps, overflow skips, capture storage, and device promotion."""
+
+        device = require_cuda_graph_capture("FlashSAC population optimizer state")
+        rng = np.random.default_rng(331)
+        for count in (1, 2):
+            baseline = tuple(
+                NetworkFlashSAC(
+                    input_dim=3,
+                    hidden_dim=4,
+                    num_blocks=1,
+                    output_dim=4,
+                    actor_heads=True,
+                    device=device,
+                    seed=331 + member,
+                    contraction_dtype="float16",
+                )
+                for member in range(count)
+            )
+            members = tuple(
+                NetworkFlashSAC(
+                    input_dim=3,
+                    hidden_dim=4,
+                    num_blocks=1,
+                    output_dim=4,
+                    actor_heads=True,
+                    device=device,
+                    seed=331 + member,
+                    contraction_dtype="float16",
+                )
+                for member in range(count)
+            )
+            ensemble = EnsembleNetworkFlashSAC(*members)
+            ensemble.reserve_buffers(8)
+            scalar_optimizers = tuple(Adam(network.parameters(), lr=3.0e-4) for network in baseline)
+            optimizer = AdamPopulation(ensemble.population_parameters(), lr=3.0e-4)
+            scaler = AMPStatePopulation(count, device)
+            optimizer.step_condition = scaler.step_condition
+            learning_rates = np.linspace(3.0e-4, 4.0e-4, count, dtype=np.float32)
+            lr_scales = np.linspace(1.0, 0.75, count, dtype=np.float32)
+            optimizer.set_pbt_lrs(learning_rates)
+            optimizer.lr_scale.assign(lr_scales)
+            for member, scalar in enumerate(scalar_optimizers):
+                scalar.set_pbt_lr(float(learning_rates[member]))
+                scalar.lr_scale.assign(np.asarray([lr_scales[member]], dtype=np.float32))
+
+            grouped_grads: list[list[np.ndarray]] = [[] for _ in optimizer.params]
+            for member, network in enumerate(baseline):
+                for group, param in enumerate(network.parameters()):
+                    values = rng.normal(size=param.shape).astype(np.float32)
+                    param.grad.assign(values)
+                    members[member].parameters()[group].grad.assign(values)
+                    grouped_grads[group].append(values)
+            for param, values in zip(optimizer.params, grouped_grads, strict=True):
+                param.grad.assign(np.stack(values))
+            found_inf = np.zeros(count, dtype=np.int32)
+            if count == 2:
+                found_inf[1] = 1
+            scaler.found_inf.assign(found_inf)
+            scaler.update()
+            conditions = scaler.step_condition.numpy()
+            for member, scalar in enumerate(scalar_optimizers):
+                scalar.step_condition.assign(np.asarray([conditions[member]], dtype=np.int32))
+                scalar.step()
+            optimizer.step()
+
+            for member, (network, scalar) in enumerate(zip(members, scalar_optimizers, strict=True)):
+                for group, (actual, expected) in enumerate(
+                    zip(network.parameters(), baseline[member].parameters(), strict=True)
+                ):
+                    np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+                    np.testing.assert_array_equal(optimizer.m[group].numpy()[member], scalar.m[group].numpy())
+                    np.testing.assert_array_equal(optimizer.v[group].numpy()[member], scalar.v[group].numpy())
+            expected_steps = np.ones(count, dtype=np.int32)
+            expected_steps[found_inf != 0] = 0
+            np.testing.assert_array_equal(optimizer._step_count.numpy(), expected_steps)
+            expected_scales = np.full(count, 65536.0, dtype=np.float32)
+            expected_scales[found_inf != 0] *= 0.5
+            np.testing.assert_array_equal(scaler.scale.numpy(), expected_scales)
+            np.testing.assert_array_equal(scaler.growth_tracker.numpy(), (found_inf == 0).astype(np.int32))
+
+            arrays = (
+                *ensemble.population_state_arrays(),
+                *ensemble._fp16_weights.values(),
+                *optimizer.state_arrays(),
+                *scaler.state_arrays(),
+            )
+            pointers_before = tuple(int(value.ptr) for value in arrays)
+            with wp.ScopedCapture(device=device) as capture:
+                optimizer.step()
+                scaler.update()
+            wp.capture_launch(capture.graph)
+            self.assertEqual(pointers_before, tuple(int(value.ptr) for value in arrays))
+            capture.graph = None
+
+            if count == 2:
+                source_index = wp.array([0], dtype=wp.int32, device=device)
+                destination_index = wp.array([1], dtype=wp.int32, device=device)
+                with wp.ScopedCapture(device=device) as promotion_capture:
+                    ensemble.copy_population_member(source_index, destination_index)
+                    optimizer.copy_member(source_index, destination_index)
+                    scaler.copy_member(source_index, destination_index)
+                wp.capture_launch(promotion_capture.graph)
+                for values in (
+                    *ensemble.population_state_arrays(),
+                    *ensemble._fp16_weights.values(),
+                    *optimizer.state_arrays(),
+                    *scaler.state_arrays(),
+                ):
+                    np.testing.assert_array_equal(values.numpy()[1], values.numpy()[0])
+                promotion_capture.graph = None
+
+    def test_population_learner_state_promotion_and_target_ema(self) -> None:
+        """Preserve full learner state, graph pointers, promotion pairs, and parameter-only target EMA."""
+
+        device = require_cuda_graph_capture("FlashSAC population learner state")
+        config = ConfigFlashSAC(
+            actor_hidden_dim=4,
+            actor_num_blocks=1,
+            critic_hidden_dim=4,
+            critic_num_blocks=1,
+            distributional_atoms=5,
+            normalize_rewards=False,
+            use_amp=True,
+        )
+        trainers = tuple(
+            TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=347 + member)
+            for member in range(2)
+        )
+        trainers[0]._device_update_count.assign(np.asarray([17], dtype=np.int32))
+        trainers[0]._device_update_seed.assign(np.asarray([1907], dtype=np.int32))
+        trainers[0].log_alpha.assign(np.asarray([-0.37], dtype=np.float32))
+        population = StateFlashSACPopulation(trainers)
+        for network in (population.actors, population.critics, population.target_critics):
+            network.reserve_buffers(8)
+
+        pointers_before = tuple(int(value.ptr) for value in population.state_arrays())
+        source_index = wp.array([0], dtype=wp.int32, device=device)
+        destination_index = wp.array([1], dtype=wp.int32, device=device)
+        with wp.ScopedCapture(device=device) as promotion_capture:
+            population.copy_member(source_index, destination_index)
+        wp.capture_launch(promotion_capture.graph)
+        self.assertEqual(pointers_before, tuple(int(value.ptr) for value in population.state_arrays()))
+        for values in (
+            *population.actors.population_state_arrays(),
+            *population.actor_optimizer.state_arrays(),
+            *population.alpha_optimizer.state_arrays(),
+            *population.scaler.state_arrays(),
+            population.log_alpha,
+            population.actor_log_std,
+            population.obs_mean,
+            population.obs_m2,
+            *population.scalar_state.values(),
+        ):
+            np.testing.assert_array_equal(values.numpy()[1], values.numpy()[0])
+        for values in (
+            *population.critics.population_state_arrays(),
+            *population.target_critics.population_state_arrays(),
+            *population.critic_optimizer.state_arrays(),
+        ):
+            host = values.numpy()
+            np.testing.assert_array_equal(host[2], host[0])
+            np.testing.assert_array_equal(host[3], host[1])
+
+        running_before = tuple(
+            value.numpy().copy()
+            for value in population.target_critics.population_state_arrays()
+            if value not in population.target_critics.population_parameters()
+        )
+        target_before = tuple(value.numpy().copy() for value in population.target_critics.population_parameters())
+        online = tuple(value.numpy().copy() for value in population.critics.population_parameters())
+        with wp.ScopedCapture(device=device) as ema_capture:
+            population.soft_update_targets(0.25)
+        wp.capture_launch(ema_capture.graph)
+        for actual, old, source in zip(
+            population.target_critics.population_parameters(), target_before, online, strict=True
+        ):
+            np.testing.assert_allclose(actual.numpy(), np.float32(0.75) * old + np.float32(0.25) * source)
+        running_after = tuple(
+            value.numpy()
+            for value in population.target_critics.population_state_arrays()
+            if value not in population.target_critics.population_parameters()
+        )
+        for actual, expected in zip(running_after, running_before, strict=True):
+            np.testing.assert_array_equal(actual, expected)
+        self.assertEqual(pointers_before, tuple(int(value.ptr) for value in population.state_arrays()))
+        promotion_capture.graph = None
+        ema_capture.graph = None
+
+    def test_population_p1_complete_update_matches_trainer(self) -> None:
+        """Match a complete AMP actor-alpha-critic-EMA update through population-owned P=1 state."""
+
+        device = require_cuda_graph_capture("FlashSAC population P=1 update")
+        config = ConfigFlashSAC(
+            actor_hidden_dim=4,
+            actor_num_blocks=1,
+            critic_hidden_dim=4,
+            critic_num_blocks=1,
+            distributional_atoms=5,
+            normalize_rewards=False,
+            sample_batch_size=4,
+            use_amp=True,
+        )
+        baseline = TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=359)
+        member = TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=359)
+        population = StateFlashSACPopulation((member,))
+        rng = np.random.default_rng(359)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(4, 3)).astype(np.float32), device=device),
+            actions=wp.array(np.tanh(rng.normal(size=(4, 2))).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=4).astype(np.float32), device=device),
+            dones=wp.array(np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32), device=device),
+            next_obs=wp.array(rng.normal(size=(4, 3)).astype(np.float32), device=device),
+        )
+        baseline.update(batch, seed=733, read_stats=False)
+        population.update_p1(batch, seed=733, read_stats=False)
+        for actual_network, expected_network in (
+            (member.actor.net, baseline.actor.net),
+            (member.critic1, baseline.critic1),
+            (member.critic2, baseline.critic2),
+            (member.target_critic1, baseline.target_critic1),
+            (member.target_critic2, baseline.target_critic2),
+        ):
+            for actual, expected in zip(actual_network.state_arrays(), expected_network.state_arrays(), strict=True):
+                np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        for population_optimizer, expected_optimizers in (
+            (population.actor_optimizer, (baseline.actor_optimizer,)),
+            (population.critic_optimizer, (baseline.critic1_optimizer, baseline.critic2_optimizer)),
+            (population.alpha_optimizer, (baseline.alpha_optimizer,)),
+        ):
+            np.testing.assert_array_equal(
+                population_optimizer._step_count.numpy(),
+                np.asarray([optimizer.step_count for optimizer in expected_optimizers], dtype=np.int32),
+            )
+            for group, (m, v) in enumerate(zip(population_optimizer.m, population_optimizer.v, strict=True)):
+                np.testing.assert_array_equal(
+                    m.numpy(), np.stack([optimizer.m[group].numpy() for optimizer in expected_optimizers])
+                )
+                np.testing.assert_array_equal(
+                    v.numpy(), np.stack([optimizer.v[group].numpy() for optimizer in expected_optimizers])
+                )
+        np.testing.assert_array_equal(population.log_alpha.numpy()[0], baseline.log_alpha.numpy())
+        np.testing.assert_array_equal(population.scaler.scale.numpy(), baseline._amp_scale.numpy())
+
+    def test_population_p2_complete_updates_match_two_trainers(self) -> None:
+        """Repeat P2 updates bitwise and match independent trainers within FP16 rounding."""
+
+        device = require_cuda_graph_capture("FlashSAC population P=2 update")
+        config = ConfigFlashSAC(
+            actor_hidden_dim=4,
+            actor_num_blocks=1,
+            critic_hidden_dim=4,
+            critic_num_blocks=1,
+            distributional_atoms=5,
+            normalize_rewards=False,
+            sample_batch_size=4,
+            use_amp=True,
+        )
+        baselines = tuple(
+            TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=367 + member)
+            for member in range(2)
+        )
+        members = tuple(
+            TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=367 + member)
+            for member in range(2)
+        )
+        for trainer in (*baselines, *members):
+            trainer._amp_scale.assign(np.asarray([4096.0], dtype=np.float32))
+        population = StateFlashSACPopulation(members)
+        rng = np.random.default_rng(367)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(4, 3)).astype(np.float32), device=device),
+            actions=wp.array(np.tanh(rng.normal(size=(4, 2))).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=4).astype(np.float32), device=device),
+            dones=wp.array(np.asarray([0.0, 0.0, 1.0, 0.0], dtype=np.float32), device=device),
+            next_obs=wp.array(rng.normal(size=(4, 3)).astype(np.float32), device=device),
+        )
+        for member, baseline in enumerate(baselines):
+            baseline.update(batch, seed=911 + member, read_stats=False)
+        population.update_all_fused(batch, seed=911, read_stats=False)
+        np.testing.assert_array_equal(population._actor_step_condition.numpy(), 1)
+        np.testing.assert_array_equal(population._policy_output_grads.numpy()[:, 4:], 0.0)
+        np.testing.assert_array_equal(population._q_output_grads.numpy()[:, 4:], 0.0)
+        repeat_members = tuple(
+            TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=367 + member)
+            for member in range(2)
+        )
+        for trainer in repeat_members:
+            trainer._amp_scale.assign(np.asarray([4096.0], dtype=np.float32))
+        repeat_population = StateFlashSACPopulation(repeat_members)
+        repeat_population.update_all_fused(batch, seed=911, read_stats=False)
+        for actual, repeated in zip(population.state_arrays(), repeat_population.state_arrays(), strict=True):
+            np.testing.assert_array_equal(actual.numpy(), repeated.numpy())
+        for actual_trainer, expected_trainer in zip(members, baselines, strict=True):
+            for actual_network, expected_network in (
+                (actual_trainer.actor.net, expected_trainer.actor.net),
+                (actual_trainer.critic1, expected_trainer.critic1),
+                (actual_trainer.critic2, expected_trainer.critic2),
+                (actual_trainer.target_critic1, expected_trainer.target_critic1),
+                (actual_trainer.target_critic2, expected_trainer.target_critic2),
+            ):
+                for state_index, (actual, expected) in enumerate(
+                    zip(actual_network.state_arrays(), expected_network.state_arrays(), strict=True)
+                ):
+                    np.testing.assert_allclose(
+                        actual.numpy(),
+                        expected.numpy(),
+                        rtol=1.0e-2,
+                        atol=1.0e-5,
+                        err_msg=f"state_index={state_index}",
+                    )
+        expected_optimizers = (
+            tuple(trainer.actor_optimizer for trainer in baselines),
+            tuple(
+                optimizer
+                for trainer in baselines
+                for optimizer in (trainer.critic1_optimizer, trainer.critic2_optimizer)
+            ),
+            tuple(trainer.alpha_optimizer for trainer in baselines),
+        )
+        for population_optimizer, expected_group in zip(
+            (population.actor_optimizer, population.critic_optimizer, population.alpha_optimizer),
+            expected_optimizers,
+            strict=True,
+        ):
+            np.testing.assert_array_equal(
+                population_optimizer._step_count.numpy(), [optimizer.step_count for optimizer in expected_group]
+            )
+            for group, (m, v) in enumerate(zip(population_optimizer.m, population_optimizer.v, strict=True)):
+                np.testing.assert_allclose(
+                    m.numpy(),
+                    np.stack([optimizer.m[group].numpy() for optimizer in expected_group]),
+                    rtol=2.0e-1,
+                    atol=5.0e-5,
+                )
+                np.testing.assert_allclose(
+                    v.numpy(),
+                    np.stack([optimizer.v[group].numpy() for optimizer in expected_group]),
+                    rtol=3.5e-1,
+                    atol=5.0e-6,
+                )
+        np.testing.assert_array_equal(
+            population.scaler.scale.numpy(), [trainer._amp_scale.numpy()[0] for trainer in baselines]
+        )
+        forced_scales = np.asarray([np.finfo(np.float32).max, 4096.0], dtype=np.float32)
+        population.scaler.scale.assign(forced_scales)
+        repeat_population.scaler.scale.assign(forced_scales)
+        actor_steps_before = population.actor_optimizer._step_count.numpy().copy()
+        population_arrays = (*population.state_arrays(), *population.update_buffer_arrays())
+        repeat_arrays = (*repeat_population.state_arrays(), *repeat_population.update_buffer_arrays())
+        population_pointers = tuple(int(value.ptr) for value in population_arrays)
+        repeat_pointers = tuple(int(value.ptr) for value in repeat_arrays)
+        graph = population.capture_fused_update(batch, seed=1013)
+        repeat_graph = repeat_population.capture_fused_update(batch, seed=1013)
+        wp.capture_launch(graph)
+        wp.capture_launch(repeat_graph)
+        np.testing.assert_array_equal(population._actor_found_inf.numpy(), [1, 0])
+        np.testing.assert_array_equal(population._actor_step_condition.numpy(), [0, 1])
+        np.testing.assert_array_equal(
+            population.actor_optimizer._step_count.numpy(), actor_steps_before + np.asarray([0, 1])
+        )
+        np.testing.assert_array_equal(repeat_population._actor_step_condition.numpy(), [0, 1])
+        self.assertEqual(population_pointers, tuple(int(value.ptr) for value in population_arrays))
+        self.assertEqual(repeat_pointers, tuple(int(value.ptr) for value in repeat_arrays))
+        for actual, repeated in zip(population.state_arrays(), repeat_population.state_arrays(), strict=True):
+            np.testing.assert_array_equal(actual.numpy(), repeated.numpy())
+
     def test_population_actor_matches_separate_forward_backward(self) -> None:
         """Match two population-stacked actors to independent network equations."""
 
@@ -919,21 +1288,33 @@ class TestTrainerFlashSAC(unittest.TestCase):
         finite_difference = (losses[1] - losses[0]) / (2.0 * epsilon)
         self.assertAlmostEqual(analytic, finite_difference, delta=2.0e-2)
 
-        log_probs = wp.array(np.asarray([-2.0, -1.0], dtype=np.float32), device=device)
-        log_alpha = wp.array(np.asarray([math.log(0.25)], dtype=np.float32), device=device, requires_grad=True)
-        loss = wp.zeros(1, dtype=wp.float32, device=device, requires_grad=True)
-        with wp.Tape() as tape:
+        expected = 0.25 * ((2.0 + 0.5) + (1.0 + 0.5)) / 2.0
+        exact_results = []
+        for padding in (0, 17):
+            storage = wp.zeros((1, 2 + padding), dtype=wp.float32, device=device)
+            log_probs = storage[:, padding : padding + 2]
+            log_probs.assign(np.asarray([[-2.0, -1.0]], dtype=np.float32))
+            log_alpha = wp.array([[math.log(0.25)]], dtype=wp.float32, device=device, requires_grad=True)
+            loss = wp.zeros(1, dtype=wp.float32, device=device)
             wp.launch(
                 _flash_sac_alpha_loss_kernel,
-                dim=2,
+                dim=(1, 32),
                 inputs=[log_probs, log_alpha, 2, -0.5],
-                outputs=[loss],
+                outputs=[loss, log_alpha.grad],
+                block_dim=32,
                 device=device,
             )
-        tape.backward(loss)
-        expected = 0.25 * ((2.0 + 0.5) + (1.0 + 0.5)) / 2.0
-        self.assertAlmostEqual(float(loss.numpy()[0]), expected, places=6)
-        self.assertAlmostEqual(float(log_alpha.grad.numpy()[0]), expected, places=6)
+            exact_results.append((loss.numpy(), log_alpha.grad.numpy()))
+        np.testing.assert_array_equal(exact_results[0][0], exact_results[1][0])
+        np.testing.assert_array_equal(exact_results[0][1], exact_results[1][1])
+        self.assertAlmostEqual(float(exact_results[0][0][0]), expected, places=6)
+        source = (Path(__file__).parents[1] / "rl_training" / "flash_sac.py").read_text()
+        alpha_source = source[
+            source.index("def _flash_sac_alpha_loss_kernel") : source.index(
+                "def _prepare_flash_sac_graph_update_kernel"
+            )
+        ]
+        self.assertNotIn("atomic_", alpha_source)
 
     def test_flash_sac_defaults_and_replay_warmup(self) -> None:
         """Match upstream defaults and enforce replay warmup."""
