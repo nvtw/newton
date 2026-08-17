@@ -1147,6 +1147,13 @@ class TrainerFlashSAC(TrainerSAC):
         if min(self.config.actor_lr, self.config.critic_lr, self.config.alpha_lr) <= 0.0:
             raise ValueError("FlashSAC update graph capture requires positive optimizer learning rates")
 
+        training_rows = int(batch.obs.shape[0]) * 2
+        if isinstance(self.actor.net, NetworkFlashSAC):
+            self.actor.net.reserve_training_buffers(training_rows)
+        for network in (self.critic1, self.critic2, self.target_critic1, self.target_critic2):
+            if isinstance(network, NetworkFlashSAC):
+                network.reserve_training_buffers(training_rows)
+
         self._device_update_count.assign(np.asarray([self._update_count], dtype=np.int32))
         self._device_gradient_update_count.assign(np.asarray([self._gradient_update_count], dtype=np.int32))
         seed_base = self.seed if seed is None else int(seed)
@@ -1203,6 +1210,12 @@ class TrainerFlashSAC(TrainerSAC):
 
         replay.reserve_graph_buffers(env.world_count)
         self.reserve_buffers(env.world_count)
+        training_rows = int(replay.batch_size) * 2
+        if isinstance(self.actor.net, NetworkFlashSAC):
+            self.actor.net.reserve_training_buffers(training_rows)
+        for network in (self.critic1, self.critic2, self.target_critic1, self.target_critic2):
+            if isinstance(network, NetworkFlashSAC):
+                network.reserve_training_buffers(training_rows)
         pre_step_obs = wp.empty((env.world_count, self.obs_dim), dtype=wp.float32, device=self.device)
         zero_truncateds = wp.zeros(env.world_count, dtype=wp.float32, device=self.device)
         env_seed_counter = wp.array([int(self.seed if seed is None else seed)], dtype=wp.int32, device=self.device)
@@ -1482,6 +1495,14 @@ class GraphFlashSACTraining:
     updates_per_launch: int
     retained_arrays: tuple[wp.array, ...]
 
+    def close(self) -> None:
+        """Destroy the CUDA graph before releasing its retained arrays."""
+
+        self.graph = None
+
+    def __del__(self) -> None:
+        self.close()
+
     def launch(self, *, read_stats: bool = False) -> StatsSACUpdate:
         """Replay one full cadence and update host mirrors without synchronization."""
 
@@ -1520,6 +1541,15 @@ class GraphFlashSACUpdate:
     critic_graph: object
     batch: BatchSAC
     policy_frequency: int
+
+    def close(self) -> None:
+        """Destroy both CUDA graphs before releasing trainer state."""
+
+        self.actor_graph = None
+        self.critic_graph = None
+
+    def __del__(self) -> None:
+        self.close()
 
     def launch(self, *, read_stats: bool = False) -> StatsSACUpdate:
         """Replay one update and advance host-visible checkpoint counters."""

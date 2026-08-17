@@ -11,6 +11,8 @@ import warp as wp
 from .cublas import gemm_float32, gemm_float32_strided_batched, is_cublas_available
 from .kernels import copy_1d_kernel, copy_2d_kernel, soft_update_1d_kernel, soft_update_2d_kernel
 
+_TILE_REDUCTION_BLOCK_DIM = 256
+
 
 @wp.kernel
 def _unit_linear_kernel(
@@ -49,6 +51,60 @@ def _linear_weight_grad_kernel(
     for row in range(x.shape[0]):
         value += x[row, inner] * output_grad[row, col]
     weight_grad[inner, col] = value
+
+
+@wp.kernel
+def _inverse_std_kernel(variance: wp.array[wp.float32], eps: wp.float32, inv_std: wp.array[wp.float32]):
+    col = wp.tid()
+    inv_std[col] = wp.float32(1.0) / wp.sqrt(variance[col] + eps)
+
+
+@wp.kernel(enable_backward=False)
+def _batch_moments_tile_kernel(
+    x: wp.array2d[wp.float32],
+    count: wp.int32,
+    mean: wp.array[wp.float32],
+    variance: wp.array[wp.float32],
+):
+    col, lane = wp.tid()
+    total = wp.float32(0.0)
+    for row in range(lane, count, wp.block_dim()):
+        total += x[row, col]
+    batch_mean = wp.tile_sum(wp.tile(total))[0] / wp.float32(count)
+    squared = wp.float32(0.0)
+    for row in range(lane, count, wp.block_dim()):
+        delta = x[row, col] - batch_mean
+        squared += delta * delta
+    batch_variance = wp.tile_sum(wp.tile(squared))[0] / wp.float32(count)
+    if lane == 0:
+        mean[col] = batch_mean
+        variance[col] = batch_variance
+
+
+@wp.kernel(enable_backward=False)
+def _batch_norm_backward_tile_kernel(
+    x: wp.array2d[wp.float32],
+    output_grad: wp.array2d[wp.float32],
+    mean: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
+    sum_grad: wp.array[wp.float32],
+    sum_grad_normalized: wp.array[wp.float32],
+    scale_grad: wp.array[wp.float32],
+    bias_grad: wp.array[wp.float32],
+):
+    col, lane = wp.tid()
+    grad_sum = wp.float32(0.0)
+    grad_normalized_sum = wp.float32(0.0)
+    for row in range(lane, x.shape[0], wp.block_dim()):
+        grad = output_grad[row, col]
+        grad_sum += grad
+        grad_normalized_sum += grad * (x[row, col] - mean[col]) * inv_std[col]
+    reduced = wp.tile_sum(wp.tile(wp.vec2(grad_sum, grad_normalized_sum)), axis=1)
+    if lane == 0:
+        sum_grad[col] = reduced[0]
+        sum_grad_normalized[col] = reduced[1]
+        bias_grad[col] = reduced[0]
+        scale_grad[col] = reduced[1]
 
 
 @wp.kernel
@@ -426,6 +482,13 @@ def _orthogonal(input_dim: int, output_dim: int, rng: np.random.Generator) -> np
     return np.asarray(result, dtype=np.float32).reshape(shape).T.copy()
 
 
+class _BatchNormScratch:
+    def __init__(self, rows: int, width: int, device: wp.context.Device):
+        self.mean = wp.empty(width, dtype=wp.float32, device=device)
+        self.variance = wp.empty(width, dtype=wp.float32, device=device)
+        self.inv_std = wp.empty(width, dtype=wp.float32, device=device)
+
+
 class _UnitBatchNorm:
     def __init__(self, width: int, device: wp.context.Device, *, momentum: float = 0.01, eps: float = 1.0e-5):
         self.width = int(width)
@@ -436,19 +499,44 @@ class _UnitBatchNorm:
         self.bias = wp.zeros(self.width, dtype=wp.float32, device=device, requires_grad=True)
         self.running_mean = wp.zeros(self.width, dtype=wp.float32, device=device)
         self.running_variance = wp.ones(self.width, dtype=wp.float32, device=device)
+        self.last_mean: wp.array[wp.float32] | None = None
+        self.last_variance: wp.array[wp.float32] | None = None
+        self.last_scratch: _BatchNormScratch | None = None
+        self._scratch: dict[int, _BatchNormScratch] = {}
+
+    def scratch(self, rows: int) -> _BatchNormScratch:
+        value = self._scratch.get(rows)
+        if value is None:
+            value = _BatchNormScratch(rows, self.width, self.device)
+            self._scratch[rows] = value
+        return value
 
     def forward(self, x: wp.array2d[wp.float32], *, training: bool, requires_grad: bool) -> wp.array2d[wp.float32]:
         rows = int(x.shape[0])
         if training:
-            mean = wp.empty(self.width, dtype=wp.float32, device=self.device)
-            variance = wp.empty(self.width, dtype=wp.float32, device=self.device)
-            wp.launch(
-                _batch_moments_kernel,
-                dim=self.width,
-                inputs=[x, rows],
-                outputs=[mean, variance],
-                device=self.device,
-            )
+            scratch = self.scratch(rows)
+            mean = scratch.mean
+            variance = scratch.variance
+            if self.device.is_cuda:
+                wp.launch(
+                    _batch_moments_tile_kernel,
+                    dim=(self.width, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[x, rows],
+                    outputs=[mean, variance],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    _batch_moments_kernel,
+                    dim=self.width,
+                    inputs=[x, rows],
+                    outputs=[mean, variance],
+                    device=self.device,
+                )
+            self.last_scratch = scratch
+            self.last_mean = mean
+            self.last_variance = variance
             wp.launch(
                 _update_running_moments_kernel,
                 dim=self.width,
@@ -632,6 +720,17 @@ class NetworkFlashSAC:
         """Reserve reusable inference buffers for actor sampling."""
 
         self.reserve_forward_buffers(batch_size)
+
+    def reserve_training_buffers(self, batch_size: int) -> None:
+        """Reserve persistent BatchNorm reduction workspaces for training."""
+
+        rows = int(batch_size)
+        if rows <= 0:
+            raise ValueError("batch_size must be positive")
+        self.input_norm.scratch(rows)
+        for first, second in self.block_norms:
+            first.scratch(rows)
+            second.scratch(rows)
 
     def _forward_reuse(self, x: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
         self.reserve_forward_buffers(int(x.shape[0]))
@@ -868,17 +967,39 @@ class NetworkFlashSAC:
     ) -> wp.array2d[wp.float32]:
         input_grad = wp.empty(x.shape, dtype=wp.float32, device=self.device)
         if training:
-            mean = wp.empty(norm.width, dtype=wp.float32, device=self.device)
-            inv_std = wp.empty(norm.width, dtype=wp.float32, device=self.device)
-            sum_grad = wp.empty(norm.width, dtype=wp.float32, device=self.device)
-            sum_grad_normalized = wp.empty(norm.width, dtype=wp.float32, device=self.device)
-            wp.launch(
-                _batch_norm_backward_stats_kernel,
-                dim=norm.width,
-                inputs=[x, output_grad, norm.eps],
-                outputs=[mean, inv_std, sum_grad, sum_grad_normalized, norm.scale.grad, norm.bias.grad],
-                device=self.device,
-            )
+            if self.device.is_cuda and norm.last_scratch is not None:
+                mean = norm.last_mean
+                scratch = norm.last_scratch
+                inv_std = scratch.inv_std
+                wp.launch(
+                    _inverse_std_kernel,
+                    dim=norm.width,
+                    inputs=[norm.last_variance, norm.eps],
+                    outputs=[inv_std],
+                    device=self.device,
+                )
+                sum_grad = norm.bias.grad
+                sum_grad_normalized = norm.scale.grad
+                wp.launch(
+                    _batch_norm_backward_tile_kernel,
+                    dim=(norm.width, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[x, output_grad, mean, inv_std],
+                    outputs=[sum_grad, sum_grad_normalized, norm.scale.grad, norm.bias.grad],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=self.device,
+                )
+            else:
+                mean = wp.empty(norm.width, dtype=wp.float32, device=self.device)
+                inv_std = wp.empty(norm.width, dtype=wp.float32, device=self.device)
+                sum_grad = wp.empty(norm.width, dtype=wp.float32, device=self.device)
+                sum_grad_normalized = wp.empty(norm.width, dtype=wp.float32, device=self.device)
+                wp.launch(
+                    _batch_norm_backward_stats_kernel,
+                    dim=norm.width,
+                    inputs=[x, output_grad, norm.eps],
+                    outputs=[mean, inv_std, sum_grad, sum_grad_normalized, norm.scale.grad, norm.bias.grad],
+                    device=self.device,
+                )
             wp.launch(
                 _batch_norm_input_grad_kernel,
                 dim=x.shape,
@@ -1239,15 +1360,29 @@ class EnsembleNetworkFlashSAC:
             source = x if broadcast_input else x[ensemble_index]
             rows = int(source.shape[0])
             if training:
-                mean = wp.empty(norm.width, dtype=wp.float32, device=self.device)
-                variance = wp.empty(norm.width, dtype=wp.float32, device=self.device)
-                wp.launch(
-                    _batch_moments_kernel,
-                    dim=norm.width,
-                    inputs=[source, rows],
-                    outputs=[mean, variance],
-                    device=self.device,
-                )
+                scratch = norm.scratch(rows)
+                mean = scratch.mean
+                variance = scratch.variance
+                if self.device.is_cuda:
+                    wp.launch(
+                        _batch_moments_tile_kernel,
+                        dim=(norm.width, _TILE_REDUCTION_BLOCK_DIM),
+                        inputs=[source, rows],
+                        outputs=[mean, variance],
+                        block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                        device=self.device,
+                    )
+                else:
+                    wp.launch(
+                        _batch_moments_kernel,
+                        dim=norm.width,
+                        inputs=[source, rows],
+                        outputs=[mean, variance],
+                        device=self.device,
+                    )
+                norm.last_scratch = scratch
+                norm.last_mean = mean
+                norm.last_variance = variance
                 wp.launch(
                     _update_running_moments_kernel,
                     dim=norm.width,

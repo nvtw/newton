@@ -22,7 +22,12 @@ from newton._src.solvers.phoenx.rl_training.flash_sac import (
     TrainerFlashSAC,
     _flash_sac_alpha_loss_kernel,
 )
-from newton._src.solvers.phoenx.rl_training.flash_sac_networks import NetworkFlashSAC
+from newton._src.solvers.phoenx.rl_training.flash_sac_networks import (
+    _TILE_REDUCTION_BLOCK_DIM,
+    NetworkFlashSAC,
+    _batch_moments_tile_kernel,
+    _UnitBatchNorm,
+)
 from newton._src.solvers.phoenx.rl_training.g1 import (
     ACTION_DIM_G1,
     OBS_DIM_G1,
@@ -271,6 +276,32 @@ class TestTrainerFlashSAC(unittest.TestCase):
         target.soft_update_from(online, 0.5)
         np.testing.assert_array_equal(target.input_norm.running_mean.numpy(), running_before)
         np.testing.assert_allclose(target.head_biases[0].numpy(), [1.0])
+
+    def test_tile_batch_norm_moments_across_shapes_and_graph_replays(self) -> None:
+        """Match centered NumPy moments across shapes with stable captured storage."""
+
+        device = require_cuda_graph_capture("FlashSAC tiled BatchNorm reductions")
+        rng = np.random.default_rng(271)
+        for rows, width in ((512, 128), (2048, 256), (512, 1024)):
+            values = rng.normal(loc=5.0, scale=2.0, size=(rows, width)).astype(np.float32)
+            x = wp.array(values, device=device)
+            norm = _UnitBatchNorm(width, device)
+            scratch = norm.scratch(rows)
+            self.assertIs(scratch, norm.scratch(rows))
+            with wp.ScopedCapture(device=device) as capture:
+                wp.launch(
+                    _batch_moments_tile_kernel,
+                    dim=(width, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[x, rows],
+                    outputs=[scratch.mean, scratch.variance],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=device,
+                )
+            wp.capture_launch(capture.graph)
+            wp.capture_launch(capture.graph)
+            np.testing.assert_allclose(scratch.mean.numpy(), values.mean(axis=0), rtol=2.0e-6, atol=2.0e-6)
+            np.testing.assert_allclose(scratch.variance.numpy(), values.var(axis=0), rtol=3.0e-6, atol=3.0e-6)
+            capture.graph = None
 
     def test_reference_actor_log_std_smooth_mapping(self) -> None:
         """Map raw actor standard deviations smoothly into upstream bounds."""
