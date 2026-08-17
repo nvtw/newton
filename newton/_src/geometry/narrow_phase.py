@@ -2338,6 +2338,8 @@ class NarrowPhase:
         self.has_meshes = has_meshes
         self.has_heightfields = has_heightfields
         self.mesh_sdf_texture_only = mesh_sdf_texture_only
+        if all_pairs_generic_convex and not has_generic_convex_pairs:
+            raise ValueError("all_pairs_generic_convex=True requires has_generic_convex_pairs=True")
         self.has_generic_convex_pairs = has_generic_convex_pairs
         self.sdf_texture_paired_samples = sdf_texture_paired_samples
         self.mesh_sdf_identity_scale_only = mesh_sdf_identity_scale_only

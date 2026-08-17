@@ -96,6 +96,7 @@ def _generic_convex_pair_requirements(
     *,
     broad_phase_mode: str,
     shape_pairs_filtered: wp.array[wp.vec2i] | None,
+    use_current_shape_properties: bool = False,
 ) -> list[bool] | None:
     """Collect generic-convex requirements for possible shape-type pairs."""
     shape_types_array = getattr(model, "shape_type", None)
@@ -109,8 +110,10 @@ def _generic_convex_pair_requirements(
         pairs = shape_pairs_filtered.numpy()
         if pairs.size == 0:
             return []
-        shape_scale_array = getattr(model, "shape_scale", None)
-        shape_scales = shape_scale_array.numpy() if shape_scale_array is not None else None
+        shape_scales = None
+        if use_current_shape_properties:
+            shape_scale_array = getattr(model, "shape_scale", None)
+            shape_scales = shape_scale_array.numpy() if shape_scale_array is not None else None
         requirements = []
         for shape_a, shape_b in pairs.reshape(-1, 2):
             type_a = int(shape_types[shape_a])
@@ -159,6 +162,7 @@ def _all_pairs_require_generic_convex_narrow_phase(
         model,
         broad_phase_mode=broad_phase_mode,
         shape_pairs_filtered=shape_pairs_filtered,
+        use_current_shape_properties=True,
     )
     return requirements is not None and bool(requirements) and all(requirements)
 

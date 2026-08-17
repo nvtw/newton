@@ -3225,27 +3225,39 @@ def test_separated_analytic_pair_skips_gjk_queue(test, device):
     test.assertEqual(int(pipeline.narrow_phase.gjk_candidate_pairs_count.numpy()[0]), 0)
 
 
-def test_straight_cylinder_pair_skips_static_gjk_stage(test, device):
-    """Keep straight plane-cylinder pairs on the analytic narrow-phase path."""
+def test_cylinder_scale_update_keeps_generic_stage(test, device):
+    """Keep GJK available when a straight cylinder gains a barrel radius."""
     builder = newton.ModelBuilder()
-    body = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.5)))
+    body = builder.add_body(
+        xform=wp.transform(
+            p=wp.vec3(0.0, 0.0, 0.4),
+            q=wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 2.0),
+        )
+    )
     builder.add_shape_cylinder(body, radius=0.2, half_height=0.5)
     builder.add_ground_plane()
     model = builder.finalize(device=device)
 
     pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
-    test.assertFalse(pipeline.narrow_phase.has_generic_convex_pairs)
+    test.assertTrue(pipeline.narrow_phase.has_generic_convex_pairs)
     test.assertFalse(pipeline.narrow_phase.all_pairs_generic_convex)
 
-    barrel_builder = newton.ModelBuilder()
-    barrel_body = barrel_builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.5)))
-    barrel_builder.add_shape_cylinder(barrel_body, radius=0.2, half_height=0.5, barrel_radius=0.6)
-    barrel_builder.add_ground_plane()
-    barrel_model = barrel_builder.finalize(device=device)
+    shape_scale = model.shape_scale.numpy()
+    shape_scale[0, 2] = 0.6
+    model.shape_scale.assign(shape_scale)
 
-    barrel_pipeline = newton.CollisionPipeline(barrel_model, broad_phase="explicit")
-    test.assertTrue(barrel_pipeline.narrow_phase.has_generic_convex_pairs)
-    test.assertTrue(barrel_pipeline.narrow_phase.all_pairs_generic_convex)
+    state = model.state()
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+    reused_count = int(contacts.rigid_contact_count.numpy()[0])
+
+    rebuilt_pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
+    test.assertTrue(rebuilt_pipeline.narrow_phase.all_pairs_generic_convex)
+    rebuilt_contacts = rebuilt_pipeline.contacts()
+    rebuilt_pipeline.collide(state, rebuilt_contacts)
+
+    test.assertGreater(reused_count, 0)
+    test.assertEqual(reused_count, int(rebuilt_contacts.rigid_contact_count.numpy()[0]))
 
 
 add_function_test(
@@ -3256,8 +3268,8 @@ add_function_test(
 )
 add_function_test(
     TestDeterministicPipeline,
-    "test_straight_cylinder_pair_skips_static_gjk_stage",
-    test_straight_cylinder_pair_skips_static_gjk_stage,
+    "test_cylinder_scale_update_keeps_generic_stage",
+    test_cylinder_scale_update_keeps_generic_stage,
     devices=get_test_devices(),
 )
 add_function_test(

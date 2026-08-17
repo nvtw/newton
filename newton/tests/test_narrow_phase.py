@@ -27,6 +27,7 @@ from warp.tests.unittest_utils import StdOutCapture
 import newton
 from newton._src.geometry.flags import ShapeFlags
 from newton._src.geometry.narrow_phase import (
+    _SPARSE_GJK_PAIR_CAPACITY_THRESHOLD,
     NarrowPhase,
     _append_pair_compacted,
     _append_work_index_compacted,
@@ -2137,6 +2138,116 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         np.testing.assert_array_equal(narrow_phase.gjk_candidate_pairs.numpy(), [[-1, -1], [1, 2]])
         self.assertGreater(int(contact_count.numpy()[0]), 0)
         np.testing.assert_array_equal(contact_pair.numpy()[0], [1, 2])
+
+    @unittest.skipUnless(_cuda_available, "Sparse GJK routing is enabled only on CUDA")
+    def test_sparse_gjk_routing_matches_compact_contacts(self):
+        """Match compact and sparse GJK contact results after primitive filtering."""
+        geom_list = [
+            {"type": GeoType.PLANE, "data": ([0.0, 0.0, 0.0], 0.0)},
+            {
+                "type": GeoType.BOX,
+                "data": ([0.5, 0.5, 0.5], 0.0),
+                "transform": ([0.0, 0.0, 5.0], [0.0, 0.0, 0.0, 1.0]),
+            },
+            {
+                "type": GeoType.BOX,
+                "data": ([0.5, 0.5, 0.5], 0.0),
+                "transform": ([0.0, 0.0, 5.49], [0.0, 0.0, 0.0, 1.0]),
+            },
+        ]
+        arrays = self._create_geometry_arrays(geom_list)
+        candidate_pair = wp.array([[0, 1], [1, 2]], dtype=wp.vec2i)
+        candidate_pair_count = wp.array([2], dtype=int)
+
+        def run(sparse_gjk_pairs):
+            narrow_phase = NarrowPhase(
+                max_candidate_pairs=2,
+                has_meshes=False,
+                verify_buffers=False,
+                shape_aabb_lower=arrays[7],
+                shape_aabb_upper=arrays[8],
+                sparse_gjk_pairs=sparse_gjk_pairs,
+            )
+            contact_count = wp.zeros(1, dtype=int)
+            contact_pair = wp.zeros(8, dtype=wp.vec2i)
+            contact_position = wp.zeros(8, dtype=wp.vec3)
+            contact_normal = wp.zeros(8, dtype=wp.vec3)
+            contact_penetration = wp.zeros(8, dtype=float)
+            narrow_phase.launch(
+                candidate_pair=candidate_pair,
+                candidate_pair_count=candidate_pair_count,
+                shape_types=arrays[0],
+                shape_data=arrays[1],
+                shape_transform=arrays[2],
+                shape_source=arrays[3],
+                shape_gap=arrays[4],
+                shape_collision_radius=arrays[5],
+                shape_flags=arrays[6],
+                shape_local_aabb_lower=arrays[7],
+                shape_local_aabb_upper=arrays[8],
+                shape_voxel_resolution=arrays[9],
+                contact_pair=contact_pair,
+                contact_position=contact_position,
+                contact_normal=contact_normal,
+                contact_penetration=contact_penetration,
+                contact_count=contact_count,
+            )
+            count = int(contact_count.numpy()[0])
+            return (
+                contact_pair.numpy()[:count],
+                contact_position.numpy()[:count],
+                contact_normal.numpy()[:count],
+                contact_penetration.numpy()[:count],
+            )
+
+        compact = run(False)
+        sparse = run(True)
+        self.assertEqual(compact[0].shape[0], sparse[0].shape[0])
+
+        def sorted_contacts(result):
+            rows = np.concatenate(
+                (result[0].astype(np.float32), result[1], result[2], result[3][:, None]),
+                axis=1,
+            )
+            order = np.lexsort(tuple(rows[:, column] for column in reversed(range(rows.shape[1]))))
+            return rows[order]
+
+        compact_rows = sorted_contacts(compact)
+        sparse_rows = sorted_contacts(sparse)
+        np.testing.assert_array_equal(compact_rows[:, :2], sparse_rows[:, :2])
+        np.testing.assert_allclose(compact_rows[:, 2:], sparse_rows[:, 2:], rtol=1.0e-5, atol=1.0e-5)
+
+    @unittest.skipUnless(_cuda_available, "Sparse GJK routing is enabled only on CUDA")
+    def test_sparse_gjk_routing_auto_selection_threshold(self):
+        """Enable automatic sparse routing at the one-million-pair threshold."""
+        self.assertEqual(_SPARSE_GJK_PAIR_CAPACITY_THRESHOLD, 1_000_000)
+        below_threshold = NarrowPhase(
+            max_candidate_pairs=1,
+            has_meshes=False,
+            has_generic_convex_pairs=False,
+            candidate_pair_work_estimate=0,
+            device="cuda:0",
+        )
+        at_threshold = NarrowPhase(
+            max_candidate_pairs=_SPARSE_GJK_PAIR_CAPACITY_THRESHOLD,
+            has_meshes=False,
+            has_generic_convex_pairs=False,
+            candidate_pair_work_estimate=0,
+            device="cuda:0",
+        )
+
+        self.assertFalse(below_threshold.sparse_gjk_pairs)
+        self.assertTrue(at_threshold.sparse_gjk_pairs)
+
+    def test_rejects_inconsistent_generic_convex_scheduling(self):
+        """Reject an all-generic route when the GJK stage is disabled."""
+        with self.assertRaisesRegex(ValueError, "requires has_generic_convex_pairs=True"):
+            NarrowPhase(
+                max_candidate_pairs=1,
+                has_meshes=False,
+                has_generic_convex_pairs=False,
+                all_pairs_generic_convex=True,
+            )
 
     @unittest.skipUnless(_cuda_available, "Split GJK/MPR is enabled only on CUDA")
     def test_split_buffers_use_candidate_work_estimate(self):
