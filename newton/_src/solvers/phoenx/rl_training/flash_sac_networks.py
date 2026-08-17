@@ -59,18 +59,14 @@ def _linear_weight_grad_kernel(
     weight_grad[inner, col] = value
 
 
-@wp.kernel
-def _inverse_std_kernel(variance: wp.array[wp.float32], eps: wp.float32, inv_std: wp.array[wp.float32]):
-    col = wp.tid()
-    inv_std[col] = wp.float32(1.0) / wp.sqrt(variance[col] + eps)
-
-
 @wp.kernel(enable_backward=False)
 def _batch_moments_tile_kernel(
     x: wp.array2d[wp.float32],
     count: wp.int32,
+    eps: wp.float32,
     mean: wp.array[wp.float32],
     variance: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
 ):
     col, lane = wp.tid()
     total = wp.float32(0.0)
@@ -85,6 +81,7 @@ def _batch_moments_tile_kernel(
     if lane == 0:
         mean[col] = batch_mean
         variance[col] = batch_variance
+        inv_std[col] = wp.float32(1.0) / wp.sqrt(batch_variance + eps)
 
 
 @wp.kernel(enable_backward=False)
@@ -373,8 +370,10 @@ def _bias_grad_kernel(output_grad: wp.array2d[wp.float32], bias_grad: wp.array[w
 def _batch_moments_kernel(
     x: wp.array2d[wp.float32],
     count: wp.int32,
+    eps: wp.float32,
     mean: wp.array[wp.float32],
     variance: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
 ):
     col = wp.tid()
     total = wp.float32(0.0)
@@ -387,6 +386,7 @@ def _batch_moments_kernel(
         squared += delta * delta
     mean[col] = batch_mean
     variance[col] = squared / wp.float32(count)
+    inv_std[col] = wp.float32(1.0) / wp.sqrt(variance[col] + eps)
 
 
 @wp.kernel(enable_backward=False)
@@ -419,6 +419,49 @@ def _batch_norm_kernel(
     row, col = wp.tid()
     normalized = (x[row, col] - mean[col]) / wp.sqrt(variance[col] + eps)
     out[row, col] = normalized * scale[col] + bias[col]
+
+
+@wp.kernel
+def _batch_norm_relu_kernel(
+    x: wp.array2d[wp.float32],
+    mean: wp.array[wp.float32],
+    variance: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    bias: wp.array[wp.float32],
+    eps: wp.float32,
+    out: wp.array2d[wp.float32],
+):
+    row, col = wp.tid()
+    normalized = (x[row, col] - mean[col]) / wp.sqrt(variance[col] + eps)
+    out[row, col] = wp.max(normalized * scale[col] + bias[col], wp.float32(0.0))
+
+
+@wp.kernel
+def _batch_norm_inv_std_kernel(
+    x: wp.array2d[wp.float32],
+    mean: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    bias: wp.array[wp.float32],
+    out: wp.array2d[wp.float32],
+):
+    row, col = wp.tid()
+    normalized = (x[row, col] - mean[col]) * inv_std[col]
+    out[row, col] = normalized * scale[col] + bias[col]
+
+
+@wp.kernel
+def _batch_norm_inv_std_relu_kernel(
+    x: wp.array2d[wp.float32],
+    mean: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    bias: wp.array[wp.float32],
+    out: wp.array2d[wp.float32],
+):
+    row, col = wp.tid()
+    normalized = (x[row, col] - mean[col]) * inv_std[col]
+    out[row, col] = wp.max(normalized * scale[col] + bias[col], wp.float32(0.0))
 
 
 @wp.kernel
@@ -717,7 +760,9 @@ class _UnitBatchNorm:
             self._scratch[rows] = value
         return value
 
-    def forward(self, x: wp.array2d[wp.float32], *, training: bool, requires_grad: bool) -> wp.array2d[wp.float32]:
+    def forward(
+        self, x: wp.array2d[wp.float32], *, training: bool, requires_grad: bool, relu: bool = False
+    ) -> wp.array2d[wp.float32]:
         rows = int(x.shape[0])
         if training:
             scratch = self.scratch(rows)
@@ -727,8 +772,8 @@ class _UnitBatchNorm:
                 wp.launch(
                     _batch_moments_tile_kernel,
                     dim=(self.width, _TILE_REDUCTION_BLOCK_DIM),
-                    inputs=[x, rows],
-                    outputs=[mean, variance],
+                    inputs=[x, rows, self.eps],
+                    outputs=[mean, variance, scratch.inv_std],
                     block_dim=_TILE_REDUCTION_BLOCK_DIM,
                     device=self.device,
                 )
@@ -736,8 +781,8 @@ class _UnitBatchNorm:
                 wp.launch(
                     _batch_moments_kernel,
                     dim=self.width,
-                    inputs=[x, rows],
-                    outputs=[mean, variance],
+                    inputs=[x, rows, self.eps],
+                    outputs=[mean, variance, scratch.inv_std],
                     device=self.device,
                 )
             self.last_scratch = scratch
@@ -755,9 +800,21 @@ class _UnitBatchNorm:
             variance = self.running_variance
         out = wp.empty(x.shape, dtype=wp.float32, device=self.device, requires_grad=requires_grad)
         wp.launch(
-            _batch_norm_kernel,
+            (
+                _batch_norm_inv_std_relu_kernel
+                if training and relu
+                else _batch_norm_inv_std_kernel
+                if training
+                else _batch_norm_relu_kernel
+                if relu
+                else _batch_norm_kernel
+            ),
             dim=x.shape,
-            inputs=[x, mean, variance, self.scale, self.bias, self.eps],
+            inputs=(
+                [x, mean, scratch.inv_std, self.scale, self.bias]
+                if training
+                else [x, mean, variance, self.scale, self.bias, self.eps]
+            ),
             outputs=[out],
             device=self.device,
         )
@@ -973,25 +1030,23 @@ class NetworkFlashSAC:
             zip(self.block_weights, self.block_norms, strict=True)
         ):
             residual = hidden
-            pre1, normed1, activated1, pre2, normed2, activated2, block_out = blocks[block_index]
+            pre1, _normed1, activated1, pre2, _normed2, activated2, block_out = blocks[block_index]
             self._linear_into(residual, w1, pre1)
             wp.launch(
-                _batch_norm_kernel,
+                _batch_norm_relu_kernel,
                 dim=pre1.shape,
                 inputs=[pre1, norm1.running_mean, norm1.running_variance, norm1.scale, norm1.bias, norm1.eps],
-                outputs=[normed1],
+                outputs=[activated1],
                 device=self.device,
             )
-            wp.launch(_relu_kernel, dim=normed1.shape, inputs=[normed1], outputs=[activated1], device=self.device)
             self._linear_into(activated1, w2, pre2)
             wp.launch(
-                _batch_norm_kernel,
+                _batch_norm_relu_kernel,
                 dim=pre2.shape,
                 inputs=[pre2, norm2.running_mean, norm2.running_variance, norm2.scale, norm2.bias, norm2.eps],
-                outputs=[normed2],
+                outputs=[activated2],
                 device=self.device,
             )
-            wp.launch(_relu_kernel, dim=normed2.shape, inputs=[normed2], outputs=[activated2], device=self.device)
             wp.launch(
                 _residual_add_kernel,
                 dim=block_out.shape,
@@ -1042,13 +1097,9 @@ class NetworkFlashSAC:
         for (w1, w2), (norm1, norm2) in zip(self.block_weights, self.block_norms, strict=True):
             residual = hidden
             hidden = self._linear(hidden, w1, requires_grad=requires_grad)
-            hidden = norm1.forward(hidden, training=training, requires_grad=requires_grad)
-            activated = wp.empty_like(hidden, requires_grad=requires_grad)
-            wp.launch(_relu_kernel, dim=hidden.shape, inputs=[hidden], outputs=[activated], device=self.device)
+            activated = norm1.forward(hidden, training=training, requires_grad=requires_grad, relu=True)
             hidden = self._linear(activated, w2, requires_grad=requires_grad)
-            hidden = norm2.forward(hidden, training=training, requires_grad=requires_grad)
-            activated = wp.empty_like(hidden, requires_grad=requires_grad)
-            wp.launch(_relu_kernel, dim=hidden.shape, inputs=[hidden], outputs=[activated], device=self.device)
+            activated = norm2.forward(hidden, training=training, requires_grad=requires_grad, relu=True)
             hidden = wp.empty_like(activated, requires_grad=requires_grad)
             wp.launch(
                 _residual_add_kernel,
@@ -1165,13 +1216,6 @@ class NetworkFlashSAC:
                 mean = norm.last_mean
                 scratch = norm.last_scratch
                 inv_std = scratch.inv_std
-                wp.launch(
-                    _inverse_std_kernel,
-                    dim=norm.width,
-                    inputs=[norm.last_variance, norm.eps],
-                    outputs=[inv_std],
-                    device=self.device,
-                )
                 sum_grad = norm.bias.grad
                 sum_grad_normalized = norm.scale.grad
                 wp.launch(
@@ -1239,13 +1283,11 @@ class NetworkFlashSAC:
         for (w1, w2), (norm1, norm2) in zip(self.block_weights, self.block_norms, strict=True):
             residual = hidden
             pre1 = self._linear(residual, w1, requires_grad=False)
-            normed1 = norm1.forward(pre1, training=training, requires_grad=False)
-            activated1 = wp.empty_like(normed1)
-            wp.launch(_relu_kernel, dim=normed1.shape, inputs=[normed1], outputs=[activated1], device=self.device)
+            activated1 = norm1.forward(pre1, training=training, requires_grad=False, relu=True)
+            normed1 = activated1
             pre2 = self._linear(activated1, w2, requires_grad=False)
-            normed2 = norm2.forward(pre2, training=training, requires_grad=False)
-            activated2 = wp.empty_like(normed2)
-            wp.launch(_relu_kernel, dim=normed2.shape, inputs=[normed2], outputs=[activated2], device=self.device)
+            activated2 = norm2.forward(pre2, training=training, requires_grad=False, relu=True)
+            normed2 = activated2
             hidden = wp.empty_like(activated2)
             wp.launch(
                 _residual_add_kernel,
@@ -1568,6 +1610,7 @@ class EnsembleNetworkFlashSAC:
         *,
         training: bool,
         broadcast_input: bool = False,
+        relu: bool = False,
     ) -> None:
         for ensemble_index, norm in enumerate(norms):
             source = x if broadcast_input else x[ensemble_index]
@@ -1580,8 +1623,8 @@ class EnsembleNetworkFlashSAC:
                     wp.launch(
                         _batch_moments_tile_kernel,
                         dim=(norm.width, _TILE_REDUCTION_BLOCK_DIM),
-                        inputs=[source, rows],
-                        outputs=[mean, variance],
+                        inputs=[source, rows, norm.eps],
+                        outputs=[mean, variance, scratch.inv_std],
                         block_dim=_TILE_REDUCTION_BLOCK_DIM,
                         device=self.device,
                     )
@@ -1589,8 +1632,8 @@ class EnsembleNetworkFlashSAC:
                     wp.launch(
                         _batch_moments_kernel,
                         dim=norm.width,
-                        inputs=[source, rows],
-                        outputs=[mean, variance],
+                        inputs=[source, rows, norm.eps],
+                        outputs=[mean, variance, scratch.inv_std],
                         device=self.device,
                     )
                 norm.last_scratch = scratch
@@ -1607,9 +1650,21 @@ class EnsembleNetworkFlashSAC:
                 mean = norm.running_mean
                 variance = norm.running_variance
             wp.launch(
-                _batch_norm_kernel,
+                (
+                    _batch_norm_inv_std_relu_kernel
+                    if training and relu
+                    else _batch_norm_inv_std_kernel
+                    if training
+                    else _batch_norm_relu_kernel
+                    if relu
+                    else _batch_norm_kernel
+                ),
                 dim=source.shape,
-                inputs=[source, mean, variance, norm.scale, norm.bias, norm.eps],
+                inputs=(
+                    [source, mean, scratch.inv_std, norm.scale, norm.bias]
+                    if training
+                    else [source, mean, variance, norm.scale, norm.bias, norm.eps]
+                ),
                 outputs=[out[ensemble_index]],
                 device=self.device,
             )
@@ -1632,32 +1687,17 @@ class EnsembleNetworkFlashSAC:
         for block_index, (w1, w2) in enumerate(self.block_weights):
             residual = hidden
             pre1 = self._linear(residual, w1)
-            normed1 = wp.empty_like(pre1)
+            activated1 = wp.empty_like(pre1)
             first_norms = first.block_norms[block_index]
             second_norms = second.block_norms[block_index]
-            self._norm_into(pre1, normed1, (first_norms[0], second_norms[0]), training=training)
-            activated1 = wp.empty_like(normed1)
-            for ensemble_index in range(2):
-                wp.launch(
-                    _relu_kernel,
-                    dim=normed1[ensemble_index].shape,
-                    inputs=[normed1[ensemble_index]],
-                    outputs=[activated1[ensemble_index]],
-                    device=self.device,
-                )
+            self._norm_into(pre1, activated1, (first_norms[0], second_norms[0]), training=training, relu=True)
+            normed1 = activated1
             pre2 = self._linear(activated1, w2)
-            normed2 = wp.empty_like(pre2)
-            self._norm_into(pre2, normed2, (first_norms[1], second_norms[1]), training=training)
-            activated2 = wp.empty_like(normed2)
-            hidden = wp.empty_like(normed2)
+            activated2 = wp.empty_like(pre2)
+            self._norm_into(pre2, activated2, (first_norms[1], second_norms[1]), training=training, relu=True)
+            normed2 = activated2
+            hidden = wp.empty_like(activated2)
             for ensemble_index in range(2):
-                wp.launch(
-                    _relu_kernel,
-                    dim=normed2[ensemble_index].shape,
-                    inputs=[normed2[ensemble_index]],
-                    outputs=[activated2[ensemble_index]],
-                    device=self.device,
-                )
                 wp.launch(
                     _residual_add_kernel,
                     dim=normed2[ensemble_index].shape,

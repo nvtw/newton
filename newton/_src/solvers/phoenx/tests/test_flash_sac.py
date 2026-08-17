@@ -297,8 +297,8 @@ class TestTrainerFlashSAC(unittest.TestCase):
                 wp.launch(
                     _batch_moments_tile_kernel,
                     dim=(width, _TILE_REDUCTION_BLOCK_DIM),
-                    inputs=[x, rows],
-                    outputs=[scratch.mean, scratch.variance],
+                    inputs=[x, rows, norm.eps],
+                    outputs=[scratch.mean, scratch.variance, scratch.inv_std],
                     block_dim=_TILE_REDUCTION_BLOCK_DIM,
                     device=device,
                 )
@@ -306,6 +306,9 @@ class TestTrainerFlashSAC(unittest.TestCase):
             wp.capture_launch(capture.graph)
             np.testing.assert_allclose(scratch.mean.numpy(), values.mean(axis=0), rtol=2.0e-6, atol=2.0e-6)
             np.testing.assert_allclose(scratch.variance.numpy(), values.var(axis=0), rtol=3.0e-6, atol=3.0e-6)
+            np.testing.assert_allclose(
+                scratch.inv_std.numpy(), 1.0 / np.sqrt(values.var(axis=0) + norm.eps), rtol=3.0e-6, atol=3.0e-6
+            )
             capture.graph = None
 
     def test_packed_rms_reductions_and_shared_mlp_projection(self) -> None:
