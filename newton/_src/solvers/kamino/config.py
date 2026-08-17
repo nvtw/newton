@@ -390,7 +390,9 @@ class ConstrainedDynamicsConfig(ConfigBase):
     Whether to discard separated speculative contacts before the dynamics solve.
 
     Disable this when contacts come from a speculative :class:`CollisionPipeline`
-    and should constrain approaching bodies before impact. Defaults to ``True``.
+    and should constrain approaching bodies before impact. Keeping speculative
+    contacts can cause numerical instability or inaccurate restitutive impacts.
+    Defaults to ``True``.
     """
 
     @override
