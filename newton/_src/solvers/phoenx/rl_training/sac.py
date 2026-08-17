@@ -30,6 +30,7 @@ from .kernels import (
     sac_distributional_actor_q_backward_kernel,
     sac_distributional_critic_loss_backward_kernel,
     sac_distributional_critic_loss_backward_tile_kernel,
+    sac_distributional_critic_loss_deterministic_tile_kernel,
     sac_distributional_min_projection_device_alpha_kernel,
     sac_distributional_projection_device_alpha_kernel,
     sac_distributional_q_value_kernel,
@@ -632,6 +633,22 @@ class TrainerSAC:
                 block_dim=128 if self.device.is_cuda else 256,
                 device=self.device,
             )
+            if self.device.is_cuda and getattr(self, "_deterministic_critic_stats", False):
+                wp.launch(
+                    sac_distributional_critic_loss_deterministic_tile_kernel,
+                    dim=128,
+                    inputs=[
+                        q1,
+                        q2,
+                        target_distribution1,
+                        target_distribution2,
+                        batch.batch_size,
+                        atoms,
+                    ],
+                    outputs=[self._critic_loss],
+                    block_dim=128,
+                    device=self.device,
+                )
         else:
             targets = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
             wp.launch(

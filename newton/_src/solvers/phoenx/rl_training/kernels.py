@@ -2208,6 +2208,39 @@ def sac_distributional_critic_loss_backward_tile_kernel(
         wp.atomic_add(loss, 0, row_loss * inv_batch)
 
 
+@wp.kernel(enable_backward=False)
+def sac_distributional_critic_loss_deterministic_tile_kernel(
+    logits1: wp.array2d[wp.float32],
+    logits2: wp.array2d[wp.float32],
+    targets1: wp.array2d[wp.float32],
+    targets2: wp.array2d[wp.float32],
+    batch_size: wp.int32,
+    num_atoms: wp.int32,
+    loss: wp.array[wp.float32],
+):
+    lane = wp.tid()
+    partial_loss = wp.float32(0.0)
+    for row in range(lane, batch_size, wp.block_dim()):
+        max_logit1 = logits1[row, 0]
+        max_logit2 = logits2[row, 0]
+        for atom in range(1, num_atoms):
+            max_logit1 = wp.max(max_logit1, logits1[row, atom])
+            max_logit2 = wp.max(max_logit2, logits2[row, atom])
+        normalizer1 = wp.float32(0.0)
+        normalizer2 = wp.float32(0.0)
+        for atom in range(num_atoms):
+            normalizer1 += wp.exp(logits1[row, atom] - max_logit1)
+            normalizer2 += wp.exp(logits2[row, atom] - max_logit2)
+        log_normalizer1 = wp.log(normalizer1)
+        log_normalizer2 = wp.log(normalizer2)
+        for atom in range(num_atoms):
+            partial_loss -= targets1[row, atom] * (logits1[row, atom] - max_logit1 - log_normalizer1)
+            partial_loss -= targets2[row, atom] * (logits2[row, atom] - max_logit2 - log_normalizer2)
+    total_loss = wp.tile_sum(wp.tile(partial_loss))[0]
+    if lane == 0:
+        loss[0] = total_loss / wp.float32(batch_size)
+
+
 @wp.kernel
 def sac_distributional_actor_q_backward_kernel(
     logits1: wp.array2d[wp.float32],

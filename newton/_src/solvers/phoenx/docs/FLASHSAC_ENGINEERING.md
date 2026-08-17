@@ -322,6 +322,28 @@ for continuous tuning.  The retained prerequisites are graph-safe optimizer
 rate mutation and allocation-stable learner state copying.  The next design
 must population-batch actors and critics rather than launch two trainer graphs.
 
+### Population-network foundation
+
+The retained network foundation population-stacks arbitrary compatible
+reference actors or critics, including a P=1 specialization boundary. All
+forward/backward activation, reduction, and AMP mirror storage is reserved
+before capture and retains stable pointers across repeated graph replay.
+Per-member BatchNorm affine and running state remain logical checkpoint views
+over contiguous population storage.
+
+At batch 2,048, two captured actor networks measured 0.421-0.422 ms versus
+0.467-0.469 ms for separate networks (1.108-1.112x). Four captured critics
+measured 3.104-3.148 ms versus 3.300-3.311 ms (1.052-1.063x). Segmented AMP
+BatchNorm moments and affine gradients match independent member reductions
+bit-for-bit, including a width-99 tail. Whole-network tests retain the existing
+input/master-gradient cosine and relative-error gates; each staged GEMM is
+allowed one local FP16 ULP, with an explicit bounded allowance for compounding
+through residual, normalization, and head stages.
+
+This is a network-only prerequisite, not a public autotuner. Population-batched
+optimizer, target/scaler state, replay-source trust guards, evaluation, and
+promotion remain future work.
+
 ## Reproducible quality evidence
 
 The corrected FP32 seed-0 result is stored in

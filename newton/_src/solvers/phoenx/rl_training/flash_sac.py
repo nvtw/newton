@@ -842,6 +842,7 @@ class TrainerFlashSAC(TrainerSAC):
             self.critic2_optimizer.step_condition = self._amp_step_condition
         self._device_actor_condition = wp.zeros(1, dtype=wp.int32, device=self.device)
         self._device_actor_skip_condition = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._deterministic_critic_stats = False
         if self.config.normalize_weights:
             self._normalize_online_weights()
             self.target_critic1.copy_from(self.critic1)
@@ -1725,6 +1726,7 @@ class TrainerFlashSAC(TrainerSAC):
                 self._update_actor(batch, seed=update_seed)
                 if self.config.auto_alpha:
                     self._update_alpha(batch, seed=update_seed + 1)
+            self._deterministic_critic_stats = bool(read_stats and i + 1 == int(self.config.update_steps))
             self._update_critics(batch, seed=update_seed + 2)
             self.target_critic1.soft_update_from(self.critic1, self.config.tau)
             self.target_critic2.soft_update_from(self.critic2, self.config.tau)
@@ -1744,6 +1746,7 @@ class TrainerFlashSAC(TrainerSAC):
             inputs=[self._device_update_count, 1],
             device=self.device,
         )
+        self._deterministic_critic_stats = False
         if read_stats:
             return self._read_update_stats()
         return StatsSACUpdate(actor_loss=0.0, critic_loss=0.0, alpha_loss=0.0, alpha=0.0)

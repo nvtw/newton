@@ -26,10 +26,13 @@ from newton._src.solvers.phoenx.rl_training.flash_sac import (
 )
 from newton._src.solvers.phoenx.rl_training.flash_sac_networks import (
     _TILE_REDUCTION_BLOCK_DIM,
+    EnsembleNetworkFlashSAC,
     NetworkFlashSAC,
     _batch_moments_tile_kernel,
+    _batch_moments_transposed_population_tile_kernel,
     _batch_moments_transposed_tile_kernel,
     _batch_norm_amp_dual_kernel,
+    _batch_norm_backward_amp_population_tile_kernel,
     _batch_norm_backward_amp_tile_kernel,
     _batch_norm_backward_amp_transposed_tile_kernel,
     _batch_norm_input_grad_amp_kernel,
@@ -49,6 +52,7 @@ from newton._src.solvers.phoenx.rl_training.flash_sac_networks import (
     _rms_norm_kernel,
     _round_batch_moments_f16_kernel,
     _transpose_2d_tile_kernel,
+    _transpose_population_2d_tile_kernel,
     _UnitBatchNorm,
 )
 from newton._src.solvers.phoenx.rl_training.g1 import (
@@ -379,6 +383,424 @@ class TestTrainerFlashSAC(unittest.TestCase):
         target.soft_update_from(online, 0.5)
         np.testing.assert_array_equal(target.input_norm.running_mean.numpy(), running_before)
         np.testing.assert_allclose(target.head_biases[0].numpy(), [1.0])
+
+    def test_population_batch_norm_reductions_and_state_views(self) -> None:
+        """Match segmented AMP BatchNorm reductions and preserve logical state views."""
+
+        device = require_cuda_graph_capture("FlashSAC population BatchNorm reductions")
+        rng = np.random.default_rng(317)
+        count, rows, width = 2, 64, 99
+        padded_width = ((width + 31) // 32) * 32
+        values = rng.normal(size=(count, rows, width)).astype(np.float16)
+        output_grads = rng.normal(size=(count, rows, width)).astype(np.float32)
+        scales = rng.normal(size=(count, width)).astype(np.float32)
+        flat_values = wp.array(values.reshape(count * rows, width), device=device)
+        flat_output_grads = wp.array(output_grads.reshape(count * rows, width), device=device)
+        transposed = wp.empty((count * padded_width, rows), dtype=wp.float16, device=device)
+        transposed_output_grads = wp.empty((count * padded_width, rows), dtype=wp.float32, device=device)
+        population_arrays = [wp.empty((count, width), dtype=wp.float32, device=device) for _ in range(7)]
+        means, variances, inv_stds, mean_grads, variance_grads, scale_grads, bias_grads = population_arrays
+        transpose_dim = (
+            count * ((rows + 31) // 32),
+            (width + 31) // 32,
+            _TILE_REDUCTION_BLOCK_DIM,
+        )
+        for source, target in (
+            (flat_values, transposed),
+            (flat_output_grads, transposed_output_grads),
+        ):
+            wp.launch(
+                _transpose_population_2d_tile_kernel,
+                dim=transpose_dim,
+                inputs=[source, rows, width],
+                outputs=[target],
+                block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                device=device,
+            )
+        wp.launch(
+            _batch_moments_transposed_population_tile_kernel,
+            dim=(count * width, _TILE_REDUCTION_BLOCK_DIM),
+            inputs=[transposed, rows, width, 1.0e-5],
+            outputs=[means, variances, inv_stds],
+            block_dim=_TILE_REDUCTION_BLOCK_DIM,
+            device=device,
+        )
+        wp.launch(
+            _batch_norm_backward_amp_population_tile_kernel,
+            dim=(count * width, _TILE_REDUCTION_BLOCK_DIM),
+            inputs=[
+                transposed,
+                transposed_output_grads,
+                rows,
+                width,
+                means,
+                inv_stds,
+                wp.array(scales, device=device),
+            ],
+            outputs=[mean_grads, variance_grads, scale_grads, bias_grads],
+            block_dim=_TILE_REDUCTION_BLOCK_DIM,
+            device=device,
+        )
+
+        separate_results: list[list[np.ndarray]] = [[] for _ in population_arrays]
+        for member in range(count):
+            x = wp.array(values[member], device=device)
+            grad = wp.array(output_grads[member], device=device)
+            norm = _UnitBatchNorm(width, device)
+            norm.scale.assign(scales[member])
+            scratch = norm.scratch(rows, wp.float16)
+            for source, target in ((x, scratch.transposed), (grad, scratch.transposed_grad)):
+                wp.launch(
+                    _transpose_2d_tile_kernel,
+                    dim=((rows + 31) // 32, (width + 31) // 32, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[source],
+                    outputs=[target],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=device,
+                )
+            wp.launch(
+                _batch_moments_transposed_tile_kernel,
+                dim=(width, _TILE_REDUCTION_BLOCK_DIM),
+                inputs=[scratch.transposed, rows, 1.0e-5],
+                outputs=[scratch.mean, scratch.variance, scratch.inv_std],
+                block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                device=device,
+            )
+            wp.launch(
+                _batch_norm_backward_amp_transposed_tile_kernel,
+                dim=(width, _TILE_REDUCTION_BLOCK_DIM),
+                inputs=[scratch.transposed, scratch.transposed_grad, scratch.mean, scratch.inv_std, norm.scale],
+                outputs=[scratch.mean_grad, scratch.variance_grad, norm.scale.grad, norm.bias.grad],
+                block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                device=device,
+            )
+            member_arrays = (
+                scratch.mean,
+                scratch.variance,
+                scratch.inv_std,
+                scratch.mean_grad,
+                scratch.variance_grad,
+                norm.scale.grad,
+                norm.bias.grad,
+            )
+            for result, value in zip(separate_results, member_arrays, strict=True):
+                result.append(value.numpy())
+        for actual, expected in zip(population_arrays, separate_results, strict=True):
+            np.testing.assert_array_equal(actual.numpy(), np.stack(expected))
+
+        members = tuple(
+            NetworkFlashSAC(
+                input_dim=3,
+                hidden_dim=8,
+                num_blocks=1,
+                output_dim=4,
+                actor_heads=True,
+                device=device,
+                seed=321 + index,
+                contraction_dtype="float16",
+            )
+            for index in range(count)
+        )
+        ensemble = EnsembleNetworkFlashSAC(*members)
+        ensemble.reserve_buffers(rows)
+        inputs = wp.array(rng.normal(size=(rows, 3)).astype(np.float32), device=device)
+        ensemble.forward_all_manual(inputs, training=True)
+        norms = tuple(member.block_norms[0][0] for member in members)
+        state = ensemble._population_norm_states[id(norms[0])]
+        stacked_mean = state["running_mean"].numpy()
+        stacked_variance = state["running_variance"].numpy()
+        for member, norm in enumerate(norms):
+            self.assertEqual(int(norm.scale.ptr), int(state["scale"][member].ptr))
+            self.assertEqual(int(norm.scale.grad.ptr), int(state["scale"].grad[member].ptr))
+            np.testing.assert_array_equal(norm.running_mean.numpy(), stacked_mean[member])
+            np.testing.assert_array_equal(norm.running_variance.numpy(), stacked_variance[member])
+            state_arrays = members[member].state_arrays()
+            self.assertEqual(len({int(value.ptr) for value in state_arrays}), len(state_arrays))
+
+    def test_dynamic_critic_ensemble_matches_separate_forward_backward(self) -> None:
+        """Match four population-stacked critics to independent network equations."""
+
+        device = require_cuda_graph_capture("FlashSAC dynamic critic ensemble")
+        rng = np.random.default_rng(269)
+        baseline = tuple(
+            NetworkFlashSAC(
+                input_dim=3,
+                hidden_dim=4,
+                num_blocks=1,
+                output_dim=5,
+                actor_heads=False,
+                device=device,
+                seed=269 + index,
+            )
+            for index in range(4)
+        )
+        population = tuple(
+            NetworkFlashSAC(
+                input_dim=3,
+                hidden_dim=4,
+                num_blocks=1,
+                output_dim=5,
+                actor_heads=False,
+                device=device,
+                seed=269 + index,
+            )
+            for index in range(4)
+        )
+        x = wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device)
+        output_grads_np = rng.normal(size=(4, 8, 5)).astype(np.float32)
+        expected_outputs = []
+        expected_input_grads = []
+        for index, network in enumerate(baseline):
+            input_grad = wp.empty(x.shape, dtype=wp.float32, device=device)
+            expected_outputs.append(network.forward_manual(x, training=False).numpy())
+            network.backward_manual(
+                wp.array(output_grads_np[index], device=device),
+                input_grad=input_grad,
+            )
+            expected_input_grads.append(input_grad.numpy())
+
+        ensemble = EnsembleNetworkFlashSAC(*population)
+
+        def workspace_signature() -> tuple[tuple[object, ...], tuple[int, ...]]:
+            def pointers(value: object) -> tuple[int, ...]:
+                if isinstance(value, wp.array):
+                    return (int(value.ptr),)
+                if isinstance(value, dict):
+                    values = value.values()
+                else:
+                    values = value if isinstance(value, list | tuple) else ()
+                return tuple(pointer for item in values for pointer in pointers(item))
+
+            mirror_keys = (
+                *sorted(ensemble._fp16_inputs_2d),
+                *sorted(ensemble._fp16_inputs_3d),
+                tuple(
+                    sorted((source_ptr, int(view.ptr)) for source_ptr, view in ensemble._population_flat_views.items())
+                ),
+            )
+            return mirror_keys, pointers(ensemble._workspace)
+
+        ensemble.reserve_buffers(8)
+        signature_before = workspace_signature()
+        actual_outputs = ensemble.forward_all_manual(x, training=False)
+        actual_output_grads = wp.array(output_grads_np, device=device)
+        actual_input_grads = tuple(wp.empty(x.shape, dtype=wp.float32, device=device) for _ in population)
+        ensemble.backward_all_manual(actual_output_grads, input_grads=actual_input_grads)
+        self.assertEqual(signature_before, workspace_signature())
+
+        np.testing.assert_allclose(
+            actual_outputs.numpy(),
+            np.stack(expected_outputs),
+            rtol=2.0e-6,
+            atol=2.0e-6,
+        )
+        for actual, expected in zip(actual_input_grads, expected_input_grads, strict=True):
+            np.testing.assert_allclose(actual.numpy(), expected, rtol=2.0e-5, atol=2.0e-5)
+        for actual_network, expected_network in zip(population, baseline, strict=True):
+            for actual, expected in zip(actual_network.parameters(), expected_network.parameters(), strict=True):
+                np.testing.assert_allclose(actual.grad.numpy(), expected.grad.numpy(), rtol=3.0e-5, atol=3.0e-5)
+
+        ensemble.forward_all_manual(x, training=False)
+        ensemble.backward_all_manual(actual_output_grads, input_grads=actual_input_grads)
+        self.assertEqual(signature_before, workspace_signature())
+        with wp.ScopedCapture(device=device) as capture:
+            ensemble.forward_all_manual(x, training=False)
+            ensemble.backward_all_manual(actual_output_grads, input_grads=actual_input_grads)
+        wp.capture_launch(capture.graph)
+        wp.capture_launch(capture.graph)
+        self.assertEqual(signature_before, workspace_signature())
+        capture.graph = None
+
+    def test_single_member_population_matches_scalar_graph(self) -> None:
+        """Match the P=1 population core to the optimized scalar network graph."""
+
+        device = require_cuda_graph_capture("FlashSAC single-member population network")
+        rng = np.random.default_rng(311)
+        baseline = NetworkFlashSAC(
+            input_dim=3,
+            hidden_dim=4,
+            num_blocks=1,
+            output_dim=4,
+            actor_heads=True,
+            device=device,
+            seed=311,
+        )
+        member = NetworkFlashSAC(
+            input_dim=3,
+            hidden_dim=4,
+            num_blocks=1,
+            output_dim=4,
+            actor_heads=True,
+            device=device,
+            seed=311,
+        )
+        inputs = wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device)
+        output_grad_values = rng.normal(size=(8, 4)).astype(np.float32)
+        expected_input_grad = wp.empty(inputs.shape, dtype=wp.float32, device=device)
+        expected_output = baseline.forward_manual(inputs, training=False).numpy()
+        baseline.backward_manual(wp.array(output_grad_values, device=device), input_grad=expected_input_grad)
+
+        ensemble = EnsembleNetworkFlashSAC(member)
+        ensemble.reserve_buffers(8)
+        actual_input_grad = wp.empty(inputs.shape, dtype=wp.float32, device=device)
+        stacked_output_grad = wp.array(output_grad_values[None, ...], device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            actual_output = ensemble.forward_all_manual(inputs, training=False)
+            ensemble.backward_all_manual(stacked_output_grad, input_grads=(actual_input_grad,))
+        wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(actual_output.numpy()[0], expected_output, rtol=2.0e-6, atol=2.0e-6)
+        np.testing.assert_allclose(actual_input_grad.numpy(), expected_input_grad.numpy(), rtol=2.0e-5, atol=2.0e-5)
+        for actual, expected in zip(member.parameters(), baseline.parameters(), strict=True):
+            np.testing.assert_allclose(actual.grad.numpy(), expected.grad.numpy(), rtol=3.0e-5, atol=3.0e-5)
+        capture.graph = None
+
+    def test_population_actor_matches_separate_forward_backward(self) -> None:
+        """Match two population-stacked actors to independent network equations."""
+
+        device = require_cuda_graph_capture("FlashSAC population actor")
+        rng = np.random.default_rng(279)
+        baseline = tuple(
+            NetworkFlashSAC(
+                input_dim=3,
+                hidden_dim=4,
+                num_blocks=1,
+                output_dim=4,
+                actor_heads=True,
+                device=device,
+                seed=279 + index,
+            )
+            for index in range(2)
+        )
+        population = tuple(
+            NetworkFlashSAC(
+                input_dim=3,
+                hidden_dim=4,
+                num_blocks=1,
+                output_dim=4,
+                actor_heads=True,
+                device=device,
+                seed=279 + index,
+            )
+            for index in range(2)
+        )
+        x = wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device)
+        output_grads_np = rng.normal(size=(2, 8, 4)).astype(np.float32)
+        expected_outputs = []
+        expected_input_grads = []
+        for index, network in enumerate(baseline):
+            input_grad = wp.empty(x.shape, dtype=wp.float32, device=device)
+            expected_outputs.append(network.forward_manual(x, training=False).numpy())
+            network.backward_manual(
+                wp.array(output_grads_np[index], device=device),
+                input_grad=input_grad,
+            )
+            expected_input_grads.append(input_grad.numpy())
+
+        ensemble = EnsembleNetworkFlashSAC(*population)
+        actual_outputs = ensemble.forward_all_manual(x, training=False)
+        actual_input_grads = tuple(wp.empty(x.shape, dtype=wp.float32, device=device) for _ in population)
+        ensemble.backward_all_manual(
+            wp.array(output_grads_np, device=device),
+            input_grads=actual_input_grads,
+        )
+
+        np.testing.assert_allclose(actual_outputs.numpy(), np.stack(expected_outputs), rtol=2.0e-6, atol=2.0e-6)
+        for actual, expected in zip(actual_input_grads, expected_input_grads, strict=True):
+            np.testing.assert_allclose(actual.numpy(), expected, rtol=2.0e-5, atol=2.0e-5)
+        for actual_network, expected_network in zip(population, baseline, strict=True):
+            for actual, expected in zip(actual_network.parameters(), expected_network.parameters(), strict=True):
+                np.testing.assert_allclose(actual.grad.numpy(), expected.grad.numpy(), rtol=3.0e-5, atol=3.0e-5)
+
+    def test_population_amp_matches_separate_networks(self) -> None:
+        """Match stacked AMP actor and critic gradients to separate networks."""
+
+        device = require_cuda_graph_capture("FlashSAC AMP population networks")
+        rng = np.random.default_rng(313)
+        for actor_heads, count, output_dim in ((True, 2, 4), (False, 4, 5)):
+            baseline = tuple(
+                NetworkFlashSAC(
+                    input_dim=3,
+                    hidden_dim=8,
+                    num_blocks=1,
+                    output_dim=output_dim,
+                    actor_heads=actor_heads,
+                    device=device,
+                    seed=313 + index,
+                    contraction_dtype="float16",
+                )
+                for index in range(count)
+            )
+            population = tuple(
+                NetworkFlashSAC(
+                    input_dim=3,
+                    hidden_dim=8,
+                    num_blocks=1,
+                    output_dim=output_dim,
+                    actor_heads=actor_heads,
+                    device=device,
+                    seed=313 + index,
+                    contraction_dtype="float16",
+                )
+                for index in range(count)
+            )
+            x = wp.array(rng.normal(size=(256, 3)).astype(np.float32), device=device)
+            output_grads_np = rng.normal(size=(count, 256, output_dim)).astype(np.float32) * 1.0e-4
+            loss_scale = wp.array(np.asarray([65536.0], dtype=np.float32), device=device)
+            expected_outputs = []
+            expected_input_grads = []
+            for index, network in enumerate(baseline):
+                input_grad = wp.empty(x.shape, dtype=wp.float32, device=device)
+                expected_outputs.append(network.forward_manual(x, training=True).numpy())
+                found_inf = wp.zeros(1, dtype=wp.int32, device=device)
+                network.backward_manual(
+                    wp.array(output_grads_np[index] * 65536.0, device=device),
+                    input_grad=input_grad,
+                    loss_scale=loss_scale,
+                    found_inf=found_inf,
+                )
+                self.assertEqual(int(found_inf.numpy()[0]), 0)
+                expected_input_grads.append(input_grad.numpy())
+
+            ensemble = EnsembleNetworkFlashSAC(*population)
+            ensemble.reserve_buffers(256)
+            actual_outputs = ensemble.forward_all_manual(x, training=True)
+            actual_input_grads = tuple(wp.empty(x.shape, dtype=wp.float32, device=device) for _ in population)
+            found_inf = wp.zeros(1, dtype=wp.int32, device=device)
+            ensemble.backward_all_manual(
+                wp.array(output_grads_np * 65536.0, device=device),
+                input_grads=actual_input_grads,
+                loss_scale=loss_scale,
+                found_inf=found_inf,
+            )
+            self.assertEqual(int(found_inf.numpy()[0]), 0)
+
+            actual_output_values = actual_outputs.numpy()
+            expected_output_values = np.stack(expected_outputs)
+            # Each staged GEMM may differ by one FP16 ULP from independent cuBLAS reduction order;
+            # residual, normalization, and head mapping compound that to at most 16 unit-scale ULPs.
+            fp16_ulp = float(np.finfo(np.float16).eps)
+            np.testing.assert_allclose(
+                actual_output_values, expected_output_values, rtol=16.0 * fp16_ulp, atol=16.0 * fp16_ulp
+            )
+            for actual, expected in zip(actual_input_grads, expected_input_grads, strict=True):
+                # Input gradients remain loss-scaled; guard direction while allowing isolated FP16 reduction ULPs.
+                actual_input = actual.numpy()
+                input_cosine = np.dot(actual_input.ravel(), expected.ravel()) / (
+                    np.linalg.norm(actual_input) * np.linalg.norm(expected)
+                )
+                self.assertGreater(input_cosine, 0.999)
+                relative_input_error = np.linalg.norm(actual_input - expected) / np.linalg.norm(expected)
+                self.assertLess(relative_input_error, 3.5e-2)
+            for actual_network, expected_network in zip(population, baseline, strict=True):
+                actual_grads = np.concatenate([value.grad.numpy().ravel() for value in actual_network.parameters()])
+                expected_grads = np.concatenate([value.grad.numpy().ravel() for value in expected_network.parameters()])
+                self.assertTrue(np.isfinite(actual_grads).all())
+                cosine = np.dot(actual_grads, expected_grads) / (
+                    np.linalg.norm(actual_grads) * np.linalg.norm(expected_grads)
+                )
+                self.assertGreater(cosine, 0.997)
+                relative_gradient_error = np.linalg.norm(actual_grads - expected_grads) / np.linalg.norm(expected_grads)
+                self.assertLess(relative_gradient_error, 8.0e-2)
 
     def test_tile_batch_norm_moments_across_shapes_and_graph_replays(self) -> None:
         """Match centered NumPy moments across shapes with stable captured storage."""
@@ -935,14 +1357,47 @@ class TestTrainerFlashSAC(unittest.TestCase):
         ):
             np.testing.assert_array_equal(actual.numpy(), expected.numpy())
 
+        def assert_reference_state_equal() -> None:
+            network_pairs = (
+                (trainer.actor.net, restored.actor.net),
+                (trainer.critic1, restored.critic1),
+                (trainer.critic2, restored.critic2),
+                (trainer.target_critic1, restored.target_critic1),
+                (trainer.target_critic2, restored.target_critic2),
+            )
+            for expected_network, actual_network in network_pairs:
+                for expected, actual in zip(
+                    expected_network.state_arrays(), actual_network.state_arrays(), strict=True
+                ):
+                    np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+            for expected_ensemble, actual_ensemble in (
+                (trainer._critic_ensemble, restored._critic_ensemble),
+                (trainer._target_critic_ensemble, restored._target_critic_ensemble),
+            ):
+                for expected_state, actual_state in zip(
+                    expected_ensemble._population_norm_states.values(),
+                    actual_ensemble._population_norm_states.values(),
+                    strict=True,
+                ):
+                    for name in expected_state:
+                        np.testing.assert_array_equal(actual_state[name].numpy(), expected_state[name].numpy())
+                for expected_weight, actual_weight in zip(
+                    expected_ensemble._fp16_weights.values(),
+                    actual_ensemble._fp16_weights.values(),
+                    strict=True,
+                ):
+                    np.testing.assert_array_equal(actual_weight.numpy(), expected_weight.numpy())
+
+        assert_reference_state_equal()
+
         for seed in range(171, 187):
             for actual, expected in zip(
                 restored.act(batch.obs, seed=seed), trainer.act(batch.obs, seed=seed), strict=True
             ):
                 np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        assert_reference_state_equal()
         expected_stats = trainer.update(batch, seed=173)
         actual_stats = restored.update(batch, seed=173)
-        self.assertEqual(actual_stats, expected_stats)
         deterministic_expected = trainer.act(batch.obs, seed=179, deterministic=True)
         deterministic_actual = restored.act(batch.obs, seed=181, deterministic=True)
         for actual, expected in zip(deterministic_actual, deterministic_expected, strict=True):
@@ -956,6 +1411,7 @@ class TestTrainerFlashSAC(unittest.TestCase):
         ):
             for expected, actual in zip(expected_network.state_arrays(), actual_network.state_arrays(), strict=True):
                 np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        self.assertEqual(actual_stats, expected_stats)
 
     def test_same_seed_produces_identical_actions_and_updates(self) -> None:
         """Produce bitwise-identical stochastic actions and updates from one seed."""
