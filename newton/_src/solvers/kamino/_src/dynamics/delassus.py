@@ -262,12 +262,11 @@ def _build_delassus_elementwise_sparse(
     # Retrieve the number of non-zero blocks
     num_nzb = jacobian_cts_num_nzb[wid]
 
-    # Compute Jacobian block indices from the tid
-    block_id_i = tid // num_nzb
-    block_id_j = tid % num_nzb
+    # Process each unordered block pair once; the result is mirrored below.
+    block_id_i, block_id_j = upper_triangular_indices_from_index(tid, num_nzb)
 
     # Skip if index exceeds problem size
-    if block_id_i >= num_nzb:
+    if block_id_i < 0 or block_id_i >= num_nzb or block_id_j >= num_nzb:
         return
 
     nzb_start = jacobian_cts_nzb_start[wid]
@@ -282,11 +281,8 @@ def _build_delassus_elementwise_sparse(
     if block_coords_i[1] != block_coords_j[1]:
         return
 
-    # The Delassus matrix is symmetric, so we only compute the upper triangle (ct_i <= ct_j).
     ct_i = block_coords_i[0]
     ct_j = block_coords_j[0]
-    if ct_i > ct_j:
-        return
 
     # Body index (bid) of body k w.r.t the model, from Jacobian block coords
     bid_k = bio + block_coords_i[1] // 6
@@ -1015,9 +1011,12 @@ class DelassusOperator:
             )
         else:
             jacobian_cts = jacobians._J_cts.bsm
+            upper_tri_size = jacobian_cts.max_of_num_nzb * (jacobian_cts.max_of_num_nzb + 1) // 2
+            warp_size = 32
+            upper_tri_size = ((upper_tri_size + warp_size - 1) // warp_size) * warp_size
             wp.launch(
                 kernel=_build_delassus_elementwise_sparse,
-                dim=(self._size.num_worlds, jacobian_cts.max_of_num_nzb * jacobian_cts.max_of_num_nzb),
+                dim=(self._size.num_worlds, upper_tri_size),
                 inputs=[
                     # Inputs:
                     model.info.bodies_offset,

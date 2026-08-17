@@ -122,6 +122,7 @@ class DVISolver:
         self._device: wp.DeviceLike = None
         self._joint_rows_host: list[int] = []
         self._unilateral_strides_host: list[int] = []
+        self._max_unilateral_rows: int = 0
         self._dense_response_factor_ptrs: wp.array[wp.uint64] | None = None
         self._dense_response_rhs_ptrs: wp.array[wp.uint64] | None = None
         self._dense_response_factor: wp.array[wp.float32] | None = None
@@ -220,6 +221,7 @@ class DVISolver:
         self._unilateral_strides_host = [
             limit_count + 3 * contact_count for limit_count, contact_count in zip(max_limits, max_contacts, strict=True)
         ]
+        self._max_unilateral_rows = max(self._unilateral_strides_host, default=0)
         self._allocate_bilateral_solver(model)
         self._sparse_path = SparseDVIPath(
             device=self._device,
@@ -903,7 +905,7 @@ class DVISolver:
         use_permutation = isinstance(self._bilateral_solver, LLTBlockedRCMSolver)
         permutation = self._bilateral_solver.P if use_permutation else self._data.state.projected_mio
         unilateral_begin = 0
-        unilateral_count = self._size.max_of_max_unilaterals
+        unilateral_count = self._max_unilateral_rows
         if self._dense_response_factor_ptrs is not None:
             self._solve_dense_batched_bilateral_response(problem, permutation, use_permutation)
             unilateral_begin = _BATCHED_DENSE_RESPONSE_RHS
@@ -932,8 +934,8 @@ class DVISolver:
             kernel=_assemble_bilateral_contact_response,
             dim=(
                 self._size.num_worlds,
-                self._size.max_of_max_total_cts,
-                self._size.max_of_max_total_cts,
+                self._max_unilateral_rows,
+                self._max_unilateral_rows,
             ),
             inputs=[
                 problem.data.dim,

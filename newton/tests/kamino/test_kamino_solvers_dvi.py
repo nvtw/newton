@@ -3681,6 +3681,11 @@ class TestDVISolver(unittest.TestCase):
                     setup=SimpleNamespace(data=data, limits=limits, contacts=detector.contacts, jacobians=jacobians),
                 )
 
+                max_limits = model.info.max_limits.numpy()
+                max_contacts = model.info.max_contacts.numpy()
+                expected_unilateral_rows = int(np.max(max_limits + 3 * max_contacts))
+                self.assertGreater(expected_unilateral_rows, 64)
+                self.assertEqual(solver._max_unilateral_rows, expected_unilateral_rows)
                 self.assertEqual(int(limits.model_active_limits.numpy()[0]), 1)
                 self.assertEqual(int(detector.contacts.world_active_contacts.numpy()[0]), 36)
                 self.assertGreater(int(solver.data.state.inequality_num_colors.numpy()[0]), 0)
