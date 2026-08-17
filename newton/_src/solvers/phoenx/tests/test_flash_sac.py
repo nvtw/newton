@@ -2279,6 +2279,24 @@ class TestTrainerFlashSAC(unittest.TestCase):
         self.assertTrue(np.isfinite(rollout.obs.numpy()).all())
         self.assertTrue(np.isfinite(rollout.actions.numpy()).all())
 
+    def test_isaaclab_flat_g1_flash_sac_recipe(self) -> None:
+        """Keep the full-action G1 FlashSAC tuning separate from generic defaults."""
+
+        generic = ConfigFlashSAC()
+        config = g1_recipe.isaaclab_flat_g1_flash_sac_config()
+        override = g1_recipe.isaaclab_flat_g1_flash_sac_config(actor_lr=7.0e-4)
+
+        self.assertEqual(config.actor_lr, 6.0e-4)
+        self.assertEqual(config.critic_lr, 6.0e-4)
+        self.assertEqual(config.alpha_lr, 6.0e-4)
+        self.assertEqual(config.sample_batch_size, 2048)
+        self.assertEqual(config.n_step, 3)
+        self.assertEqual(config.learning_rate_decay_steps, 100_000)
+        self.assertTrue(config.use_amp)
+        self.assertTrue(config.normalize_rewards)
+        self.assertEqual(override.actor_lr, 7.0e-4)
+        self.assertEqual(generic.actor_lr, 3.0e-4)
+
     def test_isaaclab_flat_full_action_g1_workflows_smoke(self) -> None:
         """Exercise PPO and FlashSAC on the shared full-action G1 recipe."""
         device = require_cuda_graph_capture("full-action G1 PPO and FlashSAC workflow smoke")

@@ -277,6 +277,26 @@ actually used 1,024 worlds sustained in 48.168, 51.104, and 54.158 seconds
 four replay items per transition but reduced warm throughput from 328.8k to
 208.3k transitions/s and sustained only after 81.249 seconds.  It was rejected.
 
+### Full-action G1 learning-rate sweep
+
+An asserted 2,048-world sweep retained batch size 2,048, two interactions and
+four updates per cadence, policy delay 2, AMP, overlapped rollout, reward
+normalization, n-step 3, target rate 0.01, and a 100,000-update cosine schedule.
+Raising the actor, critic, and temperature learning rates together from
+``3e-4`` to ``6e-4`` sustained the fixed 0.8 m/s gate at seeds 0, 1, and 2 in
+40.755, 34.327, and 32.980 seconds including setup but excluding separately
+recorded evaluation overhead.  The corresponding transitions were 13.093M,
+11.094M, and 10.594M; all sustained evaluations had zero falls.  The median
+34.327 seconds is 31.7 percent below the prior three-seed median of 50.236
+seconds.  The tuned rate is exposed only through
+``isaaclab_flat_g1_flash_sac_config()``; the generic FlashSAC defaults continue
+to match the upstream recipe.
+
+For seed 0, ``4.5e-4`` sustained in 42.197 seconds, n-step 5 in 44.237
+seconds, and target rate 0.015 did not sustain within the 15M-transition cap.
+The standard non-G1 distributional continuous-control learning regression
+also passed after the sweep.
+
 An Nsight Systems trace of the selected 2,048-world, batch-2,048 cadence is at
 ``/tmp/flash_overlap_2048_b2048.nsys-rep``.  It measured 12.379 ms per cadence.
 The two alternating rollout graph instances each averaged about 11.56 ms, while

@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Default PhoenX G1 PPO recipe.
+"""Default PhoenX G1 training recipes.
 
 This file is the single tuning surface for the experimental pure-Warp G1
-training run: environment timing, solver decimation, reward weights, PPO
+training runs: environment timing, solver decimation, reward weights, learner
 hyperparameters, and the left/right symmetry regularizer.
 """
 
@@ -287,6 +287,30 @@ def isaaclab_flat_g1_env_config(**overrides: Any):
     }
     values.update(overrides)
     return default_g1_env_config(**values)
+
+
+def isaaclab_flat_g1_flash_sac_config(**overrides: Any):
+    """Return the tuned FlashSAC config for the full-action G1 recipe."""
+
+    from .flash_sac import ConfigFlashSAC  # noqa: PLC0415
+
+    values = {
+        "buffer_max_length": 10_000_000,
+        "buffer_min_length": 100_000,
+        "sample_batch_size": 2048,
+        "gamma": 0.99,
+        "n_step": 3,
+        "actor_lr": 6.0e-4,
+        "critic_lr": 6.0e-4,
+        "alpha_lr": 6.0e-4,
+        "policy_frequency": 2,
+        "tau": 0.01,
+        "learning_rate_decay_steps": 100_000,
+        "normalize_rewards": True,
+        "use_amp": True,
+    }
+    values.update(overrides)
+    return ConfigFlashSAC(**values)
 
 
 def default_g1_ppo_config(**overrides: Any):
