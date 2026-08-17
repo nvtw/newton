@@ -211,6 +211,23 @@ complete cadence measured 14.23 ms (143.9k transitions/s).  Fresh seed-0 quality
 first passed at 7.596M transitions and sustained at 8.096M in 57.07 seconds,
 with tracking 0.863, aligned velocity 0.466 m/s, and zero falls.
 
+The opt-in multi-stream cadence uses a separate FP32 rollout-policy snapshot
+and two fixed learner-batch phases.  Each preparation graph runs only after the
+previous rollout and update graphs have joined: it pre-samples the next learner
+batches from stable replay state and copies the updated actor into the rollout
+snapshot.  The following rollout and learner graphs can therefore overlap
+without concurrent replay reads/writes or learner/collector parameter races.
+The public handle drains all streams explicitly for checkpoints and teardown.
+
+Including phase preparation, batch copies, joins, rollout, and all four learner
+updates, the overlap cadence measured 11.75 ms (174.3k transitions/s), compared
+with 14.12 ms (145.0k transitions/s) for the combined graph in the same process.
+A fresh seed-0 run first passed at 7.596M transitions and sustained at 8.096M,
+with tracking 0.770, aligned velocity 0.458 m/s, and zero falls.  Its recorded
+training times were 55.04 and 57.96 seconds, including 14.11 seconds of cold
+setup through the first 0.600M transitions.  The mode remains opt-in pending
+multi-seed quality evidence.
+
 ## Reproducible quality evidence
 
 The corrected FP32 seed-0 result is stored in

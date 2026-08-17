@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Protocol
@@ -34,6 +36,38 @@ from .ppo import (
     _unpack_policy_network,
 )
 from .sac import BatchSAC, BufferReplaySAC, ConfigSAC, StatsSACUpdate, TrainerSAC
+
+
+def _capture_flash_stream_graph(stream: wp.Stream, device: wp.context.Device, workload: Callable[[], None]) -> object:
+    """Capture one workload on a dedicated stream after the main stream."""
+
+    main_stream = wp.get_stream(device)
+    with wp.ScopedStream(stream, sync_enter=False, sync_exit=False):
+        wp.wait_stream(main_stream)
+        with wp.ScopedCapture(device=device, stream=stream) as capture:
+            workload()
+    wp.wait_stream(stream)
+    wp.synchronize_device(device)
+    return capture.graph
+
+
+def _allocate_flash_sac_batch(trainer: TrainerFlashSAC) -> BatchSAC:
+    rows = int(trainer.config.sample_batch_size)
+    return BatchSAC(
+        obs=wp.empty((rows, trainer.obs_dim), dtype=wp.float32, device=trainer.device),
+        actions=wp.empty((rows, trainer.action_dim), dtype=wp.float32, device=trainer.device),
+        rewards=wp.empty(rows, dtype=wp.float32, device=trainer.device),
+        dones=wp.empty(rows, dtype=wp.float32, device=trainer.device),
+        next_obs=wp.empty((rows, trainer.obs_dim), dtype=wp.float32, device=trainer.device),
+    )
+
+
+def _copy_flash_sac_batch(destination: BatchSAC, source: BatchSAC) -> None:
+    wp.copy(destination.obs, source.obs)
+    wp.copy(destination.actions, source.actions)
+    wp.copy(destination.rewards, source.rewards)
+    wp.copy(destination.dones, source.dones)
+    wp.copy(destination.next_obs, source.next_obs)
 
 
 @wp.kernel
@@ -880,6 +914,7 @@ class TrainerFlashSAC(TrainerSAC):
         interactions_per_graph: int = 2,
         seed: int | None = None,
         reset_at_start: bool = True,
+        overlap: bool = False,
     ) -> GraphFlashSACTraining:
         """Warm graph-native replay and capture steady-state training.
 
@@ -896,6 +931,8 @@ class TrainerFlashSAC(TrainerSAC):
             interactions_per_graph: Environment interactions per graph launch.
             seed: Base exploration and graph seed. Uses the trainer seed by default.
             reset_at_start: Whether to reset the environment before warmup.
+            overlap: Whether rollout and learner graphs may execute concurrently
+                using a lagged FP32 policy snapshot and pre-sampled batches.
 
         Returns:
             Captured steady-state training cadence ready for repeated launches.
@@ -941,6 +978,7 @@ class TrainerFlashSAC(TrainerSAC):
             updates_per_step=updates_per_step,
             interactions_per_graph=interactions_per_graph,
             seed=seed,
+            overlap=overlap,
         )
 
     def save_checkpoint(self, path: str | Path) -> None:
@@ -1217,8 +1255,30 @@ class TrainerFlashSAC(TrainerSAC):
         updates_per_step: int = 2,
         interactions_per_graph: int = 2,
         seed: int | None = None,
+        overlap: bool = False,
     ) -> GraphFlashSACTraining:
-        """Capture steady-state interaction, replay, and learner updates together."""
+        """Capture steady-state interaction, replay, and learner updates.
+
+        ``overlap=True`` runs rollout and fixed-batch learner graphs concurrently.
+        Transitions collected by one launch become eligible for learner sampling
+        during preparation of the next launch. The collector uses an FP32 policy
+        snapshot copied after the preceding rollout and learner streams join.
+
+        Call :meth:`GraphFlashSACTraining.synchronize` before directly inspecting
+        device state or checkpointing. :meth:`GraphFlashSACTraining.close` drains
+        all streams and releases every captured phase graph.
+
+        Args:
+            env: Vectorized environment matching the trainer dimensions.
+            replay: Warm graph-native replay buffer owned by this cadence.
+            updates_per_step: Learner updates per environment interaction.
+            interactions_per_graph: Environment interactions per graph launch.
+            seed: Base exploration and update seed. Uses the trainer seed by default.
+            overlap: Whether to overlap rollout and learner work with phase buffers.
+
+        Returns:
+            Captured training cadence ready for repeated launches.
+        """
 
         updates = int(updates_per_step)
         interactions = int(interactions_per_graph)
@@ -1266,6 +1326,19 @@ class TrainerFlashSAC(TrainerSAC):
         seed_base = self.seed if seed is None else int(seed)
         start_gradient_update = self._gradient_update_count
         sim_time_before = getattr(env, "sim_time", None)
+        if overlap:
+            return self._capture_overlapped_training_graph(
+                env=env,
+                replay=replay,
+                interactions=interactions,
+                total_updates=total_updates,
+                seed_base=seed_base,
+                start_gradient_update=start_gradient_update,
+                pre_step_obs=pre_step_obs,
+                zero_truncateds=zero_truncateds,
+                env_seed_counter=env_seed_counter,
+                sim_time_before=sim_time_before,
+            )
 
         with wp.ScopedCapture(device=self.device) as capture:
             local_update = 0
@@ -1307,6 +1380,118 @@ class TrainerFlashSAC(TrainerSAC):
             interactions_per_launch=interactions,
             updates_per_launch=total_updates,
             retained_arrays=(pre_step_obs, zero_truncateds, env_seed_counter),
+        )
+
+    def _capture_overlapped_training_graph(
+        self,
+        *,
+        env: EnvFlashSAC,
+        replay: BufferReplayFlashSAC,
+        interactions: int,
+        total_updates: int,
+        seed_base: int,
+        start_gradient_update: int,
+        pre_step_obs: wp.array2d[wp.float32],
+        zero_truncateds: wp.array[wp.float32],
+        env_seed_counter: wp.array[wp.int32],
+        sim_time_before: float | None,
+    ) -> GraphFlashSACTraining:
+        """Capture a two-phase rollout/learner leapfrog without replay races."""
+
+        if not isinstance(self.actor.net, NetworkFlashSAC):
+            raise ValueError("overlapped training requires the FlashSAC reference backbone")
+        source_net = self.actor.net
+        rollout_actor = copy.copy(self.actor)
+        rollout_actor.net = NetworkFlashSAC(
+            input_dim=source_net.input_dim,
+            hidden_dim=source_net.hidden_dim,
+            num_blocks=source_net.num_blocks,
+            output_dim=source_net.output_dim,
+            actor_heads=True,
+            device=self.device,
+            seed=self.seed,
+            contraction_dtype="float32",
+        )
+        rollout_actor.log_std = wp.clone(self.actor.log_std)
+        rollout_actor._sample_reuse_capacity = 0
+        rollout_actor._sample_reuse_actions = None
+        rollout_actor._sample_reuse_log_probs = None
+        rollout_actor._sample_reuse_eps = None
+        rollout_actor.copy_from(self.actor)
+        rollout_actor.reserve_reuse_buffers(env.world_count)
+
+        phase_batches = tuple(
+            tuple(_allocate_flash_sac_batch(self) for _ in range(total_updates)) for _phase in range(2)
+        )
+
+        def collect() -> None:
+            for _interaction in range(interactions):
+                wp.copy(pre_step_obs, env.obs)
+                exploration_seed = self.prepare_graph_exploration_seed()
+                actions, _log_probs, _policy_out = rollout_actor.sample_reuse_seed_counter(
+                    pre_step_obs,
+                    seed_counter=exploration_seed,
+                )
+                next_obs, rewards, dones = env.step(actions)
+                replay.add_batch_graph(
+                    pre_step_obs,
+                    actions,
+                    rewards,
+                    getattr(env, "step_terminateds", dones),
+                    getattr(env, "step_next_obs", next_obs),
+                    truncateds=getattr(env, "step_truncateds", zero_truncateds),
+                )
+
+        def prepare(phase: int) -> None:
+            rollout_actor.copy_from(self.actor)
+            for update_index, batch in enumerate(phase_batches[phase]):
+                sampled = replay.sample_graph_seed_counter(
+                    self._device_update_count,
+                    seed_offset=update_index + 101,
+                )
+                _copy_flash_sac_batch(batch, sampled)
+
+        def update(phase: int) -> None:
+            for update_index, batch in enumerate(phase_batches[phase]):
+                include_actor = (start_gradient_update + update_index) % int(self.config.policy_frequency) == 0
+                self._graph_update_operations(
+                    batch,
+                    include_actor=include_actor,
+                    seed_base=seed_base,
+                )
+
+        rollout_stream = wp.Stream(self.device, priority=-1)
+        update_stream = wp.Stream(self.device)
+        prepare_stream = wp.Stream(self.device)
+        rollout_graph = _capture_flash_stream_graph(rollout_stream, self.device, collect)
+        update_graphs = tuple(
+            _capture_flash_stream_graph(update_stream, self.device, lambda phase=phase: update(phase))
+            for phase in range(2)
+        )
+        prepare_graphs = tuple(
+            _capture_flash_stream_graph(prepare_stream, self.device, lambda phase=phase: prepare(phase))
+            for phase in range(2)
+        )
+        wp.capture_launch(prepare_graphs[0], stream=prepare_stream)
+        wp.synchronize_device(self.device)
+        if sim_time_before is not None:
+            env.sim_time = sim_time_before
+        return GraphFlashSACTraining(
+            trainer=self,
+            replay=replay,
+            env=env,
+            graph=None,
+            interactions_per_launch=interactions,
+            updates_per_launch=total_updates,
+            retained_arrays=(pre_step_obs, zero_truncateds, env_seed_counter),
+            rollout_graph=rollout_graph,
+            update_graphs=update_graphs,
+            prepare_graphs=prepare_graphs,
+            rollout_stream=rollout_stream,
+            update_stream=update_stream,
+            prepare_stream=prepare_stream,
+            rollout_actor=rollout_actor,
+            phase_batches=phase_batches,
         )
 
     def prepare_graph_exploration_seed(self) -> wp.array[wp.int32]:
@@ -1531,15 +1716,47 @@ class GraphFlashSACTraining:
     trainer: TrainerFlashSAC
     replay: BufferReplayFlashSAC
     env: EnvFlashSAC
-    graph: object
+    graph: object | None
     interactions_per_launch: int
     updates_per_launch: int
     retained_arrays: tuple[wp.array, ...]
+    rollout_graph: object | None = None
+    update_graphs: tuple[object, object] | None = None
+    prepare_graphs: tuple[object, object] | None = None
+    rollout_stream: wp.Stream | None = None
+    update_stream: wp.Stream | None = None
+    prepare_stream: wp.Stream | None = None
+    rollout_actor: object | None = None
+    phase_batches: tuple[tuple[BatchSAC, ...], tuple[BatchSAC, ...]] | None = None
+    phase: int = 0
+
+    @property
+    def overlaps_rollout_and_updates(self) -> bool:
+        """Return whether this handle uses the multi-stream leapfrog cadence."""
+
+        return self.update_graphs is not None
+
+    def synchronize(self) -> None:
+        """Wait for all cadence streams before checkpointing or reading state."""
+
+        wp.synchronize_device(self.trainer.device)
 
     def close(self) -> None:
-        """Destroy the CUDA graph before releasing its retained arrays."""
+        """Drain cadence streams and destroy graphs before releasing arrays."""
 
+        if self.graph is None and self.rollout_graph is None:
+            return
+        self.synchronize()
         self.graph = None
+        self.rollout_graph = None
+        self.update_graphs = None
+        self.prepare_graphs = None
+        self.rollout_stream = None
+        self.update_stream = None
+        self.prepare_stream = None
+        self.rollout_actor = None
+        self.phase_batches = None
+        self.retained_arrays = ()
 
     def __del__(self) -> None:
         self.close()
@@ -1547,7 +1764,32 @@ class GraphFlashSACTraining:
     def launch(self, *, read_stats: bool = False) -> StatsSACUpdate:
         """Replay one full cadence and update host mirrors without synchronization."""
 
-        wp.capture_launch(self.graph)
+        if self.update_graphs is None:
+            if self.graph is None:
+                raise RuntimeError("training graph is closed")
+            wp.capture_launch(self.graph)
+        else:
+            if (
+                self.rollout_graph is None
+                or self.prepare_graphs is None
+                or self.rollout_stream is None
+                or self.update_stream is None
+                or self.prepare_stream is None
+            ):
+                raise RuntimeError("overlapped training graph is closed")
+            phase = self.phase
+            with wp.ScopedStream(self.update_stream, sync_enter=False, sync_exit=False):
+                wp.wait_stream(self.prepare_stream)
+            with wp.ScopedStream(self.rollout_stream, sync_enter=False, sync_exit=False):
+                wp.wait_stream(self.prepare_stream)
+            wp.capture_launch(self.update_graphs[phase], stream=self.update_stream)
+            wp.capture_launch(self.rollout_graph, stream=self.rollout_stream)
+            next_phase = 1 - phase
+            with wp.ScopedStream(self.prepare_stream, sync_enter=False, sync_exit=False):
+                wp.wait_stream(self.update_stream)
+                wp.wait_stream(self.rollout_stream)
+            wp.capture_launch(self.prepare_graphs[next_phase], stream=self.prepare_stream)
+            self.phase = next_phase
         self.replay.advance_graph_host_state(self.interactions_per_launch)
         self.trainer._gradient_update_count += self.updates_per_launch
         self.trainer._update_count += self.updates_per_launch

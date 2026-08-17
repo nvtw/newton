@@ -1696,6 +1696,86 @@ class TestTrainerFlashSAC(unittest.TestCase):
         ):
             np.testing.assert_array_equal(actual.numpy(), expected.numpy())
 
+    def test_overlapped_training_graph_orders_replay_policy_and_checkpoint(self) -> None:
+        """Order fixed replay phases, policy snapshots, counters, and checkpoint state."""
+
+        device = require_cuda_graph_capture("FlashSAC overlapped training graph")
+        obs = wp.zeros((2, 3), dtype=wp.float32, device=device)
+        next_obs = wp.ones((2, 3), dtype=wp.float32, device=device)
+        env = _G1SmokeEnv(obs, next_obs)
+        config = ConfigFlashSAC(
+            buffer_max_length=16,
+            buffer_min_length=2,
+            sample_batch_size=2,
+            n_step=3,
+            normalize_rewards=False,
+            actor_hidden_dim=4,
+            critic_hidden_dim=4,
+            actor_num_blocks=1,
+            critic_num_blocks=1,
+            distributional_atoms=5,
+            use_amp=True,
+        )
+        trainer = TrainerFlashSAC(
+            obs_dim=3,
+            action_dim=ACTION_DIM_G1,
+            config=config,
+            device=device,
+            seed=271,
+        )
+        training_graph = trainer.prepare_training_graph(
+            env,
+            updates_per_step=2,
+            interactions_per_graph=2,
+            seed=277,
+            overlap=True,
+        )
+        self.assertTrue(training_graph.overlaps_rollout_and_updates)
+        self.assertEqual(training_graph.phase, 0)
+        self.assertIsNotNone(training_graph.phase_batches)
+        phase_batches = training_graph.phase_batches
+        if phase_batches is None:
+            self.fail("overlapped graph did not retain phase batches")
+        phase_zero_before = tuple(
+            tuple(
+                array.numpy().copy() for array in (batch.obs, batch.actions, batch.rewards, batch.dones, batch.next_obs)
+            )
+            for batch in phase_batches[0]
+        )
+        replay_size_before = trainer.replay_buffer.size
+        training_graph.launch()
+        training_graph.synchronize()
+
+        self.assertEqual(training_graph.phase, 1)
+        self.assertEqual(trainer.replay_buffer.size, replay_size_before + 4)
+        self.assertEqual(trainer._update_count, 4)
+        self.assertEqual(trainer._gradient_update_count, 4)
+        for batch, expected_arrays in zip(phase_batches[0], phase_zero_before, strict=True):
+            for actual, expected in zip(
+                (batch.obs, batch.actions, batch.rewards, batch.dones, batch.next_obs), expected_arrays, strict=True
+            ):
+                np.testing.assert_array_equal(actual.numpy(), expected)
+
+        rollout_actor = training_graph.rollout_actor
+        self.assertIsNotNone(rollout_actor)
+        for expected, actual in zip(trainer.actor.net.state_arrays(), rollout_actor.net.state_arrays(), strict=True):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/overlap_checkpoint.npz"
+            trainer.save_checkpoint(path)
+            restored = TrainerFlashSAC.load_checkpoint(path, device=device)
+        self.assertEqual(restored._update_count, trainer._update_count)
+        self.assertEqual(restored._gradient_update_count, trainer._gradient_update_count)
+        for expected, actual in zip(trainer.actor.net.state_arrays(), restored.actor.net.state_arrays(), strict=True):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        training_graph.close()
+        self.assertIsNone(training_graph.rollout_graph)
+        self.assertIsNone(training_graph.update_stream)
+        self.assertIsNone(training_graph.prepare_stream)
+        self.assertIsNone(training_graph.phase_batches)
+        self.assertEqual(training_graph.retained_arrays, ())
+
     def test_real_g1_end_to_end_training_graph(self) -> None:
         """Capture real G1 interaction, pre-reset replay, sampling, and learner updates."""
 
@@ -1760,7 +1840,9 @@ class TestTrainerFlashSAC(unittest.TestCase):
             updates_per_step=2,
             interactions_per_graph=2,
             seed=269,
+            overlap=True,
         )
+        self.assertTrue(training_graph.overlaps_rollout_and_updates)
         batch_ptr = replay.reserve_graph_buffers(1).obs.ptr
         sim_time_before = env.sim_time
         stats = training_graph.run(1, stats_interval=1)
