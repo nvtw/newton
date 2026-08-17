@@ -9,7 +9,13 @@ import numpy as np
 import warp as wp
 
 from .cublas import gemm_float32, gemm_float32_strided_batched, is_cublas_available
-from .kernels import copy_1d_kernel, copy_2d_kernel, soft_update_1d_kernel, soft_update_2d_kernel
+from .kernels import (
+    copy_1d_kernel,
+    copy_2d_kernel,
+    soft_update_1d_kernel,
+    soft_update_2d_kernel,
+    unit_normalize_weight_columns_tile_kernel,
+)
 
 _TILE_REDUCTION_BLOCK_DIM = 256
 
@@ -196,6 +202,79 @@ def _batch_norm_inference_parameter_grad_kernel(
         grad_bias += output_grad[row, col]
     scale_grad[col] = grad_scale
     bias_grad[col] = grad_bias
+
+
+@wp.kernel(enable_backward=False)
+def _batch_norm_inference_parameter_grad_tile_kernel(
+    x: wp.array2d[wp.float32],
+    output_grad: wp.array2d[wp.float32],
+    running_mean: wp.array[wp.float32],
+    running_variance: wp.array[wp.float32],
+    eps: wp.float32,
+    scale_grad: wp.array[wp.float32],
+    bias_grad: wp.array[wp.float32],
+):
+    col, lane = wp.tid()
+    inv_std = wp.float32(1.0) / wp.sqrt(running_variance[col] + eps)
+    grad_scale = wp.float32(0.0)
+    grad_bias = wp.float32(0.0)
+    for row in range(lane, x.shape[0], wp.block_dim()):
+        grad = output_grad[row, col]
+        grad_scale += grad * (x[row, col] - running_mean[col]) * inv_std
+        grad_bias += grad
+    reduced = wp.tile_sum(wp.tile(wp.vec2(grad_scale, grad_bias)), axis=1)
+    if lane == 0:
+        scale_grad[col] = reduced[0]
+        bias_grad[col] = reduced[1]
+
+
+@wp.kernel(enable_backward=False)
+def _rms_norm_backward_stats_tile_kernel(
+    x: wp.array2d[wp.float32],
+    output_grad: wp.array2d[wp.float32],
+    scale: wp.array[wp.float32],
+    eps: wp.float32,
+    inv_rms: wp.array[wp.float32],
+    projection: wp.array[wp.float32],
+):
+    row, lane = wp.tid()
+    mean_square = wp.float32(0.0)
+    projected = wp.float32(0.0)
+    for col in range(lane, x.shape[1], wp.block_dim()):
+        value = x[row, col]
+        mean_square += value * value
+        projected += output_grad[row, col] * scale[col] * value
+    reduced = wp.tile_sum(wp.tile(wp.vec2(mean_square, projected)), axis=1)
+    if lane == 0:
+        inv_rms[row] = wp.float32(1.0) / wp.sqrt(reduced[0] / wp.float32(x.shape[1]) + eps)
+        projection[row] = reduced[1]
+
+
+@wp.kernel(enable_backward=False)
+def _rms_norm_scale_grad_tile_kernel(
+    x: wp.array2d[wp.float32],
+    output_grad: wp.array2d[wp.float32],
+    inv_rms: wp.array[wp.float32],
+    scale_grad: wp.array[wp.float32],
+):
+    col, lane = wp.tid()
+    value = wp.float32(0.0)
+    for row in range(lane, x.shape[0], wp.block_dim()):
+        value += output_grad[row, col] * x[row, col] * inv_rms[row]
+    reduced = wp.tile_sum(wp.tile(value))
+    if lane == 0:
+        scale_grad[col] = reduced[0]
+
+
+@wp.kernel(enable_backward=False)
+def _bias_grad_tile_kernel(output_grad: wp.array2d[wp.float32], bias_grad: wp.array[wp.float32]):
+    col, lane = wp.tid()
+    value = wp.float32(0.0)
+    for row in range(lane, output_grad.shape[0], wp.block_dim()):
+        value += output_grad[row, col]
+    reduced = wp.tile_sum(wp.tile(value))
+    if lane == 0:
+        bias_grad[col] = reduced[0]
 
 
 @wp.kernel
@@ -394,6 +473,22 @@ def _rms_inv_kernel(
     inv_rms[row] = wp.float32(1.0) / wp.sqrt(squared / wp.float32(x.shape[1]) + eps)
 
 
+@wp.kernel(enable_backward=False)
+def _rms_inv_tile_kernel(
+    x: wp.array2d[wp.float32],
+    eps: wp.float32,
+    inv_rms: wp.array[wp.float32],
+):
+    row, lane = wp.tid()
+    squared = wp.float32(0.0)
+    for col in range(lane, x.shape[1], wp.block_dim()):
+        value = x[row, col]
+        squared += value * value
+    reduced = wp.tile_sum(wp.tile(squared))
+    if lane == 0:
+        inv_rms[row] = wp.float32(1.0) / wp.sqrt(reduced[0] / wp.float32(x.shape[1]) + eps)
+
+
 @wp.kernel
 def _rms_norm_kernel(
     x: wp.array2d[wp.float32],
@@ -468,6 +563,117 @@ def _normalize_scale_kernel(scale: wp.array[wp.float32], eps: wp.float32):
         factor = wp.sqrt(wp.float32(scale.shape[0])) / wp.sqrt(squared + eps)
         for col in range(scale.shape[0]):
             scale[col] = scale[col] * factor
+
+
+@wp.kernel(enable_backward=False)
+def _normalize_batch_affine_tile_kernel(
+    scale: wp.array[wp.float32],
+    bias: wp.array[wp.float32],
+    eps: wp.float32,
+):
+    lane = wp.tid()
+    squared = wp.float32(0.0)
+    for col in range(lane, scale.shape[0], wp.block_dim()):
+        squared += scale[col] * scale[col] + bias[col] * bias[col]
+    total = wp.tile_sum(wp.tile(squared))[0]
+    factor = wp.sqrt(wp.float32(scale.shape[0])) / wp.sqrt(total + eps)
+    for col in range(lane, scale.shape[0], wp.block_dim()):
+        scale[col] *= factor
+        bias[col] *= factor
+
+
+@wp.kernel(enable_backward=False)
+def _normalize_scale_tile_kernel(scale: wp.array[wp.float32], eps: wp.float32):
+    lane = wp.tid()
+    squared = wp.float32(0.0)
+    for col in range(lane, scale.shape[0], wp.block_dim()):
+        squared += scale[col] * scale[col]
+    total = wp.tile_sum(wp.tile(squared))[0]
+    factor = wp.sqrt(wp.float32(scale.shape[0])) / wp.sqrt(total + eps)
+    for col in range(lane, scale.shape[0], wp.block_dim()):
+        scale[col] *= factor
+
+
+def _launch_rms_inv(x: wp.array2d[wp.float32], eps: float, out: wp.array[wp.float32]) -> None:
+    if x.device.is_cuda:
+        wp.launch(
+            _rms_inv_tile_kernel,
+            dim=(x.shape[0], _TILE_REDUCTION_BLOCK_DIM),
+            inputs=[x, eps],
+            outputs=[out],
+            block_dim=_TILE_REDUCTION_BLOCK_DIM,
+            device=x.device,
+        )
+    else:
+        wp.launch(_rms_inv_kernel, dim=x.shape[0], inputs=[x, eps], outputs=[out], device=x.device)
+
+
+def _launch_bias_grad(output_grad: wp.array2d[wp.float32], bias_grad: wp.array[wp.float32]) -> None:
+    if output_grad.device.is_cuda:
+        wp.launch(
+            _bias_grad_tile_kernel,
+            dim=(bias_grad.shape[0], _TILE_REDUCTION_BLOCK_DIM),
+            inputs=[output_grad],
+            outputs=[bias_grad],
+            block_dim=_TILE_REDUCTION_BLOCK_DIM,
+            device=output_grad.device,
+        )
+    else:
+        wp.launch(
+            _bias_grad_kernel, dim=bias_grad.shape, inputs=[output_grad], outputs=[bias_grad], device=output_grad.device
+        )
+
+
+def _launch_rms_backward_stats(
+    x: wp.array2d[wp.float32],
+    output_grad: wp.array2d[wp.float32],
+    scale: wp.array[wp.float32],
+    eps: float,
+    inv_rms: wp.array[wp.float32],
+    projection: wp.array[wp.float32],
+) -> None:
+    if x.device.is_cuda:
+        wp.launch(
+            _rms_norm_backward_stats_tile_kernel,
+            dim=(x.shape[0], _TILE_REDUCTION_BLOCK_DIM),
+            inputs=[x, output_grad, scale, eps],
+            outputs=[inv_rms, projection],
+            block_dim=_TILE_REDUCTION_BLOCK_DIM,
+            device=x.device,
+        )
+    else:
+        wp.launch(
+            _rms_norm_backward_stats_kernel,
+            dim=x.shape[0],
+            inputs=[x, output_grad, scale, eps],
+            outputs=[inv_rms, projection],
+            device=x.device,
+        )
+
+
+def _launch_rms_scale_grad(
+    x: wp.array2d[wp.float32],
+    output_grad: wp.array2d[wp.float32],
+    inv_rms: wp.array[wp.float32],
+    scale_grad: wp.array[wp.float32],
+) -> None:
+    if x.device.is_cuda:
+        wp.launch(
+            _rms_norm_scale_grad_tile_kernel,
+            dim=(scale_grad.shape[0], _TILE_REDUCTION_BLOCK_DIM),
+            inputs=[x, output_grad, inv_rms],
+            outputs=[scale_grad],
+            block_dim=_TILE_REDUCTION_BLOCK_DIM,
+            device=x.device,
+        )
+    else:
+        wp.launch(
+            _rms_norm_scale_grad_kernel,
+            dim=scale_grad.shape,
+            inputs=[x, output_grad, inv_rms],
+            outputs=[scale_grad],
+            device=x.device,
+        )
 
 
 def _orthogonal(input_dim: int, output_dim: int, rng: np.random.Generator) -> np.ndarray:
@@ -794,13 +1000,7 @@ class NetworkFlashSAC:
                 device=self.device,
             )
             hidden = block_out
-        wp.launch(
-            _rms_inv_kernel,
-            dim=hidden.shape[0],
-            inputs=[hidden, 1.0e-6],
-            outputs=[inv_rms],
-            device=self.device,
-        )
+        _launch_rms_inv(hidden, 1.0e-6, inv_rms)
         wp.launch(
             _rms_norm_kernel,
             dim=hidden.shape,
@@ -859,13 +1059,7 @@ class NetworkFlashSAC:
             )
         normalized = wp.empty_like(hidden, requires_grad=requires_grad)
         inv_rms = wp.empty(hidden.shape[0], dtype=wp.float32, device=self.device)
-        wp.launch(
-            _rms_inv_kernel,
-            dim=hidden.shape[0],
-            inputs=[hidden, 1.0e-6],
-            outputs=[inv_rms],
-            device=self.device,
-        )
+        _launch_rms_inv(hidden, 1.0e-6, inv_rms)
         wp.launch(
             _rms_norm_kernel,
             dim=hidden.shape,
@@ -1015,13 +1209,23 @@ class NetworkFlashSAC:
                 outputs=[input_grad],
                 device=self.device,
             )
-            wp.launch(
-                _batch_norm_inference_parameter_grad_kernel,
-                dim=norm.width,
-                inputs=[x, output_grad, norm.running_mean, norm.running_variance, norm.eps],
-                outputs=[norm.scale.grad, norm.bias.grad],
-                device=self.device,
-            )
+            if self.device.is_cuda:
+                wp.launch(
+                    _batch_norm_inference_parameter_grad_tile_kernel,
+                    dim=(norm.width, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[x, output_grad, norm.running_mean, norm.running_variance, norm.eps],
+                    outputs=[norm.scale.grad, norm.bias.grad],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    _batch_norm_inference_parameter_grad_kernel,
+                    dim=norm.width,
+                    inputs=[x, output_grad, norm.running_mean, norm.running_variance, norm.eps],
+                    outputs=[norm.scale.grad, norm.bias.grad],
+                    device=self.device,
+                )
         return input_grad
 
     def forward_manual(self, x: wp.array2d[wp.float32], *, training: bool = True) -> wp.array2d[wp.float32]:
@@ -1054,13 +1258,7 @@ class NetworkFlashSAC:
         rms_input = hidden
         normalized = wp.empty_like(hidden)
         inv_rms = wp.empty(hidden.shape[0], dtype=wp.float32, device=self.device)
-        wp.launch(
-            _rms_inv_kernel,
-            dim=hidden.shape[0],
-            inputs=[hidden, 1.0e-6],
-            outputs=[inv_rms],
-            device=self.device,
-        )
+        _launch_rms_inv(hidden, 1.0e-6, inv_rms)
         wp.launch(
             _rms_norm_kernel,
             dim=hidden.shape,
@@ -1142,7 +1340,7 @@ class NetworkFlashSAC:
                 outputs=[head_grad],
                 device=self.device,
             )
-            wp.launch(_bias_grad_kernel, dim=bias.shape, inputs=[head_grad], outputs=[bias.grad], device=self.device)
+            _launch_bias_grad(head_grad, bias.grad)
             head_input_grad = self._linear_backward(normalized, weight, head_grad)
             accumulated = wp.empty_like(normalized_grad)
             wp.launch(
@@ -1158,13 +1356,7 @@ class NetworkFlashSAC:
         hidden_grad = wp.empty(rms_input.shape, dtype=wp.float32, device=self.device)
         inv_rms = wp.empty(rms_input.shape[0], dtype=wp.float32, device=self.device)
         projection = wp.empty(rms_input.shape[0], dtype=wp.float32, device=self.device)
-        wp.launch(
-            _rms_norm_backward_stats_kernel,
-            dim=rms_input.shape[0],
-            inputs=[rms_input, normalized_grad, self.rms_scale, 1.0e-6],
-            outputs=[inv_rms, projection],
-            device=self.device,
-        )
+        _launch_rms_backward_stats(rms_input, normalized_grad, self.rms_scale, 1.0e-6, inv_rms, projection)
         wp.launch(
             _rms_norm_input_grad_kernel,
             dim=rms_input.shape,
@@ -1172,13 +1364,7 @@ class NetworkFlashSAC:
             outputs=[hidden_grad],
             device=self.device,
         )
-        wp.launch(
-            _rms_norm_scale_grad_kernel,
-            dim=self.rms_scale.shape,
-            inputs=[rms_input, normalized_grad, inv_rms],
-            outputs=[self.rms_scale.grad],
-            device=self.device,
-        )
+        _launch_rms_scale_grad(rms_input, normalized_grad, inv_rms, self.rms_scale.grad)
 
         for block_index in reversed(range(self.num_blocks)):
             residual, pre1, _normed1, activated1, pre2, _normed2, activated2 = blocks[block_index]
@@ -1230,18 +1416,45 @@ class NetworkFlashSAC:
 
     def normalize_parameters(self, eps: float = 1.0e-8) -> None:
         for weight in self.weights:
-            wp.launch(_normalize_columns_kernel, dim=weight.shape[1], inputs=[weight, eps], device=self.device)
+            if self.device.is_cuda:
+                wp.launch(
+                    unit_normalize_weight_columns_tile_kernel,
+                    dim=(weight.shape[1], _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[weight, eps],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=self.device,
+                )
+            else:
+                wp.launch(_normalize_columns_kernel, dim=weight.shape[1], inputs=[weight, eps], device=self.device)
         norms = [self.input_norm]
         for norm1, norm2 in self.block_norms:
             norms.extend((norm1, norm2))
         for norm in norms:
+            if self.device.is_cuda:
+                wp.launch(
+                    _normalize_batch_affine_tile_kernel,
+                    dim=_TILE_REDUCTION_BLOCK_DIM,
+                    inputs=[norm.scale, norm.bias, eps],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    _normalize_batch_affine_kernel,
+                    dim=1,
+                    inputs=[norm.scale, norm.bias, eps],
+                    device=self.device,
+                )
+        if self.device.is_cuda:
             wp.launch(
-                _normalize_batch_affine_kernel,
-                dim=1,
-                inputs=[norm.scale, norm.bias, eps],
+                _normalize_scale_tile_kernel,
+                dim=_TILE_REDUCTION_BLOCK_DIM,
+                inputs=[self.rms_scale, eps],
+                block_dim=_TILE_REDUCTION_BLOCK_DIM,
                 device=self.device,
             )
-        wp.launch(_normalize_scale_kernel, dim=1, inputs=[self.rms_scale, eps], device=self.device)
+        else:
+            wp.launch(_normalize_scale_kernel, dim=1, inputs=[self.rms_scale, eps], device=self.device)
 
     def normalize_weights(self, eps: float = 1.0e-8) -> None:
         self.normalize_parameters(eps)
@@ -1467,13 +1680,7 @@ class EnsembleNetworkFlashSAC:
         normalized = wp.empty_like(hidden)
         for ensemble_index, network in enumerate(self.networks):
             inv_rms = wp.empty(hidden.shape[1], dtype=wp.float32, device=self.device)
-            wp.launch(
-                _rms_inv_kernel,
-                dim=hidden.shape[1],
-                inputs=[hidden[ensemble_index], 1.0e-6],
-                outputs=[inv_rms],
-                device=self.device,
-            )
+            _launch_rms_inv(hidden[ensemble_index], 1.0e-6, inv_rms)
             wp.launch(
                 _rms_norm_kernel,
                 dim=hidden[ensemble_index].shape,
@@ -1637,24 +1844,14 @@ class EnsembleNetworkFlashSAC:
                 device=self.device,
             )
             bias = network.head_biases[0]
-            wp.launch(
-                _bias_grad_kernel,
-                dim=bias.shape,
-                inputs=[head_grad[ensemble_index]],
-                outputs=[bias.grad],
-                device=self.device,
-            )
+            _launch_bias_grad(head_grad[ensemble_index], bias.grad)
         hidden_grad = self._linear_backward_pair(normalized, self.head_weights[0], head_grad)
         rms_grad = wp.empty_like(rms_input)
         for ensemble_index, network in enumerate(self.networks):
             inv_rms = wp.empty(rms_input.shape[1], dtype=wp.float32, device=self.device)
             projection = wp.empty(rms_input.shape[1], dtype=wp.float32, device=self.device)
-            wp.launch(
-                _rms_norm_backward_stats_kernel,
-                dim=rms_input.shape[1],
-                inputs=[rms_input[ensemble_index], hidden_grad[ensemble_index], network.rms_scale, 1.0e-6],
-                outputs=[inv_rms, projection],
-                device=self.device,
+            _launch_rms_backward_stats(
+                rms_input[ensemble_index], hidden_grad[ensemble_index], network.rms_scale, 1.0e-6, inv_rms, projection
             )
             wp.launch(
                 _rms_norm_input_grad_kernel,
@@ -1663,12 +1860,8 @@ class EnsembleNetworkFlashSAC:
                 outputs=[rms_grad[ensemble_index]],
                 device=self.device,
             )
-            wp.launch(
-                _rms_norm_scale_grad_kernel,
-                dim=network.rms_scale.shape,
-                inputs=[rms_input[ensemble_index], hidden_grad[ensemble_index], inv_rms],
-                outputs=[network.rms_scale.grad],
-                device=self.device,
+            _launch_rms_scale_grad(
+                rms_input[ensemble_index], hidden_grad[ensemble_index], inv_rms, network.rms_scale.grad
             )
         hidden_grad = rms_grad
         first, second = self.networks

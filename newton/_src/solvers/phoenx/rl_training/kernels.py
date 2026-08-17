@@ -2472,6 +2472,20 @@ def weight_column_sumsq_kernel(
     column_sumsq[j] = sumsq
 
 
+@wp.kernel(enable_backward=False)
+def unit_normalize_weight_columns_tile_kernel(weight: wp.array2d[wp.float32], eps: wp.float32):
+    """Normalize dense incoming weights with one CUDA block per output."""
+
+    column, lane = wp.tid()
+    squared = wp.float32(0.0)
+    for row in range(lane, weight.shape[0], wp.block_dim()):
+        value = weight[row, column]
+        squared += value * value
+    inv_norm = wp.float32(1.0) / wp.sqrt(wp.tile_sum(wp.tile(squared))[0] + eps)
+    for row in range(lane, weight.shape[0], wp.block_dim()):
+        weight[row, column] *= inv_norm
+
+
 @wp.kernel
 def unit_normalize_weight_columns_kernel(
     weight: wp.array2d[wp.float32], column_sumsq: wp.array[wp.float32], eps: wp.float32

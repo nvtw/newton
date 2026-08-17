@@ -50,6 +50,7 @@ from .kernels import (
     soft_update_1d_kernel,
     soft_update_2d_kernel,
     unit_normalize_weight_columns_kernel,
+    unit_normalize_weight_columns_tile_kernel,
     weight_column_sumsq_kernel,
     zero_2d_tail_rows_kernel,
     zero_3d_kernel,
@@ -710,20 +711,29 @@ class WarpMLP:
         """Constrain each output's incoming weight vector to unit length."""
 
         for weight in self.weights:
-            column_sumsq = wp.empty(int(weight.shape[1]), dtype=wp.float32, device=self.device)
-            wp.launch(
-                weight_column_sumsq_kernel,
-                dim=column_sumsq.shape[0],
-                inputs=[weight],
-                outputs=[column_sumsq],
-                device=self.device,
-            )
-            wp.launch(
-                unit_normalize_weight_columns_kernel,
-                dim=weight.shape,
-                inputs=[weight, column_sumsq, float(eps)],
-                device=self.device,
-            )
+            if self.device.is_cuda:
+                wp.launch(
+                    unit_normalize_weight_columns_tile_kernel,
+                    dim=(weight.shape[1], 256),
+                    inputs=[weight, float(eps)],
+                    block_dim=256,
+                    device=self.device,
+                )
+            else:
+                column_sumsq = wp.empty(int(weight.shape[1]), dtype=wp.float32, device=self.device)
+                wp.launch(
+                    weight_column_sumsq_kernel,
+                    dim=column_sumsq.shape[0],
+                    inputs=[weight],
+                    outputs=[column_sumsq],
+                    device=self.device,
+                )
+                wp.launch(
+                    unit_normalize_weight_columns_kernel,
+                    dim=weight.shape,
+                    inputs=[weight, column_sumsq, float(eps)],
+                    device=self.device,
+                )
 
 
 class PufferMinGRUNet:

@@ -26,6 +26,9 @@ from newton._src.solvers.phoenx.rl_training.flash_sac_networks import (
     _TILE_REDUCTION_BLOCK_DIM,
     NetworkFlashSAC,
     _batch_moments_tile_kernel,
+    _launch_rms_backward_stats,
+    _launch_rms_inv,
+    _launch_rms_scale_grad,
     _UnitBatchNorm,
 )
 from newton._src.solvers.phoenx.rl_training.g1 import (
@@ -37,6 +40,7 @@ from newton._src.solvers.phoenx.rl_training.g1 import (
 from newton._src.solvers.phoenx.rl_training.kernels import (
     sac_distributional_min_projection_device_alpha_kernel,
 )
+from newton._src.solvers.phoenx.rl_training.networks import WarpMLP
 from newton._src.solvers.phoenx.rl_training.ppo import BufferRollout, ConfigPPO, TrainerPPO
 from newton._src.solvers.phoenx.rl_training.sac import BatchSAC
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
@@ -302,6 +306,42 @@ class TestTrainerFlashSAC(unittest.TestCase):
             np.testing.assert_allclose(scratch.mean.numpy(), values.mean(axis=0), rtol=2.0e-6, atol=2.0e-6)
             np.testing.assert_allclose(scratch.variance.numpy(), values.var(axis=0), rtol=3.0e-6, atol=3.0e-6)
             capture.graph = None
+
+    def test_packed_rms_reductions_and_shared_mlp_projection(self) -> None:
+        """Match multi-shape RMS reductions and shared MLP unit projection."""
+
+        device = require_cuda_graph_capture("FlashSAC packed RMS reductions")
+        rng = np.random.default_rng(277)
+        for rows, width in ((512, 128), (2048, 256), (512, 1024)):
+            values = rng.normal(size=(rows, width)).astype(np.float32)
+            grads = rng.normal(size=(rows, width)).astype(np.float32)
+            scale = rng.uniform(0.5, 1.5, size=width).astype(np.float32)
+            x = wp.array(values, device=device)
+            output_grad = wp.array(grads, device=device)
+            scale_array = wp.array(scale, device=device)
+            inv_rms = wp.empty(rows, dtype=wp.float32, device=device)
+            projection = wp.empty(rows, dtype=wp.float32, device=device)
+            scale_grad = wp.empty(width, dtype=wp.float32, device=device)
+            _launch_rms_inv(x, 1.0e-6, inv_rms)
+            _launch_rms_backward_stats(x, output_grad, scale_array, 1.0e-6, inv_rms, projection)
+            _launch_rms_scale_grad(x, output_grad, inv_rms, scale_grad)
+            expected_inv = 1.0 / np.sqrt(np.mean(values * values, axis=1) + 1.0e-6)
+            expected_projection = np.sum(grads * scale[None, :] * values, axis=1)
+            expected_scale_grad = np.sum(grads * values * expected_inv[:, None], axis=0)
+            np.testing.assert_allclose(inv_rms.numpy(), expected_inv, rtol=3.0e-6, atol=3.0e-6)
+            np.testing.assert_allclose(projection.numpy(), expected_projection, rtol=5.0e-6, atol=2.0e-4)
+            np.testing.assert_allclose(scale_grad.numpy(), expected_scale_grad, rtol=8.0e-6, atol=2.0e-4)
+
+        network = WarpMLP((127, 256), device=device, seed=281)
+        weights = rng.normal(size=(127, 256)).astype(np.float32)
+        network.weights[0].assign(weights)
+        with wp.ScopedCapture(device=device) as capture:
+            network.normalize_weights()
+        wp.capture_launch(capture.graph)
+        wp.capture_launch(capture.graph)
+        normalized = network.weights[0].numpy()
+        np.testing.assert_allclose(np.sum(normalized * normalized, axis=0), 1.0, rtol=2.0e-6, atol=2.0e-6)
+        capture.graph = None
 
     def test_reference_actor_log_std_smooth_mapping(self) -> None:
         """Map raw actor standard deviations smoothly into upstream bounds."""
