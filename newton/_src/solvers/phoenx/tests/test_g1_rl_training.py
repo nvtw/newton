@@ -3540,6 +3540,46 @@ class TestG1PhoenXRL(unittest.TestCase):
         expected = obs_np @ puffer_weight_np.T + bias_np
         np.testing.assert_allclose(out.numpy(), expected, rtol=1.0e-6, atol=1.0e-6)
 
+    def test_isaaclab_flat_recipe_rewards_target_velocity_over_stationary(self) -> None:
+        """Reward target-speed motion above the stationary tracking baseline."""
+        device = require_cuda_graph_capture("PhoenX G1 IsaacLab-flat recipe tests")
+        config = g1_recipe.isaaclab_flat_g1_env_config(
+            world_count=2,
+            command=(0.8, 0.0, 0.0),
+            randomize_commands_on_reset=False,
+            command_resample_steps=0,
+            auto_reset=False,
+            max_episode_steps=0,
+        )
+        env = rl.EnvG1PhoenX(config, device=device)
+
+        self.assertEqual(env.policy_action_dim, rl.ACTION_DIM_G1)
+        self.assertEqual(env.obs_dim, rl.OBS_DIM_G1_ISAACLAB_FLAT)
+        self.assertEqual(config.action_scale, 0.5)
+        self.assertEqual(config.w_alive, 0.0)
+        self.assertEqual(config.w_termination, -200.0)
+        self.assertEqual(config.w_track_lin, 1.0)
+        self.assertEqual(config.w_track_ang, 1.0)
+
+        qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.dof_stride)
+        qd[:, :] = 0.0
+        qd[1, 0] = 0.8
+        env.state_0.joint_qd.assign(qd.reshape(-1))
+        with wp.ScopedCapture(device=device) as capture:
+            env.observe()
+        wp.capture_launch(capture.graph)
+
+        stationary_tracking = math.exp(-(0.8 * 0.8) / 0.25)
+        np.testing.assert_allclose(
+            env.successes.numpy(),
+            np.asarray([stationary_tracking, 1.0], dtype=np.float32),
+            rtol=1.0e-6,
+            atol=1.0e-6,
+        )
+        rewards = env.rewards.numpy()
+        self.assertGreater(float(rewards[1]), float(rewards[0]))
+        self.assertGreater(float(rewards[1] - rewards[0]), 0.015)
+
     def test_default_recipe_enables_mirror_and_matches_config_defaults(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 RL recipe tests")
 

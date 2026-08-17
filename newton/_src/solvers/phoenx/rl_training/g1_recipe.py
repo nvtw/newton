@@ -241,6 +241,53 @@ def default_g1_env_config(**overrides: Any):
     return ConfigEnvG1PhoenX(**values)
 
 
+def isaaclab_flat_g1_env_config(**overrides: Any):
+    """Return the portable PhoenX approximation of IsaacLab's flat G1 task.
+
+    The recipe follows IsaacLab's ``Isaac-Velocity-Flat-G1-v0`` command,
+    observation, full-action, and reward contract. Contact-sensor terms use
+    PhoenX's native foot-contact state. The native MJCF dynamics and actuator
+    gains remain different from IsaacLab's USD asset and are not claimed to be
+    simulator-identical.
+    """
+
+    values = {
+        "action_scale": 0.5,
+        "controlled_action_count": 29,
+        "observation_mode": "isaaclab_flat",
+        "reward_mode": "nanog1_dense",
+        "command_x_range": (0.0, 1.0),
+        "command_y_range": (-0.5, 0.5),
+        "command_yaw_range": (-1.0, 1.0),
+        "w_track_lin": 1.0,
+        "w_track_ang": 1.0,
+        "w_command_progress": 0.0,
+        "w_lin_vel_z": -0.2,
+        "w_ang_vel_xy": -0.05,
+        "w_orientation": -1.0,
+        "w_torque": -2.0e-6,
+        "w_action_rate": -0.005,
+        "w_alive": 0.0,
+        "w_termination": -200.0,
+        "w_mechanical_power": 0.0,
+        "w_gait_contact": 0.0,
+        "w_gait_swing": 0.0,
+        "w_gait_swing_contact": 0.0,
+        "w_gait_hip": 0.0,
+        "w_base_height": 0.0,
+        "w_feet_air_time": 0.75,
+        "feet_air_time_threshold": 0.4,
+        "w_feet_slide": -0.1,
+        "w_joint_deviation_hip": -0.1,
+        "w_joint_deviation_waist": -0.1,
+        "w_joint_deviation_upper": -0.1,
+        "w_joint_acc_legs": -1.0e-7,
+        "w_joint_pos_limit_ankle": -1.0,
+    }
+    values.update(overrides)
+    return default_g1_env_config(**values)
+
+
 def default_g1_ppo_config(**overrides: Any):
     """Return the default PhoenX G1 PPO config."""
 
