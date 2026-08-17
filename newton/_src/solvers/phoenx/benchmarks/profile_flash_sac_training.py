@@ -90,13 +90,26 @@ def _profile_full(
     worlds: int,
     use_amp: bool,
     overlap: bool = False,
+    full_action: bool = False,
 ) -> dict[str, float | int | str]:
     setup_start = time.perf_counter()
-    env = rl.EnvG1PhoenX(g1_recipe.default_g1_env_config(world_count=worlds), device=device)
+    env_config = (
+        g1_recipe.isaaclab_flat_g1_env_config(world_count=worlds)
+        if full_action
+        else g1_recipe.default_g1_env_config(world_count=worlds)
+    )
+    config = (
+        g1_recipe.isaaclab_flat_g1_flash_sac_config(
+            buffer_max_length=max(worlds * 4, 16_384), buffer_min_length=worlds, use_amp=use_amp
+        )
+        if full_action
+        else _config(minimum_size=worlds, use_amp=use_amp)
+    )
+    env = rl.EnvG1PhoenX(env_config, device=device)
     trainer = rl.TrainerFlashSAC(
         obs_dim=env.obs_dim,
         action_dim=env.policy_action_dim,
-        config=_config(minimum_size=worlds, use_amp=use_amp),
+        config=config,
         device=device,
         seed=29,
     )
@@ -126,6 +139,7 @@ def _profile_full(
         "mode": "full",
         "use_amp": use_amp,
         "overlap": overlap,
+        "full_action": full_action,
         "setup_seconds": setup_seconds,
         "world_count": worlds,
         "replays": replays,
@@ -145,6 +159,7 @@ def main() -> int:
     parser.add_argument("--amp", action="store_true", help="Use FP16 FlashSAC contractions")
     parser.add_argument("--action-dim", type=int, default=29, help="Policy action width for learner-only profiling")
     parser.add_argument("--overlap", action="store_true", help="Overlap rollout and learner graphs")
+    parser.add_argument("--full-action", action="store_true", help="Use the tuned IsaacLab-flat full-action G1 recipe")
     args = parser.parse_args()
     if args.replays <= 0 or args.warmup_replays < 0:
         parser.error("replays must be positive and warmup-replays non-negative")
@@ -156,7 +171,9 @@ def main() -> int:
     if args.mode == "learner":
         result = _profile_learner(device, args.replays, args.warmup_replays, args.amp, args.action_dim)
     else:
-        result = _profile_full(device, args.replays, args.warmup_replays, args.world_count, args.amp, args.overlap)
+        result = _profile_full(
+            device, args.replays, args.warmup_replays, args.world_count, args.amp, args.overlap, args.full_action
+        )
     print(json.dumps(result, sort_keys=True))
     return 0
 
