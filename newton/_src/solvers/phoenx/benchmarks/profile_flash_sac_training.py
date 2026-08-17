@@ -35,18 +35,23 @@ def _load_cudart() -> ctypes.CDLL:
     raise RuntimeError("CUDA runtime library not found; profiling requires CUDA")
 
 
-def _config(*, minimum_size: int) -> rl.ConfigFlashSAC:
+def _config(*, minimum_size: int, use_amp: bool) -> rl.ConfigFlashSAC:
     return rl.ConfigFlashSAC(
         buffer_max_length=max(minimum_size * 4, 16_384),
         buffer_min_length=minimum_size,
         sample_batch_size=2048,
         n_step=3,
+        use_amp=use_amp,
     )
 
 
-def _profile_learner(device: wp.Device, replays: int, warmup_replays: int) -> dict[str, float | int | str]:
+def _profile_learner(
+    device: wp.Device, replays: int, warmup_replays: int, use_amp: bool
+) -> dict[str, float | int | str]:
     rng = np.random.default_rng(17)
-    trainer = rl.TrainerFlashSAC(obs_dim=98, action_dim=12, config=_config(minimum_size=2048), device=device, seed=19)
+    trainer = rl.TrainerFlashSAC(
+        obs_dim=98, action_dim=12, config=_config(minimum_size=2048, use_amp=use_amp), device=device, seed=19
+    )
     batch = rl.BatchSAC(
         obs=wp.array(rng.normal(size=(2048, 98)).astype(np.float32), device=device),
         actions=wp.array(rng.uniform(-1.0, 1.0, size=(2048, 12)).astype(np.float32), device=device),
@@ -70,18 +75,21 @@ def _profile_learner(device: wp.Device, replays: int, warmup_replays: int) -> di
         raise RuntimeError("cudaProfilerStop failed")
     return {
         "mode": "learner",
+        "use_amp": use_amp,
         "replays": replays,
         "elapsed_seconds": elapsed,
         "milliseconds_per_update": elapsed * 1000.0 / replays,
     }
 
 
-def _profile_full(device: wp.Device, replays: int, warmup_replays: int, worlds: int) -> dict[str, float | int | str]:
+def _profile_full(
+    device: wp.Device, replays: int, warmup_replays: int, worlds: int, use_amp: bool
+) -> dict[str, float | int | str]:
     env = rl.EnvG1PhoenX(g1_recipe.default_g1_env_config(world_count=worlds), device=device)
     trainer = rl.TrainerFlashSAC(
         obs_dim=env.obs_dim,
         action_dim=env.policy_action_dim,
-        config=_config(minimum_size=worlds),
+        config=_config(minimum_size=worlds, use_amp=use_amp),
         device=device,
         seed=29,
     )
@@ -102,6 +110,7 @@ def _profile_full(device: wp.Device, replays: int, warmup_replays: int, worlds: 
     transitions = worlds * 2 * replays
     return {
         "mode": "full",
+        "use_amp": use_amp,
         "world_count": worlds,
         "replays": replays,
         "elapsed_seconds": elapsed,
@@ -117,6 +126,7 @@ def main() -> int:
     parser.add_argument("--warmup-replays", type=int, default=5)
     parser.add_argument("--world-count", type=int, default=1024)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--amp", action="store_true", help="Use FP16 FlashSAC contractions")
     args = parser.parse_args()
     if args.replays <= 0 or args.warmup_replays < 0:
         parser.error("replays must be positive and warmup-replays non-negative")
@@ -124,9 +134,9 @@ def main() -> int:
     if not device.is_cuda or not wp.is_mempool_enabled(device):
         raise RuntimeError("FlashSAC profiling requires CUDA with Warp memory pools enabled")
     if args.mode == "learner":
-        result = _profile_learner(device, args.replays, args.warmup_replays)
+        result = _profile_learner(device, args.replays, args.warmup_replays, args.amp)
     else:
-        result = _profile_full(device, args.replays, args.warmup_replays, args.world_count)
+        result = _profile_full(device, args.replays, args.warmup_replays, args.world_count, args.amp)
     print(json.dumps(result, sort_keys=True))
     return 0
 

@@ -5,10 +5,20 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import warp as wp
 
-from .cublas import gemm_float32, gemm_float32_strided_batched, is_cublas_available
+from .cublas import (
+    gemm_float16,
+    gemm_float16_output,
+    gemm_float16_strided_batched,
+    gemm_float16_strided_batched_output,
+    gemm_float32,
+    gemm_float32_strided_batched,
+    is_cublas_available,
+)
 from .kernels import (
     copy_1d_kernel,
     copy_2d_kernel,
@@ -16,15 +26,22 @@ from .kernels import (
     soft_update_2d_kernel,
     unit_normalize_weight_columns_tile_kernel,
 )
+from .kernels_bf16 import cast_2d_float_to_float16_kernel, cast_3d_float_to_float16_kernel
 
 _TILE_REDUCTION_BLOCK_DIM = 256
 
 
 @wp.kernel
+def _copy_2d_same_kernel(src: wp.array2d[Any], dst: wp.array2d[Any]):
+    row, col = wp.tid()
+    dst[row, col] = src[row, col]
+
+
+@wp.kernel
 def _unit_linear_kernel(
-    x: wp.array2d[wp.float32],
-    weight: wp.array2d[wp.float32],
-    out: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    weight: wp.array2d[Any],
+    out: wp.array2d[Any],
 ):
     row, col = wp.tid()
     value = wp.float32(0.0)
@@ -35,22 +52,22 @@ def _unit_linear_kernel(
 
 @wp.kernel
 def _linear_input_grad_kernel(
-    output_grad: wp.array2d[wp.float32],
-    weight: wp.array2d[wp.float32],
-    input_grad: wp.array2d[wp.float32],
+    output_grad: wp.array2d[Any],
+    weight: wp.array2d[Any],
+    input_grad: wp.array2d[Any],
 ):
     row, inner = wp.tid()
     value = wp.float32(0.0)
     for col in range(weight.shape[1]):
-        value += output_grad[row, col] * weight[inner, col]
+        value += wp.float32(output_grad[row, col]) * weight[inner, col]
     input_grad[row, inner] = value
 
 
 @wp.kernel
 def _linear_weight_grad_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
-    weight_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
+    weight_grad: wp.array2d[Any],
 ):
     inner, col = wp.tid()
     value = wp.float32(0.0)
@@ -61,7 +78,7 @@ def _linear_weight_grad_kernel(
 
 @wp.kernel(enable_backward=False)
 def _batch_moments_tile_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     count: wp.int32,
     eps: wp.float32,
     mean: wp.array[wp.float32],
@@ -71,11 +88,11 @@ def _batch_moments_tile_kernel(
     col, lane = wp.tid()
     total = wp.float32(0.0)
     for row in range(lane, count, wp.block_dim()):
-        total += x[row, col]
+        total += wp.float32(x[row, col])
     batch_mean = wp.tile_sum(wp.tile(total))[0] / wp.float32(count)
     squared = wp.float32(0.0)
     for row in range(lane, count, wp.block_dim()):
-        delta = x[row, col] - batch_mean
+        delta = wp.float32(x[row, col]) - batch_mean
         squared += delta * delta
     batch_variance = wp.tile_sum(wp.tile(squared))[0] / wp.float32(count)
     if lane == 0:
@@ -86,8 +103,8 @@ def _batch_moments_tile_kernel(
 
 @wp.kernel(enable_backward=False)
 def _batch_norm_backward_tile_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     mean: wp.array[wp.float32],
     inv_std: wp.array[wp.float32],
     sum_grad: wp.array[wp.float32],
@@ -99,9 +116,9 @@ def _batch_norm_backward_tile_kernel(
     grad_sum = wp.float32(0.0)
     grad_normalized_sum = wp.float32(0.0)
     for row in range(lane, x.shape[0], wp.block_dim()):
-        grad = output_grad[row, col]
+        grad = wp.float32(output_grad[row, col])
         grad_sum += grad
-        grad_normalized_sum += grad * (x[row, col] - mean[col]) * inv_std[col]
+        grad_normalized_sum += grad * (wp.float32(x[row, col]) - mean[col]) * inv_std[col]
     reduced = wp.tile_sum(wp.tile(wp.vec2(grad_sum, grad_normalized_sum)), axis=1)
     if lane == 0:
         sum_grad[col] = reduced[0]
@@ -112,8 +129,8 @@ def _batch_norm_backward_tile_kernel(
 
 @wp.kernel
 def _batch_norm_backward_stats_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     eps: wp.float32,
     mean: wp.array[wp.float32],
     inv_std: wp.array[wp.float32],
@@ -125,20 +142,20 @@ def _batch_norm_backward_stats_kernel(
     col = wp.tid()
     batch_mean = wp.float32(0.0)
     for row in range(x.shape[0]):
-        batch_mean += x[row, col]
+        batch_mean += wp.float32(x[row, col])
     batch_mean /= wp.float32(x.shape[0])
     variance = wp.float32(0.0)
     for row in range(x.shape[0]):
-        delta = x[row, col] - batch_mean
+        delta = wp.float32(x[row, col]) - batch_mean
         variance += delta * delta
     variance /= wp.float32(x.shape[0])
     batch_inv_std = wp.float32(1.0) / wp.sqrt(variance + eps)
     grad_sum = wp.float32(0.0)
     grad_normalized_sum = wp.float32(0.0)
     for row in range(x.shape[0]):
-        normalized = (x[row, col] - batch_mean) * batch_inv_std
-        grad_sum += output_grad[row, col]
-        grad_normalized_sum += output_grad[row, col] * normalized
+        normalized = (wp.float32(x[row, col]) - batch_mean) * batch_inv_std
+        grad_sum += wp.float32(output_grad[row, col])
+        grad_normalized_sum += wp.float32(output_grad[row, col]) * normalized
     mean[col] = batch_mean
     inv_std[col] = batch_inv_std
     sum_grad[col] = grad_sum
@@ -149,41 +166,41 @@ def _batch_norm_backward_stats_kernel(
 
 @wp.kernel
 def _batch_norm_input_grad_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     scale: wp.array[wp.float32],
     mean: wp.array[wp.float32],
     inv_std: wp.array[wp.float32],
     sum_grad: wp.array[wp.float32],
     sum_grad_normalized: wp.array[wp.float32],
-    input_grad: wp.array2d[wp.float32],
+    input_grad: wp.array2d[Any],
 ):
     row, col = wp.tid()
     count = wp.float32(x.shape[0])
-    normalized = (x[row, col] - mean[col]) * inv_std[col]
+    normalized = (wp.float32(x[row, col]) - mean[col]) * inv_std[col]
     input_grad[row, col] = (
         scale[col]
         * inv_std[col]
-        * (output_grad[row, col] - sum_grad[col] / count - normalized * sum_grad_normalized[col] / count)
+        * (wp.float32(output_grad[row, col]) - sum_grad[col] / count - normalized * sum_grad_normalized[col] / count)
     )
 
 
 @wp.kernel
 def _batch_norm_inference_input_grad_kernel(
-    output_grad: wp.array2d[wp.float32],
+    output_grad: wp.array2d[Any],
     scale: wp.array[wp.float32],
     running_variance: wp.array[wp.float32],
     eps: wp.float32,
-    input_grad: wp.array2d[wp.float32],
+    input_grad: wp.array2d[Any],
 ):
     row, col = wp.tid()
-    input_grad[row, col] = output_grad[row, col] * scale[col] / wp.sqrt(running_variance[col] + eps)
+    input_grad[row, col] = wp.float32(output_grad[row, col]) * scale[col] / wp.sqrt(running_variance[col] + eps)
 
 
 @wp.kernel
 def _batch_norm_inference_parameter_grad_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     running_mean: wp.array[wp.float32],
     running_variance: wp.array[wp.float32],
     eps: wp.float32,
@@ -195,16 +212,16 @@ def _batch_norm_inference_parameter_grad_kernel(
     grad_scale = wp.float32(0.0)
     grad_bias = wp.float32(0.0)
     for row in range(x.shape[0]):
-        grad_scale += output_grad[row, col] * (x[row, col] - running_mean[col]) * inv_std
-        grad_bias += output_grad[row, col]
+        grad_scale += wp.float32(output_grad[row, col]) * (wp.float32(x[row, col]) - running_mean[col]) * inv_std
+        grad_bias += wp.float32(output_grad[row, col])
     scale_grad[col] = grad_scale
     bias_grad[col] = grad_bias
 
 
 @wp.kernel(enable_backward=False)
 def _batch_norm_inference_parameter_grad_tile_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     running_mean: wp.array[wp.float32],
     running_variance: wp.array[wp.float32],
     eps: wp.float32,
@@ -216,8 +233,8 @@ def _batch_norm_inference_parameter_grad_tile_kernel(
     grad_scale = wp.float32(0.0)
     grad_bias = wp.float32(0.0)
     for row in range(lane, x.shape[0], wp.block_dim()):
-        grad = output_grad[row, col]
-        grad_scale += grad * (x[row, col] - running_mean[col]) * inv_std
+        grad = wp.float32(output_grad[row, col])
+        grad_scale += grad * (wp.float32(x[row, col]) - running_mean[col]) * inv_std
         grad_bias += grad
     reduced = wp.tile_sum(wp.tile(wp.vec2(grad_scale, grad_bias)), axis=1)
     if lane == 0:
@@ -227,8 +244,8 @@ def _batch_norm_inference_parameter_grad_tile_kernel(
 
 @wp.kernel(enable_backward=False)
 def _rms_norm_backward_stats_tile_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     scale: wp.array[wp.float32],
     eps: wp.float32,
     inv_rms: wp.array[wp.float32],
@@ -238,9 +255,9 @@ def _rms_norm_backward_stats_tile_kernel(
     mean_square = wp.float32(0.0)
     projected = wp.float32(0.0)
     for col in range(lane, x.shape[1], wp.block_dim()):
-        value = x[row, col]
+        value = wp.float32(x[row, col])
         mean_square += value * value
-        projected += output_grad[row, col] * scale[col] * value
+        projected += wp.float32(output_grad[row, col]) * scale[col] * value
     reduced = wp.tile_sum(wp.tile(wp.vec2(mean_square, projected)), axis=1)
     if lane == 0:
         inv_rms[row] = wp.float32(1.0) / wp.sqrt(reduced[0] / wp.float32(x.shape[1]) + eps)
@@ -249,26 +266,26 @@ def _rms_norm_backward_stats_tile_kernel(
 
 @wp.kernel(enable_backward=False)
 def _rms_norm_scale_grad_tile_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     inv_rms: wp.array[wp.float32],
     scale_grad: wp.array[wp.float32],
 ):
     col, lane = wp.tid()
     value = wp.float32(0.0)
     for row in range(lane, x.shape[0], wp.block_dim()):
-        value += output_grad[row, col] * x[row, col] * inv_rms[row]
+        value += wp.float32(output_grad[row, col]) * wp.float32(x[row, col]) * inv_rms[row]
     reduced = wp.tile_sum(wp.tile(value))
     if lane == 0:
         scale_grad[col] = reduced[0]
 
 
 @wp.kernel(enable_backward=False)
-def _bias_grad_tile_kernel(output_grad: wp.array2d[wp.float32], bias_grad: wp.array[wp.float32]):
+def _bias_grad_tile_kernel(output_grad: wp.array2d[Any], bias_grad: wp.array[wp.float32]):
     col, lane = wp.tid()
     value = wp.float32(0.0)
     for row in range(lane, output_grad.shape[0], wp.block_dim()):
-        value += output_grad[row, col]
+        value += wp.float32(output_grad[row, col])
     reduced = wp.tile_sum(wp.tile(value))
     if lane == 0:
         bias_grad[col] = reduced[0]
@@ -276,24 +293,24 @@ def _bias_grad_tile_kernel(output_grad: wp.array2d[wp.float32], bias_grad: wp.ar
 
 @wp.kernel
 def _relu_grad_kernel(
-    activated: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
-    input_grad: wp.array2d[wp.float32],
+    activated: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
+    input_grad: wp.array2d[Any],
 ):
     row, col = wp.tid()
     input_grad[row, col] = wp.where(activated[row, col] > wp.float32(0.0), output_grad[row, col], wp.float32(0.0))
 
 
 @wp.kernel
-def _add_kernel(a: wp.array2d[wp.float32], b: wp.array2d[wp.float32], out: wp.array2d[wp.float32]):
+def _add_kernel(a: wp.array2d[Any], b: wp.array2d[Any], out: wp.array2d[Any]):
     row, col = wp.tid()
     out[row, col] = a[row, col] + b[row, col]
 
 
 @wp.kernel
 def _rms_norm_backward_stats_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     scale: wp.array[wp.float32],
     eps: wp.float32,
     inv_rms: wp.array[wp.float32],
@@ -303,51 +320,51 @@ def _rms_norm_backward_stats_kernel(
     mean_square = wp.float32(0.0)
     projected = wp.float32(0.0)
     for col in range(x.shape[1]):
-        mean_square += x[row, col] * x[row, col]
-        projected += output_grad[row, col] * scale[col] * x[row, col]
+        mean_square += wp.float32(x[row, col]) * wp.float32(x[row, col])
+        projected += wp.float32(output_grad[row, col]) * scale[col] * wp.float32(x[row, col])
     inv_rms[row] = wp.float32(1.0) / wp.sqrt(mean_square / wp.float32(x.shape[1]) + eps)
     projection[row] = projected
 
 
 @wp.kernel
 def _rms_norm_input_grad_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     scale: wp.array[wp.float32],
     inv_rms: wp.array[wp.float32],
     projection: wp.array[wp.float32],
-    input_grad: wp.array2d[wp.float32],
+    input_grad: wp.array2d[Any],
 ):
     row, col = wp.tid()
-    input_grad[row, col] = output_grad[row, col] * scale[col] * inv_rms[row] - (
+    input_grad[row, col] = wp.float32(output_grad[row, col]) * scale[col] * inv_rms[row] - (
         x[row, col] * inv_rms[row] * inv_rms[row] * inv_rms[row] * projection[row] / wp.float32(x.shape[1])
     )
 
 
 @wp.kernel
 def _rms_norm_scale_grad_kernel(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     inv_rms: wp.array[wp.float32],
     scale_grad: wp.array[wp.float32],
 ):
     col = wp.tid()
     value = wp.float32(0.0)
     for row in range(x.shape[0]):
-        value += output_grad[row, col] * x[row, col] * inv_rms[row]
+        value += wp.float32(output_grad[row, col]) * wp.float32(x[row, col]) * inv_rms[row]
     scale_grad[col] = value
 
 
 @wp.kernel
 def _head_output_grad_kernel(
-    output_grad: wp.array2d[wp.float32],
-    head: wp.array2d[wp.float32],
+    output_grad: wp.array2d[Any],
+    head: wp.array2d[Any],
     bias: wp.array[wp.float32],
     offset: wp.int32,
     smooth_log_std: wp.bool,
     minimum: wp.float32,
     maximum: wp.float32,
-    head_grad: wp.array2d[wp.float32],
+    head_grad: wp.array2d[Any],
 ):
     row, col = wp.tid()
     value = output_grad[row, col + offset]
@@ -358,17 +375,17 @@ def _head_output_grad_kernel(
 
 
 @wp.kernel
-def _bias_grad_kernel(output_grad: wp.array2d[wp.float32], bias_grad: wp.array[wp.float32]):
+def _bias_grad_kernel(output_grad: wp.array2d[Any], bias_grad: wp.array[wp.float32]):
     col = wp.tid()
     value = wp.float32(0.0)
     for row in range(output_grad.shape[0]):
-        value += output_grad[row, col]
+        value += wp.float32(output_grad[row, col])
     bias_grad[col] = value
 
 
 @wp.kernel(enable_backward=False)
 def _batch_moments_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     count: wp.int32,
     eps: wp.float32,
     mean: wp.array[wp.float32],
@@ -378,11 +395,11 @@ def _batch_moments_kernel(
     col = wp.tid()
     total = wp.float32(0.0)
     for row in range(count):
-        total += x[row, col]
+        total += wp.float32(x[row, col])
     batch_mean = total / wp.float32(count)
     squared = wp.float32(0.0)
     for row in range(count):
-        delta = x[row, col] - batch_mean
+        delta = wp.float32(x[row, col]) - batch_mean
         squared += delta * delta
     mean[col] = batch_mean
     variance[col] = squared / wp.float32(count)
@@ -408,70 +425,70 @@ def _update_running_moments_kernel(
 
 @wp.kernel
 def _batch_norm_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     mean: wp.array[wp.float32],
     variance: wp.array[wp.float32],
     scale: wp.array[wp.float32],
     bias: wp.array[wp.float32],
     eps: wp.float32,
-    out: wp.array2d[wp.float32],
+    out: wp.array2d[Any],
 ):
     row, col = wp.tid()
-    normalized = (x[row, col] - mean[col]) / wp.sqrt(variance[col] + eps)
+    normalized = (wp.float32(x[row, col]) - mean[col]) / wp.sqrt(variance[col] + eps)
     out[row, col] = normalized * scale[col] + bias[col]
 
 
 @wp.kernel
 def _batch_norm_relu_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     mean: wp.array[wp.float32],
     variance: wp.array[wp.float32],
     scale: wp.array[wp.float32],
     bias: wp.array[wp.float32],
     eps: wp.float32,
-    out: wp.array2d[wp.float32],
+    out: wp.array2d[Any],
 ):
     row, col = wp.tid()
-    normalized = (x[row, col] - mean[col]) / wp.sqrt(variance[col] + eps)
+    normalized = (wp.float32(x[row, col]) - mean[col]) / wp.sqrt(variance[col] + eps)
     out[row, col] = wp.max(normalized * scale[col] + bias[col], wp.float32(0.0))
 
 
 @wp.kernel
 def _batch_norm_inv_std_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     mean: wp.array[wp.float32],
     inv_std: wp.array[wp.float32],
     scale: wp.array[wp.float32],
     bias: wp.array[wp.float32],
-    out: wp.array2d[wp.float32],
+    out: wp.array2d[Any],
 ):
     row, col = wp.tid()
-    normalized = (x[row, col] - mean[col]) * inv_std[col]
+    normalized = (wp.float32(x[row, col]) - mean[col]) * inv_std[col]
     out[row, col] = normalized * scale[col] + bias[col]
 
 
 @wp.kernel
 def _batch_norm_inv_std_relu_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     mean: wp.array[wp.float32],
     inv_std: wp.array[wp.float32],
     scale: wp.array[wp.float32],
     bias: wp.array[wp.float32],
-    out: wp.array2d[wp.float32],
+    out: wp.array2d[Any],
 ):
     row, col = wp.tid()
-    normalized = (x[row, col] - mean[col]) * inv_std[col]
+    normalized = (wp.float32(x[row, col]) - mean[col]) * inv_std[col]
     out[row, col] = wp.max(normalized * scale[col] + bias[col], wp.float32(0.0))
 
 
 @wp.kernel
 def _batch_norm_training_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     count: wp.int32,
     scale: wp.array[wp.float32],
     bias: wp.array[wp.float32],
     eps: wp.float32,
-    out: wp.array2d[wp.float32],
+    out: wp.array2d[Any],
 ):
     row, col = wp.tid()
     total = wp.float32(0.0)
@@ -483,21 +500,21 @@ def _batch_norm_training_kernel(
         delta = x[sample, col] - mean
         squared += delta * delta
     variance = squared / wp.float32(count)
-    normalized = (x[row, col] - mean) / wp.sqrt(variance + eps)
+    normalized = (wp.float32(x[row, col]) - mean) / wp.sqrt(variance + eps)
     out[row, col] = normalized * scale[col] + bias[col]
 
 
 @wp.kernel
-def _relu_kernel(x: wp.array2d[wp.float32], out: wp.array2d[wp.float32]):
+def _relu_kernel(x: wp.array2d[Any], out: wp.array2d[Any]):
     row, col = wp.tid()
     out[row, col] = wp.max(x[row, col], wp.float32(0.0))
 
 
 @wp.kernel
 def _residual_add_kernel(
-    x: wp.array2d[wp.float32],
-    residual: wp.array2d[wp.float32],
-    out: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    residual: wp.array2d[Any],
+    out: wp.array2d[Any],
 ):
     row, col = wp.tid()
     out[row, col] = x[row, col] + residual[row, col]
@@ -505,7 +522,7 @@ def _residual_add_kernel(
 
 @wp.kernel
 def _rms_inv_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     eps: wp.float32,
     inv_rms: wp.array[wp.float32],
 ):
@@ -518,14 +535,14 @@ def _rms_inv_kernel(
 
 @wp.kernel(enable_backward=False)
 def _rms_inv_tile_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     eps: wp.float32,
     inv_rms: wp.array[wp.float32],
 ):
     row, lane = wp.tid()
     squared = wp.float32(0.0)
     for col in range(lane, x.shape[1], wp.block_dim()):
-        value = x[row, col]
+        value = wp.float32(x[row, col])
         squared += value * value
     reduced = wp.tile_sum(wp.tile(squared))
     if lane == 0:
@@ -534,10 +551,10 @@ def _rms_inv_tile_kernel(
 
 @wp.kernel
 def _rms_norm_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     scale: wp.array[wp.float32],
     inv_rms: wp.array[wp.float32],
-    out: wp.array2d[wp.float32],
+    out: wp.array2d[Any],
 ):
     row, col = wp.tid()
     out[row, col] = x[row, col] * inv_rms[row] * scale[col]
@@ -545,31 +562,206 @@ def _rms_norm_kernel(
 
 @wp.kernel
 def _head_bias_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     bias: wp.array[wp.float32],
     offset: wp.int32,
-    out: wp.array2d[wp.float32],
+    out: wp.array2d[Any],
 ):
     row, col = wp.tid()
-    out[row, col + offset] = x[row, col] + bias[col]
+    out[row, col + offset] = wp.float32(x[row, col]) + bias[col]
 
 
 @wp.kernel
 def _head_bias_log_std_kernel(
-    x: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
     bias: wp.array[wp.float32],
     offset: wp.int32,
     minimum: wp.float32,
     maximum: wp.float32,
-    out: wp.array2d[wp.float32],
+    out: wp.array2d[Any],
 ):
     row, col = wp.tid()
-    raw = x[row, col] + bias[col]
+    raw = wp.float32(x[row, col]) + bias[col]
     out[row, col + offset] = minimum + (maximum - minimum) * wp.float32(0.5) * (wp.float32(1.0) + wp.tanh(raw))
 
 
 @wp.kernel
-def _normalize_columns_kernel(weight: wp.array2d[wp.float32], eps: wp.float32):
+def _batch_norm_f16_kernel(
+    x: wp.array2d[Any],
+    mean: wp.array[wp.float32],
+    variance: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    bias: wp.array[wp.float32],
+    eps: wp.float32,
+    out: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = (wp.float32(x[row, col]) - mean[col]) / wp.sqrt(variance[col] + eps)
+    out[row, col] = wp.float16(value * scale[col] + bias[col])
+
+
+@wp.kernel
+def _batch_norm_inv_std_f16_kernel(
+    x: wp.array2d[Any],
+    mean: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    bias: wp.array[wp.float32],
+    out: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = (wp.float32(x[row, col]) - mean[col]) * inv_std[col]
+    out[row, col] = wp.float16(value * scale[col] + bias[col])
+
+
+@wp.kernel
+def _batch_norm_relu_f16_kernel(
+    x: wp.array2d[Any],
+    mean: wp.array[wp.float32],
+    variance: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    bias: wp.array[wp.float32],
+    eps: wp.float32,
+    out: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = (wp.float32(x[row, col]) - mean[col]) / wp.sqrt(variance[col] + eps)
+    out[row, col] = wp.float16(wp.max(value * scale[col] + bias[col], wp.float32(0.0)))
+
+
+@wp.kernel
+def _batch_norm_inv_std_relu_f16_kernel(
+    x: wp.array2d[Any],
+    mean: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    bias: wp.array[wp.float32],
+    out: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = (wp.float32(x[row, col]) - mean[col]) * inv_std[col]
+    out[row, col] = wp.float16(wp.max(value * scale[col] + bias[col], wp.float32(0.0)))
+
+
+@wp.kernel
+def _residual_add_f16_kernel(
+    x: wp.array2d[wp.float16],
+    residual: wp.array2d[wp.float16],
+    out: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    out[row, col] = wp.float16(wp.float32(x[row, col]) + wp.float32(residual[row, col]))
+
+
+@wp.kernel
+def _rms_norm_f16_kernel(
+    x: wp.array2d[wp.float16],
+    scale: wp.array[wp.float32],
+    inv_rms: wp.array[wp.float32],
+    out: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    out[row, col] = wp.float16(wp.float32(x[row, col]) * inv_rms[row] * scale[col])
+
+
+@wp.kernel
+def _relu_grad_f16_kernel(
+    activated: wp.array2d[wp.float16],
+    output_grad: wp.array2d[wp.float16],
+    input_grad: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = wp.where(
+        wp.float32(activated[row, col]) > wp.float32(0.0), wp.float32(output_grad[row, col]), wp.float32(0.0)
+    )
+    input_grad[row, col] = wp.float16(value)
+
+
+@wp.kernel
+def _add_f16_kernel(
+    a: wp.array2d[wp.float16],
+    b: wp.array2d[wp.float16],
+    out: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    out[row, col] = wp.float16(wp.float32(a[row, col]) + wp.float32(b[row, col]))
+
+
+@wp.kernel
+def _batch_norm_input_grad_f16_kernel(
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
+    scale: wp.array[wp.float32],
+    mean: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
+    sum_grad: wp.array[wp.float32],
+    sum_grad_normalized: wp.array[wp.float32],
+    input_grad: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    count = wp.float32(x.shape[0])
+    centered = wp.float32(x[row, col]) - mean[col]
+    normalized = centered * inv_std[col]
+    value = (
+        scale[col]
+        * inv_std[col]
+        / count
+        * (count * wp.float32(output_grad[row, col]) - sum_grad[col] - normalized * sum_grad_normalized[col])
+    )
+    input_grad[row, col] = wp.float16(value)
+
+
+@wp.kernel
+def _batch_norm_inference_input_grad_f16_kernel(
+    output_grad: wp.array2d[wp.float16],
+    scale: wp.array[wp.float32],
+    running_variance: wp.array[wp.float32],
+    eps: wp.float32,
+    input_grad: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = wp.float32(output_grad[row, col]) * scale[col] / wp.sqrt(running_variance[col] + eps)
+    input_grad[row, col] = wp.float16(value)
+
+
+@wp.kernel
+def _rms_norm_input_grad_f16_kernel(
+    x: wp.array2d[wp.float16],
+    output_grad: wp.array2d[wp.float16],
+    scale: wp.array[wp.float32],
+    inv_rms: wp.array[wp.float32],
+    projection: wp.array[wp.float32],
+    input_grad: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = wp.float32(output_grad[row, col]) * scale[col] * inv_rms[row] - wp.float32(x[row, col]) * projection[
+        row
+    ] * inv_rms[row] * inv_rms[row] / wp.float32(x.shape[1])
+    input_grad[row, col] = wp.float16(value)
+
+
+@wp.kernel
+def _head_output_grad_f16_kernel(
+    output_grad: wp.array2d[wp.float32],
+    head: wp.array2d[wp.float16],
+    bias: wp.array[wp.float32],
+    offset: wp.int32,
+    smooth_log_std: wp.bool,
+    minimum: wp.float32,
+    maximum: wp.float32,
+    head_grad: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = output_grad[row, col + offset]
+    if smooth_log_std:
+        raw = wp.float32(head[row, col]) + bias[col]
+        t = wp.tanh(raw)
+        value *= (maximum - minimum) * wp.float32(0.5) * (wp.float32(1.0) - t * t)
+    head_grad[row, col] = wp.float16(value)
+
+
+@wp.kernel
+def _normalize_columns_kernel(weight: wp.array2d[Any], eps: wp.float32):
     col = wp.tid()
     squared = wp.float32(0.0)
     for row in range(weight.shape[0]):
@@ -637,7 +829,7 @@ def _normalize_scale_tile_kernel(scale: wp.array[wp.float32], eps: wp.float32):
         scale[col] *= factor
 
 
-def _launch_rms_inv(x: wp.array2d[wp.float32], eps: float, out: wp.array[wp.float32]) -> None:
+def _launch_rms_inv(x: wp.array2d[Any], eps: float, out: wp.array[wp.float32]) -> None:
     if x.device.is_cuda:
         wp.launch(
             _rms_inv_tile_kernel,
@@ -651,7 +843,7 @@ def _launch_rms_inv(x: wp.array2d[wp.float32], eps: float, out: wp.array[wp.floa
         wp.launch(_rms_inv_kernel, dim=x.shape[0], inputs=[x, eps], outputs=[out], device=x.device)
 
 
-def _launch_bias_grad(output_grad: wp.array2d[wp.float32], bias_grad: wp.array[wp.float32]) -> None:
+def _launch_bias_grad(output_grad: wp.array2d[Any], bias_grad: wp.array[wp.float32]) -> None:
     if output_grad.device.is_cuda:
         wp.launch(
             _bias_grad_tile_kernel,
@@ -668,8 +860,8 @@ def _launch_bias_grad(output_grad: wp.array2d[wp.float32], bias_grad: wp.array[w
 
 
 def _launch_rms_backward_stats(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     scale: wp.array[wp.float32],
     eps: float,
     inv_rms: wp.array[wp.float32],
@@ -695,8 +887,8 @@ def _launch_rms_backward_stats(
 
 
 def _launch_rms_scale_grad(
-    x: wp.array2d[wp.float32],
-    output_grad: wp.array2d[wp.float32],
+    x: wp.array2d[Any],
+    output_grad: wp.array2d[Any],
     inv_rms: wp.array[wp.float32],
     scale_grad: wp.array[wp.float32],
 ) -> None:
@@ -761,8 +953,14 @@ class _UnitBatchNorm:
         return value
 
     def forward(
-        self, x: wp.array2d[wp.float32], *, training: bool, requires_grad: bool, relu: bool = False
-    ) -> wp.array2d[wp.float32]:
+        self,
+        x: wp.array2d[Any],
+        *,
+        training: bool,
+        requires_grad: bool,
+        relu: bool = False,
+        output_dtype: Any = wp.float32,
+    ) -> wp.array2d[Any]:
         rows = int(x.shape[0])
         if training:
             scratch = self.scratch(rows)
@@ -798,9 +996,19 @@ class _UnitBatchNorm:
         else:
             mean = self.running_mean
             variance = self.running_variance
-        out = wp.empty(x.shape, dtype=wp.float32, device=self.device, requires_grad=requires_grad)
-        wp.launch(
-            (
+        out = wp.empty(x.shape, dtype=output_dtype, device=self.device, requires_grad=requires_grad)
+        if output_dtype == wp.float16:
+            kernel = (
+                _batch_norm_inv_std_relu_f16_kernel
+                if training and relu
+                else _batch_norm_inv_std_f16_kernel
+                if training
+                else _batch_norm_relu_f16_kernel
+                if relu
+                else _batch_norm_f16_kernel
+            )
+        else:
+            kernel = (
                 _batch_norm_inv_std_relu_kernel
                 if training and relu
                 else _batch_norm_inv_std_kernel
@@ -808,7 +1016,9 @@ class _UnitBatchNorm:
                 else _batch_norm_relu_kernel
                 if relu
                 else _batch_norm_kernel
-            ),
+            )
+        wp.launch(
+            kernel,
             dim=x.shape,
             inputs=(
                 [x, mean, scratch.inv_std, self.scale, self.bias]
@@ -840,6 +1050,7 @@ class NetworkFlashSAC:
         actor_heads: bool,
         device: wp.context.Devicelike = None,
         seed: int = 0,
+        contraction_dtype: str = "float32",
     ):
         self.input_dim = int(input_dim)
         self.hidden_dim = int(hidden_dim)
@@ -847,6 +1058,12 @@ class NetworkFlashSAC:
         self.output_dim = int(output_dim)
         self.actor_heads = bool(actor_heads)
         self.device = wp.get_device(device)
+        if contraction_dtype not in {"float32", "float16"}:
+            raise ValueError("contraction_dtype must be float32 or float16")
+        if contraction_dtype == "float16" and not self.device.is_cuda:
+            raise ValueError("float16 contractions require a CUDA device")
+        self.contraction_dtype = contraction_dtype
+        self.activation_dtype = wp.float16 if contraction_dtype == "float16" else wp.float32
         self.log_std_min = -10.0
         self.log_std_max = 2.0
         self.default_training = False
@@ -889,7 +1106,9 @@ class NetworkFlashSAC:
         self._manual_cache: dict[str, object] | None = None
         self._forward_rows = 0
         self._forward_buffers: dict[str, object] = {}
+        self._fp16_weights: dict[int, wp.array2d[wp.float16]] = {}
         self.normalize_parameters()
+        self.refresh_contraction_weights()
 
     def _weight(self, input_dim: int, output_dim: int, rng: np.random.Generator) -> wp.array2d[wp.float32]:
         return wp.array(
@@ -898,6 +1117,32 @@ class NetworkFlashSAC:
             device=self.device,
             requires_grad=True,
         )
+
+    def refresh_contraction_weights(self) -> None:
+        """Refresh setup-owned FP16 mirrors after FP32 parameter mutation."""
+
+        if self.contraction_dtype != "float16":
+            return
+        current: dict[int, wp.array2d[wp.float16]] = {}
+        for weight in self.weights:
+            mirror = self._fp16_weights.get(int(weight.ptr))
+            if mirror is None or mirror.shape != weight.shape:
+                mirror = wp.empty(weight.shape, dtype=wp.float16, device=self.device)
+            wp.launch(
+                cast_2d_float_to_float16_kernel,
+                dim=weight.shape,
+                inputs=[weight],
+                outputs=[mirror],
+                device=self.device,
+            )
+            current[int(weight.ptr)] = mirror
+        self._fp16_weights = current
+
+    def _contraction_weight(self, weight: wp.array2d[wp.float32]) -> wp.array2d[wp.float16]:
+        mirror = self._fp16_weights.get(int(weight.ptr))
+        if mirror is None:
+            raise RuntimeError("FP16 contraction weights have not been refreshed")
+        return mirror
 
     def parameters(self) -> list[wp.array]:
         params: list[wp.array] = list(self.weights)
@@ -919,29 +1164,34 @@ class NetworkFlashSAC:
         arrays.append(self.rms_scale)
         return arrays
 
-    def _linear(
-        self, x: wp.array2d[wp.float32], weight: wp.array2d[wp.float32], *, requires_grad: bool
-    ) -> wp.array2d[wp.float32]:
+    def _linear(self, x: wp.array2d[Any], weight: wp.array2d[wp.float32], *, requires_grad: bool) -> wp.array2d[Any]:
         out = wp.empty(
             (int(x.shape[0]), int(weight.shape[1])),
-            dtype=wp.float32,
+            dtype=self.activation_dtype,
             device=self.device,
             requires_grad=requires_grad,
         )
-        if self._use_cublas:
-            gemm_float32(x, weight, out, int(x.shape[0]), int(weight.shape[1]), int(weight.shape[0]))
-        else:
-            wp.launch(_unit_linear_kernel, dim=out.shape, inputs=[x, weight], outputs=[out], device=self.device)
+        self._linear_into(x, weight, out)
         return out
 
     def _linear_into(
         self,
-        x: wp.array2d[wp.float32],
+        x: wp.array2d[Any],
         weight: wp.array2d[wp.float32],
-        out: wp.array2d[wp.float32],
+        out: wp.array2d[Any],
     ) -> None:
         if self._use_cublas:
-            gemm_float32(x, weight, out, int(x.shape[0]), int(weight.shape[1]), int(weight.shape[0]))
+            if self.contraction_dtype == "float16":
+                gemm_float16_output(
+                    x,
+                    self._contraction_weight(weight),
+                    out,
+                    int(x.shape[0]),
+                    int(weight.shape[1]),
+                    int(weight.shape[0]),
+                )
+            else:
+                gemm_float32(x, weight, out, int(x.shape[0]), int(weight.shape[1]), int(weight.shape[0]))
         else:
             wp.launch(_unit_linear_kernel, dim=out.shape, inputs=[x, weight], outputs=[out], device=self.device)
 
@@ -957,24 +1207,26 @@ class NetworkFlashSAC:
         for _ in range(self.num_blocks):
             blocks.append(
                 (
-                    wp.empty((rows, self.hidden_dim * 4), dtype=wp.float32, device=self.device),
-                    wp.empty((rows, self.hidden_dim * 4), dtype=wp.float32, device=self.device),
-                    wp.empty((rows, self.hidden_dim * 4), dtype=wp.float32, device=self.device),
-                    wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
-                    wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
-                    wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
-                    wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
+                    wp.empty((rows, self.hidden_dim * 4), dtype=self.activation_dtype, device=self.device),
+                    wp.empty((rows, self.hidden_dim * 4), dtype=self.activation_dtype, device=self.device),
+                    wp.empty((rows, self.hidden_dim * 4), dtype=self.activation_dtype, device=self.device),
+                    wp.empty((rows, self.hidden_dim), dtype=self.activation_dtype, device=self.device),
+                    wp.empty((rows, self.hidden_dim), dtype=self.activation_dtype, device=self.device),
+                    wp.empty((rows, self.hidden_dim), dtype=self.activation_dtype, device=self.device),
+                    wp.empty((rows, self.hidden_dim), dtype=self.activation_dtype, device=self.device),
                 )
             )
         head_width = self.output_dim // 2 if self.actor_heads else self.output_dim
         head_count = 2 if self.actor_heads else 1
         self._forward_buffers = {
-            "input_normalized": wp.empty((rows, self.input_dim), dtype=wp.float32, device=self.device),
-            "embed": wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
+            "input_normalized": wp.empty((rows, self.input_dim), dtype=self.activation_dtype, device=self.device),
+            "embed": wp.empty((rows, self.hidden_dim), dtype=self.activation_dtype, device=self.device),
             "blocks": blocks,
             "inv_rms": wp.empty(rows, dtype=wp.float32, device=self.device),
-            "normalized": wp.empty((rows, self.hidden_dim), dtype=wp.float32, device=self.device),
-            "heads": [wp.empty((rows, head_width), dtype=wp.float32, device=self.device) for _ in range(head_count)],
+            "normalized": wp.empty((rows, self.hidden_dim), dtype=self.activation_dtype, device=self.device),
+            "heads": [
+                wp.empty((rows, head_width), dtype=self.activation_dtype, device=self.device) for _ in range(head_count)
+            ],
             "output": wp.empty((rows, self.output_dim), dtype=wp.float32, device=self.device),
         }
         self._forward_rows = rows
@@ -1012,7 +1264,7 @@ class NetworkFlashSAC:
         if not isinstance(blocks, list) or not isinstance(heads, list):
             raise RuntimeError("FlashSAC forward buffers are invalid")
         wp.launch(
-            _batch_norm_kernel,
+            _batch_norm_f16_kernel if self.contraction_dtype == "float16" else _batch_norm_kernel,
             dim=input_normalized.shape,
             inputs=[
                 x,
@@ -1033,7 +1285,7 @@ class NetworkFlashSAC:
             pre1, _normed1, activated1, pre2, _normed2, activated2, block_out = blocks[block_index]
             self._linear_into(residual, w1, pre1)
             wp.launch(
-                _batch_norm_relu_kernel,
+                _batch_norm_relu_f16_kernel if self.contraction_dtype == "float16" else _batch_norm_relu_kernel,
                 dim=pre1.shape,
                 inputs=[pre1, norm1.running_mean, norm1.running_variance, norm1.scale, norm1.bias, norm1.eps],
                 outputs=[activated1],
@@ -1041,14 +1293,14 @@ class NetworkFlashSAC:
             )
             self._linear_into(activated1, w2, pre2)
             wp.launch(
-                _batch_norm_relu_kernel,
+                _batch_norm_relu_f16_kernel if self.contraction_dtype == "float16" else _batch_norm_relu_kernel,
                 dim=pre2.shape,
                 inputs=[pre2, norm2.running_mean, norm2.running_variance, norm2.scale, norm2.bias, norm2.eps],
                 outputs=[activated2],
                 device=self.device,
             )
             wp.launch(
-                _residual_add_kernel,
+                _residual_add_f16_kernel if self.contraction_dtype == "float16" else _residual_add_kernel,
                 dim=block_out.shape,
                 inputs=[activated2, residual],
                 outputs=[block_out],
@@ -1057,7 +1309,7 @@ class NetworkFlashSAC:
             hidden = block_out
         _launch_rms_inv(hidden, 1.0e-6, inv_rms)
         wp.launch(
-            _rms_norm_kernel,
+            _rms_norm_f16_kernel if self.contraction_dtype == "float16" else _rms_norm_kernel,
             dim=hidden.shape,
             inputs=[hidden, self.rms_scale, inv_rms],
             outputs=[normalized],
@@ -1092,17 +1344,31 @@ class NetworkFlashSAC:
         training: bool,
         requires_grad: bool,
     ) -> wp.array2d[wp.float32]:
-        hidden = self.input_norm.forward(x, training=training, requires_grad=requires_grad)
+        hidden = self.input_norm.forward(
+            x, training=training, requires_grad=requires_grad, output_dtype=self.activation_dtype
+        )
         hidden = self._linear(hidden, self.embed_weight, requires_grad=requires_grad)
         for (w1, w2), (norm1, norm2) in zip(self.block_weights, self.block_norms, strict=True):
             residual = hidden
             hidden = self._linear(hidden, w1, requires_grad=requires_grad)
-            activated = norm1.forward(hidden, training=training, requires_grad=requires_grad, relu=True)
+            activated = norm1.forward(
+                hidden,
+                training=training,
+                requires_grad=requires_grad,
+                relu=True,
+                output_dtype=self.activation_dtype,
+            )
             hidden = self._linear(activated, w2, requires_grad=requires_grad)
-            activated = norm2.forward(hidden, training=training, requires_grad=requires_grad, relu=True)
+            activated = norm2.forward(
+                hidden,
+                training=training,
+                requires_grad=requires_grad,
+                relu=True,
+                output_dtype=self.activation_dtype,
+            )
             hidden = wp.empty_like(activated, requires_grad=requires_grad)
             wp.launch(
-                _residual_add_kernel,
+                _residual_add_f16_kernel if self.contraction_dtype == "float16" else _residual_add_kernel,
                 dim=hidden.shape,
                 inputs=[activated, residual],
                 outputs=[hidden],
@@ -1112,7 +1378,7 @@ class NetworkFlashSAC:
         inv_rms = wp.empty(hidden.shape[0], dtype=wp.float32, device=self.device)
         _launch_rms_inv(hidden, 1.0e-6, inv_rms)
         wp.launch(
-            _rms_norm_kernel,
+            _rms_norm_f16_kernel if self.contraction_dtype == "float16" else _rms_norm_kernel,
             dim=hidden.shape,
             inputs=[hidden, self.rms_scale, inv_rms],
             outputs=[normalized],
@@ -1161,30 +1427,51 @@ class NetworkFlashSAC:
 
     def _linear_backward(
         self,
-        x: wp.array2d[wp.float32],
+        x: wp.array2d[Any],
         weight: wp.array2d[wp.float32],
-        output_grad: wp.array2d[wp.float32],
-    ) -> wp.array2d[wp.float32]:
-        input_grad = wp.empty(x.shape, dtype=wp.float32, device=self.device)
+        output_grad: wp.array2d[Any],
+    ) -> wp.array2d[Any]:
+        input_grad = wp.empty(x.shape, dtype=x.dtype, device=self.device)
         if self._use_cublas:
-            gemm_float32(
-                output_grad,
-                weight,
-                input_grad,
-                int(x.shape[0]),
-                int(weight.shape[0]),
-                int(weight.shape[1]),
-                transpose_rhs=True,
-            )
-            gemm_float32(
-                x,
-                output_grad,
-                weight.grad,
-                int(weight.shape[0]),
-                int(weight.shape[1]),
-                int(x.shape[0]),
-                transpose_lhs=True,
-            )
+            if self.contraction_dtype == "float16":
+                mirror = self._contraction_weight(weight)
+                gemm_float16_output(
+                    output_grad,
+                    mirror,
+                    input_grad,
+                    int(x.shape[0]),
+                    int(weight.shape[0]),
+                    int(weight.shape[1]),
+                    transpose_rhs=True,
+                )
+                gemm_float16(
+                    x,
+                    output_grad,
+                    weight.grad,
+                    int(weight.shape[0]),
+                    int(weight.shape[1]),
+                    int(x.shape[0]),
+                    transpose_lhs=True,
+                )
+            else:
+                gemm_float32(
+                    output_grad,
+                    weight,
+                    input_grad,
+                    int(x.shape[0]),
+                    int(weight.shape[0]),
+                    int(weight.shape[1]),
+                    transpose_rhs=True,
+                )
+                gemm_float32(
+                    x,
+                    output_grad,
+                    weight.grad,
+                    int(weight.shape[0]),
+                    int(weight.shape[1]),
+                    int(x.shape[0]),
+                    transpose_lhs=True,
+                )
         else:
             wp.launch(
                 _linear_input_grad_kernel,
@@ -1210,7 +1497,7 @@ class NetworkFlashSAC:
         *,
         training: bool,
     ) -> wp.array2d[wp.float32]:
-        input_grad = wp.empty(x.shape, dtype=wp.float32, device=self.device)
+        input_grad = wp.empty(x.shape, dtype=x.dtype, device=self.device)
         if training:
             if self.device.is_cuda and norm.last_scratch is not None:
                 mean = norm.last_mean
@@ -1239,7 +1526,7 @@ class NetworkFlashSAC:
                     device=self.device,
                 )
             wp.launch(
-                _batch_norm_input_grad_kernel,
+                _batch_norm_input_grad_f16_kernel if x.dtype == wp.float16 else _batch_norm_input_grad_kernel,
                 dim=x.shape,
                 inputs=[x, output_grad, norm.scale, mean, inv_std, sum_grad, sum_grad_normalized],
                 outputs=[input_grad],
@@ -1247,7 +1534,9 @@ class NetworkFlashSAC:
             )
         else:
             wp.launch(
-                _batch_norm_inference_input_grad_kernel,
+                _batch_norm_inference_input_grad_f16_kernel
+                if x.dtype == wp.float16
+                else _batch_norm_inference_input_grad_kernel,
                 dim=x.shape,
                 inputs=[output_grad, norm.scale, norm.running_variance, norm.eps],
                 outputs=[input_grad],
@@ -1277,20 +1566,26 @@ class NetworkFlashSAC:
 
         manual_input = wp.empty(x.shape, dtype=wp.float32, device=self.device)
         wp.launch(copy_2d_kernel, dim=x.shape, inputs=[x], outputs=[manual_input], device=self.device)
-        input_normalized = self.input_norm.forward(manual_input, training=training, requires_grad=False)
+        input_normalized = self.input_norm.forward(
+            manual_input, training=training, requires_grad=False, output_dtype=self.activation_dtype
+        )
         hidden = self._linear(input_normalized, self.embed_weight, requires_grad=False)
         block_cache: list[tuple[wp.array2d[wp.float32], ...]] = []
         for (w1, w2), (norm1, norm2) in zip(self.block_weights, self.block_norms, strict=True):
             residual = hidden
             pre1 = self._linear(residual, w1, requires_grad=False)
-            activated1 = norm1.forward(pre1, training=training, requires_grad=False, relu=True)
+            activated1 = norm1.forward(
+                pre1, training=training, requires_grad=False, relu=True, output_dtype=self.activation_dtype
+            )
             normed1 = activated1
             pre2 = self._linear(activated1, w2, requires_grad=False)
-            activated2 = norm2.forward(pre2, training=training, requires_grad=False, relu=True)
+            activated2 = norm2.forward(
+                pre2, training=training, requires_grad=False, relu=True, output_dtype=self.activation_dtype
+            )
             normed2 = activated2
             hidden = wp.empty_like(activated2)
             wp.launch(
-                _residual_add_kernel,
+                _residual_add_f16_kernel if self.contraction_dtype == "float16" else _residual_add_kernel,
                 dim=hidden.shape,
                 inputs=[activated2, residual],
                 outputs=[hidden],
@@ -1302,7 +1597,7 @@ class NetworkFlashSAC:
         inv_rms = wp.empty(hidden.shape[0], dtype=wp.float32, device=self.device)
         _launch_rms_inv(hidden, 1.0e-6, inv_rms)
         wp.launch(
-            _rms_norm_kernel,
+            _rms_norm_f16_kernel if self.contraction_dtype == "float16" else _rms_norm_kernel,
             dim=hidden.shape,
             inputs=[hidden, self.rms_scale, inv_rms],
             outputs=[normalized],
@@ -1363,12 +1658,12 @@ class NetworkFlashSAC:
         if not isinstance(input_normalized, wp.array) or not isinstance(heads, list) or not isinstance(blocks, list):
             raise RuntimeError("FlashSAC manual activation cache is invalid")
 
-        normalized_grad = wp.zeros(normalized.shape, dtype=wp.float32, device=self.device)
+        normalized_grad = wp.zeros(normalized.shape, dtype=self.activation_dtype, device=self.device)
         offset = 0
         for head_index, (head, weight, bias) in enumerate(zip(heads, self.head_weights, self.head_biases, strict=True)):
-            head_grad = wp.empty(head.shape, dtype=wp.float32, device=self.device)
+            head_grad = wp.empty(head.shape, dtype=self.activation_dtype, device=self.device)
             wp.launch(
-                _head_output_grad_kernel,
+                _head_output_grad_f16_kernel if self.contraction_dtype == "float16" else _head_output_grad_kernel,
                 dim=head.shape,
                 inputs=[
                     output_grad,
@@ -1386,7 +1681,7 @@ class NetworkFlashSAC:
             head_input_grad = self._linear_backward(normalized, weight, head_grad)
             accumulated = wp.empty_like(normalized_grad)
             wp.launch(
-                _add_kernel,
+                _add_f16_kernel if self.contraction_dtype == "float16" else _add_kernel,
                 dim=normalized_grad.shape,
                 inputs=[normalized_grad, head_input_grad],
                 outputs=[accumulated],
@@ -1395,12 +1690,12 @@ class NetworkFlashSAC:
             normalized_grad = accumulated
             offset += int(head.shape[1])
 
-        hidden_grad = wp.empty(rms_input.shape, dtype=wp.float32, device=self.device)
+        hidden_grad = wp.empty(rms_input.shape, dtype=self.activation_dtype, device=self.device)
         inv_rms = wp.empty(rms_input.shape[0], dtype=wp.float32, device=self.device)
         projection = wp.empty(rms_input.shape[0], dtype=wp.float32, device=self.device)
         _launch_rms_backward_stats(rms_input, normalized_grad, self.rms_scale, 1.0e-6, inv_rms, projection)
         wp.launch(
-            _rms_norm_input_grad_kernel,
+            _rms_norm_input_grad_f16_kernel if self.contraction_dtype == "float16" else _rms_norm_input_grad_kernel,
             dim=rms_input.shape,
             inputs=[rms_input, normalized_grad, self.rms_scale, inv_rms, projection],
             outputs=[hidden_grad],
@@ -1414,7 +1709,7 @@ class NetworkFlashSAC:
             w1, w2 = self.block_weights[block_index]
             norm2_grad = wp.empty_like(activated2)
             wp.launch(
-                _relu_grad_kernel,
+                _relu_grad_f16_kernel if self.contraction_dtype == "float16" else _relu_grad_kernel,
                 dim=activated2.shape,
                 inputs=[activated2, hidden_grad],
                 outputs=[norm2_grad],
@@ -1424,7 +1719,7 @@ class NetworkFlashSAC:
             activated1_grad = self._linear_backward(activated1, w2, pre2_grad)
             norm1_grad = wp.empty_like(activated1)
             wp.launch(
-                _relu_grad_kernel,
+                _relu_grad_f16_kernel if self.contraction_dtype == "float16" else _relu_grad_kernel,
                 dim=activated1.shape,
                 inputs=[activated1, activated1_grad],
                 outputs=[norm1_grad],
@@ -1434,7 +1729,7 @@ class NetworkFlashSAC:
             branch_grad = self._linear_backward(residual, w1, pre1_grad)
             combined = wp.empty_like(hidden_grad)
             wp.launch(
-                _add_kernel,
+                _add_f16_kernel if self.contraction_dtype == "float16" else _add_kernel,
                 dim=hidden_grad.shape,
                 inputs=[hidden_grad, branch_grad],
                 outputs=[combined],
@@ -1541,6 +1836,7 @@ class EnsembleNetworkFlashSAC:
             or first.layer_sizes != second.layer_sizes
             or first.actor_heads
             or second.actor_heads
+            or first.contraction_dtype != second.contraction_dtype
         ):
             raise ValueError("FlashSAC critic structures do not match")
         self.networks = (first, second)
@@ -1549,6 +1845,8 @@ class EnsembleNetworkFlashSAC:
         self.hidden_dim = first.hidden_dim
         self.num_blocks = first.num_blocks
         self.output_dim = first.output_dim
+        self.contraction_dtype = first.contraction_dtype
+        self.activation_dtype = first.activation_dtype
         self.embed_weight = self._stack_weights(first.embed_weight, second.embed_weight)
         first.embed_weight, second.embed_weight = self.embed_weight[0], self.embed_weight[1]
         self.block_weights: list[tuple[wp.array3d[wp.float32], wp.array3d[wp.float32]]] = []
@@ -1570,6 +1868,12 @@ class EnsembleNetworkFlashSAC:
             for w1, w2 in network.block_weights:
                 network.weights.extend((w1, w2))
             network.weights.extend(network.head_weights)
+        self.weights = [self.embed_weight]
+        for w1, w2 in self.block_weights:
+            self.weights.extend((w1, w2))
+        self.weights.extend(self.head_weights)
+        self._fp16_weights: dict[int, wp.array3d[wp.float16]] = {}
+        self.refresh_contraction_weights()
 
     def _stack_weights(self, first: wp.array2d[wp.float32], second: wp.array2d[wp.float32]) -> wp.array3d[wp.float32]:
         return wp.array(
@@ -1579,33 +1883,55 @@ class EnsembleNetworkFlashSAC:
             requires_grad=True,
         )
 
+    def refresh_contraction_weights(self) -> None:
+        """Refresh persistent fused FP16 mirrors after master-weight mutation."""
+
+        if self.contraction_dtype != "float16":
+            return
+        current: dict[int, wp.array3d[wp.float16]] = {}
+        for weight in self.weights:
+            mirror = self._fp16_weights.get(int(weight.ptr))
+            if mirror is None or mirror.shape != weight.shape:
+                mirror = wp.empty(weight.shape, dtype=wp.float16, device=self.device)
+            wp.launch(
+                cast_3d_float_to_float16_kernel,
+                dim=weight.shape,
+                inputs=[weight],
+                outputs=[mirror],
+                device=self.device,
+            )
+            current[int(weight.ptr)] = mirror
+        self._fp16_weights = current
+
+    def _contraction_weight(self, weight: wp.array3d[wp.float32]) -> wp.array3d[wp.float16]:
+        mirror = self._fp16_weights.get(int(weight.ptr))
+        if mirror is None:
+            raise RuntimeError("Fused FP16 contraction weights have not been refreshed")
+        return mirror
+
     def _linear(
         self,
-        x: wp.array2d[wp.float32] | wp.array3d[wp.float32],
+        x: wp.array2d[Any] | wp.array3d[Any],
         weight: wp.array3d[wp.float32],
         *,
         broadcast_input: bool = False,
-    ) -> wp.array3d[wp.float32]:
+    ) -> wp.array3d[Any]:
         rows = int(x.shape[-2])
         inner = int(weight.shape[1])
         cols = int(weight.shape[2])
-        out = wp.empty((2, rows, cols), dtype=wp.float32, device=self.device)
-        gemm_float32_strided_batched(
-            x,
-            weight,
-            out,
-            rows,
-            cols,
-            inner,
-            2,
-            broadcast_lhs=broadcast_input,
-        )
+        out = wp.empty((2, rows, cols), dtype=self.activation_dtype, device=self.device)
+        if self.contraction_dtype == "float16":
+            gemm_float16_strided_batched_output(
+                x, self._contraction_weight(weight), out, rows, cols, inner, 2, broadcast_lhs=broadcast_input
+            )
+        else:
+            gemm_float32_strided_batched(x, weight, out, rows, cols, inner, 2, broadcast_lhs=broadcast_input)
         return out
 
     def _norm_into(
         self,
         x: wp.array2d[wp.float32] | wp.array3d[wp.float32],
-        out: wp.array3d[wp.float32],
+        out: wp.array3d[Any],
         norms: tuple[_UnitBatchNorm, _UnitBatchNorm],
         *,
         training: bool,
@@ -1649,8 +1975,18 @@ class EnsembleNetworkFlashSAC:
             else:
                 mean = norm.running_mean
                 variance = norm.running_variance
-            wp.launch(
-                (
+            if self.contraction_dtype == "float16":
+                kernel = (
+                    _batch_norm_inv_std_relu_f16_kernel
+                    if training and relu
+                    else _batch_norm_inv_std_f16_kernel
+                    if training
+                    else _batch_norm_relu_f16_kernel
+                    if relu
+                    else _batch_norm_f16_kernel
+                )
+            else:
+                kernel = (
                     _batch_norm_inv_std_relu_kernel
                     if training and relu
                     else _batch_norm_inv_std_kernel
@@ -1658,7 +1994,9 @@ class EnsembleNetworkFlashSAC:
                     else _batch_norm_relu_kernel
                     if relu
                     else _batch_norm_kernel
-                ),
+                )
+            wp.launch(
+                kernel,
                 dim=source.shape,
                 inputs=(
                     [source, mean, scratch.inv_std, norm.scale, norm.bias]
@@ -1673,7 +2011,9 @@ class EnsembleNetworkFlashSAC:
         self, x: wp.array2d[wp.float32], *, training: bool, retain_activations: bool
     ) -> tuple[wp.array2d[wp.float32], wp.array2d[wp.float32]]:
         first, second = self.networks
-        input_normalized = wp.empty((2, int(x.shape[0]), self.input_dim), dtype=wp.float32, device=self.device)
+        input_normalized = wp.empty(
+            (2, int(x.shape[0]), self.input_dim), dtype=self.activation_dtype, device=self.device
+        )
         self._norm_into(
             x,
             input_normalized,
@@ -1699,7 +2039,7 @@ class EnsembleNetworkFlashSAC:
             hidden = wp.empty_like(activated2)
             for ensemble_index in range(2):
                 wp.launch(
-                    _residual_add_kernel,
+                    _residual_add_f16_kernel if self.contraction_dtype == "float16" else _residual_add_kernel,
                     dim=normed2[ensemble_index].shape,
                     inputs=[activated2[ensemble_index], residual[ensemble_index]],
                     outputs=[hidden[ensemble_index]],
@@ -1722,14 +2062,14 @@ class EnsembleNetworkFlashSAC:
             inv_rms = wp.empty(hidden.shape[1], dtype=wp.float32, device=self.device)
             _launch_rms_inv(hidden[ensemble_index], 1.0e-6, inv_rms)
             wp.launch(
-                _rms_norm_kernel,
+                _rms_norm_f16_kernel if self.contraction_dtype == "float16" else _rms_norm_kernel,
                 dim=hidden[ensemble_index].shape,
                 inputs=[hidden[ensemble_index], network.rms_scale, inv_rms],
                 outputs=[normalized[ensemble_index]],
                 device=self.device,
             )
         head = self._linear(normalized, self.head_weights[0])
-        output = wp.empty_like(head)
+        output = wp.empty(head.shape, dtype=wp.float32, device=self.device)
         for ensemble_index, network in enumerate(self.networks):
             wp.launch(
                 _head_bias_kernel,
@@ -1776,34 +2116,29 @@ class EnsembleNetworkFlashSAC:
 
     def _linear_backward_pair(
         self,
-        x: wp.array3d[wp.float32],
+        x: wp.array3d[Any],
         weight: wp.array3d[wp.float32],
-        output_grad: wp.array3d[wp.float32],
-    ) -> wp.array3d[wp.float32]:
+        output_grad: wp.array3d[Any],
+    ) -> wp.array3d[Any]:
         rows = int(x.shape[1])
         input_width = int(weight.shape[1])
         output_width = int(weight.shape[2])
         input_grad = wp.empty_like(x)
-        gemm_float32_strided_batched(
-            output_grad,
-            weight,
-            input_grad,
-            rows,
-            input_width,
-            output_width,
-            2,
-            transpose_rhs=True,
-        )
-        gemm_float32_strided_batched(
-            x,
-            output_grad,
-            weight.grad,
-            input_width,
-            output_width,
-            rows,
-            2,
-            transpose_lhs=True,
-        )
+        if self.contraction_dtype == "float16":
+            mirror = self._contraction_weight(weight)
+            gemm_float16_strided_batched_output(
+                output_grad, mirror, input_grad, rows, input_width, output_width, 2, transpose_rhs=True
+            )
+            gemm_float16_strided_batched(
+                x, output_grad, weight.grad, input_width, output_width, rows, 2, transpose_lhs=True
+            )
+        else:
+            gemm_float32_strided_batched(
+                output_grad, weight, input_grad, rows, input_width, output_width, 2, transpose_rhs=True
+            )
+            gemm_float32_strided_batched(
+                x, output_grad, weight.grad, input_width, output_width, rows, 2, transpose_lhs=True
+            )
         return input_grad
 
     def _norm_backward_pair(
@@ -1823,7 +2158,7 @@ class EnsembleNetworkFlashSAC:
                 training=training,
             )
             wp.launch(
-                copy_2d_kernel,
+                _copy_2d_same_kernel,
                 dim=member_grad.shape,
                 inputs=[member_grad],
                 outputs=[input_grad[ensemble_index]],
@@ -1866,10 +2201,10 @@ class EnsembleNetworkFlashSAC:
             outputs=[output_grad[1]],
             device=self.device,
         )
-        head_grad = wp.empty_like(output_grad)
+        head_grad = wp.empty(output_grad.shape, dtype=self.activation_dtype, device=self.device)
         for ensemble_index, network in enumerate(self.networks):
             wp.launch(
-                _head_output_grad_kernel,
+                _head_output_grad_f16_kernel if self.contraction_dtype == "float16" else _head_output_grad_kernel,
                 dim=output_grad[ensemble_index].shape,
                 inputs=[
                     output_grad[ensemble_index],
@@ -1894,7 +2229,7 @@ class EnsembleNetworkFlashSAC:
                 rms_input[ensemble_index], hidden_grad[ensemble_index], network.rms_scale, 1.0e-6, inv_rms, projection
             )
             wp.launch(
-                _rms_norm_input_grad_kernel,
+                _rms_norm_input_grad_f16_kernel if self.contraction_dtype == "float16" else _rms_norm_input_grad_kernel,
                 dim=rms_input[ensemble_index].shape,
                 inputs=[rms_input[ensemble_index], hidden_grad[ensemble_index], network.rms_scale, inv_rms, projection],
                 outputs=[rms_grad[ensemble_index]],
@@ -1910,7 +2245,7 @@ class EnsembleNetworkFlashSAC:
             norm2_grad = wp.empty_like(hidden_grad)
             for ensemble_index in range(2):
                 wp.launch(
-                    _relu_grad_kernel,
+                    _relu_grad_f16_kernel if self.contraction_dtype == "float16" else _relu_grad_kernel,
                     dim=activated2[ensemble_index].shape,
                     inputs=[activated2[ensemble_index], hidden_grad[ensemble_index]],
                     outputs=[norm2_grad[ensemble_index]],
@@ -1928,7 +2263,7 @@ class EnsembleNetworkFlashSAC:
             norm1_grad = wp.empty_like(activated1_grad)
             for ensemble_index in range(2):
                 wp.launch(
-                    _relu_grad_kernel,
+                    _relu_grad_f16_kernel if self.contraction_dtype == "float16" else _relu_grad_kernel,
                     dim=activated1[ensemble_index].shape,
                     inputs=[activated1[ensemble_index], activated1_grad[ensemble_index]],
                     outputs=[norm1_grad[ensemble_index]],
@@ -1944,7 +2279,7 @@ class EnsembleNetworkFlashSAC:
             combined = wp.empty_like(hidden_grad)
             for ensemble_index in range(2):
                 wp.launch(
-                    _add_kernel,
+                    _add_f16_kernel if self.contraction_dtype == "float16" else _add_kernel,
                     dim=hidden_grad[ensemble_index].shape,
                     inputs=[hidden_grad[ensemble_index], branch_grad[ensemble_index]],
                     outputs=[combined[ensemble_index]],

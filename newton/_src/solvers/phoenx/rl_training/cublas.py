@@ -10,6 +10,7 @@ import threading
 import warp as wp
 
 _CUDA_R_32F = 0
+_CUDA_R_16F = 2
 _CUDA_R_16BF = 14
 _CUBLAS_OP_N = 0
 _CUBLAS_OP_T = 1
@@ -192,6 +193,8 @@ def _gemm_strided_batched(
     out_batch_stride: int,
     transpose_lhs: bool,
     transpose_rhs: bool,
+    input_type: int = _CUDA_R_32F,
+    output_type: int = _CUDA_R_32F,
 ) -> None:
     cublas = _get_cublas()
     if cublas is None:
@@ -216,16 +219,16 @@ def _gemm_strided_batched(
             inner,
             ctypes.byref(_alpha),
             ctypes.c_void_p(rhs.ptr),
-            _CUDA_R_32F,
+            input_type,
             rhs_stride,
             int(rhs_batch_stride),
             ctypes.c_void_p(lhs.ptr),
-            _CUDA_R_32F,
+            input_type,
             lhs_stride,
             int(lhs_batch_stride),
             ctypes.byref(_beta),
             ctypes.c_void_p(out.ptr),
-            _CUDA_R_32F,
+            output_type,
             cols,
             int(out_batch_stride),
             int(batch_count),
@@ -234,6 +237,38 @@ def _gemm_strided_batched(
         )
     if status != 0:
         raise RuntimeError(f"cublasGemmStridedBatchedEx failed with status {status}")
+
+
+def gemm_float16(
+    lhs: wp.array2d[wp.float16],
+    rhs: wp.array2d[wp.float16],
+    out: wp.array2d[wp.float32],
+    rows: int,
+    cols: int,
+    inner: int,
+    *,
+    transpose_lhs: bool = False,
+    transpose_rhs: bool = False,
+) -> None:
+    """Enqueue a row-major FP16 GEMM with FP32 accumulation and output."""
+
+    _gemm(lhs, rhs, out, rows, cols, inner, _CUDA_R_16F, transpose_lhs, transpose_rhs)
+
+
+def gemm_float16_output(
+    lhs: wp.array2d[wp.float16],
+    rhs: wp.array2d[wp.float16],
+    out: wp.array2d[wp.float16],
+    rows: int,
+    cols: int,
+    inner: int,
+    *,
+    transpose_lhs: bool = False,
+    transpose_rhs: bool = False,
+) -> None:
+    """Enqueue a row-major FP16 GEMM with FP32 accumulation and FP16 output."""
+
+    _gemm(lhs, rhs, out, rows, cols, inner, _CUDA_R_16F, transpose_lhs, transpose_rhs, output_type=_CUDA_R_16F)
 
 
 def gemm_bfloat16(
@@ -323,4 +358,70 @@ def gemm_float32_strided_batched(
         rows * cols,
         transpose_lhs,
         transpose_rhs,
+    )
+
+
+def gemm_float16_strided_batched_output(
+    lhs: wp.array3d[wp.float16] | wp.array2d[wp.float16],
+    rhs: wp.array3d[wp.float16],
+    out: wp.array3d[wp.float16],
+    rows: int,
+    cols: int,
+    inner: int,
+    batch_count: int,
+    *,
+    broadcast_lhs: bool = False,
+    transpose_lhs: bool = False,
+    transpose_rhs: bool = False,
+) -> None:
+    """Enqueue row-major strided-batched FP16 GEMMs with FP16 output."""
+
+    _gemm_strided_batched(
+        lhs,
+        rhs,
+        out,
+        rows,
+        cols,
+        inner,
+        batch_count,
+        0 if broadcast_lhs else rows * inner,
+        inner * cols,
+        rows * cols,
+        transpose_lhs,
+        transpose_rhs,
+        input_type=_CUDA_R_16F,
+        output_type=_CUDA_R_16F,
+    )
+
+
+def gemm_float16_strided_batched(
+    lhs: wp.array3d[wp.float16] | wp.array2d[wp.float16],
+    rhs: wp.array3d[wp.float16],
+    out: wp.array3d[wp.float32],
+    rows: int,
+    cols: int,
+    inner: int,
+    batch_count: int,
+    *,
+    broadcast_lhs: bool = False,
+    transpose_lhs: bool = False,
+    transpose_rhs: bool = False,
+) -> None:
+    """Enqueue row-major strided-batched FP16 GEMMs with FP32 output."""
+
+    _gemm_strided_batched(
+        lhs,
+        rhs,
+        out,
+        rows,
+        cols,
+        inner,
+        batch_count,
+        0 if broadcast_lhs else rows * inner,
+        inner * cols,
+        rows * cols,
+        transpose_lhs,
+        transpose_rhs,
+        input_type=_CUDA_R_16F,
+        output_type=_CUDA_R_32F,
     )

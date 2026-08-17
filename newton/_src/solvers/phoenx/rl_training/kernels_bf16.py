@@ -25,6 +25,18 @@ def cast_2d_float_to_bfloat16_kernel(src: wp.array2d[wp.float32], dst: wp.array2
 
 
 @wp.kernel
+def cast_2d_float_to_float16_kernel(src: wp.array2d[wp.float32], dst: wp.array2d[wp.float16]):
+    row, col = wp.tid()
+    dst[row, col] = wp.float16(src[row, col])
+
+
+@wp.kernel
+def cast_3d_float_to_float16_kernel(src: wp.array3d[wp.float32], dst: wp.array3d[wp.float16]):
+    plane, row, col = wp.tid()
+    dst[plane, row, col] = wp.float16(src[plane, row, col])
+
+
+@wp.kernel
 def dense_weight_grad_bf16_tiled_kernel(
     x: wp.array2d[wp.bfloat16],
     grad_pre: wp.array2d[wp.bfloat16],

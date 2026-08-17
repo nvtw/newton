@@ -153,6 +153,7 @@ class ConfigFlashSAC(ConfigSAC):
         actor_hidden_dim: Actor feature width.
         critic_num_blocks: Number of expanded critic blocks.
         critic_hidden_dim: Critic feature width.
+        use_amp: Whether reference-backbone dense contractions use FP16 inputs with FP32 accumulation.
     """
 
     tau: float = 0.01
@@ -183,6 +184,7 @@ class ConfigFlashSAC(ConfigSAC):
     actor_hidden_dim: int = 128
     critic_num_blocks: int = 2
     critic_hidden_dim: int = 256
+    use_amp: bool = False
 
 
 class RewardNormalizerFlashSAC:
@@ -721,6 +723,9 @@ class TrainerFlashSAC(TrainerSAC):
         ):
             raise ValueError("FlashSAC network dimensions and block counts must be positive")
         reference_backbone = hidden_layers is None
+        if flash_config.use_amp and not reference_backbone:
+            raise ValueError("use_amp requires the FlashSAC reference backbone")
+        contraction_dtype = "float16" if flash_config.use_amp else "float32"
         if hidden_layers is None:
             actor_layers = self._expanded_block_layers(flash_config.actor_hidden_dim, flash_config.actor_num_blocks)
             critic_layers = self._expanded_block_layers(flash_config.critic_hidden_dim, flash_config.critic_num_blocks)
@@ -746,6 +751,7 @@ class TrainerFlashSAC(TrainerSAC):
                 actor_heads=True,
                 device=self.device,
                 seed=seed,
+                contraction_dtype=contraction_dtype,
             )
             critic_kwargs = {
                 "input_dim": obs_dim + action_dim,
@@ -754,6 +760,7 @@ class TrainerFlashSAC(TrainerSAC):
                 "output_dim": flash_config.distributional_atoms if flash_config.distributional_critic else 1,
                 "actor_heads": False,
                 "device": self.device,
+                "contraction_dtype": contraction_dtype,
             }
             self.critic1 = NetworkFlashSAC(**critic_kwargs, seed=seed + 1)
             self.critic2 = NetworkFlashSAC(**critic_kwargs, seed=seed + 2)
@@ -795,6 +802,10 @@ class TrainerFlashSAC(TrainerSAC):
             self._normalize_online_weights()
             self.target_critic1.copy_from(self.critic1)
             self.target_critic2.copy_from(self.critic2)
+            if self.config.use_amp:
+                self.actor.net.refresh_contraction_weights()
+                self._critic_ensemble.refresh_contraction_weights()
+                self._target_critic_ensemble.refresh_contraction_weights()
 
     @property
     def replay_buffer(self) -> BufferReplayFlashSAC | None:
@@ -1055,6 +1066,10 @@ class TrainerFlashSAC(TrainerSAC):
                 ("alpha_optimizer", trainer.alpha_optimizer),
             ):
                 _unpack_optimizer(data, prefix, optimizer)
+            if reference_backbone:
+                trainer.actor.net.refresh_contraction_weights()
+                trainer._critic_ensemble.refresh_contraction_weights()
+                trainer._target_critic_ensemble.refresh_contraction_weights()
             return trainer
 
     def _graph_update_operations(
@@ -1107,6 +1122,8 @@ class TrainerFlashSAC(TrainerSAC):
         )
         self.target_critic1.soft_update_from(self.critic1, self.config.tau)
         self.target_critic2.soft_update_from(self.critic2, self.config.tau)
+        if self.config.use_amp:
+            self._target_critic_ensemble.refresh_contraction_weights()
         wp.launch(
             seed_counter_increment_kernel,
             dim=1,
@@ -1414,6 +1431,8 @@ class TrainerFlashSAC(TrainerSAC):
             self._update_critics(batch, seed=update_seed + 2)
             self.target_critic1.soft_update_from(self.critic1, self.config.tau)
             self.target_critic2.soft_update_from(self.critic2, self.config.tau)
+            if self.config.use_amp:
+                self._target_critic_ensemble.refresh_contraction_weights()
             self._gradient_update_count += 1
         self._update_count += 1
         wp.launch(
@@ -1456,6 +1475,9 @@ class TrainerFlashSAC(TrainerSAC):
         self.actor.normalize_weights()
         self.critic1.normalize_weights()
         self.critic2.normalize_weights()
+        if self.config.use_amp:
+            self.actor.net.refresh_contraction_weights()
+            self._critic_ensemble.refresh_contraction_weights()
 
     def _update_actor(
         self,
@@ -1468,6 +1490,8 @@ class TrainerFlashSAC(TrainerSAC):
         super()._update_actor(batch, seed=seed, seed_counter=seed_counter, seed_offset=seed_offset)
         if self.config.normalize_weights:
             self.actor.normalize_weights()
+        if self.config.use_amp:
+            self.actor.net.refresh_contraction_weights()
 
     def _update_critics(
         self,
@@ -1481,6 +1505,8 @@ class TrainerFlashSAC(TrainerSAC):
         if self.config.normalize_weights:
             self.critic1.normalize_weights()
             self.critic2.normalize_weights()
+        if self.config.use_amp:
+            self._critic_ensemble.refresh_contraction_weights()
 
 
 @dataclass

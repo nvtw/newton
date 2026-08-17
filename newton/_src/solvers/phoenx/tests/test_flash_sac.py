@@ -661,6 +661,7 @@ class TestTrainerFlashSAC(unittest.TestCase):
             distributional_atoms=7,
             normalize_rewards=False,
             policy_frequency=1,
+            use_amp=True,
         )
         trainer = TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=163)
         batch = BatchSAC(
@@ -682,6 +683,7 @@ class TestTrainerFlashSAC(unittest.TestCase):
             trainer.save_checkpoint(path)
             restored = TrainerFlashSAC.load_checkpoint(path, device=device)
 
+        self.assertTrue(restored.config.use_amp)
         for expected, actual in (
             (trainer._device_noise_repeat_count, restored._device_noise_repeat_count),
             (trainer._device_noise_repeat_steps, restored._device_noise_repeat_steps),
@@ -814,6 +816,14 @@ class TestTrainerFlashSAC(unittest.TestCase):
             TrainerFlashSAC(obs_dim=2, action_dim=1, config=ConfigFlashSAC(actor_num_blocks=0), device=device)
         with self.assertRaisesRegex(ValueError, "distributional_atoms"):
             TrainerFlashSAC(obs_dim=2, action_dim=1, config=ConfigFlashSAC(distributional_atoms=1), device=device)
+        with self.assertRaisesRegex(ValueError, "use_amp requires"):
+            TrainerFlashSAC(
+                obs_dim=2,
+                action_dim=1,
+                hidden_layers=(4,),
+                config=ConfigFlashSAC(use_amp=True),
+                device=device,
+            )
         replay = BufferReplayFlashSAC(minimum_size=0, capacity=2, obs_dim=2, action_dim=1, batch_size=1, device=device)
         with self.assertRaisesRegex(ValueError, "empty"):
             replay.sample(seed=1)
@@ -996,6 +1006,7 @@ class TestTrainerFlashSAC(unittest.TestCase):
                     normalize_rewards=False,
                     learning_rate_warmup_steps=1,
                     learning_rate_decay_steps=8,
+                    use_amp=True,
                 ),
                 device=device,
                 seed=241,
