@@ -2058,6 +2058,56 @@ class TestShapePairsMaxScaling(unittest.TestCase):
         self.assertEqual(narrow_phase.shape_pairs_mesh_plane.shape[0], 2)
         self.assertEqual(narrow_phase.mesh_plane_block_offsets.shape[0], 3)
 
+    def test_explicit_cross_world_mesh_pair_uses_explicit_bound(self):
+        """Keep explicit cross-world mesh pairs in mesh work buffers."""
+        world = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        world.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.5, 0.5, 0.5))
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        builder.add_world(world)
+        builder.add_world(world)
+        model = builder.finalize(device="cpu")
+        shape_pairs = wp.array(np.array([[0, 1]], dtype=np.int32), dtype=wp.vec2i, device="cpu")
+
+        for reduce_contacts in (False, True):
+            with self.subTest(reduce_contacts=reduce_contacts):
+                pipeline = newton.CollisionPipeline(
+                    model,
+                    broad_phase="explicit",
+                    shape_pairs_filtered=shape_pairs,
+                    reduce_contacts=reduce_contacts,
+                )
+                contacts = pipeline.contacts()
+
+                self.assertEqual(pipeline.narrow_phase.max_mesh_mesh_pairs, 1)
+                pipeline.collide(model.state(), contacts)
+                self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
+    def test_finite_plane_pair_keeps_generic_convex_stage(self):
+        """Generate contacts for two intersecting finite planes."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        builder.add_shape_plane(body=-1, width=1.0, length=1.0)
+        builder.add_shape_plane(
+            body=-1,
+            xform=wp.transform(
+                wp.vec3(0.0, 0.0, 0.0),
+                wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 2.0),
+            ),
+            width=1.0,
+            length=1.0,
+        )
+        model = builder.finalize(device="cpu")
+        shape_pairs = wp.array(np.array([[0, 1]], dtype=np.int32), dtype=wp.vec2i, device="cpu")
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="explicit",
+            shape_pairs_filtered=shape_pairs,
+        )
+        contacts = pipeline.contacts()
+
+        self.assertTrue(pipeline.narrow_phase.has_generic_convex_pairs)
+        pipeline.collide(model.state(), contacts)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
     def test_zero_capacity_mesh_stages_preserve_mesh_convex_contacts(self):
         """Keep mesh-convex contacts when unrelated mesh stages have zero capacity."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))

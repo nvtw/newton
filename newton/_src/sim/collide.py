@@ -76,8 +76,6 @@ def _pair_requires_generic_convex_narrow_phase(
         return False
     if type_b in (int(GeoType.HFIELD), int(GeoType.MESH)):
         return False
-    if type_a == int(GeoType.PLANE) and type_b == int(GeoType.PLANE):
-        return False
     return (type_a, type_b) not in _ANALYTIC_PRIMITIVE_PAIRS
 
 
@@ -1140,7 +1138,9 @@ class CollisionPipeline:
                 provided together with a broad phase instance for expert usage.
             shape_pairs_filtered: Precomputed shape pairs for EXPLICIT mode.
                 When broad_phase is "explicit", uses model.shape_contact_pairs if not provided. For
-                "nxn"/"sap" modes, ignored.
+                "nxn"/"sap" modes, ignored. The pair count and shape-type routing are used to size
+                and specialize internal buffers at construction, so do not modify or resize the
+                array while the pipeline is in use. Rebuild the pipeline after changing the pairs.
             include_static_kinematic_pairs: Whether to generate contacts for
                 pairs where both shapes are immovable. Set to ``False`` to
                 filter static-static, static-kinematic, and
@@ -1438,14 +1438,20 @@ class CollisionPipeline:
                             bool(scale_baked[shape_sdf_index[shape_idx]]) or identity_shape_scale[shape_idx]
                             for shape_idx in np.flatnonzero(mesh_sdf_shapes)
                         )
-                max_mesh_mesh_pairs = min(
-                    self.shape_pairs_max,
-                    _compute_per_world_mask_pair_max(model, mesh_sdf_pair_mask),
-                )
-                max_mesh_plane_pairs = min(
-                    self.shape_pairs_max,
-                    _compute_per_world_mask_pair_max(model, mesh_mask, plane_mask),
-                )
+                if self.broad_phase_mode == "explicit":
+                    # Explicit pairs are not constrained by shape_world and may
+                    # intentionally connect shapes from different worlds.
+                    max_mesh_mesh_pairs = self.shape_pairs_max
+                    max_mesh_plane_pairs = self.shape_pairs_max
+                else:
+                    max_mesh_mesh_pairs = min(
+                        self.shape_pairs_max,
+                        _compute_per_world_mask_pair_max(model, mesh_sdf_pair_mask),
+                    )
+                    max_mesh_plane_pairs = min(
+                        self.shape_pairs_max,
+                        _compute_per_world_mask_pair_max(model, mesh_mask, plane_mask),
+                    )
                 # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
                 # cylinders, or cones (which need full support function and axial
                 # rolling post-processing)
