@@ -33,19 +33,18 @@ class Example:
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 6 if self.solver_type == "kamino" else 10
+        self.sim_substeps = 6 if self.solver_type == "kamino" else 5
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         builder = newton.ModelBuilder()
         if self.solver_type == "kamino":
             newton.solvers.SolverKamino.register_custom_attributes(builder)
 
-        builder.default_shape_cfg.mu = 0.5  # Friction coefficient
+        builder.default_shape_cfg.mu = 1.0  # Friction coefficient
 
         if self.solver_type == "vbd":
-            # Stiff, undamped contacts give VBD stable resting poses.
             builder.default_shape_cfg.ke = 1.0e8
-            builder.default_shape_cfg.kd = 0.0
+            builder.default_shape_cfg.kd = 5.0e5
         else:
             builder.default_shape_cfg.mu_torsional = 0.01  # Contact stiffness
             builder.default_shape_cfg.mu_rolling = 3e-3  # Contact stiffness
@@ -109,7 +108,8 @@ class Example:
         if self.solver_type == "vbd":
             self.solver = newton.solvers.SolverVBD(
                 self.model,
-                iterations=10,
+                iterations=5,
+                rigid_compliant_alm=True,
             )
         elif self.solver_type == "kamino":
             solver_config = newton.solvers.SolverKamino.Config.from_model(
@@ -126,7 +126,7 @@ class Example:
             solver_config.dvi.bilateral_solve_interval = 4
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
-            self.solver = newton.solvers.SolverXPBD(self.model, iterations=10)
+            self.solver = newton.solvers.SolverXPBD(self.model, iterations=5)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()

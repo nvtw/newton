@@ -194,14 +194,14 @@ class Example:
         )
         rail_cfg = newton.ModelBuilder.ShapeConfig(
             mu=0.8,
-            ke=1.0e5,  # vbd only
+            ke=1.0e7,  # vbd only
             kd=0.0,  # vbd only
             collision_group=RAIL_COLLISION_GROUP,
         )
         bag_cfg = newton.ModelBuilder.ShapeConfig(
             mu=1.0,
-            ke=1.0e5,  # vbd only
-            kd=0.0,  # vbd only
+            ke=1.0e7,  # vbd only
+            kd=1.0e4,  # vbd only
             restitution=0.0,
         )
 
@@ -386,7 +386,12 @@ class Example:
         self.model = builder.finalize()
 
         if solver_type == "vbd":
-            self.solver = newton.solvers.SolverVBD(self.model, iterations=5, rigid_body_contact_buffer_size=512)
+            self.solver = newton.solvers.SolverVBD(
+                self.model,
+                iterations=1,
+                rigid_compliant_alm=True,
+                rigid_body_contact_buffer_size=512,
+            )
         elif solver_type == "kamino":
             solver_config = newton.solvers.SolverKamino.Config.from_model(
                 self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
