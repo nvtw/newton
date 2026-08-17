@@ -543,6 +543,7 @@ class TestDVISolver(unittest.TestCase):
             integrator="moreau",
             sparse_dynamics=True,
             sparse_jacobian=True,
+            use_collision_detector=True,
         )
         config.dvi.split_contact_recovery = True
         solver = SolverKamino(model, config=config)

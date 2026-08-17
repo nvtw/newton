@@ -76,12 +76,10 @@ class Example:
             solver_config = newton.solvers.SolverKamino.Config.from_model(
                 self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
             )
-            solver_config.use_collision_detector = False
-            solver_config.integrator = "moreau"
             solver_config.dvi.max_alternating_iterations = 8
             solver_config.dvi.bilateral_solve_interval = 8
             solver_config.dvi.bilateral_solver_type = "LLTBRCM"
-            solver_config.dvi.parallel_factorization = True
+            solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverMuJoCo(
@@ -154,7 +152,6 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        velocity_limit = 0.075 if self.solver_type == "kamino" else 0.015
         newton.examples.test_body_state(
             self.model,
             self.state_0,
@@ -165,7 +162,7 @@ class Example:
             self.model,
             self.state_0,
             "all body velocities are small",
-            lambda q, qd: max(abs(qd)) < velocity_limit,
+            lambda q, qd: max(abs(qd)) < 0.015,
         )
 
     @staticmethod

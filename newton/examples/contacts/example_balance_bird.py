@@ -159,10 +159,7 @@ class Example:
             solver_config.use_collision_detector = True
             solver_config.integrator = "moreau"
             solver_config.dvi.omega = 1.0
-            solver_config.dvi.bilateral_solver_type = "LLTBRCM"
-            solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
             solver_config.dvi.max_alternating_iterations = 8
-            solver_config.dvi.bilateral_solve_interval = 8
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
             self.contacts = newton.Contacts(
                 self.model.rigid_contact_max,

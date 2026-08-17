@@ -80,8 +80,6 @@ class Example:
                 sparse_dynamics=True,
                 sparse_jacobian=True,
             )
-            solver_config.use_collision_detector = False
-            solver_config.integrator = "moreau"
             solver_config.dvi.bilateral_solver_type = "LLTBRCM"
             solver_config.dvi.bilateral_solver_kwargs = {"parallel_factorization": True}
             solver_config.dvi.max_alternating_iterations = 8
