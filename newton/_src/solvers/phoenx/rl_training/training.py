@@ -996,7 +996,7 @@ def _copy_trainer_rollout_state(dst: TrainerPPO, src: TrainerPPO, num_envs: int)
 def _make_g1_rollout_trainer(env: EnvG1PhoenX, trainer: TrainerPPO) -> TrainerPPO:
     rollout = TrainerPPO(
         obs_dim=env.obs_dim,
-        action_dim=env.action_dim,
+        action_dim=int(getattr(env, "policy_action_dim", env.action_dim)),
         hidden_layers=trainer.hidden_layers,
         config=trainer.config,
         device=env.device,
@@ -1004,7 +1004,9 @@ def _make_g1_rollout_trainer(env: EnvG1PhoenX, trainer: TrainerPPO) -> TrainerPP
         squash_actions=trainer.squash_actions,
         activation=trainer.activation,
         log_std_init=trainer.log_std_init,
-        mirror_map=g1_mirror_map_ppo() if trainer.config.mirror_loss_coeff > 0.0 else None,
+        mirror_map=g1_mirror_map_ppo(int(getattr(env, "policy_action_dim", env.action_dim)))
+        if trainer.config.mirror_loss_coeff > 0.0
+        else None,
     )
     _copy_trainer_policy(rollout, trainer)
     _copy_trainer_rollout_state(rollout, trainer, env.world_count)
@@ -1034,7 +1036,7 @@ def _make_g1_buffer(env: EnvG1PhoenX, steps: int) -> BufferRollout:
         num_steps=int(steps),
         num_envs=env.world_count,
         obs_dim=env.obs_dim,
-        action_dim=env.action_dim,
+        action_dim=int(getattr(env, "policy_action_dim", env.action_dim)),
         device=env.device,
     )
 
@@ -1808,14 +1810,16 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         else:
             trainer = load_ppo_checkpoint(cfg.resume_checkpoint, config=cfg.ppo_config, device=device)
             ppo_config = trainer.config
-        if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
+        if trainer.obs_dim != env.obs_dim or trainer.action_dim != int(
+            getattr(env, "policy_action_dim", env.action_dim)
+        ):
             raise ValueError("Checkpoint dimensions do not match the G1 environment")
         if trainer.config.mirror_loss_coeff > 0.0:
-            trainer.set_mirror_map(g1_mirror_map_ppo())
+            trainer.set_mirror_map(g1_mirror_map_ppo(int(getattr(env, "policy_action_dim", env.action_dim))))
     else:
         trainer = TrainerPPO(
             obs_dim=env.obs_dim,
-            action_dim=env.action_dim,
+            action_dim=int(getattr(env, "policy_action_dim", env.action_dim)),
             hidden_layers=cfg.hidden_layers,
             config=ppo_config,
             device=device,
@@ -1823,7 +1827,9 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
             squash_actions=cfg.squash_actions,
             activation=cfg.activation,
             log_std_init=cfg.log_std_init,
-            mirror_map=g1_mirror_map_ppo() if ppo_config.mirror_loss_coeff > 0.0 else None,
+            mirror_map=g1_mirror_map_ppo(int(getattr(env, "policy_action_dim", env.action_dim)))
+            if ppo_config.mirror_loss_coeff > 0.0
+            else None,
         )
     buffer = _make_g1_buffer(env, int(cfg.rollout_steps))
     checkpoint_metadata = _g1_checkpoint_metadata(cfg, env)
@@ -1880,7 +1886,7 @@ def evaluate_g1_ppo(trainer: TrainerPPO, config: ConfigEvaluateG1PPO | None = No
     base_env_config = cfg.env_config or ConfigEnvG1PhoenX(world_count=64)
     eval_config = replace(base_env_config, auto_reset=False, max_episode_steps=0)
     env = EnvG1PhoenX(eval_config, device=device)
-    if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
+    if trainer.obs_dim != env.obs_dim or trainer.action_dim != int(getattr(env, "policy_action_dim", env.action_dim)):
         raise ValueError("Trainer dimensions do not match the G1 environment")
 
     obs = env.reset()
@@ -2553,7 +2559,7 @@ def _g1_gate_commands_array(commands: tuple[tuple[float, float, float], ...]) ->
 
 
 def _check_g1_trainer_dimensions(trainer: TrainerPPO, env: EnvG1PhoenX) -> None:
-    if trainer.obs_dim != env.obs_dim or trainer.action_dim != env.action_dim:
+    if trainer.obs_dim != env.obs_dim or trainer.action_dim != int(getattr(env, "policy_action_dim", env.action_dim)):
         raise ValueError("Trainer dimensions do not match the G1 environment")
 
 

@@ -222,7 +222,8 @@ def _collect_ppo_rollout_impl(
     seed_counter: wp.array[wp.int32] | None,
     reset_state_at_start: bool,
 ) -> None:
-    if buffer.num_envs != env.world_count or buffer.obs_dim != env.obs_dim or buffer.action_dim != env.action_dim:
+    policy_action_dim = int(getattr(env, "policy_action_dim", env.action_dim))
+    if buffer.num_envs != env.world_count or buffer.obs_dim != env.obs_dim or buffer.action_dim != policy_action_dim:
         raise ValueError("PPO buffer dimensions do not match environment")
 
     if reset_state_at_start:

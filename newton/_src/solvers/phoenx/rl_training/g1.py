@@ -328,14 +328,24 @@ _G1_ACTION_MIRROR_SIGN = (
 )
 
 
-def g1_mirror_map_ppo() -> MirrorMapPPO:
-    """Return nanoG1's validated left/right G1 PPO mirror map."""
+def g1_mirror_map_ppo(action_dim: int = ACTION_DIM_G1) -> MirrorMapPPO:
+    """Return nanoG1's validated left/right G1 PPO mirror map.
 
+    Args:
+        action_dim: Number of leading controlled joints exposed by the policy.
+    """
+
+    count = int(action_dim)
+    if count <= 0 or count > ACTION_DIM_G1:
+        raise ValueError(f"action_dim must be in [1, {ACTION_DIM_G1}]")
+    action_src = _G1_ACTION_MIRROR_SRC[:count]
+    if any(source >= count for source in action_src):
+        raise ValueError("action_dim does not form a closed G1 mirror mapping")
     return MirrorMapPPO(
         obs_src=_G1_OBS_MIRROR_SRC,
         obs_sign=_G1_OBS_MIRROR_SIGN,
-        action_src=_G1_ACTION_MIRROR_SRC,
-        action_sign=_G1_ACTION_MIRROR_SIGN,
+        action_src=action_src,
+        action_sign=_G1_ACTION_MIRROR_SIGN[:count],
     )
 
 

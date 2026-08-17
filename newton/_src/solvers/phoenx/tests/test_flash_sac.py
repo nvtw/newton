@@ -1374,6 +1374,42 @@ class TestTrainerFlashSAC(unittest.TestCase):
         self.assertTrue(all(math.isfinite(value) for value in ppo_stats.__dict__.values()))
         self.assertTrue(all(math.isfinite(value) for value in flash_stats.__dict__.values()))
 
+    def test_high_level_g1_ppo_uses_compact_policy_actions(self) -> None:
+        """Use only controlled G1 joints in the high-level PPO lifecycle."""
+
+        device = require_cuda_graph_capture("compact G1 PPO lifecycle")
+        env_config = ConfigEnvG1PhoenX(
+            world_count=1,
+            sim_substeps=1,
+            solver_iterations=1,
+            max_episode_steps=2,
+            randomize_commands_on_reset=False,
+            command_resample_steps=0,
+            parse_visuals=False,
+        )
+        result = public_rl.train_g1_ppo(
+            public_rl.ConfigTrainG1PPO(
+                iterations=1,
+                rollout_steps=2,
+                hidden_layers=(4,),
+                env_config=env_config,
+                ppo_config=ConfigPPO(
+                    train_epochs=1,
+                    minibatch_size=2,
+                    normalize_advantages=False,
+                    mirror_loss_coeff=0.25,
+                ),
+                device=device,
+                seed=307,
+                randomize_commands=False,
+                readback_diagnostics=False,
+            )
+        )
+        self.assertEqual(result.env.policy_action_dim, 12)
+        self.assertEqual(result.trainer.action_dim, result.env.policy_action_dim)
+        self.assertEqual(result.buffer.actions.shape[1], result.env.policy_action_dim)
+        self.assertEqual(len(result.trainer.mirror_map.action_src), result.env.policy_action_dim)
+
     def test_real_g1_flash_sac_and_ppo_workflow_smoke(self) -> None:
         """Exercise one real G1 collection and update for each trainer workflow."""
 
@@ -1411,7 +1447,7 @@ class TestTrainerFlashSAC(unittest.TestCase):
         )
         ppo = TrainerPPO(
             obs_dim=OBS_DIM_G1,
-            action_dim=ACTION_DIM_G1,
+            action_dim=ppo_env.policy_action_dim,
             hidden_layers=(4,),
             config=ConfigPPO(
                 train_epochs=1,
@@ -1443,12 +1479,12 @@ class TestTrainerFlashSAC(unittest.TestCase):
             num_steps=1,
             num_envs=1,
             obs_dim=OBS_DIM_G1,
-            action_dim=ACTION_DIM_G1,
+            action_dim=ppo_env.policy_action_dim,
             device=device,
         )
         ppo_env.collect_ppo_rollout(ppo, rollout, seed=227)
         self.assertEqual(rollout.obs.shape, (1, OBS_DIM_G1))
-        self.assertEqual(rollout.actions.shape, (1, ACTION_DIM_G1))
+        self.assertEqual(rollout.actions.shape, (1, ppo_env.policy_action_dim))
         ppo_stats = ppo.update(rollout)
         self.assertTrue(all(math.isfinite(value) for value in flash_updates[0].__dict__.values()))
         self.assertTrue(all(math.isfinite(value) for value in ppo_stats.__dict__.values()))
