@@ -2927,7 +2927,6 @@ def test_static_empty_gjk_specialization_under_graph_capture(test, device):
         rigid_contact_max=64,
     )
     test.assertFalse(specialized.narrow_phase.has_generic_convex_pairs)
-    test.assertFalse(specialized.narrow_phase.all_pairs_generic_convex)
     reference.narrow_phase.has_generic_convex_pairs = True
 
     state = model.state()
@@ -2956,57 +2955,6 @@ def test_static_empty_gjk_specialization_under_graph_capture(test, device):
         np.testing.assert_array_equal(
             getattr(contacts, name).numpy()[:active],
             getattr(reference_contacts, name).numpy()[:active],
-        )
-
-    generic_builder = newton.ModelBuilder()
-    body_a = generic_builder.add_body(xform=wp.transform(p=wp.vec3(-0.1, 0.0, 0.0)))
-    body_b = generic_builder.add_body(xform=wp.transform(p=wp.vec3(0.1, 0.0, 0.0)))
-    generic_builder.add_shape_box(body_a, hx=0.2, hy=0.2, hz=0.2)
-    generic_builder.add_shape_box(body_b, hx=0.2, hy=0.2, hz=0.2)
-    generic_model = generic_builder.finalize(device=device)
-    generic_pipeline = newton.CollisionPipeline(
-        generic_model,
-        broad_phase="explicit",
-        deterministic=True,
-        rigid_contact_max=16,
-    )
-    generic_reference = newton.CollisionPipeline(
-        generic_model,
-        broad_phase="explicit",
-        deterministic=True,
-        rigid_contact_max=16,
-    )
-    generic_reference.narrow_phase.all_pairs_generic_convex = False
-    test.assertTrue(generic_pipeline.narrow_phase.has_generic_convex_pairs)
-    test.assertTrue(generic_pipeline.narrow_phase.all_pairs_generic_convex)
-    test.assertTrue(generic_reference.narrow_phase.has_generic_convex_pairs)
-    test.assertFalse(generic_reference.narrow_phase.all_pairs_generic_convex)
-    generic_contacts = generic_pipeline.contacts()
-    generic_reference_contacts = generic_reference.contacts()
-    generic_state = generic_model.state()
-    with wp.ScopedCapture(device=device) as capture:
-        generic_pipeline.collide(generic_state, generic_contacts)
-        generic_reference.collide(generic_state, generic_reference_contacts)
-    for _ in range(2):
-        wp.capture_launch(capture.graph)
-
-    active = int(generic_contacts.rigid_contact_count.numpy()[0])
-    test.assertGreater(active, 0)
-    test.assertEqual(active, int(generic_reference_contacts.rigid_contact_count.numpy()[0]))
-    for name in (
-        "rigid_contact_shape0",
-        "rigid_contact_shape1",
-        "rigid_contact_point0",
-        "rigid_contact_point1",
-        "rigid_contact_normal",
-        "rigid_contact_offset0",
-        "rigid_contact_offset1",
-        "rigid_contact_margin0",
-        "rigid_contact_margin1",
-    ):
-        np.testing.assert_array_equal(
-            getattr(generic_contacts, name).numpy()[:active],
-            getattr(generic_reference_contacts, name).numpy()[:active],
         )
 
 
@@ -3135,7 +3083,6 @@ def test_split_gjk_mpr_matches_fused_under_graph_capture(test, device):
         verify_buffers=False,
     )
     test.assertTrue(split.narrow_phase.split_gjk_mpr)
-    test.assertTrue(split.narrow_phase.reorder_replicated_pairs)
     fused.narrow_phase.split_gjk_mpr = False
 
     state = model.state()
@@ -3240,7 +3187,6 @@ def test_cylinder_scale_update_keeps_generic_stage(test, device):
 
     pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
     test.assertTrue(pipeline.narrow_phase.has_generic_convex_pairs)
-    test.assertFalse(pipeline.narrow_phase.all_pairs_generic_convex)
 
     shape_scale = model.shape_scale.numpy()
     shape_scale[0, 2] = 0.6
@@ -3252,7 +3198,6 @@ def test_cylinder_scale_update_keeps_generic_stage(test, device):
     reused_count = int(contacts.rigid_contact_count.numpy()[0])
 
     rebuilt_pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
-    test.assertTrue(rebuilt_pipeline.narrow_phase.all_pairs_generic_convex)
     rebuilt_contacts = rebuilt_pipeline.contacts()
     rebuilt_pipeline.collide(state, rebuilt_contacts)
 

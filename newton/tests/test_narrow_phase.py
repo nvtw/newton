@@ -2239,16 +2239,6 @@ class TestBufferOverflowWarnings(unittest.TestCase):
         self.assertFalse(below_threshold.sparse_gjk_pairs)
         self.assertTrue(at_threshold.sparse_gjk_pairs)
 
-    def test_rejects_inconsistent_generic_convex_scheduling(self):
-        """Reject an all-generic route when the GJK stage is disabled."""
-        with self.assertRaisesRegex(ValueError, "requires has_generic_convex_pairs=True"):
-            NarrowPhase(
-                max_candidate_pairs=1,
-                has_meshes=False,
-                has_generic_convex_pairs=False,
-                all_pairs_generic_convex=True,
-            )
-
     @unittest.skipUnless(_cuda_available, "Split GJK/MPR is enabled only on CUDA")
     def test_split_buffers_use_candidate_work_estimate(self):
         """Size split GJK/MPR buffers from the candidate work estimate."""

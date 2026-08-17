@@ -34,7 +34,6 @@ from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 _prepare_speculative_convex_pair = create_prepare_convex_pair(
     external_aabb=True,
-    sort_pairs=False,
     speculative=True,
 )
 

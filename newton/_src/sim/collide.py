@@ -65,18 +65,10 @@ _ANALYTIC_PRIMITIVE_PAIRS = frozenset(
     }
 )
 
-_STRAIGHT_CYLINDER_ANALYTIC_PAIRS = frozenset(
-    {
-        (int(GeoType.PLANE), int(GeoType.CYLINDER)),
-        (int(GeoType.SPHERE), int(GeoType.CYLINDER)),
-    }
-)
-
 
 def _pair_requires_generic_convex_narrow_phase(
     type_a: int,
     type_b: int,
-    cylinder_barrel_radius: float | None = None,
 ) -> bool:
     """Return whether a sorted shape-type pair can reach GJK/MPR."""
     type_a, type_b = min(type_a, type_b), max(type_a, type_b)
@@ -86,8 +78,6 @@ def _pair_requires_generic_convex_narrow_phase(
         return False
     if type_a == int(GeoType.PLANE) and type_b == int(GeoType.PLANE):
         return False
-    if (type_a, type_b) in _STRAIGHT_CYLINDER_ANALYTIC_PAIRS and cylinder_barrel_radius == 0.0:
-        return False
     return (type_a, type_b) not in _ANALYTIC_PRIMITIVE_PAIRS
 
 
@@ -96,7 +86,6 @@ def _generic_convex_pair_requirements(
     *,
     broad_phase_mode: str,
     shape_pairs_filtered: wp.array[wp.vec2i] | None,
-    use_current_shape_properties: bool = False,
 ) -> list[bool] | None:
     """Collect generic-convex requirements for possible shape-type pairs."""
     shape_types_array = getattr(model, "shape_type", None)
@@ -110,21 +99,11 @@ def _generic_convex_pair_requirements(
         pairs = shape_pairs_filtered.numpy()
         if pairs.size == 0:
             return []
-        shape_scales = None
-        if use_current_shape_properties:
-            shape_scale_array = getattr(model, "shape_scale", None)
-            shape_scales = shape_scale_array.numpy() if shape_scale_array is not None else None
         requirements = []
         for shape_a, shape_b in pairs.reshape(-1, 2):
             type_a = int(shape_types[shape_a])
             type_b = int(shape_types[shape_b])
-            cylinder_barrel_radius = None
-            if shape_scales is not None:
-                if type_a == int(GeoType.CYLINDER):
-                    cylinder_barrel_radius = float(shape_scales[shape_a, 2])
-                elif type_b == int(GeoType.CYLINDER):
-                    cylinder_barrel_radius = float(shape_scales[shape_b, 2])
-            requirements.append(_pair_requires_generic_convex_narrow_phase(type_a, type_b, cylinder_barrel_radius))
+            requirements.append(_pair_requires_generic_convex_narrow_phase(type_a, type_b))
         return requirements
 
     colliding_types = shape_types[_shape_collide_mask(model, len(shape_types))]
@@ -149,22 +128,6 @@ def _has_generic_convex_pairs(
         shape_pairs_filtered=shape_pairs_filtered,
     )
     return True if requirements is None else any(requirements)
-
-
-def _all_pairs_require_generic_convex_narrow_phase(
-    model: Model,
-    *,
-    broad_phase_mode: str,
-    shape_pairs_filtered: wp.array[wp.vec2i] | None,
-) -> bool:
-    """Conservatively prove that every broad-phase pair requires GJK/MPR."""
-    requirements = _generic_convex_pair_requirements(
-        model,
-        broad_phase_mode=broad_phase_mode,
-        shape_pairs_filtered=shape_pairs_filtered,
-        use_current_shape_properties=True,
-    )
-    return requirements is not None and bool(requirements) and all(requirements)
 
 
 @wp.struct
@@ -1499,38 +1462,9 @@ class CollisionPipeline:
                 broad_phase_mode=self.broad_phase_mode,
                 shape_pairs_filtered=self.shape_pairs_filtered,
             )
-            all_pairs_generic_convex = (
-                has_generic_convex_pairs
-                and not has_meshes
-                and model.heightfield_count == 0
-                and hydroelastic_sdf is None
-                and _all_pairs_require_generic_convex_narrow_phase(
-                    model,
-                    broad_phase_mode=self.broad_phase_mode,
-                    shape_pairs_filtered=self.shape_pairs_filtered,
-                )
-            )
-            replicated_world_count = 0
-            shapes_per_replicated_world = 0
-            replicated_global_shape_count = 0
             candidate_pair_work_estimate = min(self.shape_pairs_max, _compute_per_world_shape_pairs_max(model))
             if self.broad_phase_mode == "explicit":
                 candidate_pair_work_estimate = self.shape_pairs_max
-            if shape_world is not None and model.world_count >= 32:
-                shape_world_np = shape_world.numpy()
-                global_indices = np.flatnonzero(shape_world_np < 0)
-                local_shape_count = int(global_indices[0]) if len(global_indices) else shape_count
-                global_shape_count = shape_count - local_shape_count
-                trailing_globals = not global_shape_count or np.all(shape_world_np[local_shape_count:] == -1)
-                if trailing_globals and local_shape_count % model.world_count == 0:
-                    shapes_per_world = local_shape_count // model.world_count
-                    expected_worlds = np.repeat(
-                        np.arange(model.world_count, dtype=shape_world_np.dtype), shapes_per_world
-                    )
-                    if shapes_per_world > 0 and np.array_equal(shape_world_np[:local_shape_count], expected_worlds):
-                        replicated_world_count = model.world_count
-                        shapes_per_replicated_world = shapes_per_world
-                        replicated_global_shape_count = global_shape_count
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
             # Pass write_contact as custom writer to write directly to final Contacts format
@@ -1558,11 +1492,7 @@ class CollisionPipeline:
                 has_heightfields=model.heightfield_count > 0,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
                 has_generic_convex_pairs=has_generic_convex_pairs,
-                all_pairs_generic_convex=all_pairs_generic_convex,
                 candidate_pair_work_estimate=candidate_pair_work_estimate,
-                replicated_world_count=replicated_world_count,
-                shapes_per_replicated_world=shapes_per_replicated_world,
-                replicated_global_shape_count=replicated_global_shape_count,
                 mesh_sdf_identity_scale_only=mesh_sdf_identity_scale_only,
                 mesh_sdf_texture_only=mesh_sdf_texture_only,
                 sdf_texture_paired_samples=model._sdf_texture_paired_samples,
