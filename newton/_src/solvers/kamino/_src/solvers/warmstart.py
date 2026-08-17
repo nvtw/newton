@@ -454,7 +454,6 @@ def _warmstart_contacts_by_matched_geom_pair_key_and_position_with_net_force_bac
     contact_reaction_old: wp.array[wp.vec3f],
     contact_velocity_old: wp.array[wp.vec3f],
     tangent_force_sums_old: wp.array[wp.vec3f],
-    pair_contact_counts_old: wp.array[wp.int32],
     current_pair_contact_counts: wp.array[wp.int32],
     # Inputs - Next:
     num_active_contacts_new: wp.array[wp.int32],
@@ -610,9 +609,9 @@ def _warmstart_contacts_by_matched_geom_pair_key_and_position_with_net_force_bac
         target_reaction = wp.transpose(R_k_target) @ contact_force_uniform_new
         target_reaction = scaling * project_to_coulomb_cone(target_reaction, target_mu)
 
-    pair_contact_count = pair_contact_counts_old[start]
-    if balance_tangential and pair_contact_count > 0:
-        tangent_force_uniform = tangent_force_sums_old[start] / wp.float32(pair_contact_count)
+    current_pair_contact_count = current_pair_contact_counts[start]
+    if balance_tangential and current_pair_contact_count > 0:
+        tangent_force_uniform = tangent_force_sums_old[start] / wp.float32(current_pair_contact_count)
         tangent_local = wp.transpose(R_k_target) @ tangent_force_uniform
         tangent_norm = wp.length(wp.vec2f(tangent_local.x, tangent_local.y))
         tangent_limit = contact_material_new[cid][0] * wp.max(target_reaction.z, 0.0)
@@ -908,7 +907,6 @@ def warmstart_contacts_by_matched_geom_pair_key_and_position_with_net_force_back
             cache.reaction,
             cache.velocity,
             tangent_force_sums,
-            pair_contact_counts,
             current_pair_contact_counts,
             # Inputs - Next:
             contacts.model_active_contacts,
