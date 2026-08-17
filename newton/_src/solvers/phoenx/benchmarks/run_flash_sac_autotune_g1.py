@@ -196,36 +196,29 @@ def main() -> int:
             evaluation_start = time.perf_counter()
             training.synchronize()
             challenger_fallback_fraction = training.challenger_fallback_fraction()
-            (
-                champion_scores,
-                challenger_scores,
-                champion_finite,
-                challenger_finite,
-                champion_termination_rate,
-                challenger_termination_rate,
-            ) = evaluator.evaluate(training.trainers)
+            scores = evaluator.evaluate(training.trainers)
             evaluated_rates = controller.member_rates.tolist()
             decision = training.evaluate_paired(
-                champion_scores,
-                challenger_scores,
-                challenger_safe=champion_finite and challenger_finite,
-                champion_termination_rate=champion_termination_rate,
-                challenger_termination_rate=challenger_termination_rate,
+                scores.champion_scores,
+                scores.challenger_scores,
+                challenger_safe=scores.champion_finite and scores.challenger_finite,
+                champion_termination_rate=scores.champion_termination_rate,
+                challenger_termination_rate=scores.challenger_termination_rate,
             )
             history.append(
                 {
                     "launch": launch,
-                    "champion_success": float(np.mean(champion_scores)),
-                    "challenger_success": float(np.mean(challenger_scores)),
-                    "champion_finite": champion_finite,
-                    "challenger_finite": challenger_finite,
-                    "champion_termination_rate": champion_termination_rate,
-                    "challenger_termination_rate": challenger_termination_rate,
+                    "champion_success": float(np.mean(scores.champion_scores)),
+                    "challenger_success": float(np.mean(scores.challenger_scores)),
+                    "champion_finite": scores.champion_finite,
+                    "challenger_finite": scores.challenger_finite,
+                    "champion_termination_rate": scores.champion_termination_rate,
+                    "challenger_termination_rate": scores.challenger_termination_rate,
                     "challenger_action_fallback_fraction": challenger_fallback_fraction,
-                    "challenger_relative_safe": champion_finite
-                    and challenger_finite
-                    and challenger_termination_rate
-                    <= champion_termination_rate + controller.config.termination_rate_margin,
+                    "challenger_relative_safe": scores.champion_finite
+                    and scores.challenger_finite
+                    and scores.challenger_termination_rate
+                    <= scores.champion_termination_rate + controller.config.termination_rate_margin,
                     "action": decision.action,
                     "evaluated_rates": evaluated_rates,
                     "next_rates": controller.member_rates.tolist(),
@@ -238,8 +231,8 @@ def main() -> int:
         live_scores = evaluator.evaluate(controller.trainers)
         controller.finalize_best(
             policy="live",
-            live_score=float(np.mean(live_scores[0])),
-            live_termination_rate=float(live_scores[4]),
+            live_score=float(np.mean(live_scores.champion_scores)),
+            live_termination_rate=live_scores.champion_termination_rate,
         )
     else:
         controller.finalize_best(policy=args.finalization)
@@ -274,15 +267,18 @@ def main() -> int:
         "initial_rates": [args.base_lr, args.base_lr, args.base_lr],
         "finalization": args.finalization,
         "final_rates": controller.member_rates.tolist(),
-        "final_champion_success": float(np.mean(final_scores[0])),
-        "final_challenger_success": float(np.mean(final_scores[1])),
-        "final_champion_termination_rate": final_scores[4],
-        "final_challenger_termination_rate": final_scores[5],
-        "final_zero_fall_gate": bool(final_scores[2] and final_scores[4] == 0.0),
-        "final_tracking_gate": bool(np.mean(final_scores[0]) >= 0.30),
+        "final_champion_success": float(np.mean(final_scores.champion_scores)),
+        "final_challenger_success": float(np.mean(final_scores.challenger_scores)),
+        "final_champion_termination_rate": final_scores.champion_termination_rate,
+        "final_challenger_termination_rate": final_scores.challenger_termination_rate,
+        "final_zero_fall_gate": bool(final_scores.champion_finite and final_scores.champion_termination_rate == 0.0),
+        "final_tracking_gate": bool(np.mean(final_scores.champion_scores) >= 0.30),
         "final_velocity_gate": bool(final_velocity >= 0.4),
         "final_quality_gate": bool(
-            final_scores[2] and final_scores[4] == 0.0 and np.mean(final_scores[0]) >= 0.30 and final_velocity >= 0.4
+            final_scores.champion_finite
+            and final_scores.champion_termination_rate == 0.0
+            and np.mean(final_scores.champion_scores) >= 0.30
+            and final_velocity >= 0.4
         ),
         "final_command_aligned_velocity": final_velocity,
         "history": history,

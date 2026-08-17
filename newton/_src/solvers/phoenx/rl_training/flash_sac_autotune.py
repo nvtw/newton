@@ -8,18 +8,19 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 import numpy as np
 import warp as wp
 
-from .flash_sac import BufferReplayFlashSAC, EnvFlashSAC, TrainerFlashSAC
+from .flash_sac import (
+    BufferReplayFlashSAC,
+    EnvFlashSAC,
+    TrainerFlashSAC,
+    _allocate_flash_sac_batch,
+)
 from .flash_sac_population import StateFlashSACPopulation
 from .sac import BatchSAC, StatsSACUpdate
-
-if TYPE_CHECKING:
-    from .flash_sac_autotune_overlap import GraphFlashSACLRAutotuneOverlap
-    from .flash_sac_autotune_parallel import GraphFlashSACLRAutotuneParallelOverlap
 
 
 @wp.kernel
@@ -59,7 +60,7 @@ def _paired_evaluation_kernel(
 
 @dataclass(frozen=True)
 class ConfigFlashSACLRAutotune:
-    """Configure the internal bounded FlashSAC learning-rate search."""
+    """Configure bounded paired FlashSAC learning-rate search."""
 
     evaluation_episodes: int = 8
     challenger_fraction: float = 0.10
@@ -111,10 +112,67 @@ class ResultFlashSACLRAutotune:
     converged: bool
 
 
+class GraphFlashSACLRAutotune(Protocol):
+    """Represent a backend-neutral captured FlashSAC autotuning graph."""
+
+    trainers: tuple[TrainerFlashSAC, TrainerFlashSAC]
+
+    def launch(self) -> None:
+        """Launch one captured training cadence."""
+
+    def synchronize(self) -> None:
+        """Wait for all captured training work to complete."""
+
+    def sync_controller_state(self) -> None:
+        """Copy backend learner state into its controller."""
+
+    def evaluate_paired(self, *args: Any, **kwargs: Any) -> ResultFlashSACLRAutotune:
+        """Evaluate paired scores and apply the controller decision."""
+
+    def challenger_fallback_fraction(self) -> float:
+        """Return the most recent guarded-action fallback fraction."""
+
+    def close(self) -> None:
+        """Drain work and release captured graph resources."""
+
+
 class ControllerFlashSACLRAutotune:
     """Run a bounded two-member FlashSAC learning-rate search."""
 
     _RATE_NAMES = ("actor", "critic", "alpha")
+
+    @classmethod
+    def from_trainer(
+        cls,
+        trainer: TrainerFlashSAC,
+        *,
+        rollout_world_count: int,
+        config: ConfigFlashSACLRAutotune | None = None,
+    ) -> ControllerFlashSACLRAutotune:
+        """Create a paired search controller from one configured trainer.
+
+        The supplied trainer becomes the owned champion. A compatible challenger,
+        fixed learner batch, and confirmed-best snapshot are allocated during setup.
+
+        Args:
+            trainer: Configured champion trainer to own.
+            rollout_world_count: Number of training rollout worlds.
+            config: Optional bounded-search configuration.
+
+        Returns:
+            A setup-complete paired learning-rate controller.
+        """
+
+        challenger = TrainerFlashSAC(
+            obs_dim=trainer.obs_dim,
+            action_dim=trainer.action_dim,
+            config=trainer.config,
+            device=trainer.device,
+            seed=trainer.seed + 1,
+        )
+        challenger.copy_training_state_from(trainer)
+        batch = _allocate_flash_sac_batch(trainer)
+        return cls((trainer, challenger), batch, rollout_world_count=rollout_world_count, config=config)
 
     def __init__(
         self,
@@ -267,7 +325,7 @@ class ControllerFlashSACLRAutotune:
         interactions_per_launch: int = 2,
         seed: int = 0,
         population_backend: str = "parallel",
-    ) -> GraphFlashSACLRAutotuneOverlap | GraphFlashSACLRAutotuneParallelOverlap:
+    ) -> GraphFlashSACLRAutotune:
         """Capture split rollout and identical-batch learner overlap."""
 
         backend = str(population_backend)

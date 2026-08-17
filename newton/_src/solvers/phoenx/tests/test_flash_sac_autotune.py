@@ -13,11 +13,13 @@ from types import SimpleNamespace
 import numpy as np
 import warp as wp
 
+import newton.rl as public_rl
 from newton._src.solvers.phoenx.benchmarks.run_flash_sac_autotune_g1 import _root_command_tracking_kernel
 from newton._src.solvers.phoenx.rl_training.flash_sac import ConfigFlashSAC, TrainerFlashSAC
 from newton._src.solvers.phoenx.rl_training.flash_sac_autotune import (
     ConfigFlashSACLRAutotune,
     ControllerFlashSACLRAutotune,
+    GraphFlashSACLRAutotune,
 )
 from newton._src.solvers.phoenx.rl_training.flash_sac_autotune_evaluation import EvaluatorPairedFlashSAC
 from newton._src.solvers.phoenx.rl_training.flash_sac_autotune_parallel import _guard_challenger_actions_kernel
@@ -55,6 +57,43 @@ class _AutotuneSmokeEnv:
 
 class TestFlashSACLRAutotune(unittest.TestCase):
     """Validate deterministic, allocation-stable LR search control."""
+
+    def test_public_facade_builds_controller_from_trainer(self) -> None:
+        """Build the public paired controller from one owned champion trainer."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune public facade")
+        trainer = public_rl.TrainerFlashSAC(
+            obs_dim=3,
+            action_dim=2,
+            config=public_rl.ConfigFlashSAC(
+                actor_hidden_dim=4,
+                actor_num_blocks=1,
+                critic_hidden_dim=4,
+                critic_num_blocks=1,
+                distributional_atoms=5,
+                sample_batch_size=4,
+                buffer_min_length=8,
+                buffer_max_length=64,
+            ),
+            device=device,
+            seed=127,
+        )
+        controller = public_rl.ControllerFlashSACLRAutotune.from_trainer(
+            trainer,
+            rollout_world_count=8,
+            config=public_rl.ConfigFlashSACLRAutotune(evaluation_episodes=4),
+        )
+        self.assertIs(controller.trainers[0], trainer)
+        self.assertIsNot(controller.trainers[1], trainer)
+        self.assertEqual(controller.batch.obs.shape, (4, 3))
+        self.assertEqual(controller.rollout_world_count, 8)
+        for champion_state, challenger_state in zip(
+            controller.trainers[0].actor.net.state_arrays(),
+            controller.trainers[1].actor.net.state_arrays(),
+            strict=True,
+        ):
+            np.testing.assert_array_equal(champion_state.numpy(), challenger_state.numpy())
+        self.assertIs(public_rl.GraphFlashSACLRAutotune, GraphFlashSACLRAutotune)
 
     def test_challenger_action_guard(self) -> None:
         """Route only finite challenger actions within both divergence limits."""
@@ -669,19 +708,12 @@ class TestFlashSACLRAutotune(unittest.TestCase):
             for network in (trainer.actor.net, trainer.critic1, trainer.critic2)
             for value in network.state_arrays()
         )
-        (
-            champion,
-            challenger,
-            champion_finite,
-            challenger_finite,
-            champion_termination_rate,
-            challenger_termination_rate,
-        ) = evaluator.evaluate(controller.trainers)
-        np.testing.assert_array_equal(champion, challenger)
-        self.assertTrue(champion_finite)
-        self.assertTrue(challenger_finite)
-        self.assertEqual(champion_termination_rate, 0.0)
-        self.assertEqual(challenger_termination_rate, 0.0)
+        result = evaluator.evaluate(controller.trainers)
+        np.testing.assert_array_equal(result.champion_scores, result.challenger_scores)
+        self.assertTrue(result.champion_finite)
+        self.assertTrue(result.challenger_finite)
+        self.assertEqual(result.champion_termination_rate, 0.0)
+        self.assertEqual(result.challenger_termination_rate, 0.0)
         after = tuple(
             value.numpy()
             for trainer in controller.trainers

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import warp as wp
@@ -15,7 +15,11 @@ import warp as wp
 from .flash_sac import EnvFlashSAC, TrainerFlashSAC
 
 if TYPE_CHECKING:
-    from .flash_sac_autotune import ControllerFlashSACLRAutotune, ResultFlashSACLRAutotune
+    from .flash_sac_autotune import (
+        ControllerFlashSACLRAutotune,
+        GraphFlashSACLRAutotune,
+        ResultFlashSACLRAutotune,
+    )
 
 
 @wp.kernel
@@ -76,7 +80,27 @@ def _clone_evaluation_trainer(source: TrainerFlashSAC, world_count: int) -> Trai
 
 
 class EvaluatorPairedFlashSAC:
-    """Evaluate two policies on isolated, identically seeded environments."""
+    """Evaluate two policies on isolated, identically seeded environments.
+
+    Args:
+        trainers: Initial champion and challenger trainers.
+        envs: Isolated champion and challenger evaluation environments.
+        horizon_steps: Fixed evaluation horizon.
+        seed: Shared deterministic evaluation seed.
+        metric_source: Optional callback returning one device metric per world.
+            Environment rewards are accumulated when omitted.
+    """
+
+    @dataclass(frozen=True)
+    class Result:
+        """Store named outputs from one paired evaluation."""
+
+        champion_scores: np.ndarray
+        challenger_scores: np.ndarray
+        champion_finite: bool
+        challenger_finite: bool
+        champion_termination_rate: float
+        challenger_termination_rate: float
 
     def __init__(
         self,
@@ -172,9 +196,7 @@ class EvaluatorPairedFlashSAC:
             if sim_time is not None:
                 env.sim_time = sim_time
 
-    def evaluate(
-        self, sources: tuple[TrainerFlashSAC, TrainerFlashSAC]
-    ) -> tuple[np.ndarray, np.ndarray, bool, bool, float, float]:
+    def evaluate(self, sources: tuple[TrainerFlashSAC, TrainerFlashSAC]) -> EvaluatorPairedFlashSAC.Result:
         """Copy policies into isolated trainers and replay one paired evaluation."""
 
         for destination, source in zip(self.trainers, sources, strict=True):
@@ -186,22 +208,30 @@ class EvaluatorPairedFlashSAC:
         champion_finite = bool(np.all(self._safe[0].numpy() != 0))
         champion_termination_rate = float(np.mean(self._terminated[0].numpy()))
         challenger_termination_rate = float(np.mean(self._terminated[1].numpy()))
-        return (
-            champion_scores,
-            challenger_scores,
-            challenger_finite,
-            champion_finite,
-            champion_termination_rate,
-            challenger_termination_rate,
+        return self.Result(
+            champion_scores=champion_scores,
+            challenger_scores=challenger_scores,
+            champion_finite=champion_finite,
+            challenger_finite=challenger_finite,
+            champion_termination_rate=champion_termination_rate,
+            challenger_termination_rate=challenger_termination_rate,
         )
 
 
 @dataclass
 class CadenceFlashSACLRAutotune:
-    """Run captured training and coarse deterministic paired evaluation."""
+    """Run captured training and coarse deterministic paired evaluation.
+
+    Args:
+        controller: Bounded learning-rate search controller.
+        training_graph: Captured backend-neutral training graph.
+        evaluator: Isolated paired evaluator.
+        evaluation_interval: Training launches between paired evaluations.
+        launch_count: Initial launch counter.
+    """
 
     controller: ControllerFlashSACLRAutotune
-    training_graph: Any
+    training_graph: GraphFlashSACLRAutotune
     evaluator: EvaluatorPairedFlashSAC
     evaluation_interval: int
     launch_count: int = 0
@@ -222,16 +252,16 @@ class CadenceFlashSACLRAutotune:
         scores = self.evaluator.evaluate(sources)
         if hasattr(self.training_graph, "evaluate_paired"):
             return self.training_graph.evaluate_paired(
-                scores[0],
-                scores[1],
-                challenger_safe=scores[2] and scores[3],
-                champion_termination_rate=scores[4],
-                challenger_termination_rate=scores[5],
+                scores.champion_scores,
+                scores.challenger_scores,
+                challenger_safe=scores.champion_finite and scores.challenger_finite,
+                champion_termination_rate=scores.champion_termination_rate,
+                challenger_termination_rate=scores.challenger_termination_rate,
             )
         return self.controller.evaluate_paired(
-            scores[0],
-            scores[1],
-            challenger_safe=scores[2] and scores[3],
-            champion_termination_rate=scores[4],
-            challenger_termination_rate=scores[5],
+            scores.champion_scores,
+            scores.challenger_scores,
+            challenger_safe=scores.champion_finite and scores.challenger_finite,
+            champion_termination_rate=scores.champion_termination_rate,
+            challenger_termination_rate=scores.challenger_termination_rate,
         )
