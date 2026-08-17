@@ -674,6 +674,48 @@ def _batch_norm_inv_std_relu_amp_kernel(
 
 
 @wp.kernel
+def _batch_norm_inv_std_amp_dual_kernel(
+    x: wp.array2d[Any],
+    mean: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    bias: wp.array[wp.float32],
+    relu: bool,
+    out: wp.array2d[wp.float32],
+    out_f16: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    centered = wp.float16(wp.float32(x[row, col]) - mean[col])
+    normalized = wp.float32(centered) * inv_std[col]
+    value = normalized * scale[col] + bias[col]
+    if relu:
+        value = wp.max(value, wp.float32(0.0))
+    out[row, col] = value
+    out_f16[row, col] = wp.float16(value)
+
+
+@wp.kernel
+def _batch_norm_amp_dual_kernel(
+    x: wp.array2d[Any],
+    mean: wp.array[wp.float32],
+    variance: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    bias: wp.array[wp.float32],
+    eps: wp.float32,
+    relu: bool,
+    out: wp.array2d[wp.float32],
+    out_f16: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = (wp.float32(x[row, col]) - mean[col]) / wp.sqrt(variance[col] + eps)
+    value = value * scale[col] + bias[col]
+    if relu:
+        value = wp.max(value, wp.float32(0.0))
+    out[row, col] = value
+    out_f16[row, col] = wp.float16(value)
+
+
+@wp.kernel
 def _batch_norm_inv_std_relu_kernel(
     x: wp.array2d[Any],
     mean: wp.array[wp.float32],
@@ -900,6 +942,19 @@ def _residual_add_mixed_f32_kernel(
 
 
 @wp.kernel
+def _residual_add_mixed_dual_kernel(
+    x: wp.array2d[Any],
+    residual: wp.array2d[Any],
+    out: wp.array2d[wp.float32],
+    out_f16: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = wp.float32(x[row, col]) + wp.float32(residual[row, col])
+    out[row, col] = value
+    out_f16[row, col] = wp.float16(value)
+
+
+@wp.kernel
 def _add_mixed_f16_kernel(
     a: wp.array2d[Any],
     b: wp.array2d[Any],
@@ -917,7 +972,22 @@ def _rms_norm_f16_kernel(
     out: wp.array2d[wp.float16],
 ):
     row, col = wp.tid()
+
     out[row, col] = wp.float16(wp.float32(x[row, col]) * inv_rms[row] * scale[col])
+
+
+@wp.kernel
+def _rms_norm_dual_kernel(
+    x: wp.array2d[Any],
+    scale: wp.array[wp.float32],
+    inv_rms: wp.array[wp.float32],
+    out: wp.array2d[wp.float32],
+    out_f16: wp.array2d[wp.float16],
+):
+    row, col = wp.tid()
+    value = wp.float32(x[row, col]) * inv_rms[row] * scale[col]
+    out[row, col] = value
+    out_f16[row, col] = wp.float16(value)
 
 
 @wp.kernel
@@ -2242,7 +2312,10 @@ class EnsembleNetworkFlashSAC:
         return mirror
 
     def _contraction_input(
-        self, value: wp.array2d[Any] | wp.array3d[Any]
+        self,
+        value: wp.array2d[Any] | wp.array3d[Any],
+        *,
+        refresh: bool = True,
     ) -> wp.array2d[wp.float16] | wp.array3d[wp.float16]:
         if value.dtype == wp.float16:
             return value
@@ -2259,7 +2332,8 @@ class EnsembleNetworkFlashSAC:
                 mirror = wp.empty(value.shape, dtype=wp.float16, device=self.device)
                 self._fp16_inputs_3d[key] = mirror
             kernel = cast_3d_float_to_float16_kernel
-        wp.launch(kernel, dim=value.shape, inputs=[value], outputs=[mirror], device=self.device)
+        if refresh:
+            wp.launch(kernel, dim=value.shape, inputs=[value], outputs=[mirror], device=self.device)
         return mirror
 
     def _linear(
@@ -2268,13 +2342,14 @@ class EnsembleNetworkFlashSAC:
         weight: wp.array3d[wp.float32],
         *,
         broadcast_input: bool = False,
+        contraction_input: wp.array2d[wp.float16] | wp.array3d[wp.float16] | None = None,
     ) -> wp.array3d[Any]:
         rows = int(x.shape[-2])
         inner = int(weight.shape[1])
         cols = int(weight.shape[2])
         out = wp.empty((2, rows, cols), dtype=self.activation_dtype, device=self.device)
         if self.contraction_dtype == "float16":
-            x = self._contraction_input(x)
+            x = contraction_input if contraction_input is not None else self._contraction_input(x)
             gemm_float16_strided_batched_output(
                 x, self._contraction_weight(weight), out, rows, cols, inner, 2, broadcast_lhs=broadcast_input
             )
@@ -2291,7 +2366,13 @@ class EnsembleNetworkFlashSAC:
         training: bool,
         broadcast_input: bool = False,
         relu: bool = False,
-    ) -> None:
+        mirror_output: bool = True,
+    ) -> wp.array3d[wp.float16] | None:
+        out_f16 = (
+            self._contraction_input(out, refresh=False)
+            if self.contraction_dtype == "float16" and mirror_output
+            else None
+        )
         for ensemble_index, norm in enumerate(norms):
             source = x if broadcast_input else x[ensemble_index]
             rows = int(source.shape[0])
@@ -2345,65 +2426,93 @@ class EnsembleNetworkFlashSAC:
             else:
                 mean = norm.running_mean
                 variance = norm.running_variance
-            kernel = (
-                _batch_norm_inv_std_relu_amp_kernel
-                if training and relu and self.contraction_dtype == "float16"
-                else _batch_norm_inv_std_amp_kernel
-                if training and self.contraction_dtype == "float16"
-                else _batch_norm_inv_std_relu_kernel
-                if training and relu
-                else _batch_norm_inv_std_kernel
-                if training
-                else _batch_norm_relu_kernel
-                if relu
-                else _batch_norm_kernel
-            )
-            wp.launch(
-                kernel,
-                dim=source.shape,
-                inputs=(
-                    [source, mean, scratch.inv_std, norm.scale, norm.bias]
+            if out_f16 is not None:
+                kernel = _batch_norm_inv_std_amp_dual_kernel if training else _batch_norm_amp_dual_kernel
+                wp.launch(
+                    kernel,
+                    dim=source.shape,
+                    inputs=(
+                        [source, mean, scratch.inv_std, norm.scale, norm.bias, relu]
+                        if training
+                        else [source, mean, variance, norm.scale, norm.bias, norm.eps, relu]
+                    ),
+                    outputs=[out[ensemble_index], out_f16[ensemble_index]],
+                    device=self.device,
+                )
+            else:
+                kernel = (
+                    _batch_norm_inv_std_relu_kernel
+                    if training and relu
+                    else _batch_norm_inv_std_kernel
                     if training
-                    else [source, mean, variance, norm.scale, norm.bias, norm.eps]
-                ),
-                outputs=[out[ensemble_index]],
-                device=self.device,
-            )
+                    else _batch_norm_relu_kernel
+                    if relu
+                    else _batch_norm_kernel
+                )
+                wp.launch(
+                    kernel,
+                    dim=source.shape,
+                    inputs=(
+                        [source, mean, scratch.inv_std, norm.scale, norm.bias]
+                        if training
+                        else [source, mean, variance, norm.scale, norm.bias, norm.eps]
+                    ),
+                    outputs=[out[ensemble_index]],
+                    device=self.device,
+                )
+        return out_f16
 
     def _forward(
         self, x: wp.array2d[wp.float32], *, training: bool, retain_activations: bool
     ) -> tuple[wp.array2d[wp.float32], wp.array2d[wp.float32]]:
         first, second = self.networks
         input_normalized = wp.empty((2, int(x.shape[0]), self.input_dim), dtype=wp.float32, device=self.device)
-        self._norm_into(
+        input_normalized_f16 = self._norm_into(
             x,
             input_normalized,
             (first.input_norm, second.input_norm),
             training=training,
             broadcast_input=True,
         )
-        hidden = self._linear(input_normalized, self.embed_weight)
+        hidden = self._linear(input_normalized, self.embed_weight, contraction_input=input_normalized_f16)
+        hidden_f16 = hidden if self.contraction_dtype == "float16" else None
         block_caches: list[list[tuple[wp.array2d[wp.float32], ...]]] = [[], []]
         pair_block_cache: list[tuple[wp.array3d[wp.float32], ...]] = []
         for block_index, (w1, w2) in enumerate(self.block_weights):
             residual = hidden
-            pre1 = self._linear(residual, w1)
+            residual_f16 = hidden_f16
+            pre1 = self._linear(residual, w1, contraction_input=residual_f16)
             activated1 = wp.empty(pre1.shape, dtype=wp.float32, device=self.device)
             first_norms = first.block_norms[block_index]
             second_norms = second.block_norms[block_index]
-            self._norm_into(pre1, activated1, (first_norms[0], second_norms[0]), training=training, relu=True)
+            activated1_f16 = self._norm_into(
+                pre1, activated1, (first_norms[0], second_norms[0]), training=training, relu=True
+            )
             normed1 = activated1
-            pre2 = self._linear(activated1, w2)
+            pre2 = self._linear(activated1, w2, contraction_input=activated1_f16)
             activated2 = wp.empty(pre2.shape, dtype=wp.float32, device=self.device)
-            self._norm_into(pre2, activated2, (first_norms[1], second_norms[1]), training=training, relu=True)
+            self._norm_into(
+                pre2,
+                activated2,
+                (first_norms[1], second_norms[1]),
+                training=training,
+                relu=True,
+                mirror_output=False,
+            )
             normed2 = activated2
             hidden = wp.empty(activated2.shape, dtype=wp.float32, device=self.device)
+            hidden_f16 = self._contraction_input(hidden, refresh=False) if self.contraction_dtype == "float16" else None
             for ensemble_index in range(2):
+                kernel = _residual_add_mixed_dual_kernel if hidden_f16 is not None else _residual_add_kernel
                 wp.launch(
-                    _residual_add_mixed_f32_kernel if self.contraction_dtype == "float16" else _residual_add_kernel,
+                    kernel,
                     dim=normed2[ensemble_index].shape,
                     inputs=[activated2[ensemble_index], residual[ensemble_index]],
-                    outputs=[hidden[ensemble_index]],
+                    outputs=(
+                        [hidden[ensemble_index], hidden_f16[ensemble_index]]
+                        if hidden_f16 is not None
+                        else [hidden[ensemble_index]]
+                    ),
                     device=self.device,
                 )
                 block_caches[ensemble_index].append(
@@ -2419,17 +2528,25 @@ class EnsembleNetworkFlashSAC:
                 )
             pair_block_cache.append((residual, pre1, normed1, activated1, pre2, normed2, activated2))
         normalized = wp.empty(hidden.shape, dtype=wp.float32, device=self.device)
+        normalized_f16 = (
+            self._contraction_input(normalized, refresh=False) if self.contraction_dtype == "float16" else None
+        )
         for ensemble_index, network in enumerate(self.networks):
             inv_rms = wp.empty(hidden.shape[1], dtype=wp.float32, device=self.device)
             _launch_rms_inv(hidden[ensemble_index], 1.0e-6, inv_rms)
+            kernel = _rms_norm_dual_kernel if normalized_f16 is not None else _rms_norm_kernel
             wp.launch(
-                _rms_norm_kernel,
+                kernel,
                 dim=hidden[ensemble_index].shape,
                 inputs=[hidden[ensemble_index], network.rms_scale, inv_rms],
-                outputs=[normalized[ensemble_index]],
+                outputs=(
+                    [normalized[ensemble_index], normalized_f16[ensemble_index]]
+                    if normalized_f16 is not None
+                    else [normalized[ensemble_index]]
+                ),
                 device=self.device,
             )
-        head = self._linear(normalized, self.head_weights[0])
+        head = self._linear(normalized, self.head_weights[0], contraction_input=normalized_f16)
         output = wp.empty(head.shape, dtype=wp.float32, device=self.device)
         for ensemble_index, network in enumerate(self.networks):
             wp.launch(
@@ -2492,7 +2609,7 @@ class EnsembleNetworkFlashSAC:
             input_gemm(
                 contraction_output_grad, mirror, input_grad, rows, input_width, output_width, 2, transpose_rhs=True
             )
-            contraction_input = self._contraction_input(x)
+            contraction_input = self._contraction_input(x, refresh=False)
             gemm_float16_strided_batched(
                 contraction_input,
                 contraction_output_grad,

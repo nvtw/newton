@@ -202,6 +202,15 @@ reduction result.  This further reduced cadence to 15.00 ms (136.6k transitions/
 Fresh seed-0 quality first passed at 7.596M and sustained at 8.096M transitions
 in 63.92 seconds, with tracking 0.826, aligned velocity 0.608 m/s, and zero falls.
 
+The ensemble BatchNorm, residual-add, and RMSNorm producers now write their
+FP32 activations and exact FP16 mirrors together.  Forward and weight-gradient
+GEMMs reuse those setup-owned mirrors, removing separate activation casts while
+retaining the original FP32 state.  Bit-exact producer fixtures cover training
+and inference normalization, residual addition, and RMS normalization.  The
+complete cadence measured 14.23 ms (143.9k transitions/s).  Fresh seed-0 quality
+first passed at 7.596M transitions and sustained at 8.096M in 57.07 seconds,
+with tracking 0.863, aligned velocity 0.466 m/s, and zero falls.
+
 ## Reproducible quality evidence
 
 The corrected FP32 seed-0 result is stored in

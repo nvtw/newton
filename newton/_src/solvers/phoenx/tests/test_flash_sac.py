@@ -28,17 +28,24 @@ from newton._src.solvers.phoenx.rl_training.flash_sac_networks import (
     NetworkFlashSAC,
     _batch_moments_tile_kernel,
     _batch_moments_transposed_tile_kernel,
+    _batch_norm_amp_dual_kernel,
     _batch_norm_backward_amp_tile_kernel,
     _batch_norm_backward_amp_transposed_tile_kernel,
     _batch_norm_input_grad_amp_kernel,
+    _batch_norm_inv_std_amp_dual_kernel,
     _batch_norm_inv_std_amp_kernel,
+    _batch_norm_kernel,
     _head_bias_amp_kernel,
     _head_bias_log_std_amp_kernel,
     _launch_rms_backward_stats,
     _launch_rms_inv,
     _launch_rms_scale_grad,
+    _residual_add_mixed_dual_kernel,
+    _residual_add_mixed_f32_kernel,
+    _rms_norm_dual_kernel,
     _rms_norm_f16_kernel,
     _rms_norm_input_grad_f16_kernel,
+    _rms_norm_kernel,
     _round_batch_moments_f16_kernel,
     _transpose_2d_tile_kernel,
     _UnitBatchNorm,
@@ -947,6 +954,93 @@ class TestTrainerFlashSAC(unittest.TestCase):
         self.assertEqual(critic_cache["rms_input"].dtype, wp.float32)
         self.assertEqual(critic_cache["normalized"].dtype, wp.float32)
         self.assertEqual(critic_cache["heads"].dtype, wp.float16)
+
+    def test_amp_dual_output_producers_match_separate_casts(self) -> None:
+        """Match FP32 producers and their separately rounded FP16 mirrors bit for bit."""
+
+        device = require_cuda_graph_capture("FlashSAC AMP dual-output producers")
+        rng = np.random.default_rng(727)
+        rows, width = 5, 7
+        source = wp.array(rng.normal(size=(rows, width)).astype(np.float16), device=device)
+        mean = wp.array(rng.normal(size=width).astype(np.float32), device=device)
+        variance = wp.array((rng.random(width) + 0.25).astype(np.float32), device=device)
+        inv_std = wp.array((1.0 / np.sqrt(variance.numpy() + 1.0e-5)).astype(np.float32), device=device)
+        scale = wp.array(rng.normal(size=width).astype(np.float32), device=device)
+        bias = wp.array(rng.normal(size=width).astype(np.float32), device=device)
+        old = wp.empty((rows, width), dtype=wp.float32, device=device)
+        dual = wp.empty_like(old)
+        mirror = wp.empty((rows, width), dtype=wp.float16, device=device)
+
+        wp.launch(
+            _batch_norm_inv_std_amp_kernel,
+            dim=source.shape,
+            inputs=[source, mean, inv_std, scale, bias],
+            outputs=[old],
+            device=device,
+        )
+        wp.launch(
+            _batch_norm_inv_std_amp_dual_kernel,
+            dim=source.shape,
+            inputs=[source, mean, inv_std, scale, bias, False],
+            outputs=[dual, mirror],
+            device=device,
+        )
+        np.testing.assert_array_equal(dual.numpy(), old.numpy())
+        np.testing.assert_array_equal(mirror.numpy(), old.numpy().astype(np.float16))
+
+        wp.launch(
+            _batch_norm_kernel,
+            dim=source.shape,
+            inputs=[source, mean, variance, scale, bias, 1.0e-5],
+            outputs=[old],
+            device=device,
+        )
+        wp.launch(
+            _batch_norm_amp_dual_kernel,
+            dim=source.shape,
+            inputs=[source, mean, variance, scale, bias, 1.0e-5, True],
+            outputs=[dual, mirror],
+            device=device,
+        )
+        expected = np.maximum(old.numpy(), np.float32(0.0))
+        np.testing.assert_array_equal(dual.numpy(), expected)
+        np.testing.assert_array_equal(mirror.numpy(), expected.astype(np.float16))
+
+        residual = wp.array(rng.normal(size=(rows, width)).astype(np.float32), device=device)
+        wp.launch(
+            _residual_add_mixed_f32_kernel,
+            dim=source.shape,
+            inputs=[source, residual],
+            outputs=[old],
+            device=device,
+        )
+        wp.launch(
+            _residual_add_mixed_dual_kernel,
+            dim=source.shape,
+            inputs=[source, residual],
+            outputs=[dual, mirror],
+            device=device,
+        )
+        np.testing.assert_array_equal(dual.numpy(), old.numpy())
+        np.testing.assert_array_equal(mirror.numpy(), old.numpy().astype(np.float16))
+
+        inv_rms = wp.array((rng.random(rows) + 0.5).astype(np.float32), device=device)
+        wp.launch(
+            _rms_norm_kernel,
+            dim=source.shape,
+            inputs=[residual, scale, inv_rms],
+            outputs=[old],
+            device=device,
+        )
+        wp.launch(
+            _rms_norm_dual_kernel,
+            dim=source.shape,
+            inputs=[residual, scale, inv_rms],
+            outputs=[dual, mirror],
+            device=device,
+        )
+        np.testing.assert_array_equal(dual.numpy(), old.numpy())
+        np.testing.assert_array_equal(mirror.numpy(), old.numpy().astype(np.float16))
 
     def test_amp_matches_authoritative_pytorch_stage_fixture(self) -> None:
         """Match fixed autocast values generated from FlashSAC commit 87edc906."""
