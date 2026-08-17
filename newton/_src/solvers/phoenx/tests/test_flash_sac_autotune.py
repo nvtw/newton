@@ -1,0 +1,721 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Unit tests for internal FlashSAC learning-rate autotuning."""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import warp as wp
+
+from newton._src.solvers.phoenx.benchmarks.run_flash_sac_autotune_g1 import _root_command_tracking_kernel
+from newton._src.solvers.phoenx.rl_training.flash_sac import ConfigFlashSAC, TrainerFlashSAC
+from newton._src.solvers.phoenx.rl_training.flash_sac_autotune import (
+    ConfigFlashSACLRAutotune,
+    ControllerFlashSACLRAutotune,
+)
+from newton._src.solvers.phoenx.rl_training.flash_sac_autotune_evaluation import EvaluatorPairedFlashSAC
+from newton._src.solvers.phoenx.rl_training.flash_sac_autotune_parallel import _guard_challenger_actions_kernel
+from newton._src.solvers.phoenx.rl_training.sac import BatchSAC
+from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
+
+
+class _AutotuneSmokeEnv:
+    def __init__(self, obs: wp.array2d[wp.float32], next_obs: wp.array2d[wp.float32]):
+        self.world_count = int(obs.shape[0])
+        self.obs_dim = int(obs.shape[1])
+        self.action_dim = 2
+        self.policy_action_dim = 2
+        self.device = obs.device
+        self.obs = obs
+        self._initial_obs = obs
+        self.step_next_obs = next_obs
+        self.step_terminateds = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.step_truncateds = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self._rewards = wp.ones(self.world_count, dtype=wp.float32, device=self.device)
+        self._dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+
+        self.sim_time = 0.0
+        self.config = SimpleNamespace(frame_dt=0.01)
+
+    def reset(self):
+        self.obs = self._initial_obs
+        return self.obs
+
+    def step(self, actions: wp.array2d[wp.float32]):
+        del actions
+        self.obs = self.step_next_obs
+        return self.obs, self._rewards, self._dones
+
+
+class TestFlashSACLRAutotune(unittest.TestCase):
+    """Validate deterministic, allocation-stable LR search control."""
+
+    def test_challenger_action_guard(self) -> None:
+        """Route only finite challenger actions within both divergence limits."""
+
+        device = require_cuda_graph_capture("FlashSAC challenger action guard")
+        champion_np = np.asarray([[0.0, 0.0], [0.1, -0.1], [0.2, 0.3], [-0.4, 0.2]], dtype=np.float32)
+        challenger_np = np.asarray([[0.1, -0.1], [0.3, -0.2], [1.2, 0.3], [np.nan, 0.2]], dtype=np.float32)
+        champion = wp.array(champion_np, dtype=wp.float32, device=device)
+        challenger = wp.array(challenger_np, dtype=wp.float32, device=device)
+        guarded = wp.empty_like(challenger)
+        fallbacks = wp.empty((1, 4), dtype=wp.int32, device=device)
+        wp.launch(
+            _guard_challenger_actions_kernel,
+            dim=4,
+            inputs=[champion, challenger, 0.25, 0.50, 0],
+            outputs=[guarded, fallbacks],
+            device=device,
+        )
+        expected = np.asarray(
+            [
+                challenger_np[0],
+                challenger_np[1],
+                champion_np[2],
+                champion_np[3],
+            ],
+            dtype=np.float32,
+        )
+        np.testing.assert_array_equal(guarded.numpy(), expected)
+        np.testing.assert_array_equal(fallbacks.numpy(), np.asarray([[0, 0, 1, 1]], dtype=np.int32))
+        with wp.ScopedCapture(device=device) as capture:
+            wp.launch(
+                _guard_challenger_actions_kernel,
+                dim=4,
+                inputs=[champion, challenger, 0.25, 0.50, 0],
+                outputs=[guarded, fallbacks],
+                device=device,
+            )
+        wp.capture_launch(capture.graph)
+
+    @staticmethod
+    def _make_controller(
+        device: wp.Device,
+        *,
+        autotune: ConfigFlashSACLRAutotune | None = None,
+    ) -> ControllerFlashSACLRAutotune:
+        config = ConfigFlashSAC(
+            actor_hidden_dim=4,
+            actor_num_blocks=1,
+            critic_hidden_dim=4,
+            critic_num_blocks=1,
+            distributional_atoms=5,
+            normalize_rewards=False,
+            sample_batch_size=4,
+            use_amp=True,
+            actor_lr=6.0e-4,
+            critic_lr=6.0e-4,
+            alpha_lr=6.0e-4,
+            buffer_min_length=8,
+            buffer_max_length=64,
+        )
+        trainers = tuple(
+            TrainerFlashSAC(obs_dim=3, action_dim=2, config=config, device=device, seed=431 + member)
+            for member in range(2)
+        )
+        for trainer in trainers:
+            trainer._amp_scale.assign(np.asarray([4096.0], dtype=np.float32))
+        rng = np.random.default_rng(431)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(4, 3)).astype(np.float32), device=device),
+            actions=wp.array(np.tanh(rng.normal(size=(4, 2))).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=4).astype(np.float32), device=device),
+            dones=wp.array(np.asarray([0.0, 0.0, 1.0, 0.0], dtype=np.float32), device=device),
+            next_obs=wp.array(rng.normal(size=(4, 3)).astype(np.float32), device=device),
+        )
+        return ControllerFlashSACLRAutotune(
+            trainers,
+            batch,
+            rollout_world_count=8,
+            config=autotune or ConfigFlashSACLRAutotune(evaluation_episodes=4),
+        )
+
+    @staticmethod
+    def _make_scalar_oracles(controller: ControllerFlashSACLRAutotune) -> tuple[TrainerFlashSAC, TrainerFlashSAC]:
+        oracles = tuple(
+            TrainerFlashSAC(
+                obs_dim=trainer.obs_dim,
+                action_dim=trainer.action_dim,
+                config=trainer.config,
+                device=controller.device,
+                seed=trainer.seed,
+            )
+            for trainer in controller.trainers
+        )
+        for member, oracle in enumerate(oracles):
+            oracle._amp_scale.assign(np.asarray([4096.0], dtype=np.float32))
+            oracle.set_pbt_learning_rates(*controller.member_rates[member])
+        return oracles
+
+    def _assert_population_matches_oracles(
+        self,
+        controller: ControllerFlashSACLRAutotune,
+        oracles: tuple[TrainerFlashSAC, TrainerFlashSAC],
+    ) -> None:
+        for member, (actual, expected) in enumerate(zip(controller.trainers, oracles, strict=True)):
+            for network_name, actual_network, expected_network in (
+                ("actor", actual.actor.net, expected.actor.net),
+                ("critic1", actual.critic1, expected.critic1),
+                ("critic2", actual.critic2, expected.critic2),
+                ("target1", actual.target_critic1, expected.target_critic1),
+                ("target2", actual.target_critic2, expected.target_critic2),
+            ):
+                for state_index, (actual_state, expected_state) in enumerate(
+                    zip(actual_network.state_arrays(), expected_network.state_arrays(), strict=True)
+                ):
+                    np.testing.assert_allclose(
+                        actual_state.numpy(),
+                        expected_state.numpy(),
+                        rtol=1.0e-2,
+                        # FP16 population kernels use a batched reduction layout; the observed
+                        # four-step worst case is a 6.72e-5 BatchNorm bias delta.
+                        atol=1.0e-5 if network_name == "actor" else 1.0e-4,
+                        err_msg=f"member={member} network={network_name} state={state_index}",
+                    )
+            np.testing.assert_allclose(actual.log_alpha.numpy(), expected.log_alpha.numpy(), rtol=1.0e-2, atol=1.0e-6)
+            np.testing.assert_array_equal(actual._amp_scale.numpy(), expected._amp_scale.numpy())
+            np.testing.assert_array_equal(actual._amp_growth_tracker.numpy(), expected._amp_growth_tracker.numpy())
+            self.assertEqual(actual._gradient_update_count, expected._gradient_update_count)
+            self.assertEqual(actual._update_count, expected._update_count)
+            for optimizer_index, (actual_optimizer, expected_optimizer) in enumerate(
+                (
+                    (actual.actor_optimizer, expected.actor_optimizer),
+                    (actual.critic1_optimizer, expected.critic1_optimizer),
+                    (actual.critic2_optimizer, expected.critic2_optimizer),
+                    (actual.alpha_optimizer, expected.alpha_optimizer),
+                )
+            ):
+                self.assertEqual(actual_optimizer.step_count, expected_optimizer.step_count)
+                np.testing.assert_allclose(actual_optimizer.lr_scale.numpy(), expected_optimizer.lr_scale.numpy())
+                np.testing.assert_allclose(
+                    actual_optimizer.pbt_lr_scale.numpy(), expected_optimizer.pbt_lr_scale.numpy()
+                )
+                for actual_moment, expected_moment in zip(
+                    actual_optimizer.m + actual_optimizer.v,
+                    expected_optimizer.m + expected_optimizer.v,
+                    strict=True,
+                ):
+                    actual_values = actual_moment.numpy()
+                    expected_values = expected_moment.numpy()
+                    significant = np.abs(expected_values) > 2.0e-4
+                    self.assertTrue(
+                        np.all(actual_values[significant] * expected_values[significant] >= 0.0),
+                        msg=f"member={member} optimizer={optimizer_index} moment sign",
+                    )
+                    np.testing.assert_allclose(
+                        actual_values,
+                        expected_values,
+                        rtol=3.5e-1,
+                        # Near-zero actor moments expose the FP16 batched-reduction layout;
+                        # the sign guard above rejects the Adam sign-flip failure mode.
+                        atol=2.0e-4 if optimizer_index == 0 else 5.0e-5,
+                        err_msg=f"member={member} optimizer={optimizer_index}",
+                    )
+
+    @staticmethod
+    def _actor_state(trainer: TrainerFlashSAC) -> tuple[np.ndarray, ...]:
+        return tuple(
+            value.numpy().copy()
+            for value in (
+                *trainer.actor.net.state_arrays(),
+                trainer.log_alpha,
+                *trainer.actor_optimizer.m,
+                trainer.actor.log_std,
+                trainer._alpha,
+                *trainer.actor_optimizer.v,
+                trainer.actor_optimizer._step_count,
+                *trainer.alpha_optimizer.m,
+                *trainer.alpha_optimizer.v,
+                trainer.alpha_optimizer._step_count,
+                trainer._amp_scale,
+            )
+        )
+
+    @staticmethod
+    def _critic_state(trainer: TrainerFlashSAC) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
+        online = tuple(
+            value.numpy().copy() for network in (trainer.critic1, trainer.critic2) for value in network.state_arrays()
+        )
+        targets = tuple(
+            value.numpy().copy()
+            for network in (trainer.target_critic1, trainer.target_critic2)
+            for value in network.state_arrays()
+        )
+        return online, targets
+
+    def test_captured_population_respects_policy_frequency(self) -> None:
+        """Match four alternating P2 graph updates to two scalar trainers."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune policy cadence")
+        controller = self._make_controller(device)
+        oracles = self._make_scalar_oracles(controller)
+        seed = 953
+        controller.capture(seed=seed)
+        previous_actor_state: tuple[tuple[np.ndarray, ...], ...] | None = None
+        previous_critic_state = tuple(self._critic_state(trainer) for trainer in controller.trainers)
+        previous_critic_steps = tuple(oracle.critic1_optimizer.step_count for oracle in oracles)
+        for step in range(4):
+            for member, oracle in enumerate(oracles):
+                oracle.update(controller.batch, seed=seed + member + step * 9973, read_stats=False)
+            controller.launch()
+            with self.subTest(step=step):
+                self._assert_population_matches_oracles(controller, oracles)
+            np.testing.assert_array_equal(
+                controller.population.scalar_state["_device_update_seed"].numpy()[:, 0],
+                np.asarray([seed + step * 9973, seed + 1 + step * 9973], dtype=np.int32),
+            )
+            actor_state = tuple(self._actor_state(trainer) for trainer in controller.trainers)
+            critic_steps = tuple(trainer.critic1_optimizer.step_count for trainer in controller.trainers)
+            critic_state = tuple(self._critic_state(trainer) for trainer in controller.trainers)
+            for (online, targets), (previous_online, previous_targets) in zip(
+                critic_state, previous_critic_state, strict=True
+            ):
+                self.assertTrue(
+                    any(
+                        not np.array_equal(actual, previous)
+                        for actual, previous in zip(online, previous_online, strict=False)
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        not np.array_equal(actual, previous)
+                        for actual, previous in zip(targets, previous_targets, strict=False)
+                    )
+                )
+            self.assertEqual(critic_steps, tuple(value + 1 for value in previous_critic_steps))
+            if step % 2 == 1:
+                assert previous_actor_state is not None
+                for actual_member, previous_member in zip(actor_state, previous_actor_state, strict=True):
+                    for actual, previous in zip(actual_member, previous_member, strict=True):
+                        np.testing.assert_array_equal(actual, previous)
+            previous_actor_state = actor_state
+            previous_critic_steps = critic_steps
+            previous_critic_state = critic_state
+
+    def test_round_robin_proposals_promote_with_hysteresis(self) -> None:
+        """Promote only after repeated paired wins and continue the successful direction."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune hysteresis")
+        controller = self._make_controller(
+            device,
+            autotune=ConfigFlashSACLRAutotune(
+                evaluation_episodes=4,
+                promotion_windows=2,
+                improvement_margin=0.01,
+            ),
+        )
+        np.testing.assert_allclose(controller.member_rates[1], controller.default_rates * 1.5)
+        actor_state = controller.population.actors.population_state_arrays()[0]
+        values = actor_state.numpy()
+        values[1] = values[1] + np.float32(0.125)
+        actor_state.assign(values)
+        champion = np.asarray([1.0, 1.1, 0.9, 1.0], dtype=np.float32)
+        challenger = champion + np.float32(0.02)
+        first = controller.evaluate_paired(champion, challenger)
+        self.assertEqual(first.action, "continue")
+        self.assertEqual(first.consecutive_wins, 1)
+        second = controller.evaluate_paired(champion, challenger)
+        self.assertEqual(second.action, "promote")
+        np.testing.assert_array_equal(actor_state.numpy()[0], actor_state.numpy()[1])
+        self.assertTrue(np.all(controller.member_rates[1] > controller.member_rates[0]))
+        np.testing.assert_allclose(controller.member_rates[1], controller.default_rates * 2.0)
+        self.assertTrue(controller.best_valid)
+        self.assertEqual(controller.best_member, 1)
+        self.assertAlmostEqual(controller.best_score, float(np.mean(challenger)), places=6)
+        np.testing.assert_allclose(controller.best_rates, controller.default_rates * 1.5)
+
+        promoted = actor_state.numpy()
+        promoted[0] += np.float32(0.25)
+        actor_state.assign(promoted)
+        improved = champion + np.float32(0.30)
+        inferior = champion
+        controller.evaluate_paired(improved, inferior)
+        controller.evaluate_paired(improved, inferior)
+        self.assertEqual(controller.best_member, 0)
+        self.assertAlmostEqual(controller.best_score, float(np.mean(improved)), places=6)
+        confirmed_actor = tuple(
+            value.numpy()[0].copy() for value in controller.population.actors.population_state_arrays()
+        )
+
+        degraded = actor_state.numpy()
+        degraded[0] += np.float32(0.50)
+        actor_state.assign(degraded)
+        controller.finalize_best()
+        self.assertTrue(controller.converged)
+        for population_state, expected in zip(
+            controller.population.actors.population_state_arrays(), confirmed_actor, strict=True
+        ):
+            np.testing.assert_array_equal(population_state.numpy()[0], expected)
+            np.testing.assert_array_equal(population_state.numpy()[1], expected)
+
+    def test_rejected_proposal_reverses_then_advances_coordinate(self) -> None:
+        """Reverse and shrink a rejected bracket before advancing its coordinate."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune bracket")
+        controller = self._make_controller(device)
+        scores = np.ones(4, dtype=np.float32)
+        self.assertEqual(controller.evaluate_paired(scores, scores).action, "reject")
+        np.testing.assert_allclose(
+            controller.member_rates[1], controller.default_rates / controller.perturbation_factor
+        )
+        self.assertEqual(controller.evaluate_paired(scores, scores).action, "reject")
+        changed = controller.member_rates[1] != controller.member_rates[0]
+        self.assertEqual(int(np.count_nonzero(changed)), 1)
+        self.assertTrue(changed[0])
+
+    def test_best_snapshot_rolls_back_transient_quality_collapse(self) -> None:
+        """Restore the repeated best policy after live training regresses."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune best rollback")
+        controller = self._make_controller(
+            device,
+            autotune=ConfigFlashSACLRAutotune(evaluation_episodes=4, promotion_windows=2),
+        )
+        stable = np.full(4, 0.5, dtype=np.float32)
+        controller.evaluate_paired(stable, stable, champion_termination_rate=0.0, challenger_termination_rate=0.0)
+        controller.evaluate_paired(stable, stable, champion_termination_rate=0.0, challenger_termination_rate=0.0)
+        self.assertTrue(controller.best_valid)
+        best_actor = tuple(value.numpy().copy() for value in controller.single_trainer.actor.net.state_arrays())
+        champion_actor = controller.population.actors.population_state_arrays()[0]
+        changed = champion_actor.numpy()
+        changed[0] += np.float32(0.25)
+        champion_actor.assign(changed)
+        collapsed = np.full(4, 0.1, dtype=np.float32)
+        result = controller.evaluate_paired(
+            collapsed,
+            collapsed,
+            champion_termination_rate=1.0,
+            challenger_termination_rate=1.0,
+        )
+        self.assertEqual(result.action, "rollback")
+        for population_state, expected in zip(
+            controller.population.actors.population_state_arrays(), best_actor, strict=True
+        ):
+            np.testing.assert_array_equal(population_state.numpy()[0], expected)
+        np.testing.assert_array_equal(controller.member_rates[0], controller.best_rates)
+
+    def test_split_rollout_routes_safely(self) -> None:
+        """Route challenger worlds and immediately fall back after an unsafe gate."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune split rollout")
+        controller = self._make_controller(device)
+        champion = wp.zeros((8, 2), dtype=wp.float32, device=device)
+        challenger = wp.ones((8, 2), dtype=wp.float32, device=device)
+        routed = controller.route_split_actions(champion, challenger).numpy()
+        np.testing.assert_array_equal(routed[: controller.champion_worlds], 0.0)
+        np.testing.assert_array_equal(routed[controller.champion_worlds :], 1.0)
+        scores = np.ones(4, dtype=np.float32)
+        result = controller.evaluate_paired(scores, scores, challenger_safe=False)
+        self.assertEqual(result.action, "safety_fallback")
+        np.testing.assert_array_equal(controller.route_split_actions(champion, challenger).numpy(), 0.0)
+        controller.begin_search_window()
+        np.testing.assert_array_equal(
+            controller.route_split_actions(champion, challenger).numpy()[controller.champion_worlds :], 1.0
+        )
+
+    def test_relative_termination_safety_allows_equal_early_failures(self) -> None:
+        """Compare challenger falls to the paired champion instead of an absolute gate."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune relative safety")
+        scores = np.ones(4, dtype=np.float32)
+        equal = self._make_controller(device)
+        result = equal.evaluate_paired(
+            scores,
+            scores,
+            champion_termination_rate=0.75,
+            challenger_termination_rate=0.75,
+        )
+        self.assertEqual(result.action, "reject")
+        worse = self._make_controller(device)
+        result = worse.evaluate_paired(
+            scores,
+            scores,
+            champion_termination_rate=0.25,
+            challenger_termination_rate=0.50,
+        )
+        self.assertEqual(result.action, "safety_fallback")
+
+    def test_captured_population_converges_to_preallocated_single(self) -> None:
+        """Replay fixed graphs, preserve pointers, and switch to the setup-owned P1 trainer."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune capture")
+        controller = self._make_controller(
+            device,
+            autotune=ConfigFlashSACLRAutotune(
+                evaluation_episodes=4,
+                convergence_windows=2,
+                promotion_windows=2,
+                minimum_search_windows=2,
+            ),
+        )
+        pointers = tuple(int(value.ptr) for value in controller.state_arrays())
+        controller.capture(seed=719)
+        controller.launch()
+        controller.launch()
+        scores = np.ones(4, dtype=np.float32)
+        self.assertEqual(controller.evaluate_paired(scores, scores - np.float32(0.1)).action, "reject")
+        self.assertEqual(controller.evaluate_paired(scores, scores - np.float32(0.1)).action, "converge")
+        self.assertFalse(controller.population_active)
+        controller.launch()
+        controller.launch()
+        self.assertEqual(pointers, tuple(int(value.ptr) for value in controller.state_arrays()))
+        self.assertEqual(controller.single_trainer._update_count, controller.trainers[0]._update_count + 2)
+
+    def test_checkpoint_restores_search_and_learner_state(self) -> None:
+        """Restore controller, population members, and the preallocated P1 state."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune checkpoint")
+        controller = self._make_controller(device)
+        scores = np.ones(4, dtype=np.float32)
+        controller.evaluate_paired(scores, scores + np.float32(0.02))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "search.npz"
+            controller.save_checkpoint(path)
+            restored = ControllerFlashSACLRAutotune.load_checkpoint(path, controller.batch, device=device)
+        np.testing.assert_array_equal(restored.member_rates, controller.member_rates)
+        self.assertEqual(restored.search_round, controller.search_round)
+        self.assertEqual(restored.consecutive_wins, controller.consecutive_wins)
+        self.assertEqual(restored.evaluation_count, controller.evaluation_count)
+        self.assertEqual(restored.best_member, controller.best_member)
+        self.assertEqual(restored._best_candidate_member, controller._best_candidate_member)
+        for actual, expected in zip(
+            restored.population.state_arrays(), controller.population.state_arrays(), strict=True
+        ):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+    def test_overlap_uses_shared_batches_and_switches_to_p1(self) -> None:
+        """Overlap split rollout with shared-batch P2 updates and converged P1 updates."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune overlap")
+        controller = self._make_controller(
+            device,
+            autotune=ConfigFlashSACLRAutotune(evaluation_episodes=4, convergence_windows=2, minimum_search_windows=2),
+        )
+        rng = np.random.default_rng(811)
+        oracles = self._make_scalar_oracles(controller)
+        controller.population.scaler.scale.assign(np.asarray([16.0, 16.0], dtype=np.float32))
+        for oracle in oracles:
+            oracle._amp_scale.assign(np.asarray([16.0], dtype=np.float32))
+        obs = wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device)
+        next_obs = wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device)
+        env = _AutotuneSmokeEnv(obs, next_obs)
+        replay = controller.trainers[0].initialize_replay_buffer()
+        replay.reserve_graph_buffers(env.world_count)
+        replay.add_batch_graph(
+            obs,
+            wp.zeros((8, 2), dtype=wp.float32, device=device),
+            wp.ones(8, dtype=wp.float32, device=device),
+            wp.zeros(8, dtype=wp.float32, device=device),
+            next_obs,
+            truncateds=wp.zeros(8, dtype=wp.float32, device=device),
+        )
+        replay.advance_graph_host_state()
+        wp.synchronize_device(device)
+        pointers = tuple(int(value.ptr) for value in controller.state_arrays())
+        initial_replay_size = replay.size
+        graph = controller.capture_overlap(
+            env,
+            replay,
+            updates_per_step=1,
+            interactions_per_launch=2,
+            seed=811,
+            population_backend="fused",
+        )
+        self.addCleanup(graph.close)
+        self.assertIsNotNone(graph.phase_batches)
+        for launch_index in range(2):
+            assert graph.phase_batches is not None
+            for update_index, batch in enumerate(graph.phase_batches[graph.phase]):
+                batch_arrays = (batch.obs, batch.actions, batch.rewards, batch.dones, batch.next_obs)
+                batch_pointers = tuple(int(value.ptr) for value in batch_arrays)
+                batch_values = tuple(value.numpy().copy() for value in batch_arrays)
+                step = launch_index * graph.updates_per_launch + update_index
+                for member, oracle in enumerate(oracles):
+                    actor_step_before = oracle.actor_optimizer.step_count
+                    oracle.update(batch, seed=811 + member + step * 9973, read_stats=False)
+                    expected_delta = int(step % int(oracle.config.policy_frequency) == 0)
+                    self.assertEqual(oracle.actor_optimizer.step_count, actor_step_before + expected_delta)
+                self.assertEqual(batch_pointers, tuple(int(value.ptr) for value in batch_arrays))
+                for before, value in zip(batch_values, batch_arrays, strict=True):
+                    np.testing.assert_array_equal(value.numpy(), before)
+
+            wp.synchronize_device(device)
+            graph.launch()
+            graph.synchronize()
+            np.testing.assert_array_equal(controller.population._actor_found_inf.numpy(), 0)
+            np.testing.assert_array_equal(
+                controller.population.scalar_state["_device_update_count"].numpy()[:, 0],
+                np.asarray([2 * (launch_index + 1), 2 * (launch_index + 1)], dtype=np.int32),
+            )
+            np.testing.assert_array_equal(controller.population._actor_step_condition.numpy(), 1)
+            self.assertEqual(
+                tuple(trainer.actor_optimizer.step_count for trainer in controller.trainers),
+                (launch_index + 1, launch_index + 1),
+            )
+            expected_size = min(initial_replay_size + env.world_count * 2 * (launch_index + 1), replay.capacity)
+            self.assertEqual(replay.size, expected_size)
+            self.assertAlmostEqual(env.sim_time, 0.02 * (launch_index + 1))
+            with self.subTest(launch_index=launch_index):
+                self._assert_population_matches_oracles(controller, oracles)
+        self.assertEqual(controller.trainers[0]._update_count, 4)
+        self.assertEqual(controller.trainers[1]._update_count, 4)
+        scores = np.ones(4, dtype=np.float32)
+        controller.evaluate_paired(scores, scores - np.float32(0.1))
+        controller.evaluate_paired(scores, scores - np.float32(0.1))
+        single_before = controller.single_trainer._update_count
+        graph.launch()
+        graph.launch()
+        graph.synchronize()
+        self.assertEqual(controller.single_trainer._update_count, single_before + 4)
+        self.assertEqual(pointers, tuple(int(value.ptr) for value in controller.state_arrays()))
+        graph.close()
+
+    def test_parallel_overlap_matches_two_exact_scalar_trainers(self) -> None:
+        """Match parallel member graphs to exact scalar learners on shared batches."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune parallel overlap")
+        controller = self._make_controller(device)
+        oracles = self._make_scalar_oracles(controller)
+        obs = wp.zeros((8, 3), dtype=wp.float32, device=device)
+        next_obs = wp.ones((8, 3), dtype=wp.float32, device=device)
+        env = _AutotuneSmokeEnv(obs, next_obs)
+        replay = controller.trainers[0].initialize_replay_buffer()
+        replay.reserve_graph_buffers(env.world_count)
+        replay.add_batch_graph(
+            obs,
+            wp.zeros((8, 2), dtype=wp.float32, device=device),
+            wp.ones(8, dtype=wp.float32, device=device),
+            wp.zeros(8, dtype=wp.float32, device=device),
+            next_obs,
+            truncateds=wp.zeros(8, dtype=wp.float32, device=device),
+        )
+        replay.advance_graph_host_state()
+        graph = controller.capture_overlap(
+            env,
+            replay,
+            updates_per_step=1,
+            interactions_per_launch=2,
+            seed=977,
+            population_backend="parallel",
+        )
+        self.addCleanup(graph.close)
+        pointers = tuple(
+            int(value.ptr)
+            for trainer in graph.trainers
+            for network in (trainer.actor.net, trainer.critic1, trainer.critic2)
+            for value in network.state_arrays()
+        )
+        for launch_index in range(2):
+            assert graph.phase_batches is not None
+            for update_index, batch in enumerate(graph.phase_batches[graph.phase]):
+                step = launch_index * graph.updates_per_launch + update_index
+                batch_arrays = (batch.obs, batch.actions, batch.rewards, batch.dones, batch.next_obs)
+                batch_values = tuple(value.numpy().copy() for value in batch_arrays)
+                for member, oracle in enumerate(oracles):
+                    oracle.update(batch, seed=977 + member + step * 9973, read_stats=False)
+                for before, value in zip(batch_values, batch_arrays, strict=True):
+                    np.testing.assert_array_equal(value.numpy(), before)
+            graph.launch()
+            graph.synchronize()
+            for actual, expected in zip(graph.trainers, oracles, strict=True):
+                for actual_network, expected_network in (
+                    (actual.actor.net, expected.actor.net),
+                    (actual.critic1, expected.critic1),
+                    (actual.critic2, expected.critic2),
+                    (actual.target_critic1, expected.target_critic1),
+                    (actual.target_critic2, expected.target_critic2),
+                ):
+                    for actual_state, expected_state in zip(
+                        actual_network.state_arrays(), expected_network.state_arrays(), strict=True
+                    ):
+                        np.testing.assert_allclose(
+                            actual_state.numpy(), expected_state.numpy(), rtol=1.0e-6, atol=1.0e-7
+                        )
+                self.assertEqual(actual.actor_optimizer.step_count, expected.actor_optimizer.step_count)
+                self.assertEqual(actual.critic1_optimizer.step_count, expected.critic1_optimizer.step_count)
+                np.testing.assert_array_equal(actual._amp_scale.numpy(), expected._amp_scale.numpy())
+        self.assertEqual(
+            pointers,
+            tuple(
+                int(value.ptr)
+                for trainer in graph.trainers
+                for network in (trainer.actor.net, trainer.critic1, trainer.critic2)
+                for value in network.state_arrays()
+            ),
+        )
+        scores = np.ones(4, dtype=np.float32)
+        result = graph.evaluate_paired(scores, scores)
+        self.assertEqual(result.action, "reject")
+        self.assertAlmostEqual(env.sim_time, 0.04)
+
+    def test_captured_paired_evaluation_is_isolated_and_deterministic(self) -> None:
+        """Evaluate identical policies with paired seeds without mutating training state."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune paired evaluation")
+        controller = self._make_controller(device)
+        obs = wp.zeros((4, 3), dtype=wp.float32, device=device)
+        next_obs = wp.ones((4, 3), dtype=wp.float32, device=device)
+        envs = (_AutotuneSmokeEnv(obs, next_obs), _AutotuneSmokeEnv(obs, next_obs))
+        evaluator = EvaluatorPairedFlashSAC(controller.trainers, envs, horizon_steps=3, seed=991)
+        before = tuple(
+            value.numpy().copy()
+            for trainer in controller.trainers
+            for network in (trainer.actor.net, trainer.critic1, trainer.critic2)
+            for value in network.state_arrays()
+        )
+        (
+            champion,
+            challenger,
+            champion_finite,
+            challenger_finite,
+            champion_termination_rate,
+            challenger_termination_rate,
+        ) = evaluator.evaluate(controller.trainers)
+        np.testing.assert_array_equal(champion, challenger)
+        self.assertTrue(champion_finite)
+        self.assertTrue(challenger_finite)
+        self.assertEqual(champion_termination_rate, 0.0)
+        self.assertEqual(challenger_termination_rate, 0.0)
+        after = tuple(
+            value.numpy()
+            for trainer in controller.trainers
+            for network in (trainer.actor.net, trainer.critic1, trainer.critic2)
+            for value in network.state_arrays()
+        )
+        for expected, actual in zip(before, after, strict=True):
+            np.testing.assert_array_equal(actual, expected)
+
+    def test_g1_command_tracking_gives_standstill_zero_credit(self) -> None:
+        """Give zero score at standstill and full score at the commanded speed."""
+
+        device = require_cuda_graph_capture("FlashSAC G1 command tracking")
+        joint_q = np.zeros((2, 7), dtype=np.float32)
+        joint_q[:, 6] = 1.0
+        joint_qd = np.zeros((2, 6), dtype=np.float32)
+        joint_qd[1, 0] = 0.8
+        scores = wp.empty(2, dtype=wp.float32, device=device)
+        wp.launch(
+            _root_command_tracking_kernel,
+            dim=2,
+            inputs=[
+                wp.array(joint_q.reshape(-1), device=device),
+                wp.array(joint_qd.reshape(-1), device=device),
+                wp.ones(2, dtype=wp.float32, device=device),
+                7,
+                6,
+                0.8,
+            ],
+            outputs=[scores],
+            device=device,
+        )
+        np.testing.assert_allclose(scores.numpy(), [0.0, 1.0], atol=1.0e-6)
+
+
+if __name__ == "__main__":
+    unittest.main()

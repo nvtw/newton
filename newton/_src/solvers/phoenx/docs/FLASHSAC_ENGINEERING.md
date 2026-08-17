@@ -309,40 +309,88 @@ density would need to reduce updates-to-gate by at least 12 and 24 percent just
 to break even.  The batch-4,096 quality run reduced updates-to-gate by only
 about three percent, so these intermediate batches were not quality-run.
 
-### Rejected champion/challenger execution layouts
+### Champion/challenger execution layouts
 
-A two-learner online tuning prototype used one shared replay and identical
-persistent sampled batches.  At 2,048 worlds, the tuned single learner measured
-12.664 ms per cadence.  Sequential champion/challenger updates with partitioned
-rollout measured 23.802 ms (1.879x).  Independent learner CUDA streams reduced
-this to 19.647 ms (1.595x), compared with a same-process single baseline of
-12.321 ms.  Both layouts were rejected before public integration: the latter
-saves about 20 percent relative to two separate cadences but remains too costly
-for continuous tuning.  The retained prerequisites are graph-safe optimizer
-rate mutation and allocation-stable learner state copying.  The next design
-must population-batch actors and critics rather than launch two trainer graphs.
+The retained bounded search uses one shared replay and identical setup-owned sampled
+batches for both learners. In the production-shaped 2,048-world benchmark, the
+normal overlapped P1 path measured 335.9k transitions/s. Two independent learner
+streams measured 210.9k transitions/s, or 1.593x the P1 cost, while remaining
+about eight percent faster end-to-end than the fused population backend on this
+GPU. Once search converges, the controller returns to the preallocated P1 graph
+and recovers full single-learner throughput. The independent-stream backend is
+therefore retained for bounded, coarse-cadence search rather than rejected as a
+continuous execution layout.
 
-### Population-network foundation
+### Population training foundation
 
-The retained network foundation population-stacks arbitrary compatible
-reference actors or critics, including a P=1 specialization boundary. All
-forward/backward activation, reduction, and AMP mirror storage is reserved
-before capture and retains stable pointers across repeated graph replay.
-Per-member BatchNorm affine and running state remain logical checkpoint views
-over contiguous population storage.
+The population implementation stacks arbitrary compatible actors and critics and
+owns all optimizer moments, AMP scaler/overflow state, online and target
+parameters, scalar counters, and update workspaces at setup. Forward/backward
+activation, reduction, and AMP mirror storage retains stable addresses across
+CUDA graph replay. Per-member BatchNorm affine and running state remain logical
+checkpoint views over contiguous population storage.
 
-At batch 2,048, two captured actor networks measured 0.421-0.422 ms versus
-0.467-0.469 ms for separate networks (1.108-1.112x). Four captured critics
-measured 3.104-3.148 ms versus 3.300-3.311 ms (1.052-1.063x). Segmented AMP
-BatchNorm moments and affine gradients match independent member reductions
-bit-for-bit, including a width-99 tail. Whole-network tests retain the existing
-input/master-gradient cosine and relative-error gates; each staged GEMM is
-allowed one local FP16 ULP, with an explicit bounded allowance for compounding
-through residual, normalization, and head stages.
+P2 fused updates preserve the scalar FlashSAC order: actor, deterministic
+temperature, distributional critic, and parameter-only target EMA. Per-member
+seeds, scaler decisions, overflow skips, optimizer state, and policy-frequency
+cadence are deterministic. Repeated independent allocations produce bitwise
+identical P2 state, while the scalar oracle bounds the expected FP16 batched-GEMM
+layout difference.
 
-This is a network-only prerequisite, not a public autotuner. Population-batched
-optimizer, target/scaler state, replay-source trust guards, evaluation, and
-promotion remain future work.
+At batch 2,048, the complete fused P2 micro-update measured 2.165 ms versus
+2.298 ms for two scalar updates. The larger production overlap benchmark favored
+two independent learner streams by about eight percent because concurrent exact
+scalar graphs overlap better with rollout on this GPU. The fused implementation
+remains useful as a deterministic population primitive; backend selection must
+be based on full end-to-end cadence rather than the isolated update microbenchmark.
+
+### Bounded automatic learning-rate search
+
+The LR controller starts from reliable configured actor, critic, and temperature
+rates and applies deterministic bounded log-space proposals. It first probes a
+linked rate, then explores individual coordinates. Both members consume the
+same sampled batch, so paired differences are not replay-sampling noise. Search
+uses 10 percent of rollout worlds for the challenger and 90 percent for the
+champion, with all storage allocated before capture.
+
+A device-side per-world guard evaluates champion and challenger actions using
+the same exploration seed. Challenger actions are used only when both policies
+are finite and their RMS and maximum action differences stay within configured
+bounds; otherwise the champion action is routed and the fallback is counted.
+This protects shared replay from an immature challenger without adding host
+synchronization to the steady-state captured path.
+
+Paired policy evaluation runs in isolated held-out G1 environments with identical
+commands, seeds, and reset state. The device objective multiplies upright/alive
+tracking success by nonnegative command-aligned velocity normalized to the fixed
+0.8 m/s command, so standing still scores exactly zero. Nonfinite state is always
+unsafe. Early falls use relative paired safety, allowing equally immature
+policies to remain comparable while rejecting a challenger whose fall rate is
+worse than the champion beyond a small margin.
+
+Promotion and best-state updates require repeated windows. Candidate evidence
+tracks the actual superior member before promotion or reset, including its exact
+optimizer, AMP, target, and rate state. A setup-owned frozen best snapshot
+supports rollback after live regression. Bounded quality proofs finalize with
+the repeatedly confirmed best, restore it into the active P1 learner, and
+evaluate that restored state. A one-window live-policy finalization exists only
+as an explicit diagnostic mode.
+
+Two measurement pitfalls materially changed the apparent result. A benchmark
+replay configuration with a roughly 2k-item warmup and 16k capacity failed even
+for the known-good fixed-rate control; the production quality protocol requires
+a 100,000-item warmup and 10,000,000-item capacity. An earlier shaped/Gaussian
+score also rewarded standing. Neither setup is valid evidence for locomotion
+learning or search quality.
+
+Starting all three rates at 3e-4, the confirmed discovery run processed 18.022M
+transitions. It promoted the temperature rate to 3.200226e-4 and subsequently
+confirmed 3.413815e-4. The restored best achieved objective 0.872365, mean
+command-aligned velocity 0.843517 m/s, and zero falls at 198.2k transitions/s.
+This supports the narrow claim that bounded coordinate search discovered a
+useful temperature-rate improvement while preserving learning from a safe
+default. It does not establish a global optimum or show that this run discovered
+the separately validated linked 6e-4 G1 recipe.
 
 ## Reproducible quality evidence
 

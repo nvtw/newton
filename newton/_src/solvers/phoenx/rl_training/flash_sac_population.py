@@ -1066,6 +1066,160 @@ class StateFlashSACPopulation:
             device=self.device,
         )
 
+    def _fused_critic_only_update_operations(self, batch: BatchSAC, *, read_stats: bool) -> None:
+        """Record one population critic-only update for policy-frequency cadence."""
+
+        first = self.trainers[0]
+        config = first.config
+        population = self.population_count
+        batch_size = self._update_batch_size
+        atoms = int(config.distributional_atoms)
+        wp.launch(
+            _population_prepare_update_kernel,
+            dim=population,
+            inputs=[
+                self.scalar_state["_device_gradient_update_count"],
+                self.scalar_state["_device_update_count"],
+                self._seed_base,
+                int(config.learning_rate_warmup_steps),
+                int(config.learning_rate_decay_steps),
+                float(config.actor_lr),
+                float(config.learning_rate_end),
+                float(self.actor_optimizer.lr),
+                float(self.critic_optimizer.lr),
+                float(self.alpha_optimizer.lr),
+            ],
+            outputs=[
+                self.scalar_state["_device_update_seed"],
+                self.actor_optimizer.lr_scale,
+                self.critic_optimizer.lr_scale,
+                self.alpha_optimizer.lr_scale,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _concat_population_actor_observations_kernel,
+            dim=self._actor_observations.shape,
+            inputs=[batch.obs, batch.next_obs, batch_size],
+            outputs=[self._actor_observations],
+            device=self.device,
+        )
+        policy_out = self.actors.forward_all(self._actor_observations, training=False)
+        wp.launch(
+            _population_fill_eps_kernel,
+            dim=self._next_eps.shape,
+            inputs=[self.scalar_state["_device_update_seed"], 2],
+            outputs=[self._next_eps],
+            device=self.device,
+        )
+        wp.launch(
+            _population_sample_actions_kernel,
+            dim=(population, batch_size),
+            inputs=[
+                policy_out,
+                batch_size,
+                self._next_eps,
+                first.action_dim,
+                first.actor.log_std_min,
+                first.actor.log_std_max,
+            ],
+            outputs=[self._next_actions, self._next_log_probs],
+            device=self.device,
+        )
+        wp.launch(
+            _population_training_q_input_kernel,
+            dim=self._q_inputs.shape,
+            inputs=[
+                batch.obs,
+                batch.actions,
+                batch.next_obs,
+                self._next_actions,
+                first.obs_dim,
+                batch_size,
+            ],
+            outputs=[self._q_inputs],
+            device=self.device,
+        )
+        target_logits = self.target_critics.forward_all(self._q_inputs, training=True)
+        critic_logits = self.critics.forward_all_manual(self._q_inputs, training=True)
+        wp.launch(
+            _population_distributional_projection_kernel,
+            dim=(population, batch_size, atoms),
+            inputs=[
+                batch.rewards,
+                batch.dones,
+                target_logits,
+                self._next_log_probs,
+                self.scalar_state["_alpha"],
+                float(config.gamma**config.n_step),
+                batch_size,
+                atoms,
+                float(config.distributional_v_min),
+                float(config.distributional_v_max),
+                bool(config.distributional_min_target),
+            ],
+            outputs=[self._target_distributions],
+            device=self.device,
+        )
+        wp.launch(
+            _population_critic_loss_backward_kernel,
+            dim=self._q_output_grads.shape,
+            inputs=[
+                critic_logits,
+                self._target_distributions,
+                self.scaler.scale,
+                batch_size,
+                atoms,
+            ],
+            outputs=[self._q_output_grads],
+            device=self.device,
+        )
+        if read_stats:
+            wp.launch(
+                _population_critic_loss_kernel,
+                dim=population,
+                inputs=[critic_logits, self._target_distributions, batch_size, atoms],
+                outputs=[self.critic_loss],
+                device=self.device,
+            )
+        self.scaler.reset_found_inf()
+        self.critics.backward_all_manual(self._q_output_grads)
+        self._unscale_population_parameters(
+            self._critic_parameter_grads,
+            members_per_scale=2,
+            parameter_flags=self._critic_param_found_inf,
+            parameter_flag_views=self._critic_param_found_inf_views,
+        )
+        self.scaler.update()
+        self.sync_critic_step_condition()
+        self.critic_optimizer.step()
+        self._normalize_population_networks(self.critics.networks)
+        self.critics.refresh_contraction_weights()
+        self.soft_update_targets(float(config.tau))
+        wp.launch(
+            _population_increment_counters_kernel,
+            dim=population,
+            inputs=[
+                self.scalar_state["_device_gradient_update_count"],
+                self.scalar_state["_device_update_count"],
+            ],
+            device=self.device,
+        )
+
+    def capture_fused_critic_update(self, batch: BatchSAC, *, seed: int) -> object:
+        """Capture one fixed-address critic-only population update."""
+
+        self._validate_fused_batch(batch)
+        self._seed_base.assign(
+            np.asarray([int(seed) + member for member in range(self.population_count)], dtype=np.int32)
+        )
+        pointers = tuple(array.ptr for array in (*self.state_arrays(), *self.update_buffer_arrays()))
+        with wp.ScopedCapture(device=self.device) as capture:
+            self._fused_critic_only_update_operations(batch, read_stats=False)
+        if pointers != tuple(array.ptr for array in (*self.state_arrays(), *self.update_buffer_arrays())):
+            raise RuntimeError("Population critic capture changed a setup-owned array address")
+        return capture.graph
+
     def update_all_fused(self, batch: BatchSAC, *, seed: int, read_stats: bool = True) -> tuple[StatsSACUpdate, ...]:
         """Run one allocation-stable population update, specializing P=1 to the scalar path."""
 

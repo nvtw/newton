@@ -959,8 +959,16 @@ class TrainerFlashSAC(TrainerSAC):
         self._noise_rng.bit_generator.state = json.loads(json.dumps(source._noise_rng.bit_generator.state))
         if isinstance(self.actor.net, NetworkFlashSAC):
             self.actor.net.refresh_contraction_weights()
-            self._critic_ensemble.refresh_contraction_weights()
-            self._target_critic_ensemble.refresh_contraction_weights()
+            if self._critic_ensemble is None:
+                self.critic1.refresh_contraction_weights()
+                self.critic2.refresh_contraction_weights()
+            else:
+                self._critic_ensemble.refresh_contraction_weights()
+            if self._target_critic_ensemble is None:
+                self.target_critic1.refresh_contraction_weights()
+                self.target_critic2.refresh_contraction_weights()
+            else:
+                self._target_critic_ensemble.refresh_contraction_weights()
 
     def initialize_replay_buffer(self) -> BufferReplayFlashSAC:
         """Allocate the configured replay buffer and return it.
