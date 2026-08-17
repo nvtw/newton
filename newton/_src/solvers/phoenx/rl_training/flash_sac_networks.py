@@ -200,6 +200,41 @@ def _batch_norm_backward_tile_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _batch_norm_backward_amp_transposed_tile_kernel(
+    transposed: wp.array2d[Any],
+    transposed_output_grad: wp.array2d[wp.float32],
+    mean: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    mean_grad: wp.array[wp.float32],
+    variance_grad: wp.array[wp.float32],
+    scale_grad: wp.array[wp.float32],
+    bias_grad: wp.array[wp.float32],
+):
+    column, lane = wp.tid()
+    bias_sum = wp.float32(0.0)
+    scale_sum = wp.float32(0.0)
+    centered_grad_sum = wp.float32(0.0)
+    inv_std_grad_sum = wp.float32(0.0)
+    for row in range(lane, transposed.shape[1], wp.block_dim()):
+        grad = transposed_output_grad[column, row]
+        centered = wp.float16(wp.float32(transposed[column, row]) - mean[column])
+        normalized = wp.float32(centered) * inv_std[column]
+        centered_grad = wp.float16(grad * scale[column] * inv_std[column])
+        bias_sum += grad
+        scale_sum += grad * normalized
+        centered_grad_sum += wp.float32(centered_grad)
+        inv_std_grad_sum += grad * scale[column] * wp.float32(centered)
+    reduced = wp.tile_sum(wp.tile(wp.vec4(bias_sum, scale_sum, centered_grad_sum, inv_std_grad_sum)), axis=1)
+    if lane == 0:
+        bias_grad[column] = reduced[0]
+        scale_grad[column] = reduced[1]
+        mean_grad[column] = wp.float32(wp.float16(-wp.float32(wp.float16(reduced[2]))))
+        inv_cube = inv_std[column] * inv_std[column] * inv_std[column]
+        variance_grad[column] = wp.float32(wp.float16(reduced[3] * wp.float32(-0.5) * inv_cube))
+
+
+@wp.kernel(enable_backward=False)
 def _batch_norm_backward_amp_tile_kernel(
     x: wp.array2d[Any],
     output_grad: wp.array2d[Any],
@@ -1150,6 +1185,7 @@ def _orthogonal(input_dim: int, output_dim: int, rng: np.random.Generator) -> np
 class _BatchNormScratch:
     def __init__(self, rows: int, width: int, input_dtype: Any, device: wp.context.Device):
         self.transposed = wp.empty((width, rows), dtype=input_dtype, device=device)
+        self.transposed_grad = wp.empty((width, rows), dtype=wp.float32, device=device)
         self.mean = wp.empty(width, dtype=wp.float32, device=device)
         self.variance = wp.empty(width, dtype=wp.float32, device=device)
         self.inv_std = wp.empty(width, dtype=wp.float32, device=device)
@@ -1758,9 +1794,17 @@ class NetworkFlashSAC:
         if training and amp_staged and self.device.is_cuda and norm.last_scratch is not None:
             scratch = norm.last_scratch
             wp.launch(
-                _batch_norm_backward_amp_tile_kernel,
+                _transpose_2d_tile_kernel,
+                dim=((x.shape[0] + 31) // 32, (norm.width + 31) // 32, _TILE_REDUCTION_BLOCK_DIM),
+                inputs=[output_grad],
+                outputs=[scratch.transposed_grad],
+                block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                device=self.device,
+            )
+            wp.launch(
+                _batch_norm_backward_amp_transposed_tile_kernel,
                 dim=(norm.width, _TILE_REDUCTION_BLOCK_DIM),
-                inputs=[x, output_grad, norm.last_mean, scratch.inv_std, norm.scale],
+                inputs=[scratch.transposed, scratch.transposed_grad, norm.last_mean, scratch.inv_std, norm.scale],
                 outputs=[scratch.mean_grad, scratch.variance_grad, norm.scale.grad, norm.bias.grad],
                 block_dim=_TILE_REDUCTION_BLOCK_DIM,
                 device=self.device,

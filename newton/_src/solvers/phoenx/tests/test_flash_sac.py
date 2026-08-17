@@ -29,6 +29,7 @@ from newton._src.solvers.phoenx.rl_training.flash_sac_networks import (
     _batch_moments_tile_kernel,
     _batch_moments_transposed_tile_kernel,
     _batch_norm_backward_amp_tile_kernel,
+    _batch_norm_backward_amp_transposed_tile_kernel,
     _batch_norm_input_grad_amp_kernel,
     _batch_norm_inv_std_amp_kernel,
     _head_bias_amp_kernel,
@@ -255,6 +256,37 @@ class TestTrainerFlashSAC(unittest.TestCase):
                 np.testing.assert_array_equal(new_mean.numpy(), old_mean.numpy())
                 np.testing.assert_array_equal(new_variance.numpy(), old_variance.numpy())
                 np.testing.assert_array_equal(new_inv_std.numpy(), old_inv_std.numpy())
+                output_grad = wp.array(rng.normal(size=(rows, width)).astype(np.float32), device=device)
+                transposed_grad = wp.empty((width, rows), dtype=wp.float32, device=device)
+                scale = wp.array(rng.normal(size=width).astype(np.float32), device=device)
+                old_grads = [wp.empty(width, dtype=wp.float32, device=device) for _ in range(4)]
+                new_grads = [wp.empty(width, dtype=wp.float32, device=device) for _ in range(4)]
+                wp.launch(
+                    _batch_norm_backward_amp_tile_kernel,
+                    dim=(width, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[source, output_grad, old_mean, old_inv_std, scale],
+                    outputs=old_grads,
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=device,
+                )
+                wp.launch(
+                    _transpose_2d_tile_kernel,
+                    dim=((rows + 31) // 32, (width + 31) // 32, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[output_grad],
+                    outputs=[transposed_grad],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=device,
+                )
+                wp.launch(
+                    _batch_norm_backward_amp_transposed_tile_kernel,
+                    dim=(width, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[transposed, transposed_grad, new_mean, new_inv_std, scale],
+                    outputs=new_grads,
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=device,
+                )
+                for new_grad, old_grad in zip(new_grads, old_grads, strict=True):
+                    np.testing.assert_array_equal(new_grad.numpy(), old_grad.numpy())
 
     def test_reference_backbone_forward_equations_and_initialization(self) -> None:
         """Match reference normalization, residual, head, and orthogonal equations."""

@@ -196,6 +196,11 @@ full-cadence improvement was only about 0.3 percent.
 Fresh seed-0 quality first passed at 8.096M transitions and sustained at 8.595M
 in 66.40 seconds of training, with tracking 0.860, aligned velocity 0.738 m/s,
 and zero falls.
+The staged AMP BatchNorm backward now reuses the feature-major forward input and
+transposes its output gradient once, preserving every FP16 rounding boundary and
+reduction result.  This further reduced cadence to 15.00 ms (136.6k transitions/s).
+Fresh seed-0 quality first passed at 7.596M and sustained at 8.096M transitions
+in 63.92 seconds, with tracking 0.826, aligned velocity 0.608 m/s, and zero falls.
 
 ## Reproducible quality evidence
 
