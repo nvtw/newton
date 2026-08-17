@@ -5345,6 +5345,34 @@ class ModelBuilder:
             **kwargs,
         )
 
+    def _set_joint_cable_stiffnesses(
+        self,
+        joint: int,
+        *,
+        stretch_stiffness: float | None,
+        shear_stiffness: float | None,
+        bend_stiffness: float | None,
+        twist_stiffness: float | None,
+    ) -> None:
+        """Overwrite each non-None stiffness and its inferred target mode, in :meth:`add_joint_cable` axis order."""
+        joint_type = self.joint_type[joint]
+        joint_dof_dim = self.joint_dof_dim[joint]
+        if joint_type != JointType.CABLE or joint_dof_dim != (2, 2):
+            raise ValueError(
+                "_set_joint_cable_stiffnesses() expected the four-DOF CABLE layout "
+                f"(2 linear, 2 angular); got joint type {JointType(joint_type).name} with dimensions "
+                f"{joint_dof_dim}. Update the CABLE material-slot mapping when changing its DOF layout."
+            )
+        dof_start = self.joint_qd_start[joint]
+        for offset, stiffness in enumerate((stretch_stiffness, shear_stiffness, bend_stiffness, twist_stiffness)):
+            if stiffness is not None:
+                dof = dof_start + offset
+                damping = self.joint_target_kd[dof]
+                self.joint_target_ke[dof] = stiffness
+                self.joint_target_mode[dof] = int(
+                    JointTargetMode.from_gains(stiffness, damping, has_drive=stiffness != 0.0 or damping != 0.0)
+                )
+
     def add_constraint_mimic(
         self,
         joint0: int,
@@ -10663,6 +10691,7 @@ class ModelBuilder:
 
         - Body references: shape_body, joint_parent, joint_child, equality_constraint_body1/2
         - Joint references: equality_constraint_joint1/2
+        - Particle references: spring, triangle, edge, and tetrahedron connectivity
         - Self-referential joints: joint_parent[i] != joint_child[i]
         - Start array monotonicity: joint_q_start, joint_qd_start, articulation_start, articulation_end
         - Array length consistency: per-DOF and per-coord arrays
@@ -10865,6 +10894,61 @@ class ModelBuilder:
                     f"Array length mismatch: {name} has length {len(values)}, "
                     f"but expected {particle_count} (particle_count)."
                 )
+
+        def _topology_array(name: str, values: list, expected_shape: tuple[int, ...]) -> np.ndarray:
+            try:
+                source = np.asarray(values)
+                if np.iscomplexobj(source):
+                    raise ValueError
+                array = np.asarray(values, dtype=np.int64)
+                if not np.array_equal(source, array):
+                    raise ValueError
+            except (OverflowError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid {name}: expected integer indices representable as int32 with shape {expected_shape}."
+                ) from exc
+            if array.size == 0 and expected_shape[0] == 0:
+                return array.reshape(expected_shape)
+            if array.shape != expected_shape:
+                raise ValueError(f"Invalid {name} shape: expected {expected_shape}, got {array.shape}.")
+            int32_info = np.iinfo(np.int32)
+            if array.size > 0 and (int(array.min()) < int32_info.min or int(array.max()) > int32_info.max):
+                raise ValueError(
+                    f"Invalid {name}: expected integer indices representable as int32 with shape {expected_shape}."
+                )
+            return array
+
+        def _validate_particle_topology(name: str, indices: np.ndarray) -> None:
+            invalid_mask = (indices < 0) | (indices >= particle_count)
+            if np.any(invalid_mask):
+                element, slot = np.argwhere(invalid_mask)[0]
+                index = int(indices[element, slot])
+                raise ValueError(
+                    f"Invalid particle reference in {name}: element {element}, slot {slot} references particle "
+                    f"{index}, but valid range is [0, {particle_count - 1}] (particle count={particle_count})."
+                )
+
+        spring_indices = _topology_array("spring_indices", self.spring_indices, (self.spring_count * 2,)).reshape(-1, 2)
+        tri_indices = _topology_array("tri_indices", self.tri_indices, (self.tri_count, 3))
+        edge_indices = _topology_array("edge_indices", self.edge_indices, (self.edge_count, 4))
+        tet_indices = _topology_array("tet_indices", self.tet_indices, (self.tet_count, 4))
+
+        _validate_particle_topology("spring_indices", spring_indices)
+        _validate_particle_topology("tri_indices", tri_indices)
+        _validate_particle_topology("tet_indices", tet_indices)
+
+        if edge_indices.size > 0:
+            opposite_vertices = edge_indices[:, :2]
+            invalid_opposite_mask = (opposite_vertices < -1) | (opposite_vertices >= particle_count)
+            if np.any(invalid_opposite_mask):
+                element, slot = np.argwhere(invalid_opposite_mask)[0]
+                index = int(opposite_vertices[element, slot])
+                raise ValueError(
+                    f"Invalid particle reference in edge_indices: element {element}, opposite vertex {slot} "
+                    f"references particle {index}, but valid values are -1 or [0, {particle_count - 1}] "
+                    f"(particle count={particle_count})."
+                )
+            _validate_particle_topology("edge_indices", edge_indices[:, 2:])
 
         if joint_count > 0:
             # Per-DOF arrays should have length == joint_dof_count
@@ -11219,7 +11303,7 @@ class ModelBuilder:
                 must belong to an articulation or close a loop; standalone world-root joints are allowed.
             skip_validation_shapes: If True, skips validation of shapes having valid contact margins. Default is False.
             skip_validation_structure: If True, skips validation of structural invariants (body/joint references,
-                array lengths, monotonicity). Default is False.
+                particle topology, array lengths, monotonicity). Default is False.
             skip_validation_joint_ordering: If True, skips validation of DFS topological joint ordering within
                 articulations. Default is True (opt-in) because this check has O(n log n) complexity.
             skip_shape_contact_pairs: If True, skips the O(n^2) precomputed explicit shape-contact pair list.

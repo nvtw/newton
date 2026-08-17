@@ -144,9 +144,9 @@ class Example:
         builder = newton.ModelBuilder()
 
         # Set default material properties before adding any shapes
-        builder.default_shape_cfg.ke = 1.0e4  # Contact stiffness
+        builder.default_shape_cfg.ke = 1.0e6  # Contact stiffness
         builder.default_shape_cfg.kd = 0.0
-        builder.default_shape_cfg.mu = 1.0e0  # Friction coefficient
+        builder.default_shape_cfg.mu = 5.0e-1  # Friction coefficient
 
         kinematic_body_indices = []
         self.cable_bodies_list = []
@@ -230,6 +230,7 @@ class Example:
         return newton.solvers.SolverVBD(
             self.model,
             iterations=self.sim_iterations,
+            rigid_compliant_alm=True,
             rigid_avbd_contact_alpha=0.0,
         )
 
