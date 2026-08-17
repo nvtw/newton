@@ -46,15 +46,15 @@ def _config(*, minimum_size: int, use_amp: bool) -> rl.ConfigFlashSAC:
 
 
 def _profile_learner(
-    device: wp.Device, replays: int, warmup_replays: int, use_amp: bool
+    device: wp.Device, replays: int, warmup_replays: int, use_amp: bool, action_dim: int
 ) -> dict[str, float | int | str]:
     rng = np.random.default_rng(17)
     trainer = rl.TrainerFlashSAC(
-        obs_dim=98, action_dim=12, config=_config(minimum_size=2048, use_amp=use_amp), device=device, seed=19
+        obs_dim=98, action_dim=action_dim, config=_config(minimum_size=2048, use_amp=use_amp), device=device, seed=19
     )
     batch = rl.BatchSAC(
         obs=wp.array(rng.normal(size=(2048, 98)).astype(np.float32), device=device),
-        actions=wp.array(rng.uniform(-1.0, 1.0, size=(2048, 12)).astype(np.float32), device=device),
+        actions=wp.array(rng.uniform(-1.0, 1.0, size=(2048, action_dim)).astype(np.float32), device=device),
         rewards=wp.array(rng.normal(size=2048).astype(np.float32), device=device),
         dones=wp.zeros(2048, dtype=wp.float32, device=device),
         next_obs=wp.array(rng.normal(size=(2048, 98)).astype(np.float32), device=device),
@@ -76,6 +76,7 @@ def _profile_learner(
     return {
         "mode": "learner",
         "use_amp": use_amp,
+        "action_dim": action_dim,
         "replays": replays,
         "elapsed_seconds": elapsed,
         "milliseconds_per_update": elapsed * 1000.0 / replays,
@@ -142,15 +143,18 @@ def main() -> int:
     parser.add_argument("--world-count", type=int, default=1024)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--amp", action="store_true", help="Use FP16 FlashSAC contractions")
+    parser.add_argument("--action-dim", type=int, default=29, help="Policy action width for learner-only profiling")
     parser.add_argument("--overlap", action="store_true", help="Overlap rollout and learner graphs")
     args = parser.parse_args()
     if args.replays <= 0 or args.warmup_replays < 0:
         parser.error("replays must be positive and warmup-replays non-negative")
+    if args.action_dim <= 0:
+        parser.error("action-dim must be positive")
     device = wp.get_device(args.device)
     if not device.is_cuda or not wp.is_mempool_enabled(device):
         raise RuntimeError("FlashSAC profiling requires CUDA with Warp memory pools enabled")
     if args.mode == "learner":
-        result = _profile_learner(device, args.replays, args.warmup_replays, args.amp)
+        result = _profile_learner(device, args.replays, args.warmup_replays, args.amp, args.action_dim)
     else:
         result = _profile_full(device, args.replays, args.warmup_replays, args.world_count, args.amp, args.overlap)
     print(json.dumps(result, sort_keys=True))
