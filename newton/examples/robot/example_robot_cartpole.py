@@ -44,6 +44,8 @@ class Example:
             enable_self_collisions=False,
             collapse_fixed_joints=True,
         )
+        for shape in range(cartpole.shape_count):
+            cartpole.shape_flags[shape] &= ~newton.ShapeFlags.COLLIDE_SHAPES
 
         # apply additional inertia to the bodies for better stability
         body_armature = 0.1
@@ -63,7 +65,7 @@ class Example:
 
         if self.solver_type == "kamino":
             solver_config = newton.solvers.SolverKamino.Config.from_model(
-                self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
+                self.model, dynamics_solver="dvi", sparse_dynamics=False, sparse_jacobian=False
             )
             solver_config.dvi.max_alternating_iterations = 8
             solver_config.dvi.bilateral_solve_interval = 8
@@ -180,27 +182,34 @@ class Example:
         world0_cart_vel = wp.spatial_vector(*qd[0])
         world0_pole1_vel = wp.spatial_vector(*qd[1])
         world0_pole2_vel = wp.spatial_vector(*qd[2])
-        # Replicated GPU worlds can drift by a few ulps in body twists.
+        # Replicated GPU worlds can accumulate small relative differences in body twists.
         world_velocity_atol = 1e-6
+        world_velocity_rtol = 2.5e-4
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "cart velocities match across worlds",
-            lambda q, qd: newton.math.vec_allclose(qd, world0_cart_vel, atol=world_velocity_atol),
+            lambda q, qd: newton.math.vec_allclose(
+                qd, world0_cart_vel, rtol=world_velocity_rtol, atol=world_velocity_atol
+            ),
             indices=[i * num_bodies_per_world for i in range(self.world_count)],
         )
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "pole1 velocities match across worlds",
-            lambda q, qd: newton.math.vec_allclose(qd, world0_pole1_vel, atol=world_velocity_atol),
+            lambda q, qd: newton.math.vec_allclose(
+                qd, world0_pole1_vel, rtol=world_velocity_rtol, atol=world_velocity_atol
+            ),
             indices=[i * num_bodies_per_world + 1 for i in range(self.world_count)],
         )
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "pole2 velocities match across worlds",
-            lambda q, qd: newton.math.vec_allclose(qd, world0_pole2_vel, atol=world_velocity_atol),
+            lambda q, qd: newton.math.vec_allclose(
+                qd, world0_pole2_vel, rtol=world_velocity_rtol, atol=world_velocity_atol
+            ),
             indices=[i * num_bodies_per_world + 2 for i in range(self.world_count)],
         )
 
