@@ -247,6 +247,48 @@ backward fusion was rejected despite a repeatable 1.4 percent cadence gain:
 its isolated equations passed, but the full-G1 gate failed through 15.09M
 transitions.
 
+### Environment-count and batch-size sweep
+
+An early scaling diagnostic changed a nonexistent standalone ``WORLDS = 1024``
+assignment while the harness actually declared a tuple.  Phases previously
+labelled as 2,048, 4,096, or 8,192 worlds before the ``*_corrected_*`` phases
+therefore all ran with 1,024 worlds and are invalid as world-scaling evidence.
+The raw profiler results were separate invocations with an explicit world-count
+argument and remain valid.
+
+The corrected harness asserts both the requested and constructed environment
+counts, two interactions per cadence, and four learner updates per cadence.
+At batch size 2,048, seed-0 sustained-gate results were:
+
+| Worlds | Samples | Updates | Training wall [s] |
+| ---: | ---: | ---: | ---: |
+| 1,536 | 13,120,512 | 17,084 | 53.204 |
+| 2,048 | 15,591,424 | 15,226 | 48.690 |
+| 2,560 | 20,070,400 | 15,680 | 51.392 |
+| 3,072 | 20,505,600 | 13,350 | 51.537 |
+| 4,096 | 28,585,984 | 13,958 | 49.390 |
+| 8,192 | 50,077,696 | 12,226 | 51.625 |
+
+The 2,048-world configuration was then repeated at seeds 1 and 2 and sustained
+the gate in 50.236 and 50.469 seconds; its three-seed median is 50.236 seconds.
+For comparison, three phases that were mislabeled during the initial sweep but
+actually used 1,024 worlds sustained in 48.168, 51.104, and 54.158 seconds
+(median 51.104 seconds).  Raising the 2,048-world batch size to 4,096 restored
+four replay items per transition but reduced warm throughput from 328.8k to
+208.3k transitions/s and sustained only after 81.249 seconds.  It was rejected.
+
+An Nsight Systems trace of the selected 2,048-world, batch-2,048 cadence is at
+``/tmp/flash_overlap_2048_b2048.nsys-rep``.  It measured 12.379 ms per cadence.
+The two alternating rollout graph instances each averaged about 11.56 ms, while
+the complete four-update learner graph averaged 5.55 ms and phase preparation
+averaged 0.025 ms.  The learner is therefore hidden behind rollout at this
+world count; reducing learner kernels alone cannot shorten the critical path.
+Increasing the batch to 2,560 or 3,072 moved the learner onto the critical path,
+raising cadence to 14.016 and 16.242 ms respectively.  Their extra replay
+density would need to reduce updates-to-gate by at least 12 and 24 percent just
+to break even.  The batch-4,096 quality run reduced updates-to-gate by only
+about three percent, so these intermediate batches were not quality-run.
+
 ## Reproducible quality evidence
 
 The corrected FP32 seed-0 result is stored in
