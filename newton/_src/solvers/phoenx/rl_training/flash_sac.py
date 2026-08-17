@@ -857,6 +857,103 @@ class TrainerFlashSAC(TrainerSAC):
 
         return self._replay_buffer
 
+    def set_pbt_learning_rates(self, actor_lr: float, critic_lr: float, alpha_lr: float) -> None:
+        """Set graph-safe effective learning rates for online tuning.
+
+        The optimizer base rates and captured learning-rate schedule remain
+        unchanged. Device-resident multipliers apply these effective rates on
+        subsequent eager or captured updates without rebuilding graphs.
+
+        Args:
+            actor_lr: Effective actor learning rate.
+            critic_lr: Effective learning rate for both critics.
+            alpha_lr: Effective entropy-temperature learning rate.
+        """
+
+        rates = (float(actor_lr), float(critic_lr), float(alpha_lr))
+        if not all(math.isfinite(rate) and rate > 0.0 for rate in rates):
+            raise ValueError("PBT learning rates must be finite and positive")
+        self.actor_optimizer.set_pbt_lr(rates[0])
+        self.critic1_optimizer.set_pbt_lr(rates[1])
+        self.critic2_optimizer.set_pbt_lr(rates[1])
+        self.alpha_optimizer.set_pbt_lr(rates[2])
+
+    def copy_training_state_from(self, source: TrainerFlashSAC) -> None:
+        """Copy complete learner state without replacing owned allocations.
+
+        Replay storage is deliberately excluded so multiple compatible
+        trainers can consume one shared replay. Existing CUDA graphs remain
+        valid because every destination array keeps its address.
+
+        Args:
+            source: Compatible trainer donating networks, targets, optimizer
+                state, normalization state, temperature, counters, and AMP
+                scaler state.
+        """
+
+        if not isinstance(source, TrainerFlashSAC):
+            raise TypeError("source must be a TrainerFlashSAC")
+        if source is self:
+            return
+        if self.device != source.device or self.obs_dim != source.obs_dim or self.action_dim != source.action_dim:
+            raise ValueError("FlashSAC trainer devices and dimensions must match")
+        tunable = {"actor_lr", "critic_lr", "alpha_lr"}
+        for config_field in fields(ConfigFlashSAC):
+            if config_field.name not in tunable and getattr(self.config, config_field.name) != getattr(
+                source.config, config_field.name
+            ):
+                raise ValueError(f"FlashSAC config field '{config_field.name}' is incompatible")
+        networks = (
+            (self.actor.net, source.actor.net),
+            (self.critic1, source.critic1),
+            (self.critic2, source.critic2),
+            (self.target_critic1, source.target_critic1),
+            (self.target_critic2, source.target_critic2),
+        )
+        for destination, donor in networks:
+            if type(destination) is not type(donor) or destination.layer_sizes != donor.layer_sizes:
+                raise ValueError("FlashSAC network structures do not match")
+            destination.copy_from(donor)
+        wp.copy(self.actor.log_std, source.actor.log_std)
+        for destination, donor in (
+            (self.log_alpha, source.log_alpha),
+            (self._alpha, source._alpha),
+            (self._obs_mean, source._obs_mean),
+            (self._obs_m2, source._obs_m2),
+            (self._obs_count, source._obs_count),
+            (self._device_update_count, source._device_update_count),
+            (self._device_gradient_update_count, source._device_gradient_update_count),
+            (self._device_update_seed, source._device_update_seed),
+            (self._device_noise_repeat_count, source._device_noise_repeat_count),
+            (self._device_noise_repeat_steps, source._device_noise_repeat_steps),
+            (self._device_exploration_seed, source._device_exploration_seed),
+            (self._device_interaction_seed, source._device_interaction_seed),
+            (self._amp_scale, source._amp_scale),
+            (self._amp_growth_tracker, source._amp_growth_tracker),
+            (self._amp_found_inf, source._amp_found_inf),
+            (self._amp_step_condition, source._amp_step_condition),
+            (self._device_actor_condition, source._device_actor_condition),
+            (self._device_actor_skip_condition, source._device_actor_skip_condition),
+        ):
+            wp.copy(destination, donor)
+        for destination, donor in (
+            (self.actor_optimizer, source.actor_optimizer),
+            (self.critic1_optimizer, source.critic1_optimizer),
+            (self.critic2_optimizer, source.critic2_optimizer),
+            (self.alpha_optimizer, source.alpha_optimizer),
+        ):
+            _copy_optimizer_state(destination, donor)
+        self._update_count = source._update_count
+        self._gradient_update_count = source._gradient_update_count
+        self._noise_repeat_count = source._noise_repeat_count
+        self._noise_repeat_steps = source._noise_repeat_steps
+        self._exploration_seed = source._exploration_seed
+        self._noise_rng.bit_generator.state = json.loads(json.dumps(source._noise_rng.bit_generator.state))
+        if isinstance(self.actor.net, NetworkFlashSAC):
+            self.actor.net.refresh_contraction_weights()
+            self._critic_ensemble.refresh_contraction_weights()
+            self._target_critic_ensemble.refresh_contraction_weights()
+
     def initialize_replay_buffer(self) -> BufferReplayFlashSAC:
         """Allocate the configured replay buffer and return it.
 
@@ -1926,6 +2023,31 @@ def _config_from_flash_sac_checkpoint(data: np.lib.npyio.NpzFile) -> ConfigFlash
         elif f"config_{config_field.name}" in data:
             kwargs[config_field.name] = data[f"config_{config_field.name}"].item()
     return ConfigFlashSAC(**kwargs)
+
+
+def _copy_optimizer_state(destination: Adam, source: Adam) -> None:
+    """Copy Adam state into compatible setup-owned arrays."""
+
+    if type(destination) is not type(source) or len(destination.params) != len(source.params):
+        raise ValueError("FlashSAC optimizer structures do not match")
+    for dst_param, src_param, dst_m, src_m, dst_v, src_v in zip(
+        destination.params, source.params, destination.m, source.m, destination.v, source.v, strict=True
+    ):
+        if dst_param.shape != src_param.shape or dst_param.dtype != src_param.dtype:
+            raise ValueError("FlashSAC optimizer parameter structures do not match")
+        wp.copy(dst_m, src_m)
+        wp.copy(dst_v, src_v)
+    for dst, src in (
+        (destination._step_count, source._step_count),
+        (destination._step_corrections, source._step_corrections),
+        (destination._grad_sumsq, source._grad_sumsq),
+        (destination.lr_scale, source.lr_scale),
+        (destination.step_condition, source.step_condition),
+    ):
+        wp.copy(dst, src)
+    source_pbt_scale = float(source.pbt_lr_scale.numpy()[0])
+    destination.set_pbt_lr(source.lr * source_pbt_scale)
+    destination._step_count_host = source._step_count_host
 
 
 def _pack_flash_sac_network(

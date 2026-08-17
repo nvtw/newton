@@ -309,6 +309,19 @@ density would need to reduce updates-to-gate by at least 12 and 24 percent just
 to break even.  The batch-4,096 quality run reduced updates-to-gate by only
 about three percent, so these intermediate batches were not quality-run.
 
+### Rejected champion/challenger execution layouts
+
+A two-learner online tuning prototype used one shared replay and identical
+persistent sampled batches.  At 2,048 worlds, the tuned single learner measured
+12.664 ms per cadence.  Sequential champion/challenger updates with partitioned
+rollout measured 23.802 ms (1.879x).  Independent learner CUDA streams reduced
+this to 19.647 ms (1.595x), compared with a same-process single baseline of
+12.321 ms.  Both layouts were rejected before public integration: the latter
+saves about 20 percent relative to two separate cadences but remains too costly
+for continuous tuning.  The retained prerequisites are graph-safe optimizer
+rate mutation and allocation-stable learner state copying.  The next design
+must population-batch actors and critics rather than launch two trainer graphs.
+
 ## Reproducible quality evidence
 
 The corrected FP32 seed-0 result is stored in

@@ -9,6 +9,7 @@ import ast
 import math
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -708,6 +709,151 @@ class TestTrainerFlashSAC(unittest.TestCase):
                 np.testing.assert_array_equal(actual.numpy(), expected.numpy())
             for expected, actual in zip(expected_optimizer.v, actual_optimizer.v, strict=True):
                 np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+    def test_copy_training_state_preserves_allocations_and_effective_rates(self) -> None:
+        """Copy complete compatible learner state without changing destination addresses."""
+
+        device = require_cuda_graph_capture("FlashSAC allocation-stable state copy")
+        source_config = ConfigFlashSAC(
+            actor_hidden_dim=4,
+            critic_hidden_dim=4,
+            actor_num_blocks=1,
+            critic_num_blocks=1,
+            distributional_atoms=7,
+            normalize_rewards=False,
+            policy_frequency=1,
+        )
+        destination_config = replace(source_config, actor_lr=7.0e-4, critic_lr=8.0e-4, alpha_lr=9.0e-4)
+        source = TrainerFlashSAC(obs_dim=3, action_dim=2, config=source_config, device=device, seed=701)
+        destination = TrainerFlashSAC(obs_dim=3, action_dim=2, config=destination_config, device=device, seed=703)
+        rng = np.random.default_rng(705)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device),
+            actions=wp.array(rng.normal(size=(8, 2)).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=8).astype(np.float32), device=device),
+            dones=wp.zeros(8, dtype=wp.float32, device=device),
+            next_obs=wp.array(rng.normal(size=(8, 3)).astype(np.float32), device=device),
+        )
+        source.update(batch, seed=707, read_stats=False)
+        source.set_pbt_learning_rates(6.0e-4, 5.0e-4, 4.0e-4)
+        addresses = tuple(
+            array.ptr
+            for network in (
+                destination.actor.net,
+                destination.critic1,
+                destination.critic2,
+                destination.target_critic1,
+                destination.target_critic2,
+            )
+            for array in network.state_arrays()
+        )
+
+        destination.copy_training_state_from(source)
+
+        self.assertEqual(
+            addresses,
+            tuple(
+                array.ptr
+                for network in (
+                    destination.actor.net,
+                    destination.critic1,
+                    destination.critic2,
+                    destination.target_critic1,
+                    destination.target_critic2,
+                )
+                for array in network.state_arrays()
+            ),
+        )
+        for dst_network, src_network in (
+            (destination.actor.net, source.actor.net),
+            (destination.critic1, source.critic1),
+            (destination.critic2, source.critic2),
+            (destination.target_critic1, source.target_critic1),
+            (destination.target_critic2, source.target_critic2),
+        ):
+            for dst, src in zip(dst_network.state_arrays(), src_network.state_arrays(), strict=True):
+                np.testing.assert_array_equal(dst.numpy(), src.numpy())
+        for dst_optimizer, src_optimizer, effective_lr in (
+            (destination.actor_optimizer, source.actor_optimizer, 6.0e-4),
+            (destination.critic1_optimizer, source.critic1_optimizer, 5.0e-4),
+            (destination.critic2_optimizer, source.critic2_optimizer, 5.0e-4),
+            (destination.alpha_optimizer, source.alpha_optimizer, 4.0e-4),
+        ):
+            np.testing.assert_array_equal(dst_optimizer._step_count.numpy(), src_optimizer._step_count.numpy())
+            for dst, src in zip(dst_optimizer.m + dst_optimizer.v, src_optimizer.m + src_optimizer.v, strict=True):
+                np.testing.assert_array_equal(dst.numpy(), src.numpy())
+            self.assertAlmostEqual(
+                dst_optimizer.lr * float(dst_optimizer.pbt_lr_scale.numpy()[0]), effective_lr, places=10
+            )
+        self.assertEqual(destination._gradient_update_count, source._gradient_update_count)
+        np.testing.assert_array_equal(destination._amp_scale.numpy(), source._amp_scale.numpy())
+        with self.assertRaisesRegex(ValueError, "n_step"):
+            incompatible = TrainerFlashSAC(
+                obs_dim=3, action_dim=2, config=replace(source_config, n_step=5), device=device, seed=709
+            )
+            incompatible.copy_training_state_from(source)
+
+    def test_pbt_learning_rates_update_captured_graph_multipliers(self) -> None:
+        """Change all effective learning rates after capture without rebuilding graphs."""
+
+        device = require_cuda_graph_capture("FlashSAC graph-safe PBT learning rates")
+        trainer = TrainerFlashSAC(
+            obs_dim=2,
+            action_dim=1,
+            config=ConfigFlashSAC(
+                actor_hidden_dim=4,
+                critic_hidden_dim=4,
+                actor_num_blocks=1,
+                critic_num_blocks=1,
+                distributional_atoms=5,
+                normalize_rewards=False,
+                policy_frequency=1,
+                use_amp=True,
+            ),
+            device=device,
+            seed=711,
+        )
+        rng = np.random.default_rng(712)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(4, 2)).astype(np.float32), device=device),
+            actions=wp.array(rng.normal(size=(4, 1)).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=4).astype(np.float32), device=device),
+            dones=wp.zeros(4, dtype=wp.float32, device=device),
+            next_obs=wp.array(rng.normal(size=(4, 2)).astype(np.float32), device=device),
+        )
+        graph = trainer.capture_update_graph(batch, seed=713)
+        pointers = tuple(
+            optimizer.pbt_lr_scale.ptr
+            for optimizer in (
+                trainer.actor_optimizer,
+                trainer.critic1_optimizer,
+                trainer.critic2_optimizer,
+                trainer.alpha_optimizer,
+            )
+        )
+        trainer.set_pbt_learning_rates(6.0e-4, 5.0e-4, 4.0e-4)
+        graph.launch()
+        self.assertEqual(
+            pointers,
+            tuple(
+                optimizer.pbt_lr_scale.ptr
+                for optimizer in (
+                    trainer.actor_optimizer,
+                    trainer.critic1_optimizer,
+                    trainer.critic2_optimizer,
+                    trainer.alpha_optimizer,
+                )
+            ),
+        )
+        for optimizer, expected in (
+            (trainer.actor_optimizer, 6.0e-4),
+            (trainer.critic1_optimizer, 5.0e-4),
+            (trainer.critic2_optimizer, 5.0e-4),
+            (trainer.alpha_optimizer, 4.0e-4),
+        ):
+            self.assertAlmostEqual(optimizer.lr * float(optimizer.pbt_lr_scale.numpy()[0]), expected, places=10)
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            trainer.set_pbt_learning_rates(0.0, 1.0e-3, 1.0e-3)
 
     def test_reference_backbone_checkpoint_round_trip(self) -> None:
         """Restore reference affine, running-statistic, RMS, and head state."""
