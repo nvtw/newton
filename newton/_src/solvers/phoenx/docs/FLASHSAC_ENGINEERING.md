@@ -180,11 +180,22 @@ the earlier normalization kernels is stored outside the repository at:
 
 The report showed severe underfill for narrow per-column BatchNorm reductions
 (roughly 0.09--0.11 waves/SM for widths 98 and 128), while wide elementwise
-normalization was healthy.  A future reduction rewrite should use coalesced
-two-dimensional row/column tiles, setup-owned partial buffers, and measured
-`vec2`/`vec4` packing.  Re-profile with Nsight Systems after AMP quality is
-restored because the hotspot distribution will have changed; request another
-sudo Nsight Compute run only for kernels with meaningful remaining wall share.
+normalization was healthy.  Chunked partial reductions and single-block grouped
+tile reductions were measured and rejected: preserving the exact two-pass
+centered variance required enough staging to lose end-to-end time.
+
+The retained alternative transposes each BatchNorm input with a coalesced 32 by
+32 tile into a setup-owned feature-major workspace, then evaluates the same
+two-pass equation with the same lane assignment and tile reduction order.
+Multi-shape FP32 and FP16 tests confirm bit-exact means, variances, and inverse
+standard deviations, including row and column tails.  On the corrected AMP
+graph this reduced complete cadence time from 17.55 ms to 15.68 ms and raised
+throughput from 116.7k to 130.6k transitions/s.  A projection/EMA-to-FP16-mirror
+fusion was also rejected after focused correctness passed because its measured
+full-cadence improvement was only about 0.3 percent.
+Fresh seed-0 quality first passed at 8.096M transitions and sustained at 8.595M
+in 66.40 seconds of training, with tracking 0.860, aligned velocity 0.738 m/s,
+and zero falls.
 
 ## Reproducible quality evidence
 

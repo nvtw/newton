@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.rl_training.flash_sac_networks import (
     _TILE_REDUCTION_BLOCK_DIM,
     NetworkFlashSAC,
     _batch_moments_tile_kernel,
+    _batch_moments_transposed_tile_kernel,
     _batch_norm_backward_amp_tile_kernel,
     _batch_norm_input_grad_amp_kernel,
     _batch_norm_inv_std_amp_kernel,
@@ -38,6 +39,7 @@ from newton._src.solvers.phoenx.rl_training.flash_sac_networks import (
     _rms_norm_f16_kernel,
     _rms_norm_input_grad_f16_kernel,
     _round_batch_moments_f16_kernel,
+    _transpose_2d_tile_kernel,
     _UnitBatchNorm,
 )
 from newton._src.solvers.phoenx.rl_training.g1 import (
@@ -208,6 +210,51 @@ class TestTrainerFlashSAC(unittest.TestCase):
         self.assertFalse(np.array_equal(first_actions, second_actions))
         np.testing.assert_array_equal(repeated_actions, first_actions)
         np.testing.assert_array_equal(repeated_log_probs, first_log_probs)
+
+    def test_transposed_batch_moments_match_reference_reduction(self) -> None:
+        """Preserve two-pass BatchNorm moments across tails and input dtypes."""
+
+        device = require_cuda_graph_capture("FlashSAC transposed BatchNorm moments")
+        rng = np.random.default_rng(401)
+        rows = 65
+        for dtype in (wp.float32, wp.float16):
+            for width in (99, 128, 256):
+                values = rng.normal(size=(rows, width)).astype(np.float32)
+                source = wp.array(values, dtype=dtype, device=device)
+                transposed = wp.empty((width, rows), dtype=dtype, device=device)
+                old_mean = wp.empty(width, dtype=wp.float32, device=device)
+                old_variance = wp.empty(width, dtype=wp.float32, device=device)
+                old_inv_std = wp.empty(width, dtype=wp.float32, device=device)
+                new_mean = wp.empty(width, dtype=wp.float32, device=device)
+                new_variance = wp.empty(width, dtype=wp.float32, device=device)
+                new_inv_std = wp.empty(width, dtype=wp.float32, device=device)
+                wp.launch(
+                    _batch_moments_tile_kernel,
+                    dim=(width, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[source, rows, 1.0e-5],
+                    outputs=[old_mean, old_variance, old_inv_std],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=device,
+                )
+                wp.launch(
+                    _transpose_2d_tile_kernel,
+                    dim=((rows + 31) // 32, (width + 31) // 32, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[source],
+                    outputs=[transposed],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=device,
+                )
+                wp.launch(
+                    _batch_moments_transposed_tile_kernel,
+                    dim=(width, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[transposed, rows, 1.0e-5],
+                    outputs=[new_mean, new_variance, new_inv_std],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=device,
+                )
+                np.testing.assert_array_equal(new_mean.numpy(), old_mean.numpy())
+                np.testing.assert_array_equal(new_variance.numpy(), old_variance.numpy())
+                np.testing.assert_array_equal(new_inv_std.numpy(), old_inv_std.numpy())
 
     def test_reference_backbone_forward_equations_and_initialization(self) -> None:
         """Match reference normalization, residual, head, and orthogonal equations."""

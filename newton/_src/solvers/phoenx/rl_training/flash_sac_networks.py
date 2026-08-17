@@ -112,6 +112,43 @@ def _linear_weight_grad_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _transpose_2d_tile_kernel(x: wp.array2d[Any], transposed: wp.array2d[Any]):
+    row_group, column_group, _lane = wp.tid()
+    tile = wp.tile_load(
+        x,
+        shape=(32, 32),
+        offset=(row_group * 32, column_group * 32),
+        storage="shared",
+    )
+    wp.tile_store(transposed, wp.tile_transpose(tile), offset=(column_group * 32, row_group * 32))
+
+
+@wp.kernel(enable_backward=False)
+def _batch_moments_transposed_tile_kernel(
+    transposed: wp.array2d[Any],
+    count: wp.int32,
+    eps: wp.float32,
+    mean: wp.array[wp.float32],
+    variance: wp.array[wp.float32],
+    inv_std: wp.array[wp.float32],
+):
+    column, lane = wp.tid()
+    total = wp.float32(0.0)
+    for row in range(lane, count, wp.block_dim()):
+        total += wp.float32(transposed[column, row])
+    batch_mean = wp.tile_sum(wp.tile(total))[0] / wp.float32(count)
+    squared = wp.float32(0.0)
+    for row in range(lane, count, wp.block_dim()):
+        delta = wp.float32(transposed[column, row]) - batch_mean
+        squared += delta * delta
+    batch_variance = wp.tile_sum(wp.tile(squared))[0] / wp.float32(count)
+    if lane == 0:
+        mean[column] = batch_mean
+        variance[column] = batch_variance
+        inv_std[column] = wp.float32(1.0) / wp.sqrt(batch_variance + eps)
+
+
+@wp.kernel(enable_backward=False)
 def _batch_moments_tile_kernel(
     x: wp.array2d[Any],
     count: wp.int32,
@@ -1111,7 +1148,8 @@ def _orthogonal(input_dim: int, output_dim: int, rng: np.random.Generator) -> np
 
 
 class _BatchNormScratch:
-    def __init__(self, rows: int, width: int, device: wp.context.Device):
+    def __init__(self, rows: int, width: int, input_dtype: Any, device: wp.context.Device):
+        self.transposed = wp.empty((width, rows), dtype=input_dtype, device=device)
         self.mean = wp.empty(width, dtype=wp.float32, device=device)
         self.variance = wp.empty(width, dtype=wp.float32, device=device)
         self.inv_std = wp.empty(width, dtype=wp.float32, device=device)
@@ -1132,13 +1170,14 @@ class _UnitBatchNorm:
         self.last_mean: wp.array[wp.float32] | None = None
         self.last_variance: wp.array[wp.float32] | None = None
         self.last_scratch: _BatchNormScratch | None = None
-        self._scratch: dict[int, _BatchNormScratch] = {}
+        self._scratch: dict[tuple[int, Any], _BatchNormScratch] = {}
 
-    def scratch(self, rows: int) -> _BatchNormScratch:
-        value = self._scratch.get(rows)
+    def scratch(self, rows: int, input_dtype: Any = wp.float32) -> _BatchNormScratch:
+        key = (int(rows), input_dtype)
+        value = self._scratch.get(key)
         if value is None:
-            value = _BatchNormScratch(rows, self.width, self.device)
-            self._scratch[rows] = value
+            value = _BatchNormScratch(rows, self.width, input_dtype, self.device)
+            self._scratch[key] = value
         return value
 
     def forward(
@@ -1152,14 +1191,22 @@ class _UnitBatchNorm:
     ) -> wp.array2d[Any]:
         rows = int(x.shape[0])
         if training:
-            scratch = self.scratch(rows)
+            scratch = self.scratch(rows, x.dtype)
             mean = scratch.mean
             variance = scratch.variance
             if self.device.is_cuda:
                 wp.launch(
-                    _batch_moments_tile_kernel,
+                    _transpose_2d_tile_kernel,
+                    dim=((rows + 31) // 32, (self.width + 31) // 32, _TILE_REDUCTION_BLOCK_DIM),
+                    inputs=[x],
+                    outputs=[scratch.transposed],
+                    block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                    device=self.device,
+                )
+                wp.launch(
+                    _batch_moments_transposed_tile_kernel,
                     dim=(self.width, _TILE_REDUCTION_BLOCK_DIM),
-                    inputs=[x, rows, self.eps],
+                    inputs=[scratch.transposed, rows, self.eps],
                     outputs=[mean, variance, scratch.inv_std],
                     block_dim=_TILE_REDUCTION_BLOCK_DIM,
                     device=self.device,
@@ -1450,10 +1497,10 @@ class NetworkFlashSAC:
         rows = int(batch_size)
         if rows <= 0:
             raise ValueError("batch_size must be positive")
-        self.input_norm.scratch(rows)
+        self.input_norm.scratch(rows, wp.float32)
         for first, second in self.block_norms:
-            first.scratch(rows)
-            second.scratch(rows)
+            first.scratch(rows, self.activation_dtype)
+            second.scratch(rows, self.activation_dtype)
 
     def _forward_reuse(self, x: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
         self.reserve_forward_buffers(int(x.shape[0]))
@@ -2205,14 +2252,22 @@ class EnsembleNetworkFlashSAC:
             source = x if broadcast_input else x[ensemble_index]
             rows = int(source.shape[0])
             if training:
-                scratch = norm.scratch(rows)
+                scratch = norm.scratch(rows, source.dtype)
                 mean = scratch.mean
                 variance = scratch.variance
                 if self.device.is_cuda:
                     wp.launch(
-                        _batch_moments_tile_kernel,
+                        _transpose_2d_tile_kernel,
+                        dim=((rows + 31) // 32, (norm.width + 31) // 32, _TILE_REDUCTION_BLOCK_DIM),
+                        inputs=[source],
+                        outputs=[scratch.transposed],
+                        block_dim=_TILE_REDUCTION_BLOCK_DIM,
+                        device=self.device,
+                    )
+                    wp.launch(
+                        _batch_moments_transposed_tile_kernel,
                         dim=(norm.width, _TILE_REDUCTION_BLOCK_DIM),
-                        inputs=[source, rows, norm.eps],
+                        inputs=[scratch.transposed, rows, norm.eps],
                         outputs=[mean, variance, scratch.inv_std],
                         block_dim=_TILE_REDUCTION_BLOCK_DIM,
                         device=self.device,
