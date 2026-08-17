@@ -55,6 +55,7 @@ class Example:
         pyramid_size = args.pyramid_size
         if pyramid_size is None:
             pyramid_size = DEFAULT_PYRAMID_SIZE
+        self.pyramid_size = pyramid_size
 
         builder = newton.ModelBuilder()
         if self.solver_type == "kamino":
@@ -214,20 +215,28 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        """Verify pyramid top cubes remain near their initial positions.
+        """Verify pyramid top cubes settle without moving laterally.
 
         In test mode the wrecking ball is omitted so the pyramids should
-        settle under gravity without toppling.  Each top cube must stay
-        within ``max_displacement`` of its initial position.
+        settle under gravity without toppling. Vertical gaps between rows
+        are expected to close.
         """
         body_q = self.state_0.body_q.numpy()
-        max_displacement = 0.5  # [m]
+        max_lateral_displacement = 0.5  # [m]
+        initial_row_gap = CUBE_SPACING - 2.0 * CUBE_HALF
+        max_vertical_settlement = (self.pyramid_size - 1) * initial_row_gap + 0.1
         for idx in self.top_body_indices:
             current_pos = body_q[idx, :3]
             initial_pos = self.top_initial_positions[idx]
-            displacement = np.linalg.norm(current_pos - initial_pos)
-            assert displacement < max_displacement, (
-                f"Top cube body {idx}: displaced {displacement:.4f} m (max allowed {max_displacement:.4f} m)"
+            lateral_displacement = np.linalg.norm(current_pos[:2] - initial_pos[:2])
+            vertical_settlement = initial_pos[2] - current_pos[2]
+            assert lateral_displacement < max_lateral_displacement, (
+                f"Top cube body {idx}: moved laterally {lateral_displacement:.4f} m "
+                f"(max allowed {max_lateral_displacement:.4f} m)"
+            )
+            assert vertical_settlement < max_vertical_settlement, (
+                f"Top cube body {idx}: settled {vertical_settlement:.4f} m vertically "
+                f"(max allowed {max_vertical_settlement:.4f} m)"
             )
 
     @staticmethod

@@ -267,7 +267,7 @@ class Example:
             solver_config = newton.solvers.SolverKamino.Config.from_model(
                 self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
             )
-            solver_config.dvi.max_alternating_iterations = 8
+            solver_config.dvi.max_alternating_iterations = 4
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             raise ValueError(f"Unknown solver '{self.solver_type}'")

@@ -546,9 +546,8 @@ def _launch_sparse_inequality_pgs(
     if path.device.is_cuda:
         threads_per_world = 64
         if path.size.max_of_max_contacts >= 2048:
+            # This kernel exceeds CUDA graph resource limits at 512 threads on some devices.
             threads_per_world = 256
-        if path.size.max_of_max_contacts >= 4096:
-            threads_per_world = 512
     contact_only = path.size.max_of_max_limits == 0 and path.bilateral_solver is None
     parallel_contact_path = contact_only and _use_parallel_contact_colors(
         path.size.num_worlds,
