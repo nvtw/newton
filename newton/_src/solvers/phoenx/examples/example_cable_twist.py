@@ -25,7 +25,7 @@ class Example(ExampleVBD):
         return newton.solvers.SolverPhoenX(
             self.model,
             # The inherited frame loop supplies ten contact-refresh substeps.
-            substeps=1,
+            substeps=2,
             solver_iterations=self.sim_iterations,
             velocity_iterations=1,
             prepare_refresh_stride=1,

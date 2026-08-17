@@ -526,7 +526,7 @@ class Example:
         parser.add_argument(
             "--sim-substeps",
             type=int,
-            default=40,
+            default=4,
             help=(
                 "PhoenX internal solver substeps per ``solver.step`` call."
                 " The asset has ~6 g parallel-rod / ankle-bracket bodies"
@@ -542,7 +542,7 @@ class Example:
         parser.add_argument(
             "--solver-iterations",
             type=int,
-            default=8,
+            default=2,
             help="PhoenX inequality PGS iterations per substep.",
         )
         parser.add_argument(

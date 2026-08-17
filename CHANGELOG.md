@@ -12,6 +12,7 @@
 ### Added
 - Add `ViewerOptix` for interactive OptiX path tracing with DLSS Ray Reconstruction, Newton body picking, ImGui callbacks, depth-tested debug lines and contact arrows, a configurable saturated shape palette, procedural-sky time and intensity controls, a light neutral floor, and headless frame extraction through the separately installed `otk-pyoptix` backend.
 - Add a `ViewerOptix` grayscale-sky control that preserves maximum-channel brightness.
+- Add a PhoenX slinky-stairs demo with an elastic capsule helix, self-contact, and an initial graded kick that starts its stair descent.
 - Add `ViewerOptix` DLSS quality, path-bounce, direct-light sample, and non-DLSS samples-per-frame controls through its constructor, rendering panel, and common example command line.
 - Add compact, panel-parallel, RCM-reordered direct equality and implicit PD drive solves per connected mechanism to experimental `SolverPhoenX`, including finite motor-effort active sets
 
@@ -104,6 +105,7 @@
 
 ### Changed
 - Default `ViewerOptix` to the same 1920 x 1080 window size as `ViewerGL`, raise its instance capacity to 16,384, and default the PhoenX Kapla tower example to OptiX. Pass `--viewer gl` to retain OpenGL for the example, or construct `ViewerOptix(width=1280, height=720, max_instances=10000)` to retain its previous defaults.
+- Default the PhoenX chain-mesh example and the standard H1 and G1 robot examples to `ViewerOptix` and its saturated color palette. Pass `--viewer gl` to retain OpenGL rendering.
 - Represent revolute and prismatic armature in direct maximal PhoenX as exact gear-reflected generalized inertia without modifying either attached rigid-body inertia.
 - Default `ViewerOptix` to performance DLSS and three path bounces for higher interactive frame rates. Pass `dlss_quality="quality", max_bounces=4` or `--optix-dlss-quality quality --optix-max-bounces 4` to retain the previous rendering budget.
 

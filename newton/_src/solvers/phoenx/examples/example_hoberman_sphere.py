@@ -73,7 +73,7 @@ class Example:
 
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
-            substeps=5,
+            substeps=1,
             solver_iterations=2,
             velocity_iterations=1,
             articulation_mode="maximal",

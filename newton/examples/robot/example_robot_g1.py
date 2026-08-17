@@ -21,7 +21,7 @@ import newton.utils
 from newton import JointTargetMode
 
 # Set to True for PhoenX reduced coordinates; False uses full-coordinate joint mechanisms.
-PHOENX_USE_REDUCED_COORDINATES = True
+PHOENX_USE_REDUCED_COORDINATES = False
 
 
 class Example:
@@ -252,7 +252,7 @@ class Example:
             default="phoenx",
             help="Rigid-body solver backend. 'phoenx' (default) uses SolverPhoenX; 'mujoco' uses the MuJoCo/Warp solver.",
         )
-        parser.set_defaults(world_count=4)
+        parser.set_defaults(viewer="optix", world_count=4)
         return parser
 
 

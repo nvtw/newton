@@ -245,5 +245,9 @@ class Example(PortedExample):
         )
 
 
+def _configure_parser(parser) -> None:
+    parser.set_defaults(viewer="optix")
+
+
 if __name__ == "__main__":
-    run_ported_example(Example)
+    run_ported_example(Example, _configure_parser)

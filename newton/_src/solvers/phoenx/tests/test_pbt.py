@@ -5,12 +5,10 @@
 
 from __future__ import annotations
 
-import math
 import tempfile
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import warp as wp
@@ -32,7 +30,6 @@ from newton._src.solvers.phoenx.rl_training.pbt import (
 )
 from newton._src.solvers.phoenx.rl_training.ppo import ConfigPPO, TrainerPPO
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -299,9 +296,7 @@ class TestPBTCorePythonLogic(unittest.TestCase):
         ]
         rng = np.random.default_rng(1)
         for _ in range(20):
-            h = _perturb_classic(
-                config, specs, (0.8, 1.2), 0.0, ("actor_lr", "critic_lr"), rng
-            )
+            h = _perturb_classic(config, specs, (0.8, 1.2), 0.0, ("actor_lr", "critic_lr"), rng)
             # Both should change by the same multiplicative factor
             ratio = h["actor_lr"] / h["critic_lr"]
             self.assertAlmostEqual(ratio, 1.0, places=8)
@@ -424,9 +419,7 @@ class TestPopulationBasedTrainGeneric(unittest.TestCase):
 
     def test_live_workers_call_train_fn_only_once_per_worker(self) -> None:
         """With continue_fn provided, train_fn is called exactly pop_size times."""
-        train_fn, continue_fn, get_trainer, make_config, get_history, call_log = (
-            self._make_fake_infrastructure()
-        )
+        train_fn, continue_fn, get_trainer, make_config, get_history, call_log = self._make_fake_infrastructure()
         pop_size = 3
         total_cycles = 4
         pbt_cfg = ConfigPBT(population_size=pop_size, exploit_interval=2, total_cycles=total_cycles, seed=7)
@@ -568,9 +561,7 @@ class TestPopulationBasedTrainGeneric(unittest.TestCase):
 
         def fake_continue_fn(result: _FakeResult, config: _FakeConfig) -> _FakeResult:
             fit = 0.9 if result.trainer is trainers[3] else 0.1
-            return _FakeResult(
-                trainer=result.trainer, env_id=result.env_id, fitness=fit, history=[_FakeStats(fit)]
-            )
+            return _FakeResult(trainer=result.trainer, env_id=result.env_id, fitness=fit, history=[_FakeStats(fit)])
 
         pbt_cfg = ConfigPBT(
             population_size=4,
@@ -659,12 +650,12 @@ class TestPBTWithTrainerPPOCUDA(unittest.TestCase):
     def test_pbt_live_workers_update_entropy_without_error(self) -> None:
         device = require_cuda_graph_capture("PBT TrainerPPO live-worker tests")
 
+        from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
+        from newton._src.solvers.phoenx.rl_training.ppo import BufferRollout
         from newton._src.solvers.phoenx.rl_training.standard_envs import (
             ConfigEnvPendulumV1Warp,
             EnvPendulumV1Warp,
         )
-        from newton._src.solvers.phoenx.rl_training.ppo import BufferRollout
-        from newton._src.solvers.phoenx.rl_training.env import collect_ppo_rollout_seed_counter, make_seed_counter
 
         env_config = ConfigEnvPendulumV1Warp(world_count=8, max_episode_steps=0)
         n_steps = 4

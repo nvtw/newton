@@ -40,7 +40,7 @@ CAPSULE_DIAMETER = 0.05
 _CAPSULE_RADIUS = 0.5 * CAPSULE_DIAMETER
 _CAPSULE_HALF_HEIGHT = 0.5 * CAPSULE_LENGTH
 
-NUM_LINKS = 100
+NUM_LINKS = 200
 HALF_EXTENT = 0.05
 
 _DIAGONAL_HALF = HALF_EXTENT * math.sqrt(2.0)
@@ -164,8 +164,8 @@ class Example:
 
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
-            substeps=5,
-            solver_iterations=2,
+            substeps=10,
+            solver_iterations=3,
             velocity_iterations=1,
             articulation_mode="maximal",
         )

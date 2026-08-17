@@ -184,7 +184,7 @@ class Example:
             default="mujoco",
             help="Rigid-body solver backend. 'mujoco' (default) uses the MuJoCo/Warp solver; 'phoenx' uses SolverPhoenX.",
         )
-        parser.set_defaults(world_count=4)
+        parser.set_defaults(viewer="optix", world_count=4)
         return parser
 
 

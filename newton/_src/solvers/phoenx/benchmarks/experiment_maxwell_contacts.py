@@ -13,7 +13,6 @@ import sys
 import time
 from pathlib import Path
 
-
 EXAMPLE_MODULE = "newton._src.solvers.phoenx.examples.example_maxwell_top_si"
 MAXWELL_TOP_USD_ENV = "NEWTON_MAXWELL_TOP_USD"
 DEFAULT_USD_PATH = Path(r"C:\Users\twidmer\Downloads\MaxwellTopSI\MaxwellTopSI2.usda")
