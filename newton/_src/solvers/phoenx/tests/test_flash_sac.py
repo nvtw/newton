@@ -45,6 +45,7 @@ class _G1SmokeEnv:
         self.device = obs.device
         self._initial_obs = obs
         self._obs = obs
+        self.obs = obs
         self._next_obs = next_obs
         self._rewards = wp.array(np.linspace(-0.2, 0.3, self.world_count, dtype=np.float32), device=self.device)
         self._dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
@@ -54,6 +55,7 @@ class _G1SmokeEnv:
 
     def reset(self) -> wp.array2d[wp.float32]:
         self._obs = self._initial_obs
+        self.obs = self._obs
         return self._obs
 
     def observe(self) -> wp.array2d[wp.float32]:
@@ -61,6 +63,7 @@ class _G1SmokeEnv:
 
     def step(self, actions: wp.array2d[wp.float32]) -> tuple[wp.array, wp.array, wp.array]:
         self._obs = self._initial_obs
+        self.obs = self._obs
         return self._obs, self._rewards, wp.ones_like(self._dones)
 
 
@@ -1066,6 +1069,66 @@ class TestTrainerFlashSAC(unittest.TestCase):
             strict=True,
         ):
             np.testing.assert_array_equal(graph_array.numpy(), eager_array.numpy())
+
+    def test_prepare_training_graph_warms_n_step_replay_and_checkpoints(self) -> None:
+        """Warm n-step replay graph-natively and preserve it through a checkpoint."""
+
+        device = require_cuda_graph_capture("FlashSAC graph-native warmup lifecycle")
+        obs = wp.zeros((2, 3), dtype=wp.float32, device=device)
+        next_obs = wp.ones((2, 3), dtype=wp.float32, device=device)
+        env = _G1SmokeEnv(obs, next_obs)
+        trainer = TrainerFlashSAC(
+            obs_dim=3,
+            action_dim=ACTION_DIM_G1,
+            config=ConfigFlashSAC(
+                buffer_max_length=16,
+                buffer_min_length=2,
+                sample_batch_size=2,
+                n_step=3,
+                normalize_rewards=False,
+                actor_hidden_dim=4,
+                critic_hidden_dim=4,
+                actor_num_blocks=1,
+                critic_num_blocks=1,
+                distributional_atoms=5,
+            ),
+            device=device,
+            seed=251,
+        )
+        training_graph = trainer.prepare_training_graph(
+            env,
+            updates_per_step=2,
+            interactions_per_graph=2,
+            seed=257,
+        )
+        replay = trainer.replay_buffer
+        self.assertEqual(replay.n_step, 3)
+        self.assertEqual(replay.size, 2)
+        self.assertEqual(len(replay._n_step_transitions), 0)
+        self.assertEqual(replay._graph_pending_count_host, 3)
+        np.testing.assert_allclose(replay.rewards.numpy()[:2], [-0.2, 0.3], rtol=0.0, atol=1.0e-6)
+        np.testing.assert_array_equal(replay.dones.numpy()[:2], [0.0, 0.0])
+        np.testing.assert_array_equal(replay.next_obs.numpy()[:2], next_obs.numpy())
+
+        training_graph.launch()
+        self.assertEqual(replay.size, 6)
+        self.assertEqual(trainer._update_count, 4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/graph_warmup_replay.npz"
+            replay.save(path)
+            restored = BufferReplayFlashSAC.load(path, device=device)
+        self.assertEqual((restored.size, restored.position), (replay.size, replay.position))
+        self.assertEqual(restored._graph_pending_count_host, replay._graph_pending_count_host)
+        for expected, actual in (
+            (replay.obs, restored.obs),
+            (replay.actions, restored.actions),
+            (replay.rewards, restored.rewards),
+            (replay.dones, restored.dones),
+            (replay.next_obs, restored.next_obs),
+            (replay._graph_pending_obs, restored._graph_pending_obs),
+            (replay._graph_pending_next_obs, restored._graph_pending_next_obs),
+        ):
+            np.testing.assert_array_equal(actual.numpy(), expected.numpy())
 
     def test_real_g1_end_to_end_training_graph(self) -> None:
         """Capture real G1 interaction, pre-reset replay, sampling, and learner updates."""

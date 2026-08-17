@@ -850,6 +850,78 @@ class TrainerFlashSAC(TrainerSAC):
 
         return self._replay_buffer is not None and self._replay_buffer.can_sample()
 
+    def prepare_training_graph(
+        self,
+        env: EnvFlashSAC,
+        *,
+        warmup_interaction_steps: int | None = None,
+        updates_per_step: int = 2,
+        interactions_per_graph: int = 2,
+        seed: int | None = None,
+        reset_at_start: bool = True,
+    ) -> GraphFlashSACTraining:
+        """Warm graph-native replay and capture steady-state training.
+
+        This is the high-level entry point for a fresh captured training run.
+        Replay graph buffers are reserved before warmup, so n-step pending
+        transitions remain device-resident and can continue unchanged in the
+        captured steady-state cadence.
+
+        Args:
+            env: Vectorized environment matching the trainer dimensions.
+            warmup_interaction_steps: Eager graph-native collection steps before
+                capture. ``None`` collects the minimum needed for replay sampling.
+            updates_per_step: Learner updates per environment interaction.
+            interactions_per_graph: Environment interactions per graph launch.
+            seed: Base exploration and graph seed. Uses the trainer seed by default.
+            reset_at_start: Whether to reset the environment before warmup.
+
+        Returns:
+            Captured steady-state training cadence ready for repeated launches.
+        """
+
+        policy_action_dim = int(getattr(env, "policy_action_dim", env.action_dim))
+        if self.obs_dim != env.obs_dim or self.action_dim != policy_action_dim:
+            raise ValueError("FlashSAC trainer dimensions do not match environment policy interface")
+        replay = self.initialize_replay_buffer()
+        if replay._n_step_transitions:
+            raise RuntimeError("prepare_training_graph requires fresh or graph-native replay state")
+        replay.reserve_graph_buffers(env.world_count)
+        if replay.size <= 0 or not replay.can_sample():
+            pending = replay._graph_pending_count_host
+            rows_needed = max(replay.minimum_size, 1) - replay.size
+            row_steps = (rows_needed + env.world_count - 1) // env.world_count
+            minimum_steps = row_steps + max(replay.n_step - pending - 1, 0)
+            steps = minimum_steps if warmup_interaction_steps is None else int(warmup_interaction_steps)
+            if steps < 0:
+                raise ValueError("warmup_interaction_steps must be non-negative")
+            obs = env.reset() if reset_at_start else env.observe()
+            pre_step_obs = wp.empty_like(obs)
+            zero_truncateds = wp.zeros(env.world_count, dtype=wp.float32, device=self.device)
+            seed_base = self.seed if seed is None else int(seed)
+            for step in range(steps):
+                actions, _log_probs = self.act(obs, seed=seed_base + step)
+                wp.copy(pre_step_obs, obs)
+                next_obs, rewards, dones = env.step(actions)
+                replay.add_batch_graph(
+                    pre_step_obs,
+                    actions,
+                    rewards,
+                    getattr(env, "step_terminateds", dones),
+                    getattr(env, "step_next_obs", next_obs),
+                    truncateds=getattr(env, "step_truncateds", zero_truncateds),
+                )
+                obs = next_obs
+            if not replay.can_sample():
+                raise RuntimeError(f"warmup produced {replay.size} replay rows; {replay.minimum_size} are required")
+        return self.capture_training_graph(
+            env,
+            replay,
+            updates_per_step=updates_per_step,
+            interactions_per_graph=interactions_per_graph,
+            seed=seed,
+        )
+
     def save_checkpoint(self, path: str | Path) -> None:
         """Save complete trainer state except the potentially large replay buffer.
 
