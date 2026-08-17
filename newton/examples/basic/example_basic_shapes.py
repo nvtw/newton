@@ -118,9 +118,8 @@ class Example:
                 sparse_dynamics=True,
                 sparse_jacobian=True,
             )
-            solver_config.use_collision_detector = True
-            solver_config.integrator = "moreau"
-            solver_config.dvi.max_alternating_iterations = 4
+            solver_config.dynamics.cull_speculative_contacts = False
+            solver_config.dvi.max_alternating_iterations = 2
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverXPBD(self.model, iterations=5)
@@ -130,13 +129,12 @@ class Example:
         self.control = self.model.control()
 
         if self.solver_type == "kamino":
-            self.collision_pipeline = None
-            self.contacts = newton.Contacts(
-                self.model.rigid_contact_max,
-                0,
-                device=self.model.device,
-                requested_attributes=self.model.get_requested_contact_attributes(),
+            self.collision_interval = 2
+            self.collision_pipeline = newton.CollisionPipeline(
+                self.model,
+                speculative_config=newton.CollisionPipeline.SpeculativeContactConfig(),
             )
+            self.contacts = self.collision_pipeline.contacts()
         else:
             self.collision_pipeline = newton.CollisionPipeline(self.model)
             self.contacts = self.collision_pipeline.contacts()
@@ -160,16 +158,22 @@ class Example:
         self.graph = capture.graph
 
     def simulate(self):
-        contacts = None if self.solver_type == "kamino" else self.contacts
-        for _ in range(self.sim_substeps):
+        for substep in range(self.sim_substeps):
             self.state_0.clear_forces()
 
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            if self.collision_pipeline is not None:
+            if self.solver_type == "kamino":
+                if substep % self.collision_interval == 0:
+                    self.collision_pipeline.collide(
+                        self.state_0,
+                        self.contacts,
+                        dt=self.collision_interval * self.sim_dt,
+                    )
+            else:
                 self.collision_pipeline.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, contacts, self.sim_dt)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
             self.state_0, self.state_1 = self.state_1, self.state_0

@@ -385,7 +385,8 @@ def _merge_inv_mass_matrix_kernel(
     num_nzb: wp.array[wp.int32],
     nzb_start: wp.array[wp.int32],
     nzb_coords: wp.array2d[wp.int32],
-    nzb_values: wp.array[vec6f],
+    jacobian_nzb_values: wp.array[vec6f],
+    mass_weighted_nzb_values: wp.array[vec6f],
 ):
     """
     Kernel to merge the inverse mass matrix into an existing sparse matrix, so that the resulting
@@ -399,7 +400,7 @@ def _merge_inv_mass_matrix_kernel(
 
     global_block_idx = nzb_start[mat_id] + block_idx
     block_coord = nzb_coords[global_block_idx]
-    block = nzb_values[global_block_idx]
+    block = jacobian_nzb_values[global_block_idx]
 
     body_id = block_coord[1] // 6
 
@@ -421,7 +422,7 @@ def _merge_inv_mass_matrix_kernel(
     block[3] = w[0]
     block[4] = w[1]
     block[5] = w[2]
-    nzb_values[global_block_idx] = block
+    mass_weighted_nzb_values[global_block_idx] = block
 
 
 @functools.cache
@@ -1463,10 +1464,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
         else:
             self._col_major_jacobian.update(self._model, self._jacobians, self._limits, self._contacts)
 
-        # Copy current Jacobian values to local constraint Jacobian
-        wp.copy(self.bsm.nzb_values, self.constraint_jacobian.nzb_values)
-
-        # Apply inverse mass matrix to (copy of) constraint Jacobian
+        # Apply inverse mass matrix while copying the current Jacobian values.
         wp.launch(
             kernel=_merge_inv_mass_matrix_kernel,
             dim=(self.bsm.num_matrices, self.bsm.max_of_num_nzb),
@@ -1478,6 +1476,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
                 self.bsm.num_nzb,
                 self.bsm.nzb_start,
                 self.bsm.nzb_coords,
+                self.constraint_jacobian.nzb_values,
                 # Outputs:
                 self.bsm.nzb_values,
             ],

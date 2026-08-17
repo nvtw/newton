@@ -700,8 +700,9 @@ def _build_free_velocity_bias_contacts(
     # NOTE: We still write zeros to overwrite previous values
     problem_v_i[ccio_k] = 0.0
     problem_v_i[ccio_k + 1] = 0.0
-    # Speculative contacts prevent overlap; they must not bounce before touch.
-    problem_v_i[ccio_k + 2] = wp.where(distance_k > 0.0, 0.0, epsilon_k)
+    # Speculative contacts prevent overlap; allow restitution only within the
+    # contact dead zone, including roundoff at its boundary.
+    problem_v_i[ccio_k + 2] = wp.where(distance_k > 2.0 * config.delta, 0.0, epsilon_k)
 
     # Store the contact friction coefficient in the output vector
     problem_mu[cio_k] = mu_k

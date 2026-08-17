@@ -385,6 +385,14 @@ class ConstrainedDynamicsConfig(ConfigBase):
     Defaults to an empty dictionary.
     """
 
+    cull_speculative_contacts: bool = True
+    """
+    Whether to discard separated speculative contacts before the dynamics solve.
+
+    Disable this when contacts come from a speculative :class:`CollisionPipeline`
+    and should constrain approaching bodies before impact. Defaults to ``True``.
+    """
+
     @override
     @staticmethod
     def register_custom_attributes(builder: ModelBuilder) -> None:

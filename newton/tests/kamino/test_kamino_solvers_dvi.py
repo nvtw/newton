@@ -3470,6 +3470,82 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_allclose(results[0][1], results[1][1], rtol=1.0e-6, atol=1.0e-6)
         np.testing.assert_allclose(results[0][2], results[1][2], rtol=1.0e-6, atol=1.0e-6)
 
+    def test_05b6_speculative_contact_restores_restitution_at_touching_tolerance(self):
+        """Restore restitution only after a speculative contact becomes numerically touching."""
+
+        def run(restitution: float) -> tuple[float, float, float, bool]:
+            radius = 0.05
+            dt = 1.0 / 600.0
+            collision_interval = 2
+            builder = newton.ModelBuilder(gravity=wp.vec3(0.0, 0.0, -9.81))
+            SolverKamino.register_custom_attributes(builder)
+            shape_cfg = newton.ModelBuilder.ShapeConfig(
+                mu=0.0,
+                restitution=restitution,
+                gap=0.005,
+                margin=0.0,
+            )
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.30), wp.quat_identity()))
+            builder.add_shape_sphere(body, radius=radius, cfg=shape_cfg)
+            builder.add_ground_plane(cfg=shape_cfg)
+            model = builder.finalize(device=self.device)
+
+            config = SolverKamino.Config.from_model(
+                model,
+                dynamics_solver="dvi",
+                sparse_dynamics=True,
+                sparse_jacobian=True,
+            )
+            config.dynamics.cull_speculative_contacts = False
+            config.dvi.max_alternating_iterations = 8
+            solver = SolverKamino(model, config=config)
+            pipeline = newton.CollisionPipeline(
+                model,
+                broad_phase="nxn",
+                speculative_config=newton.CollisionPipeline.SpeculativeContactConfig(
+                    max_speculative_extension=0.1,
+                ),
+            )
+            contacts = pipeline.contacts()
+            state_0 = model.state()
+            state_1 = model.state()
+            touching_seen = False
+            max_separated_upward_velocity = -np.inf
+            max_post_touch_upward_velocity = -np.inf
+            min_height = np.inf
+
+            for step in range(180):
+                if step % collision_interval == 0:
+                    pipeline.collide(state_0, contacts, dt=collision_interval * dt)
+                solver.step(state_0, state_1, None, contacts, dt)
+                state_0, state_1 = state_1, state_0
+
+                velocity_z = float(state_0.body_qd.numpy()[body, 2])
+                min_height = min(min_height, float(state_0.body_q.numpy()[body, 2]))
+                kamino_contacts = solver._contacts_kamino
+                contact_count = int(kamino_contacts.model_active_contacts.numpy()[0])
+                if contact_count == 0:
+                    continue
+                min_gap = float(np.min(kamino_contacts.gapfunc.numpy()[:contact_count, 3]))
+                if min_gap <= 2.0 * config.constraints.delta:
+                    touching_seen = True
+                if touching_seen:
+                    max_post_touch_upward_velocity = max(max_post_touch_upward_velocity, velocity_z)
+                else:
+                    max_separated_upward_velocity = max(max_separated_upward_velocity, velocity_z)
+
+            return min_height, max_separated_upward_velocity, max_post_touch_upward_velocity, touching_seen
+
+        inelastic = run(0.0)
+        restitutive = run(0.8)
+
+        for result in (inelastic, restitutive):
+            self.assertTrue(result[3])
+            self.assertGreaterEqual(result[0], 0.05 - 1.0e-5)
+            self.assertLessEqual(result[1], 0.0)
+        self.assertLess(inelastic[2], 0.01)
+        self.assertGreater(restitutive[2], 1.5)
+
     def test_05b6_dvi_split_recovery_respects_stabilization_config(self):
         """Honor stabilization gain, dead zone, and their disabled cases."""
 
