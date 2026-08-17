@@ -1545,6 +1545,42 @@ class TestTrainerFlashSAC(unittest.TestCase):
         self.assertEqual(result.buffer.actions.shape[1], result.env.policy_action_dim)
         self.assertEqual(len(result.trainer.mirror_map.action_src), result.env.policy_action_dim)
 
+    def test_high_level_g1_ppo_uses_isaaclab_flat_mirror_map(self) -> None:
+        """Train one PPO step with the full-action IsaacLab-flat symmetry map."""
+        device = require_cuda_graph_capture("IsaacLab-flat G1 PPO lifecycle")
+        env_config = g1_recipe.isaaclab_flat_g1_env_config(
+            world_count=1,
+            sim_substeps=1,
+            solver_iterations=1,
+            max_episode_steps=1,
+            randomize_commands_on_reset=False,
+            command_resample_steps=0,
+            parse_visuals=False,
+        )
+        result = public_rl.train_g1_ppo(
+            public_rl.ConfigTrainG1PPO(
+                iterations=1,
+                rollout_steps=1,
+                hidden_layers=(4,),
+                env_config=env_config,
+                ppo_config=ConfigPPO(
+                    train_epochs=1,
+                    minibatch_size=1,
+                    normalize_advantages=False,
+                    mirror_loss_coeff=0.25,
+                ),
+                device=device,
+                seed=353,
+                randomize_commands=False,
+                readback_diagnostics=False,
+            )
+        )
+
+        self.assertEqual(result.trainer.obs_dim, result.env.obs_dim)
+        self.assertEqual(result.trainer.action_dim, ACTION_DIM_G1)
+        self.assertEqual(len(result.trainer.mirror_map.obs_src), result.env.obs_dim)
+        self.assertEqual(len(result.trainer.mirror_map.action_src), ACTION_DIM_G1)
+
     def test_real_g1_flash_sac_and_ppo_workflow_smoke(self) -> None:
         """Exercise one real G1 collection and update for each trainer workflow."""
 

@@ -269,6 +269,7 @@ def isaaclab_flat_g1_env_config(**overrides: Any):
         "w_action_rate": -0.005,
         "w_alive": 0.0,
         "w_termination": -200.0,
+        "scale_termination_by_dt": True,
         "w_mechanical_power": 0.0,
         "w_gait_contact": 0.0,
         "w_gait_swing": 0.0,

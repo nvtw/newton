@@ -328,11 +328,13 @@ _G1_ACTION_MIRROR_SIGN = (
 )
 
 
-def g1_mirror_map_ppo(action_dim: int = ACTION_DIM_G1) -> MirrorMapPPO:
-    """Return nanoG1's validated left/right G1 PPO mirror map.
+def g1_mirror_map_ppo(action_dim: int = ACTION_DIM_G1, observation_mode: str = "nanog1") -> MirrorMapPPO:
+    """Return the left/right G1 PPO mirror map for an observation layout.
 
     Args:
         action_dim: Number of leading controlled joints exposed by the policy.
+        observation_mode: G1 observation layout, either ``"nanog1"`` or
+            ``"isaaclab_flat"``.
     """
 
     count = int(action_dim)
@@ -341,9 +343,51 @@ def g1_mirror_map_ppo(action_dim: int = ACTION_DIM_G1) -> MirrorMapPPO:
     action_src = _G1_ACTION_MIRROR_SRC[:count]
     if any(source >= count for source in action_src):
         raise ValueError("action_dim does not form a closed G1 mirror mapping")
+    if observation_mode == "nanog1":
+        obs_src = _G1_OBS_MIRROR_SRC
+        obs_sign = _G1_OBS_MIRROR_SIGN
+    elif observation_mode == "isaaclab_flat":
+        action_src_full = _G1_ACTION_MIRROR_SRC
+        action_sign_full = _G1_ACTION_MIRROR_SIGN
+        obs_src = (
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            *(12 + source for source in action_src_full),
+            *(41 + source for source in action_src_full),
+            *(70 + source for source in action_src_full),
+        )
+        obs_sign = (
+            1,
+            -1,
+            1,
+            -1,
+            1,
+            -1,
+            1,
+            -1,
+            1,
+            1,
+            -1,
+            -1,
+            *action_sign_full,
+            *action_sign_full,
+            *action_sign_full,
+        )
+    else:
+        raise ValueError('observation_mode must be "nanog1" or "isaaclab_flat"')
     return MirrorMapPPO(
-        obs_src=_G1_OBS_MIRROR_SRC,
-        obs_sign=_G1_OBS_MIRROR_SIGN,
+        obs_src=obs_src,
+        obs_sign=obs_sign,
         action_src=action_src,
         action_sign=_G1_ACTION_MIRROR_SIGN[:count],
     )
@@ -1006,6 +1050,7 @@ def g1_observe_reward_kernel(
     w_action_rate: wp.float32,
     w_alive: wp.float32,
     w_termination: wp.float32,
+    scale_termination_by_dt: wp.int32,
     gait_stance_fraction: wp.float32,
     w_gait_contact: wp.float32,
     w_gait_swing: wp.float32,
@@ -1419,6 +1464,9 @@ def g1_observe_reward_kernel(
             fall = wp.float32(1.0)
 
         reward = wp.float32(0.0)
+        termination_reward = w_termination
+        if scale_termination_by_dt != wp.int32(0):
+            termination_reward = termination_reward * reward_dt
         success_metric = track_lin_upright
         if reward_mode == wp.int32(0):
             # nanoG1 keeps tracking active during recovery; the upright gate only
@@ -1497,10 +1545,10 @@ def g1_observe_reward_kernel(
             reward = shaped_reward * reward_dt
             success_metric = sparse_success_upright
         if fall > wp.float32(0.5):
-            reward = reward + w_termination
+            reward = reward + termination_reward
             success_metric = wp.float32(0.0)
         if state_bad != wp.int32(0) or not wp.isfinite(reward):
-            reward = w_termination
+            reward = termination_reward
             success_metric = wp.float32(0.0)
         rewards[world] = reward
         successes[world] = success_metric
@@ -2067,7 +2115,9 @@ class ConfigEnvG1PhoenX:
         w_torque: Torque-squared penalty scale.
         w_action_rate: Action-rate penalty scale.
         w_alive: Alive reward per policy step.
-        w_termination: Termination reward applied on fall.
+        w_termination: Termination reward weight applied on fall.
+        scale_termination_by_dt: Scale the termination reward by the policy step
+            duration, matching IsaacLab's reward manager.
         reward_mode: Reward mode, either ``"nanog1_dense"``, ``"sparse_command"``,
             ``"sparse_target"``, or ``"dense_sparse_command"``.
         w_sparse_command_success: Sparse command or target success reward scale.
@@ -2159,6 +2209,7 @@ class ConfigEnvG1PhoenX:
     w_action_rate: float = g1_recipe.W_ACTION_RATE
     w_alive: float = g1_recipe.W_ALIVE
     w_termination: float = g1_recipe.W_TERMINATION
+    scale_termination_by_dt: bool = False
     reward_mode: str = g1_recipe.REWARD_MODE
     w_sparse_command_success: float = g1_recipe.W_SPARSE_COMMAND_SUCCESS
     w_target_progress: float = g1_recipe.W_TARGET_PROGRESS
@@ -2818,6 +2869,7 @@ class EnvG1PhoenX:
                 self.config.w_action_rate,
                 self.config.w_alive,
                 self.config.w_termination,
+                int(self.config.scale_termination_by_dt),
                 self.config.gait_stance_fraction,
                 self.config.w_gait_contact,
                 self.config.w_gait_swing,

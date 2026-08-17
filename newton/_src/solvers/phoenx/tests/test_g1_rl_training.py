@@ -607,6 +607,19 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(obs_src.size, rl.OBS_DIM_G1)
         self.assertEqual(action_src.size, rl.ACTION_DIM_G1)
 
+    def test_isaaclab_flat_mirror_map_is_an_involution(self) -> None:
+        """Mirror every IsaacLab-flat observation component exactly twice."""
+        mirror = rl.g1_mirror_map_ppo(observation_mode="isaaclab_flat")
+        obs_src = np.asarray(mirror.obs_src, dtype=np.int64)
+        obs_sign = np.asarray(mirror.obs_sign, dtype=np.float64)
+
+        self.assertEqual(obs_src.size, rl.OBS_DIM_G1_ISAACLAB_FLAT)
+        np.testing.assert_array_equal(obs_src[obs_src], np.arange(obs_src.size))
+        np.testing.assert_array_equal(obs_sign * obs_sign[obs_src], np.ones(obs_src.size))
+        np.testing.assert_array_equal(obs_src[12:41] - 12, np.asarray(mirror.action_src))
+        np.testing.assert_array_equal(obs_src[41:70] - 41, np.asarray(mirror.action_src))
+        np.testing.assert_array_equal(obs_src[70:99] - 70, np.asarray(mirror.action_src))
+
     def test_nanog1_model_and_deploy_constants_match_env(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 nanoG1 constant parity tests")
         deploy = _load_nanog1_deploy()
@@ -3558,6 +3571,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertEqual(config.action_scale, 0.5)
         self.assertEqual(config.w_alive, 0.0)
         self.assertEqual(config.w_termination, -200.0)
+        self.assertTrue(config.scale_termination_by_dt)
         self.assertEqual(config.w_track_lin, 1.0)
         self.assertEqual(config.w_track_ang, 1.0)
 
@@ -4970,6 +4984,41 @@ class TestG1PhoenXRL(unittest.TestCase):
         wp.capture_launch(fall_capture.graph)
         self.assertAlmostEqual(float(env.rewards.numpy()[0]), expected + env.config.w_termination, places=5)
         self.assertEqual(float(env.dones.numpy()[0]), 1.0)
+
+    def test_isaaclab_termination_reward_scales_by_dt_inside_graph(self) -> None:
+        """Scale IsaacLab termination and invalid-state rewards by policy dt."""
+        env = _g1_test_env(world_count=1)
+        env.config.w_gait_contact = 0.0
+        env.config.w_gait_swing = 0.0
+        env.config.w_gait_hip = 0.0
+        env.config.w_base_height = 0.0
+        env.config.w_termination = -200.0
+        env.config.scale_termination_by_dt = True
+        env.set_command((0.0, 0.0, 0.0))
+
+        with wp.ScopedCapture(device=env.device) as nominal_capture:
+            env.observe()
+        wp.capture_launch(nominal_capture.graph)
+        nominal_reward = float(env.rewards.numpy()[0])
+
+        joint_q = env.state_0.joint_q.numpy()
+        joint_q[2] = env.config.min_base_height - 0.01
+        env.state_0.joint_q.assign(joint_q)
+        with wp.ScopedCapture(device=env.device) as fall_capture:
+            env.observe()
+        wp.capture_launch(fall_capture.graph)
+        self.assertAlmostEqual(
+            float(env.rewards.numpy()[0]),
+            nominal_reward + env.config.w_termination * env.config.frame_dt,
+            places=5,
+        )
+
+        joint_q[0] = env.config.max_abs_root_position + 1.0
+        env.state_0.joint_q.assign(joint_q)
+        with wp.ScopedCapture(device=env.device) as invalid_capture:
+            env.observe()
+        wp.capture_launch(invalid_capture.graph)
+        self.assertAlmostEqual(float(env.rewards.numpy()[0]), env.config.w_termination * env.config.frame_dt, places=5)
 
     def test_command_progress_reward_is_optional_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 command progress reward tests")

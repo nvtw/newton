@@ -1004,7 +1004,9 @@ def _make_g1_rollout_trainer(env: EnvG1PhoenX, trainer: TrainerPPO) -> TrainerPP
         squash_actions=trainer.squash_actions,
         activation=trainer.activation,
         log_std_init=trainer.log_std_init,
-        mirror_map=g1_mirror_map_ppo(int(getattr(env, "policy_action_dim", env.action_dim)))
+        mirror_map=g1_mirror_map_ppo(
+            int(getattr(env, "policy_action_dim", env.action_dim)), env.config.observation_mode
+        )
         if trainer.config.mirror_loss_coeff > 0.0
         else None,
     )
@@ -1815,7 +1817,9 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
         ):
             raise ValueError("Checkpoint dimensions do not match the G1 environment")
         if trainer.config.mirror_loss_coeff > 0.0:
-            trainer.set_mirror_map(g1_mirror_map_ppo(int(getattr(env, "policy_action_dim", env.action_dim))))
+            trainer.set_mirror_map(
+                g1_mirror_map_ppo(int(getattr(env, "policy_action_dim", env.action_dim)), env.config.observation_mode)
+            )
     else:
         trainer = TrainerPPO(
             obs_dim=env.obs_dim,
@@ -1827,7 +1831,9 @@ def train_g1_ppo(config: ConfigTrainG1PPO | None = None) -> ResultTrainG1PPO:
             squash_actions=cfg.squash_actions,
             activation=cfg.activation,
             log_std_init=cfg.log_std_init,
-            mirror_map=g1_mirror_map_ppo(int(getattr(env, "policy_action_dim", env.action_dim)))
+            mirror_map=g1_mirror_map_ppo(
+                int(getattr(env, "policy_action_dim", env.action_dim)), env.config.observation_mode
+            )
             if ppo_config.mirror_loss_coeff > 0.0
             else None,
         )
