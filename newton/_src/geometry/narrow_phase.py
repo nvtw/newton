@@ -81,7 +81,6 @@ from ..utils.heightfield import (
 )
 
 _SPARSE_GJK_PAIR_CAPACITY_THRESHOLD = 1_000_000
-_SPLIT_GJK_MPR_PAIR_CAPACITY_THRESHOLD = 4096
 
 
 @wp.func
@@ -2146,6 +2145,7 @@ class NarrowPhase:
         use_lean_gjk_mpr: bool = False,
         has_generic_convex_pairs: bool = True,
         sparse_gjk_pairs: bool | None = None,
+        split_gjk_mpr: bool = False,
         candidate_pair_work_estimate: int | None = None,
         mesh_sdf_texture_only: bool = False,
         mesh_sdf_identity_scale_only: bool = False,
@@ -2189,6 +2189,9 @@ class NarrowPhase:
             sparse_gjk_pairs: Whether GJK routing preserves broad-phase pair
                 indices instead of compacting its work buffer. Defaults to
                 automatic enablement for large CUDA candidate buffers.
+            split_gjk_mpr: Whether to split generic convex collision into MPR,
+                GJK, and manifold kernels. Ignored on CPU and when generic
+                convex processing is unnecessary.
             candidate_pair_work_estimate: Static upper bound on pairs that the
                 broad phase can emit. Defaults to ``max_candidate_pairs``.
             mesh_sdf_texture_only: Whether every participating mesh SDF has a texture representation,
@@ -2321,12 +2324,7 @@ class NarrowPhase:
             candidate_pair_work_estimate = max_candidate_pairs
         if candidate_pair_work_estimate < 0:
             raise ValueError("candidate_pair_work_estimate must be non-negative or None")
-        self.split_gjk_mpr = (
-            device_obj.is_cuda
-            and has_generic_convex_pairs
-            and use_lean_gjk_mpr
-            and candidate_pair_work_estimate >= _SPLIT_GJK_MPR_PAIR_CAPACITY_THRESHOLD
-        )
+        self.split_gjk_mpr = device_obj.is_cuda and has_generic_convex_pairs and split_gjk_mpr
         # Create the appropriate kernel variants
         # Primitive kernel handles lightweight primitives and routes remaining pairs
         self.primitive_kernel = create_narrow_phase_primitive_kernel(

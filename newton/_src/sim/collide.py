@@ -747,6 +747,7 @@ def _resolve_shape_pairs_max(model: Model, override: int | None) -> int:
 
 
 BROAD_PHASE_MODES = ("nxn", "sap", "explicit")
+_SPLIT_GJK_MPR_SHAPE_COUNT_THRESHOLD = 6_144
 
 
 def _normalize_broad_phase_mode(mode: str) -> str:
@@ -1471,6 +1472,11 @@ class CollisionPipeline:
             candidate_pair_work_estimate = min(self.shape_pairs_max, _compute_per_world_shape_pairs_max(model))
             if self.broad_phase_mode == "explicit":
                 candidate_pair_work_estimate = self.shape_pairs_max
+            split_gjk_mpr = (
+                device.is_cuda
+                and has_generic_convex_pairs
+                and int(np.count_nonzero(colliding_mask)) >= _SPLIT_GJK_MPR_SHAPE_COUNT_THRESHOLD
+            )
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
             # Pass write_contact as custom writer to write directly to final Contacts format
@@ -1498,6 +1504,7 @@ class CollisionPipeline:
                 has_heightfields=model.heightfield_count > 0,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
                 has_generic_convex_pairs=has_generic_convex_pairs,
+                split_gjk_mpr=split_gjk_mpr,
                 candidate_pair_work_estimate=candidate_pair_work_estimate,
                 mesh_sdf_identity_scale_only=mesh_sdf_identity_scale_only,
                 mesh_sdf_texture_only=mesh_sdf_texture_only,

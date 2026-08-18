@@ -17,7 +17,25 @@ from newton.viewer import ViewerNull
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 IRREGULAR_ROCK_VERTEX_COUNTS = (10, 14, 18, 26)
-IRREGULAR_ROCK_WORLD_COUNTS = (256, 1024)
+CONVEX_COLLISION_CASES = (("hulls", 192), ("mixed", 512))
+MIXED_CONVEX_PAIR_TYPES = (
+    ("sphere", "sphere"),
+    ("capsule", "capsule"),
+    ("sphere", "capsule"),
+    ("box", "hull"),
+    ("ellipsoid", "box"),
+    ("cylinder", "cylinder"),
+    ("cone", "cylinder"),
+    ("capsule", "hull"),
+    ("sphere", "cone"),
+    ("ellipsoid", "hull"),
+    ("box", "box"),
+    ("hull", "hull"),
+    ("cone", "hull"),
+    ("capsule", "ellipsoid"),
+    ("sphere", "hull"),
+    ("cylinder", "box"),
+)
 
 try:
     from newton.examples import download_external_git_folder as _download_external_git_folder
@@ -74,24 +92,54 @@ def _make_irregular_rock(vertex_count: int, seed: int) -> newton.Mesh:
     return newton.Mesh(np.asarray(vertices, dtype=np.float32), np.asarray(indices, dtype=np.int32))
 
 
-def _build_irregular_rock_pile(world_count: int, rocks_per_world: int = 10) -> newton.Model:
-    """Build replicated piles containing varied irregular convex hulls."""
+def _add_mixed_convex_shape(
+    builder: newton.ModelBuilder,
+    body: int,
+    shape_kind: str,
+    rocks: list[newton.Mesh],
+    rock_index: int,
+    cfg: newton.ModelBuilder.ShapeConfig,
+) -> None:
+    """Add one convex shape to the mixed collision workload."""
+    if shape_kind == "sphere":
+        builder.add_shape_sphere(body, radius=0.5, cfg=cfg)
+    elif shape_kind == "box":
+        builder.add_shape_box(body, hx=0.48, hy=0.42, hz=0.45, cfg=cfg)
+    elif shape_kind == "capsule":
+        builder.add_shape_capsule(body, radius=0.32, half_height=0.25, cfg=cfg)
+    elif shape_kind == "ellipsoid":
+        builder.add_shape_ellipsoid(body, rx=0.52, ry=0.43, rz=0.38, cfg=cfg)
+    elif shape_kind == "cylinder":
+        builder.add_shape_cylinder(body, radius=0.48, half_height=0.45, cfg=cfg)
+    elif shape_kind == "cone":
+        builder.add_shape_cone(body, radius=0.5, half_height=0.48, cfg=cfg)
+    elif shape_kind == "hull":
+        builder.add_shape_convex_hull(body, mesh=rocks[rock_index % len(rocks)], cfg=cfg)
+    else:
+        raise ValueError(f"Unsupported convex shape kind: {shape_kind}")
+
+
+def _build_convex_scene(world_count: int, pair_types: tuple[tuple[str, str], ...]) -> newton.Model:
+    """Build replicated isolated convex pairs."""
     newton.use_coord_layout_targets = True
     rocks = [_make_irregular_rock(count, 100 + index) for index, count in enumerate(IRREGULAR_ROCK_VERTEX_COUNTS)]
 
     world_builder = newton.ModelBuilder()
     shape_cfg = newton.ModelBuilder.ShapeConfig(gap=0.01, margin=0.0)
-    world_builder.add_ground_plane(cfg=shape_cfg)
-    for index in range(rocks_per_world):
-        position = wp.vec3(
-            0.08 * ((index % 3) - 1),
-            0.07 * (((index * 2) % 3) - 1),
-            0.43 + 0.83 * index,
+    axis = wp.normalize(wp.vec3(0.3, 0.2, 1.0))
+    for pair_index, (shape_a, shape_b) in enumerate(pair_types):
+        x = 3.0 * (pair_index % 4)
+        y = 3.0 * (pair_index // 4)
+        angle = 0.11 * pair_index
+        body_a = world_builder.add_body(xform=wp.transform(wp.vec3(x, y, 1.0), wp.quat_from_axis_angle(axis, angle)))
+        body_b = world_builder.add_body(
+            xform=wp.transform(
+                wp.vec3(x + 0.84, y + 0.03 * ((pair_index % 3) - 1), 1.0),
+                wp.quat_from_axis_angle(axis, -0.7 * angle),
+            )
         )
-        axis = wp.normalize(wp.vec3(0.3 + 0.1 * (index % 2), 0.2, 1.0))
-        rotation = wp.quat_from_axis_angle(axis, 0.19 * index)
-        body = world_builder.add_body(xform=wp.transform(position, rotation))
-        world_builder.add_shape_convex_hull(body, mesh=rocks[index % len(rocks)], cfg=shape_cfg)
+        _add_mixed_convex_shape(world_builder, body_a, shape_a, rocks, 2 * pair_index, shape_cfg)
+        _add_mixed_convex_shape(world_builder, body_b, shape_b, rocks, 2 * pair_index + 1, shape_cfg)
 
     builder = newton.ModelBuilder()
     builder.replicate(world_builder, world_count=world_count)
@@ -200,28 +248,34 @@ class FastExampleContactPyramidDefaults:
         wp.synchronize_device()
 
 
-class FastIrregularRockPileCollision:
-    """Benchmark narrow-phase collision for replicated irregular rock piles."""
+class FastConvexCollision:
+    """Benchmark lean-hull and mixed-type convex collision workloads."""
 
-    params = (IRREGULAR_ROCK_WORLD_COUNTS,)
-    param_names = ["world_count"]
+    params = (CONVEX_COLLISION_CASES,)
+    param_names = ["case"]
     repeat = 5
     number = 1
 
-    def setup(self, world_count):
+    def setup(self, case):
         device = wp.get_device()
         if not device.is_cuda or not wp.is_mempool_enabled(device):
             raise SkipNotImplemented
 
         self.launch_count = 100
-        rocks_per_world = 10
-        self.model = _build_irregular_rock_pile(world_count, rocks_per_world)
+        scene, world_count = case
+        if scene == "hulls":
+            pair_types = (("hull", "hull"),) * len(MIXED_CONVEX_PAIR_TYPES)
+        elif scene == "mixed":
+            pair_types = MIXED_CONVEX_PAIR_TYPES
+        else:
+            raise ValueError(f"Unsupported convex benchmark scene: {scene}")
+        self.model = _build_convex_scene(world_count, pair_types)
         self.state = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
             broad_phase="sap",
-            rigid_contact_max=world_count * rocks_per_world * 8,
+            rigid_contact_max=self.model.shape_count * 8,
             verify_buffers=False,
         )
         self.contacts = self.collision_pipeline.contacts()
@@ -229,14 +283,14 @@ class FastIrregularRockPileCollision:
         for _ in range(5):
             self.collision_pipeline.collide(self.state, self.contacts)
         if int(self.collision_pipeline.narrow_phase.gjk_candidate_pairs_count.numpy()[0]) == 0:
-            raise RuntimeError("irregular rock pile produced no GJK candidate pairs")
+            raise RuntimeError("convex benchmark scene produced no GJK candidate pairs")
 
         with wp.ScopedCapture(device=device) as capture:
             self.collision_pipeline.collide(self.state, self.contacts)
         self.graph = capture.graph
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_collide(self, world_count):
+    def time_collide(self, case):
         for _ in range(self.launch_count):
             wp.capture_launch(self.graph)
         wp.synchronize_device()
@@ -251,7 +305,7 @@ if __name__ == "__main__":
         "FastExampleContactSdfDefaults": FastExampleContactSdfDefaults,
         "FastExampleContactHydroWorkingDefaults": FastExampleContactHydroWorkingDefaults,
         "FastExampleContactPyramidDefaults": FastExampleContactPyramidDefaults,
-        "FastIrregularRockPileCollision": FastIrregularRockPileCollision,
+        "FastConvexCollision": FastConvexCollision,
     }
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)

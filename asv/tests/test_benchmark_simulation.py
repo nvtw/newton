@@ -77,9 +77,13 @@ class TestSimulationBenchmarks(unittest.TestCase):
         self.assertFalse(hasattr(bench_quadruped_xpbd, "Example"))
         self.assertFalse(hasattr(bench_quadruped_xpbd, "newton"))
 
-    def test_irregular_rock_benchmark_covers_mixed_hulls_and_scales(self):
-        """Cover mixed hull sizes at both benchmark world counts."""
-        self.assertEqual(tuple(bench_contacts.FastIrregularRockPileCollision.params[0]), (256, 1024))
+    def test_convex_benchmark_covers_types_and_scales(self):
+        """Cover every convex type, varied hulls, and two workload scales."""
+        self.assertEqual(tuple(bench_contacts.FastConvexCollision.params[0]), (("hulls", 192), ("mixed", 512)))
+        self.assertEqual(
+            {shape for pair in bench_contacts.MIXED_CONVEX_PAIR_TYPES for shape in pair},
+            {"sphere", "box", "capsule", "ellipsoid", "cylinder", "cone", "hull"},
+        )
 
         for vertex_count in bench_contacts.IRREGULAR_ROCK_VERTEX_COUNTS:
             with self.subTest(vertex_count=vertex_count):
