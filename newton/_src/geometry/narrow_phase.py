@@ -84,115 +84,38 @@ _SPARSE_GJK_PAIR_CAPACITY_THRESHOLD = 1_000_000
 _SPLIT_GJK_MPR_PAIR_CAPACITY_THRESHOLD = 4096
 
 
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
-const unsigned int mask = __ballot_sync(__activemask(), predicate != 0);
-if (predicate == 0) {
-    return -1;
-}
-
-const int lane = threadIdx.x & 31;
-const int leader = __ffs(mask) - 1;
-const int count = __popc(mask);
-int base = 0;
-if (lane == leader) {
-    base = atomic_add(work_count, 0, count);
-}
-base = __shfl_sync(mask, base, leader);
-const unsigned int lower_mask = mask & ((1u << lane) - 1u);
-return base + __popc(lower_mask);
-#else
-if (predicate == 0) {
-    return -1;
-}
-return atomic_add(work_count, 0, 1);
-#endif
-""")
-def _reserve_warp_aggregated(predicate: int, work_count: wp.array[int]) -> int:
-    """Reserve one compacted output slot, aggregating atomics per CUDA warp."""
-    ...
+@wp.func
+def _reserve_compacted_slot(predicate: int, work_count: wp.array[int]) -> int:
+    """Reserve one compacted output slot for a selected work item."""
+    if predicate == 0:
+        return -1
+    return wp.atomic_add(work_count, 0, 1)
 
 
 @wp.func
-def _append_work_index_warp_aggregated(
+def _append_work_index_compacted(
     predicate: bool,
     value: int,
     work_items: wp.array[int],
     work_count: wp.array[int],
 ):
-    """Append one work item using a single atomic reservation per active warp."""
-    index = _reserve_warp_aggregated(int(predicate), work_count)
+    """Append one selected work item to a compacted queue."""
+    index = _reserve_compacted_slot(int(predicate), work_count)
     if index >= 0 and index < work_items.shape[0]:
         work_items[index] = value
 
 
 @wp.func
-def _append_pair_warp_aggregated(
+def _append_pair_compacted(
     predicate: bool,
     value: wp.vec2i,
     work_items: wp.array[wp.vec2i],
     work_count: wp.array[int],
 ):
-    """Append one pair using a single atomic reservation per active warp."""
-    index = _reserve_warp_aggregated(int(predicate), work_count)
+    """Append one selected pair to a compacted queue."""
+    index = _reserve_compacted_slot(int(predicate), work_count)
     if index >= 0 and index < work_items.shape[0]:
         work_items[index] = value
-
-
-@wp.kernel(enable_backward=False)
-def reorder_replicated_world_pairs_kernel(
-    candidate_pairs: wp.array[wp.vec2i],
-    candidate_pair_count: wp.array[int],
-    world_count: int,
-    shapes_per_world: int,
-    global_shape_count: int,
-    total_num_threads: int,
-    reordered_pairs: wp.array[wp.vec2i],
-):
-    """Group replicated-world pairs by their within-world shape indices."""
-    tid = wp.tid()
-    count = wp.min(candidate_pairs.shape[0], candidate_pair_count[0])
-    for pair_index in range(tid, count, total_num_threads):
-        pair = candidate_pairs[pair_index]
-        shape_a = pair[0]
-        shape_b = pair[1]
-        if shape_a < 0 or shape_b < 0 or shape_a == shape_b:
-            continue
-        local_shape_count = world_count * shapes_per_world
-        local_pair_capacity = world_count * shapes_per_world * (shapes_per_world - 1) // 2
-        local_global_capacity = world_count * shapes_per_world * global_shape_count
-        a_is_global = shape_a >= local_shape_count
-        b_is_global = shape_b >= local_shape_count
-        output_index = int(-1)  # noqa: RUF046, RUF100 - explicit cast required by Warp codegen
-        if not a_is_global and not b_is_global:
-            world_a = shape_a // shapes_per_world
-            world_b = shape_b // shapes_per_world
-            if world_a == world_b and world_a >= 0 and world_a < world_count:
-                local_a = shape_a - world_a * shapes_per_world
-                local_b = shape_b - world_b * shapes_per_world
-                if local_a > local_b:
-                    local_a, local_b = local_b, local_a
-                local_pair = (local_b * (local_b - 1)) // 2 + local_a
-                output_index = local_pair * world_count + world_a
-        elif a_is_global != b_is_global:
-            local_shape = shape_b if a_is_global else shape_a
-            global_shape = shape_a if a_is_global else shape_b
-            world = local_shape // shapes_per_world
-            local_index = local_shape - world * shapes_per_world
-            global_index = global_shape - local_shape_count
-            if world >= 0 and world < world_count and global_index >= 0 and global_index < global_shape_count:
-                local_global_pair = global_index * shapes_per_world + local_index
-                output_index = local_pair_capacity + local_global_pair * world_count + world
-        else:
-            global_a = shape_a - local_shape_count
-            global_b = shape_b - local_shape_count
-            if global_a > global_b:
-                global_a, global_b = global_b, global_a
-            global_pair = (global_b * (global_b - 1)) // 2 + global_a
-            output_index = local_pair_capacity + local_global_capacity + global_pair
-        if output_index < reordered_pairs.shape[0]:
-            if output_index >= 0:
-                reordered_pairs[output_index] = pair
 
 
 @wp.struct
@@ -238,7 +161,7 @@ class ConvexPairQueryData:
     enlarge: float
 
 
-def create_prepare_convex_pair(external_aabb: bool, sort_pairs: bool, speculative: bool = False):
+def create_prepare_convex_pair(external_aabb: bool, speculative: bool = False):
     """Create pair preparation shared by the split convex-contact kernels."""
 
     @wp.func
@@ -263,9 +186,6 @@ def create_prepare_convex_pair(external_aabb: bool, sort_pairs: bool, speculativ
 
         type_a = shape_types[shape_a]
         type_b = shape_types[shape_b]
-        if wp.static(sort_pairs) and type_a > type_b:
-            shape_a, shape_b = shape_b, shape_a
-            type_a, type_b = type_b, type_a
 
         pos_a, quat_a, geom_a, _scale_a, margin_a = extract_shape_data(
             shape_a, shape_transform, shape_types, shape_data, shape_source
@@ -316,12 +236,14 @@ def create_prepare_convex_pair(external_aabb: bool, sort_pairs: bool, speculativ
 
             center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
             center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
+            overlap_radius_a = bsphere_radius_a
+            overlap_radius_b = bsphere_radius_b
             if wp.static(external_aabb and speculative):
                 pair_search_extension = rigid_gap
                 if is_infinite_plane_a:
-                    bsphere_radius_b += pair_search_extension
+                    overlap_radius_b += pair_search_extension
                 else:
-                    bsphere_radius_a += pair_search_extension
+                    overlap_radius_a += pair_search_extension
             if not check_infinite_plane_bsphere_overlap(
                 geom_a,
                 geom_b,
@@ -331,8 +253,8 @@ def create_prepare_convex_pair(external_aabb: bool, sort_pairs: bool, speculativ
                 quat_b,
                 center_a,
                 center_b,
-                bsphere_radius_a,
-                bsphere_radius_b,
+                overlap_radius_a,
+                overlap_radius_b,
             ):
                 return False, result
 
@@ -727,7 +649,7 @@ def create_narrow_phase_primitive_kernel(
                     if t < gjk_candidate_pairs.shape[0]:
                         gjk_candidate_pairs[t] = wp.vec2i(shape_a, shape_b)
                 else:
-                    _append_pair_warp_aggregated(
+                    _append_pair_compacted(
                         True, wp.vec2i(shape_a, shape_b), gjk_candidate_pairs, gjk_candidate_pairs_count
                     )
                 continue
@@ -1087,9 +1009,7 @@ def create_narrow_phase_primitive_kernel(
                 if t < gjk_candidate_pairs.shape[0]:
                     gjk_candidate_pairs[t] = wp.vec2i(shape_a, shape_b)
             else:
-                _append_pair_warp_aggregated(
-                    True, wp.vec2i(shape_a, shape_b), gjk_candidate_pairs, gjk_candidate_pairs_count
-                )
+                _append_pair_compacted(True, wp.vec2i(shape_a, shape_b), gjk_candidate_pairs, gjk_candidate_pairs_count)
 
     return narrow_phase_primitive_kernel
 
@@ -1100,7 +1020,6 @@ def create_narrow_phase_kernel_gjk_mpr(
     support_func: Any = None,
     post_process_contact: Any = None,
     speculative: bool = False,
-    sort_pairs: bool = False,
 ):
     """
     Create a GJK/MPR narrow phase kernel for complex convex shape collisions.
@@ -1116,7 +1035,7 @@ def create_narrow_phase_kernel_gjk_mpr(
     """
     _sf = support_func.__name__ if support_func is not None else "default"
     _ppc = post_process_contact.__name__ if post_process_contact is not None else "default"
-    _module = f"narrow_phase_gjk_mpr_{external_aabb}_{speculative}_{writer_func.__name__}_{_sf}_{_ppc}_{sort_pairs}"
+    _module = f"narrow_phase_gjk_mpr_{external_aabb}_{speculative}_{writer_func.__name__}_{_sf}_{_ppc}"
 
     @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_kernel_gjk_mpr(
@@ -1139,7 +1058,7 @@ def create_narrow_phase_kernel_gjk_mpr(
         GJK/MPR collision detection for complex convex pairs.
 
         Pairs are pre-filtered (no meshes, no hydroelastic, no simple
-        primitives) and are either pre-sorted or locally sorted.
+        primitives) and pre-sorted by shape type.
         """
         tid = wp.tid()
 
@@ -1154,13 +1073,6 @@ def create_narrow_phase_kernel_gjk_mpr(
         block_index = tid // block_dim
         lane = tid - block_index * block_dim
 
-        if wp.static(sort_pairs):
-            # Direct pairs already have coherent global-stride ordering.
-            block_dim = total_num_threads
-            num_blocks = 1
-            block_index = 0
-            lane = tid
-
         items_per_block = (num_work_items + num_blocks - 1) // num_blocks
         block_start = block_index * items_per_block
 
@@ -1168,7 +1080,7 @@ def create_narrow_phase_kernel_gjk_mpr(
             t = block_start + local_index
             if t >= num_work_items:
                 continue
-            # Get a pre-routed pair or a direct broad-phase pair.
+            # Get a pre-routed pair.
             pair = candidate_pair[t]
             shape_a = pair[0]
             shape_b = pair[1]
@@ -1177,12 +1089,8 @@ def create_narrow_phase_kernel_gjk_mpr(
             if shape_a == shape_b or shape_a < 0 or shape_b < 0:
                 continue
 
-            # Direct broad-phase pairs require local type sorting.
             type_a = shape_types[shape_a]
             type_b = shape_types[shape_b]
-            if wp.static(sort_pairs) and type_a > type_b:
-                shape_a, shape_b = shape_b, shape_a
-                type_a, type_b = type_b, type_a
 
             # Extract shape data
             pos_a, quat_a, shape_data_a, scale_a, margin_offset_a = extract_shape_data(
@@ -1254,15 +1162,17 @@ def create_narrow_phase_kernel_gjk_mpr(
                 # Compute bounding spheres and check for overlap (early rejection)
                 bsphere_center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
                 bsphere_center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
+                overlap_radius_a = bsphere_radius_a
+                overlap_radius_b = bsphere_radius_b
 
                 # External AABBs describe the current geometry. Include both shapes' search
                 # extensions so relative translational motion cannot be culled before GJK.
                 if wp.static(external_aabb and speculative):
                     pair_search_extension = shape_gap[shape_a] + shape_gap[shape_b]
                     if is_infinite_plane_a:
-                        bsphere_radius_b += pair_search_extension
+                        overlap_radius_b += pair_search_extension
                     else:
-                        bsphere_radius_a += pair_search_extension
+                        overlap_radius_a += pair_search_extension
 
                 if not check_infinite_plane_bsphere_overlap(
                     shape_data_a,
@@ -1273,8 +1183,8 @@ def create_narrow_phase_kernel_gjk_mpr(
                     quat_b,
                     bsphere_center_a,
                     bsphere_center_b,
-                    bsphere_radius_a,
-                    bsphere_radius_b,
+                    overlap_radius_a,
+                    overlap_radius_b,
                 ):
                     continue
 
@@ -1314,7 +1224,6 @@ def create_narrow_phase_kernels_gjk_mpr_split(
     support_func: Any = None,
     post_process_contact: Any = None,
     speculative: bool = False,
-    sort_pairs: bool = False,
 ):
     """Create graph-capturable MPR, GJK, and manifold work-queue kernels."""
     if support_func is None:
@@ -1325,13 +1234,12 @@ def create_narrow_phase_kernels_gjk_mpr_split(
     support_funcs = create_support_map_function(support_func, use_precomputed_center=True)
     solve_mpr = create_solve_mpr(support_func, _support_funcs=support_funcs)
     solve_gjk = create_solve_closest_distance(support_func, _support_funcs=support_funcs)
-    prepare_pair = create_prepare_convex_pair(external_aabb, sort_pairs, speculative)
+    prepare_pair = create_prepare_convex_pair(external_aabb, speculative)
     write_result = create_write_convex_query_result(
         support_func, writer_func, post_process_contact, use_precomputed_center=True
     )
     suffix = (
-        f"{external_aabb}_{writer_func.__name__}_{support_func.__name__}_{post_process_contact.__name__}_"
-        f"{speculative}_{sort_pairs}"
+        f"{external_aabb}_{writer_func.__name__}_{support_func.__name__}_{post_process_contact.__name__}_{speculative}"
     )
 
     @wp.kernel(enable_backward=False, module=f"narrow_phase_mpr_{suffix}")
@@ -1361,11 +1269,6 @@ def create_narrow_phase_kernels_gjk_mpr_split(
         num_blocks = total_num_threads // block_dim
         block_index = tid // block_dim
         lane = tid - block_index * block_dim
-        if wp.static(sort_pairs):
-            block_dim = total_num_threads
-            num_blocks = 1
-            block_index = 0
-            lane = tid
         items_per_block = (num_work_items + num_blocks - 1) // num_blocks
         block_start = block_index * items_per_block
 
@@ -1414,8 +1317,8 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                 else:
                     needs_gjk = True
 
-            _append_work_index_warp_aggregated(needs_gjk, pair_index, gjk_work_items, gjk_work_count)
-            _append_work_index_warp_aggregated(needs_manifold, pair_index, manifold_work_items, manifold_work_count)
+            _append_work_index_compacted(needs_gjk, pair_index, gjk_work_items, gjk_work_count)
+            _append_work_index_compacted(needs_manifold, pair_index, manifold_work_items, manifold_work_count)
 
     @wp.kernel(enable_backward=False, module=f"narrow_phase_gjk_{suffix}")
     def narrow_phase_gjk_kernel(
@@ -1473,7 +1376,7 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                     result.signed_distance = signed_distance
                     query_results[pair_index] = result
                     needs_manifold = True
-            _append_work_index_warp_aggregated(needs_manifold, pair_index, manifold_work_items, manifold_work_count)
+            _append_work_index_compacted(needs_manifold, pair_index, manifold_work_items, manifold_work_count)
 
     @wp.kernel(enable_backward=False, module=f"narrow_phase_manifold_{suffix}")
     def narrow_phase_manifold_kernel(
@@ -1835,7 +1738,7 @@ def compute_mesh_plane_block_offsets_scan(
         device=device,
         record_tape=record_tape,
     )
-    # Step 4: exclusive scan of block counts → block_offsets
+    # Step 3: exclusive scan of block counts → block_offsets
     wp.utils.array_scan(block_offsets, block_offsets, inclusive=False)
 
 
@@ -2099,6 +2002,8 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 def verify_narrow_phase_buffers(
     broad_phase_count: wp.array[int],
     max_broad_phase: int,
+    split_query_count: wp.array[int],
+    max_split_query: int,
     gjk_count: wp.array[int],
     max_gjk: int,
     split_gjk_count: wp.array[int],
@@ -2128,6 +2033,12 @@ def verify_narrow_phase_buffers(
             "Warning: Broad phase pair buffer overflowed %d > %d.\n",
             broad_phase_count[0],
             max_broad_phase,
+        )
+    if max_split_query >= 0 and split_query_count[0] > max_split_query:
+        wp.printf(
+            "Warning: Split query-result buffer overflowed %d > %d.\n",
+            split_query_count[0],
+            max_split_query,
         )
     if gjk_count[0] > max_gjk:
         wp.printf(
@@ -2234,12 +2145,8 @@ class NarrowPhase:
         has_heightfields: bool = False,
         use_lean_gjk_mpr: bool = False,
         has_generic_convex_pairs: bool = True,
-        all_pairs_generic_convex: bool = False,
         sparse_gjk_pairs: bool | None = None,
         candidate_pair_work_estimate: int | None = None,
-        replicated_world_count: int = 0,
-        shapes_per_replicated_world: int = 0,
-        replicated_global_shape_count: int = 0,
         mesh_sdf_texture_only: bool = False,
         mesh_sdf_identity_scale_only: bool = False,
         sdf_texture_paired_samples: bool = True,
@@ -2279,20 +2186,11 @@ class NarrowPhase:
             has_generic_convex_pairs: Whether any candidate pair can require
                 generic GJK/MPR processing. Set to False only from a complete
                 scene-topology proof; this omits the GJK/MPR launch entirely.
-            all_pairs_generic_convex: Whether every candidate pair can go
-                directly to generic GJK/MPR after local type sorting. Defaults
-                to False so expert callers retain primitive routing.
             sparse_gjk_pairs: Whether GJK routing preserves broad-phase pair
                 indices instead of compacting its work buffer. Defaults to
                 automatic enablement for large CUDA candidate buffers.
             candidate_pair_work_estimate: Static upper bound on pairs that the
                 broad phase can emit. Defaults to ``max_candidate_pairs``.
-            replicated_world_count: Number of equal-size, contiguous replicated
-                worlds eligible for coherent convex-pair scheduling.
-            shapes_per_replicated_world: Shape stride between eligible replicated
-                worlds.
-            replicated_global_shape_count: Number of trailing global shapes in a
-                coherently scheduled replicated model.
             mesh_sdf_texture_only: Whether every participating mesh SDF has a texture representation,
                 allowing BVH fallback branches to be removed from mesh/SDF kernels.
             mesh_sdf_identity_scale_only: Whether every participating texture SDF is queried with
@@ -2355,10 +2253,6 @@ class NarrowPhase:
         self.has_generic_convex_pairs = has_generic_convex_pairs
         self.sdf_texture_paired_samples = sdf_texture_paired_samples
         self.mesh_sdf_identity_scale_only = mesh_sdf_identity_scale_only
-        self.all_pairs_generic_convex = all_pairs_generic_convex
-        self.replicated_world_count = replicated_world_count
-        self.shapes_per_replicated_world = shapes_per_replicated_world
-        self.replicated_global_shape_count = replicated_global_shape_count
         self.deterministic = deterministic
         self.verify_buffers = verify_buffers
         self.speculative = speculative
@@ -2432,24 +2326,6 @@ class NarrowPhase:
             and has_generic_convex_pairs
             and candidate_pair_work_estimate >= _SPLIT_GJK_MPR_PAIR_CAPACITY_THRESHOLD
         )
-        replicated_local_pair_capacity = (
-            replicated_world_count * shapes_per_replicated_world * (shapes_per_replicated_world - 1) // 2
-        )
-        replicated_local_global_capacity = (
-            replicated_world_count * shapes_per_replicated_world * replicated_global_shape_count
-        )
-        replicated_global_pair_capacity = replicated_global_shape_count * (replicated_global_shape_count - 1) // 2
-        replicated_pair_capacity = (
-            replicated_local_pair_capacity + replicated_local_global_capacity + replicated_global_pair_capacity
-        )
-        self.reorder_replicated_pairs = (
-            self.split_gjk_mpr
-            and replicated_world_count >= 32
-            and shapes_per_replicated_world > 1
-            and replicated_pair_capacity <= candidate_pair_work_estimate
-        )
-        self.replicated_pair_capacity = replicated_pair_capacity if self.reorder_replicated_pairs else 0
-
         # Create the appropriate kernel variants
         # Primitive kernel handles lightweight primitives and routes remaining pairs
         self.primitive_kernel = create_narrow_phase_primitive_kernel(
@@ -2474,25 +2350,6 @@ class NarrowPhase:
                 self.external_aabb, writer_func, speculative=speculative
             )
 
-        if self.all_pairs_generic_convex:
-            if use_lean_gjk_mpr:
-                self.narrow_phase_kernel_direct = create_narrow_phase_kernel_gjk_mpr(
-                    self.external_aabb,
-                    writer_func,
-                    support_func=support_map_lean,
-                    post_process_contact=post_process_minkowski_only,
-                    speculative=speculative,
-                    sort_pairs=True,
-                )
-            else:
-                self.narrow_phase_kernel_direct = create_narrow_phase_kernel_gjk_mpr(
-                    self.external_aabb,
-                    writer_func,
-                    speculative=speculative,
-                    sort_pairs=True,
-                )
-        else:
-            self.narrow_phase_kernel_direct = None
         if self.split_gjk_mpr:
             split_support = support_map_lean if use_lean_gjk_mpr else None
             split_post_process = post_process_minkowski_only if use_lean_gjk_mpr else None
@@ -2506,7 +2363,6 @@ class NarrowPhase:
                 support_func=split_support,
                 post_process_contact=split_post_process,
                 speculative=speculative,
-                sort_pairs=self.all_pairs_generic_convex,
             )
         else:
             self.narrow_phase_mpr_kernel = None
@@ -2643,17 +2499,6 @@ class NarrowPhase:
             self.split_manifold_work_items = (
                 wp.zeros(candidate_pair_work_estimate, dtype=wp.int32, device=device) if self.split_gjk_mpr else None
             )
-            self.reordered_replicated_pairs = (
-                wp.zeros(self.replicated_pair_capacity, dtype=wp.vec2i, device=device)
-                if self.reorder_replicated_pairs
-                else None
-            )
-            self.reordered_replicated_pair_count = (
-                wp.array([self.replicated_pair_capacity], dtype=wp.int32, device=device)
-                if self.reorder_replicated_pairs
-                else None
-            )
-
             self.shape_pairs_mesh = (
                 wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_mesh_like else None
             )
@@ -2845,8 +2690,7 @@ class NarrowPhase:
 
         # Clear counters only when a routed or split path consumes them.
         if (
-            (not self.all_pairs_generic_convex and self.has_generic_convex_pairs)
-            or self.split_gjk_mpr
+            self.has_generic_convex_pairs
             or self.has_meshes
             or self.has_heightfields
             or self.hydroelastic_sdf is not None
@@ -2856,78 +2700,53 @@ class NarrowPhase:
         # Stage 1: Launch primitive kernel for fast analytical collisions
         # This handles sphere-sphere, sphere-capsule, capsule-capsule, plane-sphere, plane-capsule
         # and routes remaining pairs to gjk_candidate_pairs and mesh buffers
-        if not self.all_pairs_generic_convex:
-            wp.launch(
-                kernel=self.primitive_kernel,
-                dim=self.total_num_threads,
-                inputs=[
-                    candidate_pair,
-                    candidate_pair_count,
-                    shape_types,
-                    shape_data,
-                    shape_transform,
-                    shape_linear_velocity,
-                    shape_angular_velocity,
-                    collision_update_dt,
-                    max_speculative_extension,
-                    shape_source,
-                    shape_gap,
-                    shape_flags,
-                    shape_sdf_index,
-                    shape_edge_range,
-                    writer_data,
-                    self.total_num_threads,
-                ],
-                outputs=[
-                    self.gjk_candidate_pairs,
-                    self.gjk_candidate_pairs_count,
-                    self.shape_pairs_mesh,
-                    self.shape_pairs_mesh_count,
-                    self.shape_pairs_mesh_plane,
-                    self.shape_pairs_mesh_plane_cumsum,
-                    self.shape_pairs_mesh_plane_count,
-                    self.mesh_plane_vertex_total_count,
-                    self.shape_pairs_mesh_mesh,
-                    self.shape_pairs_mesh_mesh_count,
-                    self.shape_pairs_sdf_sdf,
-                    self.shape_pairs_sdf_sdf_count,
-                ],
-                device=device,
-                block_dim=self.block_dim,
-                record_tape=False,
-            )
+        wp.launch(
+            kernel=self.primitive_kernel,
+            dim=self.total_num_threads,
+            inputs=[
+                candidate_pair,
+                candidate_pair_count,
+                shape_types,
+                shape_data,
+                shape_transform,
+                shape_linear_velocity,
+                shape_angular_velocity,
+                collision_update_dt,
+                max_speculative_extension,
+                shape_source,
+                shape_gap,
+                shape_flags,
+                shape_sdf_index,
+                shape_edge_range,
+                writer_data,
+                self.total_num_threads,
+            ],
+            outputs=[
+                self.gjk_candidate_pairs,
+                self.gjk_candidate_pairs_count,
+                self.shape_pairs_mesh,
+                self.shape_pairs_mesh_count,
+                self.shape_pairs_mesh_plane,
+                self.shape_pairs_mesh_plane_cumsum,
+                self.shape_pairs_mesh_plane_count,
+                self.mesh_plane_vertex_total_count,
+                self.shape_pairs_mesh_mesh,
+                self.shape_pairs_mesh_mesh_count,
+                self.shape_pairs_sdf_sdf,
+                self.shape_pairs_sdf_sdf_count,
+            ],
+            device=device,
+            block_dim=self.block_dim,
+            record_tape=False,
+        )
 
         # Stage 2: Launch GJK/MPR kernel for remaining convex pairs
         # These are pairs that couldn't be handled analytically (box, cylinder, cone, convex hull, etc.)
         # All routing has been done by the primitive kernel, so this kernel just does GJK/MPR.
         if self.has_generic_convex_pairs:
-            convex_pairs = candidate_pair if self.all_pairs_generic_convex else self.gjk_candidate_pairs
-            convex_pair_count = (
-                candidate_pair_count
-                if self.all_pairs_generic_convex or self.sparse_gjk_pairs
-                else self.gjk_candidate_pairs_count
-            )
+            convex_pairs = self.gjk_candidate_pairs
+            convex_pair_count = candidate_pair_count if self.sparse_gjk_pairs else self.gjk_candidate_pairs_count
             if self.split_gjk_mpr:
-                if self.reorder_replicated_pairs:
-                    self.reordered_replicated_pairs.zero_()
-                    wp.launch(
-                        kernel=reorder_replicated_world_pairs_kernel,
-                        dim=self.total_num_threads,
-                        inputs=[
-                            convex_pairs,
-                            convex_pair_count,
-                            self.replicated_world_count,
-                            self.shapes_per_replicated_world,
-                            self.replicated_global_shape_count,
-                            self.total_num_threads,
-                        ],
-                        outputs=[self.reordered_replicated_pairs],
-                        device=device,
-                        block_dim=self.block_dim,
-                        record_tape=False,
-                    )
-                    convex_pairs = self.reordered_replicated_pairs
-                    convex_pair_count = self.reordered_replicated_pair_count
                 common_inputs = [
                     shape_types,
                     shape_data,
@@ -2993,9 +2812,7 @@ class NarrowPhase:
                 )
             else:
                 wp.launch(
-                    kernel=self.narrow_phase_kernel_direct
-                    if self.all_pairs_generic_convex
-                    else self.narrow_phase_kernel,
+                    kernel=self.narrow_phase_kernel,
                     dim=self.total_num_threads,
                     inputs=[
                         convex_pairs,
@@ -3375,12 +3192,21 @@ class NarrowPhase:
                 reduction_ht_capacity = 0
                 reduction_ht_insert_failures = self.gjk_candidate_pairs_count
 
+            if self.split_gjk_mpr:
+                split_query_count = candidate_pair_count if self.sparse_gjk_pairs else self.gjk_candidate_pairs_count
+                max_split_query = self.split_query_results.shape[0]
+            else:
+                split_query_count = self.gjk_candidate_pairs_count
+                max_split_query = -1
+
             wp.launch(
                 kernel=verify_narrow_phase_buffers,
                 dim=[1],
                 inputs=[
                     candidate_pair_count,
-                    self.split_query_results.shape[0] if self.split_gjk_mpr else candidate_pair.shape[0],
+                    candidate_pair.shape[0],
+                    split_query_count,
+                    max_split_query,
                     self.gjk_candidate_pairs_count,
                     self.gjk_candidate_pairs.shape[0],
                     self.split_gjk_work_count

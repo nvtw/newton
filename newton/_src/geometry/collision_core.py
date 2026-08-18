@@ -1036,6 +1036,7 @@ def mesh_vs_convex_midphase(
     narrow-phase collision detection.
 
     Args:
+        idx_in_thread_block: Lane index within the mesh-query thread block
         mesh_shape: Index of the mesh shape
         non_mesh_shape: Index of the non-mesh (convex) shape
         X_mesh_ws: Mesh world-space transform

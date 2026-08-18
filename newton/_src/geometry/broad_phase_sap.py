@@ -480,7 +480,7 @@ def _sap_broadphase_kernel(
     chunk_stride = nsweep_in * chunk_size
     while chunk_base < total_work_packages:
         flat_id = binary_search(sap_cumulative_sum_in, chunk_base, 0, total_intervals)
-        chunk_offset = int(0)
+        chunk_offset = int(0)  # noqa: RUF046, RUF100 - explicit cast required by Warp codegen
         while chunk_offset < chunk_size:
             workid = chunk_base + chunk_offset
             chunk_offset += 1

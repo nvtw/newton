@@ -952,9 +952,8 @@ def compute_mesh_mesh_edge_counts(
     """Compute per-pair edge counts for mesh-mesh (or heightfield-mesh) pairs.
 
     Sums the edge counts of both shapes in each pair — each shape may be
-    a triangle mesh or a heightfield. Each thread handles one slot in the
-    ``edge_counts`` array. Slots beyond ``pair_count`` are zeroed so that a
-    subsequent ``array_scan`` over the full array produces correct prefix sums.
+    a triangle mesh or a heightfield. Threads stride over the active pair
+    prefix and accumulate its total edge count.
     """
     pair_count = wp.min(shape_pairs_mesh_mesh_count[0], shape_pairs_mesh_mesh.shape[0])
     for i in range(wp.tid(), pair_count, total_num_threads):
@@ -986,10 +985,9 @@ def compute_block_counts_from_weights(
 ):
     """Convert per-pair weights to block counts using adaptive load balancing.
 
-    Reads the total weight from the inclusive prefix sum to compute the
-    adaptive ``weight_per_block`` threshold, then assigns each pair a
-    block count proportional to its weight. Slots beyond ``pair_count``
-    are zeroed for a subsequent exclusive ``array_scan``.
+    Reads the scalar total weight to compute the adaptive
+    ``weight_per_block`` threshold, then assigns each active pair a block
+    count proportional to its weight.
     """
     pair_count = wp.min(pair_count_arr[0], max_pairs)
     for i in range(wp.tid(), pair_count, total_num_threads):
@@ -1022,8 +1020,8 @@ def compute_mesh_mesh_block_offsets_scan(
 ):
     """Compute mesh-mesh block offsets using parallel kernels and array_scan.
 
-    Runs a four-stage parallel pipeline: per-pair edge counts →
-    inclusive scan → adaptive block counts → exclusive scan into
+    Runs a three-stage parallel pipeline: per-pair edge counts and scalar
+    accumulation, adaptive block counts, then an exclusive scan into
     ``block_offsets``.
     """
     n = block_counts.shape[0]
@@ -1061,7 +1059,7 @@ def compute_mesh_mesh_block_offsets_scan(
         device=device,
         record_tape=record_tape,
     )
-    # Step 4: exclusive scan of block counts → block_offsets
+    # Step 3: exclusive scan of block counts → block_offsets
     wp.utils.array_scan(block_offsets, block_offsets, inclusive=False)
 
 

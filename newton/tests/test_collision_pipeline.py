@@ -2058,6 +2058,56 @@ class TestShapePairsMaxScaling(unittest.TestCase):
         self.assertEqual(narrow_phase.shape_pairs_mesh_plane.shape[0], 2)
         self.assertEqual(narrow_phase.mesh_plane_block_offsets.shape[0], 3)
 
+    def test_explicit_cross_world_mesh_pair_uses_explicit_bound(self):
+        """Keep explicit cross-world mesh pairs in mesh work buffers."""
+        world = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        world.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.5, 0.5, 0.5))
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        builder.add_world(world)
+        builder.add_world(world)
+        model = builder.finalize(device="cpu")
+        shape_pairs = wp.array(np.array([[0, 1]], dtype=np.int32), dtype=wp.vec2i, device="cpu")
+
+        for reduce_contacts in (False, True):
+            with self.subTest(reduce_contacts=reduce_contacts):
+                pipeline = newton.CollisionPipeline(
+                    model,
+                    broad_phase="explicit",
+                    shape_pairs_filtered=shape_pairs,
+                    reduce_contacts=reduce_contacts,
+                )
+                contacts = pipeline.contacts()
+
+                self.assertEqual(pipeline.narrow_phase.max_mesh_mesh_pairs, 1)
+                pipeline.collide(model.state(), contacts)
+                self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
+    def test_finite_plane_pair_keeps_generic_convex_stage(self):
+        """Generate contacts for two intersecting finite planes."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        builder.add_shape_plane(body=-1, width=1.0, length=1.0)
+        builder.add_shape_plane(
+            body=-1,
+            xform=wp.transform(
+                wp.vec3(0.0, 0.0, 0.0),
+                wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 2.0),
+            ),
+            width=1.0,
+            length=1.0,
+        )
+        model = builder.finalize(device="cpu")
+        shape_pairs = wp.array(np.array([[0, 1]], dtype=np.int32), dtype=wp.vec2i, device="cpu")
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="explicit",
+            shape_pairs_filtered=shape_pairs,
+        )
+        contacts = pipeline.contacts()
+
+        self.assertTrue(pipeline.narrow_phase.has_generic_convex_pairs)
+        pipeline.collide(model.state(), contacts)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
     def test_zero_capacity_mesh_stages_preserve_mesh_convex_contacts(self):
         """Keep mesh-convex contacts when unrelated mesh stages have zero capacity."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -2959,7 +3009,6 @@ def test_static_empty_gjk_specialization_under_graph_capture(test, device):
         rigid_contact_max=64,
     )
     test.assertFalse(specialized.narrow_phase.has_generic_convex_pairs)
-    test.assertFalse(specialized.narrow_phase.all_pairs_generic_convex)
     reference.narrow_phase.has_generic_convex_pairs = True
 
     state = model.state()
@@ -2988,57 +3037,6 @@ def test_static_empty_gjk_specialization_under_graph_capture(test, device):
         np.testing.assert_array_equal(
             getattr(contacts, name).numpy()[:active],
             getattr(reference_contacts, name).numpy()[:active],
-        )
-
-    generic_builder = newton.ModelBuilder()
-    body_a = generic_builder.add_body(xform=wp.transform(p=wp.vec3(-0.1, 0.0, 0.0)))
-    body_b = generic_builder.add_body(xform=wp.transform(p=wp.vec3(0.1, 0.0, 0.0)))
-    generic_builder.add_shape_box(body_a, hx=0.2, hy=0.2, hz=0.2)
-    generic_builder.add_shape_box(body_b, hx=0.2, hy=0.2, hz=0.2)
-    generic_model = generic_builder.finalize(device=device)
-    generic_pipeline = newton.CollisionPipeline(
-        generic_model,
-        broad_phase="explicit",
-        deterministic=True,
-        rigid_contact_max=16,
-    )
-    generic_reference = newton.CollisionPipeline(
-        generic_model,
-        broad_phase="explicit",
-        deterministic=True,
-        rigid_contact_max=16,
-    )
-    generic_reference.narrow_phase.all_pairs_generic_convex = False
-    test.assertTrue(generic_pipeline.narrow_phase.has_generic_convex_pairs)
-    test.assertTrue(generic_pipeline.narrow_phase.all_pairs_generic_convex)
-    test.assertTrue(generic_reference.narrow_phase.has_generic_convex_pairs)
-    test.assertFalse(generic_reference.narrow_phase.all_pairs_generic_convex)
-    generic_contacts = generic_pipeline.contacts()
-    generic_reference_contacts = generic_reference.contacts()
-    generic_state = generic_model.state()
-    with wp.ScopedCapture(device=device) as capture:
-        generic_pipeline.collide(generic_state, generic_contacts)
-        generic_reference.collide(generic_state, generic_reference_contacts)
-    for _ in range(2):
-        wp.capture_launch(capture.graph)
-
-    active = int(generic_contacts.rigid_contact_count.numpy()[0])
-    test.assertGreater(active, 0)
-    test.assertEqual(active, int(generic_reference_contacts.rigid_contact_count.numpy()[0]))
-    for name in (
-        "rigid_contact_shape0",
-        "rigid_contact_shape1",
-        "rigid_contact_point0",
-        "rigid_contact_point1",
-        "rigid_contact_normal",
-        "rigid_contact_offset0",
-        "rigid_contact_offset1",
-        "rigid_contact_margin0",
-        "rigid_contact_margin1",
-    ):
-        np.testing.assert_array_equal(
-            getattr(generic_contacts, name).numpy()[:active],
-            getattr(generic_reference_contacts, name).numpy()[:active],
         )
 
 
@@ -3167,7 +3165,6 @@ def test_split_gjk_mpr_matches_fused_under_graph_capture(test, device):
         verify_buffers=False,
     )
     test.assertTrue(split.narrow_phase.split_gjk_mpr)
-    test.assertTrue(split.narrow_phase.reorder_replicated_pairs)
     fused.narrow_phase.split_gjk_mpr = False
 
     state = model.state()
@@ -3257,10 +3254,49 @@ def test_separated_analytic_pair_skips_gjk_queue(test, device):
     test.assertEqual(int(pipeline.narrow_phase.gjk_candidate_pairs_count.numpy()[0]), 0)
 
 
+def test_cylinder_scale_update_keeps_generic_stage(test, device):
+    """Keep GJK available when a straight cylinder gains a barrel radius."""
+    builder = newton.ModelBuilder()
+    body = builder.add_body(
+        xform=wp.transform(
+            p=wp.vec3(0.0, 0.0, 0.4),
+            q=wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 2.0),
+        )
+    )
+    builder.add_shape_cylinder(body, radius=0.2, half_height=0.5)
+    builder.add_ground_plane()
+    model = builder.finalize(device=device)
+
+    pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
+    test.assertTrue(pipeline.narrow_phase.has_generic_convex_pairs)
+
+    shape_scale = model.shape_scale.numpy()
+    shape_scale[0, 2] = 0.6
+    model.shape_scale.assign(shape_scale)
+
+    state = model.state()
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+    reused_count = int(contacts.rigid_contact_count.numpy()[0])
+
+    rebuilt_pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
+    rebuilt_contacts = rebuilt_pipeline.contacts()
+    rebuilt_pipeline.collide(state, rebuilt_contacts)
+
+    test.assertGreater(reused_count, 0)
+    test.assertEqual(reused_count, int(rebuilt_contacts.rigid_contact_count.numpy()[0]))
+
+
 add_function_test(
     TestDeterministicPipeline,
     "test_separated_analytic_pair_skips_gjk_queue",
     test_separated_analytic_pair_skips_gjk_queue,
+    devices=get_test_devices(),
+)
+add_function_test(
+    TestDeterministicPipeline,
+    "test_cylinder_scale_update_keeps_generic_stage",
+    test_cylinder_scale_update_keeps_generic_stage,
     devices=get_test_devices(),
 )
 add_function_test(

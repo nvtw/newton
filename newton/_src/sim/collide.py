@@ -66,16 +66,51 @@ _ANALYTIC_PRIMITIVE_PAIRS = frozenset(
 )
 
 
-def _pair_requires_generic_convex_narrow_phase(type_a: int, type_b: int) -> bool:
+def _pair_requires_generic_convex_narrow_phase(
+    type_a: int,
+    type_b: int,
+) -> bool:
     """Return whether a sorted shape-type pair can reach GJK/MPR."""
     type_a, type_b = min(type_a, type_b), max(type_a, type_b)
     if type_a in (int(GeoType.HFIELD), int(GeoType.MESH)):
         return False
     if type_b in (int(GeoType.HFIELD), int(GeoType.MESH)):
         return False
-    if type_a == int(GeoType.PLANE) and type_b == int(GeoType.PLANE):
-        return False
     return (type_a, type_b) not in _ANALYTIC_PRIMITIVE_PAIRS
+
+
+def _generic_convex_pair_requirements(
+    model: Model,
+    *,
+    broad_phase_mode: str,
+    shape_pairs_filtered: wp.array[wp.vec2i] | None,
+) -> list[bool] | None:
+    """Collect generic-convex requirements for possible shape-type pairs."""
+    shape_types_array = getattr(model, "shape_type", None)
+    if shape_types_array is None:
+        return None
+
+    shape_types = shape_types_array.numpy()
+    if broad_phase_mode == "explicit":
+        if shape_pairs_filtered is None:
+            return None
+        pairs = shape_pairs_filtered.numpy()
+        if pairs.size == 0:
+            return []
+        requirements = []
+        for shape_a, shape_b in pairs.reshape(-1, 2):
+            type_a = int(shape_types[shape_a])
+            type_b = int(shape_types[shape_b])
+            requirements.append(_pair_requires_generic_convex_narrow_phase(type_a, type_b))
+        return requirements
+
+    colliding_types = shape_types[_shape_collide_mask(model, len(shape_types))]
+    unique_types = np.unique(colliding_types)
+    return [
+        _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b))
+        for index, type_a in enumerate(unique_types)
+        for type_b in unique_types[index:]
+    ]
 
 
 def _has_generic_convex_pairs(
@@ -85,61 +120,12 @@ def _has_generic_convex_pairs(
     shape_pairs_filtered: wp.array[wp.vec2i] | None,
 ) -> bool:
     """Conservatively prove whether any broad-phase pair can reach GJK/MPR."""
-    shape_types_array = getattr(model, "shape_type", None)
-    if shape_types_array is None:
-        return True
-
-    shape_types = shape_types_array.numpy()
-    if broad_phase_mode == "explicit":
-        if shape_pairs_filtered is None:
-            return True
-        pairs = shape_pairs_filtered.numpy()
-        if pairs.size == 0:
-            return False
-        pair_types = shape_types[pairs.reshape(-1, 2)]
-        return any(
-            _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b)) for type_a, type_b in pair_types
-        )
-
-    colliding_types = shape_types[_shape_collide_mask(model, len(shape_types))]
-    unique_types = np.unique(colliding_types)
-    return any(
-        _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b))
-        for index, type_a in enumerate(unique_types)
-        for type_b in unique_types[index:]
+    requirements = _generic_convex_pair_requirements(
+        model,
+        broad_phase_mode=broad_phase_mode,
+        shape_pairs_filtered=shape_pairs_filtered,
     )
-
-
-def _all_pairs_require_generic_convex_narrow_phase(
-    model: Model,
-    *,
-    broad_phase_mode: str,
-    shape_pairs_filtered: wp.array[wp.vec2i] | None,
-) -> bool:
-    """Conservatively prove that every broad-phase pair requires GJK/MPR."""
-    shape_types_array = getattr(model, "shape_type", None)
-    if shape_types_array is None:
-        return False
-
-    shape_types = shape_types_array.numpy()
-    if broad_phase_mode == "explicit":
-        if shape_pairs_filtered is None:
-            return False
-        pairs = shape_pairs_filtered.numpy()
-        if pairs.size == 0:
-            return False
-        pair_types = shape_types[pairs.reshape(-1, 2)]
-        return all(
-            _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b)) for type_a, type_b in pair_types
-        )
-
-    colliding_types = shape_types[_shape_collide_mask(model, len(shape_types))]
-    unique_types = np.unique(colliding_types)
-    return bool(unique_types.size) and all(
-        _pair_requires_generic_convex_narrow_phase(int(type_a), int(type_b))
-        for index, type_a in enumerate(unique_types)
-        for type_b in unique_types[index:]
-    )
+    return True if requirements is None else any(requirements)
 
 
 @wp.struct
@@ -416,6 +402,12 @@ def compute_shape_aabbs(
     elif geo_type == GeoType.CYLINDER:
         radius = scale[0]
         half_height = scale[1]
+        barrel_radius = scale[2]
+        # Imported MuJoCo site display sizes may use scale[2] without barrel semantics.
+        if barrel_radius >= half_height and barrel_radius > 0.0:
+            radius += (half_height * half_height) / (
+                barrel_radius + wp.sqrt(barrel_radius * barrel_radius - half_height * half_height)
+            )
         r0 = wp.quat_rotate(orientation, wp.vec3(1.0, 0.0, 0.0))
         r1 = wp.quat_rotate(orientation, wp.vec3(0.0, 1.0, 0.0))
         r2 = wp.quat_rotate(orientation, wp.vec3(0.0, 0.0, 1.0))
@@ -1146,7 +1138,9 @@ class CollisionPipeline:
                 provided together with a broad phase instance for expert usage.
             shape_pairs_filtered: Precomputed shape pairs for EXPLICIT mode.
                 When broad_phase is "explicit", uses model.shape_contact_pairs if not provided. For
-                "nxn"/"sap" modes, ignored.
+                "nxn"/"sap" modes, ignored. The pair count and shape-type routing are used to size
+                and specialize internal buffers at construction, so do not modify or resize the
+                array while the pipeline is in use. Rebuild the pipeline after changing the pairs.
             include_static_kinematic_pairs: Whether to generate contacts for
                 pairs where both shapes are immovable. Set to ``False`` to
                 filter static-static, static-kinematic, and
@@ -1444,14 +1438,20 @@ class CollisionPipeline:
                             bool(scale_baked[shape_sdf_index[shape_idx]]) or identity_shape_scale[shape_idx]
                             for shape_idx in np.flatnonzero(mesh_sdf_shapes)
                         )
-                max_mesh_mesh_pairs = min(
-                    self.shape_pairs_max,
-                    _compute_per_world_mask_pair_max(model, mesh_sdf_pair_mask),
-                )
-                max_mesh_plane_pairs = min(
-                    self.shape_pairs_max,
-                    _compute_per_world_mask_pair_max(model, mesh_mask, plane_mask),
-                )
+                if self.broad_phase_mode == "explicit":
+                    # Explicit pairs are not constrained by shape_world and may
+                    # intentionally connect shapes from different worlds.
+                    max_mesh_mesh_pairs = self.shape_pairs_max
+                    max_mesh_plane_pairs = self.shape_pairs_max
+                else:
+                    max_mesh_mesh_pairs = min(
+                        self.shape_pairs_max,
+                        _compute_per_world_mask_pair_max(model, mesh_sdf_pair_mask),
+                    )
+                    max_mesh_plane_pairs = min(
+                        self.shape_pairs_max,
+                        _compute_per_world_mask_pair_max(model, mesh_mask, plane_mask),
+                    )
                 # Use lean GJK/MPR kernel when scene has no capsules, ellipsoids,
                 # cylinders, or cones (which need full support function and axial
                 # rolling post-processing)
@@ -1468,38 +1468,9 @@ class CollisionPipeline:
                 broad_phase_mode=self.broad_phase_mode,
                 shape_pairs_filtered=self.shape_pairs_filtered,
             )
-            all_pairs_generic_convex = (
-                has_generic_convex_pairs
-                and not has_meshes
-                and model.heightfield_count == 0
-                and hydroelastic_sdf is None
-                and _all_pairs_require_generic_convex_narrow_phase(
-                    model,
-                    broad_phase_mode=self.broad_phase_mode,
-                    shape_pairs_filtered=self.shape_pairs_filtered,
-                )
-            )
-            replicated_world_count = 0
-            shapes_per_replicated_world = 0
-            replicated_global_shape_count = 0
             candidate_pair_work_estimate = min(self.shape_pairs_max, _compute_per_world_shape_pairs_max(model))
             if self.broad_phase_mode == "explicit":
                 candidate_pair_work_estimate = self.shape_pairs_max
-            if shape_world is not None and model.world_count >= 32:
-                shape_world_np = shape_world.numpy()
-                global_indices = np.flatnonzero(shape_world_np < 0)
-                local_shape_count = int(global_indices[0]) if len(global_indices) else shape_count
-                global_shape_count = shape_count - local_shape_count
-                trailing_globals = not global_shape_count or np.all(shape_world_np[local_shape_count:] == -1)
-                if trailing_globals and local_shape_count % model.world_count == 0:
-                    shapes_per_world = local_shape_count // model.world_count
-                    expected_worlds = np.repeat(
-                        np.arange(model.world_count, dtype=shape_world_np.dtype), shapes_per_world
-                    )
-                    if shapes_per_world > 0 and np.array_equal(shape_world_np[:local_shape_count], expected_worlds):
-                        replicated_world_count = model.world_count
-                        shapes_per_replicated_world = shapes_per_world
-                        replicated_global_shape_count = global_shape_count
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
             # Pass write_contact as custom writer to write directly to final Contacts format
@@ -1527,11 +1498,7 @@ class CollisionPipeline:
                 has_heightfields=model.heightfield_count > 0,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
                 has_generic_convex_pairs=has_generic_convex_pairs,
-                all_pairs_generic_convex=all_pairs_generic_convex,
                 candidate_pair_work_estimate=candidate_pair_work_estimate,
-                replicated_world_count=replicated_world_count,
-                shapes_per_replicated_world=shapes_per_replicated_world,
-                replicated_global_shape_count=replicated_global_shape_count,
                 mesh_sdf_identity_scale_only=mesh_sdf_identity_scale_only,
                 mesh_sdf_texture_only=mesh_sdf_texture_only,
                 sdf_texture_paired_samples=model._sdf_texture_paired_samples,
