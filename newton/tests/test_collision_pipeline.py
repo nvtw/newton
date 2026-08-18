@@ -3049,6 +3049,192 @@ add_function_test(
 )
 
 
+def test_split_gjk_mpr_matches_fused_under_graph_capture(test, device):
+    """Match fused convex contacts when replaying the split work queues."""
+    builder = newton.ModelBuilder()
+    convex = newton.Mesh(
+        np.array(
+            [
+                [-0.4, -0.3, -0.35],
+                [-0.3, -0.4, 0.3],
+                [-0.35, 0.4, -0.25],
+                [-0.25, 0.3, 0.4],
+                [0.4, -0.35, -0.3],
+                [0.3, -0.25, 0.4],
+                [0.45, 0.35, -0.4],
+                [0.3, 0.4, 0.3],
+            ],
+            dtype=np.float32,
+        ),
+        np.array(
+            [
+                0,
+                2,
+                1,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                5,
+                7,
+                6,
+                0,
+                1,
+                4,
+                1,
+                5,
+                4,
+                2,
+                6,
+                3,
+                3,
+                6,
+                7,
+                0,
+                4,
+                2,
+                2,
+                4,
+                6,
+                1,
+                3,
+                5,
+                3,
+                7,
+                5,
+            ],
+            dtype=np.int32,
+        ),
+    )
+
+    def add_pair(x, add_a, add_b):
+        body_a = builder.add_body(xform=wp.transform(wp.vec3(x - 0.15, 0.0, 0.0)))
+        body_b = builder.add_body(xform=wp.transform(wp.vec3(x + 0.15, 0.0, 0.0)))
+        add_a(body_a)
+        add_b(body_b)
+
+    add_pair(
+        -8.0,
+        lambda body: builder.add_shape_convex_hull(body, mesh=convex),
+        lambda body: builder.add_shape_convex_hull(body, mesh=convex),
+    )
+    add_pair(
+        -4.0,
+        lambda body: builder.add_shape_box(body, hx=0.4, hy=0.35, hz=0.3),
+        lambda body: builder.add_shape_box(body, hx=0.35, hy=0.4, hz=0.3),
+    )
+    add_pair(
+        0.0,
+        lambda body: builder.add_shape_cone(body, radius=0.4, half_height=0.4),
+        lambda body: builder.add_shape_cylinder(body, radius=0.4, half_height=0.4),
+    )
+    add_pair(
+        4.0,
+        lambda body: builder.add_shape_capsule(body, radius=0.3, half_height=0.3),
+        lambda body: builder.add_shape_convex_hull(body, mesh=convex),
+    )
+    add_pair(
+        8.0,
+        lambda body: builder.add_shape_sphere(body, radius=0.4),
+        lambda body: builder.add_shape_cone(body, radius=0.4, half_height=0.4),
+    )
+    for index in range(7):
+        body = builder.add_body(xform=wp.transform(wp.vec3(100.0 + 4.0 * index, 0.0, 0.0)))
+        builder.add_shape_box(body, hx=0.25, hy=0.25, hz=0.25)
+
+    replicated_builder = newton.ModelBuilder()
+    replicated_builder.replicate(builder, world_count=32)
+    replicated_builder.add_ground_plane()
+    model = replicated_builder.finalize(device=device)
+    split = newton.CollisionPipeline(
+        model,
+        broad_phase="sap",
+        shape_pairs_max=8192,
+        deterministic=True,
+        rigid_contact_max=4096,
+        verify_buffers=False,
+    )
+    fused = newton.CollisionPipeline(
+        model,
+        broad_phase="sap",
+        shape_pairs_max=8192,
+        deterministic=True,
+        rigid_contact_max=4096,
+        verify_buffers=False,
+    )
+    test.assertTrue(split.narrow_phase.split_gjk_mpr)
+    fused.narrow_phase.split_gjk_mpr = False
+
+    state = model.state()
+    body_q = state.body_q.numpy()
+    rng = np.random.default_rng(7)
+    body_q[:, :3] += rng.uniform(-0.08, 0.08, size=body_q[:, :3].shape).astype(np.float32)
+    state.body_q.assign(body_q)
+    split_contacts = split.contacts()
+    fused_contacts = fused.contacts()
+    split.collide(state, split_contacts)
+    fused.collide(state, fused_contacts)
+    with wp.ScopedCapture(device=device) as capture:
+        split.collide(state, split_contacts)
+        fused.collide(state, fused_contacts)
+    wp.capture_launch(capture.graph)
+
+    active = int(split_contacts.rigid_contact_count.numpy()[0])
+    test.assertGreater(active, 0)
+    test.assertEqual(active, int(fused_contacts.rigid_contact_count.numpy()[0]))
+    for name in ("rigid_contact_shape0", "rigid_contact_shape1"):
+        np.testing.assert_array_equal(
+            getattr(split_contacts, name).numpy()[:active],
+            getattr(fused_contacts, name).numpy()[:active],
+        )
+    for name in (
+        "rigid_contact_point0",
+        "rigid_contact_point1",
+        "rigid_contact_normal",
+        "rigid_contact_offset0",
+        "rigid_contact_offset1",
+        "rigid_contact_margin0",
+        "rigid_contact_margin1",
+    ):
+        np.testing.assert_allclose(
+            getattr(split_contacts, name).numpy()[:active],
+            getattr(fused_contacts, name).numpy()[:active],
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        )
+
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_split_gjk_mpr_matches_fused_under_graph_capture",
+    test_split_gjk_mpr_matches_fused_under_graph_capture,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+
+def test_split_gjk_mpr_uses_natural_pair_bound(test, device):
+    """Keep the fused path when only an oversized pair buffer crosses the split threshold."""
+    builder = newton.ModelBuilder()
+    for x in (-0.2, 0.2):
+        body = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.0)))
+        builder.add_shape_box(body, hx=0.3, hy=0.3, hz=0.3)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="sap", shape_pairs_max=4096)
+    test.assertFalse(pipeline.narrow_phase.split_gjk_mpr)
+
+
+add_function_test(
+    TestDeterministicPipeline,
+    "test_split_gjk_mpr_uses_natural_pair_bound",
+    test_split_gjk_mpr_uses_natural_pair_bound,
+    devices=get_cuda_test_devices(),
+    check_output=False,
+)
+
+
 def test_separated_analytic_pair_skips_gjk_queue(test, device):
     """Keep separated analytic pairs out of the generic-convex queue."""
     builder = newton.ModelBuilder()
