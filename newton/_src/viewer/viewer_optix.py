@@ -467,9 +467,19 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         changed, grayscale_sky = imgui.checkbox("Grayscale Sky", self.grayscale_sky)
         if changed:
             self.grayscale_sky = grayscale_sky
-        changed, sky_intensity = imgui.slider_float("Sky Intensity", self.sky_intensity, 0.0, 3.0)
+        changed, sky_intensity = imgui.slider_float("Sky Intensity", self.sky_intensity, 0.0, 5.0)
         if changed:
             self.sky_intensity = sky_intensity
+        changed, analytic_light_intensity = imgui.slider_float(
+            "Light Source Intensity", self.analytic_light_intensity, 0.0, 5.0
+        )
+        if changed:
+            self.analytic_light_intensity = analytic_light_intensity
+        changed, emissive_material_intensity = imgui.slider_float(
+            "Emissive Material Intensity", self.emissive_material_intensity, 0.0, 5.0
+        )
+        if changed:
+            self.emissive_material_intensity = emissive_material_intensity
         changed, time_of_day = imgui.slider_float("Time of Day", self.time_of_day, 0.0, 24.0)
         if changed:
             self.time_of_day = time_of_day

@@ -107,6 +107,10 @@ class Example:
         ):
             raise RuntimeError(f"OptiX failed to load USD stage: {usd_path}")
 
+        # Keep authored emissive materials available for the UI control while
+        # avoiding bright emissive pixels in DLSS ray-reconstruction inputs.
+        viewer.emissive_material_intensity = 0.0
+
         viewer.configure_auto_exposure(
             True,
             target_luminance=0.18,
