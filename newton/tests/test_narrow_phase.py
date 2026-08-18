@@ -30,7 +30,6 @@ from newton._src.geometry.narrow_phase import (
     _SPARSE_GJK_PAIR_CAPACITY_THRESHOLD,
     NarrowPhase,
     _append_pair_compacted,
-    _append_work_index_compacted,
 )
 from newton._src.geometry.types import GeoType
 
@@ -39,23 +38,20 @@ _cuda_available = wp.is_cuda_available()
 
 @wp.kernel(enable_backward=False)
 def append_compacted_test_kernel(
-    work_items: wp.array[int],
-    work_count: wp.array[int],
     pair_items: wp.array[wp.vec2i],
     pair_count: wp.array[int],
 ):
-    """Append matching scalar and pair values from a partially active launch."""
+    """Append selected pairs from a partially active launch."""
     tid = wp.tid()
     predicate = tid % 3 != 1
-    _append_work_index_compacted(predicate, tid, work_items, work_count)
     _append_pair_compacted(predicate, wp.vec2i(tid, -tid), pair_items, pair_count)
 
 
 class TestCompactedAppend(unittest.TestCase):
-    """Test compacted work-queue appends across supported devices."""
+    """Test compacted pair-queue appends across supported devices."""
 
-    def test_compacted_append_matches_cpu_and_cuda(self):
-        """Preserve all selected values through CPU and CUDA compacted queues."""
+    def test_compacted_pair_append_matches_cpu_and_cuda(self):
+        """Preserve all selected pairs through CPU and CUDA compacted queues."""
         launch_size = 257
         expected = np.array([i for i in range(launch_size) if i % 3 != 1], dtype=np.int32)
         devices = ["cpu"]
@@ -64,22 +60,16 @@ class TestCompactedAppend(unittest.TestCase):
 
         for device in devices:
             with self.subTest(device=device):
-                work_items = wp.zeros(launch_size, dtype=int, device=device)
-                work_count = wp.zeros(1, dtype=int, device=device)
                 pair_items = wp.zeros(launch_size, dtype=wp.vec2i, device=device)
                 pair_count = wp.zeros(1, dtype=int, device=device)
-
                 wp.launch(
                     append_compacted_test_kernel,
                     dim=launch_size,
-                    inputs=[work_items, work_count, pair_items, pair_count],
+                    inputs=[pair_items, pair_count],
                     device=device,
                 )
 
-                self.assertEqual(int(work_count.numpy()[0]), expected.size)
                 self.assertEqual(int(pair_count.numpy()[0]), expected.size)
-                np.testing.assert_array_equal(np.sort(work_items.numpy()[: expected.size]), expected)
-
                 pairs = pair_items.numpy()[: expected.size]
                 pairs = pairs[np.argsort(pairs[:, 0])]
                 np.testing.assert_array_equal(pairs[:, 0], expected)
@@ -2225,34 +2215,17 @@ class TestBufferOverflowWarnings(unittest.TestCase):
             max_candidate_pairs=1,
             has_meshes=False,
             has_generic_convex_pairs=False,
-            candidate_pair_work_estimate=0,
             device="cuda:0",
         )
         at_threshold = NarrowPhase(
             max_candidate_pairs=_SPARSE_GJK_PAIR_CAPACITY_THRESHOLD,
             has_meshes=False,
             has_generic_convex_pairs=False,
-            candidate_pair_work_estimate=0,
             device="cuda:0",
         )
 
         self.assertFalse(below_threshold.sparse_gjk_pairs)
         self.assertTrue(at_threshold.sparse_gjk_pairs)
-
-    @unittest.skipUnless(_cuda_available, "Split GJK/MPR is enabled only on CUDA")
-    def test_split_buffers_use_candidate_work_estimate(self):
-        """Size split GJK/MPR buffers from the candidate work estimate."""
-        narrow_phase = NarrowPhase(
-            max_candidate_pairs=5000,
-            candidate_pair_work_estimate=4096,
-            has_meshes=False,
-            device="cuda:0",
-        )
-
-        self.assertTrue(narrow_phase.split_gjk_mpr)
-        self.assertEqual(narrow_phase.split_query_results.shape[0], 4096)
-        self.assertEqual(narrow_phase.split_gjk_work_items.shape[0], 4096)
-        self.assertEqual(narrow_phase.split_manifold_work_items.shape[0], 4096)
 
     def test_broad_phase_buffer_overflow(self):
         """Test that broad phase buffer overflow produces a warning and no crash."""

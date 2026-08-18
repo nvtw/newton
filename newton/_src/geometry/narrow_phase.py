@@ -9,18 +9,15 @@ from typing import Any
 import warp as wp
 
 from ..core.types import MAXVAL, Devicelike
-from ..geometry.collision_convex import ConvexQueryResult, create_write_convex_query_result
 from ..geometry.collision_core import (
     ENABLE_TILE_BVH_QUERY,
     check_infinite_plane_bsphere_overlap,
     compute_bounding_sphere_from_aabb,
     compute_tight_aabb_from_support,
-    convert_infinite_plane_to_cube,
     create_compute_gjk_mpr_contacts,
     create_find_contacts,
     get_triangle_shape_from_mesh,
     mesh_vs_convex_midphase,
-    post_process_axial_on_discrete_contact,
     post_process_minkowski_only,
 )
 from ..geometry.collision_primitive import (
@@ -56,7 +53,6 @@ from ..geometry.contact_reduction_global import (
 )
 from ..geometry.contact_sort import ContactSorter
 from ..geometry.flags import ShapeFlags
-from ..geometry.mpr import create_solve_mpr, create_support_map_function
 from ..geometry.sdf_contact import (
     MESH_SDF_BLOCK_DIM,
     compute_block_counts_from_weights,
@@ -65,12 +61,9 @@ from ..geometry.sdf_contact import (
 )
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.sdf_texture import TextureSDFData
-from ..geometry.simplex_solver import create_solve_closest_distance
 from ..geometry.support_function import (
-    GenericShapeData,
     SupportMapDataProvider,
     extract_shape_data,
-    support_map,
     support_map_lean,
 )
 from ..geometry.types import GeoType
@@ -81,7 +74,6 @@ from ..utils.heightfield import (
 )
 
 _SPARSE_GJK_PAIR_CAPACITY_THRESHOLD = 1_000_000
-_SPLIT_GJK_MPR_PAIR_CAPACITY_THRESHOLD = 4096
 
 
 @wp.func
@@ -90,19 +82,6 @@ def _reserve_compacted_slot(predicate: int, work_count: wp.array[int]) -> int:
     if predicate == 0:
         return -1
     return wp.atomic_add(work_count, 0, 1)
-
-
-@wp.func
-def _append_work_index_compacted(
-    predicate: bool,
-    value: int,
-    work_items: wp.array[int],
-    work_count: wp.array[int],
-):
-    """Append one selected work item to a compacted queue."""
-    index = _reserve_compacted_slot(int(predicate), work_count)
-    if index >= 0 and index < work_items.shape[0]:
-        work_items[index] = value
 
 
 @wp.func
@@ -134,175 +113,6 @@ class ContactWriterData:
     shape_angular_velocity: wp.array[wp.vec3]
     collision_update_dt: float
     max_speculative_extension: float
-
-
-@wp.struct
-class ConvexPairQueryData:
-    """Prepared shape-pair data shared by split MPR, GJK, and manifold passes."""
-
-    shape_a: int
-    shape_b: int
-    type_a: int
-    type_b: int
-    geom_a: GenericShapeData
-    geom_b: GenericShapeData
-    position_a: wp.vec3
-    position_b: wp.vec3
-    orientation_a: wp.quat
-    orientation_b: wp.quat
-    relative_position_b: wp.vec3
-    relative_orientation_b: wp.quat
-    radius_eff_a: float
-    radius_eff_b: float
-    margin_a: float
-    margin_b: float
-    rigid_gap: float
-    contact_threshold: float
-    enlarge: float
-
-
-def create_prepare_convex_pair(external_aabb: bool, speculative: bool = False):
-    """Create pair preparation shared by the split convex-contact kernels."""
-
-    @wp.func
-    def prepare_convex_pair(
-        pair: wp.vec2i,
-        shape_types: wp.array[int],
-        shape_data: wp.array[wp.vec4],
-        shape_transform: wp.array[wp.transform],
-        shape_source: wp.array[wp.uint64],
-        shape_gap: wp.array[float],
-        shape_collision_radius: wp.array[float],
-        shape_aabb_lower: wp.array[wp.vec3],
-        shape_aabb_upper: wp.array[wp.vec3],
-        shape_collision_aabb_lower: wp.array[wp.vec3],
-        shape_collision_aabb_upper: wp.array[wp.vec3],
-    ) -> tuple[bool, ConvexPairQueryData]:
-        result = ConvexPairQueryData()
-        shape_a = pair[0]
-        shape_b = pair[1]
-        if shape_a == shape_b or shape_a < 0 or shape_b < 0:
-            return False, result
-
-        type_a = shape_types[shape_a]
-        type_b = shape_types[shape_b]
-
-        pos_a, quat_a, geom_a, _scale_a, margin_a = extract_shape_data(
-            shape_a, shape_transform, shape_types, shape_data, shape_source
-        )
-        pos_b, quat_b, geom_b, _scale_b, margin_b = extract_shape_data(
-            shape_b, shape_transform, shape_types, shape_data, shape_source
-        )
-        if type_a == GeoType.CONVEX_MESH:
-            geom_a.center = 0.5 * (shape_collision_aabb_lower[shape_a] + shape_collision_aabb_upper[shape_a])
-        if type_b == GeoType.CONVEX_MESH:
-            geom_b.center = 0.5 * (shape_collision_aabb_lower[shape_b] + shape_collision_aabb_upper[shape_b])
-
-        is_infinite_plane_a = (type_a == GeoType.PLANE) and (geom_a.scale[0] == 0.0 and geom_a.scale[1] == 0.0)
-        is_infinite_plane_b = (type_b == GeoType.PLANE) and (geom_b.scale[0] == 0.0 and geom_b.scale[1] == 0.0)
-        if is_infinite_plane_a and is_infinite_plane_b:
-            return False, result
-
-        rigid_gap = shape_gap[shape_a] + shape_gap[shape_b]
-        bsphere_radius_a = float(0.0)
-        bsphere_radius_b = float(0.0)
-        if is_infinite_plane_a or is_infinite_plane_b:
-            if wp.static(external_aabb):
-                aabb_a_lower = shape_aabb_lower[shape_a]
-                aabb_a_upper = shape_aabb_upper[shape_a]
-                aabb_b_lower = shape_aabb_lower[shape_b]
-                aabb_b_upper = shape_aabb_upper[shape_b]
-            else:
-                gap_vec_a = wp.vec3(shape_gap[shape_a])
-                gap_vec_b = wp.vec3(shape_gap[shape_b])
-                if is_infinite_plane_a:
-                    radius_a = shape_collision_radius[shape_a]
-                    aabb_a_lower = pos_a - wp.vec3(radius_a) - gap_vec_a
-                    aabb_a_upper = pos_a + wp.vec3(radius_a) + gap_vec_a
-                else:
-                    provider = SupportMapDataProvider()
-                    aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(geom_a, quat_a, pos_a, provider)
-                    aabb_a_lower = aabb_a_lower - gap_vec_a
-                    aabb_a_upper = aabb_a_upper + gap_vec_a
-                if is_infinite_plane_b:
-                    radius_b = shape_collision_radius[shape_b]
-                    aabb_b_lower = pos_b - wp.vec3(radius_b) - gap_vec_b
-                    aabb_b_upper = pos_b + wp.vec3(radius_b) + gap_vec_b
-                else:
-                    provider = SupportMapDataProvider()
-                    aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(geom_b, quat_b, pos_b, provider)
-                    aabb_b_lower = aabb_b_lower - gap_vec_b
-                    aabb_b_upper = aabb_b_upper + gap_vec_b
-
-            center_a, bsphere_radius_a = compute_bounding_sphere_from_aabb(aabb_a_lower, aabb_a_upper)
-            center_b, bsphere_radius_b = compute_bounding_sphere_from_aabb(aabb_b_lower, aabb_b_upper)
-            overlap_radius_a = bsphere_radius_a
-            overlap_radius_b = bsphere_radius_b
-            if wp.static(external_aabb and speculative):
-                pair_search_extension = rigid_gap
-                if is_infinite_plane_a:
-                    overlap_radius_b += pair_search_extension
-                else:
-                    overlap_radius_a += pair_search_extension
-            if not check_infinite_plane_bsphere_overlap(
-                geom_a,
-                geom_b,
-                pos_a,
-                pos_b,
-                quat_a,
-                quat_b,
-                center_a,
-                center_b,
-                overlap_radius_a,
-                overlap_radius_b,
-            ):
-                return False, result
-
-        if is_infinite_plane_a:
-            geom_a, pos_a = convert_infinite_plane_to_cube(geom_a, quat_a, pos_a, pos_b, bsphere_radius_b + rigid_gap)
-        if is_infinite_plane_b:
-            geom_b, pos_b = convert_infinite_plane_to_cube(geom_b, quat_b, pos_b, pos_a, bsphere_radius_a + rigid_gap)
-
-        radius_eff_a = float(0.0)
-        radius_eff_b = float(0.0)
-        small_radius = 0.0001
-        if type_a == GeoType.SPHERE or type_a == GeoType.CAPSULE:
-            radius_eff_a = geom_a.scale[0]
-            geom_a.scale[0] = small_radius
-        if type_b == GeoType.SPHERE or type_b == GeoType.CAPSULE:
-            radius_eff_b = geom_b.scale[0]
-            geom_b.scale[0] = small_radius
-
-        margin_sum = margin_a + margin_b
-        eps = 1.0e-4
-        enlarge = float(0.0)
-        if margin_sum <= 0.0:
-            enlarge = eps
-        elif margin_sum < eps:
-            enlarge = 2.0 * eps
-
-        result.shape_a = shape_a
-        result.shape_b = shape_b
-        result.type_a = type_a
-        result.type_b = type_b
-        result.geom_a = geom_a
-        result.geom_b = geom_b
-        result.position_a = pos_a
-        result.position_b = pos_b
-        result.orientation_a = quat_a
-        result.orientation_b = quat_b
-        result.relative_orientation_b = wp.quat_inverse(quat_a) * quat_b
-        result.relative_position_b = wp.quat_rotate_inv(quat_a, pos_b - pos_a)
-        result.radius_eff_a = radius_eff_a
-        result.radius_eff_b = radius_eff_b
-        result.margin_a = margin_a
-        result.margin_b = margin_b
-        result.rigid_gap = rigid_gap
-        result.contact_threshold = rigid_gap + radius_eff_a + radius_eff_b + margin_sum
-        result.enlarge = enlarge
-        return True, result
-
-    return prepare_convex_pair
 
 
 @wp.func
@@ -1218,240 +1028,6 @@ def create_narrow_phase_kernel_gjk_mpr(
     return narrow_phase_kernel_gjk_mpr
 
 
-def create_narrow_phase_kernels_gjk_mpr_split(
-    external_aabb: bool,
-    writer_func: Any,
-    support_func: Any = None,
-    post_process_contact: Any = None,
-    speculative: bool = False,
-):
-    """Create graph-capturable MPR, GJK, and manifold work-queue kernels."""
-    if support_func is None:
-        support_func = support_map
-    if post_process_contact is None:
-        post_process_contact = post_process_axial_on_discrete_contact
-
-    support_funcs = create_support_map_function(support_func, use_precomputed_center=True)
-    solve_mpr = create_solve_mpr(support_func, _support_funcs=support_funcs)
-    solve_gjk = create_solve_closest_distance(support_func, _support_funcs=support_funcs)
-    prepare_pair = create_prepare_convex_pair(external_aabb, speculative)
-    write_result = create_write_convex_query_result(
-        support_func, writer_func, post_process_contact, use_precomputed_center=True
-    )
-    suffix = (
-        f"{external_aabb}_{writer_func.__name__}_{support_func.__name__}_{post_process_contact.__name__}_{speculative}"
-    )
-
-    @wp.kernel(enable_backward=False, module=f"narrow_phase_mpr_{suffix}")
-    def narrow_phase_mpr_kernel(
-        candidate_pair: wp.array[wp.vec2i],
-        candidate_pair_count: wp.array[int],
-        shape_types: wp.array[int],
-        shape_data: wp.array[wp.vec4],
-        shape_transform: wp.array[wp.transform],
-        shape_source: wp.array[wp.uint64],
-        shape_gap: wp.array[float],
-        shape_collision_radius: wp.array[float],
-        shape_aabb_lower: wp.array[wp.vec3],
-        shape_aabb_upper: wp.array[wp.vec3],
-        shape_collision_aabb_lower: wp.array[wp.vec3],
-        shape_collision_aabb_upper: wp.array[wp.vec3],
-        total_num_threads: int,
-        query_results: wp.array[ConvexQueryResult],
-        gjk_work_items: wp.array[int],
-        gjk_work_count: wp.array[int],
-        manifold_work_items: wp.array[int],
-        manifold_work_count: wp.array[int],
-    ):
-        tid = wp.tid()
-        num_work_items = wp.min(query_results.shape[0], wp.min(candidate_pair.shape[0], candidate_pair_count[0]))
-        block_dim = wp.block_dim()
-        num_blocks = total_num_threads // block_dim
-        block_index = tid // block_dim
-        lane = tid - block_index * block_dim
-        items_per_block = (num_work_items + num_blocks - 1) // num_blocks
-        block_start = block_index * items_per_block
-
-        for local_index in range(lane, items_per_block, block_dim):
-            pair_index = block_start + local_index
-            valid = pair_index < num_work_items
-            query = ConvexPairQueryData()
-            if valid:
-                valid, query = wp.static(prepare_pair)(
-                    candidate_pair[pair_index],
-                    shape_types,
-                    shape_data,
-                    shape_transform,
-                    shape_source,
-                    shape_gap,
-                    shape_collision_radius,
-                    shape_aabb_lower,
-                    shape_aabb_upper,
-                    shape_collision_aabb_lower,
-                    shape_collision_aabb_upper,
-                )
-
-            needs_gjk = False
-            needs_manifold = False
-            if valid:
-                provider = SupportMapDataProvider()
-                collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
-                    query.geom_a,
-                    query.geom_b,
-                    query.relative_orientation_b,
-                    query.relative_position_b,
-                    query.enlarge,
-                    provider,
-                )
-                if collision:
-                    signed_distance = -penetration + query.enlarge
-                    if signed_distance <= query.contact_threshold:
-                        half_enlarge = 0.5 * query.enlarge
-                        result = ConvexQueryResult()
-                        result.point_a = point_a - normal * half_enlarge
-                        result.point_b = point_b + normal * half_enlarge
-                        result.normal = normal
-                        result.signed_distance = signed_distance
-                        query_results[pair_index] = result
-                        needs_manifold = True
-                else:
-                    needs_gjk = True
-
-            _append_work_index_compacted(needs_gjk, pair_index, gjk_work_items, gjk_work_count)
-            _append_work_index_compacted(needs_manifold, pair_index, manifold_work_items, manifold_work_count)
-
-    @wp.kernel(enable_backward=False, module=f"narrow_phase_gjk_{suffix}")
-    def narrow_phase_gjk_kernel(
-        candidate_pair: wp.array[wp.vec2i],
-        shape_types: wp.array[int],
-        shape_data: wp.array[wp.vec4],
-        shape_transform: wp.array[wp.transform],
-        shape_source: wp.array[wp.uint64],
-        shape_gap: wp.array[float],
-        shape_collision_radius: wp.array[float],
-        shape_aabb_lower: wp.array[wp.vec3],
-        shape_aabb_upper: wp.array[wp.vec3],
-        shape_collision_aabb_lower: wp.array[wp.vec3],
-        shape_collision_aabb_upper: wp.array[wp.vec3],
-        total_num_threads: int,
-        query_results: wp.array[ConvexQueryResult],
-        gjk_work_items: wp.array[int],
-        gjk_work_count: wp.array[int],
-        manifold_work_items: wp.array[int],
-        manifold_work_count: wp.array[int],
-    ):
-        tid = wp.tid()
-        num_work_items = wp.min(gjk_work_items.shape[0], gjk_work_count[0])
-        for work_index in range(tid, num_work_items, total_num_threads):
-            pair_index = gjk_work_items[work_index]
-            valid, query = wp.static(prepare_pair)(
-                candidate_pair[pair_index],
-                shape_types,
-                shape_data,
-                shape_transform,
-                shape_source,
-                shape_gap,
-                shape_collision_radius,
-                shape_aabb_lower,
-                shape_aabb_upper,
-                shape_collision_aabb_lower,
-                shape_collision_aabb_upper,
-            )
-            needs_manifold = False
-            if valid:
-                provider = SupportMapDataProvider()
-                _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
-                    query.geom_a,
-                    query.geom_b,
-                    query.relative_orientation_b,
-                    query.relative_position_b,
-                    0.0,
-                    provider,
-                )
-                if signed_distance <= query.contact_threshold:
-                    result = ConvexQueryResult()
-                    result.point_a = point_a
-                    result.point_b = point_b
-                    result.normal = normal
-                    result.signed_distance = signed_distance
-                    query_results[pair_index] = result
-                    needs_manifold = True
-            _append_work_index_compacted(needs_manifold, pair_index, manifold_work_items, manifold_work_count)
-
-    @wp.kernel(enable_backward=False, module=f"narrow_phase_manifold_{suffix}")
-    def narrow_phase_manifold_kernel(
-        candidate_pair: wp.array[wp.vec2i],
-        shape_types: wp.array[int],
-        shape_data: wp.array[wp.vec4],
-        shape_transform: wp.array[wp.transform],
-        shape_source: wp.array[wp.uint64],
-        shape_gap: wp.array[float],
-        shape_collision_radius: wp.array[float],
-        shape_aabb_lower: wp.array[wp.vec3],
-        shape_aabb_upper: wp.array[wp.vec3],
-        shape_collision_aabb_lower: wp.array[wp.vec3],
-        shape_collision_aabb_upper: wp.array[wp.vec3],
-        writer_data: Any,
-        total_num_threads: int,
-        query_results: wp.array[ConvexQueryResult],
-        manifold_work_items: wp.array[int],
-        manifold_work_count: wp.array[int],
-    ):
-        tid = wp.tid()
-        num_work_items = wp.min(manifold_work_items.shape[0], manifold_work_count[0])
-        for work_index in range(tid, num_work_items, total_num_threads):
-            pair_index = manifold_work_items[work_index]
-            valid, query = wp.static(prepare_pair)(
-                candidate_pair[pair_index],
-                shape_types,
-                shape_data,
-                shape_transform,
-                shape_source,
-                shape_gap,
-                shape_collision_radius,
-                shape_aabb_lower,
-                shape_aabb_upper,
-                shape_collision_aabb_lower,
-                shape_collision_aabb_upper,
-            )
-            if not valid:
-                continue
-
-            contact_template = ContactData()
-            contact_template.radius_eff_a = query.radius_eff_a
-            contact_template.radius_eff_b = query.radius_eff_b
-            contact_template.margin_a = query.margin_a
-            contact_template.margin_b = query.margin_b
-            contact_template.shape_a = query.shape_a
-            contact_template.shape_b = query.shape_b
-            contact_template.gap_sum = query.rigid_gap
-            contact_template.sort_sub_key = 0
-            skip_multi_contact = (
-                query.type_a == GeoType.SPHERE
-                or query.type_b == GeoType.SPHERE
-                or query.type_a == GeoType.ELLIPSOID
-                or query.type_b == GeoType.ELLIPSOID
-            )
-            provider = SupportMapDataProvider()
-            wp.static(write_result)(
-                query.geom_a,
-                query.geom_b,
-                query.orientation_a,
-                query.orientation_b,
-                query.position_a,
-                query.position_b,
-                query.relative_orientation_b,
-                query.relative_position_b,
-                query_results[pair_index],
-                provider,
-                skip_multi_contact,
-                writer_data,
-                contact_template,
-            )
-
-    return narrow_phase_mpr_kernel, narrow_phase_gjk_kernel, narrow_phase_manifold_kernel
-
-
 @wp.kernel(enable_backward=False)
 def narrow_phase_find_mesh_triangle_overlaps_kernel(
     shape_types: wp.array[int],
@@ -2002,14 +1578,8 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 def verify_narrow_phase_buffers(
     broad_phase_count: wp.array[int],
     max_broad_phase: int,
-    split_query_count: wp.array[int],
-    max_split_query: int,
     gjk_count: wp.array[int],
     max_gjk: int,
-    split_gjk_count: wp.array[int],
-    max_split_gjk: int,
-    split_manifold_count: wp.array[int],
-    max_split_manifold: int,
     mesh_count: wp.array[int],
     max_mesh: int,
     triangle_count: wp.array[int],
@@ -2034,29 +1604,11 @@ def verify_narrow_phase_buffers(
             broad_phase_count[0],
             max_broad_phase,
         )
-    if max_split_query >= 0 and split_query_count[0] > max_split_query:
-        wp.printf(
-            "Warning: Split query-result buffer overflowed %d > %d.\n",
-            split_query_count[0],
-            max_split_query,
-        )
     if gjk_count[0] > max_gjk:
         wp.printf(
             "Warning: GJK candidate pair buffer overflowed %d > %d.\n",
             gjk_count[0],
             max_gjk,
-        )
-    if max_split_gjk >= 0 and split_gjk_count[0] > max_split_gjk:
-        wp.printf(
-            "Warning: Split GJK work-item buffer overflowed %d > %d.\n",
-            split_gjk_count[0],
-            max_split_gjk,
-        )
-    if max_split_manifold >= 0 and split_manifold_count[0] > max_split_manifold:
-        wp.printf(
-            "Warning: Split manifold work-item buffer overflowed %d > %d.\n",
-            split_manifold_count[0],
-            max_split_manifold,
         )
     if mesh_count:
         if mesh_count[0] > max_mesh:
@@ -2146,7 +1698,6 @@ class NarrowPhase:
         use_lean_gjk_mpr: bool = False,
         has_generic_convex_pairs: bool = True,
         sparse_gjk_pairs: bool | None = None,
-        candidate_pair_work_estimate: int | None = None,
         mesh_sdf_texture_only: bool = False,
         mesh_sdf_identity_scale_only: bool = False,
         sdf_texture_paired_samples: bool = True,
@@ -2189,8 +1740,6 @@ class NarrowPhase:
             sparse_gjk_pairs: Whether GJK routing preserves broad-phase pair
                 indices instead of compacting its work buffer. Defaults to
                 automatic enablement for large CUDA candidate buffers.
-            candidate_pair_work_estimate: Static upper bound on pairs that the
-                broad phase can emit. Defaults to ``max_candidate_pairs``.
             mesh_sdf_texture_only: Whether every participating mesh SDF has a texture representation,
                 allowing BVH fallback branches to be removed from mesh/SDF kernels.
             mesh_sdf_identity_scale_only: Whether every participating texture SDF is queried with
@@ -2208,8 +1757,7 @@ class NarrowPhase:
             verify_buffers: When True (the default), launch a ``dim=[1]``
                 diagnostic kernel (:func:`verify_narrow_phase_buffers`) at the
                 end of :meth:`launch` that compares each public counter on this
-                class (``gjk_candidate_pairs_count``, ``split_gjk_work_count``,
-                ``split_manifold_work_count``, ``shape_pairs_mesh_count``,
+                class (``gjk_candidate_pairs_count``, ``shape_pairs_mesh_count``,
                 ``triangle_pairs_count``, ``shape_pairs_mesh_plane_count``,
                 ``shape_pairs_mesh_mesh_count``, ``shape_pairs_sdf_sdf_count``)
                 and the output ``contact_count`` against the capacity of its
@@ -2317,15 +1865,6 @@ class NarrowPhase:
         if sparse_gjk_pairs is None:
             sparse_gjk_pairs = device_obj.is_cuda and max_candidate_pairs >= _SPARSE_GJK_PAIR_CAPACITY_THRESHOLD
         self.sparse_gjk_pairs = sparse_gjk_pairs
-        if candidate_pair_work_estimate is None:
-            candidate_pair_work_estimate = max_candidate_pairs
-        if candidate_pair_work_estimate < 0:
-            raise ValueError("candidate_pair_work_estimate must be non-negative or None")
-        self.split_gjk_mpr = (
-            device_obj.is_cuda
-            and has_generic_convex_pairs
-            and candidate_pair_work_estimate >= _SPLIT_GJK_MPR_PAIR_CAPACITY_THRESHOLD
-        )
         # Create the appropriate kernel variants
         # Primitive kernel handles lightweight primitives and routes remaining pairs
         self.primitive_kernel = create_narrow_phase_primitive_kernel(
@@ -2350,24 +1889,6 @@ class NarrowPhase:
                 self.external_aabb, writer_func, speculative=speculative
             )
 
-        if self.split_gjk_mpr:
-            split_support = support_map_lean if use_lean_gjk_mpr else None
-            split_post_process = post_process_minkowski_only if use_lean_gjk_mpr else None
-            (
-                self.narrow_phase_mpr_kernel,
-                self.narrow_phase_gjk_kernel,
-                self.narrow_phase_manifold_kernel,
-            ) = create_narrow_phase_kernels_gjk_mpr_split(
-                self.external_aabb,
-                writer_func,
-                support_func=split_support,
-                post_process_contact=split_post_process,
-                speculative=speculative,
-            )
-        else:
-            self.narrow_phase_mpr_kernel = None
-            self.narrow_phase_gjk_kernel = None
-            self.narrow_phase_manifold_kernel = None
         # Create triangle contacts kernel when meshes or heightfields are present
         if has_meshes or has_heightfields:
             self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
@@ -2457,8 +1978,6 @@ class NarrowPhase:
             n = 0  # counter index
             gjk_idx = n
             n += 1
-            split_gjk_idx = n if self.split_gjk_mpr else None
-            n += 2 if self.split_gjk_mpr else 0
             sdf_sdf_idx = n
             n += 1
             mesh_like_idx = n if has_mesh_like else None
@@ -2471,8 +1990,6 @@ class NarrowPhase:
             self._counter_array = c
 
             self.gjk_candidate_pairs_count = c[gjk_idx : gjk_idx + 1]
-            self.split_gjk_work_count = c[split_gjk_idx : split_gjk_idx + 1] if self.split_gjk_mpr else None
-            self.split_manifold_work_count = c[split_gjk_idx + 1 : split_gjk_idx + 2] if self.split_gjk_mpr else None
             self.shape_pairs_sdf_sdf_count = c[sdf_sdf_idx : sdf_sdf_idx + 1]
             self.shape_pairs_mesh_count = c[mesh_like_idx : mesh_like_idx + 1] if has_mesh_like else None
             self.triangle_pairs_count = c[mesh_like_idx + 1 : mesh_like_idx + 2] if has_mesh_like else None
@@ -2488,17 +2005,6 @@ class NarrowPhase:
 
             # Pair and work buffers
             self.gjk_candidate_pairs = wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device)
-            self.split_query_results = (
-                wp.zeros(candidate_pair_work_estimate, dtype=ConvexQueryResult, device=device)
-                if self.split_gjk_mpr
-                else None
-            )
-            self.split_gjk_work_items = (
-                wp.zeros(candidate_pair_work_estimate, dtype=wp.int32, device=device) if self.split_gjk_mpr else None
-            )
-            self.split_manifold_work_items = (
-                wp.zeros(candidate_pair_work_estimate, dtype=wp.int32, device=device) if self.split_gjk_mpr else None
-            )
             self.shape_pairs_mesh = (
                 wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_mesh_like else None
             )
@@ -2746,8 +2252,12 @@ class NarrowPhase:
         if self.has_generic_convex_pairs:
             convex_pairs = self.gjk_candidate_pairs
             convex_pair_count = candidate_pair_count if self.sparse_gjk_pairs else self.gjk_candidate_pairs_count
-            if self.split_gjk_mpr:
-                common_inputs = [
+            wp.launch(
+                kernel=self.narrow_phase_kernel,
+                dim=self.total_num_threads,
+                inputs=[
+                    convex_pairs,
+                    convex_pair_count,
                     shape_types,
                     shape_data,
                     shape_transform,
@@ -2758,82 +2268,13 @@ class NarrowPhase:
                     self.shape_aabb_upper,
                     shape_collision_aabb_lower,
                     shape_collision_aabb_upper,
-                ]
-                wp.launch(
-                    kernel=self.narrow_phase_mpr_kernel,
-                    dim=self.total_num_threads,
-                    inputs=[
-                        convex_pairs,
-                        convex_pair_count,
-                        *common_inputs,
-                        self.total_num_threads,
-                        self.split_query_results,
-                        self.split_gjk_work_items,
-                        self.split_gjk_work_count,
-                        self.split_manifold_work_items,
-                        self.split_manifold_work_count,
-                    ],
-                    device=device,
-                    block_dim=self.block_dim,
-                    record_tape=False,
-                )
-                wp.launch(
-                    kernel=self.narrow_phase_gjk_kernel,
-                    dim=self.total_num_threads,
-                    inputs=[
-                        convex_pairs,
-                        *common_inputs,
-                        self.total_num_threads,
-                        self.split_query_results,
-                        self.split_gjk_work_items,
-                        self.split_gjk_work_count,
-                        self.split_manifold_work_items,
-                        self.split_manifold_work_count,
-                    ],
-                    device=device,
-                    block_dim=self.block_dim,
-                    record_tape=False,
-                )
-                wp.launch(
-                    kernel=self.narrow_phase_manifold_kernel,
-                    dim=self.total_num_threads,
-                    inputs=[
-                        convex_pairs,
-                        *common_inputs,
-                        writer_data,
-                        self.total_num_threads,
-                        self.split_query_results,
-                        self.split_manifold_work_items,
-                        self.split_manifold_work_count,
-                    ],
-                    device=device,
-                    block_dim=self.block_dim,
-                    record_tape=False,
-                )
-            else:
-                wp.launch(
-                    kernel=self.narrow_phase_kernel,
-                    dim=self.total_num_threads,
-                    inputs=[
-                        convex_pairs,
-                        convex_pair_count,
-                        shape_types,
-                        shape_data,
-                        shape_transform,
-                        shape_source,
-                        shape_gap,
-                        shape_collision_radius,
-                        self.shape_aabb_lower,
-                        self.shape_aabb_upper,
-                        shape_collision_aabb_lower,
-                        shape_collision_aabb_upper,
-                        writer_data,
-                        self.total_num_threads,
-                    ],
-                    device=device,
-                    block_dim=self.block_dim,
-                    record_tape=False,
-                )
+                    writer_data,
+                    self.total_num_threads,
+                ],
+                device=device,
+                block_dim=self.block_dim,
+                record_tape=False,
+            )
 
         # Skip mesh/heightfield kernels when no meshes or heightfields are present
         if self.has_meshes or self.has_heightfields:
@@ -3192,31 +2633,14 @@ class NarrowPhase:
                 reduction_ht_capacity = 0
                 reduction_ht_insert_failures = self.gjk_candidate_pairs_count
 
-            if self.split_gjk_mpr:
-                split_query_count = candidate_pair_count if self.sparse_gjk_pairs else self.gjk_candidate_pairs_count
-                max_split_query = self.split_query_results.shape[0]
-            else:
-                split_query_count = self.gjk_candidate_pairs_count
-                max_split_query = -1
-
             wp.launch(
                 kernel=verify_narrow_phase_buffers,
                 dim=[1],
                 inputs=[
                     candidate_pair_count,
                     candidate_pair.shape[0],
-                    split_query_count,
-                    max_split_query,
                     self.gjk_candidate_pairs_count,
                     self.gjk_candidate_pairs.shape[0],
-                    self.split_gjk_work_count
-                    if self.split_gjk_work_count is not None
-                    else self.gjk_candidate_pairs_count,
-                    self.split_gjk_work_items.shape[0] if self.split_gjk_work_items is not None else -1,
-                    self.split_manifold_work_count
-                    if self.split_manifold_work_count is not None
-                    else self.gjk_candidate_pairs_count,
-                    self.split_manifold_work_items.shape[0] if self.split_manifold_work_items is not None else -1,
                     self.shape_pairs_mesh_count,
                     self.shape_pairs_mesh.shape[0] if self.shape_pairs_mesh is not None else 0,
                     self.triangle_pairs_count,
