@@ -9,7 +9,6 @@ import warp as wp
 
 from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
-from ...dynamics.dual import DualProblemConfigStruct
 from ...geometry.keying import build_pair_key2, uint64_sentinel_value
 from .kernels import _FUSED_BILATERAL_BLOCK, _FUSED_INEQUALITY_BLOCK, _sync_threads
 from .projections import (
@@ -24,11 +23,6 @@ from .projections import (
 from .types import DVIConfigStruct, DVIStatus
 
 wp.set_module_options({"enable_backward": False})
-
-# This narrow contact-only pass solves configured stabilization velocities in
-# pose space. A conventional 2 m/s cap prevents large correction jumps.
-_SPLIT_CONTACT_RECOVERY_SWEEPS = 4
-_SPLIT_CONTACT_MAX_RECOVERY_SPEED = 2.0
 
 float32 = wp.float32
 int32 = wp.int32
@@ -880,7 +874,6 @@ def _solve_dvi_sparse_contacts_pgs(
     parallel_group_width: int32,
     block_iteration: int32,
     solver_config: wp.array[DVIConfigStruct],
-    split_contact_recovery: bool,
     body_space: wp.array[float32],
     solution_lambdas: wp.array[float32],
 ):
@@ -940,7 +933,13 @@ def _solve_dvi_sparse_contacts_pgs(
         sweep_begin = selected_sweep
         sweep_end = selected_sweep + int32(1)
     for sweep in range(sweep_begin, sweep_end):
-        reverse_colors = sweep % int32(2) != int32(0)
+        tangent_pass = sweep >= first_tangent_sweep and (sweep - first_tangent_sweep) % int32(2) != int32(0)
+        solve_normal = not tangent_pass
+        tangent_ordinal = int32(0)
+        if tangent_pass:
+            tangent_ordinal = (sweep - first_tangent_sweep) / int32(2)
+        # Only reverse friction passes; normal support loads use a stable order.
+        reverse_colors = tangent_pass and tangent_ordinal % int32(2) != int32(0)
         num_colors = inequality_num_colors[wid]
         color_count = num_colors
         if parallel_color_node:
@@ -1005,16 +1004,15 @@ def _solve_dvi_sparse_contacts_pgs(
                             row_n_1 = jacobian_nzb_values[nzb_offset + int32(5)]
                             for j in range(6):
                                 normal_value += block_n_1[j] * local_body_1[j]
-                        normal_bias = problem_v_b[vec_idx + int32(2)]
                         normal_value += problem_v_f[vec_idx + int32(2)]
-                        if split_contact_recovery:
-                            normal_value -= wp.min(float32(0.0), normal_bias)
                         lambda_n_old = solution_lambdas[vec_idx + int32(2)]
                         P_n = problem_P[vec_idx + int32(2)]
                         diagonal_n = projected_diag[vec_idx + int32(2)]
-                        lambda_n_new = _project_contact_normal_update(
-                            lambda_n_old, normal_value, diagonal_n, cfg.regularization, cfg.omega
-                        )
+                        lambda_n_new = lambda_n_old
+                        if solve_normal:
+                            lambda_n_new = _project_contact_normal_update(
+                                lambda_n_old, normal_value, diagonal_n, cfg.regularization, cfg.omega
+                            )
                         solution_lambdas[vec_idx + int32(2)] = lambda_n_new
                         normal_delta_body = P_n * (lambda_n_new - lambda_n_old)
                         for j in range(6):
@@ -1023,7 +1021,7 @@ def _solve_dvi_sparse_contacts_pgs(
                             for j in range(6):
                                 local_body_1[j] += row_n_1[j] * normal_delta_body
 
-                        if sweep < first_tangent_sweep:
+                        if not tangent_pass:
                             color_slot += color_step
                             continue
 
@@ -1057,7 +1055,7 @@ def _solve_dvi_sparse_contacts_pgs(
                         diagonal_t0 = projected_diag[vec_idx]
                         diagonal_t1 = projected_diag[vec_idx + int32(1)]
                         off_diagonal = inequality_tangent_cross[uio + cid]
-                        if sweep == first_tangent_sweep:
+                        if tangent_ordinal == int32(0):
                             off_diagonal = float32(0.0)
                             for j in range(6):
                                 off_diagonal += block_t0_0[j] * row_t1_0[j]
@@ -1066,12 +1064,6 @@ def _solve_dvi_sparse_contacts_pgs(
                                     off_diagonal += block_t0_1[j] * row_t1_1[j]
                             off_diagonal *= P_t1
                             inequality_tangent_cross[uio + cid] = off_diagonal
-                        friction = problem_mu[cio + cid]
-                        friction_bias = normal_bias
-                        if split_contact_recovery:
-                            friction_bias = float32(0.0)
-                            if normal_bias > float32(0.0):
-                                friction = float32(0.0)
                         lambda_t_new = _project_contact_tangent_update(
                             lambda_t_old,
                             tangent_value,
@@ -1079,10 +1071,10 @@ def _solve_dvi_sparse_contacts_pgs(
                             off_diagonal,
                             cfg.regularization,
                             cfg.omega,
-                            friction
+                            problem_mu[cio + cid]
                             * _contact_friction_normal_load(
                                 lambda_n_new,
-                                friction_bias,
+                                problem_v_b[vec_idx + int32(2)],
                                 P_n,
                                 diagonal_n,
                                 cfg.regularization,
@@ -2177,8 +2169,6 @@ def _compute_dvi_sparse_solution_vectors(
     problem_dim: wp.array[int32],
     problem_vio: wp.array[int32],
     problem_v_f: wp.array[float32],
-    problem_v_b: wp.array[float32],
-    split_contact_recovery: bool,
     # Outputs:
     state_s: wp.array[float32],
     state_v_aug: wp.array[float32],
@@ -2192,129 +2182,6 @@ def _compute_dvi_sparse_solution_vectors(
 
     v_i = problem_vio[wid] + tid
     v_plus = state_v_aug[v_i] + problem_v_f[v_i]
-    if split_contact_recovery and tid % int32(3) == int32(2):
-        v_plus -= wp.min(float32(0.0), problem_v_b[v_i])
     solution_v_plus[v_i] = v_plus
     state_v_aug[v_i] = v_plus
     state_s[v_i] = 0.0
-
-
-@wp.kernel
-def _solve_split_contact_pose_correction(
-    contact_indices: wp.array[int32],
-    contact_bid_AB: wp.array[wp.vec2i],
-    contact_frame: wp.array[wp.quatf],
-    contact_gapfunc: wp.array[wp.vec4f],
-    model_dt: wp.array[float32],
-    model_body_inv_mass: wp.array[float32],
-    problem_config: wp.array[DualProblemConfigStruct],
-    problem_nc: wp.array[int32],
-    problem_cio: wp.array[int32],
-    problem_uio: wp.array[int32],
-    problem_ccgo: wp.array[int32],
-    problem_vio: wp.array[int32],
-    problem_v_b: wp.array[float32],
-    solution_v_plus: wp.array[float32],
-    inequality_num_colors: wp.array[int32],
-    inequality_ids_by_color: wp.array[int32],
-    inequality_color_starts: wp.array[int32],
-    inequality_group_starts: wp.array[int32],
-    pseudo_lambdas: wp.array[float32],
-    body_space: wp.array[float32],
-):
-    """Solve a translation-only split impulse without changing physical velocities."""
-    tid = wp.tid()
-    threads_per_world = int32(wp.block_dim())
-    lane = tid % threads_per_world
-    wid = tid / threads_per_world
-    vio = problem_vio[wid]
-    dt = model_dt[wid]
-    cfg = problem_config[wid]
-    cio = problem_cio[wid]
-    uio = problem_uio[wid]
-    ccgo = problem_ccgo[wid]
-    schedule_offset = uio + wid
-    for _sweep in range(_SPLIT_CONTACT_RECOVERY_SWEEPS):
-        for color in range(inequality_num_colors[wid]):
-            group_start = inequality_color_starts[schedule_offset + color]
-            group_end = inequality_color_starts[schedule_offset + color + int32(1)]
-            for group in range(group_start + lane, group_end, threads_per_world):
-                start = inequality_group_starts[schedule_offset + group]
-                end = inequality_group_starts[schedule_offset + group + int32(1)]
-                first_cid = inequality_ids_by_color[uio + start]
-                first_contact_id = contact_indices[cio + first_cid]
-                xa = int32(-1)
-                xb = int32(-1)
-                inv_a = float32(0.0)
-                inv_b = float32(0.0)
-                local_a = wp.vec3f(0.0)
-                local_b = wp.vec3f(0.0)
-                if first_contact_id >= int32(0):
-                    first_bids = contact_bid_AB[first_contact_id]
-                    xb = int32(6) * first_bids[1]
-                    inv_b = model_body_inv_mass[first_bids[1]]
-                    local_b = wp.vec3f(body_space[xb], body_space[xb + 1], body_space[xb + 2])
-                    if first_bids[0] >= int32(0):
-                        xa = int32(6) * first_bids[0]
-                        inv_a = model_body_inv_mass[first_bids[0]]
-                        local_a = wp.vec3f(body_space[xa], body_space[xa + 1], body_space[xa + 2])
-                for slot in range(start, end):
-                    cid = inequality_ids_by_color[uio + slot]
-                    contact_id = contact_indices[cio + cid]
-                    if contact_id < int32(0):
-                        continue
-                    bids = contact_bid_AB[contact_id]
-                    diagonal = inv_a + inv_b
-                    if diagonal <= FLOAT32_EPS:
-                        continue
-                    normal = wp.quat_rotate(contact_frame[contact_id], wp.vec3f(0.0, 0.0, 1.0))
-                    relative = float32(0.0)
-                    if bids[0] >= int32(0):
-                        relative -= wp.dot(normal, local_a)
-                    relative += wp.dot(normal, local_b)
-                    vec_idx = vio + ccgo + int32(3) * cid + int32(2)
-                    if problem_v_b[vec_idx] >= float32(0.0):
-                        continue
-                    predicted_gap = contact_gapfunc[contact_id][3] + float32(0.5) * dt * solution_v_plus[vec_idx]
-                    penetration = wp.sign(predicted_gap) * wp.max(float32(0.0), wp.abs(predicted_gap) - cfg.delta)
-                    recovery_velocity = cfg.gamma * wp.min(float32(0.0), penetration) / dt
-                    value = relative + recovery_velocity
-                    old_lambda = pseudo_lambdas[vec_idx]
-                    new_lambda = wp.max(float32(0.0), old_lambda - value / diagonal)
-                    pseudo_lambdas[vec_idx] = new_lambda
-                    delta = new_lambda - old_lambda
-                    if bids[0] >= int32(0):
-                        for j in range(3):
-                            local_a[j] -= inv_a * normal[j] * delta
-                    for j in range(3):
-                        local_b[j] += inv_b * normal[j] * delta
-                if xa >= int32(0):
-                    for j in range(3):
-                        body_space[xa + j] = local_a[j]
-                if xb >= int32(0):
-                    for j in range(3):
-                        body_space[xb + j] = local_b[j]
-            _sync_threads()
-
-
-@wp.kernel
-def _apply_split_contact_translation(
-    model_dt: wp.array[float32],
-    model_bodies_wid: wp.array[int32],
-    model_bodies_inv_mass: wp.array[float32],
-    body_space: wp.array[float32],
-    body_q: wp.array[wp.transformf],
-):
-    bid = wp.tid()
-    if model_bodies_inv_mass[bid] <= float32(0.0):
-        return
-    wid = model_bodies_wid[bid]
-    x = int32(6) * bid
-    dt = model_dt[wid]
-    correction = dt * wp.vec3f(body_space[x], body_space[x + 1], body_space[x + 2])
-    length = wp.length(correction)
-    max_length = float32(_SPLIT_CONTACT_MAX_RECOVERY_SPEED) * dt
-    if length > max_length:
-        correction *= max_length / length
-    q = body_q[bid]
-    body_q[bid] = wp.transformf(wp.transform_get_translation(q) + correction, wp.transform_get_rotation(q))

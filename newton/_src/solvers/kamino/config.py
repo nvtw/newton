@@ -851,16 +851,6 @@ class DVISolverConfig:
     Defaults to `0.97`.
     """
 
-    split_contact_recovery: bool = False
-    """
-    Whether Moreau integration may apply pose-only penetration recovery for
-    sparse contact-only DVI systems. The recovery changes positions without
-    changing physical velocities or reported contact reactions. It currently
-    corrects translation only and is automatically bypassed for systems with
-    bilateral constraints or joint limits. Disable it to retain velocity-level
-    stabilization. This translation-only recovery is opt-in and defaults to `False`.
-    """
-
     bilateral_solver_type: Literal["LLTB", "LLTBRCM"] = "LLTB"
     """
     Direct linear solver used for the bilateral constraint block.

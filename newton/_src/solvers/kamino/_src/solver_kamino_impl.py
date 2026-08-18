@@ -301,10 +301,6 @@ class SolverKaminoImpl(SolverBase):
             raise ValueError(
                 f"Unsupported integrator type: Expected 'euler' or 'moreau', but got {self._config.integrator}."
             )
-        if isinstance(self._solver_fd, DVISolver):
-            self._solver_fd.set_split_contact_recovery_enabled(
-                self._config.dvi.split_contact_recovery and isinstance(self._integrator, IntegratorMoreauJean)
-            )
 
         # Allocate additional internal data for reset operations
         with wp.ScopedDevice(self._model.device):
@@ -752,9 +748,6 @@ class SolverKaminoImpl(SolverBase):
             contacts=contacts,
             detector=detector,
         )
-
-        if isinstance(self._solver_fd, DVISolver) and isinstance(self._integrator, IntegratorMoreauJean):
-            self._solver_fd.correct_contact_poses(self._problem_fd)
 
         # Update the internal joint states from the
         # updated body states after time-integration

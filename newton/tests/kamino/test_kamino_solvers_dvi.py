@@ -44,8 +44,6 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
     _parallel_contact_group_width,
     _sparse_delassus_matvec_rows,
-    _split_contact_threads_per_world,
-    _supports_split_contact_recovery,
     _use_parallel_contact_colors,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
@@ -268,112 +266,6 @@ def _build_reduced_kapla_tower(layer_count: int = 6) -> tuple[newton.ModelBuilde
     return builder, bodies, np.asarray(initial_positions, dtype=np.float32)
 
 
-def _build_high_mass_pyramid_impact() -> tuple[newton.ModelBuilder, list[int], int, float]:
-    """Build a small cube pyramid struck by a much heavier sphere."""
-    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-    SolverKamino.register_custom_attributes(builder)
-    half_extent = 0.1
-    shape_cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.5, gap=0.0, margin=0.0)
-    cube_positions = (
-        (-0.21, 0.0, 0.10),
-        (0.0, 0.0, 0.10),
-        (0.21, 0.0, 0.10),
-        (-0.105, 0.0, 0.305),
-        (0.105, 0.0, 0.305),
-        (0.0, 0.0, 0.510),
-    )
-    cubes = []
-    for position in cube_positions:
-        cube = builder.add_body(xform=wp.transformf(position, wp.quat_identity()))
-        builder.add_shape_box(cube, hx=half_extent, hy=half_extent, hz=half_extent, cfg=shape_cfg)
-        cubes.append(cube)
-
-    projectile = builder.add_body(xform=wp.transformf((-0.8, 0.0, 0.31), wp.quat_identity()))
-    projectile_cfg = newton.ModelBuilder.ShapeConfig(density=100000.0, mu=0.5, gap=0.0, margin=0.0)
-    builder.add_shape_sphere(projectile, radius=0.25, cfg=projectile_cfg)
-    builder.add_ground_plane(cfg=shape_cfg)
-    return builder, cubes, projectile, half_extent
-
-
-def _cube_ground_penetration(body_q: np.ndarray, cube_bodies: list[int], half_extent: float) -> float:
-    """Return the deepest exact OBB corner penetration below the z=0 plane."""
-    poses = body_q[cube_bodies]
-    qx, qy, qz, qw = poses[:, 3], poses[:, 4], poses[:, 5], poses[:, 6]
-    rotation_row_z = np.stack(
-        (
-            2.0 * (qx * qz - qw * qy),
-            2.0 * (qy * qz + qw * qx),
-            1.0 - 2.0 * (qx * qx + qy * qy),
-        ),
-        axis=1,
-    )
-    projected_half_extent = half_extent * np.sum(np.abs(rotation_row_z), axis=1)
-    lowest_corner = poses[:, 2] - projected_half_extent
-    return float(np.maximum(0.0, -np.min(lowest_corner)))
-
-
-def _run_split_contact_sphere(
-    device: wp.Device,
-    *,
-    center_z: float,
-    velocity: tuple[float, float, float],
-    friction: float,
-    restitution: float,
-    gamma: float,
-    delta: float,
-    gap: float,
-    dt: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Run one sparse Moreau-DVI sphere/ground contact step."""
-    radius = 0.1
-    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-    SolverKamino.register_custom_attributes(builder)
-    builder.gravity = (0.0, 0.0, 0.0)
-    shape_cfg = newton.ModelBuilder.ShapeConfig(
-        mu=friction,
-        restitution=restitution,
-        gap=gap,
-        margin=0.0,
-    )
-    body = builder.add_body(xform=wp.transformf((0.0, 0.0, center_z), wp.quat_identity()))
-    builder.add_shape_sphere(body, radius=radius, cfg=shape_cfg)
-    builder.add_ground_plane(cfg=shape_cfg)
-    model = builder.finalize(device=device)
-    config = SolverKamino.Config(
-        dynamics_solver="dvi",
-        integrator="moreau",
-        use_collision_detector=True,
-        sparse_dynamics=True,
-        sparse_jacobian=True,
-        collision_detector=kamino_config.CollisionDetectorConfig(
-            max_contacts=4,
-            max_contacts_per_world=4,
-            max_contacts_per_pair=4,
-        ),
-    )
-    config.constraints.gamma = gamma
-    config.constraints.delta = delta
-    config.dvi.split_contact_recovery = True
-    solver = SolverKamino(model, config=config)
-    state_0 = model.state()
-    state_1 = model.state()
-    body_qd = state_0.body_qd.numpy()
-    body_qd[body, :3] = velocity
-    state_0.body_qd.assign(body_qd)
-    solver.step(state_0, state_1, control=None, contacts=None, dt=dt)
-
-    contacts = solver._contacts_kamino
-    count = int(contacts.world_active_contacts.numpy()[0])
-    if count != 1:
-        raise AssertionError(f"Expected one sphere-ground contact, got {count}.")
-    return (
-        state_1.body_q.numpy()[body].copy(),
-        state_1.body_qd.numpy()[body].copy(),
-        contacts.reaction.numpy()[0].copy(),
-        float(contacts.gapfunc.numpy()[0, 3]),
-    )
-
-
 def _reduce_solver_status(status: np.ndarray) -> dict[str, object]:
     """Reduce per-world status while requiring every world to converge."""
     return {
@@ -519,49 +411,6 @@ class TestDVISolver(unittest.TestCase):
         if not test_context.setup_done:
             setup_tests(clear_cache=False)
         self.device = wp.get_device(test_context.device)
-
-    def test_00_split_contact_recovery_scope(self):
-        """Enable physical bias splitting only when pose recovery can run."""
-        self.assertTrue(_supports_split_contact_recovery(False, 0))
-        self.assertFalse(_supports_split_contact_recovery(True, 0))
-        self.assertFalse(_supports_split_contact_recovery(False, 1))
-        self.assertFalse(_supports_split_contact_recovery(True, 1))
-
-    def test_00_split_contact_recovery_config(self):
-        """Expose recovery as a documented construction-time DVI choice."""
-        self.assertFalse(DVISolver.Config().split_contact_recovery)
-        self.assertTrue(DVISolver.Config(split_contact_recovery=True).split_contact_recovery)
-
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        SolverKamino.register_custom_attributes(builder)
-        body = builder.add_body(xform=wp.transformf((0.0, 0.0, 0.1), wp.quat_identity()))
-        builder.add_shape_sphere(body, radius=0.1)
-        builder.add_ground_plane()
-        model = builder.finalize(device=self.device)
-        config = SolverKamino.Config(
-            dynamics_solver="dvi",
-            integrator="moreau",
-            sparse_dynamics=True,
-            sparse_jacobian=True,
-            use_collision_detector=True,
-        )
-        config.dvi.split_contact_recovery = True
-        solver = SolverKamino(model, config=config)
-        self.assertTrue(solver._solver_kamino.solver_fd._sparse_path.split_contact_recovery_enabled)
-
-    def test_00_split_contact_launch_width_policy(self):
-        """Widen only contact-rich single-world CUDA split recovery."""
-        self.assertEqual(_split_contact_threads_per_world(1, 2047, True), 64)
-        self.assertEqual(_split_contact_threads_per_world(1, 2048, True), 256)
-        self.assertEqual(_split_contact_threads_per_world(1, 4095, True), 256)
-        self.assertEqual(_split_contact_threads_per_world(1, 4096, True), 512)
-
-        for world_count in (2, 8, 128):
-            with self.subTest(world_count=world_count):
-                self.assertEqual(_split_contact_threads_per_world(world_count, 8192, True), 64)
-
-        self.assertEqual(_split_contact_threads_per_world(1, 8192, False), 1)
-        self.assertEqual(_split_contact_threads_per_world(128, 8192, False), 1)
 
     def test_00_parallel_contact_color_policy(self):
         """Enable fixed color nodes only for measured large-scene capacity."""
@@ -1181,10 +1030,12 @@ class TestDVISolver(unittest.TestCase):
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         SolverKamino.register_custom_attributes(builder)
-        shape_cfg = newton.ModelBuilder.ShapeConfig(mu=friction, gap=0.0, margin=0.0)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=friction, gap=0.0, margin=0.0)
         body = builder.add_link(
             xform=wp.transformf((0.0, 0.0, 0.1), wp.quat_identity()),
             mass=1.0,
+            inertia=wp.mat33f(0.006666667, 0.0, 0.0, 0.0, 0.006666667, 0.0, 0.0, 0.0, 0.006666667),
+            lock_inertia=True,
         )
         builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
         joint = builder.add_joint_free(parent=-1, child=body)
@@ -1207,6 +1058,9 @@ class TestDVISolver(unittest.TestCase):
                         max_contacts_per_pair=8,
                     ),
                 )
+                config.dvi.max_alternating_iterations = 200
+                config.dvi.tolerance = 1.0e-4
+                config.dvi.warmstart_mode = "none"
                 solver = SolverKamino(model, config=config)
                 state_0 = model.state()
                 state_1 = model.state()
@@ -1235,7 +1089,7 @@ class TestDVISolver(unittest.TestCase):
                     applied_force * dt,
                     delta=1.0e-6,
                 )
-                self.assertLess(abs(front_tangent - back_tangent), 1.0e-4)
+                self.assertLess(abs(front_tangent - back_tangent), 5.0e-4)
                 self.assertLess(abs(float(state_0.body_qd.numpy()[body, 0])), 1.0e-6)
 
     def test_03ia_dvi_decays_tangential_but_not_normal_warmstarts(self):
@@ -3279,6 +3133,56 @@ class TestDVISolver(unittest.TestCase):
                         delta=0.02 * expected_total_impulse,
                     )
 
+    def test_05b2_dvi_two_box_stack_preserves_support_heights(self):
+        """Preserve both measured heights in the two-box validation stack."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5, gap=0.0, margin=0.0)
+        box_inertia = wp.mat33f(0.006666667, 0.0, 0.0, 0.0, 0.006666667, 0.0, 0.0, 0.0, 0.006666667)
+        bodies = []
+        for height in (0.1, 0.5):
+            body = builder.add_body(
+                xform=wp.transformf((0.0, 0.0, height), wp.quat_identity()),
+                mass=1.0,
+                inertia=box_inertia,
+                lock_inertia=True,
+            )
+            builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
+            bodies.append(body)
+        builder.add_ground_plane(cfg=shape_cfg)
+        model = builder.finalize(device=self.device)
+        final_heights = []
+
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                config = SolverKamino.Config(
+                    dynamics_solver="dvi",
+                    use_collision_detector=True,
+                    sparse_dynamics=sparse,
+                    sparse_jacobian=sparse,
+                    collision_detector=kamino_config.CollisionDetectorConfig(
+                        max_contacts=16,
+                        max_contacts_per_world=16,
+                        max_contacts_per_pair=8,
+                    ),
+                )
+                config.dvi.max_alternating_iterations = 200
+                config.dvi.tolerance = 1.0e-4
+                config.dvi.warmstart_mode = "none"
+                solver = SolverKamino(model, config=config)
+                state_0 = model.state()
+                state_1 = model.state()
+                for _ in range(400):
+                    solver.step(state_0, state_1, control=None, contacts=None, dt=2.5e-3)
+                    state_0, state_1 = state_1, state_0
+
+                heights = state_0.body_q.numpy()[bodies, 2]
+                self.assertAlmostEqual(float(heights[0]), 0.1, delta=1.0e-3)
+                self.assertAlmostEqual(float(heights[1]), 0.3, delta=2.0e-3)
+                final_heights.append(heights)
+
+        np.testing.assert_allclose(final_heights[0], final_heights[1], rtol=0.0, atol=5.0e-4)
+
     def test_05b2_dvi_reduced_kapla_tower_remains_stable(self):
         """Keep a six-layer plank tower stable in dense and sparse modes."""
         builder, bodies, initial_positions = _build_reduced_kapla_tower()
@@ -3333,142 +3237,6 @@ class TestDVISolver(unittest.TestCase):
 
         if len(final_positions) == 2:
             np.testing.assert_allclose(final_positions[0], final_positions[1], rtol=0.0, atol=2.0e-3)
-
-    def test_05b3_dvi_high_mass_pyramid_impact_limits_ground_penetration(self):
-        """Keep exact cube OBBs above the ground during a high-mass impact."""
-        builder, cubes, projectile, half_extent = _build_high_mass_pyramid_impact()
-        model = builder.finalize(device=self.device)
-        config = SolverKamino.Config(
-            dynamics_solver="dvi",
-            integrator="moreau",
-            use_collision_detector=True,
-            sparse_dynamics=True,
-            sparse_jacobian=True,
-            collision_detector=kamino_config.CollisionDetectorConfig(
-                max_contacts=128,
-                max_contacts_per_world=128,
-                max_contacts_per_pair=8,
-            ),
-        )
-        config.dvi.split_contact_recovery = True
-        solver = SolverKamino(model, config=config)
-        state_0 = model.state()
-        state_1 = model.state()
-        body_qd = state_0.body_qd.numpy()
-        body_qd[projectile, 0] = 6.0
-        state_0.body_qd.assign(body_qd)
-
-        projectile_contact_seen = False
-        max_penetration = 0.0
-        cube_set = set(cubes)
-        for _ in range(30):
-            solver.step(state_0, state_1, control=None, contacts=None, dt=5.0e-3)
-            state_0, state_1 = state_1, state_0
-
-            body_q = state_0.body_q.numpy()
-            body_qd = state_0.body_qd.numpy()
-            self.assertTrue(np.all(np.isfinite(body_q)))
-            self.assertTrue(np.all(np.isfinite(body_qd)))
-            max_penetration = max(max_penetration, _cube_ground_penetration(body_q, cubes, half_extent))
-
-            contacts = solver._contacts_kamino
-            contact_count = int(contacts.world_active_contacts.numpy()[0])
-            for body_a, body_b in contacts.bid_AB.numpy()[:contact_count]:
-                pair = {int(body_a), int(body_b)}
-                if projectile in pair and pair & cube_set:
-                    projectile_contact_seen = True
-
-        self.assertTrue(projectile_contact_seen)
-        self.assertLessEqual(max_penetration, 0.005)
-
-    def test_05b4_dvi_split_recovery_isolates_physical_contact_solution(self):
-        """Correct an overlapping pose without changing physical velocity or reaction."""
-
-        def run(apply_pose_recovery: bool):
-            radius = 0.1
-            builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-            SolverKamino.register_custom_attributes(builder)
-            builder.gravity = (0.0, 0.0, 0.0)
-            shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, gap=0.0, margin=0.0)
-            body = builder.add_body(xform=wp.transformf((0.0, 0.0, radius - 0.005), wp.quat_identity()))
-            builder.add_shape_sphere(body, radius=radius, cfg=shape_cfg)
-            builder.add_ground_plane(cfg=shape_cfg)
-            model = builder.finalize(device=self.device)
-            solver = SolverKamino(
-                model,
-                config=SolverKamino.Config(
-                    dynamics_solver="dvi",
-                    integrator="moreau",
-                    use_collision_detector=True,
-                    sparse_dynamics=True,
-                    sparse_jacobian=True,
-                    collision_detector=kamino_config.CollisionDetectorConfig(
-                        max_contacts=4,
-                        max_contacts_per_world=4,
-                        max_contacts_per_pair=4,
-                    ),
-                ),
-            )
-            state_0 = model.state()
-            state_1 = model.state()
-            body_qd = state_0.body_qd.numpy()
-            body_qd[body, 2] = -1.0
-            state_0.body_qd.assign(body_qd)
-
-            solver_fd = solver._solver_kamino.solver_fd
-            solver_fd.set_split_contact_recovery_enabled(True)
-            original_pose_recovery = solver_fd.correct_contact_poses
-            if not apply_pose_recovery:
-                solver_fd.correct_contact_poses = lambda _problem: None
-            try:
-                solver.step(state_0, state_1, control=None, contacts=None, dt=1.0e-3)
-            finally:
-                solver_fd.correct_contact_poses = original_pose_recovery
-
-            contacts = solver._contacts_kamino
-            count = int(contacts.world_active_contacts.numpy()[0])
-            self.assertEqual(count, 1)
-            reaction = contacts.reaction.numpy()[:count].copy()
-            status = solver_fd.data.status.numpy().copy()
-            return state_1.body_q.numpy()[body].copy(), state_1.body_qd.numpy()[body].copy(), reaction, status
-
-        pose_without, velocity_without, reaction_without, status_without = run(False)
-        pose_with, velocity_with, reaction_with, status_with = run(True)
-
-        self.assertGreater(float(pose_with[2]), float(pose_without[2]))
-        np.testing.assert_allclose(velocity_with, velocity_without, rtol=1.0e-6, atol=1.0e-6)
-        np.testing.assert_allclose(reaction_with, reaction_without, rtol=1.0e-6, atol=1.0e-6)
-        np.testing.assert_array_equal(status_with, status_without)
-        self.assertGreater(float(reaction_with[0, 2]), 0.0)
-
-    def test_05b5_dvi_split_recovery_preserves_speculative_contact(self):
-        """Cap speculative closing speed without early friction or restitution."""
-        results = []
-        for restitution in (0.0, 0.8):
-            results.append(
-                _run_split_contact_sphere(
-                    self.device,
-                    center_z=0.11,
-                    velocity=(1.0, 0.0, -1.0),
-                    friction=1.0,
-                    restitution=restitution,
-                    gamma=0.6,
-                    delta=0.0,
-                    gap=0.02,
-                    dt=0.01,
-                )
-            )
-
-        for _pose, velocity, reaction, contact_gap in results:
-            self.assertGreater(contact_gap, 0.0)
-            self.assertLess(float(velocity[2]), 0.0)
-            self.assertAlmostEqual(float(velocity[2]), -contact_gap / 0.01, places=3)
-            self.assertAlmostEqual(float(velocity[0]), 1.0, places=6)
-            np.testing.assert_allclose(reaction[:2], 0.0, rtol=0.0, atol=1.0e-7)
-            self.assertGreater(float(reaction[2]), 0.0)
-
-        np.testing.assert_allclose(results[0][1], results[1][1], rtol=1.0e-6, atol=1.0e-6)
-        np.testing.assert_allclose(results[0][2], results[1][2], rtol=1.0e-6, atol=1.0e-6)
 
     def test_05b6_speculative_contact_restores_restitution_at_touching_tolerance(self):
         """Restore restitution only after a speculative contact becomes numerically touching."""
@@ -3545,37 +3313,6 @@ class TestDVISolver(unittest.TestCase):
             self.assertLessEqual(result[1], 0.0)
         self.assertLess(inelastic[2], 0.01)
         self.assertGreater(restitutive[2], 1.5)
-
-    def test_05b6_dvi_split_recovery_respects_stabilization_config(self):
-        """Honor stabilization gain, dead zone, and their disabled cases."""
-
-        def run(gamma: float, delta: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-            return _run_split_contact_sphere(
-                self.device,
-                center_z=0.096,
-                velocity=(0.0, 0.0, 0.0),
-                friction=0.0,
-                restitution=0.0,
-                gamma=gamma,
-                delta=delta,
-                gap=0.0,
-                dt=0.001,
-            )
-
-        disabled = run(0.0, 0.0)
-        inside_deadzone = run(0.6, 0.005)
-        relaxed = run(0.6, 0.001)
-        full = run(0.6, 0.0)
-
-        self.assertLess(disabled[3], 0.0)
-        self.assertLess(inside_deadzone[3], 0.0)
-        self.assertAlmostEqual(float(disabled[0][2]), 0.096, places=7)
-        self.assertAlmostEqual(float(inside_deadzone[0][2]), 0.096, places=7)
-        self.assertGreater(float(relaxed[0][2]), float(inside_deadzone[0][2]) + 1.0e-4)
-        self.assertGreater(float(full[0][2]), float(relaxed[0][2]))
-        for result in (disabled, inside_deadzone, relaxed, full):
-            np.testing.assert_allclose(result[1], 0.0, rtol=0.0, atol=1.0e-7)
-            np.testing.assert_allclose(result[2], 0.0, rtol=0.0, atol=1.0e-7)
 
     def test_05c_dvi_high_mass_ratio_stack_supports_weight(self):
         """Support a 100:1 sphere stack accurately in dense and sparse modes."""

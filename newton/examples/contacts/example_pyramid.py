@@ -131,11 +131,7 @@ class Example:
             )
             solver_config.use_collision_detector = True
             solver_config.integrator = "moreau"
-            # The wrecking ball creates a roughly 6500:1 mass-ratio impact;
-            # pose-only split recovery can safely use a strong stabilization gain.
-            solver_config.constraints.gamma = 0.6
             solver_config.collision_detector.broadphase = args.broad_phase
-            solver_config.dvi.split_contact_recovery = True
             solver_config.dvi.max_alternating_iterations = 8
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
             self.collision_pipeline = None
