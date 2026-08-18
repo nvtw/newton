@@ -374,14 +374,23 @@ scalar graphs overlap better with rollout on this GPU. The fused implementation
 remains useful as a deterministic population primitive; backend selection must
 be based on full end-to-end cadence rather than the isolated update microbenchmark.
 
-### Bounded automatic learning-rate search
+### Bounded automatic hyperparameter search
 
-The LR controller starts from reliable configured actor, critic, and temperature
-rates and applies deterministic bounded log-space proposals. It first probes a
-linked rate, then explores individual coordinates. Both members consume the
+The controller starts from reliable configured actor, critic, temperature, and
+target-network update rates and applies deterministic bounded log-space
+proposals. It first probes linked learning rates, then explores each learning
+rate and the target EMA rate as separate coordinates. Both members consume the
 same sampled batch, so paired differences are not replay-sampling noise. Search
 uses 10 percent of rollout worlds for the challenger and 90 percent for the
 champion, with all storage allocated before capture.
+
+The target EMA rate is setup-owned device state rather than a literal embedded
+in captured graph nodes. Scalar and population updates therefore change it
+without graph recapture. P2 stores one rate per learner and applies it to that
+learner's two critics; promotion, rollback, checkpoint continuation, and final
+P1 convergence preserve the exact value. A four-update P2 oracle with distinct
+member rates matches two scalar trainers, and the full 2,048-world cadence remains
+12.456 ms (328.8k transitions/s), within the retained baseline range.
 
 A device-side per-world guard evaluates champion and challenger actions using
 the same exploration seed. Challenger actions are used only when both policies

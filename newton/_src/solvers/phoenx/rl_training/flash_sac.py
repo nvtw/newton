@@ -837,6 +837,7 @@ class TrainerFlashSAC(TrainerSAC):
         self._device_update_count = wp.array([0], dtype=wp.int32, device=self.device)
         self._device_gradient_update_count = wp.array([0], dtype=wp.int32, device=self.device)
         self._device_update_seed = wp.array([int(seed)], dtype=wp.int32, device=self.device)
+        self._device_target_update_rate = wp.array([float(flash_config.tau)], dtype=wp.float32, device=self.device)
         initial_amp_scale = 65536.0 if flash_config.use_amp else 1.0
         self._amp_scale = wp.array([initial_amp_scale], dtype=wp.float32, device=self.device)
         self._loss_scale = self._amp_scale
@@ -886,6 +887,18 @@ class TrainerFlashSAC(TrainerSAC):
         self.critic2_optimizer.set_pbt_lr(rates[1])
         self.alpha_optimizer.set_pbt_lr(rates[2])
 
+    def set_pbt_target_update_rate(self, target_update_rate: float) -> None:
+        """Set the graph-safe target-network exponential update rate.
+
+        Args:
+            target_update_rate: EMA interpolation rate in the interval ``(0, 1]``.
+        """
+
+        rate = float(target_update_rate)
+        if not math.isfinite(rate) or rate <= 0.0 or rate > 1.0:
+            raise ValueError("PBT target update rate must be finite, greater than zero and at most one")
+        self._device_target_update_rate.assign(np.asarray([rate], dtype=np.float32))
+
     def copy_training_state_from(self, source: TrainerFlashSAC) -> None:
         """Copy complete learner state without replacing owned allocations.
 
@@ -905,7 +918,7 @@ class TrainerFlashSAC(TrainerSAC):
             return
         if self.device != source.device or self.obs_dim != source.obs_dim or self.action_dim != source.action_dim:
             raise ValueError("FlashSAC trainer devices and dimensions must match")
-        tunable = {"actor_lr", "critic_lr", "alpha_lr"}
+        tunable = {"actor_lr", "critic_lr", "alpha_lr", "tau"}
         for config_field in fields(ConfigFlashSAC):
             if config_field.name not in tunable and getattr(self.config, config_field.name) != getattr(
                 source.config, config_field.name
@@ -933,6 +946,7 @@ class TrainerFlashSAC(TrainerSAC):
             (self._device_gradient_update_count, source._device_gradient_update_count),
             (self._device_update_seed, source._device_update_seed),
             (self._device_noise_repeat_count, source._device_noise_repeat_count),
+            (self._device_target_update_rate, source._device_target_update_rate),
             (self._device_noise_repeat_steps, source._device_noise_repeat_steps),
             (self._device_exploration_seed, source._device_exploration_seed),
             (self._device_interaction_seed, source._device_interaction_seed),
@@ -1125,6 +1139,7 @@ class TrainerFlashSAC(TrainerSAC):
             "obs_count": self._obs_count.numpy(),
             "amp_scale": self._amp_scale.numpy(),
             "amp_growth_tracker": self._amp_growth_tracker.numpy(),
+            "device_target_update_rate": self._device_target_update_rate.numpy(),
         }
         for key, value in asdict(self.config).items():
             none_key = f"config_{key}_is_none"
@@ -1215,6 +1230,10 @@ class TrainerFlashSAC(TrainerSAC):
             if "amp_scale" in data:
                 trainer._amp_scale.assign(data["amp_scale"])
                 trainer._amp_growth_tracker.assign(data["amp_growth_tracker"])
+            if "device_target_update_rate" in data:
+                trainer._device_target_update_rate.assign(data["device_target_update_rate"])
+            else:
+                trainer.set_pbt_target_update_rate(saved_config.tau)
             if "noise_rng_state" in data:
                 trainer._noise_repeat_count = int(data["noise_repeat_count"])
                 trainer._noise_repeat_steps = int(data["noise_repeat_steps"])
@@ -1286,8 +1305,8 @@ class TrainerFlashSAC(TrainerSAC):
             seed_counter=self._device_update_seed,
             seed_offset=2,
         )
-        self.target_critic1.soft_update_from(self.critic1, self.config.tau)
-        self.target_critic2.soft_update_from(self.critic2, self.config.tau)
+        self.target_critic1.soft_update_from_device(self.critic1, self._device_target_update_rate)
+        self.target_critic2.soft_update_from_device(self.critic2, self._device_target_update_rate)
         if self.config.use_amp:
             self._target_critic_ensemble.refresh_contraction_weights()
         wp.launch(
@@ -1744,8 +1763,8 @@ class TrainerFlashSAC(TrainerSAC):
                     self._update_alpha(batch, seed=update_seed + 1)
             self._deterministic_critic_stats = bool(read_stats and i + 1 == int(self.config.update_steps))
             self._update_critics(batch, seed=update_seed + 2)
-            self.target_critic1.soft_update_from(self.critic1, self.config.tau)
-            self.target_critic2.soft_update_from(self.critic2, self.config.tau)
+            self.target_critic1.soft_update_from_device(self.critic1, self._device_target_update_rate)
+            self.target_critic2.soft_update_from_device(self.critic2, self._device_target_update_rate)
             if self.config.use_amp:
                 if self._target_critic_ensemble is not None:
                     self._target_critic_ensemble.refresh_contraction_weights()

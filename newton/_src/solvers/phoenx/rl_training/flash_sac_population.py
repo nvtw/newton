@@ -20,8 +20,8 @@ from .kernels import (
     population_copy_int_2d_kernel,
     population_pair_indices_kernel,
     population_repeat_pair_kernel,
-    soft_update_2d_kernel,
-    soft_update_3d_kernel,
+    soft_update_population_2d_kernel,
+    soft_update_population_3d_kernel,
 )
 from .optim import AdamPopulation, AMPStatePopulation
 from .sac import BatchSAC, StatsSACUpdate
@@ -494,6 +494,7 @@ class StateFlashSACPopulation:
         "_device_update_count",
         "_device_gradient_update_count",
         "_device_update_seed",
+        "_device_target_update_rate",
         "_device_noise_repeat_count",
         "_device_noise_repeat_steps",
         "_device_exploration_seed",
@@ -508,7 +509,7 @@ class StateFlashSACPopulation:
         first = trainers[0]
         if not isinstance(first.actor.net, NetworkFlashSAC):
             raise ValueError("FlashSAC population requires the reference network backbone")
-        tunable = {"actor_lr", "critic_lr", "alpha_lr"}
+        tunable = {"actor_lr", "critic_lr", "alpha_lr", "tau"}
         for trainer in trainers[1:]:
             if (
                 trainer.device != first.device
@@ -1055,7 +1056,7 @@ class StateFlashSACPopulation:
         self.critic_optimizer.step()
         self._normalize_population_networks(self.critics.networks)
         self.critics.refresh_contraction_weights()
-        self.soft_update_targets(float(config.tau))
+        self.soft_update_targets()
         wp.launch(
             _population_increment_counters_kernel,
             dim=population,
@@ -1195,7 +1196,7 @@ class StateFlashSACPopulation:
         self.critic_optimizer.step()
         self._normalize_population_networks(self.critics.networks)
         self.critics.refresh_contraction_weights()
-        self.soft_update_targets(float(config.tau))
+        self.soft_update_targets()
         wp.launch(
             _population_increment_counters_kernel,
             dim=population,
@@ -1340,12 +1341,19 @@ class StateFlashSACPopulation:
             device=self.device,
         )
 
-    def soft_update_targets(self, tau: float) -> None:
+    def soft_update_targets(self) -> None:
         """EMA online critic parameters into targets without touching BN running buffers."""
 
+        target_update_rate = self.scalar_state["_device_target_update_rate"]
         for target, online in zip(self._target_critic_parameters, self._critic_parameters, strict=True):
-            kernel = soft_update_2d_kernel if target.ndim == 2 else soft_update_3d_kernel
-            wp.launch(kernel, dim=target.shape, inputs=[online, float(tau)], outputs=[target], device=self.device)
+            kernel = soft_update_population_2d_kernel if target.ndim == 2 else soft_update_population_3d_kernel
+            wp.launch(
+                kernel,
+                dim=target.shape,
+                inputs=[online, target_update_rate],
+                outputs=[target],
+                device=self.device,
+            )
         self.target_critics.refresh_contraction_weights()
 
     def copy_member(self, source_index: wp.array[wp.int32], destination_index: wp.array[wp.int32]) -> None:

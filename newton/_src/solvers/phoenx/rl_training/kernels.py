@@ -2587,6 +2587,50 @@ def soft_update_3d_kernel(src: wp.array3d[wp.float32], tau: wp.float32, dst: wp.
 
 
 @wp.kernel
+def soft_update_1d_device_kernel(
+    src: wp.array[wp.float32],
+    tau: wp.array[wp.float32],
+    dst: wp.array[wp.float32],
+):
+    i = wp.tid()
+    rate = tau[0]
+    dst[i] = (wp.float32(1.0) - rate) * dst[i] + rate * src[i]
+
+
+@wp.kernel
+def soft_update_2d_device_kernel(
+    src: wp.array2d[wp.float32],
+    tau: wp.array[wp.float32],
+    dst: wp.array2d[wp.float32],
+):
+    i, j = wp.tid()
+    rate = tau[0]
+    dst[i, j] = (wp.float32(1.0) - rate) * dst[i, j] + rate * src[i, j]
+
+
+@wp.kernel
+def soft_update_population_2d_kernel(
+    src: wp.array2d[wp.float32],
+    tau: wp.array2d[wp.float32],
+    dst: wp.array2d[wp.float32],
+):
+    critic, column = wp.tid()
+    rate = tau[critic // 2, 0]
+    dst[critic, column] = (wp.float32(1.0) - rate) * dst[critic, column] + rate * src[critic, column]
+
+
+@wp.kernel
+def soft_update_population_3d_kernel(
+    src: wp.array3d[wp.float32],
+    tau: wp.array2d[wp.float32],
+    dst: wp.array3d[wp.float32],
+):
+    critic, row, column = wp.tid()
+    rate = tau[critic // 2, 0]
+    dst[critic, row, column] = (wp.float32(1.0) - rate) * dst[critic, row, column] + rate * src[critic, row, column]
+
+
+@wp.kernel
 def weight_column_sumsq_kernel(
     weight: wp.array2d[wp.float32],
     column_sumsq: wp.array[wp.float32],

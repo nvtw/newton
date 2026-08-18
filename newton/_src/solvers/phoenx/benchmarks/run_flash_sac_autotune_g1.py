@@ -198,6 +198,7 @@ def main() -> int:
             challenger_fallback_fraction = training.challenger_fallback_fraction()
             scores = evaluator.evaluate(training.trainers)
             evaluated_rates = controller.member_rates.tolist()
+            evaluated_target_update_rates = controller.member_target_update_rates.tolist()
             decision = training.evaluate_paired(
                 scores.champion_scores,
                 scores.challenger_scores,
@@ -222,6 +223,8 @@ def main() -> int:
                     "action": decision.action,
                     "evaluated_rates": evaluated_rates,
                     "next_rates": controller.member_rates.tolist(),
+                    "evaluated_target_update_rates": evaluated_target_update_rates,
+                    "next_target_update_rates": controller.member_target_update_rates.tolist(),
                 }
             )
             evaluation_seconds += time.perf_counter() - evaluation_start
@@ -266,8 +269,10 @@ def main() -> int:
         "transitions_per_second": args.world_count * 2 * args.launches / total_run_seconds,
         "initial_rates": [args.base_lr, args.base_lr, args.base_lr],
         "finalization": args.finalization,
+        "initial_target_update_rate": controller.default_target_update_rate,
         "final_rates": controller.member_rates.tolist(),
         "final_champion_success": float(np.mean(final_scores.champion_scores)),
+        "final_target_update_rates": controller.member_target_update_rates.tolist(),
         "final_challenger_success": float(np.mean(final_scores.challenger_scores)),
         "final_champion_termination_rate": final_scores.champion_termination_rate,
         "final_challenger_termination_rate": final_scores.challenger_termination_rate,
@@ -285,6 +290,7 @@ def main() -> int:
         "best_score": controller.best_score,
         "best_termination_rate": controller.best_termination_rate,
         "best_rates": controller.best_rates.tolist(),
+        "best_target_update_rate": controller.best_target_update_rate,
     }
     training.close()
     output = json.dumps(result, indent=2, sort_keys=True)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Internal champion/challenger learning-rate search for FlashSAC."""
+"""Internal champion/challenger hyperparameter search for FlashSAC."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _paired_evaluation_kernel(
 
 @dataclass(frozen=True)
 class ConfigFlashSACLRAutotune:
-    """Configure bounded paired FlashSAC learning-rate search."""
+    """Configure bounded paired FlashSAC hyperparameter search."""
 
     evaluation_episodes: int = 8
     challenger_fraction: float = 0.10
@@ -69,6 +69,7 @@ class ConfigFlashSACLRAutotune:
     challenger_action_max_limit: float = 0.75
     minimum_perturbation_factor: float = 1.02
     multiplier_bounds: tuple[float, float] = (0.5, 2.0)
+    target_update_rate_multiplier_bounds: tuple[float, float] = (0.5, 2.0)
     improvement_margin: float = 0.01
     termination_rate_margin: float = 0.05
     regression_margin: float = 0.05
@@ -92,6 +93,11 @@ class ConfigFlashSACLRAutotune:
             raise ValueError("multiplier_bounds must be positive and contain one")
         if self.multiplier_bounds[0] > 1.0 or self.multiplier_bounds[0] >= self.multiplier_bounds[1]:
             raise ValueError("multiplier_bounds must straddle one")
+        target_bounds = self.target_update_rate_multiplier_bounds
+        if target_bounds[0] <= 0.0 or target_bounds[1] < 1.0:
+            raise ValueError("target_update_rate_multiplier_bounds must be positive and contain one")
+        if target_bounds[0] > 1.0 or target_bounds[0] >= target_bounds[1]:
+            raise ValueError("target_update_rate_multiplier_bounds must straddle one")
         if self.improvement_margin < 0.0:
             raise ValueError("improvement_margin must be non-negative")
         if self.termination_rate_margin < 0.0:
@@ -137,7 +143,7 @@ class GraphFlashSACLRAutotune(Protocol):
 
 
 class ControllerFlashSACLRAutotune:
-    """Run a bounded two-member FlashSAC learning-rate search."""
+    """Run a bounded two-member FlashSAC hyperparameter search."""
 
     _RATE_NAMES = ("actor", "critic", "alpha")
 
@@ -213,6 +219,10 @@ class ControllerFlashSACLRAutotune:
         if not np.all(np.isfinite(self.default_rates)) or np.any(self.default_rates <= 0.0):
             raise ValueError("configured FlashSAC learning rates must be positive and finite")
         self.member_rates = np.stack((self.default_rates, self.default_rates))
+        self.default_target_update_rate = float(first.config.tau)
+        if not math.isfinite(self.default_target_update_rate) or not 0.0 < self.default_target_update_rate <= 1.0:
+            raise ValueError("configured FlashSAC target update rate must be finite and in (0, 1]")
+        self.member_target_update_rates = np.full(2, self.default_target_update_rate, dtype=np.float64)
         self.perturbation_factor = float(self.config.initial_perturbation_factor)
         self.search_round = 0
         self._proposal_rejections = 0
@@ -225,6 +235,7 @@ class ControllerFlashSACLRAutotune:
         self.best_score = -math.inf
         self.best_termination_rate = math.inf
         self.best_rates = self.member_rates[0].copy()
+        self.best_target_update_rate = float(self.member_target_update_rates[0])
         self.best_member = 0
         self._best_candidate_score = -math.inf
         self._best_candidate_termination_rate = math.inf
@@ -262,24 +273,39 @@ class ControllerFlashSACLRAutotune:
         self.population.actor_optimizer.set_pbt_lrs(rates[:, 0])
         self.population.critic_optimizer.set_pbt_lrs(np.repeat(rates[:, 1], 2))
         self.population.alpha_optimizer.set_pbt_lrs(rates[:, 2])
+        self.population.scalar_state["_device_target_update_rate"].assign(
+            self.member_target_update_rates.astype(np.float32).reshape(2, 1)
+        )
 
     def _propose_challenger(self) -> None:
         lower = self.default_rates * float(self.config.multiplier_bounds[0])
         upper = self.default_rates * float(self.config.multiplier_bounds[1])
-        for _attempt in range(8):
+        target_bounds = self.config.target_update_rate_multiplier_bounds
+        target_lower = self.default_target_update_rate * float(target_bounds[0])
+        target_upper = self.default_target_update_rate * float(target_bounds[1])
+        for _attempt in range(10):
             proposal = self.member_rates[0].copy()
-            phase = self.search_round % 4
-            selected = range(3) if phase == 0 else (phase - 1,)
-            direction = 1.0 if ((self.search_round // 4 + int(self.config.seed)) % 2 == 0) else -1.0
+            proposal_target_update_rate = float(self.member_target_update_rates[0])
+            phase = self.search_round % 5
+            direction = 1.0 if ((self.search_round // 5 + int(self.config.seed)) % 2 == 0) else -1.0
             factor = math.exp(direction * math.log(self.perturbation_factor))
-            for rate_index in selected:
-                proposal[rate_index] = np.clip(proposal[rate_index] * factor, lower[rate_index], upper[rate_index])
+            if phase < 4:
+                selected = range(3) if phase == 0 else (phase - 1,)
+                for rate_index in selected:
+                    proposal[rate_index] = np.clip(proposal[rate_index] * factor, lower[rate_index], upper[rate_index])
+            else:
+                proposal_target_update_rate = float(
+                    np.clip(proposal_target_update_rate * factor, target_lower, target_upper)
+                )
             self.search_round += 1
-            if not np.array_equal(proposal, self.member_rates[0]):
+            if not np.array_equal(proposal, self.member_rates[0]) or (
+                proposal_target_update_rate != self.member_target_update_rates[0]
+            ):
                 break
         else:
-            raise RuntimeError("bounded LR search could not produce a distinct challenger")
+            raise RuntimeError("bounded hyperparameter search could not produce a distinct challenger")
         self.member_rates[1] = proposal
+        self.member_target_update_rates[1] = proposal_target_update_rate
         self._set_member_rates()
 
     def begin_search_window(self) -> None:
@@ -375,13 +401,14 @@ class ControllerFlashSACLRAutotune:
     def _reset_challenger(self) -> None:
         self.population.copy_member(self._champion_index, self._challenger_index)
         self.member_rates[1] = self.member_rates[0]
+        self.member_target_update_rates[1] = self.member_target_update_rates[0]
         self.consecutive_wins = 0
         last_round = max(0, self.search_round - 1)
         self._proposal_rejections += 1
         distance = self.perturbation_factor - 1.0
         self.perturbation_factor = max(float(self.config.minimum_perturbation_factor), 1.0 + distance * 0.75)
         if self._proposal_rejections == 1:
-            self.search_round = last_round + 4
+            self.search_round = last_round + 5
         else:
             self.search_round = last_round + 1
             self._proposal_rejections = 0
@@ -390,8 +417,10 @@ class ControllerFlashSACLRAutotune:
     def _promote_challenger(self) -> None:
         self.population.copy_member(self._challenger_index, self._champion_index)
         self.member_rates[0] = self.member_rates[1]
+        self.member_target_update_rates[0] = self.member_target_update_rates[1]
         self.population.copy_member(self._champion_index, self._challenger_index)
         self.member_rates[1] = self.member_rates[0]
+        self.member_target_update_rates[1] = self.member_target_update_rates[0]
         self.consecutive_wins = 0
         self.stagnant_windows = 0
         self.search_round = max(0, self.search_round - 1)
@@ -440,6 +469,7 @@ class ControllerFlashSACLRAutotune:
             self.best_score = self._best_candidate_score
             self.best_termination_rate = self._best_candidate_termination_rate
             self.best_rates[:] = self.member_rates[member]
+            self.best_target_update_rate = float(self.member_target_update_rates[member])
             self._best_candidate_windows = 0
             self._best_candidate_member = -1
 
@@ -457,6 +487,8 @@ class ControllerFlashSACLRAutotune:
             trainer.copy_training_state_from(self.single_trainer)
         self.member_rates[0] = self.best_rates
         self.member_rates[1] = self.best_rates
+        self.member_target_update_rates[0] = self.best_target_update_rate
+        self.member_target_update_rates[1] = self.best_target_update_rate
         self.consecutive_wins = 0
         self._propose_challenger()
 
@@ -464,8 +496,10 @@ class ControllerFlashSACLRAutotune:
         if not self.best_valid:
             self.single_trainer.copy_training_state_from(self.trainers[0])
             self.best_rates[:] = self.member_rates[0]
+            self.best_target_update_rate = float(self.member_target_update_rates[0])
         self.single_trainer.set_pbt_learning_rates(*self.best_rates)
         self.converged = True
+        self.single_trainer.set_pbt_target_update_rate(self.best_target_update_rate)
         self._challenger_enabled.assign(np.asarray([0], dtype=np.int32))
 
     def evaluate_paired(
@@ -567,6 +601,7 @@ class ControllerFlashSACLRAutotune:
             self.best_score = float(live_score)
             self.best_termination_rate = float(live_termination_rate)
             self.best_rates[:] = self.member_rates[0]
+            self.best_target_update_rate = float(self.member_target_update_rates[0])
         elif policy == "best_confirmed":
             if not self.best_valid:
                 raise RuntimeError("no repeatedly confirmed best FlashSAC policy is available")
@@ -575,6 +610,7 @@ class ControllerFlashSACLRAutotune:
         for trainer in self.trainers:
             trainer.copy_training_state_from(self.single_trainer)
         self.member_rates[:] = self.best_rates
+        self.member_target_update_rates[:] = self.best_target_update_rate
         self._converge_to_single()
 
     def state_arrays(self) -> tuple[wp.array[Any], ...]:
@@ -613,6 +649,9 @@ class ControllerFlashSACLRAutotune:
             "member_rates": self.member_rates,
             "default_rates": self.default_rates,
             "perturbation_factor": np.asarray(self.perturbation_factor),
+            "member_target_update_rates": self.member_target_update_rates,
+            "default_target_update_rate": np.asarray(self.default_target_update_rate),
+            "best_target_update_rate": np.asarray(self.best_target_update_rate),
             "search_round": np.asarray(self.search_round, dtype=np.int64),
             "consecutive_wins": np.asarray(self.consecutive_wins, dtype=np.int64),
             "stagnant_windows": np.asarray(self.stagnant_windows, dtype=np.int64),
@@ -656,6 +695,11 @@ class ControllerFlashSACLRAutotune:
                 minimum_perturbation_factor=float(data["config_minimum_perturbation_factor"]),
                 multiplier_bounds=tuple(float(value) for value in data["config_multiplier_bounds"]),
                 improvement_margin=float(data["config_improvement_margin"]),
+                target_update_rate_multiplier_bounds=tuple(
+                    float(value) for value in data["config_target_update_rate_multiplier_bounds"]
+                )
+                if "config_target_update_rate_multiplier_bounds" in data
+                else (0.5, 2.0),
                 promotion_windows=int(data["config_promotion_windows"]),
                 regression_margin=float(data["config_regression_margin"]),
                 convergence_windows=int(data["config_convergence_windows"]),
@@ -678,6 +722,11 @@ class ControllerFlashSACLRAutotune:
             controller.member_rates[:] = data["member_rates"]
             controller.default_rates[:] = data["default_rates"]
             controller.perturbation_factor = float(data["perturbation_factor"])
+            if "member_target_update_rates" in data:
+                controller.member_target_update_rates[:] = data["member_target_update_rates"]
+                controller.default_target_update_rate = float(data["default_target_update_rate"])
+            else:
+                controller.member_target_update_rates[:] = controller.default_target_update_rate
             controller.search_round = int(data["search_round"])
             controller.consecutive_wins = int(data["consecutive_wins"])
             controller.stagnant_windows = int(data["stagnant_windows"])
@@ -691,6 +740,11 @@ class ControllerFlashSACLRAutotune:
             controller.best_termination_rate = float(data["best_termination_rate"])
             controller.best_rates[:] = data["best_rates"]
             controller.best_member = int(data["best_member"])
+            controller.best_target_update_rate = (
+                float(data["best_target_update_rate"])
+                if "best_target_update_rate" in data
+                else controller.default_target_update_rate
+            )
             controller._best_candidate_score = float(data["best_candidate_score"])
             controller._best_candidate_termination_rate = float(data["best_candidate_termination_rate"])
             controller._best_candidate_windows = int(data["best_candidate_windows"])

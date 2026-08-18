@@ -827,13 +827,18 @@ class TestTrainerFlashSAC(unittest.TestCase):
         )
         target_before = tuple(value.numpy().copy() for value in population.target_critics.population_parameters())
         online = tuple(value.numpy().copy() for value in population.critics.population_parameters())
+        trainers[0].set_pbt_target_update_rate(0.25)
+        trainers[1].set_pbt_target_update_rate(0.5)
         with wp.ScopedCapture(device=device) as ema_capture:
-            population.soft_update_targets(0.25)
+            population.soft_update_targets()
         wp.capture_launch(ema_capture.graph)
+        target_rates = np.asarray([0.25, 0.25, 0.5, 0.5], dtype=np.float32)
         for actual, old, source in zip(
             population.target_critics.population_parameters(), target_before, online, strict=True
         ):
-            np.testing.assert_allclose(actual.numpy(), np.float32(0.75) * old + np.float32(0.25) * source)
+            shape = (4,) + (1,) * (old.ndim - 1)
+            rates = target_rates.reshape(shape)
+            np.testing.assert_allclose(actual.numpy(), (np.float32(1.0) - rates) * old + rates * source)
         running_after = tuple(
             value.numpy()
             for value in population.target_critics.population_state_arrays()
@@ -1526,7 +1531,7 @@ class TestTrainerFlashSAC(unittest.TestCase):
             normalize_rewards=False,
             policy_frequency=1,
         )
-        destination_config = replace(source_config, actor_lr=7.0e-4, critic_lr=8.0e-4, alpha_lr=9.0e-4)
+        destination_config = replace(source_config, actor_lr=7.0e-4, critic_lr=8.0e-4, alpha_lr=9.0e-4, tau=0.02)
         source = TrainerFlashSAC(obs_dim=3, action_dim=2, config=source_config, device=device, seed=701)
         destination = TrainerFlashSAC(obs_dim=3, action_dim=2, config=destination_config, device=device, seed=703)
         rng = np.random.default_rng(705)
@@ -1539,6 +1544,7 @@ class TestTrainerFlashSAC(unittest.TestCase):
         )
         source.update(batch, seed=707, read_stats=False)
         source.set_pbt_learning_rates(6.0e-4, 5.0e-4, 4.0e-4)
+        source.set_pbt_target_update_rate(0.25)
         addresses = tuple(
             array.ptr
             for network in (
@@ -1590,6 +1596,9 @@ class TestTrainerFlashSAC(unittest.TestCase):
             )
         self.assertEqual(destination._gradient_update_count, source._gradient_update_count)
         np.testing.assert_array_equal(destination._amp_scale.numpy(), source._amp_scale.numpy())
+        np.testing.assert_array_equal(
+            destination._device_target_update_rate.numpy(), np.asarray([0.25], dtype=np.float32)
+        )
         with self.assertRaisesRegex(ValueError, "n_step"):
             incompatible = TrainerFlashSAC(
                 obs_dim=3, action_dim=2, config=replace(source_config, n_step=5), device=device, seed=709
@@ -1658,6 +1667,50 @@ class TestTrainerFlashSAC(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finite and positive"):
             trainer.set_pbt_learning_rates(0.0, 1.0e-3, 1.0e-3)
 
+    def test_pbt_target_update_rate_changes_captured_ema(self) -> None:
+        """Change the target update rate after capture without rebuilding the graph."""
+
+        device = require_cuda_graph_capture("FlashSAC graph-safe target update rate")
+        trainer = TrainerFlashSAC(
+            obs_dim=2,
+            action_dim=1,
+            config=ConfigFlashSAC(
+                actor_hidden_dim=4,
+                critic_hidden_dim=4,
+                actor_num_blocks=1,
+                critic_num_blocks=1,
+                distributional_atoms=5,
+                normalize_rewards=False,
+                policy_frequency=1,
+                use_amp=True,
+            ),
+            device=device,
+            seed=715,
+        )
+        rng = np.random.default_rng(716)
+        batch = BatchSAC(
+            obs=wp.array(rng.normal(size=(4, 2)).astype(np.float32), device=device),
+            actions=wp.array(rng.normal(size=(4, 1)).astype(np.float32), device=device),
+            rewards=wp.array(rng.normal(size=4).astype(np.float32), device=device),
+            dones=wp.zeros(4, dtype=wp.float32, device=device),
+            next_obs=wp.array(rng.normal(size=(4, 2)).astype(np.float32), device=device),
+        )
+        graph = trainer.capture_update_graph(batch, seed=717)
+        target_update_rate_ptr = trainer._device_target_update_rate.ptr
+
+        trainer.set_pbt_target_update_rate(1.0)
+        graph.launch()
+
+        self.assertEqual(trainer._device_target_update_rate.ptr, target_update_rate_ptr)
+        for target, online in (
+            (trainer.target_critic1, trainer.critic1),
+            (trainer.target_critic2, trainer.critic2),
+        ):
+            for target_parameter, online_parameter in zip(target.parameters(), online.parameters(), strict=True):
+                np.testing.assert_array_equal(target_parameter.numpy(), online_parameter.numpy())
+        with self.assertRaisesRegex(ValueError, "greater than zero and at most one"):
+            trainer.set_pbt_target_update_rate(0.0)
+
     def test_reference_backbone_checkpoint_round_trip(self) -> None:
         """Restore reference affine, running-statistic, RMS, and head state."""
 
@@ -1724,12 +1777,14 @@ class TestTrainerFlashSAC(unittest.TestCase):
         trainer._device_noise_repeat_steps.assign(np.asarray([5], dtype=np.int32))
         trainer._device_exploration_seed.assign(np.asarray([181], dtype=np.int32))
         trainer._device_interaction_seed.assign(np.asarray([191], dtype=np.int32))
+        trainer.set_pbt_target_update_rate(0.25)
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/continuation.npz"
             trainer.save_checkpoint(path)
             restored = TrainerFlashSAC.load_checkpoint(path, device=device)
 
         self.assertTrue(restored.config.use_amp)
+        np.testing.assert_array_equal(restored._device_target_update_rate.numpy(), np.asarray([0.25], dtype=np.float32))
         for expected, actual in (
             (trainer._device_noise_repeat_count, restored._device_noise_repeat_count),
             (trainer._device_noise_repeat_steps, restored._device_noise_repeat_steps),

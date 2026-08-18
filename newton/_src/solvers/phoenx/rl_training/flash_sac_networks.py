@@ -25,7 +25,9 @@ from .kernels import (
     population_copy_float16_3d_kernel,
     population_copy_float_2d_kernel,
     population_copy_float_3d_kernel,
+    soft_update_1d_device_kernel,
     soft_update_1d_kernel,
+    soft_update_2d_device_kernel,
     soft_update_2d_kernel,
     unit_normalize_weight_columns_tile_kernel,
 )
@@ -2362,6 +2364,29 @@ class NetworkFlashSAC:
                     soft_update_2d_kernel,
                     dim=dst.shape,
                     inputs=[src, float(tau)],
+                    outputs=[dst],
+                    device=self.device,
+                )
+
+    def soft_update_from_device(self, source: NetworkFlashSAC, tau: wp.array[wp.float32]) -> None:
+        """EMA parameters using a fixed-address device update rate."""
+
+        if len(self.parameters()) != len(source.parameters()):
+            raise ValueError("FlashSAC network structures do not match")
+        for dst, src in zip(self.parameters(), source.parameters(), strict=True):
+            if dst.ndim == 1:
+                wp.launch(
+                    soft_update_1d_device_kernel,
+                    dim=dst.shape,
+                    inputs=[src, tau],
+                    outputs=[dst],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    soft_update_2d_device_kernel,
+                    dim=dst.shape,
+                    inputs=[src, tau],
                     outputs=[dst],
                     device=self.device,
                 )

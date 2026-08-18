@@ -190,6 +190,7 @@ class TestFlashSACLRAutotune(unittest.TestCase):
         for member, oracle in enumerate(oracles):
             oracle._amp_scale.assign(np.asarray([4096.0], dtype=np.float32))
             oracle.set_pbt_learning_rates(*controller.member_rates[member])
+            oracle.set_pbt_target_update_rate(controller.member_target_update_rates[member])
         return oracles
 
     def _assert_population_matches_oracles(
@@ -293,6 +294,8 @@ class TestFlashSACLRAutotune(unittest.TestCase):
 
         device = require_cuda_graph_capture("FlashSAC LR autotune policy cadence")
         controller = self._make_controller(device)
+        controller.member_target_update_rates[:] = (0.02, 0.005)
+        controller._set_member_rates()
         oracles = self._make_scalar_oracles(controller)
         seed = 953
         controller.capture(seed=seed)
@@ -408,6 +411,26 @@ class TestFlashSACLRAutotune(unittest.TestCase):
         self.assertEqual(int(np.count_nonzero(changed)), 1)
         self.assertTrue(changed[0])
 
+    def test_target_update_rate_is_a_bounded_search_coordinate(self) -> None:
+        """Propose a graph-safe target update rate without changing learning rates."""
+
+        device = require_cuda_graph_capture("FlashSAC target update rate autotuning")
+        controller = self._make_controller(device)
+        controller.search_round = 4
+        controller.member_rates[1] = controller.member_rates[0]
+        controller.member_target_update_rates[1] = controller.member_target_update_rates[0]
+
+        controller._propose_challenger()
+
+        np.testing.assert_array_equal(controller.member_rates[1], controller.member_rates[0])
+        self.assertAlmostEqual(
+            controller.member_target_update_rates[1],
+            controller.default_target_update_rate * controller.config.initial_perturbation_factor,
+        )
+        np.testing.assert_allclose(
+            controller.trainers[1]._device_target_update_rate.numpy(), np.asarray([0.015], dtype=np.float32)
+        )
+
     def test_best_snapshot_rolls_back_transient_quality_collapse(self) -> None:
         """Restore the repeated best policy after live training regresses."""
 
@@ -438,6 +461,7 @@ class TestFlashSACLRAutotune(unittest.TestCase):
         ):
             np.testing.assert_array_equal(population_state.numpy()[0], expected)
         np.testing.assert_array_equal(controller.member_rates[0], controller.best_rates)
+        self.assertEqual(controller.member_target_update_rates[0], controller.best_target_update_rate)
 
     def test_split_rollout_routes_safely(self) -> None:
         """Route challenger worlds and immediately fall back after an unsafe gate."""
@@ -518,6 +542,7 @@ class TestFlashSACLRAutotune(unittest.TestCase):
             controller.save_checkpoint(path)
             restored = ControllerFlashSACLRAutotune.load_checkpoint(path, controller.batch, device=device)
         np.testing.assert_array_equal(restored.member_rates, controller.member_rates)
+        np.testing.assert_array_equal(restored.member_target_update_rates, controller.member_target_update_rates)
         self.assertEqual(restored.search_round, controller.search_round)
         self.assertEqual(restored.consecutive_wins, controller.consecutive_wins)
         self.assertEqual(restored.evaluation_count, controller.evaluation_count)
