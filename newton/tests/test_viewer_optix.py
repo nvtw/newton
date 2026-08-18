@@ -40,6 +40,7 @@ class _FakeOptixApi:
         self.tonemap_contrast = 1.0
         self.tonemap_saturation = 1.0
         self.sky_parameters = None
+        self.camera_look_at = None
 
     def initialize(self):
         return True
@@ -51,7 +52,12 @@ class _FakeOptixApi:
         self.sky_parameters = kwargs
 
     def set_camera_look_at(self, position, target, up, fov):
-        del position, target, up, fov
+        self.camera_look_at = (
+            np.asarray(position),
+            np.asarray(target),
+            np.asarray(up),
+            float(fov),
+        )
 
     def get_frame_uint8(self):
         return np.full((self.height, self.width, 4), 127, dtype=np.uint8)
@@ -169,6 +175,42 @@ class TestViewerOptix(unittest.TestCase):
             viewer.close()
 
     @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_set_camera_look_at_updates_shared_camera(self):
+        """Apply authored look-at cameras through the shared Newton camera."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
+        try:
+            viewer.set_up_axis("Y")
+            viewer.camera.up_axis = newton.Axis.Y
+            viewer.set_camera_look_at((1.0, 3.0, 8.0), (1.0, 0.0, 0.0), fov=52.0, renderer_space=True)
+
+            np.testing.assert_allclose(np.asarray(viewer.camera.pos), (1.0, 3.0, 8.0))
+            self.assertEqual(viewer.camera.up_axis, newton.Axis.Y)
+            self.assertAlmostEqual(viewer.camera.fov, 52.0)
+            camera_direction = api.camera_look_at[1] - api.camera_look_at[0]
+            self.assertAlmostEqual(float(np.dot(camera_direction, api.camera_look_at[2])), 0.0, places=6)
+            self.assertGreater(api.camera_look_at[2][1], 0.0)
+        finally:
+            viewer.close()
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_usd_load_syncs_converted_up_axis(self):
+        """Use renderer Y-up after converting the authored USD stage axis."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
+        backend_type = ViewerOptix.__mro__[1]
+        try:
+            viewer.set_up_axis("Z")
+            viewer.camera.up_axis = newton.Axis.Z
+            with mock.patch.object(backend_type, "load_scene_from_usd", return_value=True):
+                self.assertTrue(viewer.load_scene_from_usd("scene.usd"))
+
+            self.assertEqual(viewer._up_axis, newton.Axis.Y)
+            self.assertEqual(viewer.camera.up_axis, newton.Axis.Y)
+        finally:
+            viewer.close()
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
     def test_default_color_palette(self):
         """Remap automatic colors while preserving explicit and authored colors."""
         api = _FakeOptixApi()
@@ -201,6 +243,7 @@ class TestViewerOptix(unittest.TestCase):
         viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
         try:
             self.assertAlmostEqual(viewer.time_of_day, 12.0)
+            self.assertAlmostEqual(viewer.sky_azimuth, 0.0)
             self.assertAlmostEqual(viewer.sky_intensity, 1.0)
             self.assertFalse(viewer.grayscale_sky)
             self.assertIsNotNone(api.sky_parameters)
@@ -218,8 +261,13 @@ class TestViewerOptix(unittest.TestCase):
             viewer.time_of_day = 18.0
             self.assertEqual(api.temporal_reset_count, 3)
             np.testing.assert_allclose(api.sky_parameters["sun_direction"], (1.0, 0.0, 0.0), atol=1.0e-6)
+            viewer.sky_azimuth = -90.0
+            self.assertEqual(api.temporal_reset_count, 4)
+            np.testing.assert_allclose(api.sky_parameters["sun_direction"], (0.0, 0.0, 1.0), atol=1.0e-6)
             with self.assertRaises(ValueError):
                 viewer.time_of_day = 25.0
+            with self.assertRaises(ValueError):
+                viewer.sky_azimuth = 181.0
             with self.assertRaises(ValueError):
                 viewer.sky_intensity = -1.0
         finally:

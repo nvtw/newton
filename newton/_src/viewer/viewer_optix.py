@@ -162,6 +162,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         default_clearcoat_roughness: float = 0.4,
         default_color_palette: Sequence[Sequence[float]] | None = None,
         time_of_day: float = 12.0,
+        sky_azimuth: float = 0.0,
         sky_intensity: float = 1.0,
         grayscale_sky: bool = False,
         exposure: float = 0.68,
@@ -208,6 +209,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
                 and authored mesh colors are preserved. ``None`` uses the
                 saturated OptiX palette.
             time_of_day: Procedural-sky time in hours, in the range [0, 24].
+            sky_azimuth: Horizontal sun-angle offset [degrees], in the range
+                [-180, 180].
             sky_intensity: Procedural-sky illumination multiplier.
             grayscale_sky: Render the physical sky in grayscale while
                 preserving its maximum RGB component as brightness.
@@ -258,6 +261,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             self._DEFAULT_COLOR_PALETTE if default_color_palette is None else default_color_palette
         )
         self._time_of_day = self._validate_time_of_day(time_of_day)
+        self._sky_azimuth = self._validate_sky_azimuth(sky_azimuth)
         self._sky_intensity = self._validate_sky_intensity(sky_intensity)
         self._grayscale_sky = bool(grayscale_sky)
         self.lines = {}
@@ -442,10 +446,24 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         changed, direct_light_samples = imgui.slider_int("Direct Light Samples", self.direct_light_samples, 1, 4)
         if changed:
             self.set_ray_budget(direct_light_samples=direct_light_samples)
+        changed, roulette_start = imgui.slider_int(
+            "Russian Roulette Start",
+            self.russian_roulette_start_bounce,
+            1,
+            self._api.max_compiled_bounces + 1,
+        )
+        if changed:
+            self.set_ray_budget(russian_roulette_start_bounce=roulette_start)
         if not self._api.dlss_enabled:
             changed, samples_per_frame = imgui.slider_int("Samples Per Frame", self.samples_per_frame, 1, 8)
             if changed:
                 self.set_ray_budget(samples_per_frame=samples_per_frame)
+        changed, auto_exposure = imgui.checkbox("Auto Exposure", self.auto_exposure_enabled)
+        if changed:
+            self.configure_auto_exposure(auto_exposure)
+        changed, exposure = imgui.slider_float("Exposure Compensation", self.exposure, 0.05, 4.0)
+        if changed:
+            self.exposure = exposure
         changed, grayscale_sky = imgui.checkbox("Grayscale Sky", self.grayscale_sky)
         if changed:
             self.grayscale_sky = grayscale_sky
@@ -455,6 +473,9 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         changed, time_of_day = imgui.slider_float("Time of Day", self.time_of_day, 0.0, 24.0)
         if changed:
             self.time_of_day = time_of_day
+        changed, sky_azimuth = imgui.slider_float("Sky Azimuth Offset", self.sky_azimuth, -180.0, 180.0)
+        if changed:
+            self.sky_azimuth = sky_azimuth
         mode_names = [
             "Final",
             "Radiance",
@@ -835,6 +856,13 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         return value
 
     @staticmethod
+    def _validate_sky_azimuth(value: float) -> float:
+        value = float(value)
+        if not math.isfinite(value) or not -180.0 <= value <= 180.0:
+            raise ValueError("sky_azimuth must be in the range [-180, 180]")
+        return value
+
+    @staticmethod
     def _validate_sky_intensity(value: float) -> float:
         value = float(value)
         if not math.isfinite(value) or value < 0.0:
@@ -868,6 +896,19 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._apply_time_of_day(reset_history=True)
 
     @property
+    def sky_azimuth(self) -> float:
+        """Horizontal sun-angle offset [degrees], in the range [-180, 180]."""
+        return self._sky_azimuth
+
+    @sky_azimuth.setter
+    def sky_azimuth(self, value: float) -> None:
+        value = self._validate_sky_azimuth(value)
+        if value == self._sky_azimuth:
+            return
+        self._sky_azimuth = value
+        self._apply_time_of_day(reset_history=True)
+
+    @property
     def time_of_day(self) -> float:
         """Procedural-sky time in hours, in the range [0, 24]."""
         return self._time_of_day
@@ -889,7 +930,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         phase = math.pi * (self._time_of_day - 6.0) / 12.0
         sun_height = math.sin(phase)
         elevation = math.radians(60.0 * sun_height)
-        azimuth = math.radians(15.0 * (self._time_of_day - 12.0))
+        azimuth = math.radians(15.0 * (self._time_of_day - 12.0) + self._sky_azimuth)
         cos_elevation = math.cos(elevation)
         sun_direction = (
             cos_elevation * math.sin(azimuth),
@@ -968,6 +1009,70 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             ):
                 return True
         return False
+
+    @override
+    def load_scene_from_usd(self, usd_path: str, **kwargs) -> bool:
+        """Load a USD scene and synchronize the camera with its effective up axis."""
+        loaded = super().load_scene_from_usd(usd_path, **kwargs)
+        if not loaded:
+            return False
+
+        if kwargs.get("convert_up_axis", True):
+            up_axis = 1
+        else:
+            from pxr import UsdGeom
+
+            up_axis = "XYZ".index(str(UsdGeom.GetStageUpAxis(self.usd_scene.stage)).upper())
+        self.set_up_axis(up_axis)
+        self.camera.up_axis = up_axis
+        self._camera_dirty = True
+        return True
+
+    @override
+    def set_camera_look_at(
+        self,
+        position,
+        target,
+        *,
+        fov: float | None = None,
+        renderer_space: bool = False,
+        force: bool = False,
+    ) -> None:
+        """Set the shared Newton camera from an eye and target."""
+        if self._user_camera_control and not force:
+            return
+        if force:
+            self._camera_override_this_frame = True
+        position = np.asarray(position, dtype=np.float32).reshape(3)
+        target = np.asarray(target, dtype=np.float32).reshape(3)
+        if renderer_space:
+            renderer_to_physics = self._global_transform[:3, :3].T
+            position = renderer_to_physics @ position
+            target = renderer_to_physics @ target
+        direction = target - position
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1.0e-8:
+            raise ValueError("Camera position and target must differ")
+        direction /= norm
+
+        if self._up_axis == 0:
+            pitch = math.degrees(math.asin(float(np.clip(direction[0], -1.0, 1.0))))
+            yaw = math.degrees(math.atan2(float(direction[2]), float(direction[1])))
+        elif self._up_axis == 2:
+            pitch = math.degrees(math.asin(float(np.clip(direction[2], -1.0, 1.0))))
+            yaw = math.degrees(math.atan2(float(direction[1]), float(direction[0])))
+        else:
+            pitch = math.degrees(math.asin(float(np.clip(direction[1], -1.0, 1.0))))
+            yaw = math.degrees(math.atan2(float(direction[2]), float(direction[0])))
+
+        self.camera.pos = self.camera._as_vec3(position)
+        self.camera.pitch = float(np.clip(pitch, -89.0, 89.0))
+        self.camera.yaw = (float(yaw) + 180.0) % 360.0 - 180.0
+        if fov is not None:
+            self.camera.fov = float(np.clip(fov, 5.0, 120.0))
+        self.camera.sync_pivot_to_view()
+        self._camera_dirty = True
+        self._sync_camera()
 
     @override
     def set_camera(self, pos: wp.vec3, pitch: float, yaw: float) -> None:
