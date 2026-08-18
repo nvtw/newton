@@ -3269,9 +3269,9 @@ class TestTrainerFlashSAC(unittest.TestCase):
         config = g1_recipe.isaaclab_flat_g1_flash_sac_config()
         override = g1_recipe.isaaclab_flat_g1_flash_sac_config(actor_lr=7.0e-4)
 
-        self.assertEqual(config.actor_lr, 6.0e-4)
-        self.assertEqual(config.critic_lr, 6.0e-4)
-        self.assertEqual(config.alpha_lr, 6.0e-4)
+        self.assertEqual(config.actor_lr, 7.5e-4)
+        self.assertEqual(config.critic_lr, 7.5e-4)
+        self.assertEqual(config.alpha_lr, 7.5e-4)
         self.assertEqual(config.sample_batch_size, 2048)
         self.assertEqual(config.n_step, 3)
         self.assertEqual(config.learning_rate_decay_steps, 100_000)

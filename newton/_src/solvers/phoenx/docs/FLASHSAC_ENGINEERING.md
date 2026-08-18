@@ -281,14 +281,21 @@ four replay items per transition but reduced warm throughput from 328.8k to
 
 An asserted 2,048-world sweep retained batch size 2,048, two interactions and
 four updates per cadence, policy delay 2, AMP, overlapped rollout, reward
-normalization, n-step 3, target rate 0.01, and a 100,000-update cosine schedule.
-Raising the actor, critic, and temperature learning rates together from
-``3e-4`` to ``6e-4`` sustained the fixed 0.8 m/s gate at seeds 0, 1, and 2 in
-40.755, 34.327, and 32.980 seconds including setup but excluding separately
-recorded evaluation overhead.  The corresponding transitions were 13.093M,
-11.094M, and 10.594M; all sustained evaluations had zero falls.  The median
-34.327 seconds is 31.7 percent below the prior three-seed median of 50.236
-seconds.  The tuned rate is exposed only through
+normalization, n-step 3, target rate 0.01, and a 100,000-update cosine
+schedule. Raising the actor, critic, and temperature learning rates together
+from ``3e-4`` to ``6e-4`` sustained the fixed 0.8 m/s gate at seeds 0, 1, and
+2 in 40.755, 34.327, and 32.980 seconds including setup but excluding
+separately recorded evaluation overhead. The corresponding transitions were
+13.093M, 11.094M, and 10.594M; all sustained evaluations had zero falls.
+
+A follow-up linked-rate sweep tested ``7.5e-4`` and ``9e-4`` under the same
+asserted protocol. ``7.5e-4`` sustained at seeds 0, 1, and 2 in 31.440,
+37.263, and 31.529 seconds and at 10.594M, 12.593M, and 10.594M transitions.
+All sustained evaluations again had zero falls. Its 31.529-second median is
+8.2 percent below the ``6e-4`` median and 37.2 percent below the original
+``3e-4`` median. Seed 1 regressed, so the improvement is a multi-seed median
+result rather than a per-seed guarantee. ``9e-4`` sustained seed 0 in 34.351
+seconds and was rejected. The tuned rate is exposed only through
 ``isaaclab_flat_g1_flash_sac_config()``; the generic FlashSAC defaults continue
 to match the upstream recipe.
 
@@ -296,6 +303,29 @@ For seed 0, ``4.5e-4`` sustained in 42.197 seconds, n-step 5 in 44.237
 seconds, and target rate 0.015 did not sustain within the 15M-transition cap.
 The standard non-G1 distributional continuous-control learning regression
 also passed after the sweep.
+
+### Matched FlashSAC/PPO wall-to-quality comparison
+
+The fixed full-action G1 gate requires mean tracking of at least 0.30,
+command-aligned velocity of at least 0.4 m/s, and a fall fraction no greater
+than 0.06 for two consecutive 200-step evaluations. The retained FlashSAC
+configuration sustains this gate in 31.440, 37.263, and 31.529 seconds of
+setup-plus-training across three seeds. Including every separately timed
+evaluation, the corresponding end-to-end walls are 51.595, 61.223, and
+51.785 seconds, with a 51.785-second median.
+
+Under the same environment, fixed 0.8 m/s command, and deterministic gate, the
+strongest standard PhoenX PPO run did not pass through 70.255M transitions and
+111.500 seconds of training; its best checkpoint had tracking 0.188, aligned
+velocity 0.180 m/s, and fall fraction 1.0. Its separately timed evaluations add
+59.240 seconds, so it consumed at least 170.741 seconds end to end, excluding
+unrecorded setup, without reaching the gate. The independently mapped RSL-style
+PPO run also failed through 36.962M transitions, 319.640 seconds of training,
+and 40.708 seconds of evaluation. Raw training throughput was about 330.9k
+transitions/s for the retained FlashSAC cadence, 630.1k for standard PPO, and
+115.6k for the RSL-style PPO. PPO therefore remains faster in raw samples for
+its standard configuration, while measured PPO time-to-quality is greater than
+170.741 seconds versus FlashSAC's 51.785-second three-seed median.
 
 An Nsight Systems trace of the selected 2,048-world, batch-2,048 cadence is at
 ``/tmp/flash_overlap_2048_b2048.nsys-rep``.  It measured 12.379 ms per cadence.
@@ -390,7 +420,7 @@ command-aligned velocity 0.843517 m/s, and zero falls at 198.2k transitions/s.
 This supports the narrow claim that bounded coordinate search discovered a
 useful temperature-rate improvement while preserving learning from a safe
 default. It does not establish a global optimum or show that this run discovered
-the separately validated linked 6e-4 G1 recipe.
+the separately validated linked 7.5e-4 G1 recipe.
 
 ## Reproducible quality evidence
 
