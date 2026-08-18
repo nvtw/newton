@@ -2324,6 +2324,7 @@ class NarrowPhase:
         self.split_gjk_mpr = (
             device_obj.is_cuda
             and has_generic_convex_pairs
+            and use_lean_gjk_mpr
             and candidate_pair_work_estimate >= _SPLIT_GJK_MPR_PAIR_CAPACITY_THRESHOLD
         )
         # Create the appropriate kernel variants

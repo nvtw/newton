@@ -2126,6 +2126,22 @@ class TestShapePairsMaxScaling(unittest.TestCase):
         pipeline.collide(state, contacts)
         self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
 
+    def test_nonuniform_world_shape_counts(self):
+        """Sum candidate bounds from each world actual shape count."""
+        world_ids = np.array([0, 0, 1, 1, 1, 1, 1, 3, -1, -1], dtype=np.int32)
+        model = newton.Model()
+        model.shape_count = len(world_ids)
+        model.shape_world = wp.array(world_ids, dtype=wp.int32)
+        model.shape_flags = wp.full(
+            len(world_ids),
+            int(ShapeFlags.COLLIDE_SHAPES),
+            dtype=wp.int32,
+        )
+
+        # Local counts 2, 5, and 1 each include two global shapes; the
+        # dedicated global segment contributes one additional pair.
+        self.assertEqual(_compute_per_world_shape_pairs_max(model), 6 + 21 + 3 + 1)
+
     def test_single_world_matches_global_formula(self):
         """Single world should give the same result as the naive N*(N-1)/2."""
         model = self._make_model(num_worlds=1, shapes_per_world=20)
@@ -3125,27 +3141,12 @@ def test_split_gjk_mpr_matches_fused_under_graph_capture(test, device):
         lambda body: builder.add_shape_box(body, hx=0.4, hy=0.35, hz=0.3),
         lambda body: builder.add_shape_box(body, hx=0.35, hy=0.4, hz=0.3),
     )
-    add_pair(
-        0.0,
-        lambda body: builder.add_shape_cone(body, radius=0.4, half_height=0.4),
-        lambda body: builder.add_shape_cylinder(body, radius=0.4, half_height=0.4),
-    )
-    add_pair(
-        4.0,
-        lambda body: builder.add_shape_capsule(body, radius=0.3, half_height=0.3),
-        lambda body: builder.add_shape_convex_hull(body, mesh=convex),
-    )
-    add_pair(
-        8.0,
-        lambda body: builder.add_shape_sphere(body, radius=0.4),
-        lambda body: builder.add_shape_cone(body, radius=0.4, half_height=0.4),
-    )
     for index in range(7):
         body = builder.add_body(xform=wp.transform(wp.vec3(100.0 + 4.0 * index, 0.0, 0.0)))
         builder.add_shape_box(body, hx=0.25, hy=0.25, hz=0.25)
 
     replicated_builder = newton.ModelBuilder()
-    replicated_builder.replicate(builder, world_count=32)
+    replicated_builder.replicate(builder, world_count=128)
     replicated_builder.add_ground_plane()
     model = replicated_builder.finalize(device=device)
     split = newton.CollisionPipeline(
@@ -3153,7 +3154,7 @@ def test_split_gjk_mpr_matches_fused_under_graph_capture(test, device):
         broad_phase="sap",
         shape_pairs_max=8192,
         deterministic=True,
-        rigid_contact_max=4096,
+        rigid_contact_max=16384,
         verify_buffers=False,
     )
     fused = newton.CollisionPipeline(
@@ -3161,7 +3162,7 @@ def test_split_gjk_mpr_matches_fused_under_graph_capture(test, device):
         broad_phase="sap",
         shape_pairs_max=8192,
         deterministic=True,
-        rigid_contact_max=4096,
+        rigid_contact_max=16384,
         verify_buffers=False,
     )
     test.assertTrue(split.narrow_phase.split_gjk_mpr)

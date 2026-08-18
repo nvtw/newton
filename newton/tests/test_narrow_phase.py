@@ -2241,14 +2241,23 @@ class TestBufferOverflowWarnings(unittest.TestCase):
 
     @unittest.skipUnless(_cuda_available, "Split GJK/MPR is enabled only on CUDA")
     def test_split_buffers_use_candidate_work_estimate(self):
-        """Size split GJK/MPR buffers from the candidate work estimate."""
+        """Use split buffers only for large lean-support workloads."""
         narrow_phase = NarrowPhase(
             max_candidate_pairs=5000,
             candidate_pair_work_estimate=4096,
             has_meshes=False,
+            use_lean_gjk_mpr=True,
+            device="cuda:0",
+        )
+        full_support = NarrowPhase(
+            max_candidate_pairs=5000,
+            candidate_pair_work_estimate=4096,
+            has_meshes=False,
+            use_lean_gjk_mpr=False,
             device="cuda:0",
         )
 
+        self.assertFalse(full_support.split_gjk_mpr)
         self.assertTrue(narrow_phase.split_gjk_mpr)
         self.assertEqual(narrow_phase.split_query_results.shape[0], 4096)
         self.assertEqual(narrow_phase.split_gjk_work_items.shape[0], 4096)

@@ -9,11 +9,15 @@ wp.config.log_level = wp.LOG_WARNING
 
 import importlib
 
+import numpy as np
+
 import newton.examples
 from newton.viewer import ViewerNull
 
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
+IRREGULAR_ROCK_VERTEX_COUNTS = (10, 14, 18, 26)
+IRREGULAR_ROCK_WORLD_COUNTS = (256, 1024)
 
 try:
     from newton.examples import download_external_git_folder as _download_external_git_folder
@@ -41,6 +45,57 @@ def _import_example_class(module_names: list[str]):
         return module.Example
 
     raise SkipNotImplemented
+
+
+def _make_irregular_rock(vertex_count: int, seed: int) -> newton.Mesh:
+    """Create a closed irregular convex bipyramid for collision benchmarks."""
+    ring_count = vertex_count - 2
+    rng = np.random.default_rng(seed)
+    vertices = []
+    for index in range(ring_count):
+        angle = 2.0 * np.pi * index / ring_count
+        radius = 0.42 * rng.uniform(0.82, 1.18)
+        vertices.append([radius * np.cos(angle), radius * np.sin(angle), rng.uniform(-0.09, 0.09)])
+
+    vertices.extend(
+        [
+            [0.04, -0.03, rng.uniform(0.48, 0.60)],
+            [-0.03, 0.04, -rng.uniform(0.48, 0.60)],
+        ]
+    )
+    top = ring_count
+    bottom = ring_count + 1
+    indices = []
+    for index in range(ring_count):
+        next_index = (index + 1) % ring_count
+        indices.extend([top, index, next_index])
+        indices.extend([bottom, next_index, index])
+
+    return newton.Mesh(np.asarray(vertices, dtype=np.float32), np.asarray(indices, dtype=np.int32))
+
+
+def _build_irregular_rock_pile(world_count: int, rocks_per_world: int = 10) -> newton.Model:
+    """Build replicated piles containing varied irregular convex hulls."""
+    newton.use_coord_layout_targets = True
+    rocks = [_make_irregular_rock(count, 100 + index) for index, count in enumerate(IRREGULAR_ROCK_VERTEX_COUNTS)]
+
+    world_builder = newton.ModelBuilder()
+    shape_cfg = newton.ModelBuilder.ShapeConfig(gap=0.01, margin=0.0)
+    world_builder.add_ground_plane(cfg=shape_cfg)
+    for index in range(rocks_per_world):
+        position = wp.vec3(
+            0.08 * ((index % 3) - 1),
+            0.07 * (((index * 2) % 3) - 1),
+            0.43 + 0.83 * index,
+        )
+        axis = wp.normalize(wp.vec3(0.3 + 0.1 * (index % 2), 0.2, 1.0))
+        rotation = wp.quat_from_axis_angle(axis, 0.19 * index)
+        body = world_builder.add_body(xform=wp.transform(position, rotation))
+        world_builder.add_shape_convex_hull(body, mesh=rocks[index % len(rocks)], cfg=shape_cfg)
+
+    builder = newton.ModelBuilder()
+    builder.replicate(world_builder, world_count=world_count)
+    return builder.finalize()
 
 
 class FastExampleContactSdfDefaults:
@@ -145,6 +200,48 @@ class FastExampleContactPyramidDefaults:
         wp.synchronize_device()
 
 
+class FastIrregularRockPileCollision:
+    """Benchmark narrow-phase collision for replicated irregular rock piles."""
+
+    params = (IRREGULAR_ROCK_WORLD_COUNTS,)
+    param_names = ["world_count"]
+    repeat = 5
+    number = 1
+
+    def setup(self, world_count):
+        device = wp.get_device()
+        if not device.is_cuda or not wp.is_mempool_enabled(device):
+            raise SkipNotImplemented
+
+        self.launch_count = 100
+        rocks_per_world = 10
+        self.model = _build_irregular_rock_pile(world_count, rocks_per_world)
+        self.state = self.model.state()
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
+        self.collision_pipeline = newton.CollisionPipeline(
+            self.model,
+            broad_phase="sap",
+            rigid_contact_max=world_count * rocks_per_world * 8,
+            verify_buffers=False,
+        )
+        self.contacts = self.collision_pipeline.contacts()
+
+        for _ in range(5):
+            self.collision_pipeline.collide(self.state, self.contacts)
+        if int(self.collision_pipeline.narrow_phase.gjk_candidate_pairs_count.numpy()[0]) == 0:
+            raise RuntimeError("irregular rock pile produced no GJK candidate pairs")
+
+        with wp.ScopedCapture(device=device) as capture:
+            self.collision_pipeline.collide(self.state, self.contacts)
+        self.graph = capture.graph
+
+    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    def time_collide(self, world_count):
+        for _ in range(self.launch_count):
+            wp.capture_launch(self.graph)
+        wp.synchronize_device()
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -154,6 +251,7 @@ if __name__ == "__main__":
         "FastExampleContactSdfDefaults": FastExampleContactSdfDefaults,
         "FastExampleContactHydroWorkingDefaults": FastExampleContactHydroWorkingDefaults,
         "FastExampleContactPyramidDefaults": FastExampleContactPyramidDefaults,
+        "FastIrregularRockPileCollision": FastIrregularRockPileCollision,
     }
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
