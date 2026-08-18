@@ -2581,8 +2581,9 @@ class TestDVISolver(unittest.TestCase):
                 residuals=np.asarray(residuals),
             )
 
+        adaptive_tolerance = 1.0e-5
         full = run(0.0)
-        adaptive = run(1.0e-5)
+        adaptive = run(adaptive_tolerance)
 
         active_frames = full.active_counts > 0
         np.testing.assert_array_equal(full.iterations[active_frames], full_sweep_count)
@@ -2594,9 +2595,9 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(adaptive.iterations[~active_frames], 1)
         self.assertTrue(np.all(adaptive.iterations[active_frames] % 2 == 0))
         # The final direct equality solve may hit its FP32 floor independently
-        # of PGS. Terminal status remains authoritative and must not materially
-        # worsen relative to the full-budget reference.
-        self.assertLessEqual(float(np.max(adaptive.residuals)), float(np.max(full.residuals)) * 1.1 + 1.0e-7)
+        # of PGS. Bound the quality loss by the absolute stopping tolerance;
+        # a relative comparison is unstable when both residuals are near zero.
+        self.assertLessEqual(float(np.max(adaptive.residuals)), float(np.max(full.residuals)) + adaptive_tolerance)
 
         self.assertLess(float(np.max(np.abs(adaptive.poses - full.poses))), 1.0e-5)
         self.assertLess(float(np.max(np.abs(adaptive.velocities - full.velocities))), 1.0e-3)
