@@ -116,8 +116,8 @@ class Example:
             target_luminance=0.18,
             min_ev=-6.0,
             max_ev=6.0,
-            brighten_speed=1.5,
-            darken_speed=3.0,
+            brighten_speed=0.6,
+            darken_speed=1.2,
         )
         viewer.set_ray_budget(
             russian_roulette_start_bounce=OPTIX_RUSSIAN_ROULETTE_START_BOUNCE,
