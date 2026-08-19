@@ -78,6 +78,22 @@ class TestViewerCameraSpeed(unittest.TestCase):
         self.assertAlmostEqual(camera.pos.z, 0.0)
 
 
+class TestViewerCameraMouseLook(unittest.TestCase):
+    def test_horizontal_drag_follows_screen_right_for_each_up_axis(self):
+        """Turn toward screen right when dragging right for every up axis."""
+        for up_axis, expected_yaw in ((0, -1.0), (1, 1.0), (2, -1.0)):
+            with self.subTest(up_axis=up_axis):
+                camera = SimpleNamespace(up_axis=up_axis, yaw=0.0, pitch=0.0)
+                viewer = SimpleNamespace(camera=camera, _camera_dirty=False)
+                gui = ViewerGui.__new__(ViewerGui)
+                gui._viewer = viewer
+
+                gui.rotate_camera_from_drag(dx=10.0, dy=0.0)
+
+                self.assertEqual(camera.yaw, expected_yaw)
+                self.assertTrue(viewer._camera_dirty)
+
+
 class TestViewerGLShouldStep(unittest.TestCase):
     """ViewerGL.should_step() state machine: running, paused, and single-step."""
 

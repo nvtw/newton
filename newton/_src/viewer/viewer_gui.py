@@ -129,7 +129,8 @@ class ViewerGui:
         camera = getattr(self._viewer, "camera", None)
         if camera is None:
             return
-        camera.yaw -= dx * sensitivity
+        yaw_sign = 1.0 if camera.up_axis == 1 else -1.0
+        camera.yaw += yaw_sign * dx * sensitivity
         camera.pitch += dy * sensitivity
         camera.pitch = max(-89.0, min(89.0, camera.pitch))
         if hasattr(self._viewer, "_camera_dirty"):
@@ -378,8 +379,9 @@ class ViewerGui:
                 scale = self._camera_pan_scale()
                 camera.pan(-dx * scale, -dy * scale)
             else:
+                yaw_sign = 1.0 if camera.up_axis == 1 else -1.0
                 camera.orbit(
-                    delta_yaw=-dx * self._camera_orbit_sensitivity,
+                    delta_yaw=yaw_sign * dx * self._camera_orbit_sensitivity,
                     delta_pitch=dy * self._camera_orbit_sensitivity,
                 )
             if hasattr(viewer, "_camera_dirty"):

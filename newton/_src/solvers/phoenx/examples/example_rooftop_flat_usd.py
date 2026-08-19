@@ -18,8 +18,8 @@ import numpy as np
 
 import newton.examples
 
-DEFAULT_USD_PATH = Path("/home/twidmer/Documents/Meshes/RooftopFlat/RooftopFlat.usd")
-DEFAULT_CAMERA_PATH = "/CineCameraActor4_2"
+DEFAULT_USD_PATH = Path("/home/twidmer/Documents/Meshes/Scene.usd")
+DEFAULT_CAMERA_PATH = "/Root/Room/CineCameraActor4_2"
 
 LOAD_USD_ENVIRONMENT = False
 USD_MAX_TEXTURE_SIZE = 4096
@@ -107,9 +107,12 @@ class Example:
         ):
             raise RuntimeError(f"OptiX failed to load USD stage: {usd_path}")
 
-        # Keep authored emissive materials available for the UI control while
-        # avoiding bright emissive pixels in DLSS ray-reconstruction inputs.
-        viewer.emissive_material_intensity = 0.0
+        # Preserve authored bulb and fixture emission in the night scene.
+        viewer.emissive_material_intensity = 1.0
+
+        if not args.usd_environment:
+            # Keep initialization and the interactive time slider on one sky state.
+            viewer.time_of_day = 0.0
 
         viewer.configure_auto_exposure(
             True,

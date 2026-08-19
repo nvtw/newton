@@ -245,24 +245,30 @@ class TestViewerOptix(unittest.TestCase):
             self.assertAlmostEqual(viewer.time_of_day, 12.0)
             self.assertAlmostEqual(viewer.sky_azimuth, 0.0)
             self.assertAlmostEqual(viewer.sky_intensity, 1.0)
-            self.assertFalse(viewer.grayscale_sky)
+            self.assertAlmostEqual(viewer.grayscale_sky, 0.0)
             self.assertIsNotNone(api.sky_parameters)
             self.assertEqual(api.temporal_reset_count, 0)
             np.testing.assert_allclose(api.sky_parameters["ground_color"], (0.4, 0.4, 0.4), atol=1.0e-5)
             self.assertAlmostEqual(api.sky_parameters["sun_glow_intensity"], 1.0)
-            self.assertFalse(api.sky_parameters["grayscale"])
+            self.assertAlmostEqual(api.sky_parameters["grayscale"], 0.0)
 
-            viewer.grayscale_sky = True
-            self.assertEqual(api.temporal_reset_count, 1)
-            self.assertTrue(api.sky_parameters["grayscale"])
-            viewer.sky_intensity = 1.5
+            viewer.time_of_day = 0.0
+            self.assertGreater(api.sky_parameters["sun_disk_intensity"], 0.0)
+            night_peak = max(api.sky_parameters["night_color"])
+            self.assertGreater(night_peak, 0.0)
+            self.assertLess(night_peak, 0.001)
+
+            viewer.grayscale_sky = 0.4
             self.assertEqual(api.temporal_reset_count, 2)
-            self.assertAlmostEqual(api.sky_parameters["multiplier"], 1.5)
-            viewer.time_of_day = 18.0
+            self.assertAlmostEqual(api.sky_parameters["grayscale"], 0.4)
+            viewer.sky_intensity = 1.5
             self.assertEqual(api.temporal_reset_count, 3)
+            self.assertAlmostEqual(api.sky_parameters["multiplier"], 0.015)
+            viewer.time_of_day = 18.0
+            self.assertEqual(api.temporal_reset_count, 4)
             np.testing.assert_allclose(api.sky_parameters["sun_direction"], (1.0, 0.0, 0.0), atol=1.0e-6)
             viewer.sky_azimuth = -90.0
-            self.assertEqual(api.temporal_reset_count, 4)
+            self.assertEqual(api.temporal_reset_count, 5)
             np.testing.assert_allclose(api.sky_parameters["sun_direction"], (0.0, 0.0, 1.0), atol=1.0e-6)
             with self.assertRaises(ValueError):
                 viewer.time_of_day = 25.0
@@ -271,6 +277,8 @@ class TestViewerOptix(unittest.TestCase):
             with self.assertRaises(ValueError):
                 viewer.sky_intensity = -1.0
         finally:
+            with self.assertRaises(ValueError):
+                viewer.grayscale_sky = 1.1
             viewer.close()
 
     @unittest.skipIf(warp_optix is not None, "Exercise the missing-dependency path only without warp_optix")

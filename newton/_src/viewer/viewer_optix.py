@@ -164,7 +164,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         time_of_day: float = 12.0,
         sky_azimuth: float = 0.0,
         sky_intensity: float = 1.0,
-        grayscale_sky: bool = False,
+        grayscale_sky: float | bool = 0.0,
         exposure: float = 0.68,
         contrast: float = 1.08,
         saturation: float = 1.1,
@@ -212,8 +212,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             sky_azimuth: Horizontal sun-angle offset [degrees], in the range
                 [-180, 180].
             sky_intensity: Procedural-sky illumination multiplier.
-            grayscale_sky: Render the physical sky in grayscale while
-                preserving its maximum RGB component as brightness.
+            grayscale_sky: Blend toward a grayscale physical sky in [0, 1],
+                preserving the maximum RGB component as brightness.
             exposure: Linear display exposure multiplier.
             contrast: Display contrast multiplier.
             saturation: Display saturation multiplier.
@@ -263,7 +263,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._time_of_day = self._validate_time_of_day(time_of_day)
         self._sky_azimuth = self._validate_sky_azimuth(sky_azimuth)
         self._sky_intensity = self._validate_sky_intensity(sky_intensity)
-        self._grayscale_sky = bool(grayscale_sky)
+        self._grayscale_sky = self._validate_grayscale_sky(grayscale_sky)
         self.lines = {}
         self._material_arrays: dict[tuple[int, float, float, float], wp.array[wp.vec4]] = {}
         self.arrows = {}
@@ -464,7 +464,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         changed, exposure = imgui.slider_float("Exposure Compensation", self.exposure, 0.05, 4.0)
         if changed:
             self.exposure = exposure
-        changed, grayscale_sky = imgui.checkbox("Grayscale Sky", self.grayscale_sky)
+        changed, grayscale_sky = imgui.slider_float("Grayscale Sky", self.grayscale_sky, 0.0, 1.0)
         if changed:
             self.grayscale_sky = grayscale_sky
         changed, sky_intensity = imgui.slider_float("Sky Intensity", self.sky_intensity, 0.0, 5.0)
@@ -879,14 +879,21 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             raise ValueError("sky_intensity must be finite and non-negative")
         return value
 
+    @staticmethod
+    def _validate_grayscale_sky(value: float | bool) -> float:
+        value = float(value)
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("grayscale_sky must be in the range [0, 1]")
+        return value
+
     @property
-    def grayscale_sky(self) -> bool:
-        """Whether the physical sky is rendered without chroma."""
+    def grayscale_sky(self) -> float:
+        """Amount blended toward a physical sky without chroma."""
         return self._grayscale_sky
 
     @grayscale_sky.setter
-    def grayscale_sky(self, value: bool) -> None:
-        value = bool(value)
+    def grayscale_sky(self, value: float | bool) -> None:
+        value = self._validate_grayscale_sky(value)
         if value == self._grayscale_sky:
             return
         self._grayscale_sky = value
@@ -950,6 +957,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
 
         daylight = self._smoothstep(-0.12, 0.08, sun_height)
         horizon = daylight * (1.0 - self._smoothstep(0.0, 0.55, sun_height))
+        moonlight = 1.0 - self._smoothstep(-0.25, -0.05, sun_height)
         # The backend stores these values in linear RGB; this wrapper accepts
         # display-sRGB and converts them before forwarding.
         day_ground = (0.665185, 0.665185, 0.665185)
@@ -965,10 +973,10 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             saturation=0.5 + 0.5 * daylight + 0.2 * horizon,
             ground_color=ground_color,
             horizon_blur=1.0 + horizon,
-            night_color=(0.0, 0.0, 0.0),
-            sun_disk_intensity=daylight * (1.0 - 0.25 * horizon),
+            night_color=tuple(moonlight * channel for channel in (0.002, 0.003, 0.006)),
+            sun_disk_intensity=daylight * (1.0 - 0.25 * horizon) + moonlight,
             sun_disk_scale=1.0 + horizon,
-            sun_glow_intensity=daylight * (1.0 + 2.0 * horizon),
+            sun_glow_intensity=daylight * (1.0 + 2.0 * horizon) + 0.15 * moonlight,
             y_is_up=1,
             grayscale=self._grayscale_sky,
         )
