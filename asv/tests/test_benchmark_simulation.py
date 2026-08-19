@@ -77,16 +77,26 @@ class TestSimulationBenchmarks(unittest.TestCase):
         self.assertFalse(hasattr(bench_quadruped_xpbd, "Example"))
         self.assertFalse(hasattr(bench_quadruped_xpbd, "newton"))
 
-    def test_rock_pile_benchmark_has_one_representative_workload(self):
-        """Keep one bounded irregular-rock workload without parameter expansion."""
-        self.assertFalse(hasattr(bench_contacts.FastRockPileCollision, "params"))
-        self.assertEqual(bench_contacts.ROCK_PILE_WORLD_COUNT, 1_024)
-        self.assertEqual(bench_contacts.ROCK_PILE_ROCK_COUNT, 10)
-        self.assertEqual(len(bench_contacts.ROCK_PILE_VERTEX_COUNTS), 4)
+    def test_convex_benchmark_covers_types_and_scales(self):
+        """Cover selector crossovers, duplicate-heavy hulls, and every convex type."""
+        self.assertEqual(
+            tuple(bench_contacts.FastConvexCollision.params[0]),
+            (("hulls", 56), ("hulls_duplicate", 192), ("mixed", 191)),
+        )
+        self.assertEqual(
+            {shape for pair in bench_contacts.MIXED_CONVEX_PAIR_TYPES for shape in pair},
+            {"sphere", "box", "capsule", "ellipsoid", "cylinder", "cone", "hull"},
+        )
 
-        mesh = bench_contacts._make_irregular_rock(10, seed=100)
-        self.assertEqual(len(mesh.vertices), 10)
-        self.assertEqual(len(mesh.indices), 48)
+        for vertex_count in bench_contacts.IRREGULAR_ROCK_VERTEX_COUNTS:
+            with self.subTest(vertex_count=vertex_count):
+                mesh = bench_contacts._make_irregular_rock(vertex_count, seed=100)
+                self.assertEqual(len(mesh.vertices), vertex_count)
+                self.assertEqual(len(mesh.indices), 6 * (vertex_count - 2))
+
+        duplicate_mesh = bench_contacts._make_irregular_rock(10, seed=100, triangle_local_vertices=True)
+        self.assertEqual(len(duplicate_mesh.vertices), len(duplicate_mesh.indices))
+        self.assertEqual(len(np.unique(duplicate_mesh.vertices, axis=0)), 10)
 
     def test_fast_kitchen_g1_validates_kitchen_body_count(self):
         """Validate the configured kitchen body count at runtime."""
