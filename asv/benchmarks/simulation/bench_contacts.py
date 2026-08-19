@@ -8,6 +8,7 @@ wp.config.enable_backward = False
 wp.config.log_level = wp.LOG_WARNING
 
 import importlib
+from typing import ClassVar
 
 import numpy as np
 
@@ -252,7 +253,7 @@ class FastConvexCollision:
     """Benchmark lean-hull and mixed-type convex collision workloads."""
 
     params = (CONVEX_COLLISION_CASES,)
-    param_names = ["case"]
+    param_names: ClassVar[list[str]] = ["case"]
     repeat = 5
     number = 1
 

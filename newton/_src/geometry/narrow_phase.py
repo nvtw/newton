@@ -1692,13 +1692,13 @@ def compute_mesh_plane_vert_counts(
 
 
 def compute_mesh_plane_block_offsets_scan(
-    shape_pairs_mesh_plane: wp.array,
-    shape_pairs_mesh_plane_count: wp.array,
-    shape_source: wp.array,
+    shape_pairs_mesh_plane: wp.array[wp.vec2i],
+    shape_pairs_mesh_plane_count: wp.array[int],
+    shape_source: wp.array[wp.uint64],
     target_blocks: int,
-    block_offsets: wp.array,
-    block_counts: wp.array,
-    total_vert_count: wp.array,
+    block_offsets: wp.array[wp.int32],
+    block_counts: wp.array[wp.int32],
+    total_vert_count: wp.array[wp.int32],
     total_num_threads: int,
     device: str | None = None,
     record_tape: bool = True,
