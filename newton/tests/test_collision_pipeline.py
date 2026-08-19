@@ -32,10 +32,12 @@ from newton._src.geometry.soft_contacts_sdf import (
     optimize_face_sdf,
 )
 from newton._src.sim.collide import (
+    _SPLIT_GJK_MPR_LEAN_PAIR_COUNT_THRESHOLD,
     CollisionPipeline,
     _build_soft_edge_rigid_contact_pairs,
     _build_soft_face_rigid_contact_pairs,
     _build_soft_particle_rigid_contact_pairs,
+    _compute_generic_convex_pair_work_estimate,
     _compute_per_world_mask_pair_max,
     _compute_per_world_shape_pairs_max,
     _count_soft_particle_rigid_contact_pairs,
@@ -2036,6 +2038,43 @@ class TestShapePairsMaxScaling(unittest.TestCase):
         self.assertEqual(_compute_per_world_mask_pair_max(model, same_mask), 7)
         self.assertEqual(_compute_per_world_mask_pair_max(model, first_mask, second_mask), 9)
 
+    def test_generic_convex_work_estimate_counts_only_routed_pairs(self):
+        """Count only world-compatible pairs routed to generic convex collision."""
+        model = self._make_model(num_worlds=2, shapes_per_world=4)
+        model.shape_type = wp.array(
+            [int(GeoType.CONVEX_MESH), int(GeoType.CONVEX_MESH), int(GeoType.SPHERE), int(GeoType.SPHERE)] * 2,
+            dtype=wp.int32,
+        )
+
+        estimate = _compute_generic_convex_pair_work_estimate(
+            model,
+            broad_phase_mode="sap",
+            shape_pairs_filtered=None,
+            candidate_pair_work_estimate=12,
+        )
+
+        # Each world contributes one hull-hull and four hull-sphere pairs;
+        # sphere-sphere collision uses the analytic path.
+        self.assertEqual(estimate, 10)
+
+    def test_explicit_generic_convex_work_estimate_uses_routed_pairs(self):
+        """Count exact generic convex routes for explicit broad phase pairs."""
+        model = self._make_model(num_worlds=1, shapes_per_world=4)
+        model.shape_type = wp.array(
+            [int(GeoType.CONVEX_MESH), int(GeoType.BOX), int(GeoType.SPHERE), int(GeoType.SPHERE)],
+            dtype=wp.int32,
+        )
+        shape_pairs = wp.array(np.array([[0, 1], [1, 2], [2, 3]], dtype=np.int32), dtype=wp.vec2i)
+
+        estimate = _compute_generic_convex_pair_work_estimate(
+            model,
+            broad_phase_mode="explicit",
+            shape_pairs_filtered=shape_pairs,
+            candidate_pair_work_estimate=3,
+        )
+
+        self.assertEqual(estimate, 1)
+
     def test_mesh_work_buffers_use_category_bounds(self):
         """Size mesh work buffers from exact routed shape categories."""
         builder = newton.ModelBuilder()
@@ -3151,7 +3190,7 @@ def test_split_gjk_mpr_matches_fused_under_graph_capture(test, device):
     split = newton.CollisionPipeline(
         model,
         broad_phase="sap",
-        shape_pairs_max=8192,
+        shape_pairs_max=_SPLIT_GJK_MPR_LEAN_PAIR_COUNT_THRESHOLD,
         deterministic=True,
         rigid_contact_max=16384,
         verify_buffers=False,
@@ -3159,7 +3198,7 @@ def test_split_gjk_mpr_matches_fused_under_graph_capture(test, device):
     fused = newton.CollisionPipeline(
         model,
         broad_phase="sap",
-        shape_pairs_max=8192,
+        shape_pairs_max=_SPLIT_GJK_MPR_LEAN_PAIR_COUNT_THRESHOLD,
         deterministic=True,
         rigid_contact_max=16384,
         verify_buffers=False,

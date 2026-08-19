@@ -13,12 +13,16 @@ from typing import ClassVar
 import numpy as np
 
 import newton.examples
+from newton._src.geometry.narrow_phase import compute_mesh_plane_block_offsets_scan
+from newton._src.geometry.sdf_contact import compute_mesh_mesh_block_offsets_scan
+from newton._src.utils.heightfield import HeightfieldData
 from newton.viewer import ViewerNull
 
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 IRREGULAR_ROCK_VERTEX_COUNTS = (10, 14, 18, 26)
-CONVEX_COLLISION_CASES = (("hulls", 192), ("mixed", 512))
+CONVEX_COLLISION_CASES = (("hulls", 128), ("hulls_duplicate", 192), ("mixed", 191))
+MESH_PREPROCESSING_PAIR_COUNT = 65_536
 MIXED_CONVEX_PAIR_TYPES = (
     ("sphere", "sphere"),
     ("capsule", "capsule"),
@@ -66,7 +70,7 @@ def _import_example_class(module_names: list[str]):
     raise SkipNotImplemented
 
 
-def _make_irregular_rock(vertex_count: int, seed: int) -> newton.Mesh:
+def _make_irregular_rock(vertex_count: int, seed: int, triangle_local_vertices: bool = False) -> newton.Mesh:
     """Create a closed irregular convex bipyramid for collision benchmarks."""
     ring_count = vertex_count - 2
     rng = np.random.default_rng(seed)
@@ -90,7 +94,12 @@ def _make_irregular_rock(vertex_count: int, seed: int) -> newton.Mesh:
         indices.extend([top, index, next_index])
         indices.extend([bottom, next_index, index])
 
-    return newton.Mesh(np.asarray(vertices, dtype=np.float32), np.asarray(indices, dtype=np.int32))
+    vertices = np.asarray(vertices, dtype=np.float32)
+    indices = np.asarray(indices, dtype=np.int32)
+    if triangle_local_vertices:
+        vertices = vertices[indices]
+        indices = np.arange(len(indices), dtype=np.int32)
+    return newton.Mesh(vertices, indices)
 
 
 def _add_mixed_convex_shape(
@@ -120,10 +129,18 @@ def _add_mixed_convex_shape(
         raise ValueError(f"Unsupported convex shape kind: {shape_kind}")
 
 
-def _build_convex_scene(world_count: int, pair_types: tuple[tuple[str, str], ...]) -> newton.Model:
+def _build_convex_scene(
+    world_count: int,
+    pair_types: tuple[tuple[str, str], ...],
+    *,
+    triangle_local_vertices: bool = False,
+) -> newton.Model:
     """Build replicated isolated convex pairs."""
     newton.use_coord_layout_targets = True
-    rocks = [_make_irregular_rock(count, 100 + index) for index, count in enumerate(IRREGULAR_ROCK_VERTEX_COUNTS)]
+    rocks = [
+        _make_irregular_rock(count, 100 + index, triangle_local_vertices)
+        for index, count in enumerate(IRREGULAR_ROCK_VERTEX_COUNTS)
+    ]
 
     world_builder = newton.ModelBuilder()
     shape_cfg = newton.ModelBuilder.ShapeConfig(gap=0.01, margin=0.0)
@@ -264,13 +281,17 @@ class FastConvexCollision:
 
         self.launch_count = 100
         scene, world_count = case
-        if scene == "hulls":
+        if scene in ("hulls", "hulls_duplicate"):
             pair_types = (("hull", "hull"),) * len(MIXED_CONVEX_PAIR_TYPES)
         elif scene == "mixed":
             pair_types = MIXED_CONVEX_PAIR_TYPES
         else:
             raise ValueError(f"Unsupported convex benchmark scene: {scene}")
-        self.model = _build_convex_scene(world_count, pair_types)
+        self.model = _build_convex_scene(
+            world_count,
+            pair_types,
+            triangle_local_vertices=scene == "hulls_duplicate",
+        )
         self.state = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.collision_pipeline = newton.CollisionPipeline(
@@ -297,6 +318,94 @@ class FastConvexCollision:
         wp.synchronize_device()
 
 
+class FastMeshContactPreprocessing:
+    """Benchmark mesh-plane and mesh-mesh work-queue preprocessing."""
+
+    params = (("mesh_plane", "mesh_mesh"),)
+    param_names: ClassVar[list[str]] = ["pair_type"]
+    repeat = 5
+    number = 1
+
+    def setup(self, pair_type):
+        device = wp.get_device()
+        if not device.is_cuda or not wp.is_mempool_enabled(device):
+            raise SkipNotImplemented
+
+        builder = newton.ModelBuilder()
+        mesh = newton.Mesh.create_box(0.5, 0.5, 0.5)
+        builder.add_shape_mesh(body=-1, mesh=mesh)
+        builder.add_shape_mesh(body=-1, mesh=mesh)
+        builder.add_ground_plane()
+        model = builder.finalize()
+        self.model = model
+
+        pair_count = MESH_PREPROCESSING_PAIR_COUNT
+        active_pair = (0, 2) if pair_type == "mesh_plane" else (0, 1)
+        shape_pairs = wp.array(np.tile(active_pair, (pair_count, 1)), dtype=wp.vec2i, device=device)
+        shape_pairs_count = wp.array([pair_count], dtype=wp.int32, device=device)
+        block_offsets = wp.zeros(pair_count + 1, dtype=wp.int32, device=device)
+        block_counts = wp.zeros(pair_count + 1, dtype=wp.int32, device=device)
+        total_weight = wp.zeros(1, dtype=wp.int32, device=device)
+        total_num_threads = device.sm_count * 4 * 128
+        shape_heightfield_index = wp.zeros(model.shape_count, dtype=wp.int32, device=device)
+        heightfield_data = wp.zeros(1, dtype=HeightfieldData, device=device)
+        self._buffers = (
+            shape_pairs,
+            shape_pairs_count,
+            block_offsets,
+            block_counts,
+            total_weight,
+            shape_heightfield_index,
+            heightfield_data,
+        )
+
+        def preprocess():
+            total_weight.zero_()
+            if pair_type == "mesh_plane":
+                compute_mesh_plane_block_offsets_scan(
+                    shape_pairs_mesh_plane=shape_pairs,
+                    shape_pairs_mesh_plane_count=shape_pairs_count,
+                    shape_source=model.shape_source_ptr,
+                    target_blocks=device.sm_count * 4,
+                    block_offsets=block_offsets,
+                    block_counts=block_counts,
+                    total_vert_count=total_weight,
+                    total_num_threads=total_num_threads,
+                    device=device,
+                    record_tape=False,
+                )
+            elif pair_type == "mesh_mesh":
+                compute_mesh_mesh_block_offsets_scan(
+                    shape_pairs_mesh_mesh=shape_pairs,
+                    shape_pairs_mesh_mesh_count=shape_pairs_count,
+                    shape_edge_range=model.shape_edge_range,
+                    shape_heightfield_index=shape_heightfield_index,
+                    heightfield_data=heightfield_data,
+                    target_blocks=device.sm_count * 8,
+                    block_offsets=block_offsets,
+                    block_counts=block_counts,
+                    total_edge_count=total_weight,
+                    total_num_threads=total_num_threads,
+                    device=device,
+                    record_tape=False,
+                )
+            else:
+                raise ValueError(f"Unsupported mesh preprocessing pair type: {pair_type}")
+
+        preprocess()
+        wp.synchronize_device()
+        with wp.ScopedCapture(device=device) as capture:
+            preprocess()
+        self.graph = capture.graph
+        self.launch_count = 100
+
+    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    def time_preprocess(self, pair_type):
+        for _ in range(self.launch_count):
+            wp.capture_launch(self.graph)
+        wp.synchronize_device()
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -307,6 +416,7 @@ if __name__ == "__main__":
         "FastExampleContactHydroWorkingDefaults": FastExampleContactHydroWorkingDefaults,
         "FastExampleContactPyramidDefaults": FastExampleContactPyramidDefaults,
         "FastConvexCollision": FastConvexCollision,
+        "FastMeshContactPreprocessing": FastMeshContactPreprocessing,
     }
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)

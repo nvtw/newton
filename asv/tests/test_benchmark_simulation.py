@@ -78,8 +78,11 @@ class TestSimulationBenchmarks(unittest.TestCase):
         self.assertFalse(hasattr(bench_quadruped_xpbd, "newton"))
 
     def test_convex_benchmark_covers_types_and_scales(self):
-        """Cover every convex type, varied hulls, and two workload scales."""
-        self.assertEqual(tuple(bench_contacts.FastConvexCollision.params[0]), (("hulls", 192), ("mixed", 512)))
+        """Cover selector crossovers, duplicate-heavy hulls, and every convex type."""
+        self.assertEqual(
+            tuple(bench_contacts.FastConvexCollision.params[0]),
+            (("hulls", 128), ("hulls_duplicate", 192), ("mixed", 191)),
+        )
         self.assertEqual(
             {shape for pair in bench_contacts.MIXED_CONVEX_PAIR_TYPES for shape in pair},
             {"sphere", "box", "capsule", "ellipsoid", "cylinder", "cone", "hull"},
@@ -90,6 +93,15 @@ class TestSimulationBenchmarks(unittest.TestCase):
                 mesh = bench_contacts._make_irregular_rock(vertex_count, seed=100)
                 self.assertEqual(len(mesh.vertices), vertex_count)
                 self.assertEqual(len(mesh.indices), 6 * (vertex_count - 2))
+
+        duplicate_mesh = bench_contacts._make_irregular_rock(10, seed=100, triangle_local_vertices=True)
+        self.assertEqual(len(duplicate_mesh.vertices), len(duplicate_mesh.indices))
+        self.assertEqual(len(np.unique(duplicate_mesh.vertices, axis=0)), 10)
+
+    def test_mesh_preprocessing_benchmark_covers_changed_helpers(self):
+        """Cover both mesh work-queue preprocessors at the measured pair count."""
+        self.assertEqual(tuple(bench_contacts.FastMeshContactPreprocessing.params[0]), ("mesh_plane", "mesh_mesh"))
+        self.assertEqual(bench_contacts.MESH_PREPROCESSING_PAIR_COUNT, 65_536)
 
     def test_fast_kitchen_g1_validates_kitchen_body_count(self):
         """Validate the configured kitchen body count at runtime."""
