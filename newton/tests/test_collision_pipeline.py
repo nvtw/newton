@@ -2058,7 +2058,7 @@ class TestShapePairsMaxScaling(unittest.TestCase):
         self.assertEqual(estimate, 10)
 
     def test_lean_split_threshold_covers_crossover_workload(self):
-        """Split the lean convex path at the 56-world benchmark crossover."""
+        """Split the lean convex path at the reported 56-world crossover."""
         model = self._make_model(num_worlds=56, shapes_per_world=32)
         model.shape_type = wp.full(model.shape_count, int(GeoType.CONVEX_MESH), dtype=wp.int32)
 
