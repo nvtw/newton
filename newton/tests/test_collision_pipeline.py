@@ -2057,6 +2057,20 @@ class TestShapePairsMaxScaling(unittest.TestCase):
         # sphere-sphere collision uses the analytic path.
         self.assertEqual(estimate, 10)
 
+    def test_lean_split_threshold_covers_crossover_workload(self):
+        """Split the lean convex path at the 56-world benchmark crossover."""
+        model = self._make_model(num_worlds=56, shapes_per_world=32)
+        model.shape_type = wp.full(model.shape_count, int(GeoType.CONVEX_MESH), dtype=wp.int32)
+
+        estimate = _compute_generic_convex_pair_work_estimate(
+            model,
+            broad_phase_mode="sap",
+            shape_pairs_filtered=None,
+            candidate_pair_work_estimate=100_000,
+        )
+
+        self.assertEqual(estimate, _SPLIT_GJK_MPR_LEAN_PAIR_COUNT_THRESHOLD)
+
     def test_explicit_generic_convex_work_estimate_uses_routed_pairs(self):
         """Count exact generic convex routes for explicit broad phase pairs."""
         model = self._make_model(num_worlds=1, shapes_per_world=4)

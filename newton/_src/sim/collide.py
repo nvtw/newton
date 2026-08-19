@@ -747,7 +747,7 @@ def _resolve_shape_pairs_max(model: Model, override: int | None) -> int:
 
 
 BROAD_PHASE_MODES = ("nxn", "sap", "explicit")
-_SPLIT_GJK_MPR_LEAN_PAIR_COUNT_THRESHOLD = 32_768
+_SPLIT_GJK_MPR_LEAN_PAIR_COUNT_THRESHOLD = 27_776
 _SPLIT_GJK_MPR_FULL_PAIR_COUNT_THRESHOLD = 65_536
 
 

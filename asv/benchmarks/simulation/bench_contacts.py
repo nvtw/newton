@@ -13,16 +13,12 @@ from typing import ClassVar
 import numpy as np
 
 import newton.examples
-from newton._src.geometry.narrow_phase import compute_mesh_plane_block_offsets_scan
-from newton._src.geometry.sdf_contact import compute_mesh_mesh_block_offsets_scan
-from newton._src.utils.heightfield import HeightfieldData
 from newton.viewer import ViewerNull
 
 ISAACGYM_ENVS_REPO_URL = "https://github.com/isaac-sim/IsaacGymEnvs.git"
 ISAACGYM_NUT_BOLT_FOLDER = "assets/factory/mesh/factory_nut_bolt"
 IRREGULAR_ROCK_VERTEX_COUNTS = (10, 14, 18, 26)
-CONVEX_COLLISION_CASES = (("hulls", 128), ("hulls_duplicate", 192), ("mixed", 191))
-MESH_PREPROCESSING_PAIR_COUNT = 65_536
+CONVEX_COLLISION_CASES = (("hulls", 56), ("hulls_duplicate", 192), ("mixed", 191))
 MIXED_CONVEX_PAIR_TYPES = (
     ("sphere", "sphere"),
     ("capsule", "capsule"),
@@ -318,94 +314,6 @@ class FastConvexCollision:
         wp.synchronize_device()
 
 
-class FastMeshContactPreprocessing:
-    """Benchmark mesh-plane and mesh-mesh work-queue preprocessing."""
-
-    params = (("mesh_plane", "mesh_mesh"),)
-    param_names: ClassVar[list[str]] = ["pair_type"]
-    repeat = 5
-    number = 1
-
-    def setup(self, pair_type):
-        device = wp.get_device()
-        if not device.is_cuda or not wp.is_mempool_enabled(device):
-            raise SkipNotImplemented
-
-        builder = newton.ModelBuilder()
-        mesh = newton.Mesh.create_box(0.5, 0.5, 0.5)
-        builder.add_shape_mesh(body=-1, mesh=mesh)
-        builder.add_shape_mesh(body=-1, mesh=mesh)
-        builder.add_ground_plane()
-        model = builder.finalize()
-        self.model = model
-
-        pair_count = MESH_PREPROCESSING_PAIR_COUNT
-        active_pair = (0, 2) if pair_type == "mesh_plane" else (0, 1)
-        shape_pairs = wp.array(np.tile(active_pair, (pair_count, 1)), dtype=wp.vec2i, device=device)
-        shape_pairs_count = wp.array([pair_count], dtype=wp.int32, device=device)
-        block_offsets = wp.zeros(pair_count + 1, dtype=wp.int32, device=device)
-        block_counts = wp.zeros(pair_count + 1, dtype=wp.int32, device=device)
-        total_weight = wp.zeros(1, dtype=wp.int32, device=device)
-        total_num_threads = device.sm_count * 4 * 128
-        shape_heightfield_index = wp.zeros(model.shape_count, dtype=wp.int32, device=device)
-        heightfield_data = wp.zeros(1, dtype=HeightfieldData, device=device)
-        self._buffers = (
-            shape_pairs,
-            shape_pairs_count,
-            block_offsets,
-            block_counts,
-            total_weight,
-            shape_heightfield_index,
-            heightfield_data,
-        )
-
-        def preprocess():
-            total_weight.zero_()
-            if pair_type == "mesh_plane":
-                compute_mesh_plane_block_offsets_scan(
-                    shape_pairs_mesh_plane=shape_pairs,
-                    shape_pairs_mesh_plane_count=shape_pairs_count,
-                    shape_source=model.shape_source_ptr,
-                    target_blocks=device.sm_count * 4,
-                    block_offsets=block_offsets,
-                    block_counts=block_counts,
-                    total_vert_count=total_weight,
-                    total_num_threads=total_num_threads,
-                    device=device,
-                    record_tape=False,
-                )
-            elif pair_type == "mesh_mesh":
-                compute_mesh_mesh_block_offsets_scan(
-                    shape_pairs_mesh_mesh=shape_pairs,
-                    shape_pairs_mesh_mesh_count=shape_pairs_count,
-                    shape_edge_range=model.shape_edge_range,
-                    shape_heightfield_index=shape_heightfield_index,
-                    heightfield_data=heightfield_data,
-                    target_blocks=device.sm_count * 8,
-                    block_offsets=block_offsets,
-                    block_counts=block_counts,
-                    total_edge_count=total_weight,
-                    total_num_threads=total_num_threads,
-                    device=device,
-                    record_tape=False,
-                )
-            else:
-                raise ValueError(f"Unsupported mesh preprocessing pair type: {pair_type}")
-
-        preprocess()
-        wp.synchronize_device()
-        with wp.ScopedCapture(device=device) as capture:
-            preprocess()
-        self.graph = capture.graph
-        self.launch_count = 100
-
-    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_preprocess(self, pair_type):
-        for _ in range(self.launch_count):
-            wp.capture_launch(self.graph)
-        wp.synchronize_device()
-
-
 if __name__ == "__main__":
     import argparse
 
@@ -416,7 +324,6 @@ if __name__ == "__main__":
         "FastExampleContactHydroWorkingDefaults": FastExampleContactHydroWorkingDefaults,
         "FastExampleContactPyramidDefaults": FastExampleContactPyramidDefaults,
         "FastConvexCollision": FastConvexCollision,
-        "FastMeshContactPreprocessing": FastMeshContactPreprocessing,
     }
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)

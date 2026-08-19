@@ -1005,19 +1005,19 @@ def compute_block_counts_from_weights(
 
 
 def compute_mesh_mesh_block_offsets_scan(
-    shape_pairs_mesh_mesh: wp.array,
-    shape_pairs_mesh_mesh_count: wp.array,
-    shape_edge_range: wp.array,
-    shape_heightfield_index: wp.array,
-    heightfield_data: wp.array,
+    shape_pairs_mesh_mesh: wp.array[wp.vec2i],
+    shape_pairs_mesh_mesh_count: wp.array[int],
+    shape_edge_range: wp.array[wp.vec2i],
+    shape_heightfield_index: wp.array[wp.int32],
+    heightfield_data: wp.array[HeightfieldData],
     target_blocks: int,
-    block_offsets: wp.array,
-    block_counts: wp.array,
-    total_edge_count: wp.array,
+    block_offsets: wp.array[wp.int32],
+    block_counts: wp.array[wp.int32],
+    total_edge_count: wp.array[wp.int32],
     total_num_threads: int,
     device: str | None = None,
     record_tape: bool = True,
-):
+) -> None:
     """Compute mesh-mesh block offsets using parallel kernels and array_scan.
 
     Runs a three-stage parallel pipeline: per-pair edge counts and scalar
