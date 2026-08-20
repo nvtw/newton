@@ -18,7 +18,7 @@ import warp as wp
 from ..rl_training.ant import ConfigEnvAntPhoenX, EnvAntPhoenX, default_ant_flash_sac_config
 from ..rl_training.flash_sac import BufferReplayFlashSAC, TrainerFlashSAC
 from ..rl_training.flash_sac_autotune import ConfigFlashSACLRAutotune, ControllerFlashSACLRAutotune
-from ..rl_training.flash_sac_autotune_evaluation import EvaluatorPairedFlashSAC
+from ..rl_training.flash_sac_autotune_evaluation import EvaluatorPairedFlashSAC, _bootstrap_ready
 from ..rl_training.humanoid import ConfigEnvHumanoidPhoenX, EnvHumanoidPhoenX, default_humanoid_flash_sac_config
 
 
@@ -162,6 +162,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             seed=31 + int(args.seed) * 9973,
             population_backend="parallel",
         )
+        if controller.config.bootstrap_single_policy:
+            training.start_single_policy_bootstrap()
         sources = training.evaluation_trainers()
     evaluator = _make_evaluator(sources, env_config, args)
     setup_seconds = time.perf_counter() - setup_start
@@ -204,7 +206,19 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 and mean_velocity >= float(args.minimum_forward_velocity)
             )
             consecutive_passes = consecutive_passes + 1 if passed else 0
-            if controller is not None and not controller.converged:
+            if controller is not None and controller.bootstrapping:
+                if _bootstrap_ready(
+                    mean_velocity,
+                    float(scores.champion_termination_rate),
+                    bool(scores.champion_finite),
+                    float(controller.config.informative_score_threshold),
+                    float(controller.config.bootstrap_max_termination_rate),
+                ):
+                    training.reopen_search()
+                    action = "start_search"
+                else:
+                    action = "bootstrap"
+            elif controller is not None and not controller.converged:
                 decision = training.evaluate_paired(
                     scores.champion_scores,
                     scores.challenger_scores,

@@ -28,6 +28,18 @@ def _next_evaluation_delay(action: str, evaluation_interval: int, confirmation_i
     return int(confirmation_interval) if action == "continue" else int(evaluation_interval)
 
 
+def _bootstrap_ready(
+    score: float,
+    termination_rate: float,
+    finite: bool,
+    score_threshold: float,
+    maximum_termination_rate: float,
+) -> bool:
+    """Start search only after the champion supplies useful, survivable data."""
+
+    return finite and score >= score_threshold and termination_rate <= maximum_termination_rate
+
+
 @wp.kernel
 def _reset_evaluation_kernel(
     seed: int,
@@ -273,6 +285,10 @@ class CadenceFlashSACLRAutotune:
         if int(self.monitor_interval) < int(self.evaluation_interval):
             raise ValueError("monitor_interval must not be shorter than evaluation_interval")
 
+        config = getattr(self.controller, "config", None)
+        if bool(getattr(config, "bootstrap_single_policy", False)) and self.launch_count == 0:
+            self.training_graph.start_single_policy_bootstrap()
+
     def _schedule_after(self, result: ResultFlashSACLRAutotune) -> None:
         """Confirm favorable evidence sooner without shortening its initial resource rung."""
 
@@ -317,6 +333,21 @@ class CadenceFlashSACLRAutotune:
         score = float(np.mean(scores.champion_scores))
         termination_rate = float(scores.champion_termination_rate)
         valid = scores.champion_finite and np.isfinite(score) and np.isfinite(termination_rate)
+        if bool(getattr(self.controller, "bootstrapping", False)):
+            informative = _bootstrap_ready(
+                score,
+                termination_rate,
+                valid,
+                float(self.controller.config.informative_score_threshold),
+                float(self.controller.config.bootstrap_max_termination_rate),
+            )
+            if informative:
+                self.training_graph.reopen_search()
+                result = ResultFlashSACLRAutotune(0.0, "start_search", 0, False)
+                self._schedule_after(result)
+                return result
+            self._next_evaluation_launch = self.launch_count + int(self.evaluation_interval)
+            return ResultFlashSACLRAutotune(0.0, "bootstrap", 0, True)
         if self._monitor_score == -float("inf") and valid:
             self._monitor_score = score
             self._monitor_termination_rate = termination_rate

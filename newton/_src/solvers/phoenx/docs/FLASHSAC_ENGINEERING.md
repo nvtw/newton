@@ -487,6 +487,26 @@ transposes, and GEMMs dominate after the contact solve. Retained optimizations
 must benefit shared FlashSAC or PhoenX kernels rather than Ant-specific logic.
 
 ### Allocation-stable production graphs
+### Single-policy search bootstrap
+
+Automatic search begins on the pre-captured P1 graph and opens the P2 challenger
+only after held-out rollouts are finite, exceed the configured information
+threshold, and terminate no more often than the bootstrap limit. This avoids
+spending a second learner on early random policies while preserving the same
+replay, optimizer state, and captured graph addresses. The decision runs only at
+sparse evaluation windows; rollout and learner execution remain captured on the
+GPU.
+
+The 4,096-world Humanoid seed-0 proof stayed on P1 through launch 1,250, then
+opened paired search after its termination rate reached zero. It sustained the
+walking gate at 24.576M transitions with 0.8286 m/s champion velocity and zero
+terminations. Training took 399.04 s at 61.6k transitions/s, versus 414.90 s for
+always-active P2 and 375.77 s for fixed P1. Bootstrap therefore removed 3.8
+percent of active-search training wall while preserving the sample gate and
+quality. Setup remained 390.65 s and is a separate capture-specialization
+bottleneck. Nsight attributes 88.4 percent of Humanoid GPU kernel time to the
+world-serial reduced self-contact fallback, so the next material wall-time target
+is a deterministic packed two-link contact response rather than learner fusion.
 
 Every data-bearing FlashSAC learner temporary is setup-owned before CUDA graph
 capture. This includes actor sampling noise/actions/log probabilities, critic

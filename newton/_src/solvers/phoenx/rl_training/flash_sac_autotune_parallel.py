@@ -409,6 +409,13 @@ class GraphFlashSACLRAutotuneParallelOverlap:
         self.controller.reopen_search()
         self.sync_from_controller_state()
 
+    def start_single_policy_bootstrap(self) -> None:
+        """Switch to the pre-captured champion-only training path."""
+
+        self.sync_controller_state()
+        self.controller.start_single_policy_bootstrap()
+        self.sync_from_controller_state()
+
     def evaluate_paired(self, *args: Any, **kwargs: Any) -> ResultFlashSACLRAutotune:
         """Join learners, evaluate through the controller, and mirror the decision back."""
 

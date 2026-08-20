@@ -26,6 +26,7 @@ from newton._src.solvers.phoenx.rl_training.flash_sac_autotune import (
 from newton._src.solvers.phoenx.rl_training.flash_sac_autotune_evaluation import (
     CadenceFlashSACLRAutotune,
     EvaluatorPairedFlashSAC,
+    _bootstrap_ready,
 )
 from newton._src.solvers.phoenx.rl_training.flash_sac_autotune_parallel import _guard_challenger_actions_kernel
 from newton._src.solvers.phoenx.rl_training.sac import BatchSAC
@@ -102,6 +103,14 @@ class TestFlashSACLRAutotune(unittest.TestCase):
         ):
             np.testing.assert_array_equal(champion_state.numpy(), challenger_state.numpy())
         self.assertIs(public_rl.GraphFlashSACLRAutotune, GraphFlashSACLRAutotune)
+
+    def test_bootstrap_waits_for_survivable_learning_signal(self) -> None:
+        """Start paired search only after champion rollouts become informative."""
+
+        self.assertFalse(_bootstrap_ready(0.04, 0.0, True, 0.05, 0.5))
+        self.assertFalse(_bootstrap_ready(0.20, 0.75, True, 0.05, 0.5))
+        self.assertFalse(_bootstrap_ready(0.20, 0.0, False, 0.05, 0.5))
+        self.assertTrue(_bootstrap_ready(0.20, 0.0, True, 0.05, 0.5))
 
     def test_adaptive_confirmation_cadence(self) -> None:
         """Confirm promising evidence early and preserve full initial resource rungs."""

@@ -84,6 +84,8 @@ class ConfigFlashSACLRAutotune:
     target_update_rate_multiplier_bounds: tuple[float, float] = (0.5, 2.0)
     minimum_evidence_windows: int = 2
     informative_score_threshold: float = 0.05
+    bootstrap_single_policy: bool = True
+    bootstrap_max_termination_rate: float = 0.5
     improvement_margin: float = 0.01
     policy_frequency_choices: tuple[int, ...] = (1, 2, 4)
     relative_improvement_margin: float = 0.10
@@ -123,6 +125,8 @@ class ConfigFlashSACLRAutotune:
             raise ValueError("minimum_evidence_windows must be positive")
         if self.informative_score_threshold < 0.0:
             raise ValueError("informative_score_threshold must be non-negative")
+        if not 0.0 <= self.bootstrap_max_termination_rate <= 1.0:
+            raise ValueError("bootstrap_max_termination_rate must be in [0, 1]")
         if self.relative_improvement_margin < 0.0:
             raise ValueError("relative_improvement_margin must be non-negative")
         if self.minimum_effect_delta < 0.0:
@@ -175,6 +179,9 @@ class GraphFlashSACLRAutotune(Protocol):
 
     def reopen_search(self) -> None:
         """Restart paired search from the current converged learner."""
+
+    def start_single_policy_bootstrap(self) -> None:
+        """Use the full-speed champion until evaluations become informative."""
 
     def evaluate_paired(self, *args: Any, **kwargs: Any) -> ResultFlashSACLRAutotune:
         """Evaluate paired scores and apply the controller decision."""
@@ -291,6 +298,7 @@ class ControllerFlashSACLRAutotune:
         self.evaluation_count = 0
         self.converged = False
         self.reopen_count = 0
+        self.bootstrapping = False
         self._captured_population_graph: object | None = None
         self.best_valid = False
         self.best_score = -math.inf
@@ -433,8 +441,22 @@ class ControllerFlashSACLRAutotune:
         self._best_candidate_windows[:] = 0
         self.converged = False
         self.reopen_count += 1
+        self.bootstrapping = False
         self._propose_challenger()
         self._challenger_enabled.assign(np.asarray([1], dtype=np.int32))
+
+    def start_single_policy_bootstrap(self) -> None:
+        """Use the setup-owned P1 learner before spending work on search."""
+
+        if self.converged:
+            raise RuntimeError("FlashSAC is already using its single-policy path")
+        self.single_trainer.copy_training_state_from(self.trainers[0])
+        self.single_trainer.set_pbt_learning_rates(*self.member_rates[0])
+        self.single_trainer.set_pbt_target_update_rate(float(self.member_target_update_rates[0]))
+        self.single_trainer.set_pbt_policy_frequency(int(self.member_policy_frequencies[0]))
+        self.converged = True
+        self.bootstrapping = True
+        self._challenger_enabled.assign(np.asarray([0], dtype=np.int32))
 
     def route_split_actions(
         self,
@@ -656,6 +678,7 @@ class ControllerFlashSACLRAutotune:
         self.single_trainer.set_pbt_learning_rates(*self.best_rates)
         self.converged = True
         self.single_trainer.set_pbt_target_update_rate(self.best_target_update_rate)
+        self.bootstrapping = False
         self.single_trainer.set_pbt_policy_frequency(self.best_policy_frequency)
         self._challenger_enabled.assign(np.asarray([0], dtype=np.int32))
 
@@ -904,6 +927,7 @@ class ControllerFlashSACLRAutotune:
             "evaluation_count": np.asarray(self.evaluation_count, dtype=np.int64),
             "converged": np.asarray(self.converged),
             "reopen_count": np.asarray(self.reopen_count, dtype=np.int64),
+            "bootstrapping": np.asarray(self.bootstrapping),
             "challenger_enabled": self._challenger_enabled.numpy(),
             "rollout_world_count": np.asarray(self.rollout_world_count, dtype=np.int64),
         }
@@ -938,6 +962,12 @@ class ControllerFlashSACLRAutotune:
                 informative_score_threshold=float(data["config_informative_score_threshold"])
                 if "config_informative_score_threshold" in data
                 else 0.0,
+                bootstrap_single_policy=bool(data["config_bootstrap_single_policy"])
+                if "config_bootstrap_single_policy" in data
+                else False,
+                bootstrap_max_termination_rate=float(data["config_bootstrap_max_termination_rate"])
+                if "config_bootstrap_max_termination_rate" in data
+                else 0.5,
                 relative_improvement_margin=float(data["config_relative_improvement_margin"])
                 if "config_relative_improvement_margin" in data
                 else 0.0,
@@ -994,6 +1024,7 @@ class ControllerFlashSACLRAutotune:
             controller.converged = bool(data["converged"])
             controller._challenger_enabled.assign(data["challenger_enabled"])
             controller.reopen_count = int(data["reopen_count"]) if "reopen_count" in data else 0
+            controller.bootstrapping = bool(data["bootstrapping"]) if "bootstrapping" in data else False
             controller._set_member_rates()
             controller._proposal_rejections = int(data["proposal_rejections"])
             controller._candidate_evidence_windows = (

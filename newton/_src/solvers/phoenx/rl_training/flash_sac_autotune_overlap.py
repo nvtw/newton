@@ -272,6 +272,12 @@ class GraphFlashSACLRAutotuneOverlap:
         self.synchronize()
         self.controller.reopen_search()
 
+    def start_single_policy_bootstrap(self) -> None:
+        """Switch to the pre-captured champion-only training path."""
+
+        self.synchronize()
+        self.controller.start_single_policy_bootstrap()
+
     def launch(self) -> None:
         """Overlap one rollout with P2 or converged-P1 learner work."""
 
