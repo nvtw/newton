@@ -100,6 +100,9 @@ def _clone_evaluation_trainer(source: TrainerFlashSAC, world_count: int) -> Trai
 class EvaluatorPairedFlashSAC:
     """Evaluate two policies on isolated, identically seeded environments.
 
+    Capture size stays independent of the evaluation horizon by replaying a
+    fixed-address steady-step graph.
+
     Args:
         trainers: Initial champion and challenger trainers.
         envs: Isolated champion and challenger evaluation environments.
@@ -162,9 +165,9 @@ class EvaluatorPairedFlashSAC:
             if hasattr(env, "use_command_seed_counter"):
                 env.use_command_seed_counter(counter)
         sim_times = tuple(getattr(env, "sim_time", None) for env in self.envs)
-        with wp.ScopedCapture(device=self.device) as capture:
+        initial_obs: list[wp.array2d[wp.float32]] = []
+        with wp.ScopedCapture(device=self.device) as reset_capture:
             for member in range(2):
-                trainer = self.trainers[member]
                 env = self.envs[member]
                 counter = self._seed_counters[member]
                 wp.launch(
@@ -180,46 +183,69 @@ class EvaluatorPairedFlashSAC:
                     ],
                     device=self.device,
                 )
-                obs = env.reset()
-                for step in range(self.horizon_steps):
-                    actions, _log_probs = trainer.act_reuse_seed_counter(
-                        obs,
-                        seed_counter=counter,
-                        seed_offset=step,
-                        deterministic=True,
-                    )
-                    next_obs, rewards, dones = env.step(actions)
-                    metrics = rewards if self.metric_source is None else self.metric_source(env, rewards)
-                    if metrics.shape != rewards.shape:
-                        raise ValueError("evaluation metric source must return one value per world")
-                    wp.launch(
-                        _accumulate_evaluation_kernel,
-                        dim=worlds,
-                        inputs=[
-                            actions,
-                            metrics,
-                            getattr(env, "step_terminateds", dones),
-                        ],
-                        outputs=[
-                            self._scores[member],
-                            self._alive[member],
-                            self._safe[member],
-                            self._terminated[member],
-                        ],
-                        device=self.device,
-                    )
-                    obs = next_obs
-        self.graph = capture.graph
+                initial_obs.append(env.reset())
+        self.reset_graph = reset_capture.graph
+
+        next_obs: list[wp.array2d[wp.float32]] = []
+        with wp.ScopedCapture(device=self.device) as first_step_capture:
+            for member in range(2):
+                next_obs.append(self._capture_step(member, initial_obs[member], seed_offset=0))
+        self.first_step_graph = first_step_capture.graph
+
+        with wp.ScopedCapture(device=self.device) as steady_step_capture:
+            for member in range(2):
+                following_obs = self._capture_step(member, next_obs[member], seed_offset=1)
+                if int(following_obs.ptr) != int(next_obs[member].ptr):
+                    raise ValueError("captured evaluation environments must reuse their step observation buffer")
+        self.steady_step_graph = steady_step_capture.graph
         for env, sim_time in zip(self.envs, sim_times, strict=True):
             if sim_time is not None:
                 env.sim_time = sim_time
+
+    def _capture_step(
+        self,
+        member: int,
+        obs: wp.array2d[wp.float32],
+        *,
+        seed_offset: int,
+    ) -> wp.array2d[wp.float32]:
+        """Capture one fixed-address policy and environment step."""
+
+        trainer = self.trainers[member]
+        env = self.envs[member]
+        actions, _log_probs = trainer.act_reuse_seed_counter(
+            obs,
+            seed_counter=self._seed_counters[member],
+            seed_offset=seed_offset,
+            deterministic=True,
+        )
+        next_obs, rewards, dones = env.step(actions)
+        metrics = rewards if self.metric_source is None else self.metric_source(env, rewards)
+        if metrics.shape != rewards.shape:
+            raise ValueError("evaluation metric source must return one value per world")
+        wp.launch(
+            _accumulate_evaluation_kernel,
+            dim=self.world_count,
+            inputs=[actions, metrics, getattr(env, "step_terminateds", dones)],
+            outputs=[
+                self._scores[member],
+                self._alive[member],
+                self._safe[member],
+                self._terminated[member],
+            ],
+            device=self.device,
+        )
+        return next_obs
 
     def evaluate(self, sources: tuple[TrainerFlashSAC, TrainerFlashSAC]) -> EvaluatorPairedFlashSAC.Result:
         """Copy policies into isolated trainers and replay one paired evaluation."""
 
         for destination, source in zip(self.trainers, sources, strict=True):
             destination.copy_training_state_from(source)
-        wp.capture_launch(self.graph)
+        wp.capture_launch(self.reset_graph)
+        wp.capture_launch(self.first_step_graph)
+        for _ in range(1, self.horizon_steps):
+            wp.capture_launch(self.steady_step_graph)
         champion_scores = self._scores[0].numpy() / np.float32(self.horizon_steps)
         challenger_scores = self._scores[1].numpy() / np.float32(self.horizon_steps)
         challenger_finite = bool(np.all(self._safe[1].numpy() != 0))

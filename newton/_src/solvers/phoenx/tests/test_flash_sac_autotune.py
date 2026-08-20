@@ -48,6 +48,7 @@ class _AutotuneSmokeEnv:
         self._rewards = wp.ones(self.world_count, dtype=wp.float32, device=self.device)
         self._dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.last_actions = wp.empty((self.world_count, self.action_dim), dtype=wp.float32, device=self.device)
+        self.capture_step_calls = 0
 
         self.sim_time = 0.0
         self.config = SimpleNamespace(frame_dt=0.01)
@@ -57,6 +58,7 @@ class _AutotuneSmokeEnv:
         return self.obs
 
     def step(self, actions: wp.array2d[wp.float32]):
+        self.capture_step_calls += 1
         wp.copy(self.last_actions, actions)
         self.obs = self.step_next_obs
         return self.obs, self._rewards, self._dones
@@ -1118,6 +1120,7 @@ class TestFlashSACLRAutotune(unittest.TestCase):
         next_obs = wp.ones((4, 3), dtype=wp.float32, device=device)
         envs = (_AutotuneSmokeEnv(obs, next_obs), _AutotuneSmokeEnv(obs, next_obs))
         evaluator = EvaluatorPairedFlashSAC(controller.trainers, envs, horizon_steps=3, seed=991)
+        self.assertEqual(tuple(env.capture_step_calls for env in envs), (2, 2))
         before = tuple(
             value.numpy().copy()
             for trainer in controller.trainers

@@ -419,6 +419,14 @@ unsafe. Early falls use relative paired safety, allowing equally immature
 policies to remain comparable while rejecting a challenger whose fall rate is
 worse than the champion beyond a small margin.
 
+The evaluator captures reset, first-step, and steady-step graphs instead of
+unrolling the full horizon into one graph. Replaying the steady graph keeps
+capture size independent of horizon while retaining fixed-address device
+execution. On the 32-world, 200-step Go2 gate this reduced cached evaluator
+construction from 282.18 seconds to 1.40 seconds without changing the learning
+trajectory: the fixed 2,048-world control sustained 0.597 m/s with zero
+terminations at 5.12M transitions.
+
 Promotion and best-state updates require repeated windows. Candidate evidence
 tracks the actual superior member before promotion or reset, including its exact
 optimizer, AMP, target, and rate state. A setup-owned frozen best snapshot
