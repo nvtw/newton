@@ -23,6 +23,13 @@ from ..rl_training.flash_sac_autotune_evaluation import EvaluatorPairedFlashSAC,
 from ..rl_training.go2 import ConfigEnvGo2PhoenX, EnvGo2PhoenX, default_go2_flash_sac_config
 from ..rl_training.humanoid import ConfigEnvHumanoidPhoenX, EnvHumanoidPhoenX, default_humanoid_flash_sac_config
 
+_TASK_DEFAULT_WORLD_COUNTS = {
+    "ant": 2048,
+    "dr_legs": 4096,
+    "go2": 1024,
+    "humanoid": 4096,
+}
+
 
 def _load_cudart() -> ctypes.CDLL:
     """Load the CUDA profiler control API."""
@@ -80,6 +87,7 @@ def _make_env_config(
     if args.task == "go2":
         values = {
             "world_count": int(world_count),
+            "articulation_mode": str(args.articulation_mode),
             "auto_reset": True,
             "reward_mode": "dense_command",
             "command": (0.8, 0.0, 0.0, 0.0),
@@ -139,7 +147,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     """Run one measured locomotion seed and return its quality history."""
 
     device = wp.get_device(args.device)
-    env_config = _make_env_config(args, world_count=int(args.world_count))
+    world_count = _TASK_DEFAULT_WORLD_COUNTS[args.task] if args.world_count is None else int(args.world_count)
+    env_config = _make_env_config(args, world_count=world_count)
     if args.task == "humanoid":
         config = default_humanoid_flash_sac_config()
         env_type = EnvHumanoidPhoenX
@@ -194,6 +203,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 minimum_evidence_windows=2,
                 promotion_windows=2,
                 exploit_after_candidate=False,
+                bootstrap_single_policy=not bool(args.disable_search_bootstrap),
                 seed=int(args.seed),
             ),
         )
@@ -343,7 +353,7 @@ def main() -> int:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--task", choices=("ant", "dr_legs", "go2", "humanoid"), default="ant")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--world-count", type=int, default=2048)
+    parser.add_argument("--world-count", type=int, default=None)
     parser.add_argument(
         "--articulation-mode",
         choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
@@ -352,6 +362,11 @@ def main() -> int:
     parser.add_argument("--sim-substeps", type=int, default=None)
     parser.add_argument("--max-launches", type=int, default=3000)
     parser.add_argument("--updates-per-step", type=int, default=2)
+    parser.add_argument(
+        "--disable-search-bootstrap",
+        action="store_true",
+        help="Start both policies immediately for active-search profiling.",
+    )
     parser.add_argument("--evaluation-interval", type=int, default=250)
     parser.add_argument("--evaluation-worlds", type=int, default=32)
     parser.add_argument("--evaluation-horizon", type=int, default=200)

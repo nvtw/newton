@@ -488,6 +488,7 @@ class ConfigEnvAnymalPhoenX:
         world_count: Number of vectorized Anymal worlds.
         frame_dt: Policy step duration [s].
         sim_substeps: PhoenX substeps per policy step.
+        articulation_mode: PhoenX articulation representation.
         collide_once_per_frame: Run collision detection once per policy step and
             reuse the contact set across substeps, instead of re-detecting every
             substep. Default (on); ~20% faster on the 4-substep config. Set
@@ -538,6 +539,7 @@ class ConfigEnvAnymalPhoenX:
     world_count: int = 1024
     frame_dt: float = 1.0 / 50.0
     sim_substeps: int = 4
+    articulation_mode: str = "maximal"
     collide_once_per_frame: bool = True
     solver_iterations: int = 8
     velocity_iterations: int = 1
@@ -698,6 +700,7 @@ class EnvAnymalPhoenX:
             substeps=1,
             solver_iterations=int(self.config.solver_iterations),
             velocity_iterations=int(self.config.velocity_iterations),
+            articulation_mode=str(self.config.articulation_mode),
         )
 
     def set_command(self, command: tuple[float, ...]) -> None:

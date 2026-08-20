@@ -555,11 +555,22 @@ single-owner invariant.
 
 Go2 headless training imports collision shapes but omits unused visual shapes.
 At 4,096 worlds this reduced environment construction to 3.34 seconds. A fixed
-1,024-world seed-0 proof learned from zero to two consecutive held-out walking
-gates at 3.072M transitions: 0.672 m/s forward velocity, zero terminations, and
-58.15 seconds of training wall. The 3e-4 configuration is a conservative
-baseline; world-count optimization and automatic LR search remain to be
-validated before treating it as the final Go2 recipe.
+1,024-world maximal-coordinate seed-0 proof learned from zero to two consecutive
+held-out walking gates at 3.072M transitions: 0.672 m/s forward velocity, zero
+terminations, and 58.15 seconds of training wall. Nsight Systems attributed
+51.8 percent of the fixed-policy trace to maximal-coordinate contact iteration,
+while the learner was mostly hidden by physics.
+
+Propagating the articulation representation through the shared ANYmal
+configuration enabled the reduced-coordinate solver without specializing the
+environment. The same fixed seed reached 0.648 m/s with zero terminations in
+27.31 seconds, a 2.13x wall-to-quality improvement. Automatic search passed
+three out of three 1,024-world seeds at 3.072M transitions with a 31.71-second
+median training wall. A measured world sweep rejected larger populations for
+wall-to-quality despite their higher raw throughput: 2,048 worlds required
+33.27 seconds and 4,096 required 43.21 seconds. Go2 therefore defaults to
+reduced coordinates and 1,024 worlds; generic ANYmal retains its configurable
+maximal-coordinate default.
 
 Every data-bearing FlashSAC learner temporary is setup-owned before CUDA graph
 capture. This includes actor sampling noise/actions/log probabilities, critic

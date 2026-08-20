@@ -39,12 +39,14 @@ class ConfigEnvGo2PhoenX(ConfigEnvAnymalPhoenX):
 
     The defaults follow the flat Unitree Go2 velocity task: a 50 Hz policy,
     four 5 ms physics steps, 0.5 rad position actions, and 25/0.5 implicit PD
-    gains.
+    gains. Reduced coordinates and 1,024 worlds minimize measured wall time to
+    walking quality on the reference GPU.
     """
 
-    world_count: int = 4096
+    world_count: int = 1024
     frame_dt: float = 1.0 / 50.0
     sim_substeps: int = 4
+    articulation_mode: str = "reduced"
     action_scale: float = 0.5
     target_base_height: float = 0.4
     min_base_height: float = 0.18

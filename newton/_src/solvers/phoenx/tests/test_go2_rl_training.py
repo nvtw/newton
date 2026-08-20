@@ -26,6 +26,7 @@ class TestGo2PhoenXRL(unittest.TestCase):
         )
         env = rl.EnvGo2PhoenX(config, device=device)
         self.assertEqual(env.solver.world.substeps, 1)
+        self.assertIsNotNone(env.solver._reduced_articulation)
         action_np = np.linspace(-0.4, 0.4, env.action_dim, dtype=np.float32)
         actions = wp.array(np.tile(action_np, (env.world_count, 1)), dtype=wp.float32, device=device)
 
