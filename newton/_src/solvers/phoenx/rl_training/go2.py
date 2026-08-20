@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import warp as wp
 
@@ -11,6 +12,7 @@ import newton
 import newton.utils
 
 from .anymal import ConfigEnvAnymalPhoenX, EnvAnymalPhoenX
+from .flash_sac import ConfigFlashSAC
 
 # Policy order is right-hind, right-front, left-hind, left-front, grouped by
 # hip/thigh/calf. This matches the shared quadruped symmetry and reward layout.
@@ -61,6 +63,28 @@ class ConfigEnvGo2PhoenX(ConfigEnvAnymalPhoenX):
     ground_friction: float = 1.0
 
 
+def default_go2_flash_sac_config(**overrides: Any) -> ConfigFlashSAC:
+    """Return a conservative FlashSAC baseline for Go2 experiments."""
+
+    values = {
+        "buffer_max_length": 10_000_000,
+        "buffer_min_length": 100_000,
+        "sample_batch_size": 2048,
+        "gamma": 0.99,
+        "n_step": 3,
+        "actor_lr": 3.0e-4,
+        "critic_lr": 3.0e-4,
+        "alpha_lr": 3.0e-4,
+        "policy_frequency": 2,
+        "tau": 0.01,
+        "learning_rate_decay_steps": 100_000,
+        "normalize_rewards": True,
+        "use_amp": True,
+    }
+    values.update(overrides)
+    return ConfigFlashSAC(**values)
+
+
 class EnvGo2PhoenX(EnvAnymalPhoenX):
     """Warp-only Unitree Go2 flat-terrain locomotion environment."""
 
@@ -83,7 +107,9 @@ class EnvGo2PhoenX(EnvAnymalPhoenX):
         asset_path = newton.utils.download_asset("unitree_go2")
         robot.add_usd(
             str(asset_path / "usd" / "go2.usda"),
-            force_show_colliders=True,
+            load_visual_shapes=False,
+            load_static_visual_shapes=False,
+            force_show_colliders=False,
             force_position_velocity_actuation=True,
             collapse_fixed_joints=True,
             enable_self_collisions=False,

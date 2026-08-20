@@ -295,6 +295,7 @@ def anymal_observe_reward_kernel(
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
     successes: wp.array[wp.float32],
+    forward_velocities: wp.array[wp.float32],
 ):
     world, col = wp.tid()
     q_base = world * coord_stride
@@ -423,6 +424,7 @@ def anymal_observe_reward_kernel(
             success_metric = vel_reward * yaw_reward * height_reward * upright * speed_quality
         rewards[world] = reward
         successes[world] = success_metric
+        forward_velocities[world] = lin_b[0]
 
         done = wp.float32(0.0)
         if fall > wp.float32(0.5):
@@ -631,9 +633,11 @@ class EnvAnymalPhoenX:
         self.rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.forward_velocities = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.step_forward_velocities = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.sim_time = 0.0
 
         self.reset()
@@ -689,7 +693,9 @@ class EnvAnymalPhoenX:
     def _make_solver(self):
         return newton.solvers.SolverPhoenX(
             self.model,
-            substeps=int(self.config.sim_substeps),
+            # ``step()`` owns the substep loop so contacts and continuation
+            # state are updated at the intended cadence.
+            substeps=1,
             solver_iterations=int(self.config.solver_iterations),
             velocity_iterations=int(self.config.velocity_iterations),
         )
@@ -827,7 +833,7 @@ class EnvAnymalPhoenX:
                 self.config.actuator_ke,
                 self.config.actuator_kd,
             ],
-            outputs=[self.obs, self.rewards, self.dones, self.successes],
+            outputs=[self.obs, self.rewards, self.dones, self.successes, self.forward_velocities],
             device=self.device,
         )
         return self.obs
@@ -843,6 +849,8 @@ class EnvAnymalPhoenX:
         self.episode_steps.zero_()
         self.dones.zero_()
         self.successes.zero_()
+        self.forward_velocities.zero_()
+        self.step_forward_velocities.zero_()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         self.sim_time = 0.0
         return self.observe()
@@ -959,6 +967,7 @@ class EnvAnymalPhoenX:
         wp.copy(self.step_rewards, self.rewards)
         wp.copy(self.step_dones, self.dones)
         wp.copy(self.step_successes, self.successes)
+        wp.copy(self.step_forward_velocities, self.forward_velocities)
         wp.copy(self.previous_actions, self.current_actions)
         if self.config.auto_reset:
             self.reset_done()

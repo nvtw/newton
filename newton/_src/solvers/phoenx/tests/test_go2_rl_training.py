@@ -14,6 +14,7 @@ from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_ca
 
 class TestGo2PhoenXRL(unittest.TestCase):
     def test_step_and_action_mapping_inside_cuda_graph(self) -> None:
+        """Keep one solver step per explicit environment substep."""
         device = require_cuda_graph_capture("PhoenX Go2 RL tests")
         config = rl.ConfigEnvGo2PhoenX(
             world_count=2,
@@ -24,6 +25,7 @@ class TestGo2PhoenXRL(unittest.TestCase):
             auto_reset=False,
         )
         env = rl.EnvGo2PhoenX(config, device=device)
+        self.assertEqual(env.solver.world.substeps, 1)
         action_np = np.linspace(-0.4, 0.4, env.action_dim, dtype=np.float32)
         actions = wp.array(np.tile(action_np, (env.world_count, 1)), dtype=wp.float32, device=device)
 
@@ -48,6 +50,7 @@ class TestGo2PhoenXRL(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(obs)))
         self.assertTrue(np.all(np.isfinite(rewards)))
         self.assertTrue(np.all(np.isfinite(q)))
+        self.assertTrue(np.all(np.isfinite(env.step_forward_velocities.numpy())))
         np.testing.assert_allclose(dones, 0.0, rtol=0.0, atol=0.0)
         np.testing.assert_allclose(
             targets[:, 6:18], np.tile(expected_targets, (env.world_count, 1)), rtol=0.0, atol=1.0e-6

@@ -536,6 +536,23 @@ orientation terms make standing a strong local optimum relative to velocity
 tracking. Treat DR Legs walking as unresolved; do not present the conservative
 3e-4 FlashSAC configuration as a validated recipe.
 
+### Go2 integration
+
+The ANYmal environment owns its explicit substep loop so that it can refresh or
+reuse contacts at the configured cadence. Its PhoenX solver must therefore use
+one internal substep. Configuring both layers with four substeps accidentally
+performed sixteen integrations per policy step and made graph specialization
+and steady training unnecessarily expensive. A regression now enforces this
+single-owner invariant.
+
+Go2 headless training imports collision shapes but omits unused visual shapes.
+At 4,096 worlds this reduced environment construction to 3.34 seconds. A fixed
+1,024-world seed-0 proof learned from zero to two consecutive held-out walking
+gates at 3.072M transitions: 0.672 m/s forward velocity, zero terminations, and
+58.15 seconds of training wall. The 3e-4 configuration is a conservative
+baseline; world-count optimization and automatic LR search remain to be
+validated before treating it as the final Go2 recipe.
+
 Every data-bearing FlashSAC learner temporary is setup-owned before CUDA graph
 capture. This includes actor sampling noise/actions/log probabilities, critic
 inputs and concatenated rows, distributional targets, sliced logits, output

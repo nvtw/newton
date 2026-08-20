@@ -20,6 +20,7 @@ from ..rl_training.dr_legs import ConfigEnvDrLegsPhoenX, EnvDrLegsPhoenX, defaul
 from ..rl_training.flash_sac import BufferReplayFlashSAC, TrainerFlashSAC
 from ..rl_training.flash_sac_autotune import ConfigFlashSACLRAutotune, ControllerFlashSACLRAutotune
 from ..rl_training.flash_sac_autotune_evaluation import EvaluatorPairedFlashSAC, _bootstrap_ready
+from ..rl_training.go2 import ConfigEnvGo2PhoenX, EnvGo2PhoenX, default_go2_flash_sac_config
 from ..rl_training.humanoid import ConfigEnvHumanoidPhoenX, EnvHumanoidPhoenX, default_humanoid_flash_sac_config
 
 
@@ -36,7 +37,7 @@ def _load_cudart() -> ctypes.CDLL:
 
 def _warm_replay(
     trainer: TrainerFlashSAC,
-    env: EnvAntPhoenX | EnvDrLegsPhoenX | EnvHumanoidPhoenX,
+    env: EnvAntPhoenX | EnvDrLegsPhoenX | EnvGo2PhoenX | EnvHumanoidPhoenX,
     *,
     seed: int,
 ) -> BufferReplayFlashSAC:
@@ -67,7 +68,7 @@ def _warm_replay(
 
 def _make_env_config(
     args: argparse.Namespace, *, world_count: int
-) -> ConfigEnvAntPhoenX | ConfigEnvDrLegsPhoenX | ConfigEnvHumanoidPhoenX:
+) -> ConfigEnvAntPhoenX | ConfigEnvDrLegsPhoenX | ConfigEnvGo2PhoenX | ConfigEnvHumanoidPhoenX:
     """Build one explicit task protocol shared by training and evaluation."""
 
     sim_substeps = getattr(args, "sim_substeps", None)
@@ -76,6 +77,16 @@ def _make_env_config(
         if sim_substeps is not None:
             values["sim_substeps"] = int(sim_substeps)
         return ConfigEnvDrLegsPhoenX(**values)
+    if args.task == "go2":
+        values = {
+            "world_count": int(world_count),
+            "auto_reset": True,
+            "reward_mode": "dense_command",
+            "command": (0.8, 0.0, 0.0, 0.0),
+        }
+        if sim_substeps is not None:
+            values["sim_substeps"] = int(sim_substeps)
+        return ConfigEnvGo2PhoenX(**values)
     common = {"world_count": int(world_count), "articulation_mode": str(args.articulation_mode), "auto_reset": True}
     if sim_substeps is not None:
         common["sim_substeps"] = int(sim_substeps)
@@ -89,7 +100,7 @@ def _make_env_config(
 
 def _make_evaluator(
     sources: tuple[TrainerFlashSAC, TrainerFlashSAC],
-    env_config: ConfigEnvAntPhoenX | ConfigEnvDrLegsPhoenX | ConfigEnvHumanoidPhoenX,
+    env_config: ConfigEnvAntPhoenX | ConfigEnvDrLegsPhoenX | ConfigEnvGo2PhoenX | ConfigEnvHumanoidPhoenX,
     args: argparse.Namespace,
 ) -> EvaluatorPairedFlashSAC:
     """Capture deterministic no-reset locomotion evaluation."""
@@ -103,12 +114,13 @@ def _make_evaluator(
     env_type = {
         "ant": EnvAntPhoenX,
         "dr_legs": EnvDrLegsPhoenX,
+        "go2": EnvGo2PhoenX,
         "humanoid": EnvHumanoidPhoenX,
     }[args.task]
     envs = (env_type(eval_config, device=args.device), env_type(eval_config, device=args.device))
 
     def forward_velocity(
-        env: EnvAntPhoenX | EnvDrLegsPhoenX | EnvHumanoidPhoenX, _rewards: wp.array[wp.float32]
+        env: EnvAntPhoenX | EnvDrLegsPhoenX | EnvGo2PhoenX | EnvHumanoidPhoenX, _rewards: wp.array[wp.float32]
     ) -> wp.array[wp.float32]:
         if isinstance(env, EnvHumanoidPhoenX):
             return env.step_successes
@@ -134,11 +146,19 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     elif args.task == "dr_legs":
         config = default_dr_legs_flash_sac_config()
         env_type = EnvDrLegsPhoenX
+    elif args.task == "go2":
+        config = default_go2_flash_sac_config()
+        env_type = EnvGo2PhoenX
     else:
         config = default_ant_flash_sac_config()
         env_type = EnvAntPhoenX
+    setup_phases: dict[str, float] = {}
     setup_start = time.perf_counter()
+    phase_start = setup_start
     env = env_type(env_config, device=device)
+    setup_phases["environment"] = time.perf_counter() - phase_start
+    print(f"setup environment: {setup_phases['environment']:.3f} s", flush=True)
+    phase_start = time.perf_counter()
     champion = TrainerFlashSAC(
         obs_dim=env.obs_dim,
         action_dim=int(getattr(env, "policy_action_dim", env.action_dim)),
@@ -146,7 +166,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         device=device,
         seed=int(args.seed),
     )
+    setup_phases["trainer"] = time.perf_counter() - phase_start
+    print(f"setup trainer: {setup_phases['trainer']:.3f} s", flush=True)
+    phase_start = time.perf_counter()
     replay = _warm_replay(champion, env, seed=31 + int(args.seed) * 9973)
+    setup_phases["replay_warmup"] = time.perf_counter() - phase_start
+    print(f"setup replay warmup: {setup_phases['replay_warmup']:.3f} s", flush=True)
+    phase_start = time.perf_counter()
     controller = None
     if args.mode == "fixed":
         training = champion.capture_training_graph(
@@ -182,7 +208,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if controller.config.bootstrap_single_policy:
             training.start_single_policy_bootstrap()
         sources = training.evaluation_trainers()
+    setup_phases["training_capture"] = time.perf_counter() - phase_start
+    print(f"setup training capture: {setup_phases['training_capture']:.3f} s", flush=True)
+    phase_start = time.perf_counter()
     evaluator = _make_evaluator(sources, env_config, args)
+    setup_phases["evaluator"] = time.perf_counter() - phase_start
+    print(f"setup evaluator: {setup_phases['evaluator']:.3f} s", flush=True)
     setup_seconds = time.perf_counter() - setup_start
 
     history: list[dict[str, object]] = []
@@ -291,6 +322,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "sim_substeps": env_config.sim_substeps,
         "updates_per_step": int(args.updates_per_step),
         "setup_seconds": setup_seconds,
+        "setup_phases": setup_phases,
         "training_seconds": training_seconds,
         "evaluation_seconds": evaluation_seconds,
         "total_seconds": total_seconds,
@@ -309,7 +341,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("fixed", "autotune"), default="autotune")
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--task", choices=("ant", "dr_legs", "humanoid"), default="ant")
+    parser.add_argument("--task", choices=("ant", "dr_legs", "go2", "humanoid"), default="ant")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--world-count", type=int, default=2048)
     parser.add_argument(
