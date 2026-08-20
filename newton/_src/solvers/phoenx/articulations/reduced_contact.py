@@ -239,6 +239,26 @@ def reduced_contact_deferred_owner(
 
 
 @wp.func
+def reduced_contact_packed_owner(
+    columns: ContactColumnContainer,
+    column: wp.int32,
+    bodies: BodyContainer,
+    allow_internal: wp.bool,
+) -> wp.int32:
+    """Return the articulation that can own one packed contact column."""
+    owner = reduced_contact_deferred_owner(columns, column, bodies)
+    if owner >= wp.int32(0) or not allow_internal:
+        return owner
+    body0 = contact_get_body1(columns, column)
+    body1 = contact_get_body2(columns, column)
+    articulation0 = bodies.reduced.body_articulation[body0]
+    articulation1 = bodies.reduced.body_articulation[body1]
+    if articulation0 >= wp.int32(0) and articulation0 == articulation1:
+        return articulation0
+    return wp.int32(-1)
+
+
+@wp.func
 def _reduced_point_local(bodies: BodyContainer, body: wp.int32, point: wp.vec3f) -> wp.vec3f:
     link = body - wp.int32(1)
     local_com = wp.transform_get_translation(bodies.reduced.body_q_com[link])

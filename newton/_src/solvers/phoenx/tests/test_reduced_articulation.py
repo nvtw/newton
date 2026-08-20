@@ -3813,7 +3813,9 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
         np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
 
-    def test_world_serial_fallback_matches_colored_solver_under_graph_capture(self):
+    def test_packed_self_contact_matches_world_serial_fallback_under_graph_capture(self):
+        """Match packed two-link self-contact to the serial fallback exactly."""
+
         device = wp.get_preferred_device()
         if not device.is_cuda:
             self.skipTest("reduced articulation tests require CUDA graph capture")
@@ -3848,6 +3850,8 @@ class TestReducedArticulation(unittest.TestCase):
         colored_block = solver_colored._reduced_articulation.contact_block_system
         serial_block = solver_serial._reduced_articulation.contact_block_system
         colored_block._solve_fallback_by_world = False
+        colored_block.packed_internal_contacts = True
+        serial_block.packed_internal_contacts = False
         serial_block._solve_fallback_by_world = True
         contacts_colored = model.contacts()
         contacts_serial = model.contacts()
@@ -3859,7 +3863,11 @@ class TestReducedArticulation(unittest.TestCase):
             solver_serial.step(state_serial, output_serial, None, contacts_serial, 1.0 / 2000.0)
         wp.capture_launch(capture.graph)
 
-        self.assertGreater(int(colored_block.fallback_count.numpy()[0]), 0)
+        packed_sections = colored_block.schedule_section_end.numpy()
+        serial_sections = serial_block.schedule_section_end.numpy()
+        self.assertGreater(int(packed_sections[model.articulation_count - 1]), 0)
+        self.assertEqual(int(serial_sections[model.articulation_count - 1]), 0)
+        self.assertEqual(int(colored_block.fallback_count.numpy()[0]), 0)
         self.assertEqual(int(serial_block.fallback_count.numpy()[0]), 0)
         np.testing.assert_array_equal(output_serial.joint_q.numpy(), output_colored.joint_q.numpy())
         np.testing.assert_array_equal(output_serial.joint_qd.numpy(), output_colored.joint_qd.numpy())

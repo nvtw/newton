@@ -38,6 +38,7 @@ Detailed experiment histories belong in benchmark output, not here.
 | Contacts | FP16x2 immutable packed contact rows | Removed in `b374c0c4e`; the roughly 1% training gain did not justify the extra path. Production rows are FP32. |
 | Contacts | Register-resident generalized contact delta | Removes unnecessary global staging. |
 | Reduced contacts | SM-scaled patch-solve launch bound | Select only above 24 one-warp blocks per SM. Prepare solve uses 92 -> 80 registers with no spills. Stabilized G1 A/B improves 8K worlds 3.1% and 32K worlds 1.15%; 1K retains the original binary. |
+| Reduced contacts | Deterministic packed same-articulation point rows | Replaces the world-serial self-contact fallback with a fixed-order two-wrench ABA response. A 4,096-world Humanoid fixed-FlashSAC run improved from about 65.4k to 271.3k transitions/s and reached the sustained walking gate in 83.0 s of training; the previous fixed-policy run needed 375.8 s. |
 | G1 RL | Mask observation work after reset | Safe because reset worlds discard the omitted values. |
 | Collision | Statically omit provably empty GJK/MPR stages | Topology-selected; no runtime branch. |
 | Collision | Compact primitive-contact sort keys | Lossless key/tiebreak contract. |

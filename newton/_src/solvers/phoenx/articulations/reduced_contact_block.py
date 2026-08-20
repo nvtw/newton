@@ -15,8 +15,8 @@ from newton._src.sim import Model
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _deferred_point_velocity,
     _prepare_contact_bias_geometry,
-    reduced_contact_deferred_owner,
     reduced_contact_iterate,
+    reduced_contact_packed_owner,
     reduced_contact_prepare,
 )
 from newton._src.solvers.phoenx.body import BodyContainer, ReducedArticulationData
@@ -231,6 +231,7 @@ def _classify_reduced_contact_columns_kernel(
     num_columns: wp.array[wp.int32],
     articulation_count: wp.int32,
     key_stride: wp.int64,
+    allow_internal: wp.bool,
     keys: wp.array[wp.int64],
     values: wp.array[wp.int32],
     section_end: wp.array[wp.int32],
@@ -248,7 +249,7 @@ def _classify_reduced_contact_columns_kernel(
         keys[column] = wp.int64(_INT64_MAX)
         return
 
-    owner = reduced_contact_deferred_owner(columns, column, bodies)
+    owner = reduced_contact_packed_owner(columns, column, bodies, allow_internal)
     group = owner
     if owner < wp.int32(0):
         body0 = contact_get_body1(columns, column)
@@ -264,6 +265,7 @@ def _classify_grouped_reduced_contact_columns_kernel(
     bodies: BodyContainer,
     num_columns: wp.array[wp.int32],
     classic_column_count: wp.array[wp.int32],
+    allow_internal: wp.bool,
     values: wp.array[wp.int32],
     section_end: wp.array[wp.int32],
 ):
@@ -274,7 +276,7 @@ def _classify_grouped_reduced_contact_columns_kernel(
         columns, column
     ) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
         return
-    owner = reduced_contact_deferred_owner(columns, column, bodies)
+    owner = reduced_contact_packed_owner(columns, column, bodies, allow_internal)
     if owner < wp.int32(0):
         return
     values[column - classic_column_count[0]] = column
@@ -491,6 +493,64 @@ def _advance_reduced_contact_page_cursor_kernel(
     page_index[0] += wp.int32(1)
 
 
+@wp.func
+def _store_packed_contact_wrenches(
+    bodies: BodyContainer,
+    packed_articulation: wp.int32,
+    row: wp.int32,
+    body0: wp.int32,
+    body1: wp.int32,
+    point: wp.vec3,
+    normal: wp.vec3,
+    tangent0: wp.vec3,
+    tangent1: wp.vec3,
+    row_body: wp.array2d[wp.int32],
+    row_wrench: wp.array2d[wp.spatial_vector],
+    row_body_pair: wp.array2d[wp.int32],
+    row_wrench_pair: wp.array2d[wp.spatial_vector],
+):
+    """Store one- or two-link row wrenches about the articulation origin."""
+    articulation0 = bodies.reduced.body_articulation[body0]
+    articulation1 = bodies.reduced.body_articulation[body1]
+    primary = body0
+    secondary = wp.int32(-1)
+    if articulation0 < wp.int32(0):
+        primary = body1
+    elif articulation0 == articulation1:
+        secondary = body1
+    for axis in range(3):
+        direction = normal
+        if axis == 1:
+            direction = tangent0
+        elif axis == 2:
+            direction = tangent1
+        primary_impulse = direction
+        if primary == body0:
+            primary_impulse = -direction
+        primary_local = (
+            wp.transform_get_translation(bodies.reduced.body_q_com[primary - wp.int32(1)])
+            + point
+            - bodies.position[primary]
+        )
+        row_index = row + wp.int32(axis)
+        row_body[packed_articulation, row_index] = primary - wp.int32(1)
+        row_wrench[packed_articulation, row_index] = wp.spatial_vector(
+            primary_impulse, wp.cross(primary_local, primary_impulse)
+        )
+        row_body_pair[packed_articulation, row_index] = wp.int32(-1)
+        row_wrench_pair[packed_articulation, row_index] = wp.spatial_vector()
+        if secondary >= wp.int32(0):
+            secondary_local = (
+                wp.transform_get_translation(bodies.reduced.body_q_com[secondary - wp.int32(1)])
+                + point
+                - bodies.position[secondary]
+            )
+            row_body_pair[packed_articulation, row_index] = secondary - wp.int32(1)
+            row_wrench_pair[packed_articulation, row_index] = wp.spatial_vector(
+                direction, wp.cross(secondary_local, direction)
+            )
+
+
 @wp.kernel(enable_backward=False, module="reduced_contact_gather")
 def _gather_reduced_contact_blocks_kernel(
     schedule_section_end: wp.array[wp.int32],
@@ -514,6 +574,8 @@ def _gather_reduced_contact_blocks_kernel(
     tangent0: wp.array2d[wp.vec3],
     row_body: wp.array2d[wp.int32],
     row_wrench: wp.array2d[wp.spatial_vector],
+    row_body_pair: wp.array2d[wp.int32],
+    row_wrench_pair: wp.array2d[wp.spatial_vector],
     row_velocity: wp.array2d[wp.float32],
 ):
     articulation, lane = wp.tid()
@@ -553,12 +615,6 @@ def _gather_reduced_contact_blocks_kernel(
             contact = contact_get_contact_first(columns, column) + offset
             body0 = contact_get_body1(columns, column)
             body1 = contact_get_body2(columns, column)
-            articulation_body = body0
-            sign = wp.float32(-1.0)
-            if bodies.reduced.body_articulation[body0] < wp.int32(0):
-                articulation_body = body1
-                sign = wp.float32(1.0)
-
             n = cc_get_normal(cc, contact)
             t0 = cc_get_tangent1(cc, contact)
             t1 = wp.cross(n, t0)
@@ -607,23 +663,21 @@ def _gather_reduced_contact_blocks_kernel(
             row_velocity[packed_articulation, row] = wp.dot(relative, n)
             row_velocity[packed_articulation, row + wp.int32(1)] = wp.dot(relative, t0)
             row_velocity[packed_articulation, row + wp.int32(2)] = wp.dot(relative, t1)
-
-            local_com_position = wp.transform_get_translation(
-                bodies.reduced.body_q_com[articulation_body - wp.int32(1)]
+            _store_packed_contact_wrenches(
+                bodies,
+                packed_articulation,
+                row,
+                body0,
+                body1,
+                contact_point,
+                n,
+                t0,
+                t1,
+                row_body,
+                row_wrench,
+                row_body_pair,
+                row_wrench_pair,
             )
-            point_local = local_com_position + offset0 + wp.float32(0.5) * separation
-            if sign > wp.float32(0.0):
-                point_local = local_com_position + offset1 - wp.float32(0.5) * separation
-            for axis in range(3):
-                direction = n
-                if axis == 1:
-                    direction = t0
-                elif axis == 2:
-                    direction = t1
-                impulse = sign * direction
-                row = wp.int32(3) * point + wp.int32(axis)
-                row_body[packed_articulation, row] = articulation_body - wp.int32(1)
-                row_wrench[packed_articulation, row] = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
         point_offset = column_end
 
 
@@ -660,6 +714,8 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
     tangent0: wp.array2d[wp.vec3],
     row_body: wp.array2d[wp.int32],
     row_wrench: wp.array2d[wp.spatial_vector],
+    row_body_pair: wp.array2d[wp.int32],
+    row_wrench_pair: wp.array2d[wp.spatial_vector],
     row_velocity: wp.array2d[wp.float32],
 ):
     articulation, lane = wp.tid()
@@ -762,18 +818,24 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
                 impulse = sign * n
                 row_body[packed_articulation, point] = articulation_body - wp.int32(1)
                 row_wrench[packed_articulation, point] = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
+                row_body_pair[packed_articulation, point] = wp.int32(-1)
+                row_wrench_pair[packed_articulation, point] = wp.spatial_vector()
                 tangent_row = wp.int32(_POINTS_PER_PAGE) + wp.int32(2) * point
                 impulse = sign * t0
                 row_body[packed_articulation, tangent_row] = articulation_body - wp.int32(1)
                 row_wrench[packed_articulation, tangent_row] = wp.spatial_vector(
                     impulse, wp.cross(point_local, impulse)
                 )
+                row_body_pair[packed_articulation, tangent_row] = wp.int32(-1)
+                row_wrench_pair[packed_articulation, tangent_row] = wp.spatial_vector()
                 row_velocity[packed_articulation, tangent_row] = wp.dot(relative, t0)
                 impulse = sign * t1
                 row_body[packed_articulation, tangent_row + wp.int32(1)] = articulation_body - wp.int32(1)
                 row_wrench[packed_articulation, tangent_row + wp.int32(1)] = wp.spatial_vector(
                     impulse, wp.cross(point_local, impulse)
                 )
+                row_body_pair[packed_articulation, tangent_row + wp.int32(1)] = wp.int32(-1)
+                row_wrench_pair[packed_articulation, tangent_row + wp.int32(1)] = wp.spatial_vector()
                 row_velocity[packed_articulation, tangent_row + wp.int32(1)] = wp.dot(relative, t1)
                 global_point += wp.int32(_PACKED_GATHER_TILE_WIDTH)
             point_offset = column_end
@@ -832,6 +894,8 @@ def _gather_reduced_contact_blocks_packed_kernel(
     tangent0: wp.array2d[wp.vec3],
     row_body: wp.array2d[wp.int32],
     row_wrench: wp.array2d[wp.spatial_vector],
+    row_body_pair: wp.array2d[wp.int32],
+    row_wrench_pair: wp.array2d[wp.spatial_vector],
     row_velocity: wp.array2d[wp.float32],
 ):
     articulation, lane = wp.tid()
@@ -872,12 +936,6 @@ def _gather_reduced_contact_blocks_packed_kernel(
             contact = contact_get_contact_first(columns, column) + offset
             body0 = contact_get_body1(columns, column)
             body1 = contact_get_body2(columns, column)
-            articulation_body = body0
-            sign = wp.float32(-1.0)
-            if bodies.reduced.body_articulation[body0] < wp.int32(0):
-                articulation_body = body1
-                sign = wp.float32(1.0)
-
             n = cc_get_normal(cc, contact)
             t0 = cc_get_tangent1(cc, contact)
             t1 = wp.cross(n, t0)
@@ -927,22 +985,21 @@ def _gather_reduced_contact_blocks_packed_kernel(
             row_velocity[packed_articulation, row + wp.int32(1)] = wp.dot(relative, t0)
             row_velocity[packed_articulation, row + wp.int32(2)] = wp.dot(relative, t1)
 
-            local_com_position = wp.transform_get_translation(
-                bodies.reduced.body_q_com[articulation_body - wp.int32(1)]
+            _store_packed_contact_wrenches(
+                bodies,
+                packed_articulation,
+                row,
+                body0,
+                body1,
+                contact_point,
+                n,
+                t0,
+                t1,
+                row_body,
+                row_wrench,
+                row_body_pair,
+                row_wrench_pair,
             )
-            point_local = local_com_position + offset0 + wp.float32(0.5) * separation
-            if sign > wp.float32(0.0):
-                point_local = local_com_position + offset1 - wp.float32(0.5) * separation
-            for axis in range(3):
-                direction = n
-                if axis == 1:
-                    direction = t0
-                elif axis == 2:
-                    direction = t1
-                impulse = sign * direction
-                row = wp.int32(3) * point + wp.int32(axis)
-                row_body[packed_articulation, row] = articulation_body - wp.int32(1)
-                row_wrench[packed_articulation, row] = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
             global_point += wp.int32(_PACKED_GATHER_TILE_WIDTH)
         point_offset = column_end
 
@@ -1320,8 +1377,120 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
 
         return inverse_mass
 
+    def _build_packed_generalized_pair_row(
+        articulation: wp.int32,
+        row: wp.int32,
+        row_count: wp.int32,
+        packed_row: wp.int32,
+        data: ReducedArticulationData,
+        start: wp.int32,
+        end: wp.int32,
+        dof_start_articulation: wp.int32,
+        body0: wp.int32,
+        wrench0: wp.spatial_vector,
+        body1: wp.int32,
+        wrench1: wp.spatial_vector,
+        packed_jacobian: wp.array2d[_rows_dtype],
+        packed_response: wp.array2d[_rows_dtype],
+        joint_work: wp.array3d[wp.float32],
+        body_response: wp.array3d[wp.spatial_vector],
+    ) -> wp.float32:
+        """Build one deterministic generalized row from two internal wrenches."""
+
+        for joint in range(start, end):
+            body_response[articulation, joint - start, row] = wp.spatial_vector()
+
+        for side in range(2):
+            body = body0
+            wrench = wrench0
+            if side == 1:
+                body = body1
+                wrench = wrench1
+            target_joint = data.body_joint[body]
+            target_local = target_joint - start
+            body_response[articulation, target_local, row] -= wrench
+            path_start = data.body_path_start[body]
+            path_end = data.body_path_start[body + wp.int32(1)]
+            for path_index in range(path_start, path_end):
+                joint = data.body_path_joint[path_index]
+                dof_start = data.joint_qd_start[joint]
+                dof_end = data.joint_qd_start[joint + wp.int32(1)]
+                for dof in range(dof_start, dof_end):
+                    local_dof = dof - dof_start_articulation
+                    packed_jacobian[packed_row, local_dof] += _rows_dtype(wp.dot(data.joint_s[dof], wrench))
+
+        for reverse in range(end - start):
+            joint = end - wp.int32(1) - reverse
+            local_joint = joint - start
+            parent = data.joint_parent[joint]
+            dof_start = data.joint_qd_start[joint]
+            dof_end = data.joint_qd_start[joint + wp.int32(1)]
+            dof_count = dof_end - dof_start
+            propagated = body_response[articulation, local_joint, row]
+            reduced_force = _vec6(0.0)
+            reduced = _vec6(0.0)
+            for dof_row in range(6):
+                if wp.int32(dof_row) < dof_count:
+                    dof = dof_start + wp.int32(dof_row)
+                    reduced_force[dof_row] = -wp.dot(data.joint_s[dof], propagated)
+                    joint_work[articulation, dof - dof_start_articulation, row] = reduced_force[dof_row]
+            for dof_row in range(6):
+                if wp.int32(dof_row) < dof_count:
+                    for dof_column in range(6):
+                        if wp.int32(dof_column) < dof_count:
+                            reduced[dof_row] += (
+                                data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * reduced_force[dof_column]
+                            )
+                    propagated += data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
+            if parent >= wp.int32(0):
+                parent_local = data.body_joint[parent] - start
+                body_response[articulation, parent_local, row] += propagated
+
+        for joint in range(start, end):
+            local_joint = joint - start
+            parent = data.joint_parent[joint]
+            parent_delta = wp.spatial_vector()
+            if parent >= wp.int32(0):
+                parent_delta = body_response[articulation, data.body_joint[parent] - start, row]
+            dof_start = data.joint_qd_start[joint]
+            dof_end = data.joint_qd_start[joint + wp.int32(1)]
+            dof_count = dof_end - dof_start
+            rhs = _vec6(0.0)
+            response = _vec6(0.0)
+            for dof_row in range(6):
+                if wp.int32(dof_row) < dof_count:
+                    dof = dof_start + wp.int32(dof_row)
+                    rhs[dof_row] = joint_work[articulation, dof - dof_start_articulation, row] - wp.dot(
+                        data.joint_u[dof], parent_delta
+                    )
+            child_delta = parent_delta
+            for dof_row in range(6):
+                if wp.int32(dof_row) < dof_count:
+                    for dof_column in range(6):
+                        if wp.int32(dof_column) < dof_count:
+                            response[dof_row] += (
+                                data.joint_d_inv[dof_start + wp.int32(dof_row), dof_column] * rhs[dof_column]
+                            )
+                    dof = dof_start + wp.int32(dof_row)
+                    response_value = response[dof_row]
+                    if row_count > wp.int32(_RESPONSE_TILE):
+                        joint_work[articulation, dof - dof_start_articulation, row] = response_value
+                    else:
+                        packed_response[packed_row, dof - dof_start_articulation] = _rows_dtype(response_value)
+                    child_delta += data.joint_s[dof] * response_value
+            body_response[articulation, local_joint, row] = child_delta
+
+        inverse_mass = wp.dot(wrench0, body_response[articulation, data.body_joint[body0] - start, row])
+        inverse_mass += wp.dot(wrench1, body_response[articulation, data.body_joint[body1] - start, row])
+        return inverse_mass
+
     _build_packed_generalized_row = wp.func(
         _bind_rows_dtype_annotations(_build_packed_generalized_row, _rows_dtype, "packed_jacobian", "packed_response")
+    )
+    _build_packed_generalized_pair_row = wp.func(
+        _bind_rows_dtype_annotations(
+            _build_packed_generalized_pair_row, _rows_dtype, "packed_jacobian", "packed_response"
+        )
     )
 
     def _build_packed_generalized_contact_rows_kernel(
@@ -1331,12 +1500,15 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
         row_count_array: wp.array[wp.int32],
         row_body: wp.array2d[wp.int32],
         row_wrench: wp.array2d[wp.spatial_vector],
+        row_body_pair: wp.array2d[wp.int32],
+        row_wrench_pair: wp.array2d[wp.spatial_vector],
         point_contact: wp.array2d[wp.int32],
         cc: ContactContainer,
         max_page_count: wp.array[wp.int32],
         page_index: wp.array[wp.int32],
         prepare: wp.bool,
         previous_row_body: wp.array[wp.int32],
+        previous_row_body_pair: wp.array[wp.int32],
         packed_jacobian: wp.array2d[_rows_dtype],
         packed_response: wp.array2d[_rows_dtype],
         joint_work: wp.array3d[wp.float32],
@@ -1364,8 +1536,13 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
             return
         packed_row = packed_articulation * wp.int32(_MAX_ROWS) + row
         current_body = row_body[packed_articulation, row]
+        current_body_pair = row_body_pair[packed_articulation, row]
         previous_body = previous_row_body[packed_row]
-        if previous_body >= wp.int32(0) and previous_body != current_body:
+        previous_body_pair = previous_row_body_pair[packed_row]
+        if current_body_pair >= wp.int32(0) or previous_body_pair >= wp.int32(0):
+            for local_dof in range(dof_count_articulation):
+                packed_jacobian[packed_row, local_dof] = _rows_dtype(0.0)
+        elif previous_body >= wp.int32(0) and previous_body != current_body:
             previous_path_start = data.body_path_start[previous_body]
             previous_path_end = data.body_path_start[previous_body + wp.int32(1)]
             for path_index in range(previous_path_start, previous_path_end):
@@ -1375,25 +1552,47 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                 for dof in range(previous_dof_start, previous_dof_end):
                     packed_jacobian[packed_row, dof - dof_start_articulation] = _rows_dtype(0.0)
         previous_row_body[packed_row] = current_body
+        previous_row_body_pair[packed_row] = current_body_pair
 
-        inverse_mass = _build_packed_generalized_row(
-            articulation,
-            row,
-            row_count,
-            packed_articulation,
-            packed_row,
-            data,
-            start,
-            end,
-            dof_start_articulation,
-            dof_count_articulation,
-            row_body,
-            row_wrench,
-            packed_jacobian,
-            packed_response,
-            joint_work,
-            body_response,
-        )
+        inverse_mass = wp.float32(0.0)
+        if current_body_pair >= wp.int32(0):
+            inverse_mass = _build_packed_generalized_pair_row(
+                articulation,
+                row,
+                row_count,
+                packed_row,
+                data,
+                start,
+                end,
+                dof_start_articulation,
+                current_body,
+                row_wrench[packed_articulation, row],
+                current_body_pair,
+                row_wrench_pair[packed_articulation, row],
+                packed_jacobian,
+                packed_response,
+                joint_work,
+                body_response,
+            )
+        else:
+            inverse_mass = _build_packed_generalized_row(
+                articulation,
+                row,
+                row_count,
+                packed_articulation,
+                packed_row,
+                data,
+                start,
+                end,
+                dof_start_articulation,
+                dof_count_articulation,
+                row_body,
+                row_wrench,
+                packed_jacobian,
+                packed_response,
+                joint_work,
+                body_response,
+            )
         if wp.static(not patch_rows) and inverse_mass > wp.float32(1.0e-12):
             effective_mass = wp.float32(1.0) / inverse_mass
             point = row // wp.int32(3)
@@ -2410,6 +2609,7 @@ class ReducedContactBlockSystem:
         if patch_rows_override is not None:
             patch_rows_requested = patch_rows_override
         self.patch_rows = allow_patch_rows and self.device.is_cuda and patch_rows_requested
+        self.packed_internal_contacts = not self.patch_rows
         if self.patch_rows:
             occupancy_bound = self.articulation_count >= _PATCH_SOLVE_MIN_BLOCKS_PER_SM * sm_count
             self.solve_kernel = {
@@ -2462,6 +2662,7 @@ class ReducedContactBlockSystem:
         self.reorder_pair_source: wp.array[wp.int32] | None = None
         self.fallback_count: wp.array[wp.int32] | None = None
         self.fallback_column: wp.array[wp.int32] | None = None
+        self.packed_previous_row_body_pair: wp.array[wp.int32] | None = None
         self.fallback_element: wp.array[ElementInteractionData] | None = None
         self.fallback_partitioner: IncrementalContactPartitioner | None = None
         self.packed_jacobian: wp.array2d[wp.float32] | None = None
@@ -2486,9 +2687,11 @@ class ReducedContactBlockSystem:
         self.normal = wp.zeros_like(self.point0)
         self.tangent0 = wp.zeros_like(self.point0)
         self.row_body = wp.zeros((packed_articulation_count, _MAX_ROWS), dtype=wp.int32, device=self.device)
+        self.row_body_pair = wp.full_like(self.row_body, value=-1)
         self.patch_lambda = wp.zeros((packed_articulation_count, _POINTS_PER_PAGE), dtype=wp.vec2, device=self.device)
         self.normal_load = wp.zeros((packed_articulation_count, _POINTS_PER_PAGE), dtype=wp.float32, device=self.device)
         self.row_wrench = wp.zeros((packed_articulation_count, _MAX_ROWS), dtype=wp.spatial_vector, device=self.device)
+        self.row_wrench_pair = wp.zeros_like(self.row_wrench)
         self.row_velocity = wp.zeros((packed_articulation_count, _MAX_ROWS), dtype=wp.float32, device=self.device)
         self.deferred_active = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.generalized_delta = wp.zeros(
@@ -2526,6 +2729,7 @@ class ReducedContactBlockSystem:
         )
         self.packed_response = wp.zeros_like(self.packed_jacobian)
         self.packed_previous_row_body = wp.full(packed_row_capacity, value=-1, dtype=wp.int32, device=self.device)
+        self.packed_previous_row_body_pair = wp.full_like(self.packed_previous_row_body, value=-1)
         worker_blocks = max(1, int(getattr(self.device, "sm_count", 1)))
         self.fallback_worker_count = min(capacity, worker_blocks * _FALLBACK_BLOCK_DIM)
         self._solve_fallback_by_world = world_count >= worker_blocks
@@ -2634,6 +2838,7 @@ class ReducedContactBlockSystem:
                     bodies,
                     num_columns,
                     self.classic_column_count,
+                    wp.bool(self.packed_internal_contacts),
                 ],
                 outputs=[self.schedule_columns, self.schedule_section_end],
                 device=self.device,
@@ -2648,6 +2853,7 @@ class ReducedContactBlockSystem:
                     num_columns,
                     wp.int32(self.articulation_count),
                     wp.int64(self.schedule_capacity + 1),
+                    wp.bool(self.packed_internal_contacts),
                 ],
                 outputs=[self.schedule_keys, self.schedule_columns, self.schedule_section_end],
                 device=self.device,
@@ -2834,6 +3040,7 @@ class ReducedContactBlockSystem:
             assert self.packed_jacobian is not None
             assert self.packed_response is not None
             assert self.packed_previous_row_body is not None
+            assert self.packed_previous_row_body_pair is not None
             fused_bias = prepare and self.biased_page_launcher is not None
             fused_relax = not prepare and self.relax_page_launcher is not None
             # Cached point rows are consumed immediately, so refresh them in the solve block.
@@ -2900,12 +3107,15 @@ class ReducedContactBlockSystem:
                             self.row_count,
                             self.row_body,
                             self.row_wrench,
+                            self.row_body_pair,
+                            self.row_wrench_pair,
                             self.point_contact,
                             cc,
                             self.max_page_count,
                             self.page_index,
                             wp.bool(prepare),
                             self.packed_previous_row_body,
+                            self.packed_previous_row_body_pair,
                         ],
                         outputs=[
                             self.packed_jacobian,
@@ -3063,6 +3273,8 @@ class ReducedContactBlockSystem:
                             self.tangent0,
                             self.row_body,
                             self.row_wrench,
+                            self.row_body_pair,
+                            self.row_wrench_pair,
                             self.row_velocity,
                         ],
                         device=self.device,
