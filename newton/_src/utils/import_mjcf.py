@@ -3369,6 +3369,7 @@ def parse_mjcf(
             actuator_values["mujoco:actuator_gainprm"] = gainprm
             actuator_values["mujoco:actuator_biasprm"] = biasprm
             actuator_values["mujoco:actuator_trnid"] = wp.vec2i(target_idx, target_idx_alt)
+            actuator_values["mujoco:actuator_target_label"] = target_name_for_log
             actuator_values["mujoco:actuator_trntype"] = trntype
             actuator_values["mujoco:actuator_world"] = builder.current_world
 

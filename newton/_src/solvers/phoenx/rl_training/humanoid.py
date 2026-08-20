@@ -11,33 +11,10 @@ import warp as wp
 import newton
 import newton.examples
 
+
 ACTION_DIM_HUMANOID = 21
 OBS_DIM_HUMANOID = 75
 
-# Values follow model joint_qd order, not MJCF actuator declaration order.
-_HUMANOID_JOINT_GEARS = (
-    67.5,
-    67.5,
-    67.5,
-    45.0,
-    45.0,
-    135.0,
-    90.0,
-    22.5,
-    22.5,
-    45.0,
-    45.0,
-    135.0,
-    90.0,
-    22.5,
-    22.5,
-    67.5,
-    67.5,
-    45.0,
-    67.5,
-    67.5,
-    45.0,
-)
 _HUMANOID_JOINT_KP = (
     20.0,
     20.0,
@@ -84,6 +61,74 @@ _HUMANOID_JOINT_KD = (
     5.0,
     1.0,
 )
+_HUMANOID_JOINT_NAMES = frozenset(
+    {
+        "abdomen_x",
+        "abdomen_y",
+        "abdomen_z",
+        "left_ankle_x",
+        "left_ankle_y",
+        "left_elbow",
+        "left_hip_x",
+        "left_hip_y",
+        "left_hip_z",
+        "left_knee",
+        "left_shoulder1",
+        "left_shoulder2",
+        "right_ankle_x",
+        "right_ankle_y",
+        "right_elbow",
+        "right_hip_x",
+        "right_hip_y",
+        "right_hip_z",
+        "right_knee",
+        "right_shoulder1",
+        "right_shoulder2",
+    }
+)
+
+
+def _resolve_humanoid_actuators(robot: newton.ModelBuilder) -> tuple[np.ndarray, np.ndarray]:
+    """Resolve the source Humanoid motors independently of XML order."""
+
+    keys = (
+        "mujoco:actuator_trnid",
+        "mujoco:actuator_target_label",
+        "mujoco:actuator_trntype",
+        "mujoco:actuator_gear",
+    )
+    missing = [key for key in keys if key not in robot.custom_attributes]
+    if missing:
+        raise RuntimeError(f"Humanoid MJCF is missing actuator metadata: {', '.join(missing)}")
+    rows = [robot.custom_attributes[key].values for key in keys]
+    if any(not isinstance(values, list) or len(values) != ACTION_DIM_HUMANOID for values in rows):
+        counts = [len(values) if isinstance(values, list) else 0 for values in rows]
+        raise RuntimeError(f"Humanoid requires {ACTION_DIM_HUMANOID} complete joint actuators; got {counts}")
+
+    resolved: list[tuple[int, float]] = []
+    labels: set[str] = set()
+    dofs: set[int] = set()
+    for row, (trnid, raw_label, trntype, gear) in enumerate(zip(*rows, strict=True)):
+        dof = int(trnid[0])
+        label = str(raw_label)
+        if int(trntype) != 0 or label not in _HUMANOID_JOINT_NAMES:
+            raise RuntimeError(f"Humanoid actuator {row} has unsupported target {label!r}")
+        if label in labels or dof in dofs:
+            raise RuntimeError(f"Humanoid actuator {row} duplicates joint {label!r} or DOF {dof}")
+        scalar_gear = float(gear[0])
+        if not np.isfinite(scalar_gear) or scalar_gear <= 0.0 or any(float(gear[i]) != 0.0 for i in range(1, 6)):
+            raise RuntimeError(f"Humanoid actuator {row} ({label!r}) requires one positive scalar gear")
+        labels.add(label)
+        dofs.add(dof)
+        resolved.append((dof, scalar_gear))
+
+    if labels != _HUMANOID_JOINT_NAMES or dofs != set(range(6, 6 + ACTION_DIM_HUMANOID)):
+        raise RuntimeError("Humanoid actuators must cover every non-root joint exactly once")
+    resolved.sort(key=lambda item: item[0])
+    return (
+        np.asarray([item[0] for item in resolved], dtype=np.int32),
+        np.asarray([item[1] for item in resolved], dtype=np.float32),
+    )
 
 
 @wp.func
@@ -104,6 +149,7 @@ def _quat_rotate_inverse_humanoid(q: wp.quat, v: wp.vec3) -> wp.vec3:
 @wp.kernel(enable_backward=False)
 def humanoid_apply_actions_kernel(
     actions: wp.array2d[wp.float32],
+    action_dofs: wp.array[wp.int32],
     joint_gears: wp.array[wp.float32],
     action_scale: wp.float32,
     dof_stride: wp.int32,
@@ -116,7 +162,7 @@ def humanoid_apply_actions_kernel(
     if col < ACTION_DIM_HUMANOID:
         action = _clip_humanoid(actions[world, col], wp.float32(-1.0), wp.float32(1.0))
         current_actions[world, col] = action
-        joint_f[world * dof_stride + wp.int32(6) + col] = action_scale * joint_gears[col] * action
+        joint_f[world * dof_stride + action_dofs[col]] = action_scale * joint_gears[col] * action
 
 
 @wp.kernel(enable_backward=False)
@@ -325,6 +371,8 @@ class ConfigEnvHumanoidPhoenX:
     articulation_mode: str = "reduced"
 
 
+
+
 class EnvHumanoidPhoenX:
     """Vectorized classic Humanoid locomotion environment backed by PhoenX.
 
@@ -366,14 +414,15 @@ class EnvHumanoidPhoenX:
         self.control = self.model.control()
         self.collision_pipeline = self.solver._collision_pipeline
         self.contacts = self.collision_pipeline.contacts()
-        self.joint_gears = wp.array(_HUMANOID_JOINT_GEARS, dtype=wp.float32, device=self.device)
+        self.action_dofs = wp.array(self._action_dofs_host, dtype=wp.int32, device=self.device)
+        self.joint_gears = wp.array(self._joint_gears_host, dtype=wp.float32, device=self.device)
         self.joint_lower = wp.array(
-            np.asarray(self.model.joint_limit_lower.numpy()[6:27], dtype=np.float32),
+            np.asarray(self.model.joint_limit_lower.numpy()[self._action_dofs_host], dtype=np.float32),
             dtype=wp.float32,
             device=self.device,
         )
         self.joint_upper = wp.array(
-            np.asarray(self.model.joint_limit_upper.numpy()[6:27], dtype=np.float32),
+            np.asarray(self.model.joint_limit_upper.numpy()[self._action_dofs_host], dtype=np.float32),
             dtype=wp.float32,
             device=self.device,
         )
@@ -409,13 +458,14 @@ class EnvHumanoidPhoenX:
             enable_self_collisions=True,
             parse_mujoco_options=False,
         )
+        self._action_dofs_host, self._joint_gears_host = _resolve_humanoid_actuators(robot)
         if len(robot.joint_q) != 28 or len(robot.joint_qd) != 27:
             raise RuntimeError(
                 f"Expected Humanoid coordinate/dof counts (28, 27), got ({len(robot.joint_q)}, {len(robot.joint_qd)})"
             )
         robot.joint_q[:7] = [0.0, 0.0, 1.34, 0.0, 0.0, 0.0, 1.0]
         for action in range(ACTION_DIM_HUMANOID):
-            dof = 6 + action
+            dof = int(self._action_dofs_host[action])
             robot.joint_target_ke[dof] = _HUMANOID_JOINT_KP[action]
             robot.joint_target_kd[dof] = _HUMANOID_JOINT_KD[action]
             robot.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
@@ -493,7 +543,7 @@ class EnvHumanoidPhoenX:
         wp.launch(
             humanoid_apply_actions_kernel,
             dim=(self.world_count, max(self.dof_stride, self.action_dim)),
-            inputs=[actions, self.joint_gears, float(self.config.action_scale), self.dof_stride],
+            inputs=[actions, self.action_dofs, self.joint_gears, float(self.config.action_scale), self.dof_stride],
             outputs=[self.current_actions, self.control.joint_f],
             device=self.device,
         )

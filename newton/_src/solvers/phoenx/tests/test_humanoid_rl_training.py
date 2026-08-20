@@ -10,6 +10,8 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
+import newton.examples
 import newton.rl as rl
 from newton._src.solvers.phoenx.benchmarks.bench_humanoid_train_to_gate import (
     StatsEvaluateHumanoid,
@@ -19,10 +21,80 @@ from newton._src.solvers.phoenx.rl_training.examples.train_humanoid_phoenx_ppo i
     _make_parser,
     build_ppo_config,
 )
+from newton._src.solvers.phoenx.rl_training.humanoid import _resolve_humanoid_actuators
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
 class TestHumanoidPhoenXRL(unittest.TestCase):
+    def test_actuator_contract_uses_imported_metadata(self) -> None:
+        """Resolve reordered motors and reject duplicate DOF targets."""
+        robot = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        robot.add_mjcf(
+            newton.examples.get_asset("nv_humanoid.xml"),
+            up_axis="Z",
+            parse_meshes=False,
+            parse_visuals=False,
+            ignore_names=("floor", "ground"),
+            enable_self_collisions=True,
+            parse_mujoco_options=False,
+        )
+        expected_gears = np.asarray(
+            [
+                67.5,
+                67.5,
+                67.5,
+                45.0,
+                45.0,
+                135.0,
+                90.0,
+                22.5,
+                22.5,
+                45.0,
+                45.0,
+                135.0,
+                90.0,
+                22.5,
+                22.5,
+                67.5,
+                67.5,
+                45.0,
+                67.5,
+                67.5,
+                45.0,
+            ],
+            dtype=np.float32,
+        )
+
+        dofs, gears = _resolve_humanoid_actuators(robot)
+        np.testing.assert_array_equal(dofs, np.arange(6, 27, dtype=np.int32))
+        np.testing.assert_array_equal(gears, expected_gears)
+
+        actuator_keys = (
+            "mujoco:actuator_trnid",
+            "mujoco:actuator_target_label",
+            "mujoco:actuator_trntype",
+            "mujoco:actuator_gear",
+        )
+        for key in actuator_keys:
+            values = robot.custom_attributes[key].values
+            if isinstance(values, list):
+                values.reverse()
+        reordered_dofs, reordered_gears = _resolve_humanoid_actuators(robot)
+        np.testing.assert_array_equal(reordered_dofs, dofs)
+        np.testing.assert_array_equal(reordered_gears, gears)
+
+        trnid = robot.custom_attributes["mujoco:actuator_trnid"].values
+        trnid[1] = trnid[0]
+        with self.assertRaisesRegex(RuntimeError, "duplicates joint|cover every"):
+            _resolve_humanoid_actuators(robot)
+
+        for key in actuator_keys:
+            values = robot.custom_attributes[key].values
+            if isinstance(values, list):
+                values.pop()
+        with self.assertRaisesRegex(RuntimeError, "requires 21 complete joint actuators"):
+            _resolve_humanoid_actuators(robot)
+
     def test_direct_task_step_inside_cuda_graph(self) -> None:
         """Apply source-MJCF torques in model DOF order inside a CUDA graph."""
         device = require_cuda_graph_capture("PhoenX Humanoid RL tests")
