@@ -14,47 +14,48 @@ import newton.examples
 ACTION_DIM_HUMANOID = 21
 OBS_DIM_HUMANOID = 75
 
+# Values follow model joint_qd order, not MJCF actuator declaration order.
 _HUMANOID_JOINT_GEARS = (
     67.5,
     67.5,
+    67.5,
     45.0,
-    67.5,
-    67.5,
-    67.5,
     45.0,
     135.0,
-    45.0,
     90.0,
     22.5,
     22.5,
     45.0,
-    135.0,
     45.0,
+    135.0,
     90.0,
     22.5,
     22.5,
+    67.5,
+    67.5,
+    45.0,
     67.5,
     67.5,
     45.0,
 )
 _HUMANOID_JOINT_KP = (
-    10.0,
-    10.0,
-    2.0,
     20.0,
     20.0,
     10.0,
     10.0,
-    20.0,
     10.0,
+    20.0,
     5.0,
     2.0,
     2.0,
     10.0,
-    20.0,
     10.0,
+    20.0,
     5.0,
     2.0,
+    2.0,
+    10.0,
+    10.0,
     2.0,
     10.0,
     10.0,
@@ -63,9 +64,6 @@ _HUMANOID_JOINT_KP = (
 _HUMANOID_JOINT_KD = (
     5.0,
     5.0,
-    1.0,
-    5.0,
-    5.0,
     5.0,
     5.0,
     5.0,
@@ -78,6 +76,9 @@ _HUMANOID_JOINT_KD = (
     5.0,
     0.1,
     1.0,
+    1.0,
+    5.0,
+    5.0,
     1.0,
     5.0,
     5.0,
@@ -305,7 +306,7 @@ class ConfigEnvHumanoidPhoenX:
 
     world_count: int = 4096
     frame_dt: float = 1.0 / 60.0
-    sim_substeps: int = 2
+    sim_substeps: int = 3
     solver_iterations: int = 8
     velocity_iterations: int = 1
     action_scale: float = 1.0

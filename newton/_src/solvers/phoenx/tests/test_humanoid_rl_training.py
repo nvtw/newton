@@ -24,6 +24,7 @@ from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_ca
 
 class TestHumanoidPhoenXRL(unittest.TestCase):
     def test_direct_task_step_inside_cuda_graph(self) -> None:
+        """Apply source-MJCF torques in model DOF order inside a CUDA graph."""
         device = require_cuda_graph_capture("PhoenX Humanoid RL tests")
         env = rl.EnvHumanoidPhoenX(
             rl.ConfigEnvHumanoidPhoenX(
@@ -36,6 +37,38 @@ class TestHumanoidPhoenXRL(unittest.TestCase):
             ),
             device=device,
         )
+        expected_gears = np.asarray(
+            [
+                67.5,
+                67.5,
+                67.5,
+                45.0,
+                45.0,
+                135.0,
+                90.0,
+                22.5,
+                22.5,
+                45.0,
+                45.0,
+                135.0,
+                90.0,
+                22.5,
+                22.5,
+                67.5,
+                67.5,
+                45.0,
+                67.5,
+                67.5,
+                45.0,
+            ],
+            dtype=np.float32,
+        )
+        expected_kp = np.asarray(
+            [20, 20, 10, 10, 10, 20, 5, 2, 2, 10, 10, 20, 5, 2, 2, 10, 10, 2, 10, 10, 2],
+            dtype=np.float32,
+        )
+        expected_kd = np.asarray([5, 5, 5, 5, 5, 5, 0.1, 1, 1, 5, 5, 5, 0.1, 1, 1, 5, 5, 1, 5, 5, 1], dtype=np.float32)
+
         action_row = np.linspace(-0.2, 0.2, env.action_dim, dtype=np.float32)
         actions = wp.array(np.tile(action_row, (env.world_count, 1)), dtype=wp.float32, device=device)
 
@@ -51,17 +84,22 @@ class TestHumanoidPhoenXRL(unittest.TestCase):
         dones = env.step_dones.numpy()
         q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
         joint_f = env.control.joint_f.numpy().reshape(env.world_count, env.dof_stride)
-        expected_f = action_row * env.joint_gears.numpy()
+        expected_f = action_row * expected_gears
 
         self.assertEqual(obs.shape, (env.world_count, rl.OBS_DIM_HUMANOID))
         self.assertTrue(np.all(np.isfinite(obs)))
         self.assertTrue(np.all(np.isfinite(rewards)))
         self.assertTrue(np.all(np.isfinite(q)))
+        np.testing.assert_array_equal(env.joint_gears.numpy(), expected_gears)
         np.testing.assert_allclose(dones, 0.0, rtol=0.0, atol=0.0)
+        np.testing.assert_array_equal(env.model.joint_target_ke.numpy()[6:27], expected_kp)
+        np.testing.assert_array_equal(env.model.joint_target_kd.numpy()[6:27], expected_kd)
+        np.testing.assert_array_equal(env.model.joint_effort_limit.numpy()[6:27], np.full(21, 150.0, np.float32))
         np.testing.assert_allclose(joint_f[:, 6:27], np.tile(expected_f, (env.world_count, 1)), rtol=0.0, atol=1.0e-5)
         self.assertGreater(float(np.min(q[:, 2])), 1.0)
 
     def test_initial_reward_matches_direct_task_terms(self) -> None:
+        """Match the initial reward and source MJCF integration timestep."""
         device = require_cuda_graph_capture("PhoenX Humanoid RL tests")
         env = rl.EnvHumanoidPhoenX(
             rl.ConfigEnvHumanoidPhoenX(world_count=2, max_episode_steps=0, auto_reset=False),
@@ -70,6 +108,7 @@ class TestHumanoidPhoenXRL(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             env.observe()
         wp.capture_launch(capture.graph)
+        self.assertAlmostEqual(env.config.frame_dt / env.config.sim_substeps, 0.00555, delta=1.0e-5)
 
         rewards = env.rewards.numpy()
         np.testing.assert_allclose(rewards, 2.6, rtol=0.0, atol=1.0e-6)
