@@ -568,6 +568,43 @@ class TestFlashSACLRAutotune(unittest.TestCase):
         self.assertEqual(result.action, "safety_fallback")
         self.assertEqual(unsafe._candidate_evidence_windows, 0)
 
+    def test_rejection_converges_from_live_champion(self) -> None:
+        """Preserve safe champion learning when ending a rejected search."""
+
+        device = require_cuda_graph_capture("FlashSAC live champion convergence")
+        controller = self._make_controller(
+            device,
+            autotune=ConfigFlashSACLRAutotune(
+                evaluation_episodes=4,
+                minimum_evidence_windows=2,
+                promotion_windows=2,
+                exploit_after_candidate=True,
+            ),
+        )
+        low = np.full(4, 0.01, dtype=np.float32)
+        self.assertEqual(controller.evaluate_paired(low, low).action, "gather_evidence")
+        champion = np.full(4, 0.08, dtype=np.float32)
+        challenger = np.full(4, 0.10, dtype=np.float32)
+        self.assertEqual(controller.evaluate_paired(champion, challenger).action, "continue")
+        self.assertTrue(controller.best_valid)
+
+        population_actor = controller.population.actors.population_state_arrays()[0]
+        live = population_actor.numpy()
+        live[0] += np.float32(0.25)
+        population_actor.assign(live)
+        live_champion = tuple(
+            value.numpy()[0].copy() for value in controller.population.actors.population_state_arrays()
+        )
+
+        result = controller.evaluate_paired(
+            np.full(4, 0.09, dtype=np.float32),
+            np.full(4, 0.08, dtype=np.float32),
+        )
+        self.assertEqual(result.action, "reject")
+        self.assertTrue(controller.converged)
+        for actual, expected in zip(controller.single_trainer.actor.net.state_arrays(), live_champion, strict=True):
+            np.testing.assert_array_equal(actual.numpy(), expected)
+
     def test_paired_window_mean_retains_a_strong_candidate(self) -> None:
         """Promote from repeated paired evidence despite a narrow second window."""
 

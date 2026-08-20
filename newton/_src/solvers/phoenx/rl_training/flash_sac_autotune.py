@@ -610,15 +610,20 @@ class ControllerFlashSACLRAutotune:
             self._best_candidate_termination_rates[member] = termination_rate
             self._best_candidate_windows[member] = 1
         if self._best_candidate_windows[member] >= int(self.config.promotion_windows):
-            self.single_trainer.copy_training_state_from(self.trainers[member])
-            self.best_valid = True
-            self.best_member = member
-            self.best_score = score
-            self.best_termination_rate = termination_rate
-            self.best_rates[:] = self.member_rates[member]
-            self.best_target_update_rate = float(self.member_target_update_rates[member])
-            self.best_policy_frequency = int(self.member_policy_frequencies[member])
+            self._snapshot_member_as_best(member, score, termination_rate)
             self._best_candidate_windows[member] = 0
+
+    def _snapshot_member_as_best(self, member: int, score: float, termination_rate: float) -> None:
+        """Preserve one live member in the preallocated best-state trainer."""
+
+        self.single_trainer.copy_training_state_from(self.trainers[member])
+        self.best_valid = True
+        self.best_member = member
+        self.best_score = score
+        self.best_termination_rate = termination_rate
+        self.best_rates[:] = self.member_rates[member]
+        self.best_target_update_rate = float(self.member_target_update_rates[member])
+        self.best_policy_frequency = int(self.member_policy_frequencies[member])
 
     def _best_regressed(self, score: float, termination_rate: float) -> bool:
         if not self.best_valid:
@@ -653,6 +658,13 @@ class ControllerFlashSACLRAutotune:
         self.single_trainer.set_pbt_target_update_rate(self.best_target_update_rate)
         self.single_trainer.set_pbt_policy_frequency(self.best_policy_frequency)
         self._challenger_enabled.assign(np.asarray([0], dtype=np.int32))
+
+    def _converge_from_live_champion(self, score: float, termination_rate: float) -> None:
+        """Keep safe champion progress when ending an ordinary probe."""
+
+        if math.isfinite(score) and math.isfinite(termination_rate):
+            self._snapshot_member_as_best(0, score, termination_rate)
+        self._converge_to_single()
 
     def evaluate_paired(
         self,
@@ -795,7 +807,7 @@ class ControllerFlashSACLRAutotune:
                 self._reset_challenger()
                 action = "reject"
         if self.config.exploit_after_candidate and action in ("reject", "safety_fallback"):
-            self._converge_to_single()
+            self._converge_from_live_champion(champion_score, float(champion_termination_rate))
         if self.evaluation_count >= int(self.config.minimum_search_windows) and self.stagnant_windows >= int(
             self.config.convergence_windows
         ):
@@ -817,14 +829,7 @@ class ControllerFlashSACLRAutotune:
         if policy == "live":
             if live_score is None or live_termination_rate is None:
                 raise ValueError("live finalization requires score and termination rate")
-            self.single_trainer.copy_training_state_from(self.trainers[0])
-            self.best_valid = True
-            self.best_member = 0
-            self.best_score = float(live_score)
-            self.best_termination_rate = float(live_termination_rate)
-            self.best_rates[:] = self.member_rates[0]
-            self.best_target_update_rate = float(self.member_target_update_rates[0])
-            self.best_policy_frequency = int(self.member_policy_frequencies[0])
+            self._snapshot_member_as_best(0, float(live_score), float(live_termination_rate))
         elif policy == "best_confirmed":
             if not self.best_valid:
                 raise RuntimeError("no repeatedly confirmed best FlashSAC policy is available")
