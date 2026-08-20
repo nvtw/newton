@@ -539,7 +539,26 @@ class MinkowskiCenter:
 
 
 def create_shape_center_function(use_precomputed_center: bool = False):
-    """Create a Minkowski center function with built-in shape policies."""
+    """Create the common Minkowski-center function used by MPR and GJK.
+
+    The returned function supplies the initial interior point of the
+    Minkowski difference. Most primitives use their local origin. Uncached
+    convex meshes use the center of their scaled AABB, while cached callers
+    use ``geom.center`` and must provide a valid interior-point approximation.
+
+    Triangle-like shape A needs a partner-relative seed. Its center is moved
+    to the point on the physical triangle nearest shape B's center and nudged
+    toward the triangle centroid. This avoids portals collapsing onto one
+    vertex when a large, thin triangle is paired with a much smaller shape.
+
+    Args:
+        use_precomputed_center: Use the center stored in each geometry instead
+            of computing convex-mesh AABB centers.
+
+    Returns:
+        A shape-center function with a ``fallback`` attribute for the
+        coincident-center case.
+    """
 
     @wp.func
     def shape_center(
@@ -549,6 +568,19 @@ def create_shape_center_function(use_precomputed_center: bool = False):
         position_b: wp.vec3,
         data_provider: Any,
     ) -> MinkowskiCenter:
+        """Compute an interior point of the Minkowski difference.
+
+        Args:
+            geom_a: Shape A geometry data.
+            geom_b: Shape B geometry data.
+            orientation_b: Shape B orientation relative to shape A.
+            position_b: Shape B position relative to shape A.
+            data_provider: Support-map data provider.
+
+        Returns:
+            Centers in the relative frame. ``B`` is shape B's center and
+            ``BtoA`` points from it to the selected center on shape A.
+        """
         center = MinkowskiCenter()
         if wp.static(use_precomputed_center):
             center_a = geom_a.center

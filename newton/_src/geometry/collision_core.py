@@ -296,21 +296,21 @@ def post_process_triangle_contact(
                 normal_local = -normal_local
             normal_world = wp.quat_rotate(rot_a, normal_local)
 
-            data_provider = SupportMapDataProvider()
-            direction_b = wp.quat_rotate_inv(rot_b, -normal_world)
-            point_b = support_map(shape_b, direction_b, data_provider)
-            point_b = wp.quat_rotate(rot_b, point_b) + pos_b_adjusted
-            distance = wp.dot(point_b - pos_a_adjusted, normal_world)
-
-            center_local = wp.quat_rotate_inv(rot_a, contact_data.contact_point_center - pos_a_adjusted)
-            center_local -= wp.dot(center_local, normal_local) * normal_local
+            point_b_world = (
+                contact_data.contact_point_center
+                + 0.5 * contact_data.contact_distance * contact_data.contact_normal_a_to_b
+            )
+            point_b_local = wp.quat_rotate_inv(rot_a, point_b_world - pos_a_adjusted)
+            projected_b = point_b_local - wp.dot(point_b_local, normal_local) * normal_local
             point_a = closest_point_on_triangle(
-                center_local,
+                projected_b,
                 wp.vec3(0.0),
                 shape_a.scale,
                 shape_a.auxiliary,
             )
-
+            distance = float(0.0)
+            if wp.length_sq(point_a - projected_b) < 1.0e-10:
+                distance = wp.dot(point_b_local - point_a, normal_local)
             contact_data.contact_point_center = (
                 wp.quat_rotate(rot_a, point_a) + pos_a_adjusted + 0.5 * distance * normal_world
             )

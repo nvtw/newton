@@ -494,6 +494,30 @@ class TestHeightfield(unittest.TestCase):
 
         self.assertTrue(np.all(distance >= 0.0), f"penetrating boundary contacts: {distance}")
 
+    def test_heightfield_boundary_ignores_external_lowest_point(self):
+        """Ignore a penetrating support point outside the heightfield footprint."""
+        builder = newton.ModelBuilder()
+        self._add_flat_heightfield(builder)
+
+        rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.25 * wp.pi)
+        body = builder.add_body(xform=wp.transform((0.95, 0.0, 0.11), rotation))
+        builder.add_shape_box(body=body, hx=0.2, hy=0.05, hz=0.05)
+
+        model = builder.finalize()
+        for reduce_contacts in (False, True):
+            with self.subTest(reduce_contacts=reduce_contacts):
+                distance, normal, point0 = self._get_contact_kinematics(
+                    model, model.state(), reduce_contacts=reduce_contacts
+                )
+
+                self.assertGreater(len(distance), 0, "no contacts between box and heightfield boundary")
+                deepest = int(np.argmin(distance))
+                self.assertLess(float(distance[deepest]), -0.001)
+                self.assertGreater(float(distance[deepest]), -0.015, f"overestimated penetration: {distance}")
+                self.assertGreater(float(normal[deepest][2]), 0.999)
+                self.assertLessEqual(float(point0[deepest][0]), 1.0 + 1.0e-5)
+                self.assertAlmostEqual(float(point0[deepest][2]), 0.0, places=5)
+
     def test_heightfield_native_collision_scaled(self):
         """Per-instance ``scale`` on ``add_shape_heightfield`` is honored by narrow-phase.
 
