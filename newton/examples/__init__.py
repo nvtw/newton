@@ -713,6 +713,12 @@ def create_parser():
         help="Path-traced samples per frame when OptiX DLSS is disabled.",
     )
     parser.add_argument(
+        "--optix-texture-mipmaps",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Generate full texture mip chains in the OptiX viewer.",
+    )
+    parser.add_argument(
         "--headless",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -967,6 +973,7 @@ def init(parser=None):
             max_bounces=args.optix_max_bounces,
             direct_light_samples=args.optix_direct_light_samples,
             samples_per_frame=args.optix_samples_per_frame,
+            enable_texture_mipmaps=args.optix_texture_mipmaps,
         )
     elif args.viewer == "usd":
         if args.output_path is None:

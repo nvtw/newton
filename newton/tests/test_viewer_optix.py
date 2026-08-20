@@ -104,6 +104,8 @@ class TestViewerOptix(unittest.TestCase):
         self.assertEqual(args.optix_max_bounces, 3)
         self.assertEqual(args.optix_direct_light_samples, 1)
         self.assertEqual(args.optix_samples_per_frame, 1)
+        self.assertFalse(args.optix_texture_mipmaps)
+        self.assertTrue(parser.parse_args(["--optix-texture-mipmaps"]).optix_texture_mipmaps)
         optix_parameters = inspect.signature(ViewerOptix).parameters
         self.assertEqual(optix_parameters["width"].default, gl_parameters["width"].default)
         self.assertEqual(optix_parameters["height"].default, gl_parameters["height"].default)
