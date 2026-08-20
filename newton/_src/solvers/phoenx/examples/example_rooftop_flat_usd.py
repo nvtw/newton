@@ -117,7 +117,6 @@ class Example:
         viewer.configure_auto_exposure(
             True,
             target_luminance=0.18,
-            min_ev=-6.0,
             max_ev=6.0,
             brighten_speed=0.6,
             darken_speed=1.2,
