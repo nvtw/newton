@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import warp as wp
 
+from .cublas import release_cublas_workspace
 from .flash_sac import (
     BufferReplayFlashSAC,
     EnvFlashSAC,
@@ -40,6 +41,21 @@ def _route_partitioned_actions_kernel(
         actions[world, action] = challenger_actions[world - champion_worlds, action]
 
 
+@wp.func
+def _challenger_action_requires_fallback(
+    squared_difference: float,
+    maximum_difference: float,
+    action_dim: int,
+    finite: wp.int32,
+    rms_limit: float,
+    max_limit: float,
+):
+    """Reject diffuse RMS drift and isolated unsafe action spikes."""
+
+    rms_difference = wp.sqrt(squared_difference / float(action_dim))
+    return finite == wp.int32(0) or rms_difference > rms_limit or maximum_difference > max_limit
+
+
 @wp.kernel
 def _guard_challenger_actions_kernel(
     champion_actions: wp.array2d[wp.float32],
@@ -63,8 +79,14 @@ def _guard_challenger_actions_kernel(
         difference = wp.abs(challenger - champion)
         squared_difference += difference * difference
         maximum_difference = wp.max(maximum_difference, difference)
-    rms_difference = wp.sqrt(squared_difference / float(action_dim))
-    fallback = finite == 0 or rms_difference > rms_limit or maximum_difference > max_limit
+    fallback = _challenger_action_requires_fallback(
+        squared_difference,
+        maximum_difference,
+        action_dim,
+        finite,
+        rms_limit,
+        max_limit,
+    )
     fallbacks[interaction, world] = wp.int32(fallback)
     for action in range(action_dim):
         if fallback:
@@ -77,7 +99,7 @@ def _clone_trainer(source: TrainerFlashSAC) -> TrainerFlashSAC:
     trainer = TrainerFlashSAC(
         obs_dim=source.obs_dim,
         action_dim=source.action_dim,
-        config=source.config,
+        config=copy.deepcopy(source.config),
         device=source.device,
         seed=source.seed,
     )
@@ -130,32 +152,37 @@ def capture_lr_autotune_parallel_overlap(
     if not replay.can_sample():
         raise RuntimeError("warm shared replay before capturing LR autotuning overlap")
     total_updates = updates * interactions
-    policy_frequency = int(controller.trainers[0].config.policy_frequency)
-    if total_updates % policy_frequency != 0:
-        raise ValueError("overlap updates must span a complete policy-frequency cadence")
+    controller.configure_policy_frequency_family(total_updates, allow_search=True)
+    policy_frequencies = controller.policy_frequency_choices
 
     trainers = tuple(_clone_trainer(trainer) for trainer in controller.trainers)
     for trainer in trainers:
         trainer.reserve_buffers(env.world_count)
-    controller.single_trainer.reserve_buffers(env.world_count)
-    start_gradient_update = trainers[0]._gradient_update_count
-    rollout_rows = (controller.champion_worlds, env.world_count - controller.champion_worlds)
-    rollout_actors = tuple(
-        _make_rollout_actor(trainer, rows) for trainer, rows in zip(trainers, rollout_rows, strict=True)
-    )
-    guard_actor = _make_rollout_actor(trainers[0], rollout_rows[1])
+        trainer.reserve_update_buffers(replay.batch_size)
+    single_trainer = _clone_trainer(controller.single_trainer)
+    single_trainer.reserve_buffers(env.world_count)
+    single_trainer.reserve_update_buffers(replay.batch_size)
+    challenger_worlds = int(controller.challenger_worlds)
+    if challenger_worlds == 0:
+        rollout_actors = (_make_rollout_actor(trainers[0], env.world_count),)
+        guard_actor = None
+    else:
+        rollout_rows = (controller.champion_worlds, challenger_worlds)
+        rollout_actors = tuple(
+            _make_rollout_actor(trainer, rows) for trainer, rows in zip(trainers, rollout_rows, strict=True)
+        )
+        guard_actor = _make_rollout_actor(trainers[0], challenger_worlds)
     phase_batches = tuple(
         tuple(_allocate_flash_sac_batch(trainers[0]) for _ in range(total_updates)) for _phase in range(2)
     )
     pre_step_obs = wp.empty((env.world_count, env.obs_dim), dtype=wp.float32, device=controller.device)
-    partitioned_obs = (
-        pre_step_obs[: controller.champion_worlds],
-        pre_step_obs[controller.champion_worlds :],
-    )
+    champion_obs = pre_step_obs[: controller.champion_worlds]
+    challenger_obs = pre_step_obs[controller.champion_worlds :] if challenger_worlds else None
     zero_truncateds = wp.zeros(env.world_count, dtype=wp.float32, device=controller.device)
     env_seed_counter = wp.array([int(seed)], dtype=wp.int32, device=controller.device)
-    guarded_challenger_actions = wp.empty((rollout_rows[1], env.action_dim), dtype=wp.float32, device=controller.device)
-    challenger_fallbacks = wp.empty((interactions, rollout_rows[1]), dtype=wp.int32, device=controller.device)
+    guard_rows = max(1, challenger_worlds)
+    guarded_challenger_actions = wp.empty((guard_rows, env.action_dim), dtype=wp.float32, device=controller.device)
+    challenger_fallbacks = wp.zeros((interactions, guard_rows), dtype=wp.int32, device=controller.device)
     guard_rms_limit = float(controller.config.challenger_action_rms_limit)
     guard_max_limit = float(controller.config.challenger_action_max_limit)
     if hasattr(env, "use_reset_seed_counter"):
@@ -168,36 +195,39 @@ def capture_lr_autotune_parallel_overlap(
             wp.copy(pre_step_obs, env.obs)
             champion_seed = trainers[0].prepare_graph_exploration_seed()
             champion_actions, _log_probs, _policy_out = rollout_actors[0].sample_reuse_seed_counter(
-                partitioned_obs[0], seed_counter=champion_seed
+                champion_obs, seed_counter=champion_seed
             )
-            challenger_seed = trainers[1].prepare_graph_exploration_seed()
-            challenger_actions, _log_probs, _policy_out = rollout_actors[1].sample_reuse_seed_counter(
-                partitioned_obs[1], seed_counter=challenger_seed
-            )
-            guard_actions, _log_probs, _policy_out = guard_actor.sample_reuse_seed_counter(
-                partitioned_obs[1], seed_counter=challenger_seed
-            )
-            wp.launch(
-                _guard_challenger_actions_kernel,
-                dim=rollout_rows[1],
-                inputs=[
-                    guard_actions,
-                    challenger_actions,
-                    guard_rms_limit,
-                    guard_max_limit,
-                    _interaction,
-                ],
-                outputs=[guarded_challenger_actions, challenger_fallbacks],
-                device=controller.device,
-            )
-            actions = controller._routed_actions
-            wp.launch(
-                _route_partitioned_actions_kernel,
-                dim=actions.shape,
-                inputs=[champion_actions, guarded_challenger_actions, controller.champion_worlds],
-                outputs=[actions],
-                device=controller.device,
-            )
+            actions = champion_actions
+            if challenger_worlds:
+                assert challenger_obs is not None and guard_actor is not None
+                challenger_seed = trainers[1].prepare_graph_exploration_seed()
+                challenger_actions, _log_probs, _policy_out = rollout_actors[1].sample_reuse_seed_counter(
+                    challenger_obs, seed_counter=challenger_seed
+                )
+                guard_actions, _log_probs, _policy_out = guard_actor.sample_reuse_seed_counter(
+                    challenger_obs, seed_counter=challenger_seed
+                )
+                wp.launch(
+                    _guard_challenger_actions_kernel,
+                    dim=challenger_worlds,
+                    inputs=[
+                        guard_actions,
+                        challenger_actions,
+                        guard_rms_limit,
+                        guard_max_limit,
+                        _interaction,
+                    ],
+                    outputs=[guarded_challenger_actions, challenger_fallbacks],
+                    device=controller.device,
+                )
+                actions = controller._routed_actions
+                wp.launch(
+                    _route_partitioned_actions_kernel,
+                    dim=actions.shape,
+                    inputs=[champion_actions, guarded_challenger_actions, controller.champion_worlds],
+                    outputs=[actions],
+                    device=controller.device,
+                )
             next_obs, rewards, dones = env.step(actions)
             replay.add_batch_graph(
                 pre_step_obs,
@@ -210,35 +240,52 @@ def capture_lr_autotune_parallel_overlap(
 
     def prepare(phase: int, *, single: bool) -> None:
         if single:
-            rollout_actors[0].copy_from(controller.single_trainer.actor)
-            rollout_actors[1].copy_from(controller.single_trainer.actor)
-            guard_actor.copy_from(controller.single_trainer.actor)
-            sample_counter = controller.single_trainer._device_update_count
+            rollout_actors[0].copy_from(single_trainer.actor)
+            if challenger_worlds:
+                rollout_actors[1].copy_from(single_trainer.actor)
+                assert guard_actor is not None
+                guard_actor.copy_from(single_trainer.actor)
+            sample_counter = single_trainer._device_update_count
         else:
-            for actor, trainer in zip(rollout_actors, trainers, strict=True):
+            for actor, trainer in zip(rollout_actors, trainers[: len(rollout_actors)], strict=True):
                 actor.copy_from(trainer.actor)
-            guard_actor.copy_from(trainers[0].actor)
+            if guard_actor is not None:
+                guard_actor.copy_from(trainers[0].actor)
             sample_counter = trainers[0]._device_update_count
         for update_index, batch in enumerate(phase_batches[phase]):
             sampled = replay.sample_graph_seed_counter(sample_counter, seed_offset=update_index + 101)
             _copy_flash_sac_batch(batch, sampled)
-
-    def update_member(member: int, phase: int) -> None:
-        trainer = trainers[member]
-        for update_index, batch in enumerate(phase_batches[phase]):
-            include_actor = (start_gradient_update + update_index) % policy_frequency == 0
-            trainer._graph_update_operations(batch, include_actor=include_actor, seed_base=int(seed) + member)
-
-    def update_single(phase: int) -> None:
-        for update_index, batch in enumerate(phase_batches[phase]):
-            include_actor = (start_gradient_update + update_index) % policy_frequency == 0
-            controller.single_trainer._graph_update_operations(batch, include_actor=include_actor, seed_base=int(seed))
 
     rollout_stream = wp.Stream(controller.device, priority=-1)
     learner_streams = (wp.Stream(controller.device), wp.Stream(controller.device))
     single_stream = wp.Stream(controller.device)
     prepare_stream = wp.Stream(controller.device)
     rollout_graph = _capture_flash_stream_graph(rollout_stream, controller.device, collect)
+    if len(policy_frequencies) > 1 and not wp.is_conditional_graph_supported():
+        raise RuntimeError("policy-frequency autotuning requires CUDA graph conditional-node support")
+    for trainer, frequency in zip(trainers, controller.member_policy_frequencies, strict=True):
+        trainer.set_pbt_policy_frequency(int(frequency))
+    single_trainer.set_pbt_policy_frequency(controller.best_policy_frequency)
+
+    def update_member(member: int, phase: int) -> None:
+        trainer = trainers[member]
+        for batch in phase_batches[phase]:
+            trainer._graph_update_operations(
+                batch,
+                include_actor=False,
+                seed_base=int(seed) + member,
+                conditional_actor=True,
+            )
+
+    def update_single(phase: int) -> None:
+        for batch in phase_batches[phase]:
+            single_trainer._graph_update_operations(
+                batch,
+                include_actor=False,
+                seed_base=int(seed),
+                conditional_actor=True,
+            )
+
     update_graphs = tuple(
         tuple(
             _capture_flash_stream_graph(
@@ -267,6 +314,7 @@ def capture_lr_autotune_parallel_overlap(
     return GraphFlashSACLRAutotuneParallelOverlap(
         controller=controller,
         trainers=trainers,
+        single_trainer=single_trainer,
         replay=replay,
         env=env,
         rollout_graph=rollout_graph,
@@ -279,8 +327,9 @@ def capture_lr_autotune_parallel_overlap(
         single_stream=single_stream,
         prepare_stream=prepare_stream,
         phase_batches=phase_batches,
-        rollout_actors=(*rollout_actors, guard_actor),
+        rollout_actors=rollout_actors + ((guard_actor,) if guard_actor is not None else ()),
         challenger_fallbacks=challenger_fallbacks,
+        challenger_world_count=challenger_worlds,
         retained_arrays=(pre_step_obs, zero_truncateds, env_seed_counter, guarded_challenger_actions),
         interactions_per_launch=interactions,
         updates_per_launch=total_updates,
@@ -293,6 +342,7 @@ class GraphFlashSACLRAutotuneParallelOverlap:
 
     controller: ControllerFlashSACLRAutotune
     trainers: tuple[TrainerFlashSAC, TrainerFlashSAC]
+    single_trainer: TrainerFlashSAC
     replay: BufferReplayFlashSAC
     env: EnvFlashSAC
     rollout_graph: object | None
@@ -307,6 +357,7 @@ class GraphFlashSACLRAutotuneParallelOverlap:
     phase_batches: tuple[tuple[BatchSAC, ...], tuple[BatchSAC, ...]] | None
     rollout_actors: tuple[Any, ...] | None
     challenger_fallbacks: wp.array2d[wp.int32]
+    challenger_world_count: int
     retained_arrays: tuple[wp.array[Any], ...]
     interactions_per_launch: int
     updates_per_launch: int
@@ -327,24 +378,52 @@ class GraphFlashSACLRAutotuneParallelOverlap:
     def challenger_fallback_fraction(self) -> float:
         """Return the fraction of challenger actions replaced by champion actions."""
 
+        if self.challenger_world_count == 0:
+            return 0.0
         self.synchronize()
-        return float(self.challenger_fallbacks.numpy().mean())
+        return float(self.challenger_fallbacks.numpy()[:, : self.challenger_world_count].mean())
 
     def sync_controller_state(self) -> None:
         """Copy independent learner state into the controller without rebinding arrays."""
 
         self.synchronize()
-        for destination, source in zip(self.controller.trainers, self.trainers, strict=True):
-            destination.copy_training_state_from(source)
+        if self.controller.converged:
+            self.controller.single_trainer.copy_training_state_from(self.single_trainer)
+        else:
+            for destination, source in zip(self.controller.trainers, self.trainers, strict=True):
+                destination.copy_training_state_from(source)
+
+    def evaluation_trainers(self) -> tuple[TrainerFlashSAC, TrainerFlashSAC]:
+        """Return paired learners or the converged learner twice."""
+
+        if self.controller.converged:
+            return (self.single_trainer, self.single_trainer)
+        return self.trainers
+
+    def reopen_search(self) -> None:
+        """Restart paired graphs from the current converged learner."""
+
+        if not self.controller.converged:
+            raise RuntimeError("FlashSAC LR search is already active")
+        self.sync_controller_state()
+        self.controller.reopen_search()
+        self.sync_from_controller_state()
 
     def evaluate_paired(self, *args: Any, **kwargs: Any) -> ResultFlashSACLRAutotune:
         """Join learners, evaluate through the controller, and mirror the decision back."""
 
         self.sync_controller_state()
         result = self.controller.evaluate_paired(*args, **kwargs)
+        self.sync_from_controller_state()
+        return result
+
+    def sync_from_controller_state(self) -> None:
+        """Copy controller decisions into graph-owned fixed-address learners."""
+
+        self.synchronize()
         for destination, source in zip(self.trainers, self.controller.trainers, strict=True):
             destination.copy_training_state_from(source)
-        return result
+        self.single_trainer.copy_training_state_from(self.controller.single_trainer)
 
     def launch(self) -> None:
         """Overlap rollout with two independent learners or converged P1."""
@@ -370,8 +449,8 @@ class GraphFlashSACLRAutotuneParallelOverlap:
             wp.wait_stream(self.prepare_stream)
         if self.controller.converged:
             wp.capture_launch(self.single_graphs[phase], stream=self.single_stream)
-            self.controller.single_trainer._gradient_update_count += self.updates_per_launch
-            self.controller.single_trainer._update_count += self.updates_per_launch
+            self.single_trainer._gradient_update_count += self.updates_per_launch
+            self.single_trainer._update_count += self.updates_per_launch
         else:
             for member, stream in enumerate(self.learner_streams):
                 wp.capture_launch(self.update_graphs[member][phase], stream=stream)
@@ -397,12 +476,16 @@ class GraphFlashSACLRAutotuneParallelOverlap:
         if self.rollout_graph is None:
             return
         self.synchronize()
+        streams = (self.rollout_stream, self.single_stream, self.prepare_stream, *(self.learner_streams or ()))
         self.rollout_graph = None
         self.update_graphs = None
         self.single_graphs = None
         self.population_prepare_graphs = None
         self.single_prepare_graphs = None
         self.rollout_stream = None
+        for stream in streams:
+            if stream is not None:
+                release_cublas_workspace(self.controller.device, stream)
         self.learner_streams = None
         self.single_stream = None
         self.prepare_stream = None

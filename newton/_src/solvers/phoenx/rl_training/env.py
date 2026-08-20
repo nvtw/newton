@@ -11,21 +11,26 @@ from .kernels import seed_counter_increment_kernel
 from .ppo import BufferRollout, TrainerPPO
 
 
-class EnvPPO(Protocol):
-    """Minimal vectorized environment interface needed by PPO rollout collection."""
+class EnvRL(Protocol):
+    """Common vectorized environment interface for PhoenX RL trainers."""
 
     world_count: int
     obs_dim: int
     action_dim: int
     device: wp.context.Device
     obs: wp.array
-    step_successes: wp.array
 
     def observe(self) -> wp.array:
         """Return the current batched observation array."""
 
     def step(self, actions: wp.array) -> tuple[wp.array, wp.array, wp.array]:
         """Advance the environment with batched actions."""
+
+
+class EnvPPO(EnvRL, Protocol):
+    """Vectorized environment interface needed by PPO rollout collection."""
+
+    step_successes: wp.array
 
 
 @wp.kernel

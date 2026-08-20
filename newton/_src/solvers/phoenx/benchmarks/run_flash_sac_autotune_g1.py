@@ -21,7 +21,10 @@ from newton._src.solvers.phoenx.rl_training.flash_sac_autotune import (
     ConfigFlashSACLRAutotune,
     ControllerFlashSACLRAutotune,
 )
-from newton._src.solvers.phoenx.rl_training.flash_sac_autotune_evaluation import EvaluatorPairedFlashSAC
+from newton._src.solvers.phoenx.rl_training.flash_sac_autotune_evaluation import (
+    EvaluatorPairedFlashSAC,
+    _next_evaluation_delay,
+)
 
 
 @wp.kernel
@@ -98,9 +101,12 @@ def _warm_replay(trainer: rl.TrainerFlashSAC, env: rl.EnvG1PhoenX, seed: int) ->
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--world-count", type=int, default=2048)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--base-lr", type=float, default=6.0e-4)
+    parser.add_argument("--initial-perturbation-factor", type=float, default=2.0)
     parser.add_argument("--launches", type=int, default=4000)
     parser.add_argument("--evaluation-interval", type=int, default=400)
+    parser.add_argument("--confirmation-interval", type=int, default=0)
     parser.add_argument("--evaluation-episodes", type=int, default=32)
     parser.add_argument("--evaluation-horizon", type=int, default=200)
     parser.add_argument("--output", type=Path, default=Path("/tmp/phoenx_flash_sac_autotune_g1.json"))
@@ -134,7 +140,7 @@ def main() -> int:
             action_dim=env.policy_action_dim,
             config=config,
             device=device,
-            seed=member,
+            seed=args.seed * 101 + member,
         )
         for member in range(2)
     )
@@ -144,17 +150,19 @@ def main() -> int:
         rollout_world_count=args.world_count,
         config=ConfigFlashSACLRAutotune(
             evaluation_episodes=args.evaluation_episodes,
+            initial_perturbation_factor=args.initial_perturbation_factor,
             promotion_windows=2,
             convergence_windows=100,
+            seed=args.seed,
         ),
     )
-    replay = _warm_replay(trainers[0], env, seed=31)
+    replay = _warm_replay(trainers[0], env, seed=31 + args.seed * 9973)
     training = controller.capture_overlap(
         env,
         replay,
         updates_per_step=2,
         interactions_per_launch=2,
-        seed=31,
+        seed=31 + args.seed * 9973,
         population_backend="parallel",
     )
     eval_config = replace(env_config, world_count=args.evaluation_episodes, auto_reset=False, max_episode_steps=0)
@@ -183,16 +191,18 @@ def main() -> int:
         training.trainers,
         eval_envs,
         horizon_steps=args.evaluation_horizon,
-        seed=1101,
+        seed=1101 + args.seed * 9973,
         metric_source=command_tracking_metric,
     )
     setup_seconds = time.perf_counter() - setup_start
     history = []
     evaluation_seconds = 0.0
     run_start = time.perf_counter()
+    confirmation_interval = args.confirmation_interval or max(1, args.evaluation_interval // 4)
+    next_evaluation_launch = args.evaluation_interval
     for launch in range(1, args.launches + 1):
         training.launch()
-        if launch % args.evaluation_interval == 0:
+        if launch == next_evaluation_launch:
             evaluation_start = time.perf_counter()
             training.synchronize()
             challenger_fallback_fraction = training.challenger_fallback_fraction()
@@ -228,6 +238,11 @@ def main() -> int:
                 }
             )
             evaluation_seconds += time.perf_counter() - evaluation_start
+            next_evaluation_launch = launch + _next_evaluation_delay(
+                decision.action,
+                args.evaluation_interval,
+                confirmation_interval,
+            )
     final_evaluation_start = time.perf_counter()
     training.sync_controller_state()
     if args.finalization == "live":
@@ -267,6 +282,7 @@ def main() -> int:
         "evaluation_seconds": evaluation_seconds,
         "training_only_seconds": total_run_seconds - evaluation_seconds,
         "transitions_per_second": args.world_count * 2 * args.launches / total_run_seconds,
+        "seed": args.seed,
         "initial_rates": [args.base_lr, args.base_lr, args.base_lr],
         "finalization": args.finalization,
         "initial_target_update_rate": controller.default_target_update_rate,

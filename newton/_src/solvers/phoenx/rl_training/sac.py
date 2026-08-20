@@ -365,6 +365,37 @@ class TrainerSAC:
         self._obs_sums = wp.empty((self._obs_moment_partial_count, self.obs_dim), dtype=wp.float32, device=self.device)
         self._obs_sums_sq = wp.empty_like(self._obs_sums)
 
+    def _actor_workspace_1d(self, key: str, length: int) -> wp.array[wp.float32]:
+        """Allocate a temporary one-dimensional actor-update buffer."""
+
+        del key
+        return wp.empty(length, dtype=wp.float32, device=self.device)
+
+    def _actor_workspace_2d(self, key: str, rows: int, columns: int) -> wp.array2d[wp.float32]:
+        """Allocate a temporary two-dimensional actor-update buffer."""
+
+        del key
+        return wp.empty((rows, columns), dtype=wp.float32, device=self.device)
+
+    def _sample_actor_for_critic(
+        self,
+        observations: wp.array2d[wp.float32],
+        *,
+        seed: int,
+        seed_counter: wp.array[wp.int32] | None,
+        seed_offset: int,
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
+        """Sample target actions for a critic update."""
+
+        return self.actor.sample(
+            observations,
+            seed=seed,
+            deterministic=False,
+            requires_grad=False,
+            seed_counter=seed_counter,
+            seed_offset=seed_offset,
+        )
+
     @property
     def alpha(self) -> float:
         """Current SAC entropy-temperature value."""
@@ -494,14 +525,26 @@ class TrainerSAC:
             next_obs=self._normalize_observations(batch.next_obs),
         )
 
-    def _concat(self, obs: wp.array, actions: wp.array, *, requires_grad: bool) -> wp.array:
+    def _concat(
+        self,
+        obs: wp.array,
+        actions: wp.array,
+        *,
+        requires_grad: bool,
+        workspace_key: str | None = None,
+    ) -> wp.array:
         batch_size = int(obs.shape[0])
-        out = wp.empty(
-            (batch_size, self.obs_dim + self.action_dim),
-            dtype=wp.float32,
-            device=self.device,
-            requires_grad=requires_grad,
-        )
+        if workspace_key is None:
+            out = wp.empty(
+                (batch_size, self.obs_dim + self.action_dim),
+                dtype=wp.float32,
+                device=self.device,
+                requires_grad=requires_grad,
+            )
+        else:
+            if requires_grad:
+                raise ValueError("cached SAC workspaces do not support automatic gradients")
+            out = self._actor_workspace_2d(workspace_key, batch_size, self.obs_dim + self.action_dim)
         wp.launch(
             concat_obs_action_kernel,
             dim=(batch_size, self.obs_dim + self.action_dim),
@@ -511,15 +554,40 @@ class TrainerSAC:
         )
         return out
 
-    def _concat_rows(self, first: wp.array2d[wp.float32], second: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+    def _concat_rows(
+        self,
+        first: wp.array2d[wp.float32],
+        second: wp.array2d[wp.float32],
+        *,
+        workspace_key: str | None = None,
+    ) -> wp.array2d[wp.float32]:
         if first.shape != second.shape:
             raise ValueError("Row-concatenated arrays must have matching shapes")
-        out = wp.empty((int(first.shape[0]) * 2, int(first.shape[1])), dtype=wp.float32, device=self.device)
+        rows = int(first.shape[0]) * 2
+        columns = int(first.shape[1])
+        out = (
+            wp.empty((rows, columns), dtype=wp.float32, device=self.device)
+            if workspace_key is None
+            else self._actor_workspace_2d(workspace_key, rows, columns)
+        )
         wp.launch(_concat_rows_kernel, dim=out.shape, inputs=[first, second], outputs=[out], device=self.device)
         return out
 
-    def _slice_rows(self, source: wp.array2d[wp.float32], *, offset: int, row_count: int) -> wp.array2d[wp.float32]:
-        out = wp.empty((int(row_count), int(source.shape[1])), dtype=wp.float32, device=self.device)
+    def _slice_rows(
+        self,
+        source: wp.array2d[wp.float32],
+        *,
+        offset: int,
+        row_count: int,
+        workspace_key: str | None = None,
+    ) -> wp.array2d[wp.float32]:
+        rows = int(row_count)
+        columns = int(source.shape[1])
+        out = (
+            wp.empty((rows, columns), dtype=wp.float32, device=self.device)
+            if workspace_key is None
+            else self._actor_workspace_2d(workspace_key, rows, columns)
+        )
         wp.launch(
             _copy_rows_kernel,
             dim=out.shape,
@@ -529,8 +597,22 @@ class TrainerSAC:
         )
         return out
 
-    def _expand_first_row_grad(self, source: wp.array2d[wp.float32], *, total_rows: int) -> wp.array2d[wp.float32]:
-        out = wp.zeros((int(total_rows), int(source.shape[1])), dtype=wp.float32, device=self.device)
+    def _expand_first_row_grad(
+        self,
+        source: wp.array2d[wp.float32],
+        *,
+        total_rows: int,
+        workspace_key: str | None = None,
+    ) -> wp.array2d[wp.float32]:
+        rows = int(total_rows)
+        columns = int(source.shape[1])
+        out = (
+            wp.zeros((rows, columns), dtype=wp.float32, device=self.device)
+            if workspace_key is None
+            else self._actor_workspace_2d(workspace_key, rows, columns)
+        )
+        if workspace_key is not None:
+            out.zero_()
         wp.launch(
             _copy_rows_kernel,
             dim=source.shape,
@@ -548,19 +630,19 @@ class TrainerSAC:
         seed_counter: wp.array[wp.int32] | None = None,
         seed_offset: int = 0,
     ) -> None:
-        next_actions, next_log_probs, _policy_out = self.actor.sample(
+        next_actions, next_log_probs, _policy_out = self._sample_actor_for_critic(
             batch.next_obs,
             seed=seed,
-            deterministic=False,
-            requires_grad=False,
             seed_counter=seed_counter,
             seed_offset=seed_offset,
         )
-        next_q_input = self._concat(batch.next_obs, next_actions, requires_grad=False)
-        q_input = self._concat(batch.obs, batch.actions, requires_grad=False)
+        next_q_input = self._concat(
+            batch.next_obs, next_actions, requires_grad=False, workspace_key="critic_next_q_input"
+        )
+        q_input = self._concat(batch.obs, batch.actions, requires_grad=False, workspace_key="critic_q_input")
         reference_batch_norm = bool(getattr(self.critic1, "reference_batch_norm", False))
         if reference_batch_norm:
-            combined_q_input = self._concat_rows(q_input, next_q_input)
+            combined_q_input = self._concat_rows(q_input, next_q_input, workspace_key="critic_combined_q_input")
             critic_ensemble = getattr(self, "_critic_ensemble", None)
             target_critic_ensemble = getattr(self, "_target_critic_ensemble", None)
             if critic_ensemble is not None and target_critic_ensemble is not None:
@@ -568,15 +650,35 @@ class TrainerSAC:
             else:
                 target_q1_all = self.target_critic1.forward(combined_q_input, requires_grad=False)
                 target_q2_all = self.target_critic2.forward(combined_q_input, requires_grad=False)
-            target_q1 = self._slice_rows(target_q1_all, offset=batch.batch_size, row_count=batch.batch_size)
-            target_q2 = self._slice_rows(target_q2_all, offset=batch.batch_size, row_count=batch.batch_size)
+            target_q1 = self._slice_rows(
+                target_q1_all,
+                offset=batch.batch_size,
+                row_count=batch.batch_size,
+                workspace_key="critic_target_q1",
+            )
+            target_q2 = self._slice_rows(
+                target_q2_all,
+                offset=batch.batch_size,
+                row_count=batch.batch_size,
+                workspace_key="critic_target_q2",
+            )
             if critic_ensemble is not None:
                 q1_all, q2_all = critic_ensemble.forward_manual(combined_q_input, training=True)
             else:
                 q1_all = self.critic1.forward_manual(combined_q_input, training=True)
                 q2_all = self.critic2.forward_manual(combined_q_input, training=True)
-            q1 = self._slice_rows(q1_all, offset=0, row_count=batch.batch_size)
-            q2 = self._slice_rows(q2_all, offset=0, row_count=batch.batch_size)
+            q1 = self._slice_rows(
+                q1_all,
+                offset=0,
+                row_count=batch.batch_size,
+                workspace_key="critic_q1",
+            )
+            q2 = self._slice_rows(
+                q2_all,
+                offset=0,
+                row_count=batch.batch_size,
+                workspace_key="critic_q2",
+            )
         else:
             target_q1 = self.target_critic1.forward(next_q_input, requires_grad=False)
             target_q2 = self.target_critic2.forward(next_q_input, requires_grad=False)
@@ -584,12 +686,12 @@ class TrainerSAC:
             q2 = self.critic2.forward_manual(q_input)
 
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._critic_loss], device=self.device)
-        q1_grad = wp.empty_like(q1)
-        q2_grad = wp.empty_like(q2)
+        q1_grad = self._actor_workspace_2d("critic_q1_grad", batch.batch_size, int(q1.shape[1]))
+        q2_grad = self._actor_workspace_2d("critic_q2_grad", batch.batch_size, int(q2.shape[1]))
         if self.config.distributional_critic:
             atoms = int(self.config.distributional_atoms)
-            target_distribution1 = wp.zeros((batch.batch_size, atoms), dtype=wp.float32, device=self.device)
-            target_distribution2 = wp.zeros_like(target_distribution1)
+            target_distribution1 = self._actor_workspace_2d("critic_target_distribution1", batch.batch_size, atoms)
+            target_distribution2 = self._actor_workspace_2d("critic_target_distribution2", batch.batch_size, atoms)
             projection_kernel = (
                 sac_distributional_min_projection_device_alpha_kernel
                 if self.config.distributional_min_target
@@ -650,7 +752,7 @@ class TrainerSAC:
                     device=self.device,
                 )
         else:
-            targets = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
+            targets = self._actor_workspace_1d("critic_targets", batch.batch_size)
             wp.launch(
                 sac_q_target_device_alpha_kernel,
                 dim=batch.batch_size,
@@ -688,8 +790,12 @@ class TrainerSAC:
             wp.launch(scale_2d_in_place_kernel, dim=q1_grad.shape, inputs=[q1_grad, amp_scale], device=self.device)
             wp.launch(scale_2d_in_place_kernel, dim=q2_grad.shape, inputs=[q2_grad, amp_scale], device=self.device)
         if reference_batch_norm:
-            q1_grad = self._expand_first_row_grad(q1_grad, total_rows=batch.batch_size * 2)
-            q2_grad = self._expand_first_row_grad(q2_grad, total_rows=batch.batch_size * 2)
+            q1_grad = self._expand_first_row_grad(
+                q1_grad, total_rows=batch.batch_size * 2, workspace_key="critic_q1_grad_expanded"
+            )
+            q2_grad = self._expand_first_row_grad(
+                q2_grad, total_rows=batch.batch_size * 2, workspace_key="critic_q2_grad_expanded"
+            )
             if critic_ensemble is not None:
                 critic_ensemble.backward_manual(q1_grad, q2_grad, loss_scale=amp_scale, found_inf=found_inf)
             else:
@@ -716,6 +822,18 @@ class TrainerSAC:
                 device=self.device,
             )
 
+    def _forward_reference_actor_update(self, observations: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+        return self.actor.net.forward_manual(observations, training=True)
+
+    def _backward_reference_actor_update(
+        self,
+        output_grad: wp.array2d[wp.float32],
+        *,
+        loss_scale: wp.array[wp.float32] | None,
+        found_inf: wp.array[wp.int32] | None,
+    ) -> None:
+        self.actor.net.backward_manual(output_grad, loss_scale=loss_scale, found_inf=found_inf)
+
     def _update_actor(
         self,
         batch: BatchSAC,
@@ -726,14 +844,16 @@ class TrainerSAC:
     ) -> None:
         reference_batch_norm = bool(getattr(self.actor.net, "reference_batch_norm", False))
         if reference_batch_norm:
-            actor_observations = self._concat_rows(batch.obs, batch.next_obs)
-            policy_out_all = self.actor.net.forward_manual(actor_observations, training=True)
-            policy_out = self._slice_rows(policy_out_all, offset=0, row_count=batch.batch_size)
+            actor_observations = self._concat_rows(batch.obs, batch.next_obs, workspace_key="actor_observations")
+            policy_out_all = self._forward_reference_actor_update(actor_observations)
+            policy_out = self._slice_rows(
+                policy_out_all, offset=0, row_count=batch.batch_size, workspace_key="actor_policy_out"
+            )
         else:
             policy_out = self.actor.net.forward_manual(batch.obs)
-        actions = wp.empty((batch.batch_size, self.action_dim), dtype=wp.float32, device=self.device)
-        log_probs = wp.empty(batch.batch_size, dtype=wp.float32, device=self.device)
-        eps = wp.empty((batch.batch_size, self.action_dim), dtype=wp.float32, device=self.device)
+        actions = self._actor_workspace_2d("actor_actions", batch.batch_size, self.action_dim)
+        log_probs = self._actor_workspace_1d("actor_log_probs", batch.batch_size)
+        eps = self._actor_workspace_2d("actor_eps", batch.batch_size, self.action_dim)
         if seed_counter is None:
             wp.launch(fill_eps_kernel, dim=eps.shape, inputs=[int(seed)], outputs=[eps], device=self.device)
         else:
@@ -763,7 +883,7 @@ class TrainerSAC:
         )
         self._actor_update_log_probs = log_probs
 
-        q_input = self._concat(batch.obs, actions, requires_grad=False)
+        q_input = self._concat(batch.obs, actions, requires_grad=False, workspace_key="actor_q_input")
         if reference_batch_norm:
             critic_ensemble = getattr(self, "_critic_ensemble", None)
             if critic_ensemble is not None:
@@ -774,12 +894,12 @@ class TrainerSAC:
         else:
             q1 = self.critic1.forward_manual(q_input)
             q2 = self.critic2.forward_manual(q_input)
-        q1_grad = wp.empty_like(q1)
-        q2_grad = wp.empty_like(q2)
+        q1_grad = self._actor_workspace_2d("actor_q1_grad", batch.batch_size, int(q1.shape[1]))
+        q2_grad = self._actor_workspace_2d("actor_q2_grad", batch.batch_size, int(q2.shape[1]))
         if self.config.distributional_critic:
             atoms = int(self.config.distributional_atoms)
-            q1_value = wp.empty((batch.batch_size, 1), dtype=wp.float32, device=self.device)
-            q2_value = wp.empty_like(q1_value)
+            q1_value = self._actor_workspace_2d("actor_q1_value", batch.batch_size, 1)
+            q2_value = self._actor_workspace_2d("actor_q2_value", batch.batch_size, 1)
             for logits, values in ((q1, q1_value), (q2, q2_value)):
                 wp.launch(
                     sac_distributional_q_value_kernel,
@@ -826,8 +946,8 @@ class TrainerSAC:
             wp.launch(amp_reset_found_inf_kernel, dim=1, outputs=[found_inf], device=self.device)
             wp.launch(scale_2d_in_place_kernel, dim=q1_grad.shape, inputs=[q1_grad, amp_scale], device=self.device)
             wp.launch(scale_2d_in_place_kernel, dim=q2_grad.shape, inputs=[q2_grad, amp_scale], device=self.device)
-        q_input_grad1 = wp.empty_like(q_input)
-        q_input_grad2 = wp.empty_like(q_input)
+        q_input_grad1 = self._actor_workspace_2d("actor_q_input_grad1", batch.batch_size, int(q_input.shape[1]))
+        q_input_grad2 = self._actor_workspace_2d("actor_q_input_grad2", batch.batch_size, int(q_input.shape[1]))
         if reference_batch_norm and critic_ensemble is not None:
             critic_ensemble.backward_manual(
                 q1_grad,
@@ -844,7 +964,7 @@ class TrainerSAC:
         self.critic2_optimizer.zero_grad()
 
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._actor_loss], device=self.device)
-        policy_out_grad = wp.empty_like(policy_out)
+        policy_out_grad = self._actor_workspace_2d("actor_policy_out_grad", batch.batch_size, int(policy_out.shape[1]))
         wp.launch(
             sac_actor_policy_backward_device_alpha_kernel,
             dim=batch.batch_size,
@@ -869,9 +989,11 @@ class TrainerSAC:
             device=self.device,
         )
         if reference_batch_norm:
-            policy_out_grad = self._expand_first_row_grad(policy_out_grad, total_rows=batch.batch_size * 2)
+            policy_out_grad = self._expand_first_row_grad(
+                policy_out_grad, total_rows=batch.batch_size * 2, workspace_key="actor_policy_out_grad_expanded"
+            )
         if reference_batch_norm:
-            self.actor.net.backward_manual(policy_out_grad, loss_scale=amp_scale, found_inf=found_inf)
+            self._backward_reference_actor_update(policy_out_grad, loss_scale=amp_scale, found_inf=found_inf)
         else:
             self.actor.net.backward_manual(policy_out_grad)
         if amp_scale is not None:

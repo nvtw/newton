@@ -2449,6 +2449,14 @@ class EnsembleNetworkFlashSAC:
         for w1, w2 in self.block_weights:
             self.weights.extend((w1, w2))
         self.weights.extend(self.head_weights)
+        self._workspace_cache: dict[
+            int,
+            tuple[
+                dict[str, object],
+                dict[int, _PopulationBatchNormScratch],
+                dict[int, wp.array2d[Any]],
+            ],
+        ] = {}
         self._fp16_weights: dict[int, wp.array3d[wp.float16]] = {}
         self._fp16_inputs_2d: dict[tuple[int, tuple[int, ...]], wp.array2d[wp.float16]] = {}
         self._fp16_inputs_3d: dict[tuple[int, tuple[int, ...]], wp.array3d[wp.float16]] = {}
@@ -2495,7 +2503,10 @@ class EnsembleNetworkFlashSAC:
         rows = int(batch_size)
         if rows <= 0:
             raise ValueError("batch_size must be positive")
-        if rows == self._workspace_rows:
+        cached = self._workspace_cache.get(rows)
+        if cached is not None:
+            self._workspace, self._population_norm_scratch, self._population_flat_views = cached
+            self._workspace_rows = rows
             return
         count = self.ensemble_count
         blocks: list[tuple[wp.array3d[Any], ...]] = []
@@ -2589,6 +2600,11 @@ class EnsembleNetworkFlashSAC:
                 mirror_sources.extend((activated1, hidden))
             for source in mirror_sources:
                 self._contraction_input(source, refresh=False)
+        self._workspace_cache[rows] = (
+            self._workspace,
+            dict(self._population_norm_scratch),
+            dict(self._population_flat_views),
+        )
         self._workspace_rows = rows
         self.refresh_contraction_weights()
 

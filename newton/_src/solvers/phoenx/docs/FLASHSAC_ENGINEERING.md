@@ -381,8 +381,10 @@ target-network update rates and applies deterministic bounded log-space
 proposals. It first probes linked learning rates, then explores each learning
 rate and the target EMA rate as separate coordinates. Both members consume the
 same sampled batch, so paired differences are not replay-sampling noise. Search
-uses 10 percent of rollout worlds for the challenger and 90 percent for the
-champion, with all storage allocated before capture.
+uses champion-only rollout by default, so a rejected challenger cannot change
+the collected experience. Both learners still train on the same champion replay.
+An opt-in split-rollout mode can assign a bounded fraction of worlds to the
+challenger; all routing and guard storage is allocated before capture.
 
 The target EMA rate is setup-owned device state rather than a literal embedded
 in captured graph nodes. Scalar and population updates therefore change it
@@ -396,8 +398,18 @@ A device-side per-world guard evaluates champion and challenger actions using
 the same exploration seed. Challenger actions are used only when both policies
 are finite and their RMS and maximum action differences stay within configured
 bounds; otherwise the champion action is routed and the fallback is counted.
-This protects shared replay from an immature challenger without adding host
-synchronization to the steady-state captured path.
+This protects split-rollout replay from an immature challenger without adding
+host synchronization to the steady-state captured path. Champion-only rollout
+omits the challenger actor and guard kernels entirely.
+
+In split mode, safe challenger transitions remain useful because both learners
+train from the same mixed replay. In either mode, rejected parameters, gradients,
+and optimizer moments are never blended into the champion. After search
+stagnates, training switches to the preallocated P1 graph at full throughput.
+Sparse held-out monitoring runs at four times the search evaluation interval and
+reopens the already-captured P2 graphs only after four stagnant windows. Reopening
+clones the current P1 state into both members and continues the bounded local
+search without graph recapture or steady-state allocation.
 
 Paired policy evaluation runs in isolated held-out G1 environments with identical
 commands, seeds, and reset state. The device objective multiplies upright/alive
@@ -430,6 +442,75 @@ This supports the narrow claim that bounded coordinate search discovered a
 useful temperature-rate improvement while preserving learning from a safe
 default. It does not establish a global optimum or show that this run discovered
 the separately validated linked 7.5e-4 G1 recipe.
+
+Two additional deterministic discovery seeds passed the same restored-best
+tracking, aligned-velocity, finite-state, and zero-fall gates. Seed 1 confirmed
+a target EMA rate of 0.0103754 and finished at objective 0.871375 and 0.837069
+m/s. Seed 2 retained the original rates and target EMA rate because no challenger
+earned repeated evidence; it finished at objective 0.866786 and 0.872434 m/s.
+Together with seed 0, this gives three successful safe-default runs in which the
+controller respectively changed temperature LR, changed target EMA rate, or
+correctly retained the defaults. Exact seed-1 and seed-2 JSON records are stored
+under `/tmp/phoenx_flash_sac_autotune_g1_seed{1,2}.json`.
+
+### Ant cross-task and scale evidence
+
+The Ant benchmark uses the same captured FlashSAC and automatic-search
+interfaces with the PhoenX reduced-coordinate solver and the ``mraksha`` task
+profile. A deterministic held-out gate requires mean forward velocity of at
+least 0.4 m/s, finite state, and at most six percent terminations for two
+consecutive windows. Replay warmup and graph compilation are excluded from
+training wall time.
+
+At 2,048 worlds, fixed FlashSAC passed three seeds in 27.975, 31.164, and 27.921
+seconds of training wall time. Champion-only automatic search passed the same
+three seeds in 26.814, 36.432, and 31.502 seconds. Search promoted a useful linked
+6e-4 rate for seed 0, while seeds 1 and 2 safely retained 3e-4. This validates
+cross-task safety but does not yet make active search wall-optimal: its median
+training wall is 12.6 percent higher than fixed training.
+
+The reduced-coordinate world-count sweep measured 169k, 318k, 447k, 560k, and
+874k transitions/s at 1,024, 2,048, 3,072, 4,096, and 8,192 worlds. Raw
+throughput alone was misleading. Three-seed wall-to-quality medians were 27.975
+seconds at 2,048 worlds, 26.589 seconds at 3,072 worlds, and 28.488 seconds at
+4,096 worlds. The 3,072-world point therefore improves median training wall by
+5.0 percent over 2,048 while preserving three-of-three success. At 4,096 worlds,
+maximal coordinates measured only 259k transitions/s versus 560k for reduced
+coordinates, so maximal mode was rejected without a quality run.
+
+Nsight Systems reports for fixed and active-search Ant at 2,048 reduced worlds
+are stored at `/tmp/ant_flash_p{1,2}_reduced_2048.nsys-rep`. The reduced contact
+solve is the largest fixed-mode kernel family at 15 percent, followed by contact
+gather at 4.2 percent. Active search shifts the balance toward learner kernels;
+ReLU gradients, BatchNorm input gradients, inverse standard deviations, moments,
+transposes, and GEMMs dominate after the contact solve. Retained optimizations
+must benefit shared FlashSAC or PhoenX kernels rather than Ant-specific logic.
+
+### Allocation-stable production graphs
+
+Every data-bearing FlashSAC learner temporary is setup-owned before CUDA graph
+capture. This includes actor sampling noise/actions/log probabilities, critic
+inputs and concatenated rows, distributional targets, sliced logits, output
+gradients, expanded BatchNorm gradients, population workspaces, FP16 mirrors,
+and optimizer/scaler state. Population network workspaces are cached by row
+count so B and 2B paths reuse fixed addresses without overwriting each other's
+capture bindings.
+
+cuBLAS uses deterministic atomics-disabled handles and a 32 MiB setup-owned
+workspace for each concurrently executable CUDA stream. Reserving scratch by
+stream is required: rollout, two P2 learners, converged P1, and preparation can
+overlap, so a device-global scratch pointer would alias live contractions.
+Captured graph handles own cloned fixed-address trainers; controller state is
+copied into those owners at promotion or P2-to-P1 convergence rather than
+recapturing or rebinding arrays.
+
+The production 2,048-world capture audit reports no learner-side allocation.
+The only remaining capture-time allocation calls are zero-length placeholders
+in broad phase and contact ingestion. Cached full-G1 medians measured 339.0k
+transitions/s for normal P1, 213.4k for parallel P2 search, and 329.4k after the
+8.9 ms fixed-address convergence switch. The P2 phase therefore trains two
+independent learners at about 1.59 times P1 wall cost and returns to 97 percent
+of the ordinary P1 throughput after convergence.
 
 ## Reproducible quality evidence
 

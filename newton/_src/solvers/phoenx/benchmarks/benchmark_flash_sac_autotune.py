@@ -199,6 +199,7 @@ def main() -> int:
     switch_start = time.perf_counter()
     controller._converge_to_single()
     graph.synchronize()
+    graph.sync_from_controller_state()
     result["autotune_convergence_switch_seconds"] = time.perf_counter() - switch_start
     result["autotune_converged_p1"] = _median_throughput(
         graph,
@@ -208,7 +209,21 @@ def main() -> int:
         trials=args.trials,
         launches=args.launches,
     )
+    reopen_start = time.perf_counter()
+    graph.reopen_search()
+    result["autotune_reopen_switch_seconds"] = time.perf_counter() - reopen_start
+    result["autotune_reopened_p2"] = _median_throughput(
+        graph,
+        device,
+        worlds=worlds,
+        warmups=args.warmups,
+        trials=args.trials,
+        launches=args.launches,
+    )
     graph.close()
+    del graph, controller, trainers, replay, env, batch
+    gc.collect()
+    wp.synchronize_device(device)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

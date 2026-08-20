@@ -10,13 +10,17 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import warp as wp
 
+from .cublas import release_cublas_workspace, reserve_cublas_workspace
+from .env import EnvRL
 from .flash_sac_networks import EnsembleNetworkFlashSAC, NetworkFlashSAC
 from .kernels import (
+    fill_eps_kernel,
+    fill_eps_seed_counter_kernel,
     flash_sac_graph_n_step_finalize_kernel,
     flash_sac_graph_n_step_store_kernel,
     flash_sac_graph_replay_sample_kernel,
@@ -25,6 +29,7 @@ from .kernels import (
     flash_sac_return_stats_kernel,
     flash_sac_update_return_normalizer_kernel,
     sac_refresh_alpha_kernel,
+    sample_gaussian_actions_kernel,
     seed_counter_increment_kernel,
     zero_scalar_kernel,
 )
@@ -42,6 +47,7 @@ def _capture_flash_stream_graph(stream: wp.Stream, device: wp.context.Device, wo
     """Capture one workload on a dedicated stream after the main stream."""
 
     main_stream = wp.get_stream(device)
+    reserve_cublas_workspace(device, stream)
     with wp.ScopedStream(stream, sync_enter=False, sync_exit=False):
         wp.wait_stream(main_stream)
         with wp.ScopedCapture(device=device, stream=stream) as capture:
@@ -96,7 +102,7 @@ def _prepare_flash_sac_graph_update_kernel(
     gradient_update_count: wp.array[wp.int32],
     update_count: wp.array[wp.int32],
     seed_base: wp.int32,
-    policy_frequency: wp.int32,
+    include_actor: wp.int32,
     warmup_steps: wp.int32,
     decay_steps: wp.int32,
     peak_lr: wp.float32,
@@ -113,8 +119,8 @@ def _prepare_flash_sac_graph_update_kernel(
     alpha_lr_scale: wp.array[wp.float32],
 ):
     step = gradient_update_count[0]
-    actor_condition[0] = wp.int32(step % policy_frequency == 0)
-    actor_skip_condition[0] = wp.int32(step % policy_frequency != 0)
+    actor_condition[0] = include_actor
+    actor_skip_condition[0] = wp.int32(include_actor == 0)
     seed64 = wp.int64(seed_base) + wp.int64(update_count[0]) * wp.int64(9973)
     update_seed[0] = wp.int32(seed64 % wp.int64(2147483647))
     lr = peak_lr
@@ -129,6 +135,18 @@ def _prepare_flash_sac_graph_update_kernel(
     critic1_lr_scale[0] = lr / critic_base_lr
     critic2_lr_scale[0] = lr / critic_base_lr
     alpha_lr_scale[0] = lr / alpha_base_lr
+
+
+@wp.kernel
+def _set_flash_sac_actor_condition_kernel(
+    gradient_update_count: wp.array[wp.int32],
+    policy_frequency: wp.array[wp.int32],
+    actor_condition: wp.array[wp.int32],
+    actor_skip_condition: wp.array[wp.int32],
+):
+    include_actor = gradient_update_count[0] % policy_frequency[0] == 0
+    actor_condition[0] = wp.int32(include_actor)
+    actor_skip_condition[0] = wp.int32(1) - wp.int32(include_actor)
 
 
 @wp.kernel
@@ -153,7 +171,7 @@ def _prepare_flash_sac_exploration_kernel(
     repeat_count[0] = repeat_count[0] + 1
 
 
-class EnvFlashSAC(Protocol):
+class EnvFlashSAC(EnvRL, Protocol):
     """Vectorized environment interface consumed by :func:`train_flash_sac`."""
 
     world_count: int
@@ -782,6 +800,8 @@ class TrainerFlashSAC(TrainerSAC):
             device=device,
             seed=seed,
         )
+        self._actor_update_workspace: dict[tuple[str, tuple[int, ...]], wp.array[Any]] = {}
+        self._actor_training_ensemble: EnsembleNetworkFlashSAC | None = None
         if reference_backbone:
             flash_config.normalize_observations = False
             self.actor.net = NetworkFlashSAC(
@@ -812,10 +832,13 @@ class TrainerFlashSAC(TrainerSAC):
             self.target_critic1.copy_from(self.critic1)
             self.target_critic2.copy_from(self.critic2)
             self._critic_ensemble = EnsembleNetworkFlashSAC(self.critic1, self.critic2)
+            self._actor_training_ensemble = EnsembleNetworkFlashSAC(self.actor.net)
             self._target_critic_ensemble = EnsembleNetworkFlashSAC(self.target_critic1, self.target_critic2)
             self.actor_optimizer = Adam(self.actor.parameters(), lr=flash_config.actor_lr)
             self.critic1_optimizer = Adam(self.critic1.parameters(), lr=flash_config.critic_lr)
             self.critic2_optimizer = Adam(self.critic2.parameters(), lr=flash_config.critic_lr)
+            if flash_config.use_amp:
+                self.actor.net.refresh_contraction_weights()
         self.config = flash_config
         self._replay_buffer: BufferReplayFlashSAC | None = None
         if flash_config.target_entropy is None:
@@ -837,6 +860,9 @@ class TrainerFlashSAC(TrainerSAC):
         self._device_update_count = wp.array([0], dtype=wp.int32, device=self.device)
         self._device_gradient_update_count = wp.array([0], dtype=wp.int32, device=self.device)
         self._device_update_seed = wp.array([int(seed)], dtype=wp.int32, device=self.device)
+        self._device_policy_frequency = wp.array(
+            [int(flash_config.policy_frequency)], dtype=wp.int32, device=self.device
+        )
         self._device_target_update_rate = wp.array([float(flash_config.tau)], dtype=wp.float32, device=self.device)
         initial_amp_scale = 65536.0 if flash_config.use_amp else 1.0
         self._amp_scale = wp.array([initial_amp_scale], dtype=wp.float32, device=self.device)
@@ -856,7 +882,7 @@ class TrainerFlashSAC(TrainerSAC):
             self.target_critic1.copy_from(self.critic1)
             self.target_critic2.copy_from(self.critic2)
             if self.config.use_amp:
-                self.actor.net.refresh_contraction_weights()
+                self._refresh_actor_contraction_weights()
                 self._critic_ensemble.refresh_contraction_weights()
                 self._target_critic_ensemble.refresh_contraction_weights()
 
@@ -899,6 +925,23 @@ class TrainerFlashSAC(TrainerSAC):
             raise ValueError("PBT target update rate must be finite, greater than zero and at most one")
         self._device_target_update_rate.assign(np.asarray([rate], dtype=np.float32))
 
+    def set_pbt_policy_frequency(self, policy_frequency: int) -> None:
+        """Set the graph-safe delayed-policy update frequency.
+
+        Captured conditional update graphs read this device-resident value on
+        every replay, so changing the cadence does not recapture kernels or
+        replace fixed-address workspaces.
+
+        Args:
+            policy_frequency: Number of critic updates per actor update.
+        """
+
+        frequency = int(policy_frequency)
+        if frequency <= 0:
+            raise ValueError("PBT policy frequency must be positive")
+        self._device_policy_frequency.assign(np.asarray([frequency], dtype=np.int32))
+        self.config.policy_frequency = frequency
+
     def copy_training_state_from(self, source: TrainerFlashSAC) -> None:
         """Copy complete learner state without replacing owned allocations.
 
@@ -918,7 +961,7 @@ class TrainerFlashSAC(TrainerSAC):
             return
         if self.device != source.device or self.obs_dim != source.obs_dim or self.action_dim != source.action_dim:
             raise ValueError("FlashSAC trainer devices and dimensions must match")
-        tunable = {"actor_lr", "critic_lr", "alpha_lr", "tau"}
+        tunable = {"actor_lr", "critic_lr", "alpha_lr", "tau", "policy_frequency"}
         for config_field in fields(ConfigFlashSAC):
             if config_field.name not in tunable and getattr(self.config, config_field.name) != getattr(
                 source.config, config_field.name
@@ -945,6 +988,7 @@ class TrainerFlashSAC(TrainerSAC):
             (self._device_update_count, source._device_update_count),
             (self._device_gradient_update_count, source._device_gradient_update_count),
             (self._device_update_seed, source._device_update_seed),
+            (self._device_policy_frequency, source._device_policy_frequency),
             (self._device_noise_repeat_count, source._device_noise_repeat_count),
             (self._device_target_update_rate, source._device_target_update_rate),
             (self._device_noise_repeat_steps, source._device_noise_repeat_steps),
@@ -967,12 +1011,13 @@ class TrainerFlashSAC(TrainerSAC):
             _copy_optimizer_state(destination, donor)
         self._update_count = source._update_count
         self._gradient_update_count = source._gradient_update_count
+        self.config.policy_frequency = int(source.config.policy_frequency)
         self._noise_repeat_count = source._noise_repeat_count
         self._noise_repeat_steps = source._noise_repeat_steps
         self._exploration_seed = source._exploration_seed
         self._noise_rng.bit_generator.state = json.loads(json.dumps(source._noise_rng.bit_generator.state))
         if isinstance(self.actor.net, NetworkFlashSAC):
-            self.actor.net.refresh_contraction_weights()
+            self._refresh_actor_contraction_weights()
             if self._critic_ensemble is None:
                 self.critic1.refresh_contraction_weights()
                 self.critic2.refresh_contraction_weights()
@@ -1139,6 +1184,7 @@ class TrainerFlashSAC(TrainerSAC):
             "obs_count": self._obs_count.numpy(),
             "amp_scale": self._amp_scale.numpy(),
             "amp_growth_tracker": self._amp_growth_tracker.numpy(),
+            "device_policy_frequency": self._device_policy_frequency.numpy(),
             "device_target_update_rate": self._device_target_update_rate.numpy(),
         }
         for key, value in asdict(self.config).items():
@@ -1230,6 +1276,11 @@ class TrainerFlashSAC(TrainerSAC):
             if "amp_scale" in data:
                 trainer._amp_scale.assign(data["amp_scale"])
                 trainer._amp_growth_tracker.assign(data["amp_growth_tracker"])
+            if "device_policy_frequency" in data:
+                trainer._device_policy_frequency.assign(data["device_policy_frequency"])
+                trainer.config.policy_frequency = int(data["device_policy_frequency"][0])
+            else:
+                trainer.set_pbt_policy_frequency(saved_config.policy_frequency)
             if "device_target_update_rate" in data:
                 trainer._device_target_update_rate.assign(data["device_target_update_rate"])
             else:
@@ -1252,7 +1303,7 @@ class TrainerFlashSAC(TrainerSAC):
             ):
                 _unpack_optimizer(data, prefix, optimizer)
             if reference_backbone:
-                trainer.actor.net.refresh_contraction_weights()
+                trainer._refresh_actor_contraction_weights()
                 trainer._critic_ensemble.refresh_contraction_weights()
                 trainer._target_critic_ensemble.refresh_contraction_weights()
             return trainer
@@ -1263,8 +1314,9 @@ class TrainerFlashSAC(TrainerSAC):
         *,
         include_actor: bool,
         seed_base: int,
+        conditional_actor: bool = False,
     ) -> None:
-        """Record one allocation-stable learner update into an active capture."""
+        """Record one fixed- or device-selected-cadence update into an active capture."""
 
         wp.launch(
             _prepare_flash_sac_graph_update_kernel,
@@ -1273,7 +1325,7 @@ class TrainerFlashSAC(TrainerSAC):
                 self._device_gradient_update_count,
                 self._device_update_count,
                 int(seed_base),
-                int(self.config.policy_frequency),
+                int(include_actor),
                 int(self.config.learning_rate_warmup_steps),
                 int(self.config.learning_rate_decay_steps),
                 float(self.config.actor_lr),
@@ -1295,10 +1347,23 @@ class TrainerFlashSAC(TrainerSAC):
         )
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._actor_loss], device=self.device)
         wp.launch(zero_scalar_kernel, dim=1, outputs=[self._alpha_loss], device=self.device)
-        if include_actor:
+
+        def update_actor() -> None:
             self._update_actor(batch, seed=0, seed_counter=self._device_update_seed, seed_offset=0)
             if self.config.auto_alpha:
                 self._update_alpha(batch, seed=0)
+
+        if conditional_actor:
+            wp.launch(
+                _set_flash_sac_actor_condition_kernel,
+                dim=1,
+                inputs=[self._device_gradient_update_count, self._device_policy_frequency],
+                outputs=[self._device_actor_condition, self._device_actor_skip_condition],
+                device=self.device,
+            )
+            wp.capture_if(self._device_actor_condition, on_true=update_actor)
+        elif include_actor:
+            update_actor()
         self._update_critics(
             batch,
             seed=0,
@@ -1349,6 +1414,7 @@ class TrainerFlashSAC(TrainerSAC):
         if min(self.config.actor_lr, self.config.critic_lr, self.config.alpha_lr) <= 0.0:
             raise ValueError("FlashSAC update graph capture requires positive optimizer learning rates")
 
+        self.reserve_update_buffers(int(batch.obs.shape[0]))
         training_rows = int(batch.obs.shape[0]) * 2
         if isinstance(self.actor.net, NetworkFlashSAC):
             self.actor.net.reserve_training_buffers(training_rows)
@@ -1433,6 +1499,7 @@ class TrainerFlashSAC(TrainerSAC):
             raise RuntimeError("warm replay eagerly before capturing steady-state training")
 
         replay.reserve_graph_buffers(env.world_count)
+        self.reserve_update_buffers(int(replay.batch_size))
         self.reserve_buffers(env.world_count)
         training_rows = int(replay.batch_size) * 2
         if isinstance(self.actor.net, NetworkFlashSAC):
@@ -1649,6 +1716,155 @@ class TrainerFlashSAC(TrainerSAC):
         )
         return self._device_exploration_seed
 
+    def _forward_reference_actor_update(self, observations: wp.array2d[wp.float32]) -> wp.array2d[wp.float32]:
+        if self._actor_training_ensemble is None:
+            return super()._forward_reference_actor_update(observations)
+        return self._actor_training_ensemble.forward_all_manual(observations, training=True)[0]
+
+    def _backward_reference_actor_update(
+        self,
+        output_grad: wp.array2d[wp.float32],
+        *,
+        loss_scale: wp.array[wp.float32] | None,
+        found_inf: wp.array[wp.int32] | None,
+    ) -> None:
+        if self._actor_training_ensemble is None:
+            super()._backward_reference_actor_update(output_grad, loss_scale=loss_scale, found_inf=found_inf)
+            return
+        self._actor_training_ensemble.backward_all_manual(
+            output_grad.reshape((1, int(output_grad.shape[0]), int(output_grad.shape[1]))),
+            loss_scale=loss_scale,
+            found_inf=found_inf,
+        )
+
+    def _refresh_actor_contraction_weights(self) -> None:
+        self.actor.net.refresh_contraction_weights()
+        if self._actor_training_ensemble is not None:
+            self._actor_training_ensemble.refresh_contraction_weights()
+
+    def _actor_workspace(self, key: str, shape: tuple[int, ...]) -> wp.array[Any]:
+        cache_key = (key, shape)
+        workspace = self._actor_update_workspace.get(cache_key)
+        if workspace is None:
+            workspace = wp.empty(shape, dtype=wp.float32, device=self.device)
+            self._actor_update_workspace[cache_key] = workspace
+        return workspace
+
+    def _actor_workspace_1d(self, key: str, length: int) -> wp.array[wp.float32]:
+        return self._actor_workspace(key, (int(length),))
+
+    def _actor_workspace_2d(self, key: str, rows: int, columns: int) -> wp.array2d[wp.float32]:
+        return self._actor_workspace(key, (int(rows), int(columns)))
+
+    def _sample_actor_for_critic(
+        self,
+        observations: wp.array2d[wp.float32],
+        *,
+        seed: int,
+        seed_counter: wp.array[wp.int32] | None,
+        seed_offset: int,
+    ) -> tuple[wp.array2d[wp.float32], wp.array[wp.float32], wp.array2d[wp.float32]]:
+        if self._actor_training_ensemble is None:
+            return super()._sample_actor_for_critic(
+                observations,
+                seed=seed,
+                seed_counter=seed_counter,
+                seed_offset=seed_offset,
+            )
+        rows = int(observations.shape[0])
+        policy_out = self._actor_training_ensemble.forward_all(
+            observations,
+            training=self.actor.net.default_training,
+        )[0]
+        actions = self._actor_workspace_2d("critic_next_actions", rows, self.action_dim)
+        log_probs = self._actor_workspace_1d("critic_next_log_probs", rows)
+        eps = self._actor_workspace_2d("critic_next_eps", rows, self.action_dim)
+        if seed_counter is None:
+            wp.launch(fill_eps_kernel, dim=eps.shape, inputs=[int(seed)], outputs=[eps], device=self.device)
+        else:
+            wp.launch(
+                fill_eps_seed_counter_kernel,
+                dim=eps.shape,
+                inputs=[seed_counter, int(seed_offset)],
+                outputs=[eps],
+                device=self.device,
+            )
+        wp.launch(
+            sample_gaussian_actions_kernel,
+            dim=rows,
+            inputs=[
+                policy_out,
+                self.actor.log_std,
+                eps,
+                self.action_dim,
+                int(self.actor.state_dependent_std),
+                int(self.actor.squash),
+                0,
+                self.actor.log_std_min,
+                self.actor.log_std_max,
+            ],
+            outputs=[actions, log_probs],
+            device=self.device,
+        )
+        return actions, log_probs, policy_out
+
+    def reserve_update_buffers(self, batch_size: int) -> None:
+        """Reserve all update temporaries before CUDA graph capture."""
+
+        rows = int(batch_size)
+        if rows <= 0:
+            raise ValueError("batch_size must be positive")
+        actor_output = int(self.actor.net.layer_sizes[-1])
+        critic_output = int(self.critic1.layer_sizes[-1])
+        q_input = self.obs_dim + self.action_dim
+        self._actor_workspace_2d("actor_observations", rows * 2, self.obs_dim)
+        self._actor_workspace_2d("actor_policy_out", rows, actor_output)
+        self._actor_workspace_2d("actor_actions", rows, self.action_dim)
+        self._actor_workspace_1d("actor_log_probs", rows)
+        self._actor_workspace_2d("actor_eps", rows, self.action_dim)
+        self._actor_workspace_2d("actor_q_input", rows, q_input)
+        self._actor_workspace_2d("actor_q1_grad", rows, critic_output)
+        self._actor_workspace_2d("actor_q2_grad", rows, critic_output)
+        self._actor_workspace_2d("actor_q1_value", rows, 1)
+        self._actor_workspace_2d("actor_q2_value", rows, 1)
+        self._actor_workspace_2d("actor_q_input_grad1", rows, q_input)
+        self._actor_workspace_2d("actor_q_input_grad2", rows, q_input)
+        self._actor_workspace_2d("actor_policy_out_grad", rows, actor_output)
+        self._actor_workspace_2d("actor_policy_out_grad_expanded", rows * 2, actor_output)
+        self._actor_workspace_2d("critic_next_actions", rows, self.action_dim)
+        self._actor_workspace_1d("critic_next_log_probs", rows)
+        self._actor_workspace_2d("critic_next_eps", rows, self.action_dim)
+        self._actor_workspace_2d("critic_next_q_input", rows, q_input)
+        self._actor_workspace_2d("critic_q_input", rows, q_input)
+        self._actor_workspace_2d("critic_combined_q_input", rows * 2, q_input)
+        self._actor_workspace_2d("critic_target_q1", rows, critic_output)
+        self._actor_workspace_2d("critic_target_q2", rows, critic_output)
+        self._actor_workspace_2d("critic_q1", rows, critic_output)
+        self._actor_workspace_2d("critic_q2", rows, critic_output)
+        self._actor_workspace_2d("critic_q1_grad", rows, critic_output)
+        self._actor_workspace_2d("critic_q2_grad", rows, critic_output)
+        self._actor_workspace_2d("critic_q1_grad_expanded", rows * 2, critic_output)
+        self._actor_workspace_2d("critic_q2_grad_expanded", rows * 2, critic_output)
+        self._actor_workspace_1d("critic_targets", rows)
+        if self.config.distributional_critic:
+            atoms = int(self.config.distributional_atoms)
+            self._actor_workspace_2d("critic_target_distribution1", rows, atoms)
+            self._actor_workspace_2d("critic_target_distribution2", rows, atoms)
+        if self._actor_training_ensemble is not None:
+            self._actor_training_ensemble.reserve_buffers(rows)
+            self._actor_training_ensemble.reserve_buffers(rows * 2)
+        if self._critic_ensemble is not None:
+            self._critic_ensemble.reserve_buffers(rows)
+            self._critic_ensemble.reserve_buffers(rows * 2)
+        if self._target_critic_ensemble is not None:
+            self._target_critic_ensemble.reserve_buffers(rows * 2)
+        training_rows = rows * 2
+        if isinstance(self.actor.net, NetworkFlashSAC):
+            self.actor.net.reserve_training_buffers(training_rows)
+        for network in (self.critic1, self.critic2, self.target_critic1, self.target_critic2):
+            if isinstance(network, NetworkFlashSAC):
+                network.reserve_training_buffers(training_rows)
+
     def reserve_buffers(self, batch_size: int) -> None:
         """Reserve graph-replay-safe interaction buffers for a fixed batch size."""
 
@@ -1815,7 +2031,7 @@ class TrainerFlashSAC(TrainerSAC):
         self.critic1.normalize_weights()
         self.critic2.normalize_weights()
         if self.config.use_amp:
-            self.actor.net.refresh_contraction_weights()
+            self._refresh_actor_contraction_weights()
             self._critic_ensemble.refresh_contraction_weights()
 
     def _update_actor(
@@ -1830,7 +2046,7 @@ class TrainerFlashSAC(TrainerSAC):
         if self.config.normalize_weights:
             self.actor.normalize_weights()
         if self.config.use_amp:
-            self.actor.net.refresh_contraction_weights()
+            self._refresh_actor_contraction_weights()
 
     def _update_critics(
         self,
@@ -1891,10 +2107,14 @@ class GraphFlashSACTraining:
             return
         self.synchronize()
         self.graph = None
+        streams = (self.rollout_stream, self.update_stream, self.prepare_stream)
         self.rollout_graph = None
         self.update_graphs = None
         self.prepare_graphs = None
         self.rollout_stream = None
+        for stream in streams:
+            if stream is not None:
+                release_cublas_workspace(self.trainer.device, stream)
         self.update_stream = None
         self.prepare_stream = None
         self.rollout_actor = None

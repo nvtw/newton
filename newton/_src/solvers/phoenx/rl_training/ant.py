@@ -15,6 +15,7 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -23,6 +24,7 @@ import newton
 import newton.examples
 
 from .env import collect_ppo_rollout, collect_ppo_rollout_seed_counter, make_seed_counter
+from .flash_sac import ConfigFlashSAC
 from .ppo import BufferRollout, ConfigPPO, TrainerPPO, load_ppo_checkpoint
 
 ACTION_DIM_ANT = 8
@@ -474,11 +476,34 @@ class ConfigEnvAntPhoenX:
     auto_reset: bool = True
 
 
+def default_ant_flash_sac_config(**overrides: Any) -> ConfigFlashSAC:
+    """Return the safe FlashSAC starting recipe for Ant."""
+
+    values = {
+        "buffer_max_length": 10_000_000,
+        "buffer_min_length": 100_000,
+        "sample_batch_size": 2048,
+        "gamma": 0.99,
+        "n_step": 3,
+        "actor_lr": 3.0e-4,
+        "critic_lr": 3.0e-4,
+        "alpha_lr": 3.0e-4,
+        "policy_frequency": 2,
+        "tau": 0.01,
+        "learning_rate_decay_steps": 100_000,
+        "normalize_rewards": True,
+        "use_amp": True,
+    }
+    values.update(overrides)
+    return ConfigFlashSAC(**values)
+
+
 class EnvAntPhoenX:
-    """Vectorized Ant torque-control environment for PPO validation."""
+    """Vectorized Ant torque-control environment for PhoenX RL trainers."""
 
     obs_dim = OBS_DIM_ANT
     action_dim = ACTION_DIM_ANT
+    policy_action_dim = ACTION_DIM_ANT
 
     def __init__(self, config: ConfigEnvAntPhoenX | None = None, *, device: wp.context.Devicelike = None):
         self.config = config or ConfigEnvAntPhoenX()
@@ -579,7 +604,7 @@ class EnvAntPhoenX:
         model.set_gravity((0.0, -9.81, 0.0))
         return model
 
-    def observe(self) -> wp.array:
+    def observe(self) -> wp.array2d[wp.float32]:
         if self.config.task_profile == "mraksha":
             wp.launch(
                 ant_observe_reward_mraksha_kernel,
@@ -655,7 +680,7 @@ class EnvAntPhoenX:
             )
         return self.obs
 
-    def reset(self) -> wp.array:
+    def reset(self) -> wp.array2d[wp.float32]:
         wp.copy(self.state_0.joint_q, self.model.joint_q)
         wp.copy(self.state_0.joint_qd, self.model.joint_qd)
         self.control.joint_f.zero_()
@@ -697,7 +722,7 @@ class EnvAntPhoenX:
         )
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
-    def step(self, actions: wp.array) -> tuple[wp.array, wp.array, wp.array]:
+    def step(self, actions: wp.array2d[wp.float32]) -> tuple[wp.array, wp.array, wp.array]:
         max_cols = max(self.dof_stride, self.action_dim)
         wp.launch(
             ant_apply_actions_kernel,

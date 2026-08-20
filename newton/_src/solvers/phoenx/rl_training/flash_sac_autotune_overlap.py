@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import warp as wp
 
+from .cublas import release_cublas_workspace
 from .flash_sac import (
     BufferReplayFlashSAC,
     EnvFlashSAC,
@@ -80,6 +81,7 @@ def capture_lr_autotune_overlap(
         raise RuntimeError("warm shared replay before capturing LR autotuning overlap")
 
     total_updates = updates * interactions
+    controller.configure_policy_frequency_family(total_updates, allow_search=False)
     policy_frequency = int(controller.trainers[0].config.policy_frequency)
     if total_updates % policy_frequency != 0:
         raise ValueError("overlap updates must span a complete policy-frequency cadence")
@@ -88,7 +90,8 @@ def capture_lr_autotune_overlap(
     for trainer in controller.trainers:
         trainer.reserve_buffers(env.world_count)
     controller.single_trainer.reserve_buffers(env.world_count)
-    rollout_actors = tuple(_make_rollout_actor(controller, member, seed=seed) for member in range(2))
+    rollout_member_count = 1 if controller.challenger_worlds == 0 else 2
+    rollout_actors = tuple(_make_rollout_actor(controller, member, seed=seed) for member in range(rollout_member_count))
     phase_batches = tuple(
         tuple(_allocate_flash_sac_batch(controller.trainers[0]) for _ in range(total_updates)) for _phase in range(2)
     )
@@ -104,14 +107,16 @@ def capture_lr_autotune_overlap(
         for _interaction in range(interactions):
             wp.copy(pre_step_obs, env.obs)
             member_actions = []
-            for trainer, actor in zip(controller.trainers, rollout_actors, strict=True):
+            for trainer, actor in zip(controller.trainers[: len(rollout_actors)], rollout_actors, strict=True):
                 exploration_seed = trainer.prepare_graph_exploration_seed()
                 actions, _log_probs, _policy_out = actor.sample_reuse_seed_counter(
                     pre_step_obs,
                     seed_counter=exploration_seed,
                 )
                 member_actions.append(actions)
-            actions = controller.route_split_actions(member_actions[0], member_actions[1])
+            actions = member_actions[0]
+            if len(member_actions) == 2:
+                actions = controller.route_split_actions(member_actions[0], member_actions[1])
             next_obs, rewards, dones = env.step(actions)
             replay.add_batch_graph(
                 pre_step_obs,
@@ -124,10 +129,10 @@ def capture_lr_autotune_overlap(
 
     def prepare(phase: int, *, single: bool) -> None:
         if single:
-            rollout_actors[0].copy_from(controller.single_trainer.actor)
-            rollout_actors[1].copy_from(controller.single_trainer.actor)
+            for actor in rollout_actors:
+                actor.copy_from(controller.single_trainer.actor)
         else:
-            for actor, trainer in zip(rollout_actors, controller.trainers, strict=True):
+            for actor, trainer in zip(rollout_actors, controller.trainers[: len(rollout_actors)], strict=True):
                 actor.copy_from(trainer.actor)
         for update_index, batch in enumerate(phase_batches[phase]):
             sampled = replay.sample_graph_seed_counter(
@@ -225,7 +230,7 @@ class GraphFlashSACLRAutotuneOverlap:
     update_stream: wp.Stream | None
     prepare_stream: wp.Stream | None
     phase_batches: tuple[tuple[BatchSAC, ...], tuple[BatchSAC, ...]] | None
-    rollout_actors: tuple[Any, Any] | None
+    rollout_actors: tuple[Any, ...] | None
     retained_arrays: tuple[wp.array[Any], ...]
     interactions_per_launch: int
     updates_per_launch: int
@@ -242,6 +247,30 @@ class GraphFlashSACLRAutotuneOverlap:
                     assert stream is not None
                     wp.wait_stream(stream)
         wp.synchronize_device(self.controller.device)
+
+    @property
+    def trainers(self) -> tuple[TrainerFlashSAC, TrainerFlashSAC]:
+        """Return controller-owned population learners."""
+
+        return self.controller.trainers
+
+    def evaluation_trainers(self) -> tuple[TrainerFlashSAC, TrainerFlashSAC]:
+        """Return paired learners or the converged learner twice."""
+
+        if self.controller.converged:
+            return (self.controller.single_trainer, self.controller.single_trainer)
+        return self.controller.trainers
+
+    def challenger_fallback_fraction(self) -> float:
+        """Return zero because the fused backend does not guard split actions."""
+
+        return 0.0
+
+    def reopen_search(self) -> None:
+        """Restart paired graphs from the current converged learner."""
+
+        self.synchronize()
+        self.controller.reopen_search()
 
     def launch(self) -> None:
         """Overlap one rollout with P2 or converged-P1 learner work."""
@@ -301,12 +330,16 @@ class GraphFlashSACLRAutotuneOverlap:
             return
         self.synchronize()
         self.rollout_graph = None
+        streams = (self.rollout_stream, self.update_stream, self.prepare_stream)
         self.population_update_graphs = None
         self.single_update_graphs = None
         self.population_prepare_graphs = None
         self.single_prepare_graphs = None
         self.rollout_stream = None
         self.update_stream = None
+        for stream in streams:
+            if stream is not None:
+                release_cublas_workspace(self.controller.device, stream)
         self.prepare_stream = None
         self.phase_batches = None
         self.rollout_actors = None

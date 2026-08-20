@@ -17,6 +17,7 @@ _CUBLAS_OP_T = 1
 _CUBLAS_COMPUTE_32F = 68
 _CUBLAS_GEMM_DEFAULT = -1
 _CUBLAS_ATOMICS_NOT_ALLOWED = 0
+_CUBLAS_WORKSPACE_BYTES = 32 * 1024 * 1024
 
 
 class _Cublas:
@@ -28,6 +29,8 @@ class _Cublas:
         self.lib.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
         self.lib.cublasCreate_v2.restype = ctypes.c_int
         self.lib.cublasSetStream_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self.lib.cublasSetWorkspace_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        self.lib.cublasSetWorkspace_v2.restype = ctypes.c_int
         self.lib.cublasSetAtomicsMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
         self.lib.cublasSetAtomicsMode.restype = ctypes.c_int
         self.lib.cublasGetAtomicsMode.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
@@ -88,8 +91,7 @@ class _Cublas:
         if handles is None:
             handles = {}
             self.local.handles = handles
-        key = int(device.ordinal)
-        handle = handles.get(key)
+        handle = handles.get(int(device.ordinal))
         if handle is None:
             handle = ctypes.c_void_p()
             with wp.ScopedDevice(device):
@@ -104,8 +106,23 @@ class _Cublas:
                 raise RuntimeError(
                     f"deterministic cuBLAS atomics setup failed with status {status}, mode {atomics_mode.value}"
                 )
-            handles[key] = handle
+            handles[int(device.ordinal)] = handle
         return handle
+
+    def workspace(self, device: wp.context.Device, stream: wp.Stream) -> wp.array[wp.uint8]:
+        """Return setup-owned scratch storage for one device stream."""
+
+        self.handle(device)
+        workspaces = getattr(self.local, "workspaces", None)
+        if workspaces is None:
+            workspaces = {}
+            self.local.workspaces = workspaces
+        key = (int(device.ordinal), int(stream.cuda_stream))
+        workspace = workspaces.get(key)
+        if workspace is None:
+            workspace = wp.empty(_CUBLAS_WORKSPACE_BYTES, dtype=wp.uint8, device=device)
+            workspaces[key] = workspace
+        return workspace
 
 
 _cublas_cache: list[_Cublas | bool] = []
@@ -136,10 +153,35 @@ def is_cublas_available(device: wp.context.Device) -> bool:
     if cublas is None:
         return False
     try:
-        cublas.handle(device)
+        cublas.workspace(device, device.stream)
     except RuntimeError:
         return False
     return True
+
+
+def reserve_cublas_workspace(device: wp.context.Device, stream: wp.Stream) -> None:
+    """Reserve deterministic cuBLAS scratch storage before graph capture."""
+
+    cublas = _get_cublas()
+    if cublas is not None:
+        cublas.workspace(device, stream)
+
+
+def release_cublas_workspace(device: wp.context.Device, stream: wp.Stream) -> None:
+    """Release one stream workspace after every owning graph is destroyed."""
+
+    cublas = _get_cublas()
+    if cublas is None:
+        return
+    workspaces = getattr(cublas.local, "workspaces", None)
+    if workspaces is None:
+        return
+    handle = cublas.handle(device)
+    with wp.ScopedDevice(device):
+        status = cublas.lib.cublasSetWorkspace_v2(handle, None, 0)
+    if status != 0:
+        raise RuntimeError(f"cublasSetWorkspace_v2 reset failed with status {status}")
+    workspaces.pop((int(device.ordinal), int(stream.cuda_stream)), None)
 
 
 def _gemm(
@@ -168,6 +210,10 @@ def _gemm(
         status = cublas.lib.cublasSetStream_v2(handle, ctypes.c_void_p(stream.cuda_stream))
         if status != 0:
             raise RuntimeError(f"cublasSetStream_v2 failed with status {status}")
+        workspace = cublas.workspace(device, stream)
+        status = cublas.lib.cublasSetWorkspace_v2(handle, ctypes.c_void_p(workspace.ptr), workspace.size)
+        if status != 0:
+            raise RuntimeError(f"cublasSetWorkspace_v2 failed with status {status}")
         status = cublas.lib.cublasGemmEx(
             handle,
             op_rhs,
@@ -223,6 +269,10 @@ def _gemm_strided_batched(
         status = cublas.lib.cublasSetStream_v2(handle, ctypes.c_void_p(stream.cuda_stream))
         if status != 0:
             raise RuntimeError(f"cublasSetStream_v2 failed with status {status}")
+        workspace = cublas.workspace(device, stream)
+        status = cublas.lib.cublasSetWorkspace_v2(handle, ctypes.c_void_p(workspace.ptr), workspace.size)
+        if status != 0:
+            raise RuntimeError(f"cublasSetWorkspace_v2 failed with status {status}")
         status = cublas.lib.cublasGemmStridedBatchedEx(
             handle,
             op_rhs,

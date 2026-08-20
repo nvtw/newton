@@ -6,20 +6,26 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
 import warp as wp
 
 from .flash_sac import EnvFlashSAC, TrainerFlashSAC
+from .flash_sac_autotune import ResultFlashSACLRAutotune
 
 if TYPE_CHECKING:
     from .flash_sac_autotune import (
         ControllerFlashSACLRAutotune,
         GraphFlashSACLRAutotune,
-        ResultFlashSACLRAutotune,
     )
+
+
+def _next_evaluation_delay(action: str, evaluation_interval: int, confirmation_interval: int) -> int:
+    """Confirm favorable evidence early while giving new candidates a full rung."""
+
+    return int(confirmation_interval) if action == "continue" else int(evaluation_interval)
 
 
 @wp.kernel
@@ -227,41 +233,154 @@ class CadenceFlashSACLRAutotune:
         training_graph: Captured backend-neutral training graph.
         evaluator: Isolated paired evaluator.
         evaluation_interval: Training launches between paired evaluations.
+        confirmation_interval: Launches before confirming promising evidence.
+        monitor_interval: Launches between cheap post-convergence plateau checks.
         launch_count: Initial launch counter.
     """
+
+    @dataclass(frozen=True)
+    class State:
+        """Store host scheduling state for exact continuation."""
+
+        launch_count: int
+        next_evaluation_launch: int
+        monitor_score: float
+        monitor_termination_rate: float
+        monitor_stagnant_windows: int
 
     controller: ControllerFlashSACLRAutotune
     training_graph: GraphFlashSACLRAutotune
     evaluator: EvaluatorPairedFlashSAC
     evaluation_interval: int
+    confirmation_interval: int | None = None
+    monitor_interval: int | None = None
     launch_count: int = 0
+    _next_evaluation_launch: int = field(init=False, repr=False)
+    _monitor_score: float = field(init=False, default=-float("inf"), repr=False)
+    _monitor_termination_rate: float = field(init=False, default=float("inf"), repr=False)
+    _monitor_stagnant_windows: int = field(init=False, default=0, repr=False)
 
     def __post_init__(self) -> None:
         if int(self.evaluation_interval) <= 0:
             raise ValueError("evaluation_interval must be positive")
+        if self.confirmation_interval is None:
+            self.confirmation_interval = max(1, int(self.evaluation_interval) // 4)
+        if not 0 < int(self.confirmation_interval) <= int(self.evaluation_interval):
+            raise ValueError("confirmation_interval must be positive and not exceed evaluation_interval")
+        self._next_evaluation_launch = int(self.launch_count) + int(self.evaluation_interval)
+        if self.monitor_interval is None:
+            self.monitor_interval = 4 * int(self.evaluation_interval)
+        if int(self.monitor_interval) < int(self.evaluation_interval):
+            raise ValueError("monitor_interval must not be shorter than evaluation_interval")
+
+    def _schedule_after(self, result: ResultFlashSACLRAutotune) -> None:
+        """Confirm favorable evidence sooner without shortening its initial resource rung."""
+
+        interval = _next_evaluation_delay(
+            result.action,
+            int(self.evaluation_interval),
+            int(self.confirmation_interval),
+        )
+        self._next_evaluation_launch = self.launch_count + int(interval)
+
+    def state(self) -> State:
+        """Return allocation-free host scheduling state."""
+
+        return self.State(
+            launch_count=int(self.launch_count),
+            next_evaluation_launch=int(self._next_evaluation_launch),
+            monitor_score=float(self._monitor_score),
+            monitor_termination_rate=float(self._monitor_termination_rate),
+            monitor_stagnant_windows=int(self._monitor_stagnant_windows),
+        )
+
+    def restore_state(self, state: State) -> None:
+        """Restore scheduling after rebuilding fixed-address captured graphs."""
+
+        if state.launch_count < 0 or state.next_evaluation_launch < state.launch_count:
+            raise ValueError("cadence counters must be non-negative and ordered")
+        if state.monitor_stagnant_windows < 0:
+            raise ValueError("monitor_stagnant_windows must be non-negative")
+        if not (np.isfinite(state.monitor_score) or state.monitor_score == -float("inf")):
+            raise ValueError("monitor_score must be finite or negative infinity")
+        if not (np.isfinite(state.monitor_termination_rate) or state.monitor_termination_rate == float("inf")):
+            raise ValueError("monitor_termination_rate must be finite or positive infinity")
+        self.launch_count = int(state.launch_count)
+        self._next_evaluation_launch = int(state.next_evaluation_launch)
+        self._monitor_score = float(state.monitor_score)
+        self._monitor_termination_rate = float(state.monitor_termination_rate)
+        self._monitor_stagnant_windows = int(state.monitor_stagnant_windows)
+
+    def _monitor_converged(self, scores: EvaluatorPairedFlashSAC.Result) -> ResultFlashSACLRAutotune:
+        """Reopen search only after sustained post-convergence stagnation."""
+
+        score = float(np.mean(scores.champion_scores))
+        termination_rate = float(scores.champion_termination_rate)
+        valid = scores.champion_finite and np.isfinite(score) and np.isfinite(termination_rate)
+        if self._monitor_score == -float("inf") and valid:
+            self._monitor_score = score
+            self._monitor_termination_rate = termination_rate
+            self._monitor_stagnant_windows = 0
+        else:
+            improved = valid and (
+                termination_rate
+                < self._monitor_termination_rate - float(self.controller.config.termination_rate_margin)
+                or (
+                    termination_rate
+                    <= self._monitor_termination_rate + float(self.controller.config.termination_rate_margin)
+                    and score > self._monitor_score + float(self.controller.config.improvement_margin)
+                )
+            )
+            if improved:
+                self._monitor_score = score
+                self._monitor_termination_rate = termination_rate
+                self._monitor_stagnant_windows = 0
+            else:
+                self._monitor_stagnant_windows += 1
+        if self._monitor_stagnant_windows >= int(self.controller.config.reopen_stagnation_windows):
+            self.training_graph.reopen_search()
+            self._monitor_score = -float("inf")
+            self._monitor_termination_rate = float("inf")
+            self._monitor_stagnant_windows = 0
+            result = ResultFlashSACLRAutotune(0.0, "reopen", 0, False)
+            self._schedule_after(result)
+            return result
+        self._next_evaluation_launch = self.launch_count + int(self.monitor_interval)
+        return ResultFlashSACLRAutotune(
+            0.0,
+            "monitor",
+            0,
+            True,
+        )
 
     def launch(self) -> ResultFlashSACLRAutotune | None:
         """Launch training once and evaluate only at the configured coarse interval."""
 
         self.training_graph.launch()
         self.launch_count += 1
-        if self.launch_count % int(self.evaluation_interval) != 0 or self.controller.converged:
+        if self.launch_count < self._next_evaluation_launch:
             return None
         self.training_graph.synchronize()
-        sources = getattr(self.training_graph, "trainers", self.controller.trainers)
+        source_getter = getattr(self.training_graph, "evaluation_trainers", None)
+        sources = source_getter() if source_getter is not None else self.controller.trainers
         scores = self.evaluator.evaluate(sources)
+        if self.controller.converged:
+            return self._monitor_converged(scores)
         if hasattr(self.training_graph, "evaluate_paired"):
-            return self.training_graph.evaluate_paired(
+            result = self.training_graph.evaluate_paired(
                 scores.champion_scores,
                 scores.challenger_scores,
                 challenger_safe=scores.champion_finite and scores.challenger_finite,
                 champion_termination_rate=scores.champion_termination_rate,
                 challenger_termination_rate=scores.challenger_termination_rate,
             )
-        return self.controller.evaluate_paired(
-            scores.champion_scores,
-            scores.challenger_scores,
-            challenger_safe=scores.champion_finite and scores.challenger_finite,
-            champion_termination_rate=scores.champion_termination_rate,
-            challenger_termination_rate=scores.challenger_termination_rate,
-        )
+        else:
+            result = self.controller.evaluate_paired(
+                scores.champion_scores,
+                scores.challenger_scores,
+                challenger_safe=scores.champion_finite and scores.challenger_finite,
+                champion_termination_rate=scores.champion_termination_rate,
+                challenger_termination_rate=scores.challenger_termination_rate,
+            )
+        self._schedule_after(result)
+        return result
