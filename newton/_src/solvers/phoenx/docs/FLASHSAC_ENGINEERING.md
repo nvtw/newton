@@ -514,6 +514,28 @@ Training took 83.02 s at 271.3k transitions/s, versus 375.77 s for the prior
 fixed-policy run. The packed path is bitwise equal to the serial fallback in the
 captured self-contact regression; patch-friction rows retain the existing path.
 
+### DR Legs integration failures
+
+DR Legs initially terminated every world on the first control step because its
+USD body transforms were translated after import. Replication rebuilt the body
+poses from the unchanged joint frames, leaving the pelvis below ground. Passing
+the validated 0.265 m spawn transform to the USD importer fixes the model and
+lets a neutral five-substep policy survive 109 steps.
+
+A second failure wrote coordinate-layout joint indices into the legacy
+DOF-layout target buffer. World zero mostly worked by coincidence; subsequent
+worlds were shifted and the final targets could be out of bounds. The
+environment now derives target indices and stride from
+``model.use_coord_layout_targets`` while retaining coordinate and DOF indices
+for observations.
+
+After both fixes, a 4,096-world run learned stable standing with zero held-out
+terminations from 4.096M transitions onward, but did not learn its 0.3 m/s
+forward command by 24.576M transitions. The large survival, gait-contact, and
+orientation terms make standing a strong local optimum relative to velocity
+tracking. Treat DR Legs walking as unresolved; do not present the conservative
+3e-4 FlashSAC configuration as a validated recipe.
+
 Every data-bearing FlashSAC learner temporary is setup-owned before CUDA graph
 capture. This includes actor sampling noise/actions/log probabilities, critic
 inputs and concatenated rows, distributional targets, sliced logits, output

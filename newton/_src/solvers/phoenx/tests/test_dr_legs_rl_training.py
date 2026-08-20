@@ -17,6 +17,7 @@ from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate impo
 from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
     benchmark_train_to_gate,
 )
+from newton._src.solvers.phoenx.rl_training.dr_legs import default_dr_legs_flash_sac_config
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
@@ -35,6 +36,8 @@ def _max_anchor_residual(env: rl.EnvDrLegsPhoenX) -> float:
     for joint in range(int(env.model.joint_count)):
         parent = int(joint_parent[joint])
         child = int(joint_child[joint])
+        if parent < 0 or child < 0:
+            continue
         parent_anchor = body_q[parent, :3] + _quat_rotate(body_q[parent, 3:], joint_xform_parent[joint, :3])
         child_anchor = body_q[child, :3] + _quat_rotate(body_q[child, 3:], joint_xform_child[joint, :3])
         residual = max(residual, float(np.linalg.norm(child_anchor - parent_anchor)))
@@ -42,6 +45,25 @@ def _max_anchor_residual(env: rl.EnvDrLegsPhoenX) -> float:
 
 
 class TestDrLegsPhoenXRL(unittest.TestCase):
+    def test_flash_sac_defaults_and_forward_metric_match_walking_protocol(self) -> None:
+        """Keep DR Legs FlashSAC defaults and velocity output on the walking protocol."""
+
+        config = default_dr_legs_flash_sac_config()
+        self.assertEqual(config.sample_batch_size, 2048)
+        self.assertEqual(config.n_step, 3)
+        self.assertEqual(config.policy_frequency, 2)
+        self.assertTrue(config.normalize_rewards)
+        self.assertTrue(config.use_amp)
+
+        env = rl.EnvDrLegsPhoenX(rl.ConfigEnvDrLegsPhoenX(task="walk", world_count=1))
+        root_z = float(env.state_0.body_q.numpy()[0, 2])
+        self.assertGreater(root_z, 0.2)
+        actions = wp.zeros((1, env.action_dim), dtype=wp.float32, device=env.device)
+        env.step(actions)
+        self.assertEqual(env.step_forward_velocities.shape, (1,))
+        self.assertTrue(np.all(np.isfinite(env.step_forward_velocities.numpy())))
+        np.testing.assert_array_equal(env.step_dones.numpy(), 0.0)
+
     def test_hold_pose_preserves_direct_loops_after_shock_inside_cuda_graph(self) -> None:
         """Keep every direct DR Legs joint closed after a body shock."""
         device = require_cuda_graph_capture("PhoenX DR Legs RL tests")
@@ -110,8 +132,8 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
         wp.capture_launch(capture.graph)
 
         obs = env.obs.numpy()
-        targets = env.control.joint_target_q.numpy().reshape(env.world_count, env.joint_stride)
-        actuated = env.actuated_joint.numpy()
+        targets = env.control.joint_target_q.numpy().reshape(env.world_count, env.joint_target_stride)
+        actuated = env.actuated_joint_target.numpy()
         expected = config.action_scale * action_row
         self.assertEqual(obs.shape, (env.world_count, rl.OBS_DIM_DR_LEGS_WALK))
         self.assertTrue(np.all(np.isfinite(obs)))

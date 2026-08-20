@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -14,6 +15,7 @@ import newton.utils
 
 from .command_observation import advance_command_seed_kernel, sample_done_velocity_commands_kernel
 from .contact_observation import scan_two_body_contacts_kernel
+from .flash_sac import ConfigFlashSAC
 from .reward_functions import gaussian_reward, projected_gravity_flat_penalty, tracking_reward_2d
 
 ACTION_DIM_DR_LEGS = 12
@@ -43,16 +45,16 @@ def _quat_rotate_inverse_dr_legs(q: wp.quat, v: wp.vec3) -> wp.vec3:
 @wp.kernel(enable_backward=False)
 def dr_legs_apply_actions_kernel(
     actions: wp.array2d[wp.float32],
-    actuated_joint: wp.array[wp.int32],
+    actuated_joint_target: wp.array[wp.int32],
     action_scale: wp.float32,
-    joint_stride: wp.int32,
+    joint_target_stride: wp.int32,
     current_actions: wp.array2d[wp.float32],
     joint_target_q: wp.array[wp.float32],
 ):
     world, action = wp.tid()
     value = _clip_dr_legs(actions[world, action], wp.float32(-1.0), wp.float32(1.0))
     current_actions[world, action] = value
-    joint_target_q[world * joint_stride + actuated_joint[action]] = action_scale * value
+    joint_target_q[world * joint_target_stride + actuated_joint_target[action]] = action_scale * value
 
 
 @wp.kernel(enable_backward=False)
@@ -123,6 +125,7 @@ def dr_legs_observe_reward_kernel(
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
     successes: wp.array[wp.float32],
+    forward_velocities: wp.array[wp.float32],
 ):
     world, col = wp.tid()
     pelvis = world * body_stride
@@ -285,6 +288,7 @@ def dr_legs_observe_reward_kernel(
         rewards[world] = reward
         dones[world] = done
         successes[world] = success
+        forward_velocities[world] = linear_body[0]
 
 
 @wp.kernel(enable_backward=False)
@@ -394,6 +398,28 @@ class ConfigEnvDrLegsPhoenX:
     auto_reset: bool = True
 
 
+def default_dr_legs_flash_sac_config(**overrides: Any) -> ConfigFlashSAC:
+    """Return a conservative FlashSAC baseline for DR Legs experiments."""
+
+    values = {
+        "buffer_max_length": 10_000_000,
+        "buffer_min_length": 100_000,
+        "sample_batch_size": 2048,
+        "gamma": 0.99,
+        "n_step": 3,
+        "actor_lr": 3.0e-4,
+        "critic_lr": 3.0e-4,
+        "alpha_lr": 3.0e-4,
+        "policy_frequency": 2,
+        "tau": 0.01,
+        "learning_rate_decay_steps": 100_000,
+        "normalize_rewards": True,
+        "use_amp": True,
+    }
+    values.update(overrides)
+    return ConfigFlashSAC(**values)
+
+
 class EnvDrLegsPhoenX:
     """Warp-only DR Legs closed-loop hold-pose or walking environment."""
 
@@ -441,6 +467,9 @@ class EnvDrLegsPhoenX:
         self._can_scan_foot_contacts = self.model.shape_body is not None and self.model.shape_world is not None
         self.actuated_joint = wp.array(self._actuated_joint_q, dtype=wp.int32, device=self.device)
         self.actuated_joint_qd = wp.array(self._actuated_joint_qd, dtype=wp.int32, device=self.device)
+        target_indices = self._actuated_joint_q if self.model.use_coord_layout_targets else self._actuated_joint_qd
+        self.actuated_joint_target = wp.array(target_indices, dtype=wp.int32, device=self.device)
+        self.joint_target_stride = self.joint_stride if self.model.use_coord_layout_targets else self.joint_dof_stride
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
         self.command = wp.array(command_np, dtype=wp.float32, device=self.device)
         self._command_seed_counter = wp.array([int(self.config.command_seed)], dtype=wp.int32, device=self.device)
@@ -456,9 +485,11 @@ class EnvDrLegsPhoenX:
         self.dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.forward_velocities = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.sim_time = 0.0
+        self.step_forward_velocities = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.reset()
 
     def _build_model(self):
@@ -470,6 +501,7 @@ class EnvDrLegsPhoenX:
         asset_path = newton.utils.download_asset("disneyresearch")
         robot.add_usd(
             str(asset_path / "dr_legs" / "usd" / "dr_legs_with_meshes_and_boxes.usda"),
+            xform=wp.transform(wp.vec3(0.0, 0.0, 0.265)),
             joint_ordering=None,
             force_show_colliders=True,
             force_position_velocity_actuation=True,
@@ -498,12 +530,6 @@ class EnvDrLegsPhoenX:
             raise RuntimeError("Expected DR Legs foot_l and foot_r bodies")
         self._left_foot_body_local = foot_bodies["foot_l"]
         self._right_foot_body_local = foot_bodies["foot_r"]
-        pelvis_z = float(wp.transform_get_translation(robot.body_q[0])[2])
-        translation_z = 0.28 - pelvis_z
-        for body, transform in enumerate(robot.body_q):
-            position = wp.transform_get_translation(transform)
-            rotation = wp.transform_get_rotation(transform)
-            robot.body_q[body] = wp.transform(position + wp.vec3(0.0, 0.0, translation_z), rotation)
         for dof in range(len(robot.joint_target_ke)):
             robot.joint_target_ke[dof] = 0.0
             robot.joint_target_kd[dof] = 0.0
@@ -608,7 +634,7 @@ class EnvDrLegsPhoenX:
                 float(self.config.min_base_height),
                 float(self.config.min_upright_cos),
             ],
-            outputs=[self.obs, self.rewards, self.dones, self.successes],
+            outputs=[self.obs, self.rewards, self.dones, self.successes, self.forward_velocities],
             device=self.device,
         )
         return self.obs
@@ -626,6 +652,8 @@ class EnvDrLegsPhoenX:
         self.dones.zero_()
         self.successes.zero_()
         self.sim_time = 0.0
+        self.forward_velocities.zero_()
+        self.step_forward_velocities.zero_()
         return self.observe()
 
     def reset_done(self) -> None:
@@ -663,7 +691,12 @@ class EnvDrLegsPhoenX:
         wp.launch(
             dr_legs_apply_actions_kernel,
             dim=(self.world_count, self.action_dim),
-            inputs=[actions, self.actuated_joint, float(self.config.action_scale), self.joint_stride],
+            inputs=[
+                actions,
+                self.actuated_joint_target,
+                float(self.config.action_scale),
+                self.joint_target_stride,
+            ],
             outputs=[self.current_actions, self.control.joint_target_q],
             device=self.device,
         )
@@ -706,6 +739,7 @@ class EnvDrLegsPhoenX:
         wp.copy(self.step_rewards, self.rewards)
         wp.copy(self.step_dones, self.dones)
         wp.copy(self.step_successes, self.successes)
+        wp.copy(self.step_forward_velocities, self.forward_velocities)
         wp.launch(
             dr_legs_finish_step_kernel,
             dim=(self.world_count, self.action_dim),
