@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measure fixed or automatically tuned FlashSAC wall-to-quality on Ant."""
+"""Measure FlashSAC wall-to-quality on reusable locomotion tasks."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from ..rl_training.ant import ConfigEnvAntPhoenX, EnvAntPhoenX, default_ant_flas
 from ..rl_training.flash_sac import BufferReplayFlashSAC, TrainerFlashSAC
 from ..rl_training.flash_sac_autotune import ConfigFlashSACLRAutotune, ControllerFlashSACLRAutotune
 from ..rl_training.flash_sac_autotune_evaluation import EvaluatorPairedFlashSAC
+from ..rl_training.humanoid import ConfigEnvHumanoidPhoenX, EnvHumanoidPhoenX, default_humanoid_flash_sac_config
 
 
 def _load_cudart() -> ctypes.CDLL:
@@ -34,7 +35,7 @@ def _load_cudart() -> ctypes.CDLL:
 
 def _warm_replay(
     trainer: TrainerFlashSAC,
-    env: EnvAntPhoenX,
+    env: EnvAntPhoenX | EnvHumanoidPhoenX,
     *,
     seed: int,
 ) -> BufferReplayFlashSAC:
@@ -63,23 +64,27 @@ def _warm_replay(
     return replay
 
 
-def _make_env_config(args: argparse.Namespace, *, world_count: int) -> ConfigEnvAntPhoenX:
-    """Build one explicit Ant protocol shared by training and evaluation."""
+def _make_env_config(args: argparse.Namespace, *, world_count: int) -> ConfigEnvAntPhoenX | ConfigEnvHumanoidPhoenX:
+    """Build one explicit task protocol shared by training and evaluation."""
 
+    sim_substeps = getattr(args, "sim_substeps", None)
+    common = {"world_count": int(world_count), "articulation_mode": str(args.articulation_mode), "auto_reset": True}
+    if sim_substeps is not None:
+        common["sim_substeps"] = int(sim_substeps)
+    if args.task == "humanoid":
+        return ConfigEnvHumanoidPhoenX(**common)
     return ConfigEnvAntPhoenX(
-        world_count=int(world_count),
-        articulation_mode=str(args.articulation_mode),
+        **common,
         task_profile="mraksha",
-        auto_reset=True,
     )
 
 
 def _make_evaluator(
     sources: tuple[TrainerFlashSAC, TrainerFlashSAC],
-    env_config: ConfigEnvAntPhoenX,
+    env_config: ConfigEnvAntPhoenX | ConfigEnvHumanoidPhoenX,
     args: argparse.Namespace,
 ) -> EvaluatorPairedFlashSAC:
-    """Capture deterministic no-reset Ant evaluation."""
+    """Capture deterministic no-reset locomotion evaluation."""
 
     eval_config = replace(
         env_config,
@@ -87,9 +92,12 @@ def _make_evaluator(
         auto_reset=False,
         max_episode_steps=0,
     )
-    envs = (EnvAntPhoenX(eval_config, device=args.device), EnvAntPhoenX(eval_config, device=args.device))
+    env_type = EnvHumanoidPhoenX if args.task == "humanoid" else EnvAntPhoenX
+    envs = (env_type(eval_config, device=args.device), env_type(eval_config, device=args.device))
 
-    def forward_velocity(env: EnvAntPhoenX, _rewards: wp.array[wp.float32]) -> wp.array[wp.float32]:
+    def forward_velocity(env: EnvAntPhoenX | EnvHumanoidPhoenX, _rewards: wp.array[wp.float32]) -> wp.array[wp.float32]:
+        if isinstance(env, EnvHumanoidPhoenX):
+            return env.step_successes
         return env.step_forward_velocities
 
     return EvaluatorPairedFlashSAC(
@@ -102,16 +110,21 @@ def _make_evaluator(
 
 
 def run(args: argparse.Namespace) -> dict[str, object]:
-    """Run one measured Ant seed and return its quality history."""
+    """Run one measured locomotion seed and return its quality history."""
 
     device = wp.get_device(args.device)
     env_config = _make_env_config(args, world_count=int(args.world_count))
-    config = default_ant_flash_sac_config()
+    if args.task == "humanoid":
+        config = default_humanoid_flash_sac_config()
+        env_type = EnvHumanoidPhoenX
+    else:
+        config = default_ant_flash_sac_config()
+        env_type = EnvAntPhoenX
     setup_start = time.perf_counter()
-    env = EnvAntPhoenX(env_config, device=device)
+    env = env_type(env_config, device=device)
     champion = TrainerFlashSAC(
         obs_dim=env.obs_dim,
-        action_dim=env.policy_action_dim,
+        action_dim=int(getattr(env, "policy_action_dim", env.action_dim)),
         config=config,
         device=device,
         seed=int(args.seed),
@@ -122,7 +135,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         training = champion.capture_training_graph(
             env,
             replay,
-            updates_per_step=2,
+            updates_per_step=int(args.updates_per_step),
             interactions_per_graph=2,
             seed=31 + int(args.seed) * 9973,
             overlap=True,
@@ -137,14 +150,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 initial_perturbation_factor=2.0,
                 minimum_evidence_windows=2,
                 promotion_windows=2,
-                exploit_after_candidate=True,
+                exploit_after_candidate=False,
                 seed=int(args.seed),
             ),
         )
         training = controller.capture_overlap(
             env,
             replay,
-            updates_per_step=2,
+            updates_per_step=int(args.updates_per_step),
             interactions_per_launch=2,
             seed=31 + int(args.seed) * 9973,
             population_backend="parallel",
@@ -175,10 +188,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             if controller is None:
                 eval_sources = (champion, champion)
                 evaluated_rates = [config.actor_lr, config.critic_lr, config.alpha_lr]
+                evaluated_target_update_rates = [config.tau, config.tau]
+                evaluated_policy_frequencies = [config.policy_frequency, config.policy_frequency]
                 action = "fixed"
             else:
                 eval_sources = training.evaluation_trainers()
                 evaluated_rates = controller.member_rates.tolist()
+                evaluated_target_update_rates = controller.member_target_update_rates.tolist()
+                evaluated_policy_frequencies = controller.member_policy_frequencies.tolist()
             scores = evaluator.evaluate(eval_sources)
             mean_velocity = float(np.mean(scores.champion_scores))
             passed = bool(
@@ -212,6 +229,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     "action": action,
                     "evaluated_rates": evaluated_rates,
                     "next_rates": controller.member_rates.tolist() if controller is not None else evaluated_rates,
+                    "evaluated_target_update_rates": evaluated_target_update_rates,
+                    "evaluated_policy_frequencies": evaluated_policy_frequencies,
+                    "next_target_update_rates": controller.member_target_update_rates.tolist()
+                    if controller is not None
+                    else evaluated_target_update_rates,
+                    "next_policy_frequencies": controller.member_policy_frequencies.tolist()
+                    if controller is not None
+                    else evaluated_policy_frequencies,
                 }
             )
             if consecutive_passes >= 2:
@@ -229,8 +254,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     result = {
         "mode": args.mode,
         "seed": int(args.seed),
+        "task": args.task,
         "world_count": env.world_count,
         "articulation_mode": args.articulation_mode,
+        "sim_substeps": env_config.sim_substeps,
+        "updates_per_step": int(args.updates_per_step),
         "setup_seconds": setup_seconds,
         "training_seconds": training_seconds,
         "evaluation_seconds": evaluation_seconds,
@@ -250,6 +278,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("fixed", "autotune"), default="autotune")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--task", choices=("ant", "humanoid"), default="ant")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--world-count", type=int, default=2048)
     parser.add_argument(
@@ -257,7 +286,9 @@ def main() -> int:
         choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
     )
+    parser.add_argument("--sim-substeps", type=int, default=None)
     parser.add_argument("--max-launches", type=int, default=3000)
+    parser.add_argument("--updates-per-step", type=int, default=2)
     parser.add_argument("--evaluation-interval", type=int, default=250)
     parser.add_argument("--evaluation-worlds", type=int, default=32)
     parser.add_argument("--evaluation-horizon", type=int, default=200)

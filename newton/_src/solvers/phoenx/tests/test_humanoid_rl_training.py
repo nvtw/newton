@@ -21,11 +21,32 @@ from newton._src.solvers.phoenx.rl_training.examples.train_humanoid_phoenx_ppo i
     _make_parser,
     build_ppo_config,
 )
-from newton._src.solvers.phoenx.rl_training.humanoid import _resolve_humanoid_actuators
+from newton._src.solvers.phoenx.rl_training.humanoid import (
+    _resolve_humanoid_actuators,
+    default_humanoid_flash_sac_config,
+)
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
 class TestHumanoidPhoenXRL(unittest.TestCase):
+    def test_flash_sac_defaults_match_validated_walking_recipe(self) -> None:
+        """Keep Humanoid physics and FlashSAC defaults on the validated recipe."""
+        env_config = rl.ConfigEnvHumanoidPhoenX()
+        trainer_config = default_humanoid_flash_sac_config()
+
+        self.assertEqual(env_config.articulation_mode, "reduced")
+        self.assertEqual(env_config.sim_substeps, 4)
+        self.assertEqual(env_config.frame_dt / env_config.sim_substeps, 1.0 / 240.0)
+        self.assertEqual(trainer_config.sample_batch_size, 2048)
+        self.assertEqual(trainer_config.n_step, 3)
+        self.assertEqual(trainer_config.policy_frequency, 2)
+        self.assertEqual(trainer_config.tau, 0.01)
+        self.assertEqual(trainer_config.actor_lr, 3.0e-4)
+        self.assertEqual(trainer_config.critic_lr, 3.0e-4)
+        self.assertEqual(trainer_config.alpha_lr, 3.0e-4)
+        self.assertTrue(trainer_config.normalize_rewards)
+        self.assertTrue(trainer_config.use_amp)
+
     def test_actuator_contract_uses_imported_metadata(self) -> None:
         """Resolve reordered motors and reject duplicate DOF targets."""
         robot = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -171,7 +192,7 @@ class TestHumanoidPhoenXRL(unittest.TestCase):
         self.assertGreater(float(np.min(q[:, 2])), 1.0)
 
     def test_initial_reward_matches_direct_task_terms(self) -> None:
-        """Match the initial reward and source MJCF integration timestep."""
+        """Match the initial reward and validated DVI integration timestep."""
         device = require_cuda_graph_capture("PhoenX Humanoid RL tests")
         env = rl.EnvHumanoidPhoenX(
             rl.ConfigEnvHumanoidPhoenX(world_count=2, max_episode_steps=0, auto_reset=False),
@@ -180,7 +201,7 @@ class TestHumanoidPhoenXRL(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             env.observe()
         wp.capture_launch(capture.graph)
-        self.assertAlmostEqual(env.config.frame_dt / env.config.sim_substeps, 0.00555, delta=1.0e-5)
+        self.assertAlmostEqual(env.config.frame_dt / env.config.sim_substeps, 1.0 / 240.0, delta=1.0e-7)
 
         rewards = env.rewards.numpy()
         np.testing.assert_allclose(rewards, 2.6, rtol=0.0, atol=1.0e-6)

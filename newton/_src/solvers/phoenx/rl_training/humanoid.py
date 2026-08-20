@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -11,6 +12,7 @@ import warp as wp
 import newton
 import newton.examples
 
+from .flash_sac import ConfigFlashSAC
 
 ACTION_DIM_HUMANOID = 21
 OBS_DIM_HUMANOID = 75
@@ -352,7 +354,7 @@ class ConfigEnvHumanoidPhoenX:
 
     world_count: int = 4096
     frame_dt: float = 1.0 / 60.0
-    sim_substeps: int = 3
+    sim_substeps: int = 4
     solver_iterations: int = 8
     velocity_iterations: int = 1
     action_scale: float = 1.0
@@ -371,6 +373,26 @@ class ConfigEnvHumanoidPhoenX:
     articulation_mode: str = "reduced"
 
 
+def default_humanoid_flash_sac_config(**overrides: Any) -> ConfigFlashSAC:
+    """Return the safe FlashSAC starting recipe for Humanoid."""
+
+    values = {
+        "buffer_max_length": 10_000_000,
+        "buffer_min_length": 100_000,
+        "sample_batch_size": 2048,
+        "gamma": 0.99,
+        "n_step": 3,
+        "actor_lr": 3.0e-4,
+        "critic_lr": 3.0e-4,
+        "alpha_lr": 3.0e-4,
+        "policy_frequency": 2,
+        "tau": 0.01,
+        "learning_rate_decay_steps": 100_000,
+        "normalize_rewards": True,
+        "use_amp": True,
+    }
+    values.update(overrides)
+    return ConfigFlashSAC(**values)
 
 
 class EnvHumanoidPhoenX:
