@@ -17,7 +17,10 @@ from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate impo
 from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
     benchmark_train_to_gate,
 )
-from newton._src.solvers.phoenx.rl_training.dr_legs import default_dr_legs_flash_sac_config
+from newton._src.solvers.phoenx.rl_training.dr_legs import (
+    _DR_LEGS_ACTUATED_JOINT_NAMES,
+    default_dr_legs_flash_sac_config,
+)
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
@@ -56,6 +59,12 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
         self.assertTrue(config.use_amp)
 
         env = rl.EnvDrLegsPhoenX(rl.ConfigEnvDrLegsPhoenX(task="walk", world_count=1))
+        joint_q_start = env.model.joint_q_start.numpy()
+        labels_by_q = {
+            int(joint_q_start[joint]): env.model.joint_label[joint] for joint in range(int(env.model.joint_count))
+        }
+        actuated_names = tuple(labels_by_q[int(index)].rsplit("/", 1)[-1] for index in env.actuated_joint.numpy())
+        self.assertEqual(actuated_names, _DR_LEGS_ACTUATED_JOINT_NAMES)
         root_z = float(env.state_0.body_q.numpy()[0, 2])
         self.assertGreater(root_z, 0.2)
         actions = wp.zeros((1, env.action_dim), dtype=wp.float32, device=env.device)

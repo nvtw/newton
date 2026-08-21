@@ -24,7 +24,20 @@ OBS_DIM_DR_LEGS_WALK = 47
 TASK_DR_LEGS_HOLD = 0
 TASK_DR_LEGS_WALK = 1
 
-_DR_LEGS_ACTUATED_JOINT = (0, 1, 5, 6, 10, 15, 18, 19, 23, 24, 28, 33)
+_DR_LEGS_ACTUATED_JOINT_NAMES = (
+    "j1_l_i",
+    "j2_l_i",
+    "j6_l_i",
+    "j7_l_i",
+    "j2_l_o",
+    "j7_l_o",
+    "j1_r_i",
+    "j2_r_i",
+    "j6_r_i",
+    "j7_r_i",
+    "j2_r_o",
+    "j7_r_o",
+)
 
 
 @wp.func
@@ -518,7 +531,11 @@ class EnvDrLegsPhoenX:
         ]
         if len(revolute_joints) != 36:
             raise RuntimeError(f"Expected 36 DR Legs revolute joints, got {len(revolute_joints)}")
-        actuated_joints = [revolute_joints[index] for index in _DR_LEGS_ACTUATED_JOINT]
+        revolute_by_name = {robot.joint_label[joint].rsplit("/", 1)[-1]: joint for joint in revolute_joints}
+        missing = [name for name in _DR_LEGS_ACTUATED_JOINT_NAMES if name not in revolute_by_name]
+        if missing:
+            raise RuntimeError(f"DR Legs asset is missing actuated joints: {missing}")
+        actuated_joints = [revolute_by_name[name] for name in _DR_LEGS_ACTUATED_JOINT_NAMES]
         self._actuated_joint_q = tuple(int(robot.joint_q_start[joint]) for joint in actuated_joints)
         self._actuated_joint_qd = tuple(int(robot.joint_qd_start[joint]) for joint in actuated_joints)
         foot_bodies = {

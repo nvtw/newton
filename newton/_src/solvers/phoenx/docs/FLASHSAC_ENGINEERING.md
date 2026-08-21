@@ -537,12 +537,20 @@ environment now derives target indices and stride from
 ``model.use_coord_layout_targets`` while retaining coordinate and DOF indices
 for observations.
 
-After both fixes, a 4,096-world run learned stable standing with zero held-out
-terminations from 4.096M transitions onward, but did not learn its 0.3 m/s
-forward command by 24.576M transitions. The large survival, gait-contact, and
-orientation terms make standing a strong local optimum relative to velocity
-tracking. Treat DR Legs walking as unresolved; do not present the conservative
-3e-4 FlashSAC configuration as a validated recipe.
+A third failure selected the twelve drives by ordinal positions in the USD's
+revolute-joint list. The flattened asset changed that order, silently driving
+passive ``j3``, ``j4``, ``j8``, and ``j9`` linkage joints while omitting servo
+joints. The environment now resolves and validates the authoritative servo
+names, and a regression pins their exact action order.
+
+The earlier standing result predates that actuator fix and is not a valid
+learning baseline. With corrected actuators, a 4,096-world, five-substep run
+again learned stable standing with zero held-out terminations from 4.096M
+transitions onward, but never tracked the 0.3 m/s command through 12.288M
+transitions. Training sustained 34.5k transitions/s. The large survival,
+gait-contact, and orientation terms remain a strong standing optimum. Treat DR
+Legs walking as unresolved; do not present the conservative 3e-4 FlashSAC
+configuration as a validated recipe.
 
 ### Go2 integration
 
