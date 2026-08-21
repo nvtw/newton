@@ -48,6 +48,7 @@ from .flash_sac_autotune import (
     ResultFlashSACLRAutotune,
 )
 from .flash_sac_autotune_evaluation import CadenceFlashSACLRAutotune, EvaluatorPairedFlashSAC
+from .flash_sac_onnx import PolicyFlashSACONNX, export_flash_sac_actor_onnx, load_flash_sac_actor_onnx
 from .g1 import (
     ACTION_DIM_G1,
     OBS_DIM_G1,
@@ -177,6 +178,7 @@ __all__ = [
     "HparamSpec",
     "MirrorMapPPO",
     "Muon",
+    "PolicyFlashSACONNX",
     "PufferMinGRUNet",
     "ResultEvaluateAnymalPPO",
     "ResultEvaluateG1GatePPO",
@@ -212,8 +214,10 @@ __all__ = [
     "evaluate_g1_gate_ppo",
     "evaluate_g1_ppo",
     "evaluate_g1_target_ppo",
+    "export_flash_sac_actor_onnx",
     "g1_mirror_map_ppo",
     "insert_ppo_checkpoint_inputs",
+    "load_flash_sac_actor_onnx",
     "load_flash_sac_checkpoint",
     "load_ppo_checkpoint",
     "make_seed_counter",

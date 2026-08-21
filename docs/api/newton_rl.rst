@@ -67,6 +67,7 @@ Warp-only reinforcement learning utilities for Newton.
    HparamSpec
    MirrorMapPPO
    Muon
+   PolicyFlashSACONNX
    PufferMinGRUNet
    ResultEvaluateAnymalPPO
    ResultEvaluateG1GatePPO
@@ -109,8 +110,10 @@ Warp-only reinforcement learning utilities for Newton.
    evaluate_g1_gate_ppo
    evaluate_g1_ppo
    evaluate_g1_target_ppo
+   export_flash_sac_actor_onnx
    g1_mirror_map_ppo
    insert_ppo_checkpoint_inputs
+   load_flash_sac_actor_onnx
    load_flash_sac_checkpoint
    load_ppo_checkpoint
    make_seed_counter
