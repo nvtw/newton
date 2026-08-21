@@ -1533,6 +1533,7 @@ class NetworkFlashSAC:
         device: wp.context.Devicelike = None,
         seed: int = 0,
         contraction_dtype: str = "float32",
+        log_std_init: float = -4.0,
     ):
         self.input_dim = int(input_dim)
         self.hidden_dim = int(hidden_dim)
@@ -1548,6 +1549,8 @@ class NetworkFlashSAC:
         self.activation_dtype = wp.float16 if contraction_dtype == "float16" else wp.float32
         self.log_std_min = -10.0
         self.log_std_max = 2.0
+        if not self.log_std_min < log_std_init < self.log_std_max:
+            raise ValueError("log_std_init must lie strictly inside the actor log-std bounds")
         self.default_training = False
         self.reference_batch_norm = True
         self._use_cublas = is_cublas_available(self.device)
@@ -1573,6 +1576,10 @@ class NetworkFlashSAC:
         self.head_biases = [
             wp.zeros(head_width, dtype=wp.float32, device=self.device, requires_grad=True) for _ in range(head_count)
         ]
+        if self.actor_heads:
+            unit_log_std = 2.0 * (float(log_std_init) - self.log_std_min) / (self.log_std_max - self.log_std_min) - 1.0
+            raw_log_std = np.float32(np.arctanh(unit_log_std))
+            self.head_biases[1].assign(np.full(head_width, raw_log_std, dtype=np.float32))
         self.input_norm = _UnitBatchNorm(self.input_dim, self.device)
         self.block_norms = [
             (_UnitBatchNorm(self.hidden_dim * 4, self.device), _UnitBatchNorm(self.hidden_dim, self.device))

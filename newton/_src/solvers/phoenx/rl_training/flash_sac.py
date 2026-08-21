@@ -196,6 +196,7 @@ class ConfigFlashSAC(ConfigSAC):
 
     Args:
         target_sigma: Standard deviation used to derive the target entropy.
+        log_std_init: Initial state-dependent actor log-standard-deviation.
         noise_zeta_mu: Exponent of the repeated-noise zeta distribution.
         noise_zeta_max: Maximum number of steps for which exploration noise is reused.
         learning_rate_end: Final cosine-decay learning rate.
@@ -227,6 +228,7 @@ class ConfigFlashSAC(ConfigSAC):
     distributional_v_max: float = 5.0
     distributional_min_target: bool = True
     target_sigma: float = 0.15
+    log_std_init: float = -4.0
     noise_zeta_mu: float = 2.0
     noise_zeta_max: int = 16
     learning_rate_end: float = 1.5e-4
@@ -765,6 +767,8 @@ class TrainerFlashSAC(TrainerSAC):
         flash_config = config or ConfigFlashSAC()
         if flash_config.target_sigma <= 0.0:
             raise ValueError("target_sigma must be positive")
+        if not -10.0 < flash_config.log_std_init < 2.0:
+            raise ValueError("log_std_init must be strictly between -10 and 2")
         if flash_config.noise_zeta_max < 1:
             raise ValueError("noise_zeta_max must be positive")
         if flash_config.noise_zeta_mu <= 0.0:
@@ -813,6 +817,7 @@ class TrainerFlashSAC(TrainerSAC):
                 device=self.device,
                 seed=seed,
                 contraction_dtype=contraction_dtype,
+                log_std_init=flash_config.log_std_init,
             )
             critic_kwargs = {
                 "input_dim": obs_dim + action_dim,

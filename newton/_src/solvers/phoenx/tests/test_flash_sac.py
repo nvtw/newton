@@ -2245,12 +2245,28 @@ class TestTrainerFlashSAC(unittest.TestCase):
             scale_grad.numpy(), [-0.7573656, -0.42008877, 1.9268548, 0.69996125], rtol=2.0e-6, atol=2.0e-6
         )
 
+    def test_actor_log_std_initialization_is_configurable(self) -> None:
+        """Initialize state-dependent exploration at the configured scale."""
+
+        device = require_cuda_graph_capture("FlashSAC actor log-std initialization")
+        trainer = TrainerFlashSAC(
+            obs_dim=3,
+            action_dim=2,
+            config=ConfigFlashSAC(log_std_init=0.0),
+            device=device,
+            seed=17,
+        )
+        policy = trainer.actor.net.forward_reuse(wp.zeros((8, 3), dtype=wp.float32, device=device)).numpy()
+        np.testing.assert_allclose(policy[:, 2:], 0.0, rtol=0.0, atol=1.0e-6)
+
     def test_config_and_shape_failures_are_explicit(self) -> None:
         """Reject invalid FlashSAC configuration, replay, and update shapes."""
 
         device = require_cuda_graph_capture("FlashSAC failure cases")
         with self.assertRaisesRegex(ValueError, "target_sigma"):
             TrainerFlashSAC(obs_dim=2, action_dim=1, config=ConfigFlashSAC(target_sigma=0.0), device=device)
+        with self.assertRaisesRegex(ValueError, "log_std_init"):
+            TrainerFlashSAC(obs_dim=2, action_dim=1, config=ConfigFlashSAC(log_std_init=2.0), device=device)
         with self.assertRaisesRegex(ValueError, "block"):
             TrainerFlashSAC(obs_dim=2, action_dim=1, config=ConfigFlashSAC(actor_num_blocks=0), device=device)
         with self.assertRaisesRegex(ValueError, "distributional_atoms"):
