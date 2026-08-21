@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 
+import newton
 import newton.rl as rl
 from newton._src.solvers.phoenx.benchmarks.bench_dr_legs_hold_train_to_gate import (
     _make_parser as make_dr_legs_gate_parser,
@@ -72,6 +73,35 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
         self.assertEqual(env.step_forward_velocities.shape, (1,))
         self.assertTrue(np.all(np.isfinite(env.step_forward_velocities.numpy())))
         np.testing.assert_array_equal(env.step_dones.numpy(), 0.0)
+
+    def test_actuator_configuration_updates_only_driven_joints(self) -> None:
+        """Apply explicit actuator parameters only to the twelve driven joints."""
+
+        env = rl.EnvDrLegsPhoenX(
+            rl.ConfigEnvDrLegsPhoenX(
+                world_count=1,
+                joint_stiffness=15.0,
+                joint_damping=0.6,
+                joint_effort_limit=4.5,
+                joint_armature=0.02,
+            )
+        )
+        actuated = env.actuated_joint_qd.numpy()
+        np.testing.assert_array_equal(env.model.joint_target_ke.numpy()[actuated], np.float32(15.0))
+        np.testing.assert_array_equal(env.model.joint_target_kd.numpy()[actuated], np.float32(0.6))
+        np.testing.assert_array_equal(env.model.joint_effort_limit.numpy()[actuated], np.float32(4.5))
+        np.testing.assert_array_equal(env.model.joint_armature.numpy()[actuated], np.float32(0.02))
+
+        joint_count = int(env.model.joint_count)
+        joint_type = env.model.joint_type.numpy()[:joint_count]
+        all_revolute = env.model.joint_qd_start.numpy()[:joint_count][
+            joint_type == int(newton.JointType.REVOLUTE)
+        ]
+        passive = np.setdiff1d(all_revolute, actuated)
+        np.testing.assert_array_equal(env.model.joint_target_ke.numpy()[passive], 0.0)
+        np.testing.assert_array_equal(env.model.joint_target_kd.numpy()[passive], 0.0)
+        np.testing.assert_array_equal(env.model.joint_effort_limit.numpy()[passive], np.float32(400.0))
+        np.testing.assert_array_equal(env.model.joint_armature.numpy()[passive], 0.0)
 
     def test_hold_pose_preserves_direct_loops_after_shock_inside_cuda_graph(self) -> None:
         """Keep every direct DR Legs joint closed after a body shock."""

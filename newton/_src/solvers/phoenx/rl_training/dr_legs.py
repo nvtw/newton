@@ -129,6 +129,8 @@ def dr_legs_observe_reward_kernel(
     max_episode_steps: wp.int32,
     frame_dt: wp.float32,
     action_scale: wp.float32,
+    joint_stiffness: wp.float32,
+    joint_damping: wp.float32,
     gait_period: wp.float32,
     left_foot_body: wp.int32,
     right_foot_body: wp.int32,
@@ -185,7 +187,7 @@ def dr_legs_observe_reward_kernel(
             q = joint_q[world * joint_q_stride + actuated_joint_q[action]]
             qd = joint_qd[world * joint_qd_stride + actuated_joint_qd[action]]
             target = action_scale * current_actions[world, action]
-            torque = wp.float32(5.0) * (target - q) - wp.float32(0.2) * qd
+            torque = joint_stiffness * (target - q) - joint_damping * qd
             delta = current_actions[world, action] - previous_actions[world, action]
             delta2 = (
                 current_actions[world, action]
@@ -395,6 +397,10 @@ class ConfigEnvDrLegsPhoenX:
     solver_iterations: int = 8
     velocity_iterations: int = 1
     action_scale: float = 0.3
+    joint_stiffness: float = 5.0
+    joint_damping: float = 0.2
+    joint_effort_limit: float = 3.1
+    joint_armature: float = 0.011
     command: tuple[float, float, float] = (0.3, 0.0, 0.0)
     randomize_commands: bool = False
     command_x_range: tuple[float, float] = (-0.3, 0.3)
@@ -450,6 +456,14 @@ class EnvDrLegsPhoenX:
             raise ValueError("sim_substeps must be positive")
         if int(self.config.collision_refresh_interval) <= 0:
             raise ValueError("collision_refresh_interval must be positive")
+        for name, value in (
+            ("joint_stiffness", self.config.joint_stiffness),
+            ("joint_damping", self.config.joint_damping),
+            ("joint_effort_limit", self.config.joint_effort_limit),
+            ("joint_armature", self.config.joint_armature),
+        ):
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
         for name, limits in (
             ("x", self.config.command_x_range),
             ("y", self.config.command_y_range),
@@ -553,10 +567,11 @@ class EnvDrLegsPhoenX:
             robot.joint_target_mode[dof] = int(newton.JointTargetMode.NONE)
             robot.joint_effort_limit[dof] = 400.0
         for dof in self._actuated_joint_qd:
-            robot.joint_target_ke[dof] = 5.0
-            robot.joint_target_kd[dof] = 0.2
+            robot.joint_target_ke[dof] = float(self.config.joint_stiffness)
+            robot.joint_target_kd[dof] = float(self.config.joint_damping)
+            robot.joint_armature[dof] = float(self.config.joint_armature)
             robot.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
-            robot.joint_effort_limit[dof] = 3.1
+            robot.joint_effort_limit[dof] = float(self.config.joint_effort_limit)
         _filter_nearby_dr_legs_bodies(robot, max_hops=2)
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -645,6 +660,8 @@ class EnvDrLegsPhoenX:
                 int(self.config.max_episode_steps),
                 float(self.config.frame_dt),
                 float(self.config.action_scale),
+                float(self.config.joint_stiffness),
+                float(self.config.joint_damping),
                 float(self.config.gait_period),
                 self._left_foot_body_local,
                 self._right_foot_body_local,
