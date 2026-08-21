@@ -583,7 +583,12 @@ class StateFlashSACPopulation:
         self._reserve_update_buffers()
 
     def _bind_scalar_optimizer(self, scalar, population: AdamPopulation, member: int) -> None:
-        scalar.params = [value[member] for value in population.params]
+        scalar.params = []
+        for value in population.params:
+            view = value[member]
+            if value.grad is not None:
+                view.grad = value.grad[member]
+            scalar.params.append(view)
         scalar.m = [value[member] for value in population.m]
         scalar.v = [value[member] for value in population.v]
         scalar._step_count = population._step_count[member : member + 1]
@@ -602,6 +607,7 @@ class StateFlashSACPopulation:
             trainer.critic1_optimizer.step_condition = trainer._amp_step_condition
             trainer.critic2_optimizer.step_condition = trainer._amp_step_condition
             trainer._critic_ensemble = self.critics if self.population_count == 1 else None
+            trainer._actor_training_ensemble = self.actors if self.population_count == 1 else None
             trainer._target_critic_ensemble = self.target_critics if self.population_count == 1 else None
             for network in (
                 trainer.actor.net,

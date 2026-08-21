@@ -877,15 +877,22 @@ class TestTrainerFlashSAC(unittest.TestCase):
         )
         baseline.update(batch, seed=733, read_stats=False)
         population.update_p1(batch, seed=733, read_stats=False)
-        for actual_network, expected_network in (
-            (member.actor.net, baseline.actor.net),
-            (member.critic1, baseline.critic1),
-            (member.critic2, baseline.critic2),
-            (member.target_critic1, baseline.target_critic1),
-            (member.target_critic2, baseline.target_critic2),
+        self.assertEqual(baseline.actor_optimizer.step_count, 1)
+        np.testing.assert_array_equal(population.actor_optimizer._step_count.numpy(), 1)
+        np.testing.assert_array_equal(population.scaler.found_inf.numpy(), 0)
+        for network_name, actual_network, expected_network in (
+            ("actor", member.actor.net, baseline.actor.net),
+            ("critic1", member.critic1, baseline.critic1),
+            ("critic2", member.critic2, baseline.critic2),
+            ("target_critic1", member.target_critic1, baseline.target_critic1),
+            ("target_critic2", member.target_critic2, baseline.target_critic2),
         ):
-            for actual, expected in zip(actual_network.state_arrays(), expected_network.state_arrays(), strict=True):
-                np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+            for state_index, (actual, expected) in enumerate(
+                zip(actual_network.state_arrays(), expected_network.state_arrays(), strict=True)
+            ):
+                np.testing.assert_array_equal(
+                    actual.numpy(), expected.numpy(), err_msg=f"{network_name} state {state_index}"
+                )
         for population_optimizer, expected_optimizers in (
             (population.actor_optimizer, (baseline.actor_optimizer,)),
             (population.critic_optimizer, (baseline.critic1_optimizer, baseline.critic2_optimizer)),

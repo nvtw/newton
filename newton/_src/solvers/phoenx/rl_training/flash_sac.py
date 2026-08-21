@@ -1375,6 +1375,8 @@ class TrainerFlashSAC(TrainerSAC):
             seed_counter=self._device_update_seed,
             seed_offset=2,
         )
+        if not isinstance(self.target_critic1, NetworkFlashSAC) or not isinstance(self.target_critic2, NetworkFlashSAC):
+            raise RuntimeError("captured FlashSAC updates require the reference backbone")
         self.target_critic1.soft_update_from_device(self.critic1, self._device_target_update_rate)
         self.target_critic2.soft_update_from_device(self.critic2, self._device_target_update_rate)
         if self.config.use_amp:
@@ -1984,8 +1986,12 @@ class TrainerFlashSAC(TrainerSAC):
                     self._update_alpha(batch, seed=update_seed + 1)
             self._deterministic_critic_stats = bool(read_stats and i + 1 == int(self.config.update_steps))
             self._update_critics(batch, seed=update_seed + 2)
-            self.target_critic1.soft_update_from_device(self.critic1, self._device_target_update_rate)
-            self.target_critic2.soft_update_from_device(self.critic2, self._device_target_update_rate)
+            if isinstance(self.target_critic1, NetworkFlashSAC) and isinstance(self.target_critic2, NetworkFlashSAC):
+                self.target_critic1.soft_update_from_device(self.critic1, self._device_target_update_rate)
+                self.target_critic2.soft_update_from_device(self.critic2, self._device_target_update_rate)
+            else:
+                self.target_critic1.soft_update_from(self.critic1, self.config.tau)
+                self.target_critic2.soft_update_from(self.critic2, self.config.tau)
             if self.config.use_amp:
                 if self._target_critic_ensemble is not None:
                     self._target_critic_ensemble.refresh_contraction_weights()

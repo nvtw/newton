@@ -2402,6 +2402,15 @@ class NetworkFlashSAC:
 class EnsembleNetworkFlashSAC:
     """Fuse dense contractions across compatible reference networks."""
 
+    @staticmethod
+    def _member_view(value: wp.array, member: int) -> wp.array:
+        """Alias one member and its gradient without allocating storage."""
+
+        view = value[member]
+        if value.grad is not None:
+            view.grad = value.grad[member]
+        return view
+
     def __init__(self, first: NetworkFlashSAC, second: NetworkFlashSAC | None = None, *additional: NetworkFlashSAC):
         self.networks = (first, *(() if second is None else (second,)), *additional)
         if any(
@@ -2423,29 +2432,32 @@ class EnsembleNetworkFlashSAC:
         self.activation_dtype = first.activation_dtype
         self.embed_weight = self._stack_weights(*(network.embed_weight for network in self.networks))
         for ensemble_index, network in enumerate(self.networks):
-            network.embed_weight = self.embed_weight[ensemble_index]
+            network.embed_weight = self._member_view(self.embed_weight, ensemble_index)
         self.block_weights: list[tuple[wp.array3d[wp.float32], wp.array3d[wp.float32]]] = []
         for block_index in range(self.num_blocks):
             w1 = self._stack_weights(*(network.block_weights[block_index][0] for network in self.networks))
             w2 = self._stack_weights(*(network.block_weights[block_index][1] for network in self.networks))
             for ensemble_index, network in enumerate(self.networks):
-                network.block_weights[block_index] = (w1[ensemble_index], w2[ensemble_index])
+                network.block_weights[block_index] = (
+                    self._member_view(w1, ensemble_index),
+                    self._member_view(w2, ensemble_index),
+                )
             self.block_weights.append((w1, w2))
         self.head_weights: list[wp.array3d[wp.float32]] = []
         for head_index in range(len(first.head_weights)):
             weight = self._stack_weights(*(network.head_weights[head_index] for network in self.networks))
             for ensemble_index, network in enumerate(self.networks):
-                network.head_weights[head_index] = weight[ensemble_index]
+                network.head_weights[head_index] = self._member_view(weight, ensemble_index)
             self.head_weights.append(weight)
         self.head_biases: list[wp.array2d[wp.float32]] = []
         for head_index in range(len(first.head_biases)):
             bias = self._stack_vectors(*(network.head_biases[head_index] for network in self.networks))
             for ensemble_index, network in enumerate(self.networks):
-                network.head_biases[head_index] = bias[ensemble_index]
+                network.head_biases[head_index] = self._member_view(bias, ensemble_index)
             self.head_biases.append(bias)
         self.rms_scale = self._stack_vectors(*(network.rms_scale for network in self.networks))
         for ensemble_index, network in enumerate(self.networks):
-            network.rms_scale = self.rms_scale[ensemble_index]
+            network.rms_scale = self._member_view(self.rms_scale, ensemble_index)
             network.biases = network.head_biases
         for network in self.networks:
             network.weights = [network.embed_weight]
@@ -2500,7 +2512,7 @@ class EnsembleNetworkFlashSAC:
                 requires_grad=requires_grad,
             )
             for member, norm in enumerate(norms):
-                setattr(norm, name, stacked[member])
+                setattr(norm, name, self._member_view(stacked, member))
             state[name] = stacked
         self._population_norm_states[id(norms[0])] = state
 
