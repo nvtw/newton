@@ -31,7 +31,6 @@ import warp as wp
 import yaml
 
 import newton
-from newton._src.solvers.kamino._src.core.joints import JointActuationType
 from newton._src.solvers.kamino._src.utils import logger as msg
 from newton._src.solvers.kamino._src.utils.viewer import MeshColors, ViewerConfig
 from newton._src.solvers.kamino.examples import run_headless
@@ -147,18 +146,17 @@ class Example:
             self._apply_body_group_colors()
 
         # Override implicit PD gains to match training config exactly
-        act_type = wp.to_torch(self.sim_wrapper.sim.model.joints.act_type)
         k_p = wp.to_torch(self.sim_wrapper.sim.model.joints.k_p_j)
         k_d = wp.to_torch(self.sim_wrapper.sim.model.joints.k_d_j)
         a_j = wp.to_torch(self.sim_wrapper.sim.model.joints.a_j)
         b_j = wp.to_torch(self.sim_wrapper.sim.model.joints.b_j)
-        actuated_mask = act_type != JointActuationType.PASSIVE
-        k_p[actuated_mask] = config["pd_kp"]
-        k_d[actuated_mask] = config["pd_kd"]
-        a_j[actuated_mask] = config["pd_armature"]
-        k_p[~actuated_mask] = 0.0
-        k_d[~actuated_mask] = 0.0
+        actuated_dofs = self.sim_wrapper.actuated_dof_indices_tensor
+        k_p.zero_()
+        k_d.zero_()
         b_j.fill_(0.0)
+        k_p[actuated_dofs] = config["pd_kp"]
+        k_d[actuated_dofs] = config["pd_kd"]
+        a_j[actuated_dofs] = config["pd_armature"]
 
         # Observation builder (63D base: root_pos(3) + joints(36) + action_hist(24))
         self.obs_builder = DrlegsBaseObservation(
@@ -270,7 +268,7 @@ class Example:
     def _apply_actions(self):
         """Convert policy actions to implicit PD joint position references."""
         self.sim_wrapper.q_j_ref.zero_()
-        self.sim_wrapper.q_j_ref[:, self.sim_wrapper.actuated_dof_indices_tensor] = (
+        self.sim_wrapper.q_j_ref[:, self.sim_wrapper.actuated_coord_indices_tensor] = (
             self.cfg["action_scale"] * self.actions
         )
         self.sim_wrapper.dq_j_ref.zero_()

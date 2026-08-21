@@ -512,7 +512,17 @@ class DrlegsBaseObservation(ObservationBuilder):
         )
         self._body_sim = body_sim
         self._num_actions = body_sim.num_actuated
-        self._num_dofs = body_sim.num_joint_coords
+        joint_num_coords = wp.to_torch(body_sim.sim.model.joints.num_coords)[: len(body_sim.joint_names)].tolist()
+        coord_offset = 0
+        joint_coord_indices: list[int] = []
+        for num_coords in joint_num_coords:
+            if int(num_coords) == 1:
+                joint_coord_indices.append(coord_offset)
+            coord_offset += int(num_coords)
+        self._joint_coord_indices = torch.tensor(joint_coord_indices, device=body_sim.torch_device, dtype=torch.long)
+        self._num_dofs = len(joint_coord_indices)
+        if self._num_dofs != 36:
+            raise RuntimeError(f"Expected 36 DR Legs one-coordinate joints, got {self._num_dofs}")
         self._action_scale = action_scale
 
         # Action history buffers (actuated joints only).
@@ -544,7 +554,7 @@ class DrlegsBaseObservation(ObservationBuilder):
             self._action_history[:] = self._action_scale * actions
 
         root_pos = self._get_root_positions()
-        q_j = self._get_joint_positions()
+        q_j = self._get_joint_positions()[:, self._joint_coord_indices]
 
         d = self._num_dofs
         a = self._num_actions
