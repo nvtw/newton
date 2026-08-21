@@ -163,7 +163,7 @@ Warp-only reinforcement learning utilities for Newton.
    * - ``OBS_DIM_DR_LEGS_HOLD``
      - ``42``
    * - ``OBS_DIM_DR_LEGS_WALK``
-     - ``47``
+     - ``62``
    * - ``OBS_DIM_G1``
      - ``98``
    * - ``OBS_DIM_G1_ISAACLAB_FLAT``

@@ -57,9 +57,12 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
         self.assertEqual(config.n_step, 3)
         self.assertEqual(config.policy_frequency, 2)
         self.assertTrue(config.normalize_rewards)
+        env_config = rl.ConfigEnvDrLegsPhoenX(task="walk", world_count=1)
+        self.assertEqual(env_config.sim_substeps, 5)
+        self.assertEqual(make_dr_legs_gate_parser().get_default("sim_substeps"), 5)
         self.assertTrue(config.use_amp)
 
-        env = rl.EnvDrLegsPhoenX(rl.ConfigEnvDrLegsPhoenX(task="walk", world_count=1))
+        env = rl.EnvDrLegsPhoenX(env_config)
         joint_q_start = env.model.joint_q_start.numpy()
         labels_by_q = {
             int(joint_q_start[joint]): env.model.joint_label[joint] for joint in range(int(env.model.joint_count))
@@ -176,6 +179,10 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
         expected = config.action_scale * action_row
         self.assertEqual(obs.shape, (env.world_count, rl.OBS_DIM_DR_LEGS_WALK))
         self.assertTrue(np.all(np.isfinite(obs)))
+        self.assertEqual(env.obs_dim, 62)
+        joint_qd = env.state_0.joint_qd.numpy().reshape(env.world_count, env.joint_dof_stride)
+        actuated_qd = env.actuated_joint_qd.numpy()
+        np.testing.assert_allclose(obs[:, 50:], 0.2 * joint_qd[:, actuated_qd], rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(
             obs[:, 42:45],
             np.tile(np.asarray(config.command, dtype=np.float32), (env.world_count, 1)),

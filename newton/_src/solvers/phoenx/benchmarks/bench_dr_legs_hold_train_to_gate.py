@@ -407,7 +407,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--iterations", type=int, default=3000)
     parser.add_argument("--chunk-iterations", type=int, default=50)
     parser.add_argument("--rollout-steps", type=int, default=24)
-    parser.add_argument("--sim-substeps", type=int, default=20)
+    parser.add_argument("--sim-substeps", type=int, default=5)
     parser.add_argument("--collision-refresh-interval", type=int, default=4)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument("--velocity-iterations", type=int, default=1)

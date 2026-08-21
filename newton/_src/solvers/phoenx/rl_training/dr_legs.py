@@ -20,7 +20,7 @@ from .reward_functions import gaussian_reward, projected_gravity_flat_penalty, t
 
 ACTION_DIM_DR_LEGS = 12
 OBS_DIM_DR_LEGS_HOLD = 42
-OBS_DIM_DR_LEGS_WALK = 47
+OBS_DIM_DR_LEGS_WALK = 62
 TASK_DR_LEGS_HOLD = 0
 TASK_DR_LEGS_WALK = 1
 
@@ -170,12 +170,17 @@ def dr_legs_observe_reward_kernel(
         value = action_scale * current_actions[world, action]
     elif task == TASK_DR_LEGS_WALK and col < wp.int32(45):
         value = command[world, col - wp.int32(42)]
-    elif task == TASK_DR_LEGS_WALK and col < obs_dim:
+    elif task == TASK_DR_LEGS_WALK and col < wp.int32(47):
         phase = wp.float32(2.0) * wp.pi * wp.float32(episode_steps[world]) * frame_dt / gait_period
         if col == wp.int32(45):
             value = wp.sin(phase)
         else:
             value = wp.cos(phase)
+    elif task == TASK_DR_LEGS_WALK and col < wp.int32(50):
+        value = linear_body[col - wp.int32(47)]
+    elif task == TASK_DR_LEGS_WALK and col < obs_dim:
+        action = col - wp.int32(50)
+        value = wp.float32(0.2) * joint_qd[world * joint_qd_stride + actuated_joint_qd[action]]
     obs[world, col] = _clip_dr_legs(value, wp.float32(-100.0), wp.float32(100.0))
 
     if col == wp.int32(0):
@@ -392,7 +397,7 @@ class ConfigEnvDrLegsPhoenX:
     task: str = "hold"
     world_count: int = 4096
     frame_dt: float = 1.0 / 50.0
-    sim_substeps: int = 20
+    sim_substeps: int = 5
     collision_refresh_interval: int = 4
     solver_iterations: int = 8
     velocity_iterations: int = 1
