@@ -1033,6 +1033,9 @@ class TestFlashSACLRAutotune(unittest.TestCase):
             population_backend="parallel",
         )
         self.addCleanup(graph.close)
+        np.testing.assert_array_equal(graph.single_trainer._device_interaction_seed.numpy(), [977])
+        np.testing.assert_array_equal(graph.trainers[0]._device_interaction_seed.numpy(), [977])
+        np.testing.assert_array_equal(graph.trainers[1]._device_interaction_seed.numpy(), [978])
         self.assertEqual(graph.challenger_world_count, 0)
         self.assertEqual(graph.challenger_fallback_fraction(), 0.0)
         self.assertEqual(len(graph.rollout_actors or ()), 1)
@@ -1110,6 +1113,82 @@ class TestFlashSACLRAutotune(unittest.TestCase):
                 for value in network.state_arrays()
             ),
         )
+
+    def test_parallel_bootstrap_matches_ordinary_overlap(self) -> None:
+        """Match P1 bootstrap to ordinary overlap on identical graph inputs."""
+
+        device = require_cuda_graph_capture("FlashSAC LR autotune bootstrap parity")
+        controller = self._make_controller(
+            device,
+            autotune=ConfigFlashSACLRAutotune(evaluation_episodes=4, challenger_fraction=0.25),
+        )
+        source = controller.trainers[0]
+        fixed = TrainerFlashSAC(
+            obs_dim=source.obs_dim,
+            action_dim=source.action_dim,
+            config=source.config,
+            device=device,
+            seed=source.seed,
+        )
+        fixed.copy_training_state_from(source)
+        fixed_obs = wp.zeros((8, 3), dtype=wp.float32, device=device)
+        auto_obs = wp.zeros((8, 3), dtype=wp.float32, device=device)
+        fixed_next_obs = wp.ones((8, 3), dtype=wp.float32, device=device)
+        auto_next_obs = wp.ones((8, 3), dtype=wp.float32, device=device)
+        fixed_env = _AutotuneSmokeEnv(fixed_obs, fixed_next_obs)
+        auto_env = _AutotuneSmokeEnv(auto_obs, auto_next_obs)
+
+        def warm_replay(
+            trainer: TrainerFlashSAC, env: _AutotuneSmokeEnv, next_obs: wp.array2d[wp.float32]
+        ) -> BufferReplayFlashSAC:
+            replay = trainer.initialize_replay_buffer()
+            replay.reserve_graph_buffers(env.world_count)
+            replay.add_batch_graph(
+                env.obs,
+                wp.zeros((8, 2), dtype=wp.float32, device=device),
+                wp.ones(8, dtype=wp.float32, device=device),
+                wp.zeros(8, dtype=wp.float32, device=device),
+                next_obs,
+                truncateds=wp.zeros(8, dtype=wp.float32, device=device),
+            )
+            replay.advance_graph_host_state()
+            return replay
+
+        fixed_graph = fixed.capture_training_graph(
+            fixed_env,
+            warm_replay(fixed, fixed_env, fixed_next_obs),
+            updates_per_step=1,
+            interactions_per_graph=2,
+            seed=997,
+            overlap=True,
+        )
+        auto_graph = controller.capture_overlap(
+            auto_env,
+            warm_replay(controller.trainers[0], auto_env, auto_next_obs),
+            updates_per_step=1,
+            interactions_per_launch=2,
+            seed=997,
+            population_backend="parallel",
+        )
+        self.addCleanup(fixed_graph.close)
+        self.addCleanup(auto_graph.close)
+        auto_graph.start_single_policy_bootstrap()
+
+        for _launch in range(20):
+            fixed_graph.launch()
+            auto_graph.launch()
+            fixed_graph.synchronize()
+            auto_graph.synchronize()
+            np.testing.assert_array_equal(fixed_env.last_actions.numpy(), auto_env.last_actions.numpy())
+            for actual, expected in zip(
+                self._actor_state(auto_graph.single_trainer), self._actor_state(fixed), strict=True
+            ):
+                np.testing.assert_array_equal(actual, expected)
+            actual_critics = self._critic_state(auto_graph.single_trainer)
+            expected_critics = self._critic_state(fixed)
+            for actual_group, expected_group in zip(actual_critics, expected_critics, strict=True):
+                for actual, expected in zip(actual_group, expected_group, strict=True):
+                    np.testing.assert_array_equal(actual, expected)
 
     def test_captured_paired_evaluation_is_isolated_and_deterministic(self) -> None:
         """Evaluate identical policies with paired seeds without mutating training state."""

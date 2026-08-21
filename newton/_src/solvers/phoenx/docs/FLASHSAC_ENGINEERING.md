@@ -572,6 +572,32 @@ wall-to-quality despite their higher raw throughput: 2,048 worlds required
 reduced coordinates and 1,024 worlds; generic ANYmal retains its configurable
 maximal-coordinate default.
 
+### H1 integration
+
+The H1 environment exposes body-frame forward velocity separately from shaped
+success so the shared evaluator cannot accept stationary policies. Its flat
+protocol uses the authoritative mraksha reward weights, including no alive
+bonus, a fixed 0.8 m/s command, reduced coordinates, 4,096 worlds, and a
+6e-4 actor/critic/temperature safe base.
+
+Autotune originally initialized cloned interaction counters from trainer
+constructor seeds and kept partitioned policy sampling active during P1
+bootstrap. The parallel backend now initializes capture seeds explicitly and
+uses one device-conditional policy subgraph: P1 samples one full-world actor and
+one RNG counter, P2 samples guarded champion/challenger partitions, and both
+feed the same preallocated action buffer before one shared physics graph.
+An ordinary-overlap versus bootstrap regression remains bitwise identical for
+twenty cadences. P1 autotune throughput is 594k transitions/s versus 599k for
+ordinary FlashSAC on the same 4,096-world protocol.
+
+Hands-off H1 autotuning passed three out of three seeds with zero held-out
+terminations. Training-only wall times were 41.44, 30.82, and 44.84 seconds
+(median 41.44 seconds). Seed 0 promoted actor LR from 6e-4 to 1.2e-3 and reached
+0.79 m/s; other seeds safely rejected worse probes while the champion continued
+learning. A 2,048-world point was rejected after failing to locomote within
+73.32 seconds and 24.576M transitions.
+
+
 Every data-bearing FlashSAC learner temporary is setup-owned before CUDA graph
 capture. This includes actor sampling noise/actions/log probabilities, critic
 inputs and concatenated rows, distributional targets, sliced logits, output

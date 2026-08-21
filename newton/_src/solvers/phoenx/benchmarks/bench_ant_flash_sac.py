@@ -21,14 +21,21 @@ from ..rl_training.flash_sac import BufferReplayFlashSAC, TrainerFlashSAC
 from ..rl_training.flash_sac_autotune import ConfigFlashSACLRAutotune, ControllerFlashSACLRAutotune
 from ..rl_training.flash_sac_autotune_evaluation import EvaluatorPairedFlashSAC, _bootstrap_ready
 from ..rl_training.go2 import ConfigEnvGo2PhoenX, EnvGo2PhoenX, default_go2_flash_sac_config
+from ..rl_training.h1 import ConfigEnvH1PhoenX, EnvH1PhoenX, default_h1_flash_sac_config
 from ..rl_training.humanoid import ConfigEnvHumanoidPhoenX, EnvHumanoidPhoenX, default_humanoid_flash_sac_config
 
 _TASK_DEFAULT_WORLD_COUNTS = {
     "ant": 2048,
     "dr_legs": 4096,
+    "h1": 4096,
     "go2": 1024,
     "humanoid": 4096,
 }
+
+_EnvConfig = (
+    ConfigEnvAntPhoenX | ConfigEnvDrLegsPhoenX | ConfigEnvGo2PhoenX | ConfigEnvH1PhoenX | ConfigEnvHumanoidPhoenX
+)
+_Env = EnvAntPhoenX | EnvDrLegsPhoenX | EnvGo2PhoenX | EnvH1PhoenX | EnvHumanoidPhoenX
 
 
 def _load_cudart() -> ctypes.CDLL:
@@ -44,7 +51,7 @@ def _load_cudart() -> ctypes.CDLL:
 
 def _warm_replay(
     trainer: TrainerFlashSAC,
-    env: EnvAntPhoenX | EnvDrLegsPhoenX | EnvGo2PhoenX | EnvHumanoidPhoenX,
+    env: _Env,
     *,
     seed: int,
 ) -> BufferReplayFlashSAC:
@@ -73,12 +80,11 @@ def _warm_replay(
     return replay
 
 
-def _make_env_config(
-    args: argparse.Namespace, *, world_count: int
-) -> ConfigEnvAntPhoenX | ConfigEnvDrLegsPhoenX | ConfigEnvGo2PhoenX | ConfigEnvHumanoidPhoenX:
+def _make_env_config(args: argparse.Namespace, *, world_count: int) -> _EnvConfig:
     """Build one explicit task protocol shared by training and evaluation."""
 
     sim_substeps = getattr(args, "sim_substeps", None)
+    forward_command = getattr(args, "forward_command", None)
     if args.task == "dr_legs":
         values = {"task": "walk", "world_count": int(world_count), "auto_reset": True}
         if sim_substeps is not None:
@@ -90,7 +96,7 @@ def _make_env_config(
             "articulation_mode": str(args.articulation_mode),
             "auto_reset": True,
             "reward_mode": "dense_command",
-            "command": (0.8, 0.0, 0.0, 0.0),
+            "command": (0.8 if forward_command is None else float(forward_command), 0.0, 0.0, 0.0),
         }
         if sim_substeps is not None:
             values["sim_substeps"] = int(sim_substeps)
@@ -98,6 +104,12 @@ def _make_env_config(
     common = {"world_count": int(world_count), "articulation_mode": str(args.articulation_mode), "auto_reset": True}
     if sim_substeps is not None:
         common["sim_substeps"] = int(sim_substeps)
+    if args.task == "h1":
+        return ConfigEnvH1PhoenX(
+            **common,
+            command=(0.8 if forward_command is None else float(forward_command), 0.0, 0.0),
+            randomize_commands=False,
+        )
     if args.task == "humanoid":
         return ConfigEnvHumanoidPhoenX(**common)
     return ConfigEnvAntPhoenX(
@@ -108,7 +120,7 @@ def _make_env_config(
 
 def _make_evaluator(
     sources: tuple[TrainerFlashSAC, TrainerFlashSAC],
-    env_config: ConfigEnvAntPhoenX | ConfigEnvDrLegsPhoenX | ConfigEnvGo2PhoenX | ConfigEnvHumanoidPhoenX,
+    env_config: _EnvConfig,
     args: argparse.Namespace,
 ) -> EvaluatorPairedFlashSAC:
     """Capture deterministic no-reset locomotion evaluation."""
@@ -124,12 +136,11 @@ def _make_evaluator(
         "dr_legs": EnvDrLegsPhoenX,
         "go2": EnvGo2PhoenX,
         "humanoid": EnvHumanoidPhoenX,
+        "h1": EnvH1PhoenX,
     }[args.task]
     envs = (env_type(eval_config, device=args.device), env_type(eval_config, device=args.device))
 
-    def forward_velocity(
-        env: EnvAntPhoenX | EnvDrLegsPhoenX | EnvGo2PhoenX | EnvHumanoidPhoenX, _rewards: wp.array[wp.float32]
-    ) -> wp.array[wp.float32]:
+    def forward_velocity(env: _Env, _rewards: wp.array[wp.float32]) -> wp.array[wp.float32]:
         if isinstance(env, EnvHumanoidPhoenX):
             return env.step_successes
         return env.step_forward_velocities
@@ -158,9 +169,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     elif args.task == "go2":
         config = default_go2_flash_sac_config()
         env_type = EnvGo2PhoenX
+    elif args.task == "h1":
+        config = default_h1_flash_sac_config()
+        env_type = EnvH1PhoenX
     else:
         config = default_ant_flash_sac_config()
         env_type = EnvAntPhoenX
+    if args.base_lr is not None:
+        learning_rate = float(args.base_lr)
+        config = replace(config, actor_lr=learning_rate, critic_lr=learning_rate, alpha_lr=learning_rate)
     setup_phases: dict[str, float] = {}
     setup_start = time.perf_counter()
     phase_start = setup_start
@@ -351,7 +368,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("fixed", "autotune"), default="autotune")
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--task", choices=("ant", "dr_legs", "go2", "humanoid"), default="ant")
+    parser.add_argument("--task", choices=("ant", "dr_legs", "go2", "h1", "humanoid"), default="ant")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--world-count", type=int, default=None)
     parser.add_argument(
@@ -362,6 +379,8 @@ def main() -> int:
     parser.add_argument("--sim-substeps", type=int, default=None)
     parser.add_argument("--max-launches", type=int, default=3000)
     parser.add_argument("--updates-per-step", type=int, default=2)
+    parser.add_argument("--base-lr", type=float, default=None)
+    parser.add_argument("--forward-command", type=float, default=None)
     parser.add_argument(
         "--disable-search-bootstrap",
         action="store_true",

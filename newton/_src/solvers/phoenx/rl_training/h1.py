@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -13,6 +14,7 @@ import newton.utils
 
 from .command_observation import advance_command_seed_kernel, sample_done_velocity_commands_kernel
 from .contact_observation import scan_two_body_contacts_kernel
+from .flash_sac import ConfigFlashSAC
 from .reward_functions import gaussian_reward, projected_gravity_flat_penalty, tracking_reward_2d
 
 ACTION_DIM_H1 = 19
@@ -194,6 +196,7 @@ def h1_observe_reward_kernel(
     rewards: wp.array[wp.float32],
     dones: wp.array[wp.float32],
     successes: wp.array[wp.float32],
+    forward_velocities: wp.array[wp.float32],
 ):
     world, col = wp.tid()
     q_base = world * coord_stride
@@ -337,6 +340,7 @@ def h1_observe_reward_kernel(
         rewards[world] = reward
         dones[world] = done
         successes[world] = linear_tracking * yaw_tracking * _clip_h1(upright, wp.float32(0.0), wp.float32(1.0))
+        forward_velocities[world] = linear_body[0]
 
 
 @wp.kernel(enable_backward=False)
@@ -415,7 +419,7 @@ class ConfigEnvH1PhoenX:
     min_upright_cos: float = 0.54
     lin_vel_weight: float = 1.0
     yaw_rate_weight: float = 1.0
-    alive_weight: float = 0.25
+    alive_weight: float = 0.0
     lin_vel_sigma: float = 0.5
     yaw_rate_sigma: float = 0.5
     lin_vel_z_weight: float = -2.0
@@ -434,6 +438,28 @@ class ConfigEnvH1PhoenX:
     ground_friction: float = 1.0
     auto_reset: bool = True
     articulation_mode: str = "reduced"
+
+
+def default_h1_flash_sac_config(**overrides: Any) -> ConfigFlashSAC:
+    """Return a conservative FlashSAC baseline for H1 experiments."""
+
+    values = {
+        "buffer_max_length": 10_000_000,
+        "buffer_min_length": 100_000,
+        "sample_batch_size": 2048,
+        "gamma": 0.99,
+        "n_step": 3,
+        "actor_lr": 6.0e-4,
+        "critic_lr": 6.0e-4,
+        "alpha_lr": 6.0e-4,
+        "policy_frequency": 2,
+        "tau": 0.01,
+        "learning_rate_decay_steps": 100_000,
+        "normalize_rewards": True,
+        "use_amp": True,
+    }
+    values.update(overrides)
+    return ConfigFlashSAC(**values)
 
 
 class EnvH1PhoenX:
@@ -497,9 +523,11 @@ class EnvH1PhoenX:
         self.rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.forward_velocities = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_rewards = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_dones = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.step_successes = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
+        self.step_forward_velocities = wp.zeros(self.world_count, dtype=wp.float32, device=self.device)
         self.sim_time = 0.0
         self.reset()
 
@@ -673,7 +701,7 @@ class EnvH1PhoenX:
                 float(self._right_ankle_soft_limits[1]),
                 float(self.config.termination_weight),
             ],
-            outputs=[self.obs, self.rewards, self.dones, self.successes],
+            outputs=[self.obs, self.rewards, self.dones, self.successes, self.forward_velocities],
             device=self.device,
         )
         return self.obs
@@ -692,6 +720,7 @@ class EnvH1PhoenX:
         self.dones.zero_()
         self.successes.zero_()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+        self.forward_velocities.zero_()
         self.sim_time = 0.0
         return self.observe()
 
@@ -750,6 +779,7 @@ class EnvH1PhoenX:
         wp.copy(self.step_rewards, self.rewards)
         wp.copy(self.step_dones, self.dones)
         wp.copy(self.step_successes, self.successes)
+        wp.copy(self.step_forward_velocities, self.forward_velocities)
         wp.launch(
             h1_finish_step_kernel,
             dim=(self.world_count, self.action_dim),

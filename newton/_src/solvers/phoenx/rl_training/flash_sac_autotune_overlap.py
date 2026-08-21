@@ -90,6 +90,9 @@ def capture_lr_autotune_overlap(
     for trainer in controller.trainers:
         trainer.reserve_buffers(env.world_count)
     controller.single_trainer.reserve_buffers(env.world_count)
+    for member, trainer in enumerate(controller.trainers):
+        trainer._device_interaction_seed.assign(np.asarray([int(seed) + member], dtype=np.int32))
+    controller.single_trainer._device_interaction_seed.assign(np.asarray([int(seed)], dtype=np.int32))
     rollout_member_count = 1 if controller.challenger_worlds == 0 else 2
     rollout_actors = tuple(_make_rollout_actor(controller, member, seed=seed) for member in range(rollout_member_count))
     phase_batches = tuple(

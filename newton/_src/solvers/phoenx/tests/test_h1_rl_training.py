@@ -9,12 +9,22 @@ import numpy as np
 import warp as wp
 
 import newton.rl as rl
+from newton._src.solvers.phoenx.rl_training.h1 import default_h1_flash_sac_config
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 
 class TestH1PhoenXRL(unittest.TestCase):
+    def test_default_flash_sac_recipe_uses_validated_rates(self) -> None:
+        """Keep the validated H1 FlashSAC safe-base learning rates."""
+
+        config = default_h1_flash_sac_config()
+        self.assertEqual(config.actor_lr, 6.0e-4)
+        self.assertEqual(config.critic_lr, 6.0e-4)
+        self.assertEqual(config.alpha_lr, 6.0e-4)
+
     def test_step_and_position_targets_inside_cuda_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX H1 RL tests")
+        self.assertEqual(rl.ConfigEnvH1PhoenX().alive_weight, 0.0)
         config = rl.ConfigEnvH1PhoenX(
             world_count=2,
             sim_substeps=2,
@@ -41,11 +51,14 @@ class TestH1PhoenXRL(unittest.TestCase):
         targets = env.control.joint_target_q.numpy().reshape(env.world_count, -1)
         expected_targets = env.default_joint_pos.numpy() + config.action_scale * action_row
 
+        forward_velocities = env.step_forward_velocities.numpy()
         self.assertEqual(obs.shape, (env.world_count, rl.OBS_DIM_H1))
         self.assertTrue(np.all(np.isfinite(obs)))
         self.assertTrue(np.all(np.isfinite(rewards)))
         self.assertTrue(np.all(np.isfinite(q)))
         np.testing.assert_allclose(dones, 0.0, rtol=0.0, atol=0.0)
+        self.assertTrue(np.all(np.isfinite(forward_velocities)))
+        np.testing.assert_allclose(forward_velocities, obs[:, 0], rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(
             targets[:, 6:25], np.tile(expected_targets, (env.world_count, 1)), rtol=0.0, atol=1.0e-6
         )

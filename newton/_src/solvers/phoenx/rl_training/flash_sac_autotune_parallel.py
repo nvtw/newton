@@ -9,6 +9,7 @@ import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import warp as wp
 
 from .cublas import release_cublas_workspace
@@ -162,6 +163,9 @@ def capture_lr_autotune_parallel_overlap(
     single_trainer = _clone_trainer(controller.single_trainer)
     single_trainer.reserve_buffers(env.world_count)
     single_trainer.reserve_update_buffers(replay.batch_size)
+    for member, trainer in enumerate(trainers):
+        trainer._device_interaction_seed.assign(np.asarray([int(seed) + member], dtype=np.int32))
+    single_trainer._device_interaction_seed.assign(np.asarray([int(seed)], dtype=np.int32))
     challenger_worlds = int(controller.challenger_worlds)
     if challenger_worlds == 0:
         rollout_actors = (_make_rollout_actor(trainers[0], env.world_count),)
@@ -190,48 +194,67 @@ def capture_lr_autotune_parallel_overlap(
     if hasattr(env, "use_command_seed_counter"):
         env.use_command_seed_counter(env_seed_counter)
 
+    single_rollout_actor = _make_rollout_actor(single_trainer, env.world_count)
+    single_rollout_condition = wp.zeros(1, dtype=wp.int32, device=controller.device)
+    routed_actions = controller._routed_actions
+
     def collect() -> None:
         for _interaction in range(interactions):
             wp.copy(pre_step_obs, env.obs)
-            champion_seed = trainers[0].prepare_graph_exploration_seed()
-            champion_actions, _log_probs, _policy_out = rollout_actors[0].sample_reuse_seed_counter(
-                champion_obs, seed_counter=champion_seed
+
+            def sample_single() -> None:
+                exploration_seed = single_trainer.prepare_graph_exploration_seed()
+                single_actions, _log_probs, _policy_out = single_rollout_actor.sample_reuse_seed_counter(
+                    pre_step_obs, seed_counter=exploration_seed
+                )
+                wp.copy(routed_actions, single_actions)
+
+            def sample_population(interaction: int = _interaction) -> None:
+                champion_seed = trainers[0].prepare_graph_exploration_seed()
+                champion_actions, _log_probs, _policy_out = rollout_actors[0].sample_reuse_seed_counter(
+                    champion_obs, seed_counter=champion_seed
+                )
+                if challenger_worlds:
+                    assert challenger_obs is not None and guard_actor is not None
+                    challenger_seed = trainers[1].prepare_graph_exploration_seed()
+                    challenger_actions, _log_probs, _policy_out = rollout_actors[1].sample_reuse_seed_counter(
+                        challenger_obs, seed_counter=challenger_seed
+                    )
+                    guard_actions, _log_probs, _policy_out = guard_actor.sample_reuse_seed_counter(
+                        challenger_obs, seed_counter=challenger_seed
+                    )
+                    wp.launch(
+                        _guard_challenger_actions_kernel,
+                        dim=challenger_worlds,
+                        inputs=[
+                            guard_actions,
+                            challenger_actions,
+                            guard_rms_limit,
+                            guard_max_limit,
+                            interaction,
+                        ],
+                        outputs=[guarded_challenger_actions, challenger_fallbacks],
+                        device=controller.device,
+                    )
+                    wp.launch(
+                        _route_partitioned_actions_kernel,
+                        dim=routed_actions.shape,
+                        inputs=[champion_actions, guarded_challenger_actions, controller.champion_worlds],
+                        outputs=[routed_actions],
+                        device=controller.device,
+                    )
+                else:
+                    wp.copy(routed_actions, champion_actions)
+
+            wp.capture_if(
+                single_rollout_condition,
+                on_true=sample_single,
+                on_false=sample_population,
             )
-            actions = champion_actions
-            if challenger_worlds:
-                assert challenger_obs is not None and guard_actor is not None
-                challenger_seed = trainers[1].prepare_graph_exploration_seed()
-                challenger_actions, _log_probs, _policy_out = rollout_actors[1].sample_reuse_seed_counter(
-                    challenger_obs, seed_counter=challenger_seed
-                )
-                guard_actions, _log_probs, _policy_out = guard_actor.sample_reuse_seed_counter(
-                    challenger_obs, seed_counter=challenger_seed
-                )
-                wp.launch(
-                    _guard_challenger_actions_kernel,
-                    dim=challenger_worlds,
-                    inputs=[
-                        guard_actions,
-                        challenger_actions,
-                        guard_rms_limit,
-                        guard_max_limit,
-                        _interaction,
-                    ],
-                    outputs=[guarded_challenger_actions, challenger_fallbacks],
-                    device=controller.device,
-                )
-                actions = controller._routed_actions
-                wp.launch(
-                    _route_partitioned_actions_kernel,
-                    dim=actions.shape,
-                    inputs=[champion_actions, guarded_challenger_actions, controller.champion_worlds],
-                    outputs=[actions],
-                    device=controller.device,
-                )
-            next_obs, rewards, dones = env.step(actions)
+            next_obs, rewards, dones = env.step(routed_actions)
             replay.add_batch_graph(
                 pre_step_obs,
-                actions,
+                routed_actions,
                 rewards,
                 getattr(env, "step_terminateds", dones),
                 getattr(env, "step_next_obs", next_obs),
@@ -240,11 +263,7 @@ def capture_lr_autotune_parallel_overlap(
 
     def prepare(phase: int, *, single: bool) -> None:
         if single:
-            rollout_actors[0].copy_from(single_trainer.actor)
-            if challenger_worlds:
-                rollout_actors[1].copy_from(single_trainer.actor)
-                assert guard_actor is not None
-                guard_actor.copy_from(single_trainer.actor)
+            single_rollout_actor.copy_from(single_trainer.actor)
             sample_counter = single_trainer._device_update_count
         else:
             for actor, trainer in zip(rollout_actors, trainers[: len(rollout_actors)], strict=True):
@@ -328,6 +347,8 @@ def capture_lr_autotune_parallel_overlap(
         prepare_stream=prepare_stream,
         phase_batches=phase_batches,
         rollout_actors=rollout_actors + ((guard_actor,) if guard_actor is not None else ()),
+        single_rollout_actor=single_rollout_actor,
+        single_rollout_condition=single_rollout_condition,
         challenger_fallbacks=challenger_fallbacks,
         challenger_world_count=challenger_worlds,
         retained_arrays=(pre_step_obs, zero_truncateds, env_seed_counter, guarded_challenger_actions),
@@ -356,6 +377,8 @@ class GraphFlashSACLRAutotuneParallelOverlap:
     prepare_stream: wp.Stream | None
     phase_batches: tuple[tuple[BatchSAC, ...], tuple[BatchSAC, ...]] | None
     rollout_actors: tuple[Any, ...] | None
+    single_rollout_actor: Any | None
+    single_rollout_condition: wp.array[wp.int32] | None
     challenger_fallbacks: wp.array2d[wp.int32]
     challenger_world_count: int
     retained_arrays: tuple[wp.array[Any], ...]
@@ -431,12 +454,17 @@ class GraphFlashSACLRAutotuneParallelOverlap:
         for destination, source in zip(self.trainers, self.controller.trainers, strict=True):
             destination.copy_training_state_from(source)
         self.single_trainer.copy_training_state_from(self.controller.single_trainer)
+        if self.single_rollout_condition is None:
+            raise RuntimeError("parallel FlashSAC LR autotuning graph is closed")
+        self.single_rollout_condition.assign(np.asarray([int(self.controller.converged)], dtype=np.int32))
 
     def launch(self) -> None:
         """Overlap rollout with two independent learners or converged P1."""
 
         if (
             self.rollout_graph is None
+            or self.single_rollout_actor is None
+            or self.single_rollout_condition is None
             or self.update_graphs is None
             or self.single_graphs is None
             or self.population_prepare_graphs is None
@@ -498,6 +526,8 @@ class GraphFlashSACLRAutotuneParallelOverlap:
         self.prepare_stream = None
         self.phase_batches = None
         self.rollout_actors = None
+        self.single_rollout_actor = None
+        self.single_rollout_condition = None
         self.retained_arrays = ()
 
     def __del__(self) -> None:
