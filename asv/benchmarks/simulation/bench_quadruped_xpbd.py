@@ -13,6 +13,7 @@ wp.config.log_level = wp.LOG_WARNING
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 
+from _benchmark_config import pr_gate_repeat
 from benchmark_metric_tracks import _SimulationMetricTracksUnparameterized
 from benchmark_metrics import (
     collect_simulation_metrics,
@@ -32,12 +33,8 @@ def _create_example(num_frames, world_count):
     return Example(newton.viewer.ViewerNull(num_frames=num_frames), world_count)
 
 
-def _repeat_count():
-    return 3 if os.environ.get("NEWTON_ASV_PR_GATE") else 10
-
-
 class FastExampleQuadrupedXPBD:
-    repeat = _repeat_count()
+    repeat = pr_gate_repeat(10)
     number = 1
 
     def setup(self):

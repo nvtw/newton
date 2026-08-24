@@ -6,6 +6,8 @@ from asv_runner.benchmarks.mark import skip_benchmark_if
 
 wp.config.log_level = wp.LOG_WARNING
 
+from _benchmark_config import pr_gate_repeat
+
 import newton.examples
 from newton.examples.cloth.example_cloth_franka import Example as ExampleClothManipulation
 from newton.examples.cloth.example_cloth_twist import Example as ExampleClothTwist
@@ -33,7 +35,7 @@ class FastExampleClothManipulation:
 
 
 class FastExampleClothTwist:
-    repeat = 5
+    repeat = pr_gate_repeat(5)
     number = 1
 
     def setup(self):

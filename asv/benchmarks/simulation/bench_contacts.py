@@ -11,6 +11,7 @@ import importlib
 from typing import ClassVar
 
 import numpy as np
+from _benchmark_config import pr_gate_repeat
 
 import newton.examples
 from newton.viewer import ViewerNull
@@ -267,7 +268,7 @@ class FastConvexCollision:
 
     params = (CONVEX_COLLISION_CASES,)
     param_names: ClassVar[list[str]] = ["case"]
-    repeat = 5
+    repeat = pr_gate_repeat(5)
     number = 1
 
     def setup(self, case):

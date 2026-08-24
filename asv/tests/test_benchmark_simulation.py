@@ -26,6 +26,7 @@ _DEFERRED_WORKLOAD_MODULES = (
 _DEFERRED_WORKLOAD_MODULES_BEFORE_IMPORT = {name: name in sys.modules for name in _DEFERRED_WORKLOAD_MODULES}
 
 try:
+    from _benchmark_config import pr_gate_repeat
     from benchmark_metrics import SimulationMetrics
     from simulation import (
         bench_anymal,
@@ -219,6 +220,7 @@ class TestSimulationBenchmarks(unittest.TestCase):
         workflow = workflow_path.read_text(encoding="utf-8")
         self.assertIn("--config asv-pr.conf.json", workflow)
         self.assertIn("--interleave-rounds", workflow)
+        self.assertIn("--durations 30", workflow)
         patterns = tuple(re.compile(selection) for selection in re.findall(r"-b '([^']+)'", workflow))
         self.assertTrue(patterns)
 
@@ -263,16 +265,17 @@ class TestSimulationBenchmarks(unittest.TestCase):
     def test_pr_gate_caps_repeats_without_dropping_cases(self):
         """Keep full workloads with three timing samples in the PR gate."""
         cases = (
-            (bench_quadruped_xpbd, bench_quadruped_xpbd.FastExampleQuadrupedXPBD),
-            (bench_selection, bench_selection.FastExampleSelectionCartpoleMuJoCo),
+            (bench_quadruped_xpbd.FastExampleQuadrupedXPBD, 10),
+            (bench_selection.FastExampleSelectionCartpoleMuJoCo, 10),
+            (bench_contacts.FastConvexCollision, 5),
         )
-        for module, benchmark_cls in cases:
+        for benchmark_cls, full_repeat in cases:
             with self.subTest(benchmark=benchmark_cls.__name__):
-                self.assertEqual(benchmark_cls.repeat, module._repeat_count())
+                self.assertEqual(benchmark_cls.repeat, pr_gate_repeat(full_repeat))
                 with patch.dict("os.environ", {"NEWTON_ASV_PR_GATE": "1"}):
-                    self.assertEqual(module._repeat_count(), 3)
+                    self.assertEqual(pr_gate_repeat(full_repeat), 3)
                 with patch.dict("os.environ", {}, clear=True):
-                    self.assertEqual(module._repeat_count(), 10)
+                    self.assertEqual(pr_gate_repeat(full_repeat), full_repeat)
 
     def test_fast_allegro_uses_representative_pr_workload(self):
         """Keep Allegro coverage while reducing duplicated PR sampling."""
@@ -315,6 +318,12 @@ class TestSimulationBenchmarks(unittest.TestCase):
 
         self.assertEqual(bench_sensor_tiled_camera.FastSensorTiledCamera.repeat, 1)
         self.assertEqual(bench_sensor_tiled_camera.FastSensorTiledCameraPixel.repeat, 1)
+
+        with patch.dict("os.environ", {"NEWTON_ASV_PR_GATE": "1"}):
+            self.assertFalse(bench_sensor_tiled_camera._pr_gate_skips_output(True, True, ((True, True),)))
+            self.assertTrue(bench_sensor_tiled_camera._pr_gate_skips_output(True, False, ((True, True),)))
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(bench_sensor_tiled_camera._pr_gate_skips_output(True, False, ((True, True),)))
         self.assertEqual(bench_sensor_tiled_camera.FastSensorTiledCamera.rounds, 2)
 
         cases = (

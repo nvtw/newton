@@ -1,25 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-
 import warp as wp
 from asv_runner.benchmarks.mark import skip_benchmark_if
 
 wp.config.enable_backward = False
 wp.config.log_level = wp.LOG_WARNING
 
+from _benchmark_config import pr_gate_repeat
+
 import newton
 import newton.examples
 from newton.examples.selection.example_selection_cartpole import Example
 
 
-def _repeat_count():
-    return 3 if os.environ.get("NEWTON_ASV_PR_GATE") else 10
-
-
 class FastExampleSelectionCartpoleMuJoCo:
-    repeat = _repeat_count()
+    repeat = pr_gate_repeat(10)
     number = 1
 
     def setup(self):
