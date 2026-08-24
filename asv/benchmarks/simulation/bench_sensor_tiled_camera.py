@@ -30,6 +30,7 @@ wp.config.enable_backward = False
 wp.config.log_level = wp.LOG_WARNING
 
 import math
+import os
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -306,11 +307,15 @@ class _SceneBenchmark:
     param_names = ["resolution", "world_count", "iterations"]
     scene: str
     render_order = RENDER_ORDER
+    pr_gate_output_modes: tuple[tuple[bool, bool], ...] | None = None
 
     def setup(self, resolution: int, world_count: int, iterations: int):
         self.rig = _TiledCameraSceneRig(SCENES[self.scene], world_count, resolution, self.render_order)
-        # Compile and warm the render kernels for every output combination measured below.
-        for color, depth in ((True, True), (True, False), (False, True)):
+        output_modes = ((True, True), (True, False), (False, True))
+        if os.environ.get("NEWTON_ASV_PR_GATE") and self.pr_gate_output_modes is not None:
+            output_modes = self.pr_gate_output_modes
+        # Compile and warm each output combination selected by this ASV run.
+        for color, depth in output_modes:
             self.rig.render(color=color, depth=depth)
         wp.synchronize()
 
@@ -340,12 +345,14 @@ class TiledCameraQuadruped(_SceneBenchmark):
 
 class FastSensorTiledCamera(_SceneBenchmark):
     scene = "franka_cabinet"
+    pr_gate_output_modes = ((True, True), (False, True))
     params = ([64], [4096], [50])
 
 
 class FastSensorTiledCameraPixel(_SceneBenchmark):
     scene = "franka_cabinet"
     render_order = SensorTiledCamera.RenderOrder.PIXEL_PRIORITY
+    pr_gate_output_modes = ((True, True),)
     params = ([64], [4096], [50])
 
 

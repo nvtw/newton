@@ -337,9 +337,9 @@ def step_solver(
     start_time = time.time()
     for step in range(num_steps):
         solver.step(state_in=state_p, state_out=state_n, control=control, contacts=contacts, detector=detector, dt=dt)
-        wp.synchronize()
         state_p.copy_from(state_n)
         if show_progress:
+            wp.synchronize()
             print_progress_bar(step + 1, num_steps, start_time, prefix="Progress", suffix="")
 
 
@@ -1272,8 +1272,8 @@ class TestSolverKaminoImpl(unittest.TestCase):
         for step in range(num_steps):
             # Execute a single simulation step
             single_solver.step(state_in=single_state_p, state_out=single_state_n, control=single_control, dt=0.001)
-            wp.synchronize()
             if self.verbose or self.progress:
+                wp.synchronize()
                 print_progress_bar(step + 1, num_steps, start_time, prefix="Progress", suffix="")
 
         # Collect the initial and final states
@@ -1365,8 +1365,8 @@ class TestSolverKaminoImpl(unittest.TestCase):
         for step in range(num_steps):
             # Execute a single simulation step
             multi_solver.step(state_in=multi_state_p, state_out=multi_state_n, control=multi_control, dt=0.001)
-            wp.synchronize()
             if self.verbose or self.progress:
+                wp.synchronize()
                 print_progress_bar(step + 1, num_steps, start_time, prefix="Progress", suffix="")
 
         # Optional verbose output - enabled globally via self.verbose
@@ -1453,8 +1453,8 @@ class TestSolverKaminoImpl(unittest.TestCase):
         for step in range(num_steps):
             # Execute a single simulation step
             single_solver.step(single_state_p, single_state_n, single_control, contacts=single_contacts, dt=0.001)
-            wp.synchronize()
             if self.verbose or self.progress:
+                wp.synchronize()
                 print_progress_bar(step + 1, num_steps, start_time, prefix="Progress", suffix="")
 
         # Collect the initial and final states
@@ -1550,8 +1550,8 @@ class TestSolverKaminoImpl(unittest.TestCase):
         for step in range(num_steps):
             # Execute a single simulation step
             multi_solver.step(multi_state_p, multi_state_n, multi_control, contacts=multi_contacts, dt=0.001)
-            wp.synchronize()
             if self.verbose or self.progress:
+                wp.synchronize()
                 print_progress_bar(step + 1, num_steps, start_time, prefix="Progress", suffix="")
 
         # Optional verbose output - enabled globally via self.verbose

@@ -27,7 +27,14 @@ _DEFERRED_WORKLOAD_MODULES_BEFORE_IMPORT = {name: name in sys.modules for name i
 
 try:
     from benchmark_metrics import SimulationMetrics
-    from simulation import bench_anymal, bench_contacts, bench_kamino, bench_mujoco, bench_quadruped_xpbd
+    from simulation import (
+        bench_anymal,
+        bench_contacts,
+        bench_kamino,
+        bench_mujoco,
+        bench_quadruped_xpbd,
+        bench_sensor_tiled_camera,
+    )
 
     _DEFERRED_WORKLOAD_MODULES_AFTER_METRIC_IMPORT = {name: name in sys.modules for name in _DEFERRED_WORKLOAD_MODULES}
 
@@ -209,6 +216,8 @@ class TestSimulationBenchmarks(unittest.TestCase):
         """Gate PR comparisons on runtime while retaining dashboard metrics."""
         workflow_path = BENCHMARK_DIR.parents[1] / ".github" / "workflows" / "aws_gpu_benchmarks.yml"
         workflow = workflow_path.read_text(encoding="utf-8")
+        self.assertIn("--config asv-pr.conf.json", workflow)
+        self.assertIn("--interleave-rounds", workflow)
         patterns = tuple(re.compile(selection) for selection in re.findall(r"-b '([^']+)'", workflow))
         self.assertTrue(patterns)
 
@@ -216,9 +225,16 @@ class TestSimulationBenchmarks(unittest.TestCase):
             "simulation.bench_mujoco.FastG1.track_simulate(8192)",
             "simulation.bench_mujoco.FastG1.track_p95_step_time(8192)",
             "simulation.bench_anymal.FastMetricsExampleAnymalPretrained.track_mean_world_step_time",
-            "simulation.bench_teleop_mujoco.FastTeleopMuJoCo.track_mean_loop_ms('graph')",
+            "simulation.bench_teleop_mujoco.FastTeleopMuJoCo.time_teleop_loop('mjwarp_cuda_graph')",
+            "simulation.bench_teleop_mujoco.FastTeleopMuJoCo.track_p95_loop_ms('mjwarp_cuda_graph')",
             "simulation.bench_kamino.FastDRLegs.time_simulate",
             "simulation.bench_viewer.FastViewerGL.time_rendering_frame('g1', 256)",
+            "simulation.bench_mujoco.FastAllegro.track_p95_step_time(8192)",
+            "simulation.bench_mujoco.FastAllegro.track_simulate(8192)",
+            "simulation.bench_sensor_tiled_camera.FastSensorTiledCamera.time_render_color_depth(64, 4096, 50)",
+            "simulation.bench_sensor_tiled_camera.FastSensorTiledCamera.time_render_depth_only(64, 4096, 50)",
+            "simulation.bench_sensor_tiled_camera.FastSensorTiledCameraPixel.time_render_color_depth(64, 4096, 50)",
+            "simulation.bench_inverse_dynamics.FastInverseDynamics.time_eval_inverse_dynamics_force",
         )
         dashboard_benchmarks = (
             "simulation.bench_mujoco.FastG1.track_solver_niter_mean(8192)",
@@ -230,6 +246,10 @@ class TestSimulationBenchmarks(unittest.TestCase):
             "simulation.bench_mujoco.FastG1.track_sim_substeps(8192)",
             "simulation.bench_mujoco.FastNewtonOverheadG1.track_simulate(8192)",
             "simulation.bench_teleop_mujoco.TeleopMuJoCo.track_frame_overrun_pct('graph')",
+            "simulation.bench_teleop_mujoco.FastTeleopMuJoCo.track_mean_loop_ms('mjwarp_cuda_graph')",
+            "simulation.bench_sensor_tiled_camera.FastSensorTiledCamera.time_render_color_only(64, 4096, 50)",
+            "simulation.bench_sensor_tiled_camera.FastSensorTiledCameraPixel.time_render_color_only(64, 4096, 50)",
+            "simulation.bench_sensor_tiled_camera.FastSensorTiledCameraPixel.time_render_depth_only(64, 4096, 50)",
         )
 
         for benchmark in blocking_benchmarks:
@@ -238,6 +258,62 @@ class TestSimulationBenchmarks(unittest.TestCase):
         for benchmark in dashboard_benchmarks:
             with self.subTest(benchmark=benchmark):
                 self.assertFalse(any(pattern.search(benchmark) for pattern in patterns), benchmark)
+
+    def test_pr_asv_config_only_omits_torch(self):
+        """Keep the explicit PR ASV environment aligned with full collection."""
+        root = BENCHMARK_DIR.parents[1]
+        full_config = json.loads((root / "asv.conf.json").read_text(encoding="utf-8"))
+        pr_config = json.loads((root / "asv-pr.conf.json").read_text(encoding="utf-8"))
+
+        for config in (full_config, pr_config):
+            commands = config["install_command"]
+            pinned_stack_index = next(i for i, command in enumerate(commands) if "warp-lang==" in command)
+            newton_index = next(i for i, command in enumerate(commands) if "{wheel_file}" in command)
+            self.assertLess(pinned_stack_index, newton_index)
+            self.assertIn("[examples]", commands[newton_index])
+            self.assertNotIn("[dev]", commands[newton_index])
+
+        torch_commands = [command for command in full_config["install_command"] if "torch==" in command]
+        self.assertEqual(len(torch_commands), 1)
+        full_config["install_command"].remove(torch_commands[0])
+
+        self.assertNotEqual(pr_config["env_dir"], full_config["env_dir"])
+        pr_config["env_dir"] = full_config["env_dir"]
+        self.assertEqual(pr_config, full_config)
+
+    def test_pr_camera_warmup_matches_selected_outputs(self):
+        """Warm only camera output combinations selected by the PR gate."""
+        cases = (
+            (bench_sensor_tiled_camera.FastSensorTiledCamera, ((True, True), (False, True))),
+            (bench_sensor_tiled_camera.FastSensorTiledCameraPixel, ((True, True),)),
+        )
+        for benchmark_cls, expected_modes in cases:
+            with (
+                self.subTest(benchmark=benchmark_cls.__name__),
+                patch.dict("os.environ", {"NEWTON_ASV_PR_GATE": "1"}),
+                patch.object(bench_sensor_tiled_camera, "_TiledCameraSceneRig") as rig_cls,
+                patch.object(bench_sensor_tiled_camera.wp, "synchronize"),
+            ):
+                rig = rig_cls.return_value
+                benchmark_cls().setup(64, 4096, 50)
+
+            self.assertEqual(
+                tuple((call.kwargs["color"], call.kwargs["depth"]) for call in rig.render.call_args_list),
+                expected_modes,
+            )
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(bench_sensor_tiled_camera, "_TiledCameraSceneRig") as rig_cls,
+            patch.object(bench_sensor_tiled_camera.wp, "synchronize"),
+        ):
+            rig = rig_cls.return_value
+            bench_sensor_tiled_camera.FastSensorTiledCameraPixel().setup(64, 4096, 50)
+
+        self.assertEqual(
+            tuple((call.kwargs["color"], call.kwargs["depth"]) for call in rig.render.call_args_list),
+            ((True, True), (True, False), (False, True)),
+        )
 
     def test_anymal_short_horizon_validation(self):
         """Validate short-horizon ANYmal posture and forward progress."""
