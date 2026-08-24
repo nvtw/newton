@@ -162,7 +162,6 @@ jobs:
             --append-samples \
             --no-only-changed \
             -e \
-            --durations 30 \
             -b 'Fast(?!SensorTiledCamera)\w*\.time_' \
             -b 'FastSensorTiledCamera\.time_render_(color_depth|depth_only)(\(|$)' \
             -b 'FastSensorTiledCameraPixel\.time_render_color_depth(\(|$)' \

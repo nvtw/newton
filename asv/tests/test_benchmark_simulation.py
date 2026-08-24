@@ -220,7 +220,6 @@ class TestSimulationBenchmarks(unittest.TestCase):
         workflow = workflow_path.read_text(encoding="utf-8")
         self.assertIn("--config asv-pr.conf.json", workflow)
         self.assertIn("--interleave-rounds", workflow)
-        self.assertIn("--durations 30", workflow)
         patterns = tuple(re.compile(selection) for selection in re.findall(r"-b '([^']+)'", workflow))
         self.assertTrue(patterns)
 
