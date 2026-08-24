@@ -471,6 +471,20 @@ _SOLVERS = {
 
 
 class TestRigidFrictionRamp(unittest.TestCase):
+    def test_simulation_groups_use_separate_suites(self):
+        """Keep the two long-running simulation groups independently schedulable."""
+        ramp_tests = {name for name in dir(TestRigidFrictionRamp) if name.startswith("test_friction_ramp_")}
+        stopping_tests = {
+            name
+            for name in dir(TestRigidFrictionStoppingDistance)
+            if name.startswith("test_friction_stopping_distance_")
+        }
+        self.assertTrue(ramp_tests)
+        self.assertTrue(stopping_tests)
+        self.assertFalse(
+            any(name.startswith("test_friction_stopping_distance_") for name in dir(TestRigidFrictionRamp))
+        )
+
     @unittest.skip("Visual debugging - run manually to view simulation")
     def test_view_friction_grid_xpbd(self):
         self._run_viewer("xpbd")
@@ -601,6 +615,10 @@ class TestRigidFrictionRamp(unittest.TestCase):
             print("\nStopped by user.")
 
 
+class TestRigidFrictionStoppingDistance(unittest.TestCase):
+    """Stopping-distance simulations scheduled independently from ramp simulations."""
+
+
 for device in devices:
     for solver_name, cfg in _SOLVERS.items():
         if device.is_cpu and solver_name.startswith("mujoco_warp"):
@@ -623,7 +641,7 @@ for device in devices:
         if not cfg.get("run_stopping_distance", True):
             continue
         add_function_test(
-            TestRigidFrictionRamp,
+            TestRigidFrictionStoppingDistance,
             f"test_friction_stopping_distance_{solver_name}",
             test_friction_stopping_distance,
             devices=[device],
