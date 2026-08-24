@@ -387,9 +387,12 @@ class ConstrainedDynamicsConfig(ConfigBase):
 
     cull_speculative_contacts: bool = True
     """
-    Whether to cull speculative (= separated) contacts in the dynamics solve.
-    These contacts have occasionally led to numerical instabilities, and
-    can yield inaccurate restitutive impacts.
+    Whether to discard separated speculative contacts before the dynamics solve.
+
+    Disable this when contacts come from a speculative :class:`CollisionPipeline`
+    and should constrain approaching bodies before impact. Keeping speculative
+    contacts can cause numerical instability or inaccurate restitutive impacts.
+    Defaults to ``True``.
     """
 
     @override
@@ -871,6 +874,7 @@ class DVISolverConfig:
         "geom_pair_net_force",
         "key_and_position_with_net_force_backup",
         "key_and_position_with_tangential_net_force",
+        "key_and_position_with_net_force_backup_and_tangential_net_force",
     ] = "key_and_position_with_tangential_net_force"
     """
     The contact warmstart method used when `warmstart_mode` is `containers`.
@@ -946,6 +950,7 @@ class DVISolverConfig:
             "geom_pair_net_force",
             "key_and_position_with_net_force_backup",
             "key_and_position_with_tangential_net_force",
+            "key_and_position_with_net_force_backup_and_tangential_net_force",
         }
         if self.contact_warmstart_method not in implemented_contact_warmstart_methods:
             raise ValueError(
