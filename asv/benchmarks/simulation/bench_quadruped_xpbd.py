@@ -32,8 +32,12 @@ def _create_example(num_frames, world_count):
     return Example(newton.viewer.ViewerNull(num_frames=num_frames), world_count)
 
 
+def _repeat_count():
+    return 3 if os.environ.get("NEWTON_ASV_PR_GATE") else 10
+
+
 class FastExampleQuadrupedXPBD:
-    repeat = 10
+    repeat = _repeat_count()
     number = 1
 
     def setup(self):

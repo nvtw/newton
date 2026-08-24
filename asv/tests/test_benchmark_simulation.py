@@ -33,6 +33,7 @@ try:
         bench_kamino,
         bench_mujoco,
         bench_quadruped_xpbd,
+        bench_selection,
         bench_sensor_tiled_camera,
     )
 
@@ -258,6 +259,20 @@ class TestSimulationBenchmarks(unittest.TestCase):
         for benchmark in dashboard_benchmarks:
             with self.subTest(benchmark=benchmark):
                 self.assertFalse(any(pattern.search(benchmark) for pattern in patterns), benchmark)
+
+    def test_pr_gate_caps_repeats_without_dropping_cases(self):
+        """Keep full workloads with three timing samples in the PR gate."""
+        cases = (
+            (bench_quadruped_xpbd, bench_quadruped_xpbd.FastExampleQuadrupedXPBD),
+            (bench_selection, bench_selection.FastExampleSelectionCartpoleMuJoCo),
+        )
+        for module, benchmark_cls in cases:
+            with self.subTest(benchmark=benchmark_cls.__name__):
+                self.assertEqual(benchmark_cls.repeat, module._repeat_count())
+                with patch.dict("os.environ", {"NEWTON_ASV_PR_GATE": "1"}):
+                    self.assertEqual(module._repeat_count(), 3)
+                with patch.dict("os.environ", {}, clear=True):
+                    self.assertEqual(module._repeat_count(), 10)
 
     def test_fast_allegro_uses_representative_pr_workload(self):
         """Keep Allegro coverage while reducing duplicated PR sampling."""

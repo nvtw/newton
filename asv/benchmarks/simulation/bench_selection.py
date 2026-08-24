@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import warp as wp
 from asv_runner.benchmarks.mark import skip_benchmark_if
 
@@ -12,8 +14,12 @@ import newton.examples
 from newton.examples.selection.example_selection_cartpole import Example
 
 
+def _repeat_count():
+    return 3 if os.environ.get("NEWTON_ASV_PR_GATE") else 10
+
+
 class FastExampleSelectionCartpoleMuJoCo:
-    repeat = 10
+    repeat = _repeat_count()
     number = 1
 
     def setup(self):
