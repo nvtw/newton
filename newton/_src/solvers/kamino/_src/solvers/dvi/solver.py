@@ -23,6 +23,7 @@ from ..common import (
     warmstart_joint_constraints,
     warmstart_limit_constraints,
 )
+from .cublas import is_batched_trsm_available, solve_llt_batched
 from .kernels import (
     _FUSED_BILATERAL_BLOCK,
     _FUSED_INEQUALITY_BLOCK,
@@ -35,9 +36,11 @@ from .kernels import (
     _compute_dvi_unilateral_velocities,
     _copy_bilateral_block,
     _initialize_dvi_status,
+    _pack_batched_bilateral_response,
     _reset_dvi_solver_data,
     _reset_dvi_status,
     _scale_dvi_tangential_warmstart,
+    _scatter_batched_bilateral_response,
     _scatter_bilateral_solution,
     _set_dvi_bilateral_active_dim,
     _set_dvi_direct_status_iterations,
@@ -57,6 +60,9 @@ from .types import DVIConfigStruct, DVIData, convert_config_to_struct
 wp.set_module_options({"enable_backward": False})
 
 float32 = wp.float32
+
+_BATCHED_DENSE_RESPONSE_MIN_WORLDS = 16
+_BATCHED_DENSE_RESPONSE_RHS = 64
 
 
 class DVISolver:
@@ -118,6 +124,11 @@ class DVISolver:
         self._joint_rows_host: list[int] = []
         self._unilateral_strides_host: list[int] = []
         self._max_unilateral_rows: int = 0
+        self._dense_response_factor_ptrs: wp.array[wp.uint64] | None = None
+        self._dense_response_rhs_ptrs: wp.array[wp.uint64] | None = None
+        self._dense_response_factor: wp.array[wp.float32] | None = None
+        self._dense_response_mio: wp.array[wp.int32] | None = None
+        self._dense_response_rows: int = 0
         self._num_joints: int = 0
         self._joint_wid: wp.array[wp.int32] | None = None
         self._joint_bid_B: wp.array[wp.int32] | None = None
@@ -247,6 +258,8 @@ class DVISolver:
             self._allocate_projection_workspace(problem)
             if problem.sparse:
                 self._sparse_path.prepare(problem)
+            else:
+                self._prepare_dense_batched_bilateral_response()
 
         configs = [convert_config_to_struct(c) for c in self._config]
         with wp.ScopedDevice(self._device):
@@ -421,6 +434,108 @@ class DVISolver:
                 )
             else:
                 self._data.state.allocate_dense_projection(self._size)
+
+    def _prepare_dense_batched_bilateral_response(self) -> None:
+        """Prepare stable matrix pointers for identical many-world dense solves."""
+        self._dense_response_factor_ptrs = None
+        self._dense_response_rhs_ptrs = None
+        self._dense_response_factor = None
+        self._dense_response_mio = None
+        self._dense_response_rows = 0
+        state = self._data.state
+        if (
+            not self.device.is_cuda
+            or self._size.num_worlds < _BATCHED_DENSE_RESPONSE_MIN_WORLDS
+            or self._bilateral_solver is None
+            or state.projected_D is None
+            or not self._joint_rows_host
+            or not is_batched_trsm_available(self.device)
+        ):
+            return
+        rows = self._joint_rows_host[0]
+        if (
+            rows <= 0
+            or any(world_rows != rows for world_rows in self._joint_rows_host)
+            or any(stride < _BATCHED_DENSE_RESPONSE_RHS for stride in self._unilateral_strides_host)
+        ):
+            return
+
+        scalar_bytes = wp.types.type_size_in_bytes(wp.float32)
+        factor_base = self._bilateral_solver.L.ptr
+        response_stride = rows * _BATCHED_DENSE_RESPONSE_RHS
+        response_mio = [world * response_stride for world in range(self._size.num_worlds)]
+        self._dense_response_factor = wp.zeros(
+            self._size.num_worlds * response_stride, dtype=wp.float32, device=self.device
+        )
+        self._dense_response_mio = wp.array(response_mio, dtype=wp.int32, device=self.device)
+        rhs_base = self._dense_response_factor.ptr
+        factor_ptrs = [factor_base + scalar_bytes * world * rows * rows for world in range(self._size.num_worlds)]
+        rhs_ptrs = [rhs_base + scalar_bytes * offset for offset in response_mio]
+        self._dense_response_factor_ptrs = wp.array(factor_ptrs, dtype=wp.uint64, device=self.device)
+        self._dense_response_rhs_ptrs = wp.array(rhs_ptrs, dtype=wp.uint64, device=self.device)
+        self._dense_response_rows = rows
+
+    def _solve_dense_batched_bilateral_response(
+        self,
+        problem: DualProblem,
+        permutation: wp.array[wp.int32],
+        use_permutation: bool,
+    ) -> None:
+        """Solve a fixed dense response prefix with graph-captured cuBLAS."""
+        factor_ptrs = self._dense_response_factor_ptrs
+        rhs_ptrs = self._dense_response_rhs_ptrs
+        response_factor = self._dense_response_factor
+        response_mio = self._dense_response_mio
+        if factor_ptrs is None or rhs_ptrs is None or response_factor is None or response_mio is None:
+            raise RuntimeError("Dense batched response storage was not prepared.")
+        state = self._data.state
+        operator = self._data.bilateral_operator
+        wp.launch(
+            kernel=_pack_batched_bilateral_response,
+            dim=(self._size.num_worlds, _BATCHED_DENSE_RESPONSE_RHS, self._dense_response_rows),
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                operator.info.vio,
+                state.bilateral_preconditioner,
+                permutation,
+                use_permutation,
+                problem.data.mio,
+                problem.data.dim,
+                True,
+                response_mio,
+                problem.data.D,
+                response_factor,
+            ],
+            device=self.device,
+        )
+        solve_llt_batched(
+            factor_ptrs,
+            rhs_ptrs,
+            self._dense_response_rows,
+            _BATCHED_DENSE_RESPONSE_RHS,
+            self._size.num_worlds,
+        )
+        wp.launch(
+            kernel=_scatter_batched_bilateral_response,
+            dim=(self._size.num_worlds, _BATCHED_DENSE_RESPONSE_RHS, self._dense_response_rows),
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                operator.info.vio,
+                state.bilateral_preconditioner,
+                permutation,
+                use_permutation,
+                response_mio,
+                state.projected_mio,
+                problem.data.dim,
+                True,
+                False,
+                response_factor,
+                state.projected_D,
+            ],
+            device=self.device,
+        )
 
     def solve(self, problem: DualProblem):
         """Solve the cone-complementarity problem defined by ``problem``.
@@ -827,6 +942,10 @@ class DVISolver:
         permutation = self._bilateral_solver.P if use_permutation else self._data.state.projected_mio
         unilateral_begin = 0
         unilateral_count = self._max_unilateral_rows
+        if self._dense_response_factor_ptrs is not None:
+            self._solve_dense_batched_bilateral_response(problem, permutation, use_permutation)
+            unilateral_begin = _BATCHED_DENSE_RESPONSE_RHS
+            unilateral_count = max(1, unilateral_count - unilateral_begin)
         wp.launch(
             kernel=_solve_bilateral_contact_response,
             dim=(self._size.num_worlds, unilateral_count),

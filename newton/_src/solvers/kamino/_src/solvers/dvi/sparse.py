@@ -16,10 +16,13 @@ from ...geometry.keying import KeySorter
 from ...kinematics.jacobians import SparseSystemJacobians
 from ...kinematics.limits import LimitsKamino
 from ...linalg import LLTBlockedRCMSolver
+from .cublas import is_batched_trsm_available, solve_llt_batched
 from .kernels import (
     _FUSED_BILATERAL_BLOCK,
     _FUSED_INEQUALITY_BLOCK,
     _initialize_dvi_status,
+    _pack_batched_bilateral_response,
+    _scatter_batched_bilateral_response,
     _scatter_bilateral_solution,
     _set_dvi_direct_status_iterations,
     _solve_bilateral_unilateral_response,
@@ -68,6 +71,10 @@ _SPARSE_DELASSUS_ROWS_UNILATERAL = 1
 _CONTACT_PAIR_SORT_MIN_CAPACITY = 4096
 _PARALLEL_CONTACT_MAX_COLORS = 8
 _PARALLEL_CONTACT_MIN_CAPACITY = 32768
+_BATCHED_RESPONSE_MIN_WORLDS = 16
+_BATCHED_RESPONSE_RHS = 64
+_BATCHED_RESPONSE_TAIL_TASKS = 8
+
 _SPARSE_INEQUALITY_TOPOLOGY_ERROR = "Sparse DVI inequalities require limit/contact topology and sparse Jacobians."
 
 
@@ -140,6 +147,9 @@ class SparseDVIPath:
             | None
         ) = None
         self.bilateral_row_nzb_topology: tuple[wp.array[wp.int32], wp.array[wp.int32], wp.array[wp.int32]] | None = None
+        self.batched_response_factor_ptrs: wp.array[wp.uint64] | None = None
+        self.batched_response_rhs_ptrs: wp.array[wp.uint64] | None = None
+        self.batched_response_rows = 0
         self.contact_sorter: KeySorter | None = None
         self.contact_world_starts: wp.array[wp.int32] | None = None
         if device.is_cuda and size.max_of_max_contacts >= _CONTACT_PAIR_SORT_MIN_CAPACITY:
@@ -177,6 +187,8 @@ class SparseDVIPath:
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _build_sparse_bilateral_pairs(self, problem)
             _build_sparse_bilateral_row_nzb_topology(self, problem)
+
+            _prepare_batched_bilateral_response(self)
 
     def solve(self, problem: DualProblem) -> None:
         """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
@@ -931,6 +943,128 @@ def _solve_sparse_bilateral_block(
     )
 
 
+def _prepare_batched_bilateral_response(path: SparseDVIPath) -> None:
+    """Prepare stable pointer arrays for the many-world batched response solve."""
+    path.batched_response_factor_ptrs = None
+    path.batched_response_rhs_ptrs = None
+    path.batched_response_rows = 0
+    if (
+        not path.device.is_cuda
+        or path.size.num_worlds < _BATCHED_RESPONSE_MIN_WORLDS
+        or not path.joint_rows_host
+        or path.data.state.bilateral_response_factor is None
+        or not is_batched_trsm_available(path.device)
+    ):
+        return
+    rows = path.joint_rows_host[0]
+    if (
+        rows <= 0
+        or any(world_rows != rows for world_rows in path.joint_rows_host)
+        or any(stride < _BATCHED_RESPONSE_RHS for stride in path.unilateral_strides_host)
+    ):
+        return
+
+    factor_base = path.bilateral_solver.L.ptr
+    rhs_base = path.data.state.bilateral_response_factor.ptr
+    scalar_bytes = wp.types.type_size_in_bytes(wp.float32)
+    factor_ptrs = []
+    rhs_ptrs = []
+    factor_offset = 0
+    rhs_offset = 0
+    for stride in path.unilateral_strides_host:
+        factor_ptrs.append(factor_base + scalar_bytes * factor_offset)
+        rhs_ptrs.append(rhs_base + scalar_bytes * rhs_offset)
+        factor_offset += rows * rows
+        rhs_offset += rows * stride
+    path.batched_response_factor_ptrs = wp.array(factor_ptrs, dtype=wp.uint64, device=path.device)
+    path.batched_response_rhs_ptrs = wp.array(rhs_ptrs, dtype=wp.uint64, device=path.device)
+    path.batched_response_rows = rows
+
+
+def _solve_batched_bilateral_response(
+    path: SparseDVIPath,
+    problem: DualProblem,
+    permutation: wp.array[wp.int32],
+    use_permutation: bool,
+) -> None:
+    """Solve a fixed RHS prefix through cuBLAS and any active tail in Warp."""
+    factor_ptrs = path.batched_response_factor_ptrs
+    rhs_ptrs = path.batched_response_rhs_ptrs
+    if factor_ptrs is None or rhs_ptrs is None:
+        raise RuntimeError("Batched response pointer arrays were not prepared.")
+    state = path.data.state
+    operator = path.data.bilateral_operator
+    wp.launch(
+        kernel=_pack_batched_bilateral_response,
+        dim=(path.size.num_worlds, _BATCHED_RESPONSE_RHS, path.batched_response_rows),
+        inputs=[
+            problem.data.dim,
+            problem.data.njc,
+            operator.info.vio,
+            state.bilateral_preconditioner,
+            permutation,
+            use_permutation,
+            state.bilateral_response_mio,
+            state.bilateral_response_stride,
+            False,
+            state.bilateral_response_mio,
+            state.bilateral_coupling,
+            state.bilateral_response_factor,
+        ],
+        device=path.device,
+    )
+    solve_llt_batched(
+        factor_ptrs,
+        rhs_ptrs,
+        path.batched_response_rows,
+        _BATCHED_RESPONSE_RHS,
+        path.size.num_worlds,
+    )
+    wp.launch(
+        kernel=_scatter_batched_bilateral_response,
+        dim=(path.size.num_worlds, _BATCHED_RESPONSE_RHS, path.batched_response_rows),
+        inputs=[
+            problem.data.dim,
+            problem.data.njc,
+            operator.info.vio,
+            state.bilateral_preconditioner,
+            permutation,
+            use_permutation,
+            state.bilateral_response_mio,
+            state.bilateral_response_mio,
+            state.bilateral_response_stride,
+            False,
+            True,
+            state.bilateral_response_factor,
+            state.bilateral_response,
+        ],
+        device=path.device,
+    )
+    wp.launch(
+        kernel=_solve_bilateral_unilateral_response_cooperative,
+        dim=path.size.num_worlds * _BATCHED_RESPONSE_TAIL_TASKS * 32,
+        inputs=[
+            problem.data.dim,
+            problem.data.njc,
+            operator.info.mio,
+            operator.info.vio,
+            state.bilateral_preconditioner,
+            path.bilateral_solver.L,
+            permutation,
+            use_permutation,
+            state.bilateral_response_mio,
+            state.bilateral_response_stride,
+            state.bilateral_coupling,
+            state.bilateral_response_factor,
+            state.bilateral_response,
+            _BATCHED_RESPONSE_RHS,
+            _BATCHED_RESPONSE_TAIL_TASKS,
+        ],
+        device=path.device,
+        block_dim=32,
+    )
+
+
 def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: DualProblem) -> None:
     """Alternate a direct ``D_bb`` solve with projected sparse unilateral sweeps."""
     state = path.data.state
@@ -1019,28 +1153,31 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
         response_block_dim = 32
         response_tasks_per_world = (max_unilateral_rows + 1) // 2
         response_dim = path.size.num_worlds * response_tasks_per_world * response_block_dim
-    wp.launch(
-        kernel=response_kernel,
-        dim=response_dim,
-        inputs=[
-            problem.data.dim,
-            problem.data.njc,
-            path.data.bilateral_operator.info.mio,
-            path.data.bilateral_operator.info.vio,
-            state.bilateral_preconditioner,
-            path.bilateral_solver.L,
-            permutation,
-            use_permutation,
-            state.bilateral_response_mio,
-            state.bilateral_response_stride,
-            state.bilateral_coupling,
-            state.bilateral_response_factor,
-            state.bilateral_response,
-            *([0, response_tasks_per_world] if path.device.is_cuda else []),
-        ],
-        device=path.device,
-        block_dim=response_block_dim,
-    )
+    if path.batched_response_factor_ptrs is not None:
+        _solve_batched_bilateral_response(path, problem, permutation, use_permutation)
+    else:
+        wp.launch(
+            kernel=response_kernel,
+            dim=response_dim,
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                path.data.bilateral_operator.info.mio,
+                path.data.bilateral_operator.info.vio,
+                state.bilateral_preconditioner,
+                path.bilateral_solver.L,
+                permutation,
+                use_permutation,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_coupling,
+                state.bilateral_response_factor,
+                state.bilateral_response,
+                *([0, response_tasks_per_world] if path.device.is_cuda else []),
+            ],
+            device=path.device,
+            block_dim=response_block_dim,
+        )
     if enable_compact_schur:
         wp.launch(
             kernel=_assemble_compact_unilateral_schur,
