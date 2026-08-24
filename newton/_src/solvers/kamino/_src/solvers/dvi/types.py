@@ -56,11 +56,11 @@ class DVIStatus:
     iterations: int32
     """Projected sweeps; direct-bilateral solves report block/contact sweeps."""
     r_p: float32
-    """Primal cone-feasibility residual."""
+    """Maximum primal box- and cone-feasibility residual."""
     r_d: float32
     """Maximum dual cone-feasibility and bilateral velocity residual."""
     r_c: float32
-    """Maximum absolute impulse-velocity inner product."""
+    """Maximum absolute impulse-velocity product, directional on box rows."""
     r_b: float32
     """Bilateral constraint-space velocity residual."""
 
@@ -124,18 +124,18 @@ class DVIState:
         self.v_aug = wp.zeros(size.sum_of_max_total_cts, dtype=float32)
         self.s = wp.zeros(size.sum_of_max_total_cts, dtype=float32)
         self.scratch = wp.zeros(size.sum_of_max_total_cts, dtype=float32)
-        self.bilateral_rhs = wp.zeros(size.sum_of_num_joint_cts, dtype=float32)
-        self.bilateral_solution = wp.zeros(size.sum_of_num_joint_cts, dtype=float32)
-        self.bilateral_preconditioner = wp.zeros(size.sum_of_num_joint_cts, dtype=float32)
+        self.bilateral_rhs = wp.zeros(size.sum_of_num_bilateral_joint_cts, dtype=float32)
+        self.bilateral_solution = wp.zeros(size.sum_of_num_bilateral_joint_cts, dtype=float32)
+        self.bilateral_preconditioner = wp.zeros(size.sum_of_num_bilateral_joint_cts, dtype=float32)
         self.bilateral_active_dim = wp.zeros(size.num_worlds, dtype=int32)
         self.limit_indices = wp.full(max(1, size.sum_of_max_limits), -1, dtype=int32)
         self.contact_indices = wp.full(max(1, size.sum_of_max_contacts), -1, dtype=int32)
-        self.inequality_bodies = wp.full(max(1, size.sum_of_max_unilaterals), vec2i(-1, -1), dtype=vec2i)
+        self.inequality_bodies = wp.full(max(1, size.sum_of_max_inequalities), vec2i(-1, -1), dtype=vec2i)
         self.inequality_body_color_masks = wp.zeros(max(1, size.sum_of_num_bodies), dtype=uint64)
-        self.inequality_colors = wp.full(max(1, size.sum_of_max_unilaterals), -1, dtype=int32)
+        self.inequality_colors = wp.full(max(1, size.sum_of_max_inequalities), -1, dtype=int32)
         self.inequality_num_colors = wp.zeros(max(1, size.num_worlds), dtype=int32)
-        self.inequality_ids_by_color = wp.full(max(1, size.sum_of_max_unilaterals), -1, dtype=int32)
-        self.inequality_color_starts = wp.zeros(max(1, size.sum_of_max_unilaterals + size.num_worlds), dtype=int32)
+        self.inequality_ids_by_color = wp.full(max(1, size.sum_of_max_inequalities), -1, dtype=int32)
+        self.inequality_color_starts = wp.zeros(max(1, size.sum_of_max_inequalities + size.num_worlds), dtype=int32)
         # Sparse DVI only needs a harmless dummy permutation when RCM is disabled.
         self.projected_mio = wp.zeros(max(1, size.num_worlds), dtype=int32)
 
@@ -156,8 +156,8 @@ class DVIState:
         bilateral_vector_size: int,
     ) -> None:
         if self.inequality_group_starts is None:
-            self.inequality_group_starts = wp.zeros(max(1, size.sum_of_max_unilaterals + size.num_worlds), dtype=int32)
-            self.inequality_tangent_cross = wp.zeros(max(1, size.sum_of_max_unilaterals), dtype=float32)
+            self.inequality_group_starts = wp.zeros(max(1, size.sum_of_max_inequalities + size.num_worlds), dtype=int32)
+            self.inequality_tangent_cross = wp.zeros(max(1, size.sum_of_max_inequalities), dtype=float32)
             self.inequality_projected_diagonal = wp.zeros(max(1, size.sum_of_max_total_cts), dtype=float32)
         if self.bilateral_coupling is None:
             response_offsets = []

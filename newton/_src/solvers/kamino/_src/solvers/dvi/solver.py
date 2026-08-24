@@ -53,6 +53,7 @@ from .sparse_kernels import (
     _color_mapped_dvi_inequalities,
     _map_active_contacts,
     _map_active_limits,
+    _map_bounded_constraints,
 )
 from .types import DVIConfigStruct, DVIData, convert_config_to_struct
 
@@ -128,6 +129,11 @@ class DVISolver:
         self._dense_response_factor: wp.array[wp.float32] | None = None
         self._dense_response_mio: wp.array[wp.int32] | None = None
         self._dense_response_rows: int = 0
+        self._num_joints: int = 0
+        self._joint_wid: wp.array[wp.int32] | None = None
+        self._joint_bid_B: wp.array[wp.int32] | None = None
+        self._joint_bid_F: wp.array[wp.int32] | None = None
+        self._joint_bounded_cts_offset: wp.array[wp.int32] | None = None
 
         if model is not None:
             self.finalize(
@@ -199,19 +205,32 @@ class DVISolver:
 
         self._size = model.size
         self._device = model.device
+        self._num_joints = model.size.sum_of_num_joints
+        self._joint_wid = model.joints.wid
+        self._joint_bid_B = model.joints.bid_B
+        self._joint_bid_F = model.joints.bid_F
+        self._joint_bounded_cts_offset = model.joints.bounded_cts_offset
         self._config = self._check_config(model, config)
         self._warmstart = warmstart
         self._collect_info = collect_info
         self._max_alternating_iterations = max(c.max_alternating_iterations for c in self._config)
         self._bilateral_solve_after_block = self._make_bilateral_solve_schedule(self._config)
-        self._has_unilateral_constraints = self._size.max_of_max_limits > 0 or self._size.max_of_max_contacts > 0
+        self._has_unilateral_constraints = (
+            self._size.max_of_max_limits > 0
+            or self._size.max_of_max_contacts > 0
+            or self._size.max_of_num_bounded_joint_cts > 0
+        )
         self._data = DVIData(size=self._size, collect_info=self._collect_info, device=self._device)
         self._all_worlds_mask = wp.ones(shape=(self._size.num_worlds,), dtype=wp.bool, device=self._device)
         self._joint_rows_host = model.info.num_joint_cts.numpy().astype(int).tolist()
+        bounded_counts = model.info.num_bounded_joint_cts.numpy().astype(int).tolist()
         max_limits = model.info.max_limits.numpy().astype(int).tolist()
         max_contacts = model.info.max_contacts.numpy().astype(int).tolist()
         self._unilateral_strides_host = [
-            limit_count + 3 * contact_count for limit_count, contact_count in zip(max_limits, max_contacts, strict=True)
+            bounded_count + limit_count + 3 * contact_count
+            for bounded_count, limit_count, contact_count in zip(
+                bounded_counts, max_limits, max_contacts, strict=True
+            )
         ]
         self._max_unilateral_rows = max(self._unilateral_strides_host, default=0)
         self._allocate_bilateral_solver(model)
@@ -271,6 +290,7 @@ class DVISolver:
             dim=self._size.num_worlds,
             inputs=[
                 problem.data.njc,
+                problem.data.nbc,
                 problem.data.nl,
                 problem.data.nc,
                 block_iteration,
@@ -284,12 +304,12 @@ class DVISolver:
         """Allocate the reduced dense operator used for bilateral DVI solves."""
         self._bilateral_solver = None
         self._data.bilateral_operator = None
-        if model.size.sum_of_num_joint_cts == 0:
+        if model.size.sum_of_num_bilateral_joint_cts == 0:
             return
 
-        joint_cts_per_world = model.info.num_joint_cts.numpy().astype(int).tolist()
+        bilateral_joint_cts_per_world = model.info.num_joint_bilateral_cts.numpy().astype(int).tolist()
         # LLT metadata requires positive blocks; assembly makes zero-row worlds disconnected identities.
-        factor_dims = [max(1, njc) for njc in joint_cts_per_world]
+        factor_dims = [max(1, njc) for njc in bilateral_joint_cts_per_world]
 
         operator = DenseLinearOperatorData()
         operator.info = DenseSquareMultiLinearInfo()
@@ -638,12 +658,17 @@ class DVISolver:
                 problem.data.dim,
                 problem.data.vio,
                 problem.data.njc,
+                problem.data.nbc,
                 problem.data.nl,
                 problem.data.nc,
+                problem.data.bcgo,
                 problem.data.lcgo,
                 problem.data.ccgo,
+                problem.data.bcio,
                 problem.data.cio,
                 problem.data.mu,
+                problem.data.bound_lower,
+                problem.data.bound_upper,
                 self._data.config,
                 self._data.state.v_aug,
                 self._data.solution.lambdas,
@@ -686,6 +711,21 @@ class DVISolver:
         """Map and color active inequalities with the multi-world fast path."""
         state = self._data.state
         self._validate_inequality_topology()
+        if self._num_joints > 0 and self._size.max_of_num_bounded_joint_cts > 0:
+            wp.launch(
+                kernel=_map_bounded_constraints,
+                dim=self._num_joints,
+                inputs=[
+                    self._joint_wid,
+                    self._joint_bid_B,
+                    self._joint_bid_F,
+                    self._joint_bounded_cts_offset,
+                    problem.data.bcio,
+                    problem.data.iio,
+                    state.inequality_bodies,
+                ],
+                device=self.device,
+            )
         limits = self._limits
         if limits is not None and limits.model_max_limits_host > 0:
             wp.launch(
@@ -698,7 +738,8 @@ class DVISolver:
                     limits.bids,
                     self._sparse_path.model.bodies.effective_inv_m_i,
                     problem.data.lio,
-                    problem.data.uio,
+                    problem.data.iio,
+                    problem.data.nbc,
                     state.limit_indices,
                     state.inequality_bodies,
                 ],
@@ -715,9 +756,10 @@ class DVISolver:
                     contacts.cid,
                     contacts.bid_AB,
                     self._sparse_path.model.bodies.effective_inv_m_i,
+                    problem.data.nbc,
                     problem.data.nl,
                     problem.data.cio,
-                    problem.data.uio,
+                    problem.data.iio,
                     state.contact_indices,
                     state.inequality_bodies,
                 ],
@@ -728,9 +770,10 @@ class DVISolver:
             kernel=_color_mapped_dvi_inequalities,
             dim=self._size.num_worlds,
             inputs=[
+                problem.data.nbc,
                 problem.data.nl,
                 problem.data.nc,
-                problem.data.uio,
+                problem.data.iio,
                 state.inequality_bodies,
                 state.inequality_body_color_masks,
                 state.inequality_colors,
@@ -742,7 +785,7 @@ class DVISolver:
         )
 
     def _can_use_dense_inequality_pgs(self) -> bool:
-        return self._has_unilateral_constraints and self._size.sum_of_num_joint_cts == 0
+        return self._has_unilateral_constraints and self._size.sum_of_num_bilateral_joint_cts == 0
 
     def _solve_dense_inequality_pgs(self, problem: DualProblem) -> None:
         """Solve an inequality-only dense problem through the unified path."""
@@ -761,10 +804,10 @@ class DVISolver:
                 problem.data.dim,
                 problem.data.mio,
                 problem.data.vio,
+                problem.data.nbc,
                 problem.data.nl,
                 problem.data.nc,
-                problem.data.lcgo,
-                problem.data.ccgo,
+                problem.data.bcgo,
                 problem.data.D,
                 problem.data.v_f,
                 self._data.solution.lambdas,
@@ -782,13 +825,18 @@ class DVISolver:
                     problem.data.dim,
                     problem.data.mio,
                     problem.data.vio,
+                    problem.data.nbc,
                     problem.data.nl,
                     problem.data.nc,
+                    problem.data.bcgo,
                     problem.data.lcgo,
                     problem.data.ccgo,
+                    problem.data.bcio,
                     problem.data.cio,
-                    problem.data.uio,
+                    problem.data.iio,
                     problem.data.mu,
+                    problem.data.bound_lower,
+                    problem.data.bound_upper,
                     problem.data.D,
                     problem.data.P,
                     problem.data.v_b,
@@ -809,7 +857,7 @@ class DVISolver:
         wp.launch(
             kernel=_set_dvi_direct_status_iterations,
             dim=self._size.num_worlds,
-            inputs=[problem.data.nl, problem.data.nc, self._data.config, False, self._data.status],
+            inputs=[problem.data.nbc, problem.data.nl, problem.data.nc, self._data.config, False, self._data.status],
             device=self.device,
         )
 
@@ -819,7 +867,7 @@ class DVISolver:
         state = self._data.state
         wp.launch(
             kernel=_build_bilateral_rhs,
-            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
+            dim=(self._size.num_worlds, self._size.max_of_num_bilateral_joint_cts),
             inputs=[
                 problem.data.dim,
                 problem.data.mio,
@@ -843,7 +891,7 @@ class DVISolver:
             operator.info.dim = full_dim
         wp.launch(
             kernel=_scatter_bilateral_solution,
-            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts),
+            dim=(self._size.num_worlds, self._size.max_of_num_bilateral_joint_cts),
             inputs=[
                 problem.data.vio,
                 problem.data.njc,
@@ -861,7 +909,10 @@ class DVISolver:
         operator.info.dim = operator.info.maxdim
         wp.launch(
             kernel=_copy_bilateral_block,
-            dim=(self._size.num_worlds, self._size.max_of_num_joint_cts * self._size.max_of_num_joint_cts),
+            dim=(
+                self._size.num_worlds,
+                self._size.max_of_num_bilateral_joint_cts * self._size.max_of_num_bilateral_joint_cts,
+            ),
             inputs=[
                 problem.data.dim,
                 problem.data.mio,
@@ -958,8 +1009,10 @@ class DVISolver:
                 problem.data.dim,
                 problem.data.mio,
                 problem.data.vio,
+                problem.data.nbc,
                 problem.data.nl,
                 problem.data.nc,
+                problem.data.bcgo,
                 problem.data.lcgo,
                 problem.data.ccgo,
                 problem.data.D,
@@ -981,13 +1034,18 @@ class DVISolver:
                     problem.data.dim,
                     self._data.state.projected_mio,
                     problem.data.vio,
+                    problem.data.nbc,
                     problem.data.nl,
                     problem.data.nc,
+                    problem.data.bcgo,
                     problem.data.lcgo,
                     problem.data.ccgo,
+                    problem.data.bcio,
                     problem.data.cio,
-                    problem.data.uio,
+                    problem.data.iio,
                     problem.data.mu,
+                    problem.data.bound_lower,
+                    problem.data.bound_upper,
                     self._data.state.projected_D,
                     problem.data.P,
                     problem.data.v_b,
@@ -1017,6 +1075,7 @@ class DVISolver:
             kernel=_set_dvi_direct_status_iterations,
             dim=self._size.num_worlds,
             inputs=[
+                problem.data.nbc,
                 problem.data.nl,
                 problem.data.nc,
                 self._data.config,
@@ -1058,11 +1117,18 @@ class DVISolver:
                     model.joints.wid,
                     model.joints.num_dynamic_cts,
                     model.joints.num_kinematic_cts,
-                    model.joints.dynamic_cts_offset_joint_cts,
-                    model.joints.kinematic_cts_offset_joint_cts,
+                    model.joints.num_friction_cts,
+                    model.joints.dofs_offset,
+                    model.joints.dynamic_cts_offset,
+                    model.joints.kinematic_cts_offset,
+                    model.joints.friction_cts_offset,
                     model.joints.dynamic_cts_offset_total_cts,
                     model.joints.kinematic_cts_offset_total_cts,
-                    data.joints.lambda_j,
+                    model.joints.friction_cts_offset_total_cts,
+                    data.joints.lambda_dyn_j,
+                    data.joints.lambda_kin_j,
+                    data.joints.lambda_f_j,
+                    data.joints.dq_j,
                     problem.data.P,
                     self._data.solution.lambdas,
                     self._data.solution.lambdas,
