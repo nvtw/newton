@@ -66,6 +66,10 @@ VIEWER_FRAMES = 600
 # is noisy near 50 deg. mu=1.00 therefore exercises only the static side.
 _DEFAULT_MUS = (0.10, 0.30, 0.50, 0.70, 1.00)
 _DEFAULT_ANGLES_DEG = (3.0, 10.0, 20.0, 30.0, 40.0)
+# Kamino retains the full coefficient and angle range while omitting middle
+# cells already covered by the default grid on XPBD and MuJoCo.
+_KAMINO_MUS = (0.10, 0.30, 0.70, 1.00)
+_KAMINO_ANGLES_DEG = (3.0, 10.0, 30.0, 40.0)
 _VBD_MUS = (0.10, 0.15, 0.20, 0.25, 0.30)
 _VBD_ANGLES_DEG = (5.0, 7.5, 10.0, 12.5, 15.0, 17.5, 20.0)
 
@@ -461,8 +465,8 @@ _SOLVERS = {
     },
     "kamino": {
         "factory": newton.solvers.SolverKamino,
-        "mus": _DEFAULT_MUS,
-        "angles_deg": _DEFAULT_ANGLES_DEG,
+        "mus": _KAMINO_MUS,
+        "angles_deg": _KAMINO_ANGLES_DEG,
         "thresholds": _DEFAULT_THRESHOLDS,
         "stopping_distance_rel_tol": 0.01,
         "stopping_distance_rest_speed_max": STOPPING_REST_SPEED_MAX,
@@ -484,6 +488,31 @@ class TestRigidFrictionRamp(unittest.TestCase):
         self.assertFalse(
             any(name.startswith("test_friction_stopping_distance_") for name in dir(TestRigidFrictionRamp))
         )
+
+        self.assertIsNot(_RAMP_SUITES["kamino"], _RAMP_SUITES["vbd"])
+        self.assertIsNot(_STOPPING_SUITES["kamino"], _STOPPING_SUITES["vbd"])
+
+    def test_kamino_ramp_uses_representative_grid(self):
+        """Keep Kamino's representative ramp sweep bounded without losing endpoints."""
+        cfg = _SOLVERS["kamino"]
+        self.assertEqual(cfg["mus"], _KAMINO_MUS)
+        self.assertEqual(cfg["angles_deg"], _KAMINO_ANGLES_DEG)
+        self.assertEqual((_KAMINO_MUS[0], _KAMINO_MUS[-1]), (_DEFAULT_MUS[0], _DEFAULT_MUS[-1]))
+        self.assertEqual(
+            (_KAMINO_ANGLES_DEG[0], _KAMINO_ANGLES_DEG[-1]),
+            (_DEFAULT_ANGLES_DEG[0], _DEFAULT_ANGLES_DEG[-1]),
+        )
+        self.assertLess(len(_KAMINO_MUS) * len(_KAMINO_ANGLES_DEG), len(_DEFAULT_MUS) * len(_DEFAULT_ANGLES_DEG))
+        for solver_name in ("xpbd", "mujoco_cpu"):
+            self.assertEqual(_SOLVERS[solver_name]["mus"], _DEFAULT_MUS)
+            self.assertEqual(_SOLVERS[solver_name]["angles_deg"], _DEFAULT_ANGLES_DEG)
+        regimes = _DEFAULT_THRESHOLDS
+        rows_with_both_regimes = sum(
+            any(angle < math.degrees(math.atan(mu)) - regimes.margin_deg for angle in _KAMINO_ANGLES_DEG)
+            and any(angle > math.degrees(math.atan(mu)) + regimes.margin_deg for angle in _KAMINO_ANGLES_DEG)
+            for mu in _KAMINO_MUS
+        )
+        self.assertGreaterEqual(rows_with_both_regimes, 3)
 
     @unittest.skip("Visual debugging - run manually to view simulation")
     def test_view_friction_grid_xpbd(self):
@@ -619,6 +648,31 @@ class TestRigidFrictionStoppingDistance(unittest.TestCase):
     """Stopping-distance simulations scheduled independently from ramp simulations."""
 
 
+class TestRigidFrictionRampKamino(unittest.TestCase):
+    """Kamino ramp simulation scheduled independently."""
+
+
+class TestRigidFrictionRampVBD(unittest.TestCase):
+    """VBD ramp simulation scheduled independently."""
+
+
+class TestRigidFrictionStoppingDistanceKamino(unittest.TestCase):
+    """Kamino stopping-distance simulation scheduled independently."""
+
+
+class TestRigidFrictionStoppingDistanceVBD(unittest.TestCase):
+    """VBD stopping-distance simulation scheduled independently."""
+
+
+_RAMP_SUITES = {
+    "kamino": TestRigidFrictionRampKamino,
+    "vbd": TestRigidFrictionRampVBD,
+}
+_STOPPING_SUITES = {
+    "kamino": TestRigidFrictionStoppingDistanceKamino,
+    "vbd": TestRigidFrictionStoppingDistanceVBD,
+}
+
 for device in devices:
     for solver_name, cfg in _SOLVERS.items():
         if device.is_cpu and solver_name.startswith("mujoco_warp"):
@@ -626,7 +680,7 @@ for device in devices:
         if device.is_cuda and solver_name == "mujoco_cpu":
             continue
         add_function_test(
-            TestRigidFrictionRamp,
+            _RAMP_SUITES.get(solver_name, TestRigidFrictionRamp),
             f"test_friction_ramp_{solver_name}",
             test_friction_ramp,
             devices=[device],
@@ -641,7 +695,7 @@ for device in devices:
         if not cfg.get("run_stopping_distance", True):
             continue
         add_function_test(
-            TestRigidFrictionStoppingDistance,
+            _STOPPING_SUITES.get(solver_name, TestRigidFrictionStoppingDistance),
             f"test_friction_stopping_distance_{solver_name}",
             test_friction_stopping_distance,
             devices=[device],
