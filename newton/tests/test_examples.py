@@ -376,6 +376,13 @@ add_basic_example_test(
     use_viewer=True,
     test_suffix="vbd",
 )
+add_basic_example_test(
+    name="basic.example_basic_urdf",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 200, "solver": "kamino", "world-count": 4},
+    use_viewer=True,
+    test_suffix="kamino",
+)
 
 add_basic_example_test(name="basic.example_basic_viewer", devices=test_devices, use_viewer=True)
 
@@ -391,13 +398,6 @@ add_basic_example_test(
     use_viewer=True,
     test_options={"solver": "vbd"},
     test_suffix="vbd",
-)
-add_basic_example_test(
-    name="basic.example_basic_urdf",
-    devices=cuda_test_devices,
-    test_options={"num-frames": 200, "solver": "kamino", "world-count": 4},
-    use_viewer=True,
-    test_suffix="kamino",
 )
 add_basic_example_test(
     name="basic.example_basic_joints",
@@ -449,11 +449,27 @@ add_basic_example_test(
     allow_output_regexes=[(_WARP_SDF_CONSTANT_CONVERSION_WARNING_RE, "stderr")],
 )
 add_basic_example_test(
+    name="basic.example_basic_conveyor",
+    devices=cuda_test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 100, "solver": "kamino"},
+    test_suffix="kamino",
+    allow_output_regexes=[(_WARP_SDF_CONSTANT_CONVERSION_WARNING_RE, "stderr")],
+)
+add_basic_example_test(
     name="basic.example_basic_conveyor_forces",
     devices=test_devices,
     use_viewer=True,
     test_options={"num-frames": 100, "solver": "xpbd"},
     test_suffix="xpbd",
+    allow_output_regexes=[(_WARP_SDF_CONSTANT_CONVERSION_WARNING_RE, "stderr")],
+)
+add_basic_example_test(
+    name="basic.example_basic_conveyor_forces",
+    devices=cuda_test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 100, "solver": "kamino"},
+    test_suffix="kamino",
     allow_output_regexes=[(_WARP_SDF_CONSTANT_CONVERSION_WARNING_RE, "stderr")],
 )
 add_basic_example_test(
@@ -677,6 +693,14 @@ add_example_test(
 )
 add_example_test(
     TestRobotExamples,
+    name="robot.example_robot_cartpole",
+    devices=cuda_test_devices,
+    test_options={"usd_required": True, "num-frames": 100, "world-count": 2, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
+)
+add_example_test(
+    TestRobotExamples,
     name="robot.example_robot_anymal_c_walk",
     devices=cuda_test_devices,
     test_options={"usd_required": True, "num-frames": 500, "onnx_required": True},
@@ -692,7 +716,30 @@ add_example_test(
 )
 add_example_test(
     TestRobotExamples,
+    name="robot.example_robot_anymal_d",
+    devices=cuda_test_devices,
+    test_options={"usd_required": True, "num-frames": 500, "world-count": 1, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
+)
+add_example_test(
+    TestRobotExamples,
     name="robot.example_robot_g1",
+    devices=cuda_test_devices,
+    test_options={"usd_required": True, "num-frames": 500},
+    use_viewer=True,
+)
+add_example_test(
+    TestRobotExamples,
+    name="robot.example_robot_g1",
+    devices=cuda_test_devices,
+    test_options={"usd_required": True, "num-frames": 500, "world-count": 4, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
+)
+add_example_test(
+    TestRobotExamples,
+    name="robot.example_robot_h1",
     devices=cuda_test_devices,
     test_options={"usd_required": True, "num-frames": 500},
     use_viewer=True,
@@ -701,8 +748,9 @@ add_example_test(
     TestRobotExamples,
     name="robot.example_robot_h1",
     devices=cuda_test_devices,
-    test_options={"usd_required": True, "num-frames": 500},
+    test_options={"usd_required": True, "num-frames": 500, "world-count": 4, "solver": "kamino"},
     use_viewer=True,
+    test_suffix="kamino",
 )
 add_example_test(
     TestRobotExamples,
@@ -866,14 +914,6 @@ add_example_test(
     test_options={"num-frames": 100},
     test_options_cpu={"num-frames": 10},
     use_viewer=True,
-)
-add_example_test(
-    TestRobotExamples,
-    name="robot.example_robot_cartpole",
-    devices=cuda_test_devices,
-    test_options={"usd_required": True, "num-frames": 100, "world-count": 2, "solver": "kamino"},
-    use_viewer=True,
-    test_suffix="kamino",
 )
 add_example_test(
     TestSelectionAPIExamples,
@@ -1134,10 +1174,34 @@ add_contact_example_test(
     allow_output_regexes=[(_ISAACGYM_ASSET_DOWNLOAD_OUTPUT_RE, "stdout")],
 )
 add_contact_example_test(
+    name="contacts.example_nut_bolt_sdf",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "world-count": 1, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
+    expect_output_regexes=[
+        (_NUT_BOLT_DOWNLOAD_START_OUTPUT_RE, "stdout"),
+        (_NUT_BOLT_DOWNLOAD_DONE_OUTPUT_RE, "stdout"),
+    ],
+    allow_output_regexes=[(_ISAACGYM_ASSET_DOWNLOAD_OUTPUT_RE, "stdout")],
+)
+add_contact_example_test(
     name="contacts.example_nut_bolt_hydro",
     devices=cuda_test_devices,
     test_options={"num-frames": 120, "world-count": 1},
     use_viewer=True,
+    expect_output_regexes=[
+        (_NUT_BOLT_DOWNLOAD_START_OUTPUT_RE, "stdout"),
+        (_NUT_BOLT_DOWNLOAD_DONE_OUTPUT_RE, "stdout"),
+    ],
+    allow_output_regexes=[(_ISAACGYM_ASSET_DOWNLOAD_OUTPUT_RE, "stdout")],
+)
+add_contact_example_test(
+    name="contacts.example_nut_bolt_hydro",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "world-count": 1, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
     expect_output_regexes=[
         (_NUT_BOLT_DOWNLOAD_START_OUTPUT_RE, "stdout"),
         (_NUT_BOLT_DOWNLOAD_DONE_OUTPUT_RE, "stdout"),
