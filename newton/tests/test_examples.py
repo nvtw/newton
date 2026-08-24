@@ -1112,7 +1112,7 @@ for example_name in (
     "contacts.example_domino_spiral",
     "contacts.example_newton_cradle",
 ):
-    for solver in ("xpbd", "vbd"):
+    for solver in ("xpbd", "vbd", "kamino"):
         add_contact_example_test(
             name=example_name,
             devices=cuda_test_devices,
@@ -1158,6 +1158,16 @@ add_contact_example_test(
     use_viewer=True,
     expect_output_regexes=[(_PYRAMID_BUILD_OUTPUT_RE, "stdout")],
 )
+add_contact_example_test(
+    name="contacts.example_pyramid",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "num-pyramids": 3, "pyramid-size": 5, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
+    expect_output_regexes=[(_PYRAMID_BUILD_OUTPUT_RE, "stdout")],
+)
+
+
 class TestMultiphysicsExamples(NewtonTestCase):
     pass
 
