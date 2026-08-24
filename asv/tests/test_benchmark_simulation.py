@@ -259,6 +259,20 @@ class TestSimulationBenchmarks(unittest.TestCase):
             with self.subTest(benchmark=benchmark):
                 self.assertFalse(any(pattern.search(benchmark) for pattern in patterns), benchmark)
 
+    def test_fast_allegro_uses_representative_pr_workload(self):
+        """Keep Allegro coverage while reducing duplicated PR sampling."""
+        benchmark = bench_mujoco.FastAllegro()
+        self.assertEqual((benchmark.num_frames, benchmark.samples), (300, 2))
+
+        with (
+            patch.dict("os.environ", {"NEWTON_ASV_PR_GATE": "1"}),
+            patch.object(benchmark, "_collect_metrics", return_value={}) as collect_metrics,
+        ):
+            self.assertEqual(benchmark.setup_cache(), {})
+
+        self.assertEqual((benchmark.num_frames, benchmark.samples), (200, 1))
+        collect_metrics.assert_called_once_with()
+
     def test_pr_asv_config_only_omits_torch(self):
         """Keep the explicit PR ASV environment aligned with full collection."""
         root = BENCHMARK_DIR.parents[1]
@@ -283,6 +297,11 @@ class TestSimulationBenchmarks(unittest.TestCase):
 
     def test_pr_camera_warmup_matches_selected_outputs(self):
         """Warm only camera output combinations selected by the PR gate."""
+
+        self.assertEqual(bench_sensor_tiled_camera.FastSensorTiledCamera.repeat, 1)
+        self.assertEqual(bench_sensor_tiled_camera.FastSensorTiledCameraPixel.repeat, 1)
+        self.assertEqual(bench_sensor_tiled_camera.FastSensorTiledCamera.rounds, 2)
+
         cases = (
             (bench_sensor_tiled_camera.FastSensorTiledCamera, ((True, True), (False, True))),
             (bench_sensor_tiled_camera.FastSensorTiledCameraPixel, ((True, True),)),

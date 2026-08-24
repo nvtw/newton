@@ -345,12 +345,16 @@ class TiledCameraQuadruped(_SceneBenchmark):
 
 class FastSensorTiledCamera(_SceneBenchmark):
     scene = "franka_cabinet"
+    repeat = 1
+    rounds = 2
     pr_gate_output_modes = ((True, True), (False, True))
     params = ([64], [4096], [50])
 
 
 class FastSensorTiledCameraPixel(_SceneBenchmark):
     scene = "franka_cabinet"
+    repeat = 1
+    rounds = 2
     render_order = SensorTiledCamera.RenderOrder.PIXEL_PRIORITY
     pr_gate_output_modes = ((True, True),)
     params = ([64], [4096], [50])
