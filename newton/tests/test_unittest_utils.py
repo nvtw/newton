@@ -311,9 +311,13 @@ class TestNewtonTestCaseOutputContract(unittest.TestCase):
 
 
 class TestSkippedTestCleanup(unittest.TestCase):
-    def _gc_calls(self, resultclass, test_case):
+    def _gc_calls(self, resultclass, test_case, *, cuda_devices=()):
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(test_case)
-        with mock.patch("gc.collect") as collect:
+        with (
+            mock.patch("gc.collect") as collect,
+            mock.patch.object(unittest_utils.wp, "get_cuda_devices", return_value=list(cuda_devices)),
+            mock.patch.object(unittest_utils.wp, "is_mempool_enabled", return_value=False),
+        ):
             result = unittest.TextTestRunner(
                 stream=io.StringIO(),
                 resultclass=resultclass,
@@ -354,6 +358,17 @@ class TestSkippedTestCleanup(unittest.TestCase):
                 self.assertEqual(self._gc_calls(resultclass, RuntimeSkip), 1)
             with self.subTest(resultclass=resultclass.__name__, outcome="executed"):
                 self.assertEqual(self._gc_calls(resultclass, Executed), 1)
+
+    def test_cpu_batches_cleanup_but_cuda_cleans_each_test(self):
+        methods = {f"test_{i}": lambda self: None for i in range(17)}
+        ManyExecuted = type("ManyExecuted", (unittest.TestCase,), methods)
+
+        resultclasses = (unittest_utils.ParallelJunitTestResult, ParallelTextTestResult)
+        for resultclass in resultclasses:
+            with self.subTest(resultclass=resultclass.__name__, device="cpu"):
+                self.assertEqual(self._gc_calls(resultclass, ManyExecuted), 3)
+            with self.subTest(resultclass=resultclass.__name__, device="cuda"):
+                self.assertEqual(self._gc_calls(resultclass, ManyExecuted, cuda_devices=("cuda:0",)), 17)
 
 
 if __name__ == "__main__":

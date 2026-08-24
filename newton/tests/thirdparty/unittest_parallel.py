@@ -27,8 +27,8 @@ from io import StringIO
 os.environ.setdefault("PXR_WORK_THREAD_LIMIT", "1")
 
 from newton.tests.unittest_utils import (  # NVIDIA modification
+    AllocationCleanupTestResultMixin,
     ParallelJunitTestResult,
-    cleanup_test_allocations,
     write_junit_results,
 )
 
@@ -613,7 +613,7 @@ class ParallelTestManager:
         )
 
 
-class ParallelTextTestResult(unittest.TextTestResult):
+class ParallelTextTestResult(AllocationCleanupTestResultMixin, unittest.TextTestResult):
     def __init__(self, stream, descriptions, verbosity):
         stream = type(stream)(sys.stderr)
         super().__init__(stream, descriptions, verbosity)
@@ -627,10 +627,6 @@ class ParallelTextTestResult(unittest.TextTestResult):
             self.stream.writeln(f"{test} ...")
             self.stream.flush()
         super(unittest.TextTestResult, self).startTest(test)
-
-    def stopTest(self, test):
-        super().stopTest(test)
-        cleanup_test_allocations(test)
 
     def _add_helper(self, test, show_all_message):
         if self.showAll:
