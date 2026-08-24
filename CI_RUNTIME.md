@@ -13,6 +13,11 @@ Source: 2026-08-13 supplied CI logs.
 
 ASV finished 14:56 after unit tests and was the measured critical path.
 
+Latest PR #3966 run (2026-08-24): benchmark job 43:49; Windows and
+Ubuntu test commands 38:54 and 38:42. Final unit-test reporting finished
+1:13 before benchmarks. The benchmark commits are expected to make tests the
+critical path.
+
 ## Commit `eb78b2831`
 
 Expected ASV saving: 5.5-7.5 min; expected ASV wall time: 35-37 min.
@@ -39,6 +44,10 @@ Unit-test optimizations preserve workloads and assertions:
 | Gimbal limits | Copy final q/qd only | 4 rollouts x 50 steps |
 | Kamino loops | Remove per-step sync without progress output | Same steps and final comparisons |
 | Pendulum | Record trajectories on device; copy once | Same steps, analytical and energy assertions |
+
+Local CPU direct comparisons: gimbal limits 43.52 s -> 37.11 s
+(-6.41 s, -14.7%); semi-implicit pendulum period 3.22 s -> 3.28 s
+(no CPU gain; GPU synchronization reduction only).
 
 ## Follow-up benchmark commit
 
@@ -88,6 +97,10 @@ ASV spawn processes requires file caching, which is intentionally not used.
   cold-start ordering.
 - Rejected: removing Allegro or pixel-priority camera; each is a distinct case.
 - Rejected: NumPy mesh-loader change; whole-setup benefit was not measurable.
+- Rejected: on-device joint-friction recording; identical CPU test regressed
+  from 45.05 s to 62.84 s (+39%).
+- Rejected: test-only null-viewer sampling; alternating warm cloth runs
+  were both 3.54 s, and cable was 58.83 s baseline versus 60.23 s sampled.
 
 ## Validation
 
