@@ -680,6 +680,24 @@ def write_junit_results(
     tree.write(outfile, encoding="utf-8", xml_declaration=True)
 
 
+def cleanup_test_allocations(test):
+    """Release test allocations unless unittest skipped execution statically."""
+    method_name = getattr(test, "_testMethodName", "")
+    test_method = getattr(test, method_name, None)
+    # unittest checks these flags before setUp() and the test body, so a static
+    # skip cannot leave allocations for the issue #1881 cleanup to release.
+    if getattr(test.__class__, "__unittest_skip__", False) or getattr(test_method, "__unittest_skip__", False):
+        return
+
+    # Executed tests and runtime skips retain the existing peak-RSS cleanup.
+    import gc  # noqa: PLC0415
+
+    gc.collect()
+    for device_name in wp.get_cuda_devices():
+        if wp.is_mempool_enabled(device_name):
+            wp.set_mempool_release_threshold(device_name, 0)
+
+
 class ParallelJunitTestResult(unittest.TextTestResult):
     def __init__(self, stream, descriptions, verbosity):
         stream = type(stream)(sys.stderr)
@@ -752,17 +770,7 @@ class ParallelJunitTestResult(unittest.TextTestResult):
 
     def stopTest(self, test):
         super().stopTest(test)
-        # Force garbage collection of CPU-side allocations and release unused
-        # CUDA mempool memory to reduce peak host RSS in parallel test runs
-        # (see issue #1881).
-        import gc  # noqa: PLC0415
-
-        gc.collect()
-        import warp as wp  # noqa: PLC0415
-
-        for device_name in wp.get_cuda_devices():
-            if wp.is_mempool_enabled(device_name):
-                wp.set_mempool_release_threshold(device_name, 0)
+        cleanup_test_allocations(test)
 
     def printErrors(self):
         pass

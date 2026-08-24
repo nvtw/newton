@@ -28,6 +28,7 @@ os.environ.setdefault("PXR_WORK_THREAD_LIMIT", "1")
 
 from newton.tests.unittest_utils import (  # NVIDIA modification
     ParallelJunitTestResult,
+    cleanup_test_allocations,
     write_junit_results,
 )
 
@@ -629,17 +630,7 @@ class ParallelTextTestResult(unittest.TextTestResult):
 
     def stopTest(self, test):
         super().stopTest(test)
-        # Force garbage collection of CPU-side allocations and release unused
-        # CUDA mempool memory to reduce peak host RSS in parallel test runs
-        # (see issue #1881).
-        import gc  # noqa: PLC0415
-
-        gc.collect()
-        import warp as wp  # noqa: PLC0415
-
-        for device_name in wp.get_cuda_devices():
-            if wp.is_mempool_enabled(device_name):
-                wp.set_mempool_release_threshold(device_name, 0)
+        cleanup_test_allocations(test)
 
     def _add_helper(self, test, show_all_message):
         if self.showAll:
