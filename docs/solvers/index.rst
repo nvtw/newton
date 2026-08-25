@@ -278,7 +278,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - 🟨 :sup:`6`
      - |yes|
      - |no|
-   * - CABLE
+   * - ROD
      - |no|
      - |no|
      - |no|
@@ -327,7 +327,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |yes|
      - 🟨 :sup:`9`
      - |no|
-     - |no|
+     - |yes|
    * - :attr:`~newton.Model.joint_limit_lower` / :attr:`~newton.Model.joint_limit_upper`
      - |yes|
      - |yes| :sup:`2`

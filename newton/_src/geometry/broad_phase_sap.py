@@ -393,6 +393,101 @@ def _sap_chunk_count_kernel(sap_range: wp.array[int], chunk_count: wp.array[int]
     chunk_count[tid] = (sap_range[tid] + _SAP_SWEEP_CHUNK_SIZE_WP - wp.int32(1)) // _SAP_SWEEP_CHUNK_SIZE_WP
 
 
+@wp.func
+def _process_sap_work_package(
+    flat_id: int,
+    workid: int,
+    shape_bounding_box_lower: wp.array[wp.vec3],
+    shape_bounding_box_upper: wp.array[wp.vec3],
+    shape_gap: wp.array[float],
+    shape_displacement: wp.array[wp.vec3],
+    collision_group: wp.array[int],
+    shape_world: wp.array[int],
+    world_index_map: wp.array[int],
+    world_slice_ends: wp.array[int],
+    sap_sort_index_in: wp.array[int],
+    sap_cumulative_sum_in: wp.array[int],
+    max_shapes_per_world: int,
+    num_regular_worlds: int,
+    filter_pairs: wp.array[wp.vec2i],
+    num_filter_pairs: int,
+    shape_body: wp.array[int],
+    body_flags: wp.array[int],
+    include_static_kinematic_pairs: bool,
+    candidate_pair: wp.array[wp.vec2i],
+    candidate_pair_count: wp.array[int],
+    max_candidate_pair: int,
+):
+    """Process one mapped SAP work package."""
+    j = flat_id + workid + 1
+    if flat_id > 0:
+        j -= sap_cumulative_sum_in[flat_id - 1]
+
+    world_id = flat_id // max_shapes_per_world
+    i = flat_id % max_shapes_per_world
+    j = j % max_shapes_per_world
+
+    world_slice_start = 0
+    if world_id > 0:
+        world_slice_start = world_slice_ends[world_id - 1]
+    world_slice_end = world_slice_ends[world_id]
+    num_shapes_in_world = world_slice_end - world_slice_start
+
+    if i >= num_shapes_in_world or j >= num_shapes_in_world:
+        return
+    if i >= j:
+        return
+
+    idx_i = world_id * max_shapes_per_world + i
+    idx_j = world_id * max_shapes_per_world + j
+    local_shape1 = sap_sort_index_in[idx_i]
+    local_shape2 = sap_sort_index_in[idx_j]
+    if local_shape1 < 0 or local_shape2 < 0:
+        return
+
+    shape1_tmp = world_index_map[world_slice_start + local_shape1]
+    shape2_tmp = world_index_map[world_slice_start + local_shape2]
+    if shape1_tmp == shape2_tmp:
+        return
+
+    shape1 = wp.min(shape1_tmp, shape2_tmp)
+    shape2 = wp.max(shape1_tmp, shape2_tmp)
+
+    col_group1 = collision_group[shape1]
+    col_group2 = collision_group[shape2]
+    world1 = shape_world[shape1]
+    world2 = shape_world[shape2]
+
+    is_dedicated_minus_one_segment = world_id >= num_regular_worlds
+    if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
+        return
+
+    if test_world_and_group_pair(world1, world2, col_group1, col_group2):
+        _process_single_sap_pair(
+            wp.vec2i(shape1, shape2),
+            shape_bounding_box_lower,
+            shape_bounding_box_upper,
+            shape_gap,
+            shape_displacement,
+            candidate_pair,
+            candidate_pair_count,
+            max_candidate_pair,
+            filter_pairs,
+            num_filter_pairs,
+            shape_body,
+            body_flags,
+            include_static_kinematic_pairs,
+        )
+
+
+@wp.func
+def _advance_sap_chunk_base(chunk_base: int, chunk_stride: int, total_work_packages: int) -> int:
+    """Advance a dense SAP chunk without overflowing signed int32 arithmetic."""
+    if total_work_packages - chunk_base <= chunk_stride:
+        return total_work_packages
+    return chunk_base + chunk_stride
+
+
 @wp.kernel(enable_backward=False)
 def _sap_select_sweep_kernel(
     sap_cumulative_sum: wp.array[int],
@@ -575,8 +670,9 @@ def create_sap_broadphase_kernel(filter_func: Any, filter_data_type: Any, adapti
                 candidate_pair_count,
                 max_candidate_pair,
             )
-
             workid += nsweep_in
+        return
+
 
     return kernel
 

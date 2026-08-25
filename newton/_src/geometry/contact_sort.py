@@ -124,11 +124,20 @@ class _SimpleContactArrays:
 
 
 @wp.kernel(enable_backward=False)
-def _backup_simple_kernel(data: _SimpleContactArrays, count: wp.array[int]):
-    """Copy active contacts into scratch buffers."""
+def _backup_simple_kernel(
+    data: _SimpleContactArrays,
+    count: wp.array[int],
+    sort_keys_src: wp.array[wp.int64],
+    sort_keys_dst: wp.array[wp.int64],
+    sort_indices: wp.array[wp.int32],
+):
+    """Prepare sort keys and copy active contacts into scratch buffers."""
     i = wp.tid()
+    sort_indices[i] = wp.int32(i)
     if i >= count[0]:
+        sort_keys_dst[i] = SORT_KEY_SENTINEL
         return
+    sort_keys_dst[i] = sort_keys_src[i]
     data.pair_buf[i] = data.pair[i]
     data.position_buf[i] = data.position[i]
     data.normal_buf[i] = data.normal[i]
@@ -205,11 +214,20 @@ class _FullContactArrays:
 
 
 @wp.kernel(enable_backward=False)
-def _backup_full_kernel(data: _FullContactArrays, count: wp.array[int]):
-    """Copy active contacts into scratch buffers."""
+def _backup_full_kernel(
+    data: _FullContactArrays,
+    count: wp.array[int],
+    sort_keys_src: wp.array[wp.int64],
+    sort_keys_dst: wp.array[wp.int64],
+    sort_indices: wp.array[wp.int32],
+):
+    """Prepare sort keys and copy active contacts into scratch buffers."""
     i = wp.tid()
+    sort_indices[i] = wp.int32(i)
     if i >= count[0]:
+        sort_keys_dst[i] = SORT_KEY_SENTINEL
         return
+    sort_keys_dst[i] = sort_keys_src[i]
     data.shape0_buf[i] = data.shape0[i]
     data.shape1_buf[i] = data.shape1[i]
     data.point0_buf[i] = data.point0[i]
@@ -421,7 +439,6 @@ class ContactSorter:
             device: Device to launch on.
         """
         n = self._capacity
-        self._sort_and_permute(sort_keys, contact_count, device=device)
 
         has_tangent = contact_tangent is not None and contact_tangent.shape[0] > 0
         has_match = match_index is not None and match_index.shape[0] > 0
@@ -445,7 +462,13 @@ class ContactSorter:
         data.has_tangent = 1 if has_tangent else 0
         data.has_match_index = 1 if has_match else 0
 
-        wp.launch(_backup_simple_kernel, dim=n, inputs=[data, contact_count], device=device)
+        wp.launch(
+            _backup_simple_kernel,
+            dim=n,
+            inputs=[data, contact_count, sort_keys, self._sort_keys_copy, self._sort_indices],
+            device=device,
+        )
+        wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n)
         wp.launch(_gather_simple_kernel, dim=n, inputs=[data, self._sort_indices, contact_count], device=device)
 
     def sort_full(

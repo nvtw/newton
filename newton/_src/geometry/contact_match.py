@@ -266,9 +266,12 @@ def _match_contacts_kernel(data: _MatchData):
         old_n = data.prev_normal[old_idx]
         ndot = wp.dot(new_n, old_n)
 
-        if dist_sq <= best_dist_sq and ndot >= data.normal_dot_threshold:
-            best_dist_sq = dist_sq
-            best_idx = old_idx
+        if dist_sq <= best_dist_sq:
+            old_n = data.prev_normal[old_idx]
+            ndot = wp.dot(new_n, old_n)
+            if ndot >= data.normal_dot_threshold:
+                best_dist_sq = dist_sq
+                best_idx = old_idx
 
     if best_idx >= 0:
         data.match_index[tid] = wp.int32(best_idx)
@@ -386,6 +389,9 @@ class _SaveStateData:
     dst_offset1: wp.array[wp.vec2]
     save_sticky: int
     dst_count: wp.array[wp.int32]
+    dst_claim: wp.array[wp.int64]
+    dst_prev_was_matched: wp.array[wp.int32]
+    has_report: int
 
 
 @wp.kernel(enable_backward=False)
@@ -414,6 +420,9 @@ def _save_sorted_state_kernel(data: _SaveStateData):
         data.dst_count[0] = saved
     if i < data.src_count[0]:
         data.dst_keys[i] = data.src_keys[i]
+        data.dst_claim[i] = _CLAIM_SENTINEL
+        if data.has_report != 0:
+            data.dst_prev_was_matched[i] = wp.int32(0)
 
         p0 = data.src_point0[i]
         bid0 = data.shape_body[data.src_shape0[i]]
@@ -444,7 +453,7 @@ def _save_sorted_state_kernel(data: _SaveStateData):
 
 
 @wp.kernel(enable_backward=False)
-def _collect_new_contacts_kernel(
+def _collect_contact_report_kernel(
     match_index: wp.array[wp.int32],
     contact_count: wp.array[wp.int32],
     new_indices: wp.array[wp.int32],
@@ -476,7 +485,7 @@ def _collect_broken_contacts_kernel(
     broken_indices: wp.array[wp.int32],
     broken_count: wp.array[wp.int32],
 ):
-    """Collect indices of old contacts that were not matched by any new contact."""
+    """Collect new and broken contact indices after matching and sorting."""
     i = wp.tid()
     # Clamp against ``prev_was_matched`` capacity so an overflowed
     # prev_count (set when the prior frame overflowed and the now-fixed
@@ -675,21 +684,6 @@ class ContactMatcher:
                 Written directly (no intermediate copy).
             device: Device to launch on.
         """
-        if self._has_report:
-            self._prev_was_matched.zero_()
-
-        # Reset only the active prefix of the claim buffer.  Launching
-        # ``capacity`` threads keeps the call shape constant for graph
-        # capture, but the kernel guards on ``prev_count`` so we touch
-        # the minimum bytes — important for sparsely-loaded pipelines
-        # where ``capacity >> prev_count``.
-        wp.launch(
-            _clear_prev_claim_kernel,
-            dim=self._capacity,
-            inputs=[self._prev_claim, self._prev_count],
-            device=device,
-        )
-
         data = _MatchData()
         data.prev_keys = self._prev_sorted_keys
         data.prev_pos_world = self._prev_pos_world
@@ -785,6 +779,9 @@ class ContactMatcher:
         data.dst_offset1 = self._prev_offset1 if self._sticky else self._oct_offset_dummy
         data.save_sticky = 1 if self._sticky else 0
         data.dst_count = self._prev_count
+        data.dst_claim = self._prev_claim
+        data.dst_prev_was_matched = self._prev_was_matched
+        data.has_report = 1 if self._has_report else 0
 
         wp.launch(_save_sorted_state_kernel, dim=self._capacity, inputs=[data], device=device)
         self._reset_world_mask.zero_()
@@ -829,15 +826,13 @@ class ContactMatcher:
         broken_count.zero_()
 
         wp.launch(
-            _collect_new_contacts_kernel,
-            dim=self._capacity,
-            inputs=[match_index, contact_count, new_indices, new_count],
-            device=device,
-        )
-        wp.launch(
-            _collect_broken_contacts_kernel,
+            _collect_contact_report_kernel,
             dim=self._capacity,
             inputs=[
+                match_index,
+                contact_count,
+                new_indices,
+                new_count,
                 self._prev_was_matched,
                 self._prev_sorted_keys,
                 self._prev_count,

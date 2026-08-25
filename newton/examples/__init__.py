@@ -963,7 +963,7 @@ def init(parser=None):
     # Create viewer based on type
     visible_gl = args.viewer == "gl" and not args.headless
     if args.viewer == "gl":
-        viewer = newton.viewer.ViewerGL(headless=args.headless, paused=args.paused)
+        viewer = newton.viewer.ViewerGL(headless=args.headless, paused=args.paused, num_frames=args.num_frames)
     elif args.viewer == "optix":
         viewer = newton.viewer.ViewerOptix(
             headless=args.headless,
