@@ -155,21 +155,7 @@ jobs:
           # Keep representative camera output modes and teleop tail latency;
           # full ASV collection retains every metric. Interleave rounds across
           # revisions to control cold-start and ordering bias.
-          uvx --with virtualenv asv continuous \
-            --config asv-pr.conf.json \
-            --launch-method spawn \
-            --interleave-rounds \
-            --append-samples \
-            --no-only-changed \
-            -e \
-            -b 'Fast(?!SensorTiledCamera)\w*\.time_' \
-            -b 'FastSensorTiledCamera\.time_render_(color_depth|depth_only)(\(|$)' \
-            -b 'FastSensorTiledCameraPixel\.time_render_color_depth(\(|$)' \
-            -b 'Fast(?!NewtonOverhead)\w*\.track_simulate(\(|$)' \
-            -b 'Fast(?!TeleopMuJoCo)\w*\.track_mean_\w*(time|ms)(\(|$)' \
-            -b 'Fast\w*\.track_p95_\w*(time|ms)(\(|$)' \
-            ${{ inputs.base_ref }} \
-            ${{ inputs.ref }}
+          python asv/run_pr_benchmarks.py ${{ inputs.base_ref }} ${{ inputs.ref }}
         continue-on-error: true
         id: benchmark
 
