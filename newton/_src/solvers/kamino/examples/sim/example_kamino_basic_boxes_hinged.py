@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ###########################################################################
-# Example for basic Cartpole system.
+# Example for basic boxes hinged system
 #
-# Shows how to simulate a basic cartpole with multiple worlds using SolverKamino.
+# Shows how to simulate a basic boxes hinged with multiple worlds using SolverKamino.
 #
-# Command: python -m newton.examples kamino_basic_cartpole --world-count 16
+# Command: python -m newton.examples kamino_basic_boxes_hinged --world-count 16
 #
 ###########################################################################
 
@@ -16,6 +16,7 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton._src.solvers.kamino._src.utils.sim.viewer_recording import enable_recording
 from newton.tests import get_kamino_basics_asset
 from newton.tests.utils import basics
 
@@ -31,6 +32,18 @@ class Example:
         self.world_count = args.world_count if args else 1
         self.viewer = viewer
         self.device = wp.get_device()
+        self.actuated = args.actuated if args else False
+        self.time = wp.zeros((self.world_count,), device=self.device)
+
+        video_output_filename = getattr(args, "video_path", None)
+        self.record_video = enable_recording(
+            viewer=self.viewer,
+            record_video=args.record_video if args else False,
+            start_clip=True,
+            output_path=video_output_filename if video_output_filename is not None else "recording.mp4",
+            max_frames=getattr(args, "max_video_frames", 1000),
+            fps=self.fps,
+        )
 
         # Create a single-robot model builder and register the Kamino-specific custom attributes
         robot_builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -38,11 +51,11 @@ class Example:
         robot_builder.default_shape_cfg.margin = 0.0
         robot_builder.default_shape_cfg.gap = 0.0
 
-        # Load the basic cartpole either from USD or by manually building it
+        # Load the basic boxes hinged either from USD or by manually building it
         # with the builder API, depending on the command-line argument `--from-usd`
         if args is not None and args.from_usd:
-            # Load the basic cartpole USD and add it to the builder
-            asset_file = get_kamino_basics_asset("cartpole.usda")
+            # Load the basic boxes hinged USD and add it to the builder
+            asset_file = get_kamino_basics_asset("boxes_hinged.usda")
             robot_builder.add_usd(
                 asset_file,
                 joint_ordering=None,
@@ -52,8 +65,8 @@ class Example:
                 hide_collision_shapes=False,
             )
         else:
-            # Manually build the basic cartpole using the builder API
-            basics.build_cartpole(builder=robot_builder, ground=False)
+            # Manually build the basic boxes hinged using the builder API
+            basics.build_boxes_hinged(builder=robot_builder)
 
         # Create the multi-world model by duplicating the single-robot
         # builder for the specified number of worlds
@@ -98,9 +111,9 @@ class Example:
         # If only a single-world is created, set initial
         # camera position for better view of the system
         if self.world_count == 1 and hasattr(self.viewer, "set_camera"):
-            camera_pos = wp.vec3(5.0, 5.0, 1.5)
-            pitch = -10.0
-            yaw = 218.0
+            camera_pos = wp.vec3(-0.5, -5.2, 1.8)
+            pitch = -15.0
+            yaw = 90.0
             self.viewer.set_camera(camera_pos, pitch, yaw)
 
     def capture(self):
@@ -114,6 +127,9 @@ class Example:
     def simulate(self):
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
+            if self.actuated:
+                self._advance_time()
+                self._apply_actuation()
             self.viewer.apply_forces(self.state_0)
             self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             self.solver.update_contacts(self.contacts, self.state_0)
@@ -155,6 +171,56 @@ class Example:
                 ),  # Relaxed from 0.1 - unified pipeline has residual velocities up to ~0.2
             )
 
+    def _advance_time(self):
+        """Advances the current simulation time by ``dt``."""
+
+        @wp.kernel
+        def advance_time_kernel(dt: wp.float32, time: wp.array[wp.float32]):
+            """Advance the time in each world."""
+            wid = wp.tid()
+            time[wid] += dt
+
+        wp.launch(
+            advance_time_kernel,
+            dim=self.model.world_count,
+            inputs=[self.sim_dt, self.time],
+            device=self.device,
+        )
+
+    def _apply_actuation(self):
+        """Apply actuation to each world."""
+
+        @wp.kernel
+        def actuation_kernel(
+            time: wp.array[wp.float32],
+            joint_f: wp.array[wp.float32],
+        ):
+            # Retrieve the world index from the thread ID
+            wid = wp.tid()
+
+            # Define the time window for the active external force profile
+            t_start = wp.float32(2.0)
+            t_end = wp.float32(2.5)
+            t_loop = wp.float32(5.0)
+
+            # Apply a time-dependent force
+            t = time[wid]
+            t -= wp.floor(t / t_loop) * t_loop
+            if t > t_start and t < t_end:
+                joint_f[wid] = -3.0
+            else:
+                joint_f[wid] = 0.0
+
+        wp.launch(
+            actuation_kernel,
+            dim=self.model.world_count,
+            inputs=[
+                self.time,
+                self.control.joint_f,
+            ],
+            device=self.device,
+        )
+
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
@@ -163,8 +229,32 @@ class Example:
         parser.add_argument(
             "--from-usd",
             action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Load the basic boxes hinged from USD.",
+        )
+        parser.add_argument(
+            "--actuated",
+            action=argparse.BooleanOptionalAction,
             default=False,
-            help="Load the basic cartpole from USD.",
+            help="Actuate the model with predefined inputs.",
+        )
+        parser.add_argument(
+            "--record-video",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Record a video of the viewer, up to 1000 frames.",
+        )
+        parser.add_argument(
+            "--video-path",
+            type=str,
+            default=None,
+            help="Output video path (defaults to 'recording.mp4').",
+        )
+        parser.add_argument(
+            "--max-video-frames",
+            type=int,
+            default=1000,
+            help="Maximum number of frames recorded for the video (defaults to 1000).",
         )
         return parser
 
@@ -174,3 +264,5 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
     newton.examples.run(example, args)
+    if hasattr(viewer, "finish_clip"):
+        viewer.finish_clip()
