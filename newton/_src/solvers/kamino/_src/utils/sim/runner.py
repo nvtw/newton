@@ -74,12 +74,6 @@ class SimulationRunner:
         self.reset_graph = None
         self.step_graph = None
 
-        # Warm-start the simulator before rendering
-        # NOTE: This compiles and loads the warp kernels prior to execution
-        msg.notif("Warming up simulation...")
-        self.step()
-        self.reset()
-
         # Capture CUDA graph if requested and available
         self._capture()
 
