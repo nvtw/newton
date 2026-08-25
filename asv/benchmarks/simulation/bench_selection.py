@@ -7,7 +7,13 @@ from asv_runner.benchmarks.mark import skip_benchmark_if
 wp.config.enable_backward = False
 wp.config.log_level = wp.LOG_WARNING
 
-from _benchmark_config import pr_gate_repeat
+import os
+import sys
+
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(parent_dir)
+
+from benchmark_config import pr_gate_repeat
 
 import newton
 import newton.examples

@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 import re
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -26,7 +28,7 @@ _DEFERRED_WORKLOAD_MODULES = (
 _DEFERRED_WORKLOAD_MODULES_BEFORE_IMPORT = {name: name in sys.modules for name in _DEFERRED_WORKLOAD_MODULES}
 
 try:
-    from _benchmark_config import pr_gate_repeat
+    from benchmark_config import pr_gate_repeat
     from benchmark_metrics import SimulationMetrics
     from simulation import (
         bench_anymal,
@@ -63,6 +65,29 @@ class TestSimulationBenchmarks(unittest.TestCase):
             body_qd=self._FakeArray([[0.0] * 6]),
         )
         return SimpleNamespace(state_0=state)
+
+    def test_asv_runner_resolves_benchmark_support_modules(self):
+        """Resolve shared modules through ASV's isolated import path."""
+        script = (
+            "import importlib; "
+            "from asv_runner.discovery import update_sys_path; "
+            f"update_sys_path({str(BENCHMARK_DIR)!r}); "
+            "importlib.import_module('benchmarks.simulation.bench_cloth'); "
+            "importlib.import_module('benchmarks.simulation.bench_contacts'); "
+            "importlib.import_module('benchmarks.simulation.bench_selection')"
+        )
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        env["NEWTON_ASV_PR_GATE"] = "1"
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=BENCHMARK_DIR.parents[1],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_benchmark_imports_preserve_warp_config(self):
         """Preserve Warp global configuration across benchmark imports."""
