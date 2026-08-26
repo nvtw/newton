@@ -3387,5 +3387,126 @@ add_function_test(
 )
 
 
+def _sanding_contact_builder(resolution, *, delta=0.0):
+    """Build one round-pad and spherical-workpiece hydroelastic world."""
+    pad_radius = 0.0675
+    pad_half_height = 0.010
+    sphere_radius = 0.9
+
+    def make_cfg(kh):
+        return newton.ModelBuilder.ShapeConfig(
+            kh=kh,
+            is_hydroelastic=True,
+            gap=0.0,
+            sdf_max_resolution=resolution,
+            sdf_narrow_band_range=(-0.002, 0.002),
+        )
+
+    builder = newton.ModelBuilder()
+    builder.add_shape_sphere(
+        body=-1,
+        xform=wp.transform(wp.vec3(0.0, 0.0, -sphere_radius), wp.quat_identity()),
+        radius=sphere_radius,
+        cfg=make_cfg(1.0e9),
+    )
+    pad_body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, pad_half_height - delta), wp.quat_identity()))
+    builder.add_shape_cylinder(
+        body=pad_body,
+        radius=pad_radius,
+        half_height=pad_half_height,
+        cfg=make_cfg(5.3e6),
+    )
+    return builder
+
+
+def test_hydroelastic_replica_buffers_scale_with_traversed_grids(test, device):
+    """Size replica buffers from each pair's finer traversal grid."""
+    world_count = 4
+    one_world = _sanding_contact_builder(64)
+    builder = newton.ModelBuilder()
+    builder.replicate(one_world, world_count)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
+    hydro = pipeline.hydroelastic_sdf
+
+    # Each world contributes one pad/sphere pair. The pad's SDF is the finer of
+    # the two (a 0.135 m shape at resolution 64 against a 1.8 m sphere at the
+    # same resolution), so the broadphase traverses the pad's 4x4x8 = 128
+    # subgrids and ignores the sphere's 512. Sizing off the shapes rather than
+    # the traversed grids inflated this to 2560.
+    blocks_per_pair = 128
+    expected_blocks = world_count * blocks_per_pair
+
+    test.assertEqual(len(model.shape_contact_pairs.numpy().reshape(-1, 2)), world_count)
+    test.assertEqual(hydro.total_num_tiles, expected_blocks)
+    # Defaults are buffer_mult_broad=1 and buffer_fraction=1.0, so the
+    # broadphase buffer is exactly the traversed block count.
+    test.assertEqual(hydro.max_num_blocks_broad, expected_blocks)
+
+
+add_function_test(
+    TestHydroelastic,
+    "test_hydroelastic_replica_buffers_scale_with_traversed_grids",
+    test_hydroelastic_replica_buffers_scale_with_traversed_grids,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+
+def test_hydroelastic_traversal_buffers_have_headroom(test, device):
+    """Keep every traversal stage within its buffer on a curved deep contact.
+
+    Sizing the buffers from the traversed grid rather than from every
+    hydroelastic shape makes them substantially smaller, so this guards that a
+    demanding contact -- a round pad pressed into a large spherical workpiece
+    until the patch spans most of the pad -- still fits at default settings.
+    """
+    kh_pad = 5.3e6
+    kh_workpiece = 1.0e9
+    sphere_radius = 0.9
+    target_force = 20.0
+    # Hydroelastic pressure is kh * depth, so a sphere indented by delta carries
+    # kh * pi * R * delta**2. Invert that for the penetration hitting target_force.
+    kh_effective = kh_pad * kh_workpiece / (kh_pad + kh_workpiece)
+    delta = np.sqrt(target_force / (np.pi * kh_effective * sphere_radius))
+
+    builder = _sanding_contact_builder(64, delta=delta)
+    model = builder.finalize(device=device)
+    state = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    pipeline = newton.CollisionPipeline(
+        model,
+        rigid_contact_max=100000,
+        broad_phase="explicit",
+        sdf_hydroelastic_config=HydroelasticSDF.Config(reduce_contacts=False),
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+
+    hydro = pipeline.hydroelastic_sdf
+    # Pairs match verify_collision_step(): broadphase blocks, then the three
+    # octree subblock levels, then iso voxels.
+    stages = [
+        ("broadphase blocks", hydro.block_broad_collide_count, hydro.max_num_blocks_broad),
+        ("iso subblock L0", hydro.iso_buffer_counts[1], hydro.iso_max_dims[0]),
+        ("iso subblock L1", hydro.iso_buffer_counts[2], hydro.iso_max_dims[1]),
+        ("iso subblock L2", hydro.iso_buffer_counts[3], hydro.iso_max_dims[2]),
+        ("iso voxels", hydro.iso_voxel_count, hydro.max_num_iso_voxels),
+    ]
+    for name, count_array, capacity in stages:
+        count = int(count_array.numpy()[0])
+        test.assertGreater(count, 0, f"{name} produced no work; the scene is not exercising the contact")
+        test.assertLessEqual(count, capacity, f"{name} overflowed: {count} > {capacity}")
+
+
+add_function_test(
+    TestHydroelastic,
+    "test_hydroelastic_traversal_buffers_have_headroom",
+    test_hydroelastic_traversal_buffers_have_headroom,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)

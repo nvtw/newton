@@ -108,6 +108,14 @@ def _hydro_rsqrt_approx(value: float) -> float:
 # by one during export, so they must stay below bit 21.
 _MAX_FACE_FINGERPRINT = 0x200000
 
+# Empirical headroom applied to the iso-refinement budget, on top of the
+# traversed block count. Refinement is driven by the finer SDF of each pair,
+# but the number of surviving subblocks also depends on how the *other*
+# surface cuts through them, which the traversed block count alone does not
+# bound. Raise ``Config.buffer_mult_iso`` rather than this constant if a
+# specific scene overflows.
+_ISO_REFINEMENT_HEADROOM = 2
+
 
 class _MarginContactAreaUnset:
     """Mark an omitted deprecated margin contact area."""
@@ -386,8 +394,9 @@ class HydroelasticSDF:
 
     Args:
         num_shape_pairs: Maximum number of hydroelastic shape pairs to process.
-        total_num_tiles: Total number of SDF blocks across all hydroelastic shapes.
-        max_num_blocks_per_shape: Maximum block count for any single shape.
+        total_num_tiles: Total number of SDF blocks traversed across all
+            hydroelastic shape pairs. Each pair traverses only its finer SDF,
+            so this is the sum over pairs of that grid's block count.
         shape_material_kh: Hydroelastic stiffness coefficient for each shape.
         n_shapes: Total number of shapes in the simulation.
         config: Configuration options controlling buffer sizes, contact reduction,
@@ -569,7 +578,6 @@ class HydroelasticSDF:
         self,
         num_shape_pairs: int,
         total_num_tiles: int,
-        max_num_blocks_per_shape: int,
         shape_material_kh: wp.array[wp.float32],
         n_shapes: int,
         config: HydroelasticSDF.Config | None = None,
@@ -603,7 +611,6 @@ class HydroelasticSDF:
         self.n_shapes = n_shapes
         self.max_num_shape_pairs = num_shape_pairs
         self.total_num_tiles = total_num_tiles
-        self.max_num_blocks_per_shape = max_num_blocks_per_shape
 
         frac = float(self.config.buffer_fraction)
         if frac <= 0.0 or frac > 1.0:
@@ -612,9 +619,12 @@ class HydroelasticSDF:
         if contact_frac <= 0.0 or contact_frac > 1.0:
             raise ValueError(f"HydroelasticSDF.Config.contact_buffer_fraction must be in (0, 1], got {contact_frac}")
 
-        mult = max(int(self.config.buffer_mult_iso * self.total_num_tiles * frac), 64)
+        mult = max(
+            int(_ISO_REFINEMENT_HEADROOM * self.config.buffer_mult_iso * self.total_num_tiles * frac),
+            64,
+        )
         self.max_num_blocks_broad = max(
-            int(self.max_num_shape_pairs * self.max_num_blocks_per_shape * self.config.buffer_mult_broad * frac),
+            int(self.total_num_tiles * self.config.buffer_mult_broad * frac),
             64,
         )
         # Output buffer sizes for each octree level (subblocks 8x8x8 -> 4x4x4 -> 2x2x2 -> voxels)
@@ -852,30 +862,24 @@ class HydroelasticSDF:
                         "Build a scale-baked SDF for hydroelastic use."
                     )
 
-        # Count total subgrids and max-per-shape for hydroelastic shapes.
-        # Every shape contributes (cw-1) * (ch-1) * (cd-1) blocks to the
-        # broadphase — the broadphase visits every subgrid because the
-        # contact iso-surface can sit anywhere inside the SDF box.
+        # Count the grids that the broadphase actually traverses. Each pair
+        # walks only its finer SDF and samples the other SDF at those points.
         total_num_tiles = 0
-        max_num_blocks_per_shape = 0
-        for idx in hydroelastic_indices:
-            sdf_idx = int(shape_sdf_index[idx])
-            if sdf_idx < 0:
-                raise ValueError(f"Hydroelastic shape {idx} requires SDF data but has no attached/generated SDF.")
-            if sdf_idx >= len(coarse_textures) or coarse_textures[sdf_idx] is None:
-                raise ValueError(
-                    f"Hydroelastic shape {idx} requires texture SDF data but its attached/generated SDF has none. "
-                    "Build the SDF with mesh.build_sdf() before using hydroelastic contacts."
-                )
+        hydroelastic_pairs = shape_pairs[is_hydroelastic[shape_pairs[:, 0]] & is_hydroelastic[shape_pairs[:, 1]]]
+        for shape_a, shape_b in hydroelastic_pairs:
+            sdf_idx_a = int(shape_sdf_index[shape_a])
+            sdf_idx_b = int(shape_sdf_index[shape_b])
+            # Match broadphase_collision_pairs_count(): equal-resolution pairs
+            # retain shape B as the traversal grid.
+            sdf_idx = sdf_idx_b
+            if texture_sdf_data[sdf_idx_b]["voxel_radius"] > texture_sdf_data[sdf_idx_a]["voxel_radius"]:
+                sdf_idx = sdf_idx_a
             tex = coarse_textures[sdf_idx]
-            num_blocks = (tex.width - 1) * (tex.height - 1) * (tex.depth - 1)
-            total_num_tiles += num_blocks
-            max_num_blocks_per_shape = max(max_num_blocks_per_shape, num_blocks)
+            total_num_tiles += (tex.width - 1) * (tex.height - 1) * (tex.depth - 1)
 
         return cls(
             num_shape_pairs=num_hydroelastic_pairs,
             total_num_tiles=total_num_tiles,
-            max_num_blocks_per_shape=max_num_blocks_per_shape,
             shape_material_kh=model.shape_material_kh,
             n_shapes=model.shape_count,
             config=config,

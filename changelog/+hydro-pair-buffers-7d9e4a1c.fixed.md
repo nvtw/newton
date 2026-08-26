@@ -1,0 +1,1 @@
+Scale hydroelastic traversal buffers from the SDF grid each shape pair actually traverses instead of from every hydroelastic shape, reducing memory use for replicated scenes with differently sized shapes. `HydroelasticSDF` no longer takes the unused `max_num_blocks_per_shape` constructor argument.
