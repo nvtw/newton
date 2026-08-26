@@ -140,17 +140,18 @@ through the ``newton.viewers`` entry-point group. For example, its
    [project.entry-points."newton.viewers"]
    custom = "my_package.newton_viewer:create_viewer"
 
-The entry point must load a factory that accepts the parsed example arguments
-and returns a :class:`~newton.viewer.ViewerBase` instance:
+The entry point must load a zero-argument factory that returns a
+:class:`~newton.viewer.ViewerBase` instance:
 
 .. code-block:: python
 
-   def create_viewer(args):
-       return MyViewer(headless=args.headless, num_frames=args.num_frames)
+   def create_viewer():
+       return MyViewer()
 
 Newton reads installed entry-point metadata when constructing the example
 parser and imports only the selected viewer package. Third-party viewers cannot
-override built-in viewer names.
+override built-in viewer names. Conflicting entry points are ignored so they do
+not prevent other viewers from being used.
 
 Real-time Viewers
 -----------------

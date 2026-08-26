@@ -39,6 +39,9 @@ Layers:
     activated layer's model.
 """
 
+import importlib.metadata
+import logging
+
 from .viewer import Layer, ViewerBase
 from .viewer_file import ViewerFile
 from .viewer_gl import ViewerGL
@@ -47,6 +50,26 @@ from .viewer_rerun import ViewerRerun
 from .viewer_rtx import ViewerRTX
 from .viewer_usd import ViewerUSD
 from .viewer_viser import ViewerViser
+
+_BUILTIN_VIEWER_NAMES = ("gl", "usd", "rtx", "rerun", "null", "viser")
+_VIEWER_ENTRY_POINT_GROUP = "newton.viewers"
+_logger = logging.getLogger(__name__)
+
+
+def _get_viewer_entry_points() -> dict[str, importlib.metadata.EntryPoint]:
+    """Return installed third-party viewer entry points keyed by viewer name."""
+    viewer_entry_points = {}
+    for entry_point in importlib.metadata.entry_points(group=_VIEWER_ENTRY_POINT_GROUP):
+        if entry_point.name in _BUILTIN_VIEWER_NAMES:
+            _logger.warning(
+                "Ignoring viewer entry point '%s' because it conflicts with a built-in viewer", entry_point.name
+            )
+        elif entry_point.name in viewer_entry_points:
+            _logger.warning("Ignoring duplicate viewer entry point '%s'", entry_point.name)
+        else:
+            viewer_entry_points[entry_point.name] = entry_point
+    return viewer_entry_points
+
 
 __all__ = [
     "Layer",
