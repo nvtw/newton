@@ -632,6 +632,75 @@ class TestSolverKaminoPublic(unittest.TestCase):
                     self.assertTrue(np.all(np.isfinite(body_q)))
                     self.assertTrue(np.all(np.isfinite(body_qd)))
 
+    def test_sparse_dvi_uses_effective_kinematic_inverse_mass(self):
+        """Ignore physical inverse mass for kinematic bodies in sparse DVI."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        anchor = builder.add_link(
+            label="anchor",
+            xform=wp.transformf(wp.vec3f(0.0, 0.0, 2.0), wp.quat_identity(dtype=wp.float32)),
+            is_kinematic=True,
+        )
+        link = builder.add_link(
+            label="link",
+            xform=wp.transformf(wp.vec3f(0.0, 0.0, 0.5), wp.quat_identity(dtype=wp.float32)),
+        )
+        builder.add_shape_box(body=anchor, hx=0.1, hy=0.1, hz=0.2)
+        builder.add_shape_box(body=link, hx=0.1, hy=0.1, hz=0.75)
+        fixed = builder.add_joint_fixed(
+            parent=-1,
+            child=anchor,
+            parent_xform=wp.transformf(
+                wp.vec3f(0.0, 0.0, 2.0),
+                wp.quat_identity(dtype=wp.float32),
+            ),
+        )
+        revolute = builder.add_joint_revolute(
+            parent=anchor,
+            child=link,
+            axis=newton.Axis.X,
+            parent_xform=wp.transformf(
+                wp.vec3f(0.0, 0.0, -0.2),
+                wp.quat_identity(dtype=wp.float32),
+            ),
+            child_xform=wp.transformf(
+                wp.vec3f(0.0, 0.0, 0.75),
+                wp.quat_identity(dtype=wp.float32),
+            ),
+        )
+        builder.add_articulation([fixed, revolute])
+        builder.joint_q[-1] = 0.5 * np.pi
+        model = builder.finalize(device=self.default_device)
+
+        config = SolverKamino.Config.from_model(
+            model,
+            dynamics_solver="dvi",
+            sparse_dynamics=True,
+            sparse_jacobian=True,
+            use_collision_detector=False,
+        )
+        solver = SolverKamino(model, config=config)
+        state_in = model.state()
+        state_out = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+
+        # Poison only the physical inverse mass. Kinematic dynamics must use the
+        # separately masked effective value and remain finite.
+        physical_inv_mass = solver._model_kamino.bodies.inv_m_i.numpy()
+        self.assertGreater(float(physical_inv_mass[anchor]), 0.0)
+        physical_inv_mass[anchor] = np.nan
+        solver._model_kamino.bodies.inv_m_i.assign(physical_inv_mass)
+
+        state_in.clear_forces()
+        solver.step(state_in, state_out, control=None, contacts=None, dt=1.0e-3)
+
+        np.testing.assert_array_equal(
+            solver._model_kamino.bodies.effective_inv_m_i.numpy()[anchor],
+            np.float32(0.0),
+        )
+        self.assertTrue(np.all(np.isfinite(state_out.body_q.numpy())))
+        self.assertTrue(np.all(np.isfinite(state_out.body_qd.numpy())))
+
 
 class TestSolverKaminoImpl(unittest.TestCase):
     def setUp(self):
