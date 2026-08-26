@@ -5,6 +5,7 @@ import ast
 import copy
 import gc
 import importlib
+import importlib.metadata
 import math
 import os
 import sys
@@ -20,6 +21,8 @@ import newton
 from newton.tests.unittest_utils import find_nan_members
 
 _DEPRECATED_WARP_CONFIG_KEYS = {"quiet", "verbose"}
+_BUILTIN_VIEWER_NAMES = ("gl", "usd", "rtx", "rerun", "null", "viser")
+_VIEWER_ENTRY_POINT_GROUP = "newton.viewers"
 
 
 def get_source_directory() -> str:
@@ -629,6 +632,18 @@ def _print_examples(examples: dict[str, str]) -> None:
         print(f"  {name}")
 
 
+def _get_viewer_entry_points() -> dict[str, importlib.metadata.EntryPoint]:
+    """Return installed third-party viewer entry points keyed by viewer name."""
+    viewer_entry_points = {}
+    for entry_point in importlib.metadata.entry_points(group=_VIEWER_ENTRY_POINT_GROUP):
+        if entry_point.name in _BUILTIN_VIEWER_NAMES:
+            raise ValueError(f"Viewer entry point cannot override built-in viewer name '{entry_point.name}'")
+        if entry_point.name in viewer_entry_points:
+            raise ValueError(f"Duplicate viewer entry point '{entry_point.name}'")
+        viewer_entry_points[entry_point.name] = entry_point
+    return viewer_entry_points
+
+
 def create_parser():
     """Create a base argument parser with common parameters for Newton examples.
 
@@ -646,8 +661,8 @@ def create_parser():
         "--viewer",
         type=str,
         default="gl",
-        choices=["gl", "usd", "rtx", "rerun", "null", "viser"],
-        help="Viewer to use (gl, usd, rtx, rerun, null, or viser).",
+        choices=[*_BUILTIN_VIEWER_NAMES, *sorted(_get_viewer_entry_points())],
+        help="Viewer to use.",
     )
     parser.add_argument(
         "--rerun-address",
@@ -928,7 +943,7 @@ def init(parser=None):
     elif args.viewer == "viser":
         viewer = newton.viewer.ViewerViser()
     else:
-        raise ValueError(f"Invalid viewer: {args.viewer}")
+        viewer = _get_viewer_entry_points()[args.viewer].load()(args)
 
     if visible_gl:
         viewer.show_loading_splash("Loading...")

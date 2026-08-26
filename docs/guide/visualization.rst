@@ -128,6 +128,30 @@ All viewers support ``set_visible_worlds()`` to limit visualization to a subset 
     viewer.set_model(model)
     viewer.set_visible_worlds(range(4))
 
+Third-party viewers
+-------------------
+
+An installed package can add a viewer to the examples' ``--viewer`` choices
+through the ``newton.viewers`` entry-point group. For example, its
+``pyproject.toml`` can contain:
+
+.. code-block:: toml
+
+   [project.entry-points."newton.viewers"]
+   custom = "my_package.newton_viewer:create_viewer"
+
+The entry point must load a factory that accepts the parsed example arguments
+and returns a :class:`~newton.viewer.ViewerBase` instance:
+
+.. code-block:: python
+
+   def create_viewer(args):
+       return MyViewer(headless=args.headless, num_frames=args.num_frames)
+
+Newton reads installed entry-point metadata when constructing the example
+parser and imports only the selected viewer package. Third-party viewers cannot
+override built-in viewer names.
+
 Real-time Viewers
 -----------------
 
