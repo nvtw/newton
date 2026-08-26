@@ -3443,6 +3443,12 @@ def test_hydroelastic_replica_buffers_scale_with_traversed_grids(test, device):
     # broadphase buffer is exactly the traversed block count.
     test.assertEqual(hydro.max_num_blocks_broad, expected_blocks)
 
+    # Refinement work follows a two-dimensional contact surface, so size its
+    # buffers from narrow-band subgrids instead of every dense-grid block.
+    test.assertLess(hydro.total_num_active_tiles, hydro.total_num_tiles)
+    expected_iso_dims = tuple(mult * hydro.total_num_active_tiles for mult in (8, 32, 128, 256))
+    test.assertEqual(hydro.iso_max_dims, expected_iso_dims)
+
 
 add_function_test(
     TestHydroelastic,
@@ -3497,6 +3503,16 @@ def test_hydroelastic_traversal_buffers_have_headroom(test, device):
         count = int(count_array.numpy()[0])
         test.assertGreater(count, 0, f"{name} produced no work; the scene is not exercising the contact")
         test.assertLessEqual(count, capacity, f"{name} overflowed: {count} > {capacity}")
+
+    face_count = int(hydro.contact_reduction.contact_count.numpy()[0])
+    test.assertLessEqual(face_count, hydro.max_num_face_contacts)
+
+    # Unreduced output uses the contact arrays directly. Hashtable values and
+    # per-bin aggregates are dead storage in this mode and must stay empty.
+    reducer = hydro.contact_reduction.reducer
+    test.assertEqual(reducer.ht_values.shape[0], 0)
+    test.assertEqual(reducer.agg_force.shape[0], 0)
+    test.assertEqual(reducer.contact_nbin_entry.shape[0], 0)
 
 
 add_function_test(

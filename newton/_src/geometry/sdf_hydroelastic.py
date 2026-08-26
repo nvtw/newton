@@ -108,13 +108,17 @@ def _hydro_rsqrt_approx(value: float) -> float:
 # by one during export, so they must stay below bit 21.
 _MAX_FACE_FINGERPRINT = 0x200000
 
-# Empirical headroom applied to the iso-refinement budget, on top of the
-# traversed block count. Refinement is driven by the finer SDF of each pair,
-# but the number of surviving subblocks also depends on how the *other*
-# surface cuts through them, which the traversed block count alone does not
-# bound. Raise ``Config.buffer_mult_iso`` rather than this constant if a
-# specific scene overflows.
-_ISO_REFINEMENT_HEADROOM = 2
+# Empirical per-level bounds relative to the narrow-band subgrids of the SDF
+# traversed by each pair. Hydroelastic traversal must inspect the full dense
+# grid for deep contacts, but surviving refinement work follows a surface and
+# scales with the sparse narrow band rather than the grid volume.
+_ISO_REFINEMENT_MULTIPLIERS = (8, 32, 128, 256)
+
+# Marching cubes commonly emits more than one face from an iso voxel. The
+# theoretical maximum is five, but two provides useful headroom for ordinary
+# contact surfaces without making all face-storage allocations five times the
+# already conservative voxel capacity.
+_FACE_CONTACTS_PER_ISO_VOXEL = 2
 
 
 class _MarginContactAreaUnset:
@@ -166,6 +170,7 @@ def _map_shape_texture_sdf_data(
         out_shape_sdf_data[shape_idx].sdf_box_upper = wp.vec3(0.0, 0.0, 0.0)
         out_shape_sdf_data[shape_idx].voxel_size = wp.vec3(0.0, 0.0, 0.0)
         out_shape_sdf_data[shape_idx].voxel_radius = 0.0
+        out_shape_sdf_data[shape_idx].num_subgrids = 0
         out_shape_sdf_data[shape_idx].scale_baked = False
     else:
         out_shape_sdf_data[shape_idx] = sdf_data[sdf_idx]
@@ -394,9 +399,11 @@ class HydroelasticSDF:
 
     Args:
         num_shape_pairs: Maximum number of hydroelastic shape pairs to process.
-        total_num_tiles: Total number of SDF blocks traversed across all
+        total_num_tiles: Total number of dense SDF blocks traversed across all
             hydroelastic shape pairs. Each pair traverses only its finer SDF,
             so this is the sum over pairs of that grid's block count.
+        total_num_active_tiles: Total number of narrow-band SDF blocks across
+            the same traversal grids, used to size refinement buffers.
         shape_material_kh: Hydroelastic stiffness coefficient for each shape.
         n_shapes: Total number of shapes in the simulation.
         config: Configuration options controlling buffer sizes, contact reduction,
@@ -578,6 +585,7 @@ class HydroelasticSDF:
         self,
         num_shape_pairs: int,
         total_num_tiles: int,
+        total_num_active_tiles: int,
         shape_material_kh: wp.array[wp.float32],
         n_shapes: int,
         config: HydroelasticSDF.Config | None = None,
@@ -611,6 +619,7 @@ class HydroelasticSDF:
         self.n_shapes = n_shapes
         self.max_num_shape_pairs = num_shape_pairs
         self.total_num_tiles = total_num_tiles
+        self.total_num_active_tiles = total_num_active_tiles
 
         frac = float(self.config.buffer_fraction)
         if frac <= 0.0 or frac > 1.0:
@@ -619,17 +628,13 @@ class HydroelasticSDF:
         if contact_frac <= 0.0 or contact_frac > 1.0:
             raise ValueError(f"HydroelasticSDF.Config.contact_buffer_fraction must be in (0, 1], got {contact_frac}")
 
-        mult = max(
-            int(_ISO_REFINEMENT_HEADROOM * self.config.buffer_mult_iso * self.total_num_tiles * frac),
-            64,
-        )
         self.max_num_blocks_broad = max(
             int(self.total_num_tiles * self.config.buffer_mult_broad * frac),
             64,
         )
         # Output buffer sizes for each octree level (subblocks 8x8x8 -> 4x4x4 -> 2x2x2 -> voxels)
-        # The voxel-level multiplier (48x) is sized for texture-backed SDFs.
-        self.iso_max_dims = (int(2 * mult), int(2 * mult), int(16 * mult), int(48 * mult))
+        refinement_base = self.config.buffer_mult_iso * self.total_num_active_tiles * frac
+        self.iso_max_dims = tuple(max(int(mult * refinement_base), 64) for mult in _ISO_REFINEMENT_MULTIPLIERS)
         self.max_num_iso_voxels = self.iso_max_dims[3]
         # Input buffer sizes for each octree level
         self.input_sizes = (self.max_num_blocks_broad, *self.iso_max_dims[:3])
@@ -662,22 +667,18 @@ class HydroelasticSDF:
             # Face contacts written directly to GlobalContactReducer (no intermediate buffers)
             # When pre-pruning is active, far fewer contacts reach the buffer so we
             # scale down by contact_buffer_fraction to save memory.
-            face_contact_budget = config.buffer_mult_contact * self.max_num_iso_voxels
+            face_contact_budget = config.buffer_mult_contact * _FACE_CONTACTS_PER_ISO_VOXEL * self.max_num_iso_voxels
             if config.reduce_contacts and config.pre_prune_contacts:
                 face_contact_budget = face_contact_budget * config.contact_buffer_fraction
             self.max_num_face_contacts = max(int(face_contact_budget), 64)
-            self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
             if deterministic:
                 _validate_deterministic_fingerprint_range(self.max_num_iso_voxels)
-                max_det_contacts = 1 << int(CONTACT_ID_BITS)
-                if self.max_num_face_contacts > max_det_contacts:
-                    raise ValueError(
-                        f"Deterministic hydroelastic contact packing supports at most {max_det_contacts} "
-                        f"buffered face contacts ({int(CONTACT_ID_BITS)}-bit contact_id), but "
-                        f"HydroelasticSDF allocated {self.max_num_face_contacts}. Lower "
-                        "HydroelasticSDF.Config.buffer_mult_contact or buffer_fraction, or disable "
-                        "deterministic mode."
-                    )
+                max_det_contacts = (1 << int(CONTACT_ID_BITS)) - 1
+                # Contact IDs cannot represent a larger deterministic buffer.
+                # Bound the conservative estimate; runtime overflow reporting
+                # still catches a scene that genuinely reaches this limit.
+                self.max_num_face_contacts = min(self.max_num_face_contacts, max_det_contacts)
+            self.grid_size = min(self.config.grid_size, self.max_num_face_contacts)
 
             if self.config.output_contact_surface:
                 # stores the point and depth of the contact surface vertex
@@ -730,6 +731,7 @@ class HydroelasticSDF:
             self.generate_contacts_kernel = get_generate_contacts_kernel(
                 output_vertices=self.config.output_contact_surface,
                 pre_prune=self.config.reduce_contacts and self.config.pre_prune_contacts,
+                reduce_contacts=self.config.reduce_contacts,
                 deterministic_reduction=self.deterministic and self.config.reduce_contacts,
                 pressure_func=self.pressure_func,
                 mc_edge_clamp_min=self.config.mc_edge_clamp_min,
@@ -765,6 +767,7 @@ class HydroelasticSDF:
                         hashtable_size_factor=self.config.contact_reduction_hashtable_size_factor,
                     ),
                     deterministic=self.deterministic,
+                    enable_reduction=False,
                 )
                 self.decode_contacts_kernel = get_decode_contacts_kernel(
                     self.config.margin_contact_area,
@@ -865,6 +868,7 @@ class HydroelasticSDF:
         # Count the grids that the broadphase actually traverses. Each pair
         # walks only its finer SDF and samples the other SDF at those points.
         total_num_tiles = 0
+        total_num_active_tiles = 0
         hydroelastic_pairs = shape_pairs[is_hydroelastic[shape_pairs[:, 0]] & is_hydroelastic[shape_pairs[:, 1]]]
         for shape_a, shape_b in hydroelastic_pairs:
             sdf_idx_a = int(shape_sdf_index[shape_a])
@@ -876,10 +880,12 @@ class HydroelasticSDF:
                 sdf_idx = sdf_idx_a
             tex = coarse_textures[sdf_idx]
             total_num_tiles += (tex.width - 1) * (tex.height - 1) * (tex.depth - 1)
+            total_num_active_tiles += int(texture_sdf_data[sdf_idx]["num_subgrids"])
 
         return cls(
             num_shape_pairs=num_hydroelastic_pairs,
             total_num_tiles=total_num_tiles,
+            total_num_active_tiles=total_num_active_tiles,
             shape_material_kh=model.shape_material_kh,
             n_shapes=model.shape_count,
             config=config,
@@ -1935,6 +1941,7 @@ def get_decode_contacts_kernel(
 def get_generate_contacts_kernel(
     output_vertices: bool,
     pre_prune: bool = False,
+    reduce_contacts: bool = True,
     deterministic_reduction: bool = False,
     pressure_func: Any = None,
     mc_edge_clamp_min: float = 0.02,
@@ -1961,6 +1968,7 @@ def get_generate_contacts_kernel(
     Args:
         output_vertices: Whether to output contact surface vertices for visualization.
         pre_prune: Whether to perform local-first face compaction.
+        reduce_contacts: Whether generated contacts are reduced before export.
         deterministic_reduction: Whether aggregate accumulation is deferred
             to the deterministic reduction phase, which sums in fixed point so
             the result does not depend on contact ordering.
@@ -2138,7 +2146,7 @@ def get_generate_contacts_kernel(
                         0.0,
                     )
                 # Accumulate stats per normal bin
-                if pair_separation < 0.0 and wp.static(not deterministic_reduction):
+                if pair_separation < 0.0 and wp.static(reduce_contacts and not deterministic_reduction):
                     bin_id = get_slot(normal)
                     key = make_contact_key(shape_a, shape_b, bin_id)
                     entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
