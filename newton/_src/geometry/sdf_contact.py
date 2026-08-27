@@ -1138,19 +1138,20 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         # Strided loop over pairs
         for pair_idx in range(block_id, pair_count, total_num_blocks):
             pair_encoded = shape_pairs_mesh_mesh[pair_idx]
+            shape_a = pair_encoded[0]
+            shape_b = pair_encoded[1]
             if wp.static(enable_heightfields):
-                has_hfield = (pair_encoded[0] & SHAPE_PAIR_HFIELD_BIT) != 0
-                pair = wp.vec2i(pair_encoded[0] & SHAPE_PAIR_INDEX_MASK, pair_encoded[1])
+                has_hfield = (shape_a & SHAPE_PAIR_HFIELD_BIT) != 0
+                shape_a = shape_a & SHAPE_PAIR_INDEX_MASK
             else:
                 has_hfield = False
-                pair = pair_encoded
 
-            gap_sum = shape_gap[pair[0]] + shape_gap[pair[1]]
-            base_gap_sum = shape_base_gap[pair[0]] + shape_base_gap[pair[1]]
+            gap_sum = shape_gap[shape_a] + shape_gap[shape_b]
+            base_gap_sum = shape_base_gap[shape_a] + shape_base_gap[shape_b]
 
             for mode in range(2):
-                tri_shape = pair[mode]
-                sdf_shape = pair[1 - mode]
+                tri_shape = shape_a if mode == 0 else shape_b
+                sdf_shape = shape_b if mode == 0 else shape_a
 
                 if wp.static(enable_heightfields):
                     tri_is_hfield = has_hfield and mode == 0
@@ -1489,8 +1490,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         direction_world = wp.vec3(0.0, 1.0, 0.0)
 
                                 contact_normal = -direction_world if mode == 0 else direction_world
-                                triangle_mesh_margin = shape_data[pair[0]][3]
-                                sdf_mesh_margin = shape_data[pair[1]][3]
+                                triangle_mesh_margin = shape_data[shape_a][3]
+                                sdf_mesh_margin = shape_data[shape_b][3]
 
                                 contact_data = ContactData()
                                 contact_data.contact_point_center = point_world
@@ -1500,8 +1501,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 contact_data.radius_eff_b = 0.0
                                 contact_data.margin_a = triangle_mesh_margin
                                 contact_data.margin_b = sdf_mesh_margin
-                                contact_data.shape_a = pair[0]
-                                contact_data.shape_b = pair[1]
+                                contact_data.shape_a = shape_a
+                                contact_data.shape_b = shape_b
                                 if wp.static(speculative):
                                     contact_data.gap_sum = base_gap_sum
                                 else:
@@ -1597,19 +1598,20 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
             block_in_pair = combo_idx - pair_block_start
             blocks_for_pair = block_offsets[pair_idx + 1] - pair_block_start
             pair_encoded = shape_pairs_mesh_mesh[pair_idx]
+            shape_a = pair_encoded[0]
+            shape_b = pair_encoded[1]
             if wp.static(enable_heightfields):
-                has_hfield = (pair_encoded[0] & SHAPE_PAIR_HFIELD_BIT) != 0
-                pair = wp.vec2i(pair_encoded[0] & SHAPE_PAIR_INDEX_MASK, pair_encoded[1])
+                has_hfield = (shape_a & SHAPE_PAIR_HFIELD_BIT) != 0
+                shape_a = shape_a & SHAPE_PAIR_INDEX_MASK
             else:
                 has_hfield = False
-                pair = pair_encoded
 
-            gap_sum = shape_gap[pair[0]] + shape_gap[pair[1]]
-            base_gap_sum = shape_base_gap[pair[0]] + shape_base_gap[pair[1]]
+            gap_sum = shape_gap[shape_a] + shape_gap[shape_b]
+            base_gap_sum = shape_base_gap[shape_a] + shape_base_gap[shape_b]
 
             for mode in range(2):
-                tri_shape = pair[mode]
-                sdf_shape = pair[1 - mode]
+                tri_shape = shape_a if mode == 0 else shape_b
+                sdf_shape = shape_b if mode == 0 else shape_a
 
                 if wp.static(enable_heightfields):
                     tri_is_hfield = has_hfield and mode == 0
@@ -1949,8 +1951,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     # normal bins so the predictive pair manifold remains bounded.
                                     outer_spatial_depth = margin_sum + base_gap_sum
                                 contact_id = export_and_reduce_contact_centered_two_spatial_depths(
-                                    pair[0],
-                                    pair[1],
+                                    shape_a,
+                                    shape_b,
                                     point_world,
                                     contact_normal,
                                     dist,
@@ -1967,8 +1969,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 if wp.static(speculative):
                                     if dist >= inner_spatial_depth:
                                         export_and_reduce_predictive_contact(
-                                            pair[0],
-                                            pair[1],
+                                            shape_a,
+                                            shape_b,
                                             point_world,
                                             contact_normal,
                                             dist,
