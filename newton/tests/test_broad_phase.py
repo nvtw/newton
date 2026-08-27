@@ -189,6 +189,18 @@ class TestBroadPhase(unittest.TestCase):
 
         broad_phase = BroadPhaseSAP(shape_world, sort_type="segmented", device=device)
         self.assertEqual(broad_phase.world_count, 1)
+        self.assertTrue(broad_phase._single_segment_identity_map)
+
+        filtered_flags = np.full(shape_count, ShapeFlags.COLLIDE_SHAPES, dtype=np.int32)
+        filtered_flags[1] = 0
+        filtered_broad_phase = BroadPhaseSAP(
+            shape_world,
+            shape_flags=filtered_flags,
+            sort_type="segmented",
+            device=device,
+        )
+        self.assertFalse(filtered_broad_phase._single_segment_identity_map)
+
         with mock.patch.object(wp.utils, "radix_sort_pairs", wraps=wp.utils.radix_sort_pairs) as radix_sort:
             broad_phase.launch(
                 shape_lower,

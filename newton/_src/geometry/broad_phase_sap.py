@@ -331,6 +331,7 @@ def _process_sap_work_package(
     sap_cumulative_sum_in: wp.array[int],
     max_shapes_per_world: int,
     num_regular_worlds: int,
+    single_segment_identity_map: bool,
     filter_pairs: wp.array[wp.vec2i],
     num_filter_pairs: int,
     shape_body: wp.array[int],
@@ -372,8 +373,11 @@ def _process_sap_work_package(
     if local_shape1 < 0 or local_shape2 < 0:
         return
 
-    shape1_tmp = world_index_map[world_slice_start + local_shape1]
-    shape2_tmp = world_index_map[world_slice_start + local_shape2]
+    shape1_tmp = local_shape1
+    shape2_tmp = local_shape2
+    if not single_segment_identity_map:
+        shape1_tmp = world_index_map[world_slice_start + local_shape1]
+        shape2_tmp = world_index_map[world_slice_start + local_shape2]
     if shape1_tmp == shape2_tmp:
         return
 
@@ -437,6 +441,7 @@ def _sap_broadphase_kernel(
     max_shapes_per_world: int,
     nsweep_in: int,
     num_regular_worlds: int,  # Number of regular world segments (excluding dedicated -1 segment)
+    single_segment_identity_map: bool,
     filter_pairs: wp.array[wp.vec2i],  # Sorted excluded pairs (empty if none)
     num_filter_pairs: int,
     shape_body: wp.array[int],
@@ -473,6 +478,7 @@ def _sap_broadphase_kernel(
                 sap_cumulative_sum_in,
                 max_shapes_per_world,
                 num_regular_worlds,
+                single_segment_identity_map,
                 filter_pairs,
                 num_filter_pairs,
                 shape_body,
@@ -514,6 +520,7 @@ def _sap_broadphase_kernel(
                 sap_cumulative_sum_in,
                 max_shapes_per_world,
                 num_regular_worlds,
+                single_segment_identity_map,
                 filter_pairs,
                 num_filter_pairs,
                 shape_body,
@@ -600,6 +607,9 @@ class BroadPhaseSAP:
         # Calculate world information
         self.world_count = len(slice_ends_np)
         self.num_regular_worlds = int(num_regular_worlds)
+        self._single_segment_identity_map = self.num_regular_worlds == 0 and np.array_equal(
+            index_map_np, np.arange(len(index_map_np), dtype=np.int32)
+        )
         self.max_shapes_per_world = 0
         start_idx = 0
         for end_idx in slice_ends_np:
@@ -869,6 +879,7 @@ class BroadPhaseSAP:
                 self.max_shapes_per_world,
                 nsweep_in,
                 self.num_regular_worlds,
+                self._single_segment_identity_map,
                 filter_pairs_arr,
                 n_filter,
                 shape_body,
