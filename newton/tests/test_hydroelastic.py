@@ -17,6 +17,7 @@ from newton._src.geometry.contact_reduction_hydroelastic import (
     _to_fixed,
 )
 from newton._src.geometry.sdf_hydroelastic import (
+    _MAX_DETERMINISTIC_ISO_VOXELS,
     _extract_mc_corner_pair,
     _mc_corner_offset,
     classify_hydroelastic_contact,
@@ -1426,6 +1427,9 @@ def test_reduced_vs_unreduced_contact_forces(test, device, anchor_contact=False,
     (pipe_red, contacts_red), (pipe_unr, contacts_unr) = _make_pipelines(
         model, [cfg_reduced, cfg_unreduced], [500, 20000], deterministic=deterministic
     )
+    if deterministic:
+        test.assertLessEqual(pipe_red.hydroelastic_sdf.max_num_iso_voxels, _MAX_DETERMINISTIC_ISO_VOXELS)
+        test.assertLessEqual(pipe_unr.hydroelastic_sdf.max_num_iso_voxels, _MAX_DETERMINISTIC_ISO_VOXELS)
 
     anchor_label = "with anchor" if anchor_contact else "without anchor"
 
@@ -1483,6 +1487,9 @@ def test_reduced_vs_unreduced_contact_moments(test, device, deterministic=False)
     (pipe_red, contacts_red), (pipe_unr, contacts_unr) = _make_pipelines(
         model, [cfg_reduced, cfg_unreduced], [500, 20000], deterministic=deterministic
     )
+    if deterministic:
+        test.assertLessEqual(pipe_red.hydroelastic_sdf.max_num_iso_voxels, _MAX_DETERMINISTIC_ISO_VOXELS)
+        test.assertLessEqual(pipe_unr.hydroelastic_sdf.max_num_iso_voxels, _MAX_DETERMINISTIC_ISO_VOXELS)
 
     # Filter to the cube-sphere shape pair (shape 1=cube, shape 2=sphere).
     sp = (1, 2)

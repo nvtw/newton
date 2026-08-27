@@ -107,6 +107,7 @@ def _hydro_rsqrt_approx(value: float) -> float:
 # 0 for the normal/voxel reduction source. Face fingerprints are shifted left
 # by one during export, so they must stay below bit 21.
 _MAX_FACE_FINGERPRINT = 0x200000
+_MAX_DETERMINISTIC_ISO_VOXELS = _MAX_FACE_FINGERPRINT // MAX_MC_FACES_PER_VOXEL
 
 # Empirical per-level bounds relative to the narrow-band subgrids of the SDF
 # traversed by each pair. Hydroelastic traversal must inspect the full dense
@@ -129,24 +130,6 @@ class _MarginContactAreaUnset:
 
 
 _DEPRECATED_MARGIN_CONTACT_AREA_UNSET: Any = _MarginContactAreaUnset()
-
-
-def _validate_deterministic_fingerprint_range(max_num_iso_voxels: int) -> None:
-    """Warn when face fingerprints can no longer be distinguished.
-
-    Fingerprints and sort sub-keys are masked to a fixed width; once
-    ``max_num_iso_voxels * MAX_MC_FACES_PER_VOXEL`` reaches the anchor bit, two
-    different faces can alias and contact ordering stops being reproducible.
-    """
-    if max_num_iso_voxels * MAX_MC_FACES_PER_VOXEL >= _MAX_FACE_FINGERPRINT:
-        warnings.warn(
-            f"Deterministic hydroelastic contacts need "
-            f"max_num_iso_voxels * {MAX_MC_FACES_PER_VOXEL} < {_MAX_FACE_FINGERPRINT}, but "
-            f"max_num_iso_voxels={max_num_iso_voxels}. Face fingerprints will alias and "
-            "contact ordering may vary between runs. Lower "
-            "HydroelasticSDF.Config.buffer_fraction or reduce the SDF resolution.",
-            stacklevel=3,
-        )
 
 
 @wp.func
@@ -635,7 +618,13 @@ class HydroelasticSDF:
         )
         # Output buffer sizes for each octree level (subblocks 8x8x8 -> 4x4x4 -> 2x2x2 -> voxels)
         refinement_base = self.config.buffer_mult_iso * self.total_num_active_tiles * frac
-        self.iso_max_dims = tuple(max(int(mult * refinement_base), 64) for mult in _ISO_REFINEMENT_MULTIPLIERS)
+        iso_max_dims = [max(int(mult * refinement_base), 64) for mult in _ISO_REFINEMENT_MULTIPLIERS]
+        if deterministic:
+            # A face fingerprint is ``voxel_id * MAX_MC_FACES_PER_VOXEL + face_id``.
+            # Bound the final refinement buffer so every generated face remains
+            # below the anchor bit reserved by deterministic contact sort keys.
+            iso_max_dims[3] = min(iso_max_dims[3], _MAX_DETERMINISTIC_ISO_VOXELS)
+        self.iso_max_dims = tuple(iso_max_dims)
         self.max_num_iso_voxels = self.iso_max_dims[3]
         # Input buffer sizes for each octree level
         self.input_sizes = (self.max_num_blocks_broad, *self.iso_max_dims[:3])
@@ -673,7 +662,6 @@ class HydroelasticSDF:
                 face_contact_budget = face_contact_budget * config.contact_buffer_fraction
             self.max_num_face_contacts = max(int(face_contact_budget), 64)
             if deterministic:
-                _validate_deterministic_fingerprint_range(self.max_num_iso_voxels)
                 max_det_contacts = (1 << int(CONTACT_ID_BITS)) - 1
                 # Contact IDs cannot represent a larger deterministic buffer.
                 # Bound the conservative estimate; runtime overflow reporting
