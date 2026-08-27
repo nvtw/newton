@@ -84,14 +84,11 @@ class StructuralUpdateViolation(IntEnum):
 def mask_kinematic_body_inverse_mass_kernel(
     body_flags: wp.array[wp.int32],
     body_inv_mass: wp.array[wp.float32],
-    body_inv_mass_out: wp.array[wp.float32],
 ):
-    """Copy inverse mass while masking kinematic bodies."""
+    """Mask kinematic inverse mass in place."""
     body_id = wp.tid()
     if (body_flags[body_id] & int(BodyFlags.KINEMATIC)) != 0:
-        body_inv_mass_out[body_id] = 0.0
-    else:
-        body_inv_mass_out[body_id] = body_inv_mass[body_id]
+        body_inv_mass[body_id] = 0.0
 
 
 @wp.func
@@ -1361,14 +1358,12 @@ def convert_rigid_bodies(
     # COM world poses (joint attachment vectors are COM-relative).
     q_i_0 = wp.empty((model.body_count,), dtype=wp.transformf, device=model.device)
     convert_body_origin_to_com(model.body_com, model.body_q, q_i_0)
-    inv_mass = wp.empty_like(model.body_inv_mass)
     wp.launch(
         kernel=mask_kinematic_body_inverse_mass_kernel,
         dim=model.body_count,
         inputs=[
             model.body_flags,
             model.body_inv_mass,
-            inv_mass,
         ],
         device=model.device,
     )
@@ -1403,7 +1398,7 @@ def convert_rigid_bodies(
         wid=model.body_world,
         bid=body_bid,  # TODO: Remove
         m_i=model.body_mass,
-        inv_m_i=inv_mass,
+        inv_m_i=model.body_inv_mass,
         i_r_com_i=model.body_com,
         i_I_i=model.body_inertia,
         inv_i_I_i=model.body_inv_inertia,

@@ -684,7 +684,8 @@ class TestSolverKaminoPublic(unittest.TestCase):
         state_out = model.state()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
 
-        self.assertGreater(float(model.body_inv_mass.numpy()[anchor]), 0.0)
+        self.assertEqual(solver._model_kamino.bodies.inv_m_i.ptr, model.body_inv_mass.ptr)
+        np.testing.assert_array_equal(model.body_inv_mass.numpy()[anchor], np.float32(0.0))
         np.testing.assert_array_equal(solver._model_kamino.bodies.inv_m_i.numpy()[anchor], np.float32(0.0))
 
         state_in.clear_forces()

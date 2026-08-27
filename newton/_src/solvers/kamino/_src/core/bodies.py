@@ -388,6 +388,7 @@ def transform_body_inertial_properties(
 def _update_body_inertias(
     # Inputs:
     model_bodies_flags_in: wp.array[wp.int32],  # None also supported
+    model_bodies_inv_m_i: wp.array[wp.float32],
     model_bodies_i_I_i_in: wp.array[wp.mat33f],
     model_bodies_inv_i_I_i_in: wp.array[wp.mat33f],
     state_bodies_q_i_in: wp.array[wp.transformf],
@@ -403,6 +404,7 @@ def _update_body_inertias(
     i_I_i = model_bodies_i_I_i_in[bid]
     inv_i_I_i = model_bodies_inv_i_I_i_in[bid]
     if model_bodies_flags_in and (model_bodies_flags_in[bid] & int(BodyFlags.KINEMATIC)) != 0:
+        model_bodies_inv_m_i[bid] = 0.0
         inv_i_I_i = wp.mat33f(0.0)
 
     # Compute the moment of inertia matrices in world coordinates
@@ -570,6 +572,7 @@ def update_body_inertias(model: RigidBodiesModel, data: RigidBodiesData):
         inputs=[
             # Inputs:
             model.flags,
+            model.inv_m_i,
             model.i_I_i,
             model.inv_i_I_i,
             data.q_i,
