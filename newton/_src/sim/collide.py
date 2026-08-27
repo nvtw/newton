@@ -1603,13 +1603,10 @@ class CollisionPipeline:
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
-        # Matching decodes persistent contact fingerprints from the fixed
-        # 23-bit layout. Non-matching analytic/convex pipelines can use the
-        # narrower manifold-local sub-key selected by NarrowPhase.
-        self._contact_sort_sub_key_bits = (
-            CONTACT_SORT_SUB_KEY_BITS
-            if matching_enabled
-            else getattr(self.narrow_phase, "_contact_sort_sub_key_bits", CONTACT_SORT_SUB_KEY_BITS)
+        # Analytic and convex manifolds use compact unique sub-keys even when
+        # matching; complex contact families retain the full fingerprint width.
+        self._contact_sort_sub_key_bits = getattr(
+            self.narrow_phase, "_contact_sort_sub_key_bits", CONTACT_SORT_SUB_KEY_BITS
         )
 
         self._hydro_shape_sdf_data_prepared = self.hydroelastic_sdf is not None
@@ -1706,6 +1703,8 @@ class CollisionPipeline:
                 sorter=self._contact_sorter,
                 shape_world=model.shape_world,
                 world_count=model.world_count,
+                shape_index_bits=self._contact_sort_shape_index_bits,
+                sub_key_bits=self._contact_sort_sub_key_bits,
                 pos_threshold=contact_matching_pos_threshold,
                 normal_dot_threshold=contact_matching_normal_dot_threshold,
                 contact_report=contact_report,
