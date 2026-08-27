@@ -2308,6 +2308,8 @@ def mesh_triangle_contacts_to_reducer_kernel(
     shape_data: wp.array[wp.vec4],
     shape_transform: wp.array[wp.transform],
     shape_source: wp.array[wp.uint64],
+    shape_collision_aabb_lower: wp.array[wp.vec3],
+    shape_collision_aabb_upper: wp.array[wp.vec3],
     shape_gap: wp.array[float],
     shape_heightfield_index: wp.array[wp.int32],
     heightfield_data: wp.array[HeightfieldData],
@@ -2361,6 +2363,9 @@ def mesh_triangle_contacts_to_reducer_kernel(
             shape_data,
             shape_source,
         )
+        if shape_data_b.shape_type == GeoType.CONVEX_MESH:
+            # Avoid rebuilding the convex AABB for every candidate triangle.
+            shape_data_b.center = 0.5 * (shape_collision_aabb_lower[shape_b] + shape_collision_aabb_upper[shape_b])
 
         # Triangle position is vertex A in world space.
         # For heightfield prisms, edges are in heightfield-local space
@@ -2427,6 +2432,7 @@ def mesh_triangle_contacts_to_reducer_kernel(
         wp.static(
             create_compute_gjk_mpr_contacts(
                 write_contact_to_reducer,
+                use_precomputed_center=True,
                 penetration_refiner=create_triangle_prism_penetration_refiner(support_map),
             )
         )(
