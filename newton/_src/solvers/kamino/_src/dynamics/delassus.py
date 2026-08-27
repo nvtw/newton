@@ -985,8 +985,10 @@ class DelassusOperator:
         if reset_to_zero:
             self.zero()
 
-        # Build the Delassus matrix parallelized over the upper triangle.
-        # Aligns to warp size (32) to avoid partially-filled warps.
+        # Build the Delassus matrix parallelized over the upper triangle. Warp's
+        # CUDA kernels use 32-thread warps, so pad the work count to keep the
+        # final warp full. The padding is harmless on other devices because the
+        # kernels reject indices outside the upper triangle.
         if isinstance(jacobians, DenseSystemJacobians):
             max_ncts = max(self._world_maxdims) if self._world_maxdims else 0
             upper_tri_size = max_ncts * (max_ncts + 1) // 2
@@ -998,7 +1000,7 @@ class DelassusOperator:
                 inputs=[
                     # Inputs:
                     model.info.bodies_offset,
-                    model.bodies.effective_inv_m_i,
+                    model.bodies.inv_m_i,
                     data.bodies.inv_I_i,
                     jacobians.data.J_cts_offsets,
                     jacobians.data.J_cts_data,
@@ -1020,7 +1022,7 @@ class DelassusOperator:
                 inputs=[
                     # Inputs:
                     model.info.bodies_offset,
-                    model.bodies.effective_inv_m_i,
+                    model.bodies.inv_m_i,
                     data.bodies.inv_I_i,
                     jacobian_cts.num_nzb,
                     jacobian_cts.nzb_start,
@@ -1470,7 +1472,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
             inputs=[
                 # Inputs:
                 self._model.info.bodies_offset,
-                self._model.bodies.effective_inv_m_i,
+                self._model.bodies.inv_m_i,
                 self._data.bodies.inv_I_i,
                 self.bsm.num_nzb,
                 self.bsm.nzb_start,
@@ -1628,7 +1630,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
             dim=(self._model.size.num_worlds, self.constraint_jacobian.max_of_num_nzb),
             inputs=[
                 self._model.info.bodies_offset,
-                self._model.bodies.effective_inv_m_i,
+                self._model.bodies.inv_m_i,
                 self._data.bodies.inv_I_i,
                 self.constraint_jacobian.nzb_start,
                 self.constraint_jacobian.num_nzb,

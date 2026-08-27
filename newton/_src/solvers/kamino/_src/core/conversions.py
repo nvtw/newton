@@ -81,17 +81,17 @@ class StructuralUpdateViolation(IntEnum):
 
 
 @wp.kernel
-def effective_body_inverse_mass_kernel(
+def mask_kinematic_body_inverse_mass_kernel(
     body_flags: wp.array[wp.int32],
     body_inv_mass: wp.array[wp.float32],
-    effective_inv_mass: wp.array[wp.float32],
+    body_inv_mass_out: wp.array[wp.float32],
 ):
     """Copy inverse mass while masking kinematic bodies."""
     body_id = wp.tid()
     if (body_flags[body_id] & int(BodyFlags.KINEMATIC)) != 0:
-        effective_inv_mass[body_id] = 0.0
+        body_inv_mass_out[body_id] = 0.0
     else:
-        effective_inv_mass[body_id] = body_inv_mass[body_id]
+        body_inv_mass_out[body_id] = body_inv_mass[body_id]
 
 
 @wp.func
@@ -521,7 +521,7 @@ def joint_conversion_kernel(
     assert act_type_j >= 0, "Joint actuation type must be valid"
     joint_act_type[joint_id] = act_type_j
 
-    # Constraints between immovable bodies cannot affect the motion and produce
+    # Constraints between two static or kinematic bodies cannot affect motion and produce
     # structurally singular Delassus rows.
     parent_bid = model_joint_parent[joint_id]
     child_bid = model_joint_child[joint_id]
@@ -554,8 +554,10 @@ def joint_conversion_kernel(
     # positive friction allocates one friction row for every DoF so row-to-DoF
     # indexing remains direct even when some component bounds are zero.
     nfriction_j = int(0)
-    if dof_type_j != JointDoFType.FREE and joint_requires_friction_constraints(
-        dofs_start_j, dofs_start_j + ndofs_j, model_joint_friction
+    if (
+        has_dynamic_body
+        and dof_type_j != JointDoFType.FREE
+        and joint_requires_friction_constraints(dofs_start_j, dofs_start_j + ndofs_j, model_joint_friction)
     ):
         nfriction_j = ndofs_j
     joint_num_friction_cts[joint_id] = nfriction_j
@@ -1359,14 +1361,14 @@ def convert_rigid_bodies(
     # COM world poses (joint attachment vectors are COM-relative).
     q_i_0 = wp.empty((model.body_count,), dtype=wp.transformf, device=model.device)
     convert_body_origin_to_com(model.body_com, model.body_q, q_i_0)
-    effective_inv_mass = wp.empty_like(model.body_inv_mass)
+    inv_mass = wp.empty_like(model.body_inv_mass)
     wp.launch(
-        kernel=effective_body_inverse_mass_kernel,
+        kernel=mask_kinematic_body_inverse_mass_kernel,
         dim=model.body_count,
         inputs=[
             model.body_flags,
             model.body_inv_mass,
-            effective_inv_mass,
+            inv_mass,
         ],
         device=model.device,
     )
@@ -1401,8 +1403,7 @@ def convert_rigid_bodies(
         wid=model.body_world,
         bid=body_bid,  # TODO: Remove
         m_i=model.body_mass,
-        inv_m_i=model.body_inv_mass,
-        effective_inv_m_i=effective_inv_mass,
+        inv_m_i=inv_mass,
         i_r_com_i=model.body_com,
         i_I_i=model.body_inertia,
         inv_i_I_i=model.body_inv_inertia,

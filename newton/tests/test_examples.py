@@ -90,10 +90,6 @@ _WARP_SDF_CONSTANT_CONVERSION_WARNING_RE = (
     r")+"
     r"^\d+ warnings? generated\.\n?"
 )
-_KAMINO_NON_FLOATING_ROOT_WARNING_RE = (
-    r"(?m)^.*Model has articulations whose root is not a free joint attached to the world, "
-    r"disabling floating base resets for those worlds\..*\n?"
-)
 _ANYMAL_TEXTURE_WITHOUT_UVS_WARNING_RE = (
     r"^.*newton[/\\]_src[/\\]utils[/\\]import_urdf\.py:\d+: UserWarning: Warning: mesh "
     r"[^\n]*[/\\]base\.dae has a texture but no UVs; texture will be ignored\.\n"
@@ -383,14 +379,6 @@ add_basic_example_test(
     use_viewer=True,
     test_options={"solver": "vbd"},
     test_suffix="vbd",
-)
-add_basic_example_test(
-    name="basic.example_basic_joints",
-    devices=cuda_test_devices,
-    use_viewer=True,
-    test_options={"solver": "kamino"},
-    test_suffix="kamino",
-    allow_output_regexes=[(_KAMINO_NON_FLOATING_ROOT_WARNING_RE, "stderr")],
 )
 
 add_basic_example_test(

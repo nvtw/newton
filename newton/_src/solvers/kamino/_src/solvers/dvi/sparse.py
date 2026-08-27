@@ -385,7 +385,7 @@ def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) ->
             kernel=_build_sparse_bilateral_block,
             dim=pair_wid.size,
             inputs=[
-                path.model.bodies.effective_inv_m_i,
+                path.model.bodies.inv_m_i,
                 path.model_data.bodies.inv_I_i,
                 pair_wid,
                 pair_row,

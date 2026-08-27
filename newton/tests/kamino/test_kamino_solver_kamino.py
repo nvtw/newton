@@ -632,8 +632,8 @@ class TestSolverKaminoPublic(unittest.TestCase):
                     self.assertTrue(np.all(np.isfinite(body_q)))
                     self.assertTrue(np.all(np.isfinite(body_qd)))
 
-    def test_sparse_dvi_uses_effective_kinematic_inverse_mass(self):
-        """Ignore physical inverse mass for kinematic bodies in sparse DVI."""
+    def test_sparse_dvi_masks_kinematic_inverse_mass(self):
+        """Mask kinematic inverse mass in the converted Kamino model."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         SolverKamino.register_custom_attributes(builder)
         anchor = builder.add_link(
@@ -684,22 +684,41 @@ class TestSolverKaminoPublic(unittest.TestCase):
         state_out = model.state()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
 
-        # Poison only the physical inverse mass. Kinematic dynamics must use the
-        # separately masked effective value and remain finite.
-        physical_inv_mass = solver._model_kamino.bodies.inv_m_i.numpy()
-        self.assertGreater(float(physical_inv_mass[anchor]), 0.0)
-        physical_inv_mass[anchor] = np.nan
-        solver._model_kamino.bodies.inv_m_i.assign(physical_inv_mass)
+        self.assertGreater(float(model.body_inv_mass.numpy()[anchor]), 0.0)
+        np.testing.assert_array_equal(solver._model_kamino.bodies.inv_m_i.numpy()[anchor], np.float32(0.0))
 
         state_in.clear_forces()
         solver.step(state_in, state_out, control=None, contacts=None, dt=1.0e-3)
 
-        np.testing.assert_array_equal(
-            solver._model_kamino.bodies.effective_inv_m_i.numpy()[anchor],
-            np.float32(0.0),
-        )
         self.assertTrue(np.all(np.isfinite(state_out.body_q.numpy())))
         self.assertTrue(np.all(np.isfinite(state_out.body_qd.numpy())))
+
+    def test_culls_joint_without_dynamic_endpoint(self):
+        """Cull all constraints between static and kinematic bodies."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        static_cfg = newton.ModelBuilder.ShapeConfig(density=0.0)
+        static_body = builder.add_link()
+        kinematic_body = builder.add_link(is_kinematic=True)
+        builder.add_shape_box(body=static_body, hx=0.1, hy=0.1, hz=0.1, cfg=static_cfg)
+        builder.add_shape_box(body=kinematic_body, hx=0.1, hy=0.1, hz=0.1)
+        joint = builder.add_joint_revolute(
+            parent=kinematic_body,
+            child=static_body,
+            axis=newton.Axis.X,
+            damping=1.0,
+            effort_limit=1.0,
+            friction=1.0,
+        )
+        builder.add_articulation([joint])
+        model = builder.finalize(device=self.default_device)
+
+        joints = ModelKamino.from_newton(model).joints
+
+        np.testing.assert_array_equal(joints.num_kinematic_cts.numpy(), [0])
+        np.testing.assert_array_equal(joints.num_dynamic_cts.numpy(), [0])
+        np.testing.assert_array_equal(joints.num_friction_cts.numpy(), [0])
+        np.testing.assert_array_equal(joints.num_bounded_cts.numpy(), [0])
 
 
 class TestSolverKaminoImpl(unittest.TestCase):
