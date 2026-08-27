@@ -441,12 +441,13 @@ class HydroelasticSDF:
         writes a smaller contact set to the buffer before the normal reduce pass.
         Only active when ``reduce_contacts`` is True."""
         buffer_fraction: float = 1.0
-        """Fraction of worst-case hydroelastic buffer allocations. Range: (0, 1].
+        """Fraction applied to default hydroelastic buffer estimates. Range: (0, 1].
 
         This scales pre-allocated broadphase, iso-refinement, and face-contact
-        buffers before applying stage multipliers. Lower values reduce memory
-        usage and may cause overflows in dense scenes. Overflows are bounds-safe
-        and emit warnings; increase this value when warnings appear.
+        buffers from their default estimated capacities before applying stage
+        multipliers. Lower values reduce memory usage and may cause overflows in
+        dense scenes. Overflows are bounds-safe and emit warnings; increase this
+        value when warnings appear.
         """
         buffer_mult_broad: int = 1
         """Multiplier for the preallocated broadphase buffer that stores overlapping
