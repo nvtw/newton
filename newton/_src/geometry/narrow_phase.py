@@ -2662,6 +2662,11 @@ class NarrowPhase:
         num_blocks = max(min_blocks, min(candidate_blocks, max_blocks_limit))
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
+        # Split-convex blocks distribute independent serial pair queries across
+        # lanes. Use one warp while preserving the block distribution; lanes
+        # grid-stride over larger block queues.
+        self.split_convex_block_dim = 32 if device_obj.is_cuda else self.block_dim
+        self.split_convex_total_num_threads = self.split_convex_block_dim * num_blocks
         # One-warp blocks spread sparse, serial-per-lane triangle solves across
         # more SMs without reducing the total number of launched threads.
         self.mesh_triangle_block_dim = 32 if device_obj.is_cuda else self.block_dim
@@ -2877,12 +2882,12 @@ class NarrowPhase:
                 ]
                 wp.launch(
                     kernel=self.narrow_phase_mpr_kernel,
-                    dim=self.total_num_threads,
+                    dim=self.split_convex_total_num_threads,
                     inputs=[
                         convex_pairs,
                         convex_pair_count,
                         *common_inputs,
-                        self.total_num_threads,
+                        self.split_convex_total_num_threads,
                         self.split_query_results,
                         self.split_gjk_work_items,
                         self.split_gjk_work_count,
@@ -2890,16 +2895,16 @@ class NarrowPhase:
                         self.split_manifold_work_count,
                     ],
                     device=device,
-                    block_dim=self.block_dim,
+                    block_dim=self.split_convex_block_dim,
                     record_tape=False,
                 )
                 wp.launch(
                     kernel=self.narrow_phase_gjk_kernel,
-                    dim=self.total_num_threads,
+                    dim=self.split_convex_total_num_threads,
                     inputs=[
                         convex_pairs,
                         *common_inputs,
-                        self.total_num_threads,
+                        self.split_convex_total_num_threads,
                         self.split_query_results,
                         self.split_gjk_work_items,
                         self.split_gjk_work_count,
@@ -2907,23 +2912,23 @@ class NarrowPhase:
                         self.split_manifold_work_count,
                     ],
                     device=device,
-                    block_dim=self.block_dim,
+                    block_dim=self.split_convex_block_dim,
                     record_tape=False,
                 )
                 wp.launch(
                     kernel=self.narrow_phase_manifold_kernel,
-                    dim=self.total_num_threads,
+                    dim=self.split_convex_total_num_threads,
                     inputs=[
                         convex_pairs,
                         *common_inputs,
                         writer_data,
-                        self.total_num_threads,
+                        self.split_convex_total_num_threads,
                         self.split_query_results,
                         self.split_manifold_work_items,
                         self.split_manifold_work_count,
                     ],
                     device=device,
-                    block_dim=self.block_dim,
+                    block_dim=self.split_convex_block_dim,
                     record_tape=False,
                 )
             else:
