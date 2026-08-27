@@ -1507,6 +1507,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
     shape_collision_aabb_upper: wp.array[wp.vec3],  # Local-space AABB upper bounds
     shape_heightfield_index: wp.array[wp.int32],
     heightfield_data: wp.array[HeightfieldData],
+    heightfield_elevations: wp.array[wp.float32],
     shape_pairs_mesh: wp.array[wp.vec2i],
     shape_pairs_mesh_count: wp.array[int],
     total_num_threads: int,
@@ -1548,6 +1549,7 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
                 shape_a,
                 shape_b,
                 hfd,
+                heightfield_elevations,
                 shape_transform,
                 shape_collision_aabb_lower,
                 shape_collision_aabb_upper,
@@ -2962,6 +2964,7 @@ class NarrowPhase:
                     shape_collision_aabb_upper,
                     shape_heightfield_index,
                     heightfield_data,
+                    heightfield_elevations,
                     self.shape_pairs_mesh,
                     self.shape_pairs_mesh_count,
                     self.num_tile_blocks,
