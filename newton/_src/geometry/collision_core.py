@@ -417,7 +417,7 @@ def compute_tight_aabb_from_support(
     shape_data: GenericShapeData,
     orientation: wp.quat,
     center_pos: wp.vec3,
-    data_provider: SupportMapDataProvider,
+    data_provider: Any,
 ) -> tuple[wp.vec3, wp.vec3]:
     """
     Compute tight AABB for a shape using support function.
