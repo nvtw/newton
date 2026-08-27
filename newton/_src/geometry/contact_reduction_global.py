@@ -67,6 +67,7 @@ from .collision_core import (
     create_compute_gjk_mpr_contacts,
     get_triangle_shape_from_mesh,
 )
+from .collision_primitive import collide_sphere_sphere
 from .contact_data import ContactData, compute_contact_approach_speed
 from .contact_reduction import (
     MAX_CONTACTS_PER_PAIR,
@@ -82,6 +83,7 @@ from .contact_reduction import (
 from .support_function import (
     GeoTypeEx,
     SupportMapDataProvider,
+    closest_point_on_triangle,
     create_triangle_prism_penetration_refiner,
     extract_shape_data,
     support_map,
@@ -2318,8 +2320,8 @@ def mesh_triangle_contacts_to_reducer_kernel(
     """Process mesh/heightfield-triangle contacts and store them in GlobalContactReducer.
 
     This kernel processes triangle pairs (mesh-or-hfield shape, convex-shape, triangle_index)
-    and computes contacts using GJK/MPR, storing results in the GlobalContactReducer for
-    subsequent reduction and export.
+    and computes contacts using exact sphere-triangle geometry or GJK/MPR, storing results
+    in the GlobalContactReducer for subsequent reduction and export.
 
     Uses grid stride loop over triangle pairs.
     """
@@ -2386,6 +2388,40 @@ def mesh_triangle_contacts_to_reducer_kernel(
         gap_a = shape_gap[shape_a]
         gap_b = shape_gap[shape_b]
         gap_sum = gap_a + gap_b
+
+        # Heightfields use extruded triangle prisms to keep contacts one-sided near
+        # cell boundaries, so their sphere contacts must retain the generic path.
+        if shape_data_b.shape_type == GeoType.SPHERE and type_a != GeoType.HFIELD:
+            tri_a = pos_a
+            tri_b = pos_a + shape_data_a.scale
+            tri_c = pos_a + shape_data_a.auxiliary
+            surface_normal = wp.cross(tri_b - tri_a, tri_c - tri_a)
+            normal_length_sq = wp.length_sq(surface_normal)
+            closest = closest_point_on_triangle(pos_b, tri_a, tri_b, tri_c)
+            sphere_radius = shape_data_b.scale[0]
+
+            contact_distance, contact_position, contact_normal = collide_sphere_sphere(
+                closest, 0.0, pos_b, sphere_radius
+            )
+            if wp.length_sq(pos_b - closest) < 1.0e-24 and normal_length_sq > 1.0e-24:
+                contact_normal = surface_normal / wp.sqrt(normal_length_sq)
+                contact_position = pos_b - 0.5 * sphere_radius * contact_normal
+
+            if contact_distance < gap_sum + margin_offset_a + margin_offset_b:
+                contact_data = ContactData()
+                contact_data.contact_point_center = contact_position
+                contact_data.contact_normal_a_to_b = contact_normal
+                contact_data.contact_distance = contact_distance
+                contact_data.radius_eff_a = 0.0
+                contact_data.radius_eff_b = sphere_radius
+                contact_data.margin_a = margin_offset_a
+                contact_data.margin_b = margin_offset_b
+                contact_data.shape_a = shape_a
+                contact_data.shape_b = shape_b
+                contact_data.gap_sum = gap_sum
+                contact_data.sort_sub_key = (tri_idx << 1) | 1
+                write_contact_to_reducer(contact_data, reducer_data, -1)
+            continue
 
         data_provider = SupportMapDataProvider()
         wp.static(

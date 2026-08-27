@@ -2695,6 +2695,18 @@ class TestMeshNonUniformScaling(_NarrowPhaseSetupMixin, unittest.TestCase):
         """Sanity: uniform mesh scale (1, 1, 1) must produce contacts (regression baseline)."""
         self._assert_sphere_above_quad_contacts((1.0, 1.0, 1.0), (0.0, 0.0), "uniform 1x1x1")
 
+    def test_sphere_on_coplanar_triangle_seam_has_single_contact(self):
+        """Merge duplicate triangle contacts for a sphere on a coplanar seam."""
+        count, normals, penetrations = self._run_mesh_vs_sphere(
+            (1.0, 1.0, 1.0),
+            (0.0, 0.0, 0.25),
+            sphere_radius=0.3,
+        )
+
+        self.assertEqual(count, 1)
+        np.testing.assert_allclose(normals[0], [0.0, 0.0, 1.0], atol=1.0e-6)
+        self.assertAlmostEqual(float(penetrations[0]), -0.05, delta=1.0e-6)
+
     def test_uniform_large_scale(self):
         """Uniform scale (10, 10, 10) - sphere over the (now 10x10) quad."""
         self._assert_sphere_above_quad_contacts((10.0, 10.0, 10.0), (3.0, 3.0), "uniform 10x10x10")
