@@ -1659,8 +1659,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                 mesh_scale_tri = wp.vec3(scale_data_tri[0], scale_data_tri[1], scale_data_tri[2])
                 mesh_scale_sdf = wp.vec3(scale_data_sdf[0], scale_data_sdf[1], scale_data_sdf[2])
 
-                X_tri_ws = shape_transform[tri_shape]
-                X_sdf_ws = shape_transform[sdf_shape]
+                # Keep the search transforms distinct from the accepted-contact
+                # export transforms below so they do not stay live across the
+                # edge search and increase register spills.
+                X_tri_ws_search = shape_transform[tri_shape]
+                X_sdf_ws_search = shape_transform[sdf_shape]
 
                 texture_sdf = TextureSDFData()
                 if sdf_is_hfield:
@@ -1675,7 +1678,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         if not use_bvh_for_sdf and texture_sdf.scale_baked:
                             sdf_scale = wp.vec3(1.0, 1.0, 1.0)
 
-                X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_sdf_ws), X_tri_ws)
+                X_mesh_to_sdf = wp.transform_multiply(wp.transform_inverse(X_sdf_ws_search), X_tri_ws_search)
 
                 triangle_mesh_margin = scale_data_tri[3]
                 sdf_mesh_margin = scale_data_sdf[3]
@@ -1924,6 +1927,8 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         dist_unscaled, direction_unscaled, sdf_scale, inv_sdf_scale, min_sdf_scale
                                     )
                                     point = wp.cw_mul(point_unscaled, sdf_scale)
+                                X_tri_ws = shape_transform[tri_shape]
+                                X_sdf_ws = shape_transform[sdf_shape]
                                 point_world = wp.transform_point(X_sdf_ws, point)
 
                                 direction_world = wp.transform_vector(X_sdf_ws, direction)
