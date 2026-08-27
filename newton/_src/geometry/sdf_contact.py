@@ -1530,7 +1530,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
     # but contacts are written directly to global buffer + hashtable.
     # =========================================================================
 
-    @wp.kernel(enable_backward=False, launch_bounds=(256, 2), module=_module)
+    # The tiled launch provides exactly ``total_num_blocks`` blocks and the
+    # kernel strides those blocks over all active combinations itself.
+    @wp.kernel(enable_backward=False, launch_bounds=(256, 2), grid_stride=False, module=_module)
     def mesh_sdf_collision_global_reduce_kernel(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
