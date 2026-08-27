@@ -31,13 +31,13 @@ from .broad_phase_common import (
 wp.set_module_options({"enable_backward": False})
 
 
-SAPSortMode = Literal["segmented", "tile"]
+SAPSortMode = Literal["segmented", "tile", "auto"]
 
 
 def _normalize_sort_mode(mode: str) -> SAPSortMode:
     normalized = mode.strip().lower()
-    if normalized not in ("segmented", "tile"):
-        raise ValueError(f"Unsupported SAP sort mode: {mode!r}. Expected 'segmented' or 'tile'.")
+    if normalized not in ("segmented", "tile", "auto"):
+        raise ValueError(f"Unsupported SAP sort mode: {mode!r}. Expected 'segmented', 'tile', or 'auto'.")
     return normalized
 
 
@@ -528,7 +528,7 @@ class BroadPhaseSAP:
         shape_world: wp.array[wp.int32] | np.ndarray,
         shape_flags: wp.array[wp.int32] | np.ndarray | None = None,
         sweep_thread_count_multiplier: int = 5,
-        sort_type: Literal["segmented", "tile"] = "segmented",
+        sort_type: SAPSortMode = "segmented",
         tile_block_dim: int | None = None,
         device: Devicelike | None = None,
     ) -> None:
@@ -542,8 +542,9 @@ class BroadPhaseSAP:
                 This efficiently filters out visual-only shapes.
             sweep_thread_count_multiplier: Multiplier for number of threads used in sweep phase
             sort_type: SAP sort mode. Use ``"segmented"`` (default) for
-                ``wp.utils.segmented_sort_pairs`` or ``"tile"`` for
-                tile-based sorting via ``wp.tile_sort``.
+                ``wp.utils.segmented_sort_pairs``, ``"tile"`` for tile-based
+                sorting via ``wp.tile_sort``, or ``"auto"`` to use one of
+                three bounded tile sizes for medium-sized worlds.
             tile_block_dim: Block dimension for tile-based sorting (optional, auto-calculated if None).
                 If None, will be set to next power of 2 >= ``max_shapes_per_world``, capped at 512.
                 Minimum value is 32 (required by wp.tile_sort). If provided, will be clamped to [32, 1024].
@@ -593,6 +594,22 @@ class BroadPhaseSAP:
             num_shapes = end_idx - start_idx
             self.max_shapes_per_world = max(self.max_shapes_per_world, num_shapes)
             start_idx = end_idx
+
+        # The collision pipeline uses auto mode. Restrict it to three fixed
+        # tile sizes so arbitrary model sizes cannot create arbitrary kernel
+        # variants, and keep padding at or below 2x. Small and large worlds retain
+        # the general segmented sort.
+        if self.sort_type == "auto":
+            if 64 <= self.max_shapes_per_world <= 512:
+                self.sort_type = "tile"
+                if self.max_shapes_per_world <= 128:
+                    self.max_shapes_per_world = 128
+                elif self.max_shapes_per_world <= 256:
+                    self.max_shapes_per_world = 256
+                else:
+                    self.max_shapes_per_world = 512
+            else:
+                self.sort_type = "segmented"
 
         # Create tile sort kernel if using tile-based sorting
         self.tile_sort_kernel = None

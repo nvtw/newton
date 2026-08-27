@@ -159,6 +159,35 @@ def _test_advance_sap_chunk_base(
 
 
 class TestBroadPhase(unittest.TestCase):
+    def test_sap_auto_sort_selection(self):
+        cases = (
+            (63, "segmented", 63),
+            (64, "tile", 128),
+            (129, "tile", 256),
+            (257, "tile", 512),
+            (513, "segmented", 513),
+        )
+        for shape_count, expected_sort, expected_stride in cases:
+            with self.subTest(shape_count=shape_count):
+                shape_world = np.zeros(shape_count, dtype=np.int32)
+                broad_phase = BroadPhaseSAP(shape_world, sort_type="auto", device="cpu")
+                self.assertEqual(broad_phase.sort_type, expected_sort)
+                self.assertEqual(broad_phase.max_shapes_per_world, expected_stride)
+
+    def test_sap_broadphase_auto(self):
+        for shape_count in (70, 150, 300):
+            with self.subTest(shape_count=shape_count):
+                self._test_sap_broadphase_impl("auto", shape_count)
+
+    def test_sap_broadphase_multiple_worlds_auto(self):
+        self._test_sap_broadphase_multiple_worlds_impl("auto")
+
+    def test_sap_broadphase_with_shape_flags_auto(self):
+        self._test_sap_broadphase_with_shape_flags_impl("auto")
+
+    def test_sap_edge_cases_auto(self):
+        self._test_sap_edge_cases_impl("auto")
+
     def test_sap_chunk_advance_avoids_int32_overflow(self):
         """Stop dense SAP scheduling before the next chunk would overflow."""
         result = wp.empty(1, dtype=wp.int32)
@@ -1028,11 +1057,10 @@ class TestBroadPhase(unittest.TestCase):
         if verbose:
             print(len(pairs_np))
 
-    def _test_sap_broadphase_impl(self, sort_type):
+    def _test_sap_broadphase_impl(self, sort_type, ngeom=30):
         verbose = False
 
         # Create random bounding boxes in min-max format
-        ngeom = 30
 
         # Generate random centers and sizes using the new Generator API
         rng = np.random.Generator(np.random.PCG64(42))
