@@ -181,7 +181,8 @@ class TestBroadPhase(unittest.TestCase):
         device = wp.get_device()
         shape_lower = wp.full(shape_count, wp.vec3(-1.0), dtype=wp.vec3, device=device)
         shape_upper = wp.full(shape_count, wp.vec3(1.0), dtype=wp.vec3, device=device)
-        shape_group = wp.ones(shape_count, dtype=wp.int32, device=device)
+        # Exercise the all-global fast path's group filtering as well as sorting.
+        shape_group = wp.array([0, 1, 1, -1], dtype=wp.int32, device=device)
         shape_world = wp.full(shape_count, -1, dtype=wp.int32, device=device)
         candidate_pair = wp.zeros(6, dtype=wp.vec2i, device=device)
         candidate_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -206,7 +207,7 @@ class TestBroadPhase(unittest.TestCase):
             values=broad_phase.sap_sort_index,
             count=broad_phase.max_shapes_per_world,
         )
-        self.assertEqual(int(candidate_pair_count.numpy()[0]), 6)
+        self.assertEqual(int(candidate_pair_count.numpy()[0]), 3)
 
     def test_sap_broadphase_auto(self):
         for shape_count in (70, 150, 300):

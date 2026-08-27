@@ -24,6 +24,7 @@ from .broad_phase_common import (
     is_pair_excluded,
     is_shape_pair_immovable_filtered,
     precompute_world_map,
+    test_group_pair,
     test_world_and_group_pair,
     write_pair,
 )
@@ -344,13 +345,18 @@ def _process_sap_work_package(
     if flat_id > 0:
         j -= sap_cumulative_sum_in[flat_id - 1]
 
-    world_id = flat_id // max_shapes_per_world
-    i = flat_id % max_shapes_per_world
-    j = j % max_shapes_per_world
-
-    world_slice_start = 0
-    if world_id > 0:
-        world_slice_start = world_slice_ends[world_id - 1]
+    # With no regular worlds, the map contains only the dedicated global
+    # segment. Avoid per-pair segment arithmetic and redundant world reads.
+    single_segment = num_regular_worlds == 0
+    world_id = int(0)
+    i = flat_id
+    world_slice_start = int(0)
+    if not single_segment:
+        world_id = flat_id // max_shapes_per_world
+        i = flat_id % max_shapes_per_world
+        j = j % max_shapes_per_world
+        if world_id > 0:
+            world_slice_start = world_slice_ends[world_id - 1]
     world_slice_end = world_slice_ends[world_id]
     num_shapes_in_world = world_slice_end - world_slice_start
 
@@ -376,14 +382,19 @@ def _process_sap_work_package(
 
     col_group1 = collision_group[shape1]
     col_group2 = collision_group[shape2]
-    world1 = shape_world[shape1]
-    world2 = shape_world[shape2]
+    process_pair = False
+    if single_segment:
+        process_pair = test_group_pair(col_group1, col_group2)
+    else:
+        world1 = shape_world[shape1]
+        world2 = shape_world[shape2]
+        is_dedicated_minus_one_segment = world_id >= num_regular_worlds
+        if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
+            process_pair = False
+        else:
+            process_pair = test_world_and_group_pair(world1, world2, col_group1, col_group2)
 
-    is_dedicated_minus_one_segment = world_id >= num_regular_worlds
-    if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
-        return
-
-    if test_world_and_group_pair(world1, world2, col_group1, col_group2):
+    if process_pair:
         _process_single_sap_pair(
             wp.vec2i(shape1, shape2),
             shape_bounding_box_lower,
