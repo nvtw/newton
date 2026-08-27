@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
 import newton
@@ -110,8 +111,11 @@ class Example:
 
         self.cartpoles.set_attribute("joint_q", self.state_0, joint_q)
 
+        self._body_q_after_view_fk = None
         if not isinstance(self.solver, newton.solvers.SolverMuJoCo):
             self.cartpoles.eval_fk(self.state_0)
+            if args.test:
+                self._body_q_after_view_fk = wp.clone(self.state_0.body_q)
 
         self.viewer.set_model(self.model)
         if max_worlds is not None:
@@ -125,14 +129,7 @@ class Example:
             yaw=0.0,
         )
 
-        # Ensure FK evaluation (for non-MuJoCo solvers):
-        newton.eval_fk(
-            self.model,
-            self.model.joint_q,
-            self.model.joint_qd,
-            self.state_0,
-        )
-
+        self._body_q_before_capture = wp.clone(self.state_0.body_q) if self._body_q_after_view_fk is not None else None
         self.capture()
 
     def capture(self):
@@ -186,6 +183,13 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
+        """Validate the initialized state and constrained cartpole motion."""
+        if self._body_q_after_view_fk is not None:
+            np.testing.assert_array_equal(
+                self._body_q_after_view_fk.numpy(),
+                self._body_q_before_capture.numpy(),
+            )
+
         constrained_atol = 1.0e-6
         num_bodies_per_world = self.model.body_count // self.world_count
         newton.examples.test_body_state(
