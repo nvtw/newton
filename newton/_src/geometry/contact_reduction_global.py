@@ -81,6 +81,7 @@ from .contact_reduction import (
 )
 from .support_function import (
     GeoTypeEx,
+    SupportMapDataProvider,
     create_triangle_prism_penetration_refiner,
     extract_shape_data,
     support_map,
@@ -2386,6 +2387,7 @@ def mesh_triangle_contacts_to_reducer_kernel(
         gap_b = shape_gap[shape_b]
         gap_sum = gap_a + gap_b
 
+        data_provider = SupportMapDataProvider()
         wp.static(
             create_compute_gjk_mpr_contacts(
                 write_contact_to_reducer,
@@ -2403,6 +2405,7 @@ def mesh_triangle_contacts_to_reducer_kernel(
             shape_b,
             margin_offset_a,
             margin_offset_b,
+            data_provider,
             reducer_data,
             (tri_idx << 1) | 1,
         )
