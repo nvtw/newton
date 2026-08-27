@@ -1441,6 +1441,7 @@ class CollisionPipeline:
                 heightfield_mask = colliding_mask & (shape_types == int(GeoType.HFIELD))
                 plane_mask = colliding_mask & (shape_types == int(GeoType.PLANE))
                 mesh_sdf_pair_mask = mesh_mask | heightfield_mask
+                planar_sdf_mask = np.zeros(len(shape_types), dtype=bool)
                 has_meshes = bool(np.any(mesh_mask))
                 if (
                     hasattr(model, "_shape_sdf_index")
@@ -1479,11 +1480,34 @@ class CollisionPipeline:
                             bool(scale_baked[shape_sdf_index[shape_idx]]) or identity_shape_scale[shape_idx]
                             for shape_idx in np.flatnonzero(mesh_sdf_shapes)
                         )
-                if self.broad_phase_mode == "explicit":
-                    # Explicit pairs are not constrained by shape_world and may
-                    # intentionally connect shapes from different worlds.
-                    max_mesh_mesh_pairs = self.shape_pairs_max
-                    max_mesh_plane_pairs = self.shape_pairs_max
+                if self.broad_phase_mode == "explicit" and self.shape_pairs_filtered is not None:
+                    # Explicit pair types are fixed at pipeline construction, including
+                    # intentional cross-world pairs, so size only the stages they can reach.
+                    explicit_pairs = self.shape_pairs_filtered.numpy().reshape(-1, 2)
+                    if len(explicit_pairs) == 0:
+                        max_mesh_mesh_pairs = 0
+                        max_mesh_plane_pairs = 0
+                    else:
+                        shape_a = explicit_pairs[:, 0]
+                        shape_b = explicit_pairs[:, 1]
+                        box_mask = colliding_mask & (shape_types == int(GeoType.BOX))
+                        mesh_mesh_routes = (
+                            (mesh_mask[shape_a] & mesh_mask[shape_b])
+                            | (heightfield_mask[shape_a] & mesh_mask[shape_b])
+                            | (mesh_mask[shape_a] & heightfield_mask[shape_b])
+                            | (
+                                planar_sdf_mask[shape_a]
+                                & planar_sdf_mask[shape_b]
+                                & ~(box_mask[shape_a] & box_mask[shape_b])
+                            )
+                        )
+                        shape_scale = model.shape_scale.numpy()
+                        infinite_plane_mask = plane_mask & (shape_scale[:, 0] == 0.0) & (shape_scale[:, 1] == 0.0)
+                        mesh_plane_routes = (mesh_mask[shape_a] & infinite_plane_mask[shape_b]) | (
+                            infinite_plane_mask[shape_a] & mesh_mask[shape_b]
+                        )
+                        max_mesh_mesh_pairs = int(np.count_nonzero(mesh_mesh_routes))
+                        max_mesh_plane_pairs = int(np.count_nonzero(mesh_plane_routes))
                 else:
                     max_mesh_mesh_pairs = min(
                         self.shape_pairs_max,
