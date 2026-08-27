@@ -2487,6 +2487,7 @@ class NarrowPhase:
                     speculative=speculative,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
+                    deterministic_reduction=deterministic,
                 )
                 self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     write_contact_to_reducer,
@@ -2496,6 +2497,7 @@ class NarrowPhase:
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                     speculative=speculative,
+                    deterministic_reduction=deterministic,
                 )
             else:
                 self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
