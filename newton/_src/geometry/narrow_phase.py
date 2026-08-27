@@ -2373,7 +2373,9 @@ class NarrowPhase:
         # of the plain ``wp.launch(..., block_dim=N)`` parameter (Warp
         # GH-1413). Keep the mesh-convex midphase launch grid, tile shape,
         # and kernel-side ``wp.block_dim()`` in sync on CPU.
-        self.tile_size_mesh_convex = 1 if device_obj.is_cpu else 128
+        # Dense mesh queries benefit from wider cooperative result batches;
+        # heightfields only use lane zero and retain the leaner launch.
+        self.tile_size_mesh_convex = 1 if device_obj.is_cpu else (128 if has_heightfields else 256)
         # Must match ``MESH_SDF_BLOCK_DIM`` in sdf_contact.py: the mesh-SDF
         # kernels assume ``wp.block_dim()`` equals that constant so the
         # tile-stack overflow margin (``STACK_CAPACITY = 2 *

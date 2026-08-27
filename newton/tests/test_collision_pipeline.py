@@ -3585,6 +3585,45 @@ add_function_test(
     check_output=False,
 )
 
+
+def test_mesh_query_tile_width_follows_geometry(test, device):
+    """Use wider CUDA query tiles only when heightfields are absent."""
+    mesh_builder = newton.ModelBuilder()
+    mesh_builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.5, compute_inertia=False))
+    mesh_model = mesh_builder.finalize(device=device)
+    mesh_pipeline = newton.CollisionPipeline(mesh_model, broad_phase="nxn")
+
+    heightfield_builder = newton.ModelBuilder()
+    heightfield_builder.add_shape_heightfield(
+        heightfield=newton.Heightfield(
+            data=np.zeros((3, 3), dtype=np.float32),
+            nrow=3,
+            ncol=3,
+            hx=1.0,
+            hy=1.0,
+            min_z=0.0,
+            max_z=0.0,
+        )
+    )
+    heightfield_model = heightfield_builder.finalize(device=device)
+    heightfield_pipeline = newton.CollisionPipeline(heightfield_model, broad_phase="nxn")
+
+    if wp.get_device(device).is_cpu:
+        test.assertEqual(mesh_pipeline.narrow_phase.tile_size_mesh_convex, 1)
+        test.assertEqual(heightfield_pipeline.narrow_phase.tile_size_mesh_convex, 1)
+    else:
+        test.assertEqual(mesh_pipeline.narrow_phase.tile_size_mesh_convex, 256)
+        test.assertEqual(heightfield_pipeline.narrow_phase.tile_size_mesh_convex, 128)
+
+
+add_function_test(
+    TestMeshConvexMidphase,
+    "test_mesh_query_tile_width_follows_geometry",
+    test_mesh_query_tile_width_follows_geometry,
+    devices=get_test_devices(),
+    check_output=False,
+)
+
 add_function_test(
     TestMeshConvexMidphase,
     "test_mesh_convex_midphase_queries_margin_shell",
