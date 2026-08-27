@@ -2003,6 +2003,10 @@ class CollisionPipeline:
             narrow_phase_extension_kwargs.update(
                 mesh_edge_centers=model.mesh_edge_centers,
                 mesh_edge_halves=model.mesh_edge_halves,
+                shape_support_data=model.shape_support_data,
+                support_lut=model.convex_support_lut,
+                support_vertex_offsets=model.convex_support_vertex_offsets,
+                support_neighbors=model.convex_support_neighbors,
                 hydroelastic_shape_sdf_data_prepared=self._hydro_shape_sdf_data_prepared,
             )
         if self._speculative_enabled:

@@ -311,6 +311,7 @@ def create_compute_gjk_mpr_contacts(
         shape_b: int,
         margin_a: float,
         margin_b: float,
+        data_provider: SupportMapDataProvider,
         writer_data: Any,
         sort_sub_key: int = 0,
     ):
@@ -332,8 +333,6 @@ def create_compute_gjk_mpr_contacts(
             writer_data: Data structure for contact writer
             sort_sub_key: Sub-key for deterministic contact sorting (e.g. triangle/edge index)
         """
-        data_provider = SupportMapDataProvider()
-
         radius_eff_a = float(0.0)
         radius_eff_b = float(0.0)
 
@@ -683,6 +682,7 @@ def create_find_contacts(writer_func: Any, support_func: Any = None, post_proces
         shape_b: int,
         margin_a: float,
         margin_b: float,
+        data_provider: SupportMapDataProvider,
         writer_data: Any,
     ):
         """
@@ -748,6 +748,7 @@ def create_find_contacts(writer_func: Any, support_func: Any = None, post_proces
             shape_b,
             margin_a,
             margin_b,
+            data_provider,
             writer_data,
         )
 

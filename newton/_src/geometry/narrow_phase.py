@@ -1045,6 +1045,10 @@ def create_narrow_phase_kernel_gjk_mpr(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
         shape_source: wp.array[wp.uint64],
+        shape_support_data: wp.array[wp.vec4i],
+        support_lut: wp.array[int],
+        support_vertex_offsets: wp.array[int],
+        support_neighbors: wp.array[int],
         shape_gap: wp.array[float],
         shape_collision_radius: wp.array[float],
         shape_aabb_lower: wp.array[wp.vec3],
@@ -1103,6 +1107,11 @@ def create_narrow_phase_kernel_gjk_mpr(
                 shape_data_a.center = 0.5 * (shape_collision_aabb_lower[shape_a] + shape_collision_aabb_upper[shape_a])
             if type_b == GeoType.CONVEX_MESH:
                 shape_data_b.center = 0.5 * (shape_collision_aabb_lower[shape_b] + shape_collision_aabb_upper[shape_b])
+            data_provider = SupportMapDataProvider()
+            data_provider.shape_support_data = shape_support_data
+            data_provider.support_lut = support_lut
+            data_provider.support_vertex_offsets = support_vertex_offsets
+            data_provider.support_neighbors = support_neighbors
 
             # Check for infinite planes
             is_infinite_plane_a = (type_a == GeoType.PLANE) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
@@ -1138,7 +1147,6 @@ def create_narrow_phase_kernel_gjk_mpr(
                         aabb_a_lower = pos_a - half_extents_a - gap_vec_a
                         aabb_a_upper = pos_a + half_extents_a + gap_vec_a
                     else:
-                        data_provider = SupportMapDataProvider()
                         aabb_a_lower, aabb_a_upper = compute_tight_aabb_from_support(
                             shape_data_a, quat_a, pos_a, data_provider
                         )
@@ -1152,7 +1160,6 @@ def create_narrow_phase_kernel_gjk_mpr(
                         aabb_b_lower = pos_b - half_extents_b - gap_vec_b
                         aabb_b_upper = pos_b + half_extents_b + gap_vec_b
                     else:
-                        data_provider = SupportMapDataProvider()
                         aabb_b_lower, aabb_b_upper = compute_tight_aabb_from_support(
                             shape_data_b, quat_b, pos_b, data_provider
                         )
@@ -1212,6 +1219,7 @@ def create_narrow_phase_kernel_gjk_mpr(
                 shape_b,
                 margin_offset_a,
                 margin_offset_b,
+                data_provider,
                 writer_data,
             )
 
@@ -1250,6 +1258,10 @@ def create_narrow_phase_kernels_gjk_mpr_split(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
         shape_source: wp.array[wp.uint64],
+        shape_support_data: wp.array[wp.vec4i],
+        support_lut: wp.array[int],
+        support_vertex_offsets: wp.array[int],
+        support_neighbors: wp.array[int],
         shape_gap: wp.array[float],
         shape_collision_radius: wp.array[float],
         shape_aabb_lower: wp.array[wp.vec3],
@@ -1295,6 +1307,10 @@ def create_narrow_phase_kernels_gjk_mpr_split(
             needs_manifold = False
             if valid:
                 provider = SupportMapDataProvider()
+                provider.shape_support_data = shape_support_data
+                provider.support_lut = support_lut
+                provider.support_vertex_offsets = support_vertex_offsets
+                provider.support_neighbors = support_neighbors
                 collision, point_a, point_b, normal, penetration = wp.static(solve_mpr.core)(
                     query.geom_a,
                     query.geom_b,
@@ -1327,6 +1343,10 @@ def create_narrow_phase_kernels_gjk_mpr_split(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
         shape_source: wp.array[wp.uint64],
+        shape_support_data: wp.array[wp.vec4i],
+        support_lut: wp.array[int],
+        support_vertex_offsets: wp.array[int],
+        support_neighbors: wp.array[int],
         shape_gap: wp.array[float],
         shape_collision_radius: wp.array[float],
         shape_aabb_lower: wp.array[wp.vec3],
@@ -1360,6 +1380,10 @@ def create_narrow_phase_kernels_gjk_mpr_split(
             needs_manifold = False
             if valid:
                 provider = SupportMapDataProvider()
+                provider.shape_support_data = shape_support_data
+                provider.support_lut = support_lut
+                provider.support_vertex_offsets = support_vertex_offsets
+                provider.support_neighbors = support_neighbors
                 _separated, point_a, point_b, normal, signed_distance = wp.static(solve_gjk.core)(
                     query.geom_a,
                     query.geom_b,
@@ -1385,6 +1409,10 @@ def create_narrow_phase_kernels_gjk_mpr_split(
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
         shape_source: wp.array[wp.uint64],
+        shape_support_data: wp.array[wp.vec4i],
+        support_lut: wp.array[int],
+        support_vertex_offsets: wp.array[int],
+        support_neighbors: wp.array[int],
         shape_gap: wp.array[float],
         shape_collision_radius: wp.array[float],
         shape_aabb_lower: wp.array[wp.vec3],
@@ -1433,6 +1461,10 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                 or query.type_b == GeoType.ELLIPSOID
             )
             provider = SupportMapDataProvider()
+            provider.shape_support_data = shape_support_data
+            provider.support_lut = support_lut
+            provider.support_vertex_offsets = support_vertex_offsets
+            provider.support_neighbors = support_neighbors
             wp.static(write_result)(
                 query.geom_a,
                 query.geom_b,
@@ -1646,6 +1678,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             gap_b = shape_gap[shape_b]
             gap_sum = gap_a + gap_b
 
+            data_provider = SupportMapDataProvider()
             wp.static(
                 create_compute_gjk_mpr_contacts(
                     writer_func,
@@ -1663,6 +1696,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
                 shape_b,
                 margin_offset_a,
                 margin_offset_b,
+                data_provider,
                 writer_data,
                 (tri_idx << 1) | 1,
             )
@@ -2541,6 +2575,11 @@ class NarrowPhase:
             # sign method falls back to automatic selection (see resolve_mesh_sign_method).
             self._empty_mesh_properties = wp.zeros(max(num_shapes, 1), dtype=wp.int32, device=device)
 
+            self._empty_shape_support_data = wp.full(max(num_shapes, 1), (-1, -1, -1, 0), dtype=wp.vec4i, device=device)
+            self._empty_support_lut = wp.zeros(1, dtype=wp.int32, device=device)
+            self._empty_support_vertex_offsets = wp.zeros(1, dtype=wp.int32, device=device)
+            self._empty_support_neighbors = wp.zeros(1, dtype=wp.int32, device=device)
+
             if hydroelastic_sdf is not None:
                 self.shape_pairs_sdf_sdf = wp.zeros(hydroelastic_sdf.max_num_shape_pairs, dtype=wp.vec2i, device=device)
             else:
@@ -2609,6 +2648,10 @@ class NarrowPhase:
         shape_data: wp.array[wp.vec4],  # Shape data (scale xyz, margin w)
         shape_transform: wp.array[wp.transform],  # In world space
         shape_source: wp.array[wp.uint64],  # The index into the source array, type define by shape_types
+        shape_support_data: wp.array[wp.vec4i] | None = None,
+        support_lut: wp.array[wp.int32] | None = None,
+        support_vertex_offsets: wp.array[wp.int32] | None = None,
+        support_neighbors: wp.array[wp.int32] | None = None,
         shape_mesh_properties: wp.array[wp.int32] | None = None,  # Per-shape mesh property bitfield
         shape_sdf_index: wp.array[wp.int32],  # Per-shape index into texture_sdf_data (-1 for none)
         shape_gap: wp.array[wp.float32],  # per-shape contact gap (detection threshold)
@@ -2674,6 +2717,14 @@ class NarrowPhase:
             device = self.device if self.device is not None else candidate_pair.device
         if shape_mesh_properties is None:
             shape_mesh_properties = self._empty_mesh_properties
+        if shape_support_data is None:
+            shape_support_data = self._empty_shape_support_data
+        if support_lut is None:
+            support_lut = self._empty_support_lut
+        if support_vertex_offsets is None:
+            support_vertex_offsets = self._empty_support_vertex_offsets
+        if support_neighbors is None:
+            support_neighbors = self._empty_support_neighbors
         if shape_edge_range is None:
             shape_edge_range = self._empty_edge_range
         if self.speculative and shape_base_gap is None:
@@ -2756,6 +2807,10 @@ class NarrowPhase:
                     shape_data,
                     shape_transform,
                     shape_source,
+                    shape_support_data,
+                    support_lut,
+                    support_vertex_offsets,
+                    support_neighbors,
                     shape_gap,
                     shape_collision_radius,
                     self.shape_aabb_lower,
@@ -2825,6 +2880,10 @@ class NarrowPhase:
                         shape_data,
                         shape_transform,
                         shape_source,
+                        shape_support_data,
+                        support_lut,
+                        support_vertex_offsets,
+                        support_neighbors,
                         shape_gap,
                         shape_collision_radius,
                         self.shape_aabb_lower,
