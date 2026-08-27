@@ -430,14 +430,18 @@ class HydroelasticSDF:
         buffers from their default estimated capacities before applying stage
         multipliers. Lower values reduce memory usage and may cause overflows in
         dense scenes. Overflows are bounds-safe and emit warnings; increase this
-        value when warnings appear.
+        value when warnings appear. In deterministic mode, the final iso-voxel
+        capacity has a hard fingerprint-safe limit that buffer fractions and
+        multipliers cannot raise. If that limit overflows, reduce the SDF
+        resolution or disable deterministic mode.
         """
         buffer_mult_broad: int = 1
         """Multiplier for the preallocated broadphase buffer that stores overlapping
         block pairs. Increase only if a broadphase overflow warning is issued."""
         buffer_mult_iso: int = 1
         """Multiplier for preallocated iso-surface extraction buffers used during
-        hierarchical octree refinement (subblocks and voxels). Increase only if an iso buffer overflow warning is issued."""
+        hierarchical octree refinement (subblocks and voxels). Increase only if an iso buffer overflow warning is issued.
+        The final voxel buffer remains subject to the deterministic fingerprint-safe limit."""
         buffer_mult_contact: int = 1
         """Multiplier for the preallocated face contact buffer that stores contact
         positions, normals, depths, and areas. Increase only if a face contact overflow warning is issued."""

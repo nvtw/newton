@@ -1957,6 +1957,9 @@ The default ``buffer_fraction`` is ``1.0``, which uses the default capacity
 estimates. Lowering it reduces GPU memory usage but may cause overflow in dense contact scenes.
 If runtime overflow warnings appear, increase ``buffer_fraction`` (or stage-specific
 ``buffer_mult_*`` values) until warnings disappear in your target scenes.
+In deterministic mode, the final iso-voxel buffer has a hard fingerprint-safe
+capacity limit that these settings cannot raise. If that limit overflows, reduce
+the SDF resolution or disable deterministic mode.
 
 .. _Contact Material Properties:
 

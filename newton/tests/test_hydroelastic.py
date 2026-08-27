@@ -3394,7 +3394,7 @@ add_function_test(
 )
 
 
-def _sanding_contact_builder(resolution, *, delta=0.0):
+def _sanding_contact_builder(resolution, *, delta=0.0, pad_first=False):
     """Build one round-pad and spherical-workpiece hydroelastic world."""
     pad_radius = 0.0675
     pad_half_height = 0.010
@@ -3410,19 +3410,30 @@ def _sanding_contact_builder(resolution, *, delta=0.0):
         )
 
     builder = newton.ModelBuilder()
-    builder.add_shape_sphere(
-        body=-1,
-        xform=wp.transform(wp.vec3(0.0, 0.0, -sphere_radius), wp.quat_identity()),
-        radius=sphere_radius,
-        cfg=make_cfg(1.0e9),
-    )
-    pad_body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, pad_half_height - delta), wp.quat_identity()))
-    builder.add_shape_cylinder(
-        body=pad_body,
-        radius=pad_radius,
-        half_height=pad_half_height,
-        cfg=make_cfg(5.3e6),
-    )
+
+    def add_sphere():
+        builder.add_shape_sphere(
+            body=-1,
+            xform=wp.transform(wp.vec3(0.0, 0.0, -sphere_radius), wp.quat_identity()),
+            radius=sphere_radius,
+            cfg=make_cfg(1.0e9),
+        )
+
+    def add_pad():
+        pad_body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, pad_half_height - delta), wp.quat_identity()))
+        builder.add_shape_cylinder(
+            body=pad_body,
+            radius=pad_radius,
+            half_height=pad_half_height,
+            cfg=make_cfg(5.3e6),
+        )
+
+    if pad_first:
+        add_pad()
+        add_sphere()
+    else:
+        add_sphere()
+        add_pad()
     return builder
 
 
@@ -3456,11 +3467,80 @@ def test_hydroelastic_replica_buffers_scale_with_traversed_grids(test, device):
     expected_iso_dims = tuple(mult * hydro.total_num_active_tiles for mult in (8, 32, 128, 256))
     test.assertEqual(hydro.iso_max_dims, expected_iso_dims)
 
+    state = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    pipeline.collide(state, pipeline.contacts())
+    test.assertEqual(int(hydro.block_broad_collide_count.numpy()[0]), expected_blocks)
+
+
+def test_hydroelastic_pair_buffer_grid_selection(test, device):
+    """Match host buffer sizing to broadphase traversal-grid selection."""
+    # Shape A is the finer pad. This exercises the swap branch opposite the
+    # replicated test above, where shape B is finer.
+    model = _sanding_contact_builder(64, pad_first=True).finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
+    hydro = pipeline.hydroelastic_sdf
+    test.assertEqual(tuple(model.shape_contact_pairs.numpy()[0]), (0, 1))
+    test.assertEqual(hydro.total_num_tiles, 128)
+
+    state = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    pipeline.collide(state, pipeline.contacts())
+    test.assertEqual(int(hydro.block_broad_collide_count.numpy()[0]), 128)
+
+    # Give two differently sized grids exactly equal voxel radii. The kernel's
+    # tie rule retains shape B, so both host sizing and device traversal must
+    # use B's larger dense grid.
+    cfg = newton.ModelBuilder.ShapeConfig(
+        kh=1.0e6,
+        is_hydroelastic=True,
+        gap=0.0,
+        sdf_max_resolution=64,
+        sdf_narrow_band_range=(-0.002, 0.002),
+    )
+    builder = newton.ModelBuilder()
+    body = builder.add_body()
+    builder.add_shape_box(body=body, hx=0.9, hy=0.9, hz=0.1, cfg=cfg)
+    builder.add_shape_box(body=-1, hx=0.9, hy=0.9, hz=0.3, cfg=cfg)
+    model = builder.finalize(device=device)
+
+    shape_sdf_index = model._shape_sdf_index.numpy()
+    texture_sdf_data = model._texture_sdf_data.numpy()
+    sdf_idx_a, sdf_idx_b = (int(shape_sdf_index[i]) for i in range(2))
+    texture_sdf_data[sdf_idx_b]["voxel_radius"] = texture_sdf_data[sdf_idx_a]["voxel_radius"]
+    model._texture_sdf_data.assign(texture_sdf_data)
+
+    texture_a = model._texture_sdf_coarse_textures[sdf_idx_a]
+    texture_b = model._texture_sdf_coarse_textures[sdf_idx_b]
+    blocks_a = (texture_a.width - 1) * (texture_a.height - 1) * (texture_a.depth - 1)
+    blocks_b = (texture_b.width - 1) * (texture_b.height - 1) * (texture_b.depth - 1)
+    test.assertNotEqual(blocks_a, blocks_b)
+
+    pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
+    hydro = pipeline.hydroelastic_sdf
+    test.assertEqual(hydro.total_num_tiles, blocks_b)
+    hydro._prepare_shape_sdf_data(model._texture_sdf_data, model._shape_sdf_index)
+    hydro._broadphase_sdfs(
+        hydro._shape_sdf_data,
+        wp.array([wp.transform_identity(), wp.transform_identity()], dtype=wp.transform, device=device),
+        wp.array([wp.vec2i(0, 1)], dtype=wp.vec2i, device=device),
+        wp.array([1], dtype=wp.int32, device=device),
+    )
+    test.assertEqual(int(hydro.block_broad_collide_count.numpy()[0]), blocks_b)
+
 
 add_function_test(
     TestHydroelastic,
     "test_hydroelastic_replica_buffers_scale_with_traversed_grids",
     test_hydroelastic_replica_buffers_scale_with_traversed_grids,
+    devices=cuda_devices,
+    check_output=False,
+)
+
+add_function_test(
+    TestHydroelastic,
+    "test_hydroelastic_pair_buffer_grid_selection",
+    test_hydroelastic_pair_buffer_grid_selection,
     devices=cuda_devices,
     check_output=False,
 )
