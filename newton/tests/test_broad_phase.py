@@ -3,6 +3,7 @@
 
 import unittest
 from math import sqrt
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -173,6 +174,39 @@ class TestBroadPhase(unittest.TestCase):
                 broad_phase = BroadPhaseSAP(shape_world, sort_type="auto", device="cpu")
                 self.assertEqual(broad_phase.sort_type, expected_sort)
                 self.assertEqual(broad_phase.max_shapes_per_world, expected_stride)
+
+    def test_sap_single_segment_uses_radix_sort(self):
+        """Use ordinary radix sorting when SAP has exactly one segment."""
+        shape_count = 4
+        device = wp.get_device()
+        shape_lower = wp.full(shape_count, wp.vec3(-1.0), dtype=wp.vec3, device=device)
+        shape_upper = wp.full(shape_count, wp.vec3(1.0), dtype=wp.vec3, device=device)
+        shape_group = wp.ones(shape_count, dtype=wp.int32, device=device)
+        shape_world = wp.full(shape_count, -1, dtype=wp.int32, device=device)
+        candidate_pair = wp.zeros(6, dtype=wp.vec2i, device=device)
+        candidate_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+        broad_phase = BroadPhaseSAP(shape_world, sort_type="segmented", device=device)
+        self.assertEqual(broad_phase.world_count, 1)
+        with mock.patch.object(wp.utils, "radix_sort_pairs", wraps=wp.utils.radix_sort_pairs) as radix_sort:
+            broad_phase.launch(
+                shape_lower,
+                shape_upper,
+                None,
+                shape_group,
+                shape_world,
+                shape_count,
+                candidate_pair,
+                candidate_pair_count,
+                device=device,
+            )
+
+        radix_sort.assert_called_once_with(
+            keys=broad_phase.sap_projection_lower,
+            values=broad_phase.sap_sort_index,
+            count=broad_phase.max_shapes_per_world,
+        )
+        self.assertEqual(int(candidate_pair_count.numpy()[0]), 6)
 
     def test_sap_broadphase_auto(self):
         for shape_count in (70, 150, 300):

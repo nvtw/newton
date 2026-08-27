@@ -541,8 +541,9 @@ class BroadPhaseSAP:
                 only shapes with the COLLIDE_SHAPES flag will be included in collision checks.
                 This efficiently filters out visual-only shapes.
             sweep_thread_count_multiplier: Multiplier for number of threads used in sweep phase
-            sort_type: SAP sort mode. Use ``"segmented"`` (default) for
-                ``wp.utils.segmented_sort_pairs``, ``"tile"`` for tile-based
+            sort_type: SAP sort mode. Use ``"segmented"`` (default) for general
+                segmented sorting; a single segment uses equivalent ordinary radix sorting.
+                Use ``"tile"`` for tile-based
                 sorting via ``wp.tile_sort``, or ``"auto"`` to use one of
                 three bounded tile sizes for medium-sized worlds.
             tile_block_dim: Block dimension for tile-based sorting (optional, auto-calculated if None).
@@ -630,7 +631,7 @@ class BroadPhaseSAP:
             self.tile_sort_kernel = _create_tile_sort_kernel(self.tile_size)
 
         # Allocate 1D arrays for per-world SAP data
-        # Note: projection_lower and sort_index need 2x space for segmented sort scratch memory
+        # Note: projection_lower and sort_index need 2x space for radix-sort scratch memory
         total_elements = int(self.world_count * self.max_shapes_per_world)
         self.sap_projection_lower = wp.zeros(2 * total_elements, dtype=wp.float32, device=device)
         self.sap_projection_upper = wp.zeros(total_elements, dtype=wp.float32, device=device)
@@ -782,8 +783,8 @@ class BroadPhaseSAP:
             record_tape=False,
         )
 
-        # Perform segmented sort - each world is sorted independently
-        # Two strategies: tile-based (faster for certain sizes) or segmented (more flexible)
+        # Sort projections while preserving independent world segments
+        # Tile sorting handles bounded medium worlds; radix sorting handles the general cases.
         if self.sort_type == "tile" and self.tile_sort_kernel is not None:
             # Use tile-based sort with shared memory
             wp.launch_tiled(
@@ -797,6 +798,13 @@ class BroadPhaseSAP:
                 block_dim=self.tile_block_dim,
                 device=device,
                 record_tape=False,
+            )
+        elif self.world_count == 1:
+            # A single segment does not need segmented-sort bookkeeping.
+            wp.utils.radix_sort_pairs(
+                keys=self.sap_projection_lower,
+                values=self.sap_sort_index,
+                count=self.max_shapes_per_world,
             )
         else:
             # Use segmented sort (default)
