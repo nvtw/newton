@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.geometry.contact_data import CONTACT_SORT_SUB_KEY_BITS
 from newton._src.geometry.contact_match import _CLAIM_SENTINEL, MATCH_BROKEN, MATCH_NOT_FOUND
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
@@ -535,6 +536,7 @@ def test_deterministic_implied(test, device):
         pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
         test.assertTrue(pipeline.deterministic)
         test.assertEqual(pipeline.contact_matching, "latest")
+        test.assertEqual(pipeline._contact_sort_sub_key_bits, CONTACT_SORT_SUB_KEY_BITS)
 
 
 def test_contacts_exposes_matching_mode(test, device):

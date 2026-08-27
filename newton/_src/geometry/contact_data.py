@@ -14,6 +14,8 @@ SHAPE_PAIR_HFIELD_BIT = wp.int32(1 << 30)
 SHAPE_PAIR_INDEX_MASK = wp.int32((1 << 30) - 1)
 
 CONTACT_SORT_SUB_KEY_BITS = 23
+# Primitive contacts use sub-keys 0..3 and generic convex manifolds use 0..4.
+CONTACT_SORT_CONVEX_SUB_KEY_BITS = 3
 CONTACT_SORT_MAX_SHAPE_INDEX_BITS = 20
 
 
@@ -66,6 +68,30 @@ class ContactData:
 
 
 @wp.func
+def make_contact_sort_key_with_bits(
+    shape_a: int,
+    shape_b: int,
+    sort_sub_key: int,
+    shape_index_bits: int,
+    sub_key_bit_count: int,
+) -> wp.int64:
+    """Build a lexicographic contact key using explicit field widths.
+
+    Values exceeding either field width are masked. Callers must therefore
+    select widths that cover every sub-key emitted by their contact paths.
+    """
+    shape_bits = wp.int64(shape_index_bits)
+    sub_key_bits = wp.int64(sub_key_bit_count)
+    shape_mask = (wp.int64(1) << shape_bits) - wp.int64(1)
+    sub_key_mask = (wp.int64(1) << sub_key_bits) - wp.int64(1)
+    return (
+        ((wp.int64(shape_a) & shape_mask) << (sub_key_bits + shape_bits))
+        | ((wp.int64(shape_b) & shape_mask) << sub_key_bits)
+        | (wp.int64(sort_sub_key) & sub_key_mask)
+    )
+
+
+@wp.func
 def make_contact_sort_key(shape_a: int, shape_b: int, sort_sub_key: int, shape_index_bits: int) -> wp.int64:
     """Build a 64-bit sort key for deterministic contact ordering.
 
@@ -92,13 +118,12 @@ def make_contact_sort_key(shape_a: int, shape_b: int, sort_sub_key: int, shape_i
       reserved for reduction anchors — 21 effective fingerprint bits (~419K
       iso voxels).
     """
-    shape_bits = wp.int64(shape_index_bits)
-    sub_key_bits = wp.int64(CONTACT_SORT_SUB_KEY_BITS)
-    shape_mask = (wp.int64(1) << shape_bits) - wp.int64(1)
-    return (
-        ((wp.int64(shape_a) & shape_mask) << (sub_key_bits + shape_bits))
-        | ((wp.int64(shape_b) & shape_mask) << sub_key_bits)
-        | (wp.int64(sort_sub_key) & wp.int64(0x7FFFFF))
+    return make_contact_sort_key_with_bits(
+        shape_a,
+        shape_b,
+        sort_sub_key,
+        shape_index_bits,
+        CONTACT_SORT_SUB_KEY_BITS,
     )
 
 

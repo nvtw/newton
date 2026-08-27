@@ -419,9 +419,25 @@ class TestNarrowPhase(_NarrowPhaseSetupMixin, unittest.TestCase):
 
         count, pairs, *_ = self._run_narrow_phase(geom_list, [(2, 3), (0, 1)])
 
-        self.assertEqual(self.narrow_phase._contact_sorter._key_bit_count, 27)
+        self.assertEqual(self.narrow_phase._contact_sorter._key_bit_count, 7)
         self.assertEqual(count, 2)
         self.assertTrue(np.array_equal(pairs, np.array(((0, 1), (2, 3)), dtype=np.int32)))
+
+    def test_deterministic_complex_contact_sort_keeps_full_sub_key(self):
+        narrow_phase = NarrowPhase(
+            max_candidate_pairs=2,
+            max_triangle_pairs=8,
+            reduce_contacts=False,
+            has_meshes=True,
+            deterministic=True,
+            contact_max=20,
+            verify_buffers=False,
+            shape_aabb_lower=wp.zeros(4, dtype=wp.vec3),
+            shape_aabb_upper=wp.ones(4, dtype=wp.vec3),
+        )
+
+        self.assertEqual(narrow_phase._contact_sort_sub_key_bits, 23)
+        self.assertEqual(narrow_phase._contact_sorter._key_bit_count, 27)
 
     def test_launch_without_shape_edge_range(self):
         geom_list = [

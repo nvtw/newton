@@ -19,7 +19,7 @@ from ..geometry.contact_data import (
     ContactData,
     contact_passes_speculative_gap_check,
     contact_sort_shape_index_bits,
-    make_contact_sort_key,
+    make_contact_sort_key_with_bits,
     prepare_speculative_contact,
 )
 from ..geometry.contact_match import ContactMatcher
@@ -136,6 +136,7 @@ class ContactWriterData:
 
     contact_max: int
     shape_index_bits: int
+    sub_key_bits: int
     # Body information arrays (for transforming to body-local coordinates)
     body_q: wp.array[wp.transform]
     shape_body: wp.array[int]
@@ -205,11 +206,12 @@ def _write_contact_at_index(
         writer_data.out_friction[index] = contact_data.contact_friction_scale
 
     if writer_data.out_sort_key.shape[0] > 0:
-        writer_data.out_sort_key[index] = make_contact_sort_key(
+        writer_data.out_sort_key[index] = make_contact_sort_key_with_bits(
             contact_data.shape_a,
             contact_data.shape_b,
             contact_data.sort_sub_key,
             writer_data.shape_index_bits,
+            writer_data.sub_key_bits,
         )
 
 
@@ -1601,6 +1603,15 @@ class CollisionPipeline:
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
+        # Matching decodes persistent contact fingerprints from the fixed
+        # 23-bit layout. Non-matching analytic/convex pipelines can use the
+        # narrower manifold-local sub-key selected by NarrowPhase.
+        self._contact_sort_sub_key_bits = (
+            CONTACT_SORT_SUB_KEY_BITS
+            if matching_enabled
+            else getattr(self.narrow_phase, "_contact_sort_sub_key_bits", CONTACT_SORT_SUB_KEY_BITS)
+        )
+
         self._hydro_shape_sdf_data_prepared = self.hydroelastic_sdf is not None
         if self.hydroelastic_sdf is not None:
             # Model SDF descriptors are finalized here; only shape transforms change per frame.
@@ -1677,7 +1688,7 @@ class CollisionPipeline:
                 self._sort_key_array = wp.zeros(rigid_contact_max, dtype=wp.int64, device=device)
             self._contact_sorter = ContactSorter(
                 rigid_contact_max,
-                key_bit_count=CONTACT_SORT_SUB_KEY_BITS + 2 * self._contact_sort_shape_index_bits,
+                key_bit_count=self._contact_sort_sub_key_bits + 2 * self._contact_sort_shape_index_bits,
                 per_contact_shape_properties=per_contact_props,
                 device=device,
             )
@@ -2001,6 +2012,7 @@ class CollisionPipeline:
         writer_data = ContactWriterData()
         writer_data.contact_max = contacts.rigid_contact_max
         writer_data.shape_index_bits = self._contact_sort_shape_index_bits
+        writer_data.sub_key_bits = self._contact_sort_sub_key_bits
         writer_data.body_q = state.body_q
         writer_data.shape_body = model.shape_body
         writer_data.shape_gap = model.shape_gap

@@ -36,6 +36,7 @@ from ..geometry.collision_primitive import (
     collide_sphere_sphere,
 )
 from ..geometry.contact_data import (
+    CONTACT_SORT_CONVEX_SUB_KEY_BITS,
     CONTACT_SORT_MAX_SHAPE_INDEX_BITS,
     CONTACT_SORT_SUB_KEY_BITS,
     SHAPE_PAIR_HFIELD_BIT,
@@ -43,7 +44,7 @@ from ..geometry.contact_data import (
     _contact_passes_gap_check_precomputed,
     contact_passes_speculative_gap_check,
     contact_sort_shape_index_bits,
-    make_contact_sort_key,
+    make_contact_sort_key_with_bits,
     prepare_speculative_contact,
 )
 from ..geometry.contact_reduction_global import (
@@ -128,6 +129,7 @@ def _append_pair_compacted(
 class ContactWriterData:
     contact_max: int
     shape_index_bits: int
+    sub_key_bits: int
     contact_count: wp.array[int]
     contact_pair: wp.array[wp.vec2i]
     contact_position: wp.array[wp.vec3]
@@ -336,11 +338,12 @@ def _write_contact_simple_at_index(
         writer_data.contact_tangent[index] = wp.normalize(world_x - wp.dot(world_x, normal_a_to_b) * normal_a_to_b)
 
     if writer_data.contact_sort_key.shape[0] > 0:
-        writer_data.contact_sort_key[index] = make_contact_sort_key(
+        writer_data.contact_sort_key[index] = make_contact_sort_key_with_bits(
             contact_data.shape_a,
             contact_data.shape_b,
             contact_data.sort_sub_key,
             writer_data.shape_index_bits,
+            writer_data.sub_key_bits,
         )
 
 
@@ -2353,6 +2356,11 @@ class NarrowPhase:
             if self.external_aabb
             else CONTACT_SORT_MAX_SHAPE_INDEX_BITS
         )
+        self._contact_sort_sub_key_bits = (
+            CONTACT_SORT_SUB_KEY_BITS
+            if has_meshes or has_heightfields or hydroelastic_sdf is not None
+            else CONTACT_SORT_CONVEX_SUB_KEY_BITS
+        )
         self.shape_voxel_resolution = shape_voxel_resolution
 
         # Determine the writer function
@@ -2598,7 +2606,7 @@ class NarrowPhase:
                 self._sort_key_array = wp.zeros(det_capacity, dtype=wp.int64, device=device)
                 self._contact_sorter = ContactSorter(
                     det_capacity,
-                    key_bit_count=CONTACT_SORT_SUB_KEY_BITS + 2 * self._contact_sort_shape_index_bits,
+                    key_bit_count=self._contact_sort_sub_key_bits + 2 * self._contact_sort_shape_index_bits,
                     device=device,
                 )
             else:
@@ -3476,6 +3484,7 @@ class NarrowPhase:
         writer_data = ContactWriterData()
         writer_data.contact_max = contact_max
         writer_data.shape_index_bits = self._contact_sort_shape_index_bits
+        writer_data.sub_key_bits = self._contact_sort_sub_key_bits
         writer_data.contact_count = contact_count
         writer_data.contact_pair = contact_pair
         writer_data.contact_position = contact_position
