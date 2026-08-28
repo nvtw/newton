@@ -848,6 +848,9 @@ def pack_joint_constraint_axes_kernel(
     model_joint_damping: wp.array[wp.float32],
     model_joint_friction: wp.array[wp.float32],
     joint_dof_type: wp.array[wp.int32],
+    joint_num_dynamic_cts: wp.array[wp.int32],
+    joint_num_friction_cts: wp.array[wp.int32],
+    joint_num_effort_cts: wp.array[wp.int32],
     joint_dynamic_cts_start: wp.array[wp.int32],
     joint_friction_cts_start: wp.array[wp.int32],
     joint_effort_cts_start: wp.array[wp.int32],
@@ -864,6 +867,9 @@ def pack_joint_constraint_axes_kernel(
     friction_row = joint_friction_cts_start[joint]
     effort_row = joint_effort_cts_start[joint]
     dof_type = joint_dof_type[joint]
+    retain_dynamic = joint_num_dynamic_cts[joint] > 0
+    retain_friction = joint_num_friction_cts[joint] > 0
+    retain_effort = joint_num_effort_cts[joint] > 0
     for axis in range(dof_end - dof_start):
         dof = dof_start + axis
         act_type = JointActuationType.from_newton_wp(model_joint_target_mode[dof])
@@ -882,13 +888,13 @@ def pack_joint_constraint_axes_kernel(
             model_joint_target_kd[dof],
             model_joint_effort_limit[dof],
         )
-        if dynamic:
+        if dynamic and retain_dynamic:
             dynamic_cts_axis[dynamic_row] = axis
             dynamic_row += 1
-        if friction:
+        if friction and retain_friction:
             friction_cts_axis[friction_row] = axis
             friction_row += 1
-        if effort:
+        if effort and retain_effort:
             effort_cts_axis[effort_row] = axis
             effort_row += 1
 
@@ -1995,6 +2001,9 @@ def convert_joints(
             model.joint_damping,
             model.joint_friction,
             joint_dof_type,
+            joint_num_dynamic_cts,
+            joint_num_friction_cts,
+            joint_num_effort_cts,
             joint_dynamic_cts_start,
             joint_friction_cts_start,
             joint_effort_cts_start,
