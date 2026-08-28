@@ -859,11 +859,14 @@ def test_sparse_topology_classification_strides_over_capacity(test, device):
         max_grid_cells=30_000,
         device=device,
     )
-    surface._workspace.launch_threads = 1
-
     surface.update_field(positions, radii)
 
-    counts = surface._workspace.grid_counts.numpy()
+    workspace = surface._workspace
+    workspace.grid_counts.zero_()
+    workspace.launch_threads = 1
+    workspace._classify_topology()
+
+    counts = workspace.grid_counts.numpy()
     cell_count = surface._sparse_volume.get_active_stats().voxel_count
     node_count = cell_count
     test.assertEqual(int(counts[0]), node_count)
