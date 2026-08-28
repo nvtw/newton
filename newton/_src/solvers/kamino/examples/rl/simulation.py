@@ -452,6 +452,7 @@ class RigidBodySim:
         self._u_i = wp.to_torch(self.sim.state.u_i).reshape(nw, nb, 6)
 
         # Control tensors (writable views)
+        # q_j_ref uses generalized coordinates (njc), dq_j_ref and tau_j_ref use DOFs (njd)
         self._q_j_ref = wp.to_torch(self.sim.control.q_j_ref).reshape(nw, njc)
         self._dq_j_ref = wp.to_torch(self.sim.control.dq_j_ref).reshape(nw, njd)
         self._tau_j_ref = wp.to_torch(self.sim.control.tau_j_ref).reshape(nw, njd)
@@ -524,10 +525,9 @@ class RigidBodySim:
             ndofs = int(joint_num_dofs[j])
             self._joint_names.append(joint_labels[j])
             if int(joint_act_type[j]) > 0:  # act_type > PASSIVE means actuated
-                if ncoords != ndofs:
-                    raise RuntimeError(f"Actuated joint {joint_labels[j]!r} requires coordinate-space target mapping")
-                self._actuated_coord_indices.extend(coord_offset + i for i in range(ndofs))
                 self._actuated_joint_names.append(joint_labels[j])
+                for coord_idx in range(ncoords):
+                    self._actuated_coord_indices.append(coord_offset + coord_idx)
                 for dof_idx in range(ndofs):
                     self._actuated_dof_indices.append(dof_offset + dof_idx)
             coord_offset += ncoords
@@ -793,7 +793,7 @@ class RigidBodySim:
         The actual reset happens on the next call to :meth:`apply_resets`.
 
         Args:
-            dof_positions: Joint positions ``(len(env_ids), num_joint_dofs)``.
+            dof_positions: Joint positions ``(len(env_ids), num_joint_coords)``.
             dof_velocities: Joint velocities ``(len(env_ids), num_joint_dofs)``.
             env_ids: Which worlds to reset.  ``None`` resets all.
         """
@@ -974,12 +974,11 @@ class RigidBodySim:
 
     @property
     def actuated_coord_indices(self) -> list[int]:
-        """Actuated coordinate indices for position targets."""
         return self._actuated_coord_indices
 
     @property
     def actuated_coord_indices_tensor(self) -> torch.Tensor:
-        """Actuated coordinate indices on the simulation device."""
+        """Actuated coordinate indices (for indexing :attr:`q_j_ref`) as a ``torch.long`` tensor."""
         return self._actuated_coord_indices_tensor
 
     @property

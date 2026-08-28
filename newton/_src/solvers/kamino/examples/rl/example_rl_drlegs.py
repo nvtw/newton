@@ -122,7 +122,7 @@ class Example:
         num_worlds = 1
 
         # USD model path
-        asset_path = newton.utils.download_asset("disneyresearch")
+        asset_path = newton.utils.download_asset("disneyresearch", ref="261cd1f429619d8ef4f546bd788ab9dea906b5e1")
         usd_model_path = str(asset_path / config["usd_model"])
 
         # Create generic articulated body simulator
@@ -150,13 +150,14 @@ class Example:
         k_d = wp.to_torch(self.sim_wrapper.sim.model.joints.k_d_j)
         a_j = wp.to_torch(self.sim_wrapper.sim.model.joints.a_j)
         b_j = wp.to_torch(self.sim_wrapper.sim.model.joints.b_j)
-        actuated_dofs = self.sim_wrapper.actuated_dof_indices_tensor
-        k_p.zero_()
-        k_d.zero_()
+        actuated_mask = torch.zeros_like(k_p, dtype=torch.bool)
+        actuated_mask[self.sim_wrapper.actuated_dof_indices_tensor] = True
+        k_p[actuated_mask] = config["pd_kp"]
+        k_d[actuated_mask] = config["pd_kd"]
+        a_j[actuated_mask] = config["pd_armature"]
+        k_p[~actuated_mask] = 0.0
+        k_d[~actuated_mask] = 0.0
         b_j.fill_(0.0)
-        k_p[actuated_dofs] = config["pd_kp"]
-        k_d[actuated_dofs] = config["pd_kd"]
-        a_j[actuated_dofs] = config["pd_armature"]
 
         # Observation builder (63D base: root_pos(3) + joints(36) + action_hist(24))
         self.obs_builder = DrlegsBaseObservation(
@@ -509,7 +510,7 @@ if __name__ == "__main__":
     torch_device = "cuda" if device.is_cuda else "cpu"
 
     # Load config from YAML (with hardcoded fallback defaults)
-    asset_path = newton.utils.download_asset("disneyresearch")
+    asset_path = newton.utils.download_asset("disneyresearch", ref="261cd1f429619d8ef4f546bd788ab9dea906b5e1")
     config = _load_drlegs_config(asset_path)
 
     # CLI overrides
