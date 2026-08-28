@@ -134,6 +134,28 @@ class TestConvexSupportAcceleration(unittest.TestCase):
         self.assertFalse(small_pipeline.narrow_phase.convex_support_acceleration)
         self.assertTrue(accelerated_pipeline.narrow_phase.convex_support_acceleration)
 
+    def test_mesh_triangle_contacts_use_convex_support_acceleration(self):
+        """Generate mesh-triangle contacts with accelerated convex support."""
+        builder = newton.ModelBuilder()
+        builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.5, compute_inertia=False))
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.75)))
+        convex = newton.Mesh.create_sphere(
+            0.5,
+            num_latitudes=24,
+            num_longitudes=48,
+            compute_normals=False,
+            compute_uvs=False,
+            compute_inertia=False,
+        )
+        builder.add_shape_convex_hull(body=body, mesh=convex)
+        model = builder.finalize()
+        pipeline = newton.CollisionPipeline(model, broad_phase="explicit", reduce_contacts=False)
+        contacts = pipeline.contacts()
+
+        self.assertTrue(pipeline.narrow_phase.convex_support_acceleration)
+        pipeline.collide(model.state(), contacts)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

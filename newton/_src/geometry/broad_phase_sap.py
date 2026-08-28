@@ -747,6 +747,7 @@ class BroadPhaseSAP:
 
         if device is None:
             device = shape_lower.device
+        device_obj = wp.get_device(device)
 
         if shape_count < 0 or shape_count > shape_lower.shape[0]:
             raise ValueError(f"shape_count must be in [0, {shape_lower.shape[0]}], got {shape_count}")
@@ -820,7 +821,7 @@ class BroadPhaseSAP:
                 device=device,
                 record_tape=False,
             )
-        elif self.world_count == 1:
+        elif self.world_count == 1 and not device_obj.is_capturing:
             # A single segment does not need segmented-sort bookkeeping.
             wp.utils.radix_sort_pairs(
                 keys=self.sap_projection_lower,
@@ -828,7 +829,9 @@ class BroadPhaseSAP:
                 count=self.max_shapes_per_world,
             )
         else:
-            # Use segmented sort (default)
+            # Warp versions before 1.17 may resize radix-sort scratch storage
+            # during CUDA graph capture (NVIDIA/warp#1373). Retain the
+            # capture-safe segmented path for a single segment while capturing.
             # The count is the number of actual elements to sort (not including scratch space)
             wp.utils.segmented_sort_pairs(
                 keys=self.sap_projection_lower,

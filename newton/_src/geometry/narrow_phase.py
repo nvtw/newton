@@ -1623,8 +1623,19 @@ def narrow_phase_find_mesh_triangle_overlaps_kernel(
         )
 
 
-def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
-    _module = f"narrow_phase_mesh_tri_{writer_func.__name__}"
+def create_narrow_phase_process_mesh_triangle_contacts_kernel(
+    writer_func: Any,
+    convex_support_acceleration: bool = False,
+):
+    _module = f"narrow_phase_mesh_tri_{writer_func.__name__}_{convex_support_acceleration}"
+    support_func = support_map_accelerated if convex_support_acceleration else support_map
+    provider_type = AcceleratedSupportMapDataProvider if convex_support_acceleration else SupportMapDataProvider
+    compute_contacts = create_compute_gjk_mpr_contacts(
+        writer_func,
+        support_func=support_func,
+        use_precomputed_center=True,
+        penetration_refiner=create_triangle_prism_penetration_refiner(support_func),
+    )
 
     @wp.kernel(enable_backward=False, module=_module)
     def narrow_phase_process_mesh_triangle_contacts_kernel(
@@ -1632,6 +1643,10 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
         shape_data: wp.array[wp.vec4],
         shape_transform: wp.array[wp.transform],
         shape_source: wp.array[wp.uint64],
+        shape_support_data: wp.array[wp.vec4i],
+        support_lut: wp.array[int],
+        support_vertex_offsets: wp.array[int],
+        support_neighbors: wp.array[int],
         shape_collision_aabb_lower: wp.array[wp.vec3],
         shape_collision_aabb_upper: wp.array[wp.vec3],
         shape_gap: wp.array[float],  # Per-shape contact gaps
@@ -1706,14 +1721,13 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func: Any):
             gap_b = shape_gap[shape_b]
             gap_sum = gap_a + gap_b
 
-            data_provider = SupportMapDataProvider()
-            wp.static(
-                create_compute_gjk_mpr_contacts(
-                    writer_func,
-                    use_precomputed_center=True,
-                    penetration_refiner=create_triangle_prism_penetration_refiner(support_map),
-                )
-            )(
+            data_provider = provider_type()
+            if wp.static(convex_support_acceleration):
+                data_provider.shape_support_data = shape_support_data
+                data_provider.support_lut = support_lut
+                data_provider.support_vertex_offsets = support_vertex_offsets
+                data_provider.support_neighbors = support_neighbors
+            wp.static(compute_contacts)(
                 shape_data_a,
                 shape_data_b,
                 quat_a,
@@ -2461,7 +2475,10 @@ class NarrowPhase:
             self.narrow_phase_manifold_kernel = None
         # Create triangle contacts kernel when meshes or heightfields are present
         if has_meshes or has_heightfields:
-            self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(writer_func)
+            self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(
+                writer_func,
+                convex_support_acceleration=convex_support_acceleration,
+            )
         else:
             self.mesh_triangle_contacts_kernel = None
 
@@ -3094,6 +3111,10 @@ class NarrowPhase:
                         shape_data,
                         shape_transform,
                         shape_source,
+                        shape_support_data,
+                        support_lut,
+                        support_vertex_offsets,
+                        support_neighbors,
                         shape_collision_aabb_lower,
                         shape_collision_aabb_upper,
                         shape_gap,
