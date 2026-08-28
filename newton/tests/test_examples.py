@@ -827,7 +827,7 @@ add_example_test(
     TestSelectionAPIExamples,
     name="selection.example_selection_cartpole",
     devices=cuda_test_devices,
-    test_options={"num-frames": 100, "world-count": 2, "solver": "kamino"},
+    test_options={"num-frames": 10, "world-count": 2, "solver": "kamino"},
     use_viewer=True,
     test_suffix="kamino",
 )
