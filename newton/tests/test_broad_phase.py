@@ -161,6 +161,7 @@ def _test_advance_sap_chunk_base(
 
 class TestBroadPhase(unittest.TestCase):
     def test_sap_auto_sort_selection(self):
+        """Select bounded tile sizes only for medium-sized SAP worlds."""
         cases = (
             (63, "segmented", 63),
             (64, "tile", 128),
@@ -222,17 +223,21 @@ class TestBroadPhase(unittest.TestCase):
         self.assertEqual(int(candidate_pair_count.numpy()[0]), 3)
 
     def test_sap_broadphase_auto(self):
+        """Generate correct SAP pairs with automatic sort selection."""
         for shape_count in (70, 150, 300):
             with self.subTest(shape_count=shape_count):
                 self._test_sap_broadphase_impl("auto", shape_count)
 
     def test_sap_broadphase_multiple_worlds_auto(self):
+        """Generate correct automatic-SAP pairs across multiple worlds."""
         self._test_sap_broadphase_multiple_worlds_impl("auto")
 
     def test_sap_broadphase_with_shape_flags_auto(self):
+        """Respect shape flags when automatic SAP sorting is enabled."""
         self._test_sap_broadphase_with_shape_flags_impl("auto")
 
     def test_sap_edge_cases_auto(self):
+        """Handle SAP edge cases with automatic sort selection."""
         self._test_sap_edge_cases_impl("auto")
 
     def test_sap_chunk_advance_avoids_int32_overflow(self):

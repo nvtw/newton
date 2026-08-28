@@ -47,6 +47,7 @@ def _accelerated_support_kernel(
 
 class TestConvexSupportAcceleration(unittest.TestCase):
     def test_accelerated_support_matches_exhaustive_support_value(self):
+        """Match exhaustive support values for accelerated convex meshes."""
         mesh = _deduplicate_convex_collision_mesh(
             newton.Mesh.create_sphere(
                 0.5,
@@ -88,6 +89,7 @@ class TestConvexSupportAcceleration(unittest.TestCase):
         np.testing.assert_allclose(actual_dot, expected_dot, rtol=2.0e-6, atol=2.0e-6)
 
     def test_nonconvex_topology_falls_back(self):
+        """Reject acceleration data for unsupported nonconvex topology."""
         rng = np.random.default_rng(456)
         vertices = rng.normal(size=(300, 3)).astype(np.float32)
         vertices /= np.linalg.norm(vertices, axis=1)[:, None]
@@ -98,6 +100,7 @@ class TestConvexSupportAcceleration(unittest.TestCase):
         self.assertIsNone(_build_convex_support_acceleration(source))
 
     def test_small_hulls_do_not_allocate_acceleration(self):
+        """Skip support acceleration for small convex hulls."""
         mesh = newton.Mesh.create_sphere(
             0.5,
             num_latitudes=8,
@@ -109,6 +112,8 @@ class TestConvexSupportAcceleration(unittest.TestCase):
         self.assertIsNone(_build_convex_support_acceleration(mesh))
 
     def test_pipeline_specializes_support_map_for_available_acceleration(self):
+        """Specialize support mapping only when acceleration data exists."""
+
         def create_pipeline(num_latitudes, num_longitudes):
             builder = newton.ModelBuilder()
             mesh = newton.Mesh.create_sphere(

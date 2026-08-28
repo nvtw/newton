@@ -399,6 +399,7 @@ class TestNarrowPhase(_NarrowPhaseSetupMixin, unittest.TestCase):
     """Test NarrowPhase collision detection API with various primitive pairs."""
 
     def test_deterministic_compact_contact_sort(self):
+        """Sort deterministic primitive contacts with compact keys."""
         self.narrow_phase = NarrowPhase(
             max_candidate_pairs=2,
             max_triangle_pairs=8,
@@ -424,6 +425,7 @@ class TestNarrowPhase(_NarrowPhaseSetupMixin, unittest.TestCase):
         self.assertTrue(np.array_equal(pairs, np.array(((0, 1), (2, 3)), dtype=np.int32)))
 
     def test_deterministic_complex_contact_sort_keeps_full_sub_key(self):
+        """Retain full deterministic sub-keys for complex contacts."""
         narrow_phase = NarrowPhase(
             max_candidate_pairs=2,
             max_triangle_pairs=8,
