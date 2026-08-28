@@ -1,1 +1,0 @@
-Accelerate deterministic primitive and convex contact sorting by using compact manifold-local sub-keys, while retaining full-width keys for mesh, heightfield, SDF, hydroelastic, and persistent contacts. No migration is required.
