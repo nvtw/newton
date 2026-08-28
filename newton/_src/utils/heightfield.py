@@ -465,7 +465,10 @@ def heightfield_vs_convex_midphase(
             h10 = elevation_data[base + r * hfd.ncol + c + 1]
             h01 = elevation_data[base + (r + 1) * hfd.ncol + c]
             h11 = elevation_data[base + (r + 1) * hfd.ncol + c + 1]
-            cell_max_z = hfd.min_z + wp.max(wp.max(h00, h10), wp.max(h01, h11)) * z_range
+            corner_sample = wp.max(wp.max(h00, h10), wp.max(h01, h11))
+            if z_range < 0.0:
+                corner_sample = wp.min(wp.min(h00, h10), wp.min(h01, h11))
+            cell_max_z = hfd.min_z + corner_sample * z_range
             if aabb_lower[2] <= cell_max_z:
                 for tri_sub in range(2):
                     tri_idx = (r * cols + c) * 2 + tri_sub

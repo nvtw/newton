@@ -19,6 +19,7 @@ primitive collision functions.
 
 import typing
 import unittest
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -327,7 +328,7 @@ class _NarrowPhaseSetupMixin:
             wp.full(len(geom_list), wp.vec3i(4, 4, 4), dtype=wp.vec3i),  # shape_voxel_resolution
         )
 
-    def _run_narrow_phase(self, geom_list, pairs):
+    def _run_narrow_phase(self, geom_list, pairs, **launch_kwargs):
         """Run narrow phase on given geometry and pairs.
 
         Args:
@@ -382,6 +383,7 @@ class _NarrowPhaseSetupMixin:
             contact_penetration=contact_penetration,
             contact_count=contact_count,
             contact_tangent=contact_tangent,
+            **launch_kwargs,
         )
 
         count = contact_count.numpy()[0]
@@ -397,6 +399,42 @@ class _NarrowPhaseSetupMixin:
 
 class TestNarrowPhase(_NarrowPhaseSetupMixin, unittest.TestCase):
     """Test NarrowPhase collision detection API with various primitive pairs."""
+
+    def test_launch_forwards_convex_support_metadata(self):
+        """Forward cooked convex support metadata through the standard launch path."""
+        self.narrow_phase = NarrowPhase(
+            max_candidate_pairs=1,
+            max_triangle_pairs=1,
+            reduce_contacts=False,
+            has_meshes=False,
+        )
+        shape_support_data = wp.full(2, (-1, -1, -1, 0), dtype=wp.vec4i)
+        support_lut = wp.zeros(1, dtype=wp.int32)
+        support_vertex_offsets = wp.zeros(1, dtype=wp.int32)
+        support_neighbors = wp.zeros(1, dtype=wp.int32)
+
+        with mock.patch.object(
+            self.narrow_phase,
+            "launch_custom_write",
+            wraps=self.narrow_phase.launch_custom_write,
+        ) as launch_custom_write:
+            self._run_narrow_phase(
+                [
+                    {"type": GeoType.SPHERE, "transform": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])},
+                    {"type": GeoType.SPHERE, "transform": ([0.5, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])},
+                ],
+                [(0, 1)],
+                shape_support_data=shape_support_data,
+                support_lut=support_lut,
+                support_vertex_offsets=support_vertex_offsets,
+                support_neighbors=support_neighbors,
+            )
+
+        forwarded = launch_custom_write.call_args.kwargs
+        self.assertIs(forwarded["shape_support_data"], shape_support_data)
+        self.assertIs(forwarded["support_lut"], support_lut)
+        self.assertIs(forwarded["support_vertex_offsets"], support_vertex_offsets)
+        self.assertIs(forwarded["support_neighbors"], support_neighbors)
 
     def test_deterministic_compact_contact_sort(self):
         """Sort deterministic primitive contacts with compact keys."""
