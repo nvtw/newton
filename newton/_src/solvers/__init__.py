@@ -11,6 +11,15 @@ if TYPE_CHECKING:
     from .kamino import SolverKamino
     from .mujoco import SolverMuJoCo
     from .phoenx import SolverPhoenX
+    from .phoenx.fluid import (
+        KPMFR2D,
+        KPMFR3D,
+        KPMFR2DConfig,
+        KPMFR3DConfig,
+        VolumeBrickGrid,
+        export_state_3d,
+        rasterize_obstacles,
+    )
     from .semi_implicit import SolverSemiImplicit
     from .solver import SolverBase
     from .style3d.solver_style3d import SolverStyle3D
@@ -18,6 +27,10 @@ if TYPE_CHECKING:
     from .xpbd import SolverXPBD
 
 __all__ = [
+    "KPMFR2D",
+    "KPMFR3D",
+    "KPMFR2DConfig",
+    "KPMFR3DConfig",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
@@ -28,6 +41,9 @@ __all__ = [
     "SolverStyle3D",
     "SolverVBD",
     "SolverXPBD",
+    "VolumeBrickGrid",
+    "export_state_3d",
+    "rasterize_obstacles",
     "style3d",
 ]
 
@@ -36,6 +52,11 @@ __all__ = [
 # resolved on first attribute access (PEP 562) so that importing Newton does
 # not pay the import cost of every solver backend.
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
+    "KPMFR2D": (".phoenx.fluid", "KPMFR2D"),
+    "KPMFR3D": (".phoenx.fluid", "KPMFR3D"),
+    "KPMFR2DConfig": (".phoenx.fluid", "KPMFR2DConfig"),
+    "KPMFR3DConfig": (".phoenx.fluid", "KPMFR3DConfig"),
+    "VolumeBrickGrid": (".phoenx.fluid", "VolumeBrickGrid"),
     "SolverBase": (".solver", "SolverBase"),
     "SolverFeatherstone": (".featherstone", "SolverFeatherstone"),
     "SolverImplicitMPM": (".implicit_mpm", "SolverImplicitMPM"),
@@ -46,6 +67,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SolverStyle3D": (".style3d.solver_style3d", "SolverStyle3D"),
     "SolverVBD": (".vbd", "SolverVBD"),
     "SolverXPBD": (".xpbd", "SolverXPBD"),
+    "export_state_3d": (".phoenx.fluid", "export_state_3d"),
+    "rasterize_obstacles": (".phoenx.fluid", "rasterize_obstacles"),
     "style3d": (".style3d", None),
 }
 

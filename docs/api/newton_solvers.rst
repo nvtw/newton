@@ -34,6 +34,11 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    :toctree: _generated
    :nosignatures:
 
+   KPMFR2D
+   KPMFR3D
+   KPMFR2DConfig
+   KPMFR3DConfig
+   VolumeBrickGrid
    SolverBase
    SolverFeatherstone
    SolverImplicitMPM
@@ -44,3 +49,12 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    SolverStyle3D
    SolverVBD
    SolverXPBD
+
+.. rubric:: Functions
+
+.. autosummary::
+   :toctree: _generated
+   :nosignatures:
+
+   export_state_3d
+   rasterize_obstacles
