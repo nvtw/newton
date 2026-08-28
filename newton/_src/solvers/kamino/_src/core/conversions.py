@@ -476,6 +476,7 @@ def joint_conversion_kernel(
     joint_limit_lower: wp.array[wp.float32],
     joint_limit_upper: wp.array[wp.float32],
     model_body_inv_mass: wp.array[wp.float32],
+    model_body_inv_inertia: wp.array[wp.mat33f],
     model_body_flags: wp.array[wp.int32],
     # Outputs:
     joint_jid: wp.array[wp.int32],
@@ -530,6 +531,7 @@ def joint_conversion_kernel(
     num_dynamic_cts_j = int(0)
     num_friction_cts_j = int(0)
     num_effort_cts_j = int(0)
+    has_joint_armature = bool(False)
     for axis in range(qd_count_j):
         dof = dofs_start_j + axis
         dof_act_types = JointActuationType.from_newton_wp(model_joint_target_mode[dof])
@@ -552,6 +554,7 @@ def joint_conversion_kernel(
             model_joint_damping[dof],
         )
         friction = has_friction_cts_wp(dof_type_j, model_joint_friction[dof])
+        has_joint_armature = has_joint_armature or model_joint_armature[dof] > 0.0
         if dynamic:
             num_dynamic_cts_j += 1
         if friction:
@@ -570,12 +573,14 @@ def joint_conversion_kernel(
     # structurally singular Delassus rows.
     parent_bid = model_joint_parent[joint_id]
     child_bid = model_joint_child[joint_id]
-    has_dynamic_body = (
-        model_body_inv_mass[child_bid] > 0.0 and (model_body_flags[child_bid] & int(BodyFlags.KINEMATIC)) == 0
+    has_dynamic_body = has_joint_armature or (
+        (model_body_inv_mass[child_bid] > 0.0 or not has_zero_inverse_inertia(model_body_inv_inertia[child_bid]))
+        and (model_body_flags[child_bid] & int(BodyFlags.KINEMATIC)) == 0
     )
     if parent_bid >= 0:
         has_dynamic_body = has_dynamic_body or (
-            model_body_inv_mass[parent_bid] > 0.0 and (model_body_flags[parent_bid] & int(BodyFlags.KINEMATIC)) == 0
+            (model_body_inv_mass[parent_bid] > 0.0 or not has_zero_inverse_inertia(model_body_inv_inertia[parent_bid]))
+            and (model_body_flags[parent_bid] & int(BodyFlags.KINEMATIC)) == 0
         )
 
     if has_dynamic_body:
@@ -1630,6 +1635,7 @@ def convert_joints(
             model.joint_limit_lower,
             model.joint_limit_upper,
             model.body_inv_mass,
+            model.body_inv_inertia,
             model.body_flags,
             # Outputs:
             joint_jid,
