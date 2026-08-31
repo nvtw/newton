@@ -1587,7 +1587,7 @@ class CollisionPipeline:
                 has_meshes=has_meshes,
                 has_heightfields=model.heightfield_count > 0,
                 use_lean_gjk_mpr=use_lean_gjk_mpr,
-                convex_support_acceleration=model.convex_support_lut.shape[0] > 1,
+                convex_support_acceleration=model._convex_support_lut.shape[0] > 1,
                 has_generic_convex_pairs=has_generic_convex_pairs,
                 split_gjk_mpr=split_gjk_mpr,
                 candidate_pair_work_estimate=candidate_pair_work_estimate,
@@ -2050,10 +2050,10 @@ class CollisionPipeline:
             narrow_phase_extension_kwargs.update(
                 mesh_edge_centers=model.mesh_edge_centers,
                 mesh_edge_halves=model.mesh_edge_halves,
-                shape_support_data=model.shape_support_data,
-                support_lut=model.convex_support_lut,
-                support_vertex_offsets=model.convex_support_vertex_offsets,
-                support_neighbors=model.convex_support_neighbors,
+                shape_support_data=model._shape_support_data,
+                support_lut=model._convex_support_lut,
+                support_vertex_offsets=model._convex_support_vertex_offsets,
+                support_neighbors=model._convex_support_neighbors,
                 hydroelastic_shape_sdf_data_prepared=self._hydro_shape_sdf_data_prepared,
             )
         if self._speculative_enabled:

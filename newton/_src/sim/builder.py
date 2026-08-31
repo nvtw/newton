@@ -11900,18 +11900,18 @@ class ModelBuilder:
                         metadata = cached[0]
                 shape_support_data.append(metadata)
 
-            m.shape_support_data = wp.array(shape_support_data, dtype=wp.vec4i, device=device)
-            m.convex_support_lut = wp.array(
+            m._shape_support_data = wp.array(shape_support_data, dtype=wp.vec4i, device=device)
+            m._convex_support_lut = wp.array(
                 np.concatenate(support_lut_chunks) if support_lut_chunks else np.zeros(1, dtype=np.int32),
                 dtype=wp.int32,
                 device=device,
             )
-            m.convex_support_vertex_offsets = wp.array(
+            m._convex_support_vertex_offsets = wp.array(
                 np.concatenate(support_offset_chunks) if support_offset_chunks else np.zeros(1, dtype=np.int32),
                 dtype=wp.int32,
                 device=device,
             )
-            m.convex_support_neighbors = wp.array(
+            m._convex_support_neighbors = wp.array(
                 np.concatenate(support_neighbor_chunks) if support_neighbor_chunks else np.zeros(1, dtype=np.int32),
                 dtype=wp.int32,
                 device=device,
