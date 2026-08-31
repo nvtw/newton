@@ -177,6 +177,38 @@ def _build_convex_support_acceleration(source: Mesh) -> tuple[np.ndarray, np.nda
         if not np.all(supported_positive | supported_negative):
             return None
 
+    # A connected subset of supporting faces is not necessarily a complete
+    # hull. Walking its edges can stop at a local maximum because an omitted
+    # face also omits the edge needed to reach the global support vertex.
+    # Validate a closed two-manifold after welding numerically split seams.
+    coordinate_scale = max(float(np.max(np.abs(vertices))), 1.0)
+    weld_groups: dict[tuple[float, float, float], list[int]] = {}
+    welded_vertex = np.empty(vertex_count, dtype=np.int32)
+    for vertex, position in enumerate(vertices):
+        key = tuple(np.round(position / coordinate_scale, decimals=6))
+        group = weld_groups.setdefault(key, [])
+        if group:
+            welded_vertex[vertex] = group[0]
+        else:
+            welded_vertex[vertex] = vertex
+        group.append(vertex)
+
+    edge_incidence: Counter[tuple[int, int]] = Counter()
+    for triangle in triangles[nondegenerate]:
+        welded = tuple(int(welded_vertex[int(vertex)]) for vertex in triangle)
+        if len(set(welded)) < 3:
+            continue
+        for first, second in ((welded[0], welded[1]), (welded[1], welded[2]), (welded[2], welded[0])):
+            edge_incidence[min(first, second), max(first, second)] += 1
+    if not edge_incidence or any(count != 2 for count in edge_incidence.values()):
+        warnings.warn(
+            "Convex support acceleration requires complete closed hull topology; "
+            "falling back to exhaustive support mapping.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
     adjacent = [set() for _ in range(vertex_count)]
     for triangle in triangles:
         a, b, c = (int(value) for value in triangle)
@@ -192,11 +224,6 @@ def _build_convex_support_acceleration(source: Mesh) -> tuple[np.ndarray, np.nda
 
     # Procedural and imported meshes can have numerically split seam vertices.
     # Share their neighborhoods without changing the mesh points or support values.
-    coordinate_scale = max(float(np.max(np.abs(vertices))), 1.0)
-    weld_groups: dict[tuple[float, float, float], list[int]] = {}
-    for vertex, position in enumerate(vertices):
-        key = tuple(np.round(position / coordinate_scale, decimals=6))
-        weld_groups.setdefault(key, []).append(vertex)
     for group in weld_groups.values():
         if len(group) <= 1:
             continue

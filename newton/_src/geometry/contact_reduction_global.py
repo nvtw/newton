@@ -81,12 +81,12 @@ from .contact_reduction import (
     project_point_to_plane,
 )
 from .support_function import (
+    AcceleratedSupportMapDataProvider,
     GeoTypeEx,
-    SupportMapDataProvider,
     closest_point_on_triangle,
     create_triangle_prism_penetration_refiner,
     extract_shape_data,
-    support_map,
+    support_map_accelerated,
 )
 from .types import GeoType
 
@@ -2350,6 +2350,10 @@ def mesh_triangle_contacts_to_reducer_kernel(
     shape_data: wp.array[wp.vec4],
     shape_transform: wp.array[wp.transform],
     shape_source: wp.array[wp.uint64],
+    shape_support_data: wp.array[wp.vec4i],
+    support_lut: wp.array[int],
+    support_vertex_offsets: wp.array[int],
+    support_neighbors: wp.array[int],
     shape_collision_aabb_lower: wp.array[wp.vec3],
     shape_collision_aabb_upper: wp.array[wp.vec3],
     shape_gap: wp.array[float],
@@ -2470,12 +2474,17 @@ def mesh_triangle_contacts_to_reducer_kernel(
                 write_contact_to_reducer(contact_data, reducer_data, -1)
             continue
 
-        data_provider = SupportMapDataProvider()
+        data_provider = AcceleratedSupportMapDataProvider()
+        data_provider.shape_support_data = shape_support_data
+        data_provider.support_lut = support_lut
+        data_provider.support_vertex_offsets = support_vertex_offsets
+        data_provider.support_neighbors = support_neighbors
         wp.static(
             create_compute_gjk_mpr_contacts(
                 write_contact_to_reducer,
+                support_func=support_map_accelerated,
                 use_precomputed_center=True,
-                penetration_refiner=create_triangle_prism_penetration_refiner(support_map),
+                penetration_refiner=create_triangle_prism_penetration_refiner(support_map_accelerated),
             )
         )(
             shape_data_a,

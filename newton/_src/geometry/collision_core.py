@@ -330,6 +330,9 @@ def create_compute_gjk_mpr_contacts(
             shape_b: Index of shape B
             margin_a: Per-shape margin offset for shape A (signed distance padding)
             margin_b: Per-shape margin offset for shape B (signed distance padding)
+            data_provider: Support-map data provider passed to the configured
+                support function. Accelerated providers carry cooked convex
+                directional seeds and vertex adjacency.
             writer_data: Data structure for contact writer
             sort_sub_key: Sub-key for deterministic contact sorting (e.g. triangle/edge index)
         """
@@ -704,6 +707,9 @@ def create_find_contacts(writer_func: Any, support_func: Any = None, post_proces
             shape_b: Index of shape B
             margin_a: Per-shape margin offset for shape A (signed distance padding)
             margin_b: Per-shape margin offset for shape B (signed distance padding)
+            data_provider: Support-map data provider passed to the configured
+                support function. Accelerated providers carry cooked convex
+                directional seeds and vertex adjacency.
             writer_data: Data structure for contact writer
         """
         if writer_data.contact_count[0] >= writer_data.contact_max:

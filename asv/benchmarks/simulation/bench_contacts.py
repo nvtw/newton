@@ -210,8 +210,8 @@ def _build_mesh_convex_scene(world_count: int, resolution: int) -> tuple[newton.
     grid = _make_two_sided_grid(resolution, half_extent=1.0)
     hull = newton.Mesh.create_sphere(
         0.55,
-        num_latitudes=8,
-        num_longitudes=16,
+        num_latitudes=24,
+        num_longitudes=48,
         compute_normals=False,
         compute_uvs=False,
     )
@@ -495,6 +495,8 @@ class ComplexContactCollision:
             **pipeline_kwargs,
         )
         self.contacts = self.collision_pipeline.contacts()
+        if case == "mesh_convex" and not self.collision_pipeline.narrow_phase.convex_support_acceleration:
+            raise RuntimeError("mesh-convex benchmark did not enable convex support acceleration")
 
         for _ in range(3):
             self.collision_pipeline.collide(self.state, self.contacts)

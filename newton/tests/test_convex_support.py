@@ -99,6 +99,25 @@ class TestConvexSupportAcceleration(unittest.TestCase):
         source = SimpleNamespace(vertices=vertices, indices=indices)
         self.assertIsNone(_build_convex_support_acceleration(source))
 
+    def test_incomplete_hull_topology_falls_back(self):
+        """Reject acceleration data when a connected convex hull has a missing face."""
+        mesh = _deduplicate_convex_collision_mesh(
+            newton.Mesh.create_sphere(
+                0.5,
+                num_latitudes=24,
+                num_longitudes=48,
+                compute_normals=False,
+                compute_uvs=False,
+                compute_inertia=False,
+            )
+        )
+        incomplete = SimpleNamespace(
+            vertices=mesh.vertices,
+            indices=np.delete(np.asarray(mesh.indices, dtype=np.int32).reshape(-1, 3), 1, axis=0),
+        )
+        with self.assertWarnsRegex(RuntimeWarning, "complete closed hull topology"):
+            self.assertIsNone(_build_convex_support_acceleration(incomplete))
+
     def test_small_hulls_do_not_allocate_acceleration(self):
         """Skip support acceleration for small convex hulls."""
         mesh = newton.Mesh.create_sphere(
@@ -149,12 +168,18 @@ class TestConvexSupportAcceleration(unittest.TestCase):
         )
         builder.add_shape_convex_hull(body=body, mesh=convex)
         model = builder.finalize()
-        pipeline = newton.CollisionPipeline(model, broad_phase="explicit", reduce_contacts=False)
-        contacts = pipeline.contacts()
+        for reduce_contacts in (False, True):
+            with self.subTest(reduce_contacts=reduce_contacts):
+                pipeline = newton.CollisionPipeline(
+                    model,
+                    broad_phase="explicit",
+                    reduce_contacts=reduce_contacts,
+                )
+                contacts = pipeline.contacts()
 
-        self.assertTrue(pipeline.narrow_phase.convex_support_acceleration)
-        pipeline.collide(model.state(), contacts)
-        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+                self.assertTrue(pipeline.narrow_phase.convex_support_acceleration)
+                pipeline.collide(model.state(), contacts)
+                self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
 
 
 if __name__ == "__main__":

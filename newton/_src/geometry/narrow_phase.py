@@ -2771,6 +2771,15 @@ class NarrowPhase:
             shape_data: Array of vec4 containing scale (xyz) and margin (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
+            shape_support_data: Optional per-shape ``wp.vec4i`` metadata containing
+                packed support-LUT, vertex-offset, and neighbor starts plus the LUT resolution.
+                A nonpositive resolution disables acceleration for that shape.
+            support_lut: Optional packed octahedral-direction lookup tables whose entries
+                select seed vertices for convex support walks.
+            support_vertex_offsets: Optional packed CSR offsets delimiting each convex
+                vertex's entries in ``support_neighbors``.
+            support_neighbors: Optional packed CSR vertex-adjacency indices used by convex
+                support walks.
             shape_mesh_properties: Per-shape mesh property bitfield.
             shape_sdf_index: Per-shape SDF table index (-1 for shapes without SDF)
             texture_sdf_data: Compact array of TextureSDFData structs
@@ -3086,6 +3095,10 @@ class NarrowPhase:
                         shape_data,
                         shape_transform,
                         shape_source,
+                        shape_support_data,
+                        support_lut,
+                        support_vertex_offsets,
+                        support_neighbors,
                         shape_collision_aabb_lower,
                         shape_collision_aabb_upper,
                         shape_gap,
@@ -3441,10 +3454,15 @@ class NarrowPhase:
             shape_data: Array of vec4 containing scale (xyz) and margin (w) for each shape
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
-            shape_support_data: Optional per-shape convex support metadata.
-            support_lut: Optional packed directional support lookup tables.
-            support_vertex_offsets: Optional packed convex vertex-neighbor offsets.
-            support_neighbors: Optional packed convex vertex neighbors.
+            shape_support_data: Optional per-shape ``wp.vec4i`` metadata containing
+                packed support-LUT, vertex-offset, and neighbor starts plus the LUT resolution.
+                A nonpositive resolution disables acceleration for that shape.
+            support_lut: Optional packed octahedral-direction lookup tables whose entries
+                select seed vertices for convex support walks.
+            support_vertex_offsets: Optional packed CSR offsets delimiting each convex
+                vertex's entries in ``support_neighbors``.
+            support_neighbors: Optional packed CSR vertex-adjacency indices used by convex
+                support walks.
             shape_mesh_properties: Per-shape mesh property bitfield.
             shape_sdf_index: Per-shape SDF table index (-1 for shapes without SDF)
             texture_sdf_data: Compact array of TextureSDFData structs
