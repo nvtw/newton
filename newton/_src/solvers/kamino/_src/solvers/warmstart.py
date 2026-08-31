@@ -1099,7 +1099,8 @@ class WarmstarterContacts:
 
         KEY_AND_POSITION_WITH_NET_FORCE_BACKUP_AND_TANGENTIAL_NET_FORCE = 6
         """
-        Add geometry-pair net-force fallback while balancing cached tangential force.
+        Same as `KEY_AND_POSITION_WITH_NET_FORCE_BACKUP`, but adds uniform cached
+        tangential-force balancing.
         """
 
         @classmethod

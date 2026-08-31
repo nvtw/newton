@@ -1459,6 +1459,7 @@ class ModelBuilderKamino:
                 q_i_0=wp.array(bodies_q_i_0, dtype=wp.transformf, requires_grad=requires_grad),
                 u_i_0=wp.array(bodies_u_i_0, dtype=wp.spatial_vectorf, requires_grad=requires_grad),
             )
+
             # Create the joints model
             model_joints = JointsModel(
                 num_joints=model_size.sum_of_num_joints,
