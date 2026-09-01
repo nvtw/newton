@@ -57,6 +57,24 @@ def make_stiff_grid(side, diagonal_shift=0.02):
     return np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32), np.asarray(values, dtype=np.float32)
 
 
+def extract_symmetric_upper(rows, cols, values):
+    """Return the upper-triangle rows of a symmetric BSR matrix."""
+    upper_rows = [0]
+    upper_cols = []
+    upper_values = []
+    for row in range(rows.size - 1):
+        for block in range(int(rows[row]), int(rows[row + 1])):
+            if int(cols[block]) >= row:
+                upper_cols.append(int(cols[block]))
+                upper_values.append(values[block])
+        upper_rows.append(len(upper_cols))
+    return (
+        np.asarray(upper_rows, dtype=np.int32),
+        np.asarray(upper_cols, dtype=np.int32),
+        np.asarray(upper_values, dtype=np.float32),
+    )
+
+
 class MASPCGBenchmark:
     """Measure solve, numeric refit, iteration count, and linear storage scaling."""
 
@@ -131,6 +149,57 @@ class MASPCGBenchmark:
 
     def track_storage_bytes_per_node(self, _side_worlds, _mas_apply_mode):
         return self.solver.storage_bytes / self.solver.matrix.total_row_count
+
+
+class MASPCGSparseStorageBenchmark:
+    """Compare full BSR with mirrored upper-triangle block storage."""
+
+    params = ([(8, 1), (8, 16), (16, 1), (16, 8), (32, 1)], [False, True])
+    param_names = ("side_worlds", "symmetric_upper")
+    timeout = 600
+
+    def setup(self, side_worlds, symmetric_upper):
+        side, world_count = side_worlds
+        rows, cols, values = make_stiff_grid(side)
+        if symmetric_upper:
+            rows, cols, values = extract_symmetric_upper(rows, cols, values)
+        matrix = BatchedBSRMatrix.from_host(
+            [rows] * world_count,
+            [cols] * world_count,
+            [values] * world_count,
+            symmetric_upper=symmetric_upper,
+            device="cuda:0",
+        )
+        rng = np.random.default_rng(17)
+        self.rhs = wp.array(rng.normal(size=matrix.total_scalar_count).astype(np.float32), device=matrix.device)
+        self.x = wp.zeros_like(self.rhs)
+        self.scratch = wp.zeros_like(self.rhs)
+        self.solver = BatchedMASPCG(
+            matrix,
+            rtol=1.0e-4,
+            atol=1.0e-6,
+            max_iterations=200,
+            use_cuda_graph=True,
+            loop_granularity=2,
+        )
+        self.graph = self.solver.capture(self.rhs, self.x, refit=False)
+        wp.capture_launch(self.graph)
+        wp.synchronize_device()
+
+    def time_solve_graph(self, _side_worlds, _symmetric_upper):
+        wp.capture_launch(self.graph)
+        wp.synchronize_device()
+
+    def time_spmv(self, _side_worlds, _symmetric_upper):
+        self.solver.matrix.gemv(self.rhs, self.scratch, self.solver.world_active)
+        wp.synchronize_device()
+
+    def track_iterations(self, _side_worlds, _symmetric_upper):
+        wp.capture_launch(self.graph)
+        return int(self.solver.iterations.numpy().max())
+
+    def track_matrix_bytes_per_node(self, _side_worlds, _symmetric_upper):
+        return self.solver.matrix.storage_bytes / self.solver.matrix.total_row_count
 
 
 class MASPCGConditioningBenchmark:
@@ -240,6 +309,37 @@ def run_sizes(modes=None):
                 f"{1.0e3 * np.median(frame_times):.3f}",
                 benchmark.track_max_iterations(case, precision),
                 f"{benchmark.track_storage_bytes_per_node(case, precision):.1f}",
+            )
+
+
+def run_sparse_storage():
+    """Print full-versus-upper sparse storage and graph timings."""
+    wp.config.log_level = wp.LOG_WARNING
+    print("upper side worlds nodes/world total_nodes spmv_ms solve_ms iterations matrix_bytes/node")
+    for symmetric_upper in MASPCGSparseStorageBenchmark.params[1]:
+        for case in MASPCGSparseStorageBenchmark.params[0]:
+            benchmark = MASPCGSparseStorageBenchmark()
+            benchmark.setup(case, symmetric_upper)
+            spmv_times = []
+            solve_times = []
+            for _ in range(20):
+                start = time.perf_counter()
+                benchmark.time_spmv(case, symmetric_upper)
+                spmv_times.append(time.perf_counter() - start)
+                start = time.perf_counter()
+                benchmark.time_solve_graph(case, symmetric_upper)
+                solve_times.append(time.perf_counter() - start)
+            side, worlds = case
+            print(
+                symmetric_upper,
+                side,
+                worlds,
+                side**3,
+                worlds * side**3,
+                f"{1.0e3 * np.median(spmv_times):.3f}",
+                f"{1.0e3 * np.median(solve_times):.3f}",
+                benchmark.track_iterations(case, symmetric_upper),
+                f"{benchmark.track_matrix_bytes_per_node(case, symmetric_upper):.1f}",
             )
 
 

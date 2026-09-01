@@ -163,12 +163,16 @@ def _insert_bsr_blocks_kernel(
     row_nnz: wp.array[wp.int32],
     col_indices: wp.array[wp.int32],
     values: wp.array[wp.mat33f],
+    symmetric_upper: wp.bool,
     overflow: wp.array[wp.int32],
 ):
     block = wp.tid()
     if block >= input_count[0]:
         return
     row = input_row[block]
+    if symmetric_upper and input_col[block] < row:
+        overflow[0] = 1
+        return
     slot = wp.atomic_add(row_nnz, row, 1)
     capacity = row_offsets[row + 1] - row_offsets[row]
     if slot >= capacity:
@@ -214,6 +218,53 @@ def _bsr_gemv_kernel(
 
 
 @wp.kernel
+def _scale_batched_vector_kernel(
+    world_row_offsets: wp.array[wp.int32],
+    world_row_count: wp.array[wp.int32],
+    world_active: wp.array[wp.bool],
+    y: wp.array[wp.float32],
+    beta: wp.float32,
+):
+    world, local_dof = wp.tid()
+    scalar_count = 3 * world_row_count[world]
+    if local_dof < scalar_count and world_active[world]:
+        dof = 3 * world_row_offsets[world] + local_dof
+        y[dof] *= beta
+
+
+@wp.kernel
+def _symmetric_upper_gemv_kernel(
+    block_rows: wp.array[wp.int32],
+    block_slots: wp.array[wp.int32],
+    row_nnz: wp.array[wp.int32],
+    col_indices: wp.array[wp.int32],
+    values: wp.array[wp.mat33f],
+    fine_node_world: wp.array[wp.int32],
+    world_active: wp.array[wp.bool],
+    x: wp.array[wp.float32],
+    y: wp.array[wp.float32],
+    alpha: wp.float32,
+):
+    block = wp.tid()
+    row = block_rows[block]
+    if block_slots[block] >= row_nnz[row] or not world_active[fine_node_world[row]]:
+        return
+    col = col_indices[block]
+    value = values[block]
+    x_col = wp.vec3f(x[3 * col], x[3 * col + 1], x[3 * col + 2])
+    row_value = alpha * (value * x_col)
+    wp.atomic_add(y, 3 * row, row_value[0])
+    wp.atomic_add(y, 3 * row + 1, row_value[1])
+    wp.atomic_add(y, 3 * row + 2, row_value[2])
+    if col != row:
+        x_row = wp.vec3f(x[3 * row], x[3 * row + 1], x[3 * row + 2])
+        col_value = alpha * (wp.transpose(value) * x_row)
+        wp.atomic_add(y, 3 * col, col_value[0])
+        wp.atomic_add(y, 3 * col + 1, col_value[1])
+        wp.atomic_add(y, 3 * col + 2, col_value[2])
+
+
+@wp.kernel
 def _bsr_spmv_dot_kernel(
     row_offsets: wp.array[wp.int32],
     row_nnz: wp.array[wp.int32],
@@ -243,6 +294,50 @@ def _bsr_spmv_dot_kernel(
         ap[base + 1] = result[1]
         ap[base + 2] = result[2]
         contribution = p[base] * result[0] + p[base + 1] * result[1] + p[base + 2] * result[2]
+    chunk_sum = wp.tile_sum(wp.tile(contribution))[0]
+    if thread == 0:
+        wp.atomic_add(p_ap, world, chunk_sum)
+
+
+@wp.kernel
+def _symmetric_upper_spmv_dot_kernel(
+    row_offsets: wp.array[wp.int32],
+    row_nnz: wp.array[wp.int32],
+    block_rows: wp.array[wp.int32],
+    block_slots: wp.array[wp.int32],
+    col_indices: wp.array[wp.int32],
+    values: wp.array[wp.mat33f],
+    world_row_offsets: wp.array[wp.int32],
+    world_row_count: wp.array[wp.int32],
+    world_active: wp.array[wp.bool],
+    p: wp.array[wp.float32],
+    ap: wp.array[wp.float32],
+    p_ap: wp.array[wp.float32],
+):
+    world, chunk, thread = wp.tid()
+    row_begin = world_row_offsets[world]
+    block_begin = row_offsets[row_begin]
+    block_end = row_offsets[row_begin + world_row_count[world]]
+    block = block_begin + chunk * wp.block_dim() + thread
+    contribution = wp.float32(0.0)
+    if block < block_end and world_active[world]:
+        row = block_rows[block]
+        if block_slots[block] < row_nnz[row]:
+            col = col_indices[block]
+            value = values[block]
+            p_row = wp.vec3f(p[3 * row], p[3 * row + 1], p[3 * row + 2])
+            p_col = wp.vec3f(p[3 * col], p[3 * col + 1], p[3 * col + 2])
+            row_value = value * p_col
+            wp.atomic_add(ap, 3 * row, row_value[0])
+            wp.atomic_add(ap, 3 * row + 1, row_value[1])
+            wp.atomic_add(ap, 3 * row + 2, row_value[2])
+            contribution = wp.dot(p_row, row_value)
+            if col != row:
+                col_value = wp.transpose(value) * p_row
+                wp.atomic_add(ap, 3 * col, col_value[0])
+                wp.atomic_add(ap, 3 * col + 1, col_value[1])
+                wp.atomic_add(ap, 3 * col + 2, col_value[2])
+                contribution *= 2.0
     chunk_sum = wp.tile_sum(wp.tile(contribution))[0]
     if thread == 0:
         wp.atomic_add(p_ap, world, chunk_sum)
@@ -305,6 +400,34 @@ def _cg_update_p_reset_kernel(
 
 
 @wp.kernel
+def _cg_update_p_reset_ap_kernel(
+    tolerance: wp.array[wp.float32],
+    residual: wp.array[wp.float32],
+    rz_old: wp.array[wp.float32],
+    rz_new: wp.array[wp.float32],
+    z: wp.array[wp.float32],
+    p: wp.array[wp.float32],
+    ap: wp.array[wp.float32],
+    p_ap: wp.array[wp.float32],
+    vector_offsets: wp.array[wp.int32],
+    dimensions: wp.array[wp.int32],
+):
+    world, local_dof = wp.tid()
+    if local_dof >= dimensions[world]:
+        return
+    beta = wp.where(
+        residual[world] > tolerance[world] and rz_old[world] > 0.0,
+        rz_new[world] / rz_old[world],
+        wp.float32(0.0),
+    )
+    dof = vector_offsets[world] + local_dof
+    p[dof] = z[dof] + beta * p[dof]
+    ap[dof] = 0.0
+    if local_dof == 0:
+        p_ap[world] = 0.0
+
+
+@wp.kernel
 def _accumulate_iterations_kernel(
     pass_iterations: wp.array[wp.int32],
     total_iterations: wp.array[wp.int32],
@@ -321,6 +444,7 @@ def _scatter_hierarchy_kernel(
     col_indices: wp.array[wp.int32],
     values: wp.array[wp.mat33f],
     ancestors: wp.array2d[wp.int32],
+    symmetric_upper: wp.bool,
     factors: wp.array2d[wp.float32],
 ):
     block = wp.tid()
@@ -344,6 +468,8 @@ def _scatter_hierarchy_kernel(
         for i in range(3):
             for j in range(3):
                 wp.atomic_add(factors, matrix_row + i, local_col + j, value[i, j])
+                if symmetric_upper and row != col:
+                    wp.atomic_add(factors, cluster * _CLUSTER_DOF_COUNT + local_col + j, local_row + i, value[i, j])
 
 
 @wp.kernel
@@ -866,7 +992,11 @@ def _make_one_block_pcg_kernel(block_dim: int):
 
 @dataclass(frozen=True)
 class BatchedBSRMatrix:
-    """Batched square matrices in row-contiguous 3x3 BSR storage."""
+    """Batched square matrices in row-contiguous 3x3 BSR storage.
+
+    ``symmetric_upper`` stores only blocks whose local column is greater than
+    or equal to their row and mirrors off-diagonal products implicitly.
+    """
 
     row_offsets: wp.array
     row_nnz: wp.array
@@ -885,6 +1015,8 @@ class BatchedBSRMatrix:
     total_scalar_count: int
     max_row_count: int
     max_nnz_count: int
+    max_world_block_capacity: int
+    symmetric_upper: bool
     device: wp.Device
 
     @classmethod
@@ -895,9 +1027,14 @@ class BatchedBSRMatrix:
         values: Sequence[np.ndarray],
         *,
         row_capacities: Sequence[np.ndarray] | None = None,
+        symmetric_upper: bool = False,
         device: wp.DeviceLike = None,
     ) -> BatchedBSRMatrix:
-        """Upload independent local-indexed 3x3 BSR matrices."""
+        """Upload independent local-indexed 3x3 BSR matrices.
+
+        When ``symmetric_upper`` is true, inputs must contain only the upper
+        triangle. Device-side insertions must obey the same contract.
+        """
         if not (len(row_offsets) == len(col_indices) == len(values)) or not row_offsets:
             raise ValueError("row_offsets, col_indices, and values must have equal nonzero lengths")
 
@@ -909,6 +1046,7 @@ class BatchedBSRMatrix:
         packed_values: list[np.ndarray] = []
         packed_block_rows: list[int] = []
         packed_block_slots: list[int] = []
+        world_block_capacities: list[int] = []
         node_world: list[np.ndarray] = []
 
         if row_capacities is not None and len(row_capacities) != len(row_offsets):
@@ -925,11 +1063,16 @@ class BatchedBSRMatrix:
                 raise ValueError(f"values for world {world} must have shape ({cols.size}, 3, 3)")
             if np.any(rows[1:] < rows[:-1]) or np.any(cols < 0) or np.any(cols >= row_count):
                 raise ValueError(f"invalid BSR indices for world {world}")
+            if symmetric_upper:
+                block_rows = np.repeat(np.arange(row_count, dtype=np.int32), np.diff(rows))
+                if np.any(cols < block_rows):
+                    raise ValueError(f"symmetric upper BSR for world {world} contains a lower-triangle block")
 
             row_nnz = np.diff(rows).astype(np.int32)
             capacities = row_nnz if row_capacities is None else np.asarray(row_capacities[world], dtype=np.int32)
             if capacities.shape != (row_count,) or np.any(capacities < row_nnz):
                 raise ValueError(f"row capacities for world {world} must cover every active row entry")
+            world_block_capacities.append(int(capacities.sum()))
 
             row_base = global_rows[-1]
             row_counts.append(row_count)
@@ -973,6 +1116,8 @@ class BatchedBSRMatrix:
             total_scalar_count=3 * int(global_rows_np[-1]),
             max_row_count=int(row_counts_np.max()),
             max_nnz_count=len(packed_cols),
+            max_world_block_capacity=max(world_block_capacities),
+            symmetric_upper=bool(symmetric_upper),
             device=device,
         )
 
@@ -1027,6 +1172,7 @@ class BatchedBSRMatrix:
                 self.row_nnz,
                 self.col_indices,
                 self.values,
+                self.symmetric_upper,
                 self.overflow,
             ],
             device=self.device,
@@ -1041,6 +1187,37 @@ class BatchedBSRMatrix:
         beta: float = 0.0,
     ) -> None:
         """Compute ``y = alpha * A * x + beta * y``."""
+        if self.symmetric_upper:
+            wp.launch(
+                _scale_batched_vector_kernel,
+                dim=(self.world_count, 3 * self.max_row_count),
+                inputs=[
+                    self.world_row_offsets,
+                    self.world_row_count,
+                    world_active,
+                    y,
+                    wp.float32(beta),
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                _symmetric_upper_gemv_kernel,
+                dim=self.max_nnz_count,
+                inputs=[
+                    self.block_rows,
+                    self.block_slots,
+                    self.row_nnz,
+                    self.col_indices,
+                    self.values,
+                    self.fine_node_world,
+                    world_active,
+                    x,
+                    y,
+                    wp.float32(alpha),
+                ],
+                device=self.device,
+            )
+            return
         wp.launch(
             _bsr_gemv_kernel,
             dim=(self.world_count, self.max_row_count),
@@ -1223,6 +1400,7 @@ class MASPreconditioner:
                 self.matrix.col_indices,
                 self.matrix.values,
                 self.ancestors,
+                self.matrix.symmetric_upper,
                 self.factors,
             ],
             device=self.device,
@@ -1385,28 +1563,53 @@ class _BSRFastCGSolver(CGSolver):
 
     def solve(self, *args, **kwargs):
         self.p_ap.zero_()
+        if self.bsr_matrix.symmetric_upper:
+            self.p_and_Ap[1].zero_()
         return super().solve(*args, **kwargs)
 
     def do_iteration(self, p, Ap, rz_old, rz_new, z, x, r, r_norm_sq, active_dims, world_active):
-        chunks = (self.bsr_matrix.max_row_count + 255) // 256
-        wp.launch_tiled(
-            _bsr_spmv_dot_kernel,
-            dim=(self.n_worlds, chunks),
-            inputs=[
-                self.bsr_matrix.row_offsets,
-                self.bsr_matrix.row_nnz,
-                self.bsr_matrix.col_indices,
-                self.bsr_matrix.values,
-                self.bsr_matrix.world_row_offsets,
-                self.bsr_matrix.world_row_count,
-                world_active,
-                p,
-                Ap,
-                self.p_ap,
-            ],
-            block_dim=256,
-            device=self.device,
-        )
+        if self.bsr_matrix.symmetric_upper:
+            chunks = (self.bsr_matrix.max_world_block_capacity + 255) // 256
+            wp.launch_tiled(
+                _symmetric_upper_spmv_dot_kernel,
+                dim=(self.n_worlds, chunks),
+                inputs=[
+                    self.bsr_matrix.row_offsets,
+                    self.bsr_matrix.row_nnz,
+                    self.bsr_matrix.block_rows,
+                    self.bsr_matrix.block_slots,
+                    self.bsr_matrix.col_indices,
+                    self.bsr_matrix.values,
+                    self.bsr_matrix.world_row_offsets,
+                    self.bsr_matrix.world_row_count,
+                    world_active,
+                    p,
+                    Ap,
+                    self.p_ap,
+                ],
+                block_dim=256,
+                device=self.device,
+            )
+        else:
+            chunks = (self.bsr_matrix.max_row_count + 255) // 256
+            wp.launch_tiled(
+                _bsr_spmv_dot_kernel,
+                dim=(self.n_worlds, chunks),
+                inputs=[
+                    self.bsr_matrix.row_offsets,
+                    self.bsr_matrix.row_nnz,
+                    self.bsr_matrix.col_indices,
+                    self.bsr_matrix.values,
+                    self.bsr_matrix.world_row_offsets,
+                    self.bsr_matrix.world_row_count,
+                    world_active,
+                    p,
+                    Ap,
+                    self.p_ap,
+                ],
+                block_dim=256,
+                device=self.device,
+            )
         wp.launch(
             _cg_update_xr_save_kernel,
             dim=(self.n_worlds, self.maxdims),
@@ -1426,20 +1629,28 @@ class _BSRFastCGSolver(CGSolver):
             device=self.device,
         )
         self.update_rr_rz(r, z, self.r_repeated, active_dims, world_active)
-        wp.launch(
-            _cg_update_p_reset_kernel,
-            dim=(self.n_worlds, self.maxdims),
-            inputs=[
-                self.atol_sq,
-                r_norm_sq,
-                rz_old,
-                rz_new,
-                z,
-                p,
+        update_kernel = _cg_update_p_reset_ap_kernel if self.bsr_matrix.symmetric_upper else _cg_update_p_reset_kernel
+        update_inputs = [
+            self.atol_sq,
+            r_norm_sq,
+            rz_old,
+            rz_new,
+            z,
+            p,
+        ]
+        if self.bsr_matrix.symmetric_upper:
+            update_inputs.append(Ap)
+        update_inputs.extend(
+            [
                 self.p_ap,
                 self.vio,
                 active_dims,
-            ],
+            ]
+        )
+        wp.launch(
+            update_kernel,
+            dim=(self.n_worlds, self.maxdims),
+            inputs=update_inputs,
             device=self.device,
         )
 
@@ -1458,7 +1669,7 @@ class BatchedMASPCG:
         loop_granularity: int = 1,
         regularization: float = 1.0e-6,
         one_block_max_rows: int = 0,
-        fused_spmv_min_rows: int = 8192,
+        fused_spmv_min_rows: int = 0,
         mas_apply_mode: str = "fp32_async",
         refinement_passes: int = 1,
     ):
@@ -1470,6 +1681,8 @@ class BatchedMASPCG:
             raise ValueError("mixed-precision preconditioning is incompatible with one-block PCG")
         if refinement_passes > 1 and one_block_max_rows > 0:
             raise ValueError("reliable refinement is incompatible with one-block PCG")
+        if matrix.symmetric_upper and 0 < matrix.max_row_count <= one_block_max_rows:
+            raise ValueError("symmetric upper storage is incompatible with one-block PCG")
         self.preconditioner = MASPreconditioner(
             matrix,
             regularization=regularization,
@@ -1523,7 +1736,7 @@ class BatchedMASPCG:
             "use_graph": use_cuda_graph,
             "loop_granularity": loop_granularity,
         }
-        if matrix.max_row_count >= fused_spmv_min_rows:
+        if matrix.symmetric_upper or matrix.max_row_count >= fused_spmv_min_rows:
             self._solver = _BSRFastCGSolver(matrix, operator, **solver_kwargs)
         else:
             self._solver = CGSolver(operator, **solver_kwargs)
