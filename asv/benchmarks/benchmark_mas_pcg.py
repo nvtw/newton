@@ -57,6 +57,50 @@ def make_stiff_grid(side, diagonal_shift=0.02):
     return np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32), np.asarray(values, dtype=np.float32)
 
 
+def make_contact_contributions(side, reserved_layers, active_layers, world_count):
+    """Create fixed-capacity structural and changing-contact BSR contributions."""
+    if not 0 <= active_layers <= reserved_layers:
+        raise ValueError("active contact layers must fit in reserved row capacity")
+    rows, cols, values = make_stiff_grid(side)
+    node_count = side**3
+    block_rows = np.repeat(np.arange(node_count, dtype=np.int32), np.diff(rows))
+    rng = np.random.default_rng(91)
+    contact_rows = []
+    contact_cols = []
+    contact_values = []
+    stiffness = np.eye(3, dtype=np.float32) * 30.0
+    for _ in range(active_layers):
+        permutation = rng.permutation(node_count).astype(np.int32)
+        first = permutation[0::2]
+        second = permutation[1::2]
+        for row, col in zip(first, second, strict=True):
+            contact_rows.extend((row, row, col, col))
+            contact_cols.extend((row, col, col, row))
+            contact_values.extend((stiffness, -stiffness, stiffness, -stiffness))
+
+    local_rows = np.concatenate((block_rows, np.asarray(contact_rows, dtype=np.int32)))
+    local_cols = np.concatenate((cols, np.asarray(contact_cols, dtype=np.int32)))
+    local_values = np.concatenate((values, np.asarray(contact_values, dtype=np.float32).reshape((-1, 3, 3))))
+    contribution_rows = []
+    contribution_cols = []
+    contribution_values = []
+    for world in range(world_count):
+        offset = world * node_count
+        contribution_rows.append(local_rows + offset)
+        contribution_cols.append(local_cols + offset)
+        contribution_values.append(local_values)
+    capacities = np.diff(rows) + 2 * reserved_layers
+    return (
+        rows,
+        cols,
+        values,
+        capacities,
+        np.concatenate(contribution_rows),
+        np.concatenate(contribution_cols),
+        np.concatenate(contribution_values),
+    )
+
+
 class MASPCGBenchmark:
     """Measure solve, numeric refit, iteration count, and linear storage scaling."""
 
@@ -163,6 +207,71 @@ class MASPCGConditioningBenchmark:
         return float(np.linalg.norm(residual) / np.linalg.norm(self.rhs.numpy()))
 
 
+class MASPCGContactBenchmark:
+    """Measure captured sparse assembly, MAS refit, and solve with contact edges."""
+
+    params = ([(8, 4, 0, 1), (8, 4, 1, 1), (8, 4, 4, 1), (8, 4, 4, 16), (16, 2, 2, 1)],)
+    param_names = ("side_reserved_active_worlds",)
+    timeout = 600
+
+    def setup(self, side_reserved_active_worlds):
+        if not wp.is_cuda_available():
+            raise NotImplementedError("CUDA is required")
+        side, reserved_layers, active_layers, world_count = side_reserved_active_worlds
+        data = make_contact_contributions(side, reserved_layers, active_layers, world_count)
+        rows, cols, values, capacities, contribution_rows, contribution_cols, contribution_values = data
+        matrix = BatchedBSRMatrix.from_host(
+            [rows] * world_count,
+            [cols] * world_count,
+            [values] * world_count,
+            row_capacities=[capacities] * world_count,
+            device="cuda:0",
+        )
+        self.contribution_rows = wp.array(contribution_rows, device=matrix.device)
+        self.contribution_cols = wp.array(contribution_cols, device=matrix.device)
+        self.contribution_values = wp.array(contribution_values, dtype=wp.mat33f, device=matrix.device)
+        self.contribution_count = wp.array([contribution_rows.size], dtype=wp.int32, device=matrix.device)
+        rng = np.random.default_rng(29)
+        self.rhs = wp.array(
+            rng.normal(size=matrix.total_scalar_count).astype(np.float32),
+            device=matrix.device,
+        )
+        self.x = wp.zeros_like(self.rhs)
+        self.solver = BatchedMASPCG(
+            matrix,
+            rtol=1.0e-4,
+            atol=1.0e-6,
+            max_iterations=300,
+            use_cuda_graph=True,
+            loop_granularity=2,
+        )
+        with wp.ScopedCapture(matrix.device) as capture:
+            self.x.zero_()
+            matrix.begin_assembly()
+            matrix.insert_blocks(
+                self.contribution_rows,
+                self.contribution_cols,
+                self.contribution_values,
+                self.contribution_count,
+            )
+            self.solver.solve(self.rhs, self.x, refit=True)
+        self.frame_graph = capture.graph
+        wp.capture_launch(self.frame_graph)
+        wp.synchronize_device()
+
+    def time_assemble_refit_solve_graph(self, _side_reserved_active_worlds):
+        wp.capture_launch(self.frame_graph)
+        wp.synchronize_device()
+
+    def track_iterations(self, _side_reserved_active_worlds):
+        wp.capture_launch(self.frame_graph)
+        return int(self.solver.iterations.numpy().max())
+
+    def track_overflow(self, _side_reserved_active_worlds):
+        wp.capture_launch(self.frame_graph)
+        return int(self.solver.matrix.overflow.numpy()[0])
+
+
 def run_conditioning():
     """Print the residual-replacement sweep without the size benchmarks."""
     print("conditioning passes shift condition_upper_bound solve_ms iterations true_relative_residual")
@@ -220,9 +329,36 @@ def run_sizes():
         )
 
 
+def run_contacts():
+    """Print the dynamic contact-assembly sweep."""
+    print("contact side reserved active worlds nodes/world total_nodes frame_ms iterations overflow")
+    for case in MASPCGContactBenchmark.params[0]:
+        benchmark = MASPCGContactBenchmark()
+        benchmark.setup(case)
+        times = []
+        for _ in range(20):
+            start = time.perf_counter()
+            benchmark.time_assemble_refit_solve_graph(case)
+            times.append(time.perf_counter() - start)
+        side, reserved, active, worlds = case
+        print(
+            "contact",
+            side,
+            reserved,
+            active,
+            worlds,
+            side**3,
+            worlds * side**3,
+            f"{1.0e3 * np.median(times):.3f}",
+            benchmark.track_iterations(case),
+            benchmark.track_overflow(case),
+        )
+
+
 def main():
     """Run the representative matrix locally and print median graph timings."""
     run_sizes()
+    run_contacts()
     run_conditioning()
 
 
