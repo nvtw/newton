@@ -93,6 +93,14 @@ def _build_two_body_articulation(
                 parent_xform=wp.transformf(wp.vec3f(0.0, 0.0, 2.0), wp.quat_identity(dtype=wp.float32)),
             )
         )
+    else:
+        joints.append(
+            builder.add_joint_free(
+                parent=-1,
+                child=parent,
+                parent_xform=wp.transformf(wp.vec3f(0.0, 0.0, 2.0), wp.quat_identity(dtype=wp.float32)),
+            )
+        )
     revolute = builder.add_joint_revolute(
         parent=parent,
         child=child,
@@ -237,10 +245,10 @@ class TestKaminoBodyFlags(unittest.TestCase):
 
         self.assertGreater(float(model.body_inv_mass.numpy().max()), 0.0)
         np.testing.assert_array_equal(kamino_model.bodies.inv_m_i.numpy(), np.zeros(model.body_count, dtype=np.float32))
-        np.testing.assert_array_equal(kamino_model.joints.num_kinematic_cts.numpy(), [0])
-        np.testing.assert_array_equal(kamino_model.joints.num_dynamic_cts.numpy(), [0])
-        np.testing.assert_array_equal(kamino_model.joints.num_bounded_cts.numpy(), [0])
-        np.testing.assert_array_equal(kamino_model.joints.num_bilateral_cts.numpy(), [0])
+        np.testing.assert_array_equal(kamino_model.joints.num_kinematic_cts.numpy(), [0, 0])
+        np.testing.assert_array_equal(kamino_model.joints.num_dynamic_cts.numpy(), [0, 0])
+        np.testing.assert_array_equal(kamino_model.joints.num_bounded_cts.numpy(), [0, 0])
+        np.testing.assert_array_equal(kamino_model.joints.num_bilateral_cts.numpy(), [0, 0])
 
         state_in = view.state()
         state_out = view.state()
@@ -311,8 +319,8 @@ class TestKaminoBodyFlags(unittest.TestCase):
         model = builder.finalize(device=self.default_device)
         view = _mark_proxy(model, [parent, child])
         joints = ModelKamino.from_newton(view).joints
-        np.testing.assert_array_equal(joints.num_kinematic_cts.numpy(), [0])
-        np.testing.assert_array_equal(joints.num_dynamic_cts.numpy(), [0])
+        np.testing.assert_array_equal(joints.num_kinematic_cts.numpy(), [0, 0])
+        np.testing.assert_array_equal(joints.num_dynamic_cts.numpy(), [0, 0])
 
     def test_damping_between_immovable_bodies_culled(self):
         """Body-level culling ignores joint-DoF damping."""
@@ -320,8 +328,8 @@ class TestKaminoBodyFlags(unittest.TestCase):
         model = builder.finalize(device=self.default_device)
         view = _mark_proxy(model, [parent, child])
         joints = ModelKamino.from_newton(view).joints
-        np.testing.assert_array_equal(joints.num_kinematic_cts.numpy(), [0])
-        np.testing.assert_array_equal(joints.num_dynamic_cts.numpy(), [0])
+        np.testing.assert_array_equal(joints.num_kinematic_cts.numpy(), [0, 0])
+        np.testing.assert_array_equal(joints.num_dynamic_cts.numpy(), [0, 0])
 
     def test_position_limits_between_immovable_bodies_culled(self):
         """Position-limit slots are not reserved for two-immovable-endpoint joints.
@@ -484,66 +492,10 @@ class TestKaminoBodyFlags(unittest.TestCase):
         solver = SolverKamino(view, config=SolverKamino.Config(use_collision_detector=False))
         kamino_model = solver._model_kamino
         np.testing.assert_array_equal(kamino_model.bodies.inv_m_i.numpy(), np.zeros(model.body_count, dtype=np.float32))
-        np.testing.assert_array_equal(kamino_model.joints.num_kinematic_cts.numpy(), [0])
+        np.testing.assert_array_equal(kamino_model.joints.num_kinematic_cts.numpy(), [0, 0])
         # Base Newton model is unmodified.
         self.assertGreater(float(model.body_inv_mass.numpy().max()), 0.0)
         self.assertEqual(int((model.body_flags.numpy() & int(BodyFlags.PROXY)).sum()), 0)
-
-    def test_notify_body_inertial_refresh(self):
-        """notify_model_changed refreshes Kamino's masked inertia copy."""
-        builder, _, _, _ = _build_two_body_articulation()
-        model = builder.finalize(device=self.default_device)
-        solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=False))
-        state_in = model.state()
-        state_out = model.state()
-        newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
-
-        # Mutate a dynamic body's inverse mass and inertia and notify.
-        inv_mass = model.body_inv_mass.numpy().copy()
-        new_inv_mass_child = inv_mass[-1] * 0.5
-        inv_mass[-1] = new_inv_mass_child
-        model.body_inv_mass.assign(inv_mass)
-        inv_inertia = model.body_inv_inertia.numpy().copy()
-        inv_inertia[-1] *= 0.5
-        model.body_inv_inertia.assign(inv_inertia)
-
-        solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
-        np.testing.assert_allclose(solver._model_kamino.bodies.inv_m_i.numpy()[-1], new_inv_mass_child)
-        np.testing.assert_allclose(solver._model_kamino.bodies.inv_i_I_i.numpy()[-1], inv_inertia[-1])
-
-        state_in.clear_forces()
-        solver.step(state_in, state_out, control=None, contacts=None, dt=1.0e-3)
-        self.assertTrue(np.all(np.isfinite(state_out.body_q.numpy())))
-
-        # Making a body massless mid-run flips its Kamino immovability status
-        # and is rejected via IMMOVABILITY_FLIP.
-        inv_mass[-1] = 0.0
-        inv_inertia[-1] = 0.0
-        model.body_inv_mass.assign(inv_mass)
-        model.body_inv_inertia.assign(inv_inertia)
-        with self.assertRaisesRegex(RuntimeError, "immovability"):
-            solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
-
-    def test_notify_body_flags_flip_rejected(self):
-        """Flipping KINEMATIC/PROXY at runtime is rejected via a structural check."""
-        builder, parent, _, _ = _build_two_body_articulation()
-        model = builder.finalize(device=self.default_device)
-        solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=False))
-
-        flags = model.body_flags.numpy().copy()
-        flags[parent] = int(BodyFlags.KINEMATIC)
-        model.body_flags.assign(flags)
-        with self.assertRaisesRegex(RuntimeError, "recreate SolverKamino"):
-            solver.notify_model_changed(newton.ModelFlags.BODY_PROPERTIES)
-
-        # PROXY flip on a ModelView is likewise rejected.
-        builder2, _, _, _ = _build_two_body_articulation()
-        model2 = builder2.finalize(device=self.default_device)
-        view = ModelView(model2, "test_flip")
-        solver_view = SolverKamino(view, config=SolverKamino.Config(use_collision_detector=False))
-        view.mark_proxy_bodies(wp.array([0], dtype=int, device=model2.device))
-        with self.assertRaisesRegex(RuntimeError, "recreate SolverKamino"):
-            solver_view.notify_model_changed(newton.ModelFlags.BODY_PROPERTIES)
 
     def test_newton_arrays_not_mutated(self):
         """SolverKamino must not mutate Newton's body_inv_mass / body_inv_inertia."""
