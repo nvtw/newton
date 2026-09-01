@@ -554,7 +554,7 @@ _RIGID_CONTACT_LARGE_BUFFER_BYTES = 256 * 1024 * 1024
 
 
 @dataclasses.dataclass(frozen=True)
-class _RigidContactEstimate:
+class _RigidContactCountEstimate:
     """Diagnostic details for an automatically selected rigid-contact capacity."""
 
     capacity: int
@@ -567,7 +567,7 @@ class _RigidContactEstimate:
     source: Literal["fallback", "minimum", "neighbor heuristic", "precomputed pairs"]
 
 
-def _estimate_rigid_contact_details(model: Model) -> _RigidContactEstimate:
+def _estimate_rigid_contact_details(model: Model) -> _RigidContactCountEstimate:
     """Estimate rigid-contact capacity and retain its diagnostic inputs.
 
     Uses a linear neighbor-budget estimate assuming each non-plane shape contacts
@@ -589,7 +589,7 @@ def _estimate_rigid_contact_details(model: Model) -> _RigidContactEstimate:
     world_count = int(getattr(model, "world_count", 0) or 0)
     pair_count = int(getattr(model, "shape_contact_pair_count", 0) or 0)
     if not hasattr(model, "shape_type") or model.shape_type is None:
-        return _RigidContactEstimate(
+        return _RigidContactCountEstimate(
             capacity=_RIGID_CONTACT_MIN_CAPACITY,
             world_count=world_count,
             primitive_count=0,
@@ -683,7 +683,7 @@ def _estimate_rigid_contact_details(model: Model) -> _RigidContactEstimate:
     capacity = max(_RIGID_CONTACT_MIN_CAPACITY, total_contacts)
     if capacity == _RIGID_CONTACT_MIN_CAPACITY and total_contacts < capacity:
         source = "minimum"
-    return _RigidContactEstimate(
+    return _RigidContactCountEstimate(
         capacity=capacity,
         world_count=world_count,
         primitive_count=num_primitives,
@@ -700,7 +700,7 @@ def _estimate_rigid_contact_max(model: Model) -> int:
     return _estimate_rigid_contact_details(model).capacity
 
 
-def _warn_large_rigid_contact_estimate(estimate: _RigidContactEstimate) -> None:
+def _warn_large_rigid_contact_estimate(estimate: _RigidContactCountEstimate) -> None:
     """Warn when an automatic estimate implies a large base contact allocation."""
     allocation_bytes = estimate.capacity * _RIGID_CONTACT_BASE_BYTES_PER_SLOT
     if allocation_bytes < _RIGID_CONTACT_LARGE_BUFFER_BYTES:

@@ -1960,7 +1960,7 @@ class TestParticleShapeContacts(unittest.TestCase):
             )
 
 
-class TestContactEstimator(unittest.TestCase):
+class TestContactCountEstimator(unittest.TestCase):
     @staticmethod
     def _make_single_box_model():
         """Build a minimal model that exercises automatic contact sizing."""
