@@ -206,11 +206,12 @@ def run_conditioning():
                 )
 
 
-def main():
-    """Run the representative matrix locally and print median graph timings."""
+def run_sizes(modes=None):
+    """Print the varied-size sweep, optionally for selected apply modes."""
     wp.config.log_level = wp.LOG_WARNING
     print("precision side worlds nodes/world total_nodes mas_ms solve_ms frame_ms iterations bytes/node")
-    for precision in MASPCGBenchmark.params[1]:
+    modes = MASPCGBenchmark.params[1] if modes is None else modes
+    for precision in modes:
         for case in MASPCGBenchmark.params[0]:
             benchmark = MASPCGBenchmark()
             benchmark.setup(case, precision)
@@ -240,6 +241,11 @@ def main():
                 benchmark.track_max_iterations(case, precision),
                 f"{benchmark.track_storage_bytes_per_node(case, precision):.1f}",
             )
+
+
+def main():
+    """Run the representative matrix locally and print median graph timings."""
+    run_sizes()
     run_conditioning()
 
 

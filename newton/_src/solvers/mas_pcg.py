@@ -108,25 +108,29 @@ def _bf16_cluster_gemv(
         const unsigned shared = static_cast<unsigned>(__cvta_generic_to_shared(dst));
         asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(shared), "l"(src));
     }
-    if (thread < 12) {
-        float* dst = shared_residual + thread * 4;
-        const float* src = residual.data + base + thread * 4;
-        const unsigned shared = static_cast<unsigned>(__cvta_generic_to_shared(dst));
-        asm volatile("cp.async.ca.shared.global [%0], [%1], 16;" :: "r"(shared), "l"(src));
-    }
-    asm volatile("cp.async.commit_group;");
-    asm volatile("cp.async.wait_group 0;");
-    __syncthreads();
     #else
     for (int index = thread; index < ROWS * ROWS; index += blockDim.x) {
         const int row = index / ROWS;
         const int col = index - row * ROWS;
         shared_matrix[row * PADDED_LD + col] = factors.data[base * ROWS + index];
     }
-    if (thread < ROWS)
-        shared_residual[thread] = residual.data[base + thread];
-    __syncthreads();
     #endif
+
+    if (thread < ROWS) {
+        const int slot = cluster * 16 + thread / 3;
+        const int component = thread % 3;
+        const int begin = slot_fine_begin.data[slot];
+        const int count = slot_fine_count.data[slot];
+        float total = 0.0f;
+        for (int index = 0; index < count; ++index)
+            total += residual.data[3 * (begin + index) + component];
+        shared_residual[thread] = total;
+    }
+    #if __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.commit_group;");
+    asm volatile("cp.async.wait_group 0;");
+    #endif
+    __syncthreads();
 
     if (thread < ROWS) {
         float total = 0.0f;
@@ -140,7 +144,9 @@ def _bf16_cluster_gemv(
 )
 def _fp32_async_cluster_gemv(
     factors: wp.array2d[wp.float32],
-    residual: wp.array2d[wp.float32],
+    residual: wp.array[wp.float32],
+    slot_fine_begin: wp.array[wp.int32],
+    slot_fine_count: wp.array[wp.int32],
     result: wp.array2d[wp.float32],
     cluster: int,
     thread: int,
@@ -564,12 +570,22 @@ def _apply_cluster_inverse_fp32_async_kernel(
     factors: wp.array2d[wp.float32],
     cluster_world: wp.array[wp.int32],
     world_active: wp.array[wp.bool],
-    hierarchy_r: wp.array2d[wp.float32],
+    residual: wp.array[wp.float32],
+    slot_fine_begin: wp.array[wp.int32],
+    slot_fine_count: wp.array[wp.int32],
     hierarchy_z: wp.array2d[wp.float32],
 ):
     cluster, thread = wp.tid()
     if world_active[cluster_world[cluster]]:
-        _fp32_async_cluster_gemv(factors, hierarchy_r, hierarchy_z, cluster, thread)
+        _fp32_async_cluster_gemv(
+            factors,
+            residual,
+            slot_fine_begin,
+            slot_fine_count,
+            hierarchy_z,
+            cluster,
+            thread,
+        )
 
 
 @wp.kernel
@@ -1229,19 +1245,6 @@ class MASPreconditioner:
     def apply(self, r: wp.array, z: wp.array, world_active: wp.array) -> None:
         """Apply the preconditioner, ``z = M^-1 r``."""
         if self.apply_mode == "fp32_async":
-            wp.launch(
-                _restrict_residual_kernel,
-                dim=(self.cluster_count * _CLUSTER_NODE_COUNT, 3),
-                inputs=[
-                    r,
-                    self.slot_fine_begin,
-                    self.slot_fine_count,
-                    self.slot_world,
-                    world_active,
-                    self.hierarchy_r,
-                ],
-                device=self.device,
-            )
             wp.launch_tiled(
                 _apply_cluster_inverse_fp32_async_kernel,
                 dim=self.cluster_count,
@@ -1249,7 +1252,9 @@ class MASPreconditioner:
                     self.factors,
                     self.cluster_world,
                     world_active,
-                    self.hierarchy_r,
+                    r,
+                    self.slot_fine_begin,
+                    self.slot_fine_count,
                     self.hierarchy_z,
                 ],
                 block_dim=256,
