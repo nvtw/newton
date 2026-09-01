@@ -34,20 +34,6 @@ def make_block_laplacian(node_count: int, diagonal_shift: float = 0.25):
     return np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32), np.asarray(values), dense
 
 
-def extract_symmetric_upper(rows, cols, values):
-    """Extract upper-triangle blocks from a symmetric BSR matrix."""
-    upper_rows = [0]
-    upper_cols = []
-    upper_values = []
-    for row in range(rows.size - 1):
-        for block in range(int(rows[row]), int(rows[row + 1])):
-            if int(cols[block]) >= row:
-                upper_cols.append(int(cols[block]))
-                upper_values.append(values[block])
-        upper_rows.append(len(upper_cols))
-    return np.asarray(upper_rows, dtype=np.int32), np.asarray(upper_cols), np.asarray(upper_values)
-
-
 @unittest.skipUnless(wp.is_cuda_available(), "CUDA is required for tile Cholesky")
 class TestMASPCG(unittest.TestCase):
     def test_restricted_mas_energy_matches_global_dot(self):
@@ -67,8 +53,8 @@ class TestMASPCG(unittest.TestCase):
             matrix,
             max_iterations=20,
             use_cuda_graph=True,
-            fuse_energy_dot=True,
         )
+        solver.preconditioner.compute_cluster_energy = True
 
         solver.preconditioner.apply(residual, z, solver.world_active)
         z_host = z.numpy()
@@ -85,87 +71,6 @@ class TestMASPCG(unittest.TestCase):
             expected = np.dot(residual_host[scalar_begin:scalar_end], z_host[scalar_begin:scalar_end])
             actual = energy_host[cluster_begin:cluster_end].sum(dtype=np.float32)
             np.testing.assert_allclose(actual, expected, rtol=2.0e-5, atol=2.0e-5)
-
-    def test_symmetric_upper_storage_matches_dense_and_captures(self):
-        """Mirror nonsymmetric off-diagonal blocks in SpMV, MAS, and PCG."""
-        diagonal_0 = np.diag(np.asarray([2.0, 2.5, 3.0], dtype=np.float32))
-        diagonal_1 = np.diag(np.asarray([2.25, 2.75, 3.25], dtype=np.float32))
-        coupling = np.asarray(
-            [[-0.2, 0.05, 0.0], [0.01, -0.1, 0.03], [0.0, 0.02, -0.15]],
-            dtype=np.float32,
-        )
-        rows = np.asarray([0, 2, 3], dtype=np.int32)
-        cols = np.asarray([0, 1, 1], dtype=np.int32)
-        values = np.asarray([diagonal_0, coupling, diagonal_1], dtype=np.float32)
-        dense = np.block([[diagonal_0, coupling], [coupling.T, diagonal_1]])
-        matrix = BatchedBSRMatrix.from_host(
-            [rows],
-            [cols],
-            [values],
-            symmetric_upper=True,
-            device="cuda:0",
-        )
-        rhs_host = np.linspace(-0.75, 1.0, 6, dtype=np.float32)
-        rhs = wp.array(rhs_host, device=matrix.device)
-        product = wp.zeros_like(rhs)
-        active = wp.full(1, True, dtype=wp.bool, device=matrix.device)
-
-        matrix.gemv(rhs, product, active)
-        np.testing.assert_allclose(product.numpy(), dense @ rhs_host, rtol=2.0e-6, atol=2.0e-6)
-
-        x = wp.zeros_like(rhs)
-        solver = BatchedMASPCG(
-            matrix,
-            rtol=1.0e-6,
-            max_iterations=30,
-            use_cuda_graph=True,
-            fused_spmv_min_rows=0,
-        )
-        graph = solver.capture(rhs, x)
-        wp.capture_launch(graph)
-        np.testing.assert_allclose(x.numpy(), np.linalg.solve(dense, rhs_host), rtol=2.0e-5, atol=2.0e-5)
-
-    def test_symmetric_upper_dynamic_assembly_captures(self):
-        """Rebuild upper-triangle contact-like blocks inside the solve graph."""
-        full_rows, full_cols, full_values, dense = make_block_laplacian(9)
-        rows, cols, values = extract_symmetric_upper(full_rows, full_cols, full_values)
-        capacities = np.diff(rows) + 2
-        matrix = BatchedBSRMatrix.from_host(
-            [rows],
-            [cols],
-            [values],
-            row_capacities=[capacities],
-            symmetric_upper=True,
-            device="cuda:0",
-        )
-        input_rows = np.repeat(np.arange(9, dtype=np.int32), np.diff(rows))
-        rows_gpu = wp.array(input_rows, device=matrix.device)
-        cols_gpu = wp.array(cols, dtype=wp.int32, device=matrix.device)
-        values_gpu = wp.array(values, dtype=wp.mat33f, device=matrix.device)
-        count_gpu = wp.array([len(cols)], dtype=wp.int32, device=matrix.device)
-        rhs_host = np.linspace(-0.5, 0.75, 27, dtype=np.float32)
-        rhs = wp.array(rhs_host, device=matrix.device)
-        x = wp.zeros_like(rhs)
-        solver = BatchedMASPCG(matrix, rtol=2.0e-5, max_iterations=80, use_cuda_graph=True)
-
-        with wp.ScopedCapture(matrix.device) as capture:
-            matrix.begin_assembly()
-            matrix.insert_blocks(rows_gpu, cols_gpu, values_gpu, count_gpu)
-            x.zero_()
-            solver.solve(rhs, x)
-        wp.capture_launch(capture.graph)
-
-        np.testing.assert_allclose(x.numpy(), np.linalg.solve(dense, rhs_host), rtol=3.0e-4, atol=3.0e-4)
-        self.assertEqual(int(matrix.overflow.numpy()[0]), 0)
-
-        matrix.begin_assembly()
-        matrix.insert_blocks(
-            wp.array([1], dtype=wp.int32, device=matrix.device),
-            wp.array([0], dtype=wp.int32, device=matrix.device),
-            wp.array([np.eye(3, dtype=np.float32)], dtype=wp.mat33f, device=matrix.device),
-            wp.array([1], dtype=wp.int32, device=matrix.device),
-        )
-        self.assertEqual(int(matrix.overflow.numpy()[0]), 1)
 
     def test_batched_solve_matches_dense_reference(self):
         """Solve varied world sizes to the requested float32 tolerance."""
@@ -232,6 +137,27 @@ class TestMASPCG(unittest.TestCase):
 
         np.testing.assert_allclose(result, np.linalg.solve(dense, rhs_host), rtol=3.0e-4, atol=3.0e-4)
 
+    def test_refinement_passes_capture(self):
+        """Capture reliable residual replacement without changing graph shape."""
+        rows, cols, values, dense = make_block_laplacian(19, diagonal_shift=0.02)
+        matrix = BatchedBSRMatrix.from_host([rows], [cols], [values], device="cuda:0")
+        rhs_host = np.linspace(-1.0, 1.0, 57, dtype=np.float32)
+        rhs = wp.array(rhs_host, device=matrix.device)
+        x = wp.zeros_like(rhs)
+        solver = BatchedMASPCG(
+            matrix,
+            rtol=2.0e-5,
+            max_iterations=100,
+            use_cuda_graph=True,
+            refinement_passes=2,
+        )
+
+        graph = solver.capture(rhs, x)
+        wp.capture_launch(graph)
+
+        np.testing.assert_allclose(x.numpy(), np.linalg.solve(dense, rhs_host), rtol=4.0e-4, atol=4.0e-4)
+        self.assertGreater(int(solver.iterations.numpy()[0]), 0)
+
     def test_dynamic_assembly_and_solve_capture_together(self):
         """Capture changing BSR assembly, MAS refit, and PCG without host synchronization."""
         rows, cols, values, dense = make_block_laplacian(9)
@@ -262,29 +188,6 @@ class TestMASPCG(unittest.TestCase):
 
         np.testing.assert_allclose(result, np.linalg.solve(dense, rhs_host), rtol=3.0e-4, atol=3.0e-4)
         self.assertEqual(int(matrix.overflow.numpy()[0]), 0)
-
-    def test_tensor_core_preconditioners_converge_in_capture(self):
-        """Keep experimental local apply modes accurate under captured FP32 PCG."""
-        rows, cols, values, dense = make_block_laplacian(19, diagonal_shift=0.05)
-        rhs_host = np.linspace(-1.0, 1.0, 57, dtype=np.float32)
-        expected = np.linalg.solve(dense, rhs_host)
-        for apply_mode in ("fp32_async", "fp32_tile", "bf16_tile", "bf16_vector"):
-            with self.subTest(apply_mode=apply_mode):
-                matrix = BatchedBSRMatrix.from_host([rows], [cols], [values], device="cuda:0")
-                rhs = wp.array(rhs_host, device=matrix.device)
-                x = wp.zeros_like(rhs)
-                solver = BatchedMASPCG(
-                    matrix,
-                    rtol=2.0e-5,
-                    max_iterations=100,
-                    use_cuda_graph=True,
-                    mas_apply_mode=apply_mode,
-                )
-
-                graph = solver.capture(rhs, x)
-                wp.capture_launch(graph)
-
-                np.testing.assert_allclose(x.numpy(), expected, rtol=5.0e-4, atol=5.0e-4)
 
 
 if __name__ == "__main__":

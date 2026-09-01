@@ -57,35 +57,14 @@ def make_stiff_grid(side, diagonal_shift=0.02):
     return np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32), np.asarray(values, dtype=np.float32)
 
 
-def extract_symmetric_upper(rows, cols, values):
-    """Return the upper-triangle rows of a symmetric BSR matrix."""
-    upper_rows = [0]
-    upper_cols = []
-    upper_values = []
-    for row in range(rows.size - 1):
-        for block in range(int(rows[row]), int(rows[row + 1])):
-            if int(cols[block]) >= row:
-                upper_cols.append(int(cols[block]))
-                upper_values.append(values[block])
-        upper_rows.append(len(upper_cols))
-    return (
-        np.asarray(upper_rows, dtype=np.int32),
-        np.asarray(upper_cols, dtype=np.int32),
-        np.asarray(upper_values, dtype=np.float32),
-    )
-
-
 class MASPCGBenchmark:
     """Measure solve, numeric refit, iteration count, and linear storage scaling."""
 
-    params = (
-        [(8, 1), (8, 16), (16, 1), (16, 8), (32, 1)],
-        ["fp32", "fp32_async", "fp32_tile", "bf16_tile", "bf16_vector"],
-    )
-    param_names = ("side_worlds", "mas_apply_mode")
+    params = ([(8, 1), (8, 16), (16, 1), (16, 8), (32, 1)],)
+    param_names = ("side_worlds",)
     timeout = 600
 
-    def setup(self, side_worlds, mas_apply_mode):
+    def setup(self, side_worlds):
         if not wp.is_cuda_available():
             raise NotImplementedError("CUDA is required")
         side, world_count = side_worlds
@@ -111,150 +90,44 @@ class MASPCGBenchmark:
             max_iterations=200,
             use_cuda_graph=True,
             loop_granularity=2,
-            mas_apply_mode=mas_apply_mode,
         )
         self.solve_graph = self.solver.capture(rhs, self.x, refit=False)
         self.frame_graph = self.solver.capture(rhs, self.x, refit=True)
         wp.capture_launch(self.solve_graph)
         wp.synchronize_device()
 
-    def time_solve_graph(self, _side_worlds, _mas_apply_mode):
+    def time_solve_graph(self, _side_worlds):
         wp.capture_launch(self.solve_graph)
         wp.synchronize_device()
 
-    def time_refit_and_solve_graph(self, _side_worlds, _mas_apply_mode):
+    def time_refit_and_solve_graph(self, _side_worlds):
         wp.capture_launch(self.frame_graph)
         wp.synchronize_device()
 
-    def time_spmv(self, _side_worlds, _mas_apply_mode):
+    def time_spmv(self, _side_worlds):
         self.solver.matrix.gemv(self.rhs, self.scratch, self.solver.world_active)
         wp.synchronize_device()
 
-    def time_preconditioner_apply(self, _side_worlds, _mas_apply_mode):
+    def time_preconditioner_apply(self, _side_worlds):
         self.solver.preconditioner.apply(self.rhs, self.scratch, self.solver.world_active)
         wp.synchronize_device()
 
-    def time_dot(self, _side_worlds, _mas_apply_mode):
-        self.solver._solver.compute_dot(
-            self.rhs,
-            self.rhs,
-            self.solver.matrix.active_dims,
-            self.solver.world_active,
-        )
-        wp.synchronize_device()
-
-    def track_max_iterations(self, _side_worlds, _mas_apply_mode):
+    def track_max_iterations(self, _side_worlds):
         wp.capture_launch(self.solve_graph)
         return int(self.solver.iterations.numpy().max())
 
-    def track_storage_bytes_per_node(self, _side_worlds, _mas_apply_mode):
+    def track_storage_bytes_per_node(self, _side_worlds):
         return self.solver.storage_bytes / self.solver.matrix.total_row_count
-
-
-class MASPCGSparseStorageBenchmark:
-    """Compare full BSR with mirrored upper-triangle block storage."""
-
-    params = ([(8, 1), (8, 16), (16, 1), (16, 8), (32, 1)], [False, True])
-    param_names = ("side_worlds", "symmetric_upper")
-    timeout = 600
-
-    def setup(self, side_worlds, symmetric_upper):
-        side, world_count = side_worlds
-        rows, cols, values = make_stiff_grid(side)
-        if symmetric_upper:
-            rows, cols, values = extract_symmetric_upper(rows, cols, values)
-        matrix = BatchedBSRMatrix.from_host(
-            [rows] * world_count,
-            [cols] * world_count,
-            [values] * world_count,
-            symmetric_upper=symmetric_upper,
-            device="cuda:0",
-        )
-        rng = np.random.default_rng(17)
-        self.rhs = wp.array(rng.normal(size=matrix.total_scalar_count).astype(np.float32), device=matrix.device)
-        self.x = wp.zeros_like(self.rhs)
-        self.scratch = wp.zeros_like(self.rhs)
-        self.solver = BatchedMASPCG(
-            matrix,
-            rtol=1.0e-4,
-            atol=1.0e-6,
-            max_iterations=200,
-            use_cuda_graph=True,
-            loop_granularity=2,
-        )
-        self.graph = self.solver.capture(self.rhs, self.x, refit=False)
-        wp.capture_launch(self.graph)
-        wp.synchronize_device()
-
-    def time_solve_graph(self, _side_worlds, _symmetric_upper):
-        wp.capture_launch(self.graph)
-        wp.synchronize_device()
-
-    def time_spmv(self, _side_worlds, _symmetric_upper):
-        self.solver.matrix.gemv(self.rhs, self.scratch, self.solver.world_active)
-        wp.synchronize_device()
-
-    def track_iterations(self, _side_worlds, _symmetric_upper):
-        wp.capture_launch(self.graph)
-        return int(self.solver.iterations.numpy().max())
-
-    def track_matrix_bytes_per_node(self, _side_worlds, _symmetric_upper):
-        return self.solver.matrix.storage_bytes / self.solver.matrix.total_row_count
-
-
-class MASPCGEnergyDotBenchmark:
-    """Compare explicit vector dots with exact restricted MAS energy."""
-
-    params = ([(16, 1), (16, 8), (32, 1)], [False, True])
-    param_names = ("side_worlds", "fuse_energy_dot")
-    timeout = 600
-
-    def setup(self, side_worlds, fuse_energy_dot):
-        side, world_count = side_worlds
-        rows, cols, values = make_stiff_grid(side)
-        matrix = BatchedBSRMatrix.from_host(
-            [rows] * world_count,
-            [cols] * world_count,
-            [values] * world_count,
-            device="cuda:0",
-        )
-        rng = np.random.default_rng(17)
-        self.rhs = wp.array(rng.normal(size=matrix.total_scalar_count).astype(np.float32), device=matrix.device)
-        self.x = wp.zeros_like(self.rhs)
-        self.solver = BatchedMASPCG(
-            matrix,
-            rtol=1.0e-4,
-            atol=1.0e-6,
-            max_iterations=200,
-            use_cuda_graph=True,
-            loop_granularity=2,
-            fuse_energy_dot=fuse_energy_dot,
-        )
-        self.graph = self.solver.capture(self.rhs, self.x, refit=False)
-        wp.capture_launch(self.graph)
-        wp.synchronize_device()
-
-    def time_solve_graph(self, _side_worlds, _fuse_energy_dot):
-        wp.capture_launch(self.graph)
-        wp.synchronize_device()
-
-    def track_iterations(self, _side_worlds, _fuse_energy_dot):
-        wp.capture_launch(self.graph)
-        return int(self.solver.iterations.numpy().max())
 
 
 class MASPCGConditioningBenchmark:
     """Measure convergence as the shifted Laplacian approaches singularity."""
 
-    params = (
-        [2.0e-2, 2.0e-3, 2.0e-4, 1.0e-4],
-        ["fp32_async", "bf16_vector"],
-        [1, 2, 4],
-    )
-    param_names = ("diagonal_shift", "mas_apply_mode", "refinement_passes")
+    params = ([2.0e-2, 2.0e-3, 2.0e-4, 1.0e-4], [1, 2, 4])
+    param_names = ("diagonal_shift", "refinement_passes")
     timeout = 600
 
-    def setup(self, diagonal_shift, mas_apply_mode, refinement_passes):
+    def setup(self, diagonal_shift, refinement_passes):
         rows, cols, values = make_stiff_grid(8, diagonal_shift)
         matrix = BatchedBSRMatrix.from_host([rows], [cols], [values], device="cuda:0")
         rng = np.random.default_rng(31)
@@ -268,22 +141,21 @@ class MASPCGConditioningBenchmark:
             max_iterations=500,
             use_cuda_graph=True,
             loop_granularity=2,
-            mas_apply_mode=mas_apply_mode,
             refinement_passes=refinement_passes,
         )
         self.graph = self.solver.capture(self.rhs, self.x, refit=False)
         wp.capture_launch(self.graph)
         wp.synchronize_device()
 
-    def time_solve_graph(self, _diagonal_shift, _mas_apply_mode, _refinement_passes):
+    def time_solve_graph(self, _diagonal_shift, _refinement_passes):
         wp.capture_launch(self.graph)
         wp.synchronize_device()
 
-    def track_iterations(self, _diagonal_shift, _mas_apply_mode, _refinement_passes):
+    def track_iterations(self, _diagonal_shift, _refinement_passes):
         wp.capture_launch(self.graph)
         return int(self.solver.iterations.numpy()[0])
 
-    def track_true_relative_residual(self, _diagonal_shift, _mas_apply_mode, _refinement_passes):
+    def track_true_relative_residual(self, _diagonal_shift, _refinement_passes):
         wp.capture_launch(self.graph)
         self.solver.matrix.gemv(self.x, self.scratch, self.solver.world_active)
         wp.synchronize_device()
@@ -293,123 +165,59 @@ class MASPCGConditioningBenchmark:
 
 def run_conditioning():
     """Print the residual-replacement sweep without the size benchmarks."""
-    print("conditioning mode passes shift condition_upper_bound solve_ms iterations true_relative_residual")
-    for mode in MASPCGConditioningBenchmark.params[1]:
-        for passes in MASPCGConditioningBenchmark.params[2]:
-            for shift in MASPCGConditioningBenchmark.params[0]:
-                benchmark = MASPCGConditioningBenchmark()
-                benchmark.setup(shift, mode, passes)
-                solve_times = []
-                for _ in range(10):
-                    start = time.perf_counter()
-                    benchmark.time_solve_graph(shift, mode, passes)
-                    solve_times.append(time.perf_counter() - start)
-                print(
-                    "conditioning",
-                    mode,
-                    passes,
-                    f"{shift:.1e}",
-                    f"{(1200.0 + shift) / shift:.1e}",
-                    f"{1.0e3 * np.median(solve_times):.3f}",
-                    benchmark.track_iterations(shift, mode, passes),
-                    f"{benchmark.track_true_relative_residual(shift, mode, passes):.2e}",
-                )
-
-
-def run_sizes(modes=None):
-    """Print the varied-size sweep, optionally for selected apply modes."""
-    wp.config.log_level = wp.LOG_WARNING
-    print("precision side worlds nodes/world total_nodes mas_ms solve_ms frame_ms iterations bytes/node")
-    modes = MASPCGBenchmark.params[1] if modes is None else modes
-    for precision in modes:
-        for case in MASPCGBenchmark.params[0]:
-            benchmark = MASPCGBenchmark()
-            benchmark.setup(case, precision)
+    print("conditioning passes shift condition_upper_bound solve_ms iterations true_relative_residual")
+    for passes in MASPCGConditioningBenchmark.params[1]:
+        for shift in MASPCGConditioningBenchmark.params[0]:
+            benchmark = MASPCGConditioningBenchmark()
+            benchmark.setup(shift, passes)
             solve_times = []
-            frame_times = []
-            mas_times = []
-            for _ in range(20):
+            for _ in range(10):
                 start = time.perf_counter()
-                benchmark.time_preconditioner_apply(case, precision)
-                mas_times.append(time.perf_counter() - start)
-                start = time.perf_counter()
-                benchmark.time_solve_graph(case, precision)
+                benchmark.time_solve_graph(shift, passes)
                 solve_times.append(time.perf_counter() - start)
-                start = time.perf_counter()
-                benchmark.time_refit_and_solve_graph(case, precision)
-                frame_times.append(time.perf_counter() - start)
-            side, worlds = case
             print(
-                precision,
-                side,
-                worlds,
-                side**3,
-                worlds * side**3,
-                f"{1.0e3 * np.median(mas_times):.3f}",
+                "conditioning",
+                passes,
+                f"{shift:.1e}",
+                f"{(1200.0 + shift) / shift:.1e}",
                 f"{1.0e3 * np.median(solve_times):.3f}",
-                f"{1.0e3 * np.median(frame_times):.3f}",
-                benchmark.track_max_iterations(case, precision),
-                f"{benchmark.track_storage_bytes_per_node(case, precision):.1f}",
+                benchmark.track_iterations(shift, passes),
+                f"{benchmark.track_true_relative_residual(shift, passes):.2e}",
             )
 
 
-def run_sparse_storage():
-    """Print full-versus-upper sparse storage and graph timings."""
+def run_sizes():
+    """Print the varied-size sweep."""
     wp.config.log_level = wp.LOG_WARNING
-    print("upper side worlds nodes/world total_nodes spmv_ms solve_ms iterations matrix_bytes/node")
-    for symmetric_upper in MASPCGSparseStorageBenchmark.params[1]:
-        for case in MASPCGSparseStorageBenchmark.params[0]:
-            benchmark = MASPCGSparseStorageBenchmark()
-            benchmark.setup(case, symmetric_upper)
-            spmv_times = []
-            solve_times = []
-            for _ in range(20):
-                start = time.perf_counter()
-                benchmark.time_spmv(case, symmetric_upper)
-                spmv_times.append(time.perf_counter() - start)
-                start = time.perf_counter()
-                benchmark.time_solve_graph(case, symmetric_upper)
-                solve_times.append(time.perf_counter() - start)
-            side, worlds = case
-            print(
-                symmetric_upper,
-                side,
-                worlds,
-                side**3,
-                worlds * side**3,
-                f"{1.0e3 * np.median(spmv_times):.3f}",
-                f"{1.0e3 * np.median(solve_times):.3f}",
-                benchmark.track_iterations(case, symmetric_upper),
-                f"{benchmark.track_matrix_bytes_per_node(case, symmetric_upper):.1f}",
-            )
-
-
-def run_energy_dot():
-    """Alternate explicit and energy-dot graphs to limit timing bias."""
-    wp.config.log_level = wp.LOG_WARNING
-    print("side worlds energy_dot solve_ms iterations")
-    for case in MASPCGEnergyDotBenchmark.params[0]:
-        benchmarks = {}
-        timings = {False: [], True: []}
-        for mode in MASPCGEnergyDotBenchmark.params[1]:
-            benchmark = MASPCGEnergyDotBenchmark()
-            benchmark.setup(case, mode)
-            benchmarks[mode] = benchmark
-        for iteration in range(40):
-            order = (False, True) if iteration % 2 == 0 else (True, False)
-            for mode in order:
-                start = time.perf_counter()
-                benchmarks[mode].time_solve_graph(case, mode)
-                timings[mode].append(time.perf_counter() - start)
+    print("side worlds nodes/world total_nodes mas_ms solve_ms frame_ms iterations bytes/node")
+    for case in MASPCGBenchmark.params[0]:
+        benchmark = MASPCGBenchmark()
+        benchmark.setup(case)
+        solve_times = []
+        frame_times = []
+        mas_times = []
+        for _ in range(20):
+            start = time.perf_counter()
+            benchmark.time_preconditioner_apply(case)
+            mas_times.append(time.perf_counter() - start)
+            start = time.perf_counter()
+            benchmark.time_solve_graph(case)
+            solve_times.append(time.perf_counter() - start)
+            start = time.perf_counter()
+            benchmark.time_refit_and_solve_graph(case)
+            frame_times.append(time.perf_counter() - start)
         side, worlds = case
-        for mode in MASPCGEnergyDotBenchmark.params[1]:
-            print(
-                side,
-                worlds,
-                mode,
-                f"{1.0e3 * np.median(timings[mode]):.3f}",
-                benchmarks[mode].track_iterations(case, mode),
-            )
+        print(
+            side,
+            worlds,
+            side**3,
+            worlds * side**3,
+            f"{1.0e3 * np.median(mas_times):.3f}",
+            f"{1.0e3 * np.median(solve_times):.3f}",
+            f"{1.0e3 * np.median(frame_times):.3f}",
+            benchmark.track_max_iterations(case),
+            f"{benchmark.track_storage_bytes_per_node(case):.1f}",
+        )
 
 
 def main():
