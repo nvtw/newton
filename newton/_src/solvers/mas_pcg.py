@@ -11,13 +11,19 @@ from all levels are added during prolongation.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 import warp as wp
 
-from .kamino._src.linalg.conjugate import BatchedLinearOperator, CGSolver
+from .kamino._src.linalg.conjugate import (
+    BatchedLinearOperator,
+    CGSolver,
+    _initialize_tolerance_kernel,
+    _run_capturable_loop,
+)
 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
@@ -167,7 +173,7 @@ def _bsr_gemv_kernel(
 
 
 @wp.kernel
-def _bsr_spmv_dot_kernel(
+def _bsr_spmv_triple_dot_kernel(
     row_offsets: wp.array[wp.int32],
     row_nnz: wp.array[wp.int32],
     col_indices: wp.array[wp.int32],
@@ -175,13 +181,16 @@ def _bsr_spmv_dot_kernel(
     world_row_offsets: wp.array[wp.int32],
     world_row_count: wp.array[wp.int32],
     world_active: wp.array[wp.bool],
-    p: wp.array[wp.float32],
-    ap: wp.array[wp.float32],
-    p_ap: wp.array[wp.float32],
+    r: wp.array[wp.float32],
+    u: wp.array[wp.float32],
+    au: wp.array[wp.float32],
+    products: wp.array2d[wp.float32],
 ):
     world, chunk, thread = wp.tid()
     local_row = chunk * wp.block_dim() + thread
-    contribution = wp.float32(0.0)
+    gamma = wp.float32(0.0)
+    delta = wp.float32(0.0)
+    rr = wp.float32(0.0)
     if local_row < world_row_count[world] and world_active[world]:
         row = world_row_offsets[world] + local_row
         result = wp.vec3f(0.0)
@@ -189,141 +198,127 @@ def _bsr_spmv_dot_kernel(
         for local_block in range(row_nnz[row]):
             block = row_begin + local_block
             col = col_indices[block]
-            p_col = wp.vec3f(p[3 * col], p[3 * col + 1], p[3 * col + 2])
-            result += values[block] * p_col
+            u_col = wp.vec3f(u[3 * col], u[3 * col + 1], u[3 * col + 2])
+            result += values[block] * u_col
         base = 3 * row
-        ap[base] = result[0]
-        ap[base + 1] = result[1]
-        ap[base + 2] = result[2]
-        contribution = p[base] * result[0] + p[base + 1] * result[1] + p[base + 2] * result[2]
-    chunk_sum = wp.tile_sum(wp.tile(contribution))[0]
+        residual = wp.vec3f(r[base], r[base + 1], r[base + 2])
+        preconditioned = wp.vec3f(u[base], u[base + 1], u[base + 2])
+        au[base] = result[0]
+        au[base + 1] = result[1]
+        au[base + 2] = result[2]
+        gamma = wp.dot(residual, preconditioned)
+        delta = wp.dot(result, preconditioned)
+        rr = wp.dot(residual, residual)
+    gamma_sum = wp.tile_sum(wp.tile(gamma))[0]
+    delta_sum = wp.tile_sum(wp.tile(delta))[0]
+    rr_sum = wp.tile_sum(wp.tile(rr))[0]
     if thread == 0:
-        wp.atomic_add(p_ap, world, chunk_sum)
+        wp.atomic_add(products, 0, world, gamma_sum)
+        wp.atomic_add(products, 1, world, delta_sum)
+        wp.atomic_add(products, 2, world, rr_sum)
 
 
 @wp.kernel
-def _cg_update_xr_save_kernel(
+def _cg_cg_initialize_kernel(
     tolerance: wp.array[wp.float32],
+    products: wp.array2d[wp.float32],
+    gamma: wp.array[wp.float32],
+    alpha: wp.array[wp.float32],
     residual: wp.array[wp.float32],
-    rz_old: wp.array[wp.float32],
-    rz_new: wp.array[wp.float32],
-    p_ap: wp.array[wp.float32],
+    u: wp.array[wp.float32],
+    au: wp.array[wp.float32],
     p: wp.array[wp.float32],
     ap: wp.array[wp.float32],
-    x: wp.array[wp.float32],
-    r: wp.array[wp.float32],
     vector_offsets: wp.array[wp.int32],
     dimensions: wp.array[wp.int32],
 ):
     world, local_dof = wp.tid()
     if local_dof >= dimensions[world]:
         return
-    current_rz = rz_new[world]
-    alpha = wp.where(
-        residual[world] > tolerance[world] and p_ap[world] > 0.0,
-        current_rz / p_ap[world],
-        wp.float32(0.0),
-    )
+    gamma_value = products[0, world]
+    delta_value = products[1, world]
+    rr_value = products[2, world]
+    alpha_value = wp.float32(0.0)
+    if rr_value > tolerance[world] and delta_value > 0.0:
+        alpha_value = gamma_value / delta_value
     dof = vector_offsets[world] + local_dof
-    x[dof] += alpha * p[dof]
-    r[dof] -= alpha * ap[dof]
+    p[dof] = u[dof]
+    ap[dof] = au[dof]
     if local_dof == 0:
-        rz_old[world] = current_rz
+        gamma[world] = gamma_value
+        alpha[world] = alpha_value
+        residual[world] = rr_value
 
 
 @wp.kernel
-def _cg_update_xr_rr_kernel(
+def _cg_cg_update_xr_reset_kernel(
     tolerance: wp.array[wp.float32],
     residual: wp.array[wp.float32],
-    rz_old: wp.array[wp.float32],
-    rz_new: wp.array[wp.float32],
-    p_ap: wp.array[wp.float32],
+    gamma: wp.array[wp.float32],
+    alpha: wp.array[wp.float32],
+    previous: wp.array2d[wp.float32],
+    products: wp.array2d[wp.float32],
     p: wp.array[wp.float32],
     ap: wp.array[wp.float32],
     x: wp.array[wp.float32],
     r: wp.array[wp.float32],
     vector_offsets: wp.array[wp.int32],
-    dimensions: wp.array[wp.int32],
-    rr_partials: wp.array2d[wp.float32],
-):
-    world, chunk, thread = wp.tid()
-    local_dof = chunk * wp.block_dim() + thread
-    contribution = wp.float32(0.0)
-    current_rz = rz_new[world]
-    if local_dof < dimensions[world]:
-        alpha = wp.where(
-            residual[world] > tolerance[world] and p_ap[world] > 0.0,
-            current_rz / p_ap[world],
-            wp.float32(0.0),
-        )
-        dof = vector_offsets[world] + local_dof
-        x[dof] += alpha * p[dof]
-        value = r[dof] - alpha * ap[dof]
-        r[dof] = value
-        contribution = value * value
-    chunk_sum = wp.tile_sum(wp.tile(contribution))[0]
-    if thread == 0:
-        rr_partials[world, chunk] = chunk_sum
-        if chunk == 0:
-            rz_old[world] = current_rz
-
-
-@wp.kernel
-def _finalize_rr_rz_kernel(
     dimensions: wp.array[wp.int32],
     world_active: wp.array[wp.bool],
-    world_cluster_offsets: wp.array[wp.int32],
-    world_cluster_count: wp.array[wp.int32],
-    rr_partials: wp.array2d[wp.float32],
-    cluster_energy: wp.array[wp.float32],
-    rr: wp.array[wp.float32],
-    rz: wp.array[wp.float32],
 ):
-    world, thread = wp.tid()
-    rr_partial = wp.float32(0.0)
-    rz_partial = wp.float32(0.0)
-    if world_active[world]:
-        chunk_count = (dimensions[world] + 255) // 256
-        chunk = thread
-        while chunk < chunk_count:
-            rr_partial += rr_partials[world, chunk]
-            chunk += wp.block_dim()
-        cluster_begin = world_cluster_offsets[world]
-        cluster = thread
-        while cluster < world_cluster_count[world]:
-            rz_partial += cluster_energy[cluster_begin + cluster]
-            cluster += wp.block_dim()
-    rr_sum = wp.tile_sum(wp.tile(rr_partial))[0]
-    rz_sum = wp.tile_sum(wp.tile(rz_partial))[0]
-    if thread == 0:
-        rr[world] = rr_sum
-        rz[world] = rz_sum
+    world, local_dof = wp.tid()
+    if local_dof >= dimensions[world]:
+        return
+    if world_active[world] and residual[world] > tolerance[world]:
+        dof = vector_offsets[world] + local_dof
+        alpha_value = alpha[world]
+        x[dof] += alpha_value * p[dof]
+        r[dof] -= alpha_value * ap[dof]
+    if local_dof == 0:
+        previous[0, world] = gamma[world]
+        previous[1, world] = alpha[world]
+        products[0, world] = 0.0
+        products[1, world] = 0.0
+        products[2, world] = 0.0
 
 
 @wp.kernel
-def _cg_update_p_reset_kernel(
+def _cg_cg_update_recurrence_kernel(
     tolerance: wp.array[wp.float32],
+    products: wp.array2d[wp.float32],
+    previous: wp.array2d[wp.float32],
+    gamma: wp.array[wp.float32],
+    alpha: wp.array[wp.float32],
     residual: wp.array[wp.float32],
-    rz_old: wp.array[wp.float32],
-    rz_new: wp.array[wp.float32],
-    z: wp.array[wp.float32],
+    u: wp.array[wp.float32],
+    au: wp.array[wp.float32],
     p: wp.array[wp.float32],
-    p_ap: wp.array[wp.float32],
+    ap: wp.array[wp.float32],
     vector_offsets: wp.array[wp.int32],
     dimensions: wp.array[wp.int32],
 ):
     world, local_dof = wp.tid()
     if local_dof >= dimensions[world]:
         return
-    beta = wp.where(
-        residual[world] > tolerance[world] and rz_old[world] > 0.0,
-        rz_new[world] / rz_old[world],
-        wp.float32(0.0),
-    )
+    gamma_new = products[0, world]
+    delta = products[1, world]
+    rr = products[2, world]
+    gamma_old = previous[0, world]
+    alpha_old = previous[1, world]
+    beta = wp.float32(0.0)
+    alpha_new = wp.float32(0.0)
+    if rr > tolerance[world] and gamma_old > 0.0 and alpha_old > 0.0:
+        beta = gamma_new / gamma_old
+        denominator = delta - beta * gamma_new / alpha_old
+        if denominator > 0.0:
+            alpha_new = gamma_new / denominator
     dof = vector_offsets[world] + local_dof
-    p[dof] = z[dof] + beta * p[dof]
+    p[dof] = u[dof] + beta * p[dof]
+    ap[dof] = au[dof] + beta * ap[dof]
     if local_dof == 0:
-        p_ap[world] = 0.0
+        gamma[world] = gamma_new
+        alpha[world] = alpha_new
+        residual[world] = rr
 
 
 @wp.kernel
@@ -825,40 +820,29 @@ class MASPreconditioner:
 
 
 class _BSRFastCGSolver(CGSolver):
-    """CG specialization that fuses BSR SpMV with its dot reduction."""
+    """Chronopoulos-Gear PCG with one fused reduction per iteration.
 
-    def __init__(
-        self,
-        matrix: BatchedBSRMatrix,
-        preconditioner: MASPreconditioner,
-        *args,
-        use_energy_dot: bool,
-        **kwargs,
-    ):
+    The BSR SpMV computes ``Au`` while reducing ``(r, u)``, ``(Au, u)``,
+    and ``(r, r)`` together. Recurrences for both ``p`` and ``Ap`` then avoid
+    the second reduction required by classic PCG.
+    """
+
+    def __init__(self, matrix: BatchedBSRMatrix, *args, **kwargs):
         self.bsr_matrix = matrix
-        self.mas_preconditioner = preconditioner
-        self.use_energy_dot = use_energy_dot
-        preconditioner.compute_cluster_energy = self.use_energy_dot
         super().__init__(*args, **kwargs)
 
     def _allocate(self):
         super()._allocate()
-        self.p_ap = wp.zeros(self.n_worlds, dtype=wp.float32, device=self.device)
-        self.scalar_chunk_count = (self.maxdims + 255) // 256
-        self.rr_partials = wp.zeros(
-            (self.n_worlds, self.scalar_chunk_count),
-            dtype=wp.float32,
-            device=self.device,
-        )
+        self.au = wp.zeros(self.total_vec_size, dtype=wp.float32, device=self.device)
+        self.products = wp.zeros((3, self.n_worlds), dtype=wp.float32, device=self.device)
+        self.previous = wp.zeros((2, self.n_worlds), dtype=wp.float32, device=self.device)
+        self.gamma = wp.zeros(self.n_worlds, dtype=wp.float32, device=self.device)
+        self.alpha = wp.zeros(self.n_worlds, dtype=wp.float32, device=self.device)
 
-    def solve(self, *args, **kwargs):
-        self.p_ap.zero_()
-        return super().solve(*args, **kwargs)
-
-    def do_iteration(self, p, Ap, rz_old, rz_new, z, x, r, r_norm_sq, active_dims, world_active):
+    def _spmv_and_reduce(self, r, u, au, world_active):
         chunks = (self.bsr_matrix.max_row_count + 255) // 256
         wp.launch_tiled(
-            _bsr_spmv_dot_kernel,
+            _bsr_spmv_triple_dot_kernel,
             dim=(self.n_worlds, chunks),
             inputs=[
                 self.bsr_matrix.row_offsets,
@@ -868,82 +852,125 @@ class _BSRFastCGSolver(CGSolver):
                 self.bsr_matrix.world_row_offsets,
                 self.bsr_matrix.world_row_count,
                 world_active,
-                p,
-                Ap,
-                self.p_ap,
+                r,
+                u,
+                au,
+                self.products,
             ],
             block_dim=256,
             device=self.device,
         )
-        if self.use_energy_dot:
-            wp.launch_tiled(
-                _cg_update_xr_rr_kernel,
-                dim=(self.n_worlds, self.scalar_chunk_count),
-                inputs=[
-                    self.atol_sq,
-                    r_norm_sq,
-                    rz_old,
-                    rz_new,
-                    self.p_ap,
-                    p,
-                    Ap,
-                    x,
-                    r,
-                    self.vio,
-                    active_dims,
-                    self.rr_partials,
-                ],
-                block_dim=256,
-                device=self.device,
-            )
-            self.Mi.matvec(r, z, world_active)
-            wp.launch_tiled(
-                _finalize_rr_rz_kernel,
-                dim=self.n_worlds,
-                inputs=[
-                    active_dims,
-                    world_active,
-                    self.mas_preconditioner.world_cluster_offsets,
-                    self.mas_preconditioner.world_cluster_count,
-                    self.rr_partials,
-                    self.mas_preconditioner.cluster_energy,
-                    r_norm_sq,
-                    rz_new,
-                ],
-                block_dim=256,
-                device=self.device,
-            )
-        else:
-            wp.launch(
-                _cg_update_xr_save_kernel,
-                dim=(self.n_worlds, self.maxdims),
-                inputs=[
-                    self.atol_sq,
-                    r_norm_sq,
-                    rz_old,
-                    rz_new,
-                    self.p_ap,
-                    p,
-                    Ap,
-                    x,
-                    r,
-                    self.vio,
-                    active_dims,
-                ],
-                device=self.device,
-            )
-            self.update_rr_rz(r, z, self.r_repeated, active_dims, world_active)
+
+    def solve(self, b, x, active_dims=None, world_active=None):
+        if b.shape[0] != self.total_vec_size:
+            raise ValueError(f"b has size {b.shape[0]} but solver expects total_vec_size={self.total_vec_size}")
+        if x.shape[0] != self.total_vec_size:
+            raise ValueError(f"x has size {x.shape[0]} but solver expects total_vec_size={self.total_vec_size}")
+        if active_dims is None:
+            active_dims = self.active_dims
+        if world_active is None:
+            world_active = self.world_active
+        if active_dims is None or world_active is None:
+            raise ValueError("active_dims and world_active must be provided to the solver or solve()")
+
+        r, u = self.r_and_z[0], self.r_and_z[1]
+        p, ap = self.p_and_Ap[0], self.p_and_Ap[1]
+
+        self.compute_dot(b, b, active_dims, world_active)
         wp.launch(
-            _cg_update_p_reset_kernel,
+            _initialize_tolerance_kernel,
+            dim=self.n_worlds,
+            inputs=[self.rtol, self.atol, self.dot_product[0]],
+            outputs=[self.atol_sq],
+            device=self.device,
+        )
+        r.assign(b)
+        self.A.gemv(x, r, world_active, alpha=-1.0, beta=1.0)
+        self.Mi.matvec(r, u, world_active)
+        self.products.zero_()
+        self._spmv_and_reduce(r, u, self.au, world_active)
+        wp.launch(
+            _cg_cg_initialize_kernel,
             dim=(self.n_worlds, self.maxdims),
             inputs=[
                 self.atol_sq,
-                r_norm_sq,
-                rz_old,
-                rz_new,
-                z,
+                self.products,
+                self.gamma,
+                self.alpha,
+                self.residual,
+                u,
+                self.au,
                 p,
-                self.p_ap,
+                ap,
+                self.vio,
+                active_dims,
+            ],
+            device=self.device,
+        )
+
+        do_iteration = functools.partial(
+            self.do_iteration,
+            p=p,
+            ap=ap,
+            u=u,
+            au=self.au,
+            x=x,
+            r=r,
+            active_dims=active_dims,
+            world_active=world_active,
+        )
+        return _run_capturable_loop(
+            do_iteration,
+            self.residual,
+            world_active,
+            self.cur_iter,
+            self.conditions,
+            self.maxiter,
+            self.atol_sq,
+            self.callback,
+            self.use_graph,
+            use_graph_conditionals=self.use_graph_conditionals,
+            maxiter_host=self.maxiter_host,
+            loop_granularity=min(self.loop_granularity, self.maxiter_host),
+        )
+
+    def do_iteration(self, p, ap, u, au, x, r, active_dims, world_active):
+        wp.launch(
+            _cg_cg_update_xr_reset_kernel,
+            dim=(self.n_worlds, self.maxdims),
+            inputs=[
+                self.atol_sq,
+                self.residual,
+                self.gamma,
+                self.alpha,
+                self.previous,
+                self.products,
+                p,
+                ap,
+                x,
+                r,
+                self.vio,
+                active_dims,
+                world_active,
+            ],
+            device=self.device,
+        )
+        self.Mi.matvec(r, u, world_active)
+        self._spmv_and_reduce(r, u, au, world_active)
+        wp.launch(
+            _cg_cg_update_recurrence_kernel,
+            dim=(self.n_worlds, self.maxdims),
+            inputs=[
+                self.atol_sq,
+                self.products,
+                self.previous,
+                self.gamma,
+                self.alpha,
+                self.residual,
+                u,
+                au,
+                p,
+                ap,
                 self.vio,
                 active_dims,
             ],
@@ -1012,9 +1039,7 @@ class BatchedMASPCG:
         )
         self._solver = _BSRFastCGSolver(
             matrix,
-            self.preconditioner,
             operator,
-            use_energy_dot=matrix.world_count == 1 and matrix.max_row_count >= 2048,
             world_active=self.world_active,
             atol=float(atol),
             rtol=float(rtol),

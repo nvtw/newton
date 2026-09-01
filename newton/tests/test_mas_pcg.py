@@ -72,8 +72,8 @@ class TestMASPCG(unittest.TestCase):
             actual = energy_host[cluster_begin:cluster_end].sum(dtype=np.float32)
             np.testing.assert_allclose(actual, expected, rtol=2.0e-5, atol=2.0e-5)
 
-    def test_batched_solve_matches_dense_reference(self):
-        """Solve varied world sizes to the requested float32 tolerance."""
+    def test_single_reduction_matches_dense_reference(self):
+        """Solve varied world sizes with single-reduction PCG."""
         systems = [make_block_laplacian(size) for size in (7, 19, 65)]
         matrix = BatchedBSRMatrix.from_host(
             [system[0] for system in systems],
