@@ -132,12 +132,26 @@ def _bf16_cluster_gemv(
     #endif
     __syncthreads();
 
+    float energy_value = 0.0f;
     if (thread < ROWS) {
         float total = 0.0f;
         #pragma unroll
         for (int col = 0; col < ROWS; ++col)
             total = fmaf(shared_matrix[thread * PADDED_LD + col], shared_residual[col], total);
         result.data[base + thread] = total;
+        energy_value = shared_residual[thread] * total;
+    }
+    if (compute_energy) {
+        __syncthreads();
+        shared_matrix[thread] = energy_value;
+        __syncthreads();
+        for (int offset = 128; offset > 0; offset >>= 1) {
+            if (thread < offset)
+                shared_matrix[thread] += shared_matrix[thread + offset];
+            __syncthreads();
+        }
+        if (thread == 0)
+            energy.data[cluster] = shared_matrix[0];
     }
 #endif
 """
@@ -148,6 +162,8 @@ def _fp32_async_cluster_gemv(
     slot_fine_begin: wp.array[wp.int32],
     slot_fine_count: wp.array[wp.int32],
     result: wp.array2d[wp.float32],
+    energy: wp.array[wp.float32],
+    compute_energy: wp.bool,
     cluster: int,
     thread: int,
 ): ...
@@ -371,6 +387,75 @@ def _cg_update_xr_save_kernel(
     r[dof] -= alpha * ap[dof]
     if local_dof == 0:
         rz_old[world] = current_rz
+
+
+@wp.kernel
+def _cg_update_xr_rr_kernel(
+    tolerance: wp.array[wp.float32],
+    residual: wp.array[wp.float32],
+    rz_old: wp.array[wp.float32],
+    rz_new: wp.array[wp.float32],
+    p_ap: wp.array[wp.float32],
+    p: wp.array[wp.float32],
+    ap: wp.array[wp.float32],
+    x: wp.array[wp.float32],
+    r: wp.array[wp.float32],
+    vector_offsets: wp.array[wp.int32],
+    dimensions: wp.array[wp.int32],
+    rr_partials: wp.array2d[wp.float32],
+):
+    world, chunk, thread = wp.tid()
+    local_dof = chunk * wp.block_dim() + thread
+    contribution = wp.float32(0.0)
+    current_rz = rz_new[world]
+    if local_dof < dimensions[world]:
+        alpha = wp.where(
+            residual[world] > tolerance[world] and p_ap[world] > 0.0,
+            current_rz / p_ap[world],
+            wp.float32(0.0),
+        )
+        dof = vector_offsets[world] + local_dof
+        x[dof] += alpha * p[dof]
+        value = r[dof] - alpha * ap[dof]
+        r[dof] = value
+        contribution = value * value
+    chunk_sum = wp.tile_sum(wp.tile(contribution))[0]
+    if thread == 0:
+        rr_partials[world, chunk] = chunk_sum
+        if chunk == 0:
+            rz_old[world] = current_rz
+
+
+@wp.kernel
+def _finalize_rr_rz_kernel(
+    dimensions: wp.array[wp.int32],
+    world_active: wp.array[wp.bool],
+    world_cluster_offsets: wp.array[wp.int32],
+    world_cluster_count: wp.array[wp.int32],
+    rr_partials: wp.array2d[wp.float32],
+    cluster_energy: wp.array[wp.float32],
+    rr: wp.array[wp.float32],
+    rz: wp.array[wp.float32],
+):
+    world, thread = wp.tid()
+    rr_partial = wp.float32(0.0)
+    rz_partial = wp.float32(0.0)
+    if world_active[world]:
+        chunk_count = (dimensions[world] + 255) // 256
+        chunk = thread
+        while chunk < chunk_count:
+            rr_partial += rr_partials[world, chunk]
+            chunk += wp.block_dim()
+        cluster_begin = world_cluster_offsets[world]
+        cluster = thread
+        while cluster < world_cluster_count[world]:
+            rz_partial += cluster_energy[cluster_begin + cluster]
+            cluster += wp.block_dim()
+    rr_sum = wp.tile_sum(wp.tile(rr_partial))[0]
+    rz_sum = wp.tile_sum(wp.tile(rz_partial))[0]
+    if thread == 0:
+        rr[world] = rr_sum
+        rz[world] = rz_sum
 
 
 @wp.kernel
@@ -700,6 +785,8 @@ def _apply_cluster_inverse_fp32_async_kernel(
     slot_fine_begin: wp.array[wp.int32],
     slot_fine_count: wp.array[wp.int32],
     hierarchy_z: wp.array2d[wp.float32],
+    cluster_energy: wp.array[wp.float32],
+    compute_energy: wp.bool,
 ):
     cluster, thread = wp.tid()
     if world_active[cluster_world[cluster]]:
@@ -709,9 +796,13 @@ def _apply_cluster_inverse_fp32_async_kernel(
             slot_fine_begin,
             slot_fine_count,
             hierarchy_z,
+            cluster_energy,
+            compute_energy,
             cluster,
             thread,
         )
+    elif compute_energy and thread == 0:
+        cluster_energy[cluster] = 0.0
 
 
 @wp.kernel
@@ -1256,6 +1347,7 @@ class MASPreconditioner:
         if apply_mode not in ("fp32", "fp32_async", "fp32_tile", "bf16_tile", "bf16_vector"):
             raise ValueError("apply_mode must be 'fp32', 'fp32_async', 'fp32_tile', 'bf16_tile', or 'bf16_vector'")
         self.apply_mode = apply_mode
+        self.compute_cluster_energy = False
         metadata = self._build_hierarchy_metadata(matrix)
         self.level_count = metadata["level_count"]
         self.cluster_count = metadata["cluster_count"]
@@ -1276,6 +1368,7 @@ class MASPreconditioner:
         hierarchy_scalar_count = self.cluster_count * _CLUSTER_DOF_COUNT
         self.hierarchy_r = wp.zeros((hierarchy_scalar_count, 1), dtype=wp.float32, device=self.device)
         self.hierarchy_z = wp.zeros_like(self.hierarchy_r)
+        self.cluster_energy = wp.zeros(self.cluster_count, dtype=wp.float32, device=self.device)
         self.factors_bf16 = None
         self.hierarchy_r_tensor = None
         self.hierarchy_z_tensor = None
@@ -1373,6 +1466,7 @@ class MASPreconditioner:
             self.factors,
             self.hierarchy_r,
             self.hierarchy_z,
+            self.cluster_energy,
         ]
         if self.apply_mode in ("fp32_tile", "bf16_tile"):
             arrays.extend((self.hierarchy_r_tensor, self.hierarchy_z_tensor))
@@ -1434,6 +1528,8 @@ class MASPreconditioner:
                     self.slot_fine_begin,
                     self.slot_fine_count,
                     self.hierarchy_z,
+                    self.cluster_energy,
+                    self.compute_cluster_energy,
                 ],
                 block_dim=256,
                 device=self.device,
@@ -1553,13 +1649,29 @@ class MASPreconditioner:
 class _BSRFastCGSolver(CGSolver):
     """CG specialization that fuses BSR SpMV with its dot reduction."""
 
-    def __init__(self, matrix: BatchedBSRMatrix, *args, **kwargs):
+    def __init__(
+        self,
+        matrix: BatchedBSRMatrix,
+        preconditioner: MASPreconditioner,
+        *args,
+        use_energy_dot: bool,
+        **kwargs,
+    ):
         self.bsr_matrix = matrix
+        self.mas_preconditioner = preconditioner
+        self.use_energy_dot = use_energy_dot
+        preconditioner.compute_cluster_energy = self.use_energy_dot
         super().__init__(*args, **kwargs)
 
     def _allocate(self):
         super()._allocate()
         self.p_ap = wp.zeros(self.n_worlds, dtype=wp.float32, device=self.device)
+        self.scalar_chunk_count = (self.maxdims + 255) // 256
+        self.rr_partials = wp.zeros(
+            (self.n_worlds, self.scalar_chunk_count),
+            dtype=wp.float32,
+            device=self.device,
+        )
 
     def solve(self, *args, **kwargs):
         self.p_ap.zero_()
@@ -1610,25 +1722,64 @@ class _BSRFastCGSolver(CGSolver):
                 block_dim=256,
                 device=self.device,
             )
-        wp.launch(
-            _cg_update_xr_save_kernel,
-            dim=(self.n_worlds, self.maxdims),
-            inputs=[
-                self.atol_sq,
-                r_norm_sq,
-                rz_old,
-                rz_new,
-                self.p_ap,
-                p,
-                Ap,
-                x,
-                r,
-                self.vio,
-                active_dims,
-            ],
-            device=self.device,
-        )
-        self.update_rr_rz(r, z, self.r_repeated, active_dims, world_active)
+        if self.use_energy_dot:
+            wp.launch_tiled(
+                _cg_update_xr_rr_kernel,
+                dim=(self.n_worlds, self.scalar_chunk_count),
+                inputs=[
+                    self.atol_sq,
+                    r_norm_sq,
+                    rz_old,
+                    rz_new,
+                    self.p_ap,
+                    p,
+                    Ap,
+                    x,
+                    r,
+                    self.vio,
+                    active_dims,
+                    self.rr_partials,
+                ],
+                block_dim=256,
+                device=self.device,
+            )
+            self.Mi.matvec(r, z, world_active)
+            wp.launch_tiled(
+                _finalize_rr_rz_kernel,
+                dim=self.n_worlds,
+                inputs=[
+                    active_dims,
+                    world_active,
+                    self.mas_preconditioner.world_cluster_offsets,
+                    self.mas_preconditioner.world_cluster_count,
+                    self.rr_partials,
+                    self.mas_preconditioner.cluster_energy,
+                    r_norm_sq,
+                    rz_new,
+                ],
+                block_dim=256,
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                _cg_update_xr_save_kernel,
+                dim=(self.n_worlds, self.maxdims),
+                inputs=[
+                    self.atol_sq,
+                    r_norm_sq,
+                    rz_old,
+                    rz_new,
+                    self.p_ap,
+                    p,
+                    Ap,
+                    x,
+                    r,
+                    self.vio,
+                    active_dims,
+                ],
+                device=self.device,
+            )
+            self.update_rr_rz(r, z, self.r_repeated, active_dims, world_active)
         update_kernel = _cg_update_p_reset_ap_kernel if self.bsr_matrix.symmetric_upper else _cg_update_p_reset_kernel
         update_inputs = [
             self.atol_sq,
@@ -1670,6 +1821,7 @@ class BatchedMASPCG:
         regularization: float = 1.0e-6,
         one_block_max_rows: int = 0,
         fused_spmv_min_rows: int = 0,
+        fuse_energy_dot: bool | None = None,
         mas_apply_mode: str = "fp32_async",
         refinement_passes: int = 1,
     ):
@@ -1683,6 +1835,8 @@ class BatchedMASPCG:
             raise ValueError("reliable refinement is incompatible with one-block PCG")
         if matrix.symmetric_upper and 0 < matrix.max_row_count <= one_block_max_rows:
             raise ValueError("symmetric upper storage is incompatible with one-block PCG")
+        if fuse_energy_dot and mas_apply_mode != "fp32_async":
+            raise ValueError("fused energy dot is only available for fp32_async")
         self.preconditioner = MASPreconditioner(
             matrix,
             regularization=regularization,
@@ -1736,8 +1890,18 @@ class BatchedMASPCG:
             "use_graph": use_cuda_graph,
             "loop_granularity": loop_granularity,
         }
-        if matrix.symmetric_upper or matrix.max_row_count >= fused_spmv_min_rows:
-            self._solver = _BSRFastCGSolver(matrix, operator, **solver_kwargs)
+        if fuse_energy_dot is True or matrix.symmetric_upper or matrix.max_row_count >= fused_spmv_min_rows:
+            if fuse_energy_dot is None:
+                fuse_energy_dot = mas_apply_mode == "fp32_async" and (
+                    matrix.max_row_count >= 8192 or (matrix.world_count == 1 and matrix.max_row_count >= 2048)
+                )
+            self._solver = _BSRFastCGSolver(
+                matrix,
+                self.preconditioner,
+                operator,
+                use_energy_dot=fuse_energy_dot,
+                **solver_kwargs,
+            )
         else:
             self._solver = CGSolver(operator, **solver_kwargs)
         self._one_block = matrix.max_row_count <= one_block_max_rows

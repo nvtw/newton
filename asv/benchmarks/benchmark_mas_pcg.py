@@ -202,6 +202,47 @@ class MASPCGSparseStorageBenchmark:
         return self.solver.matrix.storage_bytes / self.solver.matrix.total_row_count
 
 
+class MASPCGEnergyDotBenchmark:
+    """Compare explicit vector dots with exact restricted MAS energy."""
+
+    params = ([(16, 1), (16, 8), (32, 1)], [False, True])
+    param_names = ("side_worlds", "fuse_energy_dot")
+    timeout = 600
+
+    def setup(self, side_worlds, fuse_energy_dot):
+        side, world_count = side_worlds
+        rows, cols, values = make_stiff_grid(side)
+        matrix = BatchedBSRMatrix.from_host(
+            [rows] * world_count,
+            [cols] * world_count,
+            [values] * world_count,
+            device="cuda:0",
+        )
+        rng = np.random.default_rng(17)
+        self.rhs = wp.array(rng.normal(size=matrix.total_scalar_count).astype(np.float32), device=matrix.device)
+        self.x = wp.zeros_like(self.rhs)
+        self.solver = BatchedMASPCG(
+            matrix,
+            rtol=1.0e-4,
+            atol=1.0e-6,
+            max_iterations=200,
+            use_cuda_graph=True,
+            loop_granularity=2,
+            fuse_energy_dot=fuse_energy_dot,
+        )
+        self.graph = self.solver.capture(self.rhs, self.x, refit=False)
+        wp.capture_launch(self.graph)
+        wp.synchronize_device()
+
+    def time_solve_graph(self, _side_worlds, _fuse_energy_dot):
+        wp.capture_launch(self.graph)
+        wp.synchronize_device()
+
+    def track_iterations(self, _side_worlds, _fuse_energy_dot):
+        wp.capture_launch(self.graph)
+        return int(self.solver.iterations.numpy().max())
+
+
 class MASPCGConditioningBenchmark:
     """Measure convergence as the shifted Laplacian approaches singularity."""
 
@@ -340,6 +381,34 @@ def run_sparse_storage():
                 f"{1.0e3 * np.median(solve_times):.3f}",
                 benchmark.track_iterations(case, symmetric_upper),
                 f"{benchmark.track_matrix_bytes_per_node(case, symmetric_upper):.1f}",
+            )
+
+
+def run_energy_dot():
+    """Alternate explicit and energy-dot graphs to limit timing bias."""
+    wp.config.log_level = wp.LOG_WARNING
+    print("side worlds energy_dot solve_ms iterations")
+    for case in MASPCGEnergyDotBenchmark.params[0]:
+        benchmarks = {}
+        timings = {False: [], True: []}
+        for mode in MASPCGEnergyDotBenchmark.params[1]:
+            benchmark = MASPCGEnergyDotBenchmark()
+            benchmark.setup(case, mode)
+            benchmarks[mode] = benchmark
+        for iteration in range(40):
+            order = (False, True) if iteration % 2 == 0 else (True, False)
+            for mode in order:
+                start = time.perf_counter()
+                benchmarks[mode].time_solve_graph(case, mode)
+                timings[mode].append(time.perf_counter() - start)
+        side, worlds = case
+        for mode in MASPCGEnergyDotBenchmark.params[1]:
+            print(
+                side,
+                worlds,
+                mode,
+                f"{1.0e3 * np.median(timings[mode]):.3f}",
+                benchmarks[mode].track_iterations(case, mode),
             )
 
 

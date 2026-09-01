@@ -50,6 +50,42 @@ def extract_symmetric_upper(rows, cols, values):
 
 @unittest.skipUnless(wp.is_cuda_available(), "CUDA is required for tile Cholesky")
 class TestMASPCG(unittest.TestCase):
+    def test_restricted_mas_energy_matches_global_dot(self):
+        """Verify that summed bank energy equals r dot the prolonged MAS result."""
+        systems = [make_block_laplacian(size, diagonal_shift=0.1) for size in (7, 19, 65)]
+        matrix = BatchedBSRMatrix.from_host(
+            [system[0] for system in systems],
+            [system[1] for system in systems],
+            [system[2] for system in systems],
+            device="cuda:0",
+        )
+        rng = np.random.default_rng(91)
+        residual_host = rng.normal(size=matrix.total_scalar_count).astype(np.float32)
+        residual = wp.array(residual_host, device=matrix.device)
+        z = wp.zeros_like(residual)
+        solver = BatchedMASPCG(
+            matrix,
+            max_iterations=20,
+            use_cuda_graph=True,
+            fuse_energy_dot=True,
+        )
+
+        solver.preconditioner.apply(residual, z, solver.world_active)
+        z_host = z.numpy()
+        energy_host = solver.preconditioner.cluster_energy.numpy()
+        row_offsets = matrix.world_row_offsets.numpy()
+        row_counts = matrix.world_row_count.numpy()
+        cluster_offsets = solver.preconditioner.world_cluster_offsets.numpy()
+        cluster_counts = solver.preconditioner.world_cluster_count.numpy()
+        for world in range(matrix.world_count):
+            scalar_begin = 3 * int(row_offsets[world])
+            scalar_end = scalar_begin + 3 * int(row_counts[world])
+            cluster_begin = int(cluster_offsets[world])
+            cluster_end = cluster_begin + int(cluster_counts[world])
+            expected = np.dot(residual_host[scalar_begin:scalar_end], z_host[scalar_begin:scalar_end])
+            actual = energy_host[cluster_begin:cluster_end].sum(dtype=np.float32)
+            np.testing.assert_allclose(actual, expected, rtol=2.0e-5, atol=2.0e-5)
+
     def test_symmetric_upper_storage_matches_dense_and_captures(self):
         """Mirror nonsymmetric off-diagonal blocks in SpMV, MAS, and PCG."""
         diagonal_0 = np.diag(np.asarray([2.0, 2.5, 3.0], dtype=np.float32))
