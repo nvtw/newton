@@ -32,9 +32,6 @@ from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     _solve_dvi_inequalities_colored_pgs,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.projections import (
-    contact_friction_normal_load as _contact_friction_normal_load,
-)
-from newton._src.solvers.kamino._src.solvers.dvi.projections import (
     project_contact_tangent_update as _project_contact_tangent_update,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
@@ -44,11 +41,12 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _color_mapped_dvi_inequalities,
-    _compact_unilateral_correction,
+    _map_bounded_constraints,
+    _map_ordered_active_contacts,
     _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
 )
-from newton._src.solvers.kamino._src.solvers.dvi.types import DVIConfigStruct, convert_config_to_struct
+from newton._src.solvers.kamino._src.solvers.dvi.types import DVIConfigStruct, DVIState, convert_config_to_struct
 from newton._src.solvers.kamino._src.solvers.metrics import SolutionMetrics
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton.tests.kamino import setup_tests, test_context
@@ -56,61 +54,6 @@ from newton.tests.kamino.test_kamino_solvers_padmm import TestSetup
 from newton.tests.kamino.utils.extract import extract_delassus, extract_problem_vector
 from newton.tests.kamino.utils.make import make_containers, make_test_problem_fourbar, update_containers
 from newton.tests.utils import basics as public_basics
-
-
-@wp.kernel
-def _compact_unilateral_correction_for_test(
-    compact_q: wp.array[wp.float32],
-    result: wp.array[wp.vec2f],
-):
-    result[0] = _compact_unilateral_correction(
-        compact_q, wp.int32(0), wp.int32(0), wp.int32(0), wp.int32(1), wp.int32(0)
-    )
-    result[1] = _compact_unilateral_correction(
-        compact_q, wp.int32(0), wp.int32(0), wp.int32(1), wp.int32(1), wp.int32(0)
-    )
-    result[2] = _compact_unilateral_correction(
-        compact_q, wp.int32(0), wp.int32(0), wp.int32(1), wp.int32(1), wp.int32(1)
-    )
-
-
-@wp.kernel
-def _assemble_sparse_coupling_reference_for_test(
-    bsm_num_nzb: wp.array[wp.int32],
-    bsm_nzb_start: wp.array[wp.int32],
-    bsm_nzb_coords: wp.array2d[wp.int32],
-    mass_weighted_nzb_values: wp.array[vec6f],
-    jacobian_nzb_values: wp.array[vec6f],
-    problem_dim: wp.array[wp.int32],
-    problem_njc: wp.array[wp.int32],
-    problem_vio: wp.array[wp.int32],
-    problem_P: wp.array[wp.float32],
-    response_mio: wp.array[wp.int32],
-    response_stride: wp.array[wp.int32],
-    coupling: wp.array[wp.float32],
-):
-    """Retain the legacy full topology scan for an exact-order regression."""
-    wid, row, unilateral = wp.tid()
-    njc = problem_njc[wid]
-    col = njc + unilateral
-    if row >= njc or col >= problem_dim[wid]:
-        return
-    block_start = bsm_nzb_start[wid]
-    block_end = block_start + bsm_num_nzb[wid]
-    value = wp.float32(0.0)
-    for row_block in range(block_start, block_end):
-        row_coord = bsm_nzb_coords[row_block]
-        if row_coord[0] != row:
-            continue
-        for col_block in range(block_start, block_end):
-            col_coord = bsm_nzb_coords[col_block]
-            if col_coord[0] == col and col_coord[1] == row_coord[1]:
-                mass_weighted = mass_weighted_nzb_values[row_block]
-                jacobian = jacobian_nzb_values[col_block]
-                for component in range(6):
-                    value += mass_weighted[component] * jacobian[component]
-    value *= problem_P[problem_vio[wid] + col]
-    coupling[response_mio[wid] + row * response_stride[wid] + unilateral] = value
 
 
 @wp.kernel
@@ -131,25 +74,6 @@ def _project_contact_tangent_for_test(
         wp.float32(0.0),
         wp.float32(1.0),
         lambda_max,
-    )
-
-
-@wp.kernel
-def _contact_friction_normal_load_for_test(
-    lambda_n: wp.float32,
-    bias_n: wp.float32,
-    preconditioner_n: wp.float32,
-    diagonal_n: wp.float32,
-    result: wp.array[wp.float32],
-):
-    """Evaluate the unbiased DVI friction load in a test kernel."""
-    result[0] = _contact_friction_normal_load(
-        lambda_n,
-        bias_n,
-        preconditioner_n,
-        diagonal_n,
-        wp.float32(0.0),
-        wp.float32(1.0),
     )
 
 
@@ -392,6 +316,18 @@ class TestDVISolver(unittest.TestCase):
         if not test_context.setup_done:
             setup_tests(clear_cache=False)
         self.device = wp.get_device(test_context.device)
+
+    def test_00_sparse_projection_rejects_int32_overflow(self):
+        state = DVIState()
+        size = SimpleNamespace(sum_of_max_inequalities=1, num_worlds=1, sum_of_max_total_cts=1)
+
+        with self.assertRaisesRegex(ValueError, "Sparse DVI projection exceeds"):
+            state.allocate_sparse_projection(
+                size=size,
+                joint_rows=[46341],
+                unilateral_strides=[46341],
+                bilateral_vector_size=1,
+            )
 
     def test_00_config_selection(self):
         default_config = SolverKamino.Config(dynamics_solver="dvi")
@@ -1649,6 +1585,114 @@ class TestDVISolver(unittest.TestCase):
 
         np.testing.assert_array_equal(inequality_ids_by_color.numpy(), np.arange(num_inequalities))
         np.testing.assert_array_equal(inequality_color_starts.numpy(), np.arange(num_inequalities + 1))
+
+    def test_03g3_dvi_ordered_contacts_follow_bounded_rows_and_limits(self):
+        """Keep ordered contacts after bounded rows and joint limits."""
+        contacts_model_active = wp.array([2], dtype=wp.int32, device=self.device)
+        contacts_wid = wp.array([0, 0], dtype=wp.int32, device=self.device)
+        contacts_cid = wp.array([0, 1], dtype=wp.int32, device=self.device)
+        contacts_bid_ab = wp.array([wp.vec2i(0, -1), wp.vec2i(1, -1)], dtype=wp.vec2i, device=self.device)
+        sorted_to_unsorted_map = wp.array([0, 1], dtype=wp.int32, device=self.device)
+        contact_world_starts = wp.array([0, 2], dtype=wp.int32, device=self.device)
+        body_inv_mass = wp.ones(shape=2, dtype=wp.float32, device=self.device)
+        problem_nbc = wp.array([1], dtype=wp.int32, device=self.device)
+        problem_nl = wp.array([1], dtype=wp.int32, device=self.device)
+        problem_cio = wp.array([0], dtype=wp.int32, device=self.device)
+        problem_uio = wp.array([0], dtype=wp.int32, device=self.device)
+        contact_indices = wp.full(shape=2, value=-1, dtype=wp.int32, device=self.device)
+        inequality_bodies = wp.full(shape=4, value=wp.vec2i(-2, -2), dtype=wp.vec2i, device=self.device)
+        inequality_order = wp.full(shape=5, value=-1, dtype=wp.int32, device=self.device)
+
+        wp.launch(
+            kernel=_map_ordered_active_contacts,
+            dim=2,
+            inputs=[
+                contacts_model_active,
+                contacts_wid,
+                contacts_cid,
+                contacts_bid_ab,
+                sorted_to_unsorted_map,
+                contact_world_starts,
+                body_inv_mass,
+                problem_nbc,
+                problem_nl,
+                problem_cio,
+                problem_uio,
+                contact_indices,
+                inequality_bodies,
+                inequality_order,
+            ],
+            device=self.device,
+        )
+
+        np.testing.assert_array_equal(contact_indices.numpy(), [0, 1])
+        np.testing.assert_array_equal(inequality_bodies.numpy()[2:], [[0, -1], [1, -1]])
+        np.testing.assert_array_equal(inequality_order.numpy()[2:4], [2, 3])
+
+    def test_03g4_dvi_coloring_separates_bounded_from_limit_conflicts(self):
+        """Separate bounded and limit rows that share a dynamic body."""
+        problem_nbc = wp.array([1], dtype=wp.int32, device=self.device)
+        problem_nl = wp.array([2], dtype=wp.int32, device=self.device)
+        problem_nc = wp.array([0], dtype=wp.int32, device=self.device)
+        problem_uio = wp.array([0], dtype=wp.int32, device=self.device)
+        inequality_bodies = wp.array(
+            [wp.vec2i(0, -1), wp.vec2i(0, -1), wp.vec2i(5, -1)], dtype=wp.vec2i, device=self.device
+        )
+        body_color_masks = wp.zeros(shape=6, dtype=wp.uint64, device=self.device)
+        inequality_colors = wp.full(shape=3, value=-1, dtype=wp.int32, device=self.device)
+        inequality_num_colors = wp.zeros(shape=1, dtype=wp.int32, device=self.device)
+        inequality_ids_by_color = wp.full(shape=3, value=-1, dtype=wp.int32, device=self.device)
+        inequality_color_starts = wp.zeros(shape=4, dtype=wp.int32, device=self.device)
+
+        wp.launch(
+            kernel=_color_mapped_dvi_inequalities,
+            dim=1,
+            inputs=[
+                problem_nbc,
+                problem_nl,
+                problem_nc,
+                problem_uio,
+                inequality_bodies,
+                body_color_masks,
+                inequality_colors,
+                inequality_num_colors,
+                inequality_ids_by_color,
+                inequality_color_starts,
+            ],
+            device=self.device,
+        )
+
+        colors = inequality_colors.numpy()
+        self.assertNotEqual(colors[0], colors[1])
+        self.assertEqual(colors[2], colors[0])
+        np.testing.assert_array_equal(np.sort(inequality_ids_by_color.numpy()), np.arange(3))
+
+    def test_03g5_dvi_map_bounded_constraints_writes_joint_body_pairs(self):
+        """Map each joint's bounded rows to its body pair and entity slot."""
+        joint_wid = wp.array([0, 0], dtype=wp.int32, device=self.device)
+        joint_bid_f = wp.array([0, 1], dtype=wp.int32, device=self.device)
+        joint_bid_b = wp.array([-1, 2], dtype=wp.int32, device=self.device)
+        joint_bounded_cts_offset = wp.array([0, 1, 2], dtype=wp.int32, device=self.device)
+        problem_bcio = wp.array([0], dtype=wp.int32, device=self.device)
+        problem_uio = wp.array([0], dtype=wp.int32, device=self.device)
+        inequality_bodies = wp.full(shape=2, value=wp.vec2i(-5, -5), dtype=wp.vec2i, device=self.device)
+
+        wp.launch(
+            kernel=_map_bounded_constraints,
+            dim=2,
+            inputs=[
+                joint_wid,
+                joint_bid_b,
+                joint_bid_f,
+                joint_bounded_cts_offset,
+                problem_bcio,
+                problem_uio,
+                inequality_bodies,
+            ],
+            device=self.device,
+        )
+
+        np.testing.assert_array_equal(inequality_bodies.numpy(), [[-1, 0], [2, 1]])
 
     def test_03i_dvi_coldstart_is_repeatable(self):
         for sparse in (False, True):

@@ -297,6 +297,7 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
                     sorter.sorted_to_unsorted_map,
                     path.contact_world_starts,
                     path.model.bodies.inv_m_i,
+                    problem.data.nbc,
                     problem.data.nl,
                     problem.data.cio,
                     problem.data.iio,

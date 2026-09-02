@@ -330,6 +330,7 @@ def _map_ordered_active_contacts(
     sorted_to_unsorted_map: wp.array[int32],
     contact_world_starts: wp.array[int32],
     model_body_inv_mass: wp.array[float32],
+    problem_nbc: wp.array[int32],
     problem_nl: wp.array[int32],
     problem_cio: wp.array[int32],
     problem_uio: wp.array[int32],
@@ -351,12 +352,13 @@ def _map_ordered_active_contacts(
             bid_a = int32(-1)
         if bid_b >= int32(0) and model_body_inv_mass[bid_b] <= float32(0.0):
             bid_b = int32(-1)
+        nbc = problem_nbc[wid]
         nl = problem_nl[wid]
         uio = problem_uio[wid]
-        uid = nl + cid
+        uid = nbc + nl + cid
         inequality_bodies[uio + uid] = wp.vec2i(bid_a, bid_b)
         local_sorted_id = sorted_id - contact_world_starts[wid]
-        inequality_order[uio + wid + nl + local_sorted_id] = uid
+        inequality_order[uio + wid + nbc + nl + local_sorted_id] = uid
 
 
 @wp.kernel

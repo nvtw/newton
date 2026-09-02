@@ -165,6 +165,8 @@ class DVIState:
             for num_joint_rows, unilateral_stride in zip(joint_rows, unilateral_strides, strict=True):
                 response_offsets.append(response_size)
                 response_size += num_joint_rows * unilateral_stride
+            if response_size > 2**31 - 1:
+                raise ValueError("Sparse DVI projection exceeds the supported int32 index range.")
             self.bilateral_response_mio = wp.array(response_offsets, dtype=int32)
             self.bilateral_response_stride = wp.array(unilateral_strides, dtype=int32)
             self.bilateral_coupling = wp.zeros(max(1, response_size), dtype=float32)
