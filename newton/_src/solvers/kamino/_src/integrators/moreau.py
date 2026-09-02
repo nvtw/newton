@@ -322,7 +322,7 @@ class IntegratorMoreauJean(IntegratorBase):
                 # Inputs:
                 model.time.dt,
                 model.bodies.wid,
-                model.bodies.effective_inv_m_i,
+                model.bodies.inv_m_i,
                 data.bodies.u_i,
                 # Outputs:
                 data.bodies.q_i,
@@ -350,7 +350,7 @@ class IntegratorMoreauJean(IntegratorBase):
                 model.time.dt,
                 model.gravity.vector,
                 model.bodies.wid,
-                model.bodies.effective_inv_m_i,
+                model.bodies.inv_m_i,
                 data.bodies.I_i,
                 data.bodies.inv_I_i,
                 data.bodies.w_i,

@@ -1167,7 +1167,7 @@ def _solve_dvi_sparse_inequalities_pgs(
     jacobian_nzb_values: wp.array[vec6f],
     bsm_row_start: wp.array[int32],
     bsm_col_start: wp.array[int32],
-    friction_nzb_offsets: wp.array[wp.vec2i],
+    bounded_nzb_offsets: wp.array[wp.vec2i],
     limit_nzb_offsets: wp.array[int32],
     contact_nzb_offsets: wp.array[int32],
     limit_indices: wp.array[int32],
@@ -1300,7 +1300,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 bid = bcio + uid
                                 row = bcgo + uid
                                 vec_idx = vio + row
-                                offsets = friction_nzb_offsets[bid]
+                                offsets = bounded_nzb_offsets[bid]
                                 bound_value = eta[row_start + row] * solution_lambdas[vec_idx]
                                 nzb_idx_f = offsets[0]
                                 if (

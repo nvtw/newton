@@ -234,7 +234,7 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
                 limits.wid,
                 limits.lid,
                 limits.bids,
-                path.model.bodies.effective_inv_m_i,
+                path.model.bodies.inv_m_i,
                 problem.data.lio,
                 problem.data.iio,
                 problem.data.nbc,
@@ -296,7 +296,7 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
                     contacts.bid_AB,
                     sorter.sorted_to_unsorted_map,
                     path.contact_world_starts,
-                    path.model.bodies.effective_inv_m_i,
+                    path.model.bodies.inv_m_i,
                     problem.data.nl,
                     problem.data.cio,
                     problem.data.iio,
@@ -315,7 +315,7 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
                     contacts.wid,
                     contacts.cid,
                     contacts.bid_AB,
-                    path.model.bodies.effective_inv_m_i,
+                    path.model.bodies.inv_m_i,
                     problem.data.nbc,
                     problem.data.nl,
                     problem.data.cio,
@@ -573,7 +573,7 @@ def _launch_sparse_inequality_pgs(
     else:
         kernel_inputs = [
             *common_inputs,
-            jacobians.friction_constraint_nzb_offsets,
+            jacobians.bounded_constraint_nzb_offsets,
             jacobians.limit_constraint_nzb_offsets,
             jacobians.contact_constraint_nzb_offsets,
             state.limit_indices,
@@ -607,13 +607,41 @@ def _launch_sparse_inequality_pgs(
             state.bilateral_delta,
         ]
         if cooperative_articulation:
-            kernel_inputs.extend(
-                [
-                    state.bilateral_response_factor,
-                    state.s,
-                    wp.bool(enable_compact_schur),
-                ]
-            )
+            # This path is enabled only when no bounded joint rows exist, and
+            # its specialized kernel omits the corresponding topology, count,
+            # offset, group-offset, and bound arrays.
+            kernel_inputs = [
+                *common_inputs,
+                jacobians.limit_constraint_nzb_offsets,
+                jacobians.contact_constraint_nzb_offsets,
+                state.limit_indices,
+                state.contact_indices,
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.lio,
+                problem.data.cio,
+                problem.data.iio,
+                problem.data.lcgo,
+                problem.data.ccgo,
+                problem.data.vio,
+                problem.data.mu,
+                problem.data.P,
+                problem.data.v_f,
+                problem.data.v_b,
+                state.scratch,
+                state.inequality_projected_diagonal,
+                delassus.regularization,
+                problem.data.njc,
+                bilateral_vio,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_coupling,
+                state.bilateral_response,
+                state.bilateral_delta,
+                state.bilateral_response_factor,
+                state.s,
+                wp.bool(enable_compact_schur),
+            ]
         kernel_inputs.extend(
             [
                 state.inequality_num_colors,
@@ -791,7 +819,7 @@ def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) ->
             kernel=_build_sparse_bilateral_block,
             dim=pair_wid.size,
             inputs=[
-                path.model.bodies.effective_inv_m_i,
+                path.model.bodies.inv_m_i,
                 path.model_data.bodies.inv_I_i,
                 pair_wid,
                 pair_row,
@@ -986,7 +1014,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
             problem.data.P,
             state.limit_indices,
             state.contact_indices,
-            path.jacobians.friction_constraint_nzb_offsets,
+            path.jacobians.bounded_constraint_nzb_offsets,
             path.jacobians.limit_constraint_nzb_offsets,
             path.jacobians.contact_constraint_nzb_offsets,
             world_row_offsets,
