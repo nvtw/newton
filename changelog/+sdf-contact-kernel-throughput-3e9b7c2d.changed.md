@@ -13,3 +13,7 @@ generated contacts:
   - The hydroelastic generation kernel ranks marching-cubes faces by index and
     re-extracts the winners on write instead of carrying every candidate's
     payload through the loop.
+  - Hydroelastic octree refinement scans only the live prefix of its
+    worst-case-sized count buffers with a tile-based chunked scan, and the
+    scatter kernels publish the next level's count themselves instead of a
+    separate single-thread launch per level.

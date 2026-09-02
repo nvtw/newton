@@ -72,7 +72,7 @@ from .sdf_texture import (
     _texture_sample_sdf_scalar,
     _texture_sample_sdf_zfiltered,
 )
-from .utils import scan_with_total
+from .utils import ActiveCountScan
 
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
 PRE_PRUNE_MAX_PENETRATING = 2
@@ -636,14 +636,15 @@ class HydroelasticSDF:
         self.input_sizes = (self.max_num_blocks_broad, *self.iso_max_dims[:3])
 
         with wp.ScopedDevice(device):
-            self.num_shape_pairs_array = wp.full((1,), self.max_num_shape_pairs, dtype=wp.int32)
-
             # Allocate buffers for octree traversal (broadphase + 4 refinement levels)
             self.iso_buffer_counts = [wp.zeros((1,), dtype=wp.int32) for _ in range(5)]
             # Scratch buffers are per-level to avoid scanning the worst-case
             # size at all refinement levels during graph-captured execution.
             self.iso_buffer_prefix_scratch = [wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes]
             self.iso_buffer_num_scratch = [wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes]
+            # The refinement buffers are sized for worst-case scenes, so scan
+            # only their live prefix instead of the whole capacity each step.
+            self.iso_buffer_scans = [ActiveCountScan(level_input, device=device) for level_input in self.input_sizes]
             self.iso_subblock_idx_scratch = [wp.zeros(level_input, dtype=wp.uint8) for level_input in self.input_sizes]
             self.iso_buffer_records = [wp.empty((self.max_num_blocks_broad,), dtype=wp.vec3ui)] + [
                 wp.empty((self.iso_max_dims[i],), dtype=wp.vec3ui) for i in range(4)
@@ -1053,19 +1054,14 @@ class HydroelasticSDF:
             record_tape=False,
         )
 
-        scan_with_total(
-            self.num_blocks_per_pair,
-            self.block_start_prefix,
-            self.num_shape_pairs_array,
-            self.block_broad_collide_count,
-        )
+        wp.utils.array_scan(self.num_blocks_per_pair, self.block_start_prefix, inclusive=False)
 
         wp.launch(
             kernel=broadphase_collision_pairs_scatter,
             dim=[self.grid_size],
             inputs=[
                 self.grid_size,
-                self.block_broad_collide_count,
+                self.num_blocks_per_pair,
                 self.block_start_prefix,
                 self.normalized_shape_pairs,
                 shape_pairs_sdf_sdf_count,
@@ -1073,6 +1069,7 @@ class HydroelasticSDF:
                 self.max_num_blocks_broad,
             ],
             outputs=[
+                self.block_broad_collide_count,
                 self.block_broad_collide_records,
             ],
             device=self.device,
@@ -1148,11 +1145,8 @@ class HydroelasticSDF:
                 record_tape=False,
             )
 
-            scan_with_total(
-                self.iso_buffer_num_scratch[i],
-                self.iso_buffer_prefix_scratch[i],
-                self.iso_buffer_counts[i],
-                self.iso_buffer_counts[i + 1],
+            self.iso_buffer_scans[i].scan(
+                self.iso_buffer_num_scratch[i], self.iso_buffer_prefix_scratch[i], self.iso_buffer_counts[i]
             )
 
             wp.launch(
@@ -1161,6 +1155,7 @@ class HydroelasticSDF:
                 inputs=[
                     self.grid_size,
                     self.iso_buffer_counts[i],
+                    self.iso_buffer_num_scratch[i],
                     self.iso_buffer_prefix_scratch[i],
                     self.iso_subblock_idx_scratch[i],
                     self.iso_buffer_records[i],
@@ -1169,6 +1164,7 @@ class HydroelasticSDF:
                     self.iso_max_dims[i],
                 ],
                 outputs=[
+                    self.iso_buffer_counts[i + 1],
                     self.iso_buffer_records[i + 1],
                 ],
                 device=self.device,
@@ -1381,20 +1377,37 @@ def broadphase_collision_pairs_count(
         thread_num_blocks[tid] = 0
 
 
+@wp.func
+def _scan_total(counts: wp.array[wp.int32], prefix_sums: wp.array[wp.int32], num_elements: int) -> int:
+    """Return the sum of the first ``num_elements`` counts from their exclusive scan."""
+    if num_elements <= 0:
+        return 0
+    final_idx = num_elements - 1
+    return prefix_sums[final_idx] + counts[final_idx]
+
+
 @wp.kernel(enable_backward=False)
 def broadphase_collision_pairs_scatter(
     grid_size: int,
-    block_broad_collide_count: wp.array[wp.int32],
+    num_blocks_per_pair: wp.array[wp.int32],
     block_start_prefix: wp.array[wp.int32],
     normalized_shape_pairs: wp.array[wp.vec2i],
     shape_pairs_sdf_sdf_count: wp.array[wp.int32],
     shape_sdf_data: wp.array[TextureSDFData],
     max_num_blocks_broad: int,
     # outputs
+    block_broad_collide_count: wp.array[wp.int32],
     block_broad_collide_records: wp.array[wp.vec3ui],
 ):
     offset = wp.tid()
-    total_blocks = wp.min(block_broad_collide_count[0], max_num_blocks_broad)
+    # The scan covers the whole pair buffer (inactive pairs contribute zero
+    # blocks), so its total is the unclamped block count. Deriving it here
+    # replaces a separate single-thread launch; the count is published for the
+    # refinement kernels and the overflow check that run afterwards.
+    total_blocks_unclamped = _scan_total(num_blocks_per_pair, block_start_prefix, block_start_prefix.shape[0])
+    if offset == 0:
+        block_broad_collide_count[0] = total_blocks_unclamped
+    total_blocks = wp.min(total_blocks_unclamped, max_num_blocks_broad)
     pair_count = wp.min(shape_pairs_sdf_sdf_count[0], block_start_prefix.shape[0])
     if pair_count == 0:
         return
@@ -1676,6 +1689,7 @@ def create_count_iso_voxel_children_kernel(pressure_func: Any, integer_center: b
 def scatter_iso_subblock(
     grid_size: int,
     in_iso_subblock_count: wp.array[int],
+    in_iso_subblock_num: wp.array[int],
     in_iso_subblock_prefix: wp.array[int],
     in_iso_subblock_idx: wp.array[wp.uint8],
     in_iso_subblock_records: wp.array[wp.vec3ui],
@@ -1683,10 +1697,16 @@ def scatter_iso_subblock(
     max_input_buffer_size: int,
     max_num_iso_subblocks: int,
     # outputs
+    out_iso_subblock_count: wp.array[int],
     out_iso_subblock_records: wp.array[wp.vec3ui],
 ):
     offset = wp.tid()
     num_items = wp.min(in_iso_subblock_count[0], max_input_buffer_size)
+    # Publish the (unclamped) number of records written to the next level,
+    # replacing a separate single-thread total kernel after the scan. Only
+    # later launches read it, so any thread may store it.
+    if offset == 0:
+        out_iso_subblock_count[0] = _scan_total(in_iso_subblock_num, in_iso_subblock_prefix, num_items)
     for tid in range(offset, num_items, grid_size):
         write_idx = in_iso_subblock_prefix[tid]
         subblock_idx = in_iso_subblock_idx[tid]

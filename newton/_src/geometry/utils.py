@@ -1031,4 +1031,135 @@ def scan_with_total(
     )
 
 
+ACTIVE_SCAN_BLOCK_DIM = 256
+"""Threads per block for :class:`ActiveCountScan` kernels."""
+ACTIVE_SCAN_CHUNK = 1024
+"""Elements scanned cooperatively by one block per chunk in :class:`ActiveCountScan`."""
+ACTIVE_SCAN_MAX_BLOCKS = 256
+"""Blocks launched per scan pass; each block strides over chunks."""
+
+
+@wp.kernel(enable_backward=False)
+def _active_scan_chunks_kernel(
+    counts: wp.array[wp.int32],
+    num_elements: wp.array[wp.int32],
+    max_elements: int,
+    num_blocks: int,
+    prefix_sums: wp.array[wp.int32],
+    chunk_sums: wp.array[wp.int32],
+):
+    """Exclusive-scan every live chunk of ``counts`` and record each chunk total.
+
+    Chunks are visited in increasing order per block, so a block stops as soon
+    as it reaches the first chunk that starts at or beyond the live count.
+    """
+    block_id, t = wp.tid()
+    n = wp.min(num_elements[0], max_elements)
+    chunk = block_id
+    start = chunk * ACTIVE_SCAN_CHUNK
+    while start < n:
+        values = wp.tile_load(counts, shape=ACTIVE_SCAN_CHUNK, offset=start)
+        exclusive = wp.tile_scan_exclusive(values)
+        wp.tile_store(prefix_sums, exclusive, offset=start)
+        if t == 0:
+            last = ACTIVE_SCAN_CHUNK - 1
+            chunk_sums[chunk] = wp.tile_extract(exclusive, last) + wp.tile_extract(values, last)
+        chunk += num_blocks
+        start = chunk * ACTIVE_SCAN_CHUNK
+
+
+@wp.kernel(enable_backward=False)
+def _active_scan_offsets_kernel(
+    num_elements: wp.array[wp.int32],
+    max_elements: int,
+    num_blocks: int,
+    chunk_sums: wp.array[wp.int32],
+    prefix_sums: wp.array[wp.int32],
+):
+    """Add the running total of the preceding chunks to each live chunk."""
+    block_id, t = wp.tid()
+    n = wp.min(num_elements[0], max_elements)
+    chunk = block_id
+    start = chunk * ACTIVE_SCAN_CHUNK
+    while start < n:
+        if chunk > 0:
+            # Stride by the runtime block size: CPU tiled launches run one
+            # thread per block, so the compile-time block constant would skip
+            # elements there.
+            partial = wp.int32(0)
+            k = t
+            while k < chunk:
+                partial += chunk_sums[k]
+                k += wp.block_dim()
+            offset = wp.tile_extract(wp.tile_sum(wp.tile(partial)), 0)
+            end = wp.min(start + ACTIVE_SCAN_CHUNK, n)
+            idx = start + t
+            while idx < end:
+                prefix_sums[idx] += offset
+                idx += wp.block_dim()
+        chunk += num_blocks
+        start = chunk * ACTIVE_SCAN_CHUNK
+
+
+class ActiveCountScan:
+    """Exclusive prefix sum whose work scales with a device-side element count.
+
+    Pipelines that keep the number of live entries on the device (so that
+    CUDA graph capture needs no host synchronization) must otherwise scan the
+    whole preallocated buffer every step. Such buffers are sized for
+    worst-case scenes and typically exceed the live prefix by two orders of
+    magnitude, so the scan alone can dominate a pass. This helper scans the
+    buffer in fixed chunks with cooperative tile scans and stops at the first
+    chunk beyond the live count, so the two launches only touch the live
+    prefix rounded up to a whole chunk. Results for indices below the live
+    count are identical to a full exclusive scan; entries beyond it are
+    untouched, except inside the last live chunk where they are scanned from
+    whatever stale counts they hold, as a full scan would also do.
+
+    Args:
+        capacity: Length of the count and prefix arrays this instance serves.
+        device: Warp device for the chunk-total scratch buffer.
+    """
+
+    def __init__(self, capacity: int, device: Any = None):
+        self.capacity = int(capacity)
+        self.num_chunks = max((self.capacity + ACTIVE_SCAN_CHUNK - 1) // ACTIVE_SCAN_CHUNK, 1)
+        self.num_blocks = min(self.num_chunks, ACTIVE_SCAN_MAX_BLOCKS)
+        self.chunk_sums = wp.zeros(self.num_chunks, dtype=wp.int32, device=device)
+        self.device = self.chunk_sums.device
+
+    def scan(
+        self,
+        counts: wp.array[wp.int32],
+        prefix_sums: wp.array[wp.int32],
+        num_elements: wp.array[wp.int32],
+    ) -> None:
+        """Write the exclusive scan of the first ``num_elements[0]`` counts.
+
+        Args:
+            counts: Per-element counts; must have length ``capacity``.
+            prefix_sums: Output array with the same length as ``counts``.
+            num_elements: Single-element array with the live element count.
+                Values above ``capacity`` are clamped.
+        """
+        if counts.shape[0] != self.capacity or prefix_sums.shape[0] != self.capacity:
+            raise ValueError("ActiveCountScan arrays must match the capacity given at construction")
+        wp.launch_tiled(
+            _active_scan_chunks_kernel,
+            dim=[self.num_blocks],
+            inputs=[counts, num_elements, self.capacity, self.num_blocks, prefix_sums, self.chunk_sums],
+            block_dim=ACTIVE_SCAN_BLOCK_DIM,
+            device=self.device,
+            record_tape=False,
+        )
+        wp.launch_tiled(
+            _active_scan_offsets_kernel,
+            dim=[self.num_blocks],
+            inputs=[num_elements, self.capacity, self.num_blocks, self.chunk_sums, prefix_sums],
+            block_dim=ACTIVE_SCAN_BLOCK_DIM,
+            device=self.device,
+            record_tape=False,
+        )
+
+
 __all__ = ["compute_shape_radius", "load_mesh", "visualize_meshes"]
