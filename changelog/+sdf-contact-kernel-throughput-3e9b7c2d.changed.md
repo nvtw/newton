@@ -7,12 +7,15 @@ generated contacts:
     search for edges whose three initial samples already prove, via the
     1-Lipschitz bound, that no point can reach the contact threshold.
   - Texture SDF samplers select the coarse or subgrid storage before issuing
-    their fetches instead of branching around them, and the reducer's
-    pre-prune probes resolve both hashtable entries and read every slot
-    before comparing.
-  - The hydroelastic generation kernel ranks marching-cubes faces by index and
-    re-extracts the winners on write instead of carrying every candidate's
-    payload through the loop.
+    their fetches instead of branching around them.
+  - The hydroelastic generation and first refinement kernels declare launch
+    bounds so the compiler stops allocating every register, raising residency
+    from 8 to 12 warps per SM (the generation kernel runs 45% faster at 80
+    nut/bolt worlds).
+  - The light hydroelastic grid-stride kernels (scatters, reduce, export,
+    decode) launch a grid sized from the traversed narrow-band tiles instead
+    of the full configured grid, which removes most of their fixed cost in
+    small scenes (about 10% of collide time at 5 nut/bolt worlds).
   - Hydroelastic octree refinement scans only the live prefix of its
     worst-case-sized count buffers with a tile-based chunked scan, and the
     scatter kernels publish the next level's count themselves instead of a

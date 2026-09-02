@@ -60,7 +60,6 @@ from newton._src.geometry.hashtable import (
     HASHTABLE_EMPTY_KEY,
     HashTable,
     hashtable_find_or_insert,
-    hashtable_find_or_insert_pair,
 )
 
 from ..utils.heightfield import HeightfieldData, get_triangle_shape_from_heightfield
@@ -119,8 +118,6 @@ HASHTABLE_WARN_LOAD_PERCENT = 80
 # Vector type for tracking exported contact IDs (used in export kernels)
 exported_ids_vec_type = wp.types.vector(length=VALUES_PER_KEY, dtype=wp.int32)
 replaced_values_vec_type = wp.types.vector(length=VALUES_PER_KEY + 1, dtype=wp.uint64)
-# Stored directional slot values read together during the pre-prune probe.
-preprune_probe_vec_type = wp.types.vector(length=NUM_SPATIAL_DIRECTIONS, dtype=wp.uint64)
 
 
 @wp.func
@@ -1570,6 +1567,28 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
     pos_2d = project_point_to_plane(bin_id, centered_position)
     key = make_contact_key(shape_a, shape_b, bin_id)
 
+    entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+    might_win = False
+
+    if entry_idx >= 0:
+        if use_inner:
+            if deterministic != 0:
+                max_depth_probe = _make_preprune_probe_det(-depth, fingerprint)
+            else:
+                max_depth_probe = _make_contact_value_fast(-depth, 0, 0)
+            if reducer_data.ht_values[wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + entry_idx] < max_depth_probe:
+                might_win = True
+
+        for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
+            if not might_win:
+                dir_2d = get_spatial_direction_2d(dir_i)
+                score = wp.dot(pos_2d, dir_2d)
+                probe = make_spatial_preprune_probe(score, use_inner, fingerprint, deterministic)
+                if reducer_data.ht_values[dir_i * ht_capacity + entry_idx] < probe:
+                    might_win = True
+    else:
+        wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
+
     # === Voxel bin: inner depth coverage ===
     voxel_idx = compute_voxel_index(position_local, aabb_lower_voxel, aabb_upper_voxel, voxel_res)
     voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
@@ -1580,52 +1599,16 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
     voxel_bin_id = wp.static(NUM_NORMAL_BINS) + voxel_group
     voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
 
-    # Nearly every candidate loses the pre-prune probes below, so this path is
-    # bound by the latency of dependent global loads rather than by their
-    # count. Resolve both hashtable entries together and read every probed
-    # slot up front, then compare; the decision is the same disjunction the
-    # former one-conditional-load-at-a-time chain produced. Inner contacts
-    # always end up inserting the voxel key (either here or before claiming a
-    # slot), so requesting it eagerly changes no hashtable contents.
-    voxel_entry_idx = int(-1)
-    if use_inner:
-        entry_idx, voxel_entry_idx = hashtable_find_or_insert_pair(
-            key, voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots
-        )
-    else:
-        entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
-
-    might_win = False
-    if entry_idx >= 0:
-        stored_max_depth = reducer_data.ht_values[wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + entry_idx]
-        stored_spatial = preprune_probe_vec_type()
-        for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
-            stored_spatial[dir_i] = reducer_data.ht_values[dir_i * ht_capacity + entry_idx]
-
-        if use_inner:
+    voxel_entry_idx = -1
+    if use_inner and not might_win:
+        voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+        if voxel_entry_idx >= 0:
             if deterministic != 0:
-                max_depth_probe = _make_preprune_probe_det(-depth, fingerprint)
+                voxel_probe = _make_preprune_probe_det(-depth, fingerprint)
             else:
-                max_depth_probe = _make_contact_value_fast(-depth, 0, 0)
-            if stored_max_depth < max_depth_probe:
+                voxel_probe = _make_contact_value_fast(-depth, 0, 0)
+            if reducer_data.ht_values[voxel_local_slot * ht_capacity + voxel_entry_idx] < voxel_probe:
                 might_win = True
-
-        for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
-            dir_2d = get_spatial_direction_2d(dir_i)
-            score = wp.dot(pos_2d, dir_2d)
-            probe = make_spatial_preprune_probe(score, use_inner, fingerprint, deterministic)
-            if stored_spatial[dir_i] < probe:
-                might_win = True
-    else:
-        wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
-
-    if use_inner and voxel_entry_idx >= 0:
-        if deterministic != 0:
-            voxel_probe = _make_preprune_probe_det(-depth, fingerprint)
-        else:
-            voxel_probe = _make_contact_value_fast(-depth, 0, 0)
-        if reducer_data.ht_values[voxel_local_slot * ht_capacity + voxel_entry_idx] < voxel_probe:
-            might_win = True
 
     if not might_win:
         return -1
