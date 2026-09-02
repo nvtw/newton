@@ -122,6 +122,7 @@ class DVISolver:
         self._joint_bid_B: wp.array[wp.int32] | None = None
         self._joint_bid_F: wp.array[wp.int32] | None = None
         self._joint_bounded_cts_offset: wp.array[wp.int32] | None = None
+        self._body_inv_mass: wp.array[wp.float32] | None = None
 
         if model is not None:
             self.finalize(
@@ -198,6 +199,7 @@ class DVISolver:
         self._joint_bid_B = model.joints.bid_B
         self._joint_bid_F = model.joints.bid_F
         self._joint_bounded_cts_offset = model.joints.bounded_cts_offset
+        self._body_inv_mass = model.bodies.inv_m_i
         self._config = self._check_config(model, config)
         self._warmstart = warmstart
         self._collect_info = collect_info
@@ -616,7 +618,7 @@ class DVISolver:
                     limits.wid,
                     limits.lid,
                     limits.bids,
-                    self._sparse_path.model.bodies.inv_m_i,
+                    self._body_inv_mass,
                     problem.data.lio,
                     problem.data.iio,
                     problem.data.nbc,
@@ -635,7 +637,7 @@ class DVISolver:
                     contacts.wid,
                     contacts.cid,
                     contacts.bid_AB,
-                    self._sparse_path.model.bodies.inv_m_i,
+                    self._body_inv_mass,
                     problem.data.nbc,
                     problem.data.nl,
                     problem.data.cio,
@@ -813,6 +815,9 @@ class DVISolver:
         The factorized bilateral block supplies the Schur-complement response
         used by every colored unilateral sweep. A final bilateral solve then
         recovers joint impulses consistent with the contact and limit solution.
+        CUDA's fused path adaptively stops and reports its completed projected
+        sweeps in :class:`DVIStatus`; CPU executes and reports the full configured
+        sweep budget.
         """
         self._factor_bilateral_block(problem)
         self._solve_bilateral_block(problem)

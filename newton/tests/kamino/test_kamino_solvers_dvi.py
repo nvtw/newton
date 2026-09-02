@@ -318,6 +318,7 @@ class TestDVISolver(unittest.TestCase):
         self.device = wp.get_device(test_context.device)
 
     def test_00_sparse_projection_rejects_int32_overflow(self):
+        """Reject sparse projection allocations exceeding int32 indexing."""
         state = DVIState()
         size = SimpleNamespace(sum_of_max_inequalities=1, num_worlds=1, sum_of_max_total_cts=1)
 
@@ -330,6 +331,7 @@ class TestDVISolver(unittest.TestCase):
             )
 
     def test_00_config_selection(self):
+        """Verify default, dense, PADMM, and explicit DVI configuration selection."""
         default_config = SolverKamino.Config(dynamics_solver="dvi")
         self.assertFalse(default_config.sparse_dynamics)
         self.assertTrue(default_config.sparse_jacobian)
@@ -1345,6 +1347,60 @@ class TestDVISolver(unittest.TestCase):
         original = problem.data.D.numpy()[: ncts * ncts].reshape(ncts, ncts)
         projected = solver.data.state.projected_D.numpy()[: ncts * ncts].reshape(ncts, ncts)
         self.assertGreater(float(np.max(np.abs(projected[njc:, njc:] - original[njc:, njc:]))), 1e-6)
+
+    @unittest.skipUnless(wp.get_cuda_device_count(), "requires CUDA device")
+    def test_03d3_dvi_direct_block_reports_backend_iteration_contract(self):
+        """Verify CPU budget reporting and CUDA adaptive iteration reporting."""
+        config_kwargs = {
+            "tolerance": 1.0e-4,
+            "regularization": 1.0e-5,
+            "max_alternating_iterations": 64,
+            "inequality_sweeps_per_iteration": 1,
+            "bilateral_solve_interval": 64,
+        }
+        iterations = {}
+
+        for device in (wp.get_device("cpu"), wp.get_cuda_devices()[0]):
+            with self.subTest(device=str(device)):
+                model, data, state, limits, detector, jacobians = make_containers(
+                    builder=basics.build_boxes_hinged(),
+                    device=device,
+                    max_world_contacts=8,
+                    sparse=False,
+                )
+                update_containers(
+                    model=model,
+                    data=data,
+                    state=state,
+                    limits=limits,
+                    detector=detector,
+                    jacobians=jacobians,
+                )
+                problem = _make_dense_dual_problem(model, data, limits, detector.contacts, jacobians)
+                solver = DVISolver(
+                    model=model,
+                    data=data,
+                    limits=limits,
+                    contacts=detector.contacts,
+                    jacobians=jacobians,
+                    config=kamino_config.DVISolverConfig(**config_kwargs),
+                    warmstart=WarmStartMode.NONE,
+                )
+                # Dense coloring must not depend on the sparse execution helper.
+                solver._sparse_path = None
+                solver.reset()
+                solver.coldstart()
+                solver.solve(problem)
+                status = solver.data.status.numpy()[0]
+                self.assertEqual(int(status["converged"]), 1, msg=str(status))
+                for residual in ("r_p", "r_d", "r_c", "r_b"):
+                    self.assertLessEqual(float(status[residual]), config_kwargs["tolerance"])
+                iterations["cuda" if device.is_cuda else "cpu"] = int(status["iterations"])
+
+        iteration_budget = config_kwargs["max_alternating_iterations"]
+        self.assertEqual(iterations["cpu"], iteration_budget)
+        self.assertGreater(iterations["cuda"], 0)
+        self.assertLess(iterations["cuda"], iteration_budget)
 
     def test_03e_dvi_direct_block_no_unilateral_rows_reports_single_iteration(self):
         builder = basics.build_box_pendulum(ground=False)

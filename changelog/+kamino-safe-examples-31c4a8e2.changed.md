@@ -1,1 +1,1 @@
-Improve Kamino contact allocation, warmstarting, and factorization, and make it available in the basic joints and selection cartpole examples.
+Improve Kamino contact allocation, warmstarting, and factorization, and make it available in the basic joints and selection cartpole examples. Review custom contact warm-start tuning because the default method now includes a net-force fallback.

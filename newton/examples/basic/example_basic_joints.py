@@ -37,7 +37,6 @@ class Example:
         self.viewer = viewer
         self.args = args
         self.solver_type = getattr(args, "solver", "xpbd") if args is not None else "xpbd"
-        # setup simulation parameters first
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -239,8 +238,6 @@ class Example:
         contacts = None if self.solver_type == "kamino" else self.contacts
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
-
-            # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
             if self.collision_pipeline is not None:

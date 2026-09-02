@@ -525,6 +525,8 @@ def _solve_bilateral_unilateral_response_cooperative(
     tasks_per_world: int32,
 ):
     """Solve response columns cooperatively with persistent warp workers."""
+    # response_factor is unilateral-major here; response always uses
+    # original_row * unilateral_stride + unilateral.
     tid = wp.tid()
     lane = tid % int32(32)
     task = tid / int32(32)
@@ -598,6 +600,8 @@ def _solve_bilateral_unilateral_response(
     response_factor: wp.array[float32],
     response: wp.array[float32],
 ):
+    # response_factor is row-major here; response always uses
+    # original_row * unilateral_stride + unilateral.
     tid = wp.tid()
     threads_per_world = int32(wp.block_dim())
     lane = tid % threads_per_world

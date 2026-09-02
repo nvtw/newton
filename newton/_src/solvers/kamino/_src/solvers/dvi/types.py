@@ -140,6 +140,14 @@ class DVIState:
         self.projected_mio = wp.zeros(max(1, size.num_worlds), dtype=int32)
 
     def allocate_dense_projection(self, size: SizeKamino) -> None:
+        """Allocate dense projected Delassus storage once.
+
+        Args:
+            size: Model dimensions that determine the flattened allocation.
+
+        Raises:
+            ValueError: If the flattened allocation exceeds int32 indexing.
+        """
         if self.projected_D is None:
             projected_stride = size.max_of_max_total_cts * size.max_of_max_total_cts
             projected_size = size.num_worlds * projected_stride
@@ -155,6 +163,17 @@ class DVIState:
         unilateral_strides: list[int],
         bilateral_vector_size: int,
     ) -> None:
+        """Allocate sparse bilateral-projection workspace once.
+
+        Args:
+            size: Model dimensions for inequality scratch storage.
+            joint_rows: Bilateral joint-row count for each world.
+            unilateral_strides: Allocated unilateral row stride for each world.
+            bilateral_vector_size: Flattened size of the bilateral solution vector.
+
+        Raises:
+            ValueError: If the flattened response workspace exceeds int32 indexing.
+        """
         if self.inequality_group_starts is None:
             self.inequality_group_starts = wp.zeros(max(1, size.sum_of_max_inequalities + size.num_worlds), dtype=int32)
             self.inequality_tangent_cross = wp.zeros(max(1, size.sum_of_max_inequalities), dtype=float32)

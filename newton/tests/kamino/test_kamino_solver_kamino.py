@@ -621,7 +621,7 @@ class TestSolverKaminoPublic(unittest.TestCase):
                         dynamics_solver="padmm",
                         integrator=integrator,
                         sparse_jacobian=sparse_jacobian,
-                        use_collision_detector=False,
+                        use_collision_detector=integrator == "moreau",
                     )
                     solver = SolverKamino(model, config=config)
                     np.testing.assert_array_equal(solver._model_kamino.joints.num_kinematic_cts.numpy(), [0, 5])
