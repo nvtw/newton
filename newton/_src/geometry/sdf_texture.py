@@ -1041,75 +1041,62 @@ def _texture_sample_sdf_variant(
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
     loc = _locate_cell(sdf, f)
 
-    v000 = float(0.0)
-    v100 = float(0.0)
-    v010 = float(0.0)
-    v110 = float(0.0)
-    v001 = float(0.0)
-    v101 = float(0.0)
-    v011 = float(0.0)
-    v111 = float(0.0)
+    # Resolve the corner-0 texel centre and interpolation weights for both
+    # storages, then select, so that the point-sampled fetches below are
+    # issued once regardless of which storage the cell uses. Lanes of one
+    # warp that straddle the narrow-band boundary would otherwise execute
+    # both fetch groups back to back.
+    is_coarse = loc.start_slot >= SLOT_LINEAR
 
-    needs_scale = False
-    tx = loc.tx
-    ty = loc.ty
-    tz = loc.tz
+    cx = float(loc.x_base)
+    cy = float(loc.y_base)
+    cz = float(loc.z_base)
+    coarse_f = wp.vec3(float(loc.ix) + loc.tx, float(loc.iy) + loc.ty, float(loc.iz) + loc.tz) * sdf.fine_to_coarse
+    coarse_origin = wp.vec3f(cx + 0.5, cy + 0.5, cz + 0.5)
+    coarse_t = wp.vec3f(coarse_f[0] - cx, coarse_f[1] - cy, coarse_f[2] - cz)
 
-    if loc.start_slot >= SLOT_LINEAR:
-        cx = float(loc.x_base)
-        cy = float(loc.y_base)
-        cz = float(loc.z_base)
-        coarse_f = wp.vec3(float(loc.ix) + loc.tx, float(loc.iy) + loc.ty, float(loc.iz) + loc.tz) * sdf.fine_to_coarse
-        tx = coarse_f[0] - cx
-        ty = coarse_f[1] - cy
-        tz = coarse_f[2] - cz
-        if paired_samples:
-            v00 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 0.5), dtype=wp.vec2)
-            v10 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 0.5), dtype=wp.vec2)
-            v01 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 1.5), dtype=wp.vec2)
-            v11 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 1.5), dtype=wp.vec2)
-            v000, v100 = v00[0], v00[1]
-            v010, v110 = v10[0], v10[1]
-            v001, v101 = v01[0], v01[1]
-            v011, v111 = v11[0], v11[1]
-        else:
-            v000 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 0.5), dtype=float)
-            v100 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 0.5, cz + 0.5), dtype=float)
-            v010 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 0.5), dtype=float)
-            v110 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 1.5, cz + 0.5), dtype=float)
-            v001 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 1.5), dtype=float)
-            v101 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 0.5, cz + 1.5), dtype=float)
-            v011 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 1.5), dtype=float)
-            v111 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 1.5, cz + 1.5), dtype=float)
+    block_x = float(loc.start_slot & wp.uint32(0x3FF))
+    block_y = float((loc.start_slot >> wp.uint32(10)) & wp.uint32(0x3FF))
+    block_z = float((loc.start_slot >> wp.uint32(20)) & wp.uint32(0x3FF))
+    lx = float(loc.ix) - float(loc.x_base) * sdf.subgrid_size_f
+    ly = float(loc.iy) - float(loc.y_base) * sdf.subgrid_size_f
+    lz = float(loc.iz) - float(loc.z_base) * sdf.subgrid_size_f
+    subgrid_origin = wp.vec3f(
+        block_x * sdf.subgrid_samples_f + lx + 0.5,
+        block_y * sdf.subgrid_samples_f + ly + 0.5,
+        block_z * sdf.subgrid_samples_f + lz + 0.5,
+    )
+
+    texture = sdf.subgrid_texture
+    if is_coarse:
+        texture = sdf.coarse_texture
+    origin = wp.where(is_coarse, coarse_origin, subgrid_origin)
+    weights = wp.where(is_coarse, coarse_t, wp.vec3f(loc.tx, loc.ty, loc.tz))
+    ox = origin[0]
+    oy = origin[1]
+    oz = origin[2]
+    tx = weights[0]
+    ty = weights[1]
+    tz = weights[2]
+
+    if paired_samples:
+        v00 = wp.texture_sample(texture, wp.vec3f(ox, oy, oz), dtype=wp.vec2)
+        v10 = wp.texture_sample(texture, wp.vec3f(ox, oy + 1.0, oz), dtype=wp.vec2)
+        v01 = wp.texture_sample(texture, wp.vec3f(ox, oy, oz + 1.0), dtype=wp.vec2)
+        v11 = wp.texture_sample(texture, wp.vec3f(ox, oy + 1.0, oz + 1.0), dtype=wp.vec2)
+        v000, v100 = v00[0], v00[1]
+        v010, v110 = v10[0], v10[1]
+        v001, v101 = v01[0], v01[1]
+        v011, v111 = v11[0], v11[1]
     else:
-        needs_scale = True
-        block_x = float(loc.start_slot & wp.uint32(0x3FF))
-        block_y = float((loc.start_slot >> wp.uint32(10)) & wp.uint32(0x3FF))
-        block_z = float((loc.start_slot >> wp.uint32(20)) & wp.uint32(0x3FF))
-        lx = float(loc.ix) - float(loc.x_base) * sdf.subgrid_size_f
-        ly = float(loc.iy) - float(loc.y_base) * sdf.subgrid_size_f
-        lz = float(loc.iz) - float(loc.z_base) * sdf.subgrid_size_f
-        ox = block_x * sdf.subgrid_samples_f + lx + 0.5
-        oy = block_y * sdf.subgrid_samples_f + ly + 0.5
-        oz = block_z * sdf.subgrid_samples_f + lz + 0.5
-        if paired_samples:
-            v00 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz), dtype=wp.vec2)
-            v10 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz), dtype=wp.vec2)
-            v01 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz + 1.0), dtype=wp.vec2)
-            v11 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz + 1.0), dtype=wp.vec2)
-            v000, v100 = v00[0], v00[1]
-            v010, v110 = v10[0], v10[1]
-            v001, v101 = v01[0], v01[1]
-            v011, v111 = v11[0], v11[1]
-        else:
-            v000 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz), dtype=float)
-            v100 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy, oz), dtype=float)
-            v010 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz), dtype=float)
-            v110 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz), dtype=float)
-            v001 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz + 1.0), dtype=float)
-            v101 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy, oz + 1.0), dtype=float)
-            v011 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz + 1.0), dtype=float)
-            v111 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz + 1.0), dtype=float)
+        v000 = wp.texture_sample(texture, wp.vec3f(ox, oy, oz), dtype=float)
+        v100 = wp.texture_sample(texture, wp.vec3f(ox + 1.0, oy, oz), dtype=float)
+        v010 = wp.texture_sample(texture, wp.vec3f(ox, oy + 1.0, oz), dtype=float)
+        v110 = wp.texture_sample(texture, wp.vec3f(ox + 1.0, oy + 1.0, oz), dtype=float)
+        v001 = wp.texture_sample(texture, wp.vec3f(ox, oy, oz + 1.0), dtype=float)
+        v101 = wp.texture_sample(texture, wp.vec3f(ox + 1.0, oy, oz + 1.0), dtype=float)
+        v011 = wp.texture_sample(texture, wp.vec3f(ox, oy + 1.0, oz + 1.0), dtype=float)
+        v111 = wp.texture_sample(texture, wp.vec3f(ox + 1.0, oy + 1.0, oz + 1.0), dtype=float)
 
     # Cover texture latency with the independent extrapolation root.
     diff_mag = wp.sqrt(diff_sq)
@@ -1121,7 +1108,7 @@ def _texture_sample_sdf_variant(
     c1 = c01 + (c11 - c01) * ty
     sdf_val = c0 + (c1 - c0) * tz
 
-    if needs_scale:
+    if not is_coarse:
         sdf_val = sdf_val * sdf.subgrids_sdf_value_range + sdf.subgrids_min_sdf_value
 
     return sdf_val + diff_mag
@@ -1265,6 +1252,54 @@ def _texture_sample_pair(
 
 
 @wp.func
+def _hw_fetch_coords(sdf: TextureSDFData, loc: _CellLookup) -> tuple[wp.Texture3D, wp.vec3f, bool]:
+    """Resolve the texture and filtered fetch coordinate for a located cell.
+
+    Both the coarse and the subgrid coordinates are computed with plain
+    arithmetic and the applicable one is selected, so the caller can issue a
+    single ``wp.texture_sample`` regardless of which storage the cell uses.
+    Keeping the fetch outside a data-dependent branch stops lanes of one
+    warp that straddle the narrow-band boundary from serializing into two
+    dependent texture round trips.
+
+    Returns:
+        ``(texture, uvw, is_coarse)`` where ``is_coarse`` tells the caller
+        whether the fetched value still needs the subgrid de-quantization.
+    """
+    is_coarse = loc.start_slot >= SLOT_LINEAR
+
+    # ``cx + tx + 0.5`` lands at the centre of coarse voxel (cx, cy, cz)
+    # and ``+tx`` walks toward (cx+1, ...); the hardware filter returns the
+    # interpolated value in one fetch.
+    cx = float(loc.x_base)
+    cy = float(loc.y_base)
+    cz = float(loc.z_base)
+    coarse_f = wp.vec3(float(loc.ix) + loc.tx, float(loc.iy) + loc.ty, float(loc.iz) + loc.tz) * sdf.fine_to_coarse
+    uvw_coarse = wp.vec3f(
+        cx + (coarse_f[0] - cx) + 0.5,
+        cy + (coarse_f[1] - cy) + 0.5,
+        cz + (coarse_f[2] - cz) + 0.5,
+    )
+
+    block_x = float(loc.start_slot & wp.uint32(0x3FF))
+    block_y = float((loc.start_slot >> wp.uint32(10)) & wp.uint32(0x3FF))
+    block_z = float((loc.start_slot >> wp.uint32(20)) & wp.uint32(0x3FF))
+    lx = float(loc.ix) - float(loc.x_base) * sdf.subgrid_size_f
+    ly = float(loc.iy) - float(loc.y_base) * sdf.subgrid_size_f
+    lz = float(loc.iz) - float(loc.z_base) * sdf.subgrid_size_f
+    uvw_subgrid = wp.vec3f(
+        block_x * sdf.subgrid_samples_f + lx + 0.5 + loc.tx,
+        block_y * sdf.subgrid_samples_f + ly + 0.5 + loc.ty,
+        block_z * sdf.subgrid_samples_f + lz + 0.5 + loc.tz,
+    )
+
+    texture = sdf.subgrid_texture
+    if is_coarse:
+        texture = sdf.coarse_texture
+    return texture, wp.where(is_coarse, uvw_coarse, uvw_subgrid), is_coarse
+
+
+@wp.func
 def _texture_sample_sdf_hw_clamped_pair_variant(
     sdf: TextureSDFData,
     clamped0: wp.vec3,
@@ -1279,62 +1314,8 @@ def _texture_sample_sdf_hw_clamped_pair_variant(
     f1 = wp.cw_mul(clamped1 - sdf.sdf_box_lower, sdf.inv_sdf_dx)
     loc0, loc1 = _locate_cell_pair(sdf, f0, f1)
 
-    texture0 = sdf.coarse_texture
-    texture1 = sdf.coarse_texture
-    uvw0 = wp.vec3f(0.0)
-    uvw1 = wp.vec3f(0.0)
-
-    if loc0.start_slot >= SLOT_LINEAR:
-        cx0 = float(loc0.x_base)
-        cy0 = float(loc0.y_base)
-        cz0 = float(loc0.z_base)
-        coarse_f0 = (
-            wp.vec3(float(loc0.ix) + loc0.tx, float(loc0.iy) + loc0.ty, float(loc0.iz) + loc0.tz) * sdf.fine_to_coarse
-        )
-        uvw0 = wp.vec3f(
-            cx0 + (coarse_f0[0] - cx0) + 0.5,
-            cy0 + (coarse_f0[1] - cy0) + 0.5,
-            cz0 + (coarse_f0[2] - cz0) + 0.5,
-        )
-    else:
-        texture0 = sdf.subgrid_texture
-        block_x0 = float(loc0.start_slot & wp.uint32(0x3FF))
-        block_y0 = float((loc0.start_slot >> wp.uint32(10)) & wp.uint32(0x3FF))
-        block_z0 = float((loc0.start_slot >> wp.uint32(20)) & wp.uint32(0x3FF))
-        lx0 = float(loc0.ix) - float(loc0.x_base) * sdf.subgrid_size_f
-        ly0 = float(loc0.iy) - float(loc0.y_base) * sdf.subgrid_size_f
-        lz0 = float(loc0.iz) - float(loc0.z_base) * sdf.subgrid_size_f
-        uvw0 = wp.vec3f(
-            block_x0 * sdf.subgrid_samples_f + lx0 + 0.5 + loc0.tx,
-            block_y0 * sdf.subgrid_samples_f + ly0 + 0.5 + loc0.ty,
-            block_z0 * sdf.subgrid_samples_f + lz0 + 0.5 + loc0.tz,
-        )
-
-    if loc1.start_slot >= SLOT_LINEAR:
-        cx1 = float(loc1.x_base)
-        cy1 = float(loc1.y_base)
-        cz1 = float(loc1.z_base)
-        coarse_f1 = (
-            wp.vec3(float(loc1.ix) + loc1.tx, float(loc1.iy) + loc1.ty, float(loc1.iz) + loc1.tz) * sdf.fine_to_coarse
-        )
-        uvw1 = wp.vec3f(
-            cx1 + (coarse_f1[0] - cx1) + 0.5,
-            cy1 + (coarse_f1[1] - cy1) + 0.5,
-            cz1 + (coarse_f1[2] - cz1) + 0.5,
-        )
-    else:
-        texture1 = sdf.subgrid_texture
-        block_x1 = float(loc1.start_slot & wp.uint32(0x3FF))
-        block_y1 = float((loc1.start_slot >> wp.uint32(10)) & wp.uint32(0x3FF))
-        block_z1 = float((loc1.start_slot >> wp.uint32(20)) & wp.uint32(0x3FF))
-        lx1 = float(loc1.ix) - float(loc1.x_base) * sdf.subgrid_size_f
-        ly1 = float(loc1.iy) - float(loc1.y_base) * sdf.subgrid_size_f
-        lz1 = float(loc1.iz) - float(loc1.z_base) * sdf.subgrid_size_f
-        uvw1 = wp.vec3f(
-            block_x1 * sdf.subgrid_samples_f + lx1 + 0.5 + loc1.tx,
-            block_y1 * sdf.subgrid_samples_f + ly1 + 0.5 + loc1.ty,
-            block_z1 * sdf.subgrid_samples_f + lz1 + 0.5 + loc1.tz,
-        )
+    texture0, uvw0, is_coarse0 = _hw_fetch_coords(sdf, loc0)
+    texture1, uvw1, is_coarse1 = _hw_fetch_coords(sdf, loc1)
 
     values = _texture_sample_pair(texture0, uvw0, texture1, uvw1, paired_samples)
     # Cover texture latency with the independent extrapolation roots.
@@ -1346,9 +1327,9 @@ def _texture_sample_sdf_hw_clamped_pair_variant(
         diff_mag1 = wp.sqrt(diff_sq1)
     value0 = values[0]
     value1 = values[1]
-    if loc0.start_slot < SLOT_LINEAR:
+    if not is_coarse0:
         value0 = value0 * sdf.subgrids_sdf_value_range + sdf.subgrids_min_sdf_value
-    if loc1.start_slot < SLOT_LINEAR:
+    if not is_coarse1:
         value1 = value1 * sdf.subgrids_sdf_value_range + sdf.subgrids_min_sdf_value
     return wp.vec2f(value0 + diff_mag0, value1 + diff_mag1)
 
@@ -1423,41 +1404,10 @@ def _texture_sample_sdf_hw_clamped_variant(
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
     loc = _locate_cell(sdf, f)
 
-    sdf_val = float(0.0)
-
-    if loc.start_slot >= SLOT_LINEAR:
-        # ``cx + tx + 0.5`` lands at the centre of voxel (cx, cy, cz) and
-        # ``+tx`` walks toward (cx+1, ...). The HW filter returns the
-        # interpolated value in one fetch.
-        cx = float(loc.x_base)
-        cy = float(loc.y_base)
-        cz = float(loc.z_base)
-        coarse_f = wp.vec3(float(loc.ix) + loc.tx, float(loc.iy) + loc.ty, float(loc.iz) + loc.tz) * sdf.fine_to_coarse
-        sdf_val = _texture_sample_sdf_x0(
-            sdf.coarse_texture,
-            wp.vec3f(
-                cx + (coarse_f[0] - cx) + 0.5,
-                cy + (coarse_f[1] - cy) + 0.5,
-                cz + (coarse_f[2] - cz) + 0.5,
-            ),
-            paired_samples,
-        )
-    else:
-        block_x = float(loc.start_slot & wp.uint32(0x3FF))
-        block_y = float((loc.start_slot >> wp.uint32(10)) & wp.uint32(0x3FF))
-        block_z = float((loc.start_slot >> wp.uint32(20)) & wp.uint32(0x3FF))
-        lx = float(loc.ix) - float(loc.x_base) * sdf.subgrid_size_f
-        ly = float(loc.iy) - float(loc.y_base) * sdf.subgrid_size_f
-        lz = float(loc.iz) - float(loc.z_base) * sdf.subgrid_size_f
-        ox = block_x * sdf.subgrid_samples_f + lx + 0.5
-        oy = block_y * sdf.subgrid_samples_f + ly + 0.5
-        oz = block_z * sdf.subgrid_samples_f + lz + 0.5
-        raw = _texture_sample_sdf_x0(
-            sdf.subgrid_texture,
-            wp.vec3f(ox + loc.tx, oy + loc.ty, oz + loc.tz),
-            paired_samples,
-        )
-        sdf_val = raw * sdf.subgrids_sdf_value_range + sdf.subgrids_min_sdf_value
+    texture, uvw, is_coarse = _hw_fetch_coords(sdf, loc)
+    sdf_val = _texture_sample_sdf_x0(texture, uvw, paired_samples)
+    if not is_coarse:
+        sdf_val = sdf_val * sdf.subgrids_sdf_value_range + sdf.subgrids_min_sdf_value
 
     return sdf_val + diff_mag
 

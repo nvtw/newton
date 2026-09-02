@@ -282,7 +282,8 @@ def mc_calc_face_texture(
     corner_vals: vec8f,
     corner_adjusted_sdf: vec8f,
     corner_other_adjusted_sdf: vec8f,
-    sdf_a: TextureSDFData,
+    sdf_box_lower: wp.vec3,
+    voxel_size: wp.vec3,
     x_id: wp.int32,
     y_id: wp.int32,
     z_id: wp.int32,
@@ -291,7 +292,8 @@ def mc_calc_face_texture(
 ) -> tuple[float, float, wp.vec3, wp.vec3, float, float, wp.mat33f]:
     """Extract a triangle face from a marching cubes voxel using texture SDF.
 
-    Vertex positions are returned in the SDF's local coordinate space.
+    Vertex positions are returned in the SDF's local coordinate space, which
+    is described by ``sdf_box_lower`` and ``voxel_size`` of the traversed SDF.
 
     ``edge_clamp_min`` / ``edge_clamp_max`` clamp the edge-interpolation
     parameter ``t`` to ``[edge_clamp_min, edge_clamp_max]``.  Pass
@@ -327,7 +329,7 @@ def mc_calc_face_texture(
             t = wp.clamp((0.0 - val_0) / val_diff, edge_clamp_min, edge_clamp_max)
         p = p_0 + t * (p_1 - p_0)
         vol_idx = p + int_to_vec3f(x_id, y_id, z_id)
-        local_pos = sdf_a.sdf_box_lower + wp.cw_mul(vol_idx, sdf_a.voxel_size)
+        local_pos = sdf_box_lower + wp.cw_mul(vol_idx, voxel_size)
         face_verts[vi] = local_pos
         adjusted_sdf_from = corner_sdfs_from[0]
         adjusted_sdf_to = corner_sdfs_to[0]
@@ -2069,46 +2071,23 @@ def get_generate_contacts_kernel(
                 continue
 
             X_ws_b = transform_b
+            box_lower_b = sdf_data_b.sdf_box_lower
+            voxel_size_b = sdf_data_b.voxel_size
 
             # Generate faces and locally compact candidates before writing to the
             # global contact buffer (reduces atomics and downstream reduction load).
-            # Retain encoded normals because export writes that representation
-            # directly, shortening each winner by one long-lived scalar.
-            best_pen0_valid = int(0)
+            # The ranking pass keeps only each winner's face index and score;
+            # the winning faces are re-extracted from the corner values (pure
+            # arithmetic, so bit-identical) when they are written. Carrying the
+            # full per-face payload through the loop instead pushed this kernel
+            # to the 255-register limit with hundreds of bytes of spills.
+            best_pen0_face = int(-1)
             best_pen0_score = float(-MAXVAL)
-            best_pen0_depth = float(0.0)
-            best_pen0_area = float(0.0)
-            best_pen0_pressure = float(0.0)
-            best_pen0_fingerprint = int(0)
-            best_pen0_normal = wp.vec2(0.0, 0.0)
-            best_pen0_center = wp.vec3(0.0, 0.0, 0.0)
-            best_pen0_v0 = wp.vec3(0.0, 0.0, 0.0)
-            best_pen0_v1 = wp.vec3(0.0, 0.0, 0.0)
-            best_pen0_v2 = wp.vec3(0.0, 0.0, 0.0)
-
-            best_pen1_valid = int(0)
+            best_pen1_face = int(-1)
             best_pen1_score = float(-MAXVAL)
-            best_pen1_depth = float(0.0)
-            best_pen1_area = float(0.0)
-            best_pen1_pressure = float(0.0)
-            best_pen1_fingerprint = int(0)
-            best_pen1_normal = wp.vec2(0.0, 0.0)
-            best_pen1_center = wp.vec3(0.0, 0.0, 0.0)
-            best_pen1_v0 = wp.vec3(0.0, 0.0, 0.0)
-            best_pen1_v1 = wp.vec3(0.0, 0.0, 0.0)
-            best_pen1_v2 = wp.vec3(0.0, 0.0, 0.0)
-
-            best_nonpen_valid = int(0)
+            best_nonpen_face = int(-1)
             best_nonpen_depth = float(MAXVAL)
-            best_nonpen_area = float(0.0)
-            best_nonpen_fingerprint = int(0)
-            best_nonpen_normal = wp.vec2(0.0, 0.0)
-            best_nonpen_center = wp.vec3(0.0, 0.0, 0.0)
-            best_nonpen_v0 = wp.vec3(0.0, 0.0, 0.0)
-            best_nonpen_v1 = wp.vec3(0.0, 0.0, 0.0)
-            best_nonpen_v2 = wp.vec3(0.0, 0.0, 0.0)
             for fi in range(num_faces):
-                face_fingerprint = tid * MAX_MC_FACES_PER_VOXEL + fi
                 force_area, geometric_area, normal, face_center, adjusted_sdf_shape_b, pair_separation, face_verts = (
                     mc_calc_face_texture(
                         flat_edge_verts_table,
@@ -2116,7 +2095,8 @@ def get_generate_contacts_kernel(
                         corner_vals,
                         corner_sdf_self,
                         corner_sdf_other,
-                        sdf_data_b,
+                        box_lower_b,
+                        voxel_size_b,
                         x_id,
                         y_id,
                         z_id,
@@ -2187,126 +2167,99 @@ def get_generate_contacts_kernel(
                 # force keeps the contacts that contribute most to agg_force.
                 if pair_separation < 0.0:
                     score = force_area * face_pressure
-                    if best_pen0_valid == 0 or score > best_pen0_score:
+                    if best_pen0_face < 0 or score > best_pen0_score:
                         # Shift slot0 -> slot1
-                        best_pen1_valid = best_pen0_valid
+                        best_pen1_face = best_pen0_face
                         best_pen1_score = best_pen0_score
-                        best_pen1_depth = best_pen0_depth
-                        best_pen1_area = best_pen0_area
-                        best_pen1_pressure = best_pen0_pressure
-                        best_pen1_fingerprint = best_pen0_fingerprint
-                        best_pen1_normal = best_pen0_normal
-                        best_pen1_center = best_pen0_center
-                        best_pen1_v0 = best_pen0_v0
-                        best_pen1_v1 = best_pen0_v1
-                        best_pen1_v2 = best_pen0_v2
-
-                        best_pen0_valid = int(1)
+                        best_pen0_face = fi
                         best_pen0_score = score
-                        best_pen0_depth = pair_separation
-                        best_pen0_area = force_area
-                        best_pen0_pressure = face_pressure
-                        best_pen0_fingerprint = face_fingerprint
-                        best_pen0_normal = encode_oct(normal)
-                        best_pen0_center = face_center
-                        best_pen0_v0 = face_verts[0]
-                        best_pen0_v1 = face_verts[1]
-                        best_pen0_v2 = face_verts[2]
                     elif wp.static(PRE_PRUNE_MAX_PENETRATING > 1):
-                        if best_pen1_valid == 0 or score > best_pen1_score:
-                            best_pen1_valid = int(1)
+                        if best_pen1_face < 0 or score > best_pen1_score:
+                            best_pen1_face = fi
                             best_pen1_score = score
-                            best_pen1_depth = pair_separation
-                            best_pen1_area = force_area
-                            best_pen1_pressure = face_pressure
-                            best_pen1_fingerprint = face_fingerprint
-                            best_pen1_normal = encode_oct(normal)
-                            best_pen1_center = face_center
-                            best_pen1_v0 = face_verts[0]
-                            best_pen1_v1 = face_verts[1]
-                            best_pen1_v2 = face_verts[2]
                 else:
                     # Defer non-penetrating contact and keep only the closest one.
                     if pair_separation < best_nonpen_depth:
-                        best_nonpen_valid = int(1)
+                        best_nonpen_face = fi
                         best_nonpen_depth = pair_separation
-                        best_nonpen_area = geometric_area
-                        best_nonpen_fingerprint = face_fingerprint
-                        best_nonpen_normal = encode_oct(normal)
-                        best_nonpen_center = face_center
-                        best_nonpen_v0 = face_verts[0]
-                        best_nonpen_v1 = face_verts[1]
-                        best_nonpen_v2 = face_verts[2]
 
             if wp.static(pre_prune):
                 # Batched reservation: one atomic for all kept contacts.
                 keep_count = int(0)
-                if best_pen0_valid == 1:
+                if best_pen0_face >= 0:
                     keep_count = keep_count + 1
                 if wp.static(PRE_PRUNE_MAX_PENETRATING > 1):
-                    if best_pen1_valid == 1:
+                    if best_pen1_face >= 0:
                         keep_count = keep_count + 1
-                if best_nonpen_valid == 1:
+                if best_nonpen_face >= 0:
                     keep_count = keep_count + 1
 
                 if keep_count > 0:
                     base = wp.atomic_add(reducer_data.contact_count, 0, keep_count)
                     if base < reducer_data.capacity:
                         out_idx = base
-
-                        if best_pen0_valid == 1 and out_idx < reducer_data.capacity:
-                            contact_id = out_idx + 1
-                            reducer_data.position_depth[contact_id] = wp.vec4(
-                                best_pen0_center[0], best_pen0_center[1], best_pen0_center[2], best_pen0_depth
-                            )
-                            reducer_data.normal[contact_id] = best_pen0_normal
-                            reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
-                            reducer_data.contact_area[contact_id] = best_pen0_area
-                            reducer_data.contact_pressure[contact_id] = best_pen0_pressure
-                            reducer_data.contact_fingerprints[contact_id] = best_pen0_fingerprint
-                            if wp.static(output_vertices):
-                                iso_vertex_point[3 * out_idx + 0] = wp.transform_point(X_ws_b, best_pen0_v0)
-                                iso_vertex_point[3 * out_idx + 1] = wp.transform_point(X_ws_b, best_pen0_v1)
-                                iso_vertex_point[3 * out_idx + 2] = wp.transform_point(X_ws_b, best_pen0_v2)
-                                iso_vertex_depth[out_idx] = best_pen0_depth
-                                iso_vertex_shape_pair[out_idx] = pair
-                            out_idx = out_idx + 1
-
-                        if wp.static(PRE_PRUNE_MAX_PENETRATING > 1):
-                            if best_pen1_valid == 1 and out_idx < reducer_data.capacity:
+                        # Write the winners in the fixed order penetrating slot 0,
+                        # penetrating slot 1, non-penetrating. A runtime loop keeps
+                        # one copy of the face re-extraction in the kernel.
+                        slot = int(0)
+                        while slot < 3:
+                            slot_face = best_pen0_face
+                            if slot == 1:
+                                slot_face = best_pen1_face
+                            elif slot == 2:
+                                slot_face = best_nonpen_face
+                            if wp.static(PRE_PRUNE_MAX_PENETRATING <= 1) and slot == 1:
+                                slot_face = int(-1)
+                            if slot_face >= 0 and out_idx < reducer_data.capacity:
+                                (
+                                    force_area,
+                                    geometric_area,
+                                    normal,
+                                    face_center,
+                                    adjusted_sdf_shape_b,
+                                    pair_separation,
+                                    face_verts,
+                                ) = mc_calc_face_texture(
+                                    flat_edge_verts_table,
+                                    tri_range_start + 3 * slot_face,
+                                    corner_vals,
+                                    corner_sdf_self,
+                                    corner_sdf_other,
+                                    box_lower_b,
+                                    voxel_size_b,
+                                    x_id,
+                                    y_id,
+                                    z_id,
+                                    wp.static(edge_clamp_min),
+                                    wp.static(edge_clamp_max),
+                                )
+                                # Penetrating winners store the force-weighted area and
+                                # their pressure; the speculative winner stores the full
+                                # geometric area with zero pressure, exactly as ranked.
+                                stored_area = geometric_area
+                                face_pressure = float(0.0)
+                                if slot < 2:
+                                    stored_area = force_area
+                                    face_pressure = wp.max(
+                                        wp.static(pressure_func)(adjusted_sdf_shape_b, shape_b, pressure_data),
+                                        0.0,
+                                    )
                                 contact_id = out_idx + 1
                                 reducer_data.position_depth[contact_id] = wp.vec4(
-                                    best_pen1_center[0], best_pen1_center[1], best_pen1_center[2], best_pen1_depth
+                                    face_center[0], face_center[1], face_center[2], pair_separation
                                 )
-                                reducer_data.normal[contact_id] = best_pen1_normal
+                                reducer_data.normal[contact_id] = encode_oct(normal)
                                 reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
-                                reducer_data.contact_area[contact_id] = best_pen1_area
-                                reducer_data.contact_pressure[contact_id] = best_pen1_pressure
-                                reducer_data.contact_fingerprints[contact_id] = best_pen1_fingerprint
+                                reducer_data.contact_area[contact_id] = stored_area
+                                reducer_data.contact_pressure[contact_id] = face_pressure
+                                reducer_data.contact_fingerprints[contact_id] = tid * MAX_MC_FACES_PER_VOXEL + slot_face
                                 if wp.static(output_vertices):
-                                    iso_vertex_point[3 * out_idx + 0] = wp.transform_point(X_ws_b, best_pen1_v0)
-                                    iso_vertex_point[3 * out_idx + 1] = wp.transform_point(X_ws_b, best_pen1_v1)
-                                    iso_vertex_point[3 * out_idx + 2] = wp.transform_point(X_ws_b, best_pen1_v2)
-                                    iso_vertex_depth[out_idx] = best_pen1_depth
+                                    for vi in range(3):
+                                        iso_vertex_point[3 * out_idx + vi] = wp.transform_point(X_ws_b, face_verts[vi])
+                                    iso_vertex_depth[out_idx] = pair_separation
                                     iso_vertex_shape_pair[out_idx] = pair
                                 out_idx = out_idx + 1
-
-                        if best_nonpen_valid == 1 and out_idx < reducer_data.capacity:
-                            contact_id = out_idx + 1
-                            reducer_data.position_depth[contact_id] = wp.vec4(
-                                best_nonpen_center[0], best_nonpen_center[1], best_nonpen_center[2], best_nonpen_depth
-                            )
-                            reducer_data.normal[contact_id] = best_nonpen_normal
-                            reducer_data.shape_pairs[contact_id] = wp.vec2i(shape_a, shape_b)
-                            reducer_data.contact_area[contact_id] = best_nonpen_area
-                            reducer_data.contact_pressure[contact_id] = 0.0
-                            reducer_data.contact_fingerprints[contact_id] = best_nonpen_fingerprint
-                            if wp.static(output_vertices):
-                                iso_vertex_point[3 * out_idx + 0] = wp.transform_point(X_ws_b, best_nonpen_v0)
-                                iso_vertex_point[3 * out_idx + 1] = wp.transform_point(X_ws_b, best_nonpen_v1)
-                                iso_vertex_point[3 * out_idx + 2] = wp.transform_point(X_ws_b, best_nonpen_v2)
-                                iso_vertex_depth[out_idx] = best_nonpen_depth
-                                iso_vertex_shape_pair[out_idx] = pair
+                            slot += 1
 
     return generate_contacts_kernel
 

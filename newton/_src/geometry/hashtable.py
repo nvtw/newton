@@ -159,6 +159,49 @@ def hashtable_find_or_insert(
     return -1
 
 
+@wp.func
+def hashtable_find_or_insert_pair(
+    key0: wp.uint64,
+    key1: wp.uint64,
+    keys: wp.array[wp.uint64],
+    active_slots: wp.array[wp.int32],
+) -> tuple[int, int]:
+    """Find or insert two keys while overlapping their first probe loads.
+
+    Equivalent to calling :func:`hashtable_find_or_insert` once per key, but
+    the home-slot read of both keys is issued before either result is
+    consumed so the two lookups do not serialize their memory latency. A key
+    that is not already resident at its home slot falls back to the full
+    linear-probing insert, which re-reads that slot and handles races exactly
+    as the single-key function does.
+
+    Args:
+        key0: First uint64 key to find or insert.
+        key1: Second uint64 key to find or insert.
+        keys: The hash table keys array (length must be a power of two).
+        active_slots: Array of size (capacity + 1) tracking active entry indices.
+
+    Returns:
+        Tuple of entry indices for ``key0`` and ``key1``; either is -1 if the
+        table is full.
+    """
+    capacity = keys.shape[0]
+    if capacity == 0:
+        return -1, -1
+    capacity_mask = capacity - 1
+    idx0 = _hashtable_hash(key0, capacity_mask)
+    idx1 = _hashtable_hash(key1, capacity_mask)
+    stored0 = keys[idx0]
+    stored1 = keys[idx1]
+    entry0 = idx0
+    entry1 = idx1
+    if stored0 != key0:
+        entry0 = hashtable_find_or_insert(key0, keys, active_slots)
+    if stored1 != key1:
+        entry1 = hashtable_find_or_insert(key1, keys, active_slots)
+    return entry0, entry1
+
+
 @wp.kernel(enable_backward=False)
 def _hashtable_clear_keys_kernel(
     keys: wp.array[wp.uint64],

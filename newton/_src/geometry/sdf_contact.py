@@ -64,6 +64,14 @@ MESH_SDF_BLOCK_DIM = 256
 # outer iteration runs.
 STACK_CAPACITY = 2 * MESH_SDF_BLOCK_DIM
 
+# Capacity of the cooperative contact-candidate stack that compacts edges
+# whose SDF minimum passed every contact gate. One edge pop-round pushes at
+# most ``MESH_SDF_BLOCK_DIM`` candidates and the stack is flushed whenever it
+# holds at least ``MESH_SDF_BLOCK_DIM`` of them, so fewer than
+# ``MESH_SDF_BLOCK_DIM`` can carry over into the next push and the total never
+# exceeds ``2 * MESH_SDF_BLOCK_DIM``.
+CANDIDATE_STACK_CAPACITY = 2 * MESH_SDF_BLOCK_DIM
+
 
 @wp.func_native("""
 #if defined(__CUDA_ARCH__)
@@ -149,6 +157,24 @@ class EdgeCullResult:
 
     edge_idx: int
     midpoint_sdf: float
+
+
+@wp.struct
+class EdgeCandidate:
+    """Edge whose SDF minimum passed every contact gate.
+
+    Only a minority of the edges that survive the midpoint cull end up as
+    contact candidates, and only a few of those win a reduction slot. Left
+    inline, the gradient sample and the export would run on that minority of
+    lanes while the rest of the warp idles. Candidates are therefore
+    compacted through a second cooperative tile stack and processed in
+    full-width batches, which changes only the order in which the same
+    candidates reach the writer.
+    """
+
+    edge_idx: int
+    dist_unscaled: float
+    point_unscaled: wp.vec3
 
 
 @wp.func
@@ -713,6 +739,7 @@ def _create_sdf_contact_funcs(
         hfd_sdf: HeightfieldData,
         elevation_data: wp.array[wp.float32],
         precision_target: float,
+        prune_threshold: float,
     ) -> tuple[float, wp.vec3, int]:
         """Find the deepest point on an edge relative to an SDF volume.
 
@@ -731,6 +758,15 @@ def _create_sdf_contact_funcs(
         edges much shorter than the target precision exit Brent in 0
         queries (the midpoint is already accurate enough).
 
+        ``prune_threshold`` is the unscaled distance below which the caller
+        accepts a contact. On the texture path, the three symmetric samples
+        bound the minimum over the whole edge through the 1-Lipschitz
+        property of a signed distance field (the same property the midpoint
+        cull relies on). When that lower bound already reaches the threshold
+        the edge cannot produce a contact, so the search returns the best
+        sampled value immediately instead of spending the Brent, endpoint,
+        and gradient queries on an edge the caller would reject anyway.
+
         After the interior search, evaluates the more promising endpoint
         (the one closer to the unconverged bracket boundary) so that vertex
         contacts at edge corners are not missed.
@@ -745,8 +781,10 @@ def _create_sdf_contact_funcs(
         edge_dir = v1 - v0
         edge_length_sq = wp.length_sq(edge_dir)
         inv_edge_length = float(1.0e12)
+        edge_length = float(0.0)
         if edge_length_sq > 0.0:
             inv_edge_length = _sdf_rsqrt_rn(edge_length_sq)
+            edge_length = edge_length_sq * inv_edge_length
 
         # Parametric tolerance floor: skip Brent for edges where the
         # midpoint already meets ``precision_target``. Zero-length edges
@@ -776,6 +814,22 @@ def _create_sdf_contact_funcs(
             )
             f_left = pair_values[0]
             f_right = pair_values[1]
+
+            # Lipschitz lower bound of the SDF over the whole edge. Each
+            # sample ``f_i`` at ``t_i`` bounds ``f(t) >= f_i - L |t - t_i|``
+            # with ``L`` the edge length, so the envelope's minimum lies at
+            # an endpoint (nearest sample ``left`` away) or halfway between
+            # adjacent samples (``offset`` apart). The relative epsilon keeps
+            # the decision conservative against the caller's rescaled
+            # comparison so a rejected edge is one Brent would reject too.
+            f_side = wp.min(f_left, f_right)
+            f_best = wp.min(f_side, midpoint_sdf)
+            lower_bound = wp.min(
+                f_side - edge_length * left,
+                0.5 * (f_side + midpoint_sdf - edge_length * offset),
+            )
+            if lower_bound >= prune_threshold * (1.0 + 1.0e-5):
+                return f_best, v0 + edge_dir * 0.5, 0
 
             if f_left < fx and f_left <= f_right:
                 b = 0.5
@@ -892,17 +946,23 @@ def _create_sdf_contact_funcs(
 
         # Check endpoints only while Brent's bracket still includes them.
         # Once a bound has moved inward, Brent has already excluded that
-        # endpoint from containing the minimum.
+        # endpoint from containing the minimum. The two checks share one
+        # sample site so lanes that need opposite endpoints run the same
+        # fetch instead of serializing two divergent ones; ``v0`` is still
+        # evaluated before ``v1`` when both bounds are untouched.
         best_endpoint = int(0)
         best_t = x
         best_f = fx
-        if a == 0.0:
+        check_lo = a == 0.0
+        check_hi = b == 1.0
+        if check_lo or check_hi:
+            t_end = wp.where(check_lo, 0.0, 1.0)
             f_end = _sample_sdf_at_t(
                 texture_sdf,
                 sdf_mesh_id,
                 v0,
                 edge_dir,
-                0.0,
+                t_end,
                 use_bvh_for_sdf,
                 sdf_mesh_query_type,
                 sdf_is_heightfield,
@@ -910,26 +970,26 @@ def _create_sdf_contact_funcs(
                 elevation_data,
             )
             if f_end < best_f:
-                best_t = 0.0
+                best_t = t_end
                 best_f = f_end
-                best_endpoint = 1
-        if b == 1.0:
-            f_end = _sample_sdf_at_t(
-                texture_sdf,
-                sdf_mesh_id,
-                v0,
-                edge_dir,
-                1.0,
-                use_bvh_for_sdf,
-                sdf_mesh_query_type,
-                sdf_is_heightfield,
-                hfd_sdf,
-                elevation_data,
-            )
-            if f_end < best_f:
-                best_t = 1.0
-                best_f = f_end
-                best_endpoint = 2
+                best_endpoint = wp.where(check_lo, 1, 2)
+            if check_lo and check_hi:
+                f_end = _sample_sdf_at_t(
+                    texture_sdf,
+                    sdf_mesh_id,
+                    v0,
+                    edge_dir,
+                    1.0,
+                    use_bvh_for_sdf,
+                    sdf_mesh_query_type,
+                    sdf_is_heightfield,
+                    hfd_sdf,
+                    elevation_data,
+                )
+                if f_end < best_f:
+                    best_t = 1.0
+                    best_f = f_end
+                    best_endpoint = 2
 
         p = v0 + edge_dir * best_t
 
@@ -1137,6 +1197,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         pair_count = wp.min(shape_pairs_mesh_mesh_count[0], shape_pairs_mesh_mesh.shape[0])
 
         edge_stack = wp.tile_stack(capacity=STACK_CAPACITY, dtype=EdgeCullResult)
+        candidate_stack = wp.tile_stack(capacity=CANDIDATE_STACK_CAPACITY, dtype=EdgeCandidate)
         # ``progress[0]`` is the next edge index the upcoming cooperative
         # culling pass should start from (a high-water mark, not a count):
         # each thread ``t`` evaluates ``progress[0] + t`` and the counter
@@ -1360,15 +1421,22 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     # loop until empty — a single pop followed by
                     # ``tile_stack_clear`` would silently discard any
                     # accepted edges that overflowed the prior push. The
+                    # loop also keeps running while contact candidates
+                    # remain to be flushed after the final cull pass, in
+                    # which case the edge pop simply returns no items. The
                     # trailing ``tile_stack_clear`` (after this drain) is
                     # a defensive no-op barrier; see the comment block
                     # above the outer ``while``.
-                    while wp.tile_stack_count(edge_stack) > 0:
+                    while wp.tile_stack_count(edge_stack) > 0 or (
+                        wp.tile_extract(progress, 0) >= num_edges and wp.tile_stack_count(candidate_stack) > 0
+                    ):
                         popped, edge_slot = wp.tile_stack_pop(edge_stack)
                         my_edge_idx = popped.edge_idx
                         cached_sdf_val = popped.midpoint_sdf
                         has_edge = edge_slot >= 0
 
+                        candidate = EdgeCandidate()
+                        is_candidate = False
                         if has_edge:
                             corner_ownership = int(0)
                             if wp.static(enable_heightfields):
@@ -1416,6 +1484,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 hfd_sdf,
                                 heightfield_elevations,
                                 search_precision_unscaled,
+                                contact_threshold_unscaled,
                             )
 
                             # Gap may widen the edge cull enough to find
@@ -1441,6 +1510,24 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 best_endpoint == 0 or corner_ownership == 0 or (corner_ownership & best_endpoint) != 0
                             )
                             if dist_approx < contact_threshold and inner_cull_consistent and owns_endpoint:
+                                is_candidate = True
+                                candidate.edge_idx = my_edge_idx
+                                candidate.dist_unscaled = dist_unscaled
+                                candidate.point_unscaled = point_unscaled
+
+                        # Compact the candidates and process them in full
+                        # batches; leftovers wait for the next pop-round and
+                        # are flushed once this edge range is exhausted.
+                        wp.tile_stack_push(candidate_stack, candidate, is_candidate)
+                        edges_done = wp.tile_stack_count(edge_stack) == 0 and wp.tile_extract(progress, 0) >= num_edges
+                        while wp.tile_stack_count(candidate_stack) >= capacity or (
+                            edges_done and wp.tile_stack_count(candidate_stack) > 0
+                        ):
+                            candidate, candidate_slot = wp.tile_stack_pop(candidate_stack)
+                            if candidate_slot >= 0:
+                                my_edge_idx = candidate.edge_idx
+                                dist_unscaled = candidate.dist_unscaled
+                                point_unscaled = candidate.point_unscaled
                                 if wp.static(enable_heightfields):
                                     if sdf_is_hfield:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(
@@ -1586,6 +1673,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         total_combos = block_offsets[pair_count]
 
         edge_stack = wp.tile_stack(capacity=STACK_CAPACITY, dtype=EdgeCullResult)
+        candidate_stack = wp.tile_stack(capacity=CANDIDATE_STACK_CAPACITY, dtype=EdgeCandidate)
         # ``progress[0]`` is the next edge index the upcoming cooperative
         # culling pass should start from (a high-water mark, not a count):
         # each thread ``t`` evaluates ``progress[0] + t`` and the counter
@@ -1805,14 +1893,21 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     # Drain the stack completely — see the matching loop
                     # in ``mesh_sdf_collision_kernel`` for why a single
                     # pop would silently drop overflowed accepted edges.
-                    # The trailing ``tile_stack_clear`` is a defensive
-                    # no-op barrier (see that same comment block).
-                    while wp.tile_stack_count(edge_stack) > 0:
+                    # The loop also keeps running while candidates remain
+                    # to be flushed after the final cull pass, in which case
+                    # the edge pop simply returns no items. The trailing
+                    # ``tile_stack_clear`` is a defensive no-op barrier (see
+                    # that same comment block).
+                    while wp.tile_stack_count(edge_stack) > 0 or (
+                        wp.tile_extract(progress, 0) >= edge_end and wp.tile_stack_count(candidate_stack) > 0
+                    ):
                         popped, edge_slot = wp.tile_stack_pop(edge_stack)
                         my_edge_idx = popped.edge_idx
                         cached_sdf_val = popped.midpoint_sdf
                         has_edge = edge_slot >= 0
 
+                        candidate = EdgeCandidate()
+                        is_candidate = False
                         if has_edge:
                             corner_ownership = int(0)
                             if wp.static(enable_heightfields):
@@ -1860,6 +1955,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 hfd_sdf,
                                 heightfield_elevations,
                                 search_precision_unscaled,
+                                contact_threshold_unscaled,
                             )
 
                             # Gap may widen the edge cull enough to find
@@ -1885,6 +1981,24 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 best_endpoint == 0 or corner_ownership == 0 or (corner_ownership & best_endpoint) != 0
                             )
                             if dist_approx < contact_threshold and inner_cull_consistent and owns_endpoint:
+                                is_candidate = True
+                                candidate.edge_idx = my_edge_idx
+                                candidate.dist_unscaled = dist_unscaled
+                                candidate.point_unscaled = point_unscaled
+
+                        # Compact the candidates and process them in full
+                        # batches; leftovers wait for the next pop-round and
+                        # are flushed once this edge range is exhausted.
+                        wp.tile_stack_push(candidate_stack, candidate, is_candidate)
+                        edges_done = wp.tile_stack_count(edge_stack) == 0 and wp.tile_extract(progress, 0) >= edge_end
+                        while wp.tile_stack_count(candidate_stack) >= capacity or (
+                            edges_done and wp.tile_stack_count(candidate_stack) > 0
+                        ):
+                            candidate, candidate_slot = wp.tile_stack_pop(candidate_stack)
+                            if candidate_slot >= 0:
+                                my_edge_idx = candidate.edge_idx
+                                dist_unscaled = candidate.dist_unscaled
+                                point_unscaled = candidate.point_unscaled
                                 if wp.static(enable_heightfields):
                                     if sdf_is_hfield:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(
