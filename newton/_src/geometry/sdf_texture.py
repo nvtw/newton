@@ -1251,6 +1251,160 @@ def _texture_sample_sdf_at_voxel_scalar(
 
 
 @wp.func
+def _lerp_exact_end(a: float, b: float, t: float) -> float:
+    """Linear blend that returns ``b`` exactly at ``t == 1``, matching a neighbor-cell evaluation at ``t == 0``."""
+    return wp.where(t == 1.0, b, a + (b - a) * t)
+
+
+@wp.func
+def _texture_read_voxel_corners_variant(
+    sdf: TextureSDFData,
+    ix: int,
+    iy: int,
+    iz: int,
+    paired_samples: bool,
+) -> vec8f:
+    """Read the eight corner SDF values of fine voxel ``(ix, iy, iz)`` with one slot lookup.
+
+    Returns the corners in marching-cubes order (see ``_mc_corner_offset``):
+    ``[v000, v100, v110, v010, v001, v101, v111, v011]``.
+
+    A fine voxel always lies inside a single subgrid block, which stores
+    ``subgrid_size + 1`` samples per axis, so all eight corners come from the
+    same block: four paired texel reads (eight scalar reads) replace eight
+    independent slot lookups and fetches. Corners on a face shared with a
+    coarse-only neighbor use this block's fine border sample instead of the
+    neighbor's coarse interpolation, which is the more accurate of the two.
+    For coarse (``SLOT_LINEAR``/empty) blocks the eight vertices are
+    interpolated from the enclosing coarse cell.
+    """
+    coarse_x = sdf.coarse_texture.width - 1
+    coarse_y = sdf.coarse_texture.height - 1
+    coarse_z = sdf.coarse_texture.depth - 1
+
+    x_base = wp.clamp(int(float(ix) * sdf.fine_to_coarse), 0, coarse_x - 1)
+    y_base = wp.clamp(int(float(iy) * sdf.fine_to_coarse), 0, coarse_y - 1)
+    z_base = wp.clamp(int(float(iz) * sdf.fine_to_coarse), 0, coarse_z - 1)
+    start_slot = sdf.subgrid_start_slots[x_base, y_base, z_base]
+
+    v000 = float(0.0)
+    v100 = float(0.0)
+    v010 = float(0.0)
+    v110 = float(0.0)
+    v001 = float(0.0)
+    v101 = float(0.0)
+    v011 = float(0.0)
+    v111 = float(0.0)
+
+    if start_slot < SLOT_LINEAR:
+        block_x = float(start_slot & wp.uint32(0x3FF))
+        block_y = float((start_slot >> wp.uint32(10)) & wp.uint32(0x3FF))
+        block_z = float((start_slot >> wp.uint32(20)) & wp.uint32(0x3FF))
+        lx = float(ix) - float(x_base) * sdf.subgrid_size_f
+        ly = float(iy) - float(y_base) * sdf.subgrid_size_f
+        lz = float(iz) - float(z_base) * sdf.subgrid_size_f
+        ox = block_x * sdf.subgrid_samples_f + lx + 0.5
+        oy = block_y * sdf.subgrid_samples_f + ly + 0.5
+        oz = block_z * sdf.subgrid_samples_f + lz + 0.5
+        if paired_samples:
+            p00 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz), dtype=wp.vec2)
+            p10 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz), dtype=wp.vec2)
+            p01 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz + 1.0), dtype=wp.vec2)
+            p11 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz + 1.0), dtype=wp.vec2)
+            v000, v100 = p00[0], p00[1]
+            v010, v110 = p10[0], p10[1]
+            v001, v101 = p01[0], p01[1]
+            v011, v111 = p11[0], p11[1]
+        else:
+            v000 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz), dtype=float)
+            v100 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy, oz), dtype=float)
+            v010 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz), dtype=float)
+            v110 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz), dtype=float)
+            v001 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy, oz + 1.0), dtype=float)
+            v101 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy, oz + 1.0), dtype=float)
+            v011 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox, oy + 1.0, oz + 1.0), dtype=float)
+            v111 = wp.texture_sample(sdf.subgrid_texture, wp.vec3f(ox + 1.0, oy + 1.0, oz + 1.0), dtype=float)
+        value_range = sdf.subgrids_sdf_value_range
+        min_value = sdf.subgrids_min_sdf_value
+        v000 = v000 * value_range + min_value
+        v100 = v100 * value_range + min_value
+        v010 = v010 * value_range + min_value
+        v110 = v110 * value_range + min_value
+        v001 = v001 * value_range + min_value
+        v101 = v101 * value_range + min_value
+        v011 = v011 * value_range + min_value
+        v111 = v111 * value_range + min_value
+    else:
+        cx = float(x_base)
+        cy = float(y_base)
+        cz = float(z_base)
+        if paired_samples:
+            c00 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 0.5), dtype=wp.vec2)
+            c10 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 0.5), dtype=wp.vec2)
+            c01 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 1.5), dtype=wp.vec2)
+            c11 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 1.5), dtype=wp.vec2)
+            c000, c100 = c00[0], c00[1]
+            c010, c110 = c10[0], c10[1]
+            c001, c101 = c01[0], c01[1]
+            c011, c111 = c11[0], c11[1]
+        else:
+            c000 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 0.5), dtype=float)
+            c100 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 0.5, cz + 0.5), dtype=float)
+            c010 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 0.5), dtype=float)
+            c110 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 1.5, cz + 0.5), dtype=float)
+            c001 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 0.5, cz + 1.5), dtype=float)
+            c101 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 0.5, cz + 1.5), dtype=float)
+            c011 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 0.5, cy + 1.5, cz + 1.5), dtype=float)
+            c111 = wp.texture_sample(sdf.coarse_texture, wp.vec3f(cx + 1.5, cy + 1.5, cz + 1.5), dtype=float)
+        # Coarse-space fractions of the voxel's lower and upper vertices.
+        tx0 = float(ix) * sdf.fine_to_coarse - cx
+        tx1 = float(ix + 1) * sdf.fine_to_coarse - cx
+        ty0 = float(iy) * sdf.fine_to_coarse - cy
+        ty1 = float(iy + 1) * sdf.fine_to_coarse - cy
+        tz0 = float(iz) * sdf.fine_to_coarse - cz
+        tz1 = float(iz + 1) * sdf.fine_to_coarse - cz
+        # Blend along x for both y rows and both z slabs, then finish per vertex.
+        x0_y0z0 = _lerp_exact_end(c000, c100, tx0)
+        x1_y0z0 = _lerp_exact_end(c000, c100, tx1)
+        x0_y1z0 = _lerp_exact_end(c010, c110, tx0)
+        x1_y1z0 = _lerp_exact_end(c010, c110, tx1)
+        x0_y0z1 = _lerp_exact_end(c001, c101, tx0)
+        x1_y0z1 = _lerp_exact_end(c001, c101, tx1)
+        x0_y1z1 = _lerp_exact_end(c011, c111, tx0)
+        x1_y1z1 = _lerp_exact_end(c011, c111, tx1)
+        x0_y0_z0 = _lerp_exact_end(x0_y0z0, x0_y1z0, ty0)
+        x1_y0_z0 = _lerp_exact_end(x1_y0z0, x1_y1z0, ty0)
+        x0_y1_z0 = _lerp_exact_end(x0_y0z0, x0_y1z0, ty1)
+        x1_y1_z0 = _lerp_exact_end(x1_y0z0, x1_y1z0, ty1)
+        x0_y0_z1 = _lerp_exact_end(x0_y0z1, x0_y1z1, ty0)
+        x1_y0_z1 = _lerp_exact_end(x1_y0z1, x1_y1z1, ty0)
+        x0_y1_z1 = _lerp_exact_end(x0_y0z1, x0_y1z1, ty1)
+        x1_y1_z1 = _lerp_exact_end(x1_y0z1, x1_y1z1, ty1)
+        v000 = _lerp_exact_end(x0_y0_z0, x0_y0_z1, tz0)
+        v100 = _lerp_exact_end(x1_y0_z0, x1_y0_z1, tz0)
+        v010 = _lerp_exact_end(x0_y1_z0, x0_y1_z1, tz0)
+        v110 = _lerp_exact_end(x1_y1_z0, x1_y1_z1, tz0)
+        v001 = _lerp_exact_end(x0_y0_z0, x0_y0_z1, tz1)
+        v101 = _lerp_exact_end(x1_y0_z0, x1_y0_z1, tz1)
+        v011 = _lerp_exact_end(x0_y1_z0, x0_y1_z1, tz1)
+        v111 = _lerp_exact_end(x1_y1_z0, x1_y1_z1, tz1)
+
+    return vec8f(v000, v100, v110, v010, v001, v101, v111, v011)
+
+
+@wp.func
+def _texture_read_voxel_corners_paired(sdf: TextureSDFData, ix: int, iy: int, iz: int) -> vec8f:
+    """Read a fine voxel's eight corners from an X-paired SDF texture."""
+    return _texture_read_voxel_corners_variant(sdf, ix, iy, iz, True)
+
+
+@wp.func
+def _texture_read_voxel_corners_scalar(sdf: TextureSDFData, ix: int, iy: int, iz: int) -> vec8f:
+    """Read a fine voxel's eight corners from a scalar SDF texture."""
+    return _texture_read_voxel_corners_variant(sdf, ix, iy, iz, False)
+
+
+@wp.func
 def _texture_sample_pair(
     texture0: wp.Texture3D,
     uvw0: wp.vec3f,

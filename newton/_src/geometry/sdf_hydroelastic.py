@@ -66,6 +66,8 @@ from .sdf_mc import (
 )
 from .sdf_texture import (
     TextureSDFData,
+    _texture_read_voxel_corners_paired,
+    _texture_read_voxel_corners_scalar,
     _texture_sample_sdf_at_voxel_paired,
     _texture_sample_sdf_at_voxel_scalar,
     _texture_sample_sdf_paired,
@@ -1721,7 +1723,7 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bo
         The specialized voxel-iteration function.
     """
     sample_sdf = _texture_sample_sdf_paired if paired_samples else _texture_sample_sdf_scalar
-    sample_sdf_at_voxel = _texture_sample_sdf_at_voxel_paired if paired_samples else _texture_sample_sdf_at_voxel_scalar
+    read_voxel_corners = _texture_read_voxel_corners_paired if paired_samples else _texture_read_voxel_corners_scalar
 
     @wp.func
     def mc_iterate_voxel_vertices(
@@ -1755,12 +1757,11 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bo
         point_b_step_x = wp.transform_vector(X_a_to_b, wp.vec3(sdf_data.voxel_size[0], 0.0, 0.0))
         point_b_step_y = wp.transform_vector(X_a_to_b, wp.vec3(0.0, sdf_data.voxel_size[1], 0.0))
         point_b_step_z = wp.transform_vector(X_a_to_b, wp.vec3(0.0, 0.0, sdf_data.voxel_size[2]))
+        # All eight own-grid corners live in one subgrid block: read them together.
+        corner_vals_self = wp.static(read_voxel_corners)(sdf_data, x_id, y_id, z_id)
 
         for i in range(8):
             corner_offset = _mc_corner_offset(i)
-            x = x_id + corner_offset.x
-            y = y_id + corner_offset.y
-            z = z_id + corner_offset.z
 
             point_b = (
                 point_b_base
@@ -1768,7 +1769,7 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bo
                 + float(corner_offset.y) * point_b_step_y
                 + float(corner_offset.z) * point_b_step_z
             )
-            valA = wp.static(sample_sdf_at_voxel)(sdf_data, x, y, z)
+            valA = corner_vals_self[i]
             valB = wp.static(sample_sdf)(sdf_other_data, point_b)
 
             is_valid = not (wp.isnan(valA) or wp.isnan(valB))
