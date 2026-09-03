@@ -48,6 +48,7 @@ _PHOENX_SOLVER_VARIANTS = {
     "phoenx_maximal": "maximal",
     "phoenx_reduced": "reduced",
 }
+_MUJOCO_SOLVER_VARIANTS = {"mujoco_sized": 320}
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +222,9 @@ def run_sweep(cfg: SweepConfig, clear_existing: bool) -> None:
             elif solver in _PHOENX_SOLVER_VARIANTS:
                 build_solver = "phoenx"
                 build_kwargs["articulation_mode"] = _PHOENX_SOLVER_VARIANTS[solver]
+            elif solver in _MUJOCO_SOLVER_VARIANTS:
+                build_solver = "mujoco"
+                build_kwargs["mujoco_contact_capacity"] = _MUJOCO_SOLVER_VARIANTS[solver]
             else:
                 build_solver = solver
 
@@ -309,7 +313,15 @@ def main(argv: list[str] | None = None) -> int:
         "--solvers",
         nargs="+",
         default=None,
-        choices=["phoenx", "phoenx_maximal", "phoenx_reduced", "phoenx_greedy", "phoenx_jp", "mujoco"],
+        choices=[
+            "phoenx",
+            "phoenx_maximal",
+            "phoenx_reduced",
+            "phoenx_greedy",
+            "phoenx_jp",
+            "mujoco",
+            "mujoco_sized",
+        ],
         help=(
             "Subset of solvers to run (default: both). ``phoenx`` "
             "respects whatever ``PHOENX_USE_GREEDY_COLORING`` is "

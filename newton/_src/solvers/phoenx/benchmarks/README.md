@@ -40,6 +40,13 @@ python -m newton._src.solvers.phoenx.benchmarks.run_benchmarks \
     --num-worlds 1024 2048 4096 8192 16384 32768 65536 \
     --substeps 2 --solver-iterations 8
 
+# Run H1 with enough MjWarp contact capacity to avoid dropping contacts.
+python -m newton._src.solvers.phoenx.benchmarks.run_benchmarks \
+    --scenarios feather_pgs_h1_tabletop \
+    --solvers phoenx_maximal mujoco_sized \
+    --num-worlds 1024 4096 \
+    --substeps 4 --solver-iterations 8
+
 # Skip the GPU-lock reminder prompt (for unattended runs).
 python -m newton._src.solvers.phoenx.benchmarks.run_benchmarks --yes
 
@@ -203,6 +210,11 @@ exactly the same shape as Dylan's nightly harness plus what the ASV
   the published FeatherPGS results. The current MjWarp API no longer exposes
   the old worker's `ls_parallel` option; all other explicit MjWarp settings
   are retained, including 100 Newton and 50 line-search iterations.
+  The copied H1 `nconmax=128` setting overflows with current MjWarp (which
+  raises it to 204 internally but needs more than 256 in this scene). Use
+  **`mujoco_sized`** for the separately labeled `nconmax=320` variant when
+  useful-work validation matters; plain **`mujoco`** retains Dylan's exact
+  legacy setting for reproduction.
 - **`g1_flat`**: headless clone of `newton.examples.robot_g1`. 29-DoF
   humanoid on a ground plane, PD-position control,
   bounding-box-approximated mesh colliders.

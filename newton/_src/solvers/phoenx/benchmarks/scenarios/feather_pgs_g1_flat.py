@@ -14,6 +14,7 @@ def build(
     solver_iterations: int,
     *,
     articulation_mode: str = "maximal",
+    mujoco_contact_capacity: int | None = None,
 ) -> SceneHandle:
     """Build the copied FeatherPGS G1-flat benchmark."""
     return feather_pgs_common.build(
@@ -23,4 +24,5 @@ def build(
         substeps,
         solver_iterations,
         articulation_mode=articulation_mode,
+        mujoco_contact_capacity=mujoco_contact_capacity,
     )

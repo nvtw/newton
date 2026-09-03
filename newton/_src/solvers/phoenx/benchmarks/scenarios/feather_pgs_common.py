@@ -222,6 +222,7 @@ def build(
     solver_iterations: int,
     *,
     articulation_mode: str = "maximal",
+    mujoco_contact_capacity: int | None = None,
 ) -> SceneHandle:
     """Build one copied FeatherPGS scene for PhoenX or MuJoCo Warp."""
     mem_before = _gpu_used_bytes()
@@ -241,6 +242,8 @@ def build(
             njmax, nconmax = 210, 35
         else:
             njmax, nconmax = 512, 128
+        if mujoco_contact_capacity is not None:
+            nconmax = mujoco_contact_capacity
         solver = newton.solvers.SolverMuJoCo(
             model,
             use_mujoco_cpu=False,

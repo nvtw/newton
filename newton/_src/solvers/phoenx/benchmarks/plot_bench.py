@@ -43,6 +43,7 @@ except ImportError:  # pragma: no cover -- install-time hint
 DEFAULT_COLORS: dict[str, str] = {
     "phoenx": "#0f8c7a",
     "mujoco": "#2563eb",
+    "mujoco_sized": "#7c3aed",
 }
 
 _DEFAULT_POINTS = Path(__file__).parent / "results" / "points.jsonl"
