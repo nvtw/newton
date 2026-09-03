@@ -20,6 +20,8 @@ from newton._src.solvers.phoenx.articulations.maximal_contact_response import (
     MaximalContactResponseData,
     maximal_contact_pair_cross_inverse_mass,
     maximal_contact_pair_inverse_mass,
+    maximal_contact_point_impulse_velocity,
+    maximal_contact_wrench_cross_mobility,
 )
 from newton._src.solvers.phoenx.articulations.maximal_projector import (
     MaximalTreeProjector,
@@ -109,6 +111,39 @@ def _evaluate_maximal_contact_pair_cross_inverse_mass_kernel(
         point1,
         direction10,
         direction11,
+    )
+
+
+@wp.kernel(enable_backward=False)
+def _compare_maximal_contact_point_impulse_velocity_kernel(
+    tree: MaximalTreeProjectorData,
+    response: MaximalContactResponseData,
+    bodies: BodyContainer,
+    body: wp.int32,
+    point_offset: wp.vec3f,
+    impulse_offset: wp.vec3f,
+    impulse: wp.vec3f,
+    result: wp.array[wp.vec3f],
+):
+    result[0] = maximal_contact_point_impulse_velocity(
+        response,
+        body,
+        point_offset,
+        impulse_offset,
+        impulse,
+    )
+    point = bodies.position[body] + point_offset
+    impulse_point = bodies.position[body] + impulse_offset
+    result[1] = wp.vec3f(
+        maximal_contact_wrench_cross_mobility(
+            tree, response, bodies, body, point, wp.vec3f(1.0, 0.0, 0.0), body, impulse_point, impulse
+        ),
+        maximal_contact_wrench_cross_mobility(
+            tree, response, bodies, body, point, wp.vec3f(0.0, 1.0, 0.0), body, impulse_point, impulse
+        ),
+        maximal_contact_wrench_cross_mobility(
+            tree, response, bodies, body, point, wp.vec3f(0.0, 0.0, 1.0), body, impulse_point, impulse
+        ),
     )
 
 
@@ -1947,6 +1982,31 @@ class TestReducedArticulation(unittest.TestCase):
             float(expected_cross),
             delta=3.0e-5,
         )
+
+        point_offset = np.array([0.12, -0.07, 0.03], dtype=np.float32)
+        impulse_offset = np.array([-0.04, 0.09, 0.06], dtype=np.float32)
+        impulse = np.array([0.35, -0.22, 0.41], dtype=np.float32)
+        point_velocity = wp.zeros(2, dtype=wp.vec3f, device=device)
+        with wp.ScopedCapture(device=device) as point_capture:
+            response.compute_mobility()
+            wp.launch(
+                _compare_maximal_contact_point_impulse_velocity_kernel,
+                dim=1,
+                inputs=[
+                    projector.data,
+                    response.data,
+                    solver.world.bodies,
+                    slot0,
+                    wp.vec3f(*point_offset),
+                    wp.vec3f(*impulse_offset),
+                    wp.vec3f(*impulse),
+                    point_velocity,
+                ],
+                device=device,
+            )
+        wp.capture_launch(point_capture.graph)
+        fast_velocity, generic_velocity = point_velocity.numpy()
+        np.testing.assert_allclose(fast_velocity, generic_velocity, rtol=3.0e-5, atol=3.0e-5)
 
     def test_full_coordinate_tree_detection_ignores_articulation_metadata(self):
         """Derive full-coordinate contact trees solely from the joint graph."""

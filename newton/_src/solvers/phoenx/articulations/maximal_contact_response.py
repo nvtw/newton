@@ -108,6 +108,30 @@ def maximal_contact_wrench_cross_mobility(
 
 
 @wp.func
+def maximal_contact_point_impulse_velocity(
+    response: MaximalContactResponseData,
+    body: wp.int32,
+    point_offset: wp.vec3f,
+    impulse_offset: wp.vec3f,
+    impulse: wp.vec3f,
+):
+    """Return the exact constrained point velocity from a same-body impulse."""
+    articulation = response.body_articulation[body]
+    lane = response.body_lane[body]
+    torque = wp.cross(impulse_offset, impulse)
+    wrench = wp.spatial_vectorf(
+        impulse[0],
+        impulse[1],
+        impulse[2],
+        torque[0],
+        torque[1],
+        torque[2],
+    )
+    velocity = response.mobility[articulation, lane] @ wrench
+    return wp.spatial_top(velocity) + wp.cross(wp.spatial_bottom(velocity), point_offset)
+
+
+@wp.func
 def maximal_contact_pair_cross_inverse_mass(
     tree: MaximalTreeProjectorData,
     response: MaximalContactResponseData,
@@ -351,5 +375,6 @@ __all__ = [
     "apply_maximal_contact_impulse_thread",
     "maximal_contact_pair_cross_inverse_mass",
     "maximal_contact_pair_inverse_mass",
+    "maximal_contact_point_impulse_velocity",
     "maximal_contact_wrench_cross_mobility",
 ]

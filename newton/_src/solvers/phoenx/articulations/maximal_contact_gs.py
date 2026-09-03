@@ -13,6 +13,7 @@ from newton._src.solvers.phoenx.articulations.maximal_contact_response import (
     apply_maximal_contact_impulse_thread,
     maximal_contact_pair_cross_inverse_mass,
     maximal_contact_pair_inverse_mass,
+    maximal_contact_point_impulse_velocity,
     maximal_contact_wrench_cross_mobility,
 )
 from newton._src.solvers.phoenx.articulations.maximal_projector import (
@@ -229,6 +230,34 @@ def _contact_cross_velocity(
     normal = cc_get_normal(contacts, contact)
     tangent0 = cc_get_tangent1(contacts, contact)
     tangent1 = wp.cross(normal, tangent0)
+    articulation0 = response.body_articulation[body0]
+    articulation1 = response.body_articulation[body1]
+    # With one immovable endpoint, all cross terms except the articulated
+    # body's same-body response are identically zero. Evaluate that response
+    # once as a vector instead of repeating the tree traversal per basis row.
+    if articulation0 >= wp.int32(0) and articulation1 < wp.int32(0):
+        point_velocity = maximal_contact_point_impulse_velocity(
+            response,
+            body0,
+            cc_get_r0(contacts, contact),
+            cc_get_r0(contacts, previous_contact),
+            -previous_impulse,
+        )
+        delta = -point_velocity
+        return wp.dot(delta, normal) * normal + wp.dot(delta, tangent0) * tangent0 + wp.dot(delta, tangent1) * tangent1
+    if articulation1 >= wp.int32(0) and articulation0 < wp.int32(0):
+        point_velocity = maximal_contact_point_impulse_velocity(
+            response,
+            body1,
+            cc_get_r1(contacts, contact),
+            cc_get_r1(contacts, previous_contact),
+            previous_impulse,
+        )
+        return (
+            wp.dot(point_velocity, normal) * normal
+            + wp.dot(point_velocity, tangent0) * tangent0
+            + wp.dot(point_velocity, tangent1) * tangent1
+        )
     point0 = bodies.position[body0] + cc_get_r0(contacts, contact)
     point1 = bodies.position[body1] + cc_get_r1(contacts, contact)
     previous_point0 = bodies.position[body0] + cc_get_r0(contacts, previous_contact)
