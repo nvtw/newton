@@ -38,6 +38,8 @@ class SceneHandle:
     substeps: int
     solver_iterations: int
     simulate_one_frame: Callable[[], None]
+    validate: Callable[[], dict[str, float | int]] | None = None
+    """Untimed post-run validation and diagnostic metric callback."""
     graph_period_frames: int = 2
     """Frames required for captured state buffers to return to their initial slot layout."""
     #: Bytes of GPU memory the scene allocated during setup. Computed
@@ -126,6 +128,9 @@ def run_one(
     wp.synchronize_device()
     elapsed_s = time.perf_counter() - t0
 
+    # Readback and correctness checks must not contaminate the timed region.
+    validation_metrics = handle.validate() if handle.validate is not None else {}
+
     # env_fps is frames/second scaled by the parallel world count
     # (Dylan's convention: "how many env steps did we produce per
     # second"). ms_per_step is the inverse, in milliseconds per
@@ -150,6 +155,7 @@ def run_one(
         "setup_gb": float(handle.setup_bytes) / (1024**3),
         "ok": True,
         "error": None,
+        **validation_metrics,
     }
 
 

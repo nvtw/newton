@@ -21,6 +21,7 @@ to ship the artefacts.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import platform
 import subprocess
@@ -32,6 +33,7 @@ from pathlib import Path
 
 import warp as wp
 
+import newton._src.solvers.phoenx.solver_config as _phx_cfg
 from newton._src.solvers.phoenx.benchmarks.runner import (
     reset_gpu_between_runs,
     run_one,
@@ -41,6 +43,11 @@ from newton._src.solvers.phoenx.benchmarks.scenarios import SCENARIOS
 RESULTS_DIR = Path(__file__).parent / "results"
 POINTS_PATH = RESULTS_DIR / "points.jsonl"
 RUNS_PATH = RESULTS_DIR / "runs.jsonl"
+
+_PHOENX_SOLVER_VARIANTS = {
+    "phoenx_maximal": "maximal",
+    "phoenx_reduced": "reduced",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -207,18 +214,27 @@ def run_sweep(cfg: SweepConfig, clear_existing: bool) -> None:
             # for the build call but keep the original label in the
             # JSONL row so the dashboard / plots overlay the two
             # variants as separate lines.
+            build_kwargs = {}
             if solver in ("phoenx_greedy", "phoenx_jp"):
-                import newton._src.solvers.phoenx.solver_config as _phx_cfg  # noqa: PLC0415
-
                 _phx_cfg.PHOENX_USE_GREEDY_COLORING = solver == "phoenx_greedy"
                 build_solver = "phoenx"
+            elif solver in _PHOENX_SOLVER_VARIANTS:
+                build_solver = "phoenx"
+                build_kwargs["articulation_mode"] = _PHOENX_SOLVER_VARIANTS[solver]
             else:
                 build_solver = solver
-            handle = SCENARIOS[scene].build(
+
+            build = SCENARIOS[scene].build
+            unsupported_options = set(build_kwargs) - set(inspect.signature(build).parameters)
+            if unsupported_options:
+                options = ", ".join(sorted(unsupported_options))
+                raise ValueError(f"scenario {scene!r} does not support benchmark option(s): {options}")
+            handle = build(
                 num_worlds=nw,
                 solver_name=build_solver,
                 substeps=ss,
                 solver_iterations=it,
+                **build_kwargs,
             )
             metrics = run_one(
                 handle,
@@ -293,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         "--solvers",
         nargs="+",
         default=None,
-        choices=["phoenx", "phoenx_greedy", "phoenx_jp", "mujoco"],
+        choices=["phoenx", "phoenx_maximal", "phoenx_reduced", "phoenx_greedy", "phoenx_jp", "mujoco"],
         help=(
             "Subset of solvers to run (default: both). ``phoenx`` "
             "respects whatever ``PHOENX_USE_GREEDY_COLORING`` is "

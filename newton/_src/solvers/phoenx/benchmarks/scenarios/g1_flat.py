@@ -30,6 +30,7 @@ def build(
     solver_iterations: int,
     velocity_iterations: int = 1,
     *,
+    articulation_mode: str = "maximal",
     step_layout: str = "multi_world",
     prepare_refresh_stride: int | str = "auto",
 ) -> SceneHandle:
@@ -72,20 +73,21 @@ def build(
     fps = 60
     frame_dt = 1.0 / fps
 
-    # Fair cadence across solvers: see h1_flat.py for the rationale.
-    # PhoenX does substepping internally (one call per frame,
-    # dt=frame_dt); MuJoCo is looped externally.
+    # Match Dylan Turpin's benchmark worker: collision detection and one
+    # solver step both run once per simulation substep. PhoenX therefore uses
+    # one internal substep here and shares the same outer loop as MuJoCo.
     if solver_name == "phoenx":
         solver = newton.solvers.SolverPhoenX(
             model,
-            substeps=substeps,
+            substeps=1,
             solver_iterations=solver_iterations,
             velocity_iterations=velocity_iterations,
             step_layout=step_layout,
             prepare_refresh_stride=prepare_refresh_stride,
+            articulation_mode=articulation_mode,
         )
-        outer_steps = 1
-        call_dt = frame_dt
+        outer_steps = substeps
+        call_dt = frame_dt / substeps
     elif solver_name == "mujoco":
         solver = newton.solvers.SolverMuJoCo(
             model,
@@ -115,8 +117,8 @@ def build(
     box = {"state_0": state_0, "state_1": state_1}
 
     def simulate_one_frame() -> None:
-        model.collide(box["state_0"], contacts)
         for _ in range(outer_steps):
+            model.collide(box["state_0"], contacts)
             box["state_0"].clear_forces()
             solver.step(box["state_0"], box["state_1"], control, contacts, call_dt)
             box["state_0"], box["state_1"] = box["state_1"], box["state_0"]

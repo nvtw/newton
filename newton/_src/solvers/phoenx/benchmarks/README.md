@@ -27,6 +27,19 @@ python -m newton._src.solvers.phoenx.benchmarks.run_benchmarks --full-sweep
 python -m newton._src.solvers.phoenx.benchmarks.run_benchmarks \
     --scenarios g1_flat --solvers phoenx --num-worlds 1024 4096
 
+# Compare generalized- and maximal-coordinate PhoenX against MuJoCo Warp.
+python -m newton._src.solvers.phoenx.benchmarks.run_benchmarks \
+    --scenarios feather_pgs_g1_flat \
+    --solvers phoenx_reduced phoenx_maximal mujoco \
+    --num-worlds 1024 4096 16384 32768
+
+# Reproduce the FeatherPGS G1 sweep (MjWarp still uses 100/50 iterations).
+python -m newton._src.solvers.phoenx.benchmarks.run_benchmarks \
+    --scenarios feather_pgs_g1_flat \
+    --solvers phoenx_reduced phoenx_maximal mujoco \
+    --num-worlds 1024 2048 4096 8192 16384 32768 65536 \
+    --substeps 2 --solver-iterations 8
+
 # Skip the GPU-lock reminder prompt (for unattended runs).
 python -m newton._src.solvers.phoenx.benchmarks.run_benchmarks --yes
 
@@ -174,7 +187,9 @@ MEASURE  ─ M * wp.capture_launch, one wp.synchronize at the end
          ─ wall-clock around the M replays
 ```
 
-16 warmup + 64 measure (Dylan's defaults). JIT compilation, the
+16 warmup + 64 measure (Dylan's defaults). Each simulation substep runs
+collision detection followed by one solver step; PhoenX uses one internal
+substep so its outer cadence matches MuJoCo Warp. JIT compilation, the
 contact sorter's lazy buffers, and any first-call allocations all
 land in the warmup; measurement is just graph replays. This is
 exactly the same shape as Dylan's nightly harness plus what the ASV
@@ -182,6 +197,12 @@ exactly the same shape as Dylan's nightly harness plus what the ASV
 
 ## Scenarios
 
+- **`feather_pgs_g1_flat`** and **`feather_pgs_h1_tabletop`**:
+  model definitions copied from Dylan Turpin's FeatherPGS nightly worker at
+  commit `af928ab3`. These are the scenarios to use when comparing against
+  the published FeatherPGS results. The current MjWarp API no longer exposes
+  the old worker's `ls_parallel` option; all other explicit MjWarp settings
+  are retained, including 100 Newton and 50 line-search iterations.
 - **`g1_flat`**: headless clone of `newton.examples.robot_g1`. 29-DoF
   humanoid on a ground plane, PD-position control,
   bounding-box-approximated mesh colliders.
