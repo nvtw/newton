@@ -1744,6 +1744,7 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bo
         """Iterate over the vertices of a voxel and return the cube index, corner values, and whether any vertices are inside the shape."""
         cube_idx = wp.uint8(0)
         any_verts_inside_gap = False
+        all_valid = True
         corner_vals = vec8f()
         corner_sdf_self = vec8f()
         corner_sdf_other = vec8f()
@@ -1772,9 +1773,10 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bo
             valA = corner_vals_self[i]
             valB = wp.static(sample_sdf)(sdf_other_data, point_b)
 
-            is_valid = not (wp.isnan(valA) or wp.isnan(valB))
-            if not is_valid:
-                return wp.uint8(0), corner_vals, corner_sdf_self, corner_sdf_other, False, False
+            # Defer the NaN exit until after the loop so the eight corner
+            # samples are not separated by control flow.
+            if wp.isnan(valA) or wp.isnan(valB):
+                all_valid = False
 
             effective_sdf_self = valA - margin_self
             effective_sdf_other = valB - margin_other
@@ -1802,6 +1804,8 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bo
             if effective_sdf_self + effective_sdf_other <= gap_sum:
                 any_verts_inside_gap = True
 
+        if not all_valid:
+            return wp.uint8(0), corner_vals, corner_sdf_self, corner_sdf_other, False, False
         return cube_idx, corner_vals, corner_sdf_self, corner_sdf_other, any_verts_inside_gap, True
 
     return mc_iterate_voxel_vertices
