@@ -1682,7 +1682,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
         return -1
 
     # Avoid allocating candidates superseded during their own slot updates.
-    still_wins = voxel_entry_missing
+    still_wins = False
     if entry_idx >= 0:
         for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
             if not still_wins and (won_mask & (1 << dir_i)) != 0:
@@ -1707,7 +1707,11 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
         if reducer_data.ht_values[voxel_local_slot * ht_capacity + voxel_entry_idx] == provisional_value:
             still_wins = True
 
-    if not still_wins:
+    # Without a surviving slot win, a contact may still claim the voxel slot of
+    # an entry that is not published yet. That claim happens after the contact
+    # ID exists, so a losing claimant returns its ID below.
+    voxel_only = voxel_entry_missing and not still_wins
+    if not still_wins and not voxel_only:
         return -1
     contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, fingerprint, reducer_data)
     if contact_id < 0:
@@ -1770,7 +1774,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
             voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
         if voxel_entry_idx >= 0:
             voxel_value = make_contact_value(-depth, fingerprint, contact_id, deterministic)
-            if voxel_entry_missing and won_mask == 0:
+            if voxel_only:
                 previous_value = reduction_try_update_slot(
                     voxel_entry_idx,
                     voxel_local_slot,
@@ -1791,7 +1795,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
                 )
         else:
             wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
-            if won_mask == 0:
+            if voxel_only:
                 reclaim_contact_id(contact_id, reducer_data)
                 return -1
 

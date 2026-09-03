@@ -975,6 +975,70 @@ def test_centered_two_spatial_depths_prefers_inner_then_outer(test, device):
         test.assertIn(2, outer_fingerprints, f"Outer contact should win when no inner contact exists ({mode})")
 
 
+def test_centered_two_spatial_depths_voxel_only_claim(test, device):
+    """A contact without a normal-slot win may claim an unpublished voxel entry; later ties allocate nothing."""
+
+    @wp.kernel
+    def reduce_kernel(
+        reducer_data: GlobalContactReducerData,
+        position_local: wp.vec3,
+        fingerprint: int,
+        result: wp.array[wp.int32],
+    ):
+        # Identical normal-bin scores for every call: only the first caller wins the
+        # normal slots, later callers tie and lose them. ``position_local`` selects
+        # the voxel group (resolution 8 along x: cells 0-6 share group 0, cell 7 is group 1).
+        result[0] = export_and_reduce_contact_centered_two_spatial_depths(
+            shape_a=0,
+            shape_b=1,
+            position=wp.vec3(0.0),
+            normal=wp.vec3(0.0, 1.0, 0.0),
+            depth=-0.01,
+            fingerprint=fingerprint,
+            centered_position=wp.vec3(0.0),
+            inner_spatial_depth=0.0,
+            outer_spatial_depth=0.1,
+            position_local=position_local,
+            aabb_lower_voxel=wp.vec3(-1.0),
+            aabb_upper_voxel=wp.vec3(1.0),
+            voxel_res=wp.vec3i(8, 1, 1),
+            reducer_data=reducer_data,
+        )
+
+    reducer = GlobalContactReducer(capacity=8, device=device, enable_contact_reclamation=True)
+    result = wp.zeros(1, dtype=wp.int32, device=device)
+
+    def run(position_local, fingerprint):
+        wp.launch(
+            reduce_kernel,
+            dim=1,
+            inputs=[reducer.get_data_struct(), position_local, fingerprint],
+            outputs=[result],
+            device=device,
+        )
+        return int(result.numpy()[0])
+
+    # First contact wins every normal slot and publishes voxel group 0.
+    test.assertEqual(run(wp.vec3(-0.99, 0.0, 0.0), 1), 1)
+    test.assertEqual(get_contact_count(reducer), 1)
+    test.assertEqual(get_active_slot_count(reducer), 2)
+
+    # Same scores, so no normal-slot win, but voxel group 1 is unpublished:
+    # the contact allocates an ID and claims that voxel slot.
+    test.assertEqual(run(wp.vec3(0.99, 0.0, 0.0), 2), 2)
+    test.assertEqual(get_contact_count(reducer), 2)
+    test.assertEqual(get_active_slot_count(reducer), 3)
+    test.assertEqual(get_winning_contacts(reducer), [1, 2])
+
+    # Once the voxel entry exists, a tying contact loses everywhere and must
+    # not allocate an ID.
+    test.assertEqual(run(wp.vec3(0.99, 0.0, 0.0), 3), -1)
+    test.assertEqual(get_contact_count(reducer), 2)
+    test.assertEqual(get_active_slot_count(reducer), 3)
+    test.assertEqual(get_winning_contacts(reducer), [1, 2])
+    test.assertEqual(int(reducer.reclaimed_contact_bits.numpy().sum()), 0)
+
+
 def test_centered_two_spatial_depths_full_buffer_does_not_publish_voxel_key(test, device):
     """Avoid publishing a voxel key when contact allocation is exhausted."""
 
@@ -1691,6 +1755,12 @@ add_function_test(
     TestGlobalContactReducer,
     "test_centered_two_spatial_depths_full_buffer_does_not_publish_voxel_key",
     test_centered_two_spatial_depths_full_buffer_does_not_publish_voxel_key,
+    devices=devices,
+)
+add_function_test(
+    TestGlobalContactReducer,
+    "test_centered_two_spatial_depths_voxel_only_claim",
+    test_centered_two_spatial_depths_voxel_only_claim,
     devices=devices,
 )
 add_function_test(
