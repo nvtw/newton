@@ -1,1 +1,0 @@
-Speed up hydroelastic marching-cubes corner evaluation by selecting coarse or fine texel coordinates without branching in the software trilinear SDF sampler and deferring the NaN exit until after the corner loop, so the eight corner fetches overlap. Contacts are unchanged; no migration is needed.

@@ -1,1 +1,0 @@
-Speed up hydroelastic SDF contact generation by replacing the full-buffer prefix scans between octree refinement levels with a scan that only processes the active records. Contacts are unchanged and no migration is needed.

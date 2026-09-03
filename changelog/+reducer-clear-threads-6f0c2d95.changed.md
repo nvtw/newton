@@ -1,1 +1,0 @@
-Speed up clearing the global contact reducer between collision steps by launching enough threads to hide the latency of its scattered per-entry stores. Contacts are unchanged and no migration is needed.
