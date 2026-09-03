@@ -1270,10 +1270,7 @@ def _texture_read_voxel_corners_variant(
 
     start_slot = sdf.subgrid_start_slots[x_base, y_base, z_base]
 
-    # Vertices on a block boundary belong to the neighboring block under the
-    # per-vertex rule. Adjacent fine blocks store identical values for their
-    # shared border vertices, so the batched read below is still exact unless
-    # this block or a touched neighbor lacks fine data.
+    # Boundary voxels stay on the batched path unless a touched block lacks fine data.
     x_upper_base = wp.clamp(int(float(ix + 1) * sdf.fine_to_coarse), 0, coarse_x - 1)
     y_upper_base = wp.clamp(int(float(iy + 1) * sdf.fine_to_coarse), 0, coarse_y - 1)
     z_upper_base = wp.clamp(int(float(iz + 1) * sdf.fine_to_coarse), 0, coarse_z - 1)

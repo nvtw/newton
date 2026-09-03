@@ -242,7 +242,7 @@ def test_scan_with_total_boundaries(test, device):
             scratch_prefix = wp.full(capacity, -1, dtype=wp.int32, device=device)
             fallback_total = wp.full(1, -1, dtype=wp.int32, device=device)
             scratch_total = wp.full(1, -1, dtype=wp.int32, device=device)
-            scratch = wp.zeros(_scan_scratch_size(capacity), dtype=wp.int32, device=device)
+            scratch = wp.zeros(_scan_scratch_size(capacity, device), dtype=wp.int32, device=device)
 
             scan_with_total(counts, fallback_prefix, num_elements, fallback_total)
             scan_with_total(counts, scratch_prefix, num_elements, scratch_total, scratch=scratch)

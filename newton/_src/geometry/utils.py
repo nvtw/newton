@@ -1016,9 +1016,16 @@ SCAN_BLOCK_DIM = 256
 SCAN_ITEMS_PER_THREAD = 8
 
 
-def _scan_scratch_size(capacity: int) -> int:
-    """Return the scratch length :func:`scan_with_total` needs for ``capacity`` counts."""
-    return (capacity + SCAN_ITEMS_PER_THREAD - 1) // SCAN_ITEMS_PER_THREAD + 1
+def _scan_chunk_size(device) -> int:
+    """Return the number of counts each scan chunk covers on ``device``."""
+    block_dim = 1 if wp.get_device(device).is_cpu else SCAN_BLOCK_DIM
+    return block_dim * SCAN_ITEMS_PER_THREAD
+
+
+def _scan_scratch_size(capacity: int, device) -> int:
+    """Return the scratch length :func:`scan_with_total` needs for ``capacity`` counts on ``device``."""
+    chunk_size = _scan_chunk_size(device)
+    return (capacity + chunk_size - 1) // chunk_size + 1
 
 
 @wp.func
@@ -1120,7 +1127,7 @@ def scan_with_total(
 
     Only the first ``num_elements[0]`` entries are read and written, so the cost
     scales with the active element count rather than the buffer capacity. Pass
-    ``scratch`` (at least :func:`_scan_scratch_size` of ``counts.shape[0]``
+    ``scratch`` (at least ``_scan_scratch_size(counts.shape[0], device)``
     entries, allocated once by the caller so the scan stays CUDA-graph safe) to
     enable that path; without it the whole buffer is scanned.
 
@@ -1144,10 +1151,9 @@ def scan_with_total(
         )
         return
 
-    if scratch.shape[0] < _scan_scratch_size(capacity):
-        raise ValueError(
-            f"scan_with_total scratch needs at least {_scan_scratch_size(capacity)} entries, got {scratch.shape[0]}"
-        )
+    scratch_size = _scan_scratch_size(capacity, device)
+    if scratch.shape[0] < scratch_size:
+        raise ValueError(f"scan_with_total scratch needs at least {scratch_size} entries, got {scratch.shape[0]}")
     num_blocks = wp.get_device(device).sm_count * 8 if device.is_cuda else 64
     wp.launch_tiled(
         _scan_chunk_sums_kernel,
