@@ -3277,7 +3277,10 @@ class TestReducedArticulation(unittest.TestCase):
                     solver_iterations=1,
                     velocity_iterations=0,
                 )
-                self.assertEqual(solver._reduced_articulation.contact_block_system.contact_dof_width, expected_width)
+                block = solver._reduced_articulation.contact_block_system
+                self.assertEqual(block.contact_dof_width, expected_width)
+                self.assertEqual(block.aba_body_response.shape[0], model.joint_count)
+                self.assertEqual(block.aba_joint_work.shape[0], model.joint_dof_count)
                 contacts = model.contacts()
                 with wp.ScopedCapture(device=device) as capture:
                     model.collide(state, contacts)

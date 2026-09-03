@@ -1160,8 +1160,8 @@ def _build_generalized_contact_rows_kernel(
     row_wrench: wp.array2d[wp.spatial_vector],
     jacobian: wp.array3d[wp.float32],
     response: wp.array3d[wp.float32],
-    joint_work: wp.array3d[wp.float32],
-    body_response: wp.array3d[wp.spatial_vector],
+    joint_work: wp.array2d[wp.float32],
+    body_response: wp.array2d[wp.spatial_vector],
 ):
     articulation, row = wp.tid()
     data = bodies.reduced
@@ -1177,7 +1177,7 @@ def _build_generalized_contact_rows_kernel(
     # Response overwrites every topology-owned DOF below; its zero-allocated tile tail is immutable.
     for local_dof in range(dof_count_articulation):
         jacobian[articulation, row, local_dof] = wp.float32(0.0)
-        joint_work[articulation, local_dof, row] = wp.float32(0.0)
+        joint_work[dof_start_articulation + local_dof, row] = wp.float32(0.0)
 
     source_body = row_body[articulation, row]
     source_wrench = row_wrench[articulation, row]
@@ -1197,7 +1197,7 @@ def _build_generalized_contact_rows_kernel(
             if wp.int32(dof_row) < dof_count:
                 dof = dof_start + wp.int32(dof_row)
                 projected[dof_row] = wp.dot(data.joint_s[dof], propagated_wrench)
-                joint_work[articulation, dof - dof_start_articulation, row] = projected[dof_row]
+                joint_work[dof, row] = projected[dof_row]
                 jacobian[articulation, row, dof - dof_start_articulation] = wp.dot(data.joint_s[dof], source_wrench)
         for dof_row in range(6):
             if wp.int32(dof_row) < dof_count:
@@ -1209,11 +1209,10 @@ def _build_generalized_contact_rows_kernel(
                 propagated_wrench -= data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
 
     for joint in range(start, end):
-        local_joint = joint - start
         parent = data.joint_parent[joint]
         parent_delta = wp.spatial_vector()
         if parent >= wp.int32(0):
-            parent_delta = body_response[articulation, data.body_joint[parent] - start, row]
+            parent_delta = body_response[data.body_joint[parent], row]
         dof_start = data.joint_qd_start[joint]
         dof_end = data.joint_qd_start[joint + wp.int32(1)]
         dof_count = dof_end - dof_start
@@ -1222,9 +1221,7 @@ def _build_generalized_contact_rows_kernel(
         for dof_row in range(6):
             if wp.int32(dof_row) < dof_count:
                 dof = dof_start + wp.int32(dof_row)
-                rhs[dof_row] = joint_work[articulation, dof - dof_start_articulation, row] - wp.dot(
-                    data.joint_u[dof], parent_delta
-                )
+                rhs[dof_row] = joint_work[dof, row] - wp.dot(data.joint_u[dof], parent_delta)
         for dof_row in range(6):
             if wp.int32(dof_row) < dof_count:
                 for dof_column in range(6):
@@ -1235,7 +1232,7 @@ def _build_generalized_contact_rows_kernel(
                 dof = dof_start + wp.int32(dof_row)
                 response[articulation, row, dof - dof_start_articulation] = generalized_delta[dof_row]
                 parent_delta += data.joint_s[dof] * generalized_delta[dof_row]
-        body_response[articulation, local_joint, row] = parent_delta
+        body_response[joint, row] = parent_delta
 
 
 def _bind_rows_dtype_annotations(func, rows_dtype, *names):
@@ -1269,8 +1266,8 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
         row_wrench: wp.array2d[wp.spatial_vector],
         packed_jacobian: wp.array2d[_rows_dtype],
         packed_response: wp.array2d[_rows_dtype],
-        joint_work: wp.array3d[wp.float32],
-        body_response: wp.array3d[wp.spatial_vector],
+        joint_work: wp.array2d[wp.float32],
+        body_response: wp.array2d[wp.spatial_vector],
     ) -> wp.float32:
         source_body = row_body[packed_articulation, row]
         source_wrench = row_wrench[packed_articulation, row]
@@ -1286,7 +1283,7 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
             dof_count = dof_end - dof_start
             if dof_count == wp.int32(1):
                 projected_scalar = wp.dot(data.joint_s[dof_start], propagated_wrench)
-                joint_work[articulation, dof_start - dof_start_articulation, row] = projected_scalar
+                joint_work[dof_start, row] = projected_scalar
                 packed_jacobian[packed_row, dof_start - dof_start_articulation] = _rows_dtype(
                     wp.dot(data.joint_s[dof_start], source_wrench)
                 )
@@ -1299,7 +1296,7 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                 if wp.int32(dof_row) < dof_count:
                     dof = dof_start + wp.int32(dof_row)
                     projected[dof_row] = wp.dot(data.joint_s[dof], propagated_wrench)
-                    joint_work[articulation, dof - dof_start_articulation, row] = projected[dof_row]
+                    joint_work[dof, row] = projected[dof_row]
                     packed_jacobian[packed_row, dof - dof_start_articulation] = _rows_dtype(
                         wp.dot(data.joint_s[dof], source_wrench)
                     )
@@ -1319,28 +1316,27 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
         if path_cursor < path_end:
             next_path_joint = data.body_path_joint[path_cursor]
         for joint in range(start, end):
-            local_joint = joint - start
             on_source_path = joint == next_path_joint
             parent = data.joint_parent[joint]
             parent_delta = wp.spatial_vector()
             if parent >= wp.int32(0):
-                parent_delta = body_response[articulation, data.body_joint[parent] - start, row]
+                parent_delta = body_response[data.body_joint[parent], row]
             dof_start = data.joint_qd_start[joint]
             dof_end = data.joint_qd_start[joint + wp.int32(1)]
             dof_count = dof_end - dof_start
             if dof_count == wp.int32(1):
                 rhs_scalar = -wp.dot(data.joint_u[dof_start], parent_delta)
                 if on_source_path:
-                    rhs_scalar += joint_work[articulation, dof_start - dof_start_articulation, row]
+                    rhs_scalar += joint_work[dof_start, row]
                 response_value = data.joint_d_inv[dof_start, 0] * rhs_scalar
                 if row_count > wp.int32(_RESPONSE_TILE):
-                    joint_work[articulation, dof_start - dof_start_articulation, row] = response_value
+                    joint_work[dof_start, row] = response_value
                 else:
                     packed_response[packed_row, dof_start - dof_start_articulation] = _rows_dtype(response_value)
                 if on_source_path:
                     inverse_mass += wp.dot(data.joint_s[dof_start], source_wrench) * response_value
                 parent_delta += data.joint_s[dof_start] * response_value
-                body_response[articulation, local_joint, row] = parent_delta
+                body_response[joint, row] = parent_delta
                 if on_source_path:
                     path_cursor += wp.int32(1)
                     next_path_joint = wp.int32(-1)
@@ -1354,7 +1350,7 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                     dof = dof_start + wp.int32(dof_row)
                     rhs[dof_row] = -wp.dot(data.joint_u[dof], parent_delta)
                     if on_source_path:
-                        rhs[dof_row] += joint_work[articulation, dof - dof_start_articulation, row]
+                        rhs[dof_row] += joint_work[dof, row]
             for dof_row in range(6):
                 if wp.int32(dof_row) < dof_count:
                     for dof_column in range(6):
@@ -1365,7 +1361,7 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                     dof = dof_start + wp.int32(dof_row)
                     response_value = generalized_delta[dof_row]
                     if row_count > wp.int32(_RESPONSE_TILE):
-                        joint_work[articulation, dof - dof_start_articulation, row] = response_value
+                        joint_work[dof, row] = response_value
                     else:
                         packed_response[packed_row, dof - dof_start_articulation] = _rows_dtype(response_value)
                     if on_source_path:
@@ -1374,7 +1370,7 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                         # avoids a 144-byte-strided reload per DOF.
                         inverse_mass += wp.dot(data.joint_s[dof], source_wrench) * response_value
                     parent_delta += data.joint_s[dof] * response_value
-            body_response[articulation, local_joint, row] = parent_delta
+            body_response[joint, row] = parent_delta
             if on_source_path:
                 path_cursor += wp.int32(1)
                 next_path_joint = wp.int32(-1)
@@ -1398,13 +1394,13 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
         wrench1: wp.spatial_vector,
         packed_jacobian: wp.array2d[_rows_dtype],
         packed_response: wp.array2d[_rows_dtype],
-        joint_work: wp.array3d[wp.float32],
-        body_response: wp.array3d[wp.spatial_vector],
+        joint_work: wp.array2d[wp.float32],
+        body_response: wp.array2d[wp.spatial_vector],
     ) -> wp.float32:
         """Build one deterministic generalized row from two internal wrenches."""
 
         for joint in range(start, end):
-            body_response[articulation, joint - start, row] = wp.spatial_vector()
+            body_response[joint, row] = wp.spatial_vector()
 
         for side in range(2):
             body = body0
@@ -1413,8 +1409,7 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                 body = body1
                 wrench = wrench1
             target_joint = data.body_joint[body]
-            target_local = target_joint - start
-            body_response[articulation, target_local, row] -= wrench
+            body_response[target_joint, row] -= wrench
             path_start = data.body_path_start[body]
             path_end = data.body_path_start[body + wp.int32(1)]
             for path_index in range(path_start, path_end):
@@ -1427,19 +1422,18 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
 
         for reverse in range(end - start):
             joint = end - wp.int32(1) - reverse
-            local_joint = joint - start
             parent = data.joint_parent[joint]
             dof_start = data.joint_qd_start[joint]
             dof_end = data.joint_qd_start[joint + wp.int32(1)]
             dof_count = dof_end - dof_start
-            propagated = body_response[articulation, local_joint, row]
+            propagated = body_response[joint, row]
             reduced_force = _vec6(0.0)
             reduced = _vec6(0.0)
             for dof_row in range(6):
                 if wp.int32(dof_row) < dof_count:
                     dof = dof_start + wp.int32(dof_row)
                     reduced_force[dof_row] = -wp.dot(data.joint_s[dof], propagated)
-                    joint_work[articulation, dof - dof_start_articulation, row] = reduced_force[dof_row]
+                    joint_work[dof, row] = reduced_force[dof_row]
             for dof_row in range(6):
                 if wp.int32(dof_row) < dof_count:
                     for dof_column in range(6):
@@ -1449,15 +1443,13 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                             )
                     propagated += data.joint_u[dof_start + wp.int32(dof_row)] * reduced[dof_row]
             if parent >= wp.int32(0):
-                parent_local = data.body_joint[parent] - start
-                body_response[articulation, parent_local, row] += propagated
+                body_response[data.body_joint[parent], row] += propagated
 
         for joint in range(start, end):
-            local_joint = joint - start
             parent = data.joint_parent[joint]
             parent_delta = wp.spatial_vector()
             if parent >= wp.int32(0):
-                parent_delta = body_response[articulation, data.body_joint[parent] - start, row]
+                parent_delta = body_response[data.body_joint[parent], row]
             dof_start = data.joint_qd_start[joint]
             dof_end = data.joint_qd_start[joint + wp.int32(1)]
             dof_count = dof_end - dof_start
@@ -1466,9 +1458,7 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
             for dof_row in range(6):
                 if wp.int32(dof_row) < dof_count:
                     dof = dof_start + wp.int32(dof_row)
-                    rhs[dof_row] = joint_work[articulation, dof - dof_start_articulation, row] - wp.dot(
-                        data.joint_u[dof], parent_delta
-                    )
+                    rhs[dof_row] = joint_work[dof, row] - wp.dot(data.joint_u[dof], parent_delta)
             child_delta = parent_delta
             for dof_row in range(6):
                 if wp.int32(dof_row) < dof_count:
@@ -1480,14 +1470,14 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                     dof = dof_start + wp.int32(dof_row)
                     response_value = response[dof_row]
                     if row_count > wp.int32(_RESPONSE_TILE):
-                        joint_work[articulation, dof - dof_start_articulation, row] = response_value
+                        joint_work[dof, row] = response_value
                     else:
                         packed_response[packed_row, dof - dof_start_articulation] = _rows_dtype(response_value)
                     child_delta += data.joint_s[dof] * response_value
-            body_response[articulation, local_joint, row] = child_delta
+            body_response[joint, row] = child_delta
 
-        inverse_mass = wp.dot(wrench0, body_response[articulation, data.body_joint[body0] - start, row])
-        inverse_mass += wp.dot(wrench1, body_response[articulation, data.body_joint[body1] - start, row])
+        inverse_mass = wp.dot(wrench0, body_response[data.body_joint[body0], row])
+        inverse_mass += wp.dot(wrench1, body_response[data.body_joint[body1], row])
         return inverse_mass
 
     _build_packed_generalized_row = wp.func(
@@ -1517,8 +1507,8 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
         previous_row_body_pair: wp.array[wp.int32],
         packed_jacobian: wp.array2d[_rows_dtype],
         packed_response: wp.array2d[_rows_dtype],
-        joint_work: wp.array3d[wp.float32],
-        body_response: wp.array3d[wp.spatial_vector],
+        joint_work: wp.array2d[wp.float32],
+        body_response: wp.array2d[wp.spatial_vector],
     ):
         articulation, row = wp.tid()
         data = bodies.reduced
@@ -1671,7 +1661,7 @@ def _make_build_packed_patch_rows_warp_kernel():
         previous_row_body: wp.array[wp.int32],
         packed_jacobian: wp.array2d[wp.float32],
         packed_response: wp.array2d[wp.float32],
-        joint_work: wp.array3d[wp.float32],
+        joint_work: wp.array2d[wp.float32],
     ):
         articulation, local_thread = wp.tid()
         row = local_thread // tile_width
@@ -1729,7 +1719,7 @@ def _make_build_packed_patch_rows_warp_kernel():
                 dof_count = dof_end - dof_start
                 if dof_count == wp.int32(1):
                     projected_scalar = wp.dot(data.joint_s[dof_start], propagated_wrench)
-                    joint_work[articulation, dof_start - dof_start_articulation, row] = projected_scalar
+                    joint_work[dof_start, row] = projected_scalar
                     packed_jacobian[packed_row, dof_start - dof_start_articulation] = wp.dot(
                         data.joint_s[dof_start], source_wrench
                     )
@@ -1742,7 +1732,7 @@ def _make_build_packed_patch_rows_warp_kernel():
                     if wp.int32(dof_row) < dof_count:
                         dof = dof_start + wp.int32(dof_row)
                         projected[dof_row] = wp.dot(data.joint_s[dof], propagated_wrench)
-                        joint_work[articulation, dof - dof_start_articulation, row] = projected[dof_row]
+                        joint_work[dof, row] = projected[dof_row]
                         packed_jacobian[packed_row, dof - dof_start_articulation] = wp.dot(
                             data.joint_s[dof], source_wrench
                         )
@@ -1777,10 +1767,10 @@ def _make_build_packed_patch_rows_warp_kernel():
                 if dof_count == wp.int32(1):
                     rhs_scalar = -wp.dot(data.joint_u[dof_start], parent_delta)
                     if on_source_path:
-                        rhs_scalar += joint_work[articulation, dof_start - dof_start_articulation, row]
+                        rhs_scalar += joint_work[dof_start, row]
                     response_value = data.joint_d_inv[dof_start, 0] * rhs_scalar
                     if row_count > wp.int32(_RESPONSE_TILE):
-                        joint_work[articulation, dof_start - dof_start_articulation, row] = response_value
+                        joint_work[dof_start, row] = response_value
                     else:
                         packed_response[packed_row, dof_start - dof_start_articulation] = response_value
                     child_delta += data.joint_s[dof_start] * response_value
@@ -1794,7 +1784,7 @@ def _make_build_packed_patch_rows_warp_kernel():
                         dof = dof_start + wp.int32(dof_row)
                         rhs[dof_row] = -wp.dot(data.joint_u[dof], parent_delta)
                         if on_source_path:
-                            rhs[dof_row] += joint_work[articulation, dof - dof_start_articulation, row]
+                            rhs[dof_row] += joint_work[dof, row]
                 for dof_row in range(6):
                     if wp.int32(dof_row) < dof_count:
                         for dof_column in range(6):
@@ -1805,7 +1795,7 @@ def _make_build_packed_patch_rows_warp_kernel():
                         dof = dof_start + wp.int32(dof_row)
                         response_value = generalized_delta[dof_row]
                         if row_count > wp.int32(_RESPONSE_TILE):
-                            joint_work[articulation, dof - dof_start_articulation, row] = response_value
+                            joint_work[dof, row] = response_value
                         else:
                             packed_response[packed_row, dof - dof_start_articulation] = response_value
                         child_delta += data.joint_s[dof] * response_value
@@ -1837,7 +1827,7 @@ def _make_transpose_response_kernel():
         page_index: wp.array[wp.int32],
         max_page_count: wp.array[wp.int32],
         prepare: wp.bool,
-        joint_work: wp.array3d[wp.float32],
+        joint_work: wp.array2d[wp.float32],
         packed_response: wp.array2d[_rows_dtype],
     ):
         tile, _lane = wp.tid()
@@ -1855,7 +1845,8 @@ def _make_transpose_response_kernel():
         data = bodies.reduced
         start = data.articulation_start[articulation]
         end = data.articulation_end[articulation]
-        dof_count = data.joint_qd_start[end] - data.joint_qd_start[start]
+        dof_start = data.joint_qd_start[start]
+        dof_count = data.joint_qd_start[end] - dof_start
         row_count = row_count_array[packed_articulation]
         if (
             enabled[articulation] == wp.int32(0)
@@ -1865,9 +1856,9 @@ def _make_transpose_response_kernel():
         ):
             return
         source = wp.tile_load(
-            joint_work[articulation],
+            joint_work,
             shape=(_RESPONSE_TILE, _RESPONSE_TILE),
-            offset=(dof_tile * wp.int32(_RESPONSE_TILE), row_tile * wp.int32(_RESPONSE_TILE)),
+            offset=(dof_start + dof_tile * wp.int32(_RESPONSE_TILE), row_tile * wp.int32(_RESPONSE_TILE)),
             storage="shared",
         )
         wp.tile_store(
@@ -2704,13 +2695,9 @@ class ReducedContactBlockSystem:
         self.generalized_delta = wp.zeros(
             (articulation_count, self.contact_dof_width), dtype=wp.float32, device=self.device
         )
-        self.aba_joint_work = wp.zeros(
-            (articulation_count, self.contact_dof_width, _MAX_ROWS), dtype=wp.float32, device=self.device
-        )
+        self.aba_joint_work = wp.zeros((int(model.joint_dof_count), _MAX_ROWS), dtype=wp.float32, device=self.device)
         self.aba_body_response = wp.zeros(
-            (articulation_count, max_body_count, _MAX_ROWS),
-            dtype=wp.spatial_vector,
-            device=self.device,
+            (int(model.joint_count), _MAX_ROWS), dtype=wp.spatial_vector, device=self.device
         )
         self.generalized_body_delta = wp.zeros(
             (articulation_count, max_body_count), dtype=wp.spatial_vector, device=self.device
