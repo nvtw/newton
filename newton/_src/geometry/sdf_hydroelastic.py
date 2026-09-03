@@ -72,7 +72,7 @@ from .sdf_texture import (
     _texture_sample_sdf_scalar,
     _texture_sample_sdf_zfiltered,
 )
-from .utils import scan_with_total
+from .utils import scan_scratch_size, scan_with_total
 
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
 PRE_PRUNE_MAX_PENETRATING = 2
@@ -643,6 +643,12 @@ class HydroelasticSDF:
             self.iso_buffer_prefix_scratch = [wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes]
             self.iso_buffer_num_scratch = [wp.zeros(level_input, dtype=wp.int32) for level_input in self.input_sizes]
             self.iso_subblock_idx_scratch = [wp.zeros(level_input, dtype=wp.uint8) for level_input in self.input_sizes]
+            # Chunk scratch for the count-aware prefix scans, so each scan only
+            # touches the active records instead of the full worst-case buffer.
+            self.iso_scan_scratch = [
+                wp.zeros(scan_scratch_size(level_input), dtype=wp.int32) for level_input in self.input_sizes
+            ]
+            self.broad_scan_scratch = wp.zeros(scan_scratch_size(self.max_num_shape_pairs), dtype=wp.int32)
             self.iso_buffer_records = [wp.empty((self.max_num_blocks_broad,), dtype=wp.vec3ui)] + [
                 wp.empty((self.iso_max_dims[i],), dtype=wp.vec3ui) for i in range(4)
             ]
@@ -1056,6 +1062,7 @@ class HydroelasticSDF:
             self.block_start_prefix,
             self.num_shape_pairs_array,
             self.block_broad_collide_count,
+            scratch=self.broad_scan_scratch,
         )
 
         wp.launch(
@@ -1151,6 +1158,7 @@ class HydroelasticSDF:
                 self.iso_buffer_prefix_scratch[i],
                 self.iso_buffer_counts[i],
                 self.iso_buffer_counts[i + 1],
+                scratch=self.iso_scan_scratch[i],
             )
 
             wp.launch(

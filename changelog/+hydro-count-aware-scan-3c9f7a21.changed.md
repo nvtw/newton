@@ -1,0 +1,1 @@
+Speed up hydroelastic SDF contact generation by replacing the full-buffer prefix scans between octree refinement levels with a scan that only processes the active records. The nut/bolt hydroelastic scene runs about 30% faster at 100 worlds and 44% faster at 1000 worlds with identical contacts; no migration is needed.
