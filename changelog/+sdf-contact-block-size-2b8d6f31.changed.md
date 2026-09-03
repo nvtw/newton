@@ -1,1 +1,1 @@
-Speed up mesh-mesh SDF contact generation by running the edge kernels with 128-thread blocks (four resident blocks per SM) instead of 256-thread blocks, which shortens the cooperative culling barriers at the same occupancy. Contacts are unchanged and no migration is needed.
+Speed up mesh-mesh SDF contact generation by running the edge kernels with 128-thread blocks (four resident blocks per SM) and four launch waves of edge chunks instead of 256-thread blocks with two waves. Contacts are unchanged and no migration is needed.
