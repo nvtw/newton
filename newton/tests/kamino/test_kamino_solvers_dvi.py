@@ -34,6 +34,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.projections import (
 from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_JOINTS,
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
+    _can_use_cooperative_articulation,
     _sparse_delassus_matvec_rows,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
@@ -339,6 +340,18 @@ class TestDVISolver(unittest.TestCase):
                 unilateral_strides=[46341],
                 bilateral_vector_size=1,
             )
+
+    def test_00_cooperative_articulation_supports_bounded_rows(self):
+        """Keep bounded joint rows on the cooperative articulated CUDA path."""
+        path = SimpleNamespace(
+            device=self.device,
+            bilateral_solver=object(),
+            size=SimpleNamespace(
+                max_of_num_bilateral_joint_cts=64,
+                max_of_num_bounded_joint_cts=43,
+            ),
+        )
+        self.assertEqual(_can_use_cooperative_articulation(path), self.device.is_cuda)
 
     def test_00_config_selection(self):
         """Verify default, dense, PADMM, and explicit DVI configuration selection."""
@@ -1368,9 +1381,9 @@ class TestDVISolver(unittest.TestCase):
 
         for device in (wp.get_device("cpu"), wp.get_cuda_devices()[0]):
             with self.subTest(device=str(device)):
+                model = ModelKamino.from_newton(basics.build_boxes_hinged().finalize(device=device))
                 model, data, state, limits, detector, jacobians = make_containers(
-                    builder=basics.build_boxes_hinged(),
-                    device=device,
+                    model=model,
                     max_world_contacts=8,
                     sparse=False,
                 )

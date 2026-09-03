@@ -54,10 +54,6 @@ class Example:
             skip_mesh_approximation=True,
         )
 
-        # Negligible joint friction disables Kamino's cooperative articulated DVI path.
-        if self.solver_type == "kamino":
-            g1.joint_friction = [0.0] * g1.joint_dof_count
-
         for i in range(6, g1.joint_dof_count):
             g1.joint_target_ke[i] = 500.0
             g1.joint_target_kd[i] = 10.0
