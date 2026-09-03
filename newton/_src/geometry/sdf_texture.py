@@ -1251,14 +1251,11 @@ def _texture_read_voxel_corners_variant(
     Returns the corners in marching-cubes order (see ``_mc_corner_offset``):
     ``[v000, v100, v110, v010, v001, v101, v111, v011]``.
 
-    A fine voxel always lies inside a single subgrid block, which stores
-    ``subgrid_size + 1`` samples per axis, so all eight corners come from the
-    same block: four paired texel reads (eight scalar reads) replace eight
-    independent slot lookups and fetches. Corners on a face shared with a
-    coarse-only neighbor use this block's fine border sample instead of the
-    neighbor's coarse interpolation, which is the more accurate of the two.
-    For coarse (``SLOT_LINEAR``/empty) blocks the eight vertices are
-    interpolated from the enclosing coarse cell.
+    Interior voxels read all eight corners from one block: four paired texel
+    reads (eight scalar reads) replace eight independent slot lookups and
+    fetches. At a block boundary, each vertex uses the canonical block selected
+    by :func:`_texture_sample_sdf_at_voxel_variant`, so adjacent coarse and
+    fine voxels evaluate their shared vertices identically.
     """
     coarse_x = sdf.coarse_texture.width - 1
     coarse_y = sdf.coarse_texture.height - 1
@@ -1267,6 +1264,21 @@ def _texture_read_voxel_corners_variant(
     x_base = wp.clamp(int(float(ix) * sdf.fine_to_coarse), 0, coarse_x - 1)
     y_base = wp.clamp(int(float(iy) * sdf.fine_to_coarse), 0, coarse_y - 1)
     z_base = wp.clamp(int(float(iz) * sdf.fine_to_coarse), 0, coarse_z - 1)
+
+    x_upper_base = wp.clamp(int(float(ix + 1) * sdf.fine_to_coarse), 0, coarse_x - 1)
+    y_upper_base = wp.clamp(int(float(iy + 1) * sdf.fine_to_coarse), 0, coarse_y - 1)
+    z_upper_base = wp.clamp(int(float(iz + 1) * sdf.fine_to_coarse), 0, coarse_z - 1)
+    if x_upper_base != x_base or y_upper_base != y_base or z_upper_base != z_base:
+        v000 = _texture_sample_sdf_at_voxel_variant(sdf, ix, iy, iz, paired_samples)
+        v100 = _texture_sample_sdf_at_voxel_variant(sdf, ix + 1, iy, iz, paired_samples)
+        v110 = _texture_sample_sdf_at_voxel_variant(sdf, ix + 1, iy + 1, iz, paired_samples)
+        v010 = _texture_sample_sdf_at_voxel_variant(sdf, ix, iy + 1, iz, paired_samples)
+        v001 = _texture_sample_sdf_at_voxel_variant(sdf, ix, iy, iz + 1, paired_samples)
+        v101 = _texture_sample_sdf_at_voxel_variant(sdf, ix + 1, iy, iz + 1, paired_samples)
+        v111 = _texture_sample_sdf_at_voxel_variant(sdf, ix + 1, iy + 1, iz + 1, paired_samples)
+        v011 = _texture_sample_sdf_at_voxel_variant(sdf, ix, iy + 1, iz + 1, paired_samples)
+        return vec8f(v000, v100, v110, v010, v001, v101, v111, v011)
+
     start_slot = sdf.subgrid_start_slots[x_base, y_base, z_base]
 
     v000 = float(0.0)

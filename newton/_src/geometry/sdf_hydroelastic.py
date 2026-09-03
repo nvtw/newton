@@ -74,7 +74,7 @@ from .sdf_texture import (
     _texture_sample_sdf_scalar,
     _texture_sample_sdf_zfiltered,
 )
-from .utils import scan_scratch_size, scan_with_total
+from .utils import _scan_scratch_size, scan_with_total
 
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
 PRE_PRUNE_MAX_PENETRATING = 2
@@ -636,8 +636,6 @@ class HydroelasticSDF:
         self.input_sizes = (self.max_num_blocks_broad, *self.iso_max_dims[:3])
 
         with wp.ScopedDevice(device):
-            self.num_shape_pairs_array = wp.full((1,), self.max_num_shape_pairs, dtype=wp.int32)
-
             # Allocate buffers for octree traversal (broadphase + 4 refinement levels)
             self.iso_buffer_counts = [wp.zeros((1,), dtype=wp.int32) for _ in range(5)]
             # Scratch buffers are per-level to avoid scanning the worst-case
@@ -648,9 +646,9 @@ class HydroelasticSDF:
             # Chunk scratch for the count-aware prefix scans, so each scan only
             # touches the active records instead of the full worst-case buffer.
             self.iso_scan_scratch = [
-                wp.zeros(scan_scratch_size(level_input), dtype=wp.int32) for level_input in self.input_sizes
+                wp.zeros(_scan_scratch_size(level_input), dtype=wp.int32) for level_input in self.input_sizes
             ]
-            self.broad_scan_scratch = wp.zeros(scan_scratch_size(self.max_num_shape_pairs), dtype=wp.int32)
+            self.broad_scan_scratch = wp.zeros(_scan_scratch_size(self.max_num_shape_pairs), dtype=wp.int32)
             self.iso_buffer_records = [wp.empty((self.max_num_blocks_broad,), dtype=wp.vec3ui)] + [
                 wp.empty((self.iso_max_dims[i],), dtype=wp.vec3ui) for i in range(4)
             ]
@@ -1062,7 +1060,7 @@ class HydroelasticSDF:
         scan_with_total(
             self.num_blocks_per_pair,
             self.block_start_prefix,
-            self.num_shape_pairs_array,
+            shape_pairs_sdf_sdf_count,
             self.block_broad_collide_count,
             scratch=self.broad_scan_scratch,
         )
@@ -1758,7 +1756,7 @@ def create_mc_iterate_voxel_vertices_func(pressure_func: Any, paired_samples: bo
         point_b_step_x = wp.transform_vector(X_a_to_b, wp.vec3(sdf_data.voxel_size[0], 0.0, 0.0))
         point_b_step_y = wp.transform_vector(X_a_to_b, wp.vec3(0.0, sdf_data.voxel_size[1], 0.0))
         point_b_step_z = wp.transform_vector(X_a_to_b, wp.vec3(0.0, 0.0, sdf_data.voxel_size[2]))
-        # All eight own-grid corners live in one subgrid block: read them together.
+        # Batch interior reads while preserving the per-vertex rule at block boundaries.
         corner_vals_self = wp.static(read_voxel_corners)(sdf_data, x_id, y_id, z_id)
 
         for i in range(8):

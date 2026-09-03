@@ -59,6 +59,7 @@ import warp as wp
 from newton._src.geometry.hashtable import (
     HASHTABLE_EMPTY_KEY,
     HashTable,
+    hashtable_find,
     hashtable_find_or_insert,
 )
 
@@ -1580,14 +1581,14 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
     voxel_bin_id = wp.static(NUM_NORMAL_BINS) + voxel_group
     voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
 
-    # Inner contacts always need the voxel entry (either to probe it or to
-    # claim it), so resolve both keys up front: the two lookups and the slot
-    # reads below are independent, which lets the compiler overlap their
-    # memory latency instead of chaining one probe after another.
+    # Resolve both keys up front so their probes and the slot reads below can
+    # overlap. Missing voxel keys are published only after a contact ID is
+    # available; deleting a speculative key after publication would race with
+    # concurrent threads that have already found it.
     entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
     voxel_entry_idx = -1
     if use_inner:
-        voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+        voxel_entry_idx = hashtable_find(voxel_key, reducer_data.ht_keys)
 
     might_win = False
     if entry_idx >= 0:
@@ -1607,6 +1608,8 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
             if slot_values[wp.static(NUM_SPATIAL_DIRECTIONS)] < max_depth_probe:
                 might_win = True
             if voxel_entry_idx >= 0 and voxel_slot_value < max_depth_probe:
+                might_win = True
+            if voxel_entry_idx < 0:
                 might_win = True
 
         for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
@@ -1674,11 +1677,12 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
             won_mask |= 1 << wp.static(NUM_SPATIAL_DIRECTIONS + 1)
             replaced_values[wp.static(NUM_SPATIAL_DIRECTIONS + 1)] = previous_value
 
-    if won_mask == 0:
+    voxel_entry_missing = use_inner and voxel_entry_idx < 0
+    if won_mask == 0 and not voxel_entry_missing:
         return -1
 
     # Avoid allocating candidates superseded during their own slot updates.
-    still_wins = False
+    still_wins = voxel_entry_missing
     if entry_idx >= 0:
         for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
             if not still_wins and (won_mask & (1 << dir_i)) != 0:
@@ -1766,9 +1770,30 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
             voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
         if voxel_entry_idx >= 0:
             voxel_value = make_contact_value(-depth, fingerprint, contact_id, deterministic)
-            reduction_update_slot(voxel_entry_idx, voxel_local_slot, voxel_value, reducer_data.ht_values, ht_capacity)
+            if voxel_entry_missing and won_mask == 0:
+                previous_value = reduction_try_update_slot(
+                    voxel_entry_idx,
+                    voxel_local_slot,
+                    voxel_value,
+                    reducer_data.ht_values,
+                    ht_capacity,
+                )
+                if previous_value >= voxel_value:
+                    reclaim_contact_id(contact_id, reducer_data)
+                    return -1
+            else:
+                reduction_update_slot(
+                    voxel_entry_idx,
+                    voxel_local_slot,
+                    voxel_value,
+                    reducer_data.ht_values,
+                    ht_capacity,
+                )
         else:
             wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
+            if won_mask == 0:
+                reclaim_contact_id(contact_id, reducer_data)
+                return -1
 
     return contact_id
 
