@@ -1,0 +1,1 @@
+Speed up mesh-mesh SDF contact generation by resolving the normal-bin and voxel hashtable entries up front and reading all reduction slots together during the pre-prune probe, so the memory latency of the per-candidate probes overlaps instead of chaining. Contact output is unchanged; no migration is needed.

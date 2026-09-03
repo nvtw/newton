@@ -1567,28 +1567,6 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
     pos_2d = project_point_to_plane(bin_id, centered_position)
     key = make_contact_key(shape_a, shape_b, bin_id)
 
-    entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
-    might_win = False
-
-    if entry_idx >= 0:
-        if use_inner:
-            if deterministic != 0:
-                max_depth_probe = _make_preprune_probe_det(-depth, fingerprint)
-            else:
-                max_depth_probe = _make_contact_value_fast(-depth, 0, 0)
-            if reducer_data.ht_values[wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + entry_idx] < max_depth_probe:
-                might_win = True
-
-        for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
-            if not might_win:
-                dir_2d = get_spatial_direction_2d(dir_i)
-                score = wp.dot(pos_2d, dir_2d)
-                probe = make_spatial_preprune_probe(score, use_inner, fingerprint, deterministic)
-                if reducer_data.ht_values[dir_i * ht_capacity + entry_idx] < probe:
-                    might_win = True
-    else:
-        wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
-
     # === Voxel bin: inner depth coverage ===
     voxel_idx = compute_voxel_index(position_local, aabb_lower_voxel, aabb_upper_voxel, voxel_res)
     voxel_idx = wp.clamp(voxel_idx, 0, wp.static(NUM_VOXEL_DEPTH_SLOTS - 1))
@@ -1599,9 +1577,43 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
     voxel_bin_id = wp.static(NUM_NORMAL_BINS) + voxel_group
     voxel_key = make_contact_key(shape_a, shape_b, voxel_bin_id)
 
+    # Inner contacts always need the voxel entry (either to probe it or to
+    # claim it), so resolve both keys up front: the two lookups and the slot
+    # reads below are independent, which lets the compiler overlap their
+    # memory latency instead of chaining one probe after another.
+    entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
     voxel_entry_idx = -1
-    if use_inner and not might_win:
+    if use_inner:
         voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+
+    might_win = False
+    if entry_idx >= 0:
+        # Read every slot before comparing so the loads issue back to back.
+        slot_values = replaced_values_vec_type()
+        for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS + 1)):
+            slot_values[dir_i] = reducer_data.ht_values[dir_i * ht_capacity + entry_idx]
+        voxel_slot_value = wp.uint64(0)
+        if voxel_entry_idx >= 0:
+            voxel_slot_value = reducer_data.ht_values[voxel_local_slot * ht_capacity + voxel_entry_idx]
+
+        if use_inner:
+            if deterministic != 0:
+                max_depth_probe = _make_preprune_probe_det(-depth, fingerprint)
+            else:
+                max_depth_probe = _make_contact_value_fast(-depth, 0, 0)
+            if slot_values[wp.static(NUM_SPATIAL_DIRECTIONS)] < max_depth_probe:
+                might_win = True
+            if voxel_entry_idx >= 0 and voxel_slot_value < max_depth_probe:
+                might_win = True
+
+        for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
+            dir_2d = get_spatial_direction_2d(dir_i)
+            score = wp.dot(pos_2d, dir_2d)
+            probe = make_spatial_preprune_probe(score, use_inner, fingerprint, deterministic)
+            if slot_values[dir_i] < probe:
+                might_win = True
+    else:
+        wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
         if voxel_entry_idx >= 0:
             if deterministic != 0:
                 voxel_probe = _make_preprune_probe_det(-depth, fingerprint)
@@ -1612,11 +1624,6 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
 
     if not might_win:
         return -1
-
-    # Compete with reserved ID zero before materializing contact geometry, so
-    # stale pre-prune survivors consume no buffer space.
-    if use_inner and voxel_entry_idx < 0:
-        voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
 
     won_mask = int(0)
     replaced_values = replaced_values_vec_type()
