@@ -1096,8 +1096,11 @@ class GlobalContactReducer:
         later-scheduled blocks (or even later-issued warps/lanes under
         independent thread scheduling), causing some entries to be skipped.
         """
-        # Use fixed thread count for efficient GPU utilization
-        num_threads = min(1024, self.hashtable.capacity)
+        # The clear is a grid-stride loop over the active entries with several
+        # scattered stores each, so it needs many resident warps to hide the
+        # store latency; the active count is only known on the device, and
+        # surplus threads exit immediately.
+        num_threads = min(65536, self.hashtable.capacity)
 
         wp.launch(
             _clear_active_kernel,

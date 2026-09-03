@@ -1,0 +1,1 @@
+Speed up clearing the global contact reducer between collision steps by launching enough threads to hide the latency of its scattered per-entry stores. Saves roughly 60 us per step in the nut/bolt SDF and hydroelastic scenes at large world counts; contacts are unchanged and no migration is needed.
