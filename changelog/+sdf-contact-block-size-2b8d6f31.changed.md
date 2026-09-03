@@ -1,0 +1,1 @@
+Speed up mesh-mesh SDF contact generation by running the edge kernels with 128-thread blocks (four resident blocks per SM) instead of 256-thread blocks, which shortens the cooperative culling barriers at the same occupancy. The nut/bolt SDF scene runs about 8% faster at 2000 worlds with identical contacts; no migration is needed.
