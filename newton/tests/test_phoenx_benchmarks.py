@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.articulations.reduced_contact_block import _fallback_world_block_dim
 from newton._src.solvers.phoenx.benchmarks.runner import SceneHandle, run_one
 from newton._src.solvers.phoenx.benchmarks.scenarios.feather_pgs_common import _validate_simulation_state
 
@@ -34,6 +35,12 @@ class _FakeContacts:
 
 
 class TestPhoenXBenchmarkValidation(unittest.TestCase):
+    def test_fallback_world_launch_exposes_small_workloads(self):
+        """Use small blocks until serial world work saturates the GPU."""
+        self.assertEqual(_fallback_world_block_dim(1024, 188), 1)
+        self.assertEqual(_fallback_world_block_dim(2048, 188), 1)
+        self.assertEqual(_fallback_world_block_dim(4096, 188), 32)
+
     def test_validate_simulation_state_accepts_useful_work(self):
         """Accept finite motion with normalized rotations and contacts."""
         initial_body_q = np.asarray([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]])
@@ -56,6 +63,17 @@ class TestPhoenXBenchmarkValidation(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "did not move"):
+            _validate_simulation_state(state, initial_body_q, _FakeContacts(1))
+
+    def test_validate_simulation_state_rejects_runaway_motion(self):
+        """Reject a benchmark whose bodies escaped the intended scene."""
+        initial_body_q = np.asarray([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]])
+        state = _FakeState(
+            body_q=[[6.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]],
+            body_qd=[[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "translation is implausibly high"):
             _validate_simulation_state(state, initial_body_q, _FakeContacts(1))
 
     def test_run_one_calls_validation_after_measurement(self):

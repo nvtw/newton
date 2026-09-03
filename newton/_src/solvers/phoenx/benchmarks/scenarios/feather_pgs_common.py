@@ -190,6 +190,8 @@ def _validate_simulation_state(
     max_translation = float(np.linalg.norm(body_q[:, :3] - initial_body_q[:, :3], axis=1).max(initial=0.0))
     if max_translation <= 1.0e-8:
         raise RuntimeError("simulation did not move any rigid body")
+    if max_translation > 5.0:
+        raise RuntimeError(f"maximum body translation is implausibly high ({max_translation:.3g} m)")
 
     body_qd = arrays["body_qd"].reshape(-1, 6)
     max_linear_speed = float(np.linalg.norm(body_qd[:, :3], axis=1).max(initial=0.0))

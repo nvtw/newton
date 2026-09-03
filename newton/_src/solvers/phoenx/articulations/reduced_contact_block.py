@@ -89,6 +89,7 @@ _RESPONSE_TILES_PER_ARTICULATION = _RESPONSE_ROW_TILES * _RESPONSE_DOF_TILES
 _MAX_DOFS = 64
 _FALLBACK_MAX_COLORED_PARTITIONS = 63
 _FALLBACK_BLOCK_DIM = 256
+_FALLBACK_SERIAL_WORLDS_PER_SM = 16
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 
 _INT64_MAX = 9223372036854775807
@@ -99,6 +100,11 @@ def _reduced_patch_rows_override() -> bool | None:
     if value is None or value.lower() == "auto":
         return None
     return value.lower() not in ("0", "false", "off", "")
+
+
+def _fallback_world_block_dim(world_count: int, sm_count: int) -> int:
+    """Expose more blocks while serial world work cannot fill the GPU."""
+    return 1 if world_count < _FALLBACK_SERIAL_WORLDS_PER_SM * sm_count else 32
 
 
 def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, bool, bool]:
@@ -2652,6 +2658,7 @@ class ReducedContactBlockSystem:
         self.schedule_capacity = 0
         self.schedule_world_count = 0
         self.fallback_worker_count = 1
+        self.fallback_world_block_dim = 32
         self._solve_fallback_by_world = False
         self.schedule_keys: wp.array[wp.int64] | None = None
         self.schedule_columns: wp.array[wp.int32] | None = None
@@ -2732,6 +2739,7 @@ class ReducedContactBlockSystem:
         self.packed_previous_row_body_pair = wp.full_like(self.packed_previous_row_body, value=-1)
         worker_blocks = max(1, int(getattr(self.device, "sm_count", 1)))
         self.fallback_worker_count = min(capacity, worker_blocks * _FALLBACK_BLOCK_DIM)
+        self.fallback_world_block_dim = _fallback_world_block_dim(world_count, worker_blocks)
         self._solve_fallback_by_world = world_count >= worker_blocks
         self.schedule_keys = wp.empty(2 * capacity, dtype=wp.int64, device=self.device)
         self.schedule_columns = wp.empty(2 * capacity, dtype=wp.int32, device=self.device)
@@ -2943,7 +2951,7 @@ class ReducedContactBlockSystem:
                 wp.launch(
                     _solve_fallback_contact_world_kernel,
                     dim=self.schedule_world_count,
-                    block_dim=32,
+                    block_dim=self.fallback_world_block_dim,
                     inputs=[
                         columns,
                         bodies,
