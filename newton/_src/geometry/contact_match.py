@@ -170,9 +170,11 @@ class _MatchData:
     # Per-new candidate prev index (final value resolved in pass 2).
     match_index: wp.array[wp.int32]
 
-    # Thresholds
+    # Thresholds and packed-key layout
     pos_threshold_sq: float
     normal_dot_threshold: float
+    pair_sub_key_mask: wp.int64
+    pair_key_stride: wp.int64
 
 
 @wp.kernel(enable_backward=False)
@@ -243,8 +245,8 @@ def _match_contacts_kernel(data: _MatchData):
     # exact key would spuriously break stable contacts.  Pair counts are
     # small (<= a few manifold points), so a linear scan inside the
     # range is cheap.
-    pair_prefix = target_key & wp.int64(~0x7FFFFF)
-    pair_end = pair_prefix + wp.int64(0x800000)  # 1 << 23
+    pair_prefix = target_key & ~data.pair_sub_key_mask
+    pair_end = pair_prefix + data.pair_key_stride
     range_lo = _lower_bound_int64(0, n_old, pair_prefix, data.prev_keys)
     range_hi = _lower_bound_int64(range_lo, n_old, pair_end, data.prev_keys)
 
@@ -479,6 +481,8 @@ def _collect_broken_contacts_kernel(
     prev_was_matched: wp.array[wp.int32],
     prev_keys: wp.array[wp.int64],
     prev_count: wp.array[wp.int32],
+    shape_index_bits: int,
+    sub_key_bits: int,
     shape_world: wp.array[wp.int32],
     reset_world_mask: wp.array[wp.bool],
     world_count: int,
@@ -487,25 +491,23 @@ def _collect_broken_contacts_kernel(
 ):
     """Collect new and broken contact indices after matching and sorting."""
     i = wp.tid()
-    # Clamp against ``prev_was_matched`` capacity so an overflowed
-    # prev_count (set when the prior frame overflowed and the now-fixed
-    # save path didn't clamp) doesn't OOB-read.
     n_old = prev_count[0]
-    cap = prev_was_matched.shape[0]
-    if n_old > cap:
-        n_old = cap
+    capacity = prev_was_matched.shape[0]
+    if n_old > capacity:
+        n_old = capacity
     if i >= n_old:
         return
+
     key = prev_keys[i]
-    shape0 = wp.int32((key >> wp.int64(43)) & wp.int64(0xFFFFF))
-    shape1 = wp.int32((key >> wp.int64(23)) & wp.int64(0xFFFFF))
-    if reset_world_selected(shape_world[shape0], reset_world_mask, world_count) or reset_world_selected(
+    shape_mask = (wp.int64(1) << wp.int64(shape_index_bits)) - wp.int64(1)
+    shape0 = wp.int32((key >> wp.int64(sub_key_bits + shape_index_bits)) & shape_mask)
+    shape1 = wp.int32((key >> wp.int64(sub_key_bits)) & shape_mask)
+    reset_selected = reset_world_selected(shape_world[shape0], reset_world_mask, world_count) or reset_world_selected(
         shape_world[shape1], reset_world_mask, world_count
-    ):
-        return
-    if prev_was_matched[i] == wp.int32(0):
-        slot = wp.atomic_add(broken_count, 0, wp.int32(1))
-        broken_indices[slot] = wp.int32(i)
+    )
+    if not reset_selected and prev_was_matched[i] == wp.int32(0):
+        broken_slot = wp.atomic_add(broken_count, 0, wp.int32(1))
+        broken_indices[broken_slot] = wp.int32(i)
 
 
 # ------------------------------------------------------------------
@@ -520,6 +522,8 @@ class ContactMatcher:
         capacity: Maximum contact count.
         shape_world: Per-shape world ids, with ``-1`` for global shapes.
         world_count: Number of local worlds.
+        shape_index_bits: Number of sort-key bits reserved for each shape index.
+        sub_key_bits: Number of low sort-key bits reserved for each contact sub-key.
         pos_threshold: Maximum midpoint drift [m] for a match. Sticky matching
             measures drift in the current contact plane; other modes use 3-D
             world-space distance.
@@ -535,6 +539,8 @@ class ContactMatcher:
         *,
         shape_world: wp.array[wp.int32],
         world_count: int,
+        shape_index_bits: int = 20,
+        sub_key_bits: int = 23,
         pos_threshold: float = 0.0005,
         normal_dot_threshold: float = 0.995,
         contact_report: bool = False,
@@ -549,6 +555,10 @@ class ContactMatcher:
             self._prev_normal = wp.zeros(capacity, dtype=wp.vec3)
             self._shape_world = shape_world
             self._world_count = int(world_count)
+            self._shape_index_bits = int(shape_index_bits)
+            self._sub_key_bits = int(sub_key_bits)
+            self._pair_sub_key_mask = wp.int64((1 << sub_key_bits) - 1)
+            self._pair_key_stride = wp.int64(1 << sub_key_bits)
             self._reset_world_mask = wp.zeros(self._world_count + 1, dtype=wp.bool)
 
             # Sorted keys must survive across frames
@@ -710,6 +720,8 @@ class ContactMatcher:
         data.prev_claim = self._prev_claim
         data.pos_threshold_sq = self._pos_threshold_sq
         data.normal_dot_threshold = self._normal_dot_threshold
+        data.pair_sub_key_mask = self._pair_sub_key_mask
+        data.pair_key_stride = self._pair_key_stride
 
         wp.launch(_match_contacts_kernel, dim=self._capacity, inputs=[data], device=device)
         wp.launch(
@@ -747,23 +759,25 @@ class ContactMatcher:
         contact_count: wp.array[wp.int32],
         sorted_point0: wp.array[wp.vec3],
         sorted_point1: wp.array[wp.vec3],
-        sorted_offset0: wp.array[wp.vec3],
-        sorted_offset1: wp.array[wp.vec3],
         sorted_shape0: wp.array[wp.int32],
         sorted_shape1: wp.array[wp.int32],
         sorted_normal: wp.array[wp.vec3],
         body_q: wp.array[wp.transform],
         shape_body: wp.array[wp.int32],
         *,
+        sorted_offset0: wp.array[wp.vec3] | None = None,
+        sorted_offset1: wp.array[wp.vec3] | None = None,
         device: Devicelike = None,
     ) -> None:
         """Save canonical matching state and optional sticky geometry."""
         data = _SaveStateData()
+        if self._sticky and (sorted_offset0 is None or sorted_offset1 is None):
+            raise ValueError("sticky matching requires both sorted contact offset arrays")
         data.src_keys = sorted_keys
         data.src_point0 = sorted_point0
         data.src_point1 = sorted_point1
-        data.src_offset0 = sorted_offset0
-        data.src_offset1 = sorted_offset1
+        data.src_offset0 = sorted_offset0 if sorted_offset0 is not None else sorted_point0
+        data.src_offset1 = sorted_offset1 if sorted_offset1 is not None else sorted_point1
         data.src_shape0 = sorted_shape0
         data.src_shape1 = sorted_shape1
         data.src_normal = sorted_normal
@@ -833,9 +847,18 @@ class ContactMatcher:
                 contact_count,
                 new_indices,
                 new_count,
+            ],
+            device=device,
+        )
+        wp.launch(
+            _collect_broken_contacts_kernel,
+            dim=self._capacity,
+            inputs=[
                 self._prev_was_matched,
                 self._prev_sorted_keys,
                 self._prev_count,
+                self._shape_index_bits,
+                self._sub_key_bits,
                 self._shape_world,
                 self._reset_world_mask,
                 self._world_count,

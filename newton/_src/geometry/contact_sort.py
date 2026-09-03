@@ -56,6 +56,8 @@ def _prepare_compact_sort(
     prefix_shape_count: wp.int32,
     suffix_shape_start: wp.int32,
     subkey_bits: wp.int32,
+    source_shape_index_bits: wp.int32,
+    source_subkey_bits: wp.int32,
     key_bits: wp.int32,
     sort_keys_dst: wp.array[wp.int32],
     sort_indices: wp.array[wp.int32],
@@ -63,10 +65,12 @@ def _prepare_compact_sort(
     tid = wp.tid()
     if tid < contact_count[0]:
         full_key = sort_keys_src[tid]
-        shape_a = wp.int32((full_key >> wp.int64(43)) & wp.int64(0xFFFFF))
-        shape_b = wp.int32((full_key >> wp.int64(23)) & wp.int64(0xFFFFF))
+        shape_mask = (wp.int64(1) << wp.int64(source_shape_index_bits)) - wp.int64(1)
+        shape_a = wp.int32((full_key >> wp.int64(source_subkey_bits + source_shape_index_bits)) & shape_mask)
+        shape_b = wp.int32((full_key >> wp.int64(source_subkey_bits)) & shape_mask)
         subkey_mask = (wp.int32(1) << subkey_bits) - wp.int32(1)
-        subkey = wp.int32(full_key & wp.int64(0x7FFFFF))
+        source_subkey_mask = (wp.int64(1) << wp.int64(source_subkey_bits)) - wp.int64(1)
+        subkey = wp.int32(full_key & source_subkey_mask)
         shape_b_rank = shape_rank[shape_b]
         pair_rank = wp.int32(0)
         if world_major != wp.int32(0):
@@ -312,13 +316,18 @@ class ContactSorter:
     the active ``contact_count`` are filled with a sentinel key
     (``0x7FFFFFFFFFFFFFFF``) so they sort to the end and the gather kernels
     skip them via the ``contact_count`` guard.
+
+    ``key_bit_count`` limits sorting to the populated low key bits, reducing
+    radix passes without changing the full-capacity graph-capture behavior.
     """
 
     def __init__(
         self,
         capacity: int,
+        source_shape_index_bits: int = 20,
+        source_subkey_bits: int = 23,
         *,
-        per_contact_shape_properties: bool = False,
+        key_bit_count: int = 64,
         compact_shape_rank: wp.array[wp.int32] | None = None,
         compact_shape_pair_base: wp.array[wp.int32] | None = None,
         compact_shape_world: wp.array[wp.int32] | None = None,
@@ -328,15 +337,21 @@ class ContactSorter:
         compact_suffix_shape_start: int = 0,
         compact_subkey_bits: int = 0,
         compact_key_bits: int = 0,
+        per_contact_shape_properties: bool = False,
         device: Devicelike = None,
     ):
         compact_sort = compact_shape_rank is not None
+        if not 1 <= key_bit_count <= 64:
+            raise ValueError(f"key_bit_count must be in [1, 64], got {key_bit_count}")
         if compact_sort != (compact_shape_pair_base is not None):
             raise ValueError("compact shape rank and pair base must be provided together")
         if compact_sort and not (1 <= compact_subkey_bits < compact_key_bits <= 30):
             raise ValueError("compact sort requires 1 <= subkey_bits < key_bits <= 30")
         with wp.ScopedDevice(device):
             self._capacity = capacity
+            self._source_shape_index_bits = int(source_shape_index_bits)
+            self._source_subkey_bits = int(source_subkey_bits)
+            self._key_bit_count = key_bit_count
             # radix_sort_pairs uses the second half as scratch, so allocate 2x.
             self._sort_indices = wp.zeros(2 * capacity, dtype=wp.int32)
             self._sort_keys_copy = wp.zeros(2 * capacity, dtype=wp.int64)
@@ -468,7 +483,7 @@ class ContactSorter:
             inputs=[data, contact_count, sort_keys, self._sort_keys_copy, self._sort_indices],
             device=device,
         )
-        wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n)
+        wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n, end_bit=self._key_bit_count)
         wp.launch(_gather_simple_kernel, dim=n, inputs=[data, self._sort_indices, contact_count], device=device)
 
     def sort_full(
@@ -653,6 +668,8 @@ class ContactSorter:
                     self._compact_prefix_shape_count,
                     self._compact_suffix_shape_start,
                     self._compact_subkey_bits,
+                    self._source_shape_index_bits,
+                    self._source_subkey_bits,
                     self._compact_key_bits,
                     self._compact_sort_keys,
                     self._sort_indices,
@@ -672,4 +689,4 @@ class ContactSorter:
                 inputs=[contact_count, sort_keys, self._sort_keys_copy, self._sort_indices],
                 device=device,
             )
-            wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n)
+            wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n, end_bit=self._key_bit_count)

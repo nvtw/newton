@@ -114,9 +114,7 @@ class Example(PortedExample):
         self.initial_min_z = float(np.min(points[:, 2]) - WIRE_RADIUS)
 
         segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
-        extents = [
-            default_capsule_half_extents(WIRE_RADIUS, 0.5 * float(length)) for length in segment_lengths
-        ]
+        extents = [default_capsule_half_extents(WIRE_RADIUS, 0.5 * float(length)) for length in segment_lengths]
 
         # A graded kick folds the upper coils over the stair edge. Lower coils
         # remain nearly stationary, so cable tension drives the first transfer.

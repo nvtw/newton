@@ -13,7 +13,6 @@ edges and non-manifold edges are always kept. The filter is applied from
 import itertools
 import math
 import unittest
-from collections import Counter
 from unittest import mock
 
 import numpy as np

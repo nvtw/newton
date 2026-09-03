@@ -26,7 +26,6 @@ PHOENX_USE_REDUCED_COORDINATES = False
 
 class Example:
     def __init__(self, viewer, args):
-        newton.use_coord_layout_targets = True
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0

@@ -97,9 +97,7 @@ class TestDrLegsPhoenXRL(unittest.TestCase):
 
         joint_count = int(env.model.joint_count)
         joint_type = env.model.joint_type.numpy()[:joint_count]
-        all_revolute = env.model.joint_qd_start.numpy()[:joint_count][
-            joint_type == int(newton.JointType.REVOLUTE)
-        ]
+        all_revolute = env.model.joint_qd_start.numpy()[:joint_count][joint_type == int(newton.JointType.REVOLUTE)]
         passive = np.setdiff1d(all_revolute, actuated)
         np.testing.assert_array_equal(env.model.joint_target_ke.numpy()[passive], 0.0)
         np.testing.assert_array_equal(env.model.joint_target_kd.numpy()[passive], 0.0)
