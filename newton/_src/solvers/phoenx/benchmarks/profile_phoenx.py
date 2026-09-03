@@ -110,11 +110,17 @@ def _build_via_benchmarks_factory(
     scene state -- perfect fit.
     """
     module = importlib.import_module(f"newton._src.solvers.phoenx.benchmarks.scenarios.{scenario}")
+    build_kwargs = {}
+    build_solver = solver
+    if solver in ("phoenx_maximal", "phoenx_reduced"):
+        build_solver = "phoenx"
+        build_kwargs["articulation_mode"] = solver.removeprefix("phoenx_")
     handle = module.build(
         num_worlds=num_worlds,
-        solver_name=solver,
+        solver_name=build_solver,
         substeps=substeps,
         solver_iterations=iterations,
+        **build_kwargs,
     )
     return ProfileScene(
         name=scenario,
@@ -259,7 +265,11 @@ def profile(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Profile a phoenx / mujoco scene: memory + per-kernel ms.")
     parser.add_argument("--scenario", default="h1_flat")
-    parser.add_argument("--solver", choices=["phoenx", "mujoco"], default="phoenx")
+    parser.add_argument(
+        "--solver",
+        choices=["phoenx", "phoenx_maximal", "phoenx_reduced", "mujoco"],
+        default="phoenx",
+    )
     parser.add_argument("--num-worlds", type=int, default=64)
     parser.add_argument("--substeps", type=int, default=4)
     parser.add_argument("--iterations", type=int, default=8)
