@@ -1118,15 +1118,12 @@ def _build_soft_edge_rigid_contact_pairs(
 def _full_surface_capable_shape_mask(model: Model) -> np.ndarray:
     """Boolean mask over shapes: ``True`` where the shape can generate full-surface edge/face contacts.
 
-    Capable: analytic primitives (sphere/box/capsule/cylinder/cone/ellipsoid), an *infinite* plane
-    (width=length=0), and a mesh/convex with a real provisioned SDF (nonnegative ``_shape_sdf_index``
-    pointing at a non-empty descriptor). Not capable -- the shape falls back to per-particle soft
-    contact: heightfields (edge/face SDF optimization is unsupported), finite planes (the +Z normal is
-    wrong off the quad), and mesh/convex shapes without a real SDF (a nonnegative index can still point
-    at an empty BVH-fallback descriptor, whose coarse texture is ``None``).
+    Capable: analytic primitives (including finite and infinite planes), plus a mesh/convex with a
+    real provisioned SDF. Not capable -- the shape falls back to per-particle soft contact:
+    heightfields (edge/face SDF optimization is unsupported) and mesh/convex shapes without a real
+    SDF. A nonnegative SDF index can still point at an empty BVH-fallback descriptor.
     """
     stype = model.shape_type.numpy()
-    scale = model.shape_scale.numpy()
     analytic = np.isin(
         stype,
         (
@@ -1136,9 +1133,9 @@ def _full_surface_capable_shape_mask(model: Model) -> np.ndarray:
             int(GeoType.CYLINDER),
             int(GeoType.CONE),
             int(GeoType.ELLIPSOID),
+            int(GeoType.PLANE),
         ),
     )
-    infinite_plane = (stype == int(GeoType.PLANE)) & (scale[:, 0] == 0.0) & (scale[:, 1] == 0.0)
     is_mesh = np.isin(stype, (int(GeoType.MESH), int(GeoType.CONVEX_MESH)))
     has_real_sdf = np.zeros(len(stype), dtype=bool)
     if getattr(model, "_shape_sdf_index", None) is not None:
@@ -1148,7 +1145,7 @@ def _full_surface_capable_shape_mask(model: Model) -> np.ndarray:
             [s >= 0 and coarse is not None and s < len(coarse) and coarse[s] is not None for s in sidx],
             dtype=bool,
         )
-    return analytic | infinite_plane | (is_mesh & has_real_sdf)
+    return analytic | (is_mesh & has_real_sdf)
 
 
 def _raise_on_unprovisioned_full_surface_meshes(model: Model, capable: np.ndarray) -> None:
@@ -1179,8 +1176,8 @@ def _raise_on_unprovisioned_full_surface_meshes(model: Model, capable: np.ndarra
 
 
 def _warn_full_surface_fallbacks(model: Model, capable: np.ndarray) -> None:
-    """Warn about participating shapes whose *type* cannot do edge/face -- heightfields, finite planes,
-    Gaussian splats, the NONE placeholder -- which fall back to per-particle soft contact. Mesh/convex
+    """Warn about participating shapes whose *type* cannot do edge/face -- heightfields, Gaussian
+    splats, and the NONE placeholder -- which fall back to per-particle soft contact. Mesh/convex
     without an SDF is handled separately (it raises; see
     :func:`_raise_on_unprovisioned_full_surface_meshes`), so it is excluded here."""
     stype = model.shape_type.numpy()
@@ -1194,19 +1191,15 @@ def _warn_full_surface_fallbacks(model: Model, capable: np.ndarray) -> None:
     def _label(i: int) -> str:
         return labels[i] if labels is not None and i < len(labels) else f"shape {int(i)}"
 
-    heightfields, finite_planes, other = [], [], []
+    heightfields, other = [], []
     for i in fallback:
         if stype[i] == int(GeoType.HFIELD):
             heightfields.append(_label(i))
-        elif stype[i] == int(GeoType.PLANE):
-            finite_planes.append(_label(i))
         else:
             other.append(_label(i))
     reasons = []
     if heightfields:
         reasons.append(f"heightfields {heightfields} (edge/face SDF optimization is not supported)")
-    if finite_planes:
-        reasons.append(f"finite planes {finite_planes} (only infinite planes are supported)")
     if other:
         reasons.append(f"shape types without an analytic signed-distance field {other}")
     warnings.warn(
@@ -1832,9 +1825,9 @@ class CollisionPipeline:
         if enable_rigid_soft_full_surface_contact:
             # Only shapes with a usable SDF can generate edge/face contacts (see
             # _full_surface_capable_shape_mask). A participating mesh/convex WITHOUT an SDF is a
-            # provisioning mistake and fails loudly. Unsupported shape TYPES (heightfields, finite
-            # planes, Gaussian splats, ...) instead warn and are excluded from the edge/face candidate
-            # pairs, falling back to per-particle soft contact -- so one such shape does not disable
+            # provisioning mistake and fails loudly. Unsupported shape TYPES (heightfields, Gaussian
+            # splats, ...) instead warn and are excluded from the edge/face candidate pairs, falling
+            # back to per-particle soft contact -- so one such shape does not disable
             # full-surface for the rest of the scene.
             _capable = _full_surface_capable_shape_mask(model) if model.shape_count > 0 else None
             if _capable is not None:

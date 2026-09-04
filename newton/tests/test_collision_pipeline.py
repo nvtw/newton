@@ -4577,22 +4577,15 @@ def test_collide_syncs_full_surface_marker(test, device):
     )
 
 
-def test_full_surface_finite_plane_falls_back(test, device):
-    """A finite plane can't do edge/face (its +Z normal is wrong off the quad), so it warns and falls
-    back to per-particle soft contact instead of failing the pipeline: construction succeeds, the
-    plane is excluded from the edge/face candidate pairs, and a capable box still keeps them (E4)."""
+def test_full_surface_supports_finite_plane(test, device):
+    """A finite plane participates in full-surface edge and face contact generation."""
     builder = newton.ModelBuilder()
-    box = builder.add_shape_box(body=-1, hx=0.5, hy=0.5, hz=0.5)
-    plane = builder.add_shape_plane(plane=(0.0, 0.0, 1.0, 0.0), width=5.0, length=5.0)  # finite
+    plane = builder.add_shape_plane(plane=(0.0, 0.0, 1.0, 0.0), width=5.0, length=5.0)
     _add_soft_triangle(builder)
     model = builder.finalize(device=device)
-    with test.assertWarns(UserWarning):
-        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", enable_rigid_soft_full_surface_contact=True)
-    face_shapes = (
-        {int(s) for s in pipeline.soft_face_rigid_pairs.numpy()[:, 1]} if len(pipeline.soft_face_rigid_pairs) else set()
-    )
-    test.assertIn(box, face_shapes, "the capable box keeps its full-surface face pairs")
-    test.assertNotIn(plane, face_shapes, "the finite plane is excluded from full-surface (fell back)")
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", enable_rigid_soft_full_surface_contact=True)
+    face_shapes = {int(s) for s in pipeline.soft_face_rigid_pairs.numpy()[:, 1]}
+    test.assertIn(plane, face_shapes)
 
 
 def test_full_surface_heightfield_falls_back(test, device):
@@ -4615,6 +4608,37 @@ def test_full_surface_heightfield_falls_back(test, device):
     )
     test.assertIn(box, face_shapes, "the capable box keeps its full-surface face pairs")
     test.assertNotIn(hf, face_shapes, "the heightfield is excluded from full-surface (fell back)")
+
+
+def test_small_finite_plane_between_deformable_vertices(test, device):
+    """A finite plane inside a large deformable triangle must not rely on its vertices."""
+    builder = newton.ModelBuilder()
+    builder.add_shape_plane(plane=(0.0, 0.0, 1.0, 0.0), width=0.2, length=0.2)
+    a = builder.add_particle(wp.vec3(-1.0, -1.0, 0.02), wp.vec3(0.0), 0.1, radius=0.0)
+    b = builder.add_particle(wp.vec3(1.0, -1.0, 0.02), wp.vec3(0.0), 0.1, radius=0.0)
+    c = builder.add_particle(wp.vec3(0.0, 1.0, 0.02), wp.vec3(0.0), 0.1, radius=0.0)
+    builder.add_triangle(a, b, c)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        soft_contact_gap=0.05,
+        enable_rigid_soft_full_surface_contact=True,
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+    total = int(contacts.soft_contact_count.numpy()[0])
+    test.assertGreater(total, 0)
+    indices = contacts.soft_contact_indices.numpy()[:total]
+    test.assertGreater(int(np.sum(indices[:, 1] >= 0)), 0)
+
+
+add_function_test(
+    TestFullSurfaceSoftContact,
+    "test_small_finite_plane_between_deformable_vertices",
+    test_small_finite_plane_between_deformable_vertices,
+    devices=soft_devices,
+)
 
 
 def test_full_surface_allows_infinite_plane(test, device):
@@ -4681,7 +4705,7 @@ for _name, _fn in (
     ("test_soft_contact_tids_decoupled_from_capacity", test_soft_contact_tids_decoupled_from_capacity),
     ("test_full_surface_replay_spans_candidate_space", test_full_surface_replay_spans_candidate_space),
     ("test_collide_syncs_full_surface_marker", test_collide_syncs_full_surface_marker),
-    ("test_full_surface_finite_plane_falls_back", test_full_surface_finite_plane_falls_back),
+    ("test_full_surface_supports_finite_plane", test_full_surface_supports_finite_plane),
     ("test_full_surface_heightfield_falls_back", test_full_surface_heightfield_falls_back),
     ("test_full_surface_allows_infinite_plane", test_full_surface_allows_infinite_plane),
     ("test_eval_shape_sdf_barrel_cylinder", test_eval_shape_sdf_barrel_cylinder),

@@ -27,7 +27,6 @@ from .kernels import (
     sdf_cylinder_grad,
     sdf_ellipsoid,
     sdf_ellipsoid_grad,
-    sdf_plane,
     sdf_sphere,
     sdf_sphere_grad,
     triangle_closest_point,
@@ -57,6 +56,34 @@ def _is_analytic(geo: wp.int32):
         or geo == GeoType.ELLIPSOID
         or geo == GeoType.PLANE
     )
+
+
+@wp.func
+def _eval_plane_sdf(scale: wp.vec3, point: wp.vec3):
+    """Return the exact signed distance and gradient for infinite planes and finite quad sheets."""
+    half_width = 0.5 * scale[0]
+    half_length = 0.5 * scale[1]
+    if half_width <= 0.0 or half_length <= 0.0:
+        distance = point[2]
+        return distance, distance, wp.vec3(0.0, 0.0, 1.0)
+
+    # Within the finite footprint, preserve the plane's signed distance. Outside it, use the
+    # Euclidean distance to the open sheet, including the correct edge/corner gradient.
+    if wp.abs(point[0]) <= half_width and wp.abs(point[1]) <= half_length:
+        distance = point[2]
+        return distance, distance, wp.vec3(0.0, 0.0, 1.0)
+
+    closest = wp.vec3(
+        wp.clamp(point[0], -half_width, half_width),
+        wp.clamp(point[1], -half_length, half_length),
+        0.0,
+    )
+    delta = point - closest
+    distance = wp.length(delta)
+    grad = wp.vec3(0.0, 0.0, 1.0)
+    if distance > 0.0:
+        grad = delta / distance
+    return distance, distance, grad
 
 
 @wp.func
@@ -99,8 +126,7 @@ def eval_shape_sdf(
         p = sdf_ellipsoid(x_local, scale)
         return p, p, sdf_ellipsoid_grad(x_local, scale)
     if geo == GeoType.PLANE:
-        p = sdf_plane(x_local, scale[0] * 0.5, scale[1] * 0.5)
-        return p, p, wp.vec3(0.0, 0.0, 1.0)
+        return _eval_plane_sdf(scale, x_local)
 
     # Volume SDF (mesh / convex / other). Honor the descriptor's scale_baked flag: if the shape
     # scale was baked into the grid (e.g. hydroelastic primitives), query directly in shape-local
