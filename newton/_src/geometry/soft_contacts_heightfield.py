@@ -44,6 +44,8 @@ def _closest_heightfield_feature(
 
     tri_lower = wp.min(a, wp.min(b, c)) - wp.vec3(threshold)
     tri_upper = wp.max(a, wp.max(b, c)) + wp.vec3(threshold)
+    # Terrain is solid below its surface, so only the upper elevation provides a safe Z rejection;
+    # deeply penetrating triangles must still reach the exact feature tests.
     if (
         hfd.nrow <= 1
         or hfd.ncol <= 1
@@ -51,6 +53,7 @@ def _closest_heightfield_feature(
         or tri_lower[0] > hfd.hx
         or tri_upper[1] < -hfd.hy
         or tri_lower[1] > hfd.hy
+        or tri_lower[2] > hfd.max_z
     ):
         return best, best_bary, best_y, best_normal
 
