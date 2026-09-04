@@ -12,8 +12,8 @@ from .soft_contacts_sdf import (
     SDF_FACE_ITERS,
     SDF_LS_ITERS,
     _emit_soft_ef_contact,
+    _eval_shape_sdf_lower,
     _shape_frames,
-    eval_shape_sdf,
     optimize_face_sdf,
 )
 
@@ -220,7 +220,7 @@ def create_soft_mesh_face_contacts(
         # penetrating-face contact in that case; any face entering from outside crosses the surface
         # and therefore has a BVH hit above.
         centroid = (a + b + c) / 3.0
-        _phi_lower, phi_centroid, _grad = eval_shape_sdf(geo, scale, centroid, sdf_idx, texture_sdf_table)
+        phi_centroid = _eval_shape_sdf_lower(geo, scale, centroid, sdf_idx, texture_sdf_table)
         if phi_centroid >= 0.0:
             return
 
@@ -232,7 +232,7 @@ def create_soft_mesh_face_contacts(
     if surface_near and exact_complete:
         distance = wp.sqrt(best_distance_sq)
         closest_x = best_bary[0] * a + best_bary[1] * b + best_bary[2] * c
-        _phi_lower, phi_probe, _probe_grad = eval_shape_sdf(geo, scale, closest_x, sdf_idx, texture_sdf_table)
+        phi_probe = _eval_shape_sdf_lower(geo, scale, closest_x, sdf_idx, texture_sdf_table)
         if distance > 1.0e-6 and phi_probe >= 0.0:
             if distance >= threshold:
                 return

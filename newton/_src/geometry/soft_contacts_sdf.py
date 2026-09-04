@@ -31,7 +31,7 @@ from .kernels import (
     sdf_sphere_grad,
     triangle_closest_point,
 )
-from .sdf_texture import TextureSDFData, texture_sample_sdf_grad
+from .sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_grad
 from .types import Axis, GeoType
 
 # Fixed iteration counts -> data-independent loops -> CUDA-graph-capturable. Passed as kernel args
@@ -84,6 +84,38 @@ def _eval_plane_sdf(scale: wp.vec3, point: wp.vec3):
     if distance > 0.0:
         grad = delta / distance
     return distance, distance, grad
+
+
+@wp.func
+def _eval_shape_sdf_lower(
+    geo: wp.int32,
+    scale: wp.vec3,
+    x_local: wp.vec3,
+    shape_sdf_index: wp.int32,
+    texture_sdf_table: wp.array[TextureSDFData],
+):
+    """Return only the conservative SDF value needed by culls and line searches."""
+    if geo == GeoType.SPHERE:
+        return sdf_sphere(x_local, scale[0])
+    if geo == GeoType.BOX:
+        return sdf_box(x_local, scale[0], scale[1], scale[2])
+    if geo == GeoType.CAPSULE:
+        return sdf_capsule(x_local, scale[0], scale[1], int(Axis.Z))
+    if geo == GeoType.CYLINDER:
+        return sdf_cylinder(x_local, scale[0], scale[1], int(Axis.Z), -1.0, scale[2])
+    if geo == GeoType.CONE:
+        return sdf_cone(x_local, scale[0], scale[1], int(Axis.Z))
+    if geo == GeoType.ELLIPSOID:
+        return sdf_ellipsoid(x_local, scale)
+    if geo == GeoType.PLANE:
+        phi_lower, _phi, _grad = _eval_plane_sdf(scale, x_local)
+        return phi_lower
+
+    tex = texture_sdf_table[shape_sdf_index]
+    if tex.scale_baked:
+        return texture_sample_sdf(tex, x_local)
+    dist = texture_sample_sdf(tex, wp.cw_div(x_local, scale))
+    return dist * wp.min(wp.abs(scale))
 
 
 @wp.func
@@ -180,21 +212,21 @@ def optimize_edge_sdf(
     hi = float(1.0)
     c = hi - (hi - lo) * inv_phi
     d = lo + (hi - lo) * inv_phi
-    fc, _fc_a, _gc = eval_shape_sdf(geo, scale, (1.0 - c) * p + c * q, shape_sdf_index, texture_sdf_table)
-    fd, _fd_a, _gd = eval_shape_sdf(geo, scale, (1.0 - d) * p + d * q, shape_sdf_index, texture_sdf_table)
+    fc = _eval_shape_sdf_lower(geo, scale, (1.0 - c) * p + c * q, shape_sdf_index, texture_sdf_table)
+    fd = _eval_shape_sdf_lower(geo, scale, (1.0 - d) * p + d * q, shape_sdf_index, texture_sdf_table)
     for _i in range(n_iter):
         if fc < fd:
             hi = d
             d = c
             fd = fc
             c = hi - (hi - lo) * inv_phi
-            fc, _fc_a, _gc = eval_shape_sdf(geo, scale, (1.0 - c) * p + c * q, shape_sdf_index, texture_sdf_table)
+            fc = _eval_shape_sdf_lower(geo, scale, (1.0 - c) * p + c * q, shape_sdf_index, texture_sdf_table)
         else:
             lo = c
             c = d
             fc = fd
             d = lo + (hi - lo) * inv_phi
-            fd, _fd_a, _gd = eval_shape_sdf(geo, scale, (1.0 - d) * p + d * q, shape_sdf_index, texture_sdf_table)
+            fd = _eval_shape_sdf_lower(geo, scale, (1.0 - d) * p + d * q, shape_sdf_index, texture_sdf_table)
     u = 0.5 * (lo + hi)
     x = (1.0 - u) * p + u * q
     _phi_l, phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
@@ -486,7 +518,7 @@ def create_soft_edge_contacts(
     threshold = margin + s_margin + radius
 
     mid_s = 0.5 * (p_s + q_s)
-    phi_m, _phi_m_a, _grad_m = eval_shape_sdf(geo, scale, mid_s, sdf_idx, texture_sdf_table)
+    phi_m = _eval_shape_sdf_lower(geo, scale, mid_s, sdf_idx, texture_sdf_table)
     if phi_m > threshold + 0.5 * wp.length(q_s - p_s):
         return
 
