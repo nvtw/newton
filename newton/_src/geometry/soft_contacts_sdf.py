@@ -43,11 +43,11 @@ SDF_EDGE_ITERS = 24
 SDF_FACE_ITERS = 24
 SDF_LS_ITERS = 16
 
-# Keep smaller workloads fused, where rematerializing compacted faces costs more than it saves.
-_SDF_FACE_COMPACTION_MIN_PAIRS = 2 * 1024 * 1024
+# Keep smaller workloads fused, where rematerializing compacted features costs more than it saves.
+_SDF_COMPACTION_MIN_PAIRS = 2 * 1024 * 1024
 _SDF_FACE_CLASSIFY_BLOCK_DIM = 128
 # Bound the compact optimization grid while keeping enough blocks to fill large GPUs.
-_SDF_FACE_FALLBACK_GRID_SIZE = 262144
+_SDF_FALLBACK_GRID_SIZE = 262144
 
 
 @wp.func
@@ -571,15 +571,134 @@ def create_soft_face_sdf_contacts(
             )
 
 
+def _create_soft_edge_contact_kernel(compact_sdf: bool):
+    module_name = f"soft_edge_contacts_{compact_sdf}"
+
+    @wp.kernel(module=module_name)
+    def soft_edge_contact_kernel(
+        edge_pairs: wp.array[wp.vec2i],
+        particle_q: wp.array[wp.vec3],
+        particle_radius: wp.array[float],
+        edge_indices: wp.array2d[wp.int32],
+        shape_body: wp.array[wp.int32],
+        shape_type: wp.array[wp.int32],
+        shape_flags: wp.array[wp.int32],
+        shape_transform: wp.array[wp.transform],
+        shape_scale: wp.array[wp.vec3],
+        body_q: wp.array[wp.transform],
+        shape_sdf_index: wp.array[wp.int32],
+        texture_sdf_table: wp.array[TextureSDFData],
+        shape_margin: wp.array[float],
+        sdf_edge_iters: wp.int32,
+        margin: float,
+        tid_base: wp.int32,
+        soft_contact_max: wp.int32,
+        fallback_tids: wp.array[wp.int32],
+        fallback_count: wp.array[wp.int32],
+        soft_contact_count: wp.array[wp.int32],
+        soft_contact_tids: wp.array[wp.int32],
+        soft_contact_particle: wp.array[wp.int32],
+        soft_contact_indices: wp.array[wp.vec3i],
+        soft_contact_barycentric: wp.array[wp.vec3],
+        soft_contact_shape: wp.array[wp.int32],
+        soft_contact_body_pos: wp.array[wp.vec3],
+        soft_contact_body_vel: wp.array[wp.vec3],
+        soft_contact_normal: wp.array[wp.vec3],
+    ):
+        """One thread per world-compatible (unique soft edge, shape) pair. Minimizes the rigid SDF along
+        the edge and emits a unified ``(v0, v1, -1)`` edge record if within margin. The endpoints come
+        straight from ``edge_indices[e, 2:4]`` -- no triangle attribution needed. Unique edges ->
+        structural dedup. Pairs are precomputed world-filtered, so no per-thread world check is needed.
+        ``tid_base`` is n_particle_pairs (this pass's offset into the shared replay-tids array)."""
+        tid = wp.tid()
+        pair = edge_pairs[tid]
+        e = pair[0]
+        shape_index = pair[1]
+
+        if (shape_flags[shape_index] & ShapeFlags.COLLIDE_PARTICLES) == 0:
+            return
+        geo = shape_type[shape_index]
+        sdf_idx = shape_sdf_index[shape_index]
+        if (not _is_analytic(geo)) and sdf_idx < 0:
+            return
+
+        # edge_indices rows are [o0, o1, v0, v1]; cols 2,3 are the edge's endpoint particle ids.
+        v0 = edge_indices[e, 2]
+        v1 = edge_indices[e, 3]
+        radius = wp.max(particle_radius[v0], particle_radius[v1])
+
+        # _s suffix = shape-local frame (matching the X_*s transforms: b = body, w = world, s = shape).
+        X_bs, X_ws, X_sw = _shape_frames(shape_body, body_q, shape_transform, shape_index)
+        p_s = wp.transform_point(X_sw, particle_q[v0])
+        q_s = wp.transform_point(X_sw, particle_q[v1])
+        scale = shape_scale[shape_index]
+        # Per-shape contact margin (#2994), same threshold term as the legacy particle pass.
+        s_margin = shape_margin[shape_index] if shape_margin.shape[0] > 0 else 0.0
+        threshold = margin + s_margin + radius
+
+        mid_s = 0.5 * (p_s + q_s)
+        phi_m = _eval_shape_sdf_lower(geo, scale, mid_s, sdf_idx, texture_sdf_table)
+        if phi_m > threshold + 0.5 * wp.length(q_s - p_s):
+            return
+
+        if wp.static(compact_sdf) and geo != GeoType.SPHERE:
+            fallback_slot = wp.atomic_add(fallback_count, 0, 1)
+            fallback_tids[fallback_slot] = tid
+            return
+
+        if geo == GeoType.SPHERE:
+            edge = q_s - p_s
+            edge_len_sq = wp.length_sq(edge)
+            u = float(0.0)
+            if edge_len_sq > 0.0:
+                u = wp.clamp(-wp.dot(p_s, edge) / edge_len_sq, 0.0, 1.0)
+            x = p_s + u * edge
+            phi = sdf_sphere(x, scale[0])
+            grad = sdf_sphere_grad(x, scale[0])
+        else:
+            u, x, phi, grad = optimize_edge_sdf(geo, scale, p_s, q_s, sdf_idx, texture_sdf_table, sdf_edge_iters)
+        if phi < threshold:
+            y = x - phi * grad
+            # optimize_edge_sdf parameterizes x = (1 - u) * p_s + u * q_s, so v0 carries weight 1 - u.
+            _emit_soft_ef_contact(
+                tid,
+                tid_base,
+                soft_contact_max,
+                soft_contact_count,
+                soft_contact_tids,
+                soft_contact_particle,
+                soft_contact_indices,
+                soft_contact_barycentric,
+                soft_contact_shape,
+                soft_contact_body_pos,
+                soft_contact_body_vel,
+                soft_contact_normal,
+                wp.vec3i(v0, v1, -1),
+                wp.vec3(1.0 - u, u, 0.0),
+                shape_index,
+                wp.transform_point(X_bs, y),
+                wp.vec3(0.0, 0.0, 0.0),
+                wp.transform_vector(X_ws, grad),
+            )
+
+    return soft_edge_contact_kernel
+
+
+create_soft_edge_contacts = _create_soft_edge_contact_kernel(False)
+classify_soft_edge_contacts = _create_soft_edge_contact_kernel(True)
+
+
 @wp.kernel
-def create_soft_edge_contacts(
+def create_soft_edge_sdf_contacts(
+    fallback_tids: wp.array[wp.int32],
+    fallback_count: wp.array[wp.int32],
+    fallback_grid_size: wp.int32,
     edge_pairs: wp.array[wp.vec2i],
     particle_q: wp.array[wp.vec3],
     particle_radius: wp.array[float],
     edge_indices: wp.array2d[wp.int32],
     shape_body: wp.array[wp.int32],
     shape_type: wp.array[wp.int32],
-    shape_flags: wp.array[wp.int32],
     shape_transform: wp.array[wp.transform],
     shape_scale: wp.array[wp.vec3],
     body_q: wp.array[wp.transform],
@@ -600,76 +719,50 @@ def create_soft_edge_contacts(
     soft_contact_body_vel: wp.array[wp.vec3],
     soft_contact_normal: wp.array[wp.vec3],
 ):
-    """One thread per world-compatible (unique soft edge, shape) pair. Minimizes the rigid SDF along
-    the edge and emits a unified ``(v0, v1, -1)`` edge record if within margin. The endpoints come
-    straight from ``edge_indices[e, 2:4]`` -- no triangle attribution needed. Unique edges ->
-    structural dedup. Pairs are precomputed world-filtered, so no per-thread world check is needed.
-    ``tid_base`` is n_particle_pairs (this pass's offset into the shared replay-tids array)."""
-    tid = wp.tid()
-    pair = edge_pairs[tid]
-    e = pair[0]
-    shape_index = pair[1]
+    """Optimize compacted non-sphere edge pairs."""
+    offset = wp.tid()
+    count = wp.min(fallback_count[0], fallback_tids.shape[0])
+    for fallback_slot in range(offset, count, fallback_grid_size):
+        source_tid = fallback_tids[fallback_slot]
+        pair = edge_pairs[source_tid]
+        edge_index = pair[0]
+        shape_index = pair[1]
 
-    if (shape_flags[shape_index] & ShapeFlags.COLLIDE_PARTICLES) == 0:
-        return
-    geo = shape_type[shape_index]
-    sdf_idx = shape_sdf_index[shape_index]
-    if (not _is_analytic(geo)) and sdf_idx < 0:
-        return
+        v0 = edge_indices[edge_index, 2]
+        v1 = edge_indices[edge_index, 3]
+        radius = wp.max(particle_radius[v0], particle_radius[v1])
 
-    # edge_indices rows are [o0, o1, v0, v1]; cols 2,3 are the edge's endpoint particle ids.
-    v0 = edge_indices[e, 2]
-    v1 = edge_indices[e, 3]
-    radius = wp.max(particle_radius[v0], particle_radius[v1])
-
-    # _s suffix = shape-local frame (matching the X_*s transforms: b = body, w = world, s = shape).
-    X_bs, X_ws, X_sw = _shape_frames(shape_body, body_q, shape_transform, shape_index)
-    p_s = wp.transform_point(X_sw, particle_q[v0])
-    q_s = wp.transform_point(X_sw, particle_q[v1])
-    scale = shape_scale[shape_index]
-    # Per-shape contact margin (#2994), same threshold term as the legacy particle pass.
-    s_margin = shape_margin[shape_index] if shape_margin.shape[0] > 0 else 0.0
-    threshold = margin + s_margin + radius
-
-    mid_s = 0.5 * (p_s + q_s)
-    phi_m = _eval_shape_sdf_lower(geo, scale, mid_s, sdf_idx, texture_sdf_table)
-    if phi_m > threshold + 0.5 * wp.length(q_s - p_s):
-        return
-
-    if geo == GeoType.SPHERE:
-        edge = q_s - p_s
-        edge_len_sq = wp.length_sq(edge)
-        u = float(0.0)
-        if edge_len_sq > 0.0:
-            u = wp.clamp(-wp.dot(p_s, edge) / edge_len_sq, 0.0, 1.0)
-        x = p_s + u * edge
-        phi = sdf_sphere(x, scale[0])
-        grad = sdf_sphere_grad(x, scale[0])
-    else:
+        X_bs, X_ws, X_sw = _shape_frames(shape_body, body_q, shape_transform, shape_index)
+        p_s = wp.transform_point(X_sw, particle_q[v0])
+        q_s = wp.transform_point(X_sw, particle_q[v1])
+        scale = shape_scale[shape_index]
+        s_margin = shape_margin[shape_index] if shape_margin.shape[0] > 0 else 0.0
+        threshold = margin + s_margin + radius
+        geo = shape_type[shape_index]
+        sdf_idx = shape_sdf_index[shape_index]
         u, x, phi, grad = optimize_edge_sdf(geo, scale, p_s, q_s, sdf_idx, texture_sdf_table, sdf_edge_iters)
-    if phi < threshold:
-        y = x - phi * grad
-        # optimize_edge_sdf parameterizes x = (1 - u) * p_s + u * q_s, so v0 carries weight 1 - u.
-        _emit_soft_ef_contact(
-            tid,
-            tid_base,
-            soft_contact_max,
-            soft_contact_count,
-            soft_contact_tids,
-            soft_contact_particle,
-            soft_contact_indices,
-            soft_contact_barycentric,
-            soft_contact_shape,
-            soft_contact_body_pos,
-            soft_contact_body_vel,
-            soft_contact_normal,
-            wp.vec3i(v0, v1, -1),
-            wp.vec3(1.0 - u, u, 0.0),
-            shape_index,
-            wp.transform_point(X_bs, y),
-            wp.vec3(0.0, 0.0, 0.0),
-            wp.transform_vector(X_ws, grad),
-        )
+        if phi < threshold:
+            y = x - phi * grad
+            _emit_soft_ef_contact(
+                source_tid,
+                tid_base,
+                soft_contact_max,
+                soft_contact_count,
+                soft_contact_tids,
+                soft_contact_particle,
+                soft_contact_indices,
+                soft_contact_barycentric,
+                soft_contact_shape,
+                soft_contact_body_pos,
+                soft_contact_body_vel,
+                soft_contact_normal,
+                wp.vec3i(v0, v1, -1),
+                wp.vec3(1.0 - u, u, 0.0),
+                shape_index,
+                wp.transform_point(X_bs, y),
+                wp.vec3(0.0),
+                wp.transform_vector(X_ws, grad),
+            )
 
 
 def launch_soft_ef_contacts(
@@ -681,8 +774,8 @@ def launch_soft_ef_contacts(
     device,
     edge_pairs,
     face_pairs,
-    face_fallback_tids,
-    face_fallback_count,
+    sdf_fallback_tids,
+    sdf_fallback_count,
     n_particle_pairs,
 ):
     """Launch the soft EDGE and FACE passes (the soft-particle pass is the legacy kernel).
@@ -731,8 +824,12 @@ def launch_soft_ef_contacts(
     ]
 
     if n_edge_pairs > 0:
+        compact_edge_sdf = device_is_cuda and n_edge_pairs >= _SDF_COMPACTION_MIN_PAIRS
+        if compact_edge_sdf:
+            sdf_fallback_count.zero_()
+        edge_kernel = classify_soft_edge_contacts if compact_edge_sdf else create_soft_edge_contacts
         wp.launch(
-            create_soft_edge_contacts,
+            edge_kernel,
             dim=n_edge_pairs,
             inputs=[
                 edge_pairs,
@@ -745,14 +842,44 @@ def launch_soft_ef_contacts(
                 n_particle_pairs,
                 contacts.soft_contact_max,
             ],
-            outputs=outputs,
+            outputs=[sdf_fallback_tids, sdf_fallback_count, *outputs],
             device=device,
             block_dim=sdf_block_dim,
         )
+        if compact_edge_sdf:
+            fallback_grid_size = min(n_edge_pairs, _SDF_FALLBACK_GRID_SIZE)
+            wp.launch(
+                create_soft_edge_sdf_contacts,
+                dim=fallback_grid_size,
+                inputs=[
+                    sdf_fallback_tids,
+                    sdf_fallback_count,
+                    fallback_grid_size,
+                    edge_pairs,
+                    state.particle_q,
+                    model.particle_radius,
+                    model.edge_indices,
+                    model.shape_body,
+                    model.shape_type,
+                    model.shape_transform,
+                    model.shape_scale,
+                    state.body_q,
+                    model._shape_sdf_index,
+                    model._texture_sdf_data,
+                    model.shape_margin,
+                    SDF_EDGE_ITERS,
+                    margin,
+                    n_particle_pairs,
+                    contacts.soft_contact_max,
+                ],
+                outputs=outputs,
+                device=device,
+                block_dim=sdf_block_dim,
+            )
     if n_face_pairs > 0:
-        compact_sdf = device_is_cuda and n_face_pairs >= _SDF_FACE_COMPACTION_MIN_PAIRS
+        compact_sdf = device_is_cuda and n_face_pairs >= _SDF_COMPACTION_MIN_PAIRS
         if compact_sdf:
-            face_fallback_count.zero_()
+            sdf_fallback_count.zero_()
         face_kernel = classify_soft_face_contacts if compact_sdf else create_soft_face_contacts
         wp.launch(
             face_kernel,
@@ -767,19 +894,19 @@ def launch_soft_ef_contacts(
                 n_particle_pairs + n_edge_pairs,
                 contacts.soft_contact_max,
             ],
-            outputs=[face_fallback_tids, face_fallback_count, *outputs],
+            outputs=[sdf_fallback_tids, sdf_fallback_count, *outputs],
             device=device,
             block_dim=_SDF_FACE_CLASSIFY_BLOCK_DIM,
         )
         if not compact_sdf:
             return
-        fallback_grid_size = min(n_face_pairs, _SDF_FACE_FALLBACK_GRID_SIZE)
+        fallback_grid_size = min(n_face_pairs, _SDF_FALLBACK_GRID_SIZE)
         wp.launch(
             create_soft_face_sdf_contacts,
             dim=fallback_grid_size,
             inputs=[
-                face_fallback_tids,
-                face_fallback_count,
+                sdf_fallback_tids,
+                sdf_fallback_count,
                 fallback_grid_size,
                 face_pairs,
                 state.particle_q,

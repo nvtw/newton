@@ -4046,8 +4046,8 @@ def test_edge_face_passes_box(test, device):
         device=device,
         edge_pairs=edge_pairs,
         face_pairs=face_pairs,
-        face_fallback_tids=face_fallback_tids,
-        face_fallback_count=face_fallback_count,
+        sdf_fallback_tids=face_fallback_tids,
+        sdf_fallback_count=face_fallback_count,
         n_particle_pairs=0,
     )
     # Small candidate sets stay fused instead of paying compaction launch overhead.
@@ -4080,6 +4080,75 @@ def test_edge_face_passes_box(test, device):
         test.assertAlmostEqual(float(barys[i].sum()), 1.0, places=4)
         test.assertGreater(float(normals[i][2]), 0.99)  # +z face of the box
         test.assertLess(abs(_box_sdf_np(body_pos[i], half)), 1.0e-2)  # closest point on the box surface
+
+
+def test_compact_edge_contacts_match_fused(test, device):
+    """Compacted iterative edge work must reproduce the fused kernel exactly."""
+    builder = newton.ModelBuilder()
+    builder.add_shape_box(body=-1, hx=0.5, hy=0.5, hz=0.5)
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.4, -0.4, 0.45),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.0),
+        dim_x=4,
+        dim_y=4,
+        cell_x=0.2,
+        cell_y=0.2,
+        mass=0.1,
+    )
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", soft_contact_gap=0.1, soft_contact_max=4096)
+    contacts = pipeline.contacts()
+    state = model.state()
+    edge_pairs = _build_soft_edge_rigid_contact_pairs(model)
+    empty_pairs = wp.empty(0, dtype=wp.vec2i, device=device)
+    fallback_tids = wp.empty(len(edge_pairs), dtype=wp.int32, device=device)
+    fallback_count = wp.zeros(1, dtype=wp.int32, device=device)
+
+    def run(compaction_threshold):
+        contacts.soft_contact_count.zero_()
+
+        def launch():
+            launch_soft_ef_contacts(
+                model=model,
+                state=state,
+                contacts=contacts,
+                margin=0.1,
+                device=device,
+                edge_pairs=edge_pairs,
+                face_pairs=empty_pairs,
+                sdf_fallback_tids=fallback_tids,
+                sdf_fallback_count=fallback_count,
+                n_particle_pairs=0,
+            )
+
+        with mock.patch("newton._src.geometry.soft_contacts_sdf._SDF_COMPACTION_MIN_PAIRS", compaction_threshold):
+            if compaction_threshold == 0:
+                with wp.ScopedCapture(device=device) as capture:
+                    launch()
+                wp.capture_launch(capture.graph)
+            else:
+                launch()
+        wp.synchronize_device(device)
+        count = int(contacts.soft_contact_count.numpy()[0])
+        indices = contacts.soft_contact_indices.numpy()[:count]
+        shapes = contacts.soft_contact_shape.numpy()[:count]
+        order = np.lexsort((indices[:, 1], indices[:, 0], shapes))
+        return (
+            int(fallback_count.numpy()[0]),
+            shapes[order].copy(),
+            indices[order].copy(),
+            contacts.soft_contact_barycentric.numpy()[:count][order].copy(),
+            contacts.soft_contact_body_pos.numpy()[:count][order].copy(),
+            contacts.soft_contact_normal.numpy()[:count][order].copy(),
+        )
+
+    fused = run(10**9)
+    compact = run(0)
+    test.assertEqual(fused[0], 0)
+    test.assertGreater(compact[0], 0)
+    for fused_array, compact_array in zip(fused[1:], compact[1:], strict=True):
+        np.testing.assert_array_equal(compact_array, fused_array)
 
 
 def test_edge_face_respect_shape_margin(test, device):
@@ -4127,8 +4196,8 @@ def test_edge_face_respect_shape_margin(test, device):
         device=device,
         edge_pairs=edge_pairs,
         face_pairs=face_pairs,
-        face_fallback_tids=face_fallback_tids,
-        face_fallback_count=face_fallback_count,
+        sdf_fallback_tids=face_fallback_tids,
+        sdf_fallback_count=face_fallback_count,
         n_particle_pairs=0,
     )
 
@@ -4295,6 +4364,13 @@ for _name, _fn in (
 ):
     add_function_test(TestFullSurfaceSoftContact, _name, _fn, devices=soft_devices)
 
+
+add_function_test(
+    TestFullSurfaceSoftContact,
+    "test_compact_edge_contacts_match_fused",
+    test_compact_edge_contacts_match_fused,
+    devices=[device for device in soft_devices if device.is_cuda],
+)
 
 # ---------------------------------------------------------------------------
 # Mesh volume-SDF provisioning at finalize. Texture SDFs are CUDA-only.
@@ -4489,8 +4565,8 @@ def test_mesh_face_bvh_cull_preserves_contacts(test, device):
         device=device,
         edge_pairs=empty,
         face_pairs=pipeline.soft_mesh_face_pairs,
-        face_fallback_tids=pipeline._soft_face_fallback_tids,
-        face_fallback_count=pipeline._soft_face_fallback_count,
+        sdf_fallback_tids=pipeline._soft_sdf_fallback_tids,
+        sdf_fallback_count=pipeline._soft_sdf_fallback_count,
         n_particle_pairs=0,
     )
 
@@ -4899,7 +4975,7 @@ def test_full_surface_allows_infinite_plane(test, device):
     total = int(contacts.soft_contact_count.numpy()[0])
     indices = contacts.soft_contact_indices.numpy()[:total]
     test.assertEqual(int(np.sum(indices[:, 2] >= 0)), 1)
-    test.assertEqual(int(pipeline._soft_face_fallback_count.numpy()[0]), 0)
+    test.assertEqual(int(pipeline._soft_sdf_fallback_count.numpy()[0]), 0)
 
 
 def _nonuniform_box_mesh_gap_model(device, tri_x):
@@ -5223,8 +5299,8 @@ def test_end_to_end_no_false_pos_neg(test, device):
         device=device,
         edge_pairs=edge_pairs,
         face_pairs=face_pairs,
-        face_fallback_tids=face_fallback_tids,
-        face_fallback_count=face_fallback_count,
+        sdf_fallback_tids=face_fallback_tids,
+        sdf_fallback_count=face_fallback_count,
         n_particle_pairs=0,
     )
 
