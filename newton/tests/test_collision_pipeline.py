@@ -4549,7 +4549,10 @@ def test_full_surface_replay_spans_candidate_space(test, device):
     )
     contacts = pipeline.contacts()
     candidate = (
-        pipeline.soft_contact_pair_count + len(pipeline.soft_edge_rigid_pairs) + len(pipeline.soft_face_rigid_pairs)
+        pipeline.soft_contact_pair_count
+        + len(pipeline.soft_edge_rigid_pairs)
+        + len(pipeline.soft_face_rigid_pairs)
+        + len(pipeline.soft_heightfield_face_pairs)
     )
     test.assertGreater(candidate, 1, "test needs a candidate space larger than the capacity override")
     test.assertEqual(contacts.soft_contact_max, 1, "explicit soft_contact_max capacity must be honored")
@@ -4588,12 +4591,9 @@ def test_full_surface_supports_finite_plane(test, device):
     test.assertIn(plane, face_shapes)
 
 
-def test_full_surface_heightfield_falls_back(test, device):
-    """A heightfield exposes only a per-cell local-plane distance (discontinuous across cells),
-    unsuitable for the edge/face SDF optimizers, so it warns and falls back to per-particle soft
-    contact rather than failing the pipeline; a capable box keeps full-surface (E4)."""
+def test_full_surface_supports_heightfield(test, device):
+    """A heightfield participates in exact full-surface face contact generation."""
     builder = newton.ModelBuilder()
-    box = builder.add_shape_box(body=-1, hx=0.5, hy=0.5, hz=0.5)
     hf = builder.add_shape_heightfield(
         heightfield=newton.Heightfield(
             data=np.zeros((3, 3), dtype=np.float32), nrow=3, ncol=3, hx=1.0, hy=1.0, min_z=0.0, max_z=0.0
@@ -4601,13 +4601,9 @@ def test_full_surface_heightfield_falls_back(test, device):
     )
     _add_soft_triangle(builder)
     model = builder.finalize(device=device)
-    with test.assertWarns(UserWarning):
-        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", enable_rigid_soft_full_surface_contact=True)
-    face_shapes = (
-        {int(s) for s in pipeline.soft_face_rigid_pairs.numpy()[:, 1]} if len(pipeline.soft_face_rigid_pairs) else set()
-    )
-    test.assertIn(box, face_shapes, "the capable box keeps its full-surface face pairs")
-    test.assertNotIn(hf, face_shapes, "the heightfield is excluded from full-surface (fell back)")
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", enable_rigid_soft_full_surface_contact=True)
+    face_shapes = {int(s) for s in pipeline.soft_heightfield_face_pairs.numpy()[:, 1]}
+    test.assertIn(hf, face_shapes)
 
 
 def test_small_finite_plane_between_deformable_vertices(test, device):
@@ -4637,6 +4633,58 @@ add_function_test(
     TestFullSurfaceSoftContact,
     "test_small_finite_plane_between_deformable_vertices",
     test_small_finite_plane_between_deformable_vertices,
+    devices=soft_devices,
+)
+
+
+def test_small_heightfield_between_deformable_vertices(test, device):
+    """A sloped heightfield inside a large deformable triangle must not rely on soft vertices."""
+    builder = newton.ModelBuilder()
+    builder.add_shape_heightfield(
+        heightfield=newton.Heightfield(
+            data=np.array(((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 0.0)), dtype=np.float32),
+            nrow=3,
+            ncol=3,
+            hx=0.1,
+            hy=0.1,
+            min_z=0.0,
+            max_z=0.01,
+        )
+    )
+    a = builder.add_particle(wp.vec3(-1.0, -1.0, 0.02), wp.vec3(0.0), 0.1, radius=0.0)
+    b = builder.add_particle(wp.vec3(1.0, -1.0, 0.02), wp.vec3(0.0), 0.1, radius=0.0)
+    c = builder.add_particle(wp.vec3(0.0, 1.0, 0.02), wp.vec3(0.0), 0.1, radius=0.0)
+    builder.add_triangle(a, b, c)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        soft_contact_gap=0.05,
+        enable_rigid_soft_full_surface_contact=True,
+    )
+    state = model.state()
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+    total = int(contacts.soft_contact_count.numpy()[0])
+    test.assertGreater(total, 0)
+    indices = contacts.soft_contact_indices.numpy()[:total]
+    test.assertGreater(int(np.sum(indices[:, 1] >= 0)), 0)
+
+    positions = state.particle_q.numpy()
+    positions[:, 2] = 0.08
+    state.particle_q.assign(positions)
+    pipeline.collide(state, contacts)
+    test.assertEqual(
+        int(contacts.soft_contact_count.numpy()[0]),
+        0,
+        "heightfield outside the gap must not create a ghost contact",
+    )
+
+
+add_function_test(
+    TestFullSurfaceSoftContact,
+    "test_small_heightfield_between_deformable_vertices",
+    test_small_heightfield_between_deformable_vertices,
     devices=soft_devices,
 )
 
@@ -4706,7 +4754,7 @@ for _name, _fn in (
     ("test_full_surface_replay_spans_candidate_space", test_full_surface_replay_spans_candidate_space),
     ("test_collide_syncs_full_surface_marker", test_collide_syncs_full_surface_marker),
     ("test_full_surface_supports_finite_plane", test_full_surface_supports_finite_plane),
-    ("test_full_surface_heightfield_falls_back", test_full_surface_heightfield_falls_back),
+    ("test_full_surface_supports_heightfield", test_full_surface_supports_heightfield),
     ("test_full_surface_allows_infinite_plane", test_full_surface_allows_infinite_plane),
     ("test_eval_shape_sdf_barrel_cylinder", test_eval_shape_sdf_barrel_cylinder),
 ):
