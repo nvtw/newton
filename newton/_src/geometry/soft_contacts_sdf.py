@@ -197,10 +197,18 @@ def optimize_face_sdf(
     # for non-smooth fields (e.g. a box-corner ridge), because the analytic gradient is single-axis
     # and never selects the third vertex. From the centroid, FW can move toward any vertex.
     bary = wp.vec3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
+    x = bary[0] * a + bary[1] * b + bary[2] * c
+    _phi_l, phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
 
+    # Reusing the line-search endpoint saves one SDF evaluation per outer iteration for analytic
+    # shapes. Keep the volume-SDF path's shorter-lived texture state; carrying it across iterations
+    # reduced occupancy in representative mesh workloads.
+    reuse_line_result = _is_analytic(geo)
     for _i in range(n_iter):
-        x = bary[0] * a + bary[1] * b + bary[2] * c
-        _phi_l, _phi_x, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
+        if not reuse_line_result and _i > 0:
+            x = bary[0] * a + bary[1] * b + bary[2] * c
+            _phi_l, phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
+
         # Frank-Wolfe vertex: argmin_k grad . corner_k (Macklin eq. 4).
         da = wp.dot(grad, a)
         db = wp.dot(grad, b)
@@ -211,13 +219,18 @@ def optimize_face_sdf(
         elif dc <= da and dc <= db:
             s = wp.vec3(0.0, 0.0, 1.0)
         target = s[0] * a + s[1] * b + s[2] * c
-        gamma, _lx, _lphi, _lgrad = optimize_edge_sdf(
+        gamma, line_x, line_phi, line_grad = optimize_edge_sdf(
             geo, scale, x, target, shape_sdf_index, texture_sdf_table, ls_iter
         )
         bary = (1.0 - gamma) * bary + gamma * s
+        if reuse_line_result:
+            x = line_x
+            phi = line_phi
+            grad = line_grad
 
-    x = bary[0] * a + bary[1] * b + bary[2] * c
-    _phi_l, phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
+    if not reuse_line_result:
+        x = bary[0] * a + bary[1] * b + bary[2] * c
+        _phi_l, phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
     return bary, x, phi, grad
 
 
