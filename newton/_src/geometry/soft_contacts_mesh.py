@@ -6,6 +6,7 @@
 import warp as wp
 
 from .flags import ShapeFlags
+from .kernels import triangle_closest_point
 from .sdf_texture import TextureSDFData
 from .soft_contacts_sdf import (
     SDF_FACE_ITERS,
@@ -15,6 +16,88 @@ from .soft_contacts_sdf import (
     eval_shape_sdf,
     optimize_face_sdf,
 )
+
+# Dense overlaps favor the fixed-cost SDF optimizer; bounding candidates also caps local storage
+# and traversal work before that fallback.
+_MESH_EXACT_MAX_TRIANGLES = wp.constant(6)
+_mesh_triangle_candidates_t = wp.types.vector(length=6, dtype=wp.int32)
+
+
+@wp.func
+def _closest_triangle_features(
+    a: wp.vec3,
+    b: wp.vec3,
+    c: wp.vec3,
+    u: wp.vec3,
+    v: wp.vec3,
+    w: wp.vec3,
+    best_distance_sq: float,
+    best_bary: wp.vec3,
+    best_y: wp.vec3,
+):
+    """Update the closest points between a deformable and rigid triangle."""
+    for rigid_vertex in range(3):
+        y = u
+        if rigid_vertex == 1:
+            y = v
+        elif rigid_vertex == 2:
+            y = w
+        x, bary, _feature = triangle_closest_point(a, b, c, y)
+        distance_sq = wp.length_sq(x - y)
+        if distance_sq < best_distance_sq:
+            best_distance_sq = distance_sq
+            best_bary = bary
+            best_y = y
+
+    for soft_vertex in range(3):
+        x = a
+        bary = wp.vec3(1.0, 0.0, 0.0)
+        if soft_vertex == 1:
+            x = b
+            bary = wp.vec3(0.0, 1.0, 0.0)
+        elif soft_vertex == 2:
+            x = c
+            bary = wp.vec3(0.0, 0.0, 1.0)
+        y, _rigid_bary, _feature = triangle_closest_point(u, v, w, x)
+        distance_sq = wp.length_sq(x - y)
+        if distance_sq < best_distance_sq:
+            best_distance_sq = distance_sq
+            best_bary = bary
+            best_y = y
+
+    for soft_edge in range(3):
+        p = a
+        q = b
+        if soft_edge == 1:
+            p = b
+            q = c
+        elif soft_edge == 2:
+            p = c
+            q = a
+        for rigid_edge in range(3):
+            r = u
+            s = v
+            if rigid_edge == 1:
+                r = v
+                s = w
+            elif rigid_edge == 2:
+                r = w
+                s = u
+            st = wp.closest_point_edge_edge(p, q, r, s, 1.0e-6)
+            x = p + st[0] * (q - p)
+            y = r + st[1] * (s - r)
+            distance_sq = wp.length_sq(x - y)
+            if distance_sq < best_distance_sq:
+                best_distance_sq = distance_sq
+                if soft_edge == 0:
+                    best_bary = wp.vec3(1.0 - st[0], st[0], 0.0)
+                elif soft_edge == 1:
+                    best_bary = wp.vec3(0.0, 1.0 - st[0], st[0])
+                else:
+                    best_bary = wp.vec3(st[0], 0.0, 1.0 - st[0])
+                best_y = y
+
+    return best_distance_sq, best_bary, best_y
 
 
 @wp.kernel
@@ -48,7 +131,7 @@ def create_soft_mesh_face_contacts(
     soft_contact_body_vel: wp.array[wp.vec3],
     soft_contact_normal: wp.array[wp.vec3],
 ):
-    """Cull mesh-face pairs with the rigid triangle BVH before running SDF minimization."""
+    """Use exact sparse mesh features, with SDF fallback for dense or penetrating pairs."""
     tid = wp.tid()
     pair = face_pairs[tid]
     tri = pair[0]
@@ -97,7 +180,39 @@ def create_soft_mesh_face_contacts(
         wp.max(a_mesh, wp.max(b_mesh, c_mesh)) + expansion,
     )
     mesh_tri = wp.int32(0)
-    surface_near = wp.mesh_query_aabb_next(query, mesh_tri)
+    surface_near = bool(False)
+    exact_complete = bool(True)
+    exact_triangle_count = wp.int32(0)
+    exact_triangles = _mesh_triangle_candidates_t(0)
+    while wp.mesh_query_aabb_next(query, mesh_tri):
+        surface_near = True
+        if exact_triangle_count >= _MESH_EXACT_MAX_TRIANGLES:
+            exact_complete = False
+            break
+        exact_triangles[exact_triangle_count] = mesh_tri
+        exact_triangle_count += 1
+
+    best_distance_sq = float(1.0e20)
+    best_bary = wp.vec3(0.0)
+    best_y = wp.vec3(0.0)
+    mesh_id = shape_source[shape]
+    if exact_complete:
+        for candidate_index in range(exact_triangle_count):
+            mesh_tri = exact_triangles[candidate_index]
+            u = wp.cw_mul(scale, wp.mesh_get_point(mesh_id, mesh_tri * 3 + 0))
+            v = wp.cw_mul(scale, wp.mesh_get_point(mesh_id, mesh_tri * 3 + 1))
+            w = wp.cw_mul(scale, wp.mesh_get_point(mesh_id, mesh_tri * 3 + 2))
+            best_distance_sq, best_bary, best_y = _closest_triangle_features(
+                a,
+                b,
+                c,
+                u,
+                v,
+                w,
+                best_distance_sq,
+                best_bary,
+                best_y,
+            )
 
     sdf_idx = shape_sdf_index[shape]
     if not surface_near:
@@ -109,17 +224,28 @@ def create_soft_mesh_face_contacts(
         if phi_centroid >= 0.0:
             return
 
-    bary, x, phi, grad = optimize_face_sdf(
-        geo,
-        scale,
-        a,
-        b,
-        c,
-        sdf_idx,
-        texture_sdf_table,
-        SDF_FACE_ITERS,
-        SDF_LS_ITERS,
-    )
+    use_exact_surface = False
+    bary = wp.vec3(0.0)
+    x = wp.vec3(0.0)
+    phi = float(0.0)
+    grad = wp.vec3(0.0)
+    if surface_near and exact_complete:
+        distance = wp.sqrt(best_distance_sq)
+        closest_x = best_bary[0] * a + best_bary[1] * b + best_bary[2] * c
+        _phi_lower, phi_probe, _probe_grad = eval_shape_sdf(geo, scale, closest_x, sdf_idx, texture_sdf_table)
+        if distance > 1.0e-6 and phi_probe >= 0.0:
+            if distance >= threshold:
+                return
+            use_exact_surface = True
+            bary = best_bary
+            x = closest_x
+            phi = distance
+            grad = (closest_x - best_y) / distance
+
+    if not use_exact_surface:
+        bary, x, phi, grad = optimize_face_sdf(
+            geo, scale, a, b, c, sdf_idx, texture_sdf_table, SDF_FACE_ITERS, SDF_LS_ITERS
+        )
     if phi < threshold:
         y = x - phi * grad
         _emit_soft_ef_contact(
@@ -145,7 +271,7 @@ def create_soft_mesh_face_contacts(
 
 
 def launch_soft_mesh_face_contacts(*, model, state, contacts, margin: float, device, face_pairs, tid_base: int):
-    """Launch BVH-culled SDF face minimization for rigid mesh shapes."""
+    """Launch BVH-guided deformable face contacts for rigid mesh shapes."""
     if len(face_pairs) == 0:
         return
     wp.launch(
@@ -184,6 +310,6 @@ def launch_soft_mesh_face_contacts(*, model, state, contacts, margin: float, dev
             contacts.soft_contact_normal,
         ],
         device=device,
-        # Texture-SDF face optimization is register-heavy; two warps per block balance occupancy and throughput.
-        block_dim=64,
+        # The exact-feature and SDF fallback branches are register-heavy; one warp preserves occupancy.
+        block_dim=32,
     )

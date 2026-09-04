@@ -4418,7 +4418,7 @@ def test_optimize_against_mesh_texture_sdf(test, device):
 
 
 def test_mesh_face_bvh_cull_preserves_contacts(test, device):
-    """Rigid-mesh BVH culling preserves the existing SDF face contacts exactly."""
+    """The mesh BVH path preserves SDF candidates and returns valid surface contacts."""
     rng = np.random.default_rng(91)
     centers = np.vstack(
         (
@@ -4515,14 +4515,84 @@ def test_mesh_face_bvh_cull_preserves_contacts(test, device):
     new_records = _sorted_records(new_contacts, new_count)
     test.assertTrue(np.array_equal(new_records[0], old_records[0]))
     test.assertTrue(np.array_equal(new_records[1], old_records[1]))
+
+    # Outside contacts now use exact mesh features. Validate their geometry directly against the
+    # scaled source box rather than requiring the texture-SDF optimizer's approximate location.
+    bary = new_records[2]
+    body_pos = new_records[3]
+    normal = new_records[4]
+    tri_points = state.particle_q.numpy()[new_records[1]]
+    soft_point = np.sum(tri_points * bary[:, :, None], axis=1)
+    delta = soft_point - body_pos
+    normal_distance = np.sum(delta * normal, axis=1)
+    tangent = delta - normal_distance[:, None] * normal
+
+    # Intersecting and penetrating faces retain the signed-SDF fallback exactly.
+    sdf_fallback = normal_distance <= 1.0e-6
+    test.assertGreater(int(np.count_nonzero(sdf_fallback)), 0)
     for new_values, old_values in zip(new_records[2:], old_records[2:], strict=True):
-        np.testing.assert_allclose(new_values, old_values, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(new_values[sdf_fallback], old_values[sdf_fallback], rtol=0.0, atol=1.0e-6)
+
+    np.testing.assert_allclose(np.linalg.norm(normal, axis=1), 1.0, rtol=0.0, atol=2.0e-5)
+    test.assertLess(float(np.max(np.linalg.norm(tangent, axis=1))), 5.0e-4)
+
+    half_extents = np.array((1.0, 0.35, 0.6), dtype=np.float32)
+    outside = normal_distance > 1.0e-5
+    test.assertGreater(int(np.count_nonzero(outside)), 0)
+    test.assertTrue(bool(np.all(np.abs(body_pos[outside]) <= half_extents + 2.0e-5)))
+    surface_error = np.min(np.abs(np.abs(body_pos[outside]) - half_extents), axis=1)
+    test.assertLess(float(np.max(surface_error)), 2.0e-5)
+
+
+def test_mesh_face_exact_corner_contact(test, device):
+    """A scaled mesh edge yields its exact closest point and outward normal."""
+    builder = newton.ModelBuilder()
+    builder.add_shape_mesh(
+        body=-1,
+        mesh=newton.Mesh.create_box(0.5, 0.5, 0.5),
+        scale=(2.0, 0.7, 1.2),
+    )
+    builder.add_cloth_mesh(
+        pos=wp.vec3(0.0),
+        rot=wp.quat_identity(),
+        scale=1.0,
+        vel=wp.vec3(0.0),
+        vertices=(
+            wp.vec3(1.03, 0.40, -0.2),
+            wp.vec3(1.03, 0.40, 0.2),
+            wp.vec3(1.20, 0.60, 0.0),
+        ),
+        indices=(0, 1, 2),
+        density=0.1,
+        particle_radius=0.0,
+    )
+    configure_sdf_for_collision_shapes(builder)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        soft_contact_gap=0.08,
+        enable_rigid_soft_full_surface_contact=True,
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+    count = int(contacts.soft_contact_count.numpy()[0])
+    records = contacts.soft_contact_indices.numpy()[:count]
+    face_records = np.flatnonzero(records[:, 2] >= 0)
+    test.assertEqual(len(face_records), 1)
+    record = face_records[0]
+    body_pos = contacts.soft_contact_body_pos.numpy()[record]
+    normal = contacts.soft_contact_normal.numpy()[record]
+    np.testing.assert_allclose(body_pos[:2], (1.0, 0.35), rtol=0.0, atol=2.0e-5)
+    expected_normal = np.array((0.03, 0.05, 0.0)) / np.sqrt(0.03**2 + 0.05**2)
+    np.testing.assert_allclose(normal, expected_normal, rtol=0.0, atol=2.0e-5)
 
 
 for _name, _fn in (
     ("test_mesh_sdf_provisioned_and_emits", test_mesh_sdf_provisioned_and_emits),
     ("test_optimize_against_mesh_texture_sdf", test_optimize_against_mesh_texture_sdf),
     ("test_mesh_face_bvh_cull_preserves_contacts", test_mesh_face_bvh_cull_preserves_contacts),
+    ("test_mesh_face_exact_corner_contact", test_mesh_face_exact_corner_contact),
 ):
     add_function_test(TestFullSurfaceSoftContact, _name, _fn, devices=get_cuda_test_devices())
 
