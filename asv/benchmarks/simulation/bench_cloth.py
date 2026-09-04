@@ -64,8 +64,10 @@ class DeformableSelfCollision:
 
     params = (DEFORMABLE_COLLISION_CASES,)
     param_names = ["case"]
-    repeat = pr_gate_repeat(5)
+    repeat = 3
     number = 1
+    warmup_count = 3
+    launch_count = 10
 
     def setup(self, case):
         device = wp.get_device()
@@ -84,9 +86,8 @@ class DeformableSelfCollision:
             edge_collision_buffer_pre_alloc=64,
         )
         self.radius = 0.012
-        self.launch_count = 20
 
-        for _ in range(5):
+        for _ in range(self.warmup_count):
             self._detect()
         with wp.ScopedCapture(device=device) as capture:
             self._detect()
