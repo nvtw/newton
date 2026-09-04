@@ -422,7 +422,10 @@ def _create_soft_face_contact_kernel(compact_sdf: bool):
         threshold = margin + s_margin + radius
 
         centroid_s = (a_s + b_s + c_s) / 3.0
-        phi_c, _phi_c_a, _grad_c = eval_shape_sdf(geo, scale, centroid_s, sdf_idx, texture_sdf_table)
+        if wp.static(compact_sdf):
+            phi_c = _eval_shape_sdf_lower(geo, scale, centroid_s, sdf_idx, texture_sdf_table)
+        else:
+            phi_c, _phi_c_a, _grad_c = eval_shape_sdf(geo, scale, centroid_s, sdf_idx, texture_sdf_table)
         # Conservative cull: the SDF is ~1-Lipschitz, so the triangle's minimum is >= phi_c minus the
         # farthest centroid-to-point distance, which is always a vertex. circumradius can be smaller than
         # that for non-equilateral triangles (e.g. 3-4-5: R=2.5 vs 2.85) and would drop valid contacts.
