@@ -4246,6 +4246,31 @@ def test_full_surface_catches_what_particles_miss(test, device):
     test.assertGreater(total, 0)  # caught by edge/face
 
 
+def test_sphere_face_contact_is_exact(test, device):
+    """A face contact against a sphere uses the exact closest point and barycentric coordinates."""
+    builder = newton.ModelBuilder()
+    builder.add_shape_sphere(body=-1, radius=0.2)
+    a = builder.add_particle(wp.vec3(-1.0, -1.0, 0.25), wp.vec3(0.0), 0.1, radius=0.0)
+    b = builder.add_particle(wp.vec3(1.0, -1.0, 0.25), wp.vec3(0.0), 0.1, radius=0.0)
+    c = builder.add_particle(wp.vec3(0.0, 1.0, 0.25), wp.vec3(0.0), 0.1, radius=0.0)
+    builder.add_triangle(a, b, c)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(
+        model, broad_phase="nxn", soft_contact_gap=0.1, enable_rigid_soft_full_surface_contact=True
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+
+    total = int(contacts.soft_contact_count.numpy()[0])
+    indices = contacts.soft_contact_indices.numpy()[:total]
+    face_rows = np.flatnonzero(indices[:, 2] >= 0)
+    test.assertEqual(len(face_rows), 1)
+    row = int(face_rows[0])
+    np.testing.assert_allclose(contacts.soft_contact_barycentric.numpy()[row], np.array((0.25, 0.25, 0.5)), atol=1.0e-6)
+    np.testing.assert_allclose(contacts.soft_contact_body_pos.numpy()[row], np.array((0.0, 0.0, 0.2)), atol=1.0e-6)
+    np.testing.assert_allclose(contacts.soft_contact_normal.numpy()[row], np.array((0.0, 0.0, 1.0)), atol=1.0e-6)
+
+
 for _name, _fn in (
     ("test_optimize_edge_sdf_box", test_optimize_edge_sdf_box),
     ("test_optimize_face_sdf_box", test_optimize_face_sdf_box),
@@ -4255,6 +4280,7 @@ for _name, _fn in (
     ("test_edge_face_respect_shape_margin", test_edge_face_respect_shape_margin),
     ("test_backward_compat_bit_for_bit", test_backward_compat_bit_for_bit),
     ("test_full_surface_catches_what_particles_miss", test_full_surface_catches_what_particles_miss),
+    ("test_sphere_face_contact_is_exact", test_sphere_face_contact_is_exact),
 ):
     add_function_test(TestFullSurfaceSoftContact, _name, _fn, devices=soft_devices)
 
@@ -5112,7 +5138,7 @@ add_function_test(
 def test_edge_face_pairs_respect_worlds(test, device):
     """Multi-world: the full-surface edge/face candidate pairs never cross worlds.
 
-    Two worlds, each a box + a triangle. The edge/face pair builders must emit exactly the
+    Two worlds, each with two rigid shapes and a triangle mesh. The edge/face pair builders emit the
     world-compatible (feature, shape) pairs (same world, or either global -1) -- matching a
     brute-force reference -- and must strictly exclude the cross-world combinations, mirroring the
     particle path's ``_build_soft_particle_rigid_contact_pairs``.
@@ -5122,6 +5148,7 @@ def test_edge_face_pairs_respect_worlds(test, device):
         # A cloth grid (not a bare triangle) so finalize builds soft-mesh edge adjacency.
         b = newton.ModelBuilder()
         b.add_shape_box(body=-1, xform=wp.transform(wp.vec3(0.0), wp.quat_identity()), hx=0.5, hy=0.5, hz=0.5)
+        b.add_shape_sphere(body=-1, xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()), radius=0.25)
         b.add_cloth_grid(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),
@@ -5157,11 +5184,15 @@ def test_edge_face_pairs_respect_worlds(test, device):
 
     face_world = pw[tri[:, 0]]
     expected_face = {(t, s) for t in range(n_tris) for s in range(n_shapes) if _compat(face_world[t], s)}
-    test.assertEqual({tuple(int(v) for v in p) for p in face_pairs.numpy()}, expected_face)
+    face_pairs_np = face_pairs.numpy()
+    test.assertEqual({tuple(int(v) for v in p) for p in face_pairs_np}, expected_face)
+    test.assertTrue(np.all(face_pairs_np[:-1, 1] <= face_pairs_np[1:, 1]))
 
     edge_world = pw[tri[owner, 0]]
     expected_edge = {(e, s) for e in range(n_edges) for s in range(n_shapes) if _compat(edge_world[e], s)}
-    test.assertEqual({tuple(int(v) for v in p) for p in edge_pairs.numpy()}, expected_edge)
+    edge_pairs_np = edge_pairs.numpy()
+    test.assertEqual({tuple(int(v) for v in p) for p in edge_pairs_np}, expected_edge)
+    test.assertTrue(np.all(edge_pairs_np[:-1, 1] <= edge_pairs_np[1:, 1]))
 
     # Filtering must drop the cross-world combinations (fewer than the naive full cross product).
     test.assertLess(len(face_pairs), n_tris * n_shapes)

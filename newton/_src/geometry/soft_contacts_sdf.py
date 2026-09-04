@@ -30,6 +30,7 @@ from .kernels import (
     sdf_plane,
     sdf_sphere,
     sdf_sphere_grad,
+    triangle_closest_point,
 )
 from .sdf_texture import TextureSDFData, texture_sample_sdf_grad
 from .types import Axis, GeoType
@@ -353,9 +354,14 @@ def create_soft_face_contacts(
     if phi_c > threshold + reach:
         return
 
-    bary, x, phi, grad = optimize_face_sdf(
-        geo, scale, a_s, b_s, c_s, sdf_idx, texture_sdf_table, sdf_face_iters, sdf_ls_iters
-    )
+    if geo == GeoType.SPHERE:
+        x, bary, _feature = triangle_closest_point(a_s, b_s, c_s, wp.vec3(0.0))
+        phi = sdf_sphere(x, scale[0])
+        grad = sdf_sphere_grad(x, scale[0])
+    else:
+        bary, x, phi, grad = optimize_face_sdf(
+            geo, scale, a_s, b_s, c_s, sdf_idx, texture_sdf_table, sdf_face_iters, sdf_ls_iters
+        )
     if phi < threshold:
         y = x - phi * grad
         _emit_soft_ef_contact(
@@ -445,7 +451,17 @@ def create_soft_edge_contacts(
     if phi_m > threshold + 0.5 * wp.length(q_s - p_s):
         return
 
-    u, x, phi, grad = optimize_edge_sdf(geo, scale, p_s, q_s, sdf_idx, texture_sdf_table, sdf_edge_iters)
+    if geo == GeoType.SPHERE:
+        edge = q_s - p_s
+        edge_len_sq = wp.length_sq(edge)
+        u = float(0.0)
+        if edge_len_sq > 0.0:
+            u = wp.clamp(-wp.dot(p_s, edge) / edge_len_sq, 0.0, 1.0)
+        x = p_s + u * edge
+        phi = sdf_sphere(x, scale[0])
+        grad = sdf_sphere_grad(x, scale[0])
+    else:
+        u, x, phi, grad = optimize_edge_sdf(geo, scale, p_s, q_s, sdf_idx, texture_sdf_table, sdf_edge_iters)
     if phi < threshold:
         y = x - phi * grad
         # optimize_edge_sdf parameterizes x = (1 - u) * p_s + u * q_s, so v0 carries weight 1 - u.

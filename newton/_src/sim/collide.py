@@ -939,6 +939,7 @@ def _world_compatible_pairs(
     world_count: int,
     device,
     shape_ok: np.ndarray | None = None,
+    shape_major: bool = False,
 ) -> wp.array[wp.vec2i]:
     """Emit ``(feature, shape)`` index pairs whose worlds are compatible: same world, or either is
     global (``-1``). ``feature_world[i]`` / ``shape_world[s]`` give each entity's world (-1 == global).
@@ -975,31 +976,53 @@ def _world_compatible_pairs(
     # 1. Global features pair with every shape (any world).
     global_features = features[feature_world < 0]
     if len(global_features):
-        f_cols.append(np.repeat(global_features, len(shapes)))
-        s_cols.append(np.tile(shapes, len(global_features)))
+        if shape_major:
+            f_cols.append(np.tile(global_features, len(shapes)))
+            s_cols.append(np.repeat(shapes, len(global_features)))
+        else:
+            f_cols.append(np.repeat(global_features, len(shapes)))
+            s_cols.append(np.tile(shapes, len(global_features)))
 
     # 2. Local-world features additionally pair with every global shape.
     local_features = features[f_local]
     global_shapes = shapes[shape_world < 0]
     if len(local_features) and len(global_shapes):
-        f_cols.append(np.repeat(local_features, len(global_shapes)))
-        s_cols.append(np.tile(global_shapes, len(local_features)))
+        if shape_major:
+            f_cols.append(np.tile(local_features, len(global_shapes)))
+            s_cols.append(np.repeat(global_shapes, len(local_features)))
+        else:
+            f_cols.append(np.repeat(local_features, len(global_shapes)))
+            s_cols.append(np.tile(global_shapes, len(local_features)))
 
     # 3. Local-world features pair with the shapes that share their world. Group the local shapes by
     #    world so each world's shapes are contiguous, then for every feature slice out its world's block.
     local_feature_world = feature_world[f_local]
-    shapes_per_world = np.bincount(shape_world[s_local], minlength=world_count)
-    reps = shapes_per_world[local_feature_world] if len(local_feature_world) else np.zeros(0, np.intp)
-    if reps.sum():
-        shapes_by_world = shapes[s_local][np.argsort(shape_world[s_local], kind="stable")]
-        world_start = np.cumsum(shapes_per_world) - shapes_per_world
-        within = np.arange(reps.sum()) - np.repeat(np.cumsum(reps) - reps, reps)
-        f_cols.append(np.repeat(local_features, reps))
-        s_cols.append(shapes_by_world[np.repeat(world_start[local_feature_world], reps) + within])
+    if shape_major:
+        local_shapes = shapes[s_local]
+        local_shape_world = shape_world[s_local]
+        features_per_world = np.bincount(local_feature_world, minlength=world_count)
+        reps = features_per_world[local_shape_world] if len(local_shape_world) else np.zeros(0, np.intp)
+        if reps.sum():
+            features_by_world = local_features[np.argsort(local_feature_world, kind="stable")]
+            world_start = np.cumsum(features_per_world) - features_per_world
+            within = np.arange(reps.sum()) - np.repeat(np.cumsum(reps) - reps, reps)
+            f_cols.append(features_by_world[np.repeat(world_start[local_shape_world], reps) + within])
+            s_cols.append(np.repeat(local_shapes, reps))
+    else:
+        shapes_per_world = np.bincount(shape_world[s_local], minlength=world_count)
+        reps = shapes_per_world[local_feature_world] if len(local_feature_world) else np.zeros(0, np.intp)
+        if reps.sum():
+            shapes_by_world = shapes[s_local][np.argsort(shape_world[s_local], kind="stable")]
+            world_start = np.cumsum(shapes_per_world) - shapes_per_world
+            within = np.arange(reps.sum()) - np.repeat(np.cumsum(reps) - reps, reps)
+            f_cols.append(np.repeat(local_features, reps))
+            s_cols.append(shapes_by_world[np.repeat(world_start[local_feature_world], reps) + within])
 
     if not f_cols:
         return _pairs(np.empty(0), np.empty(0))
-    return _pairs(np.concatenate(f_cols), np.concatenate(s_cols))
+    f_idx = np.concatenate(f_cols)
+    s_idx = np.concatenate(s_cols)
+    return _pairs(f_idx, s_idx)
 
 
 def _build_soft_particle_rigid_contact_pairs(model: Model) -> wp.array[wp.vec2i]:
@@ -1056,7 +1079,12 @@ def _build_soft_face_rigid_contact_pairs(
     world_count = int(getattr(model, "world_count", 0) or 0)
     face_world = model.particle_world.numpy()[model.tri_indices.numpy()[:, 0]]
     return _world_compatible_pairs(
-        face_world, model.shape_world.numpy(), world_count, device, shape_ok=capable_shape_mask
+        face_world,
+        model.shape_world.numpy(),
+        world_count,
+        device,
+        shape_ok=capable_shape_mask,
+        shape_major=True,
     )
 
 
@@ -1078,7 +1106,12 @@ def _build_soft_edge_rigid_contact_pairs(
     # edge_indices rows are [o0, o1, v0, v1]; col 2 (v0) is an endpoint, so its world is the edge's.
     edge_world = model.particle_world.numpy()[model.edge_indices.numpy()[:, 2]]
     return _world_compatible_pairs(
-        edge_world, model.shape_world.numpy(), world_count, device, shape_ok=capable_shape_mask
+        edge_world,
+        model.shape_world.numpy(),
+        world_count,
+        device,
+        shape_ok=capable_shape_mask,
+        shape_major=True,
     )
 
 
