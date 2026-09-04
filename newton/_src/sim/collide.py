@@ -30,6 +30,7 @@ from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.soft_contacts_heightfield import launch_soft_heightfield_contacts
+from ..geometry.soft_contacts_mesh import launch_soft_mesh_face_contacts
 from ..geometry.soft_contacts_sdf import launch_soft_ef_contacts
 from ..geometry.support_function import (
     GenericShapeData,
@@ -1813,23 +1814,30 @@ class CollisionPipeline:
         # Full-surface edge/face candidate pairs (world-compatible, like the particle pairs above);
         # empty when the flag is off so the flag-off default stays bit-for-bit.
         if enable_rigid_soft_full_surface_contact:
-            # SDF-capable shapes use the common edge/face passes; heightfields use an exact structured
-            # grid pass. A participating mesh/convex WITHOUT an SDF is a provisioning mistake and
-            # fails loudly. Other unsupported shape types warn and fall back to particle contacts.
+            # Analytic shapes use the common face pass. Mesh faces first query their rigid triangle
+            # BVH before SDF minimization; heightfields use an exact structured-grid pass. All
+            # SDF-capable shapes continue to use the common edge pass.
             _capable = _full_surface_capable_shape_mask(model) if model.shape_count > 0 else None
             if _capable is not None:
-                _heightfield_capable = model.shape_type.numpy() == int(GeoType.HFIELD)
+                _shape_types = model.shape_type.numpy()
+                _mesh_capable = _capable & np.isin(_shape_types, (int(GeoType.MESH), int(GeoType.CONVEX_MESH)))
+                _common_face_capable = _capable & ~_mesh_capable
+                _heightfield_capable = _shape_types == int(GeoType.HFIELD)
                 _all_capable = _capable | _heightfield_capable
                 _raise_on_unprovisioned_full_surface_meshes(model, _all_capable)
                 _warn_full_surface_fallbacks(model, _all_capable)
             else:
+                _mesh_capable = None
+                _common_face_capable = None
                 _heightfield_capable = None
             self.soft_edge_rigid_pairs = _build_soft_edge_rigid_contact_pairs(model, _capable)
-            self.soft_face_rigid_pairs = _build_soft_face_rigid_contact_pairs(model, _capable)
+            self.soft_face_rigid_pairs = _build_soft_face_rigid_contact_pairs(model, _common_face_capable)
+            self.soft_mesh_face_pairs = _build_soft_face_rigid_contact_pairs(model, _mesh_capable)
             self.soft_heightfield_face_pairs = _build_soft_face_rigid_contact_pairs(model, _heightfield_capable)
         else:
             _empty_pairs = wp.array(np.empty((0, 2), np.int32), dtype=wp.vec2i, device=model.device)
             self.soft_edge_rigid_pairs, self.soft_face_rigid_pairs = _empty_pairs, _empty_pairs
+            self.soft_mesh_face_pairs = _empty_pairs
             self.soft_heightfield_face_pairs = _empty_pairs
         if soft_contact_max is None:
             soft_contact_max = self.soft_contact_pair_count
@@ -1837,6 +1845,7 @@ class CollisionPipeline:
             soft_contact_max += (
                 len(self.soft_edge_rigid_pairs)
                 + len(self.soft_face_rigid_pairs)
+                + len(self.soft_mesh_face_pairs)
                 + len(self.soft_heightfield_face_pairs)
             )
         self.soft_contact_gap = soft_contact_gap
@@ -1982,6 +1991,7 @@ class CollisionPipeline:
                 self._soft_contact_pair_count
                 + len(self.soft_edge_rigid_pairs)
                 + len(self.soft_face_rigid_pairs)
+                + len(self.soft_mesh_face_pairs)
                 + len(self.soft_heightfield_face_pairs)
             ),
             requires_grad=self.requires_grad,
@@ -2673,6 +2683,17 @@ class CollisionPipeline:
                 face_pairs=self.soft_face_rigid_pairs,
                 n_particle_pairs=self.soft_contact_pair_count,
             )
+            launch_soft_mesh_face_contacts(
+                model=model,
+                state=state,
+                contacts=contacts,
+                margin=soft_contact_gap,
+                device=self.device,
+                face_pairs=self.soft_mesh_face_pairs,
+                tid_base=self.soft_contact_pair_count
+                + len(self.soft_edge_rigid_pairs)
+                + len(self.soft_face_rigid_pairs),
+            )
             launch_soft_heightfield_contacts(
                 model=model,
                 state=state,
@@ -2682,7 +2703,8 @@ class CollisionPipeline:
                 face_pairs=self.soft_heightfield_face_pairs,
                 tid_base=self.soft_contact_pair_count
                 + len(self.soft_edge_rigid_pairs)
-                + len(self.soft_face_rigid_pairs),
+                + len(self.soft_face_rigid_pairs)
+                + len(self.soft_mesh_face_pairs),
             )
 
         # Preserve the previous provenance if validation or collision setup fails.

@@ -21,6 +21,7 @@ from newton._src.geometry.kernels import (
     resolve_mesh_sign_method,
 )
 from newton._src.geometry.sdf_texture import TextureSDFData
+from newton._src.geometry.soft_contacts_mesh import launch_soft_mesh_face_contacts
 from newton._src.geometry.soft_contacts_sdf import (
     SDF_EDGE_ITERS,
     SDF_FACE_ITERS,
@@ -4416,9 +4417,112 @@ def test_optimize_against_mesh_texture_sdf(test, device):
     test.assertLess(abs(float(out_phi2.numpy()[0]) - phi_ref_face), tol)
 
 
+def test_mesh_face_bvh_cull_preserves_contacts(test, device):
+    """Rigid-mesh BVH culling preserves the existing SDF face contacts exactly."""
+    rng = np.random.default_rng(91)
+    centers = np.vstack(
+        (
+            np.zeros((1, 3)),  # wholly inside: no surface BVH overlap, but a penetrating contact
+            np.array(((0.0, 0.0, 0.62), (1.0, 0.0, 0.0), (0.0, 0.36, 0.0))),
+            rng.uniform((-1.6, -0.8, -1.2), (1.6, 0.8, 1.2), size=(60, 3)),
+        )
+    )
+    vertices = []
+    indices = []
+    for center in centers:
+        base = len(vertices)
+        points = center + rng.normal(0.0, 0.06, size=(3, 3))
+        vertices.extend(wp.vec3(*point) for point in points)
+        indices.extend((base, base + 1, base + 2))
+
+    builder = newton.ModelBuilder()
+    box_mesh = newton.Mesh.create_box(0.5, 0.5, 0.5)
+    builder.add_shape_mesh(
+        body=-1,
+        mesh=box_mesh,
+        scale=(2.0, 0.7, 1.2),
+    )
+    builder.add_shape_convex_hull(
+        body=-1,
+        mesh=box_mesh,
+        scale=(2.0, 0.7, 1.2),
+    )
+    builder.add_cloth_mesh(
+        pos=wp.vec3(0.0),
+        rot=wp.quat_identity(),
+        scale=1.0,
+        vel=wp.vec3(0.0),
+        vertices=vertices,
+        indices=indices,
+        density=0.1,
+        particle_radius=0.0,
+    )
+    configure_sdf_for_collision_shapes(builder)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        soft_contact_gap=0.08,
+        enable_rigid_soft_full_surface_contact=True,
+    )
+    test.assertEqual(len(pipeline.soft_mesh_face_pairs), 2 * model.tri_count)
+
+    state = model.state()
+    old_contacts = pipeline.contacts()
+    old_contacts.soft_contact_count.zero_()
+    empty = wp.empty(0, dtype=wp.vec2i, device=device)
+    launch_soft_ef_contacts(
+        model=model,
+        state=state,
+        contacts=old_contacts,
+        margin=0.08,
+        device=device,
+        edge_pairs=empty,
+        face_pairs=pipeline.soft_mesh_face_pairs,
+        n_particle_pairs=0,
+    )
+
+    new_contacts = pipeline.contacts()
+    new_contacts.soft_contact_count.zero_()
+    launch_soft_mesh_face_contacts(
+        model=model,
+        state=state,
+        contacts=new_contacts,
+        margin=0.08,
+        device=device,
+        face_pairs=pipeline.soft_mesh_face_pairs,
+        tid_base=0,
+    )
+
+    old_count = int(old_contacts.soft_contact_count.numpy()[0])
+    new_count = int(new_contacts.soft_contact_count.numpy()[0])
+    test.assertGreater(old_count, 0)
+    test.assertEqual(new_count, old_count)
+
+    def _sorted_records(contacts, count):
+        indices = contacts.soft_contact_indices.numpy()[:count]
+        shapes = contacts.soft_contact_shape.numpy()[:count]
+        order = np.lexsort((indices[:, 2], indices[:, 1], indices[:, 0], shapes))
+        return (
+            shapes[order],
+            indices[order],
+            contacts.soft_contact_barycentric.numpy()[:count][order],
+            contacts.soft_contact_body_pos.numpy()[:count][order],
+            contacts.soft_contact_normal.numpy()[:count][order],
+        )
+
+    old_records = _sorted_records(old_contacts, old_count)
+    new_records = _sorted_records(new_contacts, new_count)
+    test.assertTrue(np.array_equal(new_records[0], old_records[0]))
+    test.assertTrue(np.array_equal(new_records[1], old_records[1]))
+    for new_values, old_values in zip(new_records[2:], old_records[2:], strict=True):
+        np.testing.assert_allclose(new_values, old_values, rtol=0.0, atol=1.0e-6)
+
+
 for _name, _fn in (
     ("test_mesh_sdf_provisioned_and_emits", test_mesh_sdf_provisioned_and_emits),
     ("test_optimize_against_mesh_texture_sdf", test_optimize_against_mesh_texture_sdf),
+    ("test_mesh_face_bvh_cull_preserves_contacts", test_mesh_face_bvh_cull_preserves_contacts),
 ):
     add_function_test(TestFullSurfaceSoftContact, _name, _fn, devices=get_cuda_test_devices())
 
@@ -4552,6 +4656,7 @@ def test_full_surface_replay_spans_candidate_space(test, device):
         pipeline.soft_contact_pair_count
         + len(pipeline.soft_edge_rigid_pairs)
         + len(pipeline.soft_face_rigid_pairs)
+        + len(pipeline.soft_mesh_face_pairs)
         + len(pipeline.soft_heightfield_face_pairs)
     )
     test.assertGreater(candidate, 1, "test needs a candidate space larger than the capacity override")
@@ -5123,6 +5228,7 @@ def test_graph_capture_stable(test, device):
     builder.add_shape_box(
         body=-1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()), hx=0.5, hy=0.5, hz=0.5
     )
+    builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.5, 0.5, 0.5))
     builder.add_cloth_grid(
         pos=wp.vec3(-0.4, -0.4, 0.45),
         rot=wp.quat_identity(),
@@ -5133,6 +5239,7 @@ def test_graph_capture_stable(test, device):
         cell_y=0.2,
         mass=0.1,
     )
+    configure_sdf_for_collision_shapes(builder)
     model = builder.finalize(device=device)
     pipeline = newton.CollisionPipeline(
         model, broad_phase="nxn", soft_contact_gap=0.1, enable_rigid_soft_full_surface_contact=True
