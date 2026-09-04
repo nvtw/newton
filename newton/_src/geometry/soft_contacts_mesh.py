@@ -9,12 +9,10 @@ from .flags import ShapeFlags
 from .kernels import triangle_closest_point
 from .sdf_texture import TextureSDFData
 from .soft_contacts_sdf import (
-    SDF_FACE_ITERS,
-    SDF_LS_ITERS,
     _emit_soft_ef_contact,
     _eval_shape_sdf_lower,
     _shape_frames,
-    optimize_face_sdf,
+    create_soft_face_sdf_contacts,
 )
 
 # Dense overlaps favor the fixed-cost SDF optimizer; bounding candidates also caps local storage
@@ -276,86 +274,6 @@ def create_soft_mesh_face_contacts(
         )
 
 
-@wp.kernel
-def create_soft_mesh_face_sdf_contacts(
-    fallback_tids: wp.array[wp.int32],
-    fallback_count: wp.array[wp.int32],
-    fallback_grid_size: wp.int32,
-    face_pairs: wp.array[wp.vec2i],
-    particle_q: wp.array[wp.vec3],
-    particle_radius: wp.array[float],
-    tri_indices: wp.array2d[wp.int32],
-    shape_body: wp.array[wp.int32],
-    shape_type: wp.array[wp.int32],
-    shape_transform: wp.array[wp.transform],
-    shape_scale: wp.array[wp.vec3],
-    body_q: wp.array[wp.transform],
-    shape_sdf_index: wp.array[wp.int32],
-    texture_sdf_table: wp.array[TextureSDFData],
-    shape_margin: wp.array[float],
-    margin: float,
-    tid_base: wp.int32,
-    soft_contact_max: wp.int32,
-    soft_contact_count: wp.array[wp.int32],
-    soft_contact_tids: wp.array[wp.int32],
-    soft_contact_particle: wp.array[wp.int32],
-    soft_contact_indices: wp.array[wp.vec3i],
-    soft_contact_barycentric: wp.array[wp.vec3],
-    soft_contact_shape: wp.array[wp.int32],
-    soft_contact_body_pos: wp.array[wp.vec3],
-    soft_contact_body_vel: wp.array[wp.vec3],
-    soft_contact_normal: wp.array[wp.vec3],
-):
-    """Optimize the compacted mesh faces that require the volume-SDF fallback."""
-    offset = wp.tid()
-    count = wp.min(fallback_count[0], fallback_tids.shape[0])
-    for fallback_slot in range(offset, count, fallback_grid_size):
-        source_tid = fallback_tids[fallback_slot]
-        pair = face_pairs[source_tid]
-        tri = pair[0]
-        shape = pair[1]
-
-        a_idx = tri_indices[tri, 0]
-        b_idx = tri_indices[tri, 1]
-        c_idx = tri_indices[tri, 2]
-        radius = wp.max(particle_radius[a_idx], wp.max(particle_radius[b_idx], particle_radius[c_idx]))
-        shape_contact_margin = shape_margin[shape] if shape_margin.shape[0] > 0 else 0.0
-        threshold = margin + shape_contact_margin + radius
-
-        X_bs, X_ws, X_sw = _shape_frames(shape_body, body_q, shape_transform, shape)
-        a = wp.transform_point(X_sw, particle_q[a_idx])
-        b = wp.transform_point(X_sw, particle_q[b_idx])
-        c = wp.transform_point(X_sw, particle_q[c_idx])
-        scale = shape_scale[shape]
-        geo = shape_type[shape]
-        sdf_idx = shape_sdf_index[shape]
-        bary, x, phi, grad = optimize_face_sdf(
-            geo, scale, a, b, c, sdf_idx, texture_sdf_table, SDF_FACE_ITERS, SDF_LS_ITERS
-        )
-        if phi < threshold:
-            y = x - phi * grad
-            _emit_soft_ef_contact(
-                source_tid,
-                tid_base,
-                soft_contact_max,
-                soft_contact_count,
-                soft_contact_tids,
-                soft_contact_particle,
-                soft_contact_indices,
-                soft_contact_barycentric,
-                soft_contact_shape,
-                soft_contact_body_pos,
-                soft_contact_body_vel,
-                soft_contact_normal,
-                wp.vec3i(a_idx, b_idx, c_idx),
-                bary,
-                shape,
-                wp.transform_point(X_bs, y),
-                wp.vec3(0.0),
-                wp.transform_vector(X_ws, grad),
-            )
-
-
 def launch_soft_mesh_face_contacts(
     *,
     model,
@@ -417,7 +335,7 @@ def launch_soft_mesh_face_contacts(
         len(face_pairs), _MESH_SDF_FALLBACK_GRID_SIZE if wp.get_device(device).is_cuda else len(face_pairs)
     )
     wp.launch(
-        create_soft_mesh_face_sdf_contacts,
+        create_soft_face_sdf_contacts,
         dim=fallback_grid_size,
         inputs=[
             fallback_tids,

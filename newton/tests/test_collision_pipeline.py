@@ -4035,6 +4035,8 @@ def test_edge_face_passes_box(test, device):
     contacts.soft_contact_count.zero_()
     edge_pairs = _build_soft_edge_rigid_contact_pairs(model)
     face_pairs = _build_soft_face_rigid_contact_pairs(model)
+    face_fallback_tids = wp.empty(len(face_pairs), dtype=wp.int32, device=device)
+    face_fallback_count = wp.zeros(1, dtype=wp.int32, device=device)
     # Isolated launch (no particle pass), so this pass's tids start at 0.
     launch_soft_ef_contacts(
         model=model,
@@ -4044,8 +4046,12 @@ def test_edge_face_passes_box(test, device):
         device=device,
         edge_pairs=edge_pairs,
         face_pairs=face_pairs,
+        face_fallback_tids=face_fallback_tids,
+        face_fallback_count=face_fallback_count,
         n_particle_pairs=0,
     )
+    # Small candidate sets stay fused instead of paying compaction launch overhead.
+    test.assertEqual(int(face_fallback_count.numpy()[0]), 0)
 
     total = int(contacts.soft_contact_count.numpy()[0])
     idx = contacts.soft_contact_indices.numpy()[:total]
@@ -4111,6 +4117,8 @@ def test_edge_face_respect_shape_margin(test, device):
     contacts.soft_contact_count.zero_()
     edge_pairs = _build_soft_edge_rigid_contact_pairs(model)
     face_pairs = _build_soft_face_rigid_contact_pairs(model)
+    face_fallback_tids = wp.empty(len(face_pairs), dtype=wp.int32, device=device)
+    face_fallback_count = wp.zeros(1, dtype=wp.int32, device=device)
     launch_soft_ef_contacts(
         model=model,
         state=state,
@@ -4119,6 +4127,8 @@ def test_edge_face_respect_shape_margin(test, device):
         device=device,
         edge_pairs=edge_pairs,
         face_pairs=face_pairs,
+        face_fallback_tids=face_fallback_tids,
+        face_fallback_count=face_fallback_count,
         n_particle_pairs=0,
     )
 
@@ -4479,6 +4489,8 @@ def test_mesh_face_bvh_cull_preserves_contacts(test, device):
         device=device,
         edge_pairs=empty,
         face_pairs=pipeline.soft_mesh_face_pairs,
+        face_fallback_tids=pipeline._soft_face_fallback_tids,
+        face_fallback_count=pipeline._soft_face_fallback_count,
         n_particle_pairs=0,
     )
 
@@ -4874,10 +4886,20 @@ def test_full_surface_allows_infinite_plane(test, device):
     everywhere), so the common ground-plane case keeps working (E4 regression guard)."""
     builder = newton.ModelBuilder()
     builder.add_ground_plane()  # infinite
-    _add_soft_triangle(builder)
+    _add_soft_triangle(builder, z=0.005)
     model = builder.finalize(device=device)
-    # Must not raise.
-    newton.CollisionPipeline(model, broad_phase="nxn", enable_rigid_soft_full_surface_contact=True)
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        soft_contact_gap=0.01,
+        enable_rigid_soft_full_surface_contact=True,
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+    total = int(contacts.soft_contact_count.numpy()[0])
+    indices = contacts.soft_contact_indices.numpy()[:total]
+    test.assertEqual(int(np.sum(indices[:, 2] >= 0)), 1)
+    test.assertEqual(int(pipeline._soft_face_fallback_count.numpy()[0]), 0)
 
 
 def _nonuniform_box_mesh_gap_model(device, tri_x):
@@ -5191,6 +5213,8 @@ def test_end_to_end_no_false_pos_neg(test, device):
     contacts.soft_contact_count.zero_()
     edge_pairs = _build_soft_edge_rigid_contact_pairs(model)
     face_pairs = _build_soft_face_rigid_contact_pairs(model)
+    face_fallback_tids = wp.empty(len(face_pairs), dtype=wp.int32, device=device)
+    face_fallback_count = wp.zeros(1, dtype=wp.int32, device=device)
     launch_soft_ef_contacts(
         model=model,
         state=state,
@@ -5199,6 +5223,8 @@ def test_end_to_end_no_false_pos_neg(test, device):
         device=device,
         edge_pairs=edge_pairs,
         face_pairs=face_pairs,
+        face_fallback_tids=face_fallback_tids,
+        face_fallback_count=face_fallback_count,
         n_particle_pairs=0,
     )
 
