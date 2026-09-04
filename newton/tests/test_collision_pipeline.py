@@ -965,6 +965,9 @@ def test_mixed_winding_convex_pile_contact_normal(test, device):
             # Tagged watertight so the sign method resolves to parity.
             wp.array([int(MeshProperties.WATERTIGHT)], dtype=wp.int32, device=device),
             wp.array([-1], dtype=wp.int32, device=device),
+            wp.array([wp.vec3(-1.0)], dtype=wp.vec3, device=device),
+            wp.array([wp.vec3(1.0)], dtype=wp.vec3, device=device),
+            wp.array([0.0], dtype=wp.float32, device=device),
             0.0,
             wp.array([0.0], dtype=wp.float32, device=device),
             1,
@@ -1161,6 +1164,9 @@ def _launch_open_box_soft_contact(test, device, mesh_id, points, mesh_properties
             wp.array([mesh_id], dtype=wp.uint64, device=device),
             wp.array([mesh_properties], dtype=wp.int32, device=device),
             wp.array([-1], dtype=wp.int32, device=device),
+            wp.array([wp.vec3(-1.0)], dtype=wp.vec3, device=device),
+            wp.array([wp.vec3(1.0)], dtype=wp.vec3, device=device),
+            wp.array([0.0], dtype=wp.float32, device=device),
             0.0,
             wp.array([0.0], dtype=wp.float32, device=device),
             1,
@@ -2545,6 +2551,39 @@ def test_particle_shape_contacts(test, device, shape_type: GeoType):
                 np.allclose(normal_lengths, 1.0, atol=0.01),
                 f"Contact normals should be normalized, got lengths: {normal_lengths}",
             )
+
+
+def test_particle_contacts_below_one_sided_shapes(test, device):
+    """Deeply penetrating particles must not be rejected by surface-thin rigid AABBs."""
+    for shape_kind in ("infinite plane", "heightfield"):
+        with test.subTest(shape_kind=shape_kind):
+            builder = newton.ModelBuilder()
+            if shape_kind == "infinite plane":
+                builder.add_shape_plane(width=0.0, length=0.0)
+            else:
+                builder.add_shape_heightfield(
+                    heightfield=newton.Heightfield(
+                        data=np.zeros((3, 3), dtype=np.float32),
+                        nrow=3,
+                        ncol=3,
+                        hx=1.0,
+                        hy=1.0,
+                    )
+                )
+            builder.add_particle(pos=wp.vec3(0.0, 0.0, -1.0), vel=wp.vec3(), mass=1.0, radius=0.0)
+            model = builder.finalize(device=device)
+            pipeline = newton.CollisionPipeline(model, broad_phase="nxn", soft_contact_gap=0.01)
+            contacts = pipeline.contacts()
+            pipeline.collide(model.state(), contacts)
+            test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), 1)
+
+
+add_function_test(
+    TestParticleShapeContacts,
+    "test_particle_contacts_below_one_sided_shapes",
+    test_particle_contacts_below_one_sided_shapes,
+    devices=get_test_devices(),
+)
 
 
 # Shape types to test for particle-shape contacts
