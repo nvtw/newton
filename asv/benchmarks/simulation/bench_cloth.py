@@ -45,12 +45,16 @@ DEFORMABLE_RIGID_CASES = (
     ("cone", "cone", 32, 64, 16, False),
     ("ellipsoid", "ellipsoid", 32, 64, 16, False),
     ("mesh_sdf", "mesh", 32, 64, 16, False),
+    ("mesh_high_poly_fallback", "mesh_high_poly", 64, 256, 1, False),
     ("infinite_plane", "plane", 64, 128, 1, False),
     ("finite_plane", "finite_plane", 64, 128, 1, False),
     ("heightfield", "heightfield", 64, 128, 1, False),
     ("mixed", "mixed", 32, 64, 20, False),
     ("mixed_sparse", "mixed", 32, 64, 20, True),
+    ("mixed_gpu", "mixed", 128, 64, 10, False),
     ("sphere_10m_rl", "sphere", 64, 1250, 1, False),
+    ("mesh_10m_rl", "mesh", 64, 1250, 1, False),
+    ("mesh_sparse_10m_rl", "mesh", 64, 1250, 1, True),
 )
 
 
@@ -120,7 +124,12 @@ def _make_deformable_rigid_world(kind, resolution, shape_count, sparse):
     )
 
     side = int(np.ceil(np.sqrt(shape_count)))
-    mesh = newton.Mesh.create_box(0.18, 0.18, 0.18) if kind in ("mesh", "mixed") else None
+    if kind == "mesh_high_poly":
+        mesh = newton.Mesh.create_sphere(0.18, num_latitudes=64, num_longitudes=128)
+    elif kind in ("mesh", "mixed"):
+        mesh = newton.Mesh.create_box(0.18, 0.18, 0.18)
+    else:
+        mesh = None
     heightfield = (
         newton.Heightfield(data=np.zeros((17, 17), dtype=np.float32), nrow=17, ncol=17, hx=0.5, hy=0.5)
         if kind in ("heightfield", "mixed")
@@ -144,6 +153,8 @@ def _make_deformable_rigid_world(kind, resolution, shape_count, sparse):
         x = (column + 0.5) * extent / side - 0.5 * extent
         y = (row + 0.5) * extent / side - 0.5 * extent
         shape_kind = shape_kinds[shape_index % len(shape_kinds)] if kind == "mixed" else kind
+        if shape_kind == "mesh_high_poly":
+            shape_kind = "mesh"
         z = 0.42 if shape_kind in ("plane", "finite_plane", "heightfield") else 0.4
         xform = wp.transform(wp.vec3(x, y, z), wp.quat_identity())
         if shape_kind == "sphere":
