@@ -29,10 +29,11 @@ DEFORMABLE_COLLISION_CASES = (
     ("sparse", 16, 128, 2),
     ("folded", 32, 32, 2),
     ("layered", 16, 64, 2),
+)
+
+DEFORMABLE_COLLISION_SCALE_CASES = (
     ("dense_10m", 16, 11112, 1),
     ("sparse_10m", 64, 630, 1),
-    ("folded_10m", 32, 2602, 1),
-    ("layered_10m", 16, 5556, 1),
 )
 
 DEFORMABLE_RIGID_CASES = (
@@ -52,9 +53,12 @@ DEFORMABLE_RIGID_CASES = (
     ("mixed", "mixed", 32, 64, 20, False),
     ("mixed_sparse", "mixed", 32, 64, 20, True),
     ("mixed_gpu", "mixed", 128, 64, 10, False),
+)
+
+
+DEFORMABLE_RIGID_SCALE_CASES = (
     ("sphere_10m_rl", "sphere", 64, 1250, 1, False),
     ("mesh_10m_rl", "mesh", 64, 1250, 1, False),
-    ("mesh_sparse_10m_rl", "mesh", 64, 1250, 1, True),
 )
 
 
@@ -187,8 +191,10 @@ class DeformableSelfCollision:
 
     params = (DEFORMABLE_COLLISION_CASES,)
     param_names = ["case"]
-    repeat = pr_gate_repeat(5)
+    repeat = 3
     number = 1
+    warmup_count = 3
+    launch_count = 10
 
     def setup(self, case):
         device = wp.get_device()
@@ -207,9 +213,8 @@ class DeformableSelfCollision:
             edge_collision_buffer_pre_alloc=64,
         )
         self.radius = 0.012
-        self.launch_count = 20
 
-        for _ in range(5):
+        for _ in range(self.warmup_count):
             self._detect()
         with wp.ScopedCapture(device=device) as capture:
             self._detect()
@@ -227,13 +232,24 @@ class DeformableSelfCollision:
         wp.synchronize_device()
 
 
+class DeformableSelfCollisionScale(DeformableSelfCollision):
+    """Sample GPU-saturating self-collision scales once per revision."""
+
+    params = (DEFORMABLE_COLLISION_SCALE_CASES,)
+    repeat = 1
+    warmup_count = 1
+    launch_count = 3
+
+
 class DeformableRigidCollision:
     """Benchmark full-surface deformable contact against individual and mixed rigid geometry."""
 
     params = (DEFORMABLE_RIGID_CASES,)
     param_names = ["case"]
-    repeat = pr_gate_repeat(5)
+    repeat = 3
     number = 1
+    warmup_count = 2
+    launch_count = 10
     timeout = 600
 
     def setup(self, case):
@@ -257,9 +273,8 @@ class DeformableRigidCollision:
             verify_buffers=False,
         )
         self.contacts = self.pipeline.contacts()
-        self.launch_count = 20
 
-        for _ in range(3):
+        for _ in range(self.warmup_count):
             self.pipeline.collide(self.state, self.contacts)
         if kind == "mixed" and not sparse:
             contact_count = int(self.contacts.soft_contact_count.numpy()[0])
@@ -277,6 +292,15 @@ class DeformableRigidCollision:
         for _ in range(self.launch_count):
             wp.capture_launch(self.graph)
         wp.synchronize_device()
+
+
+class DeformableRigidCollisionScale(DeformableRigidCollision):
+    """Sample GPU-saturating deformable-rigid scales once per revision."""
+
+    params = (DEFORMABLE_RIGID_SCALE_CASES,)
+    repeat = 1
+    warmup_count = 1
+    launch_count = 3
 
 
 class FastExampleClothManipulation:
@@ -325,7 +349,9 @@ if __name__ == "__main__":
 
     benchmark_list = {
         "DeformableSelfCollision": DeformableSelfCollision,
+        "DeformableSelfCollisionScale": DeformableSelfCollisionScale,
         "DeformableRigidCollision": DeformableRigidCollision,
+        "DeformableRigidCollisionScale": DeformableRigidCollisionScale,
         "FastExampleClothManipulation": FastExampleClothManipulation,
         "FastExampleClothTwist": FastExampleClothTwist,
     }
