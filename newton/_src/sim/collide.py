@@ -31,7 +31,7 @@ from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.soft_contacts_heightfield import launch_soft_heightfield_contacts
 from ..geometry.soft_contacts_mesh import launch_soft_mesh_face_contacts
-from ..geometry.soft_contacts_sdf import launch_soft_ef_contacts
+from ..geometry.soft_contacts_sdf import _SDF_SPECIALIZED_GEO_TYPES, launch_soft_ef_contacts
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
@@ -1825,11 +1825,19 @@ class CollisionPipeline:
                 _heightfield_capable = _shape_types == int(GeoType.HFIELD)
                 _all_capable = _capable | _heightfield_capable
                 _raise_on_unprovisioned_full_surface_meshes(model, _all_capable)
+                self._soft_face_sdf_geo_types = tuple(
+                    int(geo)
+                    for geo in _SDF_SPECIALIZED_GEO_TYPES
+                    if np.any(_common_face_capable & (_shape_types == int(geo)))
+                )
+                self._soft_edge_sdf_geo_types = self._soft_face_sdf_geo_types
                 _warn_full_surface_fallbacks(model, _all_capable)
             else:
                 _mesh_capable = None
                 _common_face_capable = None
                 _heightfield_capable = None
+                self._soft_face_sdf_geo_types = ()
+                self._soft_edge_sdf_geo_types = ()
             self.soft_edge_rigid_pairs = _build_soft_edge_rigid_contact_pairs(model, _capable)
             self.soft_face_rigid_pairs = _build_soft_face_rigid_contact_pairs(model, _common_face_capable)
             self.soft_mesh_face_pairs = _build_soft_face_rigid_contact_pairs(model, _mesh_capable)
@@ -1838,6 +1846,8 @@ class CollisionPipeline:
             _empty_pairs = wp.array(np.empty((0, 2), np.int32), dtype=wp.vec2i, device=model.device)
             self.soft_edge_rigid_pairs, self.soft_face_rigid_pairs = _empty_pairs, _empty_pairs
             self.soft_mesh_face_pairs = _empty_pairs
+            self._soft_face_sdf_geo_types = ()
+            self._soft_edge_sdf_geo_types = ()
             self.soft_heightfield_face_pairs = _empty_pairs
         self._soft_mesh_face_fallback_tids = wp.empty(
             len(self.soft_mesh_face_pairs), dtype=wp.int32, device=model.device
@@ -2692,6 +2702,8 @@ class CollisionPipeline:
                 sdf_fallback_tids=self._soft_sdf_fallback_tids,
                 sdf_fallback_count=self._soft_sdf_fallback_count,
                 n_particle_pairs=self.soft_contact_pair_count,
+                edge_sdf_geo_types=self._soft_edge_sdf_geo_types,
+                face_sdf_geo_types=self._soft_face_sdf_geo_types,
             )
             launch_soft_mesh_face_contacts(
                 model=model,

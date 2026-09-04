@@ -4082,8 +4082,8 @@ def test_edge_face_passes_box(test, device):
         test.assertLess(abs(_box_sdf_np(body_pos[i], half)), 1.0e-2)  # closest point on the box surface
 
 
-def test_compact_edge_contacts_match_fused(test, device):
-    """Compacted iterative edge work must reproduce the fused kernel exactly."""
+def test_specialized_edge_face_contacts_match_fused(test, device):
+    """Generic and geometry-specialized compact work must reproduce fused edge/face contacts."""
     builder = newton.ModelBuilder()
     builder.add_shape_box(body=-1, hx=0.5, hy=0.5, hz=0.5)
     builder.add_cloth_grid(
@@ -4101,11 +4101,11 @@ def test_compact_edge_contacts_match_fused(test, device):
     contacts = pipeline.contacts()
     state = model.state()
     edge_pairs = _build_soft_edge_rigid_contact_pairs(model)
-    empty_pairs = wp.empty(0, dtype=wp.vec2i, device=device)
-    fallback_tids = wp.empty(len(edge_pairs), dtype=wp.int32, device=device)
+    face_pairs = _build_soft_face_rigid_contact_pairs(model)
+    fallback_tids = wp.empty(max(len(edge_pairs), len(face_pairs)), dtype=wp.int32, device=device)
     fallback_count = wp.zeros(1, dtype=wp.int32, device=device)
 
-    def run(compaction_threshold):
+    def run(compaction_threshold, specialize=False):
         contacts.soft_contact_count.zero_()
 
         def launch():
@@ -4116,13 +4116,18 @@ def test_compact_edge_contacts_match_fused(test, device):
                 margin=0.1,
                 device=device,
                 edge_pairs=edge_pairs,
-                face_pairs=empty_pairs,
+                face_pairs=face_pairs,
                 sdf_fallback_tids=fallback_tids,
                 sdf_fallback_count=fallback_count,
                 n_particle_pairs=0,
+                edge_sdf_geo_types=(int(GeoType.BOX),) if specialize else None,
+                face_sdf_geo_types=(int(GeoType.BOX),) if specialize else None,
             )
 
-        with mock.patch("newton._src.geometry.soft_contacts_sdf._SDF_COMPACTION_MIN_PAIRS", compaction_threshold):
+        with (
+            mock.patch("newton._src.geometry.soft_contacts_sdf._SDF_COMPACTION_MIN_PAIRS", compaction_threshold),
+            mock.patch("newton._src.geometry.soft_contacts_sdf._SDF_SPECIALIZATION_MIN_PAIRS_PER_GEO", 0),
+        ):
             if compaction_threshold == 0:
                 with wp.ScopedCapture(device=device) as capture:
                     launch()
@@ -4133,7 +4138,7 @@ def test_compact_edge_contacts_match_fused(test, device):
         count = int(contacts.soft_contact_count.numpy()[0])
         indices = contacts.soft_contact_indices.numpy()[:count]
         shapes = contacts.soft_contact_shape.numpy()[:count]
-        order = np.lexsort((indices[:, 1], indices[:, 0], shapes))
+        order = np.lexsort((indices[:, 2], indices[:, 1], indices[:, 0], shapes))
         return (
             int(fallback_count.numpy()[0]),
             shapes[order].copy(),
@@ -4144,11 +4149,14 @@ def test_compact_edge_contacts_match_fused(test, device):
         )
 
     fused = run(10**9)
-    compact = run(0)
+    compact_generic = run(0)
+    compact_specialized = run(0, specialize=True)
     test.assertEqual(fused[0], 0)
-    test.assertGreater(compact[0], 0)
-    for fused_array, compact_array in zip(fused[1:], compact[1:], strict=True):
-        np.testing.assert_array_equal(compact_array, fused_array)
+    test.assertGreater(compact_generic[0], 0)
+    test.assertGreater(compact_specialized[0], 0)
+    for compact in (compact_generic, compact_specialized):
+        for fused_array, compact_array in zip(fused[1:], compact[1:], strict=True):
+            np.testing.assert_array_equal(compact_array, fused_array)
 
 
 def test_edge_face_respect_shape_margin(test, device):
@@ -4367,8 +4375,8 @@ for _name, _fn in (
 
 add_function_test(
     TestFullSurfaceSoftContact,
-    "test_compact_edge_contacts_match_fused",
-    test_compact_edge_contacts_match_fused,
+    "test_specialized_edge_face_contacts_match_fused",
+    test_specialized_edge_face_contacts_match_fused,
     devices=[device for device in soft_devices if device.is_cuda],
 )
 
