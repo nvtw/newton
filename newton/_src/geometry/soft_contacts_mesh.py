@@ -21,6 +21,10 @@ from .soft_contacts_sdf import (
 # and traversal work before that fallback.
 _MESH_EXACT_MAX_TRIANGLES = wp.constant(6)
 _mesh_triangle_candidates_t = wp.types.vector(length=6, dtype=wp.int32)
+# Cap the compact fallback launch while leaving enough one-warp blocks to saturate large GPUs.
+_MESH_SDF_FALLBACK_GRID_SIZE = 131072
+
+_MESH_FACE_CLASSIFY_BLOCK_DIM = 64
 
 
 @wp.func
@@ -121,6 +125,8 @@ def create_soft_mesh_face_contacts(
     margin: float,
     tid_base: wp.int32,
     soft_contact_max: wp.int32,
+    fallback_tids: wp.array[wp.int32],
+    fallback_count: wp.array[wp.int32],
     soft_contact_count: wp.array[wp.int32],
     soft_contact_tids: wp.array[wp.int32],
     soft_contact_particle: wp.array[wp.int32],
@@ -243,9 +249,9 @@ def create_soft_mesh_face_contacts(
             grad = (closest_x - best_y) / distance
 
     if not use_exact_surface:
-        bary, x, phi, grad = optimize_face_sdf(
-            geo, scale, a, b, c, sdf_idx, texture_sdf_table, SDF_FACE_ITERS, SDF_LS_ITERS
-        )
+        fallback_slot = wp.atomic_add(fallback_count, 0, 1)
+        fallback_tids[fallback_slot] = tid
+        return
     if phi < threshold:
         y = x - phi * grad
         _emit_soft_ef_contact(
@@ -270,10 +276,102 @@ def create_soft_mesh_face_contacts(
         )
 
 
-def launch_soft_mesh_face_contacts(*, model, state, contacts, margin: float, device, face_pairs, tid_base: int):
+@wp.kernel
+def create_soft_mesh_face_sdf_contacts(
+    fallback_tids: wp.array[wp.int32],
+    fallback_count: wp.array[wp.int32],
+    fallback_grid_size: wp.int32,
+    face_pairs: wp.array[wp.vec2i],
+    particle_q: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    tri_indices: wp.array2d[wp.int32],
+    shape_body: wp.array[wp.int32],
+    shape_type: wp.array[wp.int32],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    shape_sdf_index: wp.array[wp.int32],
+    texture_sdf_table: wp.array[TextureSDFData],
+    shape_margin: wp.array[float],
+    margin: float,
+    tid_base: wp.int32,
+    soft_contact_max: wp.int32,
+    soft_contact_count: wp.array[wp.int32],
+    soft_contact_tids: wp.array[wp.int32],
+    soft_contact_particle: wp.array[wp.int32],
+    soft_contact_indices: wp.array[wp.vec3i],
+    soft_contact_barycentric: wp.array[wp.vec3],
+    soft_contact_shape: wp.array[wp.int32],
+    soft_contact_body_pos: wp.array[wp.vec3],
+    soft_contact_body_vel: wp.array[wp.vec3],
+    soft_contact_normal: wp.array[wp.vec3],
+):
+    """Optimize the compacted mesh faces that require the volume-SDF fallback."""
+    offset = wp.tid()
+    count = wp.min(fallback_count[0], fallback_tids.shape[0])
+    for fallback_slot in range(offset, count, fallback_grid_size):
+        source_tid = fallback_tids[fallback_slot]
+        pair = face_pairs[source_tid]
+        tri = pair[0]
+        shape = pair[1]
+
+        a_idx = tri_indices[tri, 0]
+        b_idx = tri_indices[tri, 1]
+        c_idx = tri_indices[tri, 2]
+        radius = wp.max(particle_radius[a_idx], wp.max(particle_radius[b_idx], particle_radius[c_idx]))
+        shape_contact_margin = shape_margin[shape] if shape_margin.shape[0] > 0 else 0.0
+        threshold = margin + shape_contact_margin + radius
+
+        X_bs, X_ws, X_sw = _shape_frames(shape_body, body_q, shape_transform, shape)
+        a = wp.transform_point(X_sw, particle_q[a_idx])
+        b = wp.transform_point(X_sw, particle_q[b_idx])
+        c = wp.transform_point(X_sw, particle_q[c_idx])
+        scale = shape_scale[shape]
+        geo = shape_type[shape]
+        sdf_idx = shape_sdf_index[shape]
+        bary, x, phi, grad = optimize_face_sdf(
+            geo, scale, a, b, c, sdf_idx, texture_sdf_table, SDF_FACE_ITERS, SDF_LS_ITERS
+        )
+        if phi < threshold:
+            y = x - phi * grad
+            _emit_soft_ef_contact(
+                source_tid,
+                tid_base,
+                soft_contact_max,
+                soft_contact_count,
+                soft_contact_tids,
+                soft_contact_particle,
+                soft_contact_indices,
+                soft_contact_barycentric,
+                soft_contact_shape,
+                soft_contact_body_pos,
+                soft_contact_body_vel,
+                soft_contact_normal,
+                wp.vec3i(a_idx, b_idx, c_idx),
+                bary,
+                shape,
+                wp.transform_point(X_bs, y),
+                wp.vec3(0.0),
+                wp.transform_vector(X_ws, grad),
+            )
+
+
+def launch_soft_mesh_face_contacts(
+    *,
+    model,
+    state,
+    contacts,
+    margin: float,
+    device,
+    face_pairs,
+    fallback_tids,
+    fallback_count,
+    tid_base: int,
+):
     """Launch BVH-guided deformable face contacts for rigid mesh shapes."""
     if len(face_pairs) == 0:
         return
+    fallback_count.zero_()
     wp.launch(
         create_soft_mesh_face_contacts,
         dim=len(face_pairs),
@@ -299,6 +397,8 @@ def launch_soft_mesh_face_contacts(*, model, state, contacts, margin: float, dev
             contacts.soft_contact_max,
         ],
         outputs=[
+            fallback_tids,
+            fallback_count,
             contacts.soft_contact_count,
             contacts.soft_contact_tids,
             contacts.soft_contact_particle,
@@ -310,6 +410,46 @@ def launch_soft_mesh_face_contacts(*, model, state, contacts, margin: float, dev
             contacts.soft_contact_normal,
         ],
         device=device,
-        # The exact-feature and SDF fallback branches are register-heavy; one warp preserves occupancy.
+        # Two warps balance BVH traversal throughput and register occupancy.
+        block_dim=_MESH_FACE_CLASSIFY_BLOCK_DIM,
+    )
+    fallback_grid_size = min(
+        len(face_pairs), _MESH_SDF_FALLBACK_GRID_SIZE if wp.get_device(device).is_cuda else len(face_pairs)
+    )
+    wp.launch(
+        create_soft_mesh_face_sdf_contacts,
+        dim=fallback_grid_size,
+        inputs=[
+            fallback_tids,
+            fallback_count,
+            fallback_grid_size,
+            face_pairs,
+            state.particle_q,
+            model.particle_radius,
+            model.tri_indices,
+            model.shape_body,
+            model.shape_type,
+            model.shape_transform,
+            model.shape_scale,
+            state.body_q,
+            model._shape_sdf_index,
+            model._texture_sdf_data,
+            model.shape_margin,
+            margin,
+            tid_base,
+            contacts.soft_contact_max,
+        ],
+        outputs=[
+            contacts.soft_contact_count,
+            contacts.soft_contact_tids,
+            contacts.soft_contact_particle,
+            contacts.soft_contact_indices,
+            contacts.soft_contact_barycentric,
+            contacts.soft_contact_shape,
+            contacts.soft_contact_body_pos,
+            contacts.soft_contact_body_vel,
+            contacts.soft_contact_normal,
+        ],
+        device=device,
         block_dim=32,
     )

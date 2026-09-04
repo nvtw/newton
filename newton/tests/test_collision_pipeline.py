@@ -4491,9 +4491,14 @@ def test_mesh_face_bvh_cull_preserves_contacts(test, device):
         margin=0.08,
         device=device,
         face_pairs=pipeline.soft_mesh_face_pairs,
+        fallback_tids=pipeline._soft_mesh_face_fallback_tids,
+        fallback_count=pipeline._soft_mesh_face_fallback_count,
         tid_base=0,
     )
 
+    fallback_count = int(pipeline._soft_mesh_face_fallback_count.numpy()[0])
+    test.assertGreater(fallback_count, 0)
+    test.assertLess(fallback_count, len(pipeline.soft_mesh_face_pairs))
     old_count = int(old_contacts.soft_contact_count.numpy()[0])
     new_count = int(new_contacts.soft_contact_count.numpy()[0])
     test.assertGreater(old_count, 0)

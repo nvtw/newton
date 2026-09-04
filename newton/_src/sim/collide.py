@@ -1839,6 +1839,10 @@ class CollisionPipeline:
             self.soft_edge_rigid_pairs, self.soft_face_rigid_pairs = _empty_pairs, _empty_pairs
             self.soft_mesh_face_pairs = _empty_pairs
             self.soft_heightfield_face_pairs = _empty_pairs
+        self._soft_mesh_face_fallback_tids = wp.empty(
+            len(self.soft_mesh_face_pairs), dtype=wp.int32, device=model.device
+        )
+        self._soft_mesh_face_fallback_count = wp.zeros(1, dtype=wp.int32, device=model.device)
         if soft_contact_max is None:
             soft_contact_max = self.soft_contact_pair_count
             # Flag-aware headroom: one record per world-compatible (soft edge/tri, shape) pair.
@@ -2690,6 +2694,8 @@ class CollisionPipeline:
                 margin=soft_contact_gap,
                 device=self.device,
                 face_pairs=self.soft_mesh_face_pairs,
+                fallback_tids=self._soft_mesh_face_fallback_tids,
+                fallback_count=self._soft_mesh_face_fallback_count,
                 tid_base=self.soft_contact_pair_count
                 + len(self.soft_edge_rigid_pairs)
                 + len(self.soft_face_rigid_pairs),
