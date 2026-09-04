@@ -545,6 +545,9 @@ def launch_soft_ef_contacts(*, model, state, contacts, margin: float, device, ed
     if n_edge_pairs == 0 and n_face_pairs == 0:
         return
 
+    # The iterative SDF kernels are register-heavy on CUDA; smaller blocks improve occupancy.
+    sdf_block_dim = 128 if wp.get_device(device).is_cuda else 256
+
     shape_args = [
         model.shape_body,
         model.shape_type,
@@ -585,6 +588,7 @@ def launch_soft_ef_contacts(*, model, state, contacts, margin: float, device, ed
             ],
             outputs=outputs,
             device=device,
+            block_dim=sdf_block_dim,
         )
     if n_face_pairs > 0:
         wp.launch(
@@ -604,4 +608,5 @@ def launch_soft_ef_contacts(*, model, state, contacts, margin: float, device, ed
             ],
             outputs=outputs,
             device=device,
+            block_dim=sdf_block_dim,
         )
