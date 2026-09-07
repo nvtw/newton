@@ -10,7 +10,6 @@ import warp as wp
 from warp import DeviceLike as Devicelike
 
 from ..geometry.tri_mesh_collision import TriMeshCollisionInfo, build_tri_mesh_collision_info
-from ..utils.deprecation import deprecate_nonkeyword_arguments
 
 GENERATION_SENTINEL = -1
 """Value reserved as an impossible generation; the increment kernel skips it."""
@@ -163,7 +162,6 @@ class Contacts:
             bad = ", ".join(invalid)
             raise ValueError(f"Unknown extended contact attribute(s): {bad}. Allowed: {allowed}.")
 
-    @deprecate_nonkeyword_arguments
     def __init__(
         self,
         rigid_contact_max: int,
@@ -454,7 +452,13 @@ class Contacts:
         self.soft_self_contact_data: TriMeshCollisionInfo | None = None
         """Tri-mesh self-contact results owned by this container, written by the
         collision pipeline's tri-mesh collision detector; ``None`` unless
-        constructed with ``soft_self_contact=True``."""
+        constructed with ``soft_self_contact=True``.
+
+        .. experimental::
+
+            This storage-level result attribute may change without the normal
+            deprecation period while the public self-contact API matures.
+        """
         if soft_self_contact:
             mesh_counts = {
                 "particle_count": particle_count,

@@ -1577,6 +1577,7 @@ def test_pipeline_soft_self_contact(test, device):
     test.assertIsNone(pipeline._soft_contact_detector.collision_info)
     for contacts in (contacts_a, contacts_b):
         pipeline.collide(state, contacts, soft_self_contact=True)
+        test.assertIs(pipeline._soft_contact_detector.vertex_positions, state.particle_q)
         data = contacts.soft_self_contact_data
         assert_np_equal(
             data.vertex_colliding_triangles_count.numpy(),

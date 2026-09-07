@@ -27,76 +27,113 @@ if TYPE_CHECKING:
 
 @wp.struct
 class TriMeshCollisionInfo:
-    """Store bounded triangle-mesh self-collision query results."""
+    """Bounded buffers produced by triangle-mesh self-collision queries.
 
-    # size: 2 x sum(vertex_colliding_triangles_buffer_sizes)
-    # every two elements records the vertex index and a triangle index it collides to
+    .. experimental::
+
+        This storage-level result type may change without the normal
+        deprecation period while the public self-contact API matures.
+
+    Vertex-triangle and edge-edge results use interleaved source/target pairs;
+    triangle-vertex results use plain target indices. Counts record all pairs
+    found and may exceed a row's capacity when a buffer overflows. Kernel code
+    should therefore read results through the internal ``get_*`` accessors,
+    which clamp counts and apply the correct packed indexing.
+    """
+
     vertex_colliding_triangles: wp.array[wp.int32]
+    """Interleaved vertex/triangle indices, shape ``[2 * sum(vertex row capacities)]``."""
     vertex_colliding_triangles_offsets: wp.array[wp.int32]
+    """Offsets into vertex-triangle rows before interleaved-pair indexing."""
     vertex_colliding_triangles_buffer_sizes: wp.array[wp.int32]
+    """Maximum stored collision count for each vertex row."""
     vertex_colliding_triangles_count: wp.array[wp.int32]
+    """Detected collision count for each vertex; values may exceed row capacity."""
     vertex_colliding_triangles_min_dist: wp.array[float]
+    """Minimum detected vertex-triangle distance for each vertex [m]."""
 
     triangle_colliding_vertices: wp.array[wp.int32]
+    """Vertex indices grouped into rows for each triangle."""
     triangle_colliding_vertices_offsets: wp.array[wp.int32]
+    """Offsets into the plain-index triangle-vertex rows."""
     triangle_colliding_vertices_buffer_sizes: wp.array[wp.int32]
+    """Maximum stored collision count for each triangle row."""
     triangle_colliding_vertices_count: wp.array[wp.int32]
+    """Detected collision count for each triangle; values may exceed row capacity."""
     triangle_colliding_vertices_min_dist: wp.array[float]
+    """Minimum detected triangle-vertex distance for each triangle [m]."""
 
-    # size: 2 x sum(edge_colliding_edges_buffer_sizes)
-    # every two elements records the edge index and an edge index it collides to
     edge_colliding_edges: wp.array[wp.int32]
+    """Interleaved source/target edge indices, shape ``[2 * sum(edge row capacities)]``."""
     edge_colliding_edges_offsets: wp.array[wp.int32]
+    """Offsets into edge-edge rows before interleaved-pair indexing."""
     edge_colliding_edges_buffer_sizes: wp.array[wp.int32]
+    """Maximum stored collision count for each edge row."""
     edge_colliding_edges_count: wp.array[wp.int32]
+    """Detected collision count for each edge; values may exceed row capacity."""
     edge_colliding_edges_min_dist: wp.array[float]
+    """Minimum detected edge-edge distance for each edge [m]."""
 
 
 @wp.func
-def get_vertex_colliding_triangles_count(col_info: TriMeshCollisionInfo, v: int):
-    return wp.min(col_info.vertex_colliding_triangles_count[v], col_info.vertex_colliding_triangles_buffer_sizes[v])
-
-
-@wp.func
-def get_vertex_colliding_triangles(col_info: TriMeshCollisionInfo, v: int, i_collision: int):
-    offset = col_info.vertex_colliding_triangles_offsets[v]
-    return col_info.vertex_colliding_triangles[2 * (offset + i_collision) + 1]
-
-
-@wp.func
-def get_vertex_collision_buffer_vertex_index(col_info: TriMeshCollisionInfo, v: int, i_collision: int):
-    offset = col_info.vertex_colliding_triangles_offsets[v]
-    return col_info.vertex_colliding_triangles[2 * (offset + i_collision)]
-
-
-@wp.func
-def get_triangle_colliding_vertices_count(col_info: TriMeshCollisionInfo, tri: int):
+def get_vertex_colliding_triangles_count(collision_info: TriMeshCollisionInfo, vertex: int):
+    """Return the stored collision count for ``vertex``, clamped to capacity."""
     return wp.min(
-        col_info.triangle_colliding_vertices_count[tri], col_info.triangle_colliding_vertices_buffer_sizes[tri]
+        collision_info.vertex_colliding_triangles_count[vertex],
+        collision_info.vertex_colliding_triangles_buffer_sizes[vertex],
     )
 
 
 @wp.func
-def get_triangle_colliding_vertices(col_info: TriMeshCollisionInfo, tri: int, i_collision: int):
-    offset = col_info.triangle_colliding_vertices_offsets[tri]
-    return col_info.triangle_colliding_vertices[offset + i_collision]
+def get_vertex_colliding_triangles(collision_info: TriMeshCollisionInfo, vertex: int, collision_index: int):
+    """Return the triangle index for ``collision_index`` of ``vertex``."""
+    offset = collision_info.vertex_colliding_triangles_offsets[vertex]
+    return collision_info.vertex_colliding_triangles[2 * (offset + collision_index) + 1]
 
 
 @wp.func
-def get_edge_colliding_edges_count(col_info: TriMeshCollisionInfo, e: int):
-    return wp.min(col_info.edge_colliding_edges_count[e], col_info.edge_colliding_edges_buffer_sizes[e])
+def get_vertex_collision_buffer_vertex_index(collision_info: TriMeshCollisionInfo, vertex: int, collision_index: int):
+    """Return the stored source vertex for ``collision_index`` of ``vertex``."""
+    offset = collision_info.vertex_colliding_triangles_offsets[vertex]
+    return collision_info.vertex_colliding_triangles[2 * (offset + collision_index)]
 
 
 @wp.func
-def get_edge_colliding_edges(col_info: TriMeshCollisionInfo, e: int, i_collision: int):
-    offset = col_info.edge_colliding_edges_offsets[e]
-    return col_info.edge_colliding_edges[2 * (offset + i_collision) + 1]
+def get_triangle_colliding_vertices_count(collision_info: TriMeshCollisionInfo, triangle: int):
+    """Return the stored collision count for ``triangle``, clamped to capacity."""
+    return wp.min(
+        collision_info.triangle_colliding_vertices_count[triangle],
+        collision_info.triangle_colliding_vertices_buffer_sizes[triangle],
+    )
 
 
 @wp.func
-def get_edge_collision_buffer_edge_index(col_info: TriMeshCollisionInfo, e: int, i_collision: int):
-    offset = col_info.edge_colliding_edges_offsets[e]
-    return col_info.edge_colliding_edges[2 * (offset + i_collision)]
+def get_triangle_colliding_vertices(collision_info: TriMeshCollisionInfo, triangle: int, collision_index: int):
+    """Return the vertex index for ``collision_index`` of ``triangle``."""
+    offset = collision_info.triangle_colliding_vertices_offsets[triangle]
+    return collision_info.triangle_colliding_vertices[offset + collision_index]
+
+
+@wp.func
+def get_edge_colliding_edges_count(collision_info: TriMeshCollisionInfo, edge: int):
+    """Return the stored collision count for ``edge``, clamped to capacity."""
+    return wp.min(
+        collision_info.edge_colliding_edges_count[edge], collision_info.edge_colliding_edges_buffer_sizes[edge]
+    )
+
+
+@wp.func
+def get_edge_colliding_edges(collision_info: TriMeshCollisionInfo, edge: int, collision_index: int):
+    """Return the target edge for ``collision_index`` of ``edge``."""
+    offset = collision_info.edge_colliding_edges_offsets[edge]
+    return collision_info.edge_colliding_edges[2 * (offset + collision_index) + 1]
+
+
+@wp.func
+def get_edge_collision_buffer_edge_index(collision_info: TriMeshCollisionInfo, edge: int, collision_index: int):
+    """Return the stored source edge for ``collision_index`` of ``edge``."""
+    offset = collision_info.edge_colliding_edges_offsets[edge]
+    return collision_info.edge_colliding_edges[2 * (offset + collision_index)]
 
 
 def _as_numpy(arr) -> np.ndarray:
@@ -270,6 +307,20 @@ def build_tri_mesh_collision_info(
     When ``record_triangle_contacting_vertices`` is ``False`` the
     triangle-side list fields are left at their empty defaults;
     ``triangle_colliding_vertices_min_dist`` is always allocated.
+
+    Args:
+        particle_count: Number of mesh vertices.
+        tri_count: Number of mesh triangles.
+        edge_count: Number of mesh edges.
+        vertex_collision_buffer_pre_alloc: Initial collision capacity per vertex.
+        triangle_collision_buffer_pre_alloc: Initial collision capacity per triangle.
+        edge_collision_buffer_pre_alloc: Initial collision capacity per edge.
+        record_triangle_contacting_vertices: Whether to allocate the reverse
+            triangle-to-vertex result lists.
+        device: Warp device on which to allocate the arrays.
+
+    Returns:
+        An allocated collision-result struct.
     """
     info = TriMeshCollisionInfo()
 
