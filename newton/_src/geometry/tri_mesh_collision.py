@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -16,7 +17,6 @@ from .kernels import (
     compute_tri_aabbs,
     compute_tri_groups,
     edge_colliding_edges_detection_kernel,
-    init_edge_collision_data_kernel,
     init_triangle_collision_data_kernel,
     triangle_triangle_collision_detection_kernel,
     vertex_triangle_collision_detection_kernel,
@@ -390,7 +390,7 @@ class TriMeshCollisionDetector:
         triangle_triangle_collision_buffer_pre_alloc=8,
         triangle_triangle_collision_buffer_max_alloc=256,
         edge_edge_parallel_epsilon=1e-5,
-        collision_detection_block_size=16,
+        collision_detection_block_size: int | None = None,
         collision_info: TriMeshCollisionInfo | None = None,
         init_collision_info: bool = False,
     ):
@@ -421,6 +421,7 @@ class TriMeshCollisionDetector:
             raise ValueError("model.soft_mesh_adjacency is missing; finalize the model with ModelBuilder.")
         self.mesh_adjacency = model.soft_mesh_adjacency.init_vertex_adjacency(model.particle_count)
 
+        # None picks the block size per kernel launch (see _edge_collision_block_size).
         self.collision_detection_block_size = collision_detection_block_size
 
         # Build each filter family independently: generate a side only when the caller did not
@@ -962,7 +963,7 @@ class TriMeshCollisionDetector:
             ],
             dim=self.model.particle_count,
             device=self.model.device,
-            block_dim=self.collision_detection_block_size,
+            block_dim=self.collision_detection_block_size or 16,
         )
 
     def edge_edge_collision_detection(
@@ -971,19 +972,8 @@ class TriMeshCollisionDetector:
         self._require_collision_info()
         self.edge_colliding_edges.fill_(-1)
         wp.launch(
-            kernel=init_edge_collision_data_kernel,
-            inputs=[max_query_radius],
-            outputs=[self.edge_colliding_edges_count, self.edge_colliding_edges_min_dist, self.resize_flags],
-            dim=self.model.edge_count,
-            device=self.model.device,
-            block_dim=self.collision_detection_block_size,
-        )
-        block_dim = 32 if self.device.is_cuda else 1
-        block_count = (self.model.edge_count + block_dim - 1) // block_dim
-        wp.launch_tiled(
             kernel=edge_colliding_edges_detection_kernel,
             inputs=[
-                self.model.edge_count,
                 max_query_radius,
                 min_query_radius,
                 self.bvh_edges.id,
@@ -1005,10 +995,19 @@ class TriMeshCollisionDetector:
                 self.edge_colliding_edges_min_dist,
                 self.resize_flags,
             ],
-            dim=block_count,
+            dim=self.model.edge_count,
             device=self.model.device,
-            block_dim=block_dim,
+            block_dim=self.collision_detection_block_size or self._edge_collision_block_size(),
         )
+
+    def _edge_collision_block_size(self) -> int:
+        # The per-edge BVH traversal diverges heavily within a warp. Launches too small to fill the
+        # GPU are latency bound and run fastest with few threads per block, while large launches
+        # need full warps for throughput. Aim for about 16 blocks per SM, clamped to [8, 32].
+        if not self.device.is_cuda:
+            return 16
+        blocks_per_sm = max(self.model.edge_count / (16 * self.device.sm_count), 1.0)
+        return int(min(32, max(8, 2 ** round(math.log2(blocks_per_sm)))))
 
     def triangle_triangle_intersection_detection(self):
         if self.triangle_intersecting_triangles is None:

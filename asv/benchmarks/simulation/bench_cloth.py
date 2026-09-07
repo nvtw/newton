@@ -59,8 +59,8 @@ def _make_collision_world(resolution):
     return world
 
 
-class DeformableSelfCollision:
-    """Benchmark dense self-collision in one large and many RL-style worlds."""
+class FastDeformableSelfCollision:
+    """Benchmark self-collision detection in one large cloth and many replicated worlds."""
 
     params = (DEFORMABLE_COLLISION_CASES,)
     param_names = ["case"]
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     from newton.utils import run_benchmark
 
     benchmark_list = {
-        "DeformableSelfCollision": DeformableSelfCollision,
+        "FastDeformableSelfCollision": FastDeformableSelfCollision,
         "FastExampleClothManipulation": FastExampleClothManipulation,
         "FastExampleClothTwist": FastExampleClothTwist,
     }

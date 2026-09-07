@@ -1,0 +1,1 @@
+Speed up CUDA deformable edge-edge self-collision detection by choosing the launch block size from the edge count and GPU size; `TriMeshCollisionDetector(collision_detection_block_size=None)` now means automatic.
