@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 class WarpOnnxPolicy:
     """Evaluate a single-input, single-output ONNX policy with Warp-NN."""
 
-    def __init__(self, path: str | Path, device: wp.DeviceLike, batch_size: int) -> None:
+    def __init__(self, path: str | Path, device: wp.DeviceLike, batch_size: int, *, action_width: int) -> None:
         try:
             from warp_nn.runtime import OnnxRuntime  # noqa: PLC0415
         except ImportError as exc:  # pragma: no cover
@@ -31,6 +31,10 @@ class WarpOnnxPolicy:
             )
         self.input_name = self.runtime.input_names[0]
         self.output_name = self.runtime.output_names[0]
+        output_shape = self.runtime._shapes[self.output_name]
+        expected_output_shape = (batch_size, action_width)
+        if output_shape != expected_output_shape:
+            raise ValueError(f"Policy '{path}' output shape must be {expected_output_shape}, got {output_shape}")
 
     def __call__(self, observation: "torch.Tensor") -> "torch.Tensor":
         """Evaluate a contiguous float32 Torch observation batch."""

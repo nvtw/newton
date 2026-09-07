@@ -1,1 +1,1 @@
-Run the Kamino DR Legs RL example from an ONNX model with Warp-NN instead of loading a PyTorch policy checkpoint.
+Run the Kamino DR Legs RL example from an ONNX model with Warp-NN instead of loading a PyTorch policy checkpoint. To migrate, export or provide the policy as ONNX and install Newton with the `onnx` extra.

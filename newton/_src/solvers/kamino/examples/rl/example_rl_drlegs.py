@@ -82,6 +82,7 @@ _DEFAULTS = {
 }
 
 _DRLEGS_ASSET_REF = "a0547548eaa966c2f5478bee496c3cfba1fa98fc"
+_DRLEGS_ACTION_WIDTH = 12
 
 
 def _load_drlegs_config(asset_path: Path) -> dict:
@@ -524,12 +525,12 @@ if __name__ == "__main__":
         policy_path = Path(args.policy)
         if policy_path.suffix.lower() != ".onnx" or not policy_path.is_file():
             raise FileNotFoundError(f"Expected an existing ONNX policy, got '{policy_path}'")
-        policy = WarpOnnxPolicy(policy_path, device=device, batch_size=1)
+        policy = WarpOnnxPolicy(policy_path, device=device, batch_size=1, action_width=_DRLEGS_ACTION_WIDTH)
         msg.info(f"Loaded policy from: {policy_path}")
     else:
         default_policy = asset_path / "dr_legs" / "rl_policies" / config["policy_file"]
         if default_policy.exists():
-            policy = WarpOnnxPolicy(default_policy, device=device, batch_size=1)
+            policy = WarpOnnxPolicy(default_policy, device=device, batch_size=1, action_width=_DRLEGS_ACTION_WIDTH)
             msg.info(f"Loaded default policy from: {default_policy}")
         else:
             msg.info(f"No policy at {default_policy} -- using random actions")
