@@ -4740,7 +4740,7 @@ def parse_usd(
                     return False
             return True
 
-        existing_filter_pairs = set(builder.shape_collision_filter_pairs)
+        existing_filter_pairs = set(builder._materialized_filter_template())
         group_classes = sorted(colliders_by_groups.items())
         for class_index_a, (groups_a, colliders_a) in enumerate(group_classes):
             for class_index_b in range(class_index_a, len(group_classes)):
@@ -4775,7 +4775,7 @@ def parse_usd(
     # here on (collapse_fixed_joints only remaps bodies). Seed the dedup set from the builder
     # so pairs the element-filter pass already added are not appended again.
     if authored_filtered_path_pairs:
-        existing_filter_pairs = set(builder.shape_collision_filter_pairs)
+        existing_filter_pairs = set(builder._materialized_filter_template())
         for filter_path1, filter_path2 in sorted(authored_filtered_path_pairs):
             shapes1, reason1 = _resolve_collision_shape_ids(filter_path1)
             shapes2, reason2 = _resolve_collision_shape_ids(filter_path2)

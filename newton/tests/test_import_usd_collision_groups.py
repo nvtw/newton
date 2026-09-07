@@ -139,6 +139,27 @@ class TestImportUsdCollisionGroups(unittest.TestCase):
         self.assertIn(tuple(sorted((shape_ids["PairA"], shape_ids["PairB"]))), filtered_pairs)
         self.assertIn(tuple(sorted((shape_ids["GroupA"], shape_ids["GroupB"]))), filtered_pairs)
 
+    def test_mjcf_import_after_usd(self):
+        """Preserve compact collision filters for a subsequent MJCF import."""
+        stage, _ = self._make_stage(("UsdShape",))
+        builder = newton.ModelBuilder()
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        builder.add_usd(stage)
+
+        builder.add_mjcf(
+            """
+            <mujoco>
+                <worldbody>
+                    <body name="mjcf_body">
+                        <geom name="mjcf_shape" type="sphere" size="0.1"/>
+                    </body>
+                </worldbody>
+            </mujoco>
+            """
+        )
+
+        self.assertEqual(builder.shape_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=False)
