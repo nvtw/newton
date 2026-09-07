@@ -53,6 +53,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _prepare_sparse_inequality_pgs,
     _solve_sparse_bilateral_block,
 )
+from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import _cache_sparse_projected_diagonal
 
 wp.config.log_level = wp.LOG_WARNING
 
@@ -64,8 +65,9 @@ def _solve_with_alternating_coupling(path: SparseDVIPath, problem) -> None:
 
     The candidate kernels reduce to the original full-system projected update
     when the bilateral response is identically zero and ``projected_diag`` is
-    the physical Delassus diagonal. After each projected block, the already
-    factored bilateral matrix is reused for forward/back substitution.
+    the preconditioned physical Delassus diagonal. After each projected block,
+    the already factored bilateral matrix is reused for forward/back
+    substitution.
     """
     if path.bilateral_solver is None or path.data.bilateral_operator is None:
         _CANDIDATE_SPARSE_SOLVE(path, problem)
@@ -88,13 +90,35 @@ def _solve_with_alternating_coupling(path: SparseDVIPath, problem) -> None:
     )
     _prepare_sparse_inequality_pgs(path, problem)
 
-    # The factorization path has already stored the physical D diagonal in
-    # scratch. Zero response arrays remove every Schur correction explicitly.
-    wp.copy(state.inequality_projected_diagonal, state.scratch)
+    # Zero response arrays to remove every Schur correction explicitly. Cache
+    # the same |D_ii| P_i^2 diagonal used by the historical full-system PGS;
+    # scratch itself contains the unscaled physical Delassus diagonal.
     state.bilateral_coupling.zero_()
     state.bilateral_response.zero_()
     state.bilateral_response_factor.zero_()
     state.bilateral_delta.zero_()
+    max_unilateral_rows = (
+        path.size.max_of_num_bounded_joint_cts + path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
+    )
+    wp.launch(
+        kernel=_cache_sparse_projected_diagonal,
+        dim=(path.size.num_worlds, max_unilateral_rows),
+        inputs=[
+            problem.data.dim,
+            problem.data.njc,
+            problem.data.vio,
+            problem.data.P,
+            state.scratch,
+            state.bilateral_response_mio,
+            state.bilateral_response_stride,
+            state.bilateral_coupling,
+            state.bilateral_response,
+            path.data.solution.lambdas,
+            state.v_aug,
+            state.inequality_projected_diagonal,
+        ],
+        device=path.device,
+    )
 
     for block_iteration in range(path.max_alternating_iterations):
         _launch_sparse_inequality_pgs(path, problem, block_iteration)
@@ -119,7 +143,7 @@ def _select_coupling_method(method: str) -> None:
 class G1CouplingWorkload:
     """Headless G1 example with parameterized DVI work."""
 
-    def __init__(self, method: str, iterations: int, sweeps: int, initial_tilt_deg: float):
+    def __init__(self, method: str, iterations: int, sweeps: int, omega: float, initial_tilt_deg: float):
         _select_coupling_method(method)
         self.frame_dt = 1.0 / 60.0
         self.sim_substeps = 4
@@ -174,7 +198,11 @@ class G1CouplingWorkload:
         )
         config.dvi.max_alternating_iterations = iterations
         config.dvi.inequality_sweeps_per_iteration = sweeps
-        config.dvi.bilateral_solve_interval = iterations
+        config.dvi.omega = omega
+        # Schur folds the bilateral response into every unilateral update.
+        # Alternating instead refreshes the direct bilateral solution after
+        # every projected block, matching the historical interval-one method.
+        config.dvi.bilateral_solve_interval = 1 if method == "alternating" else iterations
         config.dvi.bilateral_solver_type = "LLTBRCM"
         self.solver = newton.solvers.SolverKamino(self.model, config=config)
         self.state_0 = self.model.state()
@@ -229,7 +257,7 @@ def _summary(values: list[float]) -> dict[str, float]:
 
 def run(args: argparse.Namespace) -> dict:
     """Run one coupling configuration and return JSON-compatible metrics."""
-    workload = G1CouplingWorkload(args.method, args.iterations, args.sweeps, args.initial_tilt_deg)
+    workload = G1CouplingWorkload(args.method, args.iterations, args.sweeps, args.omega, args.initial_tilt_deg)
     labels = [label.rsplit("/", 1)[-1] for label in workload.model.body_label]
     pelvis = next((index for index, label in enumerate(labels) if "pelvis" in label.lower()), 0)
     solver_fd = workload.solver._solver_kamino.solver_fd
@@ -300,6 +328,7 @@ def run(args: argparse.Namespace) -> dict:
         "device_name": workload.model.device.name,
         "iterations": args.iterations,
         "sweeps_per_iteration": args.sweeps,
+        "omega": args.omega,
         "initial_tilt_deg": args.initial_tilt_deg,
         "frames": args.frames,
         "simulated_seconds": args.frames * workload.frame_dt,
@@ -336,6 +365,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", help="Warp CUDA device, for example cuda:0")
     parser.add_argument("--iterations", type=int, default=8)
     parser.add_argument("--sweeps", type=int, default=2)
+    parser.add_argument("--omega", type=float, default=1.2)
     parser.add_argument("--initial-tilt-deg", type=float, default=20.0)
     parser.add_argument("--frames", type=int, default=500)
     parser.add_argument("--settle-frames", type=int, default=60)
@@ -356,6 +386,8 @@ def main() -> None:
     for name in ("iterations", "sweeps", "frames", "settle_frames", "timing_frames", "timing_trials"):
         if getattr(args, name) <= 0:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
+    if not 0.0 < args.omega <= 2.0:
+        raise ValueError("--omega must lie in (0, 2]")
     if args.method != "both":
         serialized = json.dumps(run(args), indent=2)
         if args.output:

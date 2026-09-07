@@ -110,8 +110,8 @@
     the unilateral problem is both more accurate and faster than alternating the
     two blocks. The advantage grows with coupling strength. In a fallen Unitree G1
     with both hands and both feet on the ground, the Schur formulation reduced
-    sideways drift by <strong>27×</strong>, the median complementarity residual by
-    <strong>277×</strong>, and frame time by <strong>2×</strong>.
+    sideways drift by <strong>13×</strong>, the median complementarity residual by
+    <strong>230×</strong>, and frame time by <strong>2×</strong>.
   </p>
 
   <h2>Why block elimination helps</h2>
@@ -219,9 +219,10 @@
   <p>
     The model, collision pipeline, friction, warm start, timestep, direct bilateral
     solver, eight outer iterations, and two projected sweeps per iteration are
-    identical. Only the coupling schedule changes. Drift is measured after 60 frames
-    of settling following the first hand-and-foot contact. Timing uses five
-    20-frame synchronized trials after the contact-rich rollout.
+    identical. Both methods use the same preconditioned projected diagonal
+    \(\lvert D_{ii}\rvert P_i^2\). Only the coupling schedule changes. Drift is
+    measured after 60 frames of settling following the first hand-and-foot contact.
+    Timing uses five 20-frame synchronized trials after the contact-rich rollout.
   </p>
 
   <div class="table-wrap">
@@ -230,12 +231,12 @@
         <tr><th>Metric</th><th>Schur</th><th>Alternating</th><th>Alternating / Schur</th></tr>
       </thead>
       <tbody>
-        <tr><td>Sideways pelvis drift</td><td><strong>0.068 mm</strong></td><td>1.855 mm</td><td><strong>27.3×</strong></td></tr>
-        <tr><td>Horizontal pelvis drift</td><td><strong>0.223 mm</strong></td><td>2.455 mm</td><td><strong>11.0×</strong></td></tr>
-        <tr><td>Fitted sideways speed</td><td><strong>0.0169 mm/s</strong></td><td>0.626 mm/s</td><td><strong>37.0×</strong></td></tr>
-        <tr><td>Post-contact median \(r_c\)</td><td><strong>8.95e-6</strong></td><td>2.48e-3</td><td><strong>277×</strong></td></tr>
-        <tr><td>Post-contact p95 \(r_c\)</td><td><strong>9.46e-5</strong></td><td>1.93e-1</td><td><strong>2,035×</strong></td></tr>
-        <tr><td>Median frame time</td><td><strong>67.37 ms</strong></td><td>134.08 ms</td><td><strong>1.99×</strong></td></tr>
+        <tr><td>Sideways pelvis drift</td><td><strong>0.150 mm</strong></td><td>1.925 mm</td><td><strong>12.8×</strong></td></tr>
+        <tr><td>Horizontal pelvis drift</td><td><strong>0.249 mm</strong></td><td>2.508 mm</td><td><strong>10.1×</strong></td></tr>
+        <tr><td>Fitted sideways speed</td><td><strong>0.0476 mm/s</strong></td><td>0.542 mm/s</td><td><strong>11.4×</strong></td></tr>
+        <tr><td>Post-contact median \(r_c\)</td><td><strong>9.44e-6</strong></td><td>2.17e-3</td><td><strong>230×</strong></td></tr>
+        <tr><td>Post-contact p95 \(r_c\)</td><td><strong>1.34e-4</strong></td><td>1.76e-1</td><td><strong>1,311×</strong></td></tr>
+        <tr><td>Median frame time</td><td><strong>67.35 ms</strong></td><td>133.74 ms</td><td><strong>1.99×</strong></td></tr>
       </tbody>
     </table>
   </div>
@@ -243,7 +244,32 @@
     Both runs reached left/right hand and left/right foot contact at frame 44 or
     earlier. Measurements were made on an NVIDIA GeForce RTX 3080 Laptop GPU with
     Newton 1.6.0.dev0 and Warp 1.17.0. Timing is hardware-specific; residual and
-    drift comparisons are the primary accuracy evidence.
+    drift comparisons are the primary accuracy evidence. Frame time is an
+    end-to-end measurement: contact counts diverge with the trajectories, so it
+    is not a frozen-matrix microbenchmark.
+  </p>
+  <p>
+    Repeating the comparison with the historical relaxation \(\omega=1.0\),
+    instead of the branch default \(\omega=1.2\), gives:
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>\(\omega=1.0\) metric</th><th>Schur</th><th>Alternating</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Sideways pelvis drift</td><td><strong>0.002 mm</strong></td><td>2.338 mm</td></tr>
+        <tr><td>Horizontal pelvis drift</td><td><strong>0.127 mm</strong></td><td>2.563 mm</td></tr>
+        <tr><td>Fitted sideways speed</td><td><strong>0.0020 mm/s</strong></td><td>0.574 mm/s</td></tr>
+        <tr><td>Post-contact median \(r_c\)</td><td><strong>4.81e-6</strong></td><td>2.14e-3</td></tr>
+        <tr><td>Median frame time</td><td><strong>67.37 ms</strong></td><td>132.56 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The near-zero Schur lateral displacement makes a ratio poorly conditioned,
+    so absolute values are reported. The conclusion does not depend on the
+    relaxation change.
   </p>
   <p class="note">
     The aggregate solver convergence flag is true for 5% of frames for both
@@ -261,6 +287,7 @@
 
 uv run python scripts/evaluate_kamino_dvi_coupling.py \
   --method both \
+  --omega 1.2 \
   --frames 240 \
   --timing-frames 20 \
   --timing-trials 5 \
@@ -269,8 +296,9 @@ uv run python scripts/evaluate_kamino_dvi_coupling.py \
     The controlled benchmark uses NumPy and is deterministic. The G1 benchmark
     requires a CUDA device and accepts <code>--device</code>. Both emit complete run
     configuration and machine-readable metrics. Reference outputs:
-    <a href="docs/_static/dvi_block_coupling_reference.json">controlled problem</a>
-    and <a href="docs/_static/dvi_g1_coupling_reference.json">fallen G1</a>.
+    <a href="docs/_static/dvi_block_coupling_reference.json">controlled problem</a>,
+    <a href="docs/_static/dvi_g1_coupling_reference.json">fallen G1</a>, and
+    <a href="docs/_static/dvi_g1_coupling_reference_omega_1_0.json">fallen G1 at historical relaxation</a>.
   </p>
 </main>
 </body>
