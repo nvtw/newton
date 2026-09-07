@@ -1,0 +1,204 @@
+{
+  "schur": {
+    "method": "schur",
+    "newton_version": "1.6.0.dev0",
+    "warp_version": "1.17.0",
+    "device": "cuda:0",
+    "device_name": "NVIDIA GeForce RTX 3080 Laptop GPU",
+    "iterations": 8,
+    "sweeps_per_iteration": 2,
+    "initial_tilt_deg": 20.0,
+    "frames": 240,
+    "simulated_seconds": 4.0,
+    "body_labels_in_ground_contact": [
+      "left_foot",
+      "left_hand",
+      "right_foot",
+      "right_hand"
+    ],
+    "first_any_hand_and_foot_frame": 44,
+    "first_all_hands_and_feet_frame": 44,
+    "settled_measurement_frame": 104,
+    "pelvis_final_xyz_m": [
+      0.6094026565551758,
+      9.681702067609876e-05,
+      0.37482941150665283
+    ],
+    "pelvis_post_settle_drift_xy_m": [
+      -0.0002123117446899414,
+      -6.794575892854482e-05
+    ],
+    "pelvis_post_settle_drift_norm_m": 0.00022291905053104544,
+    "pelvis_post_settle_lateral_drift_m": 6.794575892854482e-05,
+    "pelvis_post_settle_velocity_xy_m_per_s": [
+      -7.067976274993201e-05,
+      -1.6936634973868067e-05
+    ],
+    "pelvis_post_settle_lateral_speed_m_per_s": 1.6936634973868067e-05,
+    "converged_frame_fraction": 0.05,
+    "reported_sweeps_mean": 16.0,
+    "active_contacts": {
+      "median": 6.0,
+      "p95": 6.049999999999983,
+      "max": 7.0
+    },
+    "residuals": {
+      "r_p": {
+        "median": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "r_d": {
+        "median": 0.006395397474989295,
+        "p95": 0.03151839543133973,
+        "max": 0.047982171177864075
+      },
+      "r_c": {
+        "median": 9.785495876712957e-06,
+        "p95": 0.0002090490554110134,
+        "max": 0.015684574842453003
+      },
+      "r_b": {
+        "median": 0.006395397474989295,
+        "p95": 0.03151839543133973,
+        "max": 0.047982171177864075
+      }
+    },
+    "post_hand_foot_contact_residuals": {
+      "r_p": {
+        "median": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "r_d": {
+        "median": 0.006570623954758048,
+        "p95": 0.03158260229974985,
+        "max": 0.047982171177864075
+      },
+      "r_c": {
+        "median": 8.947285550675588e-06,
+        "p95": 9.463951028010342e-05,
+        "max": 0.0038792418781667948
+      },
+      "r_b": {
+        "median": 0.006570623954758048,
+        "p95": 0.03158260229974985,
+        "max": 0.047982171177864075
+      }
+    },
+    "timing_trials_ms_per_frame": [
+      66.88038000138476,
+      66.73746999586001,
+      67.47473500436172,
+      67.4407200072892,
+      67.37370500341058
+    ],
+    "timing_median_ms_per_frame": 67.37370500341058,
+    "timing_min_ms_per_frame": 66.73746999586001,
+    "timing_median_ms_per_substep": 16.843426250852644
+  },
+  "alternating": {
+    "method": "alternating",
+    "newton_version": "1.6.0.dev0",
+    "warp_version": "1.17.0",
+    "device": "cuda:0",
+    "device_name": "NVIDIA GeForce RTX 3080 Laptop GPU",
+    "iterations": 8,
+    "sweeps_per_iteration": 2,
+    "initial_tilt_deg": 20.0,
+    "frames": 240,
+    "simulated_seconds": 4.0,
+    "body_labels_in_ground_contact": [
+      "left_foot",
+      "left_hand",
+      "right_foot",
+      "right_hand"
+    ],
+    "first_any_hand_and_foot_frame": 43,
+    "first_all_hands_and_feet_frame": 43,
+    "settled_measurement_frame": 103,
+    "pelvis_final_xyz_m": [
+      0.7436160445213318,
+      0.018425393849611282,
+      0.36352819204330444
+    ],
+    "pelvis_post_settle_drift_xy_m": [
+      -0.0016081929206848145,
+      0.0018545165657997131
+    ],
+    "pelvis_post_settle_drift_norm_m": 0.0024546926819800307,
+    "pelvis_post_settle_lateral_drift_m": 0.0018545165657997131,
+    "pelvis_post_settle_velocity_xy_m_per_s": [
+      0.00011874053735791608,
+      0.0006262281357436397
+    ],
+    "pelvis_post_settle_lateral_speed_m_per_s": 0.0006262281357436397,
+    "converged_frame_fraction": 0.05,
+    "reported_sweeps_mean": 16.0,
+    "active_contacts": {
+      "median": 8.0,
+      "p95": 14.099999999999966,
+      "max": 32.0
+    },
+    "residuals": {
+      "r_p": {
+        "median": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "r_d": {
+        "median": 0.007653118809685111,
+        "p95": 0.04790113493800138,
+        "max": 2.42753529548645
+      },
+      "r_c": {
+        "median": 0.0021932731615379453,
+        "p95": 0.20424544513225526,
+        "max": 0.7733335494995117
+      },
+      "r_b": {
+        "median": 0.006549328565597534,
+        "p95": 0.01125345407053828,
+        "max": 0.04717633128166199
+      }
+    },
+    "post_hand_foot_contact_residuals": {
+      "r_p": {
+        "median": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "r_d": {
+        "median": 0.007945060729980469,
+        "p95": 0.04882673323154431,
+        "max": 2.42753529548645
+      },
+      "r_c": {
+        "median": 0.002477662404999137,
+        "p95": 0.19258233904838545,
+        "max": 0.7398266196250916
+      },
+      "r_b": {
+        "median": 0.006982028484344482,
+        "p95": 0.010283113270998,
+        "max": 0.014217996969819069
+      }
+    },
+    "timing_trials_ms_per_frame": [
+      136.8277599918656,
+      135.25475000496954,
+      131.00834499346092,
+      132.9021049896255,
+      134.07615999458358
+    ],
+    "timing_median_ms_per_frame": 134.07615999458358,
+    "timing_min_ms_per_frame": 131.00834499346092,
+    "timing_median_ms_per_substep": 33.519039998645894
+  },
+  "ratios_alternating_over_schur": {
+    "post_settle_drift_norm": 11.011587731655851,
+    "post_settle_lateral_drift": 27.29407390606993,
+    "post_settle_lateral_speed": 36.9747672255948,
+    "timing_median": 1.990036914071987
+  }
+}

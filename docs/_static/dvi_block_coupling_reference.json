@@ -1,0 +1,390 @@
+{
+  "problem": {
+    "seed": 4125,
+    "bilateral_count": 24,
+    "unilateral_count": 32,
+    "condition": 100.0,
+    "omega": 1.2,
+    "sweeps_per_iteration": 2
+  },
+  "cases": {
+    "0.25": {
+      "full_matrix_condition": 124.51873461260413,
+      "exact_kkt": {
+        "relative_impulse_l2_error": 0.0,
+        "relative_velocity_l2_error": 9.942602831947844e-16,
+        "natural_map_inf": 0.0,
+        "bilateral_velocity_inf": 0.0,
+        "primal_feasibility_inf": 0.0,
+        "dual_feasibility_inf": 0.0,
+        "complementarity_inf": 0.0
+      },
+      "curves_by_total_projected_sweeps": {
+        "schur": {
+          "2": {
+            "relative_impulse_l2_error": 0.2232195258247803,
+            "relative_velocity_l2_error": 3.2815671827557793,
+            "natural_map_inf": 2.5502372032583027,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 2.5502372032583027,
+            "complementarity_inf": 2.3297860017173404
+          },
+          "4": {
+            "relative_impulse_l2_error": 0.11938180599524918,
+            "relative_velocity_l2_error": 1.2656144506547782,
+            "natural_map_inf": 1.1755912393702135,
+            "bilateral_velocity_inf": 1.7763568394002505e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.9252166820510732,
+            "complementarity_inf": 1.586334738210775
+          },
+          "8": {
+            "relative_impulse_l2_error": 0.01846206977391189,
+            "relative_velocity_l2_error": 0.5177559407963129,
+            "natural_map_inf": 0.4767747578749307,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.4767747578749306,
+            "complementarity_inf": 0.3933964142486775
+          },
+          "16": {
+            "relative_impulse_l2_error": 0.00033715371753748736,
+            "relative_velocity_l2_error": 0.006166788986621924,
+            "natural_map_inf": 0.005760066871488334,
+            "bilateral_velocity_inf": 2.1316282072803006e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.005760066871488334,
+            "complementarity_inf": 0.0029564925062120382
+          },
+          "32": {
+            "relative_impulse_l2_error": 2.0046384767590224e-07,
+            "relative_velocity_l2_error": 4.584862964400878e-06,
+            "natural_map_inf": 4.878202322977643e-06,
+            "bilateral_velocity_inf": 1.7763568394002505e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 4.878202322977643e-06,
+            "complementarity_inf": 3.421236719415098e-06
+          },
+          "64": {
+            "relative_impulse_l2_error": 2.2570106838357704e-14,
+            "relative_velocity_l2_error": 5.058811020439738e-13,
+            "natural_map_inf": 4.831690603168681e-13,
+            "bilateral_velocity_inf": 2.1316282072803006e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 4.831690603168681e-13,
+            "complementarity_inf": 4.3299487821752593e-13
+          }
+        },
+        "alternating": {
+          "2": {
+            "relative_impulse_l2_error": 0.1966667930886906,
+            "relative_velocity_l2_error": 3.1890038022306686,
+            "natural_map_inf": 3.282377897103335,
+            "bilateral_velocity_inf": 2.4868995751603507e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 3.282377897103335,
+            "complementarity_inf": 1.3157873899166557
+          },
+          "4": {
+            "relative_impulse_l2_error": 0.11365795164900336,
+            "relative_velocity_l2_error": 1.1217293698001702,
+            "natural_map_inf": 1.1224573244637632,
+            "bilateral_velocity_inf": 2.1316282072803006e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.8827834688229572,
+            "complementarity_inf": 1.2991149708189833
+          },
+          "8": {
+            "relative_impulse_l2_error": 0.021312593320276272,
+            "relative_velocity_l2_error": 0.42844680898925225,
+            "natural_map_inf": 0.4411695731037657,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.4411695731037657,
+            "complementarity_inf": 0.17368831845657262
+          },
+          "16": {
+            "relative_impulse_l2_error": 0.001341872090911283,
+            "relative_velocity_l2_error": 0.023646137809588234,
+            "natural_map_inf": 0.0258360549214256,
+            "bilateral_velocity_inf": 2.1316282072803006e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.0258360549214256,
+            "complementarity_inf": 0.014099110577975232
+          },
+          "32": {
+            "relative_impulse_l2_error": 4.017801933502034e-06,
+            "relative_velocity_l2_error": 7.251127887359804e-05,
+            "natural_map_inf": 6.372736809012736e-05,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 6.372736809012736e-05,
+            "complementarity_inf": 5.014789920030111e-05
+          },
+          "64": {
+            "relative_impulse_l2_error": 6.327098902944273e-12,
+            "relative_velocity_l2_error": 1.1867584038972752e-10,
+            "natural_map_inf": 1.0742695621956955e-10,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 8.833467290969566e-11,
+            "complementarity_inf": 6.805023916859514e-11
+          }
+        }
+      }
+    },
+    "1.0": {
+      "full_matrix_condition": 538.4011935961148,
+      "exact_kkt": {
+        "relative_impulse_l2_error": 0.0,
+        "relative_velocity_l2_error": 1.6408769382369435e-15,
+        "natural_map_inf": 0.0,
+        "bilateral_velocity_inf": 0.0,
+        "primal_feasibility_inf": 0.0,
+        "dual_feasibility_inf": 0.0,
+        "complementarity_inf": 0.0
+      },
+      "curves_by_total_projected_sweeps": {
+        "schur": {
+          "2": {
+            "relative_impulse_l2_error": 0.28153804916235675,
+            "relative_velocity_l2_error": 3.281567182755777,
+            "natural_map_inf": 2.550237203258284,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 2.550237203258284,
+            "complementarity_inf": 2.329786001717371
+          },
+          "4": {
+            "relative_impulse_l2_error": 0.15679214752499956,
+            "relative_velocity_l2_error": 1.2656144506547815,
+            "natural_map_inf": 1.1755912393702155,
+            "bilateral_velocity_inf": 2.842170943040401e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.9252166820510759,
+            "complementarity_inf": 1.5863347382108068
+          },
+          "8": {
+            "relative_impulse_l2_error": 0.024692129741234293,
+            "relative_velocity_l2_error": 0.5177559407963019,
+            "natural_map_inf": 0.4767747578749262,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.4767747578749262,
+            "complementarity_inf": 0.3933964142486659
+          },
+          "16": {
+            "relative_impulse_l2_error": 0.00042908960276303383,
+            "relative_velocity_l2_error": 0.006166788986626509,
+            "natural_map_inf": 0.0057600668714759,
+            "bilateral_velocity_inf": 2.842170943040401e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.0057600668714759,
+            "complementarity_inf": 0.002956492506218149
+          },
+          "32": {
+            "relative_impulse_l2_error": 2.728805664234226e-07,
+            "relative_velocity_l2_error": 4.584862969968675e-06,
+            "natural_map_inf": 4.87820234162939e-06,
+            "bilateral_velocity_inf": 2.1316282072803006e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 4.87820234162939e-06,
+            "complementarity_inf": 3.4212367210069906e-06
+          },
+          "64": {
+            "relative_impulse_l2_error": 2.911474497298796e-14,
+            "relative_velocity_l2_error": 5.082824028689274e-13,
+            "natural_map_inf": 4.796163466380676e-13,
+            "bilateral_velocity_inf": 1.7763568394002505e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 4.796163466380676e-13,
+            "complementarity_inf": 4.2981109234827923e-13
+          }
+        },
+        "alternating": {
+          "2": {
+            "relative_impulse_l2_error": 0.26283096134658346,
+            "relative_velocity_l2_error": 7.079096126941193,
+            "natural_map_inf": 6.082554624728868,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 6.082554624728868,
+            "complementarity_inf": 1.822776602093223
+          },
+          "4": {
+            "relative_impulse_l2_error": 0.18113920457166202,
+            "relative_velocity_l2_error": 3.016146825992876,
+            "natural_map_inf": 2.4486247132670087,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 2.4486247132670087,
+            "complementarity_inf": 0.931754651059289
+          },
+          "8": {
+            "relative_impulse_l2_error": 0.11199855569838668,
+            "relative_velocity_l2_error": 1.326565065795411,
+            "natural_map_inf": 0.9113985441795585,
+            "bilateral_velocity_inf": 2.1316282072803006e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.9113985441795585,
+            "complementarity_inf": 0.6026618170597953
+          },
+          "16": {
+            "relative_impulse_l2_error": 0.05892251283074011,
+            "relative_velocity_l2_error": 0.6624987597398266,
+            "natural_map_inf": 0.6340041585712299,
+            "bilateral_velocity_inf": 2.1316282072803006e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.6340041585712299,
+            "complementarity_inf": 0.342290014260532
+          },
+          "32": {
+            "relative_impulse_l2_error": 0.01364537766779769,
+            "relative_velocity_l2_error": 0.24155697071426427,
+            "natural_map_inf": 0.2170434346262322,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.2170434346262322,
+            "complementarity_inf": 0.13772292262685773
+          },
+          "64": {
+            "relative_impulse_l2_error": 0.002429239194223788,
+            "relative_velocity_l2_error": 0.029314421772386034,
+            "natural_map_inf": 0.03371269061415383,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.03371269061415383,
+            "complementarity_inf": 0.01248329164020866
+          }
+        }
+      }
+    },
+    "2.0": {
+      "full_matrix_condition": 3778.2974563970015,
+      "exact_kkt": {
+        "relative_impulse_l2_error": 0.0,
+        "relative_velocity_l2_error": 3.1985132538447453e-15,
+        "natural_map_inf": 0.0,
+        "bilateral_velocity_inf": 0.0,
+        "primal_feasibility_inf": 0.0,
+        "dual_feasibility_inf": 0.0,
+        "complementarity_inf": 0.0
+      },
+      "curves_by_total_projected_sweeps": {
+        "schur": {
+          "2": {
+            "relative_impulse_l2_error": 0.41648669325634247,
+            "relative_velocity_l2_error": 3.2815671827557806,
+            "natural_map_inf": 2.550237203258334,
+            "bilateral_velocity_inf": 2.842170943040401e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 2.550237203258334,
+            "complementarity_inf": 2.3297860017173955
+          },
+          "4": {
+            "relative_impulse_l2_error": 0.24009459735384622,
+            "relative_velocity_l2_error": 1.2656144506547724,
+            "natural_map_inf": 1.1755912393702146,
+            "bilateral_velocity_inf": 1.7763568394002505e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.9252166820510368,
+            "complementarity_inf": 1.58633473821081
+          },
+          "8": {
+            "relative_impulse_l2_error": 0.038340992081398184,
+            "relative_velocity_l2_error": 0.5177559407963293,
+            "natural_map_inf": 0.476774757874999,
+            "bilateral_velocity_inf": 2.1316282072803006e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.476774757874999,
+            "complementarity_inf": 0.39339641424866795
+          },
+          "16": {
+            "relative_impulse_l2_error": 0.0006399552426831843,
+            "relative_velocity_l2_error": 0.006166788986591562,
+            "natural_map_inf": 0.005760066871491887,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.005760066871491887,
+            "complementarity_inf": 0.0029564925061916917
+          },
+          "32": {
+            "relative_impulse_l2_error": 4.2913117335431176e-07,
+            "relative_velocity_l2_error": 4.584863000195843e-06,
+            "natural_map_inf": 4.8782023540638875e-06,
+            "bilateral_velocity_inf": 1.7763568394002505e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 4.8782023540638875e-06,
+            "complementarity_inf": 3.4212367130475224e-06
+          },
+          "64": {
+            "relative_impulse_l2_error": 4.599509159009555e-14,
+            "relative_velocity_l2_error": 5.043216900383735e-13,
+            "natural_map_inf": 4.796163466380676e-13,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 4.796163466380676e-13,
+            "complementarity_inf": 4.2981109234827883e-13
+          }
+        },
+        "alternating": {
+          "2": {
+            "relative_impulse_l2_error": 0.5619238735493092,
+            "relative_velocity_l2_error": 12.263497615593332,
+            "natural_map_inf": 10.898641199795861,
+            "bilateral_velocity_inf": 2.4868995751603507e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 10.898641199795861,
+            "complementarity_inf": 4.55426496191919
+          },
+          "4": {
+            "relative_impulse_l2_error": 0.45791565491632535,
+            "relative_velocity_l2_error": 7.759982692089716,
+            "natural_map_inf": 6.619637779700639,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 6.619637779700639,
+            "complementarity_inf": 2.3735970023016
+          },
+          "8": {
+            "relative_impulse_l2_error": 0.3513913252936423,
+            "relative_velocity_l2_error": 4.209996167380893,
+            "natural_map_inf": 4.08038819257068,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 4.08038819257068,
+            "complementarity_inf": 1.3452977571492601
+          },
+          "16": {
+            "relative_impulse_l2_error": 0.2534927672740226,
+            "relative_velocity_l2_error": 2.252907156138564,
+            "natural_map_inf": 1.9871185190605019,
+            "bilateral_velocity_inf": 1.4210854715202004e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 1.9871185190605019,
+            "complementarity_inf": 1.0263157829611687
+          },
+          "32": {
+            "relative_impulse_l2_error": 0.15834540800352834,
+            "relative_velocity_l2_error": 1.1620024379858376,
+            "natural_map_inf": 0.9093395789566329,
+            "bilateral_velocity_inf": 2.1316282072803006e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.909339578956633,
+            "complementarity_inf": 0.6152858484061317
+          },
+          "64": {
+            "relative_impulse_l2_error": 0.07507345939079768,
+            "relative_velocity_l2_error": 0.5428319270533866,
+            "natural_map_inf": 0.5699075657245203,
+            "bilateral_velocity_inf": 1.7763568394002505e-14,
+            "primal_feasibility_inf": 0.0,
+            "dual_feasibility_inf": 0.5699075657245203,
+            "complementarity_inf": 0.3499124160540803
+          }
+        }
+      }
+    }
+  }
+}
