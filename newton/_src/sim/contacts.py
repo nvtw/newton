@@ -465,10 +465,17 @@ class Contacts:
                 "tri_count": tri_count,
                 "edge_count": edge_count,
             }
-            invalid_counts = {name: count for name, count in mesh_counts.items() if count <= 0}
+            invalid_counts = {
+                name: count
+                for name, count in mesh_counts.items()
+                if count < 0 or (name == "particle_count" and count == 0)
+            }
             if invalid_counts:
                 values = ", ".join(f"{name}={count}" for name, count in invalid_counts.items())
-                raise ValueError(f"soft_self_contact=True requires positive mesh counts; got {values}")
+                raise ValueError(
+                    "soft_self_contact=True requires a positive particle_count and non-negative "
+                    f"tri_count/edge_count; got {values}"
+                )
             self.soft_self_contact_data = build_tri_mesh_collision_info(
                 particle_count,
                 tri_count,

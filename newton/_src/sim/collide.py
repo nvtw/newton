@@ -2033,6 +2033,9 @@ class CollisionPipeline:
         # Keeping its BVHs fresh is the caller's job (refit_soft_contact_bvh); collide() never
         # refits.
         self._soft_contact_detector: TriMeshCollisionDetector | None = None
+        # A SolverVBD-owned self-contact detector cannot be replaced because the
+        # solver retains device references to the detector's result buffers.
+        self._soft_self_contact_solver_owned = False
         self._full_surface_bvh_needs_detector = bool(
             len(self._full_surface_bvh_rigid_vertex_table) or len(self._full_surface_bvh_rigid_edge_table)
         )
@@ -2194,6 +2197,8 @@ class CollisionPipeline:
             external_vertex_filter_map: Extra vertex-triangle exclusions.
             external_edge_filter_map: Extra edge-edge exclusions.
         """
+        if self._soft_self_contact_solver_owned:
+            raise ValueError("soft self-contact is owned by a solver and cannot be reconfigured")
         if margin < 0.0:
             raise ValueError(f"soft self-contact margin must be >= 0, got {margin}")
         if gap < 0.0:

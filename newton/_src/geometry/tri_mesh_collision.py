@@ -393,6 +393,18 @@ class TriMeshCollisionDetector:
         collision_info: TriMeshCollisionInfo | None = None,
         init_collision_info: bool = False,
     ):
+        """Initialize a triangle-mesh collision detector.
+
+        Args:
+            collision_info: Result buffers supplied by the caller. When provided,
+                the detector validates and writes into these buffers.
+            init_collision_info: Whether the detector should allocate and own its
+                result buffers. When false and ``collision_info`` is ``None``,
+                result buffers must be bound later before detection.
+
+        Raises:
+            ValueError: If both result-buffer ownership modes are requested.
+        """
         self.model = model
         self.record_triangle_contacting_vertices = record_triangle_contacting_vertices
         self.vertex_positions = model.particle_q if vertex_positions is None else vertex_positions

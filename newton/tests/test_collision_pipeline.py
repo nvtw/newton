@@ -329,6 +329,7 @@ class TestCollisionPipeline(unittest.TestCase):
         self.assertIsInstance(contacts, newton.Contacts)
 
     def test_soft_contact_max_zero_disables_soft_contact_generation(self):
+        """Verify zero capacity disables soft-contact generation."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         builder.add_ground_plane()
         builder.add_particle(pos=(0.0, 0.0, 0.025), vel=(0.0, 0.0, 0.0), mass=1.0, radius=0.05)
@@ -1782,6 +1783,7 @@ class TestParticleShapeContacts(unittest.TestCase):
             self.assertTrue(pw[p] == sw[s] or pw[p] < 0 or sw[s] < 0, f"cross-world pair ({p}, {s})")
 
     def test_soft_rigid_pairs_multi_world_isolated(self):
+        """Verify soft-rigid candidate pairs remain world-isolated."""
         sub = newton.ModelBuilder()
         sub.add_shape_sphere(body=-1, radius=1.0)
         sub.add_particle(pos=wp.vec3(0.0, 0.0, 0.0), vel=wp.vec3(0.0, 0.0, 0.0), mass=1.0)
@@ -1799,6 +1801,7 @@ class TestParticleShapeContacts(unittest.TestCase):
         self._assert_pairs_valid(model, pipeline)
 
     def test_soft_contacts_respect_active_and_collide_flags(self):
+        """Verify soft contacts respect particle and shape collision flags."""
         # Pairs are a world-compatible superset (flags are not baked in); create_soft_contacts applies
         # ACTIVE / COLLIDE_PARTICLES dynamically, so only the active particle x the particle-colliding
         # shape actually produces a contact.
@@ -1820,6 +1823,7 @@ class TestParticleShapeContacts(unittest.TestCase):
         self.assertEqual(contacts.soft_contact_count.numpy()[0], 1)
 
     def test_soft_contacts_track_runtime_flag_changes(self):
+        """Verify soft contacts track collision flags changed at runtime."""
         # Regression: pairs are precomputed once, so a particle activated *after* the pipeline is built
         # must still produce a contact (flags are filtered dynamically, not baked into the pair list).
         builder = newton.ModelBuilder()
@@ -1842,6 +1846,7 @@ class TestParticleShapeContacts(unittest.TestCase):
         self.assertEqual(contacts.soft_contact_count.numpy()[0], 1)
 
     def test_soft_contact_capacity_defaults_to_pair_count(self):
+        """Verify soft-contact capacity defaults to the candidate-pair count."""
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         builder.add_cloth_grid(
@@ -1863,6 +1868,7 @@ class TestParticleShapeContacts(unittest.TestCase):
         self.assertEqual(contacts.soft_contact_max, pipeline.soft_contact_pair_count)
 
     def test_soft_contact_explicit_capacity_is_respected(self):
+        """Verify an explicit soft-contact capacity is preserved."""
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         builder.add_particle(pos=wp.vec3(0.0, 0.0, 0.05), vel=wp.vec3(0.0, 0.0, 0.0), mass=1.0)
@@ -1874,6 +1880,7 @@ class TestParticleShapeContacts(unittest.TestCase):
         self.assertEqual(pipeline.soft_contact_max, 1)
 
     def test_soft_contact_explicit_capacity_overflow_still_counts_candidates(self):
+        """Verify overflow preserves the attempted soft-contact count."""
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         builder.add_particle(pos=wp.vec3(0.0, 0.0, 0.05), vel=wp.vec3(0.0, 0.0, 0.0), mass=1.0)
@@ -1889,6 +1896,7 @@ class TestParticleShapeContacts(unittest.TestCase):
         self.assertEqual(contacts.soft_contact_count.numpy()[0], 2)
 
     def test_soft_contacts_skip_cross_world_shape_particle_pairs(self):
+        """Verify soft contacts skip cross-world particle-shape pairs."""
         particle_builder = newton.ModelBuilder()
         particle_builder.add_particle(pos=wp.vec3(0.0, 0.0, 0.0), vel=wp.vec3(0.0, 0.0, 0.0), mass=1.0)
 
@@ -1908,6 +1916,7 @@ class TestParticleShapeContacts(unittest.TestCase):
         self.assertEqual(contacts.soft_contact_count.numpy()[0], 0)
 
     def test_global_shape_contacts_particles_in_all_worlds(self):
+        """Verify global shapes contact particles in every world."""
         particle_builder = newton.ModelBuilder()
         particle_builder.add_particle(pos=wp.vec3(0.0, 0.0, 0.05), vel=wp.vec3(0.0, 0.0, 0.0), mass=1.0)
 
