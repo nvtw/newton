@@ -4,12 +4,8 @@
 """ONNX policy inference using Warp-NN."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import warp as wp
-
-if TYPE_CHECKING:
-    import torch
 
 
 class WarpOnnxPolicy:
@@ -23,7 +19,8 @@ class WarpOnnxPolicy:
                 "Kamino ONNX policy inference requires Warp-NN. Install it with `pip install newton[onnx]`."
             ) from exc
 
-        self.runtime = OnnxRuntime(str(path), device=device, batch_size=batch_size, input_batch_axes=0)
+        self.device = wp.get_device(device)
+        self.runtime = OnnxRuntime(str(path), device=self.device, batch_size=batch_size, input_batch_axes=0)
         if len(self.runtime.input_names) != 1 or len(self.runtime.output_names) != 1:
             raise ValueError(
                 f"Policy '{path}' must have exactly one input and one output; got "
@@ -36,14 +33,12 @@ class WarpOnnxPolicy:
         if output_shape != expected_output_shape:
             raise ValueError(f"Policy '{path}' output shape must be {expected_output_shape}, got {output_shape}")
 
-    def __call__(self, observation: "torch.Tensor") -> "torch.Tensor":
-        """Evaluate a contiguous float32 Torch observation batch."""
-        import torch
-
-        if observation.dtype != torch.float32:
-            raise TypeError(f"Policy observations must have dtype torch.float32, got {observation.dtype}")
-        if not observation.is_contiguous():
+    def __call__(self, observation: wp.array[wp.float32]) -> wp.array[wp.float32]:
+        """Evaluate a contiguous float32 Warp observation batch."""
+        if observation.dtype != wp.float32:
+            raise TypeError(f"Policy observations must have dtype wp.float32, got {observation.dtype}")
+        if observation.device != self.device:
+            raise ValueError(f"Policy observations must be on device {self.device}, got {observation.device}")
+        if not observation.is_contiguous:
             raise ValueError("Policy observations must be contiguous for zero-copy Warp inference")
-        observation_wp = wp.from_torch(observation, dtype=wp.float32)
-        output_wp = self.runtime({self.input_name: observation_wp})[self.output_name]
-        return wp.to_torch(output_wp)
+        return self.runtime({self.input_name: observation})[self.output_name]

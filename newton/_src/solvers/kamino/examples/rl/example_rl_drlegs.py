@@ -197,6 +197,7 @@ class Example:
         # 9 + 2 + 2 + 3 + 3 + 3 + 4 + 3 + 3 + 1 + 1 + 36 + 24 = 94
         obs_dim = 94
         self._obs_buffer = torch.zeros(num_worlds, obs_dim, device=self.torch_device, dtype=torch.float32)
+        self._obs_buffer_wp = wp.from_torch(self._obs_buffer)
         msg.info(f"Observation dim: {obs_dim}")
 
         # Action buffer (12 actuated joints)
@@ -205,6 +206,7 @@ class Example:
             device=self.torch_device,
             dtype=torch.float32,
         )
+        self._actions_wp = wp.from_torch(self.actions)
 
         # Joystick for velocity commands
         self.joystick = JoystickController(
@@ -432,10 +434,10 @@ class Example:
         # i += 60 → total = 94
 
         # Policy inference
-        with torch.no_grad():
-            if self.policy is not None:
-                self.actions[:] = self.policy(self._obs_buffer)
-            else:
+        if self.policy is not None:
+            wp.copy(self._actions_wp, self.policy(self._obs_buffer_wp))
+        else:
+            with torch.no_grad():
                 self.actions[:] = 2.0 * torch.rand_like(self.actions) - 1.0
 
         # Write action targets to implicit PD controller

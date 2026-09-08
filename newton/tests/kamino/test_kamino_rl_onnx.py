@@ -5,26 +5,40 @@ import importlib.util
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
+import warp as wp
 
 _HAS_ONNX = importlib.util.find_spec("onnx") is not None
 _HAS_TORCH = importlib.util.find_spec("torch") is not None
 _HAS_WARP_NN = importlib.util.find_spec("warp_nn") is not None
 
-if _HAS_ONNX and _HAS_TORCH and _HAS_WARP_NN:
-    import onnx
+if _HAS_TORCH:
     import torch
+
+    from newton._src.solvers.kamino._src.core.joints import JointDoFType
+    from newton._src.solvers.kamino.examples.rl.observations import DrlegsBaseObservation
+
+if _HAS_ONNX and _HAS_WARP_NN:
+    import onnx
     from onnx import TensorProto, helper, numpy_helper
 
     from newton._src.solvers.kamino.examples.rl.onnx_policy import WarpOnnxPolicy
 
 
-@unittest.skipUnless(_HAS_ONNX and _HAS_TORCH and _HAS_WARP_NN, "onnx, torch, or warp-nn not installed")
+@unittest.skipUnless(_HAS_ONNX and _HAS_WARP_NN, "onnx or warp-nn not installed")
 class TestKaminoRlOnnx(unittest.TestCase):
     """Test Warp-NN policy inference used by the Kamino RL example."""
 
-    def _save_policy(self, directory, *, input_count=1, output_count=1, output_width=2):
+    def _save_policy(
+        self,
+        directory: str | os.PathLike[str],
+        *,
+        input_count: int = 1,
+        output_count: int = 1,
+        output_width: int = 2,
+    ) -> tuple[str, np.ndarray, np.ndarray]:
         """Create a small ONNX policy with configurable inputs and outputs."""
         weights = np.arange(output_width * 2, dtype=np.float32).reshape(output_width, 2)
         bias = np.arange(output_width, dtype=np.float32)
@@ -66,27 +80,25 @@ class TestKaminoRlOnnx(unittest.TestCase):
         onnx.save(model, path)
         return path, weights, bias
 
-    def test_policy_accepts_torch_tensor(self):
-        """Evaluate a DR Legs-style ONNX policy from a zero-copy Torch input."""
+    def test_policy_accepts_warp_array(self):
+        """Evaluate a DR Legs-style ONNX policy from a Warp input."""
         with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmp_dir:
             path, weights, bias = self._save_policy(tmp_dir)
             policy = WarpOnnxPolicy(path, device="cpu", batch_size=2, action_width=2)
-            observation = torch.tensor([[1.0, 2.0], [-1.0, 0.5]], dtype=torch.float32)
-            actual = policy(observation)
+            observation = np.array([[1.0, 2.0], [-1.0, 0.5]], dtype=np.float32)
+            actual = policy(wp.array(observation, dtype=wp.float32, device="cpu")).numpy()
 
-        expected = observation @ torch.from_numpy(weights).T + torch.from_numpy(bias)
-        torch.testing.assert_close(actual, expected)
+        expected = observation @ weights.T + bias
+        np.testing.assert_allclose(actual, expected)
 
-    def test_policy_rejects_invalid_torch_tensor(self):
-        """Reject observations that cannot use zero-copy Warp inference."""
+    def test_policy_rejects_invalid_warp_dtype(self):
+        """Reject Warp observations with an incompatible dtype."""
         with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmp_dir:
             path, _, _ = self._save_policy(tmp_dir)
             policy = WarpOnnxPolicy(path, device="cpu", batch_size=2, action_width=2)
 
-            with self.assertRaisesRegex(TypeError, "torch.float32"):
-                policy(torch.ones((2, 2), dtype=torch.float64))
-            with self.assertRaisesRegex(ValueError, "contiguous"):
-                policy(torch.ones((2, 4), dtype=torch.float32)[:, ::2])
+            with self.assertRaisesRegex(TypeError, "wp.float32"):
+                policy(wp.ones((2, 2), dtype=wp.float64, device="cpu"))
 
     def test_policy_rejects_multiple_inputs_or_outputs(self):
         """Reject policy models that do not have one input and one output."""
@@ -105,6 +117,42 @@ class TestKaminoRlOnnx(unittest.TestCase):
             path, _, _ = self._save_policy(tmp_dir, output_width=3)
             with self.assertRaisesRegex(ValueError, "output shape"):
                 WarpOnnxPolicy(path, device="cpu", batch_size=2, action_width=2)
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not installed")
+class TestDrlegsBaseObservation(unittest.TestCase):
+    """Test DR Legs observation layout."""
+
+    def test_excludes_nonzero_index_base_joint(self):
+        """Exclude floating-root coordinates at their actual joint offset."""
+        joints = SimpleNamespace(
+            coords_offset=wp.array([0, 1, 8], dtype=wp.int32, device="cpu"),
+            dof_type=wp.array(
+                [JointDoFType.REVOLUTE, JointDoFType.FREE, JointDoFType.REVOLUTE],
+                dtype=wp.int32,
+                device="cpu",
+            ),
+            num_coords=wp.array([1, 7, 1], dtype=wp.int32, device="cpu"),
+        )
+        body_sim = SimpleNamespace(
+            num_actuated=1,
+            num_joint_coords=9,
+            num_worlds=1,
+            sim=SimpleNamespace(
+                model=SimpleNamespace(
+                    info=SimpleNamespace(base_joint_index=wp.array([1], dtype=wp.int32, device="cpu")),
+                    joints=joints,
+                )
+            ),
+            torch_device="cpu",
+        )
+        observation = DrlegsBaseObservation(body_sim)
+        observation._get_root_positions = lambda: torch.tensor([[1.0, 2.0, 3.0]])
+        observation._get_joint_positions = lambda: torch.arange(9, dtype=torch.float32).reshape(1, 9)
+
+        actual = observation.compute()
+
+        torch.testing.assert_close(actual[0, :5], torch.tensor([1.0, 2.0, 3.0, 0.0, 8.0]))
 
 
 if __name__ == "__main__":
