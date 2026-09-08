@@ -106,7 +106,8 @@ class TestApi(unittest.TestCase):
 
         parameters = inspect.signature(newton.CollisionPipeline).parameters
 
-        self.assertIn("max_speculative_extension", parameters)
+        self.assertIn("speculative_contact_gap_max", parameters)
+        self.assertNotIn("max_speculative_extension", parameters)
         self.assertNotIn("speculative_config", parameters)
         self.assertFalse(hasattr(newton.CollisionPipeline, "SpeculativeContactConfig"))
 

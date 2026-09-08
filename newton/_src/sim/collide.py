@@ -1235,7 +1235,7 @@ class CollisionPipeline:
         contact_report: bool = False,
         verify_buffers: bool = True,
         contact_reduction_hashtable_size_factor: float = 0.25,
-        max_speculative_extension: float | None = None,
+        speculative_contact_gap_max: float | None = None,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -1352,13 +1352,11 @@ class CollisionPipeline:
                 ``True``.  Overhead is one extra kernel launch per collision
                 pass; disable in hot loops or CUDA graph capture once buffer
                 sizes are known to be adequate.
-            max_speculative_extension: Upper bound on the velocity-based rigid
-                contact gap [m]. ``None`` disables speculative contacts. A
-                finite, non-negative value enables them and admits a separated
-                candidate if its normal-directed contact-point velocity can
-                close the separation within the collision-update horizon.
-                ``0.0`` keeps speculative mode enabled but disables velocity
-                adaptation. Defaults to ``None``. See
+            speculative_contact_gap_max: Cap on the velocity-derived rigid-contact
+                detection gap [m]. The effective gap is the larger of the authored
+                gap and the capped velocity-derived gap. ``None`` disables
+                speculative contacts; ``0.0`` enables them without enlarging
+                authored gaps. Defaults to ``None``. See
                 :ref:`Speculative contacts <speculative-contacts>`.
 
         .. experimental::
@@ -1383,12 +1381,12 @@ class CollisionPipeline:
         matching_sticky = contact_matching == "sticky"
         if contact_report and not matching_enabled:
             raise ValueError('contact_report=True requires contact_matching != "disabled"')
-        if max_speculative_extension is not None and (
-            not np.isfinite(max_speculative_extension) or max_speculative_extension < 0.0
+        if speculative_contact_gap_max is not None and (
+            not np.isfinite(speculative_contact_gap_max) or speculative_contact_gap_max < 0.0
         ):
             raise ValueError(
-                "max_speculative_extension must be a non-negative finite number or None, "
-                f"got {max_speculative_extension!r}"
+                "speculative_contact_gap_max must be a non-negative finite number or None, "
+                f"got {speculative_contact_gap_max!r}"
             )
 
         # Any non-disabled matching mode implies deterministic sorting.
@@ -1453,8 +1451,8 @@ class CollisionPipeline:
         self.reduce_contacts = reduce_contacts
         self.requires_grad = requires_grad
         self.include_static_kinematic_pairs = include_static_kinematic_pairs
-        self.max_speculative_extension = max_speculative_extension
-        self._speculative_enabled = max_speculative_extension is not None
+        self.speculative_contact_gap_max = speculative_contact_gap_max
+        self._speculative_enabled = speculative_contact_gap_max is not None
         contact_writer = write_contact_speculative if self._speculative_enabled else write_contact
 
         if using_expert_components:
@@ -1500,7 +1498,7 @@ class CollisionPipeline:
             if bool(getattr(narrow_phase, "speculative", False)) != self._speculative_enabled:
                 raise ValueError(
                     "Provided narrow_phase speculative mode must match "
-                    "CollisionPipeline(max_speculative_extension=...)."
+                    "CollisionPipeline(speculative_contact_gap_max=...)."
                 )
             if narrow_phase.max_candidate_pairs < self.shape_pairs_max:
                 raise ValueError(
@@ -2246,7 +2244,7 @@ class CollisionPipeline:
             collision_update_dt = dt
             if not np.isfinite(collision_update_dt) or collision_update_dt < 0.0:
                 raise ValueError(f"dt must be a non-negative finite number, got {collision_update_dt!r}")
-            max_speculative_extension = float(self.max_speculative_extension)
+            max_speculative_extension = float(self.speculative_contact_gap_max)
             speculative_active = collision_update_dt > 0.0 and max_speculative_extension > 0.0
             search_gap = self._shape_search_gap if speculative_active else model.shape_gap
         else:

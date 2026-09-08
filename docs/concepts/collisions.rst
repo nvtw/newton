@@ -1387,22 +1387,22 @@ linear and angular velocity at the contact points. Common motion and receding mo
 therefore do not enlarge the gap. Broad phase uses a conservative motion bound; narrow
 phase applies the normal-directed test above.
 
-Enable the feature with the keyword-only ``max_speculative_extension`` constructor argument:
+Enable the feature with the keyword-only ``speculative_contact_gap_max`` constructor argument:
 
 .. code-block:: python
 
     pipeline = newton.CollisionPipeline(
         model,
-        max_speculative_extension=0.1,
+        speculative_contact_gap_max=0.1,
     )
 
     pipeline.collide(state, contacts, dt=1.0 / 60.0)
 
 The per-call ``dt`` is the time [s] until the next planned
 :meth:`CollisionPipeline.collide` call, including skipped solver substeps, and is
-required when speculative contacts are enabled. ``dt=0.0`` uses only the fixed
-gaps. ``max_speculative_extension`` caps the velocity-based distance [m]; ``0.0``
-also disables velocity adaptation.
+required when speculative contacts are enabled. ``dt=0.0`` uses only the authored
+gaps. ``speculative_contact_gap_max`` caps the velocity-derived detection gap [m];
+``0.0`` does not enlarge authored gaps.
 
 Speculation changes when a contact is retained, not its geometry: contact points remain
 at their current separation rather than a predicted impact pose. Mesh and SDF contact
