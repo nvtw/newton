@@ -3,9 +3,8 @@
 
 """Evaluate DVI block-coupling methods on the Unitree G1 workload.
 
-This script is review tooling, not a public solver mode. It holds contact,
-friction, warm-starting, model, timestep, and projected-sweep count fixed while
-comparing these coupling methods:
+This script holds contact, friction, warm-starting, model, timestep, and
+projected-sweep count fixed while comparing these coupling methods:
 
 ``schur``
     Eliminate bilateral rows and solve the reduced unilateral problem, as in
@@ -40,111 +39,14 @@ import warp as wp
 import newton
 import newton.utils
 from newton import JointTargetMode
-from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
-    _initialize_dvi_status,
-    _set_dvi_direct_status_iterations,
-)
-from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
-    SparseDVIPath,
-    _can_use_sparse_colored_inequalities,
-    _compute_sparse_solution_vectors,
-    _factor_sparse_bilateral_block,
-    _launch_sparse_inequality_pgs,
-    _prepare_sparse_inequality_pgs,
-    _solve_sparse_bilateral_block,
-)
-from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import _cache_sparse_projected_diagonal
 
 wp.config.log_level = wp.LOG_WARNING
-
-_CANDIDATE_SPARSE_SOLVE = SparseDVIPath.solve
-
-
-def _solve_with_alternating_coupling(path: SparseDVIPath, problem) -> None:
-    """Run projected full-system sweeps with repeated bilateral solves.
-
-    The candidate kernels reduce to the original full-system projected update
-    when the bilateral response is identically zero and ``projected_diag`` is
-    the preconditioned physical Delassus diagonal. After each projected block,
-    the already factored bilateral matrix is reused for forward/back
-    substitution.
-    """
-    if path.bilateral_solver is None or path.data.bilateral_operator is None:
-        _CANDIDATE_SPARSE_SOLVE(path, problem)
-        return
-
-    state = path.data.state
-    _factor_sparse_bilateral_block(path, problem)
-    _solve_sparse_bilateral_block(path, problem)
-    if not path.has_unilateral_constraints:
-        _compute_sparse_solution_vectors(path, problem)
-        return
-    if not _can_use_sparse_colored_inequalities(path):
-        raise RuntimeError("Sparse DVI inequality topology is unavailable.")
-
-    wp.launch(
-        kernel=_initialize_dvi_status,
-        dim=path.size.num_worlds,
-        inputs=[path.data.config, path.data.status],
-        device=path.device,
-    )
-    _prepare_sparse_inequality_pgs(path, problem)
-
-    # Zero response arrays to remove every Schur correction explicitly. Cache
-    # the same |D_ii| P_i^2 diagonal used by the historical full-system PGS;
-    # scratch itself contains the unscaled physical Delassus diagonal.
-    state.bilateral_coupling.zero_()
-    state.bilateral_response.zero_()
-    state.bilateral_response_factor.zero_()
-    state.bilateral_delta.zero_()
-    max_unilateral_rows = (
-        path.size.max_of_num_bounded_joint_cts + path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
-    )
-    wp.launch(
-        kernel=_cache_sparse_projected_diagonal,
-        dim=(path.size.num_worlds, max_unilateral_rows),
-        inputs=[
-            problem.data.dim,
-            problem.data.njc,
-            problem.data.vio,
-            problem.data.P,
-            state.scratch,
-            state.bilateral_response_mio,
-            state.bilateral_response_stride,
-            state.bilateral_coupling,
-            state.bilateral_response,
-            path.data.solution.lambdas,
-            state.v_aug,
-            state.inequality_projected_diagonal,
-        ],
-        device=path.device,
-    )
-
-    for block_iteration in range(path.max_alternating_iterations):
-        _launch_sparse_inequality_pgs(path, problem, block_iteration)
-        if block_iteration + 1 < path.max_alternating_iterations:
-            _solve_sparse_bilateral_block(path, problem)
-    _solve_sparse_bilateral_block(path, problem)
-
-    wp.launch(
-        kernel=_set_dvi_direct_status_iterations,
-        dim=path.size.num_worlds,
-        inputs=[problem.data.nbc, problem.data.nl, problem.data.nc, path.data.config, False, path.data.status],
-        device=path.device,
-    )
-    _compute_sparse_solution_vectors(path, problem)
-
-
-def _select_coupling_method(method: str) -> None:
-    """Select a coupling method before constructing and capturing the solver."""
-    SparseDVIPath.solve = _solve_with_alternating_coupling if method == "alternating" else _CANDIDATE_SPARSE_SOLVE
 
 
 class G1CouplingWorkload:
     """Headless G1 example with parameterized DVI work."""
 
     def __init__(self, method: str, iterations: int, sweeps: int, omega: float, initial_tilt_deg: float):
-        _select_coupling_method(method)
         self.frame_dt = 1.0 / 60.0
         self.sim_substeps = 4
         self.sim_dt = self.frame_dt / self.sim_substeps
@@ -199,6 +101,7 @@ class G1CouplingWorkload:
         config.dvi.max_alternating_iterations = iterations
         config.dvi.inequality_sweeps_per_iteration = sweeps
         config.dvi.omega = omega
+        config.dvi.use_schur_complement = method == "schur"
         # Schur folds the bilateral response into every unilateral update.
         # Alternating instead refreshes the direct bilateral solution after
         # every projected block, matching the historical interval-one method.

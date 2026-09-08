@@ -101,6 +101,7 @@ class SparseDVIPath:
         contacts: ContactsKamino | None,
         jacobians: SparseSystemJacobians | None,
         bilateral_solver,
+        use_schur_complement: bool,
         max_alternating_iterations: int,
         max_inequality_sweeps_per_iteration: int,
         has_unilateral_constraints: bool,
@@ -122,6 +123,7 @@ class SparseDVIPath:
         self.body_space = wp.empty(shape=size.sum_of_num_body_dofs, dtype=wp.float32, device=device)
         self.parallel_contact_colors = wp.zeros(shape=1, dtype=wp.int32, device=device)
         self.bilateral_solver = bilateral_solver
+        self.use_schur_complement = use_schur_complement
         self.max_alternating_iterations = max_alternating_iterations
         self.max_inequality_sweeps_per_iteration = max_inequality_sweeps_per_iteration
         self.has_unilateral_constraints = has_unilateral_constraints
@@ -964,7 +966,73 @@ def _solve_sparse_bilateral_block(
 
 
 def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: DualProblem) -> None:
-    """Alternate a direct ``D_bb`` solve with projected sparse unilateral sweeps."""
+    """Solve coupled sparse bilateral and unilateral constraint blocks."""
+    if not path.use_schur_complement:
+        _solve_sparse_with_bilateral_alternation(path, problem)
+        return
+
+    _solve_sparse_with_bilateral_schur_complement(path, problem)
+
+
+def _solve_sparse_with_bilateral_alternation(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Alternate direct bilateral solves with projected sparse unilateral sweeps."""
+    state = path.data.state
+    _factor_sparse_bilateral_block(path, problem)
+    _solve_sparse_bilateral_block(path, problem)
+    if not path.has_unilateral_constraints:
+        _compute_sparse_solution_vectors(path, problem)
+        return
+    if not _can_use_sparse_colored_inequalities(path):
+        raise RuntimeError(_SPARSE_INEQUALITY_TOPOLOGY_ERROR)
+
+    wp.launch(
+        kernel=_initialize_dvi_status,
+        dim=path.size.num_worlds,
+        inputs=[path.data.config, path.data.status],
+        device=path.device,
+    )
+    _prepare_sparse_inequality_pgs(path, problem)
+    max_unilateral_rows = (
+        path.size.max_of_num_bounded_joint_cts + path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
+    )
+    wp.launch(
+        kernel=_cache_sparse_projected_diagonal,
+        dim=(path.size.num_worlds, max_unilateral_rows),
+        inputs=[
+            problem.data.dim,
+            problem.data.njc,
+            problem.data.vio,
+            problem.data.P,
+            state.scratch,
+            state.bilateral_response_mio,
+            state.bilateral_response_stride,
+            state.bilateral_coupling,
+            state.bilateral_response,
+            path.data.solution.lambdas,
+            state.v_aug,
+            state.inequality_projected_diagonal,
+        ],
+        device=path.device,
+    )
+    for block_iteration in range(path.max_alternating_iterations):
+        _launch_sparse_inequality_pgs(path, problem, block_iteration)
+        if path.should_solve_bilateral_after_block(block_iteration):
+            path.set_bilateral_active_dim(problem, block_iteration)
+            _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
+
+    path.set_bilateral_active_dim(problem, -1)
+    _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
+    wp.launch(
+        kernel=_set_dvi_direct_status_iterations,
+        dim=path.size.num_worlds,
+        inputs=[problem.data.nbc, problem.data.nl, problem.data.nc, path.data.config, False, path.data.status],
+        device=path.device,
+    )
+    _compute_sparse_solution_vectors(path, problem)
+
+
+def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Eliminate bilateral rows from projected sparse unilateral sweeps."""
     state = path.data.state
     _factor_sparse_bilateral_block(path, problem)
     _solve_sparse_bilateral_block(path, problem)

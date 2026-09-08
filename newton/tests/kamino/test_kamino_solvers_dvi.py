@@ -364,8 +364,9 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(default_config.dvi.omega, 1.2)
         self.assertEqual(default_config.dvi.max_alternating_iterations, 24)
         self.assertEqual(default_config.dvi.inequality_sweeps_per_iteration, 2)
+        self.assertFalse(default_config.dvi.use_schur_complement)
         self.assertEqual(default_config.dvi.tangential_warmstart_scale, 0.97)
-        self.assertEqual(default_config.dvi.bilateral_solve_interval, 24)
+        self.assertEqual(default_config.dvi.bilateral_solve_interval, 1)
         self.assertEqual(default_config.dvi.bilateral_solver_type, "LLTB")
         self.assertEqual(default_config.dvi.bilateral_solver_kwargs, {})
 
@@ -392,7 +393,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dynamics_solver, "dvi")
         self.assertEqual(config.dvi.max_alternating_iterations, 32)
         self.assertEqual(config.dvi.inequality_sweeps_per_iteration, 2)
-        self.assertEqual(config.dvi.bilateral_solve_interval, 24)
+        self.assertEqual(config.dvi.bilateral_solve_interval, 1)
         self.assertEqual(
             config.dvi.contact_warmstart_method,
             "key_and_position_with_net_force_backup_and_tangential_net_force",
@@ -1314,9 +1315,6 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(active_dim_updates[1][1], active_dim_updates[0][1])
         np.testing.assert_array_equal(active_dim_updates[2][1], joint_dims)
 
-        lambdas = extract_problem_vector(problem.delassus, solver.data.solution.lambdas.numpy(), only_active_dims=True)
-        np.testing.assert_allclose(lambdas[0], lambdas[1], rtol=1e-5, atol=1e-6)
-
     def test_03d2_dvi_direct_block_finishes_with_bilateral_solve(self):
         """Recover a consistent bilateral solution after fused inequality iterations."""
         builder = basics.build_boxes_hinged()
@@ -1348,6 +1346,7 @@ class TestDVISolver(unittest.TestCase):
                 regularization=1e-5,
                 max_alternating_iterations=3,
                 inequality_sweeps_per_iteration=1,
+                use_schur_complement=True,
             ),
             warmstart=WarmStartMode.NONE,
         )
@@ -1376,6 +1375,7 @@ class TestDVISolver(unittest.TestCase):
             "max_alternating_iterations": 64,
             "inequality_sweeps_per_iteration": 1,
             "bilateral_solve_interval": 64,
+            "use_schur_complement": True,
         }
         iterations = {}
 

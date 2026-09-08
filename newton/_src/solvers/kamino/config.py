@@ -832,13 +832,19 @@ class DVISolverConfig:
     on CUDA. Must be greater than zero. Defaults to `2`.
     """
 
-    bilateral_solve_interval: int = 24
+    use_schur_complement: bool = False
+    """
+    Whether to eliminate bilateral rows from the unilateral solve through a
+    Schur complement. This experimental path can improve strongly coupled
+    contact problems but adds setup work. Defaults to ``False``.
+    """
+
+    bilateral_solve_interval: int = 1
     """
     Number of alternating DVI iterations between repeated direct bilateral solves.
-    The default matches :attr:`max_alternating_iterations`, so the direct bilateral
-    block is solved after the fused inequality schedule. Smaller values trade GPU
-    launch overhead for tighter bilateral-inequality coupling. Must be greater than
-    zero. Defaults to `24`.
+    This controls coupling when :attr:`use_schur_complement` is ``False``.
+    Larger values trade coupling accuracy for fewer direct solves. Must be greater
+    than zero. Defaults to `1`.
     """
 
     tangential_warmstart_scale: float = 0.97
