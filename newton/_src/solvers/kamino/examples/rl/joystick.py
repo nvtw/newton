@@ -38,63 +38,14 @@ from __future__ import annotations
 
 # Python
 import dataclasses
-import math
 from typing import Any
 
-
-def _deadband(value: float, threshold: float) -> float:
-    """Remove a dead zone and rescale the remaining range."""
-    if abs(value) < threshold:
-        return 0.0
-    sign = 1.0 if value > 0.0 else -1.0
-    return sign * (abs(value) - threshold) / (1.0 - threshold)
-
-
-def _scale_asym(value: float, negative_scale: float, positive_scale: float) -> float:
-    """Scale a signed value with separate negative and positive limits."""
-    return value * negative_scale if value < 0.0 else value * positive_scale
-
-
-class _LowPassFilter:
-    """Scalar backward-Euler low-pass filter."""
-
-    def __init__(self, cutoff_hz: float, dt: float) -> None:
-        omega = cutoff_hz * 2.0 * math.pi
-        self.alpha = omega * dt / (omega * dt + 1.0)
-        self.value: float | None = None
-
-    def update(self, value: float) -> float:
-        if self.value is None:
-            self.value = value
-        else:
-            self.value = (1.0 - self.alpha) * self.value + self.alpha * value
-        return self.value
-
-    def reset(self) -> None:
-        self.value = None
-
-
-class _RateLimitedValue:
-    """Clamp the rate of change of a scalar value."""
-
-    def __init__(self, rate_limit: float, dt: float) -> None:
-        self.rate_limit = rate_limit
-        self.dt = dt
-        self.value = 0.0
-        self._initialized = False
-
-    def update(self, target: float) -> float:
-        if not self._initialized:
-            self._initialized = True
-            self.value = target
-        else:
-            max_delta = self.rate_limit * self.dt
-            self.value += max(-max_delta, min(target - self.value, max_delta))
-        return self.value
-
-    def reset(self) -> None:
-        self.value = 0.0
-        self._initialized = False
+from newton._src.solvers.kamino.examples.rl.input_utils import (
+    RateLimitedValue,
+    _deadband,
+    _LowPassFilter,
+    _scale_asym,
+)
 
 
 def _require_torch():
@@ -206,7 +157,7 @@ class JoystickController:
         self._head_yaw_filter = _LowPassFilter(hz, dt)
 
         # Turbo ramp (rate-limited 0→1 blend)
-        self._turbo = _RateLimitedValue(cfg.turbo_rate, dt)
+        self._turbo = RateLimitedValue(cfg.turbo_rate, dt)
 
         # Path state (per-world)
         self._track_path = track_path
@@ -297,6 +248,21 @@ class JoystickController:
             _axis("t", "g"),  # head pitch: T = up(+),      G = down(-)
             _axis("h", "f"),  # head yaw:   F = left(+),    H = right(-)
         )
+
+    @property
+    def input_mode(self) -> str | None:
+        """Active input mode: ``"joystick"``, ``"keyboard"``, or ``None``."""
+        return self._mode
+
+    @property
+    def head_pitch_up_limit(self) -> float:
+        """Maximum positive head-pitch command."""
+        return self._cfg.head_pitch_up
+
+    @property
+    def head_pitch_down_limit(self) -> float:
+        """Magnitude of the maximum negative head-pitch command."""
+        return self._cfg.head_pitch_down
 
     def _read_turbo(self) -> float:
         """Return 1.0 if turbo is engaged, 0.0 otherwise."""
@@ -389,6 +355,8 @@ class JoystickController:
             root_pos_2d: Current robot XY position ``(num_worlds, 2)``.
             root_yaw: Current robot yaw angle ``(num_worlds, 1)``.
         """
+        if not self._track_path and (root_pos_2d is not None or root_yaw is not None):
+            raise RuntimeError("Path tracking was disabled for this joystick controller")
         if root_yaw is not None:
             self.path_heading[:] = root_yaw
         if root_pos_2d is not None:

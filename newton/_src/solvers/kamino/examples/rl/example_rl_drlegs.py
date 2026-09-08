@@ -370,15 +370,15 @@ class Example:
     def poll_input(self) -> None:
         """Update scalar input commands without constructing tensor objects."""
         self.joystick.update()
-        if self.joystick._mode == "joystick":
+        if self.joystick.input_mode == "joystick":
             pitch = self.joystick.head_pitch
             if pitch >= 0.0:
-                ratio = min(1.0, pitch / self.joystick._cfg.head_pitch_up)
+                ratio = min(1.0, pitch / self.joystick.head_pitch_up_limit)
                 self._command_height = self.cfg["standing_height"] + ratio * (
                     self.cfg["height_cmd_max"] - self.cfg["standing_height"]
                 )
             else:
-                ratio = min(1.0, -pitch / self.joystick._cfg.head_pitch_down)
+                ratio = min(1.0, -pitch / self.joystick.head_pitch_down_limit)
                 self._command_height = self.cfg["standing_height"] - ratio * (
                     self.cfg["standing_height"] - self.cfg["height_cmd_min"]
                 )

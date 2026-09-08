@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import importlib.util
+import io
 import os
 import subprocess
 import sys
@@ -12,6 +14,8 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.kamino.examples.rl.example_rl_drlegs import _build_observation_kernel
+from newton._src.solvers.kamino.examples.rl.joystick import JoystickConfig, JoystickController
+from newton._src.solvers.kamino.examples.rl.simulation import RigidBodySim
 
 _HAS_ONNX = importlib.util.find_spec("onnx") is not None
 _HAS_WARP_NN = importlib.util.find_spec("warp_nn") is not None
@@ -100,6 +104,51 @@ import newton._src.solvers.kamino.examples.rl.example_rl_drlegs  # noqa: F401, E
         np.testing.assert_allclose(actual[34:70], np.concatenate((joint_positions[:1], joint_positions[8:])))
         np.testing.assert_allclose(actual[70:82], 0.4)
         np.testing.assert_allclose(actual[82:94], 0.0)
+
+    def test_joystick_torch_free_interface(self):
+        """Expose input metadata and reject path resets when tracking is disabled."""
+        config = JoystickConfig(head_pitch_up=0.8, head_pitch_down=0.4)
+        with contextlib.redirect_stdout(io.StringIO()):
+            joystick = JoystickController(dt=0.02, device="cpu", config=config, track_path=False)
+
+        self.assertIsNone(joystick.input_mode)
+        self.assertEqual(joystick.head_pitch_up_limit, 0.8)
+        self.assertEqual(joystick.head_pitch_down_limit, 0.4)
+        joystick.reset()
+        with self.assertRaisesRegex(RuntimeError, "Path tracking was disabled"):
+            joystick.reset(root_pos_2d=object())
+
+    def test_warp_interface_rejects_torch_reset_staging(self):
+        """Report unsupported Torch-style indexed reset staging clearly."""
+        wrapper = RigidBodySim.__new__(RigidBodySim)
+        wrapper._use_torch = False
+        with self.assertRaisesRegex(RuntimeError, "use_torch=True"):
+            wrapper.set_dof()
+        with self.assertRaisesRegex(RuntimeError, "use_torch=True"):
+            wrapper.set_root()
+
+    def test_body_pair_filter_stays_in_warp(self):
+        """Keep the body-pair flag as a Warp array when Torch is disabled."""
+
+        class ContactAggregationStub:
+            def __init__(self, flag):
+                self.body_pair_contact_flag = flag
+                self.filter = None
+
+            def set_body_pair_filter(self, body_a_index, body_b_index):
+                self.filter = (body_a_index, body_b_index)
+
+        flag = wp.zeros(2, dtype=wp.int32, device="cpu")
+        aggregation = ContactAggregationStub(flag)
+        wrapper = RigidBodySim.__new__(RigidBodySim)
+        wrapper._use_torch = False
+        wrapper._body_names = ["left", "right"]
+        wrapper._contact_aggregation = aggregation
+
+        wrapper.set_body_pair_contact_filter("left", "right")
+
+        self.assertEqual(aggregation.filter, (0, 1))
+        self.assertIs(wrapper.body_pair_contact_flag, flag)
 
 
 @unittest.skipUnless(_HAS_ONNX and _HAS_WARP_NN, "onnx or warp-nn not installed")

@@ -495,13 +495,23 @@ class RigidBodySim:
         self._mass = wp.to_torch(self.sim.model.bodies.m_i).reshape(nw, nb)
 
     def _make_warp_interface(self):
-        """Create the reset and contact state needed by Warp-native examples."""
+        """Create Warp views of simulator state, control, resets, and contacts."""
         nw = self.sim.model.size.num_worlds
         njc = self.sim.model.size.max_of_num_joint_coords
         njd = self.sim.model.size.max_of_num_joint_dofs
+        nb = self.sim.model.size.max_of_num_bodies
 
         assert self.sim.model.size.sum_of_num_joint_coords == nw * njc
         assert self.sim.model.size.sum_of_num_joint_dofs == nw * njd
+
+        self._q_j = self.sim.state.q_j.reshape((nw, njc))
+        self._dq_j = self.sim.state.dq_j.reshape((nw, njd))
+        self._q_i = self.sim.state.q_i.view(wp.float32).reshape((nw, nb, 7))
+        self._u_i = self.sim.state.u_i.view(wp.float32).reshape((nw, nb, 6))
+
+        self._q_j_ref = self.sim.control.q_j_ref.reshape((nw, njc))
+        self._dq_j_ref = self.sim.control.dq_j_ref.reshape((nw, njd))
+        self._tau_j_ref = self.sim.control.tau_j_ref.reshape((nw, njd))
 
         self._world_mask_wp = wp.zeros((nw,), dtype=wp.bool, device=self._device)
         self._world_mask = self._world_mask_wp
@@ -509,6 +519,10 @@ class RigidBodySim:
         self._reset_base_u_wp = wp.zeros(nw, dtype=wp.spatial_vectorf, device=self._device)
         self._reset_q_j_wp = wp.zeros(nw * njc, dtype=wp.float32, device=self._device)
         self._reset_dq_j_wp = wp.zeros(nw * njd, dtype=wp.float32, device=self._device)
+        self._reset_base_q = self._reset_base_q_wp.view(wp.float32).reshape((nw, 7))
+        self._reset_base_u = self._reset_base_u_wp.view(wp.float32).reshape((nw, 6))
+        self._reset_q_j = self._reset_q_j_wp.reshape((nw, njc))
+        self._reset_dq_j = self._reset_dq_j_wp.reshape((nw, njd))
 
         self._update_q_j = False
         self._update_dq_j = False
@@ -516,15 +530,15 @@ class RigidBodySim:
         self._update_base_u = False
 
         self._contact_aggregation = ContactAggregation(model=self.sim.model, contacts=self.sim.contacts)
-        self._contact_flags = self._contact_aggregation.body_contact_flag
-        self._ground_contact_flags = self._contact_aggregation.body_static_contact_flag
-        self._net_contact_forces = self._contact_aggregation.body_net_force
+        self._contact_flags = self._contact_aggregation.body_contact_flag.reshape((nw, nb))
+        self._ground_contact_flags = self._contact_aggregation.body_static_contact_flag.reshape((nw, nb))
+        self._net_contact_forces = self._contact_aggregation.body_net_force.view(wp.float32).reshape((nw, nb, 3))
         self._body_pair_contact_flag = None
 
-        self._default_q_j = wp.clone(self.sim.state.q_j)
-        self._env_origins = wp.zeros(nw, dtype=wp.vec3, device=self._device)
-        self._w_e_i = self.sim.solver.data.bodies.w_e_i
-        self._mass = self.sim.model.bodies.m_i
+        self._default_q_j = wp.clone(self._q_j)
+        self._env_origins = wp.zeros((nw, 3), dtype=wp.float32, device=self._device)
+        self._w_e_i = self.sim.solver.data.bodies.w_e_i.view(wp.float32).reshape((nw, nb, 6))
+        self._mass = self.sim.model.bodies.m_i.reshape((nw, nb))
 
     # ------------------------------------------------------------------
     # Metadata extraction
@@ -836,6 +850,8 @@ class RigidBodySim:
             dof_velocities: Joint velocities ``(len(env_ids), num_joint_dofs)``.
             env_ids: Which worlds to reset.  ``None`` resets all.
         """
+        if not self._use_torch:
+            raise RuntimeError("set_dof requires RigidBodySim(use_torch=True)")
         if env_ids is None:
             self._world_mask.fill_(1)
             ids = slice(None)
@@ -869,6 +885,8 @@ class RigidBodySim:
             root_angular_velocities: Root angular velocities ``(len(env_ids), 3)``.
             env_ids: Which worlds to reset.  ``None`` resets all.
         """
+        if not self._use_torch:
+            raise RuntimeError("set_root requires RigidBodySim(use_torch=True)")
         if env_ids is None:
             self._world_mask.fill_(1)
             ids = slice(None)
@@ -973,7 +991,10 @@ class RigidBodySim:
         a_idx = self.find_body_index(body_a_name)
         b_idx = self.find_body_index(body_b_name)
         self._contact_aggregation.set_body_pair_filter(a_idx, b_idx)
-        self._body_pair_contact_flag = wp.to_torch(self._contact_aggregation.body_pair_contact_flag)
+        body_pair_contact_flag = self._contact_aggregation.body_pair_contact_flag
+        self._body_pair_contact_flag = (
+            wp.to_torch(body_pair_contact_flag) if self._use_torch else body_pair_contact_flag
+        )
 
     def compute_body_pair_contacts(self) -> None:
         """Run body-pair contact detection (call after physics step)."""

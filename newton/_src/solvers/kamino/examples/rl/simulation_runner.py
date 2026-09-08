@@ -24,8 +24,8 @@ class SimulationRunner:
 
     Args:
         example: An ``Example`` instance (must expose ``step``, ``sim_step``,
-            ``update_input``, ``reset``, ``render``, ``joystick``, and
-            ``sim_wrapper``).
+            ``reset``, ``render``, ``joystick``, and ``sim_wrapper``). It may
+            expose ``poll_input`` (preferred) or ``update_input`` for input.
         mode: ``"sync"`` (default) or ``"async"``.
         render_fps: Target rendering rate in Hz (async mode only).
         joystick_hz: Target joystick polling rate in Hz (async mode only).
