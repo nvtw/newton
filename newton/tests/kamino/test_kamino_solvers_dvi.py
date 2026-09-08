@@ -328,10 +328,19 @@ class TestDVISolver(unittest.TestCase):
             setup_tests(clear_cache=False)
         self.device = wp.get_device(test_context.device)
 
-    def test_00_sparse_projection_rejects_int32_overflow(self):
-        """Reject sparse projection allocations exceeding int32 indexing."""
+    def test_00_sparse_projection_is_allocated_only_for_schur(self):
+        """Allocate the large sparse response workspace only for Schur solves."""
         state = DVIState()
         size = SimpleNamespace(sum_of_max_inequalities=1, num_worlds=1, sum_of_max_total_cts=1)
+
+        state.allocate_sparse_projection(
+            size=size,
+            joint_rows=[46341],
+            unilateral_strides=[46341],
+            bilateral_vector_size=1,
+            use_schur_complement=False,
+        )
+        self.assertEqual(state.bilateral_coupling.size, 1)
 
         with self.assertRaisesRegex(ValueError, "Sparse DVI projection exceeds"):
             state.allocate_sparse_projection(
@@ -339,6 +348,7 @@ class TestDVISolver(unittest.TestCase):
                 joint_rows=[46341],
                 unilateral_strides=[46341],
                 bilateral_vector_size=1,
+                use_schur_complement=True,
             )
 
     def test_00_cooperative_articulation_supports_bounded_rows(self):
@@ -346,12 +356,15 @@ class TestDVISolver(unittest.TestCase):
         path = SimpleNamespace(
             device=self.device,
             bilateral_solver=object(),
+            use_schur_complement=True,
             size=SimpleNamespace(
                 max_of_num_bilateral_joint_cts=64,
                 max_of_num_bounded_joint_cts=43,
             ),
         )
         self.assertEqual(_can_use_cooperative_articulation(path), self.device.is_cuda)
+        path.use_schur_complement = False
+        self.assertFalse(_can_use_cooperative_articulation(path))
 
     def test_00_config_selection(self):
         """Verify default, dense, PADMM, and explicit DVI configuration selection."""
@@ -361,7 +374,7 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(default_config.integrator, "euler")
         self.assertEqual(default_config.dynamics.linear_solver_type, "LLTBRCM")
         self.assertEqual(default_config.dynamics.linear_solver_kwargs, {})
-        self.assertEqual(default_config.dvi.omega, 1.2)
+        self.assertEqual(default_config.dvi.omega, 1.0)
         self.assertEqual(default_config.dvi.max_alternating_iterations, 24)
         self.assertEqual(default_config.dvi.inequality_sweeps_per_iteration, 2)
         self.assertFalse(default_config.dvi.use_schur_complement)
@@ -396,14 +409,14 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(config.dvi.bilateral_solve_interval, 1)
         self.assertEqual(
             config.dvi.contact_warmstart_method,
-            "key_and_position_with_net_force_backup_and_tangential_net_force",
+            "key_and_position_with_tangential_net_force",
         )
         self.assertFalse(config.dynamics.preconditioning)
 
         sparse_config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
         self.assertTrue(sparse_config.sparse_dynamics)
         self.assertTrue(sparse_config.sparse_jacobian)
-        self.assertEqual(sparse_config.dvi.omega, 1.2)
+        self.assertEqual(sparse_config.dvi.omega, 1.0)
         self.assertEqual(sparse_config.dynamics.linear_solver_type, "CR")
         self.assertEqual(sparse_config.dynamics.linear_solver_kwargs, {"maxiter": 9})
         with self.assertRaises(ValueError):
@@ -845,6 +858,7 @@ class TestDVISolver(unittest.TestCase):
                     float_array([0.0]),  # bilateral_coupling
                     float_array([0.0]),  # bilateral_response
                     float_array([0.0]),  # bilateral_delta
+                    False,  # enable_bilateral_response
                     int32_array([1]),  # inequality_num_colors
                     int32_array([0]),  # inequality_ids_by_color
                     int32_array([0, 1]),  # inequality_color_starts

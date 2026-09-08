@@ -423,7 +423,11 @@ class DVISolver:
                     else 0
                 )
                 self._data.state.allocate_sparse_projection(
-                    self._size, self._joint_rows_host, self._unilateral_strides_host, bilateral_vector_size
+                    self._size,
+                    self._joint_rows_host,
+                    self._unilateral_strides_host,
+                    bilateral_vector_size,
+                    self._use_schur_complement,
                 )
             elif self._use_schur_complement:
                 self._data.state.allocate_dense_projection(self._size)

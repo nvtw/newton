@@ -852,6 +852,7 @@ def _cache_sparse_projected_diagonal(
     response_stride: wp.array[int32],
     bilateral_coupling: wp.array[float32],
     bilateral_response: wp.array[float32],
+    enable_bilateral_response: wp.bool,
     solution_lambdas: wp.array[float32],
     initial_unilateral_lambdas: wp.array[float32],
     projected_diag: wp.array[float32],
@@ -866,11 +867,12 @@ def _cache_sparse_projected_diagonal(
     vec_idx = vio + row
     P_i = problem_P[vec_idx]
     value = wp.abs(problem_diag[vec_idx]) * P_i * P_i
-    offset = response_mio[wid]
-    stride = response_stride[wid]
-    for bilateral_row in range(njc):
-        index = offset + bilateral_row * stride + unilateral_row
-        value -= bilateral_coupling[index] * bilateral_response[index]
+    if enable_bilateral_response:
+        offset = response_mio[wid]
+        stride = response_stride[wid]
+        for bilateral_row in range(njc):
+            index = offset + bilateral_row * stride + unilateral_row
+            value -= bilateral_coupling[index] * bilateral_response[index]
     projected_diag[vec_idx] = value
     initial_unilateral_lambdas[vec_idx] = solution_lambdas[vec_idx]
 
@@ -1201,6 +1203,7 @@ def _solve_dvi_sparse_inequalities_pgs(
     bilateral_coupling: wp.array[float32],
     bilateral_response: wp.array[float32],
     bilateral_delta: wp.array[float32],
+    enable_bilateral_response: wp.bool,
     inequality_num_colors: wp.array[int32],
     inequality_ids_by_color: wp.array[int32],
     inequality_color_starts: wp.array[int32],
@@ -1236,6 +1239,9 @@ def _solve_dvi_sparse_inequalities_pgs(
     ccgo = problem_ccgo[wid]
     vio = problem_vio[wid]
     njc = problem_njc[wid]
+    response_njc = int32(0)
+    if enable_bilateral_response:
+        response_njc = njc
     bilateral_offset = response_mio[wid]
     max_unilateral_rows = response_stride[wid]
     bvio = bilateral_vio[wid]
@@ -1329,7 +1335,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 else:
                                     nzb_idx_b = int32(-1)
                                 unilateral_row = row - njc
-                                for bilateral_row in range(njc):
+                                for bilateral_row in range(response_njc):
                                     coupling_index = (
                                         bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                     )
@@ -1352,7 +1358,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 lambda_bound_delta = lambda_bound_new - lambda_bound_old
                                 bound_delta_body = P_bound * lambda_bound_delta
                                 solution_lambdas[vec_idx] = lambda_bound_new
-                                for bilateral_row in range(njc):
+                                for bilateral_row in range(response_njc):
                                     response_index = (
                                         bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                     )
@@ -1396,7 +1402,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                             for j in range(6):
                                                 limit_value += block[j] * body_space[x_idx_base + j]
                                     unilateral_row = row - njc
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         coupling_index = (
                                             bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                         )
@@ -1419,7 +1425,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     lambda_limit_delta = lambda_limit_new - lambda_limit_old
                                     limit_delta_body = P_i * lambda_limit_delta
                                     solution_lambdas[vec_idx] = lambda_limit_new
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         response_index = (
                                             bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                         )
@@ -1484,7 +1490,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 contact_delta_body = vec3f(0.0)
                                 unilateral_row = row - njc
                                 if phase == int32(0):
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         coupling_index = (
                                             bilateral_offset
                                             + bilateral_row * max_unilateral_rows
@@ -1508,7 +1514,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     lambda_n_delta = lambda_n_new - lambda_n_old
                                     solution_lambdas[vec_idx + int32(2)] = lambda_n_new
                                     contact_delta_body.z = P_n * lambda_n_delta
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         response_index = (
                                             bilateral_offset
                                             + bilateral_row * max_unilateral_rows
@@ -1521,7 +1527,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                             bilateral_response[response_index] * lambda_n_delta,
                                         )
                                 else:
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         coupling_index_t0 = (
                                             bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                         )
@@ -1551,7 +1557,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                             body_group += int32(3)
                                         off_diagonal *= P_t1
                                         inequality_tangent_cross[uio + uid] = off_diagonal
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         coupling_index_t0 = (
                                             bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                         )
@@ -1585,7 +1591,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     lambda_t1_delta = lambda_t_new.y - lambda_t_old.y
                                     contact_delta_body.x = P_t0 * lambda_t0_delta
                                     contact_delta_body.y = P_t1 * lambda_t1_delta
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         response_index_t0 = (
                                             bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                         )

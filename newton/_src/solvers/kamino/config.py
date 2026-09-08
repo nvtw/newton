@@ -811,10 +811,10 @@ class DVISolverConfig:
     Must be positive. Defaults to `1e-6`.
     """
 
-    omega: float = 1.2
+    omega: float = 1.0
     """
     Relaxation factor applied to projected Gauss-Seidel updates.
-    Must be in the range `(0, 2]`. Defaults to `1.2`.
+    Must be in the range `(0, 2]`. Defaults to `1.0`.
     """
 
     max_alternating_iterations: int = 24
@@ -834,9 +834,14 @@ class DVISolverConfig:
 
     use_schur_complement: bool = False
     """
-    Whether to eliminate bilateral rows from the unilateral solve through a
-    Schur complement. This experimental path can improve strongly coupled
-    contact problems but adds setup work. Defaults to ``False``.
+    Whether to eliminate bilateral rows from the unilateral solve through a Schur complement.
+
+    .. experimental::
+
+        The ``True`` mode may change without prior notice. It requires the same
+        setting in every world and adds response-matrix setup and storage.
+
+    Defaults to ``False``.
     """
 
     bilateral_solve_interval: int = 1
@@ -880,11 +885,11 @@ class DVISolverConfig:
         "key_and_position_with_net_force_backup",
         "key_and_position_with_tangential_net_force",
         "key_and_position_with_net_force_backup_and_tangential_net_force",
-    ] = "key_and_position_with_net_force_backup_and_tangential_net_force"
+    ] = "key_and_position_with_tangential_net_force"
     """
     The contact warmstart method used when `warmstart_mode` is `containers`.
     See :class:`WarmstarterContacts.Method` for available options.
-    Defaults to `key_and_position_with_net_force_backup_and_tangential_net_force`.
+    Defaults to `key_and_position_with_tangential_net_force`.
     """
 
     @override

@@ -115,6 +115,7 @@ class DVIState:
         self.bilateral_response_factor: wp.array[float32] | None = None
         self.bilateral_response: wp.array[float32] | None = None
         self.bilateral_delta: wp.array[float32] | None = None
+        self._sparse_projection_allocated = False
         if size is not None:
             self.finalize(size)
 
@@ -162,6 +163,7 @@ class DVIState:
         joint_rows: list[int],
         unilateral_strides: list[int],
         bilateral_vector_size: int,
+        use_schur_complement: bool,
     ) -> None:
         """Allocate sparse bilateral-projection workspace once.
 
@@ -170,6 +172,7 @@ class DVIState:
             joint_rows: Bilateral joint-row count for each world.
             unilateral_strides: Allocated unilateral row stride for each world.
             bilateral_vector_size: Flattened size of the bilateral solution vector.
+            use_schur_complement: Whether to allocate the bilateral response matrices.
 
         Raises:
             ValueError: If the flattened response workspace exceeds int32 indexing.
@@ -179,6 +182,14 @@ class DVIState:
             self.inequality_tangent_cross = wp.zeros(max(1, size.sum_of_max_inequalities), dtype=float32)
             self.inequality_projected_diagonal = wp.zeros(max(1, size.sum_of_max_total_cts), dtype=float32)
         if self.bilateral_coupling is None:
+            # Warp kernels require arrays even when their response terms are disabled.
+            self.bilateral_response_mio = wp.zeros(max(1, size.num_worlds), dtype=int32)
+            self.bilateral_response_stride = wp.zeros(max(1, size.num_worlds), dtype=int32)
+            self.bilateral_coupling = wp.zeros(1, dtype=float32)
+            self.bilateral_response_factor = wp.zeros(1, dtype=float32)
+            self.bilateral_response = wp.zeros(1, dtype=float32)
+            self.bilateral_delta = wp.zeros(1, dtype=float32)
+        if use_schur_complement and not self._sparse_projection_allocated:
             response_offsets = []
             response_size = 0
             for num_joint_rows, unilateral_stride in zip(joint_rows, unilateral_strides, strict=True):
@@ -192,6 +203,7 @@ class DVIState:
             self.bilateral_response_factor = wp.zeros(max(1, response_size), dtype=float32)
             self.bilateral_response = wp.zeros(max(1, response_size), dtype=float32)
             self.bilateral_delta = wp.zeros(max(1, bilateral_vector_size), dtype=float32)
+            self._sparse_projection_allocated = True
 
     def reset(self):
         """Reset scratch arrays to zero."""

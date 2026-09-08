@@ -101,6 +101,7 @@ class G1CouplingWorkload:
         config.dvi.max_alternating_iterations = iterations
         config.dvi.inequality_sweeps_per_iteration = sweeps
         config.dvi.omega = omega
+        config.dvi.contact_warmstart_method = "key_and_position_with_net_force_backup_and_tangential_net_force"
         config.dvi.use_schur_complement = method == "schur"
         # Schur folds the bilateral response into every unilateral update.
         # Alternating instead refreshes the direct bilateral solution after

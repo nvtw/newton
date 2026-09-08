@@ -208,7 +208,12 @@ def _can_use_sparse_colored_inequalities(path: SparseDVIPath) -> bool:
 
 def _can_use_cooperative_articulation(path: SparseDVIPath) -> bool:
     """Return whether one warp can solve each articulated world's inequalities."""
-    return path.device.is_cuda and path.bilateral_solver is not None and path.size.max_of_num_bilateral_joint_cts >= 64
+    return (
+        path.use_schur_complement
+        and path.device.is_cuda
+        and path.bilateral_solver is not None
+        and path.size.max_of_num_bilateral_joint_cts >= 64
+    )
 
 
 def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
@@ -608,6 +613,7 @@ def _launch_sparse_inequality_pgs(
             state.bilateral_coupling,
             state.bilateral_response,
             state.bilateral_delta,
+            wp.bool(path.use_schur_complement),
         ]
         if cooperative_articulation:
             kernel_inputs = [
@@ -1008,6 +1014,7 @@ def _solve_sparse_with_bilateral_alternation(path: SparseDVIPath, problem: DualP
             state.bilateral_response_stride,
             state.bilateral_coupling,
             state.bilateral_response,
+            False,
             path.data.solution.lambdas,
             state.v_aug,
             state.inequality_projected_diagonal,
@@ -1172,6 +1179,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             state.bilateral_response_stride,
             state.bilateral_coupling,
             state.bilateral_response,
+            True,
             path.data.solution.lambdas,
             state.v_aug,
             state.inequality_projected_diagonal,
