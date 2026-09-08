@@ -3,28 +3,103 @@
 
 import importlib.util
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
-from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.kamino.examples.rl.example_rl_drlegs import _build_observation_kernel
+
 _HAS_ONNX = importlib.util.find_spec("onnx") is not None
-_HAS_TORCH = importlib.util.find_spec("torch") is not None
 _HAS_WARP_NN = importlib.util.find_spec("warp_nn") is not None
-
-if _HAS_TORCH:
-    import torch
-
-    from newton._src.solvers.kamino._src.core.joints import JointDoFType
-    from newton._src.solvers.kamino.examples.rl.observations import DrlegsBaseObservation
 
 if _HAS_ONNX and _HAS_WARP_NN:
     import onnx
     from onnx import TensorProto, helper, numpy_helper
 
     from newton._src.solvers.kamino.examples.rl.onnx_policy import WarpOnnxPolicy
+
+
+class TestKaminoRlDrlegsWarp(unittest.TestCase):
+    """Test the Warp-native DR Legs policy path."""
+
+    def test_module_imports_without_torch(self):
+        """Import the DR Legs example when PyTorch is unavailable."""
+        code = """
+import builtins
+
+real_import = builtins.__import__
+
+
+def import_without_torch(name, *args, **kwargs):
+    if name == "torch" or name.startswith("torch."):
+        raise ImportError("PyTorch is intentionally unavailable")
+    return real_import(name, *args, **kwargs)
+
+
+builtins.__import__ = import_without_torch
+import newton._src.solvers.kamino.examples.rl.example_rl_drlegs  # noqa: F401, E402
+"""
+        subprocess.run([sys.executable, "-c", code], check=True, cwd=os.getcwd())
+
+    def test_builds_observation_with_warp_arrays(self):
+        """Build the policy observation without Torch tensor interop."""
+        joint_positions = np.arange(43, dtype=np.float32)
+        body_q = wp.array(
+            [
+                wp.transformf(wp.vec3f(), wp.quat_identity(dtype=wp.float32)),
+                wp.transformf(wp.vec3f(0.0, 0.0, 0.265), wp.quat_identity(dtype=wp.float32)),
+            ],
+            dtype=wp.transformf,
+            device="cpu",
+        )
+        body_u = wp.zeros(2, dtype=wp.spatial_vectorf, device="cpu")
+        actions = wp.ones((1, 12), dtype=wp.float32, device="cpu")
+        command = wp.array([wp.vec4f(0.0, 0.0, 0.0, 0.265)], dtype=wp.vec4f, device="cpu")
+        phase = wp.zeros(1, dtype=wp.float32, device="cpu")
+        path_heading = wp.zeros(1, dtype=wp.float32, device="cpu")
+        path_position = wp.zeros(1, dtype=wp.vec2f, device="cpu")
+        action_history = wp.zeros((1, 12), dtype=wp.float32, device="cpu")
+        action_history_prev = wp.zeros((1, 12), dtype=wp.float32, device="cpu")
+        observation = wp.zeros((1, 94), dtype=wp.float32, device="cpu")
+
+        wp.launch(
+            _build_observation_kernel,
+            dim=1,
+            inputs=[
+                body_q,
+                body_u,
+                wp.array(joint_positions, dtype=wp.float32, device="cpu"),
+                actions,
+                command,
+                phase,
+                path_heading,
+                path_position,
+                action_history,
+                action_history_prev,
+                1,
+                1,
+                7,
+                43,
+                0.02,
+                1.0 / 0.6,
+                0.4,
+                0.1,
+                0.1,
+                0.05,
+                observation,
+            ],
+            device="cpu",
+        )
+
+        actual = observation.numpy()[0]
+        np.testing.assert_allclose(actual[:9], np.eye(3, dtype=np.float32).reshape(-1), atol=1.0e-6)
+        np.testing.assert_allclose(actual[34:70], np.concatenate((joint_positions[:1], joint_positions[8:])))
+        np.testing.assert_allclose(actual[70:82], 0.4)
+        np.testing.assert_allclose(actual[82:94], 0.0)
 
 
 @unittest.skipUnless(_HAS_ONNX and _HAS_WARP_NN, "onnx or warp-nn not installed")
@@ -117,42 +192,6 @@ class TestKaminoRlOnnx(unittest.TestCase):
             path, _, _ = self._save_policy(tmp_dir, output_width=3)
             with self.assertRaisesRegex(ValueError, "output shape"):
                 WarpOnnxPolicy(path, device="cpu", batch_size=2, action_width=2)
-
-
-@unittest.skipUnless(_HAS_TORCH, "torch not installed")
-class TestDrlegsBaseObservation(unittest.TestCase):
-    """Test DR Legs observation layout."""
-
-    def test_excludes_nonzero_index_base_joint(self):
-        """Exclude floating-root coordinates at their actual joint offset."""
-        joints = SimpleNamespace(
-            coords_offset=wp.array([0, 1, 8], dtype=wp.int32, device="cpu"),
-            dof_type=wp.array(
-                [JointDoFType.REVOLUTE, JointDoFType.FREE, JointDoFType.REVOLUTE],
-                dtype=wp.int32,
-                device="cpu",
-            ),
-            num_coords=wp.array([1, 7, 1], dtype=wp.int32, device="cpu"),
-        )
-        body_sim = SimpleNamespace(
-            num_actuated=1,
-            num_joint_coords=9,
-            num_worlds=1,
-            sim=SimpleNamespace(
-                model=SimpleNamespace(
-                    info=SimpleNamespace(base_joint_index=wp.array([1], dtype=wp.int32, device="cpu")),
-                    joints=joints,
-                )
-            ),
-            torch_device="cpu",
-        )
-        observation = DrlegsBaseObservation(body_sim)
-        observation._get_root_positions = lambda: torch.tensor([[1.0, 2.0, 3.0]])
-        observation._get_joint_positions = lambda: torch.arange(9, dtype=torch.float32).reshape(1, 9)
-
-        actual = observation.compute()
-
-        torch.testing.assert_close(actual[0, :5], torch.tensor([1.0, 2.0, 3.0, 0.0, 8.0]))
 
 
 if __name__ == "__main__":

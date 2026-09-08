@@ -517,16 +517,11 @@ class DrlegsBaseObservation(ObservationBuilder):
         # (e.g. a FREE joint contributes 7 pose coords); the root is
         # already represented separately via root position/orientation
         # observations.
-        root_coords_offset = 0
-        num_root_coords = 0
-        base_joint_index = int(body_sim.sim.model.info.base_joint_index.numpy()[0])
-        if base_joint_index >= 0:
-            joints = body_sim.sim.model.joints
-            root_dof_type = int(joints.dof_type.numpy()[base_joint_index])
-            if root_dof_type in (JointDoFType.FREE, JointDoFType.SPHERICAL):
-                root_coords_offset = int(joints.coords_offset.numpy()[base_joint_index])
-                num_root_coords = int(joints.num_coords.numpy()[base_joint_index])
-        self._root_coords_offset = root_coords_offset
+        root_dof_type = int(wp.to_torch(body_sim.sim.model.joints.dof_type)[0].item())
+        if root_dof_type in (JointDoFType.FREE, JointDoFType.SPHERICAL):
+            num_root_coords = int(wp.to_torch(body_sim.sim.model.joints.num_coords)[0].item())
+        else:
+            num_root_coords = 0
         self._num_root_coords = num_root_coords
         self._num_coords = body_sim.num_joint_coords - num_root_coords
         self._action_scale = action_scale
@@ -560,16 +555,12 @@ class DrlegsBaseObservation(ObservationBuilder):
             self._action_history[:] = self._action_scale * actions
 
         root_pos = self._get_root_positions()
-        q_j = self._get_joint_positions()
+        q_j = self._get_joint_positions()[:, self._num_root_coords :]
 
         d = self._num_coords
         a = self._num_actions
         self._obs_buffer[:, :3] = root_pos
-        joint_obs = self._obs_buffer[:, 3 : 3 + d]
-        root_start = self._root_coords_offset
-        root_end = root_start + self._num_root_coords
-        joint_obs[:, :root_start] = q_j[:, :root_start]
-        joint_obs[:, root_start:] = q_j[:, root_end:]
+        self._obs_buffer[:, 3 : 3 + d] = q_j
         self._obs_buffer[:, 3 + d : 3 + d + a] = self._action_history
         self._obs_buffer[:, 3 + d + a :] = self._action_history_prev
         return self._obs_buffer

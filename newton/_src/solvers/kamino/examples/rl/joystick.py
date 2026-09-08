@@ -38,17 +38,71 @@ from __future__ import annotations
 
 # Python
 import dataclasses
+import math
+from typing import Any
 
-# Thirdparty
-import torch  # noqa: TID253
 
-from newton._src.solvers.kamino.examples.rl.utils import (
-    RateLimitedValue,
-    _deadband,
-    _LowPassFilter,
-    _scale_asym,
-    yaw_apply_2d,
-)
+def _deadband(value: float, threshold: float) -> float:
+    """Remove a dead zone and rescale the remaining range."""
+    if abs(value) < threshold:
+        return 0.0
+    sign = 1.0 if value > 0.0 else -1.0
+    return sign * (abs(value) - threshold) / (1.0 - threshold)
+
+
+def _scale_asym(value: float, negative_scale: float, positive_scale: float) -> float:
+    """Scale a signed value with separate negative and positive limits."""
+    return value * negative_scale if value < 0.0 else value * positive_scale
+
+
+class _LowPassFilter:
+    """Scalar backward-Euler low-pass filter."""
+
+    def __init__(self, cutoff_hz: float, dt: float) -> None:
+        omega = cutoff_hz * 2.0 * math.pi
+        self.alpha = omega * dt / (omega * dt + 1.0)
+        self.value: float | None = None
+
+    def update(self, value: float) -> float:
+        if self.value is None:
+            self.value = value
+        else:
+            self.value = (1.0 - self.alpha) * self.value + self.alpha * value
+        return self.value
+
+    def reset(self) -> None:
+        self.value = None
+
+
+class _RateLimitedValue:
+    """Clamp the rate of change of a scalar value."""
+
+    def __init__(self, rate_limit: float, dt: float) -> None:
+        self.rate_limit = rate_limit
+        self.dt = dt
+        self.value = 0.0
+        self._initialized = False
+
+    def update(self, target: float) -> float:
+        if not self._initialized:
+            self._initialized = True
+            self.value = target
+        else:
+            max_delta = self.rate_limit * self.dt
+            self.value += max(-max_delta, min(target - self.value, max_delta))
+        return self.value
+
+    def reset(self) -> None:
+        self.value = 0.0
+        self._initialized = False
+
+
+def _require_torch():
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover - exercised without the optional dependency
+        raise ImportError("Joystick path tracking requires PyTorch.") from exc
+    return torch
 
 
 @dataclasses.dataclass
@@ -121,7 +175,8 @@ class JoystickController:
       ``head_yaw``          Head yaw command   (positive = look left)
       ``turbo_alpha``       Current turbo blend factor (0.0 - 1.0)
 
-    Path state (when ``root_pos_2d`` is passed to :meth:`update`):
+    Path state (when ``track_path`` is enabled and ``root_pos_2d`` is passed
+    to :meth:`update`):
       ``path_heading``      Integrated heading  ``(num_worlds, 1)``
       ``path_position``     Integrated position ``(num_worlds, 2)``
     """
@@ -133,6 +188,7 @@ class JoystickController:
         num_worlds: int = 1,
         device: str = "cuda:0",
         config: JoystickConfig | None = None,
+        track_path: bool = True,
     ) -> None:
         cfg = config or JoystickConfig()
         self._cfg = cfg
@@ -150,11 +206,17 @@ class JoystickController:
         self._head_yaw_filter = _LowPassFilter(hz, dt)
 
         # Turbo ramp (rate-limited 0→1 blend)
-        self._turbo = RateLimitedValue(cfg.turbo_rate, dt)
+        self._turbo = _RateLimitedValue(cfg.turbo_rate, dt)
 
         # Path state (per-world)
-        self.path_heading = torch.zeros(num_worlds, 1, device=device)
-        self.path_position = torch.zeros(num_worlds, 2, device=device)
+        self._track_path = track_path
+        self._torch = _require_torch() if track_path else None
+        if track_path:
+            from newton._src.solvers.kamino.examples.rl.utils import yaw_apply_2d  # noqa: PLC0415
+
+            self._yaw_apply_2d = yaw_apply_2d
+        self.path_heading = self._torch.zeros(num_worlds, 1, device=device) if track_path else None
+        self.path_position = self._torch.zeros(num_worlds, 2, device=device) if track_path else None
 
         # Command outputs (updated by update())
         self.forward_velocity: float = 0.0
@@ -165,7 +227,7 @@ class JoystickController:
         self.turbo_alpha: float = 0.0
 
         # Pre-allocated command velocity buffer (eliminates per-step torch.tensor())
-        self._cmd_vel_buf = torch.zeros(1, 2, device=device)
+        self._cmd_vel_buf = self._torch.zeros(1, 2, device=device) if track_path else None
 
         # Reset edge-detection state
         self._reset_prev = False
@@ -242,7 +304,7 @@ class JoystickController:
             return 1.0 if self._controller.button_trigger_r.is_pressed else 0.0
         return 0.0
 
-    def update(self, root_pos_2d: torch.Tensor | None = None) -> None:
+    def update(self, root_pos_2d: Any | None = None) -> None:
         """Read input, compute commands, and optionally advance the path.
 
         Args:
@@ -276,13 +338,15 @@ class JoystickController:
 
         # --- Path integration ---
         if root_pos_2d is not None:
+            if not self._track_path:
+                raise RuntimeError("Path tracking was disabled for this joystick controller")
             dt = self._dt
             self._cmd_vel_buf[0, 0] = self.forward_velocity
             self._cmd_vel_buf[0, 1] = self.lateral_velocity
 
             # Mid-point heading integration
             mid_heading = self.path_heading + 0.5 * dt * self.angular_velocity
-            self.path_position += yaw_apply_2d(mid_heading, self._cmd_vel_buf) * dt
+            self.path_position += self._yaw_apply_2d(mid_heading, self._cmd_vel_buf) * dt
 
             # Update heading
             self.path_heading += self.angular_velocity * dt
@@ -318,7 +382,7 @@ class JoystickController:
         self._reset_prev = pressed
         return triggered
 
-    def reset(self, root_pos_2d: torch.Tensor | None = None, root_yaw: torch.Tensor | None = None) -> None:
+    def reset(self, root_pos_2d: Any | None = None, root_yaw: Any | None = None) -> None:
         """Reset path state and filters.
 
         Args:

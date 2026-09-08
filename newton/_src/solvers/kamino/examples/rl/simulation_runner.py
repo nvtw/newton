@@ -112,9 +112,12 @@ class SimulationRunner:
                 # Single lock acquisition: snapshot root pos, run joystick
                 # filter + path integration, and write commands to obs.
                 with self._lock:
-                    root_pos_2d = ex.sim_wrapper.q_i[:, 0, :2].clone()
-                    ex.joystick.update(root_pos_2d=root_pos_2d)
-                    ex.update_input()
+                    if hasattr(ex, "poll_input"):
+                        ex.poll_input()
+                    else:
+                        root_pos_2d = ex.sim_wrapper.q_i[:, 0, :2].clone()
+                        ex.joystick.update(root_pos_2d=root_pos_2d)
+                        ex.update_input()
 
                 acted = True
 
