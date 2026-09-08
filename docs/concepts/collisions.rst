@@ -1109,6 +1109,8 @@ value (e.g. ``-1.0``) to opt out of the simplification pass entirely. By default
 ``edge_concave_filter=True`` also drops a concave manifold edge when both endpoints are
 fully concave: every neighbor in each endpoint's closed manifold one-ring lies on or
 inward from its angle-weighted tangent plane, with at least one neighbor strictly inward.
+The filter is skipped for ``sign_method="normal"`` because pseudo-normal SDFs do not
+define an unambiguous solid interior.
 Set ``edge_box_absorption=True`` to additionally drop manifold edges that are fully covered
 by another nearby edge's oriented box — useful for densely tessellated curved surfaces.
 ``edge_box_half_normal``/``edge_box_half_normal_rel`` and
@@ -1402,7 +1404,7 @@ The per-call ``dt`` is the time [s] until the next planned
 :meth:`CollisionPipeline.collide` call, including skipped solver substeps, and is
 required when speculative contacts are enabled. ``dt=0.0`` uses only the authored
 gaps. ``speculative_contact_gap_max`` caps the velocity-derived detection gap [m];
-``0.0`` does not enlarge authored gaps.
+it must be non-negative and finite. ``0.0`` does not enlarge authored gaps.
 
 Speculation changes when a contact is retained, not its geometry: contact points remain
 at their current separation rather than a predicted impact pose. Mesh and SDF contact

@@ -570,6 +570,14 @@ class TestCollisionEdgesLifecycle(unittest.TestCase):
         self.assertIsNot(copy._collision_edges, mesh._collision_edges)
 
     @unittest.skipUnless(_cuda_available, "Requires CUDA device")
+    def test_build_sdf_disables_concave_filter(self):
+        mesh = _dimpled_box_mesh()
+
+        mesh.build_sdf(max_resolution=8, edge_concave_filter=False)
+
+        self.assertEqual(len(mesh._collision_edges), 60)
+
+    @unittest.skipUnless(_cuda_available, "Requires CUDA device")
     def test_build_sdf_rolls_back_sdf_on_edge_option_failure(self):
         # Negative ``edge_lower_angle_threshold_rad`` combined with box
         # absorption is rejected by the edge-option validation that runs

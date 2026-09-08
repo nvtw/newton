@@ -1354,9 +1354,10 @@ class CollisionPipeline:
                 sizes are known to be adequate.
             speculative_contact_gap_max: Cap on the velocity-derived rigid-contact
                 detection gap [m]. The effective gap is the larger of the authored
-                gap and the capped velocity-derived gap. ``None`` disables
-                speculative contacts; ``0.0`` enables them without enlarging
-                authored gaps. Defaults to ``None``. See
+                gap and the capped velocity-derived gap. Must be a non-negative
+                finite number or ``None``. ``None`` disables speculative contacts;
+                ``0.0`` enables them without enlarging authored gaps. Defaults to
+                ``None``. See
                 :ref:`Speculative contacts <speculative-contacts>`.
 
         .. experimental::

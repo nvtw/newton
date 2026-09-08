@@ -905,7 +905,9 @@ class Mesh:
                 endpoints are fully concave. An endpoint is fully concave when
                 every neighbor in its closed manifold one-ring lies on or
                 inward from its angle-weighted tangent plane, with at least
-                one neighbor strictly inward. Defaults to ``True``.
+                one neighbor strictly inward. Ignored when
+                ``sign_method="normal"`` because pseudo-normal SDFs do not
+                define an unambiguous solid interior. Defaults to ``True``.
             edge_box_absorption: Drop manifold edges fully covered by
                 another edge's oriented box.
             edge_box_half_normal: Absolute box half-extent [m] along the
