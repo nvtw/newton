@@ -963,8 +963,13 @@ class TriMeshCollisionDetector:
             ],
             dim=self.model.particle_count,
             device=self.model.device,
-            block_dim=self.collision_detection_block_size or 16,
+            block_dim=self._vertex_collision_block_size(),
         )
+
+    def _vertex_collision_block_size(self) -> int:
+        if self.collision_detection_block_size is None:
+            return 16
+        return self.collision_detection_block_size
 
     def edge_edge_collision_detection(
         self, max_query_radius, min_query_radius=0.0, min_distance_filtering_ref_pos=None
@@ -997,10 +1002,13 @@ class TriMeshCollisionDetector:
             ],
             dim=self.model.edge_count,
             device=self.model.device,
-            block_dim=self.collision_detection_block_size or self._edge_collision_block_size(),
+            block_dim=self._edge_collision_block_size(),
         )
 
     def _edge_collision_block_size(self) -> int:
+        if self.collision_detection_block_size is not None:
+            return self.collision_detection_block_size
+
         # The per-edge BVH traversal diverges heavily within a warp. Launches too small to fill the
         # GPU are latency bound and run fastest with few threads per block, while large launches
         # need full warps for throughput. Aim for about 16 blocks per SM, clamped to [8, 32].

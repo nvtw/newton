@@ -82,13 +82,15 @@ class FastDeformableSelfCollision:
             self.model,
             init_collision_info=True,
             topological_contact_filter_threshold=0,
-            vertex_collision_buffer_pre_alloc=32,
+            vertex_collision_buffer_pre_alloc=64,
             edge_collision_buffer_pre_alloc=64,
         )
         self.radius = 0.012
 
         for _ in range(self.warmup_count):
             self._detect()
+        if self.detector.resize_flags.numpy().any():
+            raise RuntimeError("collision buffers overflowed; increase the pre-allocated sizes")
         with wp.ScopedCapture(device=device) as capture:
             self._detect()
         self.graph = capture.graph
