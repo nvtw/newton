@@ -3555,23 +3555,10 @@ def parse_usd(
 
     no_collision_shapes = set()
     # OpenUSD groups are allow-by-default filters and cannot be represented by Newton's
-    # equality-based positive group IDs, so their disabled pairs are lowered explicitly after
-    # all rigid shapes exist. A positive builder default already enables every imported pair;
-    # otherwise unique negative IDs provide the same baseline without colliding by identity.
+    # equality-based collision group IDs, so their disabled pairs are lowered explicitly after
+    # all rigid shapes exist. Preserve the builder default on every imported shape so callers can
+    # still disable collisions with zero or a shared negative group.
     imported_rigid_collider_groups: dict[str, tuple[str, ...]] = {}
-    reserved_negative_groups = [
-        group for group in (*builder.shape_collision_group, builder.default_shape_cfg.collision_group) if group < 0
-    ]
-    next_imported_collision_group = min(reserved_negative_groups, default=0) - 1
-
-    def _imported_collision_group() -> int:
-        nonlocal next_imported_collision_group
-        if builder.default_shape_cfg.collision_group > 0:
-            return builder.default_shape_cfg.collision_group
-        collision_group = next_imported_collision_group
-        next_imported_collision_group -= 1
-        return collision_group
-
     rigid_body_mass_info_map = {}
     rigid_body_mass_fallback_density = {}
     rigid_body_fallback_collider_paths = collections.defaultdict(list)
@@ -3675,7 +3662,7 @@ def parse_usd(
                     print(f"collision shape {prim.GetPath()} ({prim.GetTypeName()}), body = {body_path}")
                 body_id = path_body_map.get(body_path, -1)
                 scale = usd.get_scale(prim, local=False)
-                collision_group = _imported_collision_group()
+                collision_group = builder.default_shape_cfg.collision_group
                 collision_groups = tuple(sorted(str(group) for group in shape_spec.collisionGroups))
                 material = material_specs[""]
                 has_shape_material = len(shape_spec.materials) >= 1

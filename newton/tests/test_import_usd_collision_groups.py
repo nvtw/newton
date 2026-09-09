@@ -75,19 +75,23 @@ class TestImportUsdCollisionGroups(unittest.TestCase):
         self._assert_filtered_pairs(stage, shapes, ())
 
     def test_nonpositive_builder_collision_groups(self):
-        """Preserve enabled USD pairs with non-positive builder collision defaults."""
-        stage, shapes = self._make_stage(("A", "B", "Ungrouped"))
-        self._add_group(stage, "GroupA", (shapes["A"],))
-        self._add_group(stage, "GroupB", (shapes["B"],))
+        """Preserve non-positive builder collision defaults on imported shapes."""
+        stage, shapes = self._make_stage(("A", "B", "C", "D", "E"))
 
         for default_collision_group in (0, -1):
             with self.subTest(default_collision_group=default_collision_group):
-                self._assert_filtered_pairs(
-                    stage,
-                    shapes,
-                    (),
-                    default_collision_group=default_collision_group,
-                )
+                builder = newton.ModelBuilder()
+                builder.default_shape_cfg.collision_group = default_collision_group
+                builder.add_usd(stage)
+
+                self.assertEqual(builder.shape_collision_group, [default_collision_group] * len(shapes))
+                for shape_a in range(builder.shape_count):
+                    for shape_b in range(shape_a + 1, builder.shape_count):
+                        self.assertFalse(
+                            builder._test_group_pair(
+                                builder.shape_collision_group[shape_a], builder.shape_collision_group[shape_b]
+                            )
+                        )
 
     def test_normal_and_inverted_filtering(self):
         """Preserve self, cross-group, and inverted collision filtering."""
