@@ -26,9 +26,10 @@ def filter_fully_concave_edges(
 
     A removable edge is shared by exactly two non-degenerate triangles. Both
     endpoint vertices must have connected, closed, consistently oriented
-    one-rings, and every one-ring neighbor must lie on the inward side of the
-    endpoint's angle-weighted tangent plane. Boundary, non-manifold, saddle,
-    flat, and ambiguous features are preserved.
+    one-rings, and every one-ring neighbor must lie on or outward from the
+    endpoint's angle-weighted tangent plane, with at least one neighbor strictly
+    outward. Boundary, non-manifold, saddle, flat, and ambiguous features are
+    preserved.
 
     Args:
         mesh: Source mesh with consistently authored triangle winding.

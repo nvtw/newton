@@ -904,8 +904,8 @@ class Mesh:
             edge_concave_filter: Drop a concave manifold edge when both of its
                 endpoints are fully concave. An endpoint is fully concave when
                 every neighbor in its closed manifold one-ring lies on or
-                inward from its angle-weighted tangent plane, with at least
-                one neighbor strictly inward. Ignored when
+                outward from its angle-weighted tangent plane, with at least
+                one neighbor strictly outward. Ignored when
                 ``sign_method="normal"`` because pseudo-normal SDFs do not
                 define an unambiguous solid interior. Defaults to ``True``.
             edge_box_absorption: Drop manifold edges fully covered by

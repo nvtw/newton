@@ -1108,7 +1108,7 @@ prune more aggressively, set it to ``0`` to keep every manifold edge, or pass a 
 value (e.g. ``-1.0``) to opt out of the simplification pass entirely. By default,
 ``edge_concave_filter=True`` also drops a concave manifold edge when both endpoints are
 fully concave: every neighbor in each endpoint's closed manifold one-ring lies on or
-inward from its angle-weighted tangent plane, with at least one neighbor strictly inward.
+outward from its angle-weighted tangent plane, with at least one neighbor strictly outward.
 The filter is skipped for ``sign_method="normal"`` because pseudo-normal SDFs do not
 define an unambiguous solid interior.
 Set ``edge_box_absorption=True`` to additionally drop manifold edges that are fully covered
