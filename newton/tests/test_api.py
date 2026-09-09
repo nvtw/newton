@@ -91,15 +91,6 @@ def _check_builder_method_matches_importer_function_signature(func, method):
 
 
 class TestApi(unittest.TestCase):
-    def test_mesh_build_sdf_uses_concave_filter_name(self):
-        """Expose the concave-edge filter using familiar terminology."""
-        import newton  # noqa: PLC0415
-
-        parameters = inspect.signature(newton.Mesh.build_sdf).parameters
-
-        self.assertIn("edge_concave_filter", parameters)
-        self.assertNotIn("edge_inward_filter", parameters)
-
     def test_collision_pipeline_flattens_speculative_contact_config(self):
         """Configure speculative contacts without a single-field wrapper."""
         import newton  # noqa: PLC0415

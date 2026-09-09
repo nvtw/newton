@@ -976,7 +976,7 @@ class Mesh:
                 lower_angle_threshold_rad=edge_lower_angle_threshold_rad,
                 upper_angle_threshold_rad=edge_upper_angle_threshold_rad,
                 enable_box_absorption=edge_box_absorption,
-                enable_inward_filter=edge_concave_filter,
+                edge_concave_filter=edge_concave_filter,
                 sign_method=sign_method,
                 half_normal=edge_half_normal,
                 half_lateral=edge_half_lateral,
@@ -1045,7 +1045,7 @@ class Mesh:
         lower_angle_threshold_rad: float,
         upper_angle_threshold_rad: float,
         enable_box_absorption: bool,
-        enable_inward_filter: bool = True,
+        edge_concave_filter: bool = True,
         sign_method: "SignMethod" = "auto",
         half_normal: float,
         half_lateral: float,
@@ -1076,8 +1076,8 @@ class Mesh:
 
         canonical = None
         topology = None
-        run_inward_filter = enable_inward_filter and sign_method != "normal" and self._indices.size > 0
-        if run_inward_filter:
+        run_concave_filter = edge_concave_filter and sign_method != "normal" and self._indices.size > 0
+        if run_concave_filter:
             canonical = self._canonical_vertex_ids()
             topology = self._build_edge_slot_topology(canonical)
 
@@ -1118,11 +1118,11 @@ class Mesh:
                 full_edges = full_edges[~np.isin(full_keys, remove_keys)]
 
         # Pseudo-normal SDFs define a sided sheet rather than a closed solid,
-        # so they have no unambiguous fully inward features to remove.
-        if run_inward_filter and len(full_edges) > 0:
-            from .edge_inward_filter import filter_fully_inward_edges  # noqa: PLC0415
+        # so they have no unambiguous fully concave features to remove.
+        if run_concave_filter and len(full_edges) > 0:
+            from .edge_concave_filter import filter_fully_concave_edges  # noqa: PLC0415
 
-            full_edges = filter_fully_inward_edges(
+            full_edges = filter_fully_concave_edges(
                 self,
                 full_edges,
                 canonical_vertex_ids=canonical,
