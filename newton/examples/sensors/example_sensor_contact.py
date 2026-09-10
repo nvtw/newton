@@ -70,7 +70,7 @@ class Example:
             solver_config.use_collision_detector = True
             solver_config.integrator = "moreau"
             solver_config.dvi.max_alternating_iterations = 8
-            solver_config.dvi.bilateral_solve_interval = 8
+            solver_config.dvi.use_schur_complement = True
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverMuJoCo(
