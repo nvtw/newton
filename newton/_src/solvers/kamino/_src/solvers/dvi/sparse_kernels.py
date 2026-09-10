@@ -11,7 +11,7 @@ from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from ...geometry.keying import build_pair_key2, uint64_sentinel_value
 from ...linalg.factorize.llt_blocked_rcm import get_float32_array_offset_ptr
-from .kernels import _FUSED_BILATERAL_BLOCK, _FUSED_INEQUALITY_BLOCK, _sync_threads
+from .kernels import _FUSED_BILATERAL_BLOCK, _FUSED_INEQUALITY_BLOCK, _compact_schur_fits, _sync_threads
 from .projections import (
     contact_friction_normal_load as _contact_friction_normal_load,
 )
@@ -875,8 +875,9 @@ def _cache_sparse_projected_diagonal(
     if enable_bilateral_response:
         offset = response_mio[wid]
         stride = response_stride[wid]
-        if use_forward_schur and problem_dim[wid] - njc <= njc:
-            value -= compact_schur[offset + unilateral_row * stride + unilateral_row]
+        nu = problem_dim[wid] - njc
+        if use_forward_schur and _compact_schur_fits(njc, nu, stride):
+            value -= compact_schur[offset + unilateral_row * nu + unilateral_row]
         else:
             for bilateral_row in range(njc):
                 index = offset + bilateral_row * stride + unilateral_row
@@ -1763,7 +1764,7 @@ def _assemble_compact_unilateral_schur_tiled(
     wid, group, lane = wp.tid()
     njc = problem_njc[wid]
     nu = problem_dim[wid] - njc
-    if nu > njc:
+    if not _compact_schur_fits(njc, nu, response_stride[wid]):
         return
     if group == 0:
         for row in range(lane, nu, wp.block_dim()):
@@ -1772,7 +1773,7 @@ def _assemble_compact_unilateral_schur_tiled(
     y = wp.array(ptr=get_float32_array_offset_ptr(response, offset), shape=(nu, njc), dtype=float32)
     out = wp.array(
         ptr=get_float32_array_offset_ptr(compact_schur, offset),
-        shape=(nu, response_stride[wid]),
+        shape=(nu, nu),
         dtype=float32,
     )
     tiles = (nu + 15) // 16
@@ -2175,7 +2176,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     response_row_stride = response_stride[wid]
     scalar_count = nbc + nl
     num_unilateral_rows = scalar_count + int32(3) * nc
-    use_compact_schur = enable_compact_schur and num_unilateral_rows <= njc
+    use_compact_schur = enable_compact_schur and _compact_schur_fits(njc, num_unilateral_rows, response_row_stride)
     bvio = bilateral_vio[wid]
     row_start = bsm_row_start[wid]
     col_start = bsm_col_start[wid]
@@ -2264,7 +2265,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
             value *= problem_P[vio + njc + column]
             if row == column:
                 value += eta[row_start + njc + row]
-            compact_schur[response_offset + column * response_row_stride + row] -= value
+            compact_schur[response_offset + column * num_unilateral_rows + row] -= value
         _sync_warp_32()
     first_tangent_sweep = int32(0)
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
@@ -2329,7 +2330,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                     if uid >= scalar_count and phase != int32(0):
                                         projected_cross = compact_schur[
                                             response_offset
-                                            + (unilateral_row + int32(1)) * response_row_stride
+                                            + (unilateral_row + int32(1)) * num_unilateral_rows
                                             + unilateral_row
                                         ]
                             else:
@@ -2521,7 +2522,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                     value = (
                                         compact_schur[
                                             response_offset
-                                            + (unilateral_row + component) * response_row_stride
+                                            + (unilateral_row + component) * num_unilateral_rows
                                             + target
                                         ]
                                         * delta_0
@@ -2530,7 +2531,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                         value += (
                                             compact_schur[
                                                 response_offset
-                                                + (unilateral_row + int32(1)) * response_row_stride
+                                                + (unilateral_row + int32(1)) * num_unilateral_rows
                                                 + target
                                             ]
                                             * delta_1

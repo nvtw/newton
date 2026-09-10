@@ -522,6 +522,12 @@ def _subgroup_sum_16(value: float32) -> float32: ...
 def _warp_min_32(value: int32) -> int32: ...
 
 
+@wp.func
+def _compact_schur_fits(njc: int32, nu: int32, stride: int32) -> bool:
+    # Avoid squaring nu: the allocated response size is already int32-safe.
+    return nu <= (njc * stride) / wp.max(nu, int32(1))
+
+
 @wp.kernel
 def _find_bilateral_factor_row_start(
     njc: wp.array[int32],
@@ -563,8 +569,8 @@ def _solve_bilateral_unilateral_response_cooperative(
     factor_row_start: wp.array[int32],
 ):
     """Solve response columns, or whiten them for compact Schur construction."""
-    # response_factor is unilateral-major here; response always uses
-    # original_row * unilateral_stride + unilateral.
+    # The whitening workspace and compact-path response are unilateral-major;
+    # the fallback response uses original_row * unilateral_stride + unilateral.
     tid = wp.tid()
     lane = tid % int32(32)
     task = tid / int32(32)
@@ -614,7 +620,7 @@ def _solve_bilateral_unilateral_response_cooperative(
                 ]
             _sync_warp()
         backward_rows = njc
-        if use_forward_schur and nu <= njc:
+        if use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
             # C.T A^-1 C = Y.T Y with Y = L^-1 P C; backward solves are unnecessary.
             backward_rows = int32(0)
         for reverse_row in range(backward_rows):
@@ -635,7 +641,7 @@ def _solve_bilateral_unilateral_response_cooperative(
                 original_row = row
                 if use_permutation:
                     original_row = bilateral_permutation[bvio + row]
-                if use_forward_schur and nu <= njc:
+                if use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
                     response[offset + unilateral * njc + row] = response_factor[offset + unilateral * njc + row]
                 else:
                     response[offset + original_row * unilateral_stride + unilateral] = (
