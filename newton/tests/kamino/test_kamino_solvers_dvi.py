@@ -3230,6 +3230,9 @@ class TestDVISolver(unittest.TestCase):
             scale = rng.uniform(0.5, 1.5, n)
             permutation = rng.permutation(n)
             coupling = rng.normal(size=(n, nu))
+            coupling[permutation[: n // 2]] = 0.0
+            if nu:
+                coupling[:, -1] = 0.0
             # Compare the exact float32 inputs against float64 reference solves.
             lower, scale, coupling = [a.astype(np.float32) for a in (lower, scale, coupling)]
             white = np.linalg.solve(lower.astype(np.float64), (scale[:, None] * coupling)[permutation])

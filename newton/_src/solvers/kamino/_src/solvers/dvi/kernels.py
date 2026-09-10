@@ -506,6 +506,22 @@ def _assemble_bilateral_contact_response(
 def _subgroup_sum_16(value: float32) -> float32: ...
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    int r = value;
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        r = min(r, __shfl_xor_sync(0xffffffffu, r, offset));
+    return r;
+#else
+    return value;
+#endif
+    """
+)
+def _warp_min_32(value: int32) -> int32: ...
+
+
 @wp.kernel
 def _find_bilateral_factor_row_start(
     njc: wp.array[int32],
@@ -566,7 +582,21 @@ def _solve_bilateral_unilateral_response_cooperative(
     for unilateral_pair in range(first_pair + task_in_world, pair_count, tasks_per_world):
         unilateral = int32(2) * unilateral_pair + lane / int32(16)
         active = unilateral < nu
-        for row in range(njc):
+        first_row = njc
+        if active:
+            for row in range(local_lane, njc, int32(16)):
+                original_row = row
+                if use_permutation:
+                    original_row = bilateral_permutation[bvio + row]
+                if coupling[offset + original_row * unilateral_stride + unilateral] != float32(0.0):
+                    first_row = wp.min(first_row, row)
+        # Both response columns share warp barriers, so use their common prefix.
+        first_row = _warp_min_32(first_row)
+        if active:
+            for row in range(local_lane, first_row, int32(16)):
+                response_factor[offset + unilateral * njc + row] = float32(0.0)
+        _sync_warp()
+        for row in range(first_row, njc):
             partial = float32(0.0)
             if active:
                 for k in range(factor_row_start[bvio + row] + local_lane, row, int32(16)):

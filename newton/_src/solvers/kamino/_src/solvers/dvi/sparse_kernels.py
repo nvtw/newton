@@ -770,57 +770,59 @@ def _assemble_sparse_bilateral_unilateral_coupling(
     response_stride: wp.array[int32],
     coupling: wp.array[float32],
 ):
-    wid, row, unilateral = wp.tid()
+    wid, worker = wp.tid()
     njc = problem_njc[wid]
-    col = njc + unilateral
-    if row >= njc or col >= problem_dim[wid]:
-        return
+    nu = problem_dim[wid] - njc
+    for entry_index in range(worker, njc * nu, int32(1024)):
+        row = entry_index / nu
+        unilateral = entry_index % nu
+        col = njc + unilateral
 
-    matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
-    col_block_0 = int32(-1)
-    col_block_1 = int32(-1)
-    nbc = problem_nbc[wid]
-    nl = problem_nl[wid]
-    if unilateral < nbc:
-        offsets = friction_nzb_offsets[problem_bcio[wid] + unilateral]
-        col_block_0 = offsets[0]
-        col_block_1 = offsets[1]
-    elif unilateral < nbc + nl:
-        mapped_limit = limit_indices[problem_lio[wid] + unilateral - nbc]
-        if mapped_limit >= int32(0):
-            col_block_0 = limit_nzb_offsets[mapped_limit]
-            candidate = col_block_0 + int32(1)
-            if candidate < matrix_end and bsm_nzb_coords[candidate, 0] == col:
-                col_block_1 = candidate
-    else:
-        contact_component = unilateral - nbc - nl
-        cid = contact_component / int32(3)
-        if cid < problem_nc[wid]:
-            component = contact_component - int32(3) * cid
-            mapped_contact = contact_indices[problem_cio[wid] + cid]
-            if mapped_contact >= int32(0):
-                col_block_0 = contact_nzb_offsets[mapped_contact] + component
-                candidate = col_block_0 + int32(3)
+        matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
+        col_block_0 = int32(-1)
+        col_block_1 = int32(-1)
+        nbc = problem_nbc[wid]
+        nl = problem_nl[wid]
+        if unilateral < nbc:
+            offsets = friction_nzb_offsets[problem_bcio[wid] + unilateral]
+            col_block_0 = offsets[0]
+            col_block_1 = offsets[1]
+        elif unilateral < nbc + nl:
+            mapped_limit = limit_indices[problem_lio[wid] + unilateral - nbc]
+            if mapped_limit >= int32(0):
+                col_block_0 = limit_nzb_offsets[mapped_limit]
+                candidate = col_block_0 + int32(1)
                 if candidate < matrix_end and bsm_nzb_coords[candidate, 0] == col:
                     col_block_1 = candidate
+        else:
+            contact_component = unilateral - nbc - nl
+            cid = contact_component / int32(3)
+            if cid < problem_nc[wid]:
+                component = contact_component - int32(3) * cid
+                mapped_contact = contact_indices[problem_cio[wid] + cid]
+                if mapped_contact >= int32(0):
+                    col_block_0 = contact_nzb_offsets[mapped_contact] + component
+                    candidate = col_block_0 + int32(3)
+                    if candidate < matrix_end and bsm_nzb_coords[candidate, 0] == col:
+                        col_block_1 = candidate
 
-    value = float32(0.0)
-    cached_row = bilateral_world_row_offsets[wid] + row
-    for entry in range(bilateral_row_starts[cached_row], bilateral_row_starts[cached_row + int32(1)]):
-        row_block = bilateral_row_nzb_indices[entry]
-        row_body = bsm_nzb_coords[row_block, 1]
-        mass_weighted = mass_weighted_nzb_values[row_block]
-        if col_block_0 >= int32(0) and bsm_nzb_coords[col_block_0, 1] == row_body:
-            jacobian = jacobian_nzb_values[col_block_0]
-            for component in range(6):
-                value += mass_weighted[component] * jacobian[component]
-        if col_block_1 >= int32(0) and bsm_nzb_coords[col_block_1, 1] == row_body:
-            jacobian = jacobian_nzb_values[col_block_1]
-            for component in range(6):
-                value += mass_weighted[component] * jacobian[component]
-    value *= problem_P[problem_vio[wid] + col]
-    offset = response_mio[wid]
-    coupling[offset + row * response_stride[wid] + unilateral] = value
+        value = float32(0.0)
+        cached_row = bilateral_world_row_offsets[wid] + row
+        for entry in range(bilateral_row_starts[cached_row], bilateral_row_starts[cached_row + int32(1)]):
+            row_block = bilateral_row_nzb_indices[entry]
+            row_body = bsm_nzb_coords[row_block, 1]
+            mass_weighted = mass_weighted_nzb_values[row_block]
+            if col_block_0 >= int32(0) and bsm_nzb_coords[col_block_0, 1] == row_body:
+                jacobian = jacobian_nzb_values[col_block_0]
+                for component in range(6):
+                    value += mass_weighted[component] * jacobian[component]
+            if col_block_1 >= int32(0) and bsm_nzb_coords[col_block_1, 1] == row_body:
+                jacobian = jacobian_nzb_values[col_block_1]
+                for component in range(6):
+                    value += mass_weighted[component] * jacobian[component]
+        value *= problem_P[problem_vio[wid] + col]
+        offset = response_mio[wid]
+        coupling[offset + row * response_stride[wid] + unilateral] = value
 
 
 @wp.kernel
