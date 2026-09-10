@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+from functools import cache
+
 import warp as wp
 
 from ...core.math import FLOAT32_EPS
+from ...linalg.factorize.llt_blocked import get_float32_array_offset_ptr
 from ..padmm.math import (
     compute_box_complementarity_residual,
     project_to_coulomb_cone,
@@ -582,6 +585,114 @@ def _solve_bilateral_unilateral_response_cooperative(
                 response[offset + original_row * unilateral_stride + unilateral] = (
                     bilateral_P[bvio + original_row] * response_factor[offset + unilateral * njc + row]
                 )
+
+
+@cache
+def make_solve_bilateral_unilateral_response_tiled(block_size: int = 32, rhs_tile_size: int = 16):
+    """Create a multi-RHS blocked triangular-response kernel."""
+
+    @wp.kernel
+    def _solve_bilateral_unilateral_response_tiled(
+        problem_dim: wp.array[int32],
+        problem_njc: wp.array[int32],
+        bilateral_mio: wp.array[int32],
+        bilateral_vio: wp.array[int32],
+        bilateral_P: wp.array[float32],
+        bilateral_L: wp.array[float32],
+        bilateral_permutation: wp.array[int32],
+        use_permutation: bool,
+        response_mio: wp.array[int32],
+        response_stride: wp.array[int32],
+        coupling: wp.array[float32],
+        response_factor: wp.array[float32],
+        response: wp.array[float32],
+        first_unilateral: int32,
+        rhs_tiles_per_world: int32,
+    ):
+        task, thread = wp.tid()
+        wid = task / rhs_tiles_per_world
+        rhs_tile = task - wid * rhs_tiles_per_world
+        njc = problem_njc[wid]
+        nu = problem_dim[wid] - njc
+        factor_offset = bilateral_mio[wid]
+        vector_offset = bilateral_vio[wid]
+        response_offset = response_mio[wid]
+        stride = response_stride[wid]
+        first_rhs = first_unilateral + rhs_tile * rhs_tile_size
+
+        factor_ptr = get_float32_array_offset_ptr(bilateral_L, factor_offset)
+        scratch_ptr = get_float32_array_offset_ptr(response_factor, response_offset)
+        factor = wp.array(ptr=factor_ptr, shape=(njc, njc), dtype=wp.float32)
+        scratch = wp.array(ptr=scratch_ptr, shape=(njc, stride), dtype=wp.float32)
+        padded_rows = ((njc + block_size - int32(1)) / block_size) * block_size
+
+        for i in range(0, padded_rows, block_size):
+            rhs = wp.tile_zeros(shape=(block_size, rhs_tile_size), dtype=wp.float32, storage="shared")
+            for linear in range(thread, block_size * rhs_tile_size, wp.block_dim()):
+                row = linear / rhs_tile_size
+                column = linear - row * rhs_tile_size
+                permuted_row = i + row
+                unilateral = first_rhs + column
+                active = permuted_row < njc and unilateral < nu
+                value = float32(0.0)
+                if active:
+                    original_row = permuted_row
+                    if use_permutation:
+                        original_row = bilateral_permutation[vector_offset + permuted_row]
+                    value = (
+                        bilateral_P[vector_offset + original_row]
+                        * coupling[response_offset + original_row * stride + unilateral]
+                    )
+                wp.tile_scatter_masked(rhs, row, column, value, active)
+
+            diagonal = wp.tile_load(factor, shape=(block_size, block_size), offset=(i, i))
+            if i + block_size > njc:
+                for linear in range(thread, block_size * block_size, wp.block_dim()):
+                    row = linear / block_size
+                    column = linear - row * block_size
+                    value = diagonal[row, column]
+                    if i + row >= njc:
+                        value = wp.where(row == column, float32(1.0), float32(0.0))
+                    diagonal[row, column] = value
+            for j in range(0, i, block_size):
+                left = wp.tile_load(factor, shape=(block_size, block_size), offset=(i, j))
+                solved = wp.tile_load(scratch, shape=(block_size, rhs_tile_size), offset=(j, first_rhs))
+                wp.tile_matmul(left, solved, rhs, alpha=-1.0)
+            wp.tile_lower_solve_inplace(diagonal, rhs)
+            wp.tile_store(scratch, rhs, offset=(i, first_rhs))
+
+        for reverse_i in range(0, padded_rows, block_size):
+            i = padded_rows - block_size - reverse_i
+            rhs = wp.tile_load(scratch, shape=(block_size, rhs_tile_size), offset=(i, first_rhs))
+            diagonal = wp.tile_load(factor, shape=(block_size, block_size), offset=(i, i))
+            if i + block_size > njc:
+                for linear in range(thread, block_size * block_size, wp.block_dim()):
+                    row = linear / block_size
+                    column = linear - row * block_size
+                    value = diagonal[row, column]
+                    if i + row >= njc:
+                        value = wp.where(row == column, float32(1.0), float32(0.0))
+                    diagonal[row, column] = value
+            for j in range(i + block_size, padded_rows, block_size):
+                left = wp.tile_load(factor, shape=(block_size, block_size), offset=(j, i))
+                solved = wp.tile_load(scratch, shape=(block_size, rhs_tile_size), offset=(j, first_rhs))
+                wp.tile_matmul(wp.tile_transpose(left), solved, rhs, alpha=-1.0)
+            wp.tile_upper_solve_inplace(wp.tile_transpose(diagonal), rhs)
+            wp.tile_store(scratch, rhs, offset=(i, first_rhs))
+
+        for linear in range(thread, block_size * rhs_tile_size, wp.block_dim()):
+            column = linear % rhs_tile_size
+            unilateral = first_rhs + column
+            if unilateral < nu:
+                for row in range(linear / rhs_tile_size, njc, block_size):
+                    original_row = row
+                    if use_permutation:
+                        original_row = bilateral_permutation[vector_offset + row]
+                    response[response_offset + original_row * stride + unilateral] = (
+                        bilateral_P[vector_offset + original_row] * scratch[row, unilateral]
+                    )
+
+    return _solve_bilateral_unilateral_response_tiled
 
 
 @wp.kernel

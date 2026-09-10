@@ -26,7 +26,9 @@ from newton._src.solvers.kamino._src.solvers.common import WarmStartMode
 from newton._src.solvers.kamino._src.solvers.dvi import DVISolver
 from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     _initialize_dvi_status,
+    _solve_bilateral_unilateral_response_cooperative,
     _solve_dvi_inequalities_colored_pgs,
+    make_solve_bilateral_unilateral_response_tiled,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.projections import (
     project_contact_tangent_update as _project_contact_tangent_update,
@@ -327,6 +329,110 @@ class TestDVISolver(unittest.TestCase):
         if not test_context.setup_done:
             setup_tests(clear_cache=False)
         self.device = wp.get_device(test_context.device)
+
+    def test_00_tiled_bilateral_response_matches_numpy_under_graph_capture(self):
+        """Match heterogeneous permuted LLT responses under CUDA graph capture."""
+        if not self.device.is_cuda:
+            self.skipTest("Tiled bilateral response requires CUDA")
+
+        rng = np.random.default_rng(8142)
+        rows_by_world = np.array([33, 58], dtype=np.int32)
+        active_rhs = np.array([67, 65], dtype=np.int32)
+        stride = 70
+        matrix_offsets = np.array([0, rows_by_world[0] ** 2], dtype=np.int32)
+        vector_offsets = np.array([0, rows_by_world[0]], dtype=np.int32)
+        response_offsets = np.array([0, rows_by_world[0] * stride], dtype=np.int32)
+        factor_values = []
+        permutation_values = []
+        preconditioner_values = []
+        coupling_values = []
+        expected_values = []
+
+        for rows, rhs_count in zip(rows_by_world, active_rhs, strict=True):
+            matrix = rng.normal(size=(rows, rows)).astype(np.float32)
+            factor = np.linalg.cholesky(matrix @ matrix.T + rows * np.eye(rows, dtype=np.float32)).astype(np.float32)
+            permutation = rng.permutation(rows).astype(np.int32)
+            preconditioner = rng.uniform(0.5, 1.5, size=rows).astype(np.float32)
+            coupling = rng.normal(size=(rows, stride)).astype(np.float32)
+            expected = np.zeros_like(coupling)
+            rhs = preconditioner[permutation, None] * coupling[permutation, :rhs_count]
+            solved = np.linalg.solve(factor.T, np.linalg.solve(factor, rhs))
+            expected[permutation, :rhs_count] = preconditioner[permutation, None] * solved
+            factor_values.append(factor.ravel())
+            permutation_values.append(permutation)
+            preconditioner_values.append(preconditioner)
+            coupling_values.append(coupling.ravel())
+            expected_values.append(expected.ravel())
+
+        problem_dim = wp.array(rows_by_world + active_rhs, dtype=wp.int32, device=self.device)
+        problem_njc = wp.array(rows_by_world, dtype=wp.int32, device=self.device)
+        bilateral_mio = wp.array(matrix_offsets, dtype=wp.int32, device=self.device)
+        bilateral_vio = wp.array(vector_offsets, dtype=wp.int32, device=self.device)
+        preconditioner = wp.array(np.concatenate(preconditioner_values), dtype=wp.float32, device=self.device)
+        factor = wp.array(np.concatenate(factor_values), dtype=wp.float32, device=self.device)
+        permutation = wp.array(np.concatenate(permutation_values), dtype=wp.int32, device=self.device)
+        response_mio = wp.array(response_offsets, dtype=wp.int32, device=self.device)
+        response_stride = wp.array(np.full(2, stride, dtype=np.int32), dtype=wp.int32, device=self.device)
+        coupling = wp.array(np.concatenate(coupling_values), dtype=wp.float32, device=self.device)
+        response_factor = wp.zeros(int(sum(rows_by_world) * stride), dtype=wp.float32, device=self.device)
+        response = wp.zeros_like(response_factor)
+        kernel = make_solve_bilateral_unilateral_response_tiled()
+
+        def launch():
+            wp.launch_tiled(
+                kernel=kernel,
+                dim=2 * 4,
+                inputs=[
+                    problem_dim,
+                    problem_njc,
+                    bilateral_mio,
+                    bilateral_vio,
+                    preconditioner,
+                    factor,
+                    permutation,
+                    True,
+                    response_mio,
+                    response_stride,
+                    coupling,
+                    response_factor,
+                    response,
+                    0,
+                    4,
+                ],
+                block_dim=128,
+                device=self.device,
+            )
+            wp.launch(
+                kernel=_solve_bilateral_unilateral_response_cooperative,
+                dim=2 * 2 * 32,
+                inputs=[
+                    problem_dim,
+                    problem_njc,
+                    bilateral_mio,
+                    bilateral_vio,
+                    preconditioner,
+                    factor,
+                    permutation,
+                    True,
+                    response_mio,
+                    response_stride,
+                    coupling,
+                    response_factor,
+                    response,
+                    64,
+                    2,
+                ],
+                block_dim=32,
+                device=self.device,
+            )
+
+        launch()
+        wp.synchronize_device(self.device)
+        response.zero_()
+        with wp.ScopedCapture(self.device) as capture:
+            launch()
+        wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(response.numpy(), np.concatenate(expected_values), rtol=4.0e-4, atol=4.0e-4)
 
     def test_00_sparse_projection_is_allocated_only_for_schur(self):
         """Allocate the large sparse response workspace only for Schur solves."""

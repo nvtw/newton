@@ -24,6 +24,7 @@ from .kernels import (
     _set_dvi_direct_status_iterations,
     _solve_bilateral_unilateral_response,
     _solve_bilateral_unilateral_response_cooperative,
+    make_solve_bilateral_unilateral_response_tiled,
 )
 from .sparse_kernels import (
     _assemble_compact_unilateral_schur,
@@ -68,6 +69,12 @@ _SPARSE_DELASSUS_ROWS_UNILATERAL = 1
 _CONTACT_PAIR_SORT_MIN_CAPACITY = 4096
 _PARALLEL_CONTACT_MAX_COLORS = 8
 _PARALLEL_CONTACT_MIN_CAPACITY = 32768
+_TILED_RESPONSE_RHS = 64
+_TILED_RESPONSE_RHS_TILE = 16
+_TILED_RESPONSE_TILES = _TILED_RESPONSE_RHS // _TILED_RESPONSE_RHS_TILE
+_solve_bilateral_unilateral_response_tiled = make_solve_bilateral_unilateral_response_tiled(
+    32, _TILED_RESPONSE_RHS_TILE
+)
 _SPARSE_INEQUALITY_TOPOLOGY_ERROR = "Sparse DVI inequalities require limit/contact topology and sparse Jacobians."
 
 
@@ -1117,6 +1124,33 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         and path.max_alternating_iterations >= 4
         and not has_intermediate_bilateral_solve
     )
+    first_cooperative_rhs = 0
+    if path.device.is_cuda and max_unilateral_rows >= _TILED_RESPONSE_RHS:
+        wp.launch_tiled(
+            kernel=_solve_bilateral_unilateral_response_tiled,
+            dim=path.size.num_worlds * _TILED_RESPONSE_TILES,
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                path.data.bilateral_operator.info.mio,
+                path.data.bilateral_operator.info.vio,
+                state.bilateral_preconditioner,
+                path.bilateral_solver.L,
+                permutation,
+                use_permutation,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_coupling,
+                state.bilateral_response_factor,
+                state.bilateral_response,
+                0,
+                _TILED_RESPONSE_TILES,
+            ],
+            block_dim=128,
+            device=path.device,
+        )
+        first_cooperative_rhs = _TILED_RESPONSE_RHS
+
     response_kernel = _solve_bilateral_unilateral_response
     response_block_dim = 1
     response_tasks_per_world = 0
@@ -1124,7 +1158,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     if path.device.is_cuda:
         response_kernel = _solve_bilateral_unilateral_response_cooperative
         response_block_dim = 32
-        response_tasks_per_world = (max_unilateral_rows + 1) // 2
+        response_tasks_per_world = max(1, (max_unilateral_rows - first_cooperative_rhs + 1) // 2)
         response_dim = path.size.num_worlds * response_tasks_per_world * response_block_dim
     wp.launch(
         kernel=response_kernel,
@@ -1143,7 +1177,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             state.bilateral_coupling,
             state.bilateral_response_factor,
             state.bilateral_response,
-            *([0, response_tasks_per_world] if path.device.is_cuda else []),
+            *([first_cooperative_rhs, response_tasks_per_world] if path.device.is_cuda else []),
         ],
         device=path.device,
         block_dim=response_block_dim,
