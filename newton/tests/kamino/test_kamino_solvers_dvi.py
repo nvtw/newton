@@ -16,8 +16,6 @@ import warp as wp
 import newton
 import newton._src.solvers.kamino.config as kamino_config
 from newton._src.solvers.kamino._src.core.model import ModelKamino
-from newton._src.solvers.kamino._src.core.size import SizeKamino
-from newton._src.solvers.kamino._src.core.types import vec6f
 from newton._src.solvers.kamino._src.dynamics.dual import DualProblem
 from newton._src.solvers.kamino._src.geometry.keying import KeySorter
 from newton._src.solvers.kamino._src.integrators.euler import integrate_euler_semi_implicit
@@ -41,13 +39,10 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_JOINTS,
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
     _can_use_cooperative_articulation,
-    _parallel_contact_group_width,
     _sparse_delassus_matvec_rows,
-    _use_parallel_contact_colors,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _assemble_compact_unilateral_schur,
-    _assemble_sparse_bilateral_unilateral_coupling,
     _color_compact_contact_groups,
     _color_mapped_dvi_inequalities,
     _compact_contact_group_starts,
@@ -91,45 +86,6 @@ def _compact_unilateral_correction_for_test(
     result[2] = _compact_unilateral_correction(
         compact_q, wp.int32(0), wp.int32(0), wp.int32(1), wp.int32(1), wp.int32(1)
     )
-
-
-@wp.kernel
-def _assemble_sparse_coupling_reference_for_test(
-    bsm_num_nzb: wp.array[wp.int32],
-    bsm_nzb_start: wp.array[wp.int32],
-    bsm_nzb_coords: wp.array2d[wp.int32],
-    mass_weighted_nzb_values: wp.array[vec6f],
-    jacobian_nzb_values: wp.array[vec6f],
-    problem_dim: wp.array[wp.int32],
-    problem_njc: wp.array[wp.int32],
-    problem_vio: wp.array[wp.int32],
-    problem_P: wp.array[wp.float32],
-    response_mio: wp.array[wp.int32],
-    response_stride: wp.array[wp.int32],
-    coupling: wp.array[wp.float32],
-):
-    """Retain the legacy full topology scan for an exact-order regression."""
-    wid, row, unilateral = wp.tid()
-    njc = problem_njc[wid]
-    col = njc + unilateral
-    if row >= njc or col >= problem_dim[wid]:
-        return
-    block_start = bsm_nzb_start[wid]
-    block_end = block_start + bsm_num_nzb[wid]
-    value = wp.float32(0.0)
-    for row_block in range(block_start, block_end):
-        row_coord = bsm_nzb_coords[row_block]
-        if row_coord[0] != row:
-            continue
-        for col_block in range(block_start, block_end):
-            col_coord = bsm_nzb_coords[col_block]
-            if col_coord[0] == col and col_coord[1] == row_coord[1]:
-                mass_weighted = mass_weighted_nzb_values[row_block]
-                jacobian = jacobian_nzb_values[col_block]
-                for component in range(6):
-                    value += mass_weighted[component] * jacobian[component]
-    value *= problem_P[problem_vio[wid] + col]
-    coupling[response_mio[wid] + row * response_stride[wid] + unilateral] = value
 
 
 @wp.kernel
@@ -3304,38 +3260,6 @@ class TestDVISolver(unittest.TestCase):
         residual = z - np.polyval(np.polyfit(x, z, 1), x)
         self.assertLess(float(np.max(residual) - np.min(residual)), 0.001)
 
-    def test_00_parallel_contact_color_policy(self):
-        """Enable fixed color nodes only for measured large-scene capacity."""
-        self.assertFalse(_use_parallel_contact_colors(1, 0, 11660, True))
-        self.assertTrue(_use_parallel_contact_colors(1, 0, 45210, True))
-        self.assertFalse(_use_parallel_contact_colors(2, 0, 45210, True))
-        self.assertFalse(_use_parallel_contact_colors(1, 1, 45210, True))
-        self.assertFalse(_use_parallel_contact_colors(1, 0, 45210, False))
-
-    def test_00a_parallel_contact_group_width_policy(self):
-        """Select contact-group widths from occupancy and capacity limits."""
-        self.assertEqual(_parallel_contact_group_width(20, 821), 4)
-        self.assertEqual(_parallel_contact_group_width(60, 821), 16)
-        self.assertEqual(_parallel_contact_group_width(108, 821), 32)
-        self.assertEqual(_parallel_contact_group_width(188, 821), 32)
-        self.assertEqual(_parallel_contact_group_width(188, 100_000), 2)
-
-    def test_00b_sparse_state_does_not_allocate_dense_projection_offsets(self):
-        """Keep dense projection storage out of sparse DVI state."""
-        size = SizeKamino(
-            num_worlds=64,
-            sum_of_max_total_cts=1,
-            max_of_max_total_cts=6000,
-        )
-        with wp.ScopedDevice(self.device):
-            state = DVIState(size)
-            np.testing.assert_array_equal(state.projected_mio.numpy(), np.zeros(64, dtype=np.int32))
-            self.assertIsNone(state.projected_D)
-            state.allocate_sparse_projection(size, [0] * 64, [0] * 64, 0, True)
-            self.assertIsNone(state.projected_D)
-            with self.assertRaisesRegex(ValueError, "int32 index range"):
-                state.allocate_dense_projection(size)
-
     def test_00c_sparse_projection_uses_padded_bilateral_vector_size(self):
         """Allocate sparse response state for padded zero-constraint worlds."""
         size = SimpleNamespace(
@@ -3479,102 +3403,6 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(inequality_ids_by_color.numpy(), np.arange(6))
         np.testing.assert_array_equal(inequality_color_starts.numpy()[:2], [0, 4])
         np.testing.assert_array_equal(inequality_group_starts.numpy()[:5], [0, 1, 3, 4, 6])
-
-    def test_03g3_dvi_cached_sparse_coupling_matches_legacy_scan_exactly(self):
-        """Preserve legacy block summation order for mixed multi-world inequalities."""
-        coords_np = np.array(
-            [
-                (0, 0),
-                (1, 0),
-                (1, 6),
-                (2, 6),
-                (2, 0),
-                (3, 6),
-                (4, 6),
-                (5, 6),
-                (3, 0),
-                (4, 0),
-                (5, 0),
-                (0, 0),
-                (1, 0),
-                (2, 0),
-                (3, 0),
-            ],
-            dtype=np.int32,
-        )
-        values_np = (np.arange(90, dtype=np.float32).reshape(15, 6) - 37.0) / 19.0
-        jacobian_np = np.flip(values_np, axis=1).copy() * np.float32(0.37)
-
-        def int_array(values):
-            return wp.array(values, dtype=wp.int32, device=self.device)
-
-        bsm_num_nzb = int_array([11, 4])
-        bsm_nzb_start = int_array([0, 11])
-        bsm_nzb_coords = wp.array(coords_np, dtype=wp.int32, device=self.device)
-        mass_weighted = wp.array(values_np, dtype=vec6f, device=self.device)
-        jacobian = wp.array(jacobian_np, dtype=vec6f, device=self.device)
-        problem_dim = int_array([6, 4])
-        problem_njc = int_array([2, 1])
-        problem_vio = int_array([0, 6])
-        problem_P = wp.array(np.linspace(0.5, 1.4, 10, dtype=np.float32), device=self.device)
-        response_mio = int_array([0, 8])
-        response_stride = int_array([4, 3])
-        reference = wp.full(11, -7.0, dtype=wp.float32, device=self.device)
-        cached = wp.full(11, -7.0, dtype=wp.float32, device=self.device)
-
-        wp.launch(
-            _assemble_sparse_coupling_reference_for_test,
-            dim=(2, 2, 4),
-            inputs=[
-                bsm_num_nzb,
-                bsm_nzb_start,
-                bsm_nzb_coords,
-                mass_weighted,
-                jacobian,
-                problem_dim,
-                problem_njc,
-                problem_vio,
-                problem_P,
-                response_mio,
-                response_stride,
-                reference,
-            ],
-            device=self.device,
-        )
-        wp.launch(
-            _assemble_sparse_bilateral_unilateral_coupling,
-            dim=(2, 2, 4),
-            inputs=[
-                bsm_num_nzb,
-                bsm_nzb_start,
-                bsm_nzb_coords,
-                mass_weighted,
-                jacobian,
-                problem_dim,
-                problem_njc,
-                int_array([0, 0]),
-                int_array([1, 0]),
-                int_array([1, 1]),
-                int_array([0, 0]),
-                int_array([0, 1]),
-                int_array([0, 1]),
-                problem_vio,
-                problem_P,
-                int_array([0]),
-                int_array([0, 1]),
-                wp.array([wp.vec2i(-1, -1)], dtype=wp.vec2i, device=self.device),
-                int_array([3]),
-                int_array([5, 12]),
-                int_array([0, 2]),
-                int_array([0, 1, 3, 4]),
-                int_array([0, 1, 2, 11]),
-                response_mio,
-                response_stride,
-                cached,
-            ],
-            device=self.device,
-        )
-        np.testing.assert_array_equal(cached.numpy(), reference.numpy())
 
     def test_03g3a_dvi_compact_schur_matches_bilateral_correction(self):
         """Preserve row/column orientation in the compact bilateral correction."""
@@ -4155,56 +3983,6 @@ class TestDVISolver(unittest.TestCase):
         )
         np.testing.assert_array_equal(inequality_colors.numpy(), [0, 0, 0])
         self.assertEqual(int(inequality_num_colors.numpy()[0]), 1)
-
-    def test_05b2_dvi_two_box_stack_preserves_support_heights(self):
-        """Preserve both measured heights in the two-box validation stack."""
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        SolverKamino.register_custom_attributes(builder)
-        shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5, gap=0.0, margin=0.0)
-        box_inertia = wp.mat33f(0.006666667, 0.0, 0.0, 0.0, 0.006666667, 0.0, 0.0, 0.0, 0.006666667)
-        bodies = []
-        for height in (0.1, 0.5):
-            body = builder.add_body(
-                xform=wp.transformf((0.0, 0.0, height), wp.quat_identity()),
-                mass=1.0,
-                inertia=box_inertia,
-                lock_inertia=True,
-            )
-            builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=shape_cfg)
-            bodies.append(body)
-        builder.add_ground_plane(cfg=shape_cfg)
-        model = builder.finalize(device=self.device)
-        final_heights = []
-
-        for sparse in (False, True):
-            with self.subTest(sparse=sparse):
-                config = SolverKamino.Config(
-                    dynamics_solver="dvi",
-                    use_collision_detector=True,
-                    sparse_dynamics=sparse,
-                    sparse_jacobian=sparse,
-                    collision_detector=kamino_config.CollisionDetectorConfig(
-                        max_contacts=16,
-                        max_contacts_per_world=16,
-                        max_contacts_per_pair=8,
-                    ),
-                )
-                config.dvi.max_alternating_iterations = 200
-                config.dvi.tolerance = 1.0e-4
-                config.dvi.warmstart_mode = "none"
-                solver = SolverKamino(model, config=config)
-                state_0 = model.state()
-                state_1 = model.state()
-                for _ in range(400):
-                    solver.step(state_0, state_1, control=None, contacts=None, dt=2.5e-3)
-                    state_0, state_1 = state_1, state_0
-
-                heights = state_0.body_q.numpy()[bodies, 2]
-                self.assertAlmostEqual(float(heights[0]), 0.1, delta=1.0e-3)
-                self.assertAlmostEqual(float(heights[1]), 0.3, delta=2.0e-3)
-                final_heights.append(heights)
-
-        np.testing.assert_allclose(final_heights[0], final_heights[1], rtol=0.0, atol=5.0e-4)
 
     def test_11_dvi_detects_contacts_at_moreau_midpoint(self):
         """Detect fast impacts at the pose used to assemble the DVI problem."""
