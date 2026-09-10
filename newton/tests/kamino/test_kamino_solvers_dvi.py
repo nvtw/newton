@@ -25,6 +25,7 @@ from newton._src.solvers.kamino._src.linalg import LLTBlockedRCMSolver, LLTBlock
 from newton._src.solvers.kamino._src.solvers.common import WarmStartMode
 from newton._src.solvers.kamino._src.solvers.dvi import DVISolver
 from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
+    _find_bilateral_factor_row_start,
     _initialize_dvi_status,
     _solve_bilateral_unilateral_response_cooperative,
     _solve_dvi_inequalities_colored_pgs,
@@ -3224,6 +3225,7 @@ class TestDVISolver(unittest.TestCase):
             vector_offsets.append(len(scaling))
             response_offsets.append(len(couplings))
             lower = np.tril(rng.normal(0.0, 0.05, (n, n))) + np.eye(n)
+            lower[np.tril_indices(n, -12)] = 0.0
             scale = rng.uniform(0.5, 1.5, n)
             permutation = rng.permutation(n)
             coupling = rng.normal(size=(n, nu))
@@ -3252,7 +3254,19 @@ class TestDVISolver(unittest.TestCase):
         coupling = f32(couplings)
         workspace = wp.zeros(len(couplings), dtype=wp.float32, device=self.device)
         response = wp.zeros_like(workspace)
+        row_start = wp.zeros(len(scaling), dtype=wp.int32, device=self.device)
         wp.launch(
+            _find_bilateral_factor_row_start,
+            dim=(4, max(joint_counts)),
+            inputs=[joints, i32(matrix_offsets), i32(vector_offsets), f32(factors), row_start],
+            device=self.device,
+        )
+        expected_starts = []
+        for n, offset in zip(joint_counts, matrix_offsets, strict=True):
+            lower = np.array(factors[offset : offset + n * n]).reshape(n, n)
+            expected_starts.extend(int(np.flatnonzero(lower[row])[0]) // 16 * 16 for row in range(n))
+        np.testing.assert_array_equal(row_start.numpy(), expected_starts)
+        solve_response = wp.launch(
             _solve_bilateral_unilateral_response_cooperative,
             dim=4 * 3 * 32,
             inputs=[
@@ -3272,11 +3286,17 @@ class TestDVISolver(unittest.TestCase):
                 0,
                 3,
                 True,
+                row_start,
             ],
             block_dim=128,
             device=self.device,
+            record_cmd=True,
         )
+        solve_response.launch()
         actual_response = response.numpy()
+        row_start.zero_()
+        solve_response.launch()
+        np.testing.assert_array_equal(response.numpy(), actual_response)
         wp.launch(
             _assemble_compact_unilateral_schur,
             dim=4 * 256,

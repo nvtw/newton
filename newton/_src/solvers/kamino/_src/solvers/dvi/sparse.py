@@ -19,6 +19,7 @@ from ...linalg import LLTBlockedRCMSolver
 from .kernels import (
     _FUSED_BILATERAL_BLOCK,
     _FUSED_INEQUALITY_BLOCK,
+    _find_bilateral_factor_row_start,
     _initialize_dvi_status,
     _scatter_bilateral_solution,
     _set_dvi_direct_status_iterations,
@@ -1129,6 +1130,18 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         response_block_dim = 256 if path.size.num_worlds >= 128 else 128
         response_tasks_per_world = (max_unilateral_rows + 1) // 2
         response_dim = path.size.num_worlds * response_tasks_per_world * 32
+        wp.launch(
+            kernel=_find_bilateral_factor_row_start,
+            dim=(path.size.num_worlds, max_joint_rows),
+            inputs=[
+                problem.data.njc,
+                path.data.bilateral_operator.info.mio,
+                path.data.bilateral_operator.info.vio,
+                path.bilateral_solver.L,
+                state.bilateral_factor_row_start,
+            ],
+            device=path.device,
+        )
     wp.launch(
         kernel=response_kernel,
         dim=response_dim,
@@ -1146,7 +1159,11 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             state.bilateral_coupling,
             state.bilateral_response_factor,
             state.bilateral_response,
-            *([0, response_tasks_per_world, enable_compact_schur] if path.device.is_cuda else []),
+            *(
+                [0, response_tasks_per_world, enable_compact_schur, state.bilateral_factor_row_start]
+                if path.device.is_cuda
+                else []
+            ),
         ],
         device=path.device,
         block_dim=response_block_dim,
