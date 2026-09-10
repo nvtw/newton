@@ -523,8 +523,9 @@ def _solve_bilateral_unilateral_response_cooperative(
     response: wp.array[float32],
     first_unilateral: int32,
     tasks_per_world: int32,
+    use_forward_schur: bool,
 ):
-    """Solve response columns cooperatively with persistent warp workers."""
+    """Solve response columns, or whiten them for compact Schur construction."""
     # response_factor is unilateral-major here; response always uses
     # original_row * unilateral_stride + unilateral.
     tid = wp.tid()
@@ -561,7 +562,11 @@ def _solve_bilateral_unilateral_response_cooperative(
                     factor + njc * row + row
                 ]
             _sync_warp()
-        for reverse_row in range(njc):
+        backward_rows = njc
+        if use_forward_schur and nu <= njc:
+            # C.T A^-1 C = Y.T Y with Y = L^-1 P C; backward solves are unnecessary.
+            backward_rows = int32(0)
+        for reverse_row in range(backward_rows):
             row = njc - int32(1) - reverse_row
             partial = float32(0.0)
             if active:
@@ -579,9 +584,12 @@ def _solve_bilateral_unilateral_response_cooperative(
                 original_row = row
                 if use_permutation:
                     original_row = bilateral_permutation[bvio + row]
-                response[offset + original_row * unilateral_stride + unilateral] = (
-                    bilateral_P[bvio + original_row] * response_factor[offset + unilateral * njc + row]
-                )
+                if use_forward_schur and nu <= njc:
+                    response[offset + unilateral * njc + row] = response_factor[offset + unilateral * njc + row]
+                else:
+                    response[offset + original_row * unilateral_stride + unilateral] = (
+                        bilateral_P[bvio + original_row] * response_factor[offset + unilateral * njc + row]
+                    )
 
 
 @wp.kernel
