@@ -27,7 +27,7 @@ from .kernels import (
     _solve_bilateral_unilateral_response_cooperative,
 )
 from .sparse_kernels import (
-    _assemble_compact_unilateral_schur,
+    _assemble_compact_unilateral_schur_tiled,
     _assemble_sparse_bilateral_unilateral_coupling,
     _build_sparse_bilateral_block,
     _build_sparse_bilateral_rhs,
@@ -1170,22 +1170,20 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     )
     if enable_compact_schur:
         wp.launch(
-            kernel=_assemble_compact_unilateral_schur,
-            dim=path.size.num_worlds * 256,
+            kernel=_assemble_compact_unilateral_schur_tiled,
+            dim=(path.size.num_worlds, 16, 128),
             inputs=[
                 problem.data.dim,
                 problem.data.njc,
                 problem.data.vio,
                 state.bilateral_response_mio,
                 state.bilateral_response_stride,
-                state.bilateral_coupling,
                 state.bilateral_response,
                 state.bilateral_response_factor,
                 state.s,
-                True,
             ],
             device=path.device,
-            block_dim=256,
+            block_dim=128,
         )
     wp.launch(
         kernel=_cache_sparse_projected_diagonal,

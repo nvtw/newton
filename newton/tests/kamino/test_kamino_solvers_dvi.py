@@ -41,6 +41,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _assemble_compact_unilateral_schur,
+    _assemble_compact_unilateral_schur_tiled,
     _color_mapped_dvi_inequalities,
     _map_bounded_constraints,
     _map_ordered_active_contacts,
@@ -3215,8 +3216,8 @@ class TestDVISolver(unittest.TestCase):
         if not self.device.is_cuda:
             self.skipTest("Cooperative response construction requires CUDA")
         rng = np.random.default_rng(42)
-        joint_counts = [33, 0, 65, 2]
-        unilateral_counts = [5, 0, 3, 3]
+        joint_counts = [33, 0, 97, 2]
+        unilateral_counts = [5, 0, 35, 3]
         matrix_offsets, vector_offsets, response_offsets = [], [], []
         factors, scaling, permutations, couplings = [], [], [], []
         expected = []
@@ -3268,7 +3269,7 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(row_start.numpy(), expected_starts)
         solve_response = wp.launch(
             _solve_bilateral_unilateral_response_cooperative,
-            dim=4 * 3 * 32,
+            dim=4 * 18 * 32,
             inputs=[
                 dims,
                 joints,
@@ -3284,7 +3285,7 @@ class TestDVISolver(unittest.TestCase):
                 workspace,
                 response,
                 0,
-                3,
+                18,
                 True,
                 row_start,
             ],
@@ -3303,19 +3304,37 @@ class TestDVISolver(unittest.TestCase):
             inputs=[
                 dims,
                 joints,
-                i32(np.cumsum([0, 38, 0, 68])),
+                i32(np.cumsum([0, 38, 0, 132])),
                 offsets,
                 strides,
                 coupling,
                 response,
                 workspace,
-                wp.zeros(111, dtype=wp.float32, device=self.device),
+                wp.zeros(175, dtype=wp.float32, device=self.device),
                 True,
             ],
             block_dim=256,
             device=self.device,
         )
         actual_schur = workspace.numpy()
+        workspace.fill_(float("nan"))
+        wp.launch(
+            _assemble_compact_unilateral_schur_tiled,
+            dim=(4, 16, 128),
+            inputs=[
+                dims,
+                joints,
+                i32(np.cumsum([0, 38, 0, 132])),
+                offsets,
+                strides,
+                response,
+                workspace,
+                wp.zeros(175, dtype=wp.float32, device=self.device),
+            ],
+            block_dim=128,
+            device=self.device,
+        )
+        tiled_schur = workspace.numpy()
         for n, nu, offset, reference in zip(joint_counts, unilateral_counts, response_offsets, expected, strict=True):
             white, schur, full = reference
             if nu <= n:
@@ -3324,6 +3343,9 @@ class TestDVISolver(unittest.TestCase):
                 )
                 np.testing.assert_allclose(
                     actual_schur[offset : offset + nu * nu].reshape(nu, nu), schur.T, atol=5.0e-6, rtol=5.0e-6
+                )
+                np.testing.assert_allclose(
+                    tiled_schur[offset : offset + nu * nu].reshape(nu, nu), schur.T, atol=5.0e-6, rtol=5.0e-6
                 )
             else:
                 np.testing.assert_allclose(

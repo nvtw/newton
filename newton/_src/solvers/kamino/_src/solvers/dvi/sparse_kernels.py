@@ -10,6 +10,7 @@ import warp as wp
 from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from ...geometry.keying import build_pair_key2, uint64_sentinel_value
+from ...linalg.factorize.llt_blocked_rcm import get_float32_array_offset_ptr
 from .kernels import _FUSED_BILATERAL_BLOCK, _FUSED_INEQUALITY_BLOCK, _sync_threads
 from .projections import (
     contact_friction_normal_load as _contact_friction_normal_load,
@@ -1743,6 +1744,46 @@ def _compact_unilateral_correction(
     if uid >= scalar_count and phase != int32(0):
         correction.y = compact_q[offset + unilateral_row + int32(1)]
     return correction
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _assemble_compact_unilateral_schur_tiled(
+    problem_dim: wp.array[int32],
+    problem_njc: wp.array[int32],
+    problem_vio: wp.array[int32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    response: wp.array[float32],
+    compact_schur: wp.array[float32],
+    compact_q: wp.array[float32],
+):
+    """Form the whitened response Gram matrix using FP32 tiles."""
+    wid, group, lane = wp.tid()
+    njc = problem_njc[wid]
+    nu = problem_dim[wid] - njc
+    if nu > njc:
+        return
+    if group == 0:
+        for row in range(lane, nu, wp.block_dim()):
+            compact_q[problem_vio[wid] + njc + row] = 0.0
+    offset = response_mio[wid]
+    y = wp.array(ptr=get_float32_array_offset_ptr(response, offset), shape=(nu, njc), dtype=float32)
+    out = wp.array(
+        ptr=get_float32_array_offset_ptr(compact_schur, offset),
+        shape=(nu, response_stride[wid]),
+        dtype=float32,
+    )
+    tiles = (nu + 15) // 16
+    # Spread each world's tiles over a fixed number of independent blocks.
+    for tile in range(group, tiles * tiles, 16):
+        row = (tile // tiles) * 16
+        col = (tile % tiles) * 16
+        accum = wp.tile_zeros(shape=(16, 16), dtype=float32, storage="shared")
+        for k in range(0, njc, 32):
+            a = wp.tile_load(y, shape=(16, 32), offset=(row, k))
+            b = wp.tile_load(y, shape=(16, 32), offset=(col, k))
+            wp.tile_matmul(a, wp.tile_transpose(b), accum)
+        wp.tile_store(out, accum, offset=(row, col))
 
 
 @wp.kernel
