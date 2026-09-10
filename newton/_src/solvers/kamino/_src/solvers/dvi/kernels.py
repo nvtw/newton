@@ -549,6 +549,41 @@ def _find_bilateral_factor_row_start(
 
 
 @wp.kernel
+def _find_bilateral_factor_row_start_rcm(
+    njc: wp.array[int32],
+    mio: wp.array[int32],
+    vio: wp.array[int32],
+    factor: wp.array[float32],
+    row_start: wp.array[int32],
+    tpo: wp.array[int32],
+    pattern: wp.array[int32],
+    block_size: int32,
+):
+    """Use the filled RCM tile mask to accelerate the exact leading-zero scan."""
+    wid, row = wp.tid()
+    n = njc[wid]
+    if row >= n:
+        return
+    tiles = (n + block_size - 1) // block_size
+    tile_offset = tpo[wid] + (row // block_size) * tiles
+    offset = mio[wid] + row * n
+    first = int32(0)
+    for tile in range((row + block_size - 1) // block_size):
+        end = wp.min(row, (tile + 1) * block_size)
+        if pattern[tile_offset + tile] == 0:
+            # Factorization clears skipped tiles, including when sparsity shrinks.
+            first = end
+        else:
+            # Marked tiles can contain numerical zeros: preserve the exact prefix.
+            while first < end and factor[offset + first] == float32(0.0):
+                first += 1
+            if first < end:
+                break
+    # Preserve the dense scan's 16-lane response reduction alignment.
+    row_start[vio[wid] + row] = first // 16 * 16
+
+
+@wp.kernel
 def _solve_bilateral_unilateral_response_cooperative(
     problem_dim: wp.array[int32],
     problem_njc: wp.array[int32],

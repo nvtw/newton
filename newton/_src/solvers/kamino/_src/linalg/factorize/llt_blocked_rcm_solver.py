@@ -232,6 +232,18 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             raise ValueError("Tile pattern array has not been allocated!")
         return self._tile_pattern
 
+    @property
+    def block_size(self) -> int:
+        """Side length of a factorization tile."""
+        return self._block_size
+
+    @property
+    def tile_pattern_offsets(self) -> wp.array:
+        """Offsets of the per-matrix tile masks in :attr:`tile_pattern`."""
+        if self._tpo is None:
+            raise ValueError("Tile pattern offsets have not been allocated!")
+        return self._tpo
+
     ###
     # Implementation
     ###

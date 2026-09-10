@@ -20,6 +20,7 @@ from .kernels import (
     _FUSED_BILATERAL_BLOCK,
     _FUSED_INEQUALITY_BLOCK,
     _find_bilateral_factor_row_start,
+    _find_bilateral_factor_row_start_rcm,
     _initialize_dvi_status,
     _scatter_bilateral_solution,
     _set_dvi_direct_status_iterations,
@@ -1169,7 +1170,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         response_tasks_per_world = (max_unilateral_rows + 1) // 2
         response_dim = path.size.num_worlds * response_tasks_per_world * 32
         wp.launch(
-            kernel=_find_bilateral_factor_row_start,
+            kernel=_find_bilateral_factor_row_start_rcm if use_permutation else _find_bilateral_factor_row_start,
             dim=(path.size.num_worlds, max_joint_rows),
             inputs=[
                 problem.data.njc,
@@ -1177,6 +1178,15 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
                 path.data.bilateral_operator.info.vio,
                 path.bilateral_solver.L,
                 state.bilateral_factor_row_start,
+                *(
+                    [
+                        path.bilateral_solver.tile_pattern_offsets,
+                        path.bilateral_solver.tile_pattern,
+                        path.bilateral_solver.block_size,
+                    ]
+                    if use_permutation
+                    else []
+                ),
             ],
             device=path.device,
         )
