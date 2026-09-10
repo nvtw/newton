@@ -272,7 +272,7 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
     Tile-skip logic follows :mod:`llt_blocked_semi_sparse`: both halves of an
     update (``L[i,k]`` and ``L[j,k]``, or a single ``L[k,j]``) must be nonzero
     to contribute; the destination tile is also skipped if its pattern slot
-    is zero (no need to write it).
+    is zero. Skipped output tiles are cleared for dense factor consumers.
     """
 
     @wp.kernel
@@ -345,6 +345,10 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
 
                 # Skip the whole off-diagonal block panel if L[tile_i, tile_k] is zero.
                 if TP_i[tile_i, tile_k] == int(0):
+                    # Sparsity can shrink between factorizations. DVI reads L
+                    # without the tile mask, so old factor entries cannot remain.
+                    zeros = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32)
+                    wp.tile_store(L_i, zeros, offset=(i, k))
                     continue
 
                 A_ik_tile = wp.tile_load(A_i, shape=(block_size, block_size), offset=(i, k), storage="shared")
@@ -473,6 +477,8 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
             dtype=wp.int32,
         )
         if TP_i[tile_i, tile_k] == int(0):
+            zeros = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32)
+            wp.tile_store(L_i, zeros, offset=(tile_i * block_size, tile_k * block_size))
             return
 
         i = tile_i * block_size
