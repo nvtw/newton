@@ -687,8 +687,10 @@ def warmstart_contacts_by_matched_geom_pair_key_and_position(
         cache: The cached contacts data from the previous simulation step.
         contacts: The current contacts data to be warm-started.
         balance_tangential: Whether to distribute the cached pair tangent force uniformly.
-        tangent_force_sums: Scratch storage for cached geometry-pair tangent forces.
-        pair_contact_counts: Scratch storage for cached geometry-pair contact counts.
+        tangent_force_sums: Scratch storage for cached geometry-pair tangent forces. Shape
+            ``(cache.model_max_contacts_host,)``.
+        pair_contact_counts: Scratch storage for cached geometry-pair contact counts. Shape
+            ``(cache.model_max_contacts_host,)``.
     """
     # Define tolerance for matching contact points based on distance after accounting for body motion
     if tolerance is None:
@@ -824,9 +826,12 @@ def warmstart_contacts_by_matched_geom_pair_key_and_position_with_net_force_back
         contacts: The current contacts data to be warm-started.
         tolerance: Contact-point matching tolerance [m].
         balance_tangential: Whether to distribute cached pair tangent force uniformly.
-        tangent_force_sums: Scratch storage for cached geometry-pair tangent forces.
-        pair_contact_counts: Scratch storage for cached geometry-pair contact counts.
-        current_pair_contact_counts: Scratch storage for current geometry-pair contact counts.
+        tangent_force_sums: Scratch storage for cached geometry-pair tangent forces. Shape
+            ``(cache.model_max_contacts_host,)``.
+        pair_contact_counts: Scratch storage for cached geometry-pair contact counts. Shape
+            ``(cache.model_max_contacts_host,)``.
+        current_pair_contact_counts: Scratch storage for current geometry-pair contact counts. Shape
+            ``(contacts.model_max_contacts_host,)``.
     """
     # Define tolerance for matching contact points based on distance after accounting for body motion
     if tolerance is None:
@@ -1050,7 +1055,8 @@ class WarmstarterContacts:
         Warm-starts contacts by matching geom-pair keys and contact-point positions,
         with a backup strategy using the net body-CoM contact force per geom-pair.
     - `KEY_AND_POSITION_WITH_NET_FORCE_BACKUP_AND_TANGENTIAL_NET_FORCE`:
-        Adds uniform cached tangential-force balancing to the net-force fallback.
+        Same as `KEY_AND_POSITION_WITH_NET_FORCE_BACKUP`, but adds uniform cached
+        tangential-force balancing.
     - `KEY_AND_POSITION_WITH_NET_WRENCH_BACKUP`:
         Warm-starts contacts by matching geom-pair keys and contact-point positions,
         with a backup strategy using the net body-CoM contact wrench per geom-pair.
@@ -1093,7 +1099,8 @@ class WarmstarterContacts:
 
         KEY_AND_POSITION_WITH_NET_FORCE_BACKUP_AND_TANGENTIAL_NET_FORCE = 6
         """
-        Add geometry-pair net-force fallback while balancing cached tangential force.
+        Same as `KEY_AND_POSITION_WITH_NET_FORCE_BACKUP`, but adds uniform cached
+        tangential-force balancing.
         """
 
         @classmethod

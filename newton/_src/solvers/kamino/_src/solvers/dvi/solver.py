@@ -31,7 +31,6 @@ from .kernels import (
     _compute_dvi_desaxce_corrections,
     _compute_dvi_solution_vectors,
     _compute_dvi_status_residuals,
-    _compute_dvi_status_residuals_parallel,
     _compute_dvi_unilateral_velocities,
     _copy_bilateral_block,
     _initialize_dvi_status,
@@ -107,6 +106,7 @@ class DVISolver:
         self._size: SizeKamino | None = None
         self._data: DVIData | None = None
         self._bilateral_solver: LLTBlockedSolver | LLTBlockedRCMSolver | None = None
+        self._use_schur_complement: bool = False
         self._max_alternating_iterations: int = 1
         self._bilateral_solve_after_block: tuple[bool, ...] = ()
         self._has_unilateral_constraints: bool = False
@@ -123,6 +123,7 @@ class DVISolver:
         self._joint_bid_B: wp.array[wp.int32] | None = None
         self._joint_bid_F: wp.array[wp.int32] | None = None
         self._joint_bounded_cts_offset: wp.array[wp.int32] | None = None
+        self._body_inv_mass: wp.array[wp.float32] | None = None
 
         if model is not None:
             self.finalize(
@@ -199,7 +200,11 @@ class DVISolver:
         self._joint_bid_B = model.joints.bid_B
         self._joint_bid_F = model.joints.bid_F
         self._joint_bounded_cts_offset = model.joints.bounded_cts_offset
+        self._body_inv_mass = model.bodies.inv_m_i
         self._config = self._check_config(model, config)
+        self._use_schur_complement = self._config[0].use_schur_complement
+        if any(c.use_schur_complement != self._use_schur_complement for c in self._config[1:]):
+            raise ValueError("All worlds must use the same DVI Schur-complement configuration.")
         self._warmstart = warmstart
         self._collect_info = collect_info
         self._max_alternating_iterations = max(c.max_alternating_iterations for c in self._config)
@@ -233,6 +238,7 @@ class DVISolver:
             contacts=contacts,
             jacobians=jacobians,
             bilateral_solver=self._bilateral_solver,
+            use_schur_complement=self._use_schur_complement,
             max_alternating_iterations=self._max_alternating_iterations,
             max_inequality_sweeps_per_iteration=max(c.inequality_sweeps_per_iteration for c in self._config),
             has_unilateral_constraints=self._has_unilateral_constraints,
@@ -417,9 +423,13 @@ class DVISolver:
                     else 0
                 )
                 self._data.state.allocate_sparse_projection(
-                    self._size, self._joint_rows_host, self._unilateral_strides_host, bilateral_vector_size
+                    self._size,
+                    self._joint_rows_host,
+                    self._unilateral_strides_host,
+                    bilateral_vector_size,
+                    self._use_schur_complement,
                 )
-            else:
+            elif self._use_schur_complement:
                 self._data.state.allocate_dense_projection(self._size)
 
     def solve(self, problem: DualProblem):
@@ -450,14 +460,14 @@ class DVISolver:
         ``D_bb * lambda_b = -(v_f,b + D_bu * lambda_u)``.
 
         The unilateral block is updated iteratively with projection onto the
-        nonnegative and Coulomb cones. DVI eliminates the bilateral response
-        from these updates through the Schur complement
+        nonnegative and Coulomb cones. By default, direct bilateral solves are
+        alternated with unilateral sweeps. The optional Schur path instead
+        eliminates the bilateral response through
         ``D_uu - D_ub * D_bb^-1 * D_bu``. The dense path materializes this
-        operator; the sparse path applies the same response as a compact
-        low-rank correction while retaining colored Gauss-Seidel sweeps. A
-        final direct bilateral solve recovers impulses consistent with the
-        converged unilateral solution. When no bilateral block exists, the
-        same iteration schedule applies to the original unilateral operator.
+        operator, while the sparse path applies it as a compact low-rank
+        correction. A final direct bilateral solve recovers consistent joint
+        impulses. When no bilateral block exists, the iteration schedule
+        applies to the original unilateral operator.
 
         This differs from Kamino's PADMM backend, which places all constraint
         rows in one proximal-ADMM iteration: it solves a regularized full
@@ -533,10 +543,9 @@ class DVISolver:
         # Classify the final iterate using all DVI conditions. This replaces
         # provisional iterate-change convergence from the dense fallback;
         # direct and sparse paths reach this check after fixed iteration counts.
-        parallel_status = False
         wp.launch(
-            kernel=_compute_dvi_status_residuals_parallel if parallel_status else _compute_dvi_status_residuals,
-            dim=self._size.num_worlds * 256 if parallel_status else self._size.num_worlds,
+            kernel=_compute_dvi_status_residuals,
+            dim=self._size.num_worlds,
             inputs=[
                 problem.data.dim,
                 problem.data.vio,
@@ -558,7 +567,6 @@ class DVISolver:
                 self._data.status,
             ],
             device=self.device,
-            block_dim=256 if parallel_status else 0,
         )
 
         if self._collect_info:
@@ -619,7 +627,7 @@ class DVISolver:
                     limits.wid,
                     limits.lid,
                     limits.bids,
-                    self._sparse_path.model.bodies.effective_inv_m_i,
+                    self._body_inv_mass,
                     problem.data.lio,
                     problem.data.iio,
                     problem.data.nbc,
@@ -638,7 +646,7 @@ class DVISolver:
                     contacts.wid,
                     contacts.cid,
                     contacts.bid_AB,
-                    self._sparse_path.model.bodies.effective_inv_m_i,
+                    self._body_inv_mass,
                     problem.data.nbc,
                     problem.data.nl,
                     problem.data.cio,
@@ -811,11 +819,105 @@ class DVISolver:
         self._bilateral_solver.compute(A=operator.mat)
 
     def _solve_with_bilateral_direct_block(self, problem: DualProblem):
+        """Solve coupled bilateral and unilateral constraint blocks."""
+        if not self._use_schur_complement:
+            self._solve_with_bilateral_alternation(problem)
+            return
+
+        self._solve_with_bilateral_schur_complement(problem)
+
+    def _solve_with_bilateral_alternation(self, problem: DualProblem) -> None:
+        """Alternate direct bilateral solves with projected unilateral sweeps."""
+        self._factor_bilateral_block(problem)
+        self._solve_bilateral_block(problem)
+        if not self._has_unilateral_constraints:
+            return
+
+        wp.launch(
+            kernel=_initialize_dvi_status,
+            dim=self._size.num_worlds,
+            inputs=[self._data.config, self._data.status],
+            device=self.device,
+        )
+        self._prepare_inequality_coloring(problem)
+        threads_per_world = 64 if self.device.is_cuda else 1
+        for block_iteration in range(self._max_alternating_iterations):
+            wp.launch(
+                kernel=_compute_dvi_unilateral_velocities,
+                dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+                inputs=[
+                    problem.data.dim,
+                    problem.data.mio,
+                    problem.data.vio,
+                    problem.data.nbc,
+                    problem.data.nl,
+                    problem.data.nc,
+                    problem.data.bcgo,
+                    problem.data.D,
+                    problem.data.v_f,
+                    self._data.solution.lambdas,
+                    self._data.state.v_aug,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                kernel=_solve_dvi_inequalities_colored_pgs,
+                dim=self._size.num_worlds * threads_per_world,
+                inputs=[
+                    problem.data.dim,
+                    problem.data.mio,
+                    problem.data.vio,
+                    problem.data.nbc,
+                    problem.data.nl,
+                    problem.data.nc,
+                    problem.data.bcgo,
+                    problem.data.lcgo,
+                    problem.data.ccgo,
+                    problem.data.bcio,
+                    problem.data.cio,
+                    problem.data.iio,
+                    problem.data.mu,
+                    problem.data.bound_lower,
+                    problem.data.bound_upper,
+                    problem.data.D,
+                    problem.data.P,
+                    problem.data.v_b,
+                    block_iteration,
+                    self._data.state.inequality_num_colors,
+                    self._data.state.inequality_ids_by_color,
+                    self._data.state.inequality_color_starts,
+                    self._data.config,
+                    False,
+                    self._data.status,
+                    self._data.state.scratch,
+                    self._data.state.v_aug,
+                    self._data.solution.lambdas,
+                ],
+                device=self.device,
+                block_dim=threads_per_world,
+            )
+            if self._should_solve_bilateral_after_block(block_iteration):
+                self._set_bilateral_active_dim(problem, block_iteration)
+                self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
+
+        self._set_bilateral_active_dim(problem, -1)
+        self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
+        wp.launch(
+            kernel=_set_dvi_direct_status_iterations,
+            dim=self._size.num_worlds,
+            inputs=[problem.data.nbc, problem.data.nl, problem.data.nc, self._data.config, False, self._data.status],
+            device=self.device,
+        )
+
+    def _solve_with_bilateral_schur_complement(self, problem: DualProblem) -> None:
         """Solve projected unilateral updates after eliminating bilateral rows.
 
         The factorized bilateral block supplies the Schur-complement response
         used by every colored unilateral sweep. A final bilateral solve then
         recovers joint impulses consistent with the contact and limit solution.
+        CUDA's fused path adaptively stops and reports its completed projected
+        sweeps in :class:`DVIStatus`; CPU executes and reports the full configured
+        sweep budget.
         """
         self._factor_bilateral_block(problem)
         self._solve_bilateral_block(problem)
@@ -995,17 +1097,25 @@ class DVISolver:
                     model.joints.num_dynamic_cts,
                     model.joints.num_kinematic_cts,
                     model.joints.num_friction_cts,
+                    model.joints.num_effort_cts,
                     model.joints.dofs_offset,
                     model.joints.dynamic_cts_offset,
                     model.joints.kinematic_cts_offset,
                     model.joints.friction_cts_offset,
+                    model.joints.effort_cts_offset,
+                    model.joints.friction_cts_axis,
+                    model.joints.effort_cts_axis,
                     model.joints.dynamic_cts_offset_total_cts,
                     model.joints.kinematic_cts_offset_total_cts,
                     model.joints.friction_cts_offset_total_cts,
+                    model.joints.effort_cts_offset_total_cts,
                     data.joints.lambda_dyn_j,
                     data.joints.lambda_kin_j,
                     data.joints.lambda_f_j,
+                    data.joints.lambda_tau_j,
                     data.joints.dq_j,
+                    data.joints.inv_m_a,
+                    data.joints.dq_b_a,
                     problem.data.P,
                     self._data.solution.lambdas,
                     self._data.solution.lambdas,

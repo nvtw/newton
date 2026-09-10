@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
 import newton
@@ -110,8 +111,11 @@ class Example:
 
         self.cartpoles.set_attribute("joint_q", self.state_0, joint_q)
 
+        self._body_q_after_view_fk = None
         if not isinstance(self.solver, newton.solvers.SolverMuJoCo):
             self.cartpoles.eval_fk(self.state_0)
+            if args.test:
+                self._body_q_after_view_fk = wp.clone(self.state_0.body_q)
 
         self.viewer.set_model(self.model)
         if max_worlds is not None:
@@ -125,14 +129,7 @@ class Example:
             yaw=0.0,
         )
 
-        # Ensure FK evaluation (for non-MuJoCo solvers):
-        newton.eval_fk(
-            self.model,
-            self.model.joint_q,
-            self.model.joint_qd,
-            self.state_0,
-        )
-
+        self._body_q_before_capture = wp.clone(self.state_0.body_q) if self._body_q_after_view_fk is not None else None
         self.capture()
 
     def capture(self):
@@ -186,8 +183,22 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        constrained_atol = 1.0e-6
+        """Validate the initialized state and constrained cartpole motion."""
+        if self._body_q_after_view_fk is not None:
+            np.testing.assert_array_equal(
+                self._body_q_after_view_fk.numpy(),
+                self._body_q_before_capture.numpy(),
+            )
+
+        constrained_atol = 1.0e-5 if self.solver_type == "kamino" else 1.0e-6
         num_bodies_per_world = self.model.body_count // self.world_count
+        newton.examples.test_body_state(
+            self.model,
+            self.state_0,
+            "rail remains fixed",
+            lambda q, qd: wp.length_sq(qd) < constrained_atol * constrained_atol,
+            indices=[i * num_bodies_per_world for i in range(self.world_count)],
+        )
         newton.examples.test_body_state(
             self.model,
             self.state_0,
@@ -196,7 +207,7 @@ class Example:
                 abs(q[2]) < constrained_atol
                 and newton.math.vec_allclose(q.q, wp.quat_identity(), atol=constrained_atol)
             ),
-            indices=[i * num_bodies_per_world for i in range(self.world_count)],
+            indices=[i * num_bodies_per_world + 1 for i in range(self.world_count)],
         )
         # fmt: off
         newton.examples.test_body_state(
@@ -207,19 +218,19 @@ class Example:
             and abs(qd[1]) > 0.05
             and abs(qd[2]) < constrained_atol
             and wp.length_sq(wp.spatial_bottom(qd)) < constrained_atol * constrained_atol,
-            indices=[i * num_bodies_per_world for i in range(self.world_count)],
+            indices=[i * num_bodies_per_world + 1 for i in range(self.world_count)],
         )
         newton.examples.test_body_state(
             self.model,
             self.state_0,
-            "pole1 only has y-axis linear velocity and x-axis angular velocity",
+            "pole1 only has yz-plane linear velocity and x-axis angular velocity",
             lambda q, qd: abs(qd[0]) < constrained_atol
             and abs(qd[1]) > 0.05
-            and abs(qd[2]) < constrained_atol
+            and abs(qd[2]) > 0.05
             and abs(qd[3]) > 0.3
             and abs(qd[4]) < constrained_atol
             and abs(qd[5]) < constrained_atol,
-            indices=[i * num_bodies_per_world + 1 for i in range(self.world_count)],
+            indices=[i * num_bodies_per_world + 2 for i in range(self.world_count)],
         )
         newton.examples.test_body_state(
             self.model,
@@ -231,7 +242,7 @@ class Example:
             and abs(qd[3]) > 0.2
             and abs(qd[4]) < constrained_atol
             and abs(qd[5]) < constrained_atol,
-            indices=[i * num_bodies_per_world + 2 for i in range(self.world_count)],
+            indices=[i * num_bodies_per_world + 3 for i in range(self.world_count)],
         )
         # fmt: on
 

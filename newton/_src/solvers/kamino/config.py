@@ -387,12 +387,9 @@ class ConstrainedDynamicsConfig(ConfigBase):
 
     cull_speculative_contacts: bool = True
     """
-    Whether to discard separated speculative contacts before the dynamics solve.
-
-    Disable this when contacts come from a speculative :class:`CollisionPipeline`
-    and should constrain approaching bodies before impact. Keeping speculative
-    contacts can cause numerical instability or inaccurate restitutive impacts.
-    Defaults to ``True``.
+    Whether to cull speculative (= separated) contacts in the dynamics solve.
+    These contacts have occasionally led to numerical instabilities, and
+    can yield inaccurate restitutive impacts.
     """
 
     @override
@@ -814,10 +811,10 @@ class DVISolverConfig:
     Must be positive. Defaults to `1e-6`.
     """
 
-    omega: float = 1.2
+    omega: float = 1.0
     """
     Relaxation factor applied to projected Gauss-Seidel updates.
-    Must be in the range `(0, 2]`. Defaults to `1.2`.
+    Must be in the range `(0, 2]`. Defaults to `1.0`.
     """
 
     max_alternating_iterations: int = 24
@@ -835,13 +832,24 @@ class DVISolverConfig:
     on CUDA. Must be greater than zero. Defaults to `2`.
     """
 
-    bilateral_solve_interval: int = 24
+    use_schur_complement: bool = False
+    """
+    Whether to eliminate bilateral rows from the unilateral solve through a Schur complement.
+
+    .. experimental::
+
+        The ``True`` mode may change without prior notice. It requires the same
+        setting in every world and adds response-matrix setup and storage.
+
+    Defaults to ``False``.
+    """
+
+    bilateral_solve_interval: int = 1
     """
     Number of alternating DVI iterations between repeated direct bilateral solves.
-    The default matches :attr:`max_alternating_iterations`, so the direct bilateral
-    block is solved after the fused inequality schedule. Smaller values trade GPU
-    launch overhead for tighter bilateral-inequality coupling. Must be greater than
-    zero. Defaults to `24`.
+    This controls coupling when :attr:`use_schur_complement` is ``False``.
+    Larger values trade coupling accuracy for fewer direct solves. Must be greater
+    than zero. Defaults to `1`.
     """
 
     tangential_warmstart_scale: float = 0.97
@@ -877,11 +885,11 @@ class DVISolverConfig:
         "key_and_position_with_net_force_backup",
         "key_and_position_with_tangential_net_force",
         "key_and_position_with_net_force_backup_and_tangential_net_force",
-    ] = "key_and_position_with_net_force_backup_and_tangential_net_force"
+    ] = "key_and_position_with_tangential_net_force"
     """
     The contact warmstart method used when `warmstart_mode` is `containers`.
     See :class:`WarmstarterContacts.Method` for available options.
-    Defaults to `key_and_position_with_net_force_backup_and_tangential_net_force`.
+    Defaults to `key_and_position_with_tangential_net_force`.
     """
 
     @override

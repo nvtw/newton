@@ -101,6 +101,7 @@ class SparseDVIPath:
         contacts: ContactsKamino | None,
         jacobians: SparseSystemJacobians | None,
         bilateral_solver,
+        use_schur_complement: bool,
         max_alternating_iterations: int,
         max_inequality_sweeps_per_iteration: int,
         has_unilateral_constraints: bool,
@@ -122,6 +123,7 @@ class SparseDVIPath:
         self.body_space = wp.empty(shape=size.sum_of_num_body_dofs, dtype=wp.float32, device=device)
         self.parallel_contact_colors = wp.zeros(shape=1, dtype=wp.int32, device=device)
         self.bilateral_solver = bilateral_solver
+        self.use_schur_complement = use_schur_complement
         self.max_alternating_iterations = max_alternating_iterations
         self.max_inequality_sweeps_per_iteration = max_inequality_sweeps_per_iteration
         self.has_unilateral_constraints = has_unilateral_constraints
@@ -204,6 +206,16 @@ def _can_use_sparse_colored_inequalities(path: SparseDVIPath) -> bool:
     )
 
 
+def _can_use_cooperative_articulation(path: SparseDVIPath) -> bool:
+    """Return whether one warp can solve each articulated world's inequalities."""
+    return (
+        path.use_schur_complement
+        and path.device.is_cuda
+        and path.bilateral_solver is not None
+        and path.size.max_of_num_bilateral_joint_cts >= 64
+    )
+
+
 def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) -> None:
     """Map and color active inequalities with the multi-world fast path."""
     state = path.data.state
@@ -234,7 +246,7 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
                 limits.wid,
                 limits.lid,
                 limits.bids,
-                path.model.bodies.effective_inv_m_i,
+                path.model.bodies.inv_m_i,
                 problem.data.lio,
                 problem.data.iio,
                 problem.data.nbc,
@@ -296,7 +308,8 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
                     contacts.bid_AB,
                     sorter.sorted_to_unsorted_map,
                     path.contact_world_starts,
-                    path.model.bodies.effective_inv_m_i,
+                    path.model.bodies.inv_m_i,
+                    problem.data.nbc,
                     problem.data.nl,
                     problem.data.cio,
                     problem.data.iio,
@@ -315,7 +328,7 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
                     contacts.wid,
                     contacts.cid,
                     contacts.bid_AB,
-                    path.model.bodies.effective_inv_m_i,
+                    path.model.bodies.inv_m_i,
                     problem.data.nbc,
                     problem.data.nl,
                     problem.data.cio,
@@ -513,12 +526,7 @@ def _launch_sparse_inequality_pgs(
             ],
             device=path.device,
         )
-    cooperative_articulation = (
-        path.device.is_cuda
-        and path.bilateral_solver is not None
-        and path.size.max_of_num_bounded_joint_cts == 0
-        and path.size.max_of_num_bilateral_joint_cts >= 64
-    )
+    cooperative_articulation = _can_use_cooperative_articulation(path)
     if cooperative_articulation:
         kernel = _solve_dvi_sparse_inequalities_pgs_cooperative
         threads_per_world = 32
@@ -573,7 +581,7 @@ def _launch_sparse_inequality_pgs(
     else:
         kernel_inputs = [
             *common_inputs,
-            jacobians.friction_constraint_nzb_offsets,
+            jacobians.bounded_constraint_nzb_offsets,
             jacobians.limit_constraint_nzb_offsets,
             jacobians.contact_constraint_nzb_offsets,
             state.limit_indices,
@@ -605,15 +613,47 @@ def _launch_sparse_inequality_pgs(
             state.bilateral_coupling,
             state.bilateral_response,
             state.bilateral_delta,
+            wp.bool(path.use_schur_complement),
         ]
         if cooperative_articulation:
-            kernel_inputs.extend(
-                [
-                    state.bilateral_response_factor,
-                    state.s,
-                    wp.bool(enable_compact_schur),
-                ]
-            )
+            kernel_inputs = [
+                *common_inputs,
+                jacobians.bounded_constraint_nzb_offsets,
+                jacobians.limit_constraint_nzb_offsets,
+                jacobians.contact_constraint_nzb_offsets,
+                state.limit_indices,
+                state.contact_indices,
+                problem.data.nbc,
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.bcio,
+                problem.data.lio,
+                problem.data.cio,
+                problem.data.iio,
+                problem.data.bcgo,
+                problem.data.lcgo,
+                problem.data.ccgo,
+                problem.data.vio,
+                problem.data.mu,
+                problem.data.bound_lower,
+                problem.data.bound_upper,
+                problem.data.P,
+                problem.data.v_f,
+                problem.data.v_b,
+                state.scratch,
+                state.inequality_projected_diagonal,
+                delassus.regularization,
+                problem.data.njc,
+                bilateral_vio,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_coupling,
+                state.bilateral_response,
+                state.bilateral_delta,
+                state.bilateral_response_factor,
+                state.s,
+                wp.bool(enable_compact_schur),
+            ]
         kernel_inputs.extend(
             [
                 state.inequality_num_colors,
@@ -791,7 +831,7 @@ def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) ->
             kernel=_build_sparse_bilateral_block,
             dim=pair_wid.size,
             inputs=[
-                path.model.bodies.effective_inv_m_i,
+                path.model.bodies.inv_m_i,
                 path.model_data.bodies.inv_I_i,
                 pair_wid,
                 pair_row,
@@ -932,7 +972,74 @@ def _solve_sparse_bilateral_block(
 
 
 def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: DualProblem) -> None:
-    """Alternate a direct ``D_bb`` solve with projected sparse unilateral sweeps."""
+    """Solve coupled sparse bilateral and unilateral constraint blocks."""
+    if not path.use_schur_complement:
+        _solve_sparse_with_bilateral_alternation(path, problem)
+        return
+
+    _solve_sparse_with_bilateral_schur_complement(path, problem)
+
+
+def _solve_sparse_with_bilateral_alternation(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Alternate direct bilateral solves with projected sparse unilateral sweeps."""
+    state = path.data.state
+    _factor_sparse_bilateral_block(path, problem)
+    _solve_sparse_bilateral_block(path, problem)
+    if not path.has_unilateral_constraints:
+        _compute_sparse_solution_vectors(path, problem)
+        return
+    if not _can_use_sparse_colored_inequalities(path):
+        raise RuntimeError(_SPARSE_INEQUALITY_TOPOLOGY_ERROR)
+
+    wp.launch(
+        kernel=_initialize_dvi_status,
+        dim=path.size.num_worlds,
+        inputs=[path.data.config, path.data.status],
+        device=path.device,
+    )
+    _prepare_sparse_inequality_pgs(path, problem)
+    max_unilateral_rows = (
+        path.size.max_of_num_bounded_joint_cts + path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
+    )
+    wp.launch(
+        kernel=_cache_sparse_projected_diagonal,
+        dim=(path.size.num_worlds, max_unilateral_rows),
+        inputs=[
+            problem.data.dim,
+            problem.data.njc,
+            problem.data.vio,
+            problem.data.P,
+            state.scratch,
+            state.bilateral_response_mio,
+            state.bilateral_response_stride,
+            state.bilateral_coupling,
+            state.bilateral_response,
+            False,
+            path.data.solution.lambdas,
+            state.v_aug,
+            state.inequality_projected_diagonal,
+        ],
+        device=path.device,
+    )
+    for block_iteration in range(path.max_alternating_iterations):
+        _launch_sparse_inequality_pgs(path, problem, block_iteration)
+        if path.should_solve_bilateral_after_block(block_iteration):
+            path.set_bilateral_active_dim(problem, block_iteration)
+            _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
+
+    path.set_bilateral_active_dim(problem, -1)
+    _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
+    wp.launch(
+        kernel=_set_dvi_direct_status_iterations,
+        dim=path.size.num_worlds,
+        inputs=[problem.data.nbc, problem.data.nl, problem.data.nc, path.data.config, False, path.data.status],
+        device=path.device,
+    )
+    _compute_sparse_solution_vectors(path, problem)
+
+
+def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Eliminate bilateral rows from projected sparse unilateral sweeps."""
     state = path.data.state
     _factor_sparse_bilateral_block(path, problem)
     _solve_sparse_bilateral_block(path, problem)
@@ -986,7 +1093,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
             problem.data.P,
             state.limit_indices,
             state.contact_indices,
-            path.jacobians.friction_constraint_nzb_offsets,
+            path.jacobians.bounded_constraint_nzb_offsets,
             path.jacobians.limit_constraint_nzb_offsets,
             path.jacobians.contact_constraint_nzb_offsets,
             world_row_offsets,
@@ -1072,6 +1179,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
             state.bilateral_response_stride,
             state.bilateral_coupling,
             state.bilateral_response,
+            True,
             path.data.solution.lambdas,
             state.v_aug,
             state.inequality_projected_diagonal,
@@ -1099,11 +1207,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
                 device=path.device,
             )
 
-    cooperative_fused_pgs = (
-        path.device.is_cuda
-        and path.size.max_of_num_bounded_joint_cts == 0
-        and path.size.max_of_num_bilateral_joint_cts >= 64
-    )
+    cooperative_fused_pgs = _can_use_cooperative_articulation(path)
     if has_intermediate_bilateral_solve or not cooperative_fused_pgs:
         path.set_bilateral_active_dim(problem, -1)
         _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)

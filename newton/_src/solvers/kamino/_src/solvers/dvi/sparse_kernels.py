@@ -330,6 +330,7 @@ def _map_ordered_active_contacts(
     sorted_to_unsorted_map: wp.array[int32],
     contact_world_starts: wp.array[int32],
     model_body_inv_mass: wp.array[float32],
+    problem_nbc: wp.array[int32],
     problem_nl: wp.array[int32],
     problem_cio: wp.array[int32],
     problem_uio: wp.array[int32],
@@ -351,12 +352,13 @@ def _map_ordered_active_contacts(
             bid_a = int32(-1)
         if bid_b >= int32(0) and model_body_inv_mass[bid_b] <= float32(0.0):
             bid_b = int32(-1)
+        nbc = problem_nbc[wid]
         nl = problem_nl[wid]
         uio = problem_uio[wid]
-        uid = nl + cid
+        uid = nbc + nl + cid
         inequality_bodies[uio + uid] = wp.vec2i(bid_a, bid_b)
         local_sorted_id = sorted_id - contact_world_starts[wid]
-        inequality_order[uio + wid + nl + local_sorted_id] = uid
+        inequality_order[uio + wid + nbc + nl + local_sorted_id] = uid
 
 
 @wp.kernel
@@ -850,6 +852,7 @@ def _cache_sparse_projected_diagonal(
     response_stride: wp.array[int32],
     bilateral_coupling: wp.array[float32],
     bilateral_response: wp.array[float32],
+    enable_bilateral_response: wp.bool,
     solution_lambdas: wp.array[float32],
     initial_unilateral_lambdas: wp.array[float32],
     projected_diag: wp.array[float32],
@@ -864,11 +867,12 @@ def _cache_sparse_projected_diagonal(
     vec_idx = vio + row
     P_i = problem_P[vec_idx]
     value = wp.abs(problem_diag[vec_idx]) * P_i * P_i
-    offset = response_mio[wid]
-    stride = response_stride[wid]
-    for bilateral_row in range(njc):
-        index = offset + bilateral_row * stride + unilateral_row
-        value -= bilateral_coupling[index] * bilateral_response[index]
+    if enable_bilateral_response:
+        offset = response_mio[wid]
+        stride = response_stride[wid]
+        for bilateral_row in range(njc):
+            index = offset + bilateral_row * stride + unilateral_row
+            value -= bilateral_coupling[index] * bilateral_response[index]
     projected_diag[vec_idx] = value
     initial_unilateral_lambdas[vec_idx] = solution_lambdas[vec_idx]
 
@@ -1167,7 +1171,7 @@ def _solve_dvi_sparse_inequalities_pgs(
     jacobian_nzb_values: wp.array[vec6f],
     bsm_row_start: wp.array[int32],
     bsm_col_start: wp.array[int32],
-    friction_nzb_offsets: wp.array[wp.vec2i],
+    bounded_nzb_offsets: wp.array[wp.vec2i],
     limit_nzb_offsets: wp.array[int32],
     contact_nzb_offsets: wp.array[int32],
     limit_indices: wp.array[int32],
@@ -1199,6 +1203,7 @@ def _solve_dvi_sparse_inequalities_pgs(
     bilateral_coupling: wp.array[float32],
     bilateral_response: wp.array[float32],
     bilateral_delta: wp.array[float32],
+    enable_bilateral_response: wp.bool,
     inequality_num_colors: wp.array[int32],
     inequality_ids_by_color: wp.array[int32],
     inequality_color_starts: wp.array[int32],
@@ -1234,6 +1239,9 @@ def _solve_dvi_sparse_inequalities_pgs(
     ccgo = problem_ccgo[wid]
     vio = problem_vio[wid]
     njc = problem_njc[wid]
+    response_njc = int32(0)
+    if enable_bilateral_response:
+        response_njc = njc
     bilateral_offset = response_mio[wid]
     max_unilateral_rows = response_stride[wid]
     bvio = bilateral_vio[wid]
@@ -1300,7 +1308,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 bid = bcio + uid
                                 row = bcgo + uid
                                 vec_idx = vio + row
-                                offsets = friction_nzb_offsets[bid]
+                                offsets = bounded_nzb_offsets[bid]
                                 bound_value = eta[row_start + row] * solution_lambdas[vec_idx]
                                 nzb_idx_f = offsets[0]
                                 if (
@@ -1327,7 +1335,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 else:
                                     nzb_idx_b = int32(-1)
                                 unilateral_row = row - njc
-                                for bilateral_row in range(njc):
+                                for bilateral_row in range(response_njc):
                                     coupling_index = (
                                         bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                     )
@@ -1350,7 +1358,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 lambda_bound_delta = lambda_bound_new - lambda_bound_old
                                 bound_delta_body = P_bound * lambda_bound_delta
                                 solution_lambdas[vec_idx] = lambda_bound_new
-                                for bilateral_row in range(njc):
+                                for bilateral_row in range(response_njc):
                                     response_index = (
                                         bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                     )
@@ -1394,7 +1402,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                             for j in range(6):
                                                 limit_value += block[j] * body_space[x_idx_base + j]
                                     unilateral_row = row - njc
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         coupling_index = (
                                             bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                         )
@@ -1417,7 +1425,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     lambda_limit_delta = lambda_limit_new - lambda_limit_old
                                     limit_delta_body = P_i * lambda_limit_delta
                                     solution_lambdas[vec_idx] = lambda_limit_new
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         response_index = (
                                             bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                         )
@@ -1482,7 +1490,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                 contact_delta_body = vec3f(0.0)
                                 unilateral_row = row - njc
                                 if phase == int32(0):
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         coupling_index = (
                                             bilateral_offset
                                             + bilateral_row * max_unilateral_rows
@@ -1506,7 +1514,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     lambda_n_delta = lambda_n_new - lambda_n_old
                                     solution_lambdas[vec_idx + int32(2)] = lambda_n_new
                                     contact_delta_body.z = P_n * lambda_n_delta
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         response_index = (
                                             bilateral_offset
                                             + bilateral_row * max_unilateral_rows
@@ -1519,7 +1527,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                             bilateral_response[response_index] * lambda_n_delta,
                                         )
                                 else:
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         coupling_index_t0 = (
                                             bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                         )
@@ -1549,7 +1557,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                             body_group += int32(3)
                                         off_diagonal *= P_t1
                                         inequality_tangent_cross[uio + uid] = off_diagonal
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         coupling_index_t0 = (
                                             bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                         )
@@ -1583,7 +1591,7 @@ def _solve_dvi_sparse_inequalities_pgs(
                                     lambda_t1_delta = lambda_t_new.y - lambda_t_old.y
                                     contact_delta_body.x = P_t0 * lambda_t0_delta
                                     contact_delta_body.y = P_t1 * lambda_t1_delta
-                                    for bilateral_row in range(njc):
+                                    for bilateral_row in range(response_njc):
                                         response_index_t0 = (
                                             bilateral_offset + bilateral_row * max_unilateral_rows + unilateral_row
                                         )
@@ -1669,20 +1677,25 @@ def _sync_warp_32(): ...
 
 
 @wp.func
-def _cooperative_unilateral_component(uid: int32, nl: int32, phase: int32) -> int32:
+def _cooperative_unilateral_component(uid: int32, scalar_count: int32, phase: int32) -> int32:
     component = int32(0)
-    if uid >= nl and phase == int32(0):
+    if uid >= scalar_count and phase == int32(0):
         component = int32(2)
     return component
 
 
 @wp.func
 def _compact_unilateral_correction(
-    compact_q: wp.array[float32], offset: int32, unilateral_row: int32, uid: int32, nl: int32, phase: int32
+    compact_q: wp.array[float32],
+    offset: int32,
+    unilateral_row: int32,
+    uid: int32,
+    scalar_count: int32,
+    phase: int32,
 ) -> wp.vec2f:
-    component = _cooperative_unilateral_component(uid, nl, phase)
+    component = _cooperative_unilateral_component(uid, scalar_count, phase)
     correction = wp.vec2f(compact_q[offset + unilateral_row + component], float32(0.0))
-    if uid >= nl and phase != int32(0):
+    if uid >= scalar_count and phase != int32(0):
         correction.y = compact_q[offset + unilateral_row + int32(1)]
     return correction
 
@@ -1721,6 +1734,62 @@ def _assemble_compact_unilateral_schur(
         for bilateral in range(njc):
             value += coupling[offset + bilateral * stride + row] * response[offset + bilateral * stride + column]
         compact_schur[offset + column * stride + row] = value
+
+
+@wp.func
+def _cooperative_sparse_bounded_update(
+    bounded_id: int32,
+    row: int32,
+    vec_idx: int32,
+    row_start: int32,
+    col_start: int32,
+    matrix_end: int32,
+    bilateral_value: float32,
+    cfg: DVIConfigStruct,
+    bsm_nzb_coords: wp.array2d[int32],
+    bsm_nzb_values: wp.array[vec6f],
+    jacobian_nzb_values: wp.array[vec6f],
+    bounded_nzb_offsets: wp.array[wp.vec2i],
+    problem_bound_lower: wp.array[float32],
+    problem_bound_upper: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    projected_diag: wp.array[float32],
+    eta: wp.array[float32],
+    body_space: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+) -> float32:
+    offsets = bounded_nzb_offsets[bounded_id]
+    value = eta[row_start + row] * solution_lambdas[vec_idx] + bilateral_value
+    for k in range(2):
+        nzb_idx = offsets[k]
+        if nzb_idx >= int32(0) and nzb_idx < matrix_end and bsm_nzb_coords[nzb_idx, 0] == row:
+            block = bsm_nzb_values[nzb_idx]
+            x_idx = col_start + bsm_nzb_coords[nzb_idx, 1]
+            for j in range(6):
+                value += block[j] * body_space[x_idx + j]
+    value += problem_v_f[vec_idx]
+    old_lambda = solution_lambdas[vec_idx]
+    new_lambda = _project_box_update(
+        old_lambda,
+        value,
+        projected_diag[vec_idx],
+        cfg.regularization,
+        cfg.omega,
+        problem_bound_lower[bounded_id],
+        problem_bound_upper[bounded_id],
+    )
+    lambda_delta = new_lambda - old_lambda
+    solution_lambdas[vec_idx] = new_lambda
+    body_delta = problem_P[vec_idx] * lambda_delta
+    for k in range(2):
+        nzb_idx = offsets[k]
+        if nzb_idx >= int32(0) and nzb_idx < matrix_end and bsm_nzb_coords[nzb_idx, 0] == row:
+            x_idx = col_start + bsm_nzb_coords[nzb_idx, 1]
+            jacobian_row = jacobian_nzb_values[nzb_idx]
+            for j in range(6):
+                body_space[x_idx + j] += jacobian_row[j] * body_delta
+    return lambda_delta
 
 
 @wp.func
@@ -1938,19 +2007,25 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     jacobian_nzb_values: wp.array[vec6f],
     bsm_row_start: wp.array[int32],
     bsm_col_start: wp.array[int32],
+    bounded_nzb_offsets: wp.array[wp.vec2i],
     limit_nzb_offsets: wp.array[int32],
     contact_nzb_offsets: wp.array[int32],
     limit_indices: wp.array[int32],
     contact_indices: wp.array[int32],
+    problem_nbc: wp.array[int32],
     problem_nl: wp.array[int32],
     problem_nc: wp.array[int32],
+    problem_bcio: wp.array[int32],
     problem_lio: wp.array[int32],
     problem_cio: wp.array[int32],
     problem_uio: wp.array[int32],
+    problem_bcgo: wp.array[int32],
     problem_lcgo: wp.array[int32],
     problem_ccgo: wp.array[int32],
     problem_vio: wp.array[int32],
     problem_mu: wp.array[float32],
+    problem_bound_lower: wp.array[float32],
+    problem_bound_upper: wp.array[float32],
     problem_P: wp.array[float32],
     problem_v_f: wp.array[float32],
     problem_v_b: wp.array[float32],
@@ -1985,25 +2060,29 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     cfg = solver_config[wid]
     if block_iteration >= int32(0) and block_iteration >= cfg.max_alternating_iterations:
         return
+    nbc = problem_nbc[wid]
     nl = problem_nl[wid]
     nc = problem_nc[wid]
-    if nl + nc == int32(0):
+    if nbc + nl + nc == int32(0):
         if lane == int32(0) and block_iteration == int32(_FUSED_BILATERAL_BLOCK):
             status = solver_status[wid]
             status.iterations = int32(1)
             solver_status[wid] = status
         return
+    bcio = problem_bcio[wid]
     lio = problem_lio[wid]
     cio = problem_cio[wid]
     uio = problem_uio[wid]
     schedule_offset = uio + wid
+    bcgo = problem_bcgo[wid]
     lcgo = problem_lcgo[wid]
     ccgo = problem_ccgo[wid]
     vio = problem_vio[wid]
     njc = problem_njc[wid]
     response_offset = response_mio[wid]
     response_row_stride = response_stride[wid]
-    num_unilateral_rows = nl + int32(3) * nc
+    scalar_count = nbc + nl
+    num_unilateral_rows = scalar_count + int32(3) * nc
     use_compact_schur = enable_compact_schur and num_unilateral_rows <= njc
     bvio = bilateral_vio[wid]
     row_start = bsm_row_start[wid]
@@ -2043,16 +2122,20 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                             slot = slot_end - int32(1) - slot_iteration
                         uid = inequality_ids_by_color[uio + slot]
                         mapped_id = int32(-1)
-                        if uid < nl and phase != int32(0):
+                        if uid < scalar_count and phase != int32(0):
                             continue
-                        if uid < nl:
-                            mapped_id = limit_indices[lio + uid]
+                        if uid < nbc:
+                            mapped_id = bcio + uid
+                        elif uid < scalar_count:
+                            mapped_id = limit_indices[lio + uid - nbc]
                         else:
-                            mapped_id = contact_indices[cio + uid - nl]
+                            mapped_id = contact_indices[cio + uid - scalar_count]
 
-                        row = lcgo + uid
-                        if uid >= nl:
-                            row = ccgo + int32(3) * (uid - nl)
+                        row = bcgo + uid
+                        if uid >= nbc and uid < scalar_count:
+                            row = lcgo + uid - nbc
+                        elif uid >= scalar_count:
+                            row = ccgo + int32(3) * (uid - scalar_count)
                         vec_idx = vio + row
                         unilateral_row = row - njc
                         correction_0 = float32(0.0)
@@ -2062,11 +2145,11 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                             if use_compact_schur:
                                 if lane == int32(0):
                                     correction = _compact_unilateral_correction(
-                                        compact_q, vio + njc, unilateral_row, uid, nl, phase
+                                        compact_q, vio + njc, unilateral_row, uid, scalar_count, phase
                                     )
                                     correction_0 = correction.x
                                     correction_1 = correction.y
-                                    if uid >= nl and phase != int32(0):
+                                    if uid >= scalar_count and phase != int32(0):
                                         projected_cross = compact_schur[
                                             response_offset
                                             + (unilateral_row + int32(1)) * response_row_stride
@@ -2079,9 +2162,9 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                 for bilateral_row in range(lane, njc, int32(32)):
                                     index = response_offset + bilateral_row * response_row_stride + unilateral_row
                                     bilateral_value = bilateral_delta[bvio + bilateral_row]
-                                    if uid < nl or phase == int32(0):
+                                    if uid < scalar_count or phase == int32(0):
                                         component = int32(0)
-                                        if uid >= nl:
+                                        if uid >= scalar_count:
                                             component = int32(2)
                                         partial_0 += bilateral_coupling[index + component] * bilateral_value
                                     else:
@@ -2098,7 +2181,31 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                         delta_1 = float32(0.0)
                         if lane == int32(0):
                             if mapped_id >= int32(0):
-                                if uid < nl:
+                                if uid < nbc:
+                                    if phase == int32(0):
+                                        delta_0 = _cooperative_sparse_bounded_update(
+                                            mapped_id,
+                                            row,
+                                            vec_idx,
+                                            row_start,
+                                            col_start,
+                                            matrix_end,
+                                            correction_0,
+                                            cfg,
+                                            bsm_nzb_coords,
+                                            bsm_nzb_values,
+                                            jacobian_nzb_values,
+                                            bounded_nzb_offsets,
+                                            problem_bound_lower,
+                                            problem_bound_upper,
+                                            problem_P,
+                                            problem_v_f,
+                                            projected_diag,
+                                            eta,
+                                            body_space,
+                                            solution_lambdas,
+                                        )
+                                elif uid < scalar_count:
                                     if phase == int32(0):
                                         delta_0 = _cooperative_sparse_limit_update(
                                             mapped_id,
@@ -2144,7 +2251,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                 else:
                                     tangent_delta = _cooperative_sparse_contact_tangent_update(
                                         mapped_id,
-                                        uid - nl,
+                                        uid - scalar_count,
                                         uid,
                                         row,
                                         vec_idx,
@@ -2178,7 +2285,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                         delta_0 = _broadcast_lane_0_32(delta_0)
                         delta_1 = _broadcast_lane_0_32(delta_1)
                         if mapped_id >= int32(0) and (delta_0 != float32(0.0) or delta_1 != float32(0.0)):
-                            component = _cooperative_unilateral_component(uid, nl, phase)
+                            component = _cooperative_unilateral_component(uid, scalar_count, phase)
                             if use_compact_schur:
                                 for target in range(lane, num_unilateral_rows, int32(32)):
                                     value = (
@@ -2189,7 +2296,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                         ]
                                         * delta_0
                                     )
-                                    if uid >= nl and phase != int32(0):
+                                    if uid >= scalar_count and phase != int32(0):
                                         value += (
                                             compact_schur[
                                                 response_offset
@@ -2202,7 +2309,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                             else:
                                 for bilateral_row in range(lane, njc, int32(32)):
                                     index = response_offset + bilateral_row * response_row_stride + unilateral_row
-                                    if uid < nl:
+                                    if uid < scalar_count:
                                         if phase == int32(0):
                                             bilateral_delta[bvio + bilateral_row] -= bilateral_response[index] * delta_0
                                     elif phase == int32(0):
