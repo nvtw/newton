@@ -1077,7 +1077,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     state.bilateral_delta.zero_()
     wp.launch(
         kernel=_assemble_sparse_bilateral_unilateral_coupling,
-        dim=(path.size.num_worlds, max_joint_rows, max_unilateral_rows),
+        dim=(path.size.num_worlds, 1024),
         inputs=[
             bsm.num_nzb,
             bsm.nzb_start,
