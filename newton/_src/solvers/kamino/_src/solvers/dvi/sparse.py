@@ -25,6 +25,7 @@ from .kernels import (
     _scatter_bilateral_solution,
     _set_dvi_direct_status_iterations,
     _solve_bilateral_unilateral_response,
+    _solve_bilateral_unilateral_response_compact,
     _solve_bilateral_unilateral_response_cooperative,
 )
 from .sparse_kernels import (
@@ -1212,6 +1213,29 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             ],
             device=path.device,
         )
+    # Independent columns amortize their serial work only in large batches.
+    use_scalar_response = enable_compact_schur and use_permutation and path.size.num_worlds >= 2048
+    if use_scalar_response:
+        wp.launch(
+            kernel=_solve_bilateral_unilateral_response_compact,
+            dim=(path.size.num_worlds, max_unilateral_rows),
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                path.data.bilateral_operator.info.mio,
+                path.data.bilateral_operator.info.vio,
+                state.bilateral_preconditioner,
+                path.bilateral_solver.L,
+                permutation,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_coupling,
+                state.bilateral_response,
+                state.bilateral_factor_row_start,
+            ],
+            device=path.device,
+            block_dim=128,
+        )
     wp.launch(
         kernel=response_kernel,
         dim=response_dim,
@@ -1230,7 +1254,13 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             state.bilateral_response_factor,
             state.bilateral_response,
             *(
-                [0, response_tasks_per_world, enable_compact_schur, state.bilateral_factor_row_start]
+                [
+                    0,
+                    response_tasks_per_world,
+                    enable_compact_schur,
+                    state.bilateral_factor_row_start,
+                    use_scalar_response,
+                ]
                 if path.device.is_cuda
                 else []
             ),

@@ -584,6 +584,39 @@ def _find_bilateral_factor_row_start_rcm(
 
 
 @wp.kernel
+def _solve_bilateral_unilateral_response_compact(
+    problem_dim: wp.array[int32],
+    problem_njc: wp.array[int32],
+    bilateral_mio: wp.array[int32],
+    bilateral_vio: wp.array[int32],
+    bilateral_P: wp.array[float32],
+    bilateral_L: wp.array[float32],
+    bilateral_permutation: wp.array[int32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    coupling: wp.array[float32],
+    response: wp.array[float32],
+    factor_row_start: wp.array[int32],
+):
+    """Whiten permuted response columns independently for large compact batches."""
+    wid, unilateral = wp.tid()
+    njc = problem_njc[wid]
+    nu = problem_dim[wid] - njc
+    if unilateral >= nu or not _compact_schur_fits(njc, nu, response_stride[wid]):
+        return
+    offset = response_mio[wid]
+    for row in range(njc):
+        original_row = bilateral_permutation[bilateral_vio[wid] + row]
+        value = (
+            bilateral_P[bilateral_vio[wid] + original_row]
+            * coupling[offset + original_row * response_stride[wid] + unilateral]
+        )
+        for k in range(factor_row_start[bilateral_vio[wid] + row], row):
+            value -= bilateral_L[bilateral_mio[wid] + row * njc + k] * response[offset + k * nu + unilateral]
+        response[offset + row * nu + unilateral] = value / bilateral_L[bilateral_mio[wid] + row * njc + row]
+
+
+@wp.kernel
 def _solve_bilateral_unilateral_response_cooperative(
     problem_dim: wp.array[int32],
     problem_njc: wp.array[int32],
@@ -602,6 +635,7 @@ def _solve_bilateral_unilateral_response_cooperative(
     tasks_per_world: int32,
     use_forward_schur: bool,
     factor_row_start: wp.array[int32],
+    skip_compact: bool,
 ):
     """Solve response columns, or whiten them for compact Schur construction."""
     # Keep whitening scratch unilateral-major, but output row-major for coalesced Gram loads.
@@ -618,6 +652,8 @@ def _solve_bilateral_unilateral_response_cooperative(
     bvio = bilateral_vio[wid]
     offset = response_mio[wid]
     unilateral_stride = response_stride[wid]
+    if skip_compact and use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
+        return
     first_pair = (first_unilateral + int32(1)) / int32(2)
     pair_count = (nu + int32(1)) / int32(2)
     for unilateral_pair in range(first_pair + task_in_world, pair_count, tasks_per_world):

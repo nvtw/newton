@@ -3344,6 +3344,7 @@ class TestDVISolver(unittest.TestCase):
                 18,
                 True,
                 row_start,
+                False,
             ],
             block_dim=128,
             device=self.device,
