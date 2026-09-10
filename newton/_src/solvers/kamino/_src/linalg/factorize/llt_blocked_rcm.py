@@ -85,7 +85,7 @@ def make_get_array_offset_ptr_func(dtype):
 
     @wp.func
     def get_dtype_array_offset_ptr(arr: wp.array[dtype], start_index: int) -> wp.uint64:
-        return get_dtype_array_ptr(arr) + wp.uint64(start_index * wp.static(sizeof(dtype._type_)))
+        return get_dtype_array_ptr(arr) + wp.uint64(start_index) * wp.uint64(wp.static(sizeof(dtype._type_)))
 
     return get_dtype_array_offset_ptr
 
