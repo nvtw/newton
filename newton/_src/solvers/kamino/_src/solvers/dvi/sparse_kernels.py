@@ -1781,12 +1781,17 @@ def _assemble_compact_unilateral_schur_tiled(
     for tile in range(group, tiles * tiles, 16):
         row = (tile // tiles) * 16
         col = (tile % tiles) * 16
+        # Off-diagonal Gram blocks share the same dot products.
+        if row > col:
+            continue
         accum = wp.tile_zeros(shape=(16, 16), dtype=float32, storage="shared")
         for k in range(0, njc, 32):
             a = wp.tile_load(y, shape=(16, 32), offset=(row, k))
             b = wp.tile_load(y, shape=(16, 32), offset=(col, k))
             wp.tile_matmul(a, wp.tile_transpose(b), accum)
         wp.tile_store(out, accum, offset=(row, col))
+        if row != col:
+            wp.tile_store(out, wp.tile_transpose(accum), offset=(col, row))
 
 
 @wp.kernel
