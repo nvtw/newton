@@ -254,9 +254,11 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
         self.assertEqual(solver._model_kamino.size.sum_of_num_bounded_joint_cts, 0)
 
     def test_compact_schur_friction_spin_down(self):
-        """Preserve analytic friction spin-down and sticking in ragged compact worlds."""
+        """Preserve spin-down, sticking, and reversals across ragged friction strengths."""
         builder = newton.ModelBuilder()
         SolverKamino.register_custom_attributes(builder)
+        frictions = np.resize(np.array([0.02, 0.2, 2.0, 20.0]), 26)
+        joint_index = 0
         for count in (17, 9):
             builder.begin_world()
             for _ in range(count):
@@ -266,7 +268,8 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
                     com=wp.vec3f(_BODY_COM_X, 0.0, 0.0),
                     lock_inertia=True,
                 )
-                joint = builder.add_joint_revolute(-1, body, axis=newton.Axis.Y, friction=2.0)
+                joint = builder.add_joint_revolute(-1, body, axis=newton.Axis.Y, friction=float(frictions[joint_index]))
+                joint_index += 1
                 builder.add_articulation([joint])
             builder.end_world()
         model = builder.finalize(device=test_context.device)
@@ -288,16 +291,33 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
         )
         solver = SolverKamino(model, config)
         initial = np.resize(np.array([-0.04, 0.008, 0.0, -0.008, 0.04], dtype=np.float32), 26)
+        initial *= frictions / 2.0
         model.joint_qd.assign(initial)
         state, next_state = model.state(), model.state()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state)
-        decrement = DT * 2.0 / _EFFECTIVE_JOINT_INERTIA
+        decrement = DT * frictions / _EFFECTIVE_JOINT_INERTIA
         for step in range(1, 6):
             solver.step(state, next_state, control=None, contacts=None, dt=DT)
             state, next_state = next_state, state
             expected = np.sign(initial) * np.maximum(np.abs(initial) - step * decrement, 0.0)
             np.testing.assert_allclose(state.joint_qd.numpy(), expected, atol=3.0e-5, rtol=0.0)
         np.testing.assert_allclose(state.joint_qd.numpy(), 0.0, atol=1.0e-6)
+
+        control = model.control()
+        expected = np.zeros(26)
+        force_ratios = np.resize(np.array([0.5, 0.9999, 1.0001, 1.5, -1.5]), 26)
+        for direction in (1.0, 1.0, -1.0, -1.0, 0.0, 0.0):
+            forces = direction * force_ratios * frictions
+            control.joint_f.assign(forces.astype(np.float32))
+            free_velocity = expected + DT * forces / _EFFECTIVE_JOINT_INERTIA
+            expected = np.sign(free_velocity) * np.maximum(np.abs(free_velocity) - decrement, 0.0)
+            solver.step(state, next_state, control=control, contacts=None, dt=DT)
+            state, next_state = next_state, state
+            np.testing.assert_allclose(state.joint_qd.numpy(), expected, atol=3.0e-5, rtol=0.0)
+            torque = (expected - free_velocity) * _EFFECTIVE_JOINT_INERTIA / DT
+            np.testing.assert_allclose(
+                solver._solver_kamino.data.joints.lambda_f_j.numpy(), torque, atol=1.0e-3, rtol=0.0
+            )
 
     def test_multiworld_sparse_friction_offsets(self):
         """Place sparse friction rows in their owning world's bounded group."""
