@@ -3235,7 +3235,7 @@ class TestDVISolver(unittest.TestCase):
             return wp.array(values, dtype=wp.int32, device=self.device)
 
         white = np.arange(6, dtype=np.float32).reshape(3, 2) * 0.1
-        response = wp.array(np.pad(white.ravel(), (0, 14)), dtype=wp.float32, device=self.device)
+        response = wp.array(np.pad(white.T.copy().ravel(), (0, 14)), dtype=wp.float32, device=self.device)
         schur = wp.full(20, -123.0, dtype=wp.float32, device=self.device)
         correction = wp.full(11, 99.0, dtype=wp.float32, device=self.device)
         wp.launch(
@@ -3397,7 +3397,7 @@ class TestDVISolver(unittest.TestCase):
             white, schur, full = reference
             if nu * nu <= n * stride:
                 np.testing.assert_allclose(
-                    actual_response[offset : offset + n * nu].reshape(nu, n).T, white, atol=2.0e-6, rtol=2.0e-6
+                    actual_response[offset : offset + n * nu].reshape(n, nu), white, atol=2.0e-6, rtol=2.0e-6
                 )
                 if nu <= n:
                     np.testing.assert_allclose(

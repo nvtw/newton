@@ -1770,7 +1770,7 @@ def _assemble_compact_unilateral_schur_tiled(
         for row in range(lane, nu, wp.block_dim()):
             compact_q[problem_vio[wid] + njc + row] = 0.0
     offset = response_mio[wid]
-    y = wp.array(ptr=get_float32_array_offset_ptr(response, offset), shape=(nu, njc), dtype=float32)
+    y = wp.array(ptr=get_float32_array_offset_ptr(response, offset), shape=(njc, nu), dtype=float32)
     out = wp.array(
         ptr=get_float32_array_offset_ptr(compact_schur, offset),
         shape=(nu, nu),
@@ -1786,9 +1786,9 @@ def _assemble_compact_unilateral_schur_tiled(
             continue
         accum = wp.tile_zeros(shape=(16, 16), dtype=float32, storage="shared")
         for k in range(0, njc, 32):
-            a = wp.tile_load(y, shape=(16, 32), offset=(row, k))
-            b = wp.tile_load(y, shape=(16, 32), offset=(col, k))
-            wp.tile_matmul(a, wp.tile_transpose(b), accum)
+            a = wp.tile_load(y, shape=(32, 16), offset=(k, row))
+            b = wp.tile_load(y, shape=(32, 16), offset=(k, col))
+            wp.tile_matmul(wp.tile_transpose(a), b, accum)
         wp.tile_store(out, accum, offset=(row, col))
         if row != col:
             wp.tile_store(out, wp.tile_transpose(accum), offset=(col, row))
@@ -1828,7 +1828,7 @@ def _assemble_compact_unilateral_schur(
         value = float32(0.0)
         for bilateral in range(njc):
             if use_forward_schur:
-                value += response[offset + row * njc + bilateral] * response[offset + column * njc + bilateral]
+                value += response[offset + bilateral * nu + row] * response[offset + bilateral * nu + column]
             else:
                 value += coupling[offset + bilateral * stride + row] * response[offset + bilateral * stride + column]
         compact_schur[offset + column * stride + row] = value

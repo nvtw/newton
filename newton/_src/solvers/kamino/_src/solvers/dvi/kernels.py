@@ -604,8 +604,8 @@ def _solve_bilateral_unilateral_response_cooperative(
     factor_row_start: wp.array[int32],
 ):
     """Solve response columns, or whiten them for compact Schur construction."""
-    # The whitening workspace and compact-path response are unilateral-major;
-    # the fallback response uses original_row * unilateral_stride + unilateral.
+    # Keep whitening scratch unilateral-major, but output row-major for coalesced Gram loads.
+    # The fallback response uses original_row * unilateral_stride + unilateral.
     tid = wp.tid()
     lane = tid % int32(32)
     task = tid / int32(32)
@@ -677,7 +677,7 @@ def _solve_bilateral_unilateral_response_cooperative(
                 if use_permutation:
                     original_row = bilateral_permutation[bvio + row]
                 if use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
-                    response[offset + unilateral * njc + row] = response_factor[offset + unilateral * njc + row]
+                    response[offset + row * nu + unilateral] = response_factor[offset + unilateral * njc + row]
                 else:
                     response[offset + original_row * unilateral_stride + unilateral] = (
                         bilateral_P[bvio + original_row] * response_factor[offset + unilateral * njc + row]
