@@ -415,7 +415,7 @@ class TestDVISolver(unittest.TestCase):
             bilateral_solver=object(),
             use_schur_complement=True,
             size=SimpleNamespace(
-                max_of_num_bilateral_joint_cts=64,
+                max_of_num_bilateral_joint_cts=32,
                 max_of_num_bounded_joint_cts=43,
             ),
         )
@@ -3455,17 +3455,55 @@ class TestDVISolver(unittest.TestCase):
             [[11.0, 0.0], [33.0, 0.0], [11.0, 22.0]],
         )
 
+    def test_compact_schur_uses_response_capacity(self):
+        """Pack Schur matrices into spare response capacity without crossing world bounds."""
+        if not self.device.is_cuda:
+            self.skipTest("Tiled Schur construction requires CUDA")
+
+        def i32(values):
+            return wp.array(values, dtype=wp.int32, device=self.device)
+
+        white = np.arange(6, dtype=np.float32).reshape(3, 2) * 0.1
+        response = wp.array(np.pad(white.ravel(), (0, 14)), dtype=wp.float32, device=self.device)
+        schur = wp.full(20, -123.0, dtype=wp.float32, device=self.device)
+        correction = wp.full(11, 99.0, dtype=wp.float32, device=self.device)
+        wp.launch(
+            _assemble_compact_unilateral_schur_tiled,
+            dim=(3, 16, 128),
+            inputs=[
+                i32([5, 6, 0]),
+                i32([2, 2, 0]),
+                i32([0, 5, 11]),
+                i32([0, 10, 20]),
+                i32([5, 5, 0]),
+                response,
+                schur,
+                correction,
+            ],
+            block_dim=128,
+            device=self.device,
+        )
+        expected = np.full(20, -123.0, dtype=np.float32)
+        expected[:9] = (white @ white.T).ravel()
+        np.testing.assert_allclose(schur.numpy(), expected, atol=1.0e-7, rtol=1.0e-6)
+        expected_correction = np.full(11, 99.0, dtype=np.float32)
+        expected_correction[2:5] = 0.0
+        np.testing.assert_array_equal(correction.numpy(), expected_correction)
+
     def test_forward_schur_matches_direct_elimination(self):
         """Match direct elimination with ragged worlds, scaling, and permutation."""
         if not self.device.is_cuda:
             self.skipTest("Cooperative response construction requires CUDA")
         rng = np.random.default_rng(42)
-        joint_counts = [33, 0, 97, 2]
-        unilateral_counts = [5, 0, 35, 3]
+        joint_counts = [33, 0, 97, 2, 5]
+        unilateral_counts = [5, 0, 35, 3, 7]
+        response_strides = [5, 0, 35, 3, 10]
+        totals = np.array(joint_counts) + unilateral_counts
+        problem_offsets = np.cumsum(np.concatenate(([0], totals[:-1])))
         matrix_offsets, vector_offsets, response_offsets = [], [], []
         factors, scaling, permutations, couplings = [], [], [], []
         expected = []
-        for n, nu in zip(joint_counts, unilateral_counts, strict=True):
+        for n, nu, stride in zip(joint_counts, unilateral_counts, response_strides, strict=True):
             matrix_offsets.append(len(factors))
             vector_offsets.append(len(scaling))
             response_offsets.append(len(couplings))
@@ -3487,7 +3525,7 @@ class TestDVISolver(unittest.TestCase):
             factors.extend(lower.ravel())
             scaling.extend(scale)
             permutations.extend(permutation)
-            couplings.extend(coupling.ravel())
+            couplings.extend(np.pad(coupling, ((0, 0), (0, stride - nu))).ravel())
 
         def i32(values):
             return wp.array(values, dtype=wp.int32, device=self.device)
@@ -3498,14 +3536,14 @@ class TestDVISolver(unittest.TestCase):
         dims = i32(np.array(joint_counts) + unilateral_counts)
         joints = i32(joint_counts)
         offsets = i32(response_offsets)
-        strides = i32(unilateral_counts)
+        strides = i32(response_strides)
         coupling = f32(couplings)
         workspace = wp.zeros(len(couplings), dtype=wp.float32, device=self.device)
         response = wp.zeros_like(workspace)
         row_start = wp.zeros(len(scaling), dtype=wp.int32, device=self.device)
         wp.launch(
             _find_bilateral_factor_row_start,
-            dim=(4, max(joint_counts)),
+            dim=(5, max(joint_counts)),
             inputs=[joints, i32(matrix_offsets), i32(vector_offsets), f32(factors), row_start],
             device=self.device,
         )
@@ -3516,7 +3554,7 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(row_start.numpy(), expected_starts)
         solve_response = wp.launch(
             _solve_bilateral_unilateral_response_cooperative,
-            dim=4 * 18 * 32,
+            dim=5 * 18 * 32,
             inputs=[
                 dims,
                 joints,
@@ -3547,17 +3585,17 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(response.numpy(), actual_response)
         wp.launch(
             _assemble_compact_unilateral_schur,
-            dim=4 * 256,
+            dim=5 * 256,
             inputs=[
                 dims,
                 joints,
-                i32(np.cumsum([0, 38, 0, 132])),
+                i32(problem_offsets),
                 offsets,
                 strides,
                 coupling,
                 response,
                 workspace,
-                wp.zeros(175, dtype=wp.float32, device=self.device),
+                wp.zeros(int(totals.sum()), dtype=wp.float32, device=self.device),
                 True,
             ],
             block_dim=256,
@@ -3567,36 +3605,42 @@ class TestDVISolver(unittest.TestCase):
         workspace.fill_(float("nan"))
         wp.launch(
             _assemble_compact_unilateral_schur_tiled,
-            dim=(4, 16, 128),
+            dim=(5, 16, 128),
             inputs=[
                 dims,
                 joints,
-                i32(np.cumsum([0, 38, 0, 132])),
+                i32(problem_offsets),
                 offsets,
                 strides,
                 response,
                 workspace,
-                wp.zeros(175, dtype=wp.float32, device=self.device),
+                wp.zeros(int(totals.sum()), dtype=wp.float32, device=self.device),
             ],
             block_dim=128,
             device=self.device,
         )
         tiled_schur = workspace.numpy()
-        for n, nu, offset, reference in zip(joint_counts, unilateral_counts, response_offsets, expected, strict=True):
+        for n, nu, stride, offset, reference in zip(
+            joint_counts, unilateral_counts, response_strides, response_offsets, expected, strict=True
+        ):
             white, schur, full = reference
-            if nu <= n:
+            if nu * nu <= n * stride:
                 np.testing.assert_allclose(
                     actual_response[offset : offset + n * nu].reshape(nu, n).T, white, atol=2.0e-6, rtol=2.0e-6
                 )
-                np.testing.assert_allclose(
-                    actual_schur[offset : offset + nu * nu].reshape(nu, nu), schur.T, atol=5.0e-6, rtol=5.0e-6
-                )
+                if nu <= n:
+                    np.testing.assert_allclose(
+                        actual_schur[offset : offset + nu * nu].reshape(nu, nu), schur.T, atol=5.0e-6, rtol=5.0e-6
+                    )
                 np.testing.assert_allclose(
                     tiled_schur[offset : offset + nu * nu].reshape(nu, nu), schur.T, atol=5.0e-6, rtol=5.0e-6
                 )
             else:
                 np.testing.assert_allclose(
-                    actual_response[offset : offset + n * nu].reshape(n, nu), full, atol=2.0e-6, rtol=2.0e-6
+                    actual_response[offset : offset + n * stride].reshape(n, stride)[:, :nu],
+                    full,
+                    atol=2.0e-6,
+                    rtol=2.0e-6,
                 )
 
     def test_03g3ac_dvi_reconstructs_fused_bilateral_solution(self):

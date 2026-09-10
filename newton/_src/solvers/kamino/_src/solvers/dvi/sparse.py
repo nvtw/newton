@@ -213,7 +213,7 @@ def _can_use_cooperative_articulation(path: SparseDVIPath) -> bool:
         path.use_schur_complement
         and path.device.is_cuda
         and path.bilateral_solver is not None
-        and path.size.max_of_num_bilateral_joint_cts >= 64
+        and path.size.max_of_num_bilateral_joint_cts >= 32
     )
 
 
@@ -1116,7 +1116,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     )
     enable_compact_schur = (
         path.device.is_cuda
-        and path.size.max_of_num_bilateral_joint_cts >= 64
+        and path.size.max_of_num_bilateral_joint_cts >= 32
         and path.max_alternating_iterations >= 4
         and not has_intermediate_bilateral_solve
     )
