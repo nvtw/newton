@@ -194,8 +194,7 @@ class Example:
         self.viewer = viewer
         self.args = args
 
-        # Four layers driven by different solvers. The colors make it easy
-        # to tell them apart when toggling individual layers on/off in the
+        # The colors make it easy to tell the solvers apart when toggling layers in the
         # "Layers" group of the viewer sidebar. Each layer captures its own
         # CUDA graph on construction (where supported).
         specs = [

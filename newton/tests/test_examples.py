@@ -22,12 +22,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import call, create_autospec
+from unittest.mock import call, create_autospec, patch
 
+import numpy as np
 import warp as wp
 
 import newton.tests.unittest_utils
+from newton.examples.robot.example_robot_cartpole import Example as RobotCartpoleExample
 from newton.tests.unittest_utils import (
     USD_AVAILABLE,
     NewtonTestCase,
@@ -36,6 +39,7 @@ from newton.tests.unittest_utils import (
     get_test_devices,
     sanitize_identifier,
 )
+from newton.viewer import ViewerNull
 
 _HAS_ONNX_RUNTIME = importlib.util.find_spec("onnx") is not None and importlib.util.find_spec("warp_nn") is not None
 _PXR_WORK_THREAD_LIMIT_OUTPUT_RE = (
@@ -707,6 +711,48 @@ add_example_test(
 
 class TestRobotExamples(unittest.TestCase):
     pass
+
+
+def _test_robot_cartpole_capture_matches_eager(test, device):
+    if not USD_AVAILABLE:
+        test.skipTest("Requires USD")
+
+    args = SimpleNamespace(world_count=1, solver="kamino")
+    with wp.ScopedDevice(device):
+        with patch.object(RobotCartpoleExample, "capture", lambda example: setattr(example, "graph", None)):
+            eager = RobotCartpoleExample(ViewerNull(num_frames=2), args)
+        eager_frames = []
+        for _ in range(2):
+            eager.step()
+            eager_frames.append((eager.state_0.body_q.numpy(), eager.state_0.body_qd.numpy()))
+
+        captured = RobotCartpoleExample(ViewerNull(num_frames=2), args)
+        for frame, (eager_q, eager_qd) in enumerate(eager_frames):
+            captured.step()
+            wp.synchronize_device(device)
+            np.testing.assert_allclose(
+                captured.state_0.body_q.numpy(),
+                eager_q,
+                rtol=1.0e-5,
+                atol=1.0e-6,
+                err_msg=f"body positions differ after frame {frame}",
+            )
+            np.testing.assert_allclose(
+                captured.state_0.body_qd.numpy(),
+                eager_qd,
+                rtol=1.0e-5,
+                atol=1.0e-6,
+                err_msg=f"body velocities differ after frame {frame}",
+            )
+
+
+add_function_test(
+    TestRobotExamples,
+    "test_robot_cartpole_capture_matches_eager",
+    _test_robot_cartpole_capture_matches_eager,
+    devices=cuda_test_devices,
+    check_output=False,
+)
 
 
 add_example_test(
