@@ -1,1 +1,0 @@
-Accelerate Kamino DVI Schur solves by constructing compact corrections from forward solves and performing small projected systems directly in constraint space, preserving joint friction and the configured iteration budget.

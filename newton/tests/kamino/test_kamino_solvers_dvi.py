@@ -3260,6 +3260,7 @@ class TestDVISolver(unittest.TestCase):
         expected_correction = np.full(11, 99.0, dtype=np.float32)
         expected_correction[2:5] = 0.0
         np.testing.assert_array_equal(correction.numpy(), expected_correction)
+
     def test_forward_schur_matches_direct_elimination(self):
         """Match direct elimination with ragged worlds, scaling, and permutation."""
         if not self.device.is_cuda:
@@ -3412,6 +3413,7 @@ class TestDVISolver(unittest.TestCase):
                     atol=2.0e-6,
                     rtol=2.0e-6,
                 )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,1 +1,1 @@
-Improve GPU throughput of Kamino DVI Schur-complement response solves by packing independent warp workers into larger thread blocks, without changing solver arithmetic or joint friction.
+Accelerate `SolverKamino` sparse DVI Schur-complement solves with compact constraint-space updates, tiled symmetric matrix products, and reduced response-workspace traffic, while retaining the joint-friction law and configured iteration budget. No configuration changes are required.
