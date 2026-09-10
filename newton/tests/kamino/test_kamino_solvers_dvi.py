@@ -26,6 +26,7 @@ from newton._src.solvers.kamino._src.solvers.common import WarmStartMode
 from newton._src.solvers.kamino._src.solvers.dvi import DVISolver
 from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     _initialize_dvi_status,
+    _solve_bilateral_unilateral_response_cooperative,
     _solve_dvi_inequalities_colored_pgs,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.projections import (
@@ -38,6 +39,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _sparse_delassus_matvec_rows,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
+    _assemble_compact_unilateral_schur,
     _color_mapped_dvi_inequalities,
     _map_bounded_constraints,
     _map_ordered_active_contacts,
@@ -3207,6 +3209,106 @@ class TestDVISolver(unittest.TestCase):
         residual = z - np.polyval(np.polyfit(x, z, 1), x)
         self.assertLess(float(np.max(residual) - np.min(residual)), 0.001)
 
+    def test_forward_schur_matches_direct_elimination(self):
+        """Match direct elimination with ragged worlds, scaling, and permutation."""
+        if not self.device.is_cuda:
+            self.skipTest("Cooperative response construction requires CUDA")
+        rng = np.random.default_rng(42)
+        joint_counts = [33, 0, 65, 2]
+        unilateral_counts = [5, 0, 3, 3]
+        matrix_offsets, vector_offsets, response_offsets = [], [], []
+        factors, scaling, permutations, couplings = [], [], [], []
+        expected = []
+        for n, nu in zip(joint_counts, unilateral_counts, strict=True):
+            matrix_offsets.append(len(factors))
+            vector_offsets.append(len(scaling))
+            response_offsets.append(len(couplings))
+            lower = np.tril(rng.normal(0.0, 0.05, (n, n))) + np.eye(n)
+            scale = rng.uniform(0.5, 1.5, n)
+            permutation = rng.permutation(n)
+            coupling = rng.normal(size=(n, nu))
+            # Compare the exact float32 inputs against float64 reference solves.
+            lower, scale, coupling = [a.astype(np.float32) for a in (lower, scale, coupling)]
+            white = np.linalg.solve(lower.astype(np.float64), (scale[:, None] * coupling)[permutation])
+            response = np.empty_like(white)
+            response[permutation] = np.linalg.solve(lower.T.astype(np.float64), white)
+            response *= scale[:, None]
+            expected.append((white, coupling.T @ response, response))
+            factors.extend(lower.ravel())
+            scaling.extend(scale)
+            permutations.extend(permutation)
+            couplings.extend(coupling.ravel())
+
+        def i32(values):
+            return wp.array(values, dtype=wp.int32, device=self.device)
+
+        def f32(values):
+            return wp.array(values, dtype=wp.float32, device=self.device)
+
+        dims = i32(np.array(joint_counts) + unilateral_counts)
+        joints = i32(joint_counts)
+        offsets = i32(response_offsets)
+        strides = i32(unilateral_counts)
+        coupling = f32(couplings)
+        workspace = wp.zeros(len(couplings), dtype=wp.float32, device=self.device)
+        response = wp.zeros_like(workspace)
+        wp.launch(
+            _solve_bilateral_unilateral_response_cooperative,
+            dim=4 * 3 * 32,
+            inputs=[
+                dims,
+                joints,
+                i32(matrix_offsets),
+                i32(vector_offsets),
+                f32(scaling),
+                f32(factors),
+                i32(permutations),
+                True,
+                offsets,
+                strides,
+                coupling,
+                workspace,
+                response,
+                0,
+                3,
+                True,
+            ],
+            block_dim=128,
+            device=self.device,
+        )
+        actual_response = response.numpy()
+        wp.launch(
+            _assemble_compact_unilateral_schur,
+            dim=4 * 256,
+            inputs=[
+                dims,
+                joints,
+                i32(np.cumsum([0, 38, 0, 68])),
+                offsets,
+                strides,
+                coupling,
+                response,
+                workspace,
+                wp.zeros(111, dtype=wp.float32, device=self.device),
+                True,
+            ],
+            block_dim=256,
+            device=self.device,
+        )
+        actual_schur = workspace.numpy()
+        for n, nu, offset, reference in zip(joint_counts, unilateral_counts, response_offsets, expected, strict=True):
+            white, schur, full = reference
+            if nu <= n:
+                np.testing.assert_allclose(
+                    actual_response[offset : offset + n * nu].reshape(nu, n).T, white, atol=2.0e-6, rtol=2.0e-6
+                )
+                np.testing.assert_allclose(
+                    actual_schur[offset : offset + nu * nu].reshape(nu, nu), schur.T, atol=5.0e-6, rtol=5.0e-6
+                )
+            else:
+                np.testing.assert_allclose(
+                    actual_response[offset : offset + n * nu].reshape(n, nu), full, atol=2.0e-6, rtol=2.0e-6
+                )
 
 if __name__ == "__main__":
     unittest.main()

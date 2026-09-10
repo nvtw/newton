@@ -1018,6 +1018,8 @@ def _solve_sparse_with_bilateral_alternation(path: SparseDVIPath, problem: DualP
             path.data.solution.lambdas,
             state.v_aug,
             state.inequality_projected_diagonal,
+            state.bilateral_response_factor,
+            False,
         ],
         device=path.device,
     )
@@ -1144,7 +1146,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             state.bilateral_coupling,
             state.bilateral_response_factor,
             state.bilateral_response,
-            *([0, response_tasks_per_world] if path.device.is_cuda else []),
+            *([0, response_tasks_per_world, enable_compact_schur] if path.device.is_cuda else []),
         ],
         device=path.device,
         block_dim=response_block_dim,
@@ -1163,6 +1165,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
                 state.bilateral_response,
                 state.bilateral_response_factor,
                 state.s,
+                True,
             ],
             device=path.device,
             block_dim=256,
@@ -1184,6 +1187,8 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             path.data.solution.lambdas,
             state.v_aug,
             state.inequality_projected_diagonal,
+            state.bilateral_response_factor,
+            enable_compact_schur,
         ],
         device=path.device,
     )
@@ -1209,7 +1214,9 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             )
 
     cooperative_fused_pgs = _can_use_cooperative_articulation(path)
-    if has_intermediate_bilateral_solve or not cooperative_fused_pgs:
+    if has_intermediate_bilateral_solve or not cooperative_fused_pgs or enable_compact_schur:
+        # Compact Schur stores whitened columns instead of full responses;
+        # one fresh bilateral solve recovers the final joint impulses.
         path.set_bilateral_active_dim(problem, -1)
         _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
     else:
