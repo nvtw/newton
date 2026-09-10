@@ -207,8 +207,13 @@ class DVIState:
             self.bilateral_factor_row_start = wp.zeros(max(1, bilateral_vector_size), dtype=int32)
             self._sparse_projection_allocated = True
 
-    def reset(self):
-        """Reset scratch arrays to zero."""
+    def reset(self, *, clear_response: bool = True):
+        """Reset scratch arrays, optionally retaining overwritten response workspace.
+
+        Args:
+            clear_response: Whether to clear the three large response matrices.
+                Solves overwrite their active entries before reading them.
+        """
         self.sigma.zero_()
         self.v_aug.zero_()
         self.s.zero_()
@@ -232,9 +237,10 @@ class DVIState:
         if self.projected_D is not None:
             self.projected_D.zero_()
         if self.bilateral_coupling is not None:
-            self.bilateral_coupling.zero_()
-            self.bilateral_response_factor.zero_()
-            self.bilateral_response.zero_()
+            if clear_response:
+                self.bilateral_coupling.zero_()
+                self.bilateral_response_factor.zero_()
+                self.bilateral_response.zero_()
             self.bilateral_delta.zero_()
 
 

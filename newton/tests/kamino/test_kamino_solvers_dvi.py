@@ -1788,8 +1788,9 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(inequality_bodies.numpy(), [[-1, 0], [2, 1]])
 
     def test_03i_dvi_coldstart_is_repeatable(self):
-        for sparse in (False, True):
-            with self.subTest(sparse=sparse):
+        """Repeat cold starts without clearing overwritten Schur workspace."""
+        for sparse, schur in ((False, False), (True, False), (True, True)):
+            with self.subTest(sparse=sparse, schur=schur):
                 test = TestSetup(
                     builder_fn=basics.build_boxes_hinged,
                     max_world_contacts=8,
@@ -1804,6 +1805,7 @@ class TestDVISolver(unittest.TestCase):
                     sparse_dynamics=sparse,
                     sparse_jacobian=sparse,
                 ).dvi
+                config.use_schur_complement = schur
                 solver = _solve_dvi(test.model, test.problem, config=config, setup=test)
                 first_lambdas = solver.data.solution.lambdas.numpy().copy()
                 first_v_plus = solver.data.solution.v_plus.numpy().copy()
@@ -1811,7 +1813,20 @@ class TestDVISolver(unittest.TestCase):
 
                 test.build()
                 solver.reset()
+                response_arrays = ()
+                if schur:
+                    state = solver.data.state
+                    response_arrays = (
+                        state.bilateral_coupling,
+                        state.bilateral_response_factor,
+                        state.bilateral_response,
+                    )
+                    for array in response_arrays:
+                        np.testing.assert_array_equal(array.numpy(), 0.0)
+                        array.fill_(float("nan"))
                 solver.coldstart()
+                for array in response_arrays:
+                    self.assertTrue(np.isnan(array.numpy()).all())
                 solver.solve(test.problem)
 
                 np.testing.assert_allclose(solver.data.solution.lambdas.numpy(), first_lambdas, rtol=0.0, atol=1e-6)
