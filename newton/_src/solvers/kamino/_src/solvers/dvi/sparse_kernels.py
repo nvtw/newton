@@ -2097,6 +2097,149 @@ def _cooperative_sparse_contact_tangent_update(
 
 
 @wp.kernel
+def _prepare_full_sparse_unilateral_schur(
+    bsm_num_nzb: wp.array[int32],
+    bsm_nzb_start: wp.array[int32],
+    bsm_nzb_coords: wp.array2d[int32],
+    bsm_nzb_values: wp.array[vec6f],
+    jacobian_nzb_values: wp.array[vec6f],
+    bsm_row_start: wp.array[int32],
+    bsm_col_start: wp.array[int32],
+    bounded_nzb_offsets: wp.array[wp.vec2i],
+    limit_nzb_offsets: wp.array[int32],
+    contact_nzb_offsets: wp.array[int32],
+    limit_indices: wp.array[int32],
+    contact_indices: wp.array[int32],
+    problem_nbc: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_bcio: wp.array[int32],
+    problem_lio: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_P: wp.array[float32],
+    problem_v_f: wp.array[float32],
+    eta: wp.array[float32],
+    problem_njc: wp.array[int32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    compact_schur: wp.array[float32],
+    compact_q: wp.array[float32],
+    enable_compact_schur: wp.bool,
+    block_iteration: int32,
+    solver_config: wp.array[DVIConfigStruct],
+    body_space: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+):
+    """Build the full compact operator with parallel rows and matrix entries."""
+    tid = wp.tid()
+    lane = tid % int32(128)
+    wid = tid / int32(128)
+    cfg = solver_config[wid]
+    if block_iteration >= int32(0) and block_iteration >= cfg.max_alternating_iterations:
+        return
+    nbc = problem_nbc[wid]
+    nl = problem_nl[wid]
+    nc = problem_nc[wid]
+    njc = problem_njc[wid]
+    scalar_count = nbc + nl
+    num_unilateral_rows = scalar_count + int32(3) * nc
+    if not enable_compact_schur or num_unilateral_rows == int32(0) or num_unilateral_rows > int32(128):
+        return
+    if not _compact_schur_fits(njc, num_unilateral_rows, response_stride[wid]):
+        return
+    bcio = problem_bcio[wid]
+    lio = problem_lio[wid]
+    cio = problem_cio[wid]
+    vio = problem_vio[wid]
+    response_offset = response_mio[wid]
+    row_start = bsm_row_start[wid]
+    col_start = bsm_col_start[wid]
+    matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
+    # Form the full constraint-space operator once, avoiding sparse body
+    # gathers and updates in every projected sweep. Store its negative to
+    # retain the compact correction's subtractive update convention.
+    for unilateral in range(lane, num_unilateral_rows, int32(128)):
+        row = njc + unilateral
+        offsets = _unilateral_nzb_offsets(
+            unilateral,
+            njc,
+            nbc,
+            scalar_count,
+            bcio,
+            lio,
+            cio,
+            matrix_end,
+            bsm_nzb_coords,
+            limit_indices,
+            contact_indices,
+            bounded_nzb_offsets,
+            limit_nzb_offsets,
+            contact_nzb_offsets,
+        )
+        value = eta[row_start + row] * solution_lambdas[vio + row]
+        for k in range(2):
+            idx = offsets[k]
+            if idx >= int32(0):
+                block = bsm_nzb_values[idx]
+                body = col_start + bsm_nzb_coords[idx, 1]
+                for component in range(6):
+                    value += block[component] * body_space[body + component]
+        compact_q[vio + row] = value + problem_v_f[vio + row]
+    for entry in range(lane, num_unilateral_rows * num_unilateral_rows, int32(128)):
+        column = entry / num_unilateral_rows
+        row = entry % num_unilateral_rows
+        row_blocks = _unilateral_nzb_offsets(
+            row,
+            njc,
+            nbc,
+            scalar_count,
+            bcio,
+            lio,
+            cio,
+            matrix_end,
+            bsm_nzb_coords,
+            limit_indices,
+            contact_indices,
+            bounded_nzb_offsets,
+            limit_nzb_offsets,
+            contact_nzb_offsets,
+        )
+        column_blocks = _unilateral_nzb_offsets(
+            column,
+            njc,
+            nbc,
+            scalar_count,
+            bcio,
+            lio,
+            cio,
+            matrix_end,
+            bsm_nzb_coords,
+            limit_indices,
+            contact_indices,
+            bounded_nzb_offsets,
+            limit_nzb_offsets,
+            contact_nzb_offsets,
+        )
+        value = float32(0.0)
+        for i in range(2):
+            row_block = row_blocks[i]
+            if row_block >= int32(0):
+                for j in range(2):
+                    column_block = column_blocks[j]
+                    if column_block >= int32(0):
+                        if bsm_nzb_coords[row_block, 1] == bsm_nzb_coords[column_block, 1]:
+                            weighted = bsm_nzb_values[row_block]
+                            jacobian = jacobian_nzb_values[column_block]
+                            for component in range(6):
+                                value += weighted[component] * jacobian[component]
+        value *= problem_P[vio + njc + column]
+        if row == column:
+            value += eta[row_start + njc + row]
+        compact_schur[response_offset + column * num_unilateral_rows + row] -= value
+
+
+@wp.kernel
 def _solve_dvi_sparse_inequalities_pgs_cooperative(
     bsm_num_nzb: wp.array[int32],
     bsm_nzb_start: wp.array[int32],
@@ -2151,7 +2294,11 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     body_space: wp.array[float32],
     solution_lambdas: wp.array[float32],
 ):
-    """Apply sparse PGS with one warp cooperating on each articulated world."""
+    """Apply sparse PGS with one warp cooperating on each articulated world.
+
+    Full compact operators and velocities must be initialized by
+    ``_prepare_full_sparse_unilateral_schur`` before this launch.
+    """
     tid = wp.tid()
     lane = tid % int32(32)
     wid = tid / int32(32)
@@ -2188,90 +2335,6 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
     sweep_count = cfg.inequality_sweeps_per_iteration
     use_full_schur = use_compact_schur and num_unilateral_rows <= int32(128)
-    if use_full_schur:
-        # Form the full constraint-space operator once, avoiding sparse body
-        # gathers and updates in every projected sweep. Store its negative to
-        # retain the compact correction's subtractive update convention.
-        for unilateral in range(lane, num_unilateral_rows, int32(32)):
-            row = njc + unilateral
-            offsets = _unilateral_nzb_offsets(
-                unilateral,
-                njc,
-                nbc,
-                scalar_count,
-                bcio,
-                lio,
-                cio,
-                matrix_end,
-                bsm_nzb_coords,
-                limit_indices,
-                contact_indices,
-                bounded_nzb_offsets,
-                limit_nzb_offsets,
-                contact_nzb_offsets,
-            )
-            value = eta[row_start + row] * solution_lambdas[vio + row]
-            for k in range(2):
-                idx = offsets[k]
-                if idx >= int32(0):
-                    block = bsm_nzb_values[idx]
-                    body = col_start + bsm_nzb_coords[idx, 1]
-                    for component in range(6):
-                        value += block[component] * body_space[body + component]
-            compact_q[vio + row] = value + problem_v_f[vio + row]
-        _sync_warp_32()
-        for entry in range(lane, num_unilateral_rows * num_unilateral_rows, int32(32)):
-            column = entry / num_unilateral_rows
-            row = entry % num_unilateral_rows
-            row_blocks = _unilateral_nzb_offsets(
-                row,
-                njc,
-                nbc,
-                scalar_count,
-                bcio,
-                lio,
-                cio,
-                matrix_end,
-                bsm_nzb_coords,
-                limit_indices,
-                contact_indices,
-                bounded_nzb_offsets,
-                limit_nzb_offsets,
-                contact_nzb_offsets,
-            )
-            column_blocks = _unilateral_nzb_offsets(
-                column,
-                njc,
-                nbc,
-                scalar_count,
-                bcio,
-                lio,
-                cio,
-                matrix_end,
-                bsm_nzb_coords,
-                limit_indices,
-                contact_indices,
-                bounded_nzb_offsets,
-                limit_nzb_offsets,
-                contact_nzb_offsets,
-            )
-            value = float32(0.0)
-            for i in range(2):
-                row_block = row_blocks[i]
-                if row_block >= int32(0):
-                    for j in range(2):
-                        column_block = column_blocks[j]
-                        if column_block >= int32(0):
-                            if bsm_nzb_coords[row_block, 1] == bsm_nzb_coords[column_block, 1]:
-                                weighted = bsm_nzb_values[row_block]
-                                jacobian = jacobian_nzb_values[column_block]
-                                for component in range(6):
-                                    value += weighted[component] * jacobian[component]
-            value *= problem_P[vio + njc + column]
-            if row == column:
-                value += eta[row_start + njc + row]
-            compact_schur[response_offset + column * num_unilateral_rows + row] -= value
-        _sync_warp_32()
     first_tangent_sweep = int32(0)
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
         tangent_sweep_count = sweep_count * cfg.max_alternating_iterations / int32(2)

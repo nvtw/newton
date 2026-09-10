@@ -1,0 +1,1 @@
+Improve Kamino sparse DVI performance by assembling the compact Schur operator in a separate parallel kernel, preserving projected update order and solver settings. No API or configuration changes are required.

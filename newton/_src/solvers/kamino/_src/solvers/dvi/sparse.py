@@ -48,6 +48,7 @@ from .sparse_kernels import (
     _prepare_colored_contact_group_sizes,
     _prepare_contact_pair_sort,
     _prepare_contact_world_sort,
+    _prepare_full_sparse_unilateral_schur,
     _reconstruct_fused_bilateral_solution,
     _reset_active_bilateral_delta,
     _select_parallel_contact_colors,
@@ -668,6 +669,43 @@ def _launch_sparse_inequality_pgs(
                 path.body_space,
                 path.data.solution.lambdas,
             ]
+        )
+    if cooperative_articulation and enable_compact_schur:
+        # Assemble independent rows/entries across a full block before the
+        # sequential warp-cooperative sweeps. Keep their arithmetic unchanged.
+        wp.launch(
+            kernel=_prepare_full_sparse_unilateral_schur,
+            dim=path.size.num_worlds * 128,
+            inputs=[
+                *common_inputs,
+                jacobians.bounded_constraint_nzb_offsets,
+                jacobians.limit_constraint_nzb_offsets,
+                jacobians.contact_constraint_nzb_offsets,
+                state.limit_indices,
+                state.contact_indices,
+                problem.data.nbc,
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.bcio,
+                problem.data.lio,
+                problem.data.cio,
+                problem.data.vio,
+                problem.data.P,
+                problem.data.v_f,
+                delassus.regularization,
+                problem.data.njc,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_response_factor,
+                state.s,
+                wp.bool(enable_compact_schur),
+                block_iteration,
+                path.data.config,
+                path.body_space,
+                path.data.solution.lambdas,
+            ],
+            device=path.device,
+            block_dim=128,
         )
     if parallel_contact_path:
         wp.launch(
