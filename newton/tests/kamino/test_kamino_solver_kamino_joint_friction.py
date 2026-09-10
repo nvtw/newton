@@ -257,9 +257,11 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
         """Preserve spin-down, sticking, and reversals across ragged friction strengths."""
         builder = newton.ModelBuilder()
         SolverKamino.register_custom_attributes(builder)
-        frictions = np.resize(np.array([0.02, 0.2, 2.0, 20.0]), 26)
+        joint_counts = (37, 9)
+        joint_count = sum(joint_counts)
+        frictions = np.resize(np.array([0.02, 0.2, 2.0, 20.0]), joint_count)
         joint_index = 0
-        for count in (17, 9):
+        for count in joint_counts:
             builder.begin_world()
             for _ in range(count):
                 body = builder.add_link(
@@ -290,7 +292,7 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
             ),
         )
         solver = SolverKamino(model, config)
-        initial = np.resize(np.array([-0.04, 0.008, 0.0, -0.008, 0.04], dtype=np.float32), 26)
+        initial = np.resize(np.array([-0.04, 0.008, 0.0, -0.008, 0.04], dtype=np.float32), joint_count)
         initial *= frictions / 2.0
         model.joint_qd.assign(initial)
         state, next_state = model.state(), model.state()
@@ -304,8 +306,8 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
         np.testing.assert_allclose(state.joint_qd.numpy(), 0.0, atol=1.0e-6)
 
         control = model.control()
-        expected = np.zeros(26)
-        force_ratios = np.resize(np.array([0.5, 0.9999, 1.0001, 1.5, -1.5]), 26)
+        expected = np.zeros(joint_count)
+        force_ratios = np.resize(np.array([0.5, 0.9999, 1.0001, 1.5, -1.5]), joint_count)
         for direction in (1.0, 1.0, -1.0, -1.0, 0.0, 0.0):
             forces = direction * force_ratios * frictions
             control.joint_f.assign(forces.astype(np.float32))
