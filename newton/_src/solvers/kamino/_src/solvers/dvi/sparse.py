@@ -1123,9 +1123,10 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     response_dim = path.size.num_worlds
     if path.device.is_cuda:
         response_kernel = _solve_bilateral_unilateral_response_cooperative
-        response_block_dim = 32
+        # Pack independent warp workers to avoid limiting occupancy to one warp per block.
+        response_block_dim = 256 if path.size.num_worlds >= 128 else 128
         response_tasks_per_world = (max_unilateral_rows + 1) // 2
-        response_dim = path.size.num_worlds * response_tasks_per_world * response_block_dim
+        response_dim = path.size.num_worlds * response_tasks_per_world * 32
     wp.launch(
         kernel=response_kernel,
         dim=response_dim,
