@@ -2646,6 +2646,8 @@ def _build_sparse_bilateral_block(
     bilateral_P: wp.array[float32],
     # Output:
     bilateral_D: wp.array[float32],
+    inverse_permutation: wp.array[int32],
+    use_permutation: bool,
 ):
     pair_id = wp.tid()
     wid = pair_wid[pair_id]
@@ -2670,6 +2672,9 @@ def _build_sparse_bilateral_block(
     val = p_row * D_ij * p_col
 
     bmio = bilateral_mio[wid]
+    if use_permutation:
+        row = inverse_permutation[bvio + row]
+        col = inverse_permutation[bvio + col]
     wp.atomic_add(bilateral_D, bmio + njc * row + col, val)
     wp.atomic_add(bilateral_D, bmio + njc * col + row, val)
 
@@ -2685,6 +2690,8 @@ def _set_sparse_bilateral_diagonal(
     # Outputs:
     bilateral_D: wp.array[float32],
     bilateral_P: wp.array[float32],
+    inverse_permutation: wp.array[int32],
+    use_permutation: bool,
 ):
     wid, row = wp.tid()
 
@@ -2703,6 +2710,8 @@ def _set_sparse_bilateral_diagonal(
     diag = wp.abs(problem_diag[pvio + row])
     p = wp.sqrt(1.0 / (diag + FLOAT32_EPS))
     bilateral_P[bvio + row] = p
+    if use_permutation:
+        row = inverse_permutation[bvio + row]
     bilateral_D[bmio + njc * row + row] = p * diag * p + float32(7.0e-7)
 
 

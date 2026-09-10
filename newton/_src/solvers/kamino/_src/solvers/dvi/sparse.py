@@ -182,6 +182,8 @@ class SparseDVIPath:
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _build_sparse_bilateral_pairs(self, problem)
             _build_sparse_bilateral_row_nzb_topology(self, problem)
+            if isinstance(self.bilateral_solver, LLTBlockedRCMSolver):
+                self.bilateral_solver.configure_sparse_assembly(*self.bilateral_nzb_pairs[:3])
 
     def solve(self, problem: DualProblem) -> None:
         """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
@@ -842,9 +844,26 @@ def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) ->
 
 def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) -> None:
     operator = path.data.bilateral_operator
-    state = path.data.state
     operator.info.dim = operator.info.maxdim
-    operator.mat.zero_()
+    if isinstance(path.bilateral_solver, LLTBlockedRCMSolver):
+        path.bilateral_solver.compute_sparse(
+            lambda matrix, inverse: _assemble_sparse_bilateral_block(path, problem, matrix, inverse)
+        )
+    else:
+        _assemble_sparse_bilateral_block(path, problem, operator.mat)
+        path.bilateral_solver.compute(A=operator.mat)
+
+
+def _assemble_sparse_bilateral_block(
+    path: SparseDVIPath,
+    problem: DualProblem,
+    matrix: wp.array[float32],
+    inverse: wp.array[int32] | None = None,
+) -> None:
+    """Assemble the bilateral matrix directly in the requested row ordering."""
+    operator = path.data.bilateral_operator
+    state = path.data.state
+    matrix.zero_()
     state.bilateral_preconditioner.zero_()
     problem.delassus.diagonal(state.scratch)
 
@@ -860,8 +879,10 @@ def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) ->
             operator.info.mio,
             operator.info.vio,
             state.scratch,
-            operator.mat,
+            matrix,
             state.bilateral_preconditioner,
+            inverse if inverse is not None else operator.info.vio,
+            inverse is not None,
         ],
         device=path.device,
     )
@@ -884,11 +905,12 @@ def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) ->
                 operator.info.mio,
                 operator.info.vio,
                 state.bilateral_preconditioner,
-                operator.mat,
+                matrix,
+                inverse if inverse is not None else operator.info.vio,
+                inverse is not None,
             ],
             device=path.device,
         )
-    path.bilateral_solver.compute(A=operator.mat)
 
 
 def _build_sparse_bilateral_pairs(path: SparseDVIPath, problem: DualProblem) -> None:
