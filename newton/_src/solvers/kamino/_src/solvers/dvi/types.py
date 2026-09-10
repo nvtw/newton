@@ -114,6 +114,7 @@ class DVIState:
         self.bilateral_response_stride: wp.array[int32] | None = None
         self.bilateral_response_factor: wp.array[float32] | None = None
         self.bilateral_response: wp.array[float32] | None = None
+        self.bilateral_factor_row_start: wp.array[int32] | None = None
         self.bilateral_delta: wp.array[float32] | None = None
         self._sparse_projection_allocated = False
         if size is not None:
@@ -203,6 +204,7 @@ class DVIState:
             self.bilateral_response_factor = wp.zeros(max(1, response_size), dtype=float32)
             self.bilateral_response = wp.zeros(max(1, response_size), dtype=float32)
             self.bilateral_delta = wp.zeros(max(1, bilateral_vector_size), dtype=float32)
+            self.bilateral_factor_row_start = wp.zeros(max(1, bilateral_vector_size), dtype=int32)
             self._sparse_projection_allocated = True
 
     def reset(self):

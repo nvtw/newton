@@ -507,6 +507,26 @@ def _subgroup_sum_16(value: float32) -> float32: ...
 
 
 @wp.kernel
+def _find_bilateral_factor_row_start(
+    njc: wp.array[int32],
+    mio: wp.array[int32],
+    vio: wp.array[int32],
+    factor: wp.array[float32],
+    row_start: wp.array[int32],
+):
+    """Skip exact leading zeros while preserving the response reduction order."""
+    wid, row = wp.tid()
+    n = njc[wid]
+    if row >= n:
+        return
+    first = int32(0)
+    offset = mio[wid] + row * n
+    while first < row and factor[offset + first] == float32(0.0):
+        first += int32(1)
+    row_start[vio[wid] + row] = first / int32(16) * int32(16)
+
+
+@wp.kernel
 def _solve_bilateral_unilateral_response_cooperative(
     problem_dim: wp.array[int32],
     problem_njc: wp.array[int32],
@@ -524,6 +544,7 @@ def _solve_bilateral_unilateral_response_cooperative(
     first_unilateral: int32,
     tasks_per_world: int32,
     use_forward_schur: bool,
+    factor_row_start: wp.array[int32],
 ):
     """Solve response columns, or whiten them for compact Schur construction."""
     # response_factor is unilateral-major here; response always uses
@@ -548,7 +569,7 @@ def _solve_bilateral_unilateral_response_cooperative(
         for row in range(njc):
             partial = float32(0.0)
             if active:
-                for k in range(local_lane, row, int32(16)):
+                for k in range(factor_row_start[bvio + row] + local_lane, row, int32(16)):
                     partial += bilateral_L[factor + njc * row + k] * response_factor[offset + unilateral * njc + k]
             total = _subgroup_sum_16(partial)
             if local_lane == int32(0) and active:
