@@ -1828,7 +1828,9 @@ class CollisionPipeline:
                     for geo in _SDF_SPECIALIZED_GEO_TYPES
                     if np.any(_common_face_capable & (_shape_types == int(geo)))
                 )
-                self._soft_edge_sdf_geo_types = self._soft_face_sdf_geo_types
+                # The edge stream also includes meshes. Keep its generic fallback when analytic
+                # specializations would leave mesh candidates without a consumer.
+                self._soft_edge_sdf_geo_types = () if np.any(_mesh_capable) else self._soft_face_sdf_geo_types
                 _warn_full_surface_fallbacks(model, _all_capable)
             else:
                 _mesh_capable = None
@@ -2661,8 +2663,9 @@ class CollisionPipeline:
                     model.shape_source_ptr,
                     model._shape_mesh_properties,
                     model.shape_world,
-                    self.narrow_phase.shape_aabb_lower,
-                    self.narrow_phase.shape_aabb_upper,
+                    # Persistent bounds may be overwritten before tape backward replays this call.
+                    None if self.requires_grad else self.narrow_phase.shape_aabb_lower,
+                    None if self.requires_grad else self.narrow_phase.shape_aabb_upper,
                     model.shape_gap,
                     soft_contact_gap,
                     model.shape_margin,

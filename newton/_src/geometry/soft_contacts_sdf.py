@@ -70,7 +70,7 @@ def _is_analytic(geo: wp.int32):
 
 @wp.func
 def _eval_plane_sdf(scale: wp.vec3, point: wp.vec3):
-    """Return the exact signed distance and gradient for infinite planes and finite quad sheets."""
+    """Return sheet distance and normal, with negative Z retained inside finite footprints."""
     half_width = 0.5 * scale[0]
     half_length = 0.5 * scale[1]
     if half_width <= 0.0 or half_length <= 0.0:
@@ -94,6 +94,102 @@ def _eval_plane_sdf(scale: wp.vec3, point: wp.vec3):
     if distance > 0.0:
         grad = delta / distance
     return distance, distance, grad
+
+
+@wp.func
+def _plane_corner(scale: wp.vec3, corner: int) -> wp.vec3:
+    x = 0.5 * scale[0]
+    y = 0.5 * scale[1]
+    if corner == 0 or corner == 3:
+        x = -x
+    if corner < 2:
+        y = -y
+    return wp.vec3(x, y, 0.0)
+
+
+@wp.func
+def _closest_edge_plane(scale: wp.vec3, p: wp.vec3, q: wp.vec3):
+    """Minimize the signed sheet distance using footprint clipping and exact boundary features."""
+    u = float(0.0)
+    phi, _phi, grad = _eval_plane_sdf(scale, p)
+    phi_q, _phi_q, grad_q = _eval_plane_sdf(scale, q)
+    if phi_q < phi:
+        u, phi, grad = 1.0, phi_q, grad_q
+    if scale[0] > 0.0 and scale[1] > 0.0:
+        edge = q - p
+        lo = float(0.0)
+        hi = float(1.0)
+        # Below the footprint the signed distance is linear in Z; its minimum is at a clipped end.
+        for axis in range(2):
+            half = 0.5 * scale[axis]
+            if edge[axis] != 0.0:
+                t0 = (-half - p[axis]) / edge[axis]
+                t1 = (half - p[axis]) / edge[axis]
+                lo = wp.max(lo, wp.min(t0, t1))
+                hi = wp.min(hi, wp.max(t0, t1))
+            elif wp.abs(p[axis]) > half:
+                hi = -1.0
+        if lo <= hi:
+            t = lo
+            if edge[2] < 0.0:
+                t = hi
+            z = p[2] + t * edge[2]
+            if z < phi:
+                u, phi, grad = t, z, wp.vec3(0.0, 0.0, 1.0)
+        for corner in range(4):
+            a = _plane_corner(scale, corner)
+            b = _plane_corner(scale, (corner + 1) % 4)
+            st = wp.closest_point_edge_edge(p, q, a, b, 0.0)
+            delta = p + st[0] * edge - (a + st[1] * (b - a))
+            distance = wp.length(delta)
+            if distance < phi:
+                u, phi = st[0], distance
+                grad = wp.vec3(0.0, 0.0, 1.0)
+                if distance > 0.0:
+                    grad = delta / distance
+    return u, (1.0 - u) * p + u * q, phi, grad
+
+
+@wp.func
+def _closest_face_plane(scale: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3):
+    """Minimize over triangle edges, quad vertices, and vertices of the clipped footprint."""
+    u, x, phi, grad = _closest_edge_plane(scale, a, b)
+    bary = wp.vec3(1.0 - u, u, 0.0)
+    for edge in range(2):
+        p, q = b, c
+        if edge == 1:
+            p, q = c, a
+        t, point, distance, normal = _closest_edge_plane(scale, p, q)
+        if distance < phi:
+            x, phi, grad = point, distance, normal
+            bary = wp.vec3(0.0, 1.0 - t, t)
+            if edge == 1:
+                bary = wp.vec3(t, 0.0, 1.0 - t)
+    if scale[0] > 0.0 and scale[1] > 0.0:
+        ab, ac = b - a, c - a
+        determinant = ab[0] * ac[1] - ab[1] * ac[0]
+        for corner in range(4):
+            y = _plane_corner(scale, corner)
+            point, weights, _feature = triangle_closest_point(a, b, c, y)
+            delta = point - y
+            distance = wp.length(delta)
+            if distance < phi:
+                x, bary, phi = point, weights, distance
+                grad = wp.vec3(0.0, 0.0, 1.0)
+                if distance > 0.0:
+                    grad = delta / distance
+            # Remaining clipped-polygon vertices lie above/below a quad corner. Intersect its
+            # vertical line with the soft face; perpendicular closest points alone miss penetration.
+            if determinant != 0.0:
+                offset = y - a
+                v = (offset[0] * ac[1] - offset[1] * ac[0]) / determinant
+                w = (ab[0] * offset[1] - ab[1] * offset[0]) / determinant
+                if v >= 0.0 and w >= 0.0 and v + w <= 1.0:
+                    weights = wp.vec3(1.0 - v - w, v, w)
+                    point = weights[0] * a + weights[1] * b + weights[2] * c
+                    if point[2] < phi:
+                        x, bary, phi, grad = point, weights, point[2], wp.vec3(0.0, 0.0, 1.0)
+    return bary, x, phi, grad
 
 
 @wp.func
@@ -216,6 +312,7 @@ def optimize_edge_sdf(
 
     Fixed ``n_iter`` iterations -> graph-capturable. Returns ``(u, x_local, phi, grad)`` at the
     minimizing point. Also used as the line search inside :func:`optimize_face_sdf`.
+    Finite planes use direct feature queries in the contact kernels instead of this search.
     """
     inv_phi = float(0.6180339887498949)  # 1 / golden ratio
     lo = float(0.0)
@@ -500,7 +597,8 @@ def _create_soft_face_contact_kernel(compact_sdf: bool):
         # farthest centroid-to-point distance, which is always a vertex. circumradius can be smaller than
         # that for non-equilateral triangles (e.g. 3-4-5: R=2.5 vs 2.85) and would drop valid contacts.
         reach = wp.max(wp.length(a_s - centroid_s), wp.max(wp.length(b_s - centroid_s), wp.length(c_s - centroid_s)))
-        if phi_c > threshold + reach:
+        # Finite sheets change sign at the footprint boundary and are not Lipschitz below it.
+        if geo != GeoType.PLANE and phi_c > threshold + reach:
             return
 
         bary = wp.vec3(0.0)
@@ -523,6 +621,8 @@ def _create_soft_face_contact_kernel(compact_sdf: bool):
                 x = c_s
             phi = x[2]
             grad = wp.vec3(0.0, 0.0, 1.0)
+        elif geo == GeoType.PLANE:
+            bary, x, phi, grad = _closest_face_plane(scale, a_s, b_s, c_s)
         else:
             if wp.static(compact_sdf):
                 fallback_slot = wp.atomic_add(fallback_count, 0, 1)
@@ -594,7 +694,7 @@ def _create_soft_face_sdf_contact_kernel(geo_filter: int):
         soft_contact_body_vel: wp.array[wp.vec3],
         soft_contact_normal: wp.array[wp.vec3],
     ):
-        """Optimize the compacted non-sphere face pairs."""
+        """Optimize compacted face pairs other than spheres and planes."""
         offset = wp.tid()
         count = wp.min(fallback_count[0], fallback_tids.shape[0])
         for fallback_slot in range(offset, count, fallback_grid_size):
@@ -661,7 +761,6 @@ _SDF_SPECIALIZED_GEO_TYPES = (
     GeoType.CYLINDER,
     GeoType.CONE,
     GeoType.ELLIPSOID,
-    GeoType.PLANE,
 )
 _SDF_FACE_KERNEL_BY_GEO = {geo: _create_soft_face_sdf_contact_kernel(int(geo)) for geo in _SDF_SPECIALIZED_GEO_TYPES}
 
@@ -761,10 +860,10 @@ def _create_soft_edge_contact_kernel(compact_sdf: bool):
 
         mid_s = 0.5 * (p_s + q_s)
         phi_m = _eval_shape_sdf_lower(geo, scale, mid_s, sdf_idx, texture_sdf_table)
-        if phi_m > threshold + 0.5 * wp.length(q_s - p_s):
+        if geo != GeoType.PLANE and phi_m > threshold + 0.5 * wp.length(q_s - p_s):
             return
 
-        if wp.static(compact_sdf) and geo != GeoType.SPHERE:
+        if wp.static(compact_sdf) and geo != GeoType.SPHERE and geo != GeoType.PLANE:
             fallback_slot = wp.atomic_add(fallback_count, 0, 1)
             fallback_tids[fallback_slot] = tid
             return
@@ -778,6 +877,8 @@ def _create_soft_edge_contact_kernel(compact_sdf: bool):
             x = p_s + u * edge
             phi = sdf_sphere(x, scale[0])
             grad = sdf_sphere_grad(x, scale[0])
+        elif geo == GeoType.PLANE:
+            u, x, phi, grad = _closest_edge_plane(scale, p_s, q_s)
         else:
             u, x, phi, grad = optimize_edge_sdf(geo, scale, p_s, q_s, sdf_idx, texture_sdf_table, sdf_edge_iters)
         if phi < threshold:
@@ -845,7 +946,7 @@ def _create_soft_edge_sdf_contact_kernel(geo_filter: int):
         soft_contact_body_vel: wp.array[wp.vec3],
         soft_contact_normal: wp.array[wp.vec3],
     ):
-        """Optimize compacted non-sphere edge pairs."""
+        """Optimize compacted edge pairs other than spheres and planes."""
         offset = wp.tid()
         count = wp.min(fallback_count[0], fallback_tids.shape[0])
         for fallback_slot in range(offset, count, fallback_grid_size):

@@ -1164,7 +1164,7 @@ def create_soft_contacts(
     # The rigid broad-phase AABB already includes its shape margin and rigid-contact gap. Expand it
     # only by the particle radius and any additional soft-contact gap before doing shape-specific work.
     # Plane distance is cheaper than this bound; heightfields also remain solid below their surface.
-    can_cull = geo_type != GeoType.PLANE and geo_type != GeoType.HFIELD
+    can_cull = shape_aabb_lower.shape[0] > 0 and geo_type != GeoType.PLANE and geo_type != GeoType.HFIELD
     if can_cull:
         extent = radius + wp.max(margin - shape_gap[shape_index], 0.0)
         lower = shape_aabb_lower[shape_index] - wp.vec3(extent)

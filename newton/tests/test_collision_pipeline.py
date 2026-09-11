@@ -5452,6 +5452,8 @@ def _launch_soft_ef_multiset(pipeline, state, *, use_shape_aabbs: bool):
         device=pipeline.device,
         edge_pairs=pipeline.soft_edge_rigid_pairs,
         face_pairs=pipeline.soft_face_rigid_pairs,
+        sdf_fallback_tids=pipeline._soft_sdf_fallback_tids,
+        sdf_fallback_count=pipeline._soft_sdf_fallback_count,
         n_particle_pairs=0,
         shape_aabb_lower=pipeline.narrow_phase.shape_aabb_lower if use_shape_aabbs else None,
         shape_aabb_upper=pipeline.narrow_phase.shape_aabb_upper if use_shape_aabbs else None,
