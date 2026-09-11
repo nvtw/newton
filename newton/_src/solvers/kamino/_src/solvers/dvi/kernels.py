@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+from functools import cache
+
 import warp as wp
 
 from ...core.math import FLOAT32_EPS
+from ...linalg.factorize.llt_packed import packed_element_offset
 from ..padmm.math import (
     compute_box_complementarity_residual,
     project_to_coulomb_cone,
@@ -528,258 +531,356 @@ def _compact_schur_fits(njc: int32, nu: int32, stride: int32) -> bool:
     return nu <= (njc * stride) / wp.max(nu, int32(1))
 
 
-@wp.kernel
-def _find_bilateral_factor_row_start(
-    njc: wp.array[int32],
-    mio: wp.array[int32],
-    vio: wp.array[int32],
-    factor: wp.array[float32],
-    row_start: wp.array[int32],
-):
-    """Skip exact leading zeros while preserving the response reduction order."""
-    wid, row = wp.tid()
-    n = njc[wid]
-    if row >= n:
-        return
-    first = int32(0)
-    offset = mio[wid] + row * n
-    while first < row and factor[offset + first] == float32(0.0):
-        first += int32(1)
-    row_start[vio[wid] + row] = first / int32(16) * int32(16)
+@cache
+def _make_bilateral_factor_index(packed: bool):
+    offset_dtype = wp.int64 if packed else int32
 
-
-@wp.kernel
-def _find_bilateral_factor_row_start_rcm(
-    njc: wp.array[int32],
-    mio: wp.array[int32],
-    vio: wp.array[int32],
-    factor: wp.array[float32],
-    row_start: wp.array[int32],
-    tpo: wp.array[int32],
-    pattern: wp.array[int32],
-    block_size: int32,
-):
-    """Use the filled RCM tile mask to accelerate the exact leading-zero scan."""
-    wid, row = wp.tid()
-    n = njc[wid]
-    if row >= n:
-        return
-    tiles = (n + block_size - 1) // block_size
-    tile_offset = tpo[wid] + (row // block_size) * tiles
-    offset = mio[wid] + row * n
-    first = int32(0)
-    for tile in range((row + block_size - 1) // block_size):
-        end = wp.min(row, (tile + 1) * block_size)
-        if pattern[tile_offset + tile] == 0:
-            # Factorization clears skipped tiles, including when sparsity shrinks.
-            first = end
+    @wp.func
+    def factor_index(base: offset_dtype, dimension: int32, row: int32, column: int32) -> offset_dtype:
+        base = offset_dtype(base)
+        if wp.static(packed):
+            return packed_element_offset(base, row, column)
         else:
-            # Marked tiles can contain numerical zeros: preserve the exact prefix.
-            while first < end and factor[offset + first] == float32(0.0):
-                first += 1
-            if first < end:
-                break
-    # Preserve the dense scan's 16-lane response reduction alignment.
-    row_start[vio[wid] + row] = first // 16 * 16
+            return base + dimension * row + column
+
+    return factor_index
 
 
-@wp.kernel
-def _solve_bilateral_unilateral_response_compact(
-    problem_dim: wp.array[int32],
-    problem_njc: wp.array[int32],
-    bilateral_mio: wp.array[int32],
-    bilateral_vio: wp.array[int32],
-    bilateral_P: wp.array[float32],
-    bilateral_L: wp.array[float32],
-    bilateral_permutation: wp.array[int32],
-    response_mio: wp.array[int32],
-    response_stride: wp.array[int32],
-    coupling: wp.array[float32],
-    response: wp.array[float32],
-    factor_row_start: wp.array[int32],
-):
-    """Whiten permuted response columns independently for large compact batches."""
-    wid, unilateral = wp.tid()
-    njc = problem_njc[wid]
-    nu = problem_dim[wid] - njc
-    if unilateral >= nu or not _compact_schur_fits(njc, nu, response_stride[wid]):
-        return
-    offset = response_mio[wid]
-    for row in range(njc):
-        original_row = bilateral_permutation[bilateral_vio[wid] + row]
-        value = (
-            bilateral_P[bilateral_vio[wid] + original_row]
-            * coupling[offset + original_row * response_stride[wid] + unilateral]
-        )
-        for k in range(factor_row_start[bilateral_vio[wid] + row], row):
-            value -= bilateral_L[bilateral_mio[wid] + row * njc + k] * response[offset + k * nu + unilateral]
-        response[offset + row * nu + unilateral] = value / bilateral_L[bilateral_mio[wid] + row * njc + row]
+@cache
+def make_find_bilateral_factor_row_start_kernel(packed: bool = False):
+    """Specialize factor addresses without changing response arithmetic.
+
+    Packed offsets are int64 panel-slot offsets for fixed 32-by-32 tiles;
+    dense offsets retain their existing int32 element-offset convention.
+    """
+    offset_dtype = wp.int64 if packed else int32
+    factor_index = _make_bilateral_factor_index(packed)
+
+    @wp.kernel
+    def _find_bilateral_factor_row_start(
+        njc: wp.array[int32],
+        mio: wp.array[offset_dtype],
+        vio: wp.array[int32],
+        factor: wp.array[float32],
+        row_start: wp.array[int32],
+    ):
+        """Skip exact leading zeros while preserving the response reduction order."""
+        wid, row = wp.tid()
+        n = njc[wid]
+        if row >= n:
+            return
+        first = int32(0)
+        offset = offset_dtype(mio[wid])
+        while first < row and factor[factor_index(offset, n, row, first)] == float32(0.0):
+            first += int32(1)
+        row_start[vio[wid] + row] = first / int32(16) * int32(16)
+
+    return _find_bilateral_factor_row_start
 
 
-@wp.kernel
-def _solve_bilateral_unilateral_response_cooperative(
-    problem_dim: wp.array[int32],
-    problem_njc: wp.array[int32],
-    bilateral_mio: wp.array[int32],
-    bilateral_vio: wp.array[int32],
-    bilateral_P: wp.array[float32],
-    bilateral_L: wp.array[float32],
-    bilateral_permutation: wp.array[int32],
-    use_permutation: bool,
-    response_mio: wp.array[int32],
-    response_stride: wp.array[int32],
-    coupling: wp.array[float32],
-    response_factor: wp.array[float32],
-    response: wp.array[float32],
-    first_unilateral: int32,
-    tasks_per_world: int32,
-    use_forward_schur: bool,
-    factor_row_start: wp.array[int32],
-    skip_compact: bool,
-):
-    """Solve response columns, or whiten them for compact Schur construction."""
-    # Keep whitening scratch unilateral-major, but output row-major for coalesced Gram loads.
-    # The fallback response uses original_row * unilateral_stride + unilateral.
-    tid = wp.tid()
-    lane = tid % int32(32)
-    task = tid / int32(32)
-    wid = task / tasks_per_world
-    task_in_world = task - wid * tasks_per_world
-    local_lane = lane % int32(16)
-    njc = problem_njc[wid]
-    nu = problem_dim[wid] - njc
-    factor = bilateral_mio[wid]
-    bvio = bilateral_vio[wid]
-    offset = response_mio[wid]
-    unilateral_stride = response_stride[wid]
-    if skip_compact and use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
-        return
-    first_pair = (first_unilateral + int32(1)) / int32(2)
-    pair_count = (nu + int32(1)) / int32(2)
-    for unilateral_pair in range(first_pair + task_in_world, pair_count, tasks_per_world):
-        unilateral = int32(2) * unilateral_pair + lane / int32(16)
-        active = unilateral < nu
-        first_row = njc
-        if active:
-            for row in range(local_lane, njc, int32(16)):
-                original_row = row
-                if use_permutation:
-                    original_row = bilateral_permutation[bvio + row]
-                if coupling[offset + original_row * unilateral_stride + unilateral] != float32(0.0):
-                    first_row = wp.min(first_row, row)
-        # Both response columns share warp barriers, so use their common prefix.
-        first_row = _warp_min_32(first_row)
-        if active:
-            for row in range(local_lane, first_row, int32(16)):
-                response_factor[offset + unilateral * njc + row] = float32(0.0)
-        _sync_warp()
-        for row in range(first_row, njc):
-            partial = float32(0.0)
+@cache
+def make_find_bilateral_factor_row_start_rcm_kernel(packed: bool = False):
+    """Specialize factor addresses without changing response arithmetic.
+
+    Packed offsets are int64 panel-slot offsets for fixed 32-by-32 tiles;
+    dense offsets retain their existing int32 element-offset convention.
+    """
+    offset_dtype = wp.int64 if packed else int32
+    factor_index = _make_bilateral_factor_index(packed)
+
+    @wp.kernel
+    def _find_bilateral_factor_row_start_rcm(
+        njc: wp.array[int32],
+        mio: wp.array[offset_dtype],
+        vio: wp.array[int32],
+        factor: wp.array[float32],
+        row_start: wp.array[int32],
+        tpo: wp.array[int32],
+        pattern: wp.array[int32],
+        block_size: int32,
+    ):
+        """Use the filled RCM tile mask to accelerate the exact leading-zero scan."""
+        wid, row = wp.tid()
+        n = njc[wid]
+        if row >= n:
+            return
+        tiles = (n + block_size - 1) // block_size
+        tile_offset = tpo[wid] + (row // block_size) * tiles
+        offset = offset_dtype(mio[wid])
+        first = int32(0)
+        for tile in range((row + block_size - 1) // block_size):
+            end = wp.min(row, (tile + 1) * block_size)
+            if pattern[tile_offset + tile] == 0:
+                # Factorization clears skipped tiles, including when sparsity shrinks.
+                first = end
+            else:
+                # Marked tiles can contain numerical zeros: preserve the exact prefix.
+                while first < end and factor[factor_index(offset, n, row, first)] == float32(0.0):
+                    first += 1
+                if first < end:
+                    break
+        # Preserve the dense scan's 16-lane response reduction alignment.
+        row_start[vio[wid] + row] = first // 16 * 16
+
+    return _find_bilateral_factor_row_start_rcm
+
+
+@cache
+def make_solve_bilateral_unilateral_response_compact_kernel(packed: bool = False):
+    """Specialize factor addresses without changing response arithmetic.
+
+    Packed offsets are int64 panel-slot offsets for fixed 32-by-32 tiles;
+    dense offsets retain their existing int32 element-offset convention.
+    """
+    offset_dtype = wp.int64 if packed else int32
+    factor_index = _make_bilateral_factor_index(packed)
+
+    @wp.kernel
+    def _solve_bilateral_unilateral_response_compact(
+        problem_dim: wp.array[int32],
+        problem_njc: wp.array[int32],
+        bilateral_mio: wp.array[offset_dtype],
+        bilateral_vio: wp.array[int32],
+        bilateral_P: wp.array[float32],
+        bilateral_L: wp.array[float32],
+        bilateral_permutation: wp.array[int32],
+        response_mio: wp.array[int32],
+        response_stride: wp.array[int32],
+        coupling: wp.array[float32],
+        response: wp.array[float32],
+        factor_row_start: wp.array[int32],
+    ):
+        """Whiten permuted response columns independently for large compact batches."""
+        wid, unilateral = wp.tid()
+        njc = problem_njc[wid]
+        nu = problem_dim[wid] - njc
+        if unilateral >= nu or not _compact_schur_fits(njc, nu, response_stride[wid]):
+            return
+        offset = response_mio[wid]
+        for row in range(njc):
+            original_row = bilateral_permutation[bilateral_vio[wid] + row]
+            value = (
+                bilateral_P[bilateral_vio[wid] + original_row]
+                * coupling[offset + original_row * response_stride[wid] + unilateral]
+            )
+            for k in range(factor_row_start[bilateral_vio[wid] + row], row):
+                value -= (
+                    bilateral_L[factor_index(offset_dtype(bilateral_mio[wid]), njc, row, k)]
+                    * response[offset + k * nu + unilateral]
+                )
+            response[offset + row * nu + unilateral] = (
+                value / bilateral_L[factor_index(offset_dtype(bilateral_mio[wid]), njc, row, row)]
+            )
+
+    return _solve_bilateral_unilateral_response_compact
+
+
+@cache
+def make_solve_bilateral_unilateral_response_cooperative_kernel(packed: bool = False):
+    """Specialize factor addresses without changing response arithmetic.
+
+    Packed offsets are int64 panel-slot offsets for fixed 32-by-32 tiles;
+    dense offsets retain their existing int32 element-offset convention.
+    """
+    offset_dtype = wp.int64 if packed else int32
+    factor_index = _make_bilateral_factor_index(packed)
+
+    @wp.kernel
+    def _solve_bilateral_unilateral_response_cooperative(
+        problem_dim: wp.array[int32],
+        problem_njc: wp.array[int32],
+        bilateral_mio: wp.array[offset_dtype],
+        bilateral_vio: wp.array[int32],
+        bilateral_P: wp.array[float32],
+        bilateral_L: wp.array[float32],
+        bilateral_permutation: wp.array[int32],
+        use_permutation: bool,
+        response_mio: wp.array[int32],
+        response_stride: wp.array[int32],
+        coupling: wp.array[float32],
+        response_factor: wp.array[float32],
+        response: wp.array[float32],
+        first_unilateral: int32,
+        tasks_per_world: int32,
+        use_forward_schur: bool,
+        factor_row_start: wp.array[int32],
+        skip_compact: bool,
+    ):
+        """Solve response columns, or whiten them for compact Schur construction."""
+        # Keep whitening scratch unilateral-major, but output row-major for coalesced Gram loads.
+        # The fallback response uses original_row * unilateral_stride + unilateral.
+        tid = wp.tid()
+        lane = tid % int32(32)
+        task = tid / int32(32)
+        wid = task / tasks_per_world
+        task_in_world = task - wid * tasks_per_world
+        local_lane = lane % int32(16)
+        njc = problem_njc[wid]
+        nu = problem_dim[wid] - njc
+        factor = offset_dtype(bilateral_mio[wid])
+        bvio = bilateral_vio[wid]
+        offset = response_mio[wid]
+        unilateral_stride = response_stride[wid]
+        if skip_compact and use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
+            return
+        first_pair = (first_unilateral + int32(1)) / int32(2)
+        pair_count = (nu + int32(1)) / int32(2)
+        for unilateral_pair in range(first_pair + task_in_world, pair_count, tasks_per_world):
+            unilateral = int32(2) * unilateral_pair + lane / int32(16)
+            active = unilateral < nu
+            first_row = njc
             if active:
-                for k in range(factor_row_start[bvio + row] + local_lane, row, int32(16)):
-                    partial += bilateral_L[factor + njc * row + k] * response_factor[offset + unilateral * njc + k]
-            total = _subgroup_sum_16(partial)
-            if local_lane == int32(0) and active:
+                for row in range(local_lane, njc, int32(16)):
+                    original_row = row
+                    if use_permutation:
+                        original_row = bilateral_permutation[bvio + row]
+                    if coupling[offset + original_row * unilateral_stride + unilateral] != float32(0.0):
+                        first_row = wp.min(first_row, row)
+            # Both response columns share warp barriers, so use their common prefix.
+            first_row = _warp_min_32(first_row)
+            if active:
+                for row in range(local_lane, first_row, int32(16)):
+                    response_factor[offset + unilateral * njc + row] = float32(0.0)
+            _sync_warp()
+            for row in range(first_row, njc):
+                partial = float32(0.0)
+                if active:
+                    for k in range(factor_row_start[bvio + row] + local_lane, row, int32(16)):
+                        partial += (
+                            bilateral_L[factor_index(factor, njc, row, k)]
+                            * response_factor[offset + unilateral * njc + k]
+                        )
+                total = _subgroup_sum_16(partial)
+                if local_lane == int32(0) and active:
+                    original_row = row
+                    if use_permutation:
+                        original_row = bilateral_permutation[bvio + row]
+                    value = (
+                        bilateral_P[bvio + original_row]
+                        * coupling[offset + original_row * unilateral_stride + unilateral]
+                    )
+                    response_factor[offset + unilateral * njc + row] = (value - total) / bilateral_L[
+                        factor_index(factor, njc, row, row)
+                    ]
+                _sync_warp()
+            backward_rows = njc
+            if use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
+                # C.T A^-1 C = Y.T Y with Y = L^-1 P C; backward solves are unnecessary.
+                backward_rows = int32(0)
+            for reverse_row in range(backward_rows):
+                row = njc - int32(1) - reverse_row
+                partial = float32(0.0)
+                if active:
+                    for k in range(row + int32(1) + local_lane, njc, int32(16)):
+                        partial += (
+                            bilateral_L[factor_index(factor, njc, k, row)]
+                            * response_factor[offset + unilateral * njc + k]
+                        )
+                total = _subgroup_sum_16(partial)
+                if local_lane == int32(0) and active:
+                    value = response_factor[offset + unilateral * njc + row]
+                    response_factor[offset + unilateral * njc + row] = (value - total) / bilateral_L[
+                        factor_index(factor, njc, row, row)
+                    ]
+                _sync_warp()
+            if active:
+                for row in range(local_lane, njc, int32(16)):
+                    original_row = row
+                    if use_permutation:
+                        original_row = bilateral_permutation[bvio + row]
+                    if use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
+                        response[offset + row * nu + unilateral] = response_factor[offset + unilateral * njc + row]
+                    else:
+                        response[offset + original_row * unilateral_stride + unilateral] = (
+                            bilateral_P[bvio + original_row] * response_factor[offset + unilateral * njc + row]
+                        )
+
+    return _solve_bilateral_unilateral_response_cooperative
+
+
+@cache
+def make_solve_bilateral_unilateral_response_kernel(packed: bool = False):
+    """Specialize factor addresses without changing response arithmetic.
+
+    Packed offsets are int64 panel-slot offsets for fixed 32-by-32 tiles;
+    dense offsets retain their existing int32 element-offset convention.
+    """
+    offset_dtype = wp.int64 if packed else int32
+    factor_index = _make_bilateral_factor_index(packed)
+
+    @wp.kernel
+    def _solve_bilateral_unilateral_response(
+        problem_dim: wp.array[int32],
+        problem_njc: wp.array[int32],
+        bilateral_mio: wp.array[offset_dtype],
+        bilateral_vio: wp.array[int32],
+        bilateral_P: wp.array[float32],
+        bilateral_L: wp.array[float32],
+        bilateral_permutation: wp.array[int32],
+        use_permutation: bool,
+        response_mio: wp.array[int32],
+        response_stride: wp.array[int32],
+        coupling: wp.array[float32],
+        response_factor: wp.array[float32],
+        response: wp.array[float32],
+    ):
+        # response_factor is row-major here; response always uses
+        # original_row * unilateral_stride + unilateral.
+        tid = wp.tid()
+        threads_per_world = int32(wp.block_dim())
+        lane = tid % threads_per_world
+        wid = tid / threads_per_world
+        njc = problem_njc[wid]
+        nu = problem_dim[wid] - njc
+        factor = offset_dtype(bilateral_mio[wid])
+        bvio = bilateral_vio[wid]
+        offset = response_mio[wid]
+        unilateral_stride = response_stride[wid]
+        for unilateral in range(lane, nu, threads_per_world):
+            for row in range(njc):
                 original_row = row
                 if use_permutation:
                     original_row = bilateral_permutation[bvio + row]
                 value = (
                     bilateral_P[bvio + original_row] * coupling[offset + original_row * unilateral_stride + unilateral]
                 )
-                response_factor[offset + unilateral * njc + row] = (value - total) / bilateral_L[
-                    factor + njc * row + row
-                ]
-            _sync_warp()
-        backward_rows = njc
-        if use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
-            # C.T A^-1 C = Y.T Y with Y = L^-1 P C; backward solves are unnecessary.
-            backward_rows = int32(0)
-        for reverse_row in range(backward_rows):
-            row = njc - int32(1) - reverse_row
-            partial = float32(0.0)
-            if active:
-                for k in range(row + int32(1) + local_lane, njc, int32(16)):
-                    partial += bilateral_L[factor + njc * k + row] * response_factor[offset + unilateral * njc + k]
-            total = _subgroup_sum_16(partial)
-            if local_lane == int32(0) and active:
-                value = response_factor[offset + unilateral * njc + row]
-                response_factor[offset + unilateral * njc + row] = (value - total) / bilateral_L[
-                    factor + njc * row + row
-                ]
-            _sync_warp()
-        if active:
-            for row in range(local_lane, njc, int32(16)):
+                for k in range(row):
+                    value -= (
+                        bilateral_L[factor_index(factor, njc, row, k)]
+                        * response_factor[offset + k * unilateral_stride + unilateral]
+                    )
+                response_factor[offset + row * unilateral_stride + unilateral] = (
+                    value / bilateral_L[factor_index(factor, njc, row, row)]
+                )
+
+            for reverse_row in range(njc):
+                row = njc - int32(1) - reverse_row
+                value = response_factor[offset + row * unilateral_stride + unilateral]
+                for k in range(row + int32(1), njc):
+                    value -= (
+                        bilateral_L[factor_index(factor, njc, k, row)]
+                        * response_factor[offset + k * unilateral_stride + unilateral]
+                    )
+                response_factor[offset + row * unilateral_stride + unilateral] = (
+                    value / bilateral_L[factor_index(factor, njc, row, row)]
+                )
+
+            for row in range(njc):
                 original_row = row
                 if use_permutation:
                     original_row = bilateral_permutation[bvio + row]
-                if use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
-                    response[offset + row * nu + unilateral] = response_factor[offset + unilateral * njc + row]
-                else:
-                    response[offset + original_row * unilateral_stride + unilateral] = (
-                        bilateral_P[bvio + original_row] * response_factor[offset + unilateral * njc + row]
-                    )
-
-
-@wp.kernel
-def _solve_bilateral_unilateral_response(
-    problem_dim: wp.array[int32],
-    problem_njc: wp.array[int32],
-    bilateral_mio: wp.array[int32],
-    bilateral_vio: wp.array[int32],
-    bilateral_P: wp.array[float32],
-    bilateral_L: wp.array[float32],
-    bilateral_permutation: wp.array[int32],
-    use_permutation: bool,
-    response_mio: wp.array[int32],
-    response_stride: wp.array[int32],
-    coupling: wp.array[float32],
-    response_factor: wp.array[float32],
-    response: wp.array[float32],
-):
-    # response_factor is row-major here; response always uses
-    # original_row * unilateral_stride + unilateral.
-    tid = wp.tid()
-    threads_per_world = int32(wp.block_dim())
-    lane = tid % threads_per_world
-    wid = tid / threads_per_world
-    njc = problem_njc[wid]
-    nu = problem_dim[wid] - njc
-    factor = bilateral_mio[wid]
-    bvio = bilateral_vio[wid]
-    offset = response_mio[wid]
-    unilateral_stride = response_stride[wid]
-    for unilateral in range(lane, nu, threads_per_world):
-        for row in range(njc):
-            original_row = row
-            if use_permutation:
-                original_row = bilateral_permutation[bvio + row]
-            value = bilateral_P[bvio + original_row] * coupling[offset + original_row * unilateral_stride + unilateral]
-            for k in range(row):
-                value -= (
-                    bilateral_L[factor + njc * row + k] * response_factor[offset + k * unilateral_stride + unilateral]
+                response[offset + original_row * unilateral_stride + unilateral] = (
+                    bilateral_P[bvio + original_row] * response_factor[offset + row * unilateral_stride + unilateral]
                 )
-            response_factor[offset + row * unilateral_stride + unilateral] = (
-                value / bilateral_L[factor + njc * row + row]
-            )
 
-        for reverse_row in range(njc):
-            row = njc - int32(1) - reverse_row
-            value = response_factor[offset + row * unilateral_stride + unilateral]
-            for k in range(row + int32(1), njc):
-                value -= (
-                    bilateral_L[factor + njc * k + row] * response_factor[offset + k * unilateral_stride + unilateral]
-                )
-            response_factor[offset + row * unilateral_stride + unilateral] = (
-                value / bilateral_L[factor + njc * row + row]
-            )
+    return _solve_bilateral_unilateral_response
 
-        for row in range(njc):
-            original_row = row
-            if use_permutation:
-                original_row = bilateral_permutation[bvio + row]
-            response[offset + original_row * unilateral_stride + unilateral] = (
-                bilateral_P[bvio + original_row] * response_factor[offset + row * unilateral_stride + unilateral]
-            )
+
+_find_bilateral_factor_row_start = make_find_bilateral_factor_row_start_kernel()
+_find_bilateral_factor_row_start_rcm = make_find_bilateral_factor_row_start_rcm_kernel()
+_solve_bilateral_unilateral_response_compact = make_solve_bilateral_unilateral_response_compact_kernel()
+_solve_bilateral_unilateral_response_cooperative = make_solve_bilateral_unilateral_response_cooperative_kernel()
+_solve_bilateral_unilateral_response = make_solve_bilateral_unilateral_response_kernel()
 
 
 @wp.kernel

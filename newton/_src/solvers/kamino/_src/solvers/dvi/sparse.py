@@ -19,19 +19,18 @@ from ...linalg import LLTBlockedRCMSolver
 from .kernels import (
     _FUSED_BILATERAL_BLOCK,
     _FUSED_INEQUALITY_BLOCK,
-    _find_bilateral_factor_row_start,
-    _find_bilateral_factor_row_start_rcm,
     _initialize_dvi_status,
     _scatter_bilateral_solution,
     _set_dvi_direct_status_iterations,
-    _solve_bilateral_unilateral_response,
-    _solve_bilateral_unilateral_response_compact,
-    _solve_bilateral_unilateral_response_cooperative,
+    make_find_bilateral_factor_row_start_kernel,
+    make_find_bilateral_factor_row_start_rcm_kernel,
+    make_solve_bilateral_unilateral_response_compact_kernel,
+    make_solve_bilateral_unilateral_response_cooperative_kernel,
+    make_solve_bilateral_unilateral_response_kernel,
 )
 from .sparse_kernels import (
     _assemble_compact_unilateral_schur_tiled,
     _assemble_sparse_bilateral_unilateral_coupling,
-    _build_sparse_bilateral_block,
     _build_sparse_bilateral_rhs,
     _cache_sparse_contact_diagonal,
     _cache_sparse_projected_diagonal,
@@ -54,12 +53,13 @@ from .sparse_kernels import (
     _reconstruct_fused_bilateral_solution,
     _reset_active_bilateral_delta,
     _select_parallel_contact_colors,
-    _set_sparse_bilateral_diagonal,
     _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
     _solve_dvi_sparse_inequalities_pgs_cooperative,
     _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
+    make_build_sparse_bilateral_block_kernel,
+    make_set_sparse_bilateral_diagonal_kernel,
 )
 
 wp.set_module_options({"enable_backward": False})
@@ -864,6 +864,9 @@ def _assemble_sparse_bilateral_block(
     """Assemble the bilateral matrix directly in the requested row ordering."""
     operator = path.data.bilateral_operator
     state = path.data.state
+    solver = path.bilateral_solver
+    packed = isinstance(solver, LLTBlockedRCMSolver) and solver._packed is not None and inverse is not None
+    matrix_offsets = solver._packed.slot_offsets if packed else operator.info.mio
     matrix.zero_()
     state.bilateral_preconditioner.zero_()
     problem.delassus.diagonal(state.scratch)
@@ -872,12 +875,12 @@ def _assemble_sparse_bilateral_block(
     if path.bilateral_nzb_pairs is None:
         raise RuntimeError("Sparse DVI topology is not prepared. Call `SparseDVIPath.prepare()` before solving.")
     wp.launch(
-        kernel=_set_sparse_bilateral_diagonal,
+        kernel=make_set_sparse_bilateral_diagonal_kernel(packed),
         dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
         inputs=[
             problem.data.njc,
             problem.data.vio,
-            operator.info.mio,
+            matrix_offsets,
             operator.info.vio,
             state.scratch,
             matrix,
@@ -890,7 +893,7 @@ def _assemble_sparse_bilateral_block(
     pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j = path.bilateral_nzb_pairs
     if pair_wid.size > 0:
         wp.launch(
-            kernel=_build_sparse_bilateral_block,
+            kernel=make_build_sparse_bilateral_block_kernel(packed),
             dim=pair_wid.size,
             inputs=[
                 path.model.bodies.inv_m_i,
@@ -903,7 +906,7 @@ def _assemble_sparse_bilateral_block(
                 pair_j,
                 jacobian.nzb_values,
                 problem.data.njc,
-                operator.info.mio,
+                matrix_offsets,
                 operator.info.vio,
                 state.bilateral_preconditioner,
                 matrix,
@@ -1182,24 +1185,29 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         and path.max_alternating_iterations >= 4
         and not has_intermediate_bilateral_solve
     )
-    response_kernel = _solve_bilateral_unilateral_response
+    packed = use_permutation and path.bilateral_solver._packed is not None
+    factor_offsets = path.bilateral_solver._packed.slot_offsets if packed else path.data.bilateral_operator.info.mio
+    factor = path.bilateral_solver._packed_factor if packed else path.bilateral_solver.L
+    response_kernel = make_solve_bilateral_unilateral_response_kernel(packed)
     response_block_dim = 1
     response_tasks_per_world = 0
     response_dim = path.size.num_worlds
     if path.device.is_cuda:
-        response_kernel = _solve_bilateral_unilateral_response_cooperative
+        response_kernel = make_solve_bilateral_unilateral_response_cooperative_kernel(packed)
         # Pack independent warp workers to avoid limiting occupancy to one warp per block.
         response_block_dim = 256 if path.size.num_worlds >= 128 else 128
         response_tasks_per_world = (max_unilateral_rows + 1) // 2
         response_dim = path.size.num_worlds * response_tasks_per_world * 32
         wp.launch(
-            kernel=_find_bilateral_factor_row_start_rcm if use_permutation else _find_bilateral_factor_row_start,
+            kernel=make_find_bilateral_factor_row_start_rcm_kernel(packed)
+            if use_permutation
+            else make_find_bilateral_factor_row_start_kernel(packed),
             dim=(path.size.num_worlds, max_joint_rows),
             inputs=[
                 problem.data.njc,
-                path.data.bilateral_operator.info.mio,
+                factor_offsets,
                 path.data.bilateral_operator.info.vio,
-                path.bilateral_solver.L,
+                factor,
                 state.bilateral_factor_row_start,
                 *(
                     [
@@ -1217,15 +1225,15 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     use_scalar_response = enable_compact_schur and use_permutation and path.size.num_worlds >= 2048
     if use_scalar_response:
         wp.launch(
-            kernel=_solve_bilateral_unilateral_response_compact,
+            kernel=make_solve_bilateral_unilateral_response_compact_kernel(packed),
             dim=(path.size.num_worlds, max_unilateral_rows),
             inputs=[
                 problem.data.dim,
                 problem.data.njc,
-                path.data.bilateral_operator.info.mio,
+                factor_offsets,
                 path.data.bilateral_operator.info.vio,
                 state.bilateral_preconditioner,
-                path.bilateral_solver.L,
+                factor,
                 permutation,
                 state.bilateral_response_mio,
                 state.bilateral_response_stride,
@@ -1242,10 +1250,10 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         inputs=[
             problem.data.dim,
             problem.data.njc,
-            path.data.bilateral_operator.info.mio,
+            factor_offsets,
             path.data.bilateral_operator.info.vio,
             state.bilateral_preconditioner,
-            path.bilateral_solver.L,
+            factor,
             permutation,
             use_permutation,
             state.bilateral_response_mio,

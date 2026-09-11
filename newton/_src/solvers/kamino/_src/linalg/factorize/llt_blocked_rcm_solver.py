@@ -50,6 +50,7 @@ from .llt_blocked_rcm import (
     make_llt_blocked_rcm_solve_kernel,
     make_llt_blocked_rcm_symbolic_fill_in_kernel,
 )
+from .llt_packed import _gather_intermediate, _PackedLLT, _transfer
 
 ###
 # Module interface
@@ -160,6 +161,9 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             raise NotImplementedError("LLTBlockedRCMSolver currently supports only wp.float32.")
 
         # LLT-specific internal data
+        self._packed: _PackedLLT | None = None
+        self._packed_matrix: wp.array | None = None
+        self._packed_factor: wp.array | None = None
         self._L: wp.array[dtype] | None = None
         self._y: wp.array[dtype] | None = None
         # Reordering + semi-sparse state
@@ -225,14 +229,40 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
 
     @property
     def L(self) -> wp.array:
+        """Return the dense factor, materializing packed storage on access.
+
+        In packed mode, reacquire this property after computing or replaying a
+        captured factorization; a previously returned array is not a live view.
+        """
         if self._L is None:
             raise ValueError("The factorization array has not been allocated!")
+        if self._packed is not None:
+            self._transfer_packed(to_packed=False)
         return self._L
 
     @property
     def y(self) -> wp.array:
+        """Return the forward-solve intermediate, gathering packed storage on access.
+
+        In packed mode, reacquire this property after solving or replaying a
+        captured solve; a previously returned array is not a live view.
+        """
         if self._y is None:
             raise ValueError("The intermediate result array has not been allocated!")
+        if self._packed is not None:
+            info = self._operator.info
+            wp.launch(
+                _gather_intermediate,
+                dim=(info.num_blocks, info.max_dimension),
+                inputs=[
+                    self._packed.dimensions,
+                    info.vio,
+                    self._packed.workspace_offsets,
+                    self._packed.intermediate,
+                    self._y,
+                ],
+                device=self._device,
+            )
         return self._y
 
     @property
@@ -282,6 +312,9 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         """
         if self._device.is_capturing:
             raise RuntimeError("Configure sparse assembly before graph capture.")
+        self._packed = None
+        self._packed_matrix = None
+        self._packed_factor = None
         self._structural_pairs = None
         self._structural_pattern = None
         self._structural_ready = None
@@ -292,6 +325,18 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._structural_pairs = (pair_world, pair_row, pair_col)
         self._structural_pattern = wp.zeros_like(self._tile_pattern)
         self._structural_ready = wp.zeros(1, dtype=wp.int32, device=self._device)
+        info = self._operator.info
+        # Packed tiles win for large G1 batches, but regress small bilateral
+        # systems (e.g. ANYmal's 84 rows). Keep conservative shape-only dispatch.
+        if (
+            info.num_blocks >= 2048
+            and min(info.dimensions, default=0) >= 256
+            and self._block_size == 32
+            and not self._parallel_factorization
+        ):
+            self._packed = _PackedLLT(info.dimensions, self._device, self._tile_pattern, self._tpo, self._P, info.vio)
+            self._packed_matrix = wp.zeros(self._packed.factor_size, dtype=wp.float32, device=self._device)
+            self._packed_factor = wp.zeros_like(self._packed_matrix)
 
     def compute_sparse(self, assemble: Callable[[wp.array, wp.array | None], None]) -> None:
         """Assemble and factor, preserving first-use numerical ordering.
@@ -348,9 +393,9 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._structural_ready.fill_(1)
 
     def _compute_sparse_reuse(self, assemble: Callable) -> None:
-        assemble(self._A_hat, self._inv_P)
+        assemble(self._A_hat if self._packed is None else self._packed_matrix, self._inv_P)
         wp.copy(self._tile_pattern, self._structural_pattern)
-        self._factorize_numeric()
+        self._factorize_numeric(packed_input=self._packed is not None)
         self._has_factors = True
 
     @override
@@ -362,6 +407,9 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
 
         info = self._operator.info
         self._max_dim = int(info.max_dimension)
+        self._packed = None
+        self._packed_matrix = None
+        self._packed_factor = None
         self._permutation_initialized = False
         self._permutation_initialized_during_capture = False
         self._permutation_capture_id = None
@@ -424,6 +472,12 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
 
     @override
     def _reset_impl(self) -> None:
+        if self._packed is not None:
+            self._packed_matrix.zero_()
+            self._packed_factor.zero_()
+            self._packed.intermediate.zero_()
+            self._packed.solution_permuted.zero_()
+            self._packed.errors.zero_()
         if self._structural_ready is not None:
             self._structural_ready.zero_()
         self._L.zero_()
@@ -553,9 +607,32 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         # 4. Numeric factorization with tile-pattern skips.
         self._factorize_numeric()
 
-    def _factorize_numeric(self) -> None:
+    def _transfer_packed(self, *, to_packed: bool) -> None:
+        info = self._operator.info
+        width = ((self._max_dim + 31) // 32) * 32
+        wp.launch(
+            _transfer,
+            dim=(info.num_blocks, width * width),
+            inputs=[
+                self._packed.dimensions,
+                info.mio,
+                self._packed.slot_offsets,
+                self._A_hat if to_packed else self._L,
+                self._packed_matrix if to_packed else self._packed_factor,
+                to_packed,
+            ],
+            device=self._device,
+        )
+
+    def _factorize_numeric(self, *, packed_input: bool = False) -> None:
         info = self._operator.info
         num_blocks = info.num_blocks
+        if self._packed is not None:
+            wp.copy(self._packed.dimensions, info.dim)
+            if not packed_input:
+                self._transfer_packed(to_packed=True)
+            self._packed.factor(self._packed_matrix, self._packed_factor)
+            return
         if self._parallel_factorization:
             llt_blocked_rcm_factorize_parallel(
                 kernels=self._parallel_factorize_kernels,
@@ -591,6 +668,9 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
     @override
     def _solve_impl(self, b: wp.array[Any], x: wp.array[Any]) -> None:
         info = self._operator.info
+        if self._packed is not None:
+            self._packed.solve(self._packed_factor, b, x, info.dim)
+            return
         num_blocks = info.num_blocks
 
         # Solve L L^T x_hat = P b and scatter x_hat -> x.
@@ -615,6 +695,11 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
     @override
     def _solve_inplace_impl(self, x: wp.array[Any]) -> None:
         info = self._operator.info
+        if self._packed is not None:
+            # Forward substitution reads the complete RHS before backward
+            # substitution scatters output, so aliasing b and x is safe.
+            self._packed.solve(self._packed_factor, x, x, info.dim)
+            return
         num_blocks = info.num_blocks
 
         # Permute x -> x_hat (x is the RHS here).
