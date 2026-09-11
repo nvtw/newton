@@ -29,6 +29,7 @@ from .kernels import (
     make_solve_bilateral_unilateral_response_cooperative_kernel,
     make_solve_bilateral_unilateral_response_kernel,
 )
+from .response import make_response_kernel
 from .sparse_kernels import (
     _assemble_compact_unilateral_schur_tiled,
     _assemble_sparse_bilateral_unilateral_coupling,
@@ -1260,6 +1261,37 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             device=path.device,
             block_dim=128,
         )
+    # Share factor tiles across four right-hand sides when there are few worlds.
+    use_tiled_response = (
+        enable_compact_schur
+        and use_permutation
+        and not packed
+        and path.bilateral_solver.block_size == 32
+        and path.size.num_worlds <= 16
+    )
+    if use_tiled_response:
+        wp.launch(
+            kernel=make_response_kernel(),
+            dim=(path.size.num_worlds * ((max_unilateral_rows + 3) // 4), 128),
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                factor_offsets,
+                path.data.bilateral_operator.info.vio,
+                state.bilateral_preconditioner,
+                factor,
+                permutation,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_coupling,
+                state.bilateral_response,
+                path.bilateral_solver.tile_pattern_offsets,
+                path.bilateral_solver.tile_pattern,
+                max_unilateral_rows,
+            ],
+            device=path.device,
+            block_dim=128,
+        )
     wp.launch(
         kernel=response_kernel,
         dim=response_dim,
@@ -1283,7 +1315,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
                     response_tasks_per_world,
                     enable_compact_schur,
                     state.bilateral_factor_row_start,
-                    use_scalar_response,
+                    use_scalar_response or use_tiled_response,
                 ]
                 if path.device.is_cuda
                 else []

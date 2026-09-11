@@ -1,0 +1,1 @@
+Accelerate compact Kamino DVI friction response solves for small CUDA world batches by sharing factor tiles across right-hand sides, without changing friction parameters or solver tolerances. No configuration changes are required.

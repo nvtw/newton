@@ -4,12 +4,14 @@
 """Focused tests for Coulomb joint friction in SolverKamino."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 import warp as wp
 
 import newton
 import newton._src.solvers.kamino.config as kamino_config
+from newton._src.solvers.kamino._src.solvers.dvi.response import make_response_kernel
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton.tests.kamino import setup_tests, test_context
 from newton.tests.kamino.utils.solver_configs import (
@@ -253,7 +255,11 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
         self.assertEqual(solver._model_kamino.size.sum_of_num_friction_joint_cts, 0)
         self.assertEqual(solver._model_kamino.size.sum_of_num_bounded_joint_cts, 0)
 
-    def test_compact_schur_friction_spin_down(self):
+    @mock.patch(
+        "newton._src.solvers.kamino._src.solvers.dvi.sparse.make_response_kernel",
+        wraps=make_response_kernel,
+    )
+    def test_compact_schur_friction_spin_down(self, response_kernel):
         """Preserve spin-down, sticking, and reversals across ragged friction strengths."""
         builder = newton.ModelBuilder()
         SolverKamino.register_custom_attributes(builder)
@@ -322,6 +328,7 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
             )
 
         if wp.get_device(test_context.device).is_cuda:
+            self.assertTrue(response_kernel.called, "Analytical friction checks must exercise tiled responses")
             iterations = solver._solver_kamino.solver_status.numpy()["iterations"]
             self.assertTrue(np.all(iterations > 0))
             self.assertTrue(np.all(iterations < 16), msg=str(iterations))
