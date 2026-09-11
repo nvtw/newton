@@ -2354,7 +2354,8 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     completed_sweeps = int32(0)
     for sweep in range(sweep_count):
         sweep_changed = wp.bool(False)
-        phase_count = int32(2)
+        # The second phase only updates contact tangents.
+        phase_count = wp.where(nc > int32(0), int32(2), int32(1))
         if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and sweep < first_tangent_sweep:
             phase_count = int32(1)
         for phase in range(phase_count):
