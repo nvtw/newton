@@ -267,7 +267,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - 🟨 :sup:`1`
      - |yes|
      - |no|
-     - |yes| :sup:`5`
+     - |yes| :sup:`8`
      - |no|
      - |no|
    * - D6
@@ -275,7 +275,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |yes|
      - |yes|
      - |yes|
-     - 🟨 :sup:`6`
+     - 🟨 :sup:`9`
      - |yes|
      - |no|
    * - ROD
@@ -283,7 +283,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |no|
      - |no|
      - |no|
-     - 🟨 :sup:`7`
+     - 🟨 :sup:`10`
      - |yes|
      - |no|
 
@@ -317,7 +317,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |no|
      - |no|
      - |yes|
-     - 🟨 :sup:`8`
+     - 🟨 :sup:`11`
      - |no|
      - |yes|
    * - :attr:`~newton.Model.joint_friction`
@@ -325,7 +325,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |no|
      - |no|
      - |yes|
-     - 🟨 :sup:`9`
+     - 🟨 :sup:`12`
      - |no|
      - |yes|
    * - :attr:`~newton.Model.joint_limit_lower` / :attr:`~newton.Model.joint_limit_upper`
@@ -333,7 +333,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |yes| :sup:`2`
      - |yes|
      - |yes|
-     - 🟨 :sup:`10`
+     - 🟨 :sup:`13`
      - |yes|
      - |yes|
    * - :attr:`~newton.Model.joint_limit_ke` / :attr:`~newton.Model.joint_limit_kd`
@@ -341,8 +341,8 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |yes| :sup:`2`
      - |no|
      - |yes|
-     - 🟨 :sup:`9`
-     - |yes| :sup:`4`
+     - 🟨 :sup:`12`
+     - |yes| :sup:`7`
      - |no|
    * - :attr:`~newton.Model.joint_effort_limit`
      - |no|
@@ -357,7 +357,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |no|
      - |no|
      - |no|
-     - 🟨 :sup:`11`
+     - 🟨 :sup:`14`
      - |no|
      - |no|
 
@@ -384,7 +384,7 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |yes|
      - |yes|
      - |yes|
-     - |yes| :sup:`4`
+     - |yes| :sup:`7`
      - |yes|
    * - :attr:`~newton.Model.joint_target_mode`
      - |no|
@@ -426,24 +426,27 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |no|
      - |no|
      - |no|
-   * - Mimic constraints
-     - |no|
-     - |no|
-     - |no|
+   * - Mimic joints
      - |yes| :sup:`3`
+     - |yes| :sup:`4`
+     - |yes| :sup:`5`
+     - |yes| :sup:`6`
      - |no|
-     - |no|
+     - |yes| :sup:`5`
      - |no|
 
-| :sup:`3` Mimic constraints in MuJoCo are supported for REVOLUTE and PRISMATIC joints only.
-| :sup:`4` VBD interprets ``joint_target_kd`` and ``joint_limit_kd`` as absolute damping coefficients in physical units.
-| :sup:`5` PhoenX supports reduced-coordinate DISTANCE trees and maximal-coordinate minimum/maximum distance bounds.
-| :sup:`6` Maximal PhoenX supports specialized D6 reductions and generic bilateral lock and drive layouts; finite generic-layout inequalities remain unsupported.
-| :sup:`7` PhoenX CABLE uses maximal direct rows with rigid axial stretch and soft bend/twist.
-| :sup:`8` PhoenX armature is exact on revolute/prismatic and supported D6 free axes; native BALL/FIXED/FREE joints have no scalar dynamic row.
-| :sup:`9` PhoenX joint friction and authored limit gains are currently limited to axial revolute/prismatic rows.
-| :sup:`10` PhoenX supports axial revolute/prismatic limits, maximal DISTANCE bounds, and angular limits on supported D6 reductions; finite Cartesian linear limits are unsupported.
-| :sup:`11` PhoenX supports axial velocity limits on revolute and prismatic joints.
+| :sup:`3` Featherstone eliminates follower degrees of freedom from its reduced dynamics and transfers follower forces and inertia to the reference joint.
+| :sup:`4` SemiImplicit enforces joint-owned mimic relationships with penalty springs configured by ``joint_mimic_ke`` and ``joint_mimic_kd``.
+| :sup:`5` XPBD and VBD enforce joint-owned mimic relationships through coupled maximal-coordinate corrections. Both apply one mimic correction per solver iteration.
+| :sup:`6` MuJoCo lowers each joint-owned relationship to joint equality constraints. Multi-axis D6 relationships produce one equality constraint per axis.
+| :sup:`7` VBD interprets ``joint_target_kd`` and ``joint_limit_kd`` as absolute damping coefficients in physical units.
+| :sup:`8` PhoenX supports reduced-coordinate DISTANCE trees and maximal-coordinate minimum/maximum distance bounds.
+| :sup:`9` Maximal PhoenX supports specialized D6 reductions and generic bilateral lock and drive layouts; finite generic-layout inequalities remain unsupported.
+| :sup:`10` PhoenX CABLE uses maximal direct rows with rigid axial stretch and soft bend/twist.
+| :sup:`11` PhoenX armature is exact on revolute/prismatic and supported D6 free axes; native BALL/FIXED/FREE joints have no scalar dynamic row.
+| :sup:`12` PhoenX joint friction and authored limit gains are currently limited to axial revolute/prismatic rows.
+| :sup:`13` PhoenX supports axial revolute/prismatic limits, maximal DISTANCE bounds, and angular limits on supported D6 reductions; finite Cartesian linear limits are unsupported.
+| :sup:`14` PhoenX supports axial velocity limits on revolute and prismatic joints.
 
 
 

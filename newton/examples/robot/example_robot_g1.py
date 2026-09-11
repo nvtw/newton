@@ -29,10 +29,11 @@ class Example:
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 6
+        self.sim_substeps = 4 if args.solver == "kamino" else 6
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.world_count = args.world_count
+        self.solver_type = args.solver
 
         self.viewer = viewer
 
@@ -43,7 +44,9 @@ class Example:
         )
 
         g1 = newton.ModelBuilder()
-        if solver_name == "mujoco":
+        if solver_name == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(g1)
+        elif solver_name == "mujoco":
             newton.solvers.SolverMuJoCo.register_custom_attributes(g1)
         g1.default_joint_cfg = newton.ModelBuilder.JointDofConfig(limit_ke=1.0e3, limit_kd=1.0e1, friction=1e-5)
         g1.default_shape_cfg.ke = 1.0e3
@@ -78,7 +81,7 @@ class Example:
         builder.add_ground_plane()
 
         self.model = builder.finalize()
-        use_mujoco_contacts = args.use_mujoco_contacts if args else False
+        use_mujoco_contacts = solver_name == "mujoco" and args.use_mujoco_contacts
 
         if solver_name == "phoenx":
             # Let PhoenX own the temporal schedule. Joint equalities solve
@@ -93,6 +96,19 @@ class Example:
                 velocity_iterations=2,
                 articulation_mode="reduced" if self.phoenx_reduced_coordinates else "maximal",
             )
+        elif solver_name == "kamino":
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
+            )
+            solver_config.dvi.max_alternating_iterations = 8
+            solver_config.dvi.bilateral_solve_interval = 8
+            solver_config.dvi.bilateral_solver_type = "LLTBRCM"
+            solver_config.dvi.omega = 1.2
+            solver_config.dvi.contact_warmstart_method = (
+                "key_and_position_with_net_force_backup_and_tangential_net_force"
+            )
+            solver_config.dvi.use_schur_complement = True
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverMuJoCo(
                 self.model,
@@ -210,7 +226,7 @@ class Example:
             < 0.015,  # Relaxed from 0.005 - G1 has higher residual velocities with collision pipeline
         )
         # fmt: on
-        if not self.phoenx_reduced_coordinates:
+        if self.solver_type == "phoenx" and not self.phoenx_reduced_coordinates:
             contact_count = int(self.contacts.rigid_contact_count.numpy()[0])
             shape_body = self.model.shape_body.numpy()
             shape0 = self.contacts.rigid_contact_shape0.numpy()
@@ -247,9 +263,9 @@ class Example:
         newton.examples.add_mujoco_contacts_arg(parser)
         parser.add_argument(
             "--solver",
-            choices=["mujoco", "phoenx"],
+            choices=["mujoco", "kamino", "phoenx"],
             default="phoenx",
-            help="Rigid-body solver backend. 'phoenx' (default) uses SolverPhoenX; 'mujoco' uses the MuJoCo/Warp solver.",
+            help="Rigid-body solver backend (default: phoenx).",
         )
         parser.set_defaults(viewer="optix", world_count=4)
         return parser
