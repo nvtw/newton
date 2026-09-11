@@ -1,1 +1,1 @@
-Improve Kamino contact allocation, warmstarting, and factorization, and make it available in the basic joints and selection cartpole examples. No migration is required.
+Make SolverKamino available in the basic joints example. No migration is required.
