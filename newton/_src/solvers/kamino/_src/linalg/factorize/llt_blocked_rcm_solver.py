@@ -51,6 +51,7 @@ from .llt_blocked_rcm import (
     make_llt_blocked_rcm_symbolic_fill_in_kernel,
 )
 from .llt_packed import _gather_intermediate, _PackedLLT, _transfer
+from .scalar_pattern import _ScalarFactorPattern
 
 ###
 # Module interface
@@ -164,6 +165,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._packed: _PackedLLT | None = None
         self._packed_matrix: wp.array | None = None
         self._packed_factor: wp.array | None = None
+        self._scalar_pattern: _ScalarFactorPattern | None = None
         self._L: wp.array[dtype] | None = None
         self._y: wp.array[dtype] | None = None
         # Reordering + semi-sparse state
@@ -302,19 +304,24 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
     # Implementation
     ###
 
-    def configure_sparse_assembly(self, pair_world: wp.array, pair_row: wp.array, pair_col: wp.array) -> None:
+    def configure_sparse_assembly(
+        self, pair_world: wp.array, pair_row: wp.array, pair_col: wp.array, *, scalar_pattern: bool = False
+    ) -> None:
         """Cache a fixed structural superset for direct assembly in numerical RCM order.
 
         Call outside capture, after allocation. Pairs describe all possible
         off-diagonal entries, including currently cancelling contributions.
         Changing this topology requires reconfiguration and graph recapture.
         Numerical resets retain the topology but invalidate its ordered mask.
+        Enable ``scalar_pattern`` only for repeated scalar factor responses;
+        other callers avoid its additional index and initialization storage.
         """
         if self._device.is_capturing:
             raise RuntimeError("Configure sparse assembly before graph capture.")
         self._packed = None
         self._packed_matrix = None
         self._packed_factor = None
+        self._scalar_pattern = None
         self._structural_pairs = None
         self._structural_pattern = None
         self._structural_ready = None
@@ -337,6 +344,8 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             self._packed = _PackedLLT(info.dimensions, self._device, self._tile_pattern, self._tpo, self._P, info.vio)
             self._packed_matrix = wp.zeros(self._packed.factor_size, dtype=wp.float32, device=self._device)
             self._packed_factor = wp.zeros_like(self._packed_matrix)
+            if scalar_pattern and sum(n * (n + 1) // 2 for n in info.dimensions) <= 2147483647:
+                self._scalar_pattern = _ScalarFactorPattern(info.dimensions, self._device)
 
     def compute_sparse(self, assemble: Callable[[wp.array, wp.array | None], None]) -> None:
         """Assemble and factor, preserving first-use numerical ordering.
@@ -390,6 +399,8 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             num_blocks=info.num_blocks,
             device=self._device,
         )
+        if self._scalar_pattern is not None:
+            self._scalar_pattern.initialize(*self._structural_pairs, self._inv_P, info.vio)
         self._structural_ready.fill_(1)
 
     def _compute_sparse_reuse(self, assemble: Callable) -> None:
@@ -410,6 +421,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._packed = None
         self._packed_matrix = None
         self._packed_factor = None
+        self._scalar_pattern = None
         self._permutation_initialized = False
         self._permutation_initialized_during_capture = False
         self._permutation_capture_id = None

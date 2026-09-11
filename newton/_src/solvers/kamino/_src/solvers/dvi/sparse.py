@@ -22,6 +22,7 @@ from .kernels import (
     _initialize_dvi_status,
     _scatter_bilateral_solution,
     _set_dvi_direct_status_iterations,
+    _solve_bilateral_unilateral_response_symbolic,
     make_find_bilateral_factor_row_start_kernel,
     make_find_bilateral_factor_row_start_rcm_kernel,
     make_solve_bilateral_unilateral_response_compact_kernel,
@@ -184,7 +185,18 @@ class SparseDVIPath:
             _build_sparse_bilateral_pairs(self, problem)
             _build_sparse_bilateral_row_nzb_topology(self, problem)
             if isinstance(self.bilateral_solver, LLTBlockedRCMSolver):
-                self.bilateral_solver.configure_sparse_assembly(*self.bilateral_nzb_pairs[:3])
+                self.bilateral_solver.configure_sparse_assembly(
+                    *self.bilateral_nzb_pairs[:3],
+                    scalar_pattern=(
+                        self.has_unilateral_constraints
+                        and self.use_schur_complement
+                        and self.max_alternating_iterations >= 4
+                        and not any(
+                            self.should_solve_bilateral_after_block(iteration)
+                            for iteration in range(self.max_alternating_iterations)
+                        )
+                    ),
+                )
 
     def solve(self, problem: DualProblem) -> None:
         """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
@@ -1224,8 +1236,11 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     # Independent columns amortize their serial work only in large batches.
     use_scalar_response = enable_compact_schur and use_permutation and path.size.num_worlds >= 2048
     if use_scalar_response:
+        scalar_pattern = path.bilateral_solver._scalar_pattern if packed and path.device.is_capturing else None
         wp.launch(
-            kernel=make_solve_bilateral_unilateral_response_compact_kernel(packed),
+            kernel=_solve_bilateral_unilateral_response_symbolic
+            if scalar_pattern is not None
+            else make_solve_bilateral_unilateral_response_compact_kernel(packed),
             dim=(path.size.num_worlds, max_unilateral_rows),
             inputs=[
                 problem.data.dim,
@@ -1240,6 +1255,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
                 state.bilateral_coupling,
                 state.bilateral_response,
                 state.bilateral_factor_row_start,
+                *(scalar_pattern.inputs if scalar_pattern is not None else []),
             ],
             device=path.device,
             block_dim=128,

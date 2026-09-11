@@ -675,6 +675,66 @@ def make_solve_bilateral_unilateral_response_compact_kernel(packed: bool = False
     return _solve_bilateral_unilateral_response_compact
 
 
+@wp.kernel
+def _solve_bilateral_unilateral_response_symbolic(
+    problem_dim: wp.array[int32],
+    problem_njc: wp.array[int32],
+    bilateral_mio: wp.array[wp.int64],
+    bilateral_vio: wp.array[int32],
+    bilateral_P: wp.array[float32],
+    bilateral_L: wp.array[float32],
+    bilateral_permutation: wp.array[int32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    coupling: wp.array[float32],
+    response: wp.array[float32],
+    factor_row_start: wp.array[int32],
+    pattern_row_offsets: wp.array[int32],
+    pattern_starts: wp.array[int32],
+    pattern_columns: wp.array[int32],
+):
+    """Whiten packed response columns using the conservative scalar factor pattern."""
+    wid, unilateral = wp.tid()
+    njc = problem_njc[wid]
+    nu = problem_dim[wid] - njc
+    if unilateral >= nu or not _compact_schur_fits(njc, nu, response_stride[wid]):
+        return
+    offset = response_mio[wid]
+    row_offset = pattern_row_offsets[wid]
+    nonfinite = int32(0)
+    for row in range(njc):
+        original_row = bilateral_permutation[bilateral_vio[wid] + row]
+        value = (
+            bilateral_P[bilateral_vio[wid] + original_row]
+            * coupling[offset + original_row * response_stride[wid] + unilateral]
+        )
+        for entry in range(pattern_starts[row_offset + row], pattern_starts[row_offset + row + 1] - 1):
+            k = pattern_columns[entry]
+            value -= (
+                bilateral_L[packed_element_offset(bilateral_mio[wid], row, k)] * response[offset + k * nu + unilateral]
+            )
+        result = value / bilateral_L[packed_element_offset(bilateral_mio[wid], row, row)]
+        nonfinite = nonfinite | int32(not wp.isfinite(result))
+        response[offset + row * nu + unilateral] = result
+    if nonfinite != int32(0):
+        # Recompute in dependency order so skipped zero products do not hide
+        # propagation from a nonfinite response. Signed zeros may still differ.
+        for row in range(njc):
+            original_row = bilateral_permutation[bilateral_vio[wid] + row]
+            value = (
+                bilateral_P[bilateral_vio[wid] + original_row]
+                * coupling[offset + original_row * response_stride[wid] + unilateral]
+            )
+            for k in range(factor_row_start[bilateral_vio[wid] + row], row):
+                value -= (
+                    bilateral_L[packed_element_offset(bilateral_mio[wid], row, k)]
+                    * response[offset + k * nu + unilateral]
+                )
+            response[offset + row * nu + unilateral] = (
+                value / bilateral_L[packed_element_offset(bilateral_mio[wid], row, row)]
+            )
+
+
 @cache
 def make_solve_bilateral_unilateral_response_cooperative_kernel(packed: bool = False):
     """Specialize factor addresses without changing response arithmetic.
