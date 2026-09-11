@@ -16,6 +16,7 @@ from ...geometry.keying import KeySorter
 from ...kinematics.jacobians import SparseSystemJacobians
 from ...kinematics.limits import LimitsKamino
 from ...linalg import LLTBlockedRCMSolver
+from ...linalg.factorize.llt_blocked_rcm import make_llt_blocked_rcm_solve_kernel
 from .kernels import (
     _FUSED_BILATERAL_BLOCK,
     _FUSED_INEQUALITY_BLOCK,
@@ -29,7 +30,7 @@ from .kernels import (
     make_solve_bilateral_unilateral_response_cooperative_kernel,
     make_solve_bilateral_unilateral_response_kernel,
 )
-from .response import make_response_kernel
+from .response import _update_forward_bilateral_rhs, make_response_kernel
 from .sparse_kernels import (
     _assemble_compact_unilateral_schur_tiled,
     _assemble_sparse_bilateral_unilateral_coupling,
@@ -1385,7 +1386,69 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             )
 
     cooperative_fused_pgs = _can_use_cooperative_articulation(path)
-    if has_intermediate_bilateral_solve or not cooperative_fused_pgs or enable_compact_schur:
+    # Update the cached forward solve by Y * delta_lambda, then back-substitute.
+    # The single-world capacity bound guarantees a whitened response layout.
+    if (
+        enable_compact_schur
+        and cooperative_fused_pgs
+        and not has_intermediate_bilateral_solve
+        and use_permutation
+        and not packed
+        and path.size.num_worlds == 1
+        and max_unilateral_rows <= max_joint_rows
+    ):
+        solver = path.bilateral_solver
+        info = path.data.bilateral_operator.info
+        wp.launch(
+            _update_forward_bilateral_rhs,
+            dim=(path.size.num_worlds, max_joint_rows, 32),
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                problem.data.vio,
+                info.vio,
+                state.bilateral_response_mio,
+                state.bilateral_response,
+                state.v_aug,
+                path.data.solution.lambdas,
+                solver._y,
+            ],
+            device=path.device,
+            block_dim=128,
+        )
+        wp.launch(
+            make_llt_blocked_rcm_solve_kernel(solver.block_size, False),
+            dim=(path.size.num_worlds, solver._solve_block_dim),
+            inputs=[
+                info.dim,
+                info.mio,
+                info.vio,
+                solver.tile_pattern_offsets,
+                solver.P,
+                solver.L,
+                solver.tile_pattern,
+                state.bilateral_rhs,
+                solver._y,
+                solver._x_hat,
+                state.bilateral_solution,
+            ],
+            device=path.device,
+            block_dim=solver._solve_block_dim,
+        )
+        wp.launch(
+            _scatter_bilateral_solution,
+            dim=(path.size.num_worlds, max_joint_rows),
+            inputs=[
+                problem.data.vio,
+                problem.data.njc,
+                info.vio,
+                state.bilateral_preconditioner,
+                state.bilateral_solution,
+                path.data.solution.lambdas,
+            ],
+            device=path.device,
+        )
+    elif has_intermediate_bilateral_solve or not cooperative_fused_pgs or enable_compact_schur:
         # Compact Schur stores whitened columns instead of full responses;
         # one fresh bilateral solve recovers the final joint impulses.
         path.set_bilateral_active_dim(problem, -1)

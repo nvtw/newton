@@ -8,7 +8,8 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.kamino._src.solvers.dvi.response import make_response_kernel
+from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked_rcm import make_llt_blocked_rcm_solve_kernel
+from newton._src.solvers.kamino._src.solvers.dvi.response import _update_forward_bilateral_rhs, make_response_kernel
 
 
 class TestKaminoBlockedResponse(unittest.TestCase):
@@ -64,6 +65,54 @@ class TestKaminoBlockedResponse(unittest.TestCase):
                 result = output.numpy()
                 np.testing.assert_allclose(result[: n * nu].reshape(n, nu), expected, rtol=2e-6, atol=2e-6)
                 np.testing.assert_array_equal(result[n * nu :], -123.0)
+
+                # Reuse these whitened columns to update a forward-solved RHS,
+                # then recover the final original-coordinate solution.
+                initial_y = rng.normal(size=n).astype(np.float32)
+                delta = rng.normal(0, 0.01, nu).astype(np.float32)
+                y = floats(initial_y)
+                wp.launch(
+                    _update_forward_bilateral_rhs,
+                    dim=(1, n, 32),
+                    inputs=[
+                        ints([n + nu]),
+                        ints([n]),
+                        ints([0]),
+                        ints([0]),
+                        ints([0]),
+                        output,
+                        floats(np.zeros(n + nu)),
+                        floats(np.concatenate((np.zeros(n), delta))),
+                        y,
+                    ],
+                    block_dim=128,
+                    device=device,
+                )
+                x = wp.empty(n, dtype=wp.float32, device=device)
+                wp.launch(
+                    make_llt_blocked_rcm_solve_kernel(32, False),
+                    dim=(1, 128),
+                    inputs=[
+                        ints([n]),
+                        ints([0]),
+                        ints([0]),
+                        ints([0]),
+                        ints(permutation),
+                        floats(lower),
+                        ints(pattern.ravel()),
+                        floats(np.full(n, np.nan)),
+                        y,
+                        wp.empty_like(y),
+                        x,
+                    ],
+                    block_dim=128,
+                    device=device,
+                )
+                expected_y = initial_y.astype(np.float64) - expected @ delta.astype(np.float64)
+                expected_x = np.empty(n)
+                expected_x[permutation] = np.linalg.solve(lower.astype(np.float64).T, expected_y)
+                np.testing.assert_allclose(y.numpy(), expected_y, rtol=2e-6, atol=2e-6)
+                np.testing.assert_allclose(x.numpy(), expected_x, rtol=2e-6, atol=2e-6)
 
     def test_heterogeneous_worlds(self):
         """Keep skipped worlds and padding intact with independent offsets."""

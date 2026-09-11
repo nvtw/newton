@@ -9,6 +9,7 @@ import warp as wp
 
 from ...linalg.factorize.llt_blocked_rcm import get_float32_array_offset_ptr
 from .kernels import _compact_schur_fits
+from .sparse_kernels import _subgroup_sum_32
 
 wp.set_module_options({"enable_backward": False})
 
@@ -78,3 +79,31 @@ def make_response_kernel():
             wp.tile_store(result, rhs, offset=(i, column))
 
     return response
+
+
+@wp.kernel
+def _update_forward_bilateral_rhs(
+    dim: wp.array[wp.int32],
+    njc: wp.array[wp.int32],
+    vio: wp.array[wp.int32],
+    bvio: wp.array[wp.int32],
+    rio: wp.array[wp.int32],
+    response: wp.array[wp.float32],
+    initial: wp.array[wp.float32],
+    lambdas: wp.array[wp.float32],
+    y: wp.array[wp.float32],
+):
+    """Update cached ``L^-1 P b`` by subtracting whitened responses times the impulse change."""
+    world, row, lane = wp.tid()
+    n = njc[world]
+    if row >= n:
+        return
+    nu = dim[world] - n
+    offset = vio[world] + n
+    value = wp.float32(0.0)
+    for column in range(lane, nu, 32):
+        delta = lambdas[offset + column] - initial[offset + column]
+        value += response[rio[world] + row * nu + column] * delta
+    value = _subgroup_sum_32(value)
+    if lane == 0:
+        y[bvio[world] + row] -= value

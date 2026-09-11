@@ -516,12 +516,14 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
 
 
 @cache
-def make_llt_blocked_rcm_solve_kernel(block_size: int):
+def make_llt_blocked_rcm_solve_kernel(block_size: int, forward_substitution: bool = True):
     """RCM solve with tile skipping and fused output un-permutation.
 
     The solve gathers the RHS into permuted coordinates, writes ``x_hat`` in
     permuted coordinates for backward-substitution dependencies, and scatters
     each solved tile directly to the original-coordinate output ``x``.
+    With ``forward_substitution=False``, ``y`` must already contain
+    ``L^-1 P b``; the kernel only performs backward substitution.
     """
 
     @wp.kernel
@@ -567,29 +569,30 @@ def make_llt_blocked_rcm_solve_kernel(block_size: int):
         P_i = wp.array(ptr=P_i_ptr, shape=(n_i,), dtype=wp.int32)
         TP_i = wp.array(ptr=tp_i_ptr, shape=(n_tiles, n_tiles), dtype=wp.int32)
 
-        # Forward substitution: solve L y = b.
-        for i in range(0, n_i_padded, block_size):
-            tile_i = i // block_size
-            rhs_tile = wp.tile_zeros(shape=(block_size, 1), dtype=wp.float32, storage="shared")
-            num_row_iterations = (block_size + num_threads_per_block - 1) // num_threads_per_block
-            for ii in range(num_row_iterations):
-                row = tid_block + ii * num_threads_per_block
-                active = row < block_size and i + row < n_i
-                value = wp.float32(0.0)
-                if active:
-                    value = b_i[P_i[i + row], 0]
-                wp.tile_scatter_masked(rhs_tile, row, 0, value, active)
-            L_diag = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
-            if i > 0:
-                for j in range(0, i, block_size):
-                    tile_j = j // block_size
-                    if TP_i[tile_i, tile_j] == int(0):
-                        continue
-                    L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
-                    y_block = wp.tile_load(y_i, shape=(block_size, 1), offset=(j, 0))
-                    wp.tile_matmul(L_block, y_block, rhs_tile, alpha=-1.0)
-            wp.tile_lower_solve_inplace(L_diag, rhs_tile)
-            wp.tile_store(y_i, rhs_tile, offset=(i, 0))
+        if wp.static(forward_substitution):
+            # Forward substitution: solve L y = b.
+            for i in range(0, n_i_padded, block_size):
+                tile_i = i // block_size
+                rhs_tile = wp.tile_zeros(shape=(block_size, 1), dtype=wp.float32, storage="shared")
+                num_row_iterations = (block_size + num_threads_per_block - 1) // num_threads_per_block
+                for ii in range(num_row_iterations):
+                    row = tid_block + ii * num_threads_per_block
+                    active = row < block_size and i + row < n_i
+                    value = wp.float32(0.0)
+                    if active:
+                        value = b_i[P_i[i + row], 0]
+                    wp.tile_scatter_masked(rhs_tile, row, 0, value, active)
+                L_diag = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
+                if i > 0:
+                    for j in range(0, i, block_size):
+                        tile_j = j // block_size
+                        if TP_i[tile_i, tile_j] == int(0):
+                            continue
+                        L_block = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, j))
+                        y_block = wp.tile_load(y_i, shape=(block_size, 1), offset=(j, 0))
+                        wp.tile_matmul(L_block, y_block, rhs_tile, alpha=-1.0)
+                wp.tile_lower_solve_inplace(L_diag, rhs_tile)
+                wp.tile_store(y_i, rhs_tile, offset=(i, 0))
 
         # Backward substitution: solve L^T x_hat = y and scatter x_hat -> x.
         for i in range(n_i_padded - block_size, -1, -block_size):
