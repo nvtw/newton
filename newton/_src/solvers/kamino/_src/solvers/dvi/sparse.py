@@ -1385,9 +1385,11 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         block_dim=response_block_dim,
     )
     if enable_compact_schur:
+        # Expose more independent Gram tiles when there are few worlds.
+        schur_groups = 128 if path.size.num_worlds <= 16 else 16
         wp.launch(
             kernel=_assemble_compact_unilateral_schur_tiled,
-            dim=(path.size.num_worlds, 16, 128),
+            dim=(path.size.num_worlds, schur_groups, 128),
             inputs=[
                 problem.data.dim,
                 problem.data.njc,
@@ -1397,6 +1399,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
                 state.bilateral_response,
                 state.bilateral_response_factor,
                 state.s,
+                schur_groups,
             ],
             device=path.device,
             block_dim=128,

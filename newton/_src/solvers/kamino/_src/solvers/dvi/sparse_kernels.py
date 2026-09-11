@@ -1762,6 +1762,7 @@ def _assemble_compact_unilateral_schur_tiled(
     response: wp.array[float32],
     compact_schur: wp.array[float32],
     compact_q: wp.array[float32],
+    groups_per_world: int32,
 ):
     """Form the whitened response Gram matrix using FP32 tiles."""
     wid, group, lane = wp.tid()
@@ -1781,7 +1782,7 @@ def _assemble_compact_unilateral_schur_tiled(
     )
     tiles = (nu + 15) // 16
     # Spread each world's tiles over a fixed number of independent blocks.
-    for tile in range(group, tiles * tiles, 16):
+    for tile in range(group, tiles * tiles, groups_per_world):
         row = (tile // tiles) * 16
         col = (tile % tiles) * 16
         # Off-diagonal Gram blocks share the same dot products.

@@ -41,13 +41,24 @@ class TestSchurLayout(unittest.TestCase):
             schur,
             correction,
         ]
-        wp.launch(
-            _assemble_compact_unilateral_schur_tiled, dim=(3, 16, 128), inputs=inputs, block_dim=128, device=device
-        )
-        with wp.ScopedCapture(device=device) as capture:
+        graphs = []
+        for groups in (8, 16, 128):
             wp.launch(
-                _assemble_compact_unilateral_schur_tiled, dim=(3, 16, 128), inputs=inputs, block_dim=128, device=device
+                _assemble_compact_unilateral_schur_tiled,
+                dim=(3, groups, 128),
+                inputs=[*inputs, groups],
+                block_dim=128,
+                device=device,
             )
+            with wp.ScopedCapture(device=device) as capture:
+                wp.launch(
+                    _assemble_compact_unilateral_schur_tiled,
+                    dim=(3, groups, 128),
+                    inputs=[*inputs, groups],
+                    block_dim=128,
+                    device=device,
+                )
+            graphs.append(capture.graph)
 
         rng = np.random.default_rng(941)
         for counts in ([4, 0, 129], [0, 0, 0], [1, 1, 130], [5, 0, 160], [3, 0, 7], [4, 0, 129]):
@@ -64,11 +75,17 @@ class TestSchurLayout(unittest.TestCase):
                     start = vector_offsets[world] + n
                     expected_correction[start : start + nu] = 0.0
             response.assign(source)
-            schur.fill_(-222.0)
-            correction.fill_(-333.0)
-            wp.capture_launch(capture.graph)
-            np.testing.assert_allclose(schur.numpy(), expected, atol=1.0e-8, rtol=2.0e-6)
-            np.testing.assert_array_equal(correction.numpy(), expected_correction)
+            reference = None
+            for graph in graphs:
+                schur.fill_(-222.0)
+                correction.fill_(-333.0)
+                wp.capture_launch(graph)
+                result = schur.numpy()
+                np.testing.assert_allclose(result, expected, atol=1.0e-8, rtol=2.0e-6)
+                np.testing.assert_array_equal(correction.numpy(), expected_correction)
+                if reference is not None:
+                    np.testing.assert_array_equal(result, reference)
+                reference = result
 
 
 if __name__ == "__main__":
