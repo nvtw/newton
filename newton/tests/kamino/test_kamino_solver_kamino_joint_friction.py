@@ -321,6 +321,11 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
                 solver._solver_kamino.data.joints.lambda_f_j.numpy(), torque, atol=1.0e-3, rtol=0.0
             )
 
+        if wp.get_device(test_context.device).is_cuda:
+            iterations = solver._solver_kamino.solver_status.numpy()["iterations"]
+            self.assertTrue(np.all(iterations > 0))
+            self.assertTrue(np.all(iterations < 16), msg=str(iterations))
+
     def test_multiworld_sparse_friction_offsets(self):
         """Place sparse friction rows in their owning world's bounded group."""
         builder = newton.ModelBuilder()

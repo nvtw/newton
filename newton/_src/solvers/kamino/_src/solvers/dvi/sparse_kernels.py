@@ -2301,6 +2301,8 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
 
     Full compact operators and velocities must be initialized by
     ``_prepare_full_sparse_unilateral_schur`` before this launch.
+    Contact-free full operators stop at exact impulse fixed points and
+    report the completed sweep count for fused bilateral solves.
     """
     tid = wp.tid()
     lane = tid % int32(32)
@@ -2346,7 +2348,9 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     elif block_iteration == int32(_FUSED_BILATERAL_BLOCK):
         sweep_count *= cfg.max_alternating_iterations
 
+    completed_sweeps = int32(0)
     for sweep in range(sweep_count):
+        sweep_changed = wp.bool(False)
         phase_count = int32(2)
         if block_iteration == int32(_FUSED_INEQUALITY_BLOCK) and sweep < first_tangent_sweep:
             phase_count = int32(1)
@@ -2586,6 +2590,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                 solution_lambdas[index] = new_lambda
                         delta_0 = _broadcast_lane_0_32(delta_0)
                         delta_1 = _broadcast_lane_0_32(delta_1)
+                        sweep_changed = sweep_changed or delta_0 != float32(0.0) or delta_1 != float32(0.0)
                         if mapped_id >= int32(0) and (delta_0 != float32(0.0) or delta_1 != float32(0.0)):
                             component = _cooperative_unilateral_component(uid, scalar_count, phase)
                             if use_compact_schur:
@@ -2625,9 +2630,14 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                         )
                         _sync_warp_32()
 
+        completed_sweeps = sweep + int32(1)
+        # An exact fixed point stays unchanged in all remaining scalar sweeps.
+        if use_full_schur and nc == int32(0) and not sweep_changed:
+            break
+
     if lane == int32(0) and block_iteration == int32(_FUSED_BILATERAL_BLOCK):
         status = solver_status[wid]
-        status.iterations = cfg.max_alternating_iterations * cfg.inequality_sweeps_per_iteration
+        status.iterations = completed_sweeps
         solver_status[wid] = status
 
 
