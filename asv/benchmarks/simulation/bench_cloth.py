@@ -21,20 +21,7 @@ from newton.examples.cloth.example_cloth_franka import Example as ExampleClothMa
 from newton.examples.cloth.example_cloth_twist import Example as ExampleClothTwist
 from newton.viewer import ViewerNull
 
-DEFORMABLE_COLLISION_CASES = (
-    ("dense_unfiltered", 256, 1, 0),
-    ("dense_filtered", 128, 1, 2),
-    ("dense_unfiltered", 16, 1024, 0),
-    ("dense_filtered", 16, 128, 2),
-    ("sparse", 16, 128, 2),
-    ("folded", 32, 32, 2),
-    ("layered", 16, 64, 2),
-)
-
-DEFORMABLE_COLLISION_SCALE_CASES = (
-    ("dense_10m", 16, 11112, 1),
-    ("sparse_10m", 64, 630, 1),
-)
+DEFORMABLE_COLLISION_CASES = ((256, 1), (16, 1024))
 
 DEFORMABLE_RIGID_CASES = (
     ("sphere_dense", "sphere", 64, 128, 1, False),
@@ -75,32 +62,18 @@ def _make_collision_grid(resolution, height):
     return vertices, np.asarray(triangles, dtype=np.int32)
 
 
-def _make_collision_world(scene, resolution):
-    heights = (
-        (0.0, 0.006, 0.012, 0.018)
-        if scene.startswith("layered")
-        else (0.0, 0.1 if scene.startswith("sparse") else 0.006)
-    )
-    vertices = []
-    triangles = []
-    vertex_offset = 0
-    for layer, height in enumerate(heights):
-        layer_vertices, layer_triangles = _make_collision_grid(resolution, height)
-        if scene.startswith("folded") and layer == 1:
-            extent = max((resolution - 1) * 0.01, 0.01)
-            layer_vertices[:, 2] += 0.04 * (layer_vertices[:, 0] / extent - 0.5)
-        vertices.append(layer_vertices)
-        triangles.append(layer_triangles + vertex_offset)
-        vertex_offset += len(layer_vertices)
-
+def _make_collision_world(resolution):
+    vertices_a, triangles_a = _make_collision_grid(resolution, 0.0)
+    vertices_b, triangles_b = _make_collision_grid(resolution, 0.006)
+    triangles_b += len(vertices_a)
     world = newton.ModelBuilder(gravity=wp.vec3(0.0))
     world.add_cloth_mesh(
         pos=wp.vec3(0.0),
         rot=wp.quat_identity(),
         scale=1.0,
         vel=wp.vec3(0.0),
-        vertices=np.concatenate(vertices),
-        indices=np.concatenate(triangles).reshape(-1),
+        vertices=np.concatenate((vertices_a, vertices_b)),
+        indices=np.concatenate((triangles_a, triangles_b)).reshape(-1),
         density=1.0,
         tri_ke=1.0,
         tri_ka=1.0,
@@ -186,8 +159,8 @@ def _make_deformable_rigid_world(kind, resolution, shape_count, sparse):
     return world
 
 
-class DeformableSelfCollision:
-    """Benchmark dense self-collision in one large and many RL-style worlds."""
+class FastDeformableSelfCollision:
+    """Benchmark self-collision detection in one large cloth and many replicated worlds."""
 
     params = (DEFORMABLE_COLLISION_CASES,)
     param_names = ["case"]
@@ -201,21 +174,23 @@ class DeformableSelfCollision:
         if not device.is_cuda:
             raise SkipNotImplemented
 
-        scene, resolution, world_count, filter_threshold = case
+        resolution, world_count = case
         builder = newton.ModelBuilder()
-        builder.replicate(_make_collision_world(scene, resolution), world_count)
+        builder.replicate(_make_collision_world(resolution), world_count)
         self.model = builder.finalize(device=device)
         self.detector = TriMeshCollisionDetector(
             self.model,
             init_collision_info=True,
-            topological_contact_filter_threshold=filter_threshold,
-            vertex_collision_buffer_pre_alloc=32,
+            topological_contact_filter_threshold=0,
+            vertex_collision_buffer_pre_alloc=64,
             edge_collision_buffer_pre_alloc=64,
         )
         self.radius = 0.012
 
         for _ in range(self.warmup_count):
             self._detect()
+        if self.detector.resize_flags.numpy().any():
+            raise RuntimeError("collision buffers overflowed; increase the pre-allocated sizes")
         with wp.ScopedCapture(device=device) as capture:
             self._detect()
         self.graph = capture.graph
@@ -230,15 +205,6 @@ class DeformableSelfCollision:
         for _ in range(self.launch_count):
             wp.capture_launch(self.graph)
         wp.synchronize_device()
-
-
-class DeformableSelfCollisionScale(DeformableSelfCollision):
-    """Sample GPU-saturating self-collision scales once per revision."""
-
-    params = (DEFORMABLE_COLLISION_SCALE_CASES,)
-    repeat = 1
-    warmup_count = 1
-    launch_count = 3
 
 
 class DeformableRigidCollision:
@@ -348,8 +314,7 @@ if __name__ == "__main__":
     from newton.utils import run_benchmark
 
     benchmark_list = {
-        "DeformableSelfCollision": DeformableSelfCollision,
-        "DeformableSelfCollisionScale": DeformableSelfCollisionScale,
+        "FastDeformableSelfCollision": FastDeformableSelfCollision,
         "DeformableRigidCollision": DeformableRigidCollision,
         "DeformableRigidCollisionScale": DeformableRigidCollisionScale,
         "FastExampleClothManipulation": FastExampleClothManipulation,
