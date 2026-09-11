@@ -2301,8 +2301,8 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
 
     Full compact operators and velocities must be initialized by
     ``_prepare_full_sparse_unilateral_schur`` before this launch.
-    Contact-free full operators stop at exact impulse fixed points and
-    report the completed sweep count for fused bilateral solves.
+    Contact-free full operators stop at exact impulse fixed points or
+    bounded-row stationarity and report the completed sweep count.
     """
     tid = wp.tid()
     lane = tid % int32(32)
@@ -2634,6 +2634,33 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
         # An exact fixed point stays unchanged in all remaining scalar sweeps.
         if use_full_schur and nc == int32(0) and not sweep_changed:
             break
+
+        # Tiny impulse updates alone do not certify weak friction. Require
+        # correct signs on the box faces and physical velocity tolerance
+        # inside the box, as well as the configured projected-update tolerance.
+        if use_full_schur and nc == int32(0) and nl == int32(0) and cfg.tolerance > float32(0.0):
+            violations = float32(0.0)
+            for bounded_row in range(lane, nbc, int32(32)):
+                index = vio + njc + bounded_row
+                value = solution_lambdas[index]
+                gradient = compact_q[index]
+                lower = problem_bound_lower[bcio + bounded_row]
+                upper = problem_bound_upper[bcio + bounded_row]
+                valid = wp.isfinite(value) and wp.isfinite(gradient) and value >= lower and value <= upper
+                stationary = lower == upper
+                stationary = stationary or (value == lower and gradient >= float32(0.0))
+                stationary = stationary or (value == upper and gradient <= float32(0.0))
+                stationary = stationary or (
+                    value > lower and value < upper and wp.abs(gradient) <= cfg.tolerance * wp.abs(problem_P[index])
+                )
+                projected = _project_box_update(
+                    value, gradient, projected_diag[index], cfg.regularization, cfg.omega, lower, upper
+                )
+                valid = valid and wp.isfinite(projected) and wp.abs(projected - value) <= cfg.tolerance
+                if not valid or not stationary:
+                    violations += float32(1.0)
+            if _subgroup_sum_32(violations) == float32(0.0):
+                break
 
     if lane == int32(0) and block_iteration == int32(_FUSED_BILATERAL_BLOCK):
         status = solver_status[wid]

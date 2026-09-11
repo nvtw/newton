@@ -1,0 +1,1 @@
+Stop contact-free compact Kamino DVI friction sweeps when box stationarity and the configured convergence tolerance are satisfied, preserving sliding friction even for tiny impulse bounds. No configuration changes are required.
