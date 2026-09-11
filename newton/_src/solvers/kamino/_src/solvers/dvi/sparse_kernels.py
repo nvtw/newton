@@ -2766,9 +2766,10 @@ def _solve_dvi_compact_schur_pgs_cooperative(
 
     Handles the fused-bilateral schedule for worlds with contacts whose compact
     operator fits in 128 rows; ``_solve_dvi_sparse_inequalities_pgs_cooperative``
-    covers the remaining worlds. The reversed sweep order lives in shared
-    memory, and each row's Schur entries are prefetched while the previous row
-    is projected, which shortens the serial dependency chain per row.
+    covers the remaining worlds. The reversed sweep order and the compact
+    velocity live in shared memory, and each row's Schur entries and projection
+    inputs are gathered one row ahead, so the serial per-row chain is mostly
+    on-chip.
     """
     tid = wp.tid()
     lane = tid % int32(32)
@@ -2823,111 +2824,149 @@ def _solve_dvi_compact_schur_pgs_cooperative(
             position += count
     _sync_warp_32()
 
+    # Keep the compact velocity in shared memory. Tile element writes
+    # synchronize the block, so every lane always writes: lanes beyond nu
+    # target a scratch slot whose value is never read.
+    q = wp.tile_zeros(shape=(160,), dtype=float32, storage="shared")
+    for chunk in range(4):
+        target = lane + int32(32) * chunk
+        index = wp.where(target < nu, target, int32(128) + lane)
+        q_value = compact_q[q_offset + wp.min(target, nu - int32(1))]
+        q[index] = wp.where(target < nu, q_value, float32(0.0))
+
     sweep_count = cfg.inequality_sweeps_per_iteration * cfg.max_alternating_iterations
+    uid = int32(0)
+    unilateral_row = int32(0)
+    component = int32(0)
+    index = int32(0)
+    mapped_id = int32(0)
+    s_row = wp.vec4f()
+    t_row = wp.vec4f()
+    old_lambda = float32(0.0)
+    diagonal = float32(0.0)
+    lower = float32(0.0)
+    upper = float32(0.0)
+    old_lambda_1 = float32(0.0)
+    diagonal_1 = float32(0.0)
     for sweep in range(sweep_count):
         for phase in range(2):
             use_reverse = phase == int32(1) and (sweep % cfg.inequality_sweeps_per_iteration) % int32(2) != int32(0)
-            uid_next = inequality_ids_by_color[uio]
-            if use_reverse:
-                uid_next = reverse[0]
-            row_next = _compact_unilateral_row(uid_next, nbc, scalar_count, bcgo, lcgo, ccgo, njc)
-            component_next = _cooperative_unilateral_component(uid_next, scalar_count, phase)
-            s_next = _load_compact_schur_row(compact_schur, s_offset + (row_next + component_next) * nu, lane, nu)
-            t_next = wp.vec4f()
-            if uid_next >= scalar_count and phase != int32(0):
-                t_next = _load_compact_schur_row(compact_schur, s_offset + (row_next + int32(1)) * nu, lane, nu)
-            for slot in range(slots):
-                uid = uid_next
-                unilateral_row = row_next
-                component = component_next
-                s_row = s_next
-                t_row = t_next
-                if slot + int32(1) < slots:
-                    uid_next = inequality_ids_by_color[uio + slot + int32(1)]
+            # One-slot software pipeline: gather everything the next row
+            # needs while the current row is projected serially on lane 0.
+            for step in range(slots + int32(1)):
+                uid_next = int32(0)
+                row_next = int32(0)
+                component_next = int32(0)
+                index_next = int32(0)
+                mapped_next = int32(-1)
+                s_next = wp.vec4f()
+                t_next = wp.vec4f()
+                lambda_next = float32(0.0)
+                diagonal_next = float32(0.0)
+                lower_next = float32(0.0)
+                upper_next = float32(0.0)
+                lambda_next_1 = float32(0.0)
+                diagonal_next_1 = float32(0.0)
+                if step < slots:
+                    uid_next = inequality_ids_by_color[uio + step]
                     if use_reverse:
-                        uid_next = reverse[slot + int32(1)]
-                    row_next = _compact_unilateral_row(uid_next, nbc, scalar_count, bcgo, lcgo, ccgo, njc)
-                    component_next = _cooperative_unilateral_component(uid_next, scalar_count, phase)
-                    s_next = _load_compact_schur_row(
-                        compact_schur, s_offset + (row_next + component_next) * nu, lane, nu
-                    )
-                    t_next = wp.vec4f()
-                    if uid_next >= scalar_count and phase != int32(0):
-                        t_next = _load_compact_schur_row(compact_schur, s_offset + (row_next + int32(1)) * nu, lane, nu)
-                if uid < scalar_count and phase != int32(0):
-                    continue
+                        uid_next = reverse[step]
+                    tangent_next = uid_next >= scalar_count and phase != int32(0)
+                    if uid_next >= scalar_count or phase == int32(0):
+                        row_next = _compact_unilateral_row(uid_next, nbc, scalar_count, bcgo, lcgo, ccgo, njc)
+                        component_next = _cooperative_unilateral_component(uid_next, scalar_count, phase)
+                        index_next = q_offset + row_next + component_next
+                        s_next = _load_compact_schur_row(
+                            compact_schur, s_offset + (row_next + component_next) * nu, lane, nu
+                        )
+                        mapped_next = bcio + uid_next
+                        if uid_next >= scalar_count:
+                            mapped_next = contact_indices[cio + uid_next - scalar_count]
+                        elif uid_next >= nbc:
+                            mapped_next = limit_indices[lio + uid_next - nbc]
+                        lambda_next = solution_lambdas[index_next]
+                        diagonal_next = projected_diag[index_next]
+                        if uid_next < nbc:
+                            lower_next = problem_bound_lower[mapped_next]
+                            upper_next = problem_bound_upper[mapped_next]
+                        if tangent_next:
+                            t_next = _load_compact_schur_row(
+                                compact_schur, s_offset + (row_next + int32(1)) * nu, lane, nu
+                            )
+                            lambda_next_1 = solution_lambdas[index_next + int32(1)]
+                            diagonal_next_1 = projected_diag[index_next + int32(1)]
+                process = step > int32(0) and mapped_id >= int32(0) and (uid >= scalar_count or phase == int32(0))
                 delta_0 = float32(0.0)
                 delta_1 = float32(0.0)
-                if lane == int32(0):
-                    mapped_id = bcio + uid
-                    if uid >= scalar_count:
-                        mapped_id = contact_indices[cio + uid - scalar_count]
-                    elif uid >= nbc:
-                        mapped_id = limit_indices[lio + uid - nbc]
-                    if mapped_id >= int32(0):
-                        index = q_offset + unilateral_row + component
-                        correction_0 = compact_q[index]
-                        old_lambda = solution_lambdas[index]
-                        new_lambda = old_lambda
-                        if uid < nbc:
-                            new_lambda = _project_box_update(
-                                old_lambda,
-                                correction_0,
-                                projected_diag[index],
+                if process and lane == int32(0):
+                    correction_0 = q[unilateral_row + component]
+                    new_lambda = old_lambda
+                    if uid < nbc:
+                        new_lambda = _project_box_update(
+                            old_lambda, correction_0, diagonal, cfg.regularization, cfg.omega, lower, upper
+                        )
+                    elif uid < scalar_count:
+                        if diagonal > FLOAT32_EPS:
+                            new_lambda = wp.max(
+                                float32(0.0),
+                                old_lambda - cfg.omega * correction_0 / (diagonal + cfg.regularization + FLOAT32_EPS),
+                            )
+                    elif phase == int32(0):
+                        new_lambda = _project_contact_normal_update(
+                            old_lambda, correction_0, diagonal, cfg.regularization, cfg.omega
+                        )
+                    else:
+                        old_tangent = wp.vec2f(old_lambda, old_lambda_1)
+                        new_tangent = _project_contact_tangent_update(
+                            old_tangent,
+                            wp.vec2f(correction_0, q[unilateral_row + int32(1)]),
+                            wp.vec2f(diagonal, diagonal_1),
+                            -compact_schur[s_offset + (unilateral_row + int32(1)) * nu + unilateral_row],
+                            cfg.regularization,
+                            cfg.omega,
+                            problem_mu[cio + uid - scalar_count]
+                            * _contact_friction_normal_load(
+                                solution_lambdas[index + int32(2)],
+                                problem_v_b[index + int32(2)],
+                                problem_P[index + int32(2)],
+                                wp.abs(problem_diag[index + int32(2)])
+                                * problem_P[index + int32(2)]
+                                * problem_P[index + int32(2)],
                                 cfg.regularization,
                                 cfg.omega,
-                                problem_bound_lower[mapped_id],
-                                problem_bound_upper[mapped_id],
-                            )
-                        elif uid < scalar_count:
-                            diagonal = projected_diag[index]
-                            if diagonal > FLOAT32_EPS:
-                                new_lambda = wp.max(
-                                    float32(0.0),
-                                    old_lambda
-                                    - cfg.omega * correction_0 / (diagonal + cfg.regularization + FLOAT32_EPS),
-                                )
-                        elif phase == int32(0):
-                            new_lambda = _project_contact_normal_update(
-                                old_lambda, correction_0, projected_diag[index], cfg.regularization, cfg.omega
-                            )
-                        else:
-                            old_tangent = wp.vec2f(old_lambda, solution_lambdas[index + int32(1)])
-                            new_tangent = _project_contact_tangent_update(
-                                old_tangent,
-                                wp.vec2f(correction_0, compact_q[index + int32(1)]),
-                                wp.vec2f(projected_diag[index], projected_diag[index + int32(1)]),
-                                -compact_schur[s_offset + (unilateral_row + int32(1)) * nu + unilateral_row],
-                                cfg.regularization,
-                                cfg.omega,
-                                problem_mu[cio + uid - scalar_count]
-                                * _contact_friction_normal_load(
-                                    solution_lambdas[index + int32(2)],
-                                    problem_v_b[index + int32(2)],
-                                    problem_P[index + int32(2)],
-                                    wp.abs(problem_diag[index + int32(2)])
-                                    * problem_P[index + int32(2)]
-                                    * problem_P[index + int32(2)],
-                                    cfg.regularization,
-                                    cfg.omega,
-                                ),
-                            )
-                            new_lambda = new_tangent.x
-                            delta_1 = new_tangent.y - old_tangent.y
-                            solution_lambdas[index + int32(1)] = new_tangent.y
-                        delta_0 = new_lambda - old_lambda
-                        solution_lambdas[index] = new_lambda
+                            ),
+                        )
+                        new_lambda = new_tangent.x
+                        delta_1 = new_tangent.y - old_tangent.y
+                        solution_lambdas[index + int32(1)] = new_tangent.y
+                    delta_0 = new_lambda - old_lambda
+                    solution_lambdas[index] = new_lambda
                 delta_0 = _broadcast_lane_0_32(delta_0)
                 delta_1 = _broadcast_lane_0_32(delta_1)
                 if delta_0 != float32(0.0) or delta_1 != float32(0.0):
                     for chunk in range(4):
                         target = lane + int32(32) * chunk
-                        if target < nu:
-                            update = s_row[chunk] * delta_0
-                            update += t_row[chunk] * delta_1
-                            compact_q[q_offset + target] -= update
-                _sync_warp_32()
+                        q_index = wp.where(target < nu, target, int32(128) + lane)
+                        update = s_row[chunk] * delta_0
+                        update += t_row[chunk] * delta_1
+                        q[q_index] = q[q_index] - update
+                # Rotate the pipeline; the next row's registers become current.
+                uid = uid_next
+                unilateral_row = row_next
+                component = component_next
+                index = index_next
+                mapped_id = mapped_next
+                s_row = s_next
+                t_row = t_next
+                old_lambda = lambda_next
+                diagonal = diagonal_next
+                lower = lower_next
+                upper = upper_next
+                old_lambda_1 = lambda_next_1
+                diagonal_1 = diagonal_next_1
 
+    for target in range(lane, nu, int32(32)):
+        compact_q[q_offset + target] = q[target]
     if lane == int32(0):
         status = solver_status[wid]
         status.iterations = sweep_count
