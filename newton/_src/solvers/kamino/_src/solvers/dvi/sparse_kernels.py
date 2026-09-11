@@ -1787,12 +1787,17 @@ def _assemble_compact_unilateral_schur_tiled(
     compact_schur: wp.array[float32],
     compact_q: wp.array[float32],
     groups_per_world: int32,
+    min_rows: int32,
 ):
-    """Form the whitened response Gram matrix using FP32 tiles."""
+    """Form the whitened response Gram matrix using FP32 tiles.
+
+    Worlds with fewer than ``min_rows`` compact rows are left to
+    ``_assemble_compact_unilateral_schur_blocked``.
+    """
     wid, group, lane = wp.tid()
     njc = problem_njc[wid]
     nu = problem_dim[wid] - njc
-    if not _compact_schur_fits(njc, nu, response_stride[wid]):
+    if nu < min_rows or not _compact_schur_fits(njc, nu, response_stride[wid]):
         return
     if group == 0:
         for row in range(lane, nu, wp.block_dim()):
@@ -1820,6 +1825,66 @@ def _assemble_compact_unilateral_schur_tiled(
         wp.tile_store(out, accum, offset=(row, col))
         if row != col:
             wp.tile_store(out, wp.tile_transpose(accum), offset=(col, row))
+
+
+@wp.kernel
+def _assemble_compact_unilateral_schur_blocked(
+    problem_dim: wp.array[int32],
+    problem_njc: wp.array[int32],
+    problem_vio: wp.array[int32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    response: wp.array[float32],
+    compact_schur: wp.array[float32],
+    compact_q: wp.array[float32],
+):
+    """Form the whitened response Gram matrix with one block per world.
+
+    Rows of the whitened responses are staged in shared memory with one
+    coalesced tile load, and each thread accumulates a 4x4 block of the
+    upper triangle in registers, so the responses stream through the SM once
+    per world and every shared read feeds four multiply-adds.
+    """
+    wid, lane = wp.tid()
+    njc = problem_njc[wid]
+    nu = problem_dim[wid] - njc
+    if nu > int32(128) or not _compact_schur_fits(njc, nu, response_stride[wid]):
+        # `_assemble_compact_unilateral_schur_tiled` covers wider operators.
+        return
+    for row in range(lane, nu, wp.block_dim()):
+        compact_q[problem_vio[wid] + njc + row] = float32(0.0)
+    offset = response_mio[wid]
+    y = wp.array(ptr=get_float32_array_offset_ptr(response, offset), shape=(njc, nu), dtype=float32)
+    blocks = (nu + int32(3)) / int32(4)
+    # Each pass assigns one upper-triangle 4x4 block per thread; larger
+    # operators stream the responses again for the remaining blocks.
+    for first in range(int32(0), blocks * blocks, wp.block_dim()):
+        block = first + lane
+        block_row = block / blocks
+        block_col = block - block_row * blocks
+        active = block < blocks * blocks and block_row <= block_col
+        row0 = int32(4) * block_row
+        col0 = int32(4) * block_col
+        accum = wp.mat44f()
+        for k in range(int32(0), njc, int32(8)):
+            # Out-of-range rows and columns load as zero.
+            rows = wp.tile_load(y, shape=(8, 128), offset=(k, 0), storage="shared")
+            if active:
+                for kk in range(8):
+                    a = wp.vec4f(rows[kk, row0], rows[kk, row0 + 1], rows[kk, row0 + 2], rows[kk, row0 + 3])
+                    b = wp.vec4f(rows[kk, col0], rows[kk, col0 + 1], rows[kk, col0 + 2], rows[kk, col0 + 3])
+                    for i in range(4):
+                        for j in range(4):
+                            accum[i, j] += a[i] * b[j]
+        if active:
+            for i in range(4):
+                row = row0 + i
+                if row < nu:
+                    for j in range(4):
+                        col = col0 + j
+                        if col < nu and col >= row:
+                            compact_schur[offset + row * nu + col] = accum[i, j]
+                            compact_schur[offset + col * nu + row] = accum[i, j]
 
 
 @wp.kernel

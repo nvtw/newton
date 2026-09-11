@@ -46,7 +46,7 @@ class TestSchurLayout(unittest.TestCase):
             wp.launch(
                 _assemble_compact_unilateral_schur_tiled,
                 dim=(3, groups, 128),
-                inputs=[*inputs, groups],
+                inputs=[*inputs, groups, 0],
                 block_dim=128,
                 device=device,
             )
@@ -54,7 +54,7 @@ class TestSchurLayout(unittest.TestCase):
                 wp.launch(
                     _assemble_compact_unilateral_schur_tiled,
                     dim=(3, groups, 128),
-                    inputs=[*inputs, groups],
+                    inputs=[*inputs, groups, 0],
                     block_dim=128,
                     device=device,
                 )

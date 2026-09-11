@@ -32,6 +32,7 @@ from .kernels import (
 )
 from .response import _add_forward_bilateral_gradient, _update_forward_bilateral_rhs, make_response_kernel
 from .sparse_kernels import (
+    _assemble_compact_unilateral_schur_blocked,
     _assemble_compact_unilateral_schur_tiled,
     _assemble_sparse_bilateral_unilateral_coupling,
     _build_sparse_bilateral_rhs,
@@ -1434,10 +1435,9 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     )
     if enable_compact_schur:
         # Expose more independent Gram tiles when there are few worlds.
-        schur_groups = 128 if path.size.num_worlds <= 16 else 16
         wp.launch(
-            kernel=_assemble_compact_unilateral_schur_tiled,
-            dim=(path.size.num_worlds, schur_groups, 128),
+            kernel=_assemble_compact_unilateral_schur_blocked,
+            dim=(path.size.num_worlds, 256),
             inputs=[
                 problem.data.dim,
                 problem.data.njc,
@@ -1447,11 +1447,29 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
                 state.bilateral_response,
                 state.bilateral_response_factor,
                 state.s,
-                schur_groups,
             ],
             device=path.device,
-            block_dim=128,
+            block_dim=256,
         )
+        if max_unilateral_rows > 128:
+            wp.launch(
+                kernel=_assemble_compact_unilateral_schur_tiled,
+                dim=(path.size.num_worlds, 16, 128),
+                inputs=[
+                    problem.data.dim,
+                    problem.data.njc,
+                    problem.data.vio,
+                    state.bilateral_response_mio,
+                    state.bilateral_response_stride,
+                    state.bilateral_response,
+                    state.bilateral_response_factor,
+                    state.s,
+                    16,
+                    129,
+                ],
+                device=path.device,
+                block_dim=128,
+            )
     wp.launch(
         kernel=_cache_sparse_projected_diagonal,
         dim=(path.size.num_worlds, max_unilateral_rows),

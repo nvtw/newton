@@ -115,7 +115,7 @@ class TestSplitResponse(unittest.TestCase):
                 _assemble_compact_unilateral_schur_tiled,
                 dim=(len(ns), 16, 128),
                 block_dim=128,
-                inputs=[dim, njc, qoffset, rio, stride, outputs[index], scratch[index], q[index], 16],
+                inputs=[dim, njc, qoffset, rio, stride, outputs[index], scratch[index], q[index], 16, 0],
                 device=device,
             )
 
