@@ -257,7 +257,7 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
         """Preserve spin-down, sticking, and reversals across ragged friction strengths."""
         builder = newton.ModelBuilder()
         SolverKamino.register_custom_attributes(builder)
-        joint_counts = (37, 9)
+        joint_counts = (137, 9)
         joint_count = sum(joint_counts)
         frictions = np.resize(np.array([0.02, 0.2, 2.0, 20.0]), joint_count)
         joint_index = 0

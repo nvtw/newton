@@ -22,6 +22,8 @@ class TestKaminoFullSchurAssembly(unittest.TestCase):
             (33, 3, 2, 2, 16),
             (256, 31, 1, 32, 256),
             (256, 32, 1, 32, 256),
+            (600, 512, 0, 0, 600),
+            (600, 513, 0, 0, 600),
             (2, 1, 1, 2, 2),
             (33, 0, 0, 0, 8),
             (33, 3, 2, 2, 16),
@@ -116,7 +118,7 @@ class TestKaminoFullSchurAssembly(unittest.TestCase):
             body = rng.normal(size=12).astype(np.float32)
             schur = rng.normal(size=n * stride).astype(np.float32)
             expected_matrix, expected_velocity = schur.copy(), q.copy()
-            if wid != len(cases) - 1 and 0 < nu <= 128 and nu * nu <= n * stride:
+            if wid != len(cases) - 1 and 0 < nu <= 512 and nu * nu <= n * stride:
                 operator = (weighted @ jacobian.T) * p[None, n:] + np.diag(eta[n:])
                 expected_matrix[: nu * nu] -= operator.T.ravel()
                 expected_velocity[n:] = weighted @ body + eta[n:] * lambdas[n:] + vf[n:]

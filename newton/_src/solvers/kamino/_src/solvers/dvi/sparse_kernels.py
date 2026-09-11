@@ -2147,7 +2147,7 @@ def _prepare_full_sparse_unilateral_schur(
     njc = problem_njc[wid]
     scalar_count = nbc + nl
     num_unilateral_rows = scalar_count + int32(3) * nc
-    if not enable_compact_schur or num_unilateral_rows == int32(0) or num_unilateral_rows > int32(128):
+    if not enable_compact_schur or num_unilateral_rows == int32(0) or num_unilateral_rows > int32(512):
         return
     if not _compact_schur_fits(njc, num_unilateral_rows, response_stride[wid]):
         return
@@ -2337,7 +2337,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     col_start = bsm_col_start[wid]
     matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
     sweep_count = cfg.inequality_sweeps_per_iteration
-    use_full_schur = use_compact_schur and num_unilateral_rows <= int32(128)
+    use_full_schur = use_compact_schur and num_unilateral_rows <= int32(512)
     first_tangent_sweep = int32(0)
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
         tangent_sweep_count = sweep_count * cfg.max_alternating_iterations / int32(2)

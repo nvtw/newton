@@ -1,0 +1,1 @@
+Accelerate Kamino's experimental sparse DVI Schur solver for articulated systems with up to 512 unilateral rows by precomputing the full reduced operator, preserving joint-friction bounds and iteration settings.
