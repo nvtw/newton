@@ -1,0 +1,1 @@
+Sweep compact Kamino Schur systems with a dedicated warp kernel that prefetches each row's Schur entries and keeps the reversed sweep order in shared memory (about 4.5% faster G1 frames at 2,048 worlds).

@@ -2343,6 +2343,14 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
     sweep_count = cfg.inequality_sweeps_per_iteration
     use_full_schur = use_compact_schur and num_unilateral_rows <= int32(512)
+    if (
+        use_full_schur
+        and nc > int32(0)
+        and num_unilateral_rows <= int32(128)
+        and block_iteration == int32(_FUSED_BILATERAL_BLOCK)
+    ):
+        # `_solve_dvi_compact_schur_pgs_cooperative` sweeps these worlds.
+        return
     first_tangent_sweep = int32(0)
     if block_iteration == int32(_FUSED_INEQUALITY_BLOCK):
         tangent_sweep_count = sweep_count * cfg.max_alternating_iterations / int32(2)
@@ -2669,6 +2677,237 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     if lane == int32(0) and block_iteration == int32(_FUSED_BILATERAL_BLOCK):
         status = solver_status[wid]
         status.iterations = completed_sweeps
+        solver_status[wid] = status
+
+
+@wp.func
+def _compact_unilateral_row(
+    uid: int32, nbc: int32, scalar_count: int32, bcgo: int32, lcgo: int32, ccgo: int32, njc: int32
+) -> int32:
+    """Map a scheduled inequality id to its first compact (unilateral) row."""
+    row = bcgo + uid
+    if uid >= scalar_count:
+        row = ccgo + int32(3) * (uid - scalar_count)
+    elif uid >= nbc:
+        row = lcgo + uid - nbc
+    return row - njc
+
+
+@wp.func
+def _load_compact_schur_row(compact_schur: wp.array[float32], base: int32, lane: int32, nu: int32) -> wp.vec4f:
+    """Load this lane's four strided entries of one compact Schur row."""
+    values = wp.vec4f()
+    for chunk in range(4):
+        target = lane + int32(32) * chunk
+        if target < nu:
+            values[chunk] = compact_schur[base + target]
+    return values
+
+
+@wp.kernel
+def _solve_dvi_compact_schur_pgs_cooperative(
+    limit_indices: wp.array[int32],
+    contact_indices: wp.array[int32],
+    problem_nbc: wp.array[int32],
+    problem_nl: wp.array[int32],
+    problem_nc: wp.array[int32],
+    problem_bcio: wp.array[int32],
+    problem_lio: wp.array[int32],
+    problem_cio: wp.array[int32],
+    problem_uio: wp.array[int32],
+    problem_bcgo: wp.array[int32],
+    problem_lcgo: wp.array[int32],
+    problem_ccgo: wp.array[int32],
+    problem_vio: wp.array[int32],
+    problem_mu: wp.array[float32],
+    problem_bound_lower: wp.array[float32],
+    problem_bound_upper: wp.array[float32],
+    problem_P: wp.array[float32],
+    problem_v_b: wp.array[float32],
+    problem_diag: wp.array[float32],
+    projected_diag: wp.array[float32],
+    problem_njc: wp.array[int32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    compact_schur: wp.array[float32],
+    compact_q: wp.array[float32],
+    inequality_num_colors: wp.array[int32],
+    inequality_ids_by_color: wp.array[int32],
+    inequality_color_starts: wp.array[int32],
+    inequality_group_starts: wp.array[int32],
+    solver_config: wp.array[DVIConfigStruct],
+    solver_status: wp.array[DVIStatus],
+    solution_lambdas: wp.array[float32],
+):
+    """Sweep one world's dense compact Schur system per warp.
+
+    Handles the fused-bilateral schedule for worlds with contacts whose compact
+    operator fits in 128 rows; ``_solve_dvi_sparse_inequalities_pgs_cooperative``
+    covers the remaining worlds. The reversed sweep order lives in shared
+    memory, and each row's Schur entries are prefetched while the previous row
+    is projected, which shortens the serial dependency chain per row.
+    """
+    tid = wp.tid()
+    lane = tid % int32(32)
+    wid = tid / int32(32)
+    cfg = solver_config[wid]
+    nbc = problem_nbc[wid]
+    nl = problem_nl[wid]
+    nc = problem_nc[wid]
+    scalar_count = nbc + nl
+    slots = scalar_count + nc
+    nu = scalar_count + int32(3) * nc
+    njc = problem_njc[wid]
+    # Contact-free worlds keep the fixed-point early-out of the general kernel.
+    if nc == int32(0) or nu > int32(128) or not _compact_schur_fits(njc, nu, response_stride[wid]):
+        return
+    uio = problem_uio[wid]
+    bcio = problem_bcio[wid]
+    lio = problem_lio[wid]
+    cio = problem_cio[wid]
+    bcgo = problem_bcgo[wid]
+    lcgo = problem_lcgo[wid]
+    ccgo = problem_ccgo[wid]
+    vio = problem_vio[wid]
+    q_offset = vio + njc
+    s_offset = response_mio[wid]
+    schedule_offset = uio + wid
+
+    # Forward sweeps visit slots in storage order; odd tangent sweeps reverse
+    # the colors and the slots within each group but keep groups in order.
+    # Tile element writes synchronize the block, so keep them uniform: lanes
+    # past the end of a group write to a scratch slot instead.
+    reverse = wp.tile_zeros(shape=(160,), dtype=int32, storage="shared")
+    num_colors = inequality_num_colors[wid]
+    position = int32(0)
+    for color_index in range(num_colors):
+        color = num_colors - int32(1) - color_index
+        for group in range(
+            inequality_color_starts[schedule_offset + color],
+            inequality_color_starts[schedule_offset + color + int32(1)],
+        ):
+            slot_start = inequality_group_starts[schedule_offset + group]
+            slot_end = inequality_group_starts[schedule_offset + group + int32(1)]
+            count = slot_end - slot_start
+            for base in range(int32(0), count, int32(32)):
+                iteration = base + lane
+                index = int32(128) + lane
+                value = int32(0)
+                if iteration < count:
+                    index = position + iteration
+                    value = inequality_ids_by_color[uio + slot_end - int32(1) - iteration]
+                reverse[index] = value
+            position += count
+    _sync_warp_32()
+
+    sweep_count = cfg.inequality_sweeps_per_iteration * cfg.max_alternating_iterations
+    for sweep in range(sweep_count):
+        for phase in range(2):
+            use_reverse = phase == int32(1) and (sweep % cfg.inequality_sweeps_per_iteration) % int32(2) != int32(0)
+            uid_next = inequality_ids_by_color[uio]
+            if use_reverse:
+                uid_next = reverse[0]
+            row_next = _compact_unilateral_row(uid_next, nbc, scalar_count, bcgo, lcgo, ccgo, njc)
+            component_next = _cooperative_unilateral_component(uid_next, scalar_count, phase)
+            s_next = _load_compact_schur_row(compact_schur, s_offset + (row_next + component_next) * nu, lane, nu)
+            t_next = wp.vec4f()
+            if uid_next >= scalar_count and phase != int32(0):
+                t_next = _load_compact_schur_row(compact_schur, s_offset + (row_next + int32(1)) * nu, lane, nu)
+            for slot in range(slots):
+                uid = uid_next
+                unilateral_row = row_next
+                component = component_next
+                s_row = s_next
+                t_row = t_next
+                if slot + int32(1) < slots:
+                    uid_next = inequality_ids_by_color[uio + slot + int32(1)]
+                    if use_reverse:
+                        uid_next = reverse[slot + int32(1)]
+                    row_next = _compact_unilateral_row(uid_next, nbc, scalar_count, bcgo, lcgo, ccgo, njc)
+                    component_next = _cooperative_unilateral_component(uid_next, scalar_count, phase)
+                    s_next = _load_compact_schur_row(
+                        compact_schur, s_offset + (row_next + component_next) * nu, lane, nu
+                    )
+                    t_next = wp.vec4f()
+                    if uid_next >= scalar_count and phase != int32(0):
+                        t_next = _load_compact_schur_row(compact_schur, s_offset + (row_next + int32(1)) * nu, lane, nu)
+                if uid < scalar_count and phase != int32(0):
+                    continue
+                delta_0 = float32(0.0)
+                delta_1 = float32(0.0)
+                if lane == int32(0):
+                    mapped_id = bcio + uid
+                    if uid >= scalar_count:
+                        mapped_id = contact_indices[cio + uid - scalar_count]
+                    elif uid >= nbc:
+                        mapped_id = limit_indices[lio + uid - nbc]
+                    if mapped_id >= int32(0):
+                        index = q_offset + unilateral_row + component
+                        correction_0 = compact_q[index]
+                        old_lambda = solution_lambdas[index]
+                        new_lambda = old_lambda
+                        if uid < nbc:
+                            new_lambda = _project_box_update(
+                                old_lambda,
+                                correction_0,
+                                projected_diag[index],
+                                cfg.regularization,
+                                cfg.omega,
+                                problem_bound_lower[mapped_id],
+                                problem_bound_upper[mapped_id],
+                            )
+                        elif uid < scalar_count:
+                            diagonal = projected_diag[index]
+                            if diagonal > FLOAT32_EPS:
+                                new_lambda = wp.max(
+                                    float32(0.0),
+                                    old_lambda
+                                    - cfg.omega * correction_0 / (diagonal + cfg.regularization + FLOAT32_EPS),
+                                )
+                        elif phase == int32(0):
+                            new_lambda = _project_contact_normal_update(
+                                old_lambda, correction_0, projected_diag[index], cfg.regularization, cfg.omega
+                            )
+                        else:
+                            old_tangent = wp.vec2f(old_lambda, solution_lambdas[index + int32(1)])
+                            new_tangent = _project_contact_tangent_update(
+                                old_tangent,
+                                wp.vec2f(correction_0, compact_q[index + int32(1)]),
+                                wp.vec2f(projected_diag[index], projected_diag[index + int32(1)]),
+                                -compact_schur[s_offset + (unilateral_row + int32(1)) * nu + unilateral_row],
+                                cfg.regularization,
+                                cfg.omega,
+                                problem_mu[cio + uid - scalar_count]
+                                * _contact_friction_normal_load(
+                                    solution_lambdas[index + int32(2)],
+                                    problem_v_b[index + int32(2)],
+                                    problem_P[index + int32(2)],
+                                    wp.abs(problem_diag[index + int32(2)])
+                                    * problem_P[index + int32(2)]
+                                    * problem_P[index + int32(2)],
+                                    cfg.regularization,
+                                    cfg.omega,
+                                ),
+                            )
+                            new_lambda = new_tangent.x
+                            delta_1 = new_tangent.y - old_tangent.y
+                            solution_lambdas[index + int32(1)] = new_tangent.y
+                        delta_0 = new_lambda - old_lambda
+                        solution_lambdas[index] = new_lambda
+                delta_0 = _broadcast_lane_0_32(delta_0)
+                delta_1 = _broadcast_lane_0_32(delta_1)
+                if delta_0 != float32(0.0) or delta_1 != float32(0.0):
+                    for chunk in range(4):
+                        target = lane + int32(32) * chunk
+                        if target < nu:
+                            update = s_row[chunk] * delta_0
+                            update += t_row[chunk] * delta_1
+                            compact_q[q_offset + target] -= update
+                _sync_warp_32()
+
+    if lane == int32(0):
+        status = solver_status[wid]
+        status.iterations = sweep_count
         solver_status[wid] = status
 
 
