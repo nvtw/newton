@@ -144,19 +144,33 @@ class TestKaminoFullSchurAssembly(unittest.TestCase):
                 name = arg.label
                 if name == "enable_compact_schur":
                     arrays[name] = True
+                elif name == "workers_per_world":
+                    arrays[name] = 128
                 elif name == "block_iteration":
                     arrays[name] = 0
                 else:
                     arrays[name] = wp.array(data[name], dtype=arg.type.dtype, device=device)
-            wp.launch(
-                kernel,
-                dim=len(cases) * 128,
-                inputs=[arrays[arg.label] for arg in kernel.adj.args],
-                block_dim=128,
-                device=device,
-            )
-            np.testing.assert_allclose(arrays["compact_schur"].numpy(), expected_s, atol=1e-5, rtol=1e-5)
-            np.testing.assert_allclose(arrays["compact_q"].numpy(), expected_q, atol=1e-5, rtol=1e-5)
+            reference_s = None
+            reference_q = None
+            for workers in (32, 128, 4096):
+                arrays["workers_per_world"] = workers
+                arrays["compact_schur"].assign(np.asarray(data["compact_schur"], dtype=np.float32))
+                arrays["compact_q"].assign(np.asarray(data["compact_q"], dtype=np.float32))
+                wp.launch(
+                    kernel,
+                    dim=len(cases) * workers,
+                    inputs=[arrays[arg.label] for arg in kernel.adj.args],
+                    block_dim=128,
+                    device=device,
+                )
+                actual_s = arrays["compact_schur"].numpy()
+                actual_q = arrays["compact_q"].numpy()
+                np.testing.assert_allclose(actual_s, expected_s, atol=1e-5, rtol=1e-5)
+                np.testing.assert_allclose(actual_q, expected_q, atol=1e-5, rtol=1e-5)
+                if reference_s is not None:
+                    np.testing.assert_array_equal(actual_s, reference_s)
+                    np.testing.assert_array_equal(actual_q, reference_q)
+                reference_s, reference_q = actual_s, actual_q
 
 
 if __name__ == "__main__":

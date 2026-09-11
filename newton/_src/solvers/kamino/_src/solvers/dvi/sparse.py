@@ -690,11 +690,12 @@ def _launch_sparse_inequality_pgs(
             ]
         )
     if cooperative_articulation and enable_compact_schur:
-        # Assemble independent rows/entries across a full block before the
-        # sequential warp-cooperative sweeps. Keep their arithmetic unchanged.
+        # Spread independent entries across more blocks for small batches.
+        # Keep each entry's arithmetic unchanged before the sequential sweeps.
+        schur_workers = 4096 if path.size.num_worlds <= 16 else 128
         wp.launch(
             kernel=_prepare_full_sparse_unilateral_schur,
-            dim=path.size.num_worlds * 128,
+            dim=path.size.num_worlds * schur_workers,
             inputs=[
                 *common_inputs,
                 jacobians.bounded_constraint_nzb_offsets,
@@ -722,6 +723,7 @@ def _launch_sparse_inequality_pgs(
                 path.data.config,
                 path.body_space,
                 path.data.solution.lambdas,
+                schur_workers,
             ],
             device=path.device,
             block_dim=128,
@@ -1226,9 +1228,10 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     # Coupling and response kernels overwrite every active entry; only the
     # accumulated bilateral correction must start from zero.
     state.bilateral_delta.zero_()
+    coupling_workers = 8192 if path.device.is_cuda and path.size.num_worlds <= 16 else 1024
     wp.launch(
         kernel=_assemble_sparse_bilateral_unilateral_coupling,
-        dim=(path.size.num_worlds, 1024),
+        dim=(path.size.num_worlds, coupling_workers),
         inputs=[
             bsm.num_nzb,
             bsm.nzb_start,
@@ -1256,6 +1259,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             state.bilateral_response_mio,
             state.bilateral_response_stride,
             state.bilateral_coupling,
+            coupling_workers,
         ],
         device=path.device,
     )

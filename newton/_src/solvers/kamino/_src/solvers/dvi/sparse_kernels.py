@@ -772,11 +772,12 @@ def _assemble_sparse_bilateral_unilateral_coupling(
     response_mio: wp.array[int32],
     response_stride: wp.array[int32],
     coupling: wp.array[float32],
+    workers_per_world: int32,
 ):
     wid, worker = wp.tid()
     njc = problem_njc[wid]
     nu = problem_dim[wid] - njc
-    for entry_index in range(worker, njc * nu, int32(1024)):
+    for entry_index in range(worker, njc * nu, workers_per_world):
         row = entry_index / nu
         unilateral = entry_index % nu
         col = njc + unilateral
@@ -2134,11 +2135,12 @@ def _prepare_full_sparse_unilateral_schur(
     solver_config: wp.array[DVIConfigStruct],
     body_space: wp.array[float32],
     solution_lambdas: wp.array[float32],
+    workers_per_world: int32,
 ):
     """Build the full compact operator with parallel rows and matrix entries."""
     tid = wp.tid()
-    lane = tid % int32(128)
-    wid = tid / int32(128)
+    lane = tid % workers_per_world
+    wid = tid / workers_per_world
     cfg = solver_config[wid]
     if block_iteration >= int32(0) and block_iteration >= cfg.max_alternating_iterations:
         return
@@ -2163,7 +2165,7 @@ def _prepare_full_sparse_unilateral_schur(
     # Form the full constraint-space operator once, avoiding sparse body
     # gathers and updates in every projected sweep. Store its negative to
     # retain the compact correction's subtractive update convention.
-    for unilateral in range(lane, num_unilateral_rows, int32(128)):
+    for unilateral in range(lane, num_unilateral_rows, workers_per_world):
         row = njc + unilateral
         offsets = _unilateral_nzb_offsets(
             unilateral,
@@ -2190,7 +2192,7 @@ def _prepare_full_sparse_unilateral_schur(
                 for component in range(6):
                     value += block[component] * body_space[body + component]
         compact_q[vio + row] = value + problem_v_f[vio + row]
-    for entry in range(lane, num_unilateral_rows * num_unilateral_rows, int32(128)):
+    for entry in range(lane, num_unilateral_rows * num_unilateral_rows, workers_per_world):
         column = entry / num_unilateral_rows
         row = entry % num_unilateral_rows
         row_blocks = _unilateral_nzb_offsets(
