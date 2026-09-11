@@ -1,1 +1,1 @@
-Improved full-surface deformable-rigid collision performance with shape-coherent scheduling and exact sphere feature contacts.
+Improve full-surface deformable-rigid contacts with shape-coherent scheduling, conservative bounds and BVH culling, exact sphere and rigid-mesh feature contacts, compact geometry-specialized SDF searches, and better CUDA occupancy. Detect finite planes and heightfield features that pass between deformable vertices. No migration is required.
