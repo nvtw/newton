@@ -543,9 +543,10 @@ class DVISolver:
         # Classify the final iterate using all DVI conditions. This replaces
         # provisional iterate-change convergence from the dense fallback;
         # direct and sparse paths reach this check after fixed iteration counts.
+        residual_workers = 32 if self._device.is_cuda and self._size.num_worlds <= 16 else 1
         wp.launch(
             kernel=_compute_dvi_status_residuals,
-            dim=self._size.num_worlds,
+            dim=self._size.num_worlds * residual_workers,
             inputs=[
                 problem.data.dim,
                 problem.data.vio,
@@ -565,6 +566,7 @@ class DVISolver:
                 self._data.state.v_aug,
                 self._data.solution.lambdas,
                 self._data.status,
+                residual_workers,
             ],
             device=self.device,
         )

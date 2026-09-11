@@ -233,6 +233,22 @@ def _scatter_bilateral_solution(
     solution_lambdas[problem_vio[wid] + row] = bilateral_P[bvio + row] * bilateral_solution[bvio + row]
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    float r = value;
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        r = fmaxf(r, __shfl_xor_sync(0xffffffffu, r, offset, 32));
+    return r;
+#else
+    return value;
+#endif
+    """
+)
+def _warp_max_32(value: float32) -> float32: ...
+
+
 @wp.kernel
 def _compute_dvi_status_residuals(
     # Inputs:
@@ -255,8 +271,12 @@ def _compute_dvi_status_residuals(
     solution_lambdas: wp.array[float32],
     # Outputs:
     solver_status: wp.array[DVIStatus],
+    workers_per_world: int32,
 ):
-    wid = wp.tid()
+    """Compute terminal maxima with one thread or one 32-thread warp per world."""
+    tid = wp.tid()
+    wid = tid / workers_per_world
+    lane = tid % workers_per_world
 
     ncts = problem_dim[wid]
     vio = problem_vio[wid]
@@ -283,14 +303,14 @@ def _compute_dvi_status_residuals(
     r_c = float32(0.0)
 
     # Bilateral rows require v_aug = 0.
-    for jid in range(njc):
+    for jid in range(lane, njc, workers_per_world):
         v_j = state_v_aug[vio + jid]
         r_b = wp.max(r_b, wp.abs(v_j))
 
     # Bounded-multiplier rows require lambda in the box `[lower, upper]` and directional
     # complementarity with the face selected by the sign of v_aug. There is no dual
     # condition, since v_aug is free to take either sign on a box row.
-    for bid in range(nbc):
+    for bid in range(lane, nbc, workers_per_world):
         bcio_v = vio + bcgo + bid
         lambda_b = solution_lambdas[bcio_v]
         v_b = state_v_aug[bcio_v]
@@ -300,7 +320,7 @@ def _compute_dvi_status_residuals(
         r_c = wp.max(r_c, wp.abs(compute_box_complementarity_residual(lambda_b, v_b, lower, upper)))
 
     # Limits require lambda and v_aug in R+ with lambda * v_aug = 0.
-    for lid in range(nl):
+    for lid in range(lane, nl, workers_per_world):
         lcio = vio + lcgo + lid
         lambda_l = solution_lambdas[lcio]
         v_l = state_v_aug[lcio]
@@ -309,7 +329,7 @@ def _compute_dvi_status_residuals(
         r_c = wp.max(r_c, wp.abs(lambda_l * v_l))
 
     # Contacts require lambda in K_mu, v_aug in its dual cone, and orthogonality.
-    for cid in range(nc):
+    for cid in range(lane, nc, workers_per_world):
         ccio = vio + ccgo + 3 * cid
         mu_c = problem_mu[cio + cid]
         lambda_c = vec3f(solution_lambdas[ccio], solution_lambdas[ccio + 1], solution_lambdas[ccio + 2])
@@ -319,6 +339,14 @@ def _compute_dvi_status_residuals(
         r_p = wp.max(r_p, wp.max(wp.abs(lambda_c - lambda_proj)))
         r_d = wp.max(r_d, wp.max(wp.abs(v_c - v_proj)))
         r_c = wp.max(r_c, wp.abs(wp.dot(lambda_c, v_c)))
+
+    if workers_per_world == int32(32):
+        r_b = _warp_max_32(r_b)
+        r_p = _warp_max_32(r_p)
+        r_d = _warp_max_32(r_d)
+        r_c = _warp_max_32(r_c)
+    if lane != int32(0):
+        return
 
     # Thus r_p and r_d are infinity-norm box- and cone-projection distances, while r_c
     # is the maximum absolute impulse-velocity product.
