@@ -30,7 +30,7 @@ from .kernels import (
     make_solve_bilateral_unilateral_response_cooperative_kernel,
     make_solve_bilateral_unilateral_response_kernel,
 )
-from .response import _update_forward_bilateral_rhs, make_response_kernel
+from .response import _add_forward_bilateral_gradient, _update_forward_bilateral_rhs, make_response_kernel
 from .sparse_kernels import (
     _assemble_compact_unilateral_schur_tiled,
     _assemble_sparse_bilateral_unilateral_coupling,
@@ -498,8 +498,9 @@ def _launch_sparse_inequality_pgs(
     problem: DualProblem,
     block_iteration: int,
     enable_compact_schur: bool = False,
+    forward_bilateral: bool = False,
 ) -> None:
-    """Apply colored sparse PGS from the current full dual iterate."""
+    """Apply colored sparse PGS, optionally recovering the initial gradient from a forward solve."""
     state = path.data.state
     jacobians = path.jacobians
     if jacobians is None:
@@ -721,6 +722,29 @@ def _launch_sparse_inequality_pgs(
                 path.data.config,
                 path.body_space,
                 path.data.solution.lambdas,
+            ],
+            device=path.device,
+            block_dim=128,
+        )
+    if forward_bilateral:
+        wp.launch(
+            _add_forward_bilateral_gradient,
+            dim=(
+                path.size.num_worlds,
+                path.size.max_of_num_bounded_joint_cts
+                + path.size.max_of_max_limits
+                + 3 * path.size.max_of_max_contacts,
+                32,
+            ),
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                problem.data.vio,
+                path.data.bilateral_operator.info.vio,
+                state.bilateral_response_mio,
+                state.bilateral_response,
+                path.bilateral_solver._y,
+                state.s,
             ],
             device=path.device,
             block_dim=128,
@@ -1000,7 +1024,7 @@ def _build_sparse_bilateral_row_nzb_topology(path: SparseDVIPath, problem: DualP
 
 
 def _solve_sparse_bilateral_block(
-    path: SparseDVIPath, problem: DualProblem, active_dim: wp.array[int32] | None = None
+    path: SparseDVIPath, problem: DualProblem, active_dim: wp.array[int32] | None = None, forward_only: bool = False
 ) -> None:
     operator = path.data.bilateral_operator
     state = path.data.state
@@ -1029,6 +1053,29 @@ def _solve_sparse_bilateral_block(
         ],
         device=path.device,
     )
+    if forward_only:
+        solver = path.bilateral_solver
+        info = operator.info
+        wp.launch(
+            make_llt_blocked_rcm_solve_kernel(solver.block_size, True, False),
+            dim=(path.size.num_worlds, solver._solve_block_dim),
+            inputs=[
+                info.dim,
+                info.mio,
+                info.vio,
+                solver.tile_pattern_offsets,
+                solver.P,
+                solver.L,
+                solver.tile_pattern,
+                state.bilateral_rhs,
+                solver._y,
+                solver._x_hat,
+                state.bilateral_solution,
+            ],
+            device=path.device,
+            block_dim=solver._solve_block_dim,
+        )
+        return
     full_dim = operator.info.dim
     if active_dim is not None:
         operator.info.dim = active_dim
@@ -1123,8 +1170,37 @@ def _solve_sparse_with_bilateral_alternation(path: SparseDVIPath, problem: DualP
 def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: DualProblem) -> None:
     """Eliminate bilateral rows from projected sparse unilateral sweeps."""
     state = path.data.state
+    max_joint_rows = path.size.max_of_num_bilateral_joint_cts
+    max_unilateral_rows = (
+        path.size.max_of_num_bounded_joint_cts + path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
+    )
+    use_permutation = isinstance(path.bilateral_solver, LLTBlockedRCMSolver)
+    permutation = path.bilateral_solver.P if use_permutation else state.projected_mio
+    has_intermediate_bilateral_solve = any(
+        path.should_solve_bilateral_after_block(block_iteration)
+        for block_iteration in range(path.max_alternating_iterations)
+    )
+    enable_compact_schur = (
+        path.device.is_cuda
+        and path.size.max_of_num_bilateral_joint_cts >= 32
+        and path.max_alternating_iterations >= 4
+        and not has_intermediate_bilateral_solve
+    )
+    packed = use_permutation and path.bilateral_solver._packed is not None
+    cooperative_fused_pgs = _can_use_cooperative_articulation(path)
+    reuse_forward_bilateral = (
+        enable_compact_schur
+        and cooperative_fused_pgs
+        and use_permutation
+        and not packed
+        and path.size.num_worlds == 1
+        and max_unilateral_rows <= max_joint_rows
+    )
+    # Full compact sweeps need only Y^T y, so defer back-substitution until
+    # the final impulses are known. Larger compact systems use body gathers.
+    forward_bilateral = path.has_unilateral_constraints and reuse_forward_bilateral and max_unilateral_rows <= 512
     _factor_sparse_bilateral_block(path, problem)
-    _solve_sparse_bilateral_block(path, problem)
+    _solve_sparse_bilateral_block(path, problem, forward_only=forward_bilateral)
     if not path.has_unilateral_constraints:
         _compute_sparse_solution_vectors(path, problem)
         return
@@ -1147,10 +1223,6 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     if path.bilateral_row_nzb_topology is None:
         raise RuntimeError("Sparse DVI topology is not prepared. Call `SparseDVIPath.prepare()` before solving.")
     world_row_offsets, row_starts, row_nzb_indices = path.bilateral_row_nzb_topology
-    max_joint_rows = path.size.max_of_num_bilateral_joint_cts
-    max_unilateral_rows = (
-        path.size.max_of_num_bounded_joint_cts + path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
-    )
     # Coupling and response kernels overwrite every active entry; only the
     # accumulated bilateral correction must start from zero.
     state.bilateral_delta.zero_()
@@ -1187,19 +1259,6 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         ],
         device=path.device,
     )
-    use_permutation = isinstance(path.bilateral_solver, LLTBlockedRCMSolver)
-    permutation = path.bilateral_solver.P if use_permutation else state.projected_mio
-    has_intermediate_bilateral_solve = any(
-        path.should_solve_bilateral_after_block(block_iteration)
-        for block_iteration in range(path.max_alternating_iterations)
-    )
-    enable_compact_schur = (
-        path.device.is_cuda
-        and path.size.max_of_num_bilateral_joint_cts >= 32
-        and path.max_alternating_iterations >= 4
-        and not has_intermediate_bilateral_solve
-    )
-    packed = use_permutation and path.bilateral_solver._packed is not None
     factor_offsets = path.bilateral_solver._packed.slot_offsets if packed else path.data.bilateral_operator.info.mio
     factor = path.bilateral_solver._packed_factor if packed else path.bilateral_solver.L
     response_kernel = make_solve_bilateral_unilateral_response_kernel(packed)
@@ -1366,7 +1425,13 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     )
     if not has_intermediate_bilateral_solve:
         # A fixed bilateral response lets block-local barriers preserve colored GS across all sweeps.
-        _launch_sparse_inequality_pgs(path, problem, _FUSED_BILATERAL_BLOCK, enable_compact_schur=enable_compact_schur)
+        _launch_sparse_inequality_pgs(
+            path,
+            problem,
+            _FUSED_BILATERAL_BLOCK,
+            enable_compact_schur=enable_compact_schur,
+            forward_bilateral=forward_bilateral,
+        )
     else:
         for block_iteration in range(path.max_alternating_iterations):
             _launch_sparse_inequality_pgs(path, problem, block_iteration)
@@ -1385,18 +1450,9 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
                 device=path.device,
             )
 
-    cooperative_fused_pgs = _can_use_cooperative_articulation(path)
     # Update the cached forward solve by Y * delta_lambda, then back-substitute.
     # The single-world capacity bound guarantees a whitened response layout.
-    if (
-        enable_compact_schur
-        and cooperative_fused_pgs
-        and not has_intermediate_bilateral_solve
-        and use_permutation
-        and not packed
-        and path.size.num_worlds == 1
-        and max_unilateral_rows <= max_joint_rows
-    ):
+    if reuse_forward_bilateral:
         solver = path.bilateral_solver
         info = path.data.bilateral_operator.info
         wp.launch(

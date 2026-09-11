@@ -107,3 +107,28 @@ def _update_forward_bilateral_rhs(
     value = _subgroup_sum_32(value)
     if lane == 0:
         y[bvio[world] + row] -= value
+
+
+@wp.kernel
+def _add_forward_bilateral_gradient(
+    dim: wp.array[wp.int32],
+    njc: wp.array[wp.int32],
+    vio: wp.array[wp.int32],
+    bvio: wp.array[wp.int32],
+    rio: wp.array[wp.int32],
+    response: wp.array[wp.float32],
+    y: wp.array[wp.float32],
+    gradient: wp.array[wp.float32],
+):
+    """Add the eliminated bilateral gradient using ``Y^T y``."""
+    world, column, lane = wp.tid()
+    n = njc[world]
+    nu = dim[world] - n
+    if column >= nu:
+        return
+    value = wp.float32(0.0)
+    for row in range(lane, n, 32):
+        value += response[rio[world] + row * nu + column] * y[bvio[world] + row]
+    value = _subgroup_sum_32(value)
+    if lane == 0:
+        gradient[vio[world] + n + column] += value

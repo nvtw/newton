@@ -516,7 +516,9 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
 
 
 @cache
-def make_llt_blocked_rcm_solve_kernel(block_size: int, forward_substitution: bool = True):
+def make_llt_blocked_rcm_solve_kernel(
+    block_size: int, forward_substitution: bool = True, backward_substitution: bool = True
+):
     """RCM solve with tile skipping and fused output un-permutation.
 
     The solve gathers the RHS into permuted coordinates, writes ``x_hat`` in
@@ -524,6 +526,7 @@ def make_llt_blocked_rcm_solve_kernel(block_size: int, forward_substitution: boo
     each solved tile directly to the original-coordinate output ``x``.
     With ``forward_substitution=False``, ``y`` must already contain
     ``L^-1 P b``; the kernel only performs backward substitution.
+    With ``backward_substitution=False``, only ``y`` is written.
     """
 
     @wp.kernel
@@ -594,52 +597,53 @@ def make_llt_blocked_rcm_solve_kernel(block_size: int, forward_substitution: boo
                 wp.tile_lower_solve_inplace(L_diag, rhs_tile)
                 wp.tile_store(y_i, rhs_tile, offset=(i, 0))
 
-        # Backward substitution: solve L^T x_hat = y and scatter x_hat -> x.
-        for i in range(n_i_padded - block_size, -1, -block_size):
-            tile_i = i // block_size
-            i_end = i + block_size
-            rhs_tile = wp.tile_load(y_i, shape=(block_size, 1), offset=(i, 0))
-            L_diag = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
+        if wp.static(backward_substitution):
+            # Backward substitution: solve L^T x_hat = y and scatter x_hat -> x.
+            for i in range(n_i_padded - block_size, -1, -block_size):
+                tile_i = i // block_size
+                i_end = i + block_size
+                rhs_tile = wp.tile_load(y_i, shape=(block_size, 1), offset=(i, 0))
+                L_diag = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
 
-            if i + block_size > n_i:
-                num_tile_elements = block_size * block_size
-                num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
-                for ii in range(num_iterations):
-                    linear_index = tid_block + ii * num_threads_per_block
-                    linear_index = linear_index % num_tile_elements
-                    row = linear_index // block_size
-                    col = linear_index % block_size
-                    value = L_diag[row, col]
-                    if i + row >= n_i:
-                        value = wp.where(i + row == i + col, wp.float32(1), wp.float32(0))
-                    L_diag[row, col] = value
+                if i + block_size > n_i:
+                    num_tile_elements = block_size * block_size
+                    num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
+                    for ii in range(num_iterations):
+                        linear_index = tid_block + ii * num_threads_per_block
+                        linear_index = linear_index % num_tile_elements
+                        row = linear_index // block_size
+                        col = linear_index % block_size
+                        value = L_diag[row, col]
+                        if i + row >= n_i:
+                            value = wp.where(i + row == i + col, wp.float32(1), wp.float32(0))
+                        L_diag[row, col] = value
 
-            if i_end < n_i_padded:
-                for j in range(i_end, n_i_padded, block_size):
-                    tile_j = j // block_size
-                    if TP_i[tile_j, tile_i] == int(0):
-                        continue
-                    L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(j, i))
-                    x_tile = wp.tile_load(x_hat_i, shape=(block_size, 1), offset=(j, 0))
-                    if wp.static(HAS_TILE_MATMUL_LEFT_TRANSPOSE_UPDATE):
-                        wp.tile_matmul_left_transpose_update(rhs_tile, L_tile, x_tile, alpha=-1.0)
-                    elif wp.static(HAS_NATIVE_TILE_MATMUL_LEFT_TRANSPOSE_UPDATE):
-                        wp.static(make_tile_matmul_left_transpose_update_func(block_size))(
-                            rhs_tile, L_tile, x_tile, -1.0
-                        )
-                    else:
-                        L_T_tile = wp.tile_transpose(L_tile)
-                        wp.tile_matmul(L_T_tile, x_tile, rhs_tile, alpha=-1.0)
+                if i_end < n_i_padded:
+                    for j in range(i_end, n_i_padded, block_size):
+                        tile_j = j // block_size
+                        if TP_i[tile_j, tile_i] == int(0):
+                            continue
+                        L_tile = wp.tile_load(L_i, shape=(block_size, block_size), offset=(j, i))
+                        x_tile = wp.tile_load(x_hat_i, shape=(block_size, 1), offset=(j, 0))
+                        if wp.static(HAS_TILE_MATMUL_LEFT_TRANSPOSE_UPDATE):
+                            wp.tile_matmul_left_transpose_update(rhs_tile, L_tile, x_tile, alpha=-1.0)
+                        elif wp.static(HAS_NATIVE_TILE_MATMUL_LEFT_TRANSPOSE_UPDATE):
+                            wp.static(make_tile_matmul_left_transpose_update_func(block_size))(
+                                rhs_tile, L_tile, x_tile, -1.0
+                            )
+                        else:
+                            L_T_tile = wp.tile_transpose(L_tile)
+                            wp.tile_matmul(L_T_tile, x_tile, rhs_tile, alpha=-1.0)
 
-            wp.tile_upper_solve_inplace(wp.tile_transpose(L_diag), rhs_tile)
-            wp.tile_store(x_hat_i, rhs_tile, offset=(i, 0))
+                wp.tile_upper_solve_inplace(wp.tile_transpose(L_diag), rhs_tile)
+                wp.tile_store(x_hat_i, rhs_tile, offset=(i, 0))
 
-            num_row_iterations = (block_size + num_threads_per_block - 1) // num_threads_per_block
-            for ii in range(num_row_iterations):
-                row = tid_block + ii * num_threads_per_block
-                if row < block_size and i + row < n_i:
-                    p_r = P_i[i + row]
-                    x_i[p_r, 0] = rhs_tile[row, 0]
+                num_row_iterations = (block_size + num_threads_per_block - 1) // num_threads_per_block
+                for ii in range(num_row_iterations):
+                    row = tid_block + ii * num_threads_per_block
+                    if row < block_size and i + row < n_i:
+                        p_r = P_i[i + row]
+                        x_i[p_r, 0] = rhs_tile[row, 0]
 
     return llt_blocked_rcm_solve_kernel
 

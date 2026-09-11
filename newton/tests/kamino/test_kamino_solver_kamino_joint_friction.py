@@ -284,6 +284,7 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
         self._check_compact_schur_friction(response_kernel, omega=1.0, max_iterations=8, joint_counts=(137,))
         if wp.get_device(test_context.device).is_cuda:
             self.assertIn(mock.call(32, False), solve_kernel.call_args_list)
+            self.assertIn(mock.call(32, True, False), solve_kernel.call_args_list)
 
     def _check_compact_schur_friction(self, response_kernel, omega, max_iterations, joint_counts=(137, 9)):
         """Preserve spin-down, sticking, and reversals across ragged friction strengths."""

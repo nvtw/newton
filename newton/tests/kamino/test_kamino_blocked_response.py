@@ -9,7 +9,11 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked_rcm import make_llt_blocked_rcm_solve_kernel
-from newton._src.solvers.kamino._src.solvers.dvi.response import _update_forward_bilateral_rhs, make_response_kernel
+from newton._src.solvers.kamino._src.solvers.dvi.response import (
+    _add_forward_bilateral_gradient,
+    _update_forward_bilateral_rhs,
+    make_response_kernel,
+)
 
 
 class TestKaminoBlockedResponse(unittest.TestCase):
@@ -68,9 +72,46 @@ class TestKaminoBlockedResponse(unittest.TestCase):
 
                 # Reuse these whitened columns to update a forward-solved RHS,
                 # then recover the final original-coordinate solution.
-                initial_y = rng.normal(size=n).astype(np.float32)
+                rhs = rng.normal(size=n).astype(np.float32)
+                initial_y = np.linalg.solve(lower.astype(np.float64), rhs[permutation].astype(np.float64))
+                y = wp.empty(n, dtype=wp.float32, device=device)
+                untouched_x = wp.full(n, -123.0, device=device)
+                untouched_x_hat = wp.full(n, -123.0, device=device)
+                wp.launch(
+                    make_llt_blocked_rcm_solve_kernel(32, True, False),
+                    dim=(1, 128),
+                    inputs=[
+                        ints([n]),
+                        ints([0]),
+                        ints([0]),
+                        ints([0]),
+                        ints(permutation),
+                        floats(lower),
+                        ints(pattern.ravel()),
+                        floats(rhs),
+                        y,
+                        untouched_x_hat,
+                        untouched_x,
+                    ],
+                    block_dim=128,
+                    device=device,
+                )
+                np.testing.assert_allclose(y.numpy(), initial_y, rtol=2e-6, atol=2e-6)
+                np.testing.assert_array_equal(untouched_x.numpy(), -123.0)
+                np.testing.assert_array_equal(untouched_x_hat.numpy(), -123.0)
+                initial_gradient = rng.normal(size=n + nu).astype(np.float32)
+                gradient = floats(initial_gradient)
+                wp.launch(
+                    _add_forward_bilateral_gradient,
+                    dim=(1, nu + 3, 32),
+                    inputs=[ints([n + nu]), ints([n]), ints([0]), ints([0]), ints([0]), output, y, gradient],
+                    block_dim=128,
+                    device=device,
+                )
+                expected_gradient = initial_gradient.astype(np.float64)
+                expected_gradient[n:] += expected.T @ initial_y
+                np.testing.assert_allclose(gradient.numpy(), expected_gradient, rtol=2e-6, atol=2e-6)
                 delta = rng.normal(0, 0.01, nu).astype(np.float32)
-                y = floats(initial_y)
                 wp.launch(
                     _update_forward_bilateral_rhs,
                     dim=(1, n, 32),
