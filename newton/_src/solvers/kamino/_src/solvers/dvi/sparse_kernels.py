@@ -3038,6 +3038,32 @@ def _solve_dvi_compact_schur_pgs_cooperative(
         solver_status[wid] = status
 
 
+@wp.kernel
+def _zero_packed_pattern_tiles(
+    problem_njc: wp.array[int32],
+    pattern_offsets: wp.array[int32],
+    pattern: wp.array[int32],
+    slot_offsets: wp.array[wp.int64],
+    matrix: wp.array[float32],
+):
+    """Clear only the packed 32x32 tiles inside the structural factor pattern.
+
+    The assembly accumulates into those tiles and the factorization never
+    reads tiles outside the pattern, so the rest of the buffer can stay stale.
+    """
+    wid, tile, lane = wp.tid()
+    tiles = (problem_njc[wid] + int32(31)) / int32(32)
+    if tile >= tiles * tiles:
+        return
+    row = tile / tiles
+    col = tile - row * tiles
+    if col > row or pattern[pattern_offsets[wid] + tile] == int32(0):
+        return
+    base = (slot_offsets[wid] + wp.int64(row) * wp.int64(row + int32(1)) / wp.int64(2) + wp.int64(col)) * wp.int64(1024)
+    for element in range(lane, int32(1024), int32(32)):
+        matrix[base + wp.int64(element)] = float32(0.0)
+
+
 @cache
 def make_build_sparse_bilateral_block_kernel(packed: bool = False):
     """Specialize bilateral assembly for dense elements or fixed packed tiles."""

@@ -63,6 +63,7 @@ from .sparse_kernels import (
     _solve_dvi_sparse_inequalities_pgs_cooperative,
     _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
+    _zero_packed_pattern_tiles,
     make_build_sparse_bilateral_block_kernel,
     make_set_sparse_bilateral_diagonal_kernel,
 )
@@ -950,7 +951,16 @@ def _assemble_sparse_bilateral_block(
     solver = path.bilateral_solver
     packed = isinstance(solver, LLTBlockedRCMSolver) and solver._packed is not None and inverse is not None
     matrix_offsets = solver._packed.slot_offsets if packed else operator.info.mio
-    matrix.zero_()
+    if packed:
+        max_tiles = (path.size.max_of_num_bilateral_joint_cts + 31) // 32
+        wp.launch(
+            kernel=_zero_packed_pattern_tiles,
+            dim=(path.size.num_worlds, max_tiles * max_tiles, 32),
+            inputs=[problem.data.njc, solver._tpo, solver._structural_pattern, solver._packed.slot_offsets, matrix],
+            device=path.device,
+        )
+    else:
+        matrix.zero_()
     state.bilateral_preconditioner.zero_()
     problem.delassus.diagonal(state.scratch)
 
