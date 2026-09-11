@@ -29,7 +29,7 @@ from ..geometry.flags import ShapeFlags
 from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
-from ..geometry.soft_contacts_heightfield import launch_soft_heightfield_contacts
+from ..geometry.soft_contacts_heightfield import _HEIGHTFIELD_CELLS_PER_TASK, launch_soft_heightfield_contacts
 from ..geometry.soft_contacts_mesh import launch_soft_mesh_face_contacts
 from ..geometry.soft_contacts_sdf import _SDF_SPECIALIZED_GEO_TYPES, launch_soft_ef_contacts
 from ..geometry.support_function import (
@@ -1849,6 +1849,12 @@ class CollisionPipeline:
             self._soft_face_sdf_geo_types = ()
             self._soft_edge_sdf_geo_types = ()
             self.soft_heightfield_face_pairs = _empty_pairs
+        self._soft_heightfield_large_scan = False
+        if len(self.soft_heightfield_face_pairs):
+            terrain = model.heightfield_data.numpy()
+            self._soft_heightfield_large_scan = bool(
+                np.any((terrain["nrow"] - 1) * (terrain["ncol"] - 1) > _HEIGHTFIELD_CELLS_PER_TASK)
+            )
         self._soft_mesh_face_fallback_tids = wp.empty(
             len(self.soft_mesh_face_pairs), dtype=wp.int32, device=model.device
         )
@@ -2020,6 +2026,16 @@ class CollisionPipeline:
             contact_report=self.contact_report,
         )
         contacts._contact_matching_mode = self.contact_matching
+        # Keep scan scratch with the output buffers. The extra count is a zero scan sentinel.
+        # Differentiable contacts retain the serial feature loop's existing replay behavior.
+        contacts._soft_heightfield_work = None
+        if self._soft_heightfield_large_scan and not self.requires_grad:
+            count = len(self.soft_heightfield_face_pairs)
+            contacts._soft_heightfield_work = (
+                wp.zeros(count + 1, dtype=wp.int64, device=self.model.device),
+                wp.empty(count + 1, dtype=wp.int64, device=self.model.device),
+                wp.empty(count, dtype=wp.uint64, device=self.model.device),
+            )
         # Flag the buffer so solvers that only consume particle contacts can refuse it (see
         # Contacts._enable_rigid_soft_full_surface_contact); edge/face records appear only when this is set.
         contacts._enable_rigid_soft_full_surface_contact = self.enable_rigid_soft_full_surface_contact

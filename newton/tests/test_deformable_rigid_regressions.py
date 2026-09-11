@@ -84,6 +84,77 @@ def test_finite_plane_feature_geometry(test, device):
     np.testing.assert_allclose(points.numpy()[0], (-0.1, 0.0, -1.55), atol=1.0e-6)
 
 
+def test_large_heightfield_task_contacts(test, device):
+    """Preserve exact minima across split terrain scans, empty tasks, and graph replay."""
+    builder = newton.ModelBuilder()
+    data = np.zeros((33, 33), dtype=np.float32)
+    data[12:20, 12:20] = 1.0
+    builder.add_shape_heightfield(
+        heightfield=newton.Heightfield(data=data, nrow=33, ncol=33, hx=1.0, hy=1.0, min_z=0.0, max_z=0.01)
+    )
+    for scale, offset, height in ((4.0, 0.0, 0.02), (0.05, 0.0, 0.02), (1.0, 10.0, 0.02), (4.0, 0.0, -0.02)):
+        first = len(builder.particle_q)
+        for x, y in ((-1.0, -1.0), (1.0, -1.0), (0.0, 1.0)):
+            builder.add_particle(wp.vec3(x * scale + offset, y * scale, height), wp.vec3(), 0.1, radius=0.0)
+        builder.add_triangle(first, first + 1, first + 2)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True, soft_contact_gap=0.05)
+    state = model.state()
+    reference = pipeline.contacts()
+    reference._soft_heightfield_work = None
+    pipeline.collide(state, reference)
+
+    def records(contacts):
+        count = int(contacts.soft_contact_count.numpy()[0])
+        indices = contacts.soft_contact_indices.numpy()[:count]
+        order = np.lexsort(indices.T[::-1])
+        return np.concatenate(
+            [
+                indices[order],
+                contacts.soft_contact_barycentric.numpy()[:count][order],
+                contacts.soft_contact_body_pos.numpy()[:count][order],
+                contacts.soft_contact_normal.numpy()[:count][order],
+            ],
+            axis=1,
+        )
+
+    expected = records(reference)
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+    np.testing.assert_allclose(records(contacts), expected, atol=1.0e-6)
+    counts, offsets, _winners = contacts._soft_heightfield_work
+    np.testing.assert_array_equal(counts.numpy(), (4, 0, 0, 4, 0))
+    np.testing.assert_array_equal(offsets.numpy(), (0, 4, 4, 4, 8))
+    if device.is_cuda:
+        with wp.ScopedCapture(device=device) as capture:
+            pipeline.collide(state, contacts)
+        wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(records(contacts), expected, atol=1.0e-6)
+    original = state.particle_q.numpy().copy()
+    shifted = original.copy()
+    shifted[:, 2] += 2.0
+    state.particle_q.assign(shifted)
+    if device.is_cuda:
+        wp.capture_launch(capture.graph)
+    else:
+        pipeline.collide(state, contacts)
+    test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), 0)
+    np.testing.assert_array_equal(counts.numpy(), np.zeros(5, dtype=np.int64))
+    state.particle_q.assign(original)
+    if device.is_cuda:
+        wp.capture_launch(capture.graph)
+    else:
+        pipeline.collide(state, contacts)
+    np.testing.assert_allclose(records(contacts), expected, atol=1.0e-6)
+
+    # As with SDF compaction, differentiable collision retains the serial replay path.
+    grad_model = builder.finalize(device=device, requires_grad=True)
+    grad_pipeline = newton.CollisionPipeline(
+        grad_model, enable_rigid_soft_full_surface_contact=True, soft_contact_gap=0.05
+    )
+    test.assertIsNone(grad_pipeline.contacts()._soft_heightfield_work)
+
+
 def test_particle_gradient_after_pipeline_reuse(test, device):
     """Preserve particle contact gradients when a later collision overwrites rigid bounds."""
     builder = newton.ModelBuilder()
@@ -175,6 +246,7 @@ for device in get_test_devices():
         test_particle_gradient_after_pipeline_reuse,
         test_finite_plane_penetrating_face,
         test_finite_plane_feature_geometry,
+        test_large_heightfield_task_contacts,
     ):
         add_function_test(TestDeformableRigidRegressions, fn.__name__, fn, devices=[device])
     if device.is_cuda:

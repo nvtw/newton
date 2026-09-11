@@ -242,6 +242,7 @@ class DeformableRigidCollision:
 
         for _ in range(self.warmup_count):
             self.pipeline.collide(self.state, self.contacts)
+        self._verify_contact_capacity()
         if kind == "mixed" and not sparse:
             contact_count = int(self.contacts.soft_contact_count.numpy()[0])
             contacted_shapes = np.unique(self.contacts.soft_contact_shape.numpy()[:contact_count])
@@ -252,6 +253,17 @@ class DeformableRigidCollision:
         with wp.ScopedCapture(device=device) as capture:
             self.pipeline.collide(self.state, self.contacts)
         self.graph = capture.graph
+
+    def _verify_contact_capacity(self):
+        """Reject truncated warmup results before capturing the timed collision graph."""
+        for name, counter, capacity in (
+            ("candidate pairs", self.pipeline.broad_phase_pair_count, self.pipeline.shape_pairs_max),
+            ("rigid contacts", self.contacts.rigid_contact_count, self.contacts.rigid_contact_max),
+            ("soft contacts", self.contacts.soft_contact_count, self.contacts.soft_contact_max),
+        ):
+            count = int(counter.numpy()[0])
+            if count > capacity:
+                raise RuntimeError(f"deformable-rigid benchmark overflows {name}: {count} > {capacity}")
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
     def time_collide(self, case):

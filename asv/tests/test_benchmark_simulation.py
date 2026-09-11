@@ -218,6 +218,28 @@ class TestSimulationBenchmarks(unittest.TestCase):
         self.assertEqual(bench_cloth.DeformableRigidCollision.repeat, 3)
         self.assertEqual(bench_cloth.DeformableRigidCollisionScale.repeat, 1)
 
+    def test_deformable_rigid_benchmark_rejects_overflow(self):
+        """Reject each truncated contact stream but allow exactly full buffers."""
+        benchmark = bench_cloth.DeformableRigidCollision()
+        benchmark.pipeline = SimpleNamespace(broad_phase_pair_count=self._FakeArray([8]), shape_pairs_max=8)
+        benchmark.contacts = SimpleNamespace(
+            rigid_contact_count=self._FakeArray([8]),
+            rigid_contact_max=8,
+            soft_contact_count=self._FakeArray([8]),
+            soft_contact_max=8,
+        )
+        benchmark._verify_contact_capacity()
+        for label, counter in (
+            ("candidate pairs", benchmark.pipeline.broad_phase_pair_count),
+            ("rigid contacts", benchmark.contacts.rigid_contact_count),
+            ("soft contacts", benchmark.contacts.soft_contact_count),
+        ):
+            with self.subTest(counter=label):
+                counter.values[0] = 9
+                with self.assertRaisesRegex(RuntimeError, f"overflows {label}: 9 > 8"):
+                    benchmark._verify_contact_capacity()
+                counter.values[0] = 8
+
     def test_deformable_collision_benchmark_is_in_pr_gate(self):
         """Keep the large-scene deformable collision benchmark in the PR gate."""
         benchmark_name = "simulation.bench_cloth.FastDeformableSelfCollision.time_detect"
