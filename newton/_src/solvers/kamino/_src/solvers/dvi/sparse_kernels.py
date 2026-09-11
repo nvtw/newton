@@ -1831,7 +1831,7 @@ def _assemble_compact_unilateral_schur(
                 value += response[offset + row * njc + bilateral] * response[offset + column * njc + bilateral]
             else:
                 value += coupling[offset + bilateral * stride + row] * response[offset + bilateral * stride + column]
-        compact_schur[offset + column * stride + row] = value
+        compact_schur[offset + column * nu + row] = value
 
 
 @wp.func

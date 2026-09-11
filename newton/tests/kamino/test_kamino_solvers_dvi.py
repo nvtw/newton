@@ -3226,6 +3226,52 @@ class TestDVISolver(unittest.TestCase):
         residual = z - np.polyval(np.polyfit(x, z, 1), x)
         self.assertLess(float(np.max(residual) - np.min(residual)), 0.001)
 
+    def test_compact_schur_reference_padded_stride(self):
+        """Pack reference Schur output independently of padded input strides."""
+        njc, nu, stride, offset = 3, 2, 4, 3
+        coupling = np.arange(1, njc * nu + 1, dtype=np.float32).reshape(njc, nu)
+        lower = np.diag(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+        white = np.linalg.solve(lower, coupling)
+        full = np.linalg.solve(lower.T, white)
+        capacity = offset + njc * stride + 2
+
+        def i32(values):
+            return wp.array(values, dtype=wp.int32, device=self.device)
+
+        padded_coupling = np.zeros(capacity, dtype=np.float32)
+        padded_coupling[offset : offset + njc * stride] = np.pad(coupling, ((0, 0), (0, stride - nu))).ravel()
+        for use_forward_schur in (False, True):
+            with self.subTest(use_forward_schur=use_forward_schur):
+                response = np.zeros(capacity, dtype=np.float32)
+                if use_forward_schur:
+                    response[offset : offset + njc * nu] = white.T.ravel()
+                else:
+                    response[offset : offset + njc * stride] = np.pad(full, ((0, 0), (0, stride - nu))).ravel()
+                schur = wp.full(capacity, -123.0, dtype=wp.float32, device=self.device)
+                correction = wp.full(njc + nu, 99.0, dtype=wp.float32, device=self.device)
+                wp.launch(
+                    _assemble_compact_unilateral_schur,
+                    dim=256,
+                    inputs=[
+                        i32([njc + nu]),
+                        i32([njc]),
+                        i32([0]),
+                        i32([offset]),
+                        i32([stride]),
+                        wp.array(padded_coupling, dtype=wp.float32, device=self.device),
+                        wp.array(response, dtype=wp.float32, device=self.device),
+                        schur,
+                        correction,
+                        use_forward_schur,
+                    ],
+                    block_dim=256,
+                    device=self.device,
+                )
+                expected = np.full(capacity, -123.0, dtype=np.float32)
+                expected[offset : offset + nu * nu] = (coupling.T @ full).T.ravel()
+                np.testing.assert_allclose(schur.numpy(), expected, atol=1.0e-6, rtol=1.0e-6)
+                np.testing.assert_array_equal(correction.numpy(), [99.0] * njc + [0.0] * nu)
+
     def test_compact_schur_uses_response_capacity(self):
         """Pack Schur matrices into spare response capacity without crossing world bounds."""
         if not self.device.is_cuda:
