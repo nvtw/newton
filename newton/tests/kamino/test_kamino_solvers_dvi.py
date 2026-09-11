@@ -3297,7 +3297,11 @@ class TestDVISolver(unittest.TestCase):
             factors.extend(lower.ravel())
             scaling.extend(scale)
             permutations.extend(permutation)
-            couplings.extend(np.pad(coupling, ((0, 0), (0, stride - nu))).ravel())
+            if nu * nu <= n * stride:
+                # Compact worlds store the coupling densely with row stride nu.
+                couplings.extend(np.pad(coupling.ravel(), (0, n * (stride - nu))))
+            else:
+                couplings.extend(np.pad(coupling, ((0, 0), (0, stride - nu))).ravel())
 
         def i32(values):
             return wp.array(values, dtype=wp.int32, device=self.device)

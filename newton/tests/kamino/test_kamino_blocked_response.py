@@ -33,6 +33,9 @@ class TestKaminoBlockedResponse(unittest.TestCase):
                 stride = nu + 5
                 coupling = rng.normal(size=(n, stride)).astype(np.float32)
                 expected = np.linalg.solve(lower.astype(np.float64), (scale[:, None] * coupling[:, :nu])[permutation])
+                # Compact worlds store the coupling densely with row stride nu.
+                coupling_input = np.zeros(n * stride, dtype=np.float32)
+                coupling_input[: n * nu] = coupling[:, :nu].ravel()
                 tiles = (n + 31) // 32
                 pattern = np.ones((tiles, tiles), dtype=np.int32)
                 pattern[1:, 0] = 0
@@ -57,7 +60,7 @@ class TestKaminoBlockedResponse(unittest.TestCase):
                         ints(permutation),
                         ints([0]),
                         ints([stride]),
-                        floats(coupling),
+                        floats(coupling_input),
                         output,
                         ints([0]),
                         ints(pattern.ravel()),
@@ -179,7 +182,12 @@ class TestKaminoBlockedResponse(unittest.TestCase):
             factors.extend(lower.ravel())
             permutations.extend(permutation)
             scales.extend(scale)
-            couplings.extend(coupling.ravel())
+            coupling_input = coupling.ravel().copy()
+            if nu and nu * nu <= n * stride:
+                # Compact worlds store the coupling densely with row stride nu.
+                coupling_input[:] = 0.0
+                coupling_input[: n * nu] = coupling[:, :nu].ravel()
+            couplings.extend(coupling_input)
             # Exercise offsets which are independent of matrix dimensions.
             factors.extend([0.0] * 3)
             permutations.extend([0] * 2)

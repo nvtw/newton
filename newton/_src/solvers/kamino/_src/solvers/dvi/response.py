@@ -20,8 +20,8 @@ def make_response_kernel():
 
     The unpacked RCM factor uses 32-row tiles. Its symbolic pattern lets
     independent column groups skip zero tiles while sharing factor loads.
-    Store whitened responses contiguously for the compact Schur Gram product;
-    the input coupling retains its allocation stride.
+    Both the whitened responses and the compact-world coupling are stored
+    contiguously with row stride ``nu``.
     """
     block_size = 32
     width = 4
@@ -64,10 +64,7 @@ def make_response_kernel():
             value = wp.float32(0.0)
             if active:
                 row = permutation[vio[world] + i + local_row]
-                value = (
-                    preconditioner[vio[world] + row]
-                    * coupling[response_mio[world] + row * response_stride[world] + column + local_col]
-                )
+                value = preconditioner[vio[world] + row] * coupling[response_mio[world] + row * nu + column + local_col]
             wp.tile_scatter_masked(rhs, local_row, local_col, value, active)
             diagonal = wp.tile_load(matrix, shape=(block_size, block_size), offset=(i, i))
             for j in range(0, i, block_size):

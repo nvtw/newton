@@ -687,10 +687,7 @@ def make_solve_bilateral_unilateral_response_compact_kernel(packed: bool = False
         offset = response_mio[wid]
         for row in range(njc):
             original_row = bilateral_permutation[bilateral_vio[wid] + row]
-            value = (
-                bilateral_P[bilateral_vio[wid] + original_row]
-                * coupling[offset + original_row * response_stride[wid] + unilateral]
-            )
+            value = bilateral_P[bilateral_vio[wid] + original_row] * coupling[offset + original_row * nu + unilateral]
             for k in range(factor_row_start[bilateral_vio[wid] + row], row):
                 value -= (
                     bilateral_L[factor_index(offset_dtype(bilateral_mio[wid]), njc, row, k)]
@@ -732,10 +729,7 @@ def _solve_bilateral_unilateral_response_symbolic(
     nonfinite = int32(0)
     for row in range(njc):
         original_row = bilateral_permutation[bilateral_vio[wid] + row]
-        value = (
-            bilateral_P[bilateral_vio[wid] + original_row]
-            * coupling[offset + original_row * response_stride[wid] + unilateral]
-        )
+        value = bilateral_P[bilateral_vio[wid] + original_row] * coupling[offset + original_row * nu + unilateral]
         for entry in range(pattern_starts[row_offset + row], pattern_starts[row_offset + row + 1] - 1):
             k = pattern_columns[entry]
             value -= (
@@ -749,10 +743,7 @@ def _solve_bilateral_unilateral_response_symbolic(
         # propagation from a nonfinite response. Signed zeros may still differ.
         for row in range(njc):
             original_row = bilateral_permutation[bilateral_vio[wid] + row]
-            value = (
-                bilateral_P[bilateral_vio[wid] + original_row]
-                * coupling[offset + original_row * response_stride[wid] + unilateral]
-            )
+            value = bilateral_P[bilateral_vio[wid] + original_row] * coupling[offset + original_row * nu + unilateral]
             for k in range(factor_row_start[bilateral_vio[wid] + row], row):
                 value -= (
                     bilateral_L[packed_element_offset(bilateral_mio[wid], row, k)]
@@ -809,8 +800,11 @@ def make_solve_bilateral_unilateral_response_cooperative_kernel(packed: bool = F
         bvio = bilateral_vio[wid]
         offset = response_mio[wid]
         unilateral_stride = response_stride[wid]
-        if skip_compact and use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride):
+        compact_fits = use_forward_schur and _compact_schur_fits(njc, nu, unilateral_stride)
+        if skip_compact and compact_fits:
             return
+        # Compact worlds store the coupling densely (see the coupling assembly kernel).
+        coupling_stride = wp.where(compact_fits, nu, unilateral_stride)
         first_pair = (first_unilateral + int32(1)) / int32(2)
         pair_count = (nu + int32(1)) / int32(2)
         for unilateral_pair in range(first_pair + task_in_world, pair_count, tasks_per_world):
@@ -822,7 +816,7 @@ def make_solve_bilateral_unilateral_response_cooperative_kernel(packed: bool = F
                     original_row = row
                     if use_permutation:
                         original_row = bilateral_permutation[bvio + row]
-                    if coupling[offset + original_row * unilateral_stride + unilateral] != float32(0.0):
+                    if coupling[offset + original_row * coupling_stride + unilateral] != float32(0.0):
                         first_row = wp.min(first_row, row)
             # Both response columns share warp barriers, so use their common prefix.
             first_row = _warp_min_32(first_row)
@@ -845,7 +839,7 @@ def make_solve_bilateral_unilateral_response_cooperative_kernel(packed: bool = F
                         original_row = bilateral_permutation[bvio + row]
                     value = (
                         bilateral_P[bvio + original_row]
-                        * coupling[offset + original_row * unilateral_stride + unilateral]
+                        * coupling[offset + original_row * coupling_stride + unilateral]
                     )
                     response_factor[offset + unilateral * njc + row] = (value - total) / bilateral_L[
                         factor_index(factor, njc, row, row)

@@ -170,7 +170,11 @@ class TestPackedResponse(unittest.TestCase):
                         values = rng.normal(size=(n, nu)).astype(np.float32)
                         values[: min(n, 8)] = 0.0
                         values[:, -1] = 0.0
-                        coupling_values[offset : offset + n * capacity].reshape(n, capacity)[:, :nu] = values
+                        if mode in ("forward", "split") and nu * nu <= n * capacity:
+                            # Compact worlds store the coupling densely with row stride nu.
+                            coupling_values[offset : offset + n * nu] = values.ravel()
+                        else:
+                            coupling_values[offset : offset + n * capacity].reshape(n, capacity)[:, :nu] = values
                         local_scale = scales[vio[world] : vio[world] + n]
                         permutation = permutations[world] if use_permutation else np.arange(n)
                         scaled = (local_scale[:, None] * values)[permutation].astype(np.float64)

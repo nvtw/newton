@@ -772,61 +772,84 @@ def _assemble_sparse_bilateral_unilateral_coupling(
     response_mio: wp.array[int32],
     response_stride: wp.array[int32],
     coupling: wp.array[float32],
-    workers_per_world: int32,
+    row_groups: int32,
+    compact_layout: wp.bool,
 ):
-    wid, worker = wp.tid()
+    """Assemble the bilateral-unilateral coupling with one thread per column and row group.
+
+    A column touches at most two body blocks, so their ids and Jacobians are
+    resolved once per thread; the row loop then only compares body ids.
+    Worlds solved through the compact Schur path store the block densely with
+    row stride ``nu`` instead of the padded response stride, which cuts the
+    memory traffic of this kernel and of the response solve by about 4x.
+    """
+    wid, unilateral, group = wp.tid()
     njc = problem_njc[wid]
     nu = problem_dim[wid] - njc
-    for entry_index in range(worker, njc * nu, workers_per_world):
-        row = entry_index / nu
-        unilateral = entry_index % nu
-        col = njc + unilateral
+    if unilateral >= nu:
+        return
+    col = njc + unilateral
 
-        matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
-        col_block_0 = int32(-1)
-        col_block_1 = int32(-1)
-        nbc = problem_nbc[wid]
-        nl = problem_nl[wid]
-        if unilateral < nbc:
-            offsets = friction_nzb_offsets[problem_bcio[wid] + unilateral]
-            col_block_0 = offsets[0]
-            col_block_1 = offsets[1]
-        elif unilateral < nbc + nl:
-            mapped_limit = limit_indices[problem_lio[wid] + unilateral - nbc]
-            if mapped_limit >= int32(0):
-                col_block_0 = limit_nzb_offsets[mapped_limit]
-                candidate = col_block_0 + int32(1)
+    matrix_end = bsm_nzb_start[wid] + bsm_num_nzb[wid]
+    col_block_0 = int32(-1)
+    col_block_1 = int32(-1)
+    nbc = problem_nbc[wid]
+    nl = problem_nl[wid]
+    if unilateral < nbc:
+        offsets = friction_nzb_offsets[problem_bcio[wid] + unilateral]
+        col_block_0 = offsets[0]
+        col_block_1 = offsets[1]
+    elif unilateral < nbc + nl:
+        mapped_limit = limit_indices[problem_lio[wid] + unilateral - nbc]
+        if mapped_limit >= int32(0):
+            col_block_0 = limit_nzb_offsets[mapped_limit]
+            candidate = col_block_0 + int32(1)
+            if candidate < matrix_end and bsm_nzb_coords[candidate, 0] == col:
+                col_block_1 = candidate
+    else:
+        contact_component = unilateral - nbc - nl
+        cid = contact_component / int32(3)
+        if cid < problem_nc[wid]:
+            component = contact_component - int32(3) * cid
+            mapped_contact = contact_indices[problem_cio[wid] + cid]
+            if mapped_contact >= int32(0):
+                col_block_0 = contact_nzb_offsets[mapped_contact] + component
+                candidate = col_block_0 + int32(3)
                 if candidate < matrix_end and bsm_nzb_coords[candidate, 0] == col:
                     col_block_1 = candidate
-        else:
-            contact_component = unilateral - nbc - nl
-            cid = contact_component / int32(3)
-            if cid < problem_nc[wid]:
-                component = contact_component - int32(3) * cid
-                mapped_contact = contact_indices[problem_cio[wid] + cid]
-                if mapped_contact >= int32(0):
-                    col_block_0 = contact_nzb_offsets[mapped_contact] + component
-                    candidate = col_block_0 + int32(3)
-                    if candidate < matrix_end and bsm_nzb_coords[candidate, 0] == col:
-                        col_block_1 = candidate
 
+    body_0 = int32(-1)
+    body_1 = int32(-1)
+    jacobian_0 = vec6f()
+    jacobian_1 = vec6f()
+    if col_block_0 >= int32(0):
+        body_0 = bsm_nzb_coords[col_block_0, 1]
+        jacobian_0 = jacobian_nzb_values[col_block_0]
+    if col_block_1 >= int32(0):
+        body_1 = bsm_nzb_coords[col_block_1, 1]
+        jacobian_1 = jacobian_nzb_values[col_block_1]
+    scale = problem_P[problem_vio[wid] + col]
+    offset = response_mio[wid]
+    stride = response_stride[wid]
+    if compact_layout and _compact_schur_fits(njc, nu, stride):
+        stride = nu
+    cached_base = bilateral_world_row_offsets[wid]
+    rows_per_group = (njc + row_groups - int32(1)) / row_groups
+    row_begin = group * rows_per_group
+    row_end = wp.min(njc, row_begin + rows_per_group)
+    for row in range(row_begin, row_end):
         value = float32(0.0)
-        cached_row = bilateral_world_row_offsets[wid] + row
-        for entry in range(bilateral_row_starts[cached_row], bilateral_row_starts[cached_row + int32(1)]):
+        for entry in range(bilateral_row_starts[cached_base + row], bilateral_row_starts[cached_base + row + int32(1)]):
             row_block = bilateral_row_nzb_indices[entry]
             row_body = bsm_nzb_coords[row_block, 1]
             mass_weighted = mass_weighted_nzb_values[row_block]
-            if col_block_0 >= int32(0) and bsm_nzb_coords[col_block_0, 1] == row_body:
-                jacobian = jacobian_nzb_values[col_block_0]
+            if col_block_0 >= int32(0) and body_0 == row_body:
                 for component in range(6):
-                    value += mass_weighted[component] * jacobian[component]
-            if col_block_1 >= int32(0) and bsm_nzb_coords[col_block_1, 1] == row_body:
-                jacobian = jacobian_nzb_values[col_block_1]
+                    value += mass_weighted[component] * jacobian_0[component]
+            if col_block_1 >= int32(0) and body_1 == row_body:
                 for component in range(6):
-                    value += mass_weighted[component] * jacobian[component]
-        value *= problem_P[problem_vio[wid] + col]
-        offset = response_mio[wid]
-        coupling[offset + row * response_stride[wid] + unilateral] = value
+                    value += mass_weighted[component] * jacobian_1[component]
+        coupling[offset + row * stride + unilateral] = value * scale
 
 
 @wp.kernel

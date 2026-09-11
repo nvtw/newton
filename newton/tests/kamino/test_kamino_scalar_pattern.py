@@ -192,7 +192,11 @@ class TestScalarPattern(unittest.TestCase):
                         values.fill(-0.0)
                     elif mode in ("infinity", "nan") and n and count:
                         values[orders[world][0], 0] = np.inf if mode == "infinity" else np.nan
-                    rhs[rio[world] : rio[world] + n * capacity].reshape(n, capacity)[:, :count] = values
+                    if count * count <= n * capacity:
+                        # Compact worlds store the coupling densely with row stride count.
+                        rhs[rio[world] : rio[world] + n * count] = values.ravel()
+                    else:
+                        rhs[rio[world] : rio[world] + n * capacity].reshape(n, capacity)[:, :count] = values
                     local_rhs.append(values[orders[world]].astype(np.float64))
                 coupling.assign(rhs)
                 for output in outputs:

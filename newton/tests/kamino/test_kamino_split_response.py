@@ -136,8 +136,12 @@ class TestSplitResponse(unittest.TestCase):
                     body = int(rng.integers(J.shape[1] // 6))
                     W[body * 6 : body * 6 + 6, col] = rng.normal(0, 0.1, 6)
                 C = (J @ W).astype(np.float32)
-                view = rhs[off : off + n * capacity].reshape(n, capacity)
-                view[:, :nu] = C
+                if nu * nu <= n * capacity:
+                    # Compact worlds store the coupling densely with row stride nu.
+                    rhs[off : off + n * nu] = C.ravel()
+                else:
+                    view = rhs[off : off + n * capacity].reshape(n, capacity)
+                    view[:, :nu] = C
                 b = (local_scales[world][:, None] * C)[local_orders[world]]
                 white = np.linalg.solve(local_factors[world].astype(np.float64), b.astype(np.float64))
                 references.append(white)

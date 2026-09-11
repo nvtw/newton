@@ -1270,10 +1270,11 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     # Coupling and response kernels overwrite every active entry; only the
     # accumulated bilateral correction must start from zero.
     state.bilateral_delta.zero_()
-    coupling_workers = 8192 if path.device.is_cuda and path.size.num_worlds <= 16 else 1024
+    # One thread per column; split rows only when the batch is too small to fill the GPU.
+    coupling_row_groups = max(1, min(32, (1 << 20) // (path.size.num_worlds * max_unilateral_rows)))
     wp.launch(
         kernel=_assemble_sparse_bilateral_unilateral_coupling,
-        dim=(path.size.num_worlds, coupling_workers),
+        dim=(path.size.num_worlds, max_unilateral_rows, coupling_row_groups),
         inputs=[
             bsm.num_nzb,
             bsm.nzb_start,
@@ -1301,7 +1302,8 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             state.bilateral_response_mio,
             state.bilateral_response_stride,
             state.bilateral_coupling,
-            coupling_workers,
+            coupling_row_groups,
+            wp.bool(enable_compact_schur),
         ],
         device=path.device,
     )
