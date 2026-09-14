@@ -31,7 +31,7 @@ from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.soft_contacts_heightfield import _HEIGHTFIELD_CELLS_PER_TASK, launch_soft_heightfield_contacts
 from ..geometry.soft_contacts_mesh import launch_soft_mesh_face_contacts
-from ..geometry.soft_contacts_sdf import _SDF_SPECIALIZED_GEO_TYPES, launch_soft_ef_contacts
+from ..geometry.soft_contacts_sdf import _SDF_COMPACTION_MIN_PAIRS, _SDF_SPECIALIZED_GEO_TYPES, launch_soft_ef_contacts
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
@@ -941,7 +941,6 @@ def _world_compatible_pairs(
     world_count: int,
     device,
     shape_ok: np.ndarray | None = None,
-    shape_major: bool = False,
 ) -> wp.array[wp.vec2i]:
     """Emit ``(feature, shape)`` index pairs whose worlds are compatible: same world, or either is
     global (``-1``). ``feature_world[i]`` / ``shape_world[s]`` give each entity's world (-1 == global).
@@ -961,11 +960,6 @@ def _world_compatible_pairs(
     n_shapes = len(shape_world)
 
     def _pairs(f_idx: np.ndarray, s_idx: np.ndarray) -> wp.array[wp.vec2i]:
-        # ``shape_ok`` (optional, indexed by shape) drops pairs whose shape cannot participate -- e.g.
-        # full-surface edge/face excludes shapes without a usable SDF, which fall back to per-particle.
-        if shape_ok is not None and len(s_idx):
-            keep = shape_ok[s_idx.astype(np.intp)]
-            f_idx, s_idx = f_idx[keep], s_idx[keep]
         if len(s_idx):
             order = np.argsort(s_idx, kind="stable")
             f_idx, s_idx = f_idx[order], s_idx[order]
@@ -977,6 +971,10 @@ def _world_compatible_pairs(
 
     features = np.arange(n_features)
     shapes = np.arange(n_shapes)
+    # Filter before the Cartesian products to avoid materializing pairs for other shape passes.
+    if shape_ok is not None:
+        shapes = shapes[shape_ok]
+        shape_world = shape_world[shape_ok]
     f_local = (feature_world >= 0) & (feature_world < world_count)
     s_local = (shape_world >= 0) & (shape_world < world_count)
 
@@ -986,47 +984,28 @@ def _world_compatible_pairs(
     # 1. Global features pair with every shape (any world).
     global_features = features[feature_world < 0]
     if len(global_features):
-        if shape_major:
-            f_cols.append(np.tile(global_features, len(shapes)))
-            s_cols.append(np.repeat(shapes, len(global_features)))
-        else:
-            f_cols.append(np.repeat(global_features, len(shapes)))
-            s_cols.append(np.tile(shapes, len(global_features)))
+        f_cols.append(np.tile(global_features, len(shapes)))
+        s_cols.append(np.repeat(shapes, len(global_features)))
 
     # 2. Local-world features additionally pair with every global shape.
     local_features = features[f_local]
     global_shapes = shapes[shape_world < 0]
     if len(local_features) and len(global_shapes):
-        if shape_major:
-            f_cols.append(np.tile(local_features, len(global_shapes)))
-            s_cols.append(np.repeat(global_shapes, len(local_features)))
-        else:
-            f_cols.append(np.repeat(local_features, len(global_shapes)))
-            s_cols.append(np.tile(global_shapes, len(local_features)))
+        f_cols.append(np.tile(local_features, len(global_shapes)))
+        s_cols.append(np.repeat(global_shapes, len(local_features)))
 
-    # 3. Local-world features pair with the shapes that share their world. Group the local shapes by
-    #    world so each world's shapes are contiguous, then for every feature slice out its world's block.
+    # 3. Group local features by world, then slice out each local shape's compatible block.
     local_feature_world = feature_world[f_local]
-    if shape_major:
-        local_shapes = shapes[s_local]
-        local_shape_world = shape_world[s_local]
-        features_per_world = np.bincount(local_feature_world, minlength=world_count)
-        reps = features_per_world[local_shape_world] if len(local_shape_world) else np.zeros(0, np.intp)
-        if reps.sum():
-            features_by_world = local_features[np.argsort(local_feature_world, kind="stable")]
-            world_start = np.cumsum(features_per_world) - features_per_world
-            within = np.arange(reps.sum()) - np.repeat(np.cumsum(reps) - reps, reps)
-            f_cols.append(features_by_world[np.repeat(world_start[local_shape_world], reps) + within])
-            s_cols.append(np.repeat(local_shapes, reps))
-    else:
-        shapes_per_world = np.bincount(shape_world[s_local], minlength=world_count)
-        reps = shapes_per_world[local_feature_world] if len(local_feature_world) else np.zeros(0, np.intp)
-        if reps.sum():
-            shapes_by_world = shapes[s_local][np.argsort(shape_world[s_local], kind="stable")]
-            world_start = np.cumsum(shapes_per_world) - shapes_per_world
-            within = np.arange(reps.sum()) - np.repeat(np.cumsum(reps) - reps, reps)
-            f_cols.append(np.repeat(local_features, reps))
-            s_cols.append(shapes_by_world[np.repeat(world_start[local_feature_world], reps) + within])
+    local_shapes = shapes[s_local]
+    local_shape_world = shape_world[s_local]
+    features_per_world = np.bincount(local_feature_world, minlength=world_count)
+    reps = features_per_world[local_shape_world] if len(local_shape_world) else np.zeros(0, np.intp)
+    if reps.sum():
+        features_by_world = local_features[np.argsort(local_feature_world, kind="stable")]
+        world_start = np.cumsum(features_per_world) - features_per_world
+        within = np.arange(reps.sum()) - np.repeat(np.cumsum(reps) - reps, reps)
+        f_cols.append(features_by_world[np.repeat(world_start[local_shape_world], reps) + within])
+        s_cols.append(np.repeat(local_shapes, reps))
 
     if not f_cols:
         return _pairs(np.empty(0), np.empty(0))
@@ -1094,7 +1073,6 @@ def _build_soft_face_rigid_contact_pairs(
         world_count,
         device,
         shape_ok=capable_shape_mask,
-        shape_major=True,
     )
 
 
@@ -1121,7 +1099,6 @@ def _build_soft_edge_rigid_contact_pairs(
         world_count,
         device,
         shape_ok=capable_shape_mask,
-        shape_major=True,
     )
 
 
@@ -1849,29 +1826,37 @@ class CollisionPipeline:
             self._soft_face_sdf_geo_types = ()
             self._soft_edge_sdf_geo_types = ()
             self.soft_heightfield_face_pairs = _empty_pairs
+        self._soft_contact_tids_size = self.soft_contact_pair_count + sum(
+            len(pairs)
+            for pairs in (
+                self.soft_edge_rigid_pairs,
+                self.soft_face_rigid_pairs,
+                self.soft_mesh_face_pairs,
+                self.soft_heightfield_face_pairs,
+            )
+        )
+        if self._soft_contact_tids_size > np.iinfo(np.int32).max:
+            raise ValueError("Soft contact candidates exceed the 32-bit contact indexing capacity.")
         self._soft_heightfield_large_scan = False
         if len(self.soft_heightfield_face_pairs):
             terrain = model.heightfield_data.numpy()
             self._soft_heightfield_large_scan = bool(
                 np.any((terrain["nrow"] - 1) * (terrain["ncol"] - 1) > _HEIGHTFIELD_CELLS_PER_TASK)
             )
-        self._soft_mesh_face_fallback_tids = wp.empty(
-            len(self.soft_mesh_face_pairs), dtype=wp.int32, device=model.device
+        sdf_pairs = max(len(self.soft_edge_rigid_pairs), len(self.soft_face_rigid_pairs))
+        if self.requires_grad or not model.device.is_cuda or sdf_pairs < _SDF_COMPACTION_MIN_PAIRS:
+            sdf_pairs = 0
+        # Each pair appends at most once. Sequential passes can share a queue sized to the
+        # largest producer, independent of the (possibly smaller) output contact capacity.
+        self._soft_sdf_fallback_tids = self._soft_mesh_face_fallback_tids = wp.empty(
+            max(sdf_pairs, len(self.soft_mesh_face_pairs)), dtype=wp.int32, device=model.device
         )
-        self._soft_mesh_face_fallback_count = wp.zeros(1, dtype=wp.int32, device=model.device)
-        self._soft_sdf_fallback_tids = wp.empty(
-            max(len(self.soft_edge_rigid_pairs), len(self.soft_face_rigid_pairs)), dtype=wp.int32, device=model.device
+        self._soft_sdf_fallback_count = self._soft_mesh_face_fallback_count = wp.zeros(
+            1, dtype=wp.int32, device=model.device
         )
-        self._soft_sdf_fallback_count = wp.zeros(1, dtype=wp.int32, device=model.device)
         if soft_contact_max is None:
-            soft_contact_max = self.soft_contact_pair_count
-            # Flag-aware headroom: one record per world-compatible (soft edge/tri, shape) pair.
-            soft_contact_max += (
-                len(self.soft_edge_rigid_pairs)
-                + len(self.soft_face_rigid_pairs)
-                + len(self.soft_mesh_face_pairs)
-                + len(self.soft_heightfield_face_pairs)
-            )
+            # Every candidate emits at most one output record.
+            soft_contact_max = self._soft_contact_tids_size
         self.soft_contact_gap = soft_contact_gap
         # Soft (cloth) self-contact tuning values, populated by
         # init_soft_self_contact(); consumed at detection time like
@@ -2011,13 +1996,7 @@ class CollisionPipeline:
             ),
             # The per-thread replay array must span every soft candidate-pair thread (particle + edge +
             # face), independent of soft_contact_max (which the caller may set smaller). See E2 fix.
-            soft_contact_tids_size=(
-                self._soft_contact_pair_count
-                + len(self.soft_edge_rigid_pairs)
-                + len(self.soft_face_rigid_pairs)
-                + len(self.soft_mesh_face_pairs)
-                + len(self.soft_heightfield_face_pairs)
-            ),
+            soft_contact_tids_size=self._soft_contact_tids_size,
             requires_grad=self.requires_grad,
             device=self.model.device,
             per_contact_shape_properties=self.narrow_phase.hydroelastic_sdf is not None,

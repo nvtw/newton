@@ -4265,6 +4265,13 @@ def test_specialized_edge_face_contacts_match_fused(test, device):
     for compact in (compact_generic, compact_specialized):
         for fused_array, compact_array in zip(fused[1:], compact[1:], strict=True):
             np.testing.assert_array_equal(compact_array, fused_array)
+    # An unavailable workspace must fall back to direct evaluation without dropping contacts.
+    fallback_tids = wp.empty(0, dtype=wp.int32, device=device)
+    fallback_count.zero_()
+    no_workspace = run(0)
+    test.assertEqual(no_workspace[0], 0)
+    for expected, actual in zip(fused[1:], no_workspace[1:], strict=True):
+        np.testing.assert_array_equal(actual, expected)
 
 
 def test_edge_face_respect_shape_margin(test, device):

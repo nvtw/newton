@@ -10,12 +10,84 @@ import numpy as np
 import warp as wp
 
 import newton
+import newton.solvers
 from newton._src.geometry.soft_contacts_sdf import _closest_edge_plane, _closest_face_plane
 from newton.tests.unittest_utils import add_function_test, configure_sdf_for_collision_shapes, get_test_devices
 
 
 class TestDeformableRigidRegressions(unittest.TestCase):
     pass
+
+
+def test_soft_contact_workspace_storage(test, device):
+    """Avoid unused SDF scratch and share the sequential mesh and analytic workspace."""
+    builder = newton.ModelBuilder()
+    builder.add_shape_box(body=-1, hx=0.5, hy=0.5, hz=0.5)
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.4, -0.4, 0.45),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=2,
+        dim_y=2,
+        cell_x=0.4,
+        cell_y=0.4,
+        mass=0.1,
+    )
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
+    test.assertEqual(pipeline._soft_sdf_fallback_tids.size, 0)
+    builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.5, 0.5, 0.5))
+    configure_sdf_for_collision_shapes(builder)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
+    test.assertEqual(pipeline._soft_sdf_fallback_tids.size, len(pipeline.soft_mesh_face_pairs))
+    test.assertIs(pipeline._soft_sdf_fallback_tids, pipeline._soft_mesh_face_fallback_tids)
+    test.assertIs(pipeline._soft_sdf_fallback_count, pipeline._soft_mesh_face_fallback_count)
+    # Exercise the counter bound without allocating billions of candidate records.
+    oversized = mock.MagicMock()
+    oversized.__len__.return_value = np.iinfo(np.int32).max
+    with (
+        mock.patch("newton._src.sim.collide._build_soft_edge_rigid_contact_pairs", return_value=oversized),
+        test.assertRaisesRegex(ValueError, "32-bit"),
+    ):
+        newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
+
+
+def test_soft_contact_accumulation_thread_counts(test, device):
+    """Preserve coupled body and cloth updates when increasing contact accumulation lanes."""
+    builder = newton.ModelBuilder()
+    body = builder.add_body()
+    builder.add_shape_sphere(body, radius=0.5)
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.4, -0.4, 0.45),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=8,
+        dim_y=8,
+        cell_x=0.1,
+        cell_y=0.1,
+        mass=0.1,
+    )
+    builder.color()
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True, soft_contact_gap=0.1)
+    results = []
+    for threads in (4, 128):
+        solver = newton.solvers.SolverVBD(
+            model,
+            iterations=2,
+            rigid_compliant_alm=True,
+            rigid_body_particle_contact_buffer_size=1024,
+        )
+        solver._body_particle_contact_threads = threads
+        state_in, state_out = model.state(), model.state()
+        contacts = pipeline.contacts()
+        pipeline.collide(state_in, contacts)
+        test.assertGreater(int(contacts.soft_contact_count.numpy()[0]), 128)
+        solver.step(state_in, state_out, model.control(), contacts, 0.001)
+        results.append((state_out.body_q.numpy(), state_out.body_qd.numpy(), state_out.particle_q.numpy()))
+    for serial, parallel in zip(*results, strict=True):
+        np.testing.assert_allclose(parallel, serial, rtol=1.0e-5, atol=1.0e-6)
 
 
 @wp.kernel
@@ -224,6 +296,12 @@ def test_mixed_mesh_edge_dispatch(test, device):
     state = model.state()
     records = []
     for threshold in (10**9, 0):
+        # Force compaction on this small fixture with room for every possible edge append.
+        pipeline._soft_sdf_fallback_tids = wp.empty(
+            max(len(pipeline.soft_edge_rigid_pairs), len(pipeline.soft_face_rigid_pairs)),
+            dtype=wp.int32,
+            device=device,
+        )
         contacts = pipeline.contacts()
         with (
             mock.patch("newton._src.geometry.soft_contacts_sdf._SDF_COMPACTION_MIN_PAIRS", threshold),
@@ -243,6 +321,8 @@ def test_mixed_mesh_edge_dispatch(test, device):
 
 for device in get_test_devices():
     for fn in (
+        test_soft_contact_accumulation_thread_counts,
+        test_soft_contact_workspace_storage,
         test_particle_gradient_after_pipeline_reuse,
         test_finite_plane_penetrating_face,
         test_finite_plane_feature_geometry,
