@@ -11,12 +11,61 @@ import warp as wp
 
 import newton
 import newton.solvers
-from newton._src.geometry.soft_contacts_sdf import _closest_edge_plane, _closest_face_plane
+from newton._src.geometry.sdf_texture import SLOT_LINEAR, TextureSDFData
+from newton._src.geometry.soft_contacts_sdf import (
+    _closest_edge_plane,
+    _closest_face_plane,
+    eval_shape_sdf,
+    optimize_edge_sdf,
+    optimize_face_sdf,
+)
 from newton.tests.unittest_utils import add_function_test, configure_sdf_for_collision_shapes, get_test_devices
 
 
 class TestDeformableRigidRegressions(unittest.TestCase):
     pass
+
+
+@wp.kernel
+def _sample_flat_sdf_features(sdfs: wp.array[TextureSDFData], scale: wp.vec3, distances: wp.array[float]):
+    a = wp.vec3(0.2, 0.2, 0.5)
+    b = wp.vec3(0.8, 0.2, 0.5)
+    c = wp.vec3(0.5, 0.8, 0.5)
+    _lower, phi, _grad = eval_shape_sdf(newton.GeoType.MESH, scale, a, 0, sdfs)
+    distances[0] = phi
+    _u, _x, phi, _grad = optimize_edge_sdf(newton.GeoType.MESH, scale, a, b, 0, sdfs, 24)
+    distances[1] = phi
+    _bary, _x, phi, _grad = optimize_face_sdf(newton.GeoType.MESH, scale, a, b, c, 0, sdfs, 24, 16)
+    distances[2] = phi
+
+
+def test_flat_sdf_preserves_separation(test, device):
+    """Preserve signed separation at zero-gradient samples instead of creating phantom contacts."""
+    # A constant trilinear cell models a quantized plateau or stationary SDF sample.
+    # Coarse cloth edges/faces can minimize onto these cells far from the surface.
+    for distance in (0.25, -0.25):
+        texture = wp.Texture3D(
+            np.full((2, 2, 2), distance, dtype=np.float32),
+            filter_mode=wp.TextureFilterMode.LINEAR,
+            address_mode=wp.TextureAddressMode.CLAMP,
+            normalized_coords=False,
+            device=device,
+        )
+        sdf = TextureSDFData()
+        sdf.coarse_texture = texture
+        sdf.subgrid_texture = texture
+        sdf.subgrid_start_slots = wp.full((1, 1, 1), int(SLOT_LINEAR), dtype=wp.uint32, device=device)
+        sdf.sdf_box_lower = wp.vec3(-1.0)
+        sdf.sdf_box_upper = wp.vec3(1.0)
+        sdf.inv_sdf_dx = wp.vec3(0.5)
+        sdf.subgrid_size = 1
+        sdf.subgrid_size_f = 1.0
+        sdf.fine_to_coarse = 1.0
+        sdfs = wp.array([sdf], dtype=TextureSDFData, device=device)
+        distances = wp.empty(3, dtype=float, device=device)
+        for scale in (wp.vec3(1.0), wp.vec3(2.0, 3.0, 4.0), wp.vec3(-2.0, 3.0, 4.0)):
+            wp.launch(_sample_flat_sdf_features, dim=1, inputs=[sdfs, scale, distances], device=device)
+            np.testing.assert_allclose(distances.numpy(), distance * min(abs(v) for v in scale), atol=1.0e-6)
 
 
 def test_soft_contact_workspace_storage(test, device):
@@ -330,6 +379,12 @@ for device in get_test_devices():
     ):
         add_function_test(TestDeformableRigidRegressions, fn.__name__, fn, devices=[device])
     if device.is_cuda:
+        add_function_test(
+            TestDeformableRigidRegressions,
+            test_flat_sdf_preserves_separation.__name__,
+            test_flat_sdf_preserves_separation,
+            devices=[device],
+        )
         add_function_test(
             TestDeformableRigidRegressions,
             test_mixed_mesh_edge_dispatch.__name__,

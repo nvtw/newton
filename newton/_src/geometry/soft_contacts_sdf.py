@@ -287,8 +287,10 @@ def eval_shape_sdf(
     # for an axis-aligned face, first-order near the surface where contacts live. min|scale| is a cheap
     # conservative lower bound for the cull/search. wp.length() / wp.min(wp.abs()) keep a mirrored
     # (negative) scale sign-correct; the mirror itself is applied by the cw_div query and by inv_scale.
-    stretch = wp.length(wp.cw_mul(scale, grad))
     min_scale = wp.min(wp.abs(scale))
+    # Flat/quantized SDF cells have no normal, but their separation must not collapse to zero:
+    # that would emit phantom contacts whose zero normals still generate solver friction.
+    stretch = wp.max(wp.length(wp.cw_mul(scale, grad)), min_scale)
     scaled_grad = wp.cw_mul(grad, inv_scale)
     grad_len = wp.length(scaled_grad)
     if grad_len > 0.0:
