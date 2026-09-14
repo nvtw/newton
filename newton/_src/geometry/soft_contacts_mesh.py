@@ -146,7 +146,9 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
 CONTACT_NORMAL_DEGENERATE_EPS = wp.constant(1.0e-6)
 
 
-def _mesh_feature_data(mesh: Mesh) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _mesh_feature_data(
+    mesh: Mesh, *, collision_edges: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return unique face-vertex slots, edges, and outward reference normals."""
     verts = np.asarray(mesh.vertices, dtype=np.float64)
     idx = np.asarray(mesh.indices, dtype=np.int32).reshape(-1)
@@ -194,11 +196,18 @@ def _mesh_feature_data(mesh: Mesh) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
 
     index_of_canon = np.full(n_canon, -1, dtype=np.int32)
     index_of_canon[used_canon] = vertex_table
-    _, first_idx, inverse = np.unique(slot_keys, return_index=True, return_inverse=True)
+    edge_keys, first_idx, inverse = np.unique(slot_keys, return_index=True, return_inverse=True)
     edge_normal_accumulation = np.zeros((len(first_idx), 3), dtype=np.float64)
     np.add.at(edge_normal_accumulation, inverse, np.repeat(fn_unit, 3, axis=0))
     edge_outward = _unit(edge_normal_accumulation).astype(np.float32)
     edge_canon = canonical[orig_edges[first_idx]]
+    if collision_edges is not None:
+        # Keep exactly the SDF edge set, including an intentionally empty set.
+        # Full triangle adjacency still supplies the normals and validity cones.
+        edge_canon = canonical[collision_edges]
+        sorted_canon = np.sort(edge_canon.astype(np.int64), axis=1)
+        selected_keys = (sorted_canon[:, 0] << 32) | sorted_canon[:, 1]
+        edge_outward = edge_outward[np.searchsorted(edge_keys, selected_keys)]
     edge_table = np.column_stack((index_of_canon[edge_canon[:, 0]], index_of_canon[edge_canon[:, 1]])).astype(np.int32)
 
     return vertex_table, vertex_normals, edge_table, edge_outward
@@ -213,16 +222,22 @@ def _build_rigid_features(
     vertex_normals: list[np.ndarray] = []
     edge_rows: list[np.ndarray] = []
     edge_outwards: list[np.ndarray] = []
-    cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+    cache: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+    edge_ranges = model.shape_edge_range.numpy()
+    packed_edges = model.mesh_edge_indices.numpy()
 
     for shape in np.flatnonzero(bvh_shape_mask):
         mesh = model.shape_source[shape]
         if mesh is None:
             raise ValueError(f"mesh/convex shape {int(shape)} has no shape_source Mesh")
-        key = hash(mesh)
+        start, count = (int(value) for value in edge_ranges[shape])
+        # Finalized tables include SDF edges cooked by the builder, which need
+        # not be attached to the source Mesh. Slices may differ for one source.
+        collision_edges = packed_edges[start : start + count] if start >= 0 else mesh._collision_edges
+        key = (id(mesh), start, count)
         data = cache.get(key)
         if data is None:
-            data = _mesh_feature_data(mesh)
+            data = _mesh_feature_data(mesh, collision_edges=collision_edges)
             cache[key] = data
         v_table, v_normals, e_table, e_outward = data
         if len(v_table):
