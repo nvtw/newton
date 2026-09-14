@@ -1951,6 +1951,10 @@ class CollisionPipeline:
             contact_report=self.contact_report,
         )
         contacts._contact_matching_mode = self.contact_matching
+        if self._soft_mesh_contact_data is not None:
+            contacts._soft_contact_mesh_features = wp.empty(
+                contacts.soft_contact_max, dtype=wp.vec3i, device=self.model.device
+            )
         # Keep scan scratch with the output buffers. The extra count is a zero scan sentinel.
         # Differentiable contacts retain the serial feature loop's existing replay behavior.
         contacts._soft_heightfield_work = None

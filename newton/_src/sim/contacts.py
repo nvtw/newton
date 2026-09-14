@@ -387,7 +387,7 @@ class Contacts:
             point over the non-negative slots."""
             # Mesh feature selection is discrete and immutable through backward replay. Its
             # records use the final contact slots, never an intermediate candidate pool.
-            self._soft_contact_mesh_features = wp.empty(soft_contact_max, dtype=wp.vec3i)
+            self._soft_contact_mesh_features = None
             # Particle-only view kept for solvers that consume particle contacts exclusively (XPBD,
             # semi-implicit, Style3D). Holds the particle id for particle contacts; -1 for edge/face.
             self.soft_contact_particle = wp.full(soft_contact_max, -1, dtype=int)
