@@ -32,6 +32,53 @@ if TYPE_CHECKING:
     from .types import Mesh
 
 
+# One CUDA warp cooperates on each particle query. CPU uses depth zero.
+_MESH_QUERY_PARTITION_DEPTH = wp.constant(5)
+_MESH_QUERY_PARTITIONS = wp.constant(1 << _MESH_QUERY_PARTITION_DEPTH)
+
+
+@wp.func_native("""
+const wp::Mesh mesh = wp::mesh_get(mesh_id);
+int root = *mesh.bvh.root;
+if (root < 0) return -2;
+for (int level = 0; level < depth; ++level) {
+    const auto lower = wp::bvh_load_node(mesh.bvh.node_lowers, root);
+    if (lower.b) return (lane & ((1 << (depth - level)) - 1)) == 0 ? root : -2;
+    const auto upper = wp::bvh_load_node(mesh.bvh.node_uppers, root);
+    root = ((lane >> (depth - 1 - level)) & 1) ? upper.i : lower.i;
+}
+return root;
+""")
+def _mesh_query_partition(mesh_id: wp.uint64, lane: int, depth: int) -> int:
+    """Partition the existing mesh BVH; -2 marks an unused shallow-tree lane."""
+    ...
+
+
+@wp.func_native("""
+int sign = 0;
+#if defined(__CUDA_ARCH__)
+const unsigned mask = __activemask();
+const int leader = (threadIdx.x & 31) & ~(lanes - 1);
+if ((threadIdx.x & (lanes - 1)) == 0) {
+#endif
+    const auto query = wp::mesh_query_point_sign_normal(mesh_id, point, radius);
+    sign = query.result ? (query.sign < 0.0f ? -1 : 1) : 0;
+#if defined(__CUDA_ARCH__)
+}
+return __shfl_sync(mask, sign, leader);
+#else
+return sign;
+#endif
+""")
+def _mesh_partition_sign(mesh_id: wp.uint64, point: wp.vec3, radius: float, lanes: int) -> int:
+    """Share an exact nearest query within a power-of-two group of CUDA lanes.
+
+    All lanes in each group must participate with identical query arguments.
+    Group size must divide the CUDA warp size and the launch block dimension.
+    """
+    ...
+
+
 @wp.func
 def _feature_query_capsule(
     scale: wp.vec3,
@@ -80,8 +127,9 @@ def _cone_query_bounds(
     # Six extremal halfspaces suffice for a conservative accelerator. Limit
     # precomputation storage/work even at arbitrarily high-valence vertices;
     # the exact acceptance test still uses every incident neighbor.
-    support = np.unique(np.concatenate((np.argmin(directions, axis=0), np.argmax(directions, axis=0))))
-    directions, errors = directions[support], errors[support]
+    if len(directions) > 6:
+        support = np.unique(np.concatenate((np.argmin(directions, axis=0), np.argmax(directions, axis=0))))
+        directions, errors = directions[support], errors[support]
     i, j = np.triu_indices(len(directions), 1)
     delta = directions[i] - directions[j]
     a = np.linalg.norm(delta, axis=1)
@@ -459,6 +507,7 @@ def _feature_mesh_sign(mesh: wp.uint64, X_sw: wp.transform, scale: wp.vec3, soft
 @wp.kernel(enable_backward=False)
 def _detect_mesh_vertex_contacts(
     vt_pairs: wp.array[wp.vec2i],
+    partition_depth: int,
     particle_q: wp.array[wp.vec3],
     particle_radius: wp.array[float],
     particle_flags: wp.array[wp.int32],
@@ -490,7 +539,9 @@ def _detect_mesh_vertex_contacts(
     contact_shapes: wp.array[int],
 ):
 
-    tid = wp.tid()
+    partitions = 1 << partition_depth
+    tid = wp.tid() >> partition_depth
+    lane = wp.tid() & (partitions - 1)
     pair = vt_pairs[tid]
     particle_index = pair[0]
     shape_index = pair[1]
@@ -522,8 +573,10 @@ def _detect_mesh_vertex_contacts(
     min_scale = wp.min(wp.min(wp.abs(scale[0]), wp.abs(scale[1])), wp.abs(scale[2]))
     x_mesh = wp.cw_div(x_local, scale)
     r_mesh = threshold / min_scale
-    nearest = wp.mesh_query_point_sign_normal(mesh, x_mesh, r_mesh)
-    if not nearest.result:
+    vertex_sign = _mesh_partition_sign(mesh, x_mesh, r_mesh, partitions)
+    if vertex_sign == 0:
+        if lane != 0:
+            return
         # A finite proximity band must not discard already penetrating points.
         # The expanded shape bounds have already rejected distant particles.
         recovery_radius = wp.length(upper_bound - lower_bound) / min_scale
@@ -540,9 +593,10 @@ def _detect_mesh_vertex_contacts(
                 contact_shapes,
             )
         return
-    vertex_sign = wp.where(nearest.sign < 0.0, -1, 1)
-
-    query = wp.bvh_query_sphere(wp.mesh_get_bvh(mesh), x_mesh, r_mesh)
+    root = _mesh_query_partition(mesh, lane, partition_depth)
+    if root == -2:
+        return
+    query = wp.bvh_query_sphere(wp.mesh_get_bvh(mesh), x_mesh, r_mesh, root)
     face = wp.int32(0)
     while wp.bvh_query_next(query, face):
         a = wp.cw_mul(wp.mesh_get_point(mesh, face * 3 + 0), scale)
@@ -1035,11 +1089,15 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
     parallel_epsilon = detector.edge_edge_parallel_epsilon if detector is not None else 1.0e-5
 
     if n_vt > 0:
+        # CUDA shares the nearest query within a warp. CPU queries keep one
+        # worker and the same exact traversal, without redundant sign queries.
+        partition_depth = _MESH_QUERY_PARTITION_DEPTH if device.is_cuda else 0
         wp.launch(
             _detect_mesh_vertex_contacts,
-            dim=n_vt,
+            dim=n_vt << partition_depth,
             inputs=[
                 vt_pairs,
+                partition_depth,
                 state.particle_q,
                 model.particle_radius,
                 model.particle_flags,
@@ -1184,7 +1242,7 @@ class MeshContactData:
             )
             self.detector = None
         vertices, vertex_normals, edges, edge_normals = self.rigid_features
-        if max(len(vertex_pairs), len(vertices), len(edges)) > np.iinfo(np.int32).max:
+        if max(_MESH_QUERY_PARTITIONS * len(vertex_pairs), len(vertices), len(edges)) > np.iinfo(np.int32).max:
             raise ValueError("Mesh contact queries exceed 32-bit indexing capacity.")
         self.adjacency = [*_build_feature_adjacency(model, vertices, edges), vertex_normals, edge_normals]
         # A query emits at most one contact per feature pair. Bound the wide
@@ -1194,7 +1252,8 @@ class MeshContactData:
         if bound > np.iinfo(np.int64).max - np.iinfo(np.int32).max:
             raise ValueError("Mesh contact pairs exceed 64-bit counting capacity.")
         self.contact_count = wp.empty(1, dtype=wp.int64, device=model.device)
-        # Size final storage from the deformable workload, not rigid tessellation.
+        # Size final storage primarily from the deformable workload. Retain a
+        # rigid-feature floor for fine flat patches touching very coarse cloth.
         # This remains an estimate; every write checks the caller-sized capacity.
         particle_world = model.particle_world.numpy()
         shape_world = model.shape_world.numpy()[shape_mask]
@@ -1213,4 +1272,4 @@ class MeshContactData:
             )
 
         surface_pairs = len(vertex_pairs) + count_pairs(model.tri_indices, 0) + count_pairs(model.edge_indices, 2)
-        self.contact_capacity_hint = max(4 * len(vertex_pairs), surface_pairs)
+        self.contact_capacity_hint = max(4 * len(vertex_pairs), surface_pairs, len(vertices) + len(edges))
