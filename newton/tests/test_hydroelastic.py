@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 import time
 import unittest
 from enum import Enum
@@ -2583,7 +2584,10 @@ class TestHydroelastic(unittest.TestCase):
         """Prefer the non-deprecated marching-cubes class when Warp provides it."""
         replacement = object()
         geometry = mock.Mock(IsoSurfaceMarchingCubes=replacement)
-        with mock.patch.object(wp, "geometry", geometry, create=True):
+        with (
+            mock.patch.dict(sys.modules, {"warp.geometry": geometry}),
+            mock.patch.object(wp, "geometry", None, create=True),
+        ):
             self.assertIs(_get_marching_cubes_class(), replacement)
 
     def test_fixed_point_extreme_exponents(self):
