@@ -48,7 +48,11 @@ triangles contribute near-zero area anyway)."""
 
 
 def _get_marching_cubes_class():
-    """Return Warp's marching-cubes implementation without deprecated access."""
+    """Return Warp's marching-cubes implementation without deprecated access.
+
+    Remove the fallback once Newton's minimum supported Warp version provides
+    ``wp.geometry.IsoSurfaceMarchingCubes``.
+    """
     geometry = getattr(wp, "geometry", None)
     if geometry is not None:
         iso_surface_marching_cubes = getattr(geometry, "IsoSurfaceMarchingCubes", None)
