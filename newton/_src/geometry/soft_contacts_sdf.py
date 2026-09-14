@@ -339,6 +339,15 @@ def optimize_edge_sdf(
     u = 0.5 * (lo + hi)
     x = (1.0 - u) * p + u * q
     _phi_l, phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
+    if not _is_analytic(geo):
+        # A mesh SDF need not be unimodal along the segment. Golden-section search can
+        # discard the starting basin, so retain endpoints instead of taking an uphill step.
+        phi_p = _eval_shape_sdf_lower(geo, scale, p, shape_sdf_index, texture_sdf_table)
+        phi_q = _eval_shape_sdf_lower(geo, scale, q, shape_sdf_index, texture_sdf_table)
+        if phi_p <= _phi_l or phi_q < _phi_l:
+            u = 0.0 if phi_p <= phi_q else 1.0
+            x = (1.0 - u) * p + u * q
+            _phi_l, phi, grad = eval_shape_sdf(geo, scale, x, shape_sdf_index, texture_sdf_table)
     return u, x, phi, grad
 
 
@@ -354,10 +363,10 @@ def optimize_face_sdf(
     n_iter: wp.int32,
     ls_iter: wp.int32,
 ):
-    """argmin phi over the soft triangle by Frank-Wolfe on the barycentric simplex (Macklin sec. 3).
+    """Search for a minimum of phi over the soft triangle using Frank-Wolfe (Macklin sec. 3).
 
     Each step picks the simplex vertex minimizing the linearized objective ``grad . corner`` (eq. 4)
-    and line-searches phi toward it with :func:`optimize_edge_sdf`. Fixed ``n_iter`` / ``ls_iter``
+    and line-searches phi toward it with :func:`optimize_edge_sdf`. Bounded ``n_iter`` / ``ls_iter``
     iterations -> graph-capturable. Returns ``(bary, x_local, phi, grad)``.
     """
     # Start at the centroid (interior). A corner start can strand Frank-Wolfe on a simplex edge
@@ -389,6 +398,8 @@ def optimize_face_sdf(
         gamma, line_x, line_phi, line_grad = optimize_edge_sdf(
             geo, scale, x, target, shape_sdf_index, texture_sdf_table, ls_iter
         )
+        if not reuse_line_result and gamma == 0.0:
+            break
         bary = (1.0 - gamma) * bary + gamma * s
         if reuse_line_result:
             x = line_x

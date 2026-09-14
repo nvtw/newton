@@ -68,6 +68,55 @@ def test_flat_sdf_preserves_separation(test, device):
             np.testing.assert_allclose(distances.numpy(), distance * min(abs(v) for v in scale), atol=1.0e-6)
 
 
+@wp.kernel
+def _sample_nonconvex_sdf_search(sdfs: wp.array[TextureSDFData], distances: wp.array2d[float]):
+    it = wp.tid()
+    p = wp.vec3(0.0)
+    q = wp.vec3(1.0, 0.0, 0.0)
+    _lower, phi, _grad = eval_shape_sdf(newton.GeoType.MESH, wp.vec3(1.0), p, 0, sdfs)
+    distances[it, 0] = phi
+    _u, _x, phi, _grad = optimize_edge_sdf(newton.GeoType.MESH, wp.vec3(1.0), p, q, 0, sdfs, 24)
+    distances[it, 1] = phi
+    _u, _x, phi, _grad = optimize_edge_sdf(newton.GeoType.MESH, wp.vec3(1.0), q, p, 0, sdfs, 24)
+    distances[it, 2] = phi
+    _bary, _x, phi, _grad = optimize_face_sdf(
+        newton.GeoType.MESH,
+        wp.vec3(1.0),
+        wp.vec3(-0.5, -0.3, 0.0),
+        wp.vec3(1.0, -0.3, 0.0),
+        wp.vec3(-0.5, 0.6, 0.0),
+        0,
+        sdfs,
+        it,
+        16,
+    )
+    distances[it, 3] = phi
+
+
+def test_nonconvex_sdf_search_retains_endpoints(test, device):
+    """Retain a better endpoint and prevent uphill face iterations on a multi-basin mesh SDF."""
+    sphere = newton.Mesh.create_sphere(0.2, num_latitudes=16, num_longitudes=32)
+    points = np.asarray(sphere.vertices)
+    mesh = newton.Mesh(
+        np.concatenate((points + np.array((0.0, 0.0, 0.21)), points + np.array((0.75, 0.0, 0.3)))),
+        np.concatenate((sphere.indices, np.asarray(sphere.indices) + len(points))),
+    )
+    builder = newton.ModelBuilder()
+    cfg = newton.ModelBuilder.ShapeConfig()
+    cfg.configure_sdf(force_sdf=True)
+    builder.add_shape_mesh(body=-1, mesh=mesh, cfg=cfg)
+    model = builder.finalize(device=device)
+    distances = wp.empty((25, 4), dtype=float, device=device)
+    wp.launch(_sample_nonconvex_sdf_search, dim=25, inputs=[model._texture_sdf_data, distances], device=device)
+    values = distances.numpy()
+    test.assertLess(values[0, 0], 0.02)
+    for column in (1, 2):
+        with test.subTest(edge_direction=column):
+            test.assertLessEqual(float(np.max(values[:, column] - values[:, 0])), 1.0e-6)
+    with test.subTest(feature="face"):
+        test.assertLessEqual(float(np.max(np.diff(values[:, 3]))), 1.0e-6)
+
+
 def test_soft_contact_workspace_storage(test, device):
     """Avoid unused SDF scratch and share the sequential mesh and analytic workspace."""
     builder = newton.ModelBuilder()
@@ -379,6 +428,12 @@ for device in get_test_devices():
     ):
         add_function_test(TestDeformableRigidRegressions, fn.__name__, fn, devices=[device])
     if device.is_cuda:
+        add_function_test(
+            TestDeformableRigidRegressions,
+            test_nonconvex_sdf_search_retains_endpoints.__name__,
+            test_nonconvex_sdf_search_retains_endpoints,
+            devices=[device],
+        )
         add_function_test(
             TestDeformableRigidRegressions,
             test_flat_sdf_preserves_separation.__name__,
