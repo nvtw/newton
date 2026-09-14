@@ -13,6 +13,7 @@ the accepted final contacts. No intermediate contact pool is required.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -95,6 +96,12 @@ def _feature_query_capsule(
     return axis, wp.min(width, radius)
 
 
+@lru_cache(maxsize=16)
+def _cone_pair_indices(count: int) -> tuple[np.ndarray, np.ndarray]:
+    """Reuse pair indices for at most six cone directions or sixteen axes."""
+    return np.triu_indices(count, 1)
+
+
 def _cone_query_bounds(
     point: np.ndarray, positions: np.ndarray, *, edge: np.ndarray | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -130,7 +137,7 @@ def _cone_query_bounds(
     if len(directions) > 6:
         support = np.unique(np.concatenate((np.argmin(directions, axis=0), np.argmax(directions, axis=0))))
         directions, errors = directions[support], errors[support]
-    i, j = np.triu_indices(len(directions), 1)
+    i, j = _cone_pair_indices(len(directions))
     delta = directions[i] - directions[j]
     a = np.linalg.norm(delta, axis=1)
     b = np.linalg.norm(directions[i] + directions[j], axis=1)
@@ -145,7 +152,7 @@ def _cone_query_bounds(
         axes = np.vstack((axes, axis))
         width = np.append(width, 0.0)
         relaxation = np.vstack((relaxation, np.zeros(3)))
-    i, j = np.triu_indices(len(axes), 1)
+    i, j = _cone_pair_indices(len(axes))
     eigenvalue = 1 - np.abs(np.sum(axes[i] * axes[j], axis=1))
     valid = eigenvalue > 1.0e-12
     if not np.any(valid):
@@ -214,12 +221,11 @@ def _face_valid(
 
 def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: wp.array):
     """Build fixed incident-feature spans and canonical face ownership."""
-    vt, et = vertex_table.numpy(), edge_table.numpy()
+    et = edge_table.numpy()
     offsets = np.zeros(model.shape_count, dtype=np.int32)
     vertex_spans, edge_spans, neighbors = [], [], []
     vertex_bounds, vertex_errors, edge_bounds, edge_errors = [], [], [], []
-    tv = np.zeros((len(vt), 3), dtype=np.int32)
-    ee = np.zeros((len(et), 3), dtype=np.int32)
+    ee = np.zeros(len(et), dtype=np.int32)
     cache = {}
 
     def build(mesh):
@@ -252,7 +258,7 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
         vb = {
             v: (
                 _cone_query_bounds(points[representative[v]], points[[representative[n] for n in ns]])
-                if len(vt)
+                if len(vertex_table)
                 else (np.array([0.0, 0.0, 1.0, 1.0]), np.zeros(3))
             )
             for v, ns in incident.items()
@@ -279,10 +285,8 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
             edge_slots.setdefault(key, offset + slot)
         keys = sorted(es)
         edge_keys = np.asarray([(a << 32) | b for a, b in keys], dtype=np.int64)
-        edge_data = np.asarray([es[key] for key in keys], dtype=np.int32).reshape(-1, 3)
-        edge_data[:, 2] = [edge_slots[key] for key in keys]
-        vertex_data = np.asarray(vertex_spans[offset:], dtype=np.int32).reshape(-1, 3)
-        return offset, canon, vertex_data, edge_keys, edge_data
+        edge_data = np.asarray([edge_slots[key] for key in keys], dtype=np.int32)
+        return offset, canon, edge_keys, edge_data
 
     # Shape instances share immutable local topology. Only the feature rows
     # carry a shape id; constructing full adjacency per world is unnecessary.
@@ -292,10 +296,8 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
         key = id(mesh)
         if key not in cache:
             cache[key] = build(mesh)
-        offset, canon, vertex_data, edge_keys, edge_data = cache[key]
+        offset, canon, edge_keys, edge_data = cache[key]
         offsets[shape] = offset
-        start, end = np.searchsorted(vt[:, 0], (shape, shape + 1))
-        tv[start:end] = vertex_data[vt[start:end, 1]]
         start, end = np.searchsorted(et[:, 0], (shape, shape + 1))
         edge_canon = np.sort(canon[et[start:end, 1:]].astype(np.int64), axis=1)
         keys = (edge_canon[:, 0] << 32) | edge_canon[:, 1]
@@ -305,8 +307,9 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
     arrays = [wp.array(offsets, dtype=int, device=model.device)]
     arrays.extend(
         wp.array(np.asarray(x, dtype=np.int32).reshape(-1, 3), dtype=wp.vec3i, device=model.device)
-        for x in (vertex_spans, edge_spans, tv, ee)
+        for x in (vertex_spans, edge_spans)
     )
+    arrays.append(wp.array(ee, dtype=int, device=model.device))
     arrays.append(wp.array(neighbors, dtype=int, device=model.device))
     arrays.extend(
         wp.array(np.asarray(x, dtype=np.float32).reshape(-1, width), dtype=dtype, device=model.device)
@@ -525,8 +528,7 @@ def _detect_mesh_vertex_contacts(
     face_offsets: wp.array[int],
     vertex_spans: wp.array[wp.vec3i],
     edge_spans: wp.array[wp.vec3i],
-    tv_spans: wp.array[wp.vec3i],
-    ee_spans: wp.array[wp.vec3i],
+    rigid_edge_slots: wp.array[int],
     neighbors: wp.array[int],
     vertex_bounds: wp.array[wp.vec4],
     vertex_errors: wp.array[wp.vec3],
@@ -657,8 +659,7 @@ def _detect_mesh_face_contacts(
     face_offsets: wp.array[int],
     vertex_spans: wp.array[wp.vec3i],
     edge_spans: wp.array[wp.vec3i],
-    tv_spans: wp.array[wp.vec3i],
-    ee_spans: wp.array[wp.vec3i],
+    rigid_edge_slots: wp.array[int],
     neighbors: wp.array[int],
     vertex_bounds: wp.array[wp.vec4],
     vertex_errors: wp.array[wp.vec3],
@@ -734,8 +735,8 @@ def _detect_mesh_face_contacts(
                         continue
                     cp_local = wp.transform_point(_X_sw, cp)
                     diff = cp_local - x_local
-                    outward = _cone_valid(mesh, scale, x_local, diff, tv_spans[tid], neighbors)
-                    inward = _cone_valid(mesh, scale, x_local, -diff, tv_spans[tid], neighbors)
+                    outward = _cone_valid(mesh, scale, x_local, diff, vertex_spans[slot], neighbors)
+                    inward = _cone_valid(mesh, scale, x_local, -diff, vertex_spans[slot], neighbors)
                     if not outward and not inward:
                         continue
                     sign = _feature_mesh_sign(mesh, _X_sw, scale, cp)
@@ -780,8 +781,7 @@ def _detect_mesh_edge_contacts(
     face_offsets: wp.array[int],
     vertex_spans: wp.array[wp.vec3i],
     edge_spans: wp.array[wp.vec3i],
-    tv_spans: wp.array[wp.vec3i],
-    ee_spans: wp.array[wp.vec3i],
+    rigid_edge_slots: wp.array[int],
     neighbors: wp.array[int],
     vertex_bounds: wp.array[wp.vec4],
     vertex_errors: wp.array[wp.vec3],
@@ -811,7 +811,7 @@ def _detect_mesh_edge_contacts(
     bound = gap + s_margin + max_particle_radius
     lower = wp.min(r0_w, r1_w)
     upper = wp.max(r0_w, r1_w)
-    slot = ee_spans[tid][2]
+    slot = rigid_edge_slots[tid]
     axis, width = _feature_query_capsule(scale, X_ws, edge_bounds[slot], edge_errors[slot], bound)
     half_length = bound + 0.5 * wp.length(r1_w - r0_w)
     width += 0.5 * wp.length(r1_w - r0_w)
@@ -867,8 +867,8 @@ def _detect_mesh_edge_contacts(
                         continue
                     rigid_local = wp.transform_point(_X_sw, rigid_point)
                     diff_local = wp.transform_vector(_X_sw, soft_point - rigid_point)
-                    outward = _cone_valid(mesh, scale, rigid_local, diff_local, ee_spans[tid], neighbors)
-                    inward = _cone_valid(mesh, scale, rigid_local, -diff_local, ee_spans[tid], neighbors)
+                    outward = _cone_valid(mesh, scale, rigid_local, diff_local, edge_spans[slot], neighbors)
+                    inward = _cone_valid(mesh, scale, rigid_local, -diff_local, edge_spans[slot], neighbors)
                     if not outward and not inward:
                         continue
                     sign = _feature_mesh_sign(mesh, _X_sw, scale, soft_point)
