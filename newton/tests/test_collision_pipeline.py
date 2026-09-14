@@ -21,7 +21,6 @@ from newton._src.geometry.kernels import (
     resolve_mesh_sign_method,
 )
 from newton._src.geometry.sdf_texture import TextureSDFData
-from newton._src.geometry.soft_contacts_mesh import launch_soft_mesh_face_contacts
 from newton._src.geometry.soft_contacts_sdf import (
     SDF_EDGE_ITERS,
     SDF_FACE_ITERS,
@@ -4628,7 +4627,7 @@ def test_optimize_against_mesh_texture_sdf(test, device):
 
 
 def test_mesh_face_bvh_cull_preserves_contacts(test, device):
-    """The mesh BVH path preserves SDF candidates and returns valid surface contacts."""
+    """Return exact mesh surface points without a candidate or SDF fallback pool."""
     rng = np.random.default_rng(91)
     centers = np.vstack(
         (
@@ -4675,89 +4674,26 @@ def test_mesh_face_bvh_cull_preserves_contacts(test, device):
         soft_contact_gap=0.08,
         enable_rigid_soft_full_surface_contact=True,
     )
-    test.assertEqual(len(pipeline.soft_mesh_face_pairs), 2 * model.tri_count)
-
+    test.assertIsNotNone(pipeline._soft_mesh_contact_data)
+    test.assertEqual(pipeline._soft_sdf_fallback_tids.size, 0)
     state = model.state()
-    old_contacts = pipeline.contacts()
-    old_contacts.soft_contact_count.zero_()
-    empty = wp.empty(0, dtype=wp.vec2i, device=device)
-    launch_soft_ef_contacts(
-        model=model,
-        state=state,
-        contacts=old_contacts,
-        margin=0.08,
-        device=device,
-        edge_pairs=empty,
-        face_pairs=pipeline.soft_mesh_face_pairs,
-        sdf_fallback_tids=pipeline._soft_sdf_fallback_tids,
-        sdf_fallback_count=pipeline._soft_sdf_fallback_count,
-        n_particle_pairs=0,
-    )
-
-    new_contacts = pipeline.contacts()
-    new_contacts.soft_contact_count.zero_()
-    launch_soft_mesh_face_contacts(
-        model=model,
-        state=state,
-        contacts=new_contacts,
-        margin=0.08,
-        device=device,
-        face_pairs=pipeline.soft_mesh_face_pairs,
-        fallback_tids=pipeline._soft_mesh_face_fallback_tids,
-        fallback_count=pipeline._soft_mesh_face_fallback_count,
-        tid_base=0,
-    )
-
-    fallback_count = int(pipeline._soft_mesh_face_fallback_count.numpy()[0])
-    test.assertGreater(fallback_count, 0)
-    test.assertLess(fallback_count, len(pipeline.soft_mesh_face_pairs))
-    old_count = int(old_contacts.soft_contact_count.numpy()[0])
-    new_count = int(new_contacts.soft_contact_count.numpy()[0])
-    test.assertGreater(old_count, 0)
-    test.assertEqual(new_count, old_count)
-
-    def _sorted_records(contacts, count):
-        indices = contacts.soft_contact_indices.numpy()[:count]
-        shapes = contacts.soft_contact_shape.numpy()[:count]
-        order = np.lexsort((indices[:, 2], indices[:, 1], indices[:, 0], shapes))
-        return (
-            shapes[order],
-            indices[order],
-            contacts.soft_contact_barycentric.numpy()[:count][order],
-            contacts.soft_contact_body_pos.numpy()[:count][order],
-            contacts.soft_contact_normal.numpy()[:count][order],
-        )
-
-    old_records = _sorted_records(old_contacts, old_count)
-    new_records = _sorted_records(new_contacts, new_count)
-    test.assertTrue(np.array_equal(new_records[0], old_records[0]))
-    test.assertTrue(np.array_equal(new_records[1], old_records[1]))
-
-    # Outside contacts now use exact mesh features. Validate their geometry directly against the
-    # scaled source box rather than requiring the texture-SDF optimizer's approximate location.
-    bary = new_records[2]
-    body_pos = new_records[3]
-    normal = new_records[4]
-    tri_points = state.particle_q.numpy()[new_records[1]]
-    soft_point = np.sum(tri_points * bary[:, :, None], axis=1)
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+    count = int(contacts.soft_contact_count.numpy()[0])
+    test.assertGreater(count, 0)
+    test.assertLessEqual(count, contacts.soft_contact_max)
+    ids = contacts.soft_contact_indices.numpy()[:count]
+    bary = contacts.soft_contact_barycentric.numpy()[:count]
+    body_pos = contacts.soft_contact_body_pos.numpy()[:count]
+    normal = contacts.soft_contact_normal.numpy()[:count]
+    soft_point = np.sum(state.particle_q.numpy()[np.maximum(ids, 0)] * bary[:, :, None], axis=1)
     delta = soft_point - body_pos
-    normal_distance = np.sum(delta * normal, axis=1)
-    tangent = delta - normal_distance[:, None] * normal
-
-    # Intersecting and penetrating faces retain the signed-SDF fallback exactly.
-    sdf_fallback = normal_distance <= 1.0e-6
-    test.assertGreater(int(np.count_nonzero(sdf_fallback)), 0)
-    for new_values, old_values in zip(new_records[2:], old_records[2:], strict=True):
-        np.testing.assert_allclose(new_values[sdf_fallback], old_values[sdf_fallback], rtol=0.0, atol=1.0e-6)
-
-    np.testing.assert_allclose(np.linalg.norm(normal, axis=1), 1.0, rtol=0.0, atol=2.0e-5)
+    tangent = delta - np.sum(delta * normal, axis=1)[:, None] * normal
+    np.testing.assert_allclose(np.linalg.norm(normal, axis=1), 1.0, atol=2.0e-5)
     test.assertLess(float(np.max(np.linalg.norm(tangent, axis=1))), 5.0e-4)
-
     half_extents = np.array((1.0, 0.35, 0.6), dtype=np.float32)
-    outside = normal_distance > 1.0e-5
-    test.assertGreater(int(np.count_nonzero(outside)), 0)
-    test.assertTrue(bool(np.all(np.abs(body_pos[outside]) <= half_extents + 2.0e-5)))
-    surface_error = np.min(np.abs(np.abs(body_pos[outside]) - half_extents), axis=1)
+    test.assertTrue(bool(np.all(np.abs(body_pos) <= half_extents + 2.0e-5)))
+    surface_error = np.min(np.abs(np.abs(body_pos) - half_extents), axis=1)
     test.assertLess(float(np.max(surface_error)), 2.0e-5)
 
 
@@ -4795,14 +4731,12 @@ def test_mesh_face_exact_corner_contact(test, device):
     pipeline.collide(model.state(), contacts)
     count = int(contacts.soft_contact_count.numpy()[0])
     records = contacts.soft_contact_indices.numpy()[:count]
-    face_records = np.flatnonzero(records[:, 2] >= 0)
-    test.assertEqual(len(face_records), 1)
-    record = face_records[0]
-    body_pos = contacts.soft_contact_body_pos.numpy()[record]
-    normal = contacts.soft_contact_normal.numpy()[record]
-    np.testing.assert_allclose(body_pos[:2], (1.0, 0.35), rtol=0.0, atol=2.0e-5)
+    test.assertGreater(len(records), 0)
+    body_pos = contacts.soft_contact_body_pos.numpy()[:count]
+    normal = contacts.soft_contact_normal.numpy()[:count]
+    np.testing.assert_allclose(body_pos[:, :2], np.tile((1.0, 0.35), (count, 1)), rtol=0.0, atol=2.0e-5)
     expected_normal = np.array((0.03, 0.05, 0.0)) / np.sqrt(0.03**2 + 0.05**2)
-    np.testing.assert_allclose(normal, expected_normal, rtol=0.0, atol=2.0e-5)
+    np.testing.assert_allclose(normal, np.tile(expected_normal, (count, 1)), rtol=0.0, atol=2.0e-5)
 
 
 for _name, _fn in (
@@ -4924,17 +4858,19 @@ def test_eval_shape_sdf_barrel_cylinder(test, device):
     np.testing.assert_allclose(out_grad.numpy()[0], np.array([1.0, 0.0, 0.0]), atol=1.0e-5)
 
 
-def test_full_surface_empty_sdf_descriptor_rejected(test, device):
-    """A participating mesh whose shape_sdf_index points at an empty placeholder descriptor (coarse
-    texture None, e.g. a mesh-mesh BVH fallback) is rejected by the full-surface guard rather than
-    sampled -- sampling one reproduced CUDA error 700 (E1)."""
-    model, sdf_idx = _make_box_mesh_sdf_model(device)
-    test.assertGreaterEqual(sdf_idx, 0)
-    # Simulate an empty placeholder descriptor at that slot: a nonnegative index whose descriptor
-    # carries no texture (coarse texture None), exactly what a BVH fallback appends.
-    model._texture_sdf_coarse_textures[sdf_idx] = None
-    with test.assertRaises(ValueError):
-        newton.CollisionPipeline(model, broad_phase="nxn", enable_rigid_soft_full_surface_contact=True)
+def test_full_surface_empty_sdf_descriptor_unused(test, device):
+    """Avoid sampling empty SDF descriptors when generating exact mesh contacts."""
+    builder = newton.ModelBuilder()
+    builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.5, 0.5, 0.5))
+    _add_soft_triangle(builder, z=0.505)
+    model = builder.finalize(device=device)
+    model._shape_sdf_index.assign([0])
+    model._texture_sdf_data = wp.array([TextureSDFData()], dtype=TextureSDFData, device=device)
+    model._texture_sdf_coarse_textures = [None]
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", enable_rigid_soft_full_surface_contact=True)
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+    test.assertGreater(int(contacts.soft_contact_count.numpy()[0]), 0)
 
 
 def _add_soft_triangle(builder, z=1.0):
@@ -5193,19 +5129,14 @@ for _name, _fn in (
 for _name, _fn in (
     ("test_eval_shape_sdf_mesh_distance", test_eval_shape_sdf_mesh_distance),
     ("test_eval_shape_sdf_mirrored_mesh_scale_preserves_sign", test_eval_shape_sdf_mirrored_mesh_scale_preserves_sign),
-    ("test_full_surface_empty_sdf_descriptor_rejected", test_full_surface_empty_sdf_descriptor_rejected),
+    ("test_full_surface_empty_sdf_descriptor_unused", test_full_surface_empty_sdf_descriptor_unused),
     ("test_full_surface_nonuniform_mesh_accurate_distance", test_full_surface_nonuniform_mesh_accurate_distance),
 ):
     add_function_test(TestFullSurfaceSoftContact, _name, _fn, devices=get_cuda_test_devices())
 
 
-def test_unprovisioned_mesh_raises(test, device):
-    """A participating mesh with no SDF makes CollisionPipeline raise when the flag is enabled.
-
-    Mirrors SolverVBD raising on an uncolored model: provisioning an SDF (e.g. via
-    ShapeConfig.configure_sdf(force_sdf=True)) is a required build step, and skipping it is an error
-    rather than a silent degrade to the per-particle path.
-    """
+def test_unprovisioned_mesh_contacts(test, device):
+    """Generate full-surface mesh contacts without provisioning an SDF."""
     box_mesh = newton.Mesh.create_box(0.5, 0.5, 0.5)
     builder = newton.ModelBuilder()
     builder.add_shape_mesh(body=-1, mesh=box_mesh)
@@ -5221,16 +5152,18 @@ def test_unprovisioned_mesh_raises(test, device):
     )
     # SDF provisioning intentionally skipped -> the mesh carries no SDF.
     model = builder.finalize(device=device)
-    with test.assertRaises(ValueError):
-        newton.CollisionPipeline(
-            model, broad_phase="nxn", soft_contact_gap=0.1, enable_rigid_soft_full_surface_contact=True
-        )
+    pipeline = newton.CollisionPipeline(
+        model, broad_phase="nxn", soft_contact_gap=0.1, enable_rigid_soft_full_surface_contact=True
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+    test.assertGreater(int(contacts.soft_contact_count.numpy()[0]), 0)
 
 
 add_function_test(
     TestFullSurfaceSoftContact,
-    "test_unprovisioned_mesh_raises",
-    test_unprovisioned_mesh_raises,
+    "test_unprovisioned_mesh_contacts",
+    test_unprovisioned_mesh_contacts,
     devices=soft_devices,
 )
 

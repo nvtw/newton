@@ -118,7 +118,7 @@ def test_nonconvex_sdf_search_retains_endpoints(test, device):
 
 
 def test_soft_contact_workspace_storage(test, device):
-    """Avoid unused SDF scratch and share the sequential mesh and analytic workspace."""
+    """Avoid unused SDF scratch and keep mesh provenance in final contact slots."""
     builder = newton.ModelBuilder()
     builder.add_shape_box(body=-1, hx=0.5, hy=0.5, hz=0.5)
     builder.add_cloth_grid(
@@ -138,9 +138,11 @@ def test_soft_contact_workspace_storage(test, device):
     configure_sdf_for_collision_shapes(builder)
     model = builder.finalize(device=device)
     pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
-    test.assertEqual(pipeline._soft_sdf_fallback_tids.size, len(pipeline.soft_mesh_face_pairs))
-    test.assertIs(pipeline._soft_sdf_fallback_tids, pipeline._soft_mesh_face_fallback_tids)
-    test.assertIs(pipeline._soft_sdf_fallback_count, pipeline._soft_mesh_face_fallback_count)
+    test.assertEqual(pipeline._soft_sdf_fallback_tids.size, 0)
+    test.assertIsNotNone(pipeline._soft_mesh_contact_data)
+    contacts = pipeline.contacts()
+    test.assertEqual(contacts._soft_contact_mesh_features.size, contacts.soft_contact_max)
+    test.assertFalse(hasattr(pipeline._soft_mesh_contact_data, "candidates"))
     # Exercise the counter bound without allocating billions of candidate records.
     oversized = mock.MagicMock()
     oversized.__len__.return_value = np.iinfo(np.int32).max
