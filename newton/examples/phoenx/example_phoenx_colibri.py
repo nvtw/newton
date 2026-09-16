@@ -303,7 +303,7 @@ class Example(ColibriChecks):
             help="Diagnostic legacy admission: discard candidates receding at contact generation time.",
         )
         parser.add_argument("--substeps", type=int, default=30, help="Physics steps per 120 Hz contact refresh.")
-        parser.add_argument("--iterations", type=int, default=1, help="Joint/contact sweeps per physics step.")
+        parser.add_argument("--iterations", type=int, default=4, help="Joint/contact sweeps per physics step.")
         return parser
 
 
