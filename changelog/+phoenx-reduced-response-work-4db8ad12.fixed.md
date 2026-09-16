@@ -1,0 +1,1 @@
+Avoid unused per-link impulse-response construction and reuse published local frames during reduced-coordinate contact relaxation, retaining current-pose mass factorization and contact geometry updates.

@@ -1,0 +1,1 @@
+Reduce Phoenx rigid contact solve work when the Coulomb friction disk is exactly zero, preserving accumulated impulse release and coupled friction for active contacts. No API or configuration changes are required.

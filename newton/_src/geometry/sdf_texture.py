@@ -855,7 +855,7 @@ def _locate_cell_pair(sdf: TextureSDFData, f0: wp.vec3, f1: wp.vec3) -> tuple[_C
 def _read_cell_corners(
     sdf: TextureSDFData,
     f: wp.vec3,
-) -> tuple[vec8f, float, float, float]:
+) -> tuple[vec8f, float, float, float, float]:
     """Locate the fine-grid cell containing *f* and read 8 corner texel values.
 
     Point-samples each corner at integer+0.5 coordinates (exact texel centres)
@@ -868,9 +868,10 @@ def _read_cell_corners(
             (``cw_mul(clamped - sdf_box_lower, inv_sdf_dx)``).
 
     Returns:
-        ``(corners, tx, ty, tz)`` where *corners* packs the 8 SDF values as
+        ``(corners, tx, ty, tz, inverse_spacing_scale)`` where *corners* packs the 8 SDF values as
         ``[v000, v100, v010, v110, v001, v101, v011, v111]`` and
         ``(tx, ty, tz)`` are the fractional interpolation weights in [0, 1].
+        The final value scales fine-grid inverse spacing to the sampled cell.
     """
     loc = _locate_cell(sdf, f)
 
@@ -931,7 +932,10 @@ def _read_cell_corners(
         v111 = apply_subgrid_sdf_scale(v111, sdf.subgrids_min_sdf_value, sdf.subgrids_sdf_value_range)
 
     corners = vec8f(v000, v100, v010, v110, v001, v101, v011, v111)
-    return corners, tx, ty, tz
+    inverse_spacing_scale = float(1.0)
+    if loc.start_slot >= SLOT_LINEAR:
+        inverse_spacing_scale = sdf.fine_to_coarse
+    return corners, tx, ty, tz, inverse_spacing_scale
 
 
 @wp.func
@@ -1749,7 +1753,7 @@ def texture_sample_sdf_grad(
     diff_mag = wp.length(diff)
 
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
-    corners, tx, ty, tz = _read_cell_corners(sdf, f)
+    corners, tx, ty, tz, inverse_spacing_scale = _read_cell_corners(sdf, f)
 
     sdf_val = _trilinear(corners, tx, ty, tz)
 
@@ -1771,7 +1775,8 @@ def texture_sample_sdf_grad(
     gy = omtx * omtz * (v010 - v000) + tx * omtz * (v110 - v100) + omtx * tz * (v011 - v001) + tx * tz * (v111 - v101)
     gz = omtx * omty * (v001 - v000) + tx * omty * (v101 - v100) + omtx * ty * (v011 - v010) + tx * ty * (v111 - v110)
 
-    grad = wp.cw_mul(wp.vec3(gx, gy, gz), sdf.inv_sdf_dx)
+    inv_spacing = sdf.inv_sdf_dx * inverse_spacing_scale
+    grad = wp.cw_mul(wp.vec3(gx, gy, gz), inv_spacing)
 
     if diff_mag > 0.0:
         sdf_val = sdf_val + diff_mag
@@ -1922,6 +1927,16 @@ def texture_sample_sdf_grad_only_hw(
         Gradient [unitless].
     """
     return _texture_sample_sdf_grad_hw_impl(sdf, local_pos)
+
+
+@wp.func
+def texture_sample_sdf_grad_only(
+    sdf: TextureSDFData,
+    local_pos: wp.vec3,
+) -> wp.vec3:
+    """Sample the local gradient of the stored trilinear SDF."""
+    _distance, gradient = texture_sample_sdf_grad(sdf, local_pos)
+    return gradient
 
 
 @wp.func

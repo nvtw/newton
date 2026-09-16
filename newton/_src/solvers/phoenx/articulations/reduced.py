@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+import copy
 import functools
 
 import numpy as np
 import warp as wp
 
-from newton._src.sim import Control, JointTargetMode, JointType, Model, State
+from newton._src.sim import BodyFlags, Control, JointTargetMode, JointType, Model, State
 from newton._src.sim.articulation import eval_fk
 from newton._src.solvers.featherstone.kernels import (
     compute_com_transforms,
@@ -44,6 +45,7 @@ from newton._src.solvers.semi_implicit.kernels_body import joint_force
 
 _MAX_JOINT_DOF = 6
 _WARP_FACTOR_MIN_ARTICULATIONS = 32
+_WARP_FACTOR_MIN_DEPTH_LEVELS = 8
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 _sym_mat66 = wp.types.vector(length=21, dtype=wp.float32)
 _mat66 = wp.types.matrix(shape=(6, 6), dtype=wp.float32)
@@ -3505,6 +3507,7 @@ def _solve_reduced_deferred_contacts_kernel(
     sor_boost: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
+    cross_mobility: wp.array[wp.vec3],
     iterations: wp.int32,
     use_bias: wp.bool,
     prepare: wp.bool,
@@ -3522,7 +3525,7 @@ def _solve_reduced_deferred_contacts_kernel(
         for index in range(start, end):
             column = scheduled_column[index]
             reduced_contact_prepare(
-                contact_cols, column, bodies, idt, cc, contacts, wp.bool(True), wp.bool(True), wp.bool(True)
+                contact_cols, column, bodies, idt, cc, contacts, wp.bool(True), use_bias, wp.bool(True), cross_mobility
             )
 
     for iteration in range(iterations):
@@ -3541,6 +3544,7 @@ def _solve_reduced_deferred_contacts_kernel(
                 contacts,
                 use_bias,
                 wp.bool(True),
+                cross_mobility,
             )
 
     _flush_deferred_articulation(bodies, articulation)
@@ -3554,7 +3558,6 @@ class ReducedArticulationSystem:
             raise ValueError("reduced articulation system requires at least one articulation")
         self.model = model
         self.device = model.device
-        self.use_warp_factor = bool(self.device.is_cuda and model.articulation_count >= _WARP_FACTOR_MIN_ARTICULATIONS)
         self.use_warp_kinematics = bool(self.device.is_cuda)
         self.use_warp_publish = bool(self.device.is_cuda)
         body_count = int(model.body_count)
@@ -3594,6 +3597,16 @@ class ReducedArticulationSystem:
             self.factor_depth_ranges.append((depth_offset, count))
             depth_offset += count
 
+        # Deep small trees also benefit from replacing many tiny depth launches
+        # with a cooperative walk. Keep the established path for shallow small
+        # batches; this changes scheduling only, never the current-pose operator.
+        self.use_warp_factor = bool(
+            self.device.is_cuda
+            and (
+                model.articulation_count >= _WARP_FACTOR_MIN_ARTICULATIONS
+                or len(self.factor_depth_ranges) >= _WARP_FACTOR_MIN_DEPTH_LEVELS
+            )
+        )
         self.advance_max_depth = len(self.factor_depth_ranges) - 1
         articulation_depth_start_np = np.empty(
             (articulation_count, self.advance_max_depth + 2),
@@ -4163,6 +4176,30 @@ def _build_persistent_articulation_eligibility(
     return eligible, tuple(reasons)
 
 
+def _get_reduced_model(model: Model) -> Model:
+    """Keep trees with prescribed body motion outside reduced dynamics."""
+    starts = model.articulation_start.numpy()[: model.articulation_count]
+    ends = model.articulation_end.numpy()
+    children = model.joint_child.numpy()
+    flags = model.body_flags.numpy()
+    eligible = np.array(
+        [
+            not np.any(flags[children[start:end]] & int(BodyFlags.KINEMATIC))
+            for start, end in zip(starts, ends, strict=False)
+        ],
+        dtype=bool,
+    )
+    if np.all(eligible):
+        return model
+    reduced_model = copy.copy(model)
+    selected_ends = ends[eligible]
+    selected_starts = np.append(starts[eligible], selected_ends[-1] if selected_ends.size else 0).astype(np.int32)
+    reduced_model.articulation_start = wp.array(selected_starts, dtype=wp.int32, device=model.device)
+    reduced_model.articulation_end = wp.array(ends[eligible], dtype=wp.int32, device=model.device)
+    reduced_model.articulation_count = int(np.count_nonzero(eligible))
+    return reduced_model
+
+
 class ReducedPhoenXArticulation:
     """Graph-stable bridge between common Newton articulation state and PhoenX bodies."""
 
@@ -4292,6 +4329,13 @@ class ReducedPhoenXArticulation:
             self.contact_block_system.relax_page_launcher = self._launch_persistent_relax_page
         self.owned_joint_mask_np = self.tree_joint_mask_np.copy()
         self.owned_joint_mask_np[self.loop_system.joint_indices_np] = True
+        joint_q_start = model.joint_q_start.numpy()
+        joint_qd_start = model.joint_qd_start.numpy()
+        owned_boundaries = np.flatnonzero(np.diff(np.r_[False, self.owned_joint_mask_np, False]))
+        self._owned_coordinate_ranges = [
+            (int(joint_q_start[start]), int(joint_q_start[end]), int(joint_qd_start[start]), int(joint_qd_start[end]))
+            for start, end in owned_boundaries.reshape(-1, 2)
+        ]
 
         wp.launch(
             _mark_articulated_bodies_kernel,
@@ -4353,23 +4397,26 @@ class ReducedPhoenXArticulation:
             include_coriolis=not split_dynamics,
         )
         if compute_impulse_response:
-            if self.model.device.is_cuda:
-                articulation_count = int(self.model.articulation_count)
-                impulse_response_threads = ((articulation_count + 3) // 4) * 32
-                wp.launch(
-                    _compute_reduced_impulse_response_warp_kernel,
-                    dim=impulse_response_threads,
-                    block_dim=128,
-                    inputs=[self.bodies, wp.int32(articulation_count)],
-                    device=self.model.device,
-                )
-            else:
-                wp.launch(
-                    _compute_reduced_impulse_response_kernel,
-                    dim=int(self.model.articulation_count),
-                    inputs=[self.bodies],
-                    device=self.model.device,
-                )
+            self._refresh_impulse_response()
+
+    def _refresh_impulse_response(self) -> None:
+        if self.model.device.is_cuda:
+            articulation_count = int(self.model.articulation_count)
+            impulse_response_threads = ((articulation_count + 3) // 4) * 32
+            wp.launch(
+                _compute_reduced_impulse_response_warp_kernel,
+                dim=impulse_response_threads,
+                block_dim=128,
+                inputs=[self.bodies, wp.int32(articulation_count)],
+                device=self.model.device,
+            )
+        else:
+            wp.launch(
+                _compute_reduced_impulse_response_kernel,
+                dim=int(self.model.articulation_count),
+                inputs=[self.bodies],
+                device=self.model.device,
+            )
 
     def _publish_state(
         self,
@@ -4837,9 +4884,17 @@ class ReducedPhoenXArticulation:
 
     def solve_constraints(self, world, idt: wp.float32, *, relax: bool) -> None:
         """Solve loop and contact blocks through the reduced inverse-mass operator."""
-        iterations = world.velocity_iterations if relax else world.solver_iterations
+        iterations = world._active_velocity_iterations if relax else world.solver_iterations
         if iterations <= 0:
             return
+        if relax:
+            # Integration changes the mass operator and contact Jacobians.
+            # Reusing their old values applies impulses at the wrong pose.
+            self.system.factor(
+                self.state, self.control, 1.0 / float(idt), update_kinematics=not self._kinematics_current
+            )
+            if world._reduced_contacts_active_this_step and self.contact_block_system.requires_impulse_response:
+                self._refresh_impulse_response()
         self.loop_system.solve(
             self.model,
             self.bodies,
@@ -4851,6 +4906,12 @@ class ReducedPhoenXArticulation:
         )
         if world.max_contact_columns <= 0 or not world._reduced_contacts_active_this_step:
             return
+        forest = getattr(self, "forest_contact_system", None)
+        if forest is not None:
+            forest.solve(
+                world, idt, iterations, use_bias=not relax, prepare=relax or world._refresh_prepare_this_substep()
+            )
+            return
         contact_views = world._active_contact_views()
         common_inputs = [
             world._contact_cols,
@@ -4858,10 +4919,11 @@ class ReducedPhoenXArticulation:
             idt,
             wp.float32(world.sor_boost),
         ]
-        prepare = not relax and world._refresh_prepare_this_substep()
+        prepare = relax or world._refresh_prepare_this_substep()
         common_tail = [
             world._contact_container,
             contact_views,
+            self.contact_block_system.cross_mobility,
             wp.int32(iterations),
             wp.bool(not relax),
             wp.bool(prepare),
@@ -4907,8 +4969,11 @@ class ReducedPhoenXArticulation:
 
     def export_step(self, state: State) -> None:
         """Export authoritative generalized coordinates to common Newton state."""
-        wp.copy(state.joint_q, self.state.joint_q)
-        wp.copy(state.joint_qd, self.state.joint_qd)
+        for q_start, q_end, qd_start, qd_end in self._owned_coordinate_ranges:
+            if q_end > q_start:
+                wp.copy(state.joint_q, self.state.joint_q, q_start, q_start, q_end - q_start)
+            if qd_end > qd_start:
+                wp.copy(state.joint_qd, self.state.joint_qd, qd_start, qd_start, qd_end - qd_start)
 
 
 __all__ = ["ReducedArticulationSystem", "ReducedPhoenXArticulation"]

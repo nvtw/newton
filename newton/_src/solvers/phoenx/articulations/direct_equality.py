@@ -1706,6 +1706,78 @@ def _apply_direct_equality_delta_kernel(
     bodies.angular_velocity[body] += mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
 
 
+@wp.kernel(enable_backward=False)
+def _compute_direct_bias_velocity_kernel(
+    body_row_start: wp.array[wp.int32],
+    body_rows: wp.array[wp.int32],
+    row_joint: wp.array[wp.int32],
+    row_local: wp.array[wp.int32],
+    joint_to_structural: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    delta: wp.array[wp.float32],
+    row_scale: wp.array[wp.float32],
+    bodies: BodyContainer,
+    bias_velocity: wp.array[wp.spatial_vector],
+):
+    body = wp.tid()
+    bias_velocity[body] = wp.spatial_vectorf(0.0)
+    if body <= wp.int32(0) or bodies.inverse_mass[body] <= wp.float32(0.0):
+        return
+    wrench = wp.spatial_vector()
+    for incidence in range(body_row_start[body], body_row_start[body + wp.int32(1)]):
+        row = body_rows[incidence]
+        joint = row_joint[row]
+        structural_index = joint_to_structural[joint]
+        local_row = row_local[row]
+        wrench += (
+            row_scale[row]
+            * delta[row]
+            * _row_wrench_for_body(
+                body,
+                joint,
+                structural_index,
+                local_row,
+                joint_parent,
+                joint_child,
+                row_wrench0,
+                row_wrench1,
+            )
+        )
+    linear = bodies.inverse_mass[body] * wp.spatial_top(wrench)
+    angular = mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
+    bias_velocity[body] = wp.spatial_vectorf(linear[0], linear[1], linear[2], angular[0], angular[1], angular[2])
+
+
+@wp.kernel(enable_backward=False)
+def _build_direct_bias_rhs_kernel(
+    row_joint: wp.array[wp.int32],
+    row_local: wp.array[wp.int32],
+    row_dynamic: wp.array[wp.bool],
+    joint_to_structural: wp.array[wp.int32],
+    row_bias: wp.array2d[wp.float32],
+    row_scale: wp.array[wp.float32],
+    rhs: wp.array[wp.float32],
+):
+    row = wp.tid()
+    rhs[row] = wp.float32(0.0)
+    if not row_dynamic[row]:
+        rhs[row] = -row_scale[row] * row_bias[joint_to_structural[row_joint[row]], row_local[row]]
+
+
+@wp.kernel(enable_backward=False)
+def _apply_direct_bias_velocity_kernel(
+    bias_velocity: wp.array[wp.spatial_vector],
+    bodies: BodyContainer,
+    scale: wp.float32,
+):
+    body = wp.tid()
+    bodies.velocity[body] += scale * wp.spatial_top(bias_velocity[body])
+    bodies.angular_velocity[body] += scale * wp.spatial_bottom(bias_velocity[body])
+
+
 def _effective_joint_axes(
     model: Model,
     joint_mode: np.ndarray,
@@ -2063,6 +2135,9 @@ class DirectEqualitySystem:
 
         self.rhs = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.delta = wp.zeros(row_count, dtype=wp.float32, device=device)
+        self.bias_rhs = wp.zeros(row_count, dtype=wp.float32, device=device)
+        self.bias_delta = wp.zeros(row_count, dtype=wp.float32, device=device)
+        self.bias_velocity = wp.zeros(int(model.body_count) + 1, dtype=wp.spatial_vector, device=device)
         self.solve_active = wp.zeros(1, dtype=wp.int32, device=device)
         inverse_mass = np.asarray(model.body_inv_mass.numpy(), dtype=np.float32)
         joint_parent = np.asarray(model.joint_parent.numpy(), dtype=np.int32)
@@ -2165,8 +2240,8 @@ class DirectEqualitySystem:
         self.control_target_q = target_q
         self.control_target_qd = target_qd
 
-    def begin_substep(self, idt: wp.float32) -> None:
-        """Prepare body-space rows and snapshot pre-force joint velocities."""
+    def refresh_geometry(self, idt: wp.float32) -> None:
+        """Refresh body-space rows without changing impulses or drive references."""
         if not self.enabled:
             return
         wp.launch(
@@ -2227,6 +2302,12 @@ class DirectEqualitySystem:
                 ],
                 device=self.model.device,
             )
+
+    def begin_substep(self, idt: wp.float32) -> None:
+        """Prepare rows and snapshot pre-force joint velocities."""
+        if not self.enabled:
+            return
+        self.refresh_geometry(idt)
         wp.launch(
             _snapshot_direct_dynamic_velocity_kernel,
             dim=len(self.topology.row_joint),
@@ -2413,6 +2494,57 @@ class DirectEqualitySystem:
         """Wait for private-stream factorization on the current stream."""
         if self.factor_stream is not None:
             wp.get_stream(self.model.device).wait_event(self.factor_done_event)
+
+    def compute_bias_velocity(self) -> None:
+        """Extract positional recovery without changing physical velocity or impulses."""
+        if not self.enabled:
+            return
+        wp.launch(
+            _build_direct_bias_rhs_kernel,
+            dim=len(self.topology.row_joint),
+            inputs=[
+                self.row_joint,
+                self.row_local,
+                self.row_dynamic,
+                self.joint_to_structural,
+                self.row_bias,
+                self.row_scale,
+                self.bias_rhs,
+            ],
+            device=self.model.device,
+        )
+        self.solver.solve(self.bias_rhs, self.bias_delta)
+        wp.launch(
+            _compute_direct_bias_velocity_kernel,
+            dim=int(self.model.body_count) + 1,
+            inputs=[
+                self.body_row_start,
+                self.body_rows,
+                self.row_joint,
+                self.row_local,
+                self.joint_to_structural,
+                self.model.joint_parent,
+                self.model.joint_child,
+                self.row_wrench0,
+                self.row_wrench1,
+                self.bias_delta,
+                self.row_scale,
+                self.bodies,
+                self.bias_velocity,
+            ],
+            device=self.model.device,
+        )
+
+    def apply_bias_velocity(self, scale: float) -> None:
+        """Temporarily remove or restore joint positional recovery for contact solves."""
+        if not self.enabled:
+            return
+        wp.launch(
+            _apply_direct_bias_velocity_kernel,
+            dim=int(self.model.body_count) + 1,
+            inputs=[self.bias_velocity, self.bodies, wp.float32(scale)],
+            device=self.model.device,
+        )
 
     def solve(self, *, use_bias: bool) -> None:
         if not self.enabled:

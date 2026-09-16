@@ -72,11 +72,12 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
             _solve_main_block_world=lambda **_kwargs: events.append("prepare"),
             solver_iterations=0,
             _solve_direct_contacts=lambda **_kwargs: None,
+            _warm_start_owned_contacts=lambda: events.append("warm"),
             _maximal_tree_projector=None,
             _reduced_constraints_active_this_step=False,
         )
         MultiWorldDispatcher(world).solve(wp.float32(1.0))
-        self.assertEqual(events[:4], ["factor", "prepare", ("solve", False), ("bounds", False)])
+        self.assertEqual(events[:5], ["factor", "prepare", "warm", ("solve", False), ("bounds", False)])
 
     def test_direct_contact_sweeps_share_one_launch(self) -> None:
         """Keep sequential direct-contact iterations inside one mechanism launch."""

@@ -46,6 +46,7 @@ class SingleWorldDispatcher:
             else:
                 w._run_cached_prepare_bookkeeping(idt)
             if direct is not None and direct.enabled:
+                w._warm_start_owned_contacts()
                 # Project contact/limit warm starts before the first inequality
                 # sweep. The factor is fixed for the entire substep.
                 direct.solve(use_bias=False)
@@ -59,6 +60,7 @@ class SingleWorldDispatcher:
             if direct is not None and direct.enabled:
                 direct.resolve_bounded_drives(idt, use_bias=True)
         elif direct is not None and direct.enabled:
+            w._warm_start_owned_contacts()
             direct.solve(use_bias=True)
             direct.resolve_bounded_drives(idt, use_bias=True)
         w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
@@ -73,27 +75,27 @@ class SingleWorldDispatcher:
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
-        if w._constraint_capacity == 0:
+        if w._constraint_capacity == 0 or w._active_velocity_iterations <= 0:
             return
         direct = getattr(w, "_direct_equality_system", None)
-        if w._regular_pgs_active_this_step and w.velocity_iterations > 0:
+        if w._regular_pgs_active_this_step and w._active_velocity_iterations > 0:
             _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
-            for _ in range(w.velocity_iterations):
+            for _ in range(w._active_velocity_iterations):
                 w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
                 if direct is not None and direct.enabled:
                     direct.solve(use_bias=False)
             if direct is not None and direct.enabled:
                 direct.resolve_bounded_drives(idt, use_bias=False)
-        elif direct is not None and direct.enabled and w.velocity_iterations > 0:
+        elif direct is not None and direct.enabled and w._active_velocity_iterations > 0:
             direct.solve(use_bias=False)
             direct.resolve_bounded_drives(idt, use_bias=False)
-        if w.velocity_iterations > 0:
+        if w._active_velocity_iterations > 0:
             w._solve_direct_contacts(use_bias=False, refresh_mobility=False)
         if w._maximal_tree_projector is not None:
             if not w._direct_tree_contacts:
                 w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
-            if w.velocity_iterations > 0:
+            if w._active_velocity_iterations > 0:
                 w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
         if w._reduced_constraints_active_this_step:
             w._reduced_articulation.solve_constraints(w, idt, relax=True)

@@ -1,0 +1,1 @@
+Fix PhoenX rigid friction anchors retaining positional error after sliding. Preserve independent material references through matched contact history and solve reordering, without changing collision witnesses or preloading friction while contacts are separated.

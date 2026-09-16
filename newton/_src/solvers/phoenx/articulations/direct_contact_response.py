@@ -16,7 +16,7 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     GROUPED_RHS_ITEMS_PER_TASK,
 )
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync
-from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
+from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_normal,
@@ -39,6 +39,7 @@ class DirectContactResponseData:
     body_mechanism: wp.array[wp.int32]
     body_constraint_mechanism: wp.array[wp.int32]
     body_lane: wp.array[wp.int32]
+    body_response: wp.array3d[wp.spatial_vector]
     mechanism_body_start: wp.array[wp.int32]
     mechanism_body: wp.array[wp.int32]
     mechanism_row_start: wp.array[wp.int32]
@@ -86,7 +87,11 @@ def _unconstrained_wrench_cross_mobility(
     direction0: wp.vec3,
     direction1: wp.vec3,
 ) -> wp.float32:
-    if body <= wp.int32(0) or bodies.inverse_mass[body] <= wp.float32(0.0):
+    if (
+        body <= wp.int32(0)
+        or bodies.inverse_mass[body] <= wp.float32(0.0)
+        or bodies.motion_type[body] == MOTION_KINEMATIC
+    ):
         return wp.float32(0.0)
     torque0 = wp.cross(r, direction0)
     torque1 = wp.cross(r, direction1)
@@ -253,6 +258,12 @@ def _compute_contact_schur_diagonal_kernel(
     inverse22 = _unconstrained_pair_cross_mobility(
         bodies, body0, r0, -tangent1, -tangent1, body1, r1, tangent1, tangent1
     )
+    # Subtracting the equality response can cancel all unconstrained mobility.
+    # Resolve contact directions relative to the operands precision, rather than
+    # inverting positive FP32 roundoff into arbitrarily large effective masses.
+    tolerance0 = wp.float32(64.0 * 1.1920928955078125e-7) * wp.max(wp.abs(inverse00), wp.abs(response.gram[0, contact]))
+    tolerance1 = wp.float32(64.0 * 1.1920928955078125e-7) * wp.max(wp.abs(inverse11), wp.abs(response.gram[3, contact]))
+    tolerance2 = wp.float32(64.0 * 1.1920928955078125e-7) * wp.max(wp.abs(inverse22), wp.abs(response.gram[5, contact]))
     inverse00 -= response.gram[0, contact]
     inverse01 -= response.gram[1, contact]
     inverse02 -= response.gram[2, contact]
@@ -262,15 +273,81 @@ def _compute_contact_schur_diagonal_kernel(
     response.mobility[0, contact] = wp.float32(0.0)
     response.mobility[1, contact] = wp.float32(0.0)
     response.mobility[2, contact] = wp.float32(0.0)
-    if inverse00 > wp.float32(1.0e-12):
+    if inverse00 > wp.max(tolerance0, wp.float32(1.0e-12)):
         response.mobility[0, contact] = wp.float32(1.0) / inverse00
-    if inverse11 > wp.float32(1.0e-12):
+    if inverse11 > wp.max(tolerance1, wp.float32(1.0e-12)):
         response.mobility[1, contact] = wp.float32(1.0) / inverse11
-    if inverse22 > wp.float32(1.0e-12):
+    if inverse22 > wp.max(tolerance2, wp.float32(1.0e-12)):
         response.mobility[2, contact] = wp.float32(1.0) / inverse22
+    if response.mobility[0, contact] == wp.float32(0.0):
+        inverse01 = wp.float32(0.0)
+        inverse02 = wp.float32(0.0)
+    if response.mobility[1, contact] == wp.float32(0.0):
+        inverse01 = wp.float32(0.0)
+        inverse12 = wp.float32(0.0)
+    if response.mobility[2, contact] == wp.float32(0.0):
+        inverse02 = wp.float32(0.0)
+        inverse12 = wp.float32(0.0)
     response.mobility[3, contact] = inverse01
     response.mobility[4, contact] = inverse02
     response.mobility[5, contact] = inverse12
+
+
+@wp.kernel(enable_backward=False)
+def _compute_contact_body_response_kernel(
+    response: DirectContactResponseData,
+    bodies: BodyContainer,
+    contacts: ContactContainer,
+):
+    contact, local_body, axis = wp.tid()
+    mechanism = response.contact_mechanism[contact]
+    if mechanism < 0:
+        return
+    begin = response.mechanism_body_start[mechanism]
+    end = response.mechanism_body_start[mechanism + 1]
+    if local_body >= end - begin:
+        return
+    body = response.mechanism_body[begin + local_body]
+    normal = cc_get_normal(contacts, contact)
+    tangent = cc_get_tangent1(contacts, contact)
+    direction = normal
+    if axis == 1:
+        direction = tangent
+    elif axis == 2:
+        direction = wp.cross(normal, tangent)
+    wrench = wp.spatial_vectorf(0.0)
+    for incidence in range(response.body_row_start[body], response.body_row_start[body + 1]):
+        row = response.body_rows[incidence]
+        joint = response.row_joint[row]
+        local_row = row - response.mechanism_row_start[mechanism]
+        offset = contact * response.workspace_stride + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + axis
+        wrench -= (
+            response.row_scale[row]
+            * response.solution[offset]
+            * _row_wrench_for_body(
+                body,
+                joint,
+                response.joint_to_structural[joint],
+                response.row_local[row],
+                response.joint_parent,
+                response.joint_child,
+                response.row_wrench0,
+                response.row_wrench1,
+            )
+        )
+    force = wp.spatial_top(wrench)
+    torque = wp.spatial_bottom(wrench)
+    if body == response.contact_body0[contact]:
+        force -= direction
+        torque -= wp.cross(cc_get_r0(contacts, contact), direction)
+    if body == response.contact_body1[contact]:
+        force += direction
+        torque += wp.cross(cc_get_r1(contacts, contact), direction)
+    linear = bodies.inverse_mass[body] * force
+    angular = mat33_from_sym6(bodies.inverse_inertia_world[body]) * torque
+    response.body_response[contact, local_body, axis] = wp.spatial_vectorf(
+        linear[0], linear[1], linear[2], angular[0], angular[1], angular[2]
+    )
 
 
 class DirectContactResponse:
@@ -365,6 +442,8 @@ class DirectContactResponse:
         self.data.rhs = self.contact_batch.rhs
         self.data.solution = self.contact_batch.solution
         self.data.gram = self.contact_batch.gram
+        self.body_response_dim = (capacity, max((len(bodies) for bodies in mechanism_bodies), default=1), 3)
+        self.data.body_response = wp.zeros(self.body_response_dim, dtype=wp.spatial_vector, device=device)
         self.data.accumulated_solution = wp.zeros(len(topology.row_joint), dtype=wp.float32, device=device)
         self.data.mobility = wp.zeros((6, capacity), dtype=wp.float32, device=device)
         self.data.delta_coordinate = wp.zeros(capacity, dtype=wp.vec3, device=device)
@@ -394,6 +473,13 @@ class DirectContactResponse:
         wp.launch(
             _compute_contact_schur_diagonal_kernel,
             dim=capacity,
+            inputs=[self.data, self.direct.bodies, contacts],
+            device=self.direct.model.device,
+        )
+
+        wp.launch(
+            _compute_contact_body_response_kernel,
+            dim=self.body_response_dim,
             inputs=[self.data, self.direct.bodies, contacts],
             device=self.direct.model.device,
         )

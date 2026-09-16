@@ -1,0 +1,31 @@
+--- a/newton/_src/solvers/phoenx/articulations/reduced_contact_block.py
++++ b/newton/_src/solvers/phoenx/articulations/reduced_contact_block.py
+@@ -2065,6 +2065,9 @@
+                 DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
+             )
+ 
++        # One three-component mobility per point, valid only for this invocation.
++        # Rows and response are immutable throughout its alternating sweeps.
++        cross_mobility_cache = wp.tile_zeros(shape=_POINTS_PER_PAGE, dtype=wp.vec3, storage="register")
+         for iteration in range(iterations):
+             for point_offset in range(active_point_count):
+                 point = wp.int32(point_offset)
+@@ -2105,9 +2108,15 @@
+                     offset=dof_start_articulation,
+                     storage="register",
+                 )
+-                mobility_nt1 = wp.tile_extract(wp.tile_sum(jacobian0 * response1), 0)
+-                mobility_nt2 = wp.tile_extract(wp.tile_sum(jacobian0 * response2), 0)
+-                mobility_t1t2 = wp.tile_extract(wp.tile_sum(jacobian1 * response2), 0)
++                if iteration == wp.int32(0):
++                    mobility_nt1 = wp.tile_extract(wp.tile_sum(jacobian0 * response1), 0)
++                    mobility_nt2 = wp.tile_extract(wp.tile_sum(jacobian0 * response2), 0)
++                    mobility_t1t2 = wp.tile_extract(wp.tile_sum(jacobian1 * response2), 0)
++                    cross_mobility_cache[point] = wp.vec3(mobility_nt1, mobility_nt2, mobility_t1t2)
++                mobility = wp.tile_extract(cross_mobility_cache, point)
++                mobility_nt1 = mobility[0]
++                mobility_nt2 = mobility[1]
++                mobility_t1t2 = mobility[2]
+                 jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
+                     wp.tile_sum(jacobian0 * generalized_delta), 0
+                 )

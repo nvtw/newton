@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+"""Physical invariance of rigid contact positional recovery."""
+
+import unittest
+
+import numpy as np
+import warp as wp
+
+import newton
+from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.constraint_contact import ContactColumnContainer, ContactViews
+from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+    contact_prepare_for_iteration_lean_no_soft_pd,
+)
+from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer
+
+
+@wp.kernel(enable_backward=False)
+def _prepare(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    body_count: wp.int32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copies: CopyStateContainer,
+):
+    contact_prepare_for_iteration_lean_no_soft_pd(
+        columns, 0, bodies, particles, body_count, wp.float32(1000.0), cc, contacts, copies, 0
+    )
+
+
+class TestRigidContactBias(unittest.TestCase):
+    def test_sticky_recovery_is_invariant_under_uniform_mass_scaling(self):
+        if not wp.is_cuda_available():
+            self.skipTest("CUDA required")
+        biases = []
+        for mass in (1.0, 10.0):
+            builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+            body = builder.add_body(
+                xform=wp.transform(wp.vec3(0.0, 0.0, 0.9999), wp.quat_identity()),
+                mass=mass,
+                inertia=wp.mat33(mass * 0.4, 0.0, 0.0, 0.0, mass * 0.4, 0.0, 0.0, 0.0, mass * 0.4),
+            )
+            builder.add_shape_sphere(body, radius=1.0, cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5))
+            builder.add_ground_plane()
+            model = builder.finalize(device="cuda:0")
+            pipeline = newton.CollisionPipeline(model, rigid_contact_max=8, contact_matching="sticky")
+            contacts = pipeline.contacts()
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                step_layout="single_world",
+                substeps=1,
+                solver_iterations=1,
+                velocity_iterations=0,
+                sor_boost=1.0,
+            )
+            state = model.state()
+            pipeline.collide(state, contacts)
+            solver.step(state, state, model.control(), contacts, 1.0e-6)
+            self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
+            # Same stored surface drift and proportionally scaled normal load.
+            point = contacts.rigid_contact_point0.numpy()
+            point[0, 0] += 1.0e-5
+            contacts.rigid_contact_point0.assign(point)
+            world = solver.world
+            anchors = world._contact_container.lambdas.numpy()
+            anchors[6:9, 0] = contacts.rigid_contact_point0.numpy()[0]
+            anchors[9:12, 0] = contacts.rigid_contact_point1.numpy()[0]
+            world._contact_container.lambdas.assign(anchors)
+            impulses = world._contact_container.impulses.numpy()
+            impulses[:, 0] = [mass * 1.0e-5, 0.0, 0.0]
+            world._contact_container.impulses.assign(impulses)
+            wp.launch(
+                _prepare,
+                dim=1,
+                inputs=[
+                    world._contact_cols,
+                    world.bodies,
+                    world.particles or ParticleContainer(),
+                    world.num_bodies,
+                    world._contact_container,
+                    world._active_contact_views(),
+                    world._copy_state or CopyStateContainer(),
+                ],
+                device=model.device,
+            )
+            biases.append(world._contact_container.derived.numpy()[4:6, 0].copy())
+        self.assertGreater(float(np.linalg.norm(biases[0])), 1.0e-5)
+        self.assertGreater(float(np.linalg.norm(biases[0])), 0.0007)
+        np.testing.assert_allclose(biases[1], biases[0], rtol=1.0e-5, atol=1.0e-8)
+
+
+if __name__ == "__main__":
+    unittest.main()

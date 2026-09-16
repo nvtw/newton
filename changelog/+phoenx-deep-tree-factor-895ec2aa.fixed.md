@@ -1,0 +1,1 @@
+Improve PhoenX reduced-articulation performance for deep CUDA trees, including single G1 robots, using the existing cooperative mass factorization while preserving current-pose and joint-limit updates.

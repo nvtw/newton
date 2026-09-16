@@ -2257,6 +2257,7 @@ class NarrowPhase:
         contact_reduction_hashtable_size_factor: float = 0.25,
         speculative: bool = False,
         contact_writer_supports_speculative: bool = False,
+        speculative_contact_velocity_filter: bool = True,
     ) -> None:
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -2334,7 +2335,11 @@ class NarrowPhase:
                 warnings appear. Defaults to ``0.25`` for memory compatibility.
             speculative: Whether the caller provides velocity-expanded search
                 gaps and exact speculative-contact data. Defaults to False.
-            contact_writer_supports_speculative: Whether a custom contact writer performs exact speculative-contact
+            speculative_contact_velocity_filter: Whether initial velocity filters
+                speculative candidates. False retains geometry within the expanded
+                search gaps regardless of velocity and requires speculative=True.
+                Physical separation remains unchanged.
+            contact_writer_supports_speculative: Whether a custom contact writer performs the selected candidate
                 admission. Required when ``speculative`` and ``contact_writer_warp_func`` are both provided.
         """
         self.max_candidate_pairs = max_candidate_pairs
@@ -2363,10 +2368,16 @@ class NarrowPhase:
         self.deterministic = deterministic
         self.verify_buffers = verify_buffers
         self.speculative = speculative
+        if not isinstance(speculative_contact_velocity_filter, bool):
+            raise ValueError("speculative_contact_velocity_filter must be a bool")
+        if not speculative_contact_velocity_filter and not speculative:
+            raise ValueError("Geometric candidate admission requires speculative=True")
+        self.speculative_contact_velocity_filter = speculative_contact_velocity_filter
+        filter_speculative = speculative and speculative_contact_velocity_filter
         if speculative and contact_writer_warp_func is not None and not contact_writer_supports_speculative:
             raise ValueError(
                 "A custom contact writer used with speculative=True must set "
-                "contact_writer_supports_speculative=True and perform exact speculative-contact admission"
+                "contact_writer_supports_speculative=True and implement the selected candidate-admission policy"
             )
         if speculative and hydroelastic_sdf is not None:
             raise NotImplementedError("Speculative contact generation does not yet support hydroelastic SDF contacts")
@@ -2403,7 +2414,7 @@ class NarrowPhase:
 
         # Determine the writer function
         if contact_writer_warp_func is None:
-            writer_func = _write_contact_simple_speculative if speculative else write_contact_simple
+            writer_func = _write_contact_simple_speculative if filter_speculative else write_contact_simple
         else:
             writer_func = contact_writer_warp_func
 
@@ -2445,7 +2456,7 @@ class NarrowPhase:
         # Primitive kernel handles lightweight primitives and routes remaining pairs
         self.primitive_kernel = create_narrow_phase_primitive_kernel(
             writer_func,
-            speculative=speculative,
+            speculative=filter_speculative,
             sparse_gjk_pairs=self.sparse_gjk_pairs,
             hydroelastic_enabled=hydroelastic_sdf is not None,
         )
@@ -2519,7 +2530,7 @@ class NarrowPhase:
                     write_contact_to_reducer,
                     enable_heightfields=has_heightfields,
                     reduce_contacts=True,
-                    speculative=speculative,
+                    speculative=filter_speculative,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                     deterministic_reduction=deterministic,
@@ -2531,14 +2542,14 @@ class NarrowPhase:
                     use_precomputed_edge_data=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
-                    speculative=speculative,
+                    speculative=filter_speculative,
                     deterministic_reduction=deterministic,
                 )
             else:
                 self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     writer_func,
                     enable_heightfields=has_heightfields,
-                    speculative=speculative,
+                    speculative=filter_speculative,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                 )
@@ -2548,7 +2559,7 @@ class NarrowPhase:
                     use_precomputed_edge_data=True,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
-                    speculative=speculative,
+                    speculative=filter_speculative,
                 )
         else:
             self.mesh_plane_contacts_kernel = None
@@ -3168,7 +3179,7 @@ class NarrowPhase:
             # Register mesh-plane/mesh-triangle contacts in hashtable BEFORE mesh-mesh.
             # Mesh-mesh does inline hashtable registration in its kernel.
             if self.reduce_contacts:
-                if self.speculative:
+                if self.speculative and self.speculative_contact_velocity_filter:
                     wp.launch(
                         kernel=reduce_buffered_contacts_speculative_kernel,
                         dim=self.total_num_threads,

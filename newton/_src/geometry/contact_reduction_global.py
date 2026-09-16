@@ -1644,6 +1644,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
     depth: float,
     fingerprint: int,
     centered_position: wp.vec3,
+    spatial_priority_depth: float,
     inner_spatial_depth: float,
     outer_spatial_depth: float,
     position_local: wp.vec3,
@@ -1653,13 +1654,15 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
     reducer_data: GlobalContactReducerData,
     deterministic: int,
 ) -> int:
-    """Export contact with inner-preferred spatial winners.
+    """Export contact with separate spatial priority and depth coverage.
 
     Directional slots accept contacts out to ``outer_spatial_depth``, but
-    contacts inside ``inner_spatial_depth`` always outrank outer contacts.
-    Within the same inner/outer tier, the furthest spatial projection wins.
+    contacts inside ``spatial_priority_depth`` outrank other contacts.
+    Within each tier, the furthest spatial projection wins. Depth and voxel
+    slots retain coverage inside ``inner_spatial_depth`` independently.
     """
     ht_capacity = reducer_data.ht_capacity
+    use_priority = depth < spatial_priority_depth
     use_inner = depth < inner_spatial_depth
     use_outer = depth < outer_spatial_depth
 
@@ -1715,7 +1718,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
         for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
             dir_2d = get_spatial_direction_2d(dir_i)
             score = wp.dot(pos_2d, dir_2d)
-            probe = make_spatial_preprune_probe(score, use_inner, fingerprint, deterministic)
+            probe = make_spatial_preprune_probe(score, use_priority, fingerprint, deterministic)
             if slot_values[dir_i] < probe:
                 might_win = True
     else:
@@ -1737,7 +1740,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
         for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
             dir_2d = get_spatial_direction_2d(dir_i)
             score = wp.dot(pos_2d, dir_2d)
-            provisional_value = make_spatial_contact_value(score, True, fingerprint, 0, deterministic)
+            provisional_value = make_spatial_contact_value(score, use_priority, fingerprint, 0, deterministic)
             previous_value = reduction_try_update_slot(
                 entry_idx, dir_i, provisional_value, reducer_data.ht_values, ht_capacity
             )
@@ -1760,7 +1763,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
         for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
             dir_2d = get_spatial_direction_2d(dir_i)
             score = wp.dot(pos_2d, dir_2d)
-            provisional_value = make_spatial_contact_value(score, False, fingerprint, 0, deterministic)
+            provisional_value = make_spatial_contact_value(score, use_priority, fingerprint, 0, deterministic)
             previous_value = reduction_try_update_slot(
                 entry_idx, dir_i, provisional_value, reducer_data.ht_values, ht_capacity
             )
@@ -1788,7 +1791,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
             if not still_wins and (won_mask & (1 << dir_i)) != 0:
                 dir_2d = get_spatial_direction_2d(dir_i)
                 score = wp.dot(pos_2d, dir_2d)
-                provisional_value = make_spatial_contact_value(score, use_inner, fingerprint, 0, deterministic)
+                provisional_value = make_spatial_contact_value(score, use_priority, fingerprint, 0, deterministic)
                 if reducer_data.ht_values[dir_i * ht_capacity + entry_idx] == provisional_value:
                     still_wins = True
 
@@ -1820,7 +1823,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
                 if (won_mask & (1 << dir_i)) != 0:
                     dir_2d = get_spatial_direction_2d(dir_i)
                     score = wp.dot(pos_2d, dir_2d)
-                    provisional_value = make_spatial_contact_value(score, use_inner, fingerprint, 0, deterministic)
+                    provisional_value = make_spatial_contact_value(score, use_priority, fingerprint, 0, deterministic)
                     reduction_rollback_slot(
                         entry_idx,
                         dir_i,
@@ -1855,7 +1858,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
         for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
             dir_2d = get_spatial_direction_2d(dir_i)
             score = wp.dot(pos_2d, dir_2d)
-            value = make_spatial_contact_value(score, True, fingerprint, contact_id, deterministic)
+            value = make_spatial_contact_value(score, use_priority, fingerprint, contact_id, deterministic)
             reduction_update_slot(entry_idx, dir_i, value, reducer_data.ht_values, ht_capacity)
 
         max_depth_value = make_contact_value(-depth, fingerprint, contact_id, deterministic)
@@ -1866,7 +1869,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
         for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
             dir_2d = get_spatial_direction_2d(dir_i)
             score = wp.dot(pos_2d, dir_2d)
-            value = make_spatial_contact_value(score, False, fingerprint, contact_id, deterministic)
+            value = make_spatial_contact_value(score, use_priority, fingerprint, contact_id, deterministic)
             reduction_update_slot(entry_idx, dir_i, value, reducer_data.ht_values, ht_capacity)
 
     if use_inner:
@@ -1929,6 +1932,7 @@ def export_and_reduce_contact_centered_two_spatial_depths(
         fingerprint,
         centered_position,
         inner_spatial_depth,
+        inner_spatial_depth,
         outer_spatial_depth,
         position_local,
         aabb_lower_voxel,
@@ -1940,7 +1944,7 @@ def export_and_reduce_contact_centered_two_spatial_depths(
 
 
 @wp.func
-def export_and_reduce_predictive_contact(
+def _export_and_reduce_predictive_spatial_contact(
     shape_a: int,
     shape_b: int,
     position: wp.vec3,
@@ -1957,6 +1961,7 @@ def export_and_reduce_predictive_contact(
     max_speculative_extension: float,
     existing_contact_id: int,
     reducer_data: GlobalContactReducerData,
+    normal_guard: bool,
 ) -> int:
     """Register an exact predictive candidate in a bounded shape-pair manifold.
 
@@ -1978,6 +1983,7 @@ def export_and_reduce_predictive_contact(
         existing_contact_id: ``-1`` requests a provisional claim; a positive one-based ID updates an existing
             buffered contact.
         reducer_data: Global contact-reducer storage.
+        normal_guard: Compete in the existing normal-bin depth slot instead of the spatial predictive manifold.
     """
     clearance = depth - surface_offset_sum
     if clearance <= 0.0 or clearance > max_speculative_extension:
@@ -1999,7 +2005,10 @@ def export_and_reduce_predictive_contact(
     if closing_speed <= 0.0 or clearance > closing_speed * collision_update_dt:
         return -1
 
-    key = make_contact_key(shape_a, shape_b, wp.static(PREDICTIVE_BIN_ID))
+    bin_id = int(wp.static(PREDICTIVE_BIN_ID))
+    if normal_guard:
+        bin_id = get_slot(contact_normal)
+    key = make_contact_key(shape_a, shape_b, bin_id)
     entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
     if entry_idx < 0:
         wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
@@ -2014,9 +2023,17 @@ def export_and_reduce_predictive_contact(
     shard_hash = shard_hash * ((wp.uint32(0x846C) << wp.uint32(16)) | wp.uint32(0xA68B))
     shard_hash = shard_hash ^ (shard_hash >> wp.uint32(16))
     clearance_slot = int(shard_hash % wp.uint32(wp.static(NUM_SPATIAL_DIRECTIONS)))
+    impact_slot = int(wp.static(NUM_SPATIAL_DIRECTIONS))
+    # Reuse the regular normal-bin depth slot. A deeper physical witness
+    # always outranks a separated predictive witness in the same family.
+    if normal_guard:
+        clearance_slot = wp.static(NUM_SPATIAL_DIRECTIONS)
+        impact_slot = clearance_slot
+        clearance_score = -depth
+        impact_time_score = -depth
     ht_capacity = reducer_data.ht_capacity
     clearance_idx = clearance_slot * ht_capacity + entry_idx
-    impact_time_idx = wp.static(NUM_SPATIAL_DIRECTIONS) * ht_capacity + entry_idx
+    impact_time_idx = impact_slot * ht_capacity + entry_idx
 
     # ID zero is reserved so provisional winners can be claimed atomically
     # before allocating buffer storage.
@@ -2027,7 +2044,7 @@ def export_and_reduce_predictive_contact(
         reduction_update_slot(entry_idx, clearance_slot, clearance_value, reducer_data.ht_values, ht_capacity)
         reduction_update_slot(
             entry_idx,
-            wp.static(NUM_SPATIAL_DIRECTIONS),
+            impact_slot,
             impact_time_value,
             reducer_data.ht_values,
             ht_capacity,
@@ -2046,7 +2063,7 @@ def export_and_reduce_predictive_contact(
     )
     previous_impact_time_value = reduction_try_update_slot(
         entry_idx,
-        wp.static(NUM_SPATIAL_DIRECTIONS),
+        impact_slot,
         provisional_impact_time_value,
         reducer_data.ht_values,
         ht_capacity,
@@ -2060,7 +2077,7 @@ def export_and_reduce_predictive_contact(
     if not clearance_won and not impact_time_won:
         return -1
 
-    contact_id = export_contact_to_buffer(shape_a, shape_b, position, contact_normal, depth, fingerprint, reducer_data)
+    contact_id = export_contact_to_buffer(shape_a, shape_b, position, normal, depth, fingerprint, reducer_data)
     if contact_id < 0:
         if clearance_won:
             reduction_rollback_slot(
@@ -2074,7 +2091,7 @@ def export_and_reduce_predictive_contact(
         if impact_time_won:
             reduction_rollback_slot(
                 entry_idx,
-                wp.static(NUM_SPATIAL_DIRECTIONS),
+                impact_slot,
                 provisional_impact_time_value,
                 previous_impact_time_value,
                 reducer_data.ht_values,
@@ -2098,7 +2115,7 @@ def export_and_reduce_predictive_contact(
         impact_time_value = make_contact_value(impact_time_score, fingerprint, contact_id, reducer_data.deterministic)
         if reduction_finalize_slot(
             entry_idx,
-            wp.static(NUM_SPATIAL_DIRECTIONS),
+            impact_slot,
             provisional_impact_time_value,
             impact_time_value,
             reducer_data.ht_values,
@@ -2109,6 +2126,72 @@ def export_and_reduce_predictive_contact(
         return contact_id
     reclaim_contact_id(contact_id, reducer_data)
     return -1
+
+
+@wp.func
+def export_and_reduce_predictive_contact(
+    shape_a: int,
+    shape_b: int,
+    position: wp.vec3,
+    normal: wp.vec3,
+    depth: float,
+    surface_offset_sum: float,
+    radius_eff_a: float,
+    radius_eff_b: float,
+    fingerprint: int,
+    shape_transform: wp.array[wp.transform],
+    shape_linear_velocity: wp.array[wp.vec3],
+    shape_angular_velocity: wp.array[wp.vec3],
+    collision_update_dt: float,
+    max_speculative_extension: float,
+    existing_contact_id: int,
+    reducer_data: GlobalContactReducerData,
+) -> int:
+    """Retain predictive spatial witnesses and unrepresented normal families."""
+    spatial_id = _export_and_reduce_predictive_spatial_contact(
+        shape_a,
+        shape_b,
+        position,
+        normal,
+        depth,
+        surface_offset_sum,
+        radius_eff_a,
+        radius_eff_b,
+        fingerprint,
+        shape_transform,
+        shape_linear_velocity,
+        shape_angular_velocity,
+        collision_update_dt,
+        max_speculative_extension,
+        existing_contact_id,
+        reducer_data,
+        False,
+    )
+    reusable_id = existing_contact_id
+    if spatial_id > 0:
+        reusable_id = spatial_id
+    guard_id = _export_and_reduce_predictive_spatial_contact(
+        shape_a,
+        shape_b,
+        position,
+        normal,
+        depth,
+        surface_offset_sum,
+        radius_eff_a,
+        radius_eff_b,
+        fingerprint,
+        shape_transform,
+        shape_linear_velocity,
+        shape_angular_velocity,
+        collision_update_dt,
+        max_speculative_extension,
+        reusable_id,
+        reducer_data,
+        True,
+    )
+    if guard_id > 0:
+        return guard_id
+    return spatial_id
 
 
 @wp.kernel(enable_backward=False)

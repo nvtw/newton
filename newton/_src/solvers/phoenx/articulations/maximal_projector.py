@@ -275,6 +275,54 @@ def _gather_maximal_tree_kernel(
     data.affine_offset[articulation, lane] = affine_offset
 
 
+@wp.kernel(enable_backward=False)
+def _gather_direct_contact_tree_kernel(
+    joint_parent: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_qd_start: wp.array[wp.int32],
+    bodies: BodyContainer,
+    data: MaximalTreeProjectorData,
+):
+    articulation = wp.tid() // wp.int32(_TREE_WIDTH)
+    lane = wp.tid() - articulation * wp.int32(_TREE_WIDTH)
+    if lane >= data.body_count[articulation]:
+        return
+    body = data.body_slot[articulation, lane]
+    data.body_mass[articulation, lane] = wp.float32(1.0) / bodies.inverse_mass[body]
+    data.body_inertia[articulation, lane] = sym6_from_mat33(
+        wp.inverse(mat33_from_sym6(bodies.inverse_inertia_world[body]))
+    )
+    data.velocity_in[articulation, lane] = wp.spatial_vectorf(0.0)
+    data.affine_offset[articulation, lane] = wp.spatial_vectorf(0.0)
+    data.drive_diag[articulation, lane] = wp.float32(0.0)
+    data.drive_bias[articulation, lane] = wp.float32(0.0)
+    shift = wp.vec3f(0.0)
+    motion = wp.spatial_vectorf(0.0)
+    if lane > wp.int32(0):
+        joint = data.joint_index[articulation, lane]
+        parent = joint_parent[joint] + wp.int32(1)
+        parent_orientation = bodies.orientation[parent]
+        child_orientation = bodies.orientation[body]
+        r_parent = wp.quat_rotate(
+            parent_orientation, wp.transform_get_translation(joint_x_p[joint]) - bodies.body_com[parent]
+        )
+        r_child = wp.quat_rotate(
+            child_orientation, wp.transform_get_translation(joint_x_c[joint]) - bodies.body_com[body]
+        )
+        axis = wp.normalize(
+            wp.quat_rotate(
+                parent_orientation * wp.transform_get_rotation(joint_x_p[joint]), joint_axis[joint_qd_start[joint]]
+            )
+        )
+        linear_motion = wp.cross(r_child, axis)
+        shift = r_child - r_parent
+        motion = wp.spatial_vectorf(linear_motion[0], linear_motion[1], linear_motion[2], axis[0], axis[1], axis[2])
+    data.shift[articulation, lane] = shift
+    data.motion[articulation, lane] = motion
+
+
 @wp.func
 def _gather_position_lane(
     joint_to_cid: wp.array[wp.int32],
@@ -938,10 +986,18 @@ class MaximalTreeProjector:
     def factor_contact_response(self) -> None:
         """Factor the current tree mobility without changing body velocities."""
         wp.launch(
-            _gather_maximal_tree_kernel,
+            _gather_direct_contact_tree_kernel,
             dim=self.launch_dim,
             block_dim=self.block_dim,
-            inputs=[True, False, 0.0, self.joint_to_cid, self.constraints, self.bodies, self.data],
+            inputs=[
+                self.model.joint_parent,
+                self.model.joint_X_p,
+                self.model.joint_X_c,
+                self.model.joint_axis,
+                self.model.joint_qd_start,
+                self.bodies,
+                self.data,
+            ],
             device=self.model.device,
         )
         wp.launch(

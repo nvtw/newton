@@ -1,0 +1,1 @@
+Add experimental `SolverPhoenX(contact_chunk_size=...)` for splitting rigid point-contact ranges into smaller scheduling units while preserving all contact points and matched history. The default remains disabled.

@@ -397,6 +397,22 @@ def write_contact_speculative(
     _write_contact_at_index(contact_data, writer_data, index, point_a_world, point_b_world, normal)
 
 
+@wp.func
+def write_contact_geometric(
+    contact_data: ContactData,
+    writer_data: ContactWriterData,
+    output_index: int,
+):
+    """Store geometric search witnesses without initial-velocity admission."""
+    normal, point_a_world, point_b_world, separation = prepare_speculative_contact(contact_data)
+    index = output_index
+    if index < 0:
+        if separation > contact_data.gap_sum:
+            return
+        index = wp.atomic_add(writer_data.contact_count, 0, 1)
+    _write_contact_at_index(contact_data, writer_data, index, point_a_world, point_b_world, normal)
+
+
 @wp.kernel(enable_backward=False)
 def compute_shape_aabbs(
     body_q: wp.array[wp.transform],
@@ -664,6 +680,30 @@ def compute_shape_velocities(
     angular_extension_vec = wp.min(wp.vec3(angular_extension), cap)
     shape_aabb_lower[shape_id] = shape_aabb_lower[shape_id] - angular_extension_vec
     shape_aabb_upper[shape_id] = shape_aabb_upper[shape_id] + angular_extension_vec
+
+
+@wp.kernel(enable_backward=False)
+def expand_geometric_search_aabbs(
+    shape_search_gap: wp.array[float],
+    shape_gap: wp.array[float],
+    angular_velocity: wp.array[wp.vec3],
+    local_lower: wp.array[wp.vec3],
+    local_upper: wp.array[wp.vec3],
+    collision_radius: wp.array[float],
+    dt: float,
+    extension_cap: float,
+    lower: wp.array[wp.vec3],
+    upper: wp.array[wp.vec3],
+):
+    """Complete the scalar search envelope after angular AABB expansion."""
+    shape = wp.tid()
+    furthest = wp.max(wp.abs(local_lower[shape]), wp.abs(local_upper[shape]))
+    radius = wp.max(wp.length(furthest), collision_radius[shape])
+    angular_extension = wp.min(wp.length(angular_velocity[shape]) * radius * dt, extension_cap)
+    # compute_shape_velocities already added the angular portion.
+    extra = wp.max(shape_search_gap[shape] - shape_gap[shape] - angular_extension, 0.0)
+    lower[shape] -= wp.vec3(extra)
+    upper[shape] += wp.vec3(extra)
 
 
 # Primitive pairs (GJK/MPR) produce up to 5 manifold contacts.
@@ -1374,6 +1414,7 @@ class CollisionPipeline:
         broad_phase_filter: tuple[Any, Any] | None = None,
         contact_reduction_hashtable_size_factor: float = 0.25,
         speculative_contact_gap_max: float | None = None,
+        speculative_contact_velocity_filter: bool = True,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -1518,13 +1559,24 @@ class CollisionPipeline:
                 pipeline forwards it to every broad-phase launch.  Ignored
                 when ``broad_phase`` is a pre-built instance (the caller
                 must construct that instance with the filter directly).
-            speculative_contact_gap_max: Cap on the velocity-derived rigid-contact
-                detection gap [m]. The effective gap is the larger of the authored
-                gap and the capped velocity-derived gap. Must be a non-negative
-                finite number or ``None``. ``None`` disables speculative contacts;
+            speculative_contact_gap_max: Cap on the velocity-derived extension
+                of rigid-contact search bounds [m]. The search gap adds the capped
+                extension to the authored gap. By default, admission uses the
+                authored gap or predicted closure over the update interval; the
+                extension does not change physical separation. Must be a
+                non-negative finite number or ``None``. ``None`` disables speculative contacts;
                 ``0.0`` enables them without enlarging authored gaps. Defaults to
                 ``None``. See
                 :ref:`Speculative contacts <speculative-contacts>`.
+
+            speculative_contact_velocity_filter: Whether to discard candidates
+                outside authored gaps unless the initial velocity predicts closure.
+                Defaults to True. False admits geometry throughout the same
+                velocity-expanded search envelope, including receding witnesses.
+                Requires speculative_contact_gap_max. Physical gaps and stored
+                separation remain unchanged; the solver must activate contacts from
+                live separation and velocity. The capped speed-derived envelope
+                does not guarantee coverage under arbitrary acceleration.
 
         .. experimental::
 
@@ -1544,6 +1596,10 @@ class CollisionPipeline:
             raise ValueError(
                 f"contact_matching_normal_dot_threshold must be in [-1, 1], got {contact_matching_normal_dot_threshold}"
             )
+        if not isinstance(speculative_contact_velocity_filter, bool):
+            raise ValueError("speculative_contact_velocity_filter must be a bool")
+        if not speculative_contact_velocity_filter and speculative_contact_gap_max is None:
+            raise ValueError("Geometric speculative admission requires speculative_contact_gap_max")
         matching_enabled = contact_matching != "disabled"
         matching_sticky = contact_matching == "sticky"
         if contact_report and not matching_enabled:
@@ -1664,7 +1720,10 @@ class CollisionPipeline:
         self.include_static_kinematic_pairs = include_static_kinematic_pairs
         self.speculative_contact_gap_max = speculative_contact_gap_max
         self._speculative_enabled = speculative_contact_gap_max is not None
+        self.speculative_contact_velocity_filter = speculative_contact_velocity_filter
         contact_writer = write_contact_speculative if self._speculative_enabled else write_contact
+        if self._speculative_enabled and not speculative_contact_velocity_filter:
+            contact_writer = write_contact_geometric
 
         # Broad-phase filter callback: forwarded to whichever broad phase
         # we construct below.  ``broad_phase_filter_data`` is set later
@@ -1728,6 +1787,10 @@ class CollisionPipeline:
                 raise ValueError(
                     "Provided narrow_phase speculative mode must match "
                     "CollisionPipeline(speculative_contact_gap_max=...)."
+                )
+            if narrow_phase.speculative_contact_velocity_filter != speculative_contact_velocity_filter:
+                raise ValueError(
+                    "Provided narrow_phase speculative_contact_velocity_filter must match CollisionPipeline"
                 )
             if narrow_phase.max_candidate_pairs < self.shape_pairs_max:
                 raise ValueError(
@@ -2006,6 +2069,7 @@ class CollisionPipeline:
                 verify_buffers=verify_buffers,
                 contact_reduction_hashtable_size_factor=contact_reduction_hashtable_size_factor,
                 speculative=self._speculative_enabled,
+                speculative_contact_velocity_filter=speculative_contact_velocity_filter,
                 contact_writer_supports_speculative=self._speculative_enabled,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
@@ -2722,12 +2786,33 @@ class CollisionPipeline:
                 record_tape=False,
             )
 
+        if speculative_active and not self.speculative_contact_velocity_filter:
+            wp.launch(
+                expand_geometric_search_aabbs,
+                dim=model.shape_count,
+                inputs=[
+                    search_gap,
+                    model.shape_gap,
+                    self._shape_angular_velocity,
+                    model.shape_collision_aabb_lower,
+                    model.shape_collision_aabb_upper,
+                    model.shape_collision_radius,
+                    collision_update_dt,
+                    max_speculative_extension,
+                    self.narrow_phase.shape_aabb_lower,
+                    self.narrow_phase.shape_aabb_upper,
+                ],
+                device=self.device,
+                record_tape=False,
+            )
+        filter_velocity = speculative_active and self.speculative_contact_velocity_filter
+
         self._run_broad_phase(
             shape_collision_group=model.shape_collision_group,
             shape_world=model.shape_world,
             shape_count=model.shape_count,
-            shape_displacement=self._shape_displacement if speculative_active else None,
-            sort_axis_displacement_limit=max_speculative_extension if speculative_active else None,
+            shape_displacement=self._shape_displacement if filter_velocity else None,
+            sort_axis_displacement_limit=max_speculative_extension if filter_velocity else None,
         )
 
         self._run_narrow_phase_and_post(

@@ -1,0 +1,1 @@
+Fix Phoenx contact ownership, constrained contact mobility, and positional stabilization for jointed mechanisms. Keep joint positional recovery out of physical contact impulses along nearly blocked directions, and prevent kinematic bodies from responding to contact impulses.

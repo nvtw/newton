@@ -12900,7 +12900,9 @@ class ModelBuilder:
                 self.validate_joint_ordering()
 
             with self._raw_array_access():
-                return self._finalize_impl(device=device, requires_grad=requires_grad)
+                return self._finalize_impl(
+                    device=device, requires_grad=requires_grad, skip_shape_contact_pairs=skip_shape_contact_pairs
+                )
         finally:
             if gc_was_enabled:
                 gc.enable()
@@ -12910,6 +12912,7 @@ class ModelBuilder:
         device: Devicelike | None = None,
         *,
         requires_grad: bool = False,
+        skip_shape_contact_pairs: bool = False,
     ) -> Model:
         # construct world starts by ensuring they are cumulative and appending
         # tail-end global counts and sum total counts over the entire model.

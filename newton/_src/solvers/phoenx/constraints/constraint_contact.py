@@ -502,6 +502,10 @@ def _contact_scatter_colored_rows_kernel(
         packed_headers.data[_OFF_CONTACT_FIRST, slot] = reinterpret_int_as_float(original_first)
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         destination.impulses[row, destination_k] = source.impulses[row, source_k]
+    # Prepare may reset material anchors while rows are in solve order.
+    # Publish those references before the next matched-history snapshot.
+    for row in range(6, 12):
+        destination.lambdas[row, destination_k] = source.lambdas[row, source_k]
 
 
 def contact_pack_colored_headers(

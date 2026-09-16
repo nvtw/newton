@@ -66,51 +66,21 @@ _OFF_BODY8 = wp.constant(wp.int32(8))
 
 __all__ = [
     "build_constraint_slot_cache",
+    "build_partition_slot_cache_kernel",
     "build_slot_cache_kernel",
 ]
 
 
-@wp.kernel(enable_backward=False)
-def build_slot_cache_kernel(
-    element_ids_by_color: wp.array[wp.int32],
-    color_starts: wp.array[wp.int32],
-    num_active_constraints: wp.array[wp.int32],
+@wp.func
+def _cache_slots_for_partition(
+    cid: wp.int32,
+    parallel_id: wp.int32,
     copy_state: CopyStateContainer,
     constraints: ConstraintContainer,
     contact_cols: ContactColumnContainer,
     contact_offset: wp.int32,
-    max_colored_partitions: wp.int32,
-    ms_batch_size: wp.int32,
 ):
-    """Stamp ``constraints.slot_cache[cid, v]`` and
-    ``constraints.count_cache[cid, v]`` for every active cid.
-
-    One thread per CSR position. The cid's eventual parallel_id is
-    deterministic from its position in ``element_ids_by_color``:
-
-    * Regular colour (``c < max_colored_partitions``): parallel_id = 0.
-    * Overflow colour (``c == max_colored_partitions``): parallel_id =
-      ``(csr_pos - color_starts[overflow]) / ms_batch_size``, matching
-      the per-thread layout in ``_make_singleworld_persistent_kernel``.
-
-    ``-1`` is left in the cache for vertex slots past the constraint's
-    active count (``element_interaction_data_get`` returns ``-1`` past
-    the populated entries), and for nodes outside the mass-splitting
-    graph (``get_state_index`` returns ``(-1, 1)``).
-    """
-    csr_pos = wp.tid()
-    if csr_pos >= num_active_constraints[0]:
-        return
-    cid = element_ids_by_color[csr_pos]
-    # parallel_id discovery. ``max_colored_partitions < 0`` disables the
-    # overflow bucket entirely (everything stays in regular colours), so
-    # parallel_id is statically 0 for every cid.
-    parallel_id = wp.int32(0)
-    if max_colored_partitions >= wp.int32(0):
-        overflow_start = color_starts[max_colored_partitions]
-        if csr_pos >= overflow_start:
-            parallel_id = (csr_pos - overflow_start) / ms_batch_size
-
+    """Resolve endpoint slots in the natural order consumed by each constraint."""
     if cid >= contact_offset:
         local_cid = cid - contact_offset
         if local_cid >= wp.int32(0) and local_cid < contact_cols.data.shape[1]:
@@ -230,6 +200,67 @@ def build_slot_cache_kernel(
         constraints.count_cache[cid, 5] = count5
         constraints.count_cache[cid, 6] = count6
         constraints.count_cache[cid, 7] = count7
+
+
+@wp.kernel(enable_backward=False)
+def build_partition_slot_cache_kernel(
+    element_ids_by_color: wp.array[wp.int32],
+    row_partition: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    copy_state: CopyStateContainer,
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    contact_offset: wp.int32,
+):
+    """Cache slots using an explicit partition for each active constraint row."""
+    position = wp.tid()
+    if position < num_active_constraints[0]:
+        cid = element_ids_by_color[position]
+        _cache_slots_for_partition(cid, row_partition[cid], copy_state, constraints, contact_cols, contact_offset)
+
+
+@wp.kernel(enable_backward=False)
+def build_slot_cache_kernel(
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    copy_state: CopyStateContainer,
+    constraints: ConstraintContainer,
+    contact_cols: ContactColumnContainer,
+    contact_offset: wp.int32,
+    max_colored_partitions: wp.int32,
+    ms_batch_size: wp.int32,
+):
+    """Stamp ``constraints.slot_cache[cid, v]`` and
+    ``constraints.count_cache[cid, v]`` for every active cid.
+
+    One thread per CSR position. The cid's eventual parallel_id is
+    deterministic from its position in ``element_ids_by_color``:
+
+    * Regular colour (``c < max_colored_partitions``): parallel_id = 0.
+    * Overflow colour (``c == max_colored_partitions``): parallel_id =
+      ``(csr_pos - color_starts[overflow]) / ms_batch_size``, matching
+      the per-thread layout in ``_make_singleworld_persistent_kernel``.
+
+    ``-1`` is left in the cache for vertex slots past the constraint's
+    active count (``element_interaction_data_get`` returns ``-1`` past
+    the populated entries), and for nodes outside the mass-splitting
+    graph (``get_state_index`` returns ``(-1, 1)``).
+    """
+    csr_pos = wp.tid()
+    if csr_pos >= num_active_constraints[0]:
+        return
+    cid = element_ids_by_color[csr_pos]
+    # parallel_id discovery. ``max_colored_partitions < 0`` disables the
+    # overflow bucket entirely (everything stays in regular colours), so
+    # parallel_id is statically 0 for every cid.
+    parallel_id = wp.int32(0)
+    if max_colored_partitions >= wp.int32(0):
+        overflow_start = color_starts[max_colored_partitions]
+        if csr_pos >= overflow_start:
+            parallel_id = (csr_pos - overflow_start) / ms_batch_size
+
+    _cache_slots_for_partition(cid, parallel_id, copy_state, constraints, contact_cols, contact_offset)
 
 
 def build_constraint_slot_cache(

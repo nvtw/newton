@@ -210,6 +210,22 @@ def contact_partitions_get_random_value(
     return packed_priorities[i]
 
 
+@wp.func
+def _priority_is_greater(
+    priority: wp.int32, element: wp.int32, other_priority: wp.int32, other_element: wp.int32
+) -> bool:
+    # Shape-based priorities and random hashes can collide. A total order is
+    # required so adjacent constraints cannot both join the independent set.
+    return priority > other_priority or (priority == other_priority and element > other_element)
+
+
+@wp.func
+def _endpoint_owner_priority(priority: wp.int32, element: wp.int32) -> wp.uint64:
+    # Preserve this path's unsigned packed-priority ordering, with a unique
+    # element identifier breaking ties. Only active elements enter elections.
+    return (wp.uint64(wp.uint32(priority)) << wp.uint64(32)) | wp.uint64(wp.uint32(element))
+
+
 @wp.kernel(enable_backward=False)
 def pack_priorities_kernel(
     random_values: wp.array[wp.int32],
@@ -282,7 +298,9 @@ def partitioning_coloring_kernel(
                 continue
             if contact_partitions_is_removed(partition_data_concat, neighbor, color_copy):
                 continue
-            if contact_partitions_get_random_value(packed_priorities, neighbor) > self_prio:
+            if _priority_is_greater(
+                contact_partitions_get_random_value(packed_priorities, neighbor), neighbor, self_prio, tid
+            ):
                 is_local_max = False
                 break
 
@@ -385,7 +403,7 @@ def partitioning_coloring_incremental_greedy_kernel(
                 neigh_prio = contact_partitions_get_random_value(packed_priorities, neighbor)
                 if ntag == wp.int32(0):
                     # Uncoloured neighbour -> MIS priority tiebreak.
-                    if neigh_prio > self_prio:
+                    if _priority_is_greater(neigh_prio, neighbor, self_prio, tid):
                         is_local_max = False
                         break
                 else:
@@ -565,7 +583,7 @@ def speculative_validate_commit_kernel(
                     if tentative_color[neighbor] != my_tent:
                         continue
                     neigh_prio = contact_partitions_get_random_value(packed_priorities, neighbor)
-                    if neigh_prio > my_prio:
+                    if _priority_is_greater(neigh_prio, neighbor, my_prio, tid):
                         commit = False
                         break
         if commit:
@@ -608,9 +626,9 @@ def endpoint_owner_reset_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def endpoint_owner_clear_winners_kernel(winners: wp.array[wp.uint32]):
+def endpoint_owner_clear_winners_kernel(winners: wp.array[wp.uint64]):
     """Clear the per-body, per-colour election winners."""
-    winners[wp.tid()] = wp.uint32(0)
+    winners[wp.tid()] = wp.uint64(0)
 
 
 @wp.kernel(enable_backward=False)
@@ -620,7 +638,7 @@ def endpoint_owner_propose_kernel(
     num_elements: wp.array[wp.int32],
     max_colored_partitions: wp.int32,
     body_masks: wp.array[wp.uint64],
-    winners: wp.array[wp.uint32],
+    winners: wp.array[wp.uint64],
     color_tags: wp.array[wp.int32],
     tentative_color: wp.array[wp.int32],
 ):
@@ -641,7 +659,7 @@ def endpoint_owner_propose_kernel(
     tentative_color[tid] = color
     if color >= max_colored_partitions:
         return
-    priority = wp.uint32(packed_priorities[tid])
+    priority = _endpoint_owner_priority(packed_priorities[tid], tid)
     for j in range(MAX_BODIES):
         body = element_interaction_data_get(element, j)
         if body < wp.int32(0):
@@ -656,7 +674,7 @@ def endpoint_owner_commit_kernel(
     num_elements: wp.array[wp.int32],
     max_colored_partitions: wp.int32,
     body_masks: wp.array[wp.uint64],
-    winners: wp.array[wp.uint32],
+    winners: wp.array[wp.uint64],
     partition_data_concat: wp.array[wp.int64],
     color_tags: wp.array[wp.int32],
     tentative_color: wp.array[wp.int32],
@@ -673,7 +691,7 @@ def endpoint_owner_commit_kernel(
         wp.atomic_sub(num_remaining, 0, wp.int32(1))
         return
     element = elements[tid]
-    priority = wp.uint32(packed_priorities[tid])
+    priority = _endpoint_owner_priority(packed_priorities[tid], tid)
     commit = bool(True)
     for j in range(MAX_BODIES):
         body = element_interaction_data_get(element, j)
@@ -775,7 +793,9 @@ def partitioning_coloring_incremental_kernel(
                 continue
             if contact_partitions_is_removed(partition_data_concat, neighbor, color_copy):
                 continue
-            if contact_partitions_get_random_value(packed_priorities, neighbor) > self_prio:
+            if _priority_is_greater(
+                contact_partitions_get_random_value(packed_priorities, neighbor), neighbor, self_prio, tid
+            ):
                 is_local_max = False
                 break
 

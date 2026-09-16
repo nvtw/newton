@@ -1,0 +1,1 @@
+Add optional geometric speculative-contact admission using CollisionPipeline(speculative_contact_velocity_filter=False). It retains receding candidates inside the existing expanded search bounds without changing physical gaps or stored contact separation.
