@@ -202,6 +202,11 @@ class Example:
 
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
+        if isinstance(self.viewer, newton.viewer.ViewerGL):
+            base_pos = wp.vec3(*self.state_0.joint_q.numpy()[:3])
+            self.viewer.set_camera(pos=base_pos + wp.vec3(10.0, 0.0, 2.0))
+            self.viewer.camera.look_at(base_pos)
+
         # Initialize contacts. PhoenX always needs a Contacts buffer
         # (even though the solver auto-attaches a sticky CollisionPipeline,
         # the example still drives ``model.collide`` in the simulate
@@ -333,9 +338,11 @@ class Example:
 
     def render(self):
         if self.follow_cam:
-            self.viewer.set_camera(
-                pos=wp.vec3(*self.state_0.joint_q.numpy()[:3]) + wp.vec3(10.0, 0.0, 2.0), pitch=0.0, yaw=-180.0
-            )
+            base_pos = self.state_0.joint_q.numpy()[:3]
+            if isinstance(self.viewer, newton.viewer.ViewerGL):
+                self.viewer.camera.follow(base_pos)
+            else:
+                self.viewer.set_camera(pos=wp.vec3(*base_pos) + wp.vec3(10.0, 0.0, 2.0), pitch=0.0, yaw=-180.0)
 
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)

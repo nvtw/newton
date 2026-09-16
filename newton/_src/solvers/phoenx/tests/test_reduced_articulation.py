@@ -1335,7 +1335,7 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("register introspection requires a CUDA device")
         try:
-            from cuda.bindings import driver as _drv  # noqa: PLC0415  # optional, guarded
+            from cuda.bindings import driver as _drv  # optional, guarded
 
             _num_regs_attr = _drv.CUfunction_attribute.CU_FUNC_ATTRIBUTE_NUM_REGS
         except Exception:
@@ -2188,17 +2188,20 @@ class TestReducedArticulation(unittest.TestCase):
             solver_iterations=2,
             velocity_iterations=1,
         )
-        contacts_a = model.contacts()
-        contacts_b = model.contacts()
+        # Each simulation needs its own persistent contact-matching history.
+        pipeline_a = newton.CollisionPipeline(model, contact_matching="sticky", broad_phase="explicit")
+        contacts_a = pipeline_a.contacts()
+        pipeline_b = newton.CollisionPipeline(model, contact_matching="sticky", broad_phase="explicit")
+        contacts_b = pipeline_b.contacts()
         control = model.control()
         with wp.ScopedCapture(device=device) as capture:
-            model.collide(states_a[0], contacts_a)
+            pipeline_a.collide(states_a[0], contacts_a)
             solver_a.step(states_a[0], states_a[1], control, contacts_a, 1.0 / 240.0)
-            model.collide(states_a[1], contacts_a)
+            pipeline_a.collide(states_a[1], contacts_a)
             solver_a.step(states_a[1], states_a[0], control, contacts_a, 1.0 / 240.0, state_is_continuation=True)
-            model.collide(states_b[0], contacts_b)
+            pipeline_b.collide(states_b[0], contacts_b)
             solver_b.step(states_b[0], states_b[1], control, contacts_b, 1.0 / 240.0)
-            model.collide(states_b[1], contacts_b)
+            pipeline_b.collide(states_b[1], contacts_b)
             solver_b.step(states_b[1], states_b[0], control, contacts_b, 1.0 / 240.0, state_is_continuation=True)
         for _ in range(16):
             wp.capture_launch(capture.graph)

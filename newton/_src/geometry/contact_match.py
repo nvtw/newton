@@ -102,21 +102,10 @@ def _pack_claim(dist_sq: float, key_low32: wp.int64) -> wp.int64:
     sort_sub_key) which uniquely identifies each contact in the pair as
     long as ``sort_sub_key`` is unique per contact within the pair.
 
-    Note this is a *shared* assumption with the deterministic radix sort
-    upstream, not a hard guarantee enforced by it.  The multi-contact
-    and mesh/SDF paths build ``sort_sub_key`` from per-contact identifiers
-    (clip-vertex slot, triangle/edge/vertex index) that are unique per
-    pair by construction, but the reduced-contact path
-    (``contact_reduction_global.export_reduced_contacts_kernel``)
-    re-uses the original contact's fingerprint as ``sort_sub_key`` and
-    only deduplicates by ``contact_id``, so two reduced contacts in the
-    same pair can in principle land in different reduction slots and
-    still share a fingerprint.  When that happens the deterministic
-    sort and this tiebreak degrade together: the contacts are
-    indistinguishable to either, and frame-to-frame matching becomes
-    order-sensitive only to the same extent the sort itself does.  In
-    other words, this scheme is no worse than what the upstream sort
-    already provides.
+    Reduced contacts can share a fingerprint. The duplicate-ownership pass
+    below disambiguates those claims using their full distance/key priority,
+    then fresh geometry. Canonical rank breaks ties only when the current
+    contacts have identical keys and geometry.
     """
     flipped = wp.int64(_float_flip(dist_sq))
     return (flipped << wp.int64(32)) | (key_low32 & wp.int64(0xFFFFFFFF))
@@ -360,6 +349,101 @@ def _resolve_claims_kernel(
         match_index[tid] = MATCH_BROKEN
 
 
+@wp.kernel(enable_backward=False)
+def _build_match_claim_lists_kernel(data: _MatchData, next_claim: wp.array[int], claim_head: wp.array[int]):
+    """Group current owners by predecessor without depending on insertion order."""
+    k = wp.tid()
+    if k < wp.min(data.new_count[0], next_claim.shape[0]):
+        old = data.match_index[k]
+        if old >= 0:
+            next_claim[k] = wp.atomic_exch(claim_head, old, k)
+
+
+@wp.func
+def _contact_claim_source(data: _MatchData, k: int):
+    result = k
+    if data.use_permutation != 0:
+        result = data.canonical_to_source[k]
+    return result
+
+
+@wp.func
+def _contact_claim_priority(data: _MatchData, k: int, old: int):
+    source = _contact_claim_source(data, k)
+    p0 = data.new_point0[source]
+    p1 = data.new_point1[source]
+    b0 = data.shape_body[data.new_shape0[source]]
+    b1 = data.shape_body[data.new_shape1[source]]
+    if b0 >= 0:
+        p0 = wp.transform_point(data.body_q[b0], p0)
+    if b1 >= 0:
+        p1 = wp.transform_point(data.body_q[b1], p1)
+    diff = wp.float32(0.5) * (p0 + p1) - data.prev_pos_world[old]
+    dist = wp.dot(diff, diff)
+    if data.sticky != 0:
+        nd = wp.dot(diff, data.new_normal[source])
+        dist = wp.max(dist - nd * nd, wp.float32(0))
+    return _pack_claim(dist, data.new_keys[source])
+
+
+@wp.func
+def _contact_geometry_precedes(data: _MatchData, a: int, b: int):
+    """Compare complete source geometry without using unsorted allocation order."""
+    sa = _contact_claim_source(data, a)
+    sb = _contact_claim_source(data, b)
+    ordering = int(0)
+    for group in range(3):
+        va = data.new_point0[sa]
+        vb = data.new_point0[sb]
+        if group == 1:
+            va = data.new_point1[sa]
+            vb = data.new_point1[sb]
+        elif group == 2:
+            va = data.new_normal[sa]
+            vb = data.new_normal[sb]
+        for axis in range(3):
+            if ordering == 0:
+                if va[axis] < vb[axis]:
+                    ordering = -1
+                elif va[axis] > vb[axis]:
+                    ordering = 1
+    if ordering == 0:
+        if data.new_margin0[sa] < data.new_margin0[sb]:
+            ordering = -1
+        elif data.new_margin0[sa] > data.new_margin0[sb]:
+            ordering = 1
+    if ordering == 0:
+        if data.new_margin1[sa] < data.new_margin1[sb]:
+            ordering = -1
+        elif data.new_margin1[sa] > data.new_margin1[sb]:
+            ordering = 1
+    return ordering < 0 or (ordering == 0 and a < b)
+
+
+@wp.kernel(enable_backward=False)
+def _resolve_duplicate_claims_kernel(data: _MatchData, next_claim: wp.array[int], claim_head: wp.array[int]):
+    """Keep the deterministic best owner, visiting only claims on that predecessor."""
+    k = wp.tid()
+    if k < wp.min(data.new_count[0], next_claim.shape[0]):
+        old = data.match_index[k]
+        if old >= 0:
+            other = claim_head[old]
+            if other == k and next_claim[k] < 0:
+                return
+            priority = _contact_claim_priority(data, k, old)
+            winner = wp.bool(True)
+            while other >= 0:
+                if other != k:
+                    other_priority = _contact_claim_priority(data, other, old)
+                    if other_priority < priority or (
+                        other_priority == priority and _contact_geometry_precedes(data, other, k)
+                    ):
+                        winner = False
+                other = next_claim[other]
+            if not winner:
+                data.match_index[k] = MATCH_BROKEN
+
+
 # ------------------------------------------------------------------
 # Save sorted state kernel
 # ------------------------------------------------------------------
@@ -577,6 +661,8 @@ class ContactMatcher:
             # non-deterministic narrow-phase slot assignment -- see
             # ``_pack_claim``).
             self._prev_claim = wp.empty(capacity, dtype=wp.int64)
+            self._match_next_claim = wp.empty(capacity, dtype=wp.int32)
+            self._match_claim_head = wp.zeros(capacity, dtype=wp.int32)
             self._oct_offset_dummy = wp.zeros(1, dtype=wp.vec2)
 
             # Contact report (optional).
@@ -737,6 +823,22 @@ class ContactMatcher:
                 1 if canonical_to_source is not None else 0,
                 1 if self._has_report else 0,
             ],
+            device=device,
+        )
+
+        # Fingerprints can collide after contact reduction. Repair duplicate
+        # ownership before any sticky geometry or solver history is transferred.
+        self._match_claim_head.fill_(wp.int32(-1))
+        wp.launch(
+            _build_match_claim_lists_kernel,
+            dim=self._capacity,
+            inputs=[data, self._match_next_claim, self._match_claim_head],
+            device=device,
+        )
+        wp.launch(
+            _resolve_duplicate_claims_kernel,
+            dim=self._capacity,
+            inputs=[data, self._match_next_claim, self._match_claim_head],
             device=device,
         )
 

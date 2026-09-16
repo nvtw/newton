@@ -10,15 +10,21 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
+from newton._src.geometry.flags import ShapeFlags
+from newton._src.geometry.types import GeoType
+from newton._src.sim.collide import CollisionPipeline
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import (
     DirectContactRunSchedule,
     iterate_direct_contact_runs_kernel,
+    warm_start_direct_contact_runs_kernel,
 )
 from newton._src.solvers.phoenx.articulations.direct_contact_response import DirectContactResponse
 from newton._src.solvers.phoenx.articulations.maximal_contact_gs import (
     MaximalContactRunSchedule,
     iterate_maximal_contact_runs_kernel,
+    rebase_owned_contact_levers_kernel,
     refresh_maximal_contact_mobility_kernel,
+    warm_start_maximal_contact_runs_kernel,
 )
 from newton._src.solvers.phoenx.articulations.maximal_contact_response import MaximalContactResponse
 from newton._src.solvers.phoenx.body import (
@@ -67,6 +73,10 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_scatter_colored_rows,
     contact_views_make,
 )
+from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+    _get_parallel_contact_prepare_kernel,
+    rebase_ordinary_contact_relax_kernel,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_MULTIPLIER_VEC4S,
     ConstraintContainer,
@@ -95,6 +105,11 @@ from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     SOFT_TET_TIME_US_OFFSET,
     soft_tet_init_rows_kernel,
 )
+from newton._src.solvers.phoenx.constraints.contact_chunks import (
+    ContactChunkScratch,
+    restamp_contact_chunk_owners,
+    split_contact_columns,
+)
 from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_DERIVED_DWORDS_PER_CONTACT,
     CC_DWORDS_PER_CONTACT,
@@ -115,6 +130,10 @@ from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
     copy_contact_patch_impulses,
     gather_contact_patch_warmstart,
 )
+from newton._src.solvers.phoenx.dispatch.color_groups import DEFAULT_SWEEP_BLOCK_COUNT as COLOR_GROUP_SWEEP_BLOCK_COUNT
+from newton._src.solvers.phoenx.dispatch.color_groups import get_sweep_block_dim as get_color_group_block_dim
+from newton._src.solvers.phoenx.dispatch.color_groups import get_sweep_kernel as get_color_group_sweep_kernel
+from newton._src.solvers.phoenx.dispatch.color_groups import use_cooperative_joint_rhs
 from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import (
@@ -152,7 +171,11 @@ from newton._src.solvers.phoenx.mass_splitting import (
     launch_copy_state_into_rigids,
     record_all_interactions_kernel,
 )
-from newton._src.solvers.phoenx.mass_splitting.slot_cache import build_constraint_slot_cache
+from newton._src.solvers.phoenx.mass_splitting import color_groups as color_group_topology
+from newton._src.solvers.phoenx.mass_splitting.slot_cache import (
+    build_constraint_slot_cache,
+    build_partition_slot_cache_kernel,
+)
 from newton._src.solvers.phoenx.materials import MaterialData
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
 from newton._src.solvers.phoenx.sleeping_kernels import (
@@ -606,6 +629,7 @@ class PhoenXWorld:
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
+        velocity_relaxation: str = "each_substep",
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         rigid_contact_max: int = 0,
         max_contact_columns: int | None = None,
@@ -628,6 +652,7 @@ class PhoenXWorld:
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
+        mass_splitting_color_group_size: int = 0,
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
@@ -648,6 +673,8 @@ class PhoenXWorld:
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
+        parallel_contact_prepare: bool = False,
+        contact_chunk_size: int = 0,
         contact_friction_model: str = "point",
         combine_direct_prepare_projection: bool = False,
         device: wp.context.Devicelike = None,
@@ -660,6 +687,8 @@ class PhoenXWorld:
             substeps, solver_iterations, velocity_iterations: PGS
                 schedule. ``velocity_iterations=1`` enables TGS-soft
                 relax (recommended for tall stacks).
+            velocity_relaxation: ``"each_substep"`` relaxes after every temporal
+                substep; ``"final_substep"`` relaxes only at step end.
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``"auto"``
@@ -703,6 +732,11 @@ class PhoenXWorld:
             mass_splitting_batch_size: Overflow batch size (B). Within
                 a batch, constraints process sequentially (one thread);
                 across batches, parallel. ``8`` matches C# PhoenX.
+            mass_splitting_color_group_size: Experimental sequential colors per
+                mass-copy partition for small CUDA rigid mechanisms. Zero keeps
+                the existing regular/overflow schedule. Requires one world,
+                ordinary point contacts, block joints, and no packed contacts,
+                sleeping, symmetric sweeps, deformables, or unrolled dispatch.
             partitioner_algorithm: ``"greedy"`` (default) constructs the
                 interaction graph, ``"endpoint_owner"`` uses adjacency-free
                 endpoint elections for single-world mass splitting, and
@@ -780,6 +814,18 @@ class PhoenXWorld:
             self._num_kinematic_bodies: int = int((mt == int(MOTION_KINEMATIC)).sum())
         else:
             self._num_kinematic_bodies = 0
+        if isinstance(contact_chunk_size, bool) or not isinstance(contact_chunk_size, int) or contact_chunk_size < 0:
+            raise ValueError("contact_chunk_size must be a nonnegative integer")
+        self.contact_chunk_size = contact_chunk_size
+        if contact_chunk_size and (
+            contact_friction_model != "point"
+            or num_particles
+            or num_cloth_triangles
+            or num_cloth_bending
+            or num_soft_tetrahedra
+            or num_soft_hexahedra
+        ):
+            raise ValueError("contact_chunk_size requires rigid point contacts")
         self.rigid_contact_max: int = int(rigid_contact_max)
         if self.rigid_contact_max < 0:
             raise ValueError(f"rigid_contact_max must be >= 0 (got {self.rigid_contact_max})")
@@ -794,6 +840,8 @@ class PhoenXWorld:
             if max_contact_columns not in (None, 0):
                 raise ValueError("max_contact_columns must be None or 0 when rigid_contact_max is 0")
             self.max_contact_columns = 0
+        if self.contact_chunk_size and self.max_contact_columns < self.rigid_contact_max:
+            raise ValueError("contact_chunk_size requires max_contact_columns >= rigid_contact_max")
         self.num_joints: int = int(num_joints)
         if self.num_joints < 0:
             raise ValueError(f"num_joints must be >= 0 (got {self.num_joints})")
@@ -866,6 +914,9 @@ class PhoenXWorld:
         self.solver_iterations = int(solver_iterations)
         if self.solver_iterations < 1:
             raise ValueError(f"solver_iterations must be >= 1 (got {self.solver_iterations})")
+        if velocity_relaxation not in ("each_substep", "final_substep"):
+            raise ValueError("velocity_relaxation must be 'each_substep' or 'final_substep'")
+        self.velocity_relaxation = velocity_relaxation
         self.velocity_iterations = int(velocity_iterations)
         if self.velocity_iterations < 0:
             raise ValueError(f"velocity_iterations must be >= 0 (got {self.velocity_iterations})")
@@ -944,6 +995,56 @@ class PhoenXWorld:
         if step_layout not in ("multi_world", "single_world"):
             raise ValueError(f"step_layout must be 'multi_world' or 'single_world' (got {step_layout!r})")
         self.step_layout: str = step_layout
+        if (
+            isinstance(mass_splitting_color_group_size, bool)
+            or not isinstance(mass_splitting_color_group_size, int)
+            or mass_splitting_color_group_size < 0
+        ):
+            raise ValueError("mass_splitting_color_group_size must be a nonnegative integer")
+        self.mass_splitting_color_group_size = mass_splitting_color_group_size
+        if self.mass_splitting_color_group_size and (
+            not mass_splitting
+            or step_layout != "single_world"
+            or self.num_worlds != 1
+            or not self.device.is_cuda
+            or self.num_particles
+            or self.num_cloth_triangles
+            or self.num_cloth_bending
+            or self.num_soft_tetrahedra
+            or self.num_soft_hexahedra
+            or colored_contact_headers
+            or colored_contact_rows
+            or contact_friction_model != "point"
+            or sleeping_velocity_threshold > 0.0
+            or mass_splitting_unrolled
+            or symmetric_color_sweep
+            or sor_boost != 1.0
+        ):
+            raise ValueError(
+                "mass_splitting_color_group_size requires CUDA single-world rigid "
+                "mass splitting without packed contacts, deformables, sleeping, "
+                "symmetric sweeps, or unrolled mass splitting; sor_boost must be 1.0"
+            )
+        self.parallel_contact_prepare = bool(parallel_contact_prepare)
+        if self.parallel_contact_prepare and (
+            step_layout != "single_world"
+            or not self.device.is_cuda
+            or self.num_particles
+            or self.num_cloth_triangles
+            or self.num_cloth_bending
+            or self.num_soft_tetrahedra
+            or self.num_soft_hexahedra
+            or colored_contact_headers
+            or colored_contact_rows
+            or contact_friction_model != "point"
+            or sleeping_velocity_threshold > 0.0
+            or mass_splitting_unrolled
+        ):
+            raise ValueError(
+                "parallel_contact_prepare requires CUDA single-world rigid point contacts "
+                "without packed rows, deformables, sleeping, or unrolled mass splitting"
+            )
+
         if self.prepare_refresh_stride != 1 and cached_prepare_unsupported:
             raise NotImplementedError(
                 "prepare_refresh_stride > 1 currently supports rigid contact/joint worlds "
@@ -1083,6 +1184,11 @@ class PhoenXWorld:
         # :mod:`dispatch.single_world_mass_splitting_unrolled`.
         self.mass_splitting_unrolled: bool = bool(mass_splitting_unrolled) and self.mass_splitting_enabled
         self._configure_multi_world_scheduler(self._multi_world_scheduler_policy)
+        self._color_group_data = (
+            color_group_topology.allocate(self._constraint_capacity, self.num_bodies, self.device)
+            if self.mass_splitting_color_group_size
+            else None
+        )
         # Unified body-or-particle node space for the partitioner:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
@@ -1330,6 +1436,12 @@ class PhoenXWorld:
             self._reuse_contact_indices = wp.zeros(1, dtype=wp.int32, device=self.device)
             self._cc_valid_count = wp.zeros(1, dtype=wp.int32, device=self.device)
             self._enable_body_pair_grouping = False
+
+        self._contact_chunk_scratch = (
+            ContactChunkScratch(self.max_contact_columns, self._contact_cols, self.device)
+            if self.contact_chunk_size and self.max_contact_columns > 0
+            else None
+        )
 
         self._contact_views: ContactViews | None = None
         self._has_soft_contact_pd: bool = False
@@ -1688,11 +1800,9 @@ class PhoenXWorld:
                 "use setup_cloth_collision_pipeline()"
             )
 
-        import numpy as _np  # noqa: PLC0415
-
-        shape_body_np = shape_body.numpy() if isinstance(shape_body, wp.array) else _np.asarray(shape_body)
-        shape_body_phx = _np.where(shape_body_np < 0, 0, shape_body_np + int(phoenx_body_offset))
-        shape_body_phx_arr = wp.array(shape_body_phx.astype(_np.int32), dtype=wp.int32, device=self.device)
+        shape_body_np = shape_body.numpy() if isinstance(shape_body, wp.array) else np.asarray(shape_body)
+        shape_body_phx = np.where(shape_body_np < 0, 0, shape_body_np + int(phoenx_body_offset))
+        shape_body_phx_arr = wp.array(shape_body_phx.astype(np.int32), dtype=wp.int32, device=self.device)
         self.set_shape_body(shape_body_phx_arr)
         if getattr(collision_pipeline, "unified_shape_type", None) is not None:
             self.set_shape_type(collision_pipeline.unified_shape_type)
@@ -1992,6 +2102,7 @@ class PhoenXWorld:
             self.max_contact_columns,
             self.num_worlds,
             body_pair_grouping=self._enable_body_pair_grouping,
+            contact_capacity=self._contact_container.impulses.shape[1],
         )
         self._has_reduced_loops = articulation.loop_system.count > 0
         self._has_maximal_dynamic_bodies = bool(np.any(self.bodies.motion_type.numpy() == int(MOTION_DYNAMIC)))
@@ -2465,9 +2576,6 @@ class PhoenXWorld:
         Returns:
             The constructed :class:`CollisionPipeline`.
         """
-        from newton._src.geometry.flags import ShapeFlags  # noqa: PLC0415
-        from newton._src.geometry.types import GeoType  # noqa: PLC0415
-        from newton._src.sim.collide import CollisionPipeline  # noqa: PLC0415
 
         def _soft_tet_collision_mask(tet_indices: np.ndarray) -> np.ndarray:
             tets = np.asarray(tet_indices, dtype=np.int32).reshape(-1, 4)
@@ -2798,6 +2906,16 @@ class PhoenXWorld:
         self._partitioner.begin_sweep()
         self._singleworld_head_plus_tail_sweep(cached_head, cached_fused, idt)
 
+    @property
+    def _active_velocity_iterations(self) -> int:
+        """Configured relaxation count for the current temporal substep."""
+        if (
+            self.velocity_relaxation == "final_substep"
+            and getattr(self, "_current_substep_index", 0) != self.substeps - 1
+        ):
+            return 0
+        return self.velocity_iterations
+
     def step(
         self,
         dt: float,
@@ -2985,10 +3103,11 @@ class PhoenXWorld:
                     self.substep_dt,
                     split_dynamics=True,
                 )
+            self._refresh_owned_relax_geometry(idt)
             self._dispatcher.relax(idt)
             if (
                 self._reduced_articulation is not None
-                and self.velocity_iterations > 0
+                and self._active_velocity_iterations > 0
                 and self._reduced_constraints_active_this_step
             ):
                 self._reduced_articulation.finish_relax()
@@ -3130,6 +3249,19 @@ class PhoenXWorld:
             active_constraint_base=self._contact_offset,
         )
 
+        if self._contact_chunk_scratch is not None:
+            split_contact_columns(
+                self._contact_chunk_scratch,
+                self._contact_cols,
+                self._ingest_scratch.num_contact_columns,
+                self._ingest_scratch.pair_source_idx,
+                self.contact_chunk_size,
+                self._contact_offset,
+                self._cid_of_contact_cur,
+                self._num_active_constraints,
+                device=self.device,
+            )
+
         # Compound grouping: views point at PhoenX's sorted scratch.
         # Otherwise: views point at Newton's narrow-phase arrays directly.
         if self._enable_body_pair_grouping:
@@ -3234,6 +3366,15 @@ class PhoenXWorld:
                     wp.int32(self.num_bodies),
                 ],
                 outputs=[self._contact_container],
+                device=self.device,
+            )
+
+        if self._contact_chunk_scratch is not None:
+            restamp_contact_chunk_owners(
+                self._contact_cols,
+                self._ingest_scratch.num_contact_columns,
+                self._contact_offset,
+                self._cid_of_contact_cur,
                 device=self.device,
             )
 
@@ -3718,6 +3859,38 @@ class PhoenXWorld:
 
         Single-world only. Graph-capture safe.
         """
+        if self._color_group_data is not None:
+            data = self._color_group_data
+            color_group_topology.build(
+                data,
+                self._elements,
+                self._num_active_constraints,
+                self.mass_splitting_color_group_size,
+                self.device,
+                rigid_only=True,
+            )
+            wp.launch(
+                color_group_topology.emit_partition_pairs,
+                self._constraint_capacity,
+                [self._elements, self._num_active_constraints, data["row_partition"], self._interaction_graph_scratch],
+                device=self.device,
+            )
+            build_interaction_graph(self._interaction_graph_scratch, self._copy_state)
+            wp.launch(
+                build_partition_slot_cache_kernel,
+                self._constraint_capacity,
+                [
+                    data["ids"],
+                    data["row_partition"],
+                    self._num_active_constraints,
+                    self._copy_state,
+                    self.constraints,
+                    self._contact_cols,
+                    self._contact_offset,
+                ],
+                device=self.device,
+            )
+            return
         # The emit kernel atomically appends one entry per non-static
         # endpoint; the previous step's build call has already left
         # ``scratch.num_pairs`` at 0 so the launch picks up clean.
@@ -3968,6 +4141,109 @@ class PhoenXWorld:
             device=self.device,
         )
 
+    def _warm_start_owned_contacts(self) -> None:
+        """Apply prepared cached loads before the first equality projection.
+
+        The following equality sweeps also refine the projected response of
+        redundant mechanisms. Applying these loads after those sweeps changes
+        their residual recovery and can let supported objects sink.
+        """
+        if not self._contact_input_active_this_step:
+            return
+        response = self._direct_contact_response
+        schedule = self._direct_contact_schedule
+        if response is not None and schedule is not None:
+            response.compute(self._contact_container)
+            wp.launch_tiled(
+                warm_start_direct_contact_runs_kernel,
+                dim=response.active_mechanism.size,
+                block_dim=64,
+                inputs=[
+                    response.active_mechanism,
+                    response.data,
+                    self.bodies,
+                    self._contact_cols,
+                    self._contact_container,
+                    schedule.columns,
+                    schedule.section_end,
+                ],
+                device=self.device,
+            )
+        response = self._maximal_contact_response
+        schedule = self._maximal_contact_schedule
+        projector = self._maximal_tree_projector
+        if self._direct_tree_contacts and response is not None and schedule is not None and projector is not None:
+            projector.factor_contact_response()
+            response.compute_mobility()
+            wp.launch(
+                warm_start_maximal_contact_runs_kernel,
+                dim=projector.launch_dim,
+                block_dim=projector.block_dim,
+                inputs=[
+                    projector.data,
+                    response.data,
+                    self.bodies,
+                    projector.dynamic_accumulated_impulse,
+                    self._contact_cols,
+                    self._contact_container,
+                    schedule.columns,
+                    schedule.section_end,
+                ],
+                device=self.device,
+            )
+
+    def _refresh_owned_relax_geometry(self, idt: wp.float32) -> None:
+        """Refresh maximal constraint responses at the integrated configuration."""
+        if (
+            self._active_velocity_iterations > 0
+            and self._contact_input_active_this_step
+            and not self.num_particles
+            and not self._contact_patch_enabled
+        ):
+            wp.launch(
+                rebase_ordinary_contact_relax_kernel,
+                dim=self._constraint_capacity if self._colored_contact_headers else self.max_contact_columns,
+                inputs=[
+                    self._contact_cols_packed if self._colored_contact_headers else self._contact_cols,
+                    self._contact_container_solve if self._colored_contact_rows else self._contact_container,
+                    self.bodies,
+                    self._num_active_constraints
+                    if self._colored_contact_headers
+                    else self._ingest_scratch.num_contact_columns,
+                    wp.bool(self.mass_splitting_enabled),
+                    self._contact_cols.articulation_owner,
+                    self._partitioner.element_ids_by_color,
+                    wp.int32(self._contact_offset),
+                    wp.bool(self._colored_contact_headers),
+                ],
+                device=self.device,
+            )
+        direct = getattr(self, "_direct_equality_system", None)
+        if direct is None or not direct.enabled or self._active_velocity_iterations <= 0:
+            return
+        direct.refresh_geometry(idt)
+        direct.prepare_and_factor(idt)
+        if self._contact_input_active_this_step:
+            for schedule in (self._direct_contact_schedule, self._maximal_contact_schedule):
+                if schedule is not None and schedule.section_end.size > 0:
+                    wp.launch(
+                        rebase_owned_contact_levers_kernel,
+                        dim=self.max_contact_columns,
+                        inputs=[
+                            self._contact_cols,
+                            self._contact_container,
+                            self.bodies,
+                            schedule.columns,
+                            schedule.section_end,
+                        ],
+                        device=self.device,
+                    )
+        if self._direct_contact_response is not None:
+            self._direct_contact_response.compute(self._contact_container)
+        if self._direct_tree_contacts and self._maximal_tree_projector is not None:
+            self._maximal_tree_projector.factor_contact_response()
+            self._maximal_contact_response.compute_mobility()
+
     def _solve_direct_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
         """Run deterministic contact sweeps through the direct equality mobility."""
         response = self._direct_contact_response
@@ -3976,8 +4252,12 @@ class PhoenXWorld:
             return
         if refresh_mobility:
             response.compute(self._contact_container)
-        iterations = self.solver_iterations if use_bias else self.velocity_iterations
+        iterations = self.solver_iterations if use_bias else self._active_velocity_iterations
+        direct = getattr(self, "_direct_equality_system", None)
         if iterations > 0:
+            if use_bias and direct is not None:
+                direct.compute_bias_velocity()
+                direct.apply_bias_velocity(-1.0)
             wp.launch_tiled(
                 iterate_direct_contact_runs_kernel,
                 dim=response.active_mechanism.size,
@@ -3997,6 +4277,8 @@ class PhoenXWorld:
                 ],
                 device=self.device,
             )
+            if use_bias and direct is not None:
+                direct.apply_bias_velocity(1.0)
 
     def _solve_maximal_articulated_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
         """Run one exact articulation-response contact correction sweep."""
@@ -4023,9 +4305,33 @@ class PhoenXWorld:
                 ],
                 device=self.device,
             )
+        if use_bias and refresh_mobility and not self._direct_tree_contacts:
+            wp.launch(
+                warm_start_maximal_contact_runs_kernel,
+                dim=projector.launch_dim,
+                block_dim=projector.block_dim,
+                inputs=[
+                    projector.data,
+                    response.data,
+                    self.bodies,
+                    projector.dynamic_accumulated_impulse,
+                    self._contact_cols,
+                    self._contact_container,
+                    schedule.columns,
+                    schedule.section_end,
+                ],
+                device=self.device,
+            )
         iterations = (
-            (self.solver_iterations if use_bias else self.velocity_iterations) if self._direct_tree_contacts else 1
+            (self.solver_iterations if use_bias else self._active_velocity_iterations)
+            if self._direct_tree_contacts
+            else 1
         )
+        direct = getattr(self, "_direct_equality_system", None)
+        split_bias = use_bias and iterations > 0 and direct is not None and direct.enabled
+        if split_bias:
+            direct.compute_bias_velocity()
+            direct.apply_bias_velocity(-1.0)
         for _ in range(iterations):
             wp.launch(
                 iterate_maximal_contact_runs_kernel,
@@ -4043,11 +4349,12 @@ class PhoenXWorld:
                     schedule.columns,
                     schedule.section_end,
                     schedule.mobility,
-                    schedule.delta_impulse,
                     wp.bool(use_bias),
                 ],
                 device=self.device,
             )
+        if split_bias:
+            direct.apply_bias_velocity(1.0)
 
     def _solve_main(self, *, num_iterations: int | None = None, solve_direct: bool = True) -> None:
         """Run the fused multi-world prepare and biased iterate phase."""
@@ -4126,7 +4433,7 @@ class PhoenXWorld:
         iteration_offset: int = 0,
     ) -> None:
         """Run the fused multi-world bias-off iterate phase."""
-        if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
+        if self._constraint_capacity == 0 or self._active_velocity_iterations <= 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._active_contact_views()
@@ -4139,7 +4446,7 @@ class PhoenXWorld:
             )
             self._launch_fast_iter(
                 kernel,
-                self.velocity_iterations if num_iterations is None else num_iterations,
+                self._active_velocity_iterations if num_iterations is None else num_iterations,
                 idt,
                 contact_views,
                 launch_tpw_bound=fixed_tpw if fixed_tpw > 0 else self._tpw_launch_bound,
@@ -4317,7 +4624,7 @@ class PhoenXWorld:
         iteration_offset: int = 0,
     ) -> None:
         """Run the block-world bias-off iterate phase."""
-        if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
+        if self._constraint_capacity == 0 or self._active_velocity_iterations <= 0:
             return
         if not self._block_world_supported():
             raise NotImplementedError("block-world scheduler currently supports rigid multi-world scenes only")
@@ -4347,7 +4654,7 @@ class PhoenXWorld:
                 self._world_num_colors,
                 self._contact_container,
                 contact_views,
-                wp.int32(self.velocity_iterations if num_iterations is None else num_iterations),
+                wp.int32(self._active_velocity_iterations if num_iterations is None else num_iterations),
                 wp.int32(iteration_offset),
                 wp.int32(self.num_worlds),
                 wp.int32(self.num_joints),
@@ -4412,7 +4719,7 @@ class PhoenXWorld:
 
     def _capture_singleworld_sweep(self, kernel, **kw) -> None:
         """capture_while body: head-path sweep on the persistent grid, unrolled
-        NUM_INNER_WHILE_ITERATIONS times. Tail launches no-op once head_active
+        NUM_INNER_WHILE_ITERATIONS times. Extra head launches no-op once head_active
         clears within the same outer iter."""
         idt = kw.get("idt", wp.float32(0.0))
         contact_container = kw.get("contact_container", self._contact_container)
@@ -4467,6 +4774,62 @@ class PhoenXWorld:
             device=self.device,
         )
 
+    def _color_group_sweep(self, head_kernel, idt, contact_container=None) -> None:
+        """Sweep independent mass copies, keeping colors within each copy ordered."""
+        heads = self._singleworld_kernels()[::2]
+        phase = ("prepare", "iterate", "relax")[heads.index(head_kernel)]
+        cc = self._contact_container if contact_container is None else contact_container
+        soft_pd = bool(self._dispatch_specialization_flags()["has_soft_contact_pd"])
+        if phase == "prepare" and self.parallel_contact_prepare:
+            if self.max_contact_columns:
+                wp.launch(
+                    _get_parallel_contact_prepare_kernel(True, soft_pd),
+                    dim=(self.max_contact_columns, min(128, self.contact_chunk_size or 128)),
+                    inputs=[
+                        self._contact_cols,
+                        self._ingest_scratch.num_contact_columns,
+                        self.bodies,
+                        self._particles_or_sentinel(),
+                        self.num_bodies,
+                        idt,
+                        cc,
+                        self._active_contact_views(),
+                        self._copy_state,
+                    ],
+                    device=self.device,
+                )
+            phase = "cached_prepare"
+        cooperative_joints = use_cooperative_joint_rhs(
+            phase=phase,
+            is_cuda=self.device.is_cuda,
+            has_bilateral_blocks=bool(self.constraints.bilateral.enabled),
+        )
+        block_dim = get_color_group_block_dim(cooperative_joints)
+        data = self._color_group_data
+        wp.launch(
+            get_color_group_sweep_kernel(phase, soft_pd, cooperative_joints=cooperative_joints),
+            (COLOR_GROUP_SWEEP_BLOCK_COUNT, block_dim),
+            [
+                self.constraints,
+                self._contact_cols,
+                self.bodies,
+                self._particles_or_sentinel(),
+                cc,
+                self._active_contact_views(),
+                self._copy_state,
+                self.num_joints,
+                self._joint_pgs_enabled,
+                self.num_bodies,
+                idt,
+                data["ids"],
+                data["starts"],
+                data["num_colors"],
+                self.mass_splitting_color_group_size,
+            ],
+            block_dim=block_dim,
+            device=self.device,
+        )
+
     def _singleworld_head_plus_tail_sweep(
         self,
         head_kernel,
@@ -4474,46 +4837,52 @@ class PhoenXWorld:
         idt: wp.float32,
         contact_container: ContactContainer | None = None,
     ) -> None:
-        """Persistent-grid head + fused single-block tail.
+        """Drain small colours before launching the persistent grid.
 
-        Outer ``wp.capture_while`` on ``color_cursor`` so head and tail
-        alternate until every colour is drained. Each round: re-arm
-        ``head_active``, run the head sweep (drains large colours;
-        bails when ``count <= fuse_threshold``), then run a single
-        tail launch (the tail kernel's internal ``while cursor > 0``
-        walks every remaining small colour). The tail bails back when
-        a colour grows past ``fuse_threshold`` (a sweep-time stack
-        change can flip the size of an upcoming colour), so the outer
-        loop re-arms ``head_active`` and lets head pick that colour
-        up; with the fused-tail overflow fix the tail decrements past
-        the mass-splitting overflow column the same way it decrements
-        any small column, so neither side can leave ``color_cursor``
-        stuck without progress.
-
-        The previous version used two sequential ``wp.capture_while``
-        (head on ``head_active``, then tail on ``color_cursor``) and
-        deadlocked whenever the tail bailed without decrementing the
-        cursor: capture re-launched the tail, tail bailed again,
-        ping-pong forever. Reproducer:
-        ``example_cloth_hanging`` with mass splitting enabled, on the
-        first frame where the cube contacts the cloth.
+        The fused tail stops at a colour above its threshold and arms the
+        head. The head drains large colours until it reaches a small one.
+        Repeating this pair preserves colour order in both sweep directions
+        while avoiding idle head launches when every colour fits the tail.
         """
 
-        # ``head_active`` is re-armed by the previous round's tail kernel
-        # (see :func:`_make_singleworld_fused_kernel`), so the per-round
-        # ``_reset_head_active_kernel`` launch is gone. Initial state is
-        # set to 1 once at solver setup; subsequent rounds inherit
-        # ``head_active[0] = 1`` from the tail's lane-0 writeback.
+        if self._color_group_data is not None:
+            self._color_group_sweep(head_kernel, idt, contact_container)
+            return
+
+        if self.parallel_contact_prepare and head_kernel is self._singleworld_kernels()[0]:
+            if self.max_contact_columns:
+                cc = self._contact_container if contact_container is None else contact_container
+                wp.launch(
+                    _get_parallel_contact_prepare_kernel(
+                        self.mass_splitting_enabled,
+                        self._dispatch_specialization_flags()["has_soft_contact_pd"],
+                    ),
+                    dim=(self.max_contact_columns, min(128, self.contact_chunk_size or 128)),
+                    inputs=[
+                        self._contact_cols,
+                        self._ingest_scratch.num_contact_columns,
+                        self.bodies,
+                        self._particles_or_sentinel(),
+                        wp.int32(self.num_bodies),
+                        idt,
+                        cc,
+                        self._active_contact_views(),
+                        self._copy_state,
+                    ],
+                    device=self.device,
+                )
+            head_kernel, tail_kernel = self._singleworld_cached_prepare_kernels()
+
         def _round() -> None:
+            self._capture_singleworld_tail_sweep(
+                kernel=tail_kernel,
+                idt=idt,
+                contact_container=contact_container,
+            )
             wp.capture_while(
                 self._head_active,
                 self._capture_singleworld_sweep,
                 kernel=head_kernel,
-                idt=idt,
-                contact_container=contact_container,
-            )
-            self._capture_singleworld_tail_sweep(
-                kernel=tail_kernel,
                 idt=idt,
                 contact_container=contact_container,
             )
@@ -4552,8 +4921,8 @@ class PhoenXWorld:
         )
 
     def _solve_main_singleworld(self) -> None:
-        """Single-world prepare + main PGS iterate. Each sweep is head (large
-        colours) then fused tail (small colours).
+        """Single-world prepare + main PGS iterate. Each sweep alternates the fused tail
+        (small colours) and persistent head (large colours).
 
         When mass splitting is enabled, an
         :func:`launch_average_and_broadcast` runs after every full
@@ -4589,11 +4958,11 @@ class PhoenXWorld:
 
     def _relax_velocities_singleworld(self) -> None:
         """Single-world TGS-soft relax sweeps (bias OFF)."""
-        if self._constraint_capacity == 0 or self.velocity_iterations <= 0:
+        if self._constraint_capacity == 0 or self._active_velocity_iterations <= 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         _, _, _, _, relax_head, relax_fused = self._singleworld_kernels()
-        for _ in range(self.velocity_iterations):
+        for _ in range(self._active_velocity_iterations):
             self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
             if self.mass_splitting_enabled:
@@ -4664,6 +5033,7 @@ class PhoenXWorld:
         scene-wide soft-tet variant."""
         kw = {
             **self._dispatch_specialization_flags(),
+            "bilateral_joint_blocks": bool(self.constraints.bilateral.enabled),
             "has_contacts": self.max_contact_columns > 0 and self._reduced_articulation is None,
             "has_mass_splitting": self.mass_splitting_enabled,
             "packed_contact_headers": self._colored_contact_headers,
@@ -4691,11 +5061,12 @@ class PhoenXWorld:
                 has_joints=self.num_joints > 0,
                 has_contacts=self.max_contact_columns > 0,
                 skip_joint_pgs=self._skip_all_joint_pgs(),
-                has_mass_splitting=False,
+                has_mass_splitting=self.mass_splitting_enabled,
                 packed_contact_headers=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
                 rigid_direct=self._singleworld_rigid_direct(),
+                bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
             ),
             get_singleworld_kernel(
                 phase="cached_prepare",
@@ -4706,11 +5077,12 @@ class PhoenXWorld:
                 has_joints=self.num_joints > 0,
                 has_contacts=self.max_contact_columns > 0,
                 skip_joint_pgs=self._skip_all_joint_pgs(),
-                has_mass_splitting=False,
+                has_mass_splitting=self.mass_splitting_enabled,
                 packed_contact_headers=False,
                 has_sleeping=False,
                 has_soft_contact_pd=False,
                 rigid_direct=self._singleworld_rigid_direct(),
+                bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
             ),
         )
 
