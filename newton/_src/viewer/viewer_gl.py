@@ -1948,12 +1948,12 @@ class ViewerGL(ViewerBase):
                         instancer.hidden = not visible
                         if use_cuda_interop and getattr(instancer, "_instance_transform_cuda_buffer", None) is not None:
                             instancer.update_from_packed_cuda(
-                                self._packed_vbo_xforms,
-                                offset,
-                                opacities,
-                                count,
-                                colors,
-                                materials,
+                                packed_xforms=self._packed_vbo_xforms,
+                                offset=offset,
+                                count=count,
+                                colors=colors,
+                                materials=materials,
+                                opacities=opacities,
                             )
                         else:
                             # Lazy host materialisation: only sync + read
@@ -1963,11 +1963,11 @@ class ViewerGL(ViewerBase):
                                 wp.synchronize()
                                 host_np = self._packed_vbo_xforms_host.numpy()
                             instancer.update_from_pinned(
-                                host_np[offset : offset + count],
-                                opacities,
-                                count,
-                                colors,
-                                materials,
+                                host_transforms_np=host_np[offset : offset + count],
+                                count=count,
+                                colors=colors,
+                                materials=materials,
+                                opacities=opacities,
                             )
 
                 shapes.colors_changed = False
@@ -2267,7 +2267,6 @@ class ViewerGL(ViewerBase):
         Close the viewer and clean up resources.
         """
         self._destroy_simulation_stream()
-        self._clear_array_textures()
         self._plot_logger.clear()
         self._invalidate_pbo()
         if self._image_logger is not None:

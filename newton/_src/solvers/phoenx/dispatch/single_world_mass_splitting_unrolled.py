@@ -57,6 +57,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         if not w._regular_pgs_active_this_step:
             w._mass_splitting_writeback()
             if direct is not None and direct.enabled:
+                w._warm_start_owned_contacts()
                 direct.solve(use_bias=True)
                 direct.resolve_bounded_drives(idt, use_bias=True)
             w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
@@ -85,6 +86,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             w._run_cached_prepare_bookkeeping(idt)
         if direct is not None and direct.enabled:
             w._mass_splitting_writeback(already_averaged=True)
+            w._warm_start_owned_contacts()
             direct.solve(use_bias=False)
             w._mass_splitting_broadcast()
         for iteration in range(w.solver_iterations):
@@ -110,7 +112,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
-        if w._constraint_capacity == 0 or w.velocity_iterations <= 0:
+        if w._constraint_capacity == 0 or w._active_velocity_iterations <= 0:
             return
 
         direct = getattr(w, "_direct_equality_system", None)
@@ -129,14 +131,14 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         w._mass_splitting_broadcast()
         inv_dt = 1.0 / w.substep_dt
         _, _, _, _, relax_head, _ = w._singleworld_kernels()
-        for iteration in range(w.velocity_iterations):
+        for iteration in range(w._active_velocity_iterations):
             w._partitioner.begin_sweep()
             self._unrolled_sweep(relax_head, idt, w._contact_container_solve)
             w._mass_splitting_average_and_broadcast(inv_dt)
             if direct is not None and direct.enabled:
                 w._mass_splitting_writeback(already_averaged=True)
                 direct.solve(use_bias=False)
-                if iteration + 1 < w.velocity_iterations:
+                if iteration + 1 < w._active_velocity_iterations:
                     w._mass_splitting_broadcast()
 
         if direct is None or not direct.enabled:

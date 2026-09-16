@@ -214,7 +214,7 @@ class TestMassSplittingSolverWiring(unittest.TestCase):
         self.assertEqual(int(world._interaction_graph_scratch.num_pairs.numpy()[0]), 0)
 
 
-def _build_box_stack_scene(num_boxes: int, mass_splitting: bool, device):
+def _build_box_stack_scene(num_boxes: int, mass_splitting: bool, device, max_colored_partitions: int = 12):
     """Build a small free-falling pile that produces real contact
     columns and exercises the iterate path. Returns the
     :class:`PhoenXWorld`, a Newton ``State``, ``Contacts``, and the
@@ -223,14 +223,14 @@ def _build_box_stack_scene(num_boxes: int, mass_splitting: bool, device):
     The scene is rigid-only (no joints, no cloth) so it's compatible
     with the current mass-splitting guards.
     """
-    import newton  # noqa: PLC0415
-    from newton._src.solvers.phoenx.body import body_container_zeros  # noqa: PLC0415
-    from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING  # noqa: PLC0415
+    import newton
+    from newton._src.solvers.phoenx.body import body_container_zeros
+    from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 
     mb = newton.ModelBuilder()
     mb.default_shape_cfg.gap = 0.05
     # Ground plane (static).
-    mb.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
+    mb.add_shape_plane(body=-1, xform=wp.transform_identity(), width=0.0, length=0.0)
     # Stacked boxes (slightly offset so contacts are non-degenerate).
     half_ext = (0.5, 0.5, 0.5)
     body_ids: list[int] = []
@@ -246,6 +246,25 @@ def _build_box_stack_scene(num_boxes: int, mass_splitting: bool, device):
 
     num_bodies_phx = model.body_count + 1  # +1 for static-world slot 0
     bodies = body_container_zeros(num_bodies_phx, device=device)
+    from newton._src.solvers.phoenx.examples.example_common import init_phoenx_bodies_kernel
+
+    wp.launch(
+        init_phoenx_bodies_kernel,
+        dim=model.body_count,
+        inputs=[state.body_q, state.body_qd, model.body_com, model.body_inv_mass, model.body_inv_inertia],
+        outputs=[
+            bodies.position,
+            bodies.orientation,
+            bodies.velocity,
+            bodies.angular_velocity,
+            bodies.inverse_mass,
+            bodies.inverse_inertia,
+            bodies.inverse_inertia_world,
+            bodies.motion_type,
+            bodies.body_com,
+        ],
+        device=device,
+    )
     constraints = PhoenXWorld.make_constraint_container(num_joints=0, device=device)
     world = PhoenXWorld(
         bodies=bodies,
@@ -257,7 +276,7 @@ def _build_box_stack_scene(num_boxes: int, mass_splitting: bool, device):
         solver_iterations=4,
         velocity_iterations=1,
         mass_splitting=mass_splitting,
-        max_colored_partitions=12,
+        max_colored_partitions=max_colored_partitions,
         step_layout="single_world",
         device=device,
     )
@@ -269,7 +288,7 @@ def _build_box_stack_scene(num_boxes: int, mass_splitting: bool, device):
 
 
 def _sync_newton_to_phoenx(model, state, bodies, device):
-    from newton._src.solvers.phoenx.examples.example_common import (  # noqa: PLC0415
+    from newton._src.solvers.phoenx.examples.example_common import (
         newton_to_phoenx_kernel,
     )
 
@@ -286,6 +305,26 @@ def _sync_newton_to_phoenx(model, state, bodies, device):
             bodies.velocity[1 : 1 + n],
             bodies.angular_velocity[1 : 1 + n],
         ],
+        device=device,
+    )
+
+
+def _sync_phoenx_to_newton(model, state, bodies, device):
+    """Publish solved rigid state so the next collision/update advances time."""
+    from newton._src.solvers.phoenx.examples.example_common import phoenx_to_newton_kernel
+
+    n = model.body_count
+    wp.launch(
+        phoenx_to_newton_kernel,
+        dim=n,
+        inputs=[
+            bodies.position[1 : 1 + n],
+            bodies.orientation[1 : 1 + n],
+            bodies.velocity[1 : 1 + n],
+            bodies.angular_velocity[1 : 1 + n],
+            model.body_com,
+        ],
+        outputs=[state.body_q, state.body_qd],
         device=device,
     )
 
@@ -312,13 +351,28 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
     """
 
     def _run_n_frames(self, world, state, contacts, model, collision_pipeline, shape_body, n_frames, dt):
+        """Advance persistent state and require initialized dynamics and real contacts."""
+        initial = state.body_q.numpy().copy()
+        np.testing.assert_array_equal(world.bodies.inverse_mass.numpy()[1:], model.body_inv_mass.numpy())
+        np.testing.assert_array_equal(world.bodies.inverse_inertia.numpy()[1:], model.body_inv_inertia.numpy())
+        self.assertTrue(np.all(world.bodies.inverse_mass.numpy()[1:] > 0.0))
+        peak_contacts = 0
         for _ in range(n_frames):
             _sync_newton_to_phoenx(model, state, world.bodies, world.device)
             model.collide(state, contacts=contacts, collision_pipeline=collision_pipeline)
+            peak_contacts = max(peak_contacts, int(contacts.rigid_contact_count.numpy()[0]))
             world.step(dt=dt, contacts=contacts, shape_body=shape_body)
-        return world.bodies.position.numpy().copy(), world.bodies.velocity.numpy().copy()
+            _sync_phoenx_to_newton(model, state, world.bodies, world.device)
+        position = world.bodies.position.numpy().copy()
+        velocity = world.bodies.velocity.numpy().copy()
+        self.assertTrue(np.isfinite(position).all() and np.isfinite(velocity).all())
+        self.assertGreater(peak_contacts, 0)
+        self.assertLess(float(position[1, 2]), float(initial[0, 2]) - 0.01)
+        np.testing.assert_allclose(state.body_q.numpy()[:, :3], position[1:], rtol=0, atol=1e-7)
+        return position, velocity
 
     def test_single_box_on_plane_matches_disabled(self):
+        """Compare a falling dynamic box after repeated contact solves."""
         device = wp.get_preferred_device()
         # mass_splitting=False reference.
         w0, s0, c0, m0, cp0, sb0, _ = _build_box_stack_scene(1, mass_splitting=False, device=device)
@@ -331,6 +385,7 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         np.testing.assert_allclose(vel1[1], vel0[1], rtol=1e-4, atol=1e-4)
 
     def test_two_box_stack_matches_disabled(self):
+        """Compare both dynamic stack bodies with and without copy routing."""
         device = wp.get_preferred_device()
         w0, s0, c0, m0, cp0, sb0, _ = _build_box_stack_scene(2, mass_splitting=False, device=device)
         pos0, vel0 = self._run_n_frames(w0, s0, c0, m0, cp0, sb0, 30, 1.0 / 60.0)
@@ -341,7 +396,8 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
             np.testing.assert_allclose(pos1[b], pos0[b], rtol=1e-3, atol=1e-3)
             np.testing.assert_allclose(vel1[b], vel0[b], rtol=1e-3, atol=1e-3)
 
-    def test_single_box_with_overflow_still_settles(self):
+    def test_single_box_with_one_color_still_settles(self):
+        """Require contact support with the minimum regular-color budget."""
         # Force the overflow path by setting ``max_colored_partitions=1``:
         # every contact-bucket past the first goes to the overflow
         # bucket. With a single box on a plane there's only one contact
@@ -351,41 +407,11 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         device = wp.get_preferred_device()
         w0, s0, c0, m0, cp0, sb0, _ = _build_box_stack_scene(1, mass_splitting=False, device=device)
         pos0, _ = self._run_n_frames(w0, s0, c0, m0, cp0, sb0, 30, 1.0 / 60.0)
-        # mass_splitting=True with K=1 still routes through slots.
-        device = wp.get_preferred_device()
-        import newton  # noqa: PLC0415
-        from newton._src.solvers.phoenx.body import body_container_zeros  # noqa: PLC0415
-        from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING  # noqa: PLC0415
-
-        mb = newton.ModelBuilder()
-        mb.default_shape_cfg.gap = 0.05
-        mb.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
-        body = mb.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.55), q=wp.quat_identity()))
-        mb.add_shape_box(body, hx=0.5, hy=0.5, hz=0.5)
-        model = mb.finalize(device=device)
-        state = model.state()
-        collision_pipeline = newton.CollisionPipeline(model, contact_matching=PHOENX_CONTACT_MATCHING)
-        contacts = collision_pipeline.contacts()
-        bodies = body_container_zeros(model.body_count + 1, device=device)
-        constraints = PhoenXWorld.make_constraint_container(num_joints=0, device=device)
-        w1 = PhoenXWorld(
-            bodies=bodies,
-            constraints=constraints,
-            num_joints=0,
-            rigid_contact_max=int(contacts.rigid_contact_max),
-            gravity=(0.0, 0.0, -9.81),
-            substeps=4,
-            solver_iterations=4,
-            velocity_iterations=1,
-            mass_splitting=True,
-            max_colored_partitions=1,  # Force overflow more aggressively.
-            step_layout="single_world",
-            device=device,
+        # One regular colour is sufficient for this single contact column.
+        w1, state, contacts, model, cp1, sb1, _ = _build_box_stack_scene(
+            1, mass_splitting=True, device=device, max_colored_partitions=1
         )
-        shape_body_np = model.shape_body.numpy()
-        shape_body_phx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
-        sb1 = wp.array(shape_body_phx, dtype=wp.int32, device=device)
-        pos1, _ = self._run_n_frames(w1, state, contacts, model, collision_pipeline, sb1, 30, 1.0 / 60.0)
+        pos1, _ = self._run_n_frames(w1, state, contacts, model, cp1, sb1, 30, 1.0 / 60.0)
         # Both should have the box resting on the plane (z ≈ 0.5).
         # We don't require byte-equivalent positions (the iterate
         # algebra inside the overflow bucket scales by inv_factor); we
@@ -397,6 +423,7 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         self.assertAlmostEqual(float(pos1[1][2]), float(pos0[1][2]), delta=0.05)
 
     def test_pendulum_joint_matches_disabled(self):
+        """Compare motion from a nonzero revolute coordinate after forward kinematics."""
         # Two-body pendulum: parent body welded to world via a fixed
         # joint, child body hanging from a revolute joint. With
         # mass_splitting=True (K=12, no overflow), the joint iterate
@@ -404,7 +431,7 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         # math is identity vs ``mass_splitting=False`` (modulo float
         # ordering). Covers the joint refactor end-to-end.
         device = wp.get_preferred_device()
-        import newton  # noqa: PLC0415
+        import newton
 
         def _build(mass_splitting: bool):
             mb = newton.ModelBuilder()
@@ -450,14 +477,17 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         model1, solver1 = _build(mass_splitting=True)
         state0 = model0.state()
         state1 = model1.state()
-        contacts0 = newton.CollisionPipeline(model0).contacts() if False else None
-        contacts1 = newton.CollisionPipeline(model1).contacts() if False else None
+        newton.eval_fk(model0, model0.joint_q, model0.joint_qd, state0)
+        newton.eval_fk(model1, model1.joint_q, model1.joint_qd, state1)
+        initial_child = state0.body_q.numpy()[1].copy()
         for _ in range(30):
-            solver0.step(state0, state0, control=None, contacts=contacts0, dt=1.0 / 60.0)
-            solver1.step(state1, state1, control=None, contacts=contacts1, dt=1.0 / 60.0)
+            solver0.step(state0, state0, control=None, contacts=None, dt=1.0 / 60.0)
+            solver1.step(state1, state1, control=None, contacts=None, dt=1.0 / 60.0)
         q0 = state0.body_q.numpy()
         q1 = state1.body_q.numpy()
         np.testing.assert_allclose(q1, q0, rtol=1e-3, atol=1e-3)
+        self.assertGreater(float(np.linalg.norm(q0[1, :3] - initial_child[:3])), 0.01)
+        self.assertTrue(np.isfinite(q0).all() and np.isfinite(q1).all())
 
     def test_cloth_grid_matches_disabled(self):
         # Small cloth grid falling onto a static box. With
@@ -466,9 +496,9 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         # prepare-time mass scaling is identity. End-state particle
         # positions must match the ``mass_splitting=False`` reference.
         device = wp.get_preferred_device()
-        import newton  # noqa: PLC0415
-        from newton._src.solvers.phoenx.body import body_container_zeros  # noqa: PLC0415
-        from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (  # noqa: PLC0415
+        import newton
+        from newton._src.solvers.phoenx.body import body_container_zeros
+        from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
             cloth_lame_from_youngs_poisson_plane_stress,
         )
 
@@ -545,6 +575,7 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         np.testing.assert_allclose(p1, p0, rtol=1e-3, atol=1e-3)
 
     def test_box_stack_under_graph_capture_with_mass_splitting(self):
+        """Require captured frames to advance and match an eager six-frame trajectory."""
         # Load-bearing capture-safety check: the full pipeline (ingest →
         # color → mass-splitting build → broadcast → solve → writeback →
         # integrate) must run inside a captured CUDA graph and re-launch
@@ -556,19 +587,26 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
             _sync_newton_to_phoenx(model, state, world.bodies, world.device)
             model.collide(state, contacts=contacts, collision_pipeline=cp)
             world.step(dt=1.0 / 60.0, contacts=contacts, shape_body=shape_body)
+            _sync_phoenx_to_newton(model, state, world.bodies, world.device)
 
+        initial = state.body_q.numpy().copy()
         # Warm-up.
         _frame()
         with wp.ScopedCapture(device=device) as capture:
             _frame()
-        # Run several frames of the captured graph; assertion is just
-        # that no kernel crashes and bodies fall.
         for _ in range(5):
             wp.capture_launch(capture.graph)
         pos = world.bodies.position.numpy()
-        # Bodies should have moved downward from their initial z (>= 0.55).
-        self.assertLess(float(pos[1][2]), 1.0)
-        self.assertLess(float(pos[2][2]), 2.0)
+        velocity = world.bodies.velocity.numpy()
+        self.assertTrue(np.isfinite(pos).all() and np.isfinite(velocity).all())
+        self.assertLess(float(pos[1, 2]), float(initial[0, 2]) - 0.01)
+        self.assertLess(float(pos[2, 2]), float(initial[1, 2]) - 0.01)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+        np.testing.assert_allclose(state.body_q.numpy()[:, :3], pos[1:], rtol=0, atol=1e-7)
+        eager = _build_box_stack_scene(2, mass_splitting=True, device=device)
+        expected_pos, expected_velocity = self._run_n_frames(*eager[:6], 6, 1.0 / 60.0)
+        np.testing.assert_allclose(pos, expected_pos, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(velocity, expected_velocity, rtol=1e-5, atol=1e-6)
 
 
 if __name__ == "__main__":

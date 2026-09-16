@@ -328,7 +328,7 @@ class IncrementalContactPartitioner:
         # entirely. See :mod:`warm_start` for the design.
         self.enable_warm_start: bool = bool(enable_warm_start)
         if self.enable_warm_start:
-            from newton._src.solvers.phoenx.graph_coloring.warm_start import (  # noqa: PLC0415
+            from newton._src.solvers.phoenx.graph_coloring.warm_start import (
                 warm_start_cache_zeros,
             )
 
@@ -352,7 +352,7 @@ class IncrementalContactPartitioner:
             self._ws_is_boundary = None
             self._ws_dest_idx = None
 
-        import numpy as np  # noqa: PLC0415
+        import numpy as np
 
         rng = np.random.default_rng(seed)
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
@@ -476,7 +476,7 @@ class IncrementalContactPartitioner:
         owner_colors = int(max_colored_partitions) if self._use_endpoint_owner_coloring else 1
         owner_nodes = max_num_nodes if self._use_endpoint_owner_coloring else 1
         self._owner_body_masks = wp.zeros(owner_nodes, dtype=wp.uint64, device=device)
-        self._owner_winners = wp.zeros(owner_nodes * owner_colors, dtype=wp.uint32, device=device)
+        self._owner_winners = wp.zeros(owner_nodes * owner_colors, dtype=wp.uint64, device=device)
         self._owner_tentative_color = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
         # Dummies for reusing partitioning_prepare_kernel as adjacency zeroer.
@@ -926,7 +926,7 @@ class IncrementalContactPartitioner:
         # constraints not in the cache stay at 0 and get coloured
         # normally by MIS.
         if self.enable_warm_start:
-            from newton._src.solvers.phoenx.graph_coloring.warm_start import (  # noqa: PLC0415
+            from newton._src.solvers.phoenx.graph_coloring.warm_start import (
                 seed_warm_start_kernel,
                 warm_start_invalidate_apply_kernel,
                 warm_start_invalidate_mark_kernel,
@@ -1099,7 +1099,7 @@ class IncrementalContactPartitioner:
         boundary entries into the cache (atomic-max sets
         ``num_entries``).
         """
-        from newton._src.solvers.phoenx.graph_coloring.warm_start import (  # noqa: PLC0415
+        from newton._src.solvers.phoenx.graph_coloring.warm_start import (
             warm_start_dedup_pairs_kernel,
             warm_start_emit_pairs_kernel,
             warm_start_mark_boundaries_kernel,

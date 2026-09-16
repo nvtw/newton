@@ -60,6 +60,7 @@ class MultiWorldDispatcher:
                     self._world._solve_main(num_iterations=0, solve_direct=False)
                 if overlap_factor:
                     direct.wait_factor()
+                self._world._warm_start_owned_contacts()
                 direct.solve(use_bias=False)
                 if self._world._combine_direct_prepare_projection:
                     direct.resolve_bounded_drives(idt, use_bias=False)
@@ -75,6 +76,7 @@ class MultiWorldDispatcher:
             else:
                 self._world._solve_main()
         elif direct is not None and direct.enabled:
+            self._world._warm_start_owned_contacts()
             direct.solve(use_bias=True)
             direct.resolve_bounded_drives(idt, use_bias=True)
         self._world._solve_direct_contacts(use_bias=True, refresh_mobility=True)
@@ -88,11 +90,13 @@ class MultiWorldDispatcher:
             self._world._reduced_articulation.solve_constraints(self._world, idt, relax=False)
 
     def relax(self, idt: wp.float32) -> None:
+        if self._world._active_velocity_iterations <= 0:
+            return
         direct = getattr(self._world, "_direct_equality_system", None)
         if self._world._regular_pgs_active_this_step:
             block_world = self._world._multi_world_scheduler == "block_world" and self._world._block_world_supported()
             if direct is not None and direct.enabled:
-                for iteration in range(self._world.velocity_iterations):
+                for iteration in range(self._world._active_velocity_iterations):
                     if block_world:
                         self._world._relax_velocities_block_world(
                             num_iterations=1, solve_direct=False, iteration_offset=iteration
@@ -105,15 +109,15 @@ class MultiWorldDispatcher:
                 self._world._relax_velocities_block_world()
             else:
                 self._world._relax_velocities()
-        elif direct is not None and direct.enabled and self._world.velocity_iterations > 0:
+        elif direct is not None and direct.enabled and self._world._active_velocity_iterations > 0:
             direct.solve(use_bias=False)
             direct.resolve_bounded_drives(idt, use_bias=False)
-        if self._world.velocity_iterations > 0:
+        if self._world._active_velocity_iterations > 0:
             self._world._solve_direct_contacts(use_bias=False, refresh_mobility=False)
         if self._world._maximal_tree_projector is not None:
             if not self._world._direct_tree_contacts:
                 self._world._maximal_tree_projector.project(use_bias=False, dt=self._world.substep_dt)
-            if self._world.velocity_iterations > 0:
+            if self._world._active_velocity_iterations > 0:
                 self._world._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
         if self._world._reduced_constraints_active_this_step:
             self._world._reduced_articulation.solve_constraints(self._world, idt, relax=True)

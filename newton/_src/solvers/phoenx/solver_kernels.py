@@ -93,6 +93,11 @@ def _init_phoenx_body_container_kernel(
     body_com_out[tid] = body_com[i]
     flags = body_flags[i]
     if (flags & kinematic_flag) != 0:
+        # Prescribed motion has no impulse response, even when the model
+        # retains physical mass and inertia for this body.
+        inv_mass_out[tid] = 0.0
+        inv_inertia_out[tid] = wp.mat33f(0.0)
+        inv_inertia_world_out[tid] = sym6_from_mat33(wp.mat33f(0.0))
         motion_type_out[tid] = MOTION_KINEMATIC
         affected_by_gravity_out[tid] = 0
     elif body_inv_mass[i] == 0.0:

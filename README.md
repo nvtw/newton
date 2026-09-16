@@ -978,6 +978,21 @@ If you run the examples from a source checkout with uv, use
   </tr>
 </table>
 
+### PhoenX
+
+The Colibri mechanism is an experimental solver stress test. Long-run joint and
+contact accuracy are still being investigated.
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_colibri.jpg" alt="PhoenX Colibri">
+      <br><b>Colibri mechanism</b>
+      <br><code>python -m newton.examples phoenx_colibri</code>
+    </td>
+  </tr>
+</table>
+
 ### Example Options
 
 All examples share a common set of command-line options. The most commonly used ones are:

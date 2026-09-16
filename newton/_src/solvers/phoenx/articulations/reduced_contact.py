@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.geometry.types import GeoType
-from newton._src.solvers.phoenx.body import MOTION_ARTICULATED, BodyContainer, mat33_from_sym6
+from newton._src.solvers.phoenx.body import MOTION_ARTICULATED, MOTION_KINEMATIC, BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -34,7 +33,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_eff_t2,
     cc_get_normal,
     cc_get_normal_lambda,
-    cc_get_start_gap,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
@@ -44,11 +42,14 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_eff_n,
     cc_set_eff_t1,
     cc_set_eff_t2,
+    cc_set_normal_lambda,
     cc_set_r0,
     cc_set_r1,
+    cc_set_tangent1_lambda,
+    cc_set_tangent2_lambda,
 )
 from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulation_pair_response
-from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_velocity_update_no_soft_pd
+from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_coupled_velocity_update_no_soft_pd
 from newton._src.solvers.phoenx.helpers.math_helpers import apply_body_spatial_impulse
 
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
@@ -67,7 +68,7 @@ def _rigid_endpoint_inverse_mass(
     direction: wp.vec3f,
 ) -> wp.float32:
     inverse_mass = bodies.inverse_mass[body]
-    if inverse_mass == wp.float32(0.0):
+    if inverse_mass == wp.float32(0.0) or bodies.motion_type[body] == MOTION_KINEMATIC:
         return wp.float32(0.0)
     angular_jacobian = wp.cross(point - bodies.position[body], direction)
     inverse_inertia = mat33_from_sym6(bodies.inverse_inertia_world[body])
@@ -82,7 +83,7 @@ def _apply_rigid_endpoint_impulse(
     impulse: wp.vec3f,
 ):
     inverse_mass = bodies.inverse_mass[body]
-    if inverse_mass == wp.float32(0.0):
+    if inverse_mass == wp.float32(0.0) or bodies.motion_type[body] == MOTION_KINEMATIC:
         return
     velocity, angular_velocity = apply_body_spatial_impulse(
         bodies.velocity[body],
@@ -230,10 +231,10 @@ def reduced_contact_deferred_owner(
     articulation0 = bodies.reduced.body_articulation[body0]
     articulation1 = bodies.reduced.body_articulation[body1]
     if articulation0 >= wp.int32(0) and articulation1 < wp.int32(0):
-        if bodies.inverse_mass[body1] == wp.float32(0.0):
+        if bodies.inverse_mass[body1] == wp.float32(0.0) or bodies.motion_type[body1] == MOTION_KINEMATIC:
             return articulation0
     if articulation1 >= wp.int32(0) and articulation0 < wp.int32(0):
-        if bodies.inverse_mass[body0] == wp.float32(0.0):
+        if bodies.inverse_mass[body0] == wp.float32(0.0) or bodies.motion_type[body0] == MOTION_KINEMATIC:
             return articulation1
     return wp.int32(-1)
 
@@ -396,30 +397,11 @@ def _deferred_point_velocity(
 
 
 @wp.func
-def _uses_start_gap(contacts: ContactViews, contact: wp.int32) -> wp.bool:
-    shape0 = contacts.rigid_contact_shape0[contact]
-    shape1 = contacts.rigid_contact_shape1[contact]
-    shape_count = contacts.shape_type.shape[0]
-    result = wp.bool(False)
-    if shape0 >= wp.int32(0) and shape0 < shape_count:
-        shape_type = contacts.shape_type[shape0]
-        result = (
-            shape_type == wp.int32(GeoType.MESH)
-            or shape_type == wp.int32(GeoType.HFIELD)
-            or shape_type == wp.int32(GeoType.TETRAHEDRON)
-        )
-    if shape1 >= wp.int32(0) and shape1 < shape_count:
-        shape_type = contacts.shape_type[shape1]
-        result = result or (
-            shape_type == wp.int32(GeoType.MESH)
-            or shape_type == wp.int32(GeoType.HFIELD)
-            or shape_type == wp.int32(GeoType.TETRAHEDRON)
-        )
-    return result
-
-
-@wp.func
 def _prepare_contact_bias_geometry(
+    bodies: BodyContainer,
+    body0: wp.int32,
+    body1: wp.int32,
+    project_bias: wp.bool,
     contacts_state: ContactContainer,
     contacts: ContactViews,
     contact: wp.int32,
@@ -433,19 +415,25 @@ def _prepare_contact_bias_geometry(
     r1: wp.vec3,
 ):
     gap = wp.dot(separation, normal)
-    solver_gap = gap
-    if _uses_start_gap(contacts, contact):
-        start_gap = cc_get_start_gap(contacts_state, contact)
-        if start_gap > wp.float32(0.0) and solver_gap < start_gap:
-            solver_gap = start_gap
-    bias = solver_gap * idt if solver_gap > wp.float32(0.0) else gap * bias_rate
+    # Cached witnesses move with their bodies between collision updates.
+    # Speculation must use their current separation so a closing contact
+    # activates when its initial clearance has been consumed.
+    bias = gap * idt if gap > wp.float32(0.0) else gap * bias_rate
     bias = wp.clamp(bias, wp.float32(-2.0), wp.float32(10.0))
     bias_t0 = wp.float32(0.0)
     bias_t1 = wp.float32(0.0)
-    if solver_gap <= wp.float32(0.0) and gap <= wp.float32(0.002):
+    if gap <= wp.float32(0.0):
         bias_t0 = wp.float32(0.08) * wp.clamp(wp.dot(separation, tangent0), -0.001, 0.001) * idt
         bias_t1 = wp.float32(0.08) * wp.clamp(wp.dot(separation, tangent1), -0.001, 0.001) * idt
 
+    if project_bias and bias < wp.float32(0.0):
+        point = bodies.position[body0] + r0
+        unconstrained = _rigid_endpoint_inverse_mass(bodies, body0, point, normal) + _rigid_endpoint_inverse_mass(
+            bodies, body1, point, normal
+        )
+        constrained = _pair_inverse_mass(bodies, body0, point, body1, point, normal)
+        if unconstrained > wp.float32(1.0e-12):
+            bias *= wp.clamp(constrained / unconstrained, wp.float32(0.0), wp.float32(1.0))
     cc_set_bias(contacts_state, contact, bias)
     cc_set_bias_t1(contacts_state, contact, bias_t0)
     cc_set_bias_t2(contacts_state, contact, bias_t1)
@@ -464,6 +452,7 @@ def reduced_contact_prepare(
     use_deferred: wp.bool,
     apply_warmstart: wp.bool,
     compute_effective_mass: wp.bool,
+    cross_mobility: wp.array[wp.vec3],
 ):
     """Prepare effective masses, TGS biases, and warm-start impulses.
 
@@ -518,10 +507,50 @@ def reduced_contact_prepare(
                     effective_mass[row] = wp.float32(1.0) / inverse_mass
 
         if compute_effective_mass:
+            # Polarization recovers the off-diagonal mobility from unit
+            # directions; cache it once instead of traversing the trees
+            # again for every friction iteration.
+            cross_response = wp.vec3(0.0)
+            for axis in range(3):
+                first_direction = normal
+                second_direction = tangent0
+                first_mass = effective_mass[0]
+                second_mass = effective_mass[1]
+                if axis == 1:
+                    second_direction = tangent1
+                    second_mass = effective_mass[2]
+                elif axis == 2:
+                    first_direction = tangent0
+                    second_direction = tangent1
+                    first_mass = effective_mass[1]
+                    second_mass = effective_mass[2]
+                if first_mass > wp.float32(0.0) and second_mass > wp.float32(0.0):
+                    direction = wp.float32(0.7071067811865476) * (first_direction + second_direction)
+                    inverse_mass = wp.float32(0.0)
+                    if use_deferred:
+                        inverse_mass = _deferred_inverse_mass(
+                            bodies, body0, contact_point, body1, contact_point, direction
+                        )
+                    else:
+                        inverse_mass = _pair_inverse_mass(bodies, body0, contact_point, body1, contact_point, direction)
+                    cross_response[axis] = inverse_mass - wp.float32(0.5) * (
+                        wp.float32(1.0) / first_mass + wp.float32(1.0) / second_mass
+                    )
+            cross_mobility[contact] = cross_response
             cc_set_eff_n(contacts_state, contact, effective_mass[0])
             cc_set_eff_t1(contacts_state, contact, effective_mass[1])
             cc_set_eff_t2(contacts_state, contact, effective_mass[2])
+            if effective_mass[0] == wp.float32(0.0):
+                cc_set_normal_lambda(contacts_state, contact, wp.float32(0.0))
+            if effective_mass[1] == wp.float32(0.0):
+                cc_set_tangent1_lambda(contacts_state, contact, wp.float32(0.0))
+            if effective_mass[2] == wp.float32(0.0):
+                cc_set_tangent2_lambda(contacts_state, contact, wp.float32(0.0))
         _prepare_contact_bias_geometry(
+            bodies,
+            body0,
+            body1,
+            compute_effective_mass,
             contacts_state,
             contacts,
             contact,
@@ -558,6 +587,7 @@ def reduced_contact_iterate(
     contacts: ContactViews,
     use_bias: wp.bool,
     use_deferred: wp.bool,
+    cross_mobility: wp.array[wp.vec3],
 ):
     """Run one sequential contact-manifold PGS sweep."""
     body0 = contact_get_body1(columns, column)
@@ -619,7 +649,8 @@ def reduced_contact_iterate(
                 mu_static = wp.float32(0.0)
                 mu_dynamic = wp.float32(0.0)
 
-        impulse = contact_project_velocity_update_no_soft_pd(
+        cross_response = cross_mobility[contact]
+        impulse = contact_project_coupled_velocity_update_no_soft_pd(
             contacts_state,
             contact,
             normal,
@@ -642,6 +673,9 @@ def reduced_contact_iterate(
             wp.float32(0.0),
             wp.float32(0.0),
             wp.float32(0.0),
+            cross_response[0],
+            cross_response[1],
+            cross_response[2],
         )
         if use_deferred:
             _apply_deferred_impulse(bodies, body0, contact_point, body1, contact_point, impulse)

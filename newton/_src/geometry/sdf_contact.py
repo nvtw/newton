@@ -10,7 +10,7 @@ from ..geometry.sdf_texture import (
     TextureSDFData,
     _texture_sample_sdf_hw_clamped,
     _texture_sample_sdf_hw_pair,
-    texture_sample_sdf_grad_only_hw,
+    texture_sample_sdf_grad_only,
     texture_sample_sdf_hw,
 )
 from ..geometry.types import GeoType
@@ -1087,7 +1087,9 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
         enable_heightfields, use_texture_sdf_only, texture_sample_sdf_hw, _texture_sample_sdf_hw_pair
     )
     sample_clamped = _texture_sample_sdf_hw_clamped
-    sample_grad = texture_sample_sdf_grad_only_hw
+    # Differentiate the query cell directly. A finite-difference stencil can
+    # cross adjacent cells and tilt a planar face normal near a mesh edge.
+    sample_grad = texture_sample_sdf_grad_only
     get_mesh_edge_specialized = _create_mesh_edge_accessor_func(use_precomputed_edge_data)
     get_mesh_edge_bounding_sphere_specialized = _create_get_mesh_edge_bounding_sphere_func(use_precomputed_edge_data)
 
@@ -1372,7 +1374,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         has_edge = edge_slot >= 0
 
                         if has_edge:
-                            corner_ownership = int(0)
+                            _corner_ownership = int(0)
                             if wp.static(enable_heightfields):
                                 if tri_type == GeoType.HFIELD:
                                     v0s, v1s = get_edge_from_heightfield(
@@ -1382,7 +1384,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                                 else:
-                                    v0s, v1s, corner_ownership = get_mesh_edge_specialized(
+                                    v0s, v1s, _corner_ownership = get_mesh_edge_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
@@ -1393,7 +1395,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                             else:
-                                v0s, v1s, corner_ownership = get_mesh_edge_specialized(
+                                v0s, v1s, _corner_ownership = get_mesh_edge_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
@@ -1406,7 +1408,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             v0 = wp.cw_mul(v0s, inv_sdf_scale)
                             v1 = wp.cw_mul(v1s, inv_sdf_scale)
 
-                            dist_unscaled, point_unscaled, best_endpoint = do_edge_sdf_collision(
+                            dist_unscaled, point_unscaled, _best_endpoint = do_edge_sdf_collision(
                                 texture_sdf,
                                 mesh_id_sdf,
                                 v0,
@@ -1439,10 +1441,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 min_sdf_scale,
                                 use_texture_sdf_for_search,
                             )
-                            owns_endpoint = (
-                                best_endpoint == 0 or corner_ownership == 0 or (corner_ownership & best_endpoint) != 0
-                            )
-                            if dist_approx < contact_threshold and inner_cull_consistent and owns_endpoint:
+                            # A static vertex owner is not a valid contact owner:
+                            # its edge can select a different SDF minimum. Keep
+                            # this valid corner and let geometric reduction
+                            # remove duplicate witnesses after generation.
+                            if dist_approx < contact_threshold and inner_cull_consistent:
                                 if wp.static(enable_heightfields):
                                     if sdf_is_hfield:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(
@@ -1816,7 +1819,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         has_edge = edge_slot >= 0
 
                         if has_edge:
-                            corner_ownership = int(0)
+                            _corner_ownership = int(0)
                             if wp.static(enable_heightfields):
                                 if tri_type == GeoType.HFIELD:
                                     v0s, v1s = get_edge_from_heightfield(
@@ -1826,7 +1829,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                                 else:
-                                    v0s, v1s, corner_ownership = get_mesh_edge_specialized(
+                                    v0s, v1s, _corner_ownership = get_mesh_edge_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
@@ -1837,7 +1840,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                             else:
-                                v0s, v1s, corner_ownership = get_mesh_edge_specialized(
+                                v0s, v1s, _corner_ownership = get_mesh_edge_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
@@ -1850,7 +1853,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             v0 = wp.cw_mul(v0s, inv_sdf_scale)
                             v1 = wp.cw_mul(v1s, inv_sdf_scale)
 
-                            dist_unscaled, point_unscaled, best_endpoint = do_edge_sdf_collision(
+                            dist_unscaled, point_unscaled, _best_endpoint = do_edge_sdf_collision(
                                 texture_sdf,
                                 mesh_id_sdf,
                                 v0,
@@ -1883,10 +1886,11 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 min_sdf_scale,
                                 use_texture_sdf_for_search,
                             )
-                            owns_endpoint = (
-                                best_endpoint == 0 or corner_ownership == 0 or (corner_ownership & best_endpoint) != 0
-                            )
-                            if dist_approx < contact_threshold and inner_cull_consistent and owns_endpoint:
+                            # A static vertex owner is not a valid contact owner:
+                            # its edge can select a different SDF minimum. Keep
+                            # this valid corner and let geometric reduction
+                            # remove duplicate witnesses after generation.
+                            if dist_approx < contact_threshold and inner_cull_consistent:
                                 if wp.static(enable_heightfields):
                                     if sdf_is_hfield:
                                         dist_unscaled, direction_unscaled = sample_sdf_grad_heightfield(
@@ -1973,6 +1977,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                     dist,
                                     (my_edge_idx << 2) | (mode << 1),
                                     point_world - midpoint,
+                                    margin_sum,
                                     inner_spatial_depth,
                                     outer_spatial_depth,
                                     position_local_tri,

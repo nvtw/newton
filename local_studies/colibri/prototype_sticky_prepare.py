@@ -1,0 +1,2647 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Contact prepare/iterate factories for rigid and deformable endpoints.
+
+``wp.static`` keeps rigid-only kernels on the body-register path and routes
+deformable contacts through endpoint helpers.
+"""
+
+from __future__ import annotations
+
+import warp as wp
+
+from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
+from newton._src.solvers.phoenx.body import (
+    MOTION_DYNAMIC,
+    BodyContainer,
+    body_load_inv_inertia_sym6,
+    body_load_orientation,
+    body_load_vw,
+    body_store_vw,
+    mat33_from_sym6,
+)
+from newton._src.solvers.phoenx.cloth_collision import (
+    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
+    SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
+)
+from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactColumnContainer,
+    ContactViews,
+    _contact_uses_stale_anchor_start_gap,
+    contact_get_body1,
+    contact_get_body2,
+    contact_get_contact_count,
+    contact_get_contact_first,
+    contact_get_count1,
+    contact_get_count2,
+    contact_get_friction,
+    contact_get_friction_dynamic,
+    contact_get_original_contact_first,
+    contact_get_packed_inv_inertia1,
+    contact_get_packed_inv_inertia2,
+    contact_get_packed_inv_mass1,
+    contact_get_packed_inv_mass2,
+    contact_get_side0_counts_extra,
+    contact_get_side0_kind,
+    contact_get_side0_nodes_extra,
+    contact_get_side0_slots_extra,
+    contact_get_side1_counts_extra,
+    contact_get_side1_kind,
+    contact_get_side1_nodes_extra,
+    contact_get_side1_slots_extra,
+    contact_get_slot1,
+    contact_get_slot2,
+    contact_set_packed_body_properties,
+)
+from newton._src.solvers.phoenx.constraints.constraint_container import (
+    DEFAULT_DAMPING_RATIO,
+    DEFAULT_HERTZ_CONTACT,
+    ConstraintBodies,
+    constraint_bodies_make,
+    pd_coefficients,
+    soft_constraint_coefficients,
+)
+from newton._src.solvers.phoenx.constraints.contact_container import (
+    ContactContainer,
+    cc_get_bias,
+    cc_get_bias_t1,
+    cc_get_bias_t2,
+    cc_get_eff_n,
+    cc_get_eff_t1,
+    cc_get_eff_t2,
+    cc_get_normal,
+    cc_get_normal_lambda,
+    cc_get_pd_bias,
+    cc_get_pd_eff_soft,
+    cc_get_pd_gamma,
+    cc_get_r0,
+    cc_get_r1,
+    cc_get_side0_bary,
+    cc_get_side1_bary,
+    cc_get_tangent1,
+    cc_get_tangent1_lambda,
+    cc_get_tangent2_lambda,
+    cc_set_bias,
+    cc_set_bias_t1,
+    cc_set_bias_t2,
+    cc_set_eff_n,
+    cc_set_eff_t1,
+    cc_set_eff_t2,
+    cc_set_normal_lambda,
+    cc_set_pd_bias,
+    cc_set_pd_eff_soft,
+    cc_set_pd_gamma,
+    cc_set_r0,
+    cc_set_r1,
+    cc_set_tangent1_lambda,
+    cc_set_tangent2_lambda,
+)
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    contact_endpoint_apply_impulse_cached as contact_endpoint_apply_impulse,
+)
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    contact_endpoint_inv_mass_along_cached as contact_endpoint_inv_mass_along,
+)
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    contact_endpoint_set_access_mode_cached as contact_endpoint_set_access_mode,
+)
+from newton._src.solvers.phoenx.constraints.contact_endpoint import (
+    contact_endpoint_velocity_at_point_cached as contact_endpoint_velocity_at_point,
+)
+from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
+    contact_patch_effective_mass,
+    contact_patch_project_velocity_update,
+)
+from newton._src.solvers.phoenx.constraints.contact_projection import (
+    contact_project_coupled_velocity_update,
+    contact_project_coupled_velocity_update_no_soft_pd,
+    contact_project_normal_velocity_update,
+    contact_project_normal_velocity_update_no_soft_pd,
+    contact_project_velocity_update,
+    contact_project_velocity_update_no_soft_pd,
+)
+from newton._src.solvers.phoenx.helpers.math_helpers import (
+    apply_pair_spatial_impulse,
+    apply_pair_velocity_impulse,
+    effective_mass_scalar,
+)
+from newton._src.solvers.phoenx.mass_splitting.access import (
+    set_particle_access_mode_with_slot,
+    write_angular_velocity_unified,
+    write_velocity_unified,
+)
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer
+from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
+
+__all__ = [
+    "contact_cached_warmstart_lean",
+    "contact_iterate",
+    "contact_iterate_at",
+    "contact_iterate_at_cloth_aware",
+    "contact_iterate_at_lean",
+    "contact_iterate_cloth_aware",
+    "contact_iterate_lean",
+    "contact_iterate_lean_no_sleep",
+    "contact_iterate_lean_no_sleep_no_soft_pd",
+    "contact_iterate_lean_no_soft_pd",
+    "contact_iterate_no_sleep",
+    "contact_iterate_no_sleep_no_soft_pd",
+    "contact_iterate_no_soft_pd",
+    "contact_prepare_for_iteration",
+    "contact_prepare_for_iteration_at",
+    "contact_prepare_for_iteration_at_cloth_aware",
+    "contact_prepare_for_iteration_at_lean",
+    "contact_prepare_for_iteration_cloth_aware",
+    "contact_prepare_for_iteration_lean",
+    "contact_prepare_for_iteration_lean_no_soft_pd",
+    "contact_prepare_for_iteration_no_soft_pd",
+]
+
+
+# The default contact hertz is Nyquist-clamped whenever idt <= 2*hertz.
+# In that regime the Box2D mass/impulse coefficients are independent of dt.
+_DEFAULT_CONTACT_MASS_COEFF = wp.constant(wp.float32(0.9417003989219666))
+_DEFAULT_CONTACT_IMPULSE_COEFF = wp.constant(wp.float32(0.05829954519867897))
+
+
+@wp.func
+def _default_contact_solver_coefficients(idt: wp.float32):
+    """Return default contact mass/impulse coefficients."""
+    if idt <= wp.float32(2.0) * DEFAULT_HERTZ_CONTACT:
+        return _DEFAULT_CONTACT_MASS_COEFF, _DEFAULT_CONTACT_IMPULSE_COEFF
+    dt_substep = wp.float32(1.0) / idt
+    _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
+        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+    )
+    return mass_coeff, impulse_coeff
+
+
+@wp.func
+def _soft_tet_endpoint_set_access_mode_for_column(
+    nodes: wp.vec4i,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    slots: wp.vec4i,
+    counts: wp.vec4i,
+    new_access_mode: wp.int32,
+    inv_dt: wp.float32,
+    cc: ContactContainer,
+    contact_first: wp.int32,
+    contact_count: wp.int32,
+    is_side1: wp.bool,
+):
+    # A contact column can contain multiple contact points. Use the union
+    # of nonzero barycentric weights so access modes cover exactly the
+    # particles the column can read or write.
+    use_a = bool(False)
+    use_b = bool(False)
+    use_c = bool(False)
+    use_d = bool(False)
+    for i in range(contact_count):
+        k = contact_first + i
+        bary = cc_get_side1_bary(cc, k) if is_side1 else cc_get_side0_bary(cc, k)
+        weight_a = bary[0]
+        weight_b = bary[1]
+        weight_c = bary[2]
+        weight_d = wp.float32(1.0) - weight_a - weight_b - weight_c
+        if weight_a != wp.float32(0.0):
+            use_a = bool(True)
+        if weight_b != wp.float32(0.0):
+            use_b = bool(True)
+        if weight_c != wp.float32(0.0):
+            use_c = bool(True)
+        if weight_d != wp.float32(0.0):
+            use_d = bool(True)
+    if use_a and nodes[0] >= wp.int32(0):
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[0] - num_bodies, slots[0], new_access_mode, inv_dt
+        )
+    if use_b and nodes[1] >= wp.int32(0):
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[1] - num_bodies, slots[1], new_access_mode, inv_dt
+        )
+    if use_c and nodes[2] >= wp.int32(0):
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[2] - num_bodies, slots[2], new_access_mode, inv_dt
+        )
+    if use_d and nodes[3] >= wp.int32(0):
+        set_particle_access_mode_with_slot(
+            particles, copy_state, nodes[3] - num_bodies, slots[3], new_access_mode, inv_dt
+        )
+
+
+@wp.func
+def _side_world_contact_point(
+    kind: wp.int32,
+    nodes: wp.vec4i,
+    bary: wp.vec3f,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    contacts: ContactViews,
+    source_k: wp.int32,
+    is_side1: wp.bool,
+    margin: wp.float32,
+    n: wp.vec3f,
+) -> wp.vec3f:
+    """World-space contact point on this side incl. ``+/-margin*n`` shift.
+
+    Rigid: ``pos + quat_rotate(orient, local_p - body_com) + sign*margin*n``.
+    Cloth: ``bary . particle_positions + sign*margin*n`` (3 nodes).
+    Soft-tet: 4-node barycentric anchor (4th weight derived).
+    Side 0 uses ``+margin*n`` (push toward side 1); side 1 uses ``-margin*n``.
+    """
+    sign = wp.float32(-1.0) if is_side1 else wp.float32(1.0)
+    if kind == wp.int32(SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE):
+        p_a = nodes[0] - num_bodies
+        p_b = nodes[1] - num_bodies
+        p_c = nodes[2] - num_bodies
+        anchor = (
+            bary[0] * particles.position[p_a] + bary[1] * particles.position[p_b] + bary[2] * particles.position[p_c]
+        )
+        return anchor + (sign * margin) * n
+    if kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        weight_a = bary[0]
+        weight_b = bary[1]
+        weight_c = bary[2]
+        weight_d = wp.float32(1.0) - weight_a - weight_b - weight_c
+        anchor = wp.vec3f(0.0, 0.0, 0.0)
+        if weight_a != wp.float32(0.0):
+            p_a = nodes[0] - num_bodies
+            anchor = anchor + weight_a * particles.position[p_a]
+        if weight_b != wp.float32(0.0):
+            p_b = nodes[1] - num_bodies
+            anchor = anchor + weight_b * particles.position[p_b]
+        if weight_c != wp.float32(0.0):
+            p_c = nodes[2] - num_bodies
+            anchor = anchor + weight_c * particles.position[p_c]
+        if weight_d != wp.float32(0.0):
+            p_d = nodes[3] - num_bodies
+            anchor = anchor + weight_d * particles.position[p_d]
+        return anchor + (sign * margin) * n
+    b = nodes[0]
+    local_p = contacts.rigid_contact_point1[source_k] if is_side1 else contacts.rigid_contact_point0[source_k]
+    if b < 0:
+        # Static-anchor world shape: shape transform is identity.
+        return local_p + (sign * margin) * n
+    body_com = bodies.body_com[b]
+    orient = bodies.orientation[b]
+    pos = bodies.position[b]
+    return pos + wp.quat_rotate(orient, local_p - body_com) + (sign * margin) * n
+
+
+# ---------------------------------------------------------------------------
+# Factories: one source per phase, ``cloth_support`` selects the side I/O
+# strategy at codegen via ``wp.static``. The rigid path keeps hoisted body
+# state + register-cached v/w accumulators; the cloth-aware path routes per
+# side through the endpoint helpers (barycentric for cloth tris).
+# ---------------------------------------------------------------------------
+
+
+def _make_contact_prepare_for_iteration_at(
+    cloth_support: bool,
+    has_mass_splitting: bool = True,
+    has_soft_contact_pd: bool = True,
+    patch_friction: bool = False,
+    packed_rows: bool = False,
+    stage_body_properties: bool = False,
+    pointwise_geometry: bool = False,
+):
+    if pointwise_geometry and (cloth_support or has_mass_splitting or patch_friction or packed_rows):
+        raise ValueError("Pointwise geometry requires unsplit rigid contacts without patches or packed rows.")
+
+    @wp.func
+    def impl(
+        constraints: ContactColumnContainer,
+        cid: wp.int32,
+        base_offset: wp.int32,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        num_bodies: wp.int32,
+        body_pair: ConstraintBodies,
+        idt: wp.float32,
+        cc: ContactContainer,
+        contacts: ContactViews,
+        copy_state: CopyStateContainer,
+        parallel_id: wp.int32,
+    ):
+        """Prepare one contact column for PGS.
+
+        Re-projects each contact's body-frame anchors to world space,
+        computes lever arms, effective masses for n/t1/t2 (cached in
+        ``cc.derived``), Baumgarte + friction biases, and applies the
+        warm-start impulse. Rigid path batches the warm-start scatter;
+        cloth-aware scatters per-side via endpoint helpers.
+        """
+        if wp.static(not packed_rows):
+            _ = base_offset
+
+        b1 = body_pair.b1
+        b2 = body_pair.b2
+
+        contact_first = contact_get_contact_first(constraints, cid)
+        contact_count = contact_get_contact_count(constraints, cid)
+        if contact_count == 0:
+            return
+        if wp.static(pointwise_geometry):
+            contact_first = base_offset
+            contact_count = wp.int32(1)
+
+        dt_substep = wp.float32(1.0) / idt
+        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
+            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
+        )
+
+        # Friction bias + speed caps. Scale-invariant; numeric caps would
+        # need scaling for scene_scale >> 1.
+        friction_bias_factor = wp.float32(0.08)
+        friction_slop = wp.float32(0.001)
+        max_push_speed = wp.float32(2.0)
+        max_approach_speed = wp.float32(10.0)
+        slip_threshold = wp.float32(0.002)
+
+        mu_s_col = contact_get_friction(constraints, cid)
+
+        use_patch = False
+        if wp.static(patch_friction):
+            use_patch = constraints.patch.eligible[cid] != wp.int32(0)
+            patch_normal_sum = wp.vec3f(0.0, 0.0, 0.0)
+            patch_r0_sum = wp.vec3f(0.0, 0.0, 0.0)
+            patch_r1_sum = wp.vec3f(0.0, 0.0, 0.0)
+            patch_bias_world_sum = wp.vec3f(0.0, 0.0, 0.0)
+            patch_normal_load = wp.float32(0.0)
+
+        if wp.static(cloth_support):
+            side0_kind = contact_get_side0_kind(constraints, cid)
+            side1_kind = contact_get_side1_kind(constraints, cid)
+            side0_extra = contact_get_side0_nodes_extra(constraints, cid)
+            side1_extra = contact_get_side1_nodes_extra(constraints, cid)
+            side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
+            side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
+            side0_slots_extra = contact_get_side0_slots_extra(constraints, cid)
+            side1_slots_extra = contact_get_side1_slots_extra(constraints, cid)
+            side0_counts_extra = contact_get_side0_counts_extra(constraints, cid)
+            side1_counts_extra = contact_get_side1_counts_extra(constraints, cid)
+            side0_slots = wp.vec4i(
+                contact_get_slot1(constraints, cid), side0_slots_extra[0], side0_slots_extra[1], side0_slots_extra[2]
+            )
+            side1_slots = wp.vec4i(
+                contact_get_slot2(constraints, cid), side1_slots_extra[0], side1_slots_extra[1], side1_slots_extra[2]
+            )
+            side0_counts = wp.vec4i(
+                contact_get_count1(constraints, cid),
+                side0_counts_extra[0],
+                side0_counts_extra[1],
+                side0_counts_extra[2],
+            )
+            side1_counts = wp.vec4i(
+                contact_get_count2(constraints, cid),
+                side1_counts_extra[0],
+                side1_counts_extra[1],
+                side1_counts_extra[2],
+            )
+        else:
+            # Mass-splitting fast path: ``highest_index_in_use[0] == 0`` means
+            # slot lookup would return (-1, 1) identity. Bypass the
+            # get_state_index inlining + inv_factor multiplies entirely.
+            # Sets ``slot1 = slot2 = -1`` so the warm-start scatter at the end
+            # takes the matching fast-path writeback.
+            orientation1 = body_load_orientation(bodies, b1)
+            orientation2 = body_load_orientation(bodies, b2)
+            position1 = bodies.position[b1]
+            position2 = bodies.position[b2]
+            body_com1 = bodies.body_com[b1]
+            body_com2 = bodies.body_com[b2]
+            if wp.static(not has_mass_splitting):
+                # Compile-time lean path: slot lookup dead-code-eliminated.
+                slot1 = wp.int32(-1)
+                slot2 = wp.int32(-1)
+                inv_mass1 = bodies.inverse_mass[b1]
+                inv_mass2 = bodies.inverse_mass[b2]
+                inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1))
+                inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2))
+            else:
+                slot1 = contact_get_slot1(constraints, cid)
+                slot2 = contact_get_slot2(constraints, cid)
+                inv_factor1 = contact_get_count1(constraints, cid)
+                inv_factor2 = contact_get_count2(constraints, cid)
+                inv_factor1_f = wp.float32(inv_factor1)
+                inv_factor2_f = wp.float32(inv_factor2)
+                inv_mass1_raw = bodies.inverse_mass[b1]
+                inv_mass2_raw = bodies.inverse_mass[b2]
+                inv_inertia1_raw = body_load_inv_inertia_sym6(bodies, b1)
+                inv_inertia2_raw = body_load_inv_inertia_sym6(bodies, b2)
+                inv_mass1 = inv_mass1_raw * inv_factor1_f
+                inv_mass2 = inv_mass2_raw * inv_factor2_f
+                inv_inertia1 = mat33_from_sym6(inv_inertia1_raw) * inv_factor1_f
+                inv_inertia2 = mat33_from_sym6(inv_inertia2_raw) * inv_factor2_f
+                if wp.static(stage_body_properties):
+                    contact_set_packed_body_properties(
+                        constraints,
+                        cid,
+                        inv_mass1_raw,
+                        inv_mass2_raw,
+                        inv_inertia1_raw,
+                        inv_inertia2_raw,
+                    )
+            # Batched warm-start accumulators (one velocity scatter at end).
+            total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
+            total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
+            total_ang_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
+
+        for i in range(contact_count):
+            k = contact_first + i
+            source_k = k
+            if wp.static(packed_rows):
+                source_k = base_offset + i
+
+            if wp.static(patch_friction):
+                if use_patch:
+                    cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+                    cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+
+            n = cc_get_normal(cc, k)
+            t1_dir = cc_get_tangent1(cc, k)
+            t2_dir = wp.cross(n, t1_dir)
+            margin0 = contacts.rigid_contact_margin0[source_k]
+            margin1 = contacts.rigid_contact_margin1[source_k]
+
+            if wp.static(cloth_support):
+                bary0 = cc_get_side0_bary(cc, k)
+                bary1 = cc_get_side1_bary(cc, k)
+                p0_world = _side_world_contact_point(
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    contacts,
+                    source_k,
+                    False,
+                    margin0,
+                    n,
+                )
+                p1_world = _side_world_contact_point(
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    contacts,
+                    source_k,
+                    True,
+                    margin1,
+                    n,
+                )
+                side0_is_deformable = side0_kind == wp.int32(
+                    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE
+                ) or side0_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON)
+                side1_is_deformable = side1_kind == wp.int32(
+                    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE
+                ) or side1_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON)
+
+                inv0_n = contact_endpoint_inv_mass_along(
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    copy_state,
+                    num_bodies,
+                    parallel_id,
+                    side0_slots,
+                    side0_counts,
+                    p0_world,
+                    n,
+                )
+                inv0_t1 = inv0_n
+                inv0_t2 = inv0_n
+                if not side0_is_deformable:
+                    inv0_t1 = contact_endpoint_inv_mass_along(
+                        side0_kind,
+                        side0_nodes,
+                        bary0,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        side0_slots,
+                        side0_counts,
+                        p0_world,
+                        t1_dir,
+                    )
+                    inv0_t2 = contact_endpoint_inv_mass_along(
+                        side0_kind,
+                        side0_nodes,
+                        bary0,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        side0_slots,
+                        side0_counts,
+                        p0_world,
+                        t2_dir,
+                    )
+
+                inv1_n = contact_endpoint_inv_mass_along(
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    copy_state,
+                    num_bodies,
+                    parallel_id,
+                    side1_slots,
+                    side1_counts,
+                    p1_world,
+                    n,
+                )
+                inv1_t1 = inv1_n
+                inv1_t2 = inv1_n
+                if not side1_is_deformable:
+                    inv1_t1 = contact_endpoint_inv_mass_along(
+                        side1_kind,
+                        side1_nodes,
+                        bary1,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        side1_slots,
+                        side1_counts,
+                        p1_world,
+                        t1_dir,
+                    )
+                    inv1_t2 = contact_endpoint_inv_mass_along(
+                        side1_kind,
+                        side1_nodes,
+                        bary1,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        side1_slots,
+                        side1_counts,
+                        p1_world,
+                        t2_dir,
+                    )
+
+                inv_n = inv0_n + inv1_n
+                inv_t1 = inv0_t1 + inv1_t1
+                inv_t2 = inv0_t2 + inv1_t2
+                eff_n = wp.float32(0.0)
+                if inv_n > wp.float32(1.0e-12):
+                    eff_n = wp.float32(1.0) / inv_n
+                eff_t1 = wp.float32(0.0)
+                if inv_t1 > wp.float32(1.0e-12):
+                    eff_t1 = wp.float32(1.0) / inv_t1
+                eff_t2 = wp.float32(0.0)
+                if inv_t2 > wp.float32(1.0e-12):
+                    eff_t2 = wp.float32(1.0) / inv_t2
+                effective_gap = wp.dot(p1_world - p0_world, n)
+                p_diff = p1_world - p0_world
+            else:
+                local_p0 = contacts.rigid_contact_point0[source_k]
+                local_p1 = contacts.rigid_contact_point1[source_k]
+                p0_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
+                p1_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
+                # Apply equal and opposite impulses at a common point so
+                # separated collision witnesses cannot create a friction couple.
+                impulse_point = wp.float32(0.5) * (p0_world + p1_world)
+                r1 = impulse_point - position1
+                r2 = impulse_point - position2
+                # Only ``eff_n`` is consumed before the sticky-break anchor
+                # decision (bias below). ``eff_t1`` / ``eff_t2``
+                # are deferred until after that block so they are computed once
+                # from the final ``r1`` / ``r2`` instead of twice when the
+                # break re-projects fresh anchors. Bit-identical either way.
+                eff_n = effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+                effective_gap = wp.dot(p1_world - p0_world, n)
+                p_diff = p1_world - p0_world
+
+            # Recompute remaining separation from the current transformed
+            # witnesses. A positive generation-time gap must not prevent a
+            # speculative contact from activating during later substeps.
+            solver_gap = effective_gap
+            use_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
+            if solver_gap > wp.float32(0.0):
+                bias_val = solver_gap * idt
+            else:
+                bias_val = effective_gap * bias_rate
+            bias_val = wp.clamp(bias_val, -max_push_speed, max_approach_speed)
+
+            if wp.static(not cloth_support):
+                friction_p0 = position1 + wp.quat_rotate(orientation1, cc_get_side0_bary(cc, k) - body_com1)
+                friction_p1 = position2 + wp.quat_rotate(orientation2, cc_get_side1_bary(cc, k) - body_com2)
+                p_diff = friction_p1 - friction_p0
+
+            drift_t1_raw = wp.dot(p_diff, t1_dir)
+            drift_t2_raw = wp.dot(p_diff, t2_dir)
+
+            if wp.static(not cloth_support):
+                drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
+                lam_t1_prev = cc_get_tangent1_lambda(cc, k)
+                lam_t2_prev = cc_get_tangent2_lambda(cc, k)
+                lam_n_prev = cc_get_normal_lambda(cc, k)
+                limit = mu_s_col * lam_n_prev
+                saturated = lam_n_prev > wp.float32(0.0) and (
+                    lam_t1_prev * lam_t1_prev + lam_t2_prev * lam_t2_prev >= wp.float32(0.98 * 0.98) * limit * limit
+                )
+                if drift_sq > slip_threshold * slip_threshold or saturated:
+                    # These are friction references, never collision witnesses.
+                    # Both material anchors start at one world point.
+                    point = wp.float32(0.5) * (p0_world + p1_world)
+                    anchor0 = body_com1 + wp.quat_rotate_inv(orientation1, point - position1)
+                    anchor1 = body_com2 + wp.quat_rotate_inv(orientation2, point - position2)
+                    for axis in range(3):
+                        cc.lambdas[6 + axis, k] = anchor0[axis]
+                        cc.lambdas[9 + axis, k] = anchor1[axis]
+                    cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+                    cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+                    drift_t1_raw = wp.float32(0.0)
+                    drift_t2_raw = wp.float32(0.0)
+
+            if (use_start_gap and solver_gap > wp.float32(0.0)) or effective_gap > wp.float32(0.002):
+                # Far speculative rows are normal velocity caps, not manifolds.
+                cc_set_normal_lambda(cc, k, wp.float32(0.0))
+                cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+                cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+                bias_t1_val = wp.float32(0.0)
+                bias_t2_val = wp.float32(0.0)
+            else:
+                drift_t1 = wp.clamp(drift_t1_raw, -friction_slop, friction_slop)
+                drift_t2 = wp.clamp(drift_t2_raw, -friction_slop, friction_slop)
+                bias_t1_val = friction_bias_factor * drift_t1 * idt
+                bias_t2_val = friction_bias_factor * drift_t2 * idt
+
+            if wp.static(not cloth_support):
+                # Patch friction builds one coupled tangent mass at the shared
+                # patch point, so per-point tangent masses are redundant.
+                eff_t1 = wp.float32(0.0)
+                eff_t2 = wp.float32(0.0)
+                if wp.static(not patch_friction):
+                    eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+                    eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+                elif not use_patch:
+                    eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+                    eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+
+            cc_set_eff_n(cc, k, eff_n)
+            cc_set_eff_t1(cc, k, eff_t1)
+            cc_set_eff_t2(cc, k, eff_t2)
+            cc_set_bias(cc, k, bias_val)
+            cc_set_bias_t1(cc, k, bias_t1_val)
+            cc_set_bias_t2(cc, k, bias_t2_val)
+            if wp.static(not cloth_support):
+                cc_set_r0(cc, k, r1)
+                cc_set_r1(cc, k, r2)
+
+            if wp.static(patch_friction):
+                if use_patch:
+                    patch_normal_sum += n
+                    patch_r0_sum += r1
+                    patch_r1_sum += r2
+                    patch_bias_world_sum += bias_t1_val * t1_dir + bias_t2_val * t2_dir
+                    patch_normal_load += wp.max(cc_get_normal_lambda(cc, k), wp.float32(0.0))
+
+            # Soft-contact PD normal row (per-contact stiffness/damping).
+            # Scenes without stiffness/damping arrays use a specialised iterate
+            # variant and skip these per-contact scratch writes entirely.
+            if wp.static(has_soft_contact_pd):
+                stiffness_arr_len = contacts.rigid_contact_stiffness.shape[0]
+                damping_arr_len = contacts.rigid_contact_damping.shape[0]
+                if stiffness_arr_len > k or damping_arr_len > k:
+                    k_n = wp.float32(0.0)
+                    c_n = wp.float32(0.0)
+                    if stiffness_arr_len > k:
+                        k_n = contacts.rigid_contact_stiffness[source_k]
+                    if damping_arr_len > k:
+                        c_n = contacts.rigid_contact_damping[source_k]
+                    if (
+                        (k_n > wp.float32(0.0) or c_n > wp.float32(0.0))
+                        and eff_n > wp.float32(0.0)
+                        and solver_gap <= wp.float32(0.0)
+                    ):
+                        eff_inv_n = wp.float32(1.0) / eff_n
+                        # ``-effective_gap`` flips sign so spring depth is +ve
+                        # for penetration; matches the lam_n >= 0 clamp.
+                        pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(
+                            k_n, c_n, -effective_gap, eff_inv_n, dt_substep, PHOENX_BOOST_CONTACT_NORMAL
+                        )
+                        cc_set_pd_gamma(cc, k, pd_gamma_n)
+                        cc_set_pd_bias(cc, k, pd_bias_n)
+                        cc_set_pd_eff_soft(cc, k, pd_eff_soft_n)
+                    else:
+                        cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
+                else:
+                    cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
+
+            if wp.static(pointwise_geometry):
+                # No velocity reads precede this return. The colored cached
+                # warm-start pass retains the original impulse summation order.
+                return
+
+            # Warm-start impulse scatter. Rigid path accumulates into
+            # body-level totals; cloth-aware scatters per side.
+            lam_n = cc_get_normal_lambda(cc, k)
+            lam_t1 = cc_get_tangent1_lambda(cc, k)
+            lam_t2 = cc_get_tangent2_lambda(cc, k)
+            imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
+            if constraints.articulation_owner[cid] >= wp.int32(0):
+                # The owning solver applies this cached load through its
+                # constrained response after contact geometry is prepared.
+                imp = wp.vec3f(0.0)
+            if wp.static(cloth_support):
+                contact_endpoint_apply_impulse(
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    copy_state,
+                    num_bodies,
+                    parallel_id,
+                    side0_slots,
+                    side0_counts,
+                    p0_world,
+                    -imp,
+                )
+                contact_endpoint_apply_impulse(
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    copy_state,
+                    num_bodies,
+                    parallel_id,
+                    side1_slots,
+                    side1_counts,
+                    p1_world,
+                    imp,
+                )
+            else:
+                total_lin_imp_on_b2 += imp
+                total_ang_imp_on_b1 += wp.cross(r1, imp)
+                total_ang_imp_on_b2 += wp.cross(r2, imp)
+
+        if wp.static(patch_friction):
+            if use_patch:
+                inv_count = wp.float32(1.0) / wp.float32(contact_count)
+                patch_normal_length_sq = wp.dot(patch_normal_sum, patch_normal_sum)
+                patch_normal = cc_get_normal(cc, contact_first)
+                if patch_normal_length_sq > wp.float32(1.0e-12):
+                    patch_normal = patch_normal_sum / wp.sqrt(patch_normal_length_sq)
+                patch_point0 = position1 + patch_r0_sum * inv_count
+                patch_point1 = position2 + patch_r1_sum * inv_count
+                patch_point = wp.float32(0.5) * (patch_point0 + patch_point1)
+                patch_r0 = patch_point - position1
+                patch_r1 = patch_point - position2
+                tangent_seed = cc_get_tangent1(cc, contact_first)
+                tangent1 = tangent_seed - wp.dot(tangent_seed, patch_normal) * patch_normal
+                tangent_length_sq = wp.dot(tangent1, tangent1)
+                if tangent_length_sq > wp.float32(1.0e-12):
+                    tangent1 = tangent1 / wp.sqrt(tangent_length_sq)
+                else:
+                    sign = wp.float32(1.0)
+                    if patch_normal[2] < wp.float32(0.0):
+                        sign = wp.float32(-1.0)
+                    a = wp.float32(-1.0) / (sign + patch_normal[2])
+                    tangent1 = wp.vec3f(
+                        wp.float32(1.0) + sign * patch_normal[0] * patch_normal[0] * a,
+                        sign * patch_normal[0] * patch_normal[1] * a,
+                        -sign * patch_normal[0],
+                    )
+                tangent2 = wp.cross(patch_normal, tangent1)
+                patch_bias_world = patch_bias_world_sum * inv_count
+                patch_bias = wp.vec2f(
+                    wp.dot(patch_bias_world, tangent1),
+                    wp.dot(patch_bias_world, tangent2),
+                )
+                effective_mass = contact_patch_effective_mass(
+                    tangent1,
+                    tangent2,
+                    patch_r0,
+                    patch_r1,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                )
+                warm_impulse = constraints.patch.impulse_world[cid]
+                warm_impulse = warm_impulse - wp.dot(warm_impulse, patch_normal) * patch_normal
+                warm_magnitude = wp.length(warm_impulse)
+                warm_limit = mu_s_col * patch_normal_load
+                if warm_magnitude > warm_limit and warm_magnitude > wp.float32(1.0e-15):
+                    warm_impulse *= warm_limit / warm_magnitude
+                constraints.patch.impulse_world[cid] = warm_impulse
+                constraints.patch.normal[cid] = patch_normal
+                constraints.patch.tangent1[cid] = tangent1
+                constraints.patch.r0[cid] = patch_r0
+                constraints.patch.r1[cid] = patch_r1
+                constraints.patch.effective_mass[cid] = effective_mass
+                constraints.patch.bias[cid] = patch_bias
+                total_lin_imp_on_b2 += warm_impulse
+                total_ang_imp_on_b1 += wp.cross(patch_r0, warm_impulse)
+                total_ang_imp_on_b2 += wp.cross(patch_r1, warm_impulse)
+
+        if constraints.articulation_owner[cid] >= wp.int32(0):
+            return
+
+        if wp.static(not cloth_support):
+            # Warm-start scatter. ``slot1`` / ``slot2`` carry the mass-
+            # splitting state captured at the top of this scope: -1 means
+            # the load took the disabled fast-path; >=0 means a slot lookup
+            # was done. The fast-path here bypasses ``read_*_unified`` /
+            # ``write_*_unified`` inlining for the rigid hot loop.
+            if wp.static(not has_mass_splitting):
+                # Compile-time lean writeback: direct SoA only.
+                v1_cur, w1_cur = body_load_vw(bodies, b1)
+                v2_cur, w2_cur = body_load_vw(bodies, b2)
+                v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
+                    v1_cur,
+                    v2_cur,
+                    w1_cur,
+                    w2_cur,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                    total_lin_imp_on_b2,
+                    total_ang_imp_on_b1,
+                    total_ang_imp_on_b2,
+                )
+                body_store_vw(bodies, b1, v1_new, w1_new)
+                body_store_vw(bodies, b2, v2_new, w2_new)
+            elif slot1 < wp.int32(0) and slot2 < wp.int32(0):
+                v1_cur, w1_cur = body_load_vw(bodies, b1)
+                v2_cur, w2_cur = body_load_vw(bodies, b2)
+                v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
+                    v1_cur,
+                    v2_cur,
+                    w1_cur,
+                    w2_cur,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                    total_lin_imp_on_b2,
+                    total_ang_imp_on_b1,
+                    total_ang_imp_on_b2,
+                )
+                body_store_vw(bodies, b1, v1_new, w1_new)
+                body_store_vw(bodies, b2, v2_new, w2_new)
+            else:
+                if slot1 < wp.int32(0):
+                    v1_cur = bodies.velocity[b1]
+                    w1_cur = bodies.angular_velocity[b1]
+                else:
+                    v1_cur = copy_state.velocity[slot1]
+                    w1_cur = copy_state.angular_velocity[slot1]
+                if slot2 < wp.int32(0):
+                    v2_cur = bodies.velocity[b2]
+                    w2_cur = bodies.angular_velocity[b2]
+                else:
+                    v2_cur = copy_state.velocity[slot2]
+                    w2_cur = copy_state.angular_velocity[slot2]
+                v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
+                    v1_cur,
+                    v2_cur,
+                    w1_cur,
+                    w2_cur,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                    total_lin_imp_on_b2,
+                    total_ang_imp_on_b1,
+                    total_ang_imp_on_b2,
+                )
+                write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1_new)
+                write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2_new)
+                write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1_new)
+                write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2_new)
+
+    return impl
+
+
+@wp.func
+def contact_cached_warmstart_lean(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    """Apply cached rigid contact warm-start impulses without rebuilding J."""
+    if constraints.articulation_owner[cid] >= wp.int32(0):
+        return
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    contact_first = contact_get_contact_first(constraints, cid)
+    contact_count = contact_get_contact_count(constraints, cid)
+    if contact_count == 0:
+        return
+
+    inv_mass1 = bodies.inverse_mass[b1]
+    inv_mass2 = bodies.inverse_mass[b2]
+    inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1))
+    inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2))
+
+    total_lin_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
+    total_ang_imp_on_b1 = wp.vec3f(0.0, 0.0, 0.0)
+    total_ang_imp_on_b2 = wp.vec3f(0.0, 0.0, 0.0)
+    for i in range(contact_count):
+        k = contact_first + i
+        n = cc_get_normal(cc, k)
+        t1_dir = cc_get_tangent1(cc, k)
+        t2_dir = wp.cross(n, t1_dir)
+        r1 = cc_get_r0(cc, k)
+        r2 = cc_get_r1(cc, k)
+        lam_n = cc_get_normal_lambda(cc, k)
+        lam_t1 = cc_get_tangent1_lambda(cc, k)
+        lam_t2 = cc_get_tangent2_lambda(cc, k)
+        imp = lam_n * n + lam_t1 * t1_dir + lam_t2 * t2_dir
+        total_lin_imp_on_b2 += imp
+        total_ang_imp_on_b1 += wp.cross(r1, imp)
+        total_ang_imp_on_b2 += wp.cross(r2, imp)
+
+    v1_cur, w1_cur = body_load_vw(bodies, b1)
+    v2_cur, w2_cur = body_load_vw(bodies, b2)
+    v1_new, v2_new, w1_new, w2_new = apply_pair_spatial_impulse(
+        v1_cur,
+        v2_cur,
+        w1_cur,
+        w2_cur,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        total_lin_imp_on_b2,
+        total_ang_imp_on_b1,
+        total_ang_imp_on_b2,
+    )
+    body_store_vw(bodies, b1, v1_new, w1_new)
+    body_store_vw(bodies, b2, v2_new, w2_new)
+
+
+def _make_contact_iterate_at(
+    cloth_support: bool,
+    has_mass_splitting: bool = True,
+    use_bias: bool = True,
+    has_soft_contact_pd: bool = True,
+    patch_friction: bool = False,
+    staged_body_properties: bool = False,
+):
+    @wp.func
+    def impl(
+        constraints: ContactColumnContainer,
+        cid: wp.int32,
+        base_offset: wp.int32,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        num_bodies: wp.int32,
+        body_pair: ConstraintBodies,
+        idt: wp.float32,
+        cc: ContactContainer,
+        contacts: ContactViews,
+        copy_state: CopyStateContainer,
+        parallel_id: wp.int32,
+        sor_boost: wp.float32,
+    ):
+        """One PGS sweep over every contact of one shape pair.
+
+        Sequential Gauss-Seidel within the pair; per-contact normal row
+        first (clamp lam_n >= 0), then two tangent rows under the
+        two-regime circular Coulomb cone. ``use_bias=False`` is the
+        relax pass; speculative normal rows always keep the gap bias. The
+        dispatchers exclude reduced-owned columns before calling this
+        single-sweep path; their multi-sweep path keeps its explicit guard.
+        """
+        _ = base_offset
+
+        b1 = body_pair.b1
+        b2 = body_pair.b2
+
+        contact_first = contact_get_contact_first(constraints, cid)
+        contact_count = contact_get_contact_count(constraints, cid)
+        if contact_count == 0:
+            return
+
+        mu_s = contact_get_friction(constraints, cid)
+        mu_k = contact_get_friction_dynamic(constraints, cid)
+        use_patch = False
+        if wp.static(patch_friction):
+            use_patch = constraints.patch.eligible[cid] != wp.int32(0)
+            patch_normal_load = wp.float32(0.0)
+
+        mass_coeff = wp.float32(1.0)
+        impulse_coeff = wp.float32(0.0)
+        if wp.static(use_bias):
+            mass_coeff, impulse_coeff = _default_contact_solver_coefficients(idt)
+
+        if wp.static(cloth_support):
+            side0_kind = contact_get_side0_kind(constraints, cid)
+            side1_kind = contact_get_side1_kind(constraints, cid)
+            side0_extra = contact_get_side0_nodes_extra(constraints, cid)
+            side1_extra = contact_get_side1_nodes_extra(constraints, cid)
+            side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
+            side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
+            side0_slots_extra = contact_get_side0_slots_extra(constraints, cid)
+            side1_slots_extra = contact_get_side1_slots_extra(constraints, cid)
+            side0_counts_extra = contact_get_side0_counts_extra(constraints, cid)
+            side1_counts_extra = contact_get_side1_counts_extra(constraints, cid)
+            side0_slots = wp.vec4i(
+                contact_get_slot1(constraints, cid), side0_slots_extra[0], side0_slots_extra[1], side0_slots_extra[2]
+            )
+            side1_slots = wp.vec4i(
+                contact_get_slot2(constraints, cid), side1_slots_extra[0], side1_slots_extra[1], side1_slots_extra[2]
+            )
+            side0_counts = wp.vec4i(
+                contact_get_count1(constraints, cid),
+                side0_counts_extra[0],
+                side0_counts_extra[1],
+                side0_counts_extra[2],
+            )
+            side1_counts = wp.vec4i(
+                contact_get_count2(constraints, cid),
+                side1_counts_extra[0],
+                side1_counts_extra[1],
+                side1_counts_extra[2],
+            )
+        else:
+            # Mass-splitting contact columns read slot/count values stamped by
+            # the graph build; no-slot endpoints are cached as ``(-1, 1)``.
+            if wp.static(not has_mass_splitting):
+                # Compile-time lean: slot lookup dead-code-eliminated.
+                v1, w1 = body_load_vw(bodies, b1)
+                v2, w2 = body_load_vw(bodies, b2)
+                inv_mass1 = bodies.inverse_mass[b1]
+                inv_mass2 = bodies.inverse_mass[b2]
+                inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b1))
+                inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b2))
+                slot1 = wp.int32(-1)
+                slot2 = wp.int32(-1)
+            else:
+                slot1 = contact_get_slot1(constraints, cid)
+                slot2 = contact_get_slot2(constraints, cid)
+                inv_factor1 = contact_get_count1(constraints, cid)
+                inv_factor2 = contact_get_count2(constraints, cid)
+                if slot1 < wp.int32(0):
+                    v1 = bodies.velocity[b1]
+                    w1 = bodies.angular_velocity[b1]
+                else:
+                    v1 = copy_state.velocity[slot1]
+                    w1 = copy_state.angular_velocity[slot1]
+                if slot2 < wp.int32(0):
+                    v2 = bodies.velocity[b2]
+                    w2 = bodies.angular_velocity[b2]
+                else:
+                    v2 = copy_state.velocity[slot2]
+                    w2 = copy_state.angular_velocity[slot2]
+                inv_factor1_f = wp.float32(inv_factor1)
+                inv_factor2_f = wp.float32(inv_factor2)
+                if wp.static(staged_body_properties):
+                    inv_mass1 = contact_get_packed_inv_mass1(constraints, cid) * inv_factor1_f
+                    inv_mass2 = contact_get_packed_inv_mass2(constraints, cid) * inv_factor2_f
+                    inv_inertia1 = mat33_from_sym6(contact_get_packed_inv_inertia1(constraints, cid)) * inv_factor1_f
+                    inv_inertia2 = mat33_from_sym6(contact_get_packed_inv_inertia2(constraints, cid)) * inv_factor2_f
+                else:
+                    inv_mass1 = bodies.inverse_mass[b1] * inv_factor1_f
+                    inv_mass2 = bodies.inverse_mass[b2] * inv_factor2_f
+                    inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * inv_factor1_f
+                    inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * inv_factor2_f
+
+        for i in range(contact_count):
+            k = contact_first + i
+
+            n = cc_get_normal(cc, k)
+            t1_dir = cc_get_tangent1(cc, k)
+            t2_dir = wp.cross(n, t1_dir)
+
+            if wp.static(cloth_support):
+                margin0 = contacts.rigid_contact_margin0[k]
+                margin1 = contacts.rigid_contact_margin1[k]
+                bary0 = cc_get_side0_bary(cc, k)
+                bary1 = cc_get_side1_bary(cc, k)
+                p0_world = _side_world_contact_point(
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    contacts,
+                    k,
+                    False,
+                    margin0,
+                    n,
+                )
+                p1_world = _side_world_contact_point(
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    num_bodies,
+                    contacts,
+                    k,
+                    True,
+                    margin1,
+                    n,
+                )
+                v0_at_p = contact_endpoint_velocity_at_point(
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    copy_state,
+                    num_bodies,
+                    parallel_id,
+                    side0_slots,
+                    side0_counts,
+                    p0_world,
+                )
+                v1_at_p = contact_endpoint_velocity_at_point(
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    copy_state,
+                    num_bodies,
+                    parallel_id,
+                    side1_slots,
+                    side1_counts,
+                    p1_world,
+                )
+                vel_rel = v1_at_p - v0_at_p
+            else:
+                r1 = cc_get_r0(cc, k)
+                r2 = cc_get_r1(cc, k)
+                vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
+
+            jv_n = wp.dot(vel_rel, n)
+            jv_t1 = wp.float32(0.0)
+            jv_t2 = wp.float32(0.0)
+            eff_t1 = wp.float32(0.0)
+            eff_t2 = wp.float32(0.0)
+            if wp.static(not patch_friction):
+                jv_t1 = wp.dot(vel_rel, t1_dir)
+                jv_t2 = wp.dot(vel_rel, t2_dir)
+                eff_t1 = cc_get_eff_t1(cc, k)
+                eff_t2 = cc_get_eff_t2(cc, k)
+            elif not use_patch:
+                jv_t1 = wp.dot(vel_rel, t1_dir)
+                jv_t2 = wp.dot(vel_rel, t2_dir)
+                eff_t1 = cc_get_eff_t1(cc, k)
+                eff_t2 = cc_get_eff_t2(cc, k)
+
+            eff_n = cc_get_eff_n(cc, k)
+            bias_val = cc_get_bias(cc, k)
+            speculative_bias = bias_val
+            bias_t1_val = wp.float32(0.0)
+            bias_t2_val = wp.float32(0.0)
+            if wp.static(use_bias and not patch_friction):
+                bias_t1_val = cc_get_bias_t1(cc, k)
+                bias_t2_val = cc_get_bias_t2(cc, k)
+            elif wp.static(use_bias):
+                if not use_patch:
+                    bias_t1_val = cc_get_bias_t1(cc, k)
+                    bias_t2_val = cc_get_bias_t2(cc, k)
+            is_speculative = speculative_bias > wp.float32(0.0)
+            if is_speculative and wp.static(not use_bias):
+                continue
+            if wp.static(not use_bias):
+                bias_val = wp.float32(0.0)
+
+            # Normal/friction rows: optional soft-contact PD, penetrating
+            # main solve, or rigid relax.
+            pd_eff_soft_n = wp.float32(0.0)
+            pd_gamma_n = wp.float32(0.0)
+            pd_bias_n = wp.float32(0.0)
+            if wp.static(has_soft_contact_pd):
+                pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
+                if pd_eff_soft_n > wp.float32(0.0):
+                    pd_gamma_n = cc_get_pd_gamma(cc, k)
+                    pd_bias_n = cc_get_pd_bias(cc, k)
+
+            if is_speculative:
+                mass_coeff_n = wp.float32(1.0)
+                impulse_coeff_n = wp.float32(0.0)
+                if speculative_bias <= idt * wp.float32(0.002):
+                    mu_s_eff = mu_s
+                    mu_k_eff = mu_k
+                else:
+                    mu_s_eff = wp.float32(0.0)
+                    mu_k_eff = wp.float32(0.0)
+            elif wp.static(use_bias):
+                mass_coeff_n = mass_coeff
+                impulse_coeff_n = impulse_coeff
+                mu_s_eff = mu_s
+                mu_k_eff = mu_k
+            else:
+                mass_coeff_n = wp.float32(1.0)
+                impulse_coeff_n = wp.float32(0.0)
+                mu_s_eff = mu_s
+                mu_k_eff = mu_k
+
+            if wp.static(not cloth_support) and not use_patch:
+                # Orthogonal linear rows have zero cross mobility. Their
+                # angular rows couple through each endpoint's inverse inertia.
+                rn1 = wp.cross(r1, n)
+                rn2 = wp.cross(r2, n)
+                rt11 = wp.cross(r1, t1_dir)
+                rt12 = wp.cross(r2, t1_dir)
+                rt21 = wp.cross(r1, t2_dir)
+                rt22 = wp.cross(r2, t2_dir)
+                response_t11 = inv_inertia1 * rt11
+                response_t12 = inv_inertia2 * rt12
+                response_t21 = inv_inertia1 * rt21
+                response_t22 = inv_inertia2 * rt22
+                mobility_nt1 = wp.dot(rn1, response_t11) + wp.dot(rn2, response_t12)
+                mobility_nt2 = wp.dot(rn1, response_t21) + wp.dot(rn2, response_t22)
+                mobility_t1t2 = wp.dot(rt11, response_t21) + wp.dot(rt12, response_t22)
+                if wp.static(has_soft_contact_pd):
+                    imp = contact_project_coupled_velocity_update(
+                        cc,
+                        k,
+                        n,
+                        t1_dir,
+                        t2_dir,
+                        jv_n,
+                        jv_t1,
+                        jv_t2,
+                        eff_n,
+                        eff_t1,
+                        eff_t2,
+                        bias_val,
+                        bias_t1_val,
+                        bias_t2_val,
+                        mu_s_eff,
+                        mu_k_eff,
+                        mass_coeff_n,
+                        impulse_coeff_n,
+                        sor_boost,
+                        pd_eff_soft_n,
+                        pd_gamma_n,
+                        pd_bias_n,
+                        mobility_nt1,
+                        mobility_nt2,
+                        mobility_t1t2,
+                    )
+                else:
+                    imp = contact_project_coupled_velocity_update_no_soft_pd(
+                        cc,
+                        k,
+                        n,
+                        t1_dir,
+                        t2_dir,
+                        jv_n,
+                        jv_t1,
+                        jv_t2,
+                        eff_n,
+                        eff_t1,
+                        eff_t2,
+                        bias_val,
+                        bias_t1_val,
+                        bias_t2_val,
+                        mu_s_eff,
+                        mu_k_eff,
+                        mass_coeff_n,
+                        impulse_coeff_n,
+                        sor_boost,
+                        pd_eff_soft_n,
+                        pd_gamma_n,
+                        pd_bias_n,
+                        mobility_nt1,
+                        mobility_nt2,
+                        mobility_t1t2,
+                    )
+            elif wp.static(patch_friction):
+                if use_patch:
+                    if wp.static(has_soft_contact_pd):
+                        imp = contact_project_normal_velocity_update(
+                            cc,
+                            k,
+                            n,
+                            jv_n,
+                            eff_n,
+                            bias_val,
+                            mass_coeff_n,
+                            impulse_coeff_n,
+                            sor_boost,
+                            pd_eff_soft_n,
+                            pd_gamma_n,
+                            pd_bias_n,
+                        )
+                    else:
+                        imp = contact_project_normal_velocity_update_no_soft_pd(
+                            cc,
+                            k,
+                            n,
+                            jv_n,
+                            eff_n,
+                            bias_val,
+                            mass_coeff_n,
+                            impulse_coeff_n,
+                            sor_boost,
+                            wp.float32(0.0),
+                            wp.float32(0.0),
+                            wp.float32(0.0),
+                        )
+
+                else:
+                    if wp.static(has_soft_contact_pd):
+                        imp = contact_project_velocity_update(
+                            cc,
+                            k,
+                            n,
+                            t1_dir,
+                            t2_dir,
+                            jv_n,
+                            jv_t1,
+                            jv_t2,
+                            eff_n,
+                            eff_t1,
+                            eff_t2,
+                            bias_val,
+                            bias_t1_val,
+                            bias_t2_val,
+                            mu_s_eff,
+                            mu_k_eff,
+                            mass_coeff_n,
+                            impulse_coeff_n,
+                            sor_boost,
+                            pd_eff_soft_n,
+                            pd_gamma_n,
+                            pd_bias_n,
+                        )
+                    else:
+                        imp = contact_project_velocity_update_no_soft_pd(
+                            cc,
+                            k,
+                            n,
+                            t1_dir,
+                            t2_dir,
+                            jv_n,
+                            jv_t1,
+                            jv_t2,
+                            eff_n,
+                            eff_t1,
+                            eff_t2,
+                            bias_val,
+                            bias_t1_val,
+                            bias_t2_val,
+                            mu_s_eff,
+                            mu_k_eff,
+                            mass_coeff_n,
+                            impulse_coeff_n,
+                            sor_boost,
+                            wp.float32(0.0),
+                            wp.float32(0.0),
+                            wp.float32(0.0),
+                        )
+            else:
+                if wp.static(has_soft_contact_pd):
+                    imp = contact_project_velocity_update(
+                        cc,
+                        k,
+                        n,
+                        t1_dir,
+                        t2_dir,
+                        jv_n,
+                        jv_t1,
+                        jv_t2,
+                        eff_n,
+                        eff_t1,
+                        eff_t2,
+                        bias_val,
+                        bias_t1_val,
+                        bias_t2_val,
+                        mu_s_eff,
+                        mu_k_eff,
+                        mass_coeff_n,
+                        impulse_coeff_n,
+                        sor_boost,
+                        pd_eff_soft_n,
+                        pd_gamma_n,
+                        pd_bias_n,
+                    )
+                else:
+                    imp = contact_project_velocity_update_no_soft_pd(
+                        cc,
+                        k,
+                        n,
+                        t1_dir,
+                        t2_dir,
+                        jv_n,
+                        jv_t1,
+                        jv_t2,
+                        eff_n,
+                        eff_t1,
+                        eff_t2,
+                        bias_val,
+                        bias_t1_val,
+                        bias_t2_val,
+                        mu_s_eff,
+                        mu_k_eff,
+                        mass_coeff_n,
+                        impulse_coeff_n,
+                        sor_boost,
+                        wp.float32(0.0),
+                        wp.float32(0.0),
+                        wp.float32(0.0),
+                    )
+            if wp.static(patch_friction):
+                if use_patch:
+                    lambda_n_load = cc_get_normal_lambda(cc, k)
+                    if pd_eff_soft_n <= wp.float32(0.0):
+                        lambda_n_load = wp.clamp(
+                            lambda_n_load + mass_coeff_n * eff_n * bias_val * sor_boost,
+                            wp.float32(0.0),
+                            lambda_n_load,
+                        )
+                    if is_speculative and speculative_bias > idt * wp.float32(0.002):
+                        lambda_n_load = wp.float32(0.0)
+                    patch_normal_load += lambda_n_load
+
+            if wp.static(cloth_support):
+                contact_endpoint_apply_impulse(
+                    side0_kind,
+                    side0_nodes,
+                    bary0,
+                    bodies,
+                    particles,
+                    copy_state,
+                    num_bodies,
+                    parallel_id,
+                    side0_slots,
+                    side0_counts,
+                    p0_world,
+                    -imp,
+                )
+                contact_endpoint_apply_impulse(
+                    side1_kind,
+                    side1_nodes,
+                    bary1,
+                    bodies,
+                    particles,
+                    copy_state,
+                    num_bodies,
+                    parallel_id,
+                    side1_slots,
+                    side1_counts,
+                    p1_world,
+                    imp,
+                )
+            else:
+                v1, v2, w1, w2 = apply_pair_velocity_impulse(
+                    v1,
+                    v2,
+                    w1,
+                    w2,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                    r1,
+                    r2,
+                    imp,
+                )
+
+        if wp.static(patch_friction):
+            if use_patch:
+                patch_normal = constraints.patch.normal[cid]
+                patch_tangent1 = constraints.patch.tangent1[cid]
+                patch_tangent2 = wp.cross(patch_normal, patch_tangent1)
+                patch_r0 = constraints.patch.r0[cid]
+                patch_r1 = constraints.patch.r1[cid]
+                patch_relative_velocity = v2 + wp.cross(w2, patch_r1) - v1 - wp.cross(w1, patch_r0)
+                patch_bias = wp.vec2f(0.0, 0.0)
+                if wp.static(use_bias):
+                    patch_bias = constraints.patch.bias[cid]
+                patch_impulse_old = constraints.patch.impulse_world[cid]
+                patch_lambda_old = wp.vec2f(
+                    wp.dot(patch_impulse_old, patch_tangent1),
+                    wp.dot(patch_impulse_old, patch_tangent2),
+                )
+                patch_update = contact_patch_project_velocity_update(
+                    patch_lambda_old,
+                    wp.vec2f(
+                        wp.dot(patch_relative_velocity, patch_tangent1),
+                        wp.dot(patch_relative_velocity, patch_tangent2),
+                    ),
+                    patch_bias,
+                    constraints.patch.effective_mass[cid],
+                    patch_normal_load,
+                    mu_s,
+                    mu_k,
+                    sor_boost,
+                )
+                patch_impulse_delta = patch_update.delta[0] * patch_tangent1 + patch_update.delta[1] * patch_tangent2
+                v1, v2, w1, w2 = apply_pair_velocity_impulse(
+                    v1,
+                    v2,
+                    w1,
+                    w2,
+                    inv_mass1,
+                    inv_mass2,
+                    inv_inertia1,
+                    inv_inertia2,
+                    patch_r0,
+                    patch_r1,
+                    patch_impulse_delta,
+                )
+                constraints.patch.impulse_world[cid] = (
+                    patch_update.lambda_new[0] * patch_tangent1 + patch_update.lambda_new[1] * patch_tangent2
+                )
+
+        if wp.static(not cloth_support):
+            # Mass-splitting fast-path writeback (matches the load gate above).
+            if wp.static(not has_mass_splitting) or (slot1 < wp.int32(0) and slot2 < wp.int32(0)):
+                body_store_vw(bodies, b1, v1, w1)
+                body_store_vw(bodies, b2, v2, w2)
+            else:
+                write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
+                write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
+                write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
+                write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
+
+    return impl
+
+
+# Bind factory outputs as module-level names BEFORE the entry-point
+# ``@wp.func`` wrappers below reference them.
+
+contact_prepare_for_iteration_at = _make_contact_prepare_for_iteration_at(cloth_support=False)
+contact_prepare_for_iteration_at_no_soft_pd = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_soft_contact_pd=False
+)
+contact_prepare_for_iteration_at_packed_rows = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, packed_rows=True, stage_body_properties=True
+)
+contact_prepare_for_iteration_at_packed_rows_no_soft_pd = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_soft_contact_pd=False, packed_rows=True, stage_body_properties=True
+)
+contact_prepare_for_iteration_at_lean = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_mass_splitting=False
+)
+contact_prepare_for_iteration_at_lean_no_soft_pd = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_mass_splitting=False, has_soft_contact_pd=False
+)
+contact_prepare_for_iteration_at_patch_lean = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_mass_splitting=False, patch_friction=True
+)
+contact_prepare_for_iteration_at_patch_lean_no_soft_pd = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_mass_splitting=False, has_soft_contact_pd=False, patch_friction=True
+)
+contact_prepare_for_iteration_at_cloth_aware = _make_contact_prepare_for_iteration_at(cloth_support=True)
+contact_iterate_at = _make_contact_iterate_at(cloth_support=False, use_bias=True)
+contact_relax_at = _make_contact_iterate_at(cloth_support=False, use_bias=False)
+contact_iterate_at_no_soft_pd = _make_contact_iterate_at(cloth_support=False, use_bias=True, has_soft_contact_pd=False)
+contact_relax_at_no_soft_pd = _make_contact_iterate_at(cloth_support=False, use_bias=False, has_soft_contact_pd=False)
+contact_iterate_at_packed = _make_contact_iterate_at(cloth_support=False, use_bias=True, staged_body_properties=True)
+contact_relax_at_packed = _make_contact_iterate_at(cloth_support=False, use_bias=False, staged_body_properties=True)
+contact_iterate_at_packed_no_soft_pd = _make_contact_iterate_at(
+    cloth_support=False, use_bias=True, has_soft_contact_pd=False, staged_body_properties=True
+)
+contact_relax_at_packed_no_soft_pd = _make_contact_iterate_at(
+    cloth_support=False, use_bias=False, has_soft_contact_pd=False, staged_body_properties=True
+)
+contact_iterate_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False, use_bias=True)
+contact_relax_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False, use_bias=False)
+contact_iterate_at_lean_no_soft_pd = _make_contact_iterate_at(
+    cloth_support=False, has_mass_splitting=False, use_bias=True, has_soft_contact_pd=False
+)
+contact_relax_at_lean_no_soft_pd = _make_contact_iterate_at(
+    cloth_support=False, has_mass_splitting=False, use_bias=False, has_soft_contact_pd=False
+)
+contact_iterate_at_patch_lean = _make_contact_iterate_at(
+    cloth_support=False, has_mass_splitting=False, use_bias=True, patch_friction=True
+)
+contact_relax_at_patch_lean = _make_contact_iterate_at(
+    cloth_support=False, has_mass_splitting=False, use_bias=False, patch_friction=True
+)
+contact_iterate_at_patch_lean_no_soft_pd = _make_contact_iterate_at(
+    cloth_support=False,
+    has_mass_splitting=False,
+    use_bias=True,
+    has_soft_contact_pd=False,
+    patch_friction=True,
+)
+contact_relax_at_patch_lean_no_soft_pd = _make_contact_iterate_at(
+    cloth_support=False,
+    has_mass_splitting=False,
+    use_bias=False,
+    has_soft_contact_pd=False,
+    patch_friction=True,
+)
+contact_iterate_at_cloth_aware = _make_contact_iterate_at(cloth_support=True, use_bias=True)
+contact_relax_at_cloth_aware = _make_contact_iterate_at(cloth_support=True, use_bias=False)
+
+
+# Entry-point wrappers: read header, flip access modes, then call the
+# ``*_at`` variant. Module-level wp.funcs so Warp resolves them from globals.
+
+
+@wp.func
+def contact_prepare_for_iteration(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    # Access-mode flip is the caller's responsibility now. The dispatcher routes
+    # rigid-only scenes here (``cloth_support=False`` branch), where no position-
+    # level writers exist, so the flip is provably a no-op.
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_prepare_for_iteration_at(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_prepare_for_iteration_at_no_soft_pd(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_packed_rows(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    source_first = contact_get_original_contact_first(constraints, cid)
+    contact_prepare_for_iteration_at_packed_rows(
+        constraints,
+        cid,
+        source_first,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_packed_rows_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    source_first = contact_get_original_contact_first(constraints, cid)
+    contact_prepare_for_iteration_at_packed_rows_no_soft_pd(
+        constraints,
+        cid,
+        source_first,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_lean(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    """Mass-splitting-free entry. Used by the multi-world fast-tail
+    kernel where mass splitting is rejected at construction."""
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_prepare_for_iteration_at_lean(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_lean_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_prepare_for_iteration_at_lean_no_soft_pd(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_patch_lean(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_prepare_for_iteration_at_patch_lean(
+        constraints, cid, 0, bodies, particles, num_bodies, body_pair, idt, cc, contacts, copy_state, parallel_id
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_patch_lean_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_prepare_for_iteration_at_patch_lean_no_soft_pd(
+        constraints, cid, 0, bodies, particles, num_bodies, body_pair, idt, cc, contacts, copy_state, parallel_id
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_cloth_aware(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    side0_kind = contact_get_side0_kind(constraints, cid)
+    side1_kind = contact_get_side1_kind(constraints, cid)
+    side0_extra = contact_get_side0_nodes_extra(constraints, cid)
+    side1_extra = contact_get_side1_nodes_extra(constraints, cid)
+    contact_first = contact_get_contact_first(constraints, cid)
+    contact_count = contact_get_contact_count(constraints, cid)
+    side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
+    side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
+    side0_slots_extra = contact_get_side0_slots_extra(constraints, cid)
+    side1_slots_extra = contact_get_side1_slots_extra(constraints, cid)
+    side0_counts_extra = contact_get_side0_counts_extra(constraints, cid)
+    side1_counts_extra = contact_get_side1_counts_extra(constraints, cid)
+    side0_slots = wp.vec4i(
+        contact_get_slot1(constraints, cid), side0_slots_extra[0], side0_slots_extra[1], side0_slots_extra[2]
+    )
+    side1_slots = wp.vec4i(
+        contact_get_slot2(constraints, cid), side1_slots_extra[0], side1_slots_extra[1], side1_slots_extra[2]
+    )
+    side0_counts = wp.vec4i(
+        contact_get_count1(constraints, cid), side0_counts_extra[0], side0_counts_extra[1], side0_counts_extra[2]
+    )
+    side1_counts = wp.vec4i(
+        contact_get_count2(constraints, cid), side1_counts_extra[0], side1_counts_extra[1], side1_counts_extra[2]
+    )
+    if side0_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        _soft_tet_endpoint_set_access_mode_for_column(
+            side0_nodes,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            side0_slots,
+            side0_counts,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+            cc,
+            contact_first,
+            contact_count,
+            False,
+        )
+    else:
+        contact_endpoint_set_access_mode(
+            side0_kind,
+            side0_nodes,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            side0_slots,
+            side0_counts,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+        )
+    if side1_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        _soft_tet_endpoint_set_access_mode_for_column(
+            side1_nodes,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            side1_slots,
+            side1_counts,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+            cc,
+            contact_first,
+            contact_count,
+            True,
+        )
+    else:
+        contact_endpoint_set_access_mode(
+            side1_kind,
+            side1_nodes,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            side1_slots,
+            side1_counts,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+        )
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_prepare_for_iteration_at_cloth_aware(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def _contact_iterate_guard_allows(
+    bodies: BodyContainer,
+    b1: wp.int32,
+    b2: wp.int32,
+    num_bodies: wp.int32,
+) -> wp.bool:
+    # Contacts produced before a sleep transition can survive for one step.
+    if b1 >= 0 and b1 < num_bodies and b2 >= 0 and b2 < num_bodies:
+        frozen1 = (bodies.motion_type[b1] != MOTION_DYNAMIC) or (bodies.island_root[b1] >= wp.int32(0))
+        frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.island_root[b2] >= wp.int32(0))
+        if frozen1 and frozen2:
+            return False
+    return True
+
+
+def _make_contact_iterate_entry(*, has_sleeping: bool, has_soft_contact_pd: bool, staged_body_properties: bool):
+    if staged_body_properties:
+        iterate_at = contact_iterate_at_packed if has_soft_contact_pd else contact_iterate_at_packed_no_soft_pd
+        relax_at = contact_relax_at_packed if has_soft_contact_pd else contact_relax_at_packed_no_soft_pd
+    else:
+        iterate_at = contact_iterate_at if has_soft_contact_pd else contact_iterate_at_no_soft_pd
+        relax_at = contact_relax_at if has_soft_contact_pd else contact_relax_at_no_soft_pd
+
+    @wp.func
+    def impl(
+        constraints: ContactColumnContainer,
+        cid: wp.int32,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        num_bodies: wp.int32,
+        idt: wp.float32,
+        cc: ContactContainer,
+        contacts: ContactViews,
+        use_bias: wp.bool,
+        copy_state: CopyStateContainer,
+        parallel_id: wp.int32,
+        sor_boost: wp.float32,
+    ):
+        b1 = contact_get_body1(constraints, cid)
+        b2 = contact_get_body2(constraints, cid)
+        if wp.static(has_sleeping):
+            if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
+                return
+        body_pair = constraint_bodies_make(b1, b2)
+        if use_bias:
+            iterate_at(
+                constraints,
+                cid,
+                0,
+                bodies,
+                particles,
+                num_bodies,
+                body_pair,
+                idt,
+                cc,
+                contacts,
+                copy_state,
+                parallel_id,
+                sor_boost,
+            )
+        else:
+            relax_at(
+                constraints,
+                cid,
+                0,
+                bodies,
+                particles,
+                num_bodies,
+                body_pair,
+                idt,
+                cc,
+                contacts,
+                copy_state,
+                parallel_id,
+                sor_boost,
+            )
+
+    return impl
+
+
+contact_iterate = _make_contact_iterate_entry(has_sleeping=True, has_soft_contact_pd=True, staged_body_properties=False)
+contact_iterate_no_soft_pd = _make_contact_iterate_entry(
+    has_sleeping=True, has_soft_contact_pd=False, staged_body_properties=False
+)
+contact_iterate_no_sleep = _make_contact_iterate_entry(
+    has_sleeping=False, has_soft_contact_pd=True, staged_body_properties=False
+)
+contact_iterate_no_sleep_no_soft_pd = _make_contact_iterate_entry(
+    has_sleeping=False, has_soft_contact_pd=False, staged_body_properties=False
+)
+contact_iterate_packed = _make_contact_iterate_entry(
+    has_sleeping=True, has_soft_contact_pd=True, staged_body_properties=True
+)
+contact_iterate_packed_no_soft_pd = _make_contact_iterate_entry(
+    has_sleeping=True, has_soft_contact_pd=False, staged_body_properties=True
+)
+contact_iterate_packed_no_sleep = _make_contact_iterate_entry(
+    has_sleeping=False, has_soft_contact_pd=True, staged_body_properties=True
+)
+contact_iterate_packed_no_sleep_no_soft_pd = _make_contact_iterate_entry(
+    has_sleeping=False, has_soft_contact_pd=False, staged_body_properties=True
+)
+
+
+@wp.func
+def contact_iterate_patch_lean_no_sleep(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_patch_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_patch_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+
+
+@wp.func
+def contact_iterate_patch_lean_no_sleep_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_patch_lean_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_patch_lean_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+
+
+@wp.func
+def contact_iterate_patch_multi(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    num_sweeps: wp.int32,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    sweep = wp.int32(0)
+    while sweep < num_sweeps:
+        contact_iterate_patch_lean_no_sleep(
+            constraints,
+            cid,
+            bodies,
+            particles,
+            num_bodies,
+            idt,
+            cc,
+            contacts,
+            use_bias,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+        sweep += wp.int32(1)
+
+
+@wp.func
+def contact_iterate_patch_multi_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    num_sweeps: wp.int32,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    sweep = wp.int32(0)
+    while sweep < num_sweeps:
+        contact_iterate_patch_lean_no_sleep_no_soft_pd(
+            constraints,
+            cid,
+            bodies,
+            particles,
+            num_bodies,
+            idt,
+            cc,
+            contacts,
+            use_bias,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+        sweep += wp.int32(1)
+
+
+@wp.func
+def contact_iterate_lean(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
+        return
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+
+
+@wp.func
+def contact_iterate_lean_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
+        return
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_lean_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_lean_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+
+
+@wp.func
+def contact_iterate_lean_no_sleep(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_lean(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+
+
+@wp.func
+def contact_iterate_lean_no_sleep_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_lean_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_lean_no_soft_pd(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+
+
+@wp.func
+def contact_iterate_cloth_aware(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    side0_kind = contact_get_side0_kind(constraints, cid)
+    side1_kind = contact_get_side1_kind(constraints, cid)
+    side0_extra = contact_get_side0_nodes_extra(constraints, cid)
+    side1_extra = contact_get_side1_nodes_extra(constraints, cid)
+    contact_first = contact_get_contact_first(constraints, cid)
+    contact_count = contact_get_contact_count(constraints, cid)
+    side0_nodes = wp.vec4i(b1, side0_extra[0], side0_extra[1], side0_extra[2])
+    side1_nodes = wp.vec4i(b2, side1_extra[0], side1_extra[1], side1_extra[2])
+    side0_slots_extra = contact_get_side0_slots_extra(constraints, cid)
+    side1_slots_extra = contact_get_side1_slots_extra(constraints, cid)
+    side0_counts_extra = contact_get_side0_counts_extra(constraints, cid)
+    side1_counts_extra = contact_get_side1_counts_extra(constraints, cid)
+    side0_slots = wp.vec4i(
+        contact_get_slot1(constraints, cid), side0_slots_extra[0], side0_slots_extra[1], side0_slots_extra[2]
+    )
+    side1_slots = wp.vec4i(
+        contact_get_slot2(constraints, cid), side1_slots_extra[0], side1_slots_extra[1], side1_slots_extra[2]
+    )
+    side0_counts = wp.vec4i(
+        contact_get_count1(constraints, cid), side0_counts_extra[0], side0_counts_extra[1], side0_counts_extra[2]
+    )
+    side1_counts = wp.vec4i(
+        contact_get_count2(constraints, cid), side1_counts_extra[0], side1_counts_extra[1], side1_counts_extra[2]
+    )
+    if side0_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        _soft_tet_endpoint_set_access_mode_for_column(
+            side0_nodes,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            side0_slots,
+            side0_counts,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+            cc,
+            contact_first,
+            contact_count,
+            False,
+        )
+    else:
+        contact_endpoint_set_access_mode(
+            side0_kind,
+            side0_nodes,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            side0_slots,
+            side0_counts,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+        )
+    if side1_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON):
+        _soft_tet_endpoint_set_access_mode_for_column(
+            side1_nodes,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            side1_slots,
+            side1_counts,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+            cc,
+            contact_first,
+            contact_count,
+            True,
+        )
+    else:
+        contact_endpoint_set_access_mode(
+            side1_kind,
+            side1_nodes,
+            bodies,
+            particles,
+            copy_state,
+            num_bodies,
+            parallel_id,
+            side1_slots,
+            side1_counts,
+            ACCESS_MODE_VELOCITY_LEVEL,
+            idt,
+        )
+    body_pair = constraint_bodies_make(b1, b2)
+    if use_bias:
+        contact_iterate_at_cloth_aware(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )
+    else:
+        contact_relax_at_cloth_aware(
+            constraints,
+            cid,
+            0,
+            bodies,
+            particles,
+            num_bodies,
+            body_pair,
+            idt,
+            cc,
+            contacts,
+            copy_state,
+            parallel_id,
+            sor_boost,
+        )

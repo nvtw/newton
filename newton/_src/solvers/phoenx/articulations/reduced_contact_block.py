@@ -19,7 +19,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     reduced_contact_packed_owner,
     reduced_contact_prepare,
 )
-from newton._src.solvers.phoenx.body import BodyContainer, ReducedArticulationData
+from newton._src.solvers.phoenx.body import BodyContainer, ReducedArticulationData, mat33_from_sym6
 from newton._src.solvers.phoenx.cloth_collision import SHAPE_ENDPOINT_KIND_RIGID
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
@@ -56,6 +56,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_set_bias,
     cc_set_eff_n,
     cc_set_eff_t1,
     cc_set_eff_t2,
@@ -64,7 +65,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent2_lambda,
 )
 from newton._src.solvers.phoenx.constraints.contact_patch_friction import contact_patch_project_velocity_update
-from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_velocity_update_no_soft_pd
+from newton._src.solvers.phoenx.constraints.contact_projection import (
+    contact_project_coupled_velocity_update_no_soft_pd,
+)
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
     element_interaction_data_make,
@@ -336,16 +339,19 @@ def _solve_fallback_contact_column(
     sor_boost: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
+    cross_mobility: wp.array[wp.vec3],
     column: wp.int32,
     phase: wp.int32,
     use_bias: wp.bool,
 ):
     if phase == wp.int32(0):
         reduced_contact_prepare(
-            columns, column, bodies, idt, cc, contacts, wp.bool(False), wp.bool(True), wp.bool(True)
+            columns, column, bodies, idt, cc, contacts, wp.bool(False), use_bias, wp.bool(True), cross_mobility
         )
     else:
-        reduced_contact_iterate(columns, column, bodies, idt, sor_boost, cc, contacts, use_bias, wp.bool(False))
+        reduced_contact_iterate(
+            columns, column, bodies, idt, sor_boost, cc, contacts, use_bias, wp.bool(False), cross_mobility
+        )
 
 
 @wp.kernel(enable_backward=False, module="reduced_contact_fallback")
@@ -356,6 +362,7 @@ def _solve_fallback_contact_color_kernel(
     sor_boost: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
+    cross_mobility: wp.array[wp.vec3],
     fallback_column: wp.array[wp.int32],
     element_ids_by_color: wp.array[wp.int32],
     color_starts: wp.array[wp.int32],
@@ -388,14 +395,32 @@ def _solve_fallback_contact_color_kernel(
             for index in range(start, end):
                 fallback = element_ids_by_color[index]
                 _solve_fallback_contact_column(
-                    columns, bodies, idt, sor_boost, cc, contacts, fallback_column[fallback], phase, use_bias
+                    columns,
+                    bodies,
+                    idt,
+                    sor_boost,
+                    cc,
+                    contacts,
+                    cross_mobility,
+                    fallback_column[fallback],
+                    phase,
+                    use_bias,
                 )
     else:
         index = start + tid
         while index < end:
             fallback = element_ids_by_color[index]
             _solve_fallback_contact_column(
-                columns, bodies, idt, sor_boost, cc, contacts, fallback_column[fallback], phase, use_bias
+                columns,
+                bodies,
+                idt,
+                sor_boost,
+                cc,
+                contacts,
+                cross_mobility,
+                fallback_column[fallback],
+                phase,
+                use_bias,
             )
             index += worker_count
     if tid == wp.int32(0):
@@ -410,6 +435,7 @@ def _solve_fallback_contact_world_kernel(
     sor_boost: wp.float32,
     cc: ContactContainer,
     contacts: ContactViews,
+    cross_mobility: wp.array[wp.vec3],
     articulation_count: wp.int32,
     schedule_section_end: wp.array[wp.int32],
     scheduled_column: wp.array[wp.int32],
@@ -424,13 +450,13 @@ def _solve_fallback_contact_world_kernel(
     if sweep_direction[0] == wp.int32(0):
         for index in range(start, end):
             _solve_fallback_contact_column(
-                columns, bodies, idt, sor_boost, cc, contacts, scheduled_column[index], phase, use_bias
+                columns, bodies, idt, sor_boost, cc, contacts, cross_mobility, scheduled_column[index], phase, use_bias
             )
     else:
         for reverse in range(end - start):
             index = end - wp.int32(1) - reverse
             _solve_fallback_contact_column(
-                columns, bodies, idt, sor_boost, cc, contacts, scheduled_column[index], phase, use_bias
+                columns, bodies, idt, sor_boost, cc, contacts, cross_mobility, scheduled_column[index], phase, use_bias
             )
 
 
@@ -643,6 +669,10 @@ def _gather_reduced_contact_blocks_kernel(
             if prepare:
                 bias_contact_point = wp.float32(0.5) * (p0 + p1)
                 _prepare_contact_bias_geometry(
+                    bodies,
+                    body0,
+                    body1,
+                    wp.bool(False),
                     cc,
                     contacts,
                     contact,
@@ -790,6 +820,10 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
                 if prepare:
                     bias_contact_point = wp.float32(0.5) * (p0 + p1)
                     _prepare_contact_bias_geometry(
+                        bodies,
+                        body0,
+                        body1,
+                        wp.bool(False),
                         cc,
                         contacts,
                         contact,
@@ -964,6 +998,10 @@ def _gather_reduced_contact_blocks_packed_kernel(
             if prepare:
                 bias_contact_point = wp.float32(0.5) * (p0 + p1)
                 _prepare_contact_bias_geometry(
+                    bodies,
+                    body0,
+                    body1,
+                    wp.bool(False),
                     cc,
                     contacts,
                     contact,
@@ -1471,9 +1509,15 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                     child_delta += data.joint_s[dof] * response_value
             body_response[joint, row] = child_delta
 
-        inverse_mass = wp.dot(wrench0, body_response[data.body_joint[body0], row])
-        inverse_mass += wp.dot(wrench1, body_response[data.body_joint[body1], row])
-        return inverse_mass
+        # Form the diagonal in generalized coordinates. The two body-space
+        # wrench products can cancel common ancestor motion before summation.
+        inverse_mass = wp.float64(0.0)
+        for dof in range(dof_start_articulation, data.joint_qd_start[end]):
+            response_scalar = wp.float32(packed_response[packed_row, dof])
+            if row_count > wp.int32(_RESPONSE_TILE):
+                response_scalar = joint_work[dof, row]
+            inverse_mass += wp.float64(packed_jacobian[packed_row, dof]) * wp.float64(response_scalar)
+        return wp.float32(inverse_mass)
 
     _build_packed_generalized_row = wp.func(
         _bind_rows_dtype_annotations(_build_packed_generalized_row, _rows_dtype, "packed_jacobian", "packed_response")
@@ -1585,17 +1629,51 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                 joint_work,
                 body_response,
             )
-        if wp.static(not patch_rows) and inverse_mass > wp.float32(1.0e-12):
-            effective_mass = wp.float32(1.0) / inverse_mass
+        if wp.static(not patch_rows):
+            unconstrained = wp.float32(0.0)
+            for side in range(2):
+                body = current_body
+                wrench = row_wrench[packed_articulation, row]
+                if side == 1:
+                    body = current_body_pair
+                    wrench = row_wrench_pair[packed_articulation, row]
+                if body >= wp.int32(0):
+                    slot = body + wp.int32(1)
+                    linear = wp.spatial_top(wrench)
+                    com = wp.transform_get_translation(data.body_q_com[body])
+                    angular = wp.spatial_bottom(wrench) - wp.cross(com, linear)
+                    inertia = mat33_from_sym6(bodies.inverse_inertia_world[slot])
+                    unconstrained += bodies.inverse_mass[slot] * wp.dot(linear, linear) + wp.dot(
+                        angular, inertia * angular
+                    )
+            # Mobility is quadratic in the generalized contact Jacobian. Allow
+            # 64 float32 ULPs of Jacobian cancellation, squared, so real small
+            # mobility survives while a blocked row cannot acquire huge mass.
+            tolerance = wp.float32(5.820766091346741e-11) * unconstrained
+            effective_mass = wp.float32(0.0)
+            if inverse_mass > wp.max(tolerance, wp.float32(1.0e-12)):
+                effective_mass = wp.float32(1.0) / inverse_mass
             point = row // wp.int32(3)
             axis = row - wp.int32(3) * point
             contact = point_contact[packed_articulation, point]
             if axis == wp.int32(0):
+                if prepare:
+                    bias = cc_get_bias(cc, contact)
+                    if bias < wp.float32(0.0) and unconstrained > wp.float32(1.0e-12):
+                        # Reuse the response already built for the normal row.
+                        bias *= wp.clamp(inverse_mass / unconstrained, wp.float32(0.0), wp.float32(1.0))
+                        cc_set_bias(cc, contact, bias)
                 cc_set_eff_n(cc, contact, effective_mass)
+                if effective_mass == wp.float32(0.0):
+                    cc_set_normal_lambda(cc, contact, wp.float32(0.0))
             elif axis == wp.int32(1):
                 cc_set_eff_t1(cc, contact, effective_mass)
+                if effective_mass == wp.float32(0.0):
+                    cc_set_tangent1_lambda(cc, contact, wp.float32(0.0))
             else:
                 cc_set_eff_t2(cc, contact, effective_mass)
+                if effective_mass == wp.float32(0.0):
+                    cc_set_tangent2_lambda(cc, contact, wp.float32(0.0))
 
     return wp.kernel(enable_backward=False, module=module)(
         _bind_rows_dtype_annotations(
@@ -1944,6 +2022,9 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
         dof_start_articulation = data.joint_qd_start[start]
         # Reuse across every contact row; registers avoid shared-memory round trips.
         generalized_delta = wp.tile_zeros(shape=max_dofs, dtype=wp.float32, storage="register")
+        generalized_velocity = wp.tile_load(
+            data.joint_qd, shape=max_dofs, offset=dof_start_articulation, storage="register"
+        )
         active_point_count = point_count[packed_articulation]
         if warmstart:
             for point_offset in range(active_point_count):
@@ -1984,6 +2065,9 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                 DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
             )
 
+        # One three-component mobility per point, valid only for this invocation.
+        # Rows and response are immutable throughout its alternating sweeps.
+        cross_mobility_cache = wp.tile_zeros(shape=_POINTS_PER_PAGE, dtype=wp.vec3, storage="register")
         for iteration in range(iterations):
             for point_offset in range(active_point_count):
                 point = wp.int32(point_offset)
@@ -2009,6 +2093,30 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                     offset=dof_start_articulation,
                     storage="register",
                 )
+                response0 = wp.tile_load(
+                    packed_response[packed_row], shape=max_dofs, offset=dof_start_articulation, storage="register"
+                )
+                response1 = wp.tile_load(
+                    packed_response[packed_row + wp.int32(1)],
+                    shape=max_dofs,
+                    offset=dof_start_articulation,
+                    storage="register",
+                )
+                response2 = wp.tile_load(
+                    packed_response[packed_row + wp.int32(2)],
+                    shape=max_dofs,
+                    offset=dof_start_articulation,
+                    storage="register",
+                )
+                if iteration == wp.int32(0):
+                    mobility_nt1 = wp.tile_extract(wp.tile_sum(jacobian0 * response1), 0)
+                    mobility_nt2 = wp.tile_extract(wp.tile_sum(jacobian0 * response2), 0)
+                    mobility_t1t2 = wp.tile_extract(wp.tile_sum(jacobian1 * response2), 0)
+                    cross_mobility_cache[point] = wp.vec3(mobility_nt1, mobility_nt2, mobility_t1t2)
+                mobility = wp.tile_extract(cross_mobility_cache, point)
+                mobility_nt1 = mobility[0]
+                mobility_nt2 = mobility[1]
+                mobility_t1t2 = mobility[2]
                 jv0 = row_velocity[packed_articulation, row] + wp.tile_extract(
                     wp.tile_sum(jacobian0 * generalized_delta), 0
                 )
@@ -2018,6 +2126,14 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                 jv2 = row_velocity[packed_articulation, row + wp.int32(2)] + wp.tile_extract(
                     wp.tile_sum(jacobian2 * generalized_delta), 0
                 )
+                column = point_column[packed_articulation, point]
+                body0 = contact_get_body1(columns, column)
+                body1 = contact_get_body2(columns, column)
+                if data.body_articulation[body0] == articulation and data.body_articulation[body1] == articulation:
+                    velocity = generalized_velocity + generalized_delta
+                    jv0 = wp.tile_extract(wp.tile_sum(jacobian0 * velocity), 0)
+                    jv1 = wp.tile_extract(wp.tile_sum(jacobian1 * velocity), 0)
+                    jv2 = wp.tile_extract(wp.tile_sum(jacobian2 * velocity), 0)
                 if lane == wp.int32(0):
                     contact = point_contact[packed_articulation, point]
                     column = point_column[packed_articulation, point]
@@ -2041,7 +2157,7 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                             if bias > idt * wp.float32(0.002):
                                 mu_static = wp.float32(0.0)
                                 mu_dynamic = wp.float32(0.0)
-                        impulse = contact_project_velocity_update_no_soft_pd(
+                        impulse = contact_project_coupled_velocity_update_no_soft_pd(
                             cc,
                             contact,
                             n,
@@ -2064,6 +2180,9 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                             wp.float32(0.0),
                             wp.float32(0.0),
                             wp.float32(0.0),
+                            mobility_nt1,
+                            mobility_nt2,
+                            mobility_t1t2,
                         )
                         delta0 = wp.dot(impulse, n)
                         delta1 = wp.dot(impulse, t0)
@@ -2072,21 +2191,6 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                 delta0 = _broadcast_contact_scalar(delta0)
                 delta1 = _broadcast_contact_scalar(delta1)
                 delta2 = _broadcast_contact_scalar(delta2)
-                response0 = wp.tile_load(
-                    packed_response[packed_row], shape=max_dofs, offset=dof_start_articulation, storage="register"
-                )
-                response1 = wp.tile_load(
-                    packed_response[packed_row + wp.int32(1)],
-                    shape=max_dofs,
-                    offset=dof_start_articulation,
-                    storage="register",
-                )
-                response2 = wp.tile_load(
-                    packed_response[packed_row + wp.int32(2)],
-                    shape=max_dofs,
-                    offset=dof_start_articulation,
-                    storage="register",
-                )
                 generalized_delta += delta0 * response0 + delta1 * response1 + delta2 * response2
 
         wp.tile_store(generalized_delta_out[articulation], generalized_delta)
@@ -2715,6 +2819,7 @@ class ReducedContactBlockSystem:
             self.gather_kernel = _gather_reduced_contact_blocks_kernel
             self.gather_tile_width = _POINTS_PER_PAGE
         self.body_count = int(model.body_count) + 1
+        self.cross_mobility: wp.array[wp.vec3] | None = None
         self.schedule_capacity = 0
         self.schedule_world_count = 0
         self.fallback_worker_count = 1
@@ -2772,7 +2877,9 @@ class ReducedContactBlockSystem:
             (articulation_count, max_body_count), dtype=wp.spatial_vector, device=self.device
         )
 
-    def configure_schedule(self, capacity: int, world_count: int, *, body_pair_grouping: bool) -> None:
+    def configure_schedule(
+        self, capacity: int, world_count: int, *, body_pair_grouping: bool, contact_capacity: int | None = None
+    ) -> None:
         """Allocate the fixed schedule and bounded two-page contact cache."""
         capacity = max(1, int(capacity))
         world_count = max(1, int(world_count))
@@ -2783,6 +2890,9 @@ class ReducedContactBlockSystem:
             if body_pair_grouping != self._body_pair_grouping:
                 raise RuntimeError("Reduced contact ordering cannot be changed after binding")
             return
+        self.cross_mobility = wp.zeros(
+            contact_capacity if contact_capacity is not None else capacity, dtype=wp.vec3, device=self.device
+        )
         self.schedule_capacity = capacity
         self.schedule_world_count = world_count
         self._body_pair_grouping = body_pair_grouping
@@ -3018,6 +3128,7 @@ class ReducedContactBlockSystem:
                         wp.float32(sor_boost),
                         cc,
                         contacts,
+                        self.cross_mobility,
                         wp.int32(self.articulation_count),
                         self.schedule_section_end,
                         self.schedule_columns,
@@ -3041,6 +3152,7 @@ class ReducedContactBlockSystem:
                         wp.float32(sor_boost),
                         cc,
                         contacts,
+                        self.cross_mobility,
                         self.fallback_column,
                         partitioner.element_ids_by_color,
                         partitioner.color_starts,
@@ -3108,8 +3220,8 @@ class ReducedContactBlockSystem:
             assert self.packed_response is not None
             assert self.packed_previous_row_body is not None
             assert self.packed_previous_row_body_pair is not None
-            fused_bias = prepare and self.biased_page_launcher is not None
-            fused_relax = not prepare and self.relax_page_launcher is not None
+            fused_bias = use_bias and prepare and self.biased_page_launcher is not None
+            fused_relax = not use_bias and self.relax_page_launcher is not None
             # Cached point rows are consumed immediately, so refresh them in the solve block.
             fused_point_refresh = not prepare and not gathered and not self.patch_rows
             if not gathered and not fused_relax and not fused_point_refresh:
@@ -3230,7 +3342,7 @@ class ReducedContactBlockSystem:
                         cc,
                         wp.int32(iterations),
                         wp.bool(use_bias),
-                        wp.bool(prepare),
+                        wp.bool(prepare and use_bias),
                         self.enabled,
                         self.point_count,
                         self.point_contact,
@@ -3264,7 +3376,7 @@ class ReducedContactBlockSystem:
                         cc,
                         wp.int32(iterations),
                         wp.bool(use_bias),
-                        wp.bool(prepare),
+                        wp.bool(prepare and use_bias),
                         self.enabled,
                         self.point_count,
                         self.point_contact,

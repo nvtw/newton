@@ -46,6 +46,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_prev_tangent1,
     cc_get_prev_tangent1_lambda,
     cc_get_prev_tangent2_lambda,
+    cc_set_friction_anchor0,
+    cc_set_friction_anchor1,
     cc_set_normal,
     cc_set_normal_lambda,
     cc_set_start_gap,
@@ -959,6 +961,31 @@ def _contact_warmstart_gather_kernel(
         )
         lambda_t1 = tangent_lambda[0]
         lambda_t2 = tangent_lambda[1]
+
+    # Friction references follow matched contact identity, independently of
+    # whether impulse warm-starting is enabled.
+    if prev_valid and wp.dot(cc_get_prev_normal(cc, prev_k), n) >= wp.float32(0.95):
+        for row in range(6, 12):
+            cc.lambdas[row, k] = cc.prev_lambdas[row, prev_k]
+    else:
+        sa = contacts.rigid_contact_shape0[k]
+        sb = contacts.rigid_contact_shape1[k]
+        b1 = contacts.shape_body[sa]
+        b2 = contacts.shape_body[sb]
+        if b1 >= wp.int32(0) and b2 >= wp.int32(0):
+            q1 = bodies.orientation[b1]
+            q2 = bodies.orientation[b2]
+            p1 = bodies.position[b1]
+            p2 = bodies.position[b2]
+            com1 = bodies.body_com[b1]
+            com2 = bodies.body_com[b2]
+            witness0 = p1 + wp.quat_rotate(q1, contacts.rigid_contact_point0[k] - com1)
+            witness1 = p2 + wp.quat_rotate(q2, contacts.rigid_contact_point1[k] - com2)
+            point = wp.float32(0.5) * (
+                witness0 + witness1 + (contacts.rigid_contact_margin0[k] - contacts.rigid_contact_margin1[k]) * n
+            )
+            cc_set_friction_anchor0(cc, k, com1 + wp.quat_rotate_inv(q1, point - p1))
+            cc_set_friction_anchor1(cc, k, com2 + wp.quat_rotate_inv(q2, point - p2))
 
     uses_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
     if uses_start_gap or reuse:

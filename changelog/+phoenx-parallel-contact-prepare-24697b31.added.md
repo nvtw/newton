@@ -1,0 +1,1 @@
+Added experimental parallel contact geometry preparation to SolverPhoenX for CUDA single-world rigid point contacts, including ordered warm starts with mass-split copy states. Enable it with parallel_contact_prepare=True.

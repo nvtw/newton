@@ -38,10 +38,28 @@ class MaximalContactResponseData:
     conditional_map: wp.array2d[wp.spatial_matrixf]
     mobility: wp.array2d[wp.spatial_matrixf]
     impulse: wp.array2d[wp.spatial_vectorf]
+    contact_active: wp.array[wp.int32]
     rhs: wp.array2d[wp.spatial_vectorf]
     parent_rhs: wp.array2d[wp.spatial_vectorf]
     velocity: wp.array2d[wp.spatial_vectorf]
     joint_velocity: wp.array2d[wp.float32]
+
+
+@wp.func
+def _offset_wrench(
+    point: wp.vec3f,
+    direction: wp.vec3f,
+):
+    lever = point
+    torque = wp.cross(lever, direction)
+    return wp.spatial_vectorf(
+        direction[0],
+        direction[1],
+        direction[2],
+        torque[0],
+        torque[1],
+        torque[2],
+    )
 
 
 @wp.func
@@ -132,6 +150,72 @@ def maximal_contact_point_impulse_velocity(
 
 
 @wp.func
+def maximal_contact_pair_cross_inverse_mass_offsets(
+    tree: MaximalTreeProjectorData,
+    response: MaximalContactResponseData,
+    bodies: BodyContainer,
+    body0: wp.int32,
+    offset0: wp.vec3f,
+    direction00: wp.vec3f,
+    direction01: wp.vec3f,
+    body1: wp.int32,
+    offset1: wp.vec3f,
+    direction10: wp.vec3f,
+    direction11: wp.vec3f,
+):
+    """Return paired-row mobility using the prepared center-of-mass offsets."""
+    articulation0 = wp.int32(-1)
+    articulation1 = wp.int32(-1)
+    node0 = wp.int32(-1)
+    node1 = wp.int32(-1)
+    wrench00 = wp.spatial_vectorf(0.0)
+    wrench01 = wp.spatial_vectorf(0.0)
+    wrench10 = wp.spatial_vectorf(0.0)
+    wrench11 = wp.spatial_vectorf(0.0)
+    if body0 >= wp.int32(0):
+        articulation0 = response.body_articulation[body0]
+        node0 = response.body_lane[body0]
+        if articulation0 >= wp.int32(0):
+            wrench00 = _offset_wrench(offset0, direction00)
+            wrench01 = _offset_wrench(offset0, direction01)
+    if body1 >= wp.int32(0):
+        articulation1 = response.body_articulation[body1]
+        node1 = response.body_lane[body1]
+        if articulation1 >= wp.int32(0):
+            wrench10 = _offset_wrench(offset1, direction10)
+            wrench11 = _offset_wrench(offset1, direction11)
+
+    result = wp.float32(0.0)
+    if articulation0 >= wp.int32(0) and articulation0 == articulation1:
+        # Each traversed joint contributes an independent conditional mobility.
+        # At the common ancestor, combine the wrenches before applying its
+        # mobility. Internal contacts then cancel common floating-root motion
+        # before any large quadratic terms are formed.
+        while node0 != node1:
+            if tree.depth[articulation0, node0] >= tree.depth[articulation0, node1]:
+                motion = tree.motion[articulation0, node0]
+                result += tree.inverse_d[articulation0, node0] * wp.dot(motion, wrench00) * wp.dot(motion, wrench01)
+                mapping = wp.transpose(response.conditional_map[articulation0, node0])
+                wrench00 = mapping @ wrench00
+                wrench01 = mapping @ wrench01
+                node0 = tree.parent[articulation0, node0]
+            else:
+                motion = tree.motion[articulation0, node1]
+                result += tree.inverse_d[articulation0, node1] * wp.dot(motion, wrench10) * wp.dot(motion, wrench11)
+                mapping = wp.transpose(response.conditional_map[articulation0, node1])
+                wrench10 = mapping @ wrench10
+                wrench11 = mapping @ wrench11
+                node1 = tree.parent[articulation0, node1]
+        result += wp.dot(wrench00 + wrench10, response.mobility[articulation0, node0] @ (wrench01 + wrench11))
+    else:
+        if articulation0 >= wp.int32(0):
+            result += wp.dot(wrench00, response.mobility[articulation0, node0] @ wrench01)
+        if articulation1 >= wp.int32(0):
+            result += wp.dot(wrench10, response.mobility[articulation1, node1] @ wrench11)
+    return result
+
+
+@wp.func
 def maximal_contact_pair_cross_inverse_mass(
     tree: MaximalTreeProjectorData,
     response: MaximalContactResponseData,
@@ -145,20 +229,24 @@ def maximal_contact_pair_cross_inverse_mass(
     direction10: wp.vec3f,
     direction11: wp.vec3f,
 ):
-    """Return the bilinear mobility between two two-body rows."""
-    return (
-        maximal_contact_wrench_cross_mobility(
-            tree, response, bodies, body0, point0, direction00, body0, point0, direction01
-        )
-        + maximal_contact_wrench_cross_mobility(
-            tree, response, bodies, body0, point0, direction00, body1, point1, direction11
-        )
-        + maximal_contact_wrench_cross_mobility(
-            tree, response, bodies, body1, point1, direction10, body0, point0, direction01
-        )
-        + maximal_contact_wrench_cross_mobility(
-            tree, response, bodies, body1, point1, direction10, body1, point1, direction11
-        )
+    offset0 = point0
+    offset1 = point1
+    if body0 >= 0:
+        offset0 -= bodies.position[body0]
+    if body1 >= 0:
+        offset1 -= bodies.position[body1]
+    return maximal_contact_pair_cross_inverse_mass_offsets(
+        tree,
+        response,
+        bodies,
+        body0,
+        offset0,
+        direction00,
+        direction01,
+        body1,
+        offset1,
+        direction10,
+        direction11,
     )
 
 
@@ -174,51 +262,10 @@ def maximal_contact_pair_inverse_mass(
     point1: wp.vec3f,
     direction1: wp.vec3f,
 ):
-    # Exact tree-constrained response of one two-body row.
-    articulation0 = wp.int32(-1)
-    articulation1 = wp.int32(-1)
-    lane0 = wp.int32(-1)
-    lane1 = wp.int32(-1)
-    wrench0 = wp.spatial_vectorf(0.0)
-    wrench1 = wp.spatial_vectorf(0.0)
-    result = wp.float32(0.0)
-
-    if body0 >= wp.int32(0):
-        articulation0 = response.body_articulation[body0]
-        lane0 = response.body_lane[body0]
-        if articulation0 >= wp.int32(0):
-            wrench0 = _point_wrench(bodies, body0, point0, direction0)
-            result += wp.dot(wrench0, response.mobility[articulation0, lane0] @ wrench0)
-    if body1 >= wp.int32(0):
-        articulation1 = response.body_articulation[body1]
-        lane1 = response.body_lane[body1]
-        if articulation1 >= wp.int32(0):
-            wrench1 = _point_wrench(bodies, body1, point1, direction1)
-            result += wp.dot(wrench1, response.mobility[articulation1, lane1] @ wrench1)
-
-    if articulation0 >= wp.int32(0) and articulation0 == articulation1:
-        node0 = lane0
-        node1 = lane1
-        depth0 = tree.depth[articulation0, node0]
-        depth1 = tree.depth[articulation0, node1]
-        while depth0 > depth1:
-            wrench0 = wp.transpose(response.conditional_map[articulation0, node0]) @ wrench0
-            node0 = tree.parent[articulation0, node0]
-            depth0 -= wp.int32(1)
-        while depth1 > depth0:
-            wrench1 = wp.transpose(response.conditional_map[articulation0, node1]) @ wrench1
-            node1 = tree.parent[articulation0, node1]
-            depth1 -= wp.int32(1)
-        while node0 != node1:
-            wrench0 = wp.transpose(response.conditional_map[articulation0, node0]) @ wrench0
-            wrench1 = wp.transpose(response.conditional_map[articulation0, node1]) @ wrench1
-            node0 = tree.parent[articulation0, node0]
-            node1 = tree.parent[articulation0, node1]
-        result += wp.float32(2.0) * wp.dot(
-            wrench0,
-            response.mobility[articulation0, node0] @ wrench1,
-        )
-    return result
+    """Return the nonnegative tree-constrained response of a two-body row."""
+    return maximal_contact_pair_cross_inverse_mass(
+        tree, response, bodies, body0, point0, direction0, direction0, body1, point1, direction1, direction1
+    )
 
 
 @wp.kernel(enable_backward=False)
@@ -343,6 +390,7 @@ class MaximalContactResponse:
         data.conditional_map = wp.empty(shape, dtype=wp.spatial_matrixf, device=device)
         data.mobility = wp.empty(shape, dtype=wp.spatial_matrixf, device=device)
         data.impulse = wp.zeros(shape, dtype=wp.spatial_vectorf, device=device)
+        data.contact_active = wp.zeros(shape[0], dtype=wp.int32, device=device)
         data.rhs = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.parent_rhs = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         data.velocity = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)

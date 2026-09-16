@@ -122,7 +122,7 @@ class _PhoenXScene:
     # -- scene construction --
 
     def add_ground_plane(self) -> None:
-        self.mb.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
+        self.mb.add_shape_plane(-1, xform=wp.transform_identity(), width=0.0, length=0.0)
 
     def add_box(
         self,

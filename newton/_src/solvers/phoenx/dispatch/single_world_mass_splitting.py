@@ -50,10 +50,22 @@ class SingleWorldMassSplittingDispatcher:
         direct = getattr(w, "_direct_equality_system", None)
         if direct is not None and direct.enabled:
             direct.prepare_and_factor(idt)
+            # Unbounded local blocks are solved by the colored callbacks.
+            # Keep their preparation, but avoid copy round trips around a
+            # global solve that cannot change body velocities.
+            if (
+                not getattr(direct, "requires_global_projection", True)
+                and w._regular_pgs_active_this_step
+                and w._direct_contact_response is None
+                and w._maximal_tree_projector is None
+                and not w._reduced_constraints_active_this_step
+            ):
+                direct = None
 
         if not w._regular_pgs_active_this_step:
             w._mass_splitting_writeback()
             if direct is not None and direct.enabled:
+                w._warm_start_owned_contacts()
                 direct.solve(use_bias=True)
                 direct.resolve_bounded_drives(idt, use_bias=True)
             w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
@@ -85,6 +97,7 @@ class SingleWorldMassSplittingDispatcher:
             w._run_cached_prepare_bookkeeping(idt)
         if direct is not None and direct.enabled:
             w._mass_splitting_writeback(already_averaged=True)
+            w._warm_start_owned_contacts()
             direct.solve(use_bias=False)
             w._mass_splitting_broadcast()
         for iteration in range(w.solver_iterations):
@@ -118,7 +131,7 @@ class SingleWorldMassSplittingDispatcher:
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
-        if w._constraint_capacity == 0 or w.velocity_iterations <= 0:
+        if w._constraint_capacity == 0 or w._active_velocity_iterations <= 0:
             return
 
         direct = getattr(w, "_direct_equality_system", None)
@@ -141,7 +154,7 @@ class SingleWorldMassSplittingDispatcher:
         w._mass_splitting_broadcast()
         inv_dt = 1.0 / w.substep_dt
         _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
-        for iteration in range(w.velocity_iterations):
+        for iteration in range(w._active_velocity_iterations):
             w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(
                 relax_head,
@@ -153,7 +166,7 @@ class SingleWorldMassSplittingDispatcher:
             if direct is not None and direct.enabled:
                 w._mass_splitting_writeback(already_averaged=True)
                 direct.solve(use_bias=False)
-                if iteration + 1 < w.velocity_iterations:
+                if iteration + 1 < w._active_velocity_iterations:
                     w._mass_splitting_broadcast()
 
         # Second writeback after relax: relax also routes through slots,

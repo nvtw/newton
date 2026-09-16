@@ -1,0 +1,1 @@
+Use geometric motion-envelope candidates in the Phoenx Colibri example to retain contacts whose approach changes during constraint solving. Check free-base assembly escape relative to the base while preserving joint, velocity, support, and penetration limits. The global collision-pipeline admission default is unchanged.

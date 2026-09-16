@@ -1410,6 +1410,30 @@ Speculation changes when a contact is retained, not its geometry: contact points
 at their current separation rather than a predicted impact pose. Mesh and SDF contact
 reduction preserves representative close-clearance and early-impact candidates.
 
+For mechanisms whose joint or contact impulses can reverse motion between collision
+updates, set ``speculative_contact_velocity_filter=False`` to retain geometry
+throughout the same speed-derived search envelope:
+
+.. code-block:: python
+
+    pipeline = newton.CollisionPipeline(
+        model,
+        speculative_contact_gap_max=0.005,
+        speculative_contact_velocity_filter=False,
+    )
+
+This option disables the initial normal-velocity admission test. Broad phase uses
+the corresponding scalar search bounds in every direction. The authored shape
+gaps, contact margins, and stored surface separations are unchanged. Retained
+receding candidates must remain inactive until the solver's live contact condition
+requires an impulse. The default is ``True``, which retains the initial-velocity
+filter described above.
+
+The search envelope is still based on current speed and capped per shape. It does
+not guarantee coverage for arbitrary acceleration, a reversal from rest, or motion
+beyond the search cap. Broader candidate admission can increase contact counts;
+size the contact buffers accordingly.
+
 .. note::
 
    Speculative contacts are opt-in and currently apply to rigid, non-hydroelastic

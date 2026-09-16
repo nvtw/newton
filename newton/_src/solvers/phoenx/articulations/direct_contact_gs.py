@@ -11,14 +11,12 @@ from newton._src.solvers.phoenx.articulations.direct_contact_response import (
     DirectContactResponse,
     DirectContactResponseData,
 )
-from newton._src.solvers.phoenx.articulations.direct_equality import _row_wrench_for_body
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     GROUPED_RHS_ITEM_WIDTH,
     GROUPED_RHS_ITEMS_PER_TASK,
 )
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync
-from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
-from newton._src.solvers.phoenx.constraints.constraint_block import block_project_friction_delta_sor_2
+from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     contact_get_body1,
@@ -38,6 +36,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_bias,
     cc_get_bias_t1,
     cc_get_bias_t2,
+    cc_get_eff_n,
     cc_get_normal,
     cc_get_normal_lambda,
     cc_get_pd_bias,
@@ -48,10 +47,14 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_set_normal_lambda,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
-from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_normal_velocity_update
+from newton._src.solvers.phoenx.constraints.contact_projection import (
+    contact_project_friction_metric,
+    contact_project_normal_velocity_update,
+)
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 
 _INT64_MAX = 0x7FFFFFFFFFFFFFFF
@@ -158,44 +161,95 @@ def _apply_raw_contact_impulse(
     r: wp.vec3,
     impulse: wp.vec3,
 ):
-    if body <= wp.int32(0) or bodies.inverse_mass[body] <= wp.float32(0.0):
+    if (
+        body <= wp.int32(0)
+        or bodies.inverse_mass[body] <= wp.float32(0.0)
+        or bodies.motion_type[body] == MOTION_KINEMATIC
+    ):
         return
     bodies.velocity[body] += bodies.inverse_mass[body] * impulse
     bodies.angular_velocity[body] += mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.cross(r, impulse)
 
 
 @wp.func
-def _apply_equality_correction_thread(
+def _apply_projected_contact_impulse_thread(
     response: DirectContactResponseData,
     bodies: BodyContainer,
     mechanism: wp.int32,
     lane: wp.int32,
+    contacts: ContactContainer,
+    contact: wp.int32,
 ):
-    body_begin = response.mechanism_body_start[mechanism]
-    body_end = response.mechanism_body_start[mechanism + wp.int32(1)]
-    for local_body in range(lane, body_end - body_begin, wp.block_dim()):
-        body = response.mechanism_body[body_begin + local_body]
-        wrench = wp.spatial_vectorf(0.0)
-        for incidence in range(response.body_row_start[body], response.body_row_start[body + wp.int32(1)]):
-            row = response.body_rows[incidence]
-            joint = response.row_joint[row]
-            structural = response.joint_to_structural[joint]
-            wrench -= (
-                response.row_scale[row]
-                * response.accumulated_solution[row]
-                * _row_wrench_for_body(
-                    body,
-                    joint,
-                    structural,
-                    response.row_local[row],
-                    response.joint_parent,
-                    response.joint_child,
-                    response.row_wrench0,
-                    response.row_wrench1,
+    delta = response.delta_coordinate[contact]
+    begin = response.mechanism_body_start[mechanism]
+    end = response.mechanism_body_start[mechanism + 1]
+    for local_body in range(lane, end - begin, wp.block_dim()):
+        body = response.mechanism_body[begin + local_body]
+        velocity_delta = (
+            delta[0] * response.body_response[contact, local_body, 0]
+            + delta[1] * response.body_response[contact, local_body, 1]
+            + delta[2] * response.body_response[contact, local_body, 2]
+        )
+        bodies.velocity[body] += wp.spatial_top(velocity_delta)
+        bodies.angular_velocity[body] += wp.spatial_bottom(velocity_delta)
+
+
+@wp.kernel(enable_backward=False)
+def warm_start_direct_contact_runs_kernel(
+    active_mechanism: wp.array[wp.int32],
+    response: DirectContactResponseData,
+    bodies: BodyContainer,
+    columns: ContactColumnContainer,
+    contacts: ContactContainer,
+    scheduled_column: wp.array[wp.int32],
+    section_end: wp.array[wp.int32],
+):
+    task, lane = wp.tid()
+    mechanism = active_mechanism[task]
+    row_begin = response.mechanism_row_start[mechanism]
+    row_end = response.mechanism_row_start[mechanism + 1]
+    begin = wp.int32(0)
+    if mechanism > 0:
+        begin = section_end[mechanism - 1]
+    end = section_end[mechanism]
+    for scheduled in range(begin, end):
+        column = scheduled_column[scheduled]
+        body0 = contact_get_body1(columns, column)
+        body1 = contact_get_body2(columns, column)
+        first = contact_get_contact_first(columns, column)
+        count = contact_get_contact_count(columns, column)
+        for offset in range(count):
+            contact = first + offset
+            if lane == 0:
+                normal = cc_get_normal(contacts, contact)
+                tangent = cc_get_tangent1(contacts, contact)
+                normal_lambda = cc_get_normal_lambda(contacts, contact)
+                if response.mobility[0, contact] <= wp.float32(1.0e-12):
+                    normal_lambda = wp.float32(0.0)
+                    cc_set_normal_lambda(contacts, contact, normal_lambda)
+                delta = wp.vec3(
+                    normal_lambda, cc_get_tangent1_lambda(contacts, contact), cc_get_tangent2_lambda(contacts, contact)
                 )
-            )
-        bodies.velocity[body] += bodies.inverse_mass[body] * wp.spatial_top(wrench)
-        bodies.angular_velocity[body] += mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
+                response.delta_coordinate[contact] = delta
+                impulse = delta[0] * normal + delta[1] * tangent + delta[2] * wp.cross(normal, tangent)
+                if response.body_mechanism[body0] != mechanism:
+                    _apply_raw_contact_impulse(bodies, body0, cc_get_r0(contacts, contact), -impulse)
+                if response.body_mechanism[body1] != mechanism:
+                    _apply_raw_contact_impulse(bodies, body1, cc_get_r1(contacts, contact), impulse)
+            _block_sync()
+            _apply_projected_contact_impulse_thread(response, bodies, mechanism, lane, contacts, contact)
+            delta = response.delta_coordinate[contact]
+            task_offset = contact * response.workspace_stride
+            for local_row in range(lane, row_end - row_begin, wp.block_dim()):
+                row = row_begin + local_row
+                base = task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)
+                correction = (
+                    response.solution[base] * delta[0]
+                    + response.solution[base + 1] * delta[1]
+                    + response.solution[base + 2] * delta[2]
+                )
+                response.accumulated_impulse[row] -= response.row_scale[row] * correction
+            _block_sync()
 
 
 @wp.kernel(enable_backward=False)
@@ -239,26 +293,6 @@ def iterate_direct_contact_runs_kernel(
             for offset in range(count):
                 contact = first + offset
                 task_offset = contact * response.workspace_stride
-                correction0 = wp.float32(0.0)
-                correction1 = wp.float32(0.0)
-                correction2 = wp.float32(0.0)
-                for local_row in range(lane, row_end - row_begin, wp.block_dim()):
-                    accumulated = response.accumulated_solution[row_begin + local_row]
-                    correction0 += (
-                        response.rhs[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)] * accumulated
-                    )
-                    correction1 += (
-                        response.rhs[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + wp.int32(1)]
-                        * accumulated
-                    )
-                    correction2 += (
-                        response.rhs[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + wp.int32(2)]
-                        * accumulated
-                    )
-                correction0 = wp.tile_sum(wp.tile(correction0))[0]
-                correction1 = wp.tile_sum(wp.tile(correction1))[0]
-                correction2 = wp.tile_sum(wp.tile(correction2))[0]
-
                 if lane == wp.int32(0):
                     normal = cc_get_normal(contacts, contact)
                     tangent0 = cc_get_tangent1(contacts, contact)
@@ -271,13 +305,19 @@ def iterate_direct_contact_runs_kernel(
                         - bodies.velocity[body0]
                         - wp.cross(bodies.angular_velocity[body0], r0)
                     )
-                    velocity0 = wp.dot(relative_velocity, normal) - correction0
-                    velocity1 = wp.dot(relative_velocity, tangent0) - correction1
-                    velocity2 = wp.dot(relative_velocity, tangent1) - correction2
+                    velocity0 = wp.dot(relative_velocity, normal)
+                    velocity1 = wp.dot(relative_velocity, tangent0)
+                    velocity2 = wp.dot(relative_velocity, tangent1)
                     bias = cc_get_bias(contacts, contact)
                     speculative = bias > wp.float32(0.0)
                     if not use_bias:
                         bias = wp.float32(0.0)
+                    elif bias < wp.float32(0.0) and response.mobility[0, contact] > wp.float32(1.0e-12):
+                        # Project the unconstrained recovery impulse through the joints.
+                        # Enforcing the full recovery speed along a nearly blocked normal
+                        # turns small overlaps into large joint motions. Physical velocity
+                        # impulses below still use the constrained effective mass.
+                        bias *= wp.min(wp.float32(1.0), cc_get_eff_n(contacts, contact) / response.mobility[0, contact])
                     delta_coordinate = wp.vec3(0.0)
                     impulse = wp.vec3(0.0)
                     if use_bias or not speculative:
@@ -289,22 +329,28 @@ def iterate_direct_contact_runs_kernel(
                         pd_eff = cc_get_pd_eff_soft(contacts, contact)
                         pd_gamma = cc_get_pd_gamma(contacts, contact)
                         pd_bias = cc_get_pd_bias(contacts, contact)
-                        if pd_eff > wp.float32(0.0) and response.mobility[0, contact] > wp.float32(1.0e-12):
-                            pd_eff = wp.float32(1.0) / (wp.float32(1.0) / response.mobility[0, contact] + pd_gamma)
-                        normal_impulse = contact_project_normal_velocity_update(
-                            contacts,
-                            contact,
-                            normal,
-                            velocity0,
-                            response.mobility[0, contact],
-                            bias,
-                            row_mass_coeff,
-                            row_impulse_coeff,
-                            sor_boost,
-                            pd_eff,
-                            pd_gamma,
-                            pd_bias,
-                        )
+                        if pd_eff > wp.float32(0.0):
+                            pd_eff = wp.float32(0.0)
+                            if response.mobility[0, contact] > wp.float32(1.0e-12):
+                                pd_eff = wp.float32(1.0) / (wp.float32(1.0) / response.mobility[0, contact] + pd_gamma)
+                        normal_impulse = -cc_get_normal_lambda(contacts, contact) * normal
+                        if response.mobility[0, contact] > wp.float32(1.0e-12):
+                            normal_impulse = contact_project_normal_velocity_update(
+                                contacts,
+                                contact,
+                                normal,
+                                velocity0,
+                                response.mobility[0, contact],
+                                bias,
+                                row_mass_coeff,
+                                row_impulse_coeff,
+                                sor_boost,
+                                pd_eff,
+                                pd_gamma,
+                                pd_bias,
+                            )
+                        else:
+                            cc_set_normal_lambda(contacts, contact, wp.float32(0.0))
                         normal_delta = wp.dot(normal_impulse, normal)
                         normal_lambda = cc_get_normal_lambda(contacts, contact)
                         normal_load = normal_lambda
@@ -323,32 +369,35 @@ def iterate_direct_contact_runs_kernel(
                         if response.mobility[2, contact] > wp.float32(1.0e-12):
                             inverse11 = wp.float32(1.0) / response.mobility[2, contact]
                         inverse01 = response.mobility[5, contact]
-                        determinant = inverse00 * inverse11 - inverse01 * inverse01
-                        delta0 = wp.float32(0.0)
-                        delta1 = wp.float32(0.0)
-                        if determinant > wp.float32(1.0e-12) * wp.max(wp.float32(1.0), inverse00 * inverse11):
-                            delta0 = -(inverse11 * rhs0 - inverse01 * rhs1) / determinant
-                            delta1 = -(-inverse01 * rhs0 + inverse00 * rhs1) / determinant
-                        tangents = block_project_friction_delta_sor_2(
+                        tangent_old = wp.vec2f(
                             cc_get_tangent1_lambda(contacts, contact),
                             cc_get_tangent2_lambda(contacts, contact),
-                            delta0,
-                            delta1,
-                            sor_boost,
+                        )
+                        tangent_new = contact_project_friction_metric(
+                            inverse00,
+                            inverse01,
+                            inverse11,
+                            rhs0 * sor_boost,
+                            rhs1 * sor_boost,
+                            tangent_old[0],
+                            tangent_old[1],
                             friction_static * normal_load,
                             friction_dynamic * normal_load,
                         )
-                        cc_set_tangent1_lambda(contacts, contact, tangents.lambda_new[0])
-                        cc_set_tangent2_lambda(contacts, contact, tangents.lambda_new[1])
-                        delta_coordinate = wp.vec3(normal_delta, tangents.delta[0], tangents.delta[1])
-                        impulse = normal_impulse + tangents.delta[0] * tangent0 + tangents.delta[1] * tangent1
+                        tangent_delta = tangent_new - tangent_old
+                        cc_set_tangent1_lambda(contacts, contact, tangent_new[0])
+                        cc_set_tangent2_lambda(contacts, contact, tangent_new[1])
+                        delta_coordinate = wp.vec3(normal_delta, tangent_delta[0], tangent_delta[1])
+                        impulse = normal_impulse + tangent_delta[0] * tangent0 + tangent_delta[1] * tangent1
                     response.delta_coordinate[contact] = delta_coordinate
-                    _apply_raw_contact_impulse(bodies, body0, r0, -impulse)
-                    _apply_raw_contact_impulse(bodies, body1, r1, impulse)
+                    if response.body_mechanism[body0] != mechanism:
+                        _apply_raw_contact_impulse(bodies, body0, r0, -impulse)
+                    if response.body_mechanism[body1] != mechanism:
+                        _apply_raw_contact_impulse(bodies, body1, r1, impulse)
                 _block_sync()
                 delta_coordinate = response.delta_coordinate[contact]
                 for local_row in range(lane, row_end - row_begin, wp.block_dim()):
-                    response.accumulated_solution[row_begin + local_row] += (
+                    response.accumulated_solution[row_begin + local_row] = (
                         response.solution[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)]
                         * delta_coordinate[0]
                         + response.solution[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + wp.int32(1)]
@@ -358,11 +407,11 @@ def iterate_direct_contact_runs_kernel(
                     )
                 _block_sync()
 
-        _apply_equality_correction_thread(response, bodies, mechanism, lane)
-        for local_row in range(lane, row_end - row_begin, wp.block_dim()):
-            row = row_begin + local_row
-            response.accumulated_impulse[row] -= response.row_scale[row] * response.accumulated_solution[row]
-        _block_sync()
+                _apply_projected_contact_impulse_thread(response, bodies, mechanism, lane, contacts, contact)
+                for local_row in range(lane, row_end - row_begin, wp.block_dim()):
+                    row = row_begin + local_row
+                    response.accumulated_impulse[row] -= response.row_scale[row] * response.accumulated_solution[row]
+                _block_sync()
 
 
 class DirectContactRunSchedule:

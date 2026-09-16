@@ -1,0 +1,1 @@
+Accelerate CUDA grouped Phoenx block joints by evaluating right-hand-side rows and forward substitution cooperatively while preserving solve order, physical impulses, and scalar CPU and contact-only paths. No configuration changes are required.

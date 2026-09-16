@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_RIGID,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
 )
+from newton._src.solvers.phoenx.constraints.bilateral_joint import iterate_bilateral_joint_block
 from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
     CLOTH_BENDING_TIME_US_OFFSET,
     cloth_bending_iterate_at,
@@ -55,6 +56,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_world_wrench,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+    _contact_cached_warmstart_split,
     contact_cached_warmstart_lean,
     contact_iterate,
     contact_iterate_cloth_aware,
@@ -943,6 +945,7 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
     enable_column_timers: bool,
     use_bias: bool,
     patch_friction: bool = False,
+    bilateral_joint_blocks: bool = False,
 ):
     """Generated rigid multi-world multi-sweep iterate dispatch."""
 
@@ -963,6 +966,10 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
             t0 = read_global_timer_ns()
         sweep = wp.int32(0)
         while sweep < num_sweeps:
+            if wp.static(bilateral_joint_blocks):
+                iterate_bilateral_joint_block(
+                    constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), use_bias
+                )
             joint_constraint_iterate_inequality(
                 constraints,
                 cid,
@@ -3293,6 +3300,7 @@ def _make_singleworld_rigid_contact_dispatch_func(
             )
 
     elif is_cached_prepare:
+        cached_warmstart = _contact_cached_warmstart_split if has_mass_splitting else contact_cached_warmstart_lean
 
         @wp.func
         def _dispatch_rigid_contact(
@@ -3312,7 +3320,7 @@ def _make_singleworld_rigid_contact_dispatch_func(
             solve_cid = local_cid
             if wp.static(packed_contact_headers):
                 solve_cid = colored_slot
-            contact_cached_warmstart_lean(
+            cached_warmstart(
                 contact_cols,
                 solve_cid,
                 bodies,
@@ -3371,6 +3379,8 @@ def _make_singleworld_rigid_contact_dispatch_func(
             solve_cid = local_cid
             if wp.static(packed_contact_headers):
                 solve_cid = colored_slot
+            if contact_cols.articulation_owner[local_cid] >= wp.int32(0):
+                return
             iterate_func(
                 contact_cols,
                 solve_cid,
@@ -3396,6 +3406,7 @@ def _make_singleworld_rigid_joint_dispatch_func(
     is_cached_prepare: bool,
     use_bias: bool,
     enable_column_timers: bool,
+    bilateral_joint_blocks: bool = False,
 ):
     """Generated rigid-joint dispatch for single-world kernels."""
 
@@ -3420,6 +3431,10 @@ def _make_singleworld_rigid_joint_dispatch_func(
                 constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
             )
         else:
+            if wp.static(bilateral_joint_blocks):
+                iterate_bilateral_joint_block(
+                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, use_bias
+                )
             joint_constraint_iterate_inequality(
                 constraints,
                 cid,
@@ -3457,6 +3472,7 @@ def _make_singleworld_dispatch_func(
     is_cached_prepare: bool,
     use_bias: bool,
     patch_friction: bool = False,
+    bilateral_joint_blocks: bool = False,
 ):
     """Per-cid dispatch helper used by head and fused PGS kernels.
 
@@ -3479,6 +3495,7 @@ def _make_singleworld_dispatch_func(
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
         enable_column_timers=enable_column_timers,
+        bilateral_joint_blocks=bilateral_joint_blocks,
     )
 
     @wp.func
@@ -3521,6 +3538,11 @@ def _make_singleworld_dispatch_func(
         dispatched = False
         if cid >= contact_start:
             local_cid = cid - contact_start
+            if wp.static(not is_prepare and not is_cached_prepare):
+                # Schur-owned contacts are solved through the constrained mobility.
+                # Ordinary PGS must not update the same rows a second time.
+                if contact_cols.articulation_owner[local_cid] >= wp.int32(0):
+                    return
             if wp.static(cloth_support):
                 side0_kind = contact_get_side0_kind(contact_cols, local_cid)
                 side1_kind = contact_get_side1_kind(contact_cols, local_cid)
@@ -3743,6 +3765,7 @@ def _make_singleworld_rigid_direct_color_func(
     is_cached_prepare: bool,
     use_bias: bool,
     enable_column_timers: bool,
+    bilateral_joint_blocks: bool = False,
 ):
     """Generated rigid-only color dispatch for single-world kernels."""
 
@@ -3771,6 +3794,7 @@ def _make_singleworld_rigid_direct_color_func(
         has_soft_contact_pd=has_soft_contact_pd,
         enable_column_timers=enable_column_timers,
         use_bias=use_bias,
+        bilateral_joint_blocks=bilateral_joint_blocks,
     )
 
     @wp.func
@@ -3873,6 +3897,7 @@ def _make_singleworld_persistent_kernel(
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
     patch_friction: bool = False,
+    bilateral_joint_blocks: bool = False,
 ):
     """Persistent-grid PGS kernel for the requested phase.
 
@@ -3902,6 +3927,7 @@ def _make_singleworld_persistent_kernel(
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
         patch_friction=patch_friction,
+        bilateral_joint_blocks=bilateral_joint_blocks,
     )
     _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
         has_joints=has_joints,
@@ -3915,6 +3941,7 @@ def _make_singleworld_persistent_kernel(
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
         enable_column_timers=enable_column_timers,
+        bilateral_joint_blocks=bilateral_joint_blocks,
     )
 
     @wp.kernel(enable_backward=False, module="unique", grid_stride=False)
@@ -3956,7 +3983,10 @@ def _make_singleworld_persistent_kernel(
             color_starts, num_colors, color_cursor, sweep_direction, max_colored_partitions
         )
 
-        if count <= fuse_threshold:
+        num_units = count
+        if max_colored_partitions >= wp.int32(0) and c == max_colored_partitions:
+            num_units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
+        if num_units <= fuse_threshold:
             if tid == 0:
                 head_active[0] = 0
             return
@@ -4068,6 +4098,7 @@ def _make_singleworld_fused_kernel(
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
     patch_friction: bool = False,
+    bilateral_joint_blocks: bool = False,
 ):
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel`."""
@@ -4090,6 +4121,7 @@ def _make_singleworld_fused_kernel(
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
         patch_friction=patch_friction,
+        bilateral_joint_blocks=bilateral_joint_blocks,
     )
     _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
         has_joints=has_joints,
@@ -4103,6 +4135,7 @@ def _make_singleworld_fused_kernel(
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
         enable_column_timers=enable_column_timers,
+        bilateral_joint_blocks=bilateral_joint_blocks,
     )
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -4132,12 +4165,7 @@ def _make_singleworld_fused_kernel(
         max_colored_partitions: wp.int32,
         ms_batch_size: wp.int32,
         sweep_direction: wp.array[wp.int32],
-        # Re-arm the head_active flag for the next outer round so the
-        # caller no longer needs a dedicated 1-thread ``_reset_head_active``
-        # launch between rounds. The head kernel zeros this flag when it
-        # can't make progress; the outer ``wp.capture_while(color_cursor)``
-        # only re-enters the body when there's still work, so the unread
-        # writes when ``cursor==0`` are harmless.
+        # Request the persistent head only if a large colour remains.
         head_active: wp.array[wp.int32],
     ):
         _block, lane = wp.tid()
@@ -4146,8 +4174,6 @@ def _make_singleworld_fused_kernel(
             start, count, c = _singleworld_color_range_from_cursor(
                 color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
             )
-            if count > fuse_threshold:
-                break
             is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
             # Overflow handling mirrors the head kernel's batched
             # dispatch (see ``_make_singleworld_persistent_kernel``):
@@ -4167,6 +4193,8 @@ def _make_singleworld_fused_kernel(
             if is_overflow_color:
                 inner_steps = ms_batch_size
                 num_units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
+            if num_units > fuse_threshold:
+                break
             if wp.static(rigid_direct):
                 if not is_overflow_color:
                     _dispatch_rigid_direct_color(
@@ -4228,11 +4256,7 @@ def _make_singleworld_fused_kernel(
             cursor = cursor - 1
         if lane == 0:
             color_cursor[0] = cursor
-            # Re-arm head_active for the NEXT outer round; the head
-            # kernel will zero it again if it has no work. Replaces the
-            # dedicated 1-thread ``_reset_head_active_kernel`` launch the
-            # caller used to issue between rounds.
-            head_active[0] = 1
+            head_active[0] = wp.int32(cursor > 0)
 
     return kernel
 
@@ -4253,6 +4277,7 @@ def get_singleworld_kernel(
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
     patch_friction: bool = False,
+    bilateral_joint_blocks: bool = False,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
@@ -4271,4 +4296,5 @@ def get_singleworld_kernel(
         has_soft_contact_pd=has_soft_contact_pd,
         rigid_direct=rigid_direct,
         patch_friction=patch_friction,
+        bilateral_joint_blocks=bilateral_joint_blocks,
     )

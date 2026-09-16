@@ -1174,7 +1174,7 @@ def _d6_angular_limits_block(
 
 
 @wp.func
-def joint_constraint_prepare_inequality(
+def _joint_constraint_prepare_inequality_full(
     constraints: ConstraintContainer,
     cid: wp.int32,
     bodies: BodyContainer,
@@ -1553,3 +1553,66 @@ def joint_constraint_world_error(
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_pair = constraint_bodies_make(b1, b2)
     return joint_constraint_world_error_at(constraints, cid, 0, bodies, body_pair)
+
+
+@wp.func
+def joint_constraint_prepare_inequality(
+    constraints: ConstraintContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    copy_state: CopyStateContainer,
+    num_bodies: wp.int32,
+    parallel_id: wp.int32,
+    idt: wp.float32,
+):
+    """Prepare active axial rows while retaining geometry and tracker updates."""
+    mode = read_int(constraints, _OFF_JOINT_MODE, cid)
+    if (
+        constraints.bilateral.enabled != 0
+        and bodies.has_position_level_writers[0] == 0
+        and (mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_PRISMATIC)
+    ):
+        friction = read_float(constraints, _OFF_FRICTION_COEFFICIENT, cid)
+        speed_limit = read_float(constraints, _OFF_VELOCITY_LIMIT, cid)
+        if friction <= 0.0 and speed_limit <= 0.0:
+            b1 = read_int(constraints, _OFF_BODY1, cid)
+            b2 = read_int(constraints, _OFF_BODY2, cid)
+            orientation1 = body_load_orientation(bodies, b1)
+            orientation2 = body_load_orientation(bodies, b2)
+            r1 = wp.quat_rotate(orientation1, read_vec3(constraints, _OFF_LA1_B1, cid))
+            r2 = wp.quat_rotate(orientation2, read_vec3(constraints, _OFF_LA1_B2, cid))
+            axis = wp.normalize(wp.quat_rotate(orientation1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)))
+            coordinate = float(0.0)
+            counter = int(0)
+            previous = float(0.0)
+            if mode == JOINT_MODE_REVOLUTE:
+                inv_initial = read_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid)
+                difference = orientation2 * inv_initial * wp.quat_inverse(orientation1)
+                wrapped = extract_rotation_angle(difference, axis)
+                old_counter = read_int(constraints, _OFF_REVOLUTION_COUNTER, cid)
+                old_previous = read_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
+                counter, previous = revolution_tracker_update(wrapped, old_counter, old_previous)
+                coordinate = revolution_tracker_angle(counter, previous)
+            else:
+                coordinate = wp.dot(axis, bodies.position[b2] + r2 - bodies.position[b1] - r1)
+            lower = read_float(constraints, _OFF_MIN_VALUE, cid)
+            upper = read_float(constraints, _OFF_MAX_VALUE, cid)
+            # Match _axial_limit_friction_prepare_at: only current position
+            # outside an enabled interval activates a position limit.
+            if lower > upper or (coordinate >= lower and coordinate <= upper):
+                body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
+                body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
+                write_vec3(constraints, _OFF_R1_B1, cid, r1)
+                write_vec3(constraints, _OFF_R1_B2, cid, r2)
+                write_vec3(constraints, _OFF_AXIS_WORLD, cid, axis)
+                if mode == JOINT_MODE_REVOLUTE:
+                    write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, counter)
+                    write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, previous)
+                write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
+                constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, 0.0)
+                constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
+                return
+    _joint_constraint_prepare_inequality_full(
+        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
+    )

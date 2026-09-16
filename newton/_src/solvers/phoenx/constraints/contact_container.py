@@ -28,6 +28,8 @@ __all__ = [
     "cc_get_eff_n",
     "cc_get_eff_t1",
     "cc_get_eff_t2",
+    "cc_get_friction_anchor0",
+    "cc_get_friction_anchor1",
     "cc_get_normal",
     "cc_get_normal_lambda",
     "cc_get_pd_bias",
@@ -52,6 +54,8 @@ __all__ = [
     "cc_set_eff_n",
     "cc_set_eff_t1",
     "cc_set_eff_t2",
+    "cc_set_friction_anchor0",
+    "cc_set_friction_anchor1",
     "cc_set_normal",
     "cc_set_normal_lambda",
     "cc_set_pd_bias",
@@ -77,11 +81,12 @@ CC_IMPULSE_DWORDS_PER_CONTACT: int = 3
 
 #: 12 = normal(3) + tangent1(3) + side0_bary(3) + side1_bary(3). The two
 #: ``bary`` slots are populated by contact ingest when a side is a cloth triangle;
-#: rigid sides leave them at zero.
+#: rigid sides use the same slots for body-local material friction anchors.
 CC_DWORDS_PER_CONTACT: int = 12
 
-#: Rigid contacts use only frame directions; canonical contacts own anchors.
-CC_RIGID_DWORDS_PER_CONTACT: int = 6
+#: Frame directions plus two body-local friction anchors. Collision witnesses
+#: remain canonical geometry and are never changed by a friction-anchor reset.
+CC_RIGID_DWORDS_PER_CONTACT: int = 12
 
 #: 16 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias +
 #: pd_eff_soft + r0(3) + r1(3). pd_* are non-zero only for soft contacts (user
@@ -304,6 +309,30 @@ def cc_get_start_gap(cc: ContactContainer, k: wp.int32) -> wp.float32:
 @wp.func
 def cc_set_start_gap(cc: ContactContainer, k: wp.int32, v: wp.float32):
     write2d_f32(cc.derived, _CC_OFF_START_GAP, k, v)
+
+
+@wp.func
+def cc_get_friction_anchor0(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    """Read the rigid material anchor stored in the endpoint's body frame."""
+    return cc_get_side0_bary(cc, k)
+
+
+@wp.func
+def cc_set_friction_anchor0(cc: ContactContainer, k: wp.int32, point: wp.vec3f):
+    """Store a rigid friction reference independently of collision witnesses."""
+    cc_set_side0_bary(cc, k, point)
+
+
+@wp.func
+def cc_get_friction_anchor1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    """Read the rigid material anchor stored in the endpoint's body frame."""
+    return cc_get_side1_bary(cc, k)
+
+
+@wp.func
+def cc_set_friction_anchor1(cc: ContactContainer, k: wp.int32, point: wp.vec3f):
+    """Store a rigid friction reference independently of collision witnesses."""
+    cc_set_side1_bary(cc, k, point)
 
 
 # ---- prev-step views ------------------------------------------------

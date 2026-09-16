@@ -18,6 +18,7 @@ import warp as wp
 
 import newton
 from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
+from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import DirectContactRunSchedule
 from newton._src.solvers.phoenx.articulations.direct_contact_response import DirectContactResponse
 from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem
@@ -28,7 +29,7 @@ from newton._src.solvers.phoenx.articulations.maximal_projector import (
     find_full_coordinate_revolute_trees,
 )
 from newton._src.solvers.phoenx.articulations.maximal_projector_general import GeneralMaximalTreeProjector
-from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation
+from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation, _get_reduced_model
 from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_DAMPING_DRIVE,
@@ -248,6 +249,7 @@ class SolverPhoenX(SolverBase):
         substeps: int = 1,
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
+        velocity_relaxation: str = "each_substep",
         joint_friction_model: str = "hard",
         contact_friction_model: str = "point",
         default_friction: float = 0.5,
@@ -260,6 +262,7 @@ class SolverPhoenX(SolverBase):
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
+        mass_splitting_color_group_size: int = 0,
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
@@ -269,9 +272,12 @@ class SolverPhoenX(SolverBase):
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
+        parallel_contact_prepare: bool = False,
+        contact_chunk_size: int = 0,
         solver_flavor: str | None = None,
         jacobi_max_colors: int | None = None,
         articulation_mode: str = "maximal",
+        joint_solver: str = "direct",
         reduced_articulation_path: str = "reference",
     ):
         """Build the PhoenX solver from ``model``.
@@ -282,7 +288,10 @@ class SolverPhoenX(SolverBase):
                 instead of creating a default sticky pipeline.
             substeps: PhoenX internal substeps per :meth:`step` call.
             solver_iterations: PGS iterations per substep.
-            velocity_iterations: TGS-soft relax sweeps per substep.
+            velocity_iterations: TGS-soft relax sweeps at each selected relaxation phase.
+            velocity_relaxation: ``"each_substep"`` relaxes after every temporal
+                substep (the default). ``"final_substep"`` relaxes only after
+                the final substep of each solver step.
             joint_friction_model: "hard" uses PhoenX Coulomb friction;
                 "mujoco" maps MuJoCo solref/solimp friction metadata
                 when available.
@@ -297,6 +306,22 @@ class SolverPhoenX(SolverBase):
                 conservative stride from the substep count and falls back
                 to ``1`` when cached prepare is unsupported. Pass ``1``
                 to force exact per-substep rebuilds.
+            mass_splitting_color_group_size: Experimental number of sequential
+                colors sharing each mass copy. Zero preserves existing scheduling.
+                Positive values use deterministic color groups for small CUDA
+                single-world rigid mechanisms with block PGS joints and point
+                friction. Requires mass splitting and sor_boost=1.0; incompatible with sleeping,
+                packed contacts, deformables, and unrolled mass splitting.
+            parallel_contact_prepare: Experimental parallel geometry preparation
+                for CUDA single-world maximal rigid point contacts. Preserves
+                ordered contact warm starts, including mass-split copy states.
+                Requires no deformables, sleeping, patch friction, or unrolled
+                mass splitting. Defaults to False. Independent kernels may
+                change floating-point rounding relative to serial preparation.
+            contact_chunk_size: Experimental maximum contacts per solver column.
+                Zero preserves existing grouping. Positive values preserve every
+                contact row while splitting long columns for scheduling. Requires
+                maximal rigid point contacts without deformables.
             default_friction: Fallback when Contacts/shapes carry no material.
             friction_combine_mode: Rule used to combine per-shape friction.
                 Supported values are ``"average"``, ``"min"``, ``"multiply"``,
@@ -342,6 +367,11 @@ class SolverPhoenX(SolverBase):
                 threshold before being flagged sleeping. Default 30
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
                 ``0`` recovers single-frame sleep.
+            joint_solver: ``"direct"`` preserves the existing joint strategy.
+                Experimental ``"block_pgs"`` solves physical joint blocks in
+                the contact color sweeps; requires maximal coordinates, rigid
+                point contacts and single-world layout. Direct solves remain
+                preferable for difficult mass ratios.
             articulation_mode: ``"auto"`` selects reduced coordinates for
                 supported declared articulations and maximal coordinates
                 otherwise. ``"maximal"`` keeps independent-body tree
@@ -385,6 +415,11 @@ class SolverPhoenX(SolverBase):
                 DeprecationWarning,
                 stacklevel=2,
             )
+        if joint_solver not in ("direct", "block_pgs"):
+            raise ValueError("joint_solver must be 'direct' or 'block_pgs'")
+        if isinstance(contact_chunk_size, bool) or not isinstance(contact_chunk_size, int) or contact_chunk_size < 0:
+            raise ValueError("contact_chunk_size must be a nonnegative integer")
+        self.joint_solver = joint_solver
         gravity_np = self._read_model_gravity_np(model)
         if articulation_mode == "auto":
             joint_types_for_mode = np.asarray(model.joint_type.numpy(), dtype=np.int32)
@@ -406,6 +441,16 @@ class SolverPhoenX(SolverBase):
         )
         joint_types = model.joint_type.numpy() if int(model.joint_count) > 0 else np.empty(0, dtype=np.int32)
         has_constraint_joints = bool(np.any(joint_types != int(JointType.FREE)))
+        if contact_chunk_size > 0 and (
+            has_deformables or articulation_mode != "maximal" or contact_friction_model != "point"
+        ):
+            raise ValueError("contact_chunk_size requires maximal rigid point contacts without deformables")
+
+        if parallel_contact_prepare and (
+            has_deformables or articulation_mode != "maximal" or contact_friction_model != "point"
+        ):
+            raise ValueError("parallel_contact_prepare requires maximal rigid point contacts without deformables")
+
         step_layout = _resolve_auto_step_layout(
             step_layout=step_layout,
             num_worlds=num_worlds,
@@ -416,6 +461,31 @@ class SolverPhoenX(SolverBase):
             contact_friction_model=contact_friction_model,
             articulation_mode=articulation_mode,
         )
+        if joint_solver == "block_pgs" and (
+            articulation_mode != "maximal"
+            or has_deformables
+            or contact_friction_model != "point"
+            or step_layout != "single_world"
+            or np.any(joint_types == int(JointType.CABLE))
+        ):
+            raise ValueError(
+                "joint_solver='block_pgs' requires single-world maximal rigid point contacts without cable joints"
+            )
+        if mass_splitting_color_group_size and (
+            not mass_splitting
+            or articulation_mode != "maximal"
+            or joint_solver != "block_pgs"
+            or step_layout != "single_world"
+            or num_worlds != 1
+            or has_deformables
+            or contact_friction_model != "point"
+        ):
+            raise ValueError(
+                "mass_splitting_color_group_size requires one maximal rigid world "
+                "with mass splitting, point contacts, and joint_solver='block_pgs'"
+            )
+        if contact_chunk_size and has_constraint_joints and joint_solver != "block_pgs":
+            raise ValueError("contact_chunk_size with joints requires joint_solver='block_pgs'")
         valid_articulation_modes = ("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced")
         if articulation_mode not in valid_articulation_modes:
             raise ValueError(f"articulation_mode must be one of {valid_articulation_modes}, got {articulation_mode!r}")
@@ -481,7 +551,8 @@ class SolverPhoenX(SolverBase):
         # Eligibility is resolved from the enabled joint graph after joint constraint has
         # classified D6 joints; reduced-coordinate metadata is never an input.
         direct_tree_contact_candidate = bool(
-            articulation_mode == "maximal"
+            joint_solver == "direct"
+            and articulation_mode == "maximal"
             and contact_friction_model == "point"
             and not has_deformables
             and has_rigid_collision_shapes
@@ -596,7 +667,7 @@ class SolverPhoenX(SolverBase):
                 if existing_filter is None:
                     needs_new_cp = True
             if needs_new_cp:
-                import newton as _newton  # noqa: PLC0415
+                import newton as _newton
 
                 # PhoenX-tight rigid_contact_max from shape_contact_pair_count;
                 # Newton's default ignores COLLIDE_SHAPES filter and overshoots
@@ -604,11 +675,11 @@ class SolverPhoenX(SolverBase):
                 tight_rcm = _estimate_rigid_contact_max_phoenx(model)
                 if tight_rcm is not None:
                     model.rigid_contact_max = 0  # bypass "already sized" short-circuit
-                from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
+                from newton._src.solvers.phoenx.cloth_collision import (
                     PhoenXClothShareVertexFilterData,
                     phoenx_cloth_share_vertex_filter,
                 )
-                from newton._src.solvers.phoenx.solver_config import (  # noqa: PLC0415
+                from newton._src.solvers.phoenx.solver_config import (
                     PHOENX_CONTACT_MATCHING,
                 )
 
@@ -658,9 +729,14 @@ class SolverPhoenX(SolverBase):
             substeps=int(substeps),
             solver_iterations=int(solver_iterations),
             velocity_iterations=int(velocity_iterations),
+            velocity_relaxation=velocity_relaxation,
             gravity=gravity_arg,
             rigid_contact_max=rigid_contact_max,
-            max_contact_columns=_estimate_contact_column_max_phoenx(model, rigid_contact_max),
+            max_contact_columns=(
+                rigid_contact_max
+                if contact_chunk_size > 0
+                else _estimate_contact_column_max_phoenx(model, rigid_contact_max)
+            ),
             num_joints=num_joints,
             num_particles=num_particles,
             num_cloth_triangles=num_cloth_triangles,
@@ -680,6 +756,7 @@ class SolverPhoenX(SolverBase):
                 self._joint_constraints.has_velocity_limits, contact_friction_model, articulation_mode
             ),
             mass_splitting_batch_size=mass_splitting_batch_size,
+            mass_splitting_color_group_size=mass_splitting_color_group_size,
             mass_splitting_unrolled=mass_splitting_unrolled,
             partitioner_algorithm=partitioner_algorithm,
             max_greedy_outer_iters=max_greedy_outer_iters,
@@ -689,6 +766,8 @@ class SolverPhoenX(SolverBase):
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),
             sleeping_frames_required=int(sleeping_frames_required),
             prepare_refresh_stride=prepare_refresh_stride,
+            parallel_contact_prepare=parallel_contact_prepare,
+            contact_chunk_size=contact_chunk_size,
             device=self.device,
         )
 
@@ -699,7 +778,7 @@ class SolverPhoenX(SolverBase):
         # call ``build_phoenx_share_vertex_filter_data`` themselves and
         # overwrite this binding without losing the sleeping fields.
         if self._sleeping_enabled and int(model.shape_count) > 0 and not self._has_deformable_collision:
-            from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
+            from newton._src.solvers.phoenx.cloth_collision import (
                 build_phoenx_share_vertex_filter_data,
             )
 
@@ -805,20 +884,22 @@ class SolverPhoenX(SolverBase):
             self.articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid", "reduced")
             and int(model.articulation_count) > 0
         ):
-            self._reduced_articulation = ReducedPhoenXArticulation(
-                model,
-                self.bodies,
-                execution_path=self.reduced_articulation_path,
-                contact_friction_model=contact_friction_model,
-            )
-            joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
-            joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
-            if self._uses_reduced_joint_ownership:
-                for joint, owned in enumerate(self._reduced_articulation.owned_joint_mask_np):
-                    cid = int(joint_idx_to_cid[joint])
-                    if owned and cid >= 0:
-                        joint_pgs_enabled[cid] = 0
-            self.world.set_reduced_articulation(self._reduced_articulation, joint_pgs_enabled)
+            reduced_model = _get_reduced_model(model)
+            if reduced_model.articulation_count > 0:
+                self._reduced_articulation = ReducedPhoenXArticulation(
+                    reduced_model,
+                    self.bodies,
+                    execution_path=self.reduced_articulation_path,
+                    contact_friction_model=contact_friction_model,
+                )
+                joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
+                joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
+                if self._uses_reduced_joint_ownership:
+                    for joint, owned in enumerate(self._reduced_articulation.owned_joint_mask_np):
+                        cid = int(joint_idx_to_cid[joint])
+                        if owned and cid >= 0:
+                            joint_pgs_enabled[cid] = 0
+                self.world.set_reduced_articulation(self._reduced_articulation, joint_pgs_enabled)
 
         self._direct_equality_system: DirectEqualitySystem | None = None
         # The experimental maximal tree projector already owns structural tree
@@ -838,7 +919,10 @@ class SolverPhoenX(SolverBase):
                 effective_joint_dof_start[cable_joint] = model.joint_qd_start.numpy()[: int(model.joint_count)][
                     cable_joint
                 ]
-            self._direct_equality_system = DirectEqualitySystem(
+            equality_system_type = DirectEqualitySystem
+            if joint_solver == "block_pgs":
+                equality_system_type = BlockJointSystem
+            self._direct_equality_system = equality_system_type(
                 model,
                 self.bodies,
                 excluded_joint_mask=excluded_joint_mask,
@@ -862,6 +946,8 @@ class SolverPhoenX(SolverBase):
                 self._direct_base_joint_pgs_enabled = self.world._joint_pgs_enabled.numpy()[:num_joints].copy()
                 self._direct_effective_joint_mode = effective_joint_mode
                 self._refresh_direct_joint_ownership()
+                if joint_solver == "block_pgs":
+                    self._direct_equality_system.bind_world(self.world, joint_idx_to_cid)
 
                 if direct_tree_contact_candidate and self.world.max_contact_columns > 0:
                     direct_joint_mask = self._direct_equality_system.joint_mask
@@ -927,7 +1013,7 @@ class SolverPhoenX(SolverBase):
     def _install_shape_materials(self) -> None:
         """Stream Model's per-shape (mu_static, mu_dynamic, restitution) into
         PhoenX's material table; each shape gets its own material index."""
-        from newton._src.solvers.phoenx.materials import (  # noqa: PLC0415
+        from newton._src.solvers.phoenx.materials import (
             CombineMode,
             Material,
             material_table_from_list,
@@ -988,6 +1074,9 @@ class SolverPhoenX(SolverBase):
         if direct is None or not direct.enabled:
             return
         joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
+        if self.joint_solver == "block_pgs":
+            self.world.set_joint_pgs_ownership(self._direct_base_joint_pgs_enabled.copy())
+            return
         joint_pgs_enabled = self._direct_base_joint_pgs_enabled.copy()
         friction = self._joint_constraints.friction_coefficient.numpy()
         lower_limit = self._joint_constraints.min_value.numpy()
