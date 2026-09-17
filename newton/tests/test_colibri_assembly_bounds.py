@@ -45,7 +45,7 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         self.assertEqual(len(shapes), 2)
         properties = []
         with patch.object(scene, "SHAPES", shapes):
-            for scale in (0.0, 0.9, 1.0):
+            for scale in (0.0, 0.3, 1.0):
                 builder = scene.build_scene(body_count=2, counterweight_density_scale=scale)
                 body = builder.body_label.index("Frame")
                 mass = builder.body_mass[body]
@@ -55,10 +55,10 @@ class TestColibriAssemblyBounds(unittest.TestCase):
                 properties.append((mass, mass * center, origin_inertia))
         for component in range(3):
             low, scaled, full = (item[component] for item in properties)
-            np.testing.assert_allclose(scaled, low + 0.9 * (full - low), rtol=2e-5, atol=1e-10)
+            np.testing.assert_allclose(scaled, low + 0.3 * (full - low), rtol=2e-5, atol=1e-10)
         self.assertGreater(properties[0][0], 0.0)
         self.assertGreater(properties[2][0], properties[1][0])
-        self.assertEqual(PhoenxExample.create_parser().parse_args([]).counterweight_density_scale, 0.9)
+        self.assertEqual(PhoenxExample.create_parser().parse_args([]).counterweight_density_scale, 1.0)
 
     def test_attached_flower_and_slider_belong_to_base(self):
         """Make flower and helper shapes contribute to the moving base body."""

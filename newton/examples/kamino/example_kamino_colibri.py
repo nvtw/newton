@@ -2204,6 +2204,7 @@ def build_scene(
     sdf_resolution: int = 0,
     counterweight_density_scale: float = 1.0,
     attach_flower_to_base: bool = False,
+    enable_frame_drive: bool = True,
 ):
     """Build a connected prefix with optional counterweight and flower changes.
 
@@ -2211,6 +2212,8 @@ def build_scene(
     density before accumulating body mass properties. ``attach_flower_to_base``
     merges the flower/slider shapes into FrameGround; the default preserves the
     source's separate kinematic flower.
+    ``enable_frame_drive`` retains the source's 20-degree base/frame position
+    drive; disable it to let the axle rotate without its spring and damper.
     """
     if not np.isfinite(counterweight_density_scale) or counterweight_density_scale < 0.0:
         raise ValueError("counterweight_density_scale must be finite and nonnegative")
@@ -2322,6 +2325,8 @@ def build_scene(
         if ready is None:
             break
         a, b, kind, axis, frame_a, frame_b, drive = ready
+        if not enable_frame_drive and (a, b) == ("FrameGround", "Frame"):
+            drive = {}
         kwargs = dict(drive)
         if drive:
             # USD angular drives have no maximum-force limit.
