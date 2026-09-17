@@ -236,7 +236,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         orientation = wp.quat_from_axis_angle(wp.normalize(wp.vec3(1.0, 2.0, -1.0)), 0.7)
         origin = np.asarray((0.3, -0.2, 0.5), dtype=np.float32)
-        separation = np.asarray(wp.quat_rotate(orientation, wp.vec3(0.4, 0.0, 0.0)))
+        separation = np.asarray(wp.quat_rotate(orientation, wp.vec3(0.4, 0.1, -0.2)))
         positions = (origin, origin + separation)
         links = []
         for index, position in enumerate(positions):
@@ -250,7 +250,11 @@ class TestD6DirectDispatch(unittest.TestCase):
         builder.add_joint_d6(
             parent=links[0],
             child=links[1],
-            linear_axes=[builder.JointDofConfig.create_unlimited(newton.Axis.X)],
+            linear_axes=[
+                builder.JointDofConfig(
+                    axis=newton.Axis.X, limit_lower=-1.0e10, limit_upper=1.0e10, target_ke=20.0, target_kd=2.0
+                )
+            ],
             angular_axes=[
                 builder.JointDofConfig.create_unlimited(newton.Axis.Y),
                 builder.JointDofConfig.create_unlimited(newton.Axis.Z),
@@ -269,11 +273,13 @@ class TestD6DirectDispatch(unittest.TestCase):
         solver.world.bodies.position.assign(body_positions)
         solver.world.bodies.orientation.assign(body_orientations)
         system.refresh_geometry(wp.float32(60.0))
-        wrench0 = system.row_wrench0.numpy()[0, :3].astype(np.float64)
-        wrench1 = system.row_wrench1.numpy()[0, :3].astype(np.float64)
+        wrench0 = system.row_wrench0.numpy()[0, :4].astype(np.float64)
+        wrench1 = system.row_wrench1.numpy()[0, :4].astype(np.float64)
+        self.assertEqual(int(np.count_nonzero(system.topology.row_dynamic)), 1)
+        self.assertAlmostEqual(float(np.linalg.norm(wrench1[3, :3])), 1.0, delta=2.0e-6)
         # Independently differentiate n(parent orientation) dot (p1 - p0).
         epsilon = 1.0e-4
-        for row in range(2):
+        for row in (0, 1, 3):
             direction = wrench1[row, :3]
             for axis in np.eye(3):
                 cross = np.cross(axis, direction)
@@ -283,7 +289,7 @@ class TestD6DirectDispatch(unittest.TestCase):
                 derivative = np.dot(plus - minus, separation) / (2 * epsilon)
                 self.assertAlmostEqual(float(np.dot(wrench0[row, 3:], axis)), float(derivative), delta=2.0e-6)
             np.testing.assert_allclose(wrench1[row, 3:], 0.0, atol=2.0e-6, rtol=0.0)
-        # Each unit row impulse must have zero net force and world torque.
+        # Each locked or driven row impulse must have zero net force and world torque.
         np.testing.assert_allclose(wrench0[:, :3] + wrench1[:, :3], 0.0, atol=2.0e-6, rtol=0.0)
         torque = (
             wrench0[:, 3:]
