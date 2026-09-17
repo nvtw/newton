@@ -1590,8 +1590,10 @@ def joint_constraint_prepare_inequality(
 ):
     """Prepare active axial rows while retaining geometry and tracker updates."""
     mode = read_int(constraints, _OFF_JOINT_MODE, cid)
+    common_d6 = constraints.d6.enabled != 0 and constraints.d6.row_count[cid] > wp.int32(0)
     if (
         constraints.bilateral.enabled != 0
+        and not common_d6
         and bodies.has_position_level_writers[0] == 0
         and (mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_PRISMATIC)
     ):
