@@ -241,7 +241,7 @@ class Example(ColibriChecks):
             parallel_contact_prepare=True,
             contact_chunk_size=0,
             mass_splitting=True,
-            mass_splitting_color_group_size=4,
+            mass_splitting_color_group_size=3,
             mass_splitting_batch_size=2,
             max_colored_partitions=8,
             substeps=args.substeps,
