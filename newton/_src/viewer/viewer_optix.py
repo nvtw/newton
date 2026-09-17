@@ -1205,8 +1205,23 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._destroy_overlay_depth_resources()
 
     @override
-    def log_instances(self, name, mesh, xforms, scales, colors, materials, hidden: bool = False):
-        """Log instances with OptiX defaults for un-authored materials."""
+    def log_instances(
+        self,
+        name,
+        mesh,
+        xforms,
+        scales,
+        colors,
+        materials,
+        hidden: bool = False,
+        opacities: wp.array[wp.float32] | None = None,
+    ):
+        """Log instances with OptiX defaults for un-authored materials.
+
+        The backend renders instances opaque; per-instance opacity is not
+        currently supported. Accept the common viewer argument for opaque scenes.
+        """
+        del opacities
         is_ground = mesh in self._optix_ground_meshes
         count = 0 if xforms is None else len(xforms)
         if colors is not None and not is_ground:
@@ -1244,6 +1259,21 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
                 self._material_arrays[key] = material_array
             materials = self._material_arrays[key]
         return super().log_instances(name, mesh, xforms, scales, colors, materials, hidden=hidden)
+
+    @override
+    def log_capsules(
+        self,
+        name,
+        mesh,
+        xforms,
+        scales,
+        colors,
+        materials,
+        hidden: bool = False,
+        opacities: wp.array[wp.float32] | None = None,
+    ):
+        """Log capsule mesh batches through the common instance adapter."""
+        return self.log_instances(name, mesh, xforms, scales, colors, materials, hidden=hidden, opacities=opacities)
 
     @override
     def log_lines(
@@ -1353,7 +1383,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             RGB image with a top-left origin.
         """
         del render_ui
-        frame = np.ascontiguousarray(self._api.get_frame_uint8()[..., :3])
+        frame = np.ascontiguousarray(self._api.get_frame_uint8()[::-1, :, :3])
         expected_shape = (self.height, self.width, 3)
         if frame.shape != expected_shape:
             raise RuntimeError(f"OptiX returned frame shape {frame.shape}, expected {expected_shape}")
