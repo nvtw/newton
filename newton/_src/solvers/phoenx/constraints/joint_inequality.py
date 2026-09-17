@@ -27,7 +27,12 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_R1_B1,
     _OFF_R1_B2,
     JOINT_MODE_BALL_SOCKET,
+    JOINT_MODE_CARTESIAN,
+    JOINT_MODE_CARTESIAN_PLANE,
+    JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_DISTANCE,
+    JOINT_MODE_GENERIC_D6,
+    JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
@@ -36,6 +41,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _ms_load_body_pair,
     _ms_store_body_pair,
 )
+from newton._src.solvers.phoenx.constraints.d6_inequality import iterate_d6_inequalities
 from newton._src.solvers.phoenx.mass_splitting import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
@@ -61,22 +67,29 @@ def joint_constraint_iterate_inequality(
         and mode != JOINT_MODE_DISTANCE
         and mode != JOINT_MODE_BALL_SOCKET
         and mode != JOINT_MODE_UNIVERSAL
+        and mode != JOINT_MODE_CYLINDRICAL
+        and mode != JOINT_MODE_PLANAR
+        and mode != JOINT_MODE_CARTESIAN_PLANE
+        and mode != JOINT_MODE_CARTESIAN
+        and mode != JOINT_MODE_GENERIC_D6
     ):
         return
 
+    common_d6 = constraints.d6.enabled != 0 and constraints.d6.row_count[cid] > wp.int32(0)
     body1 = read_int(constraints, _OFF_BODY1, cid)
     body2 = read_int(constraints, _OFF_BODY2, cid)
     body_set_access_mode(bodies, body1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, body2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     # Preserve lazy body-state conversion and stale friction release, but
     # avoid loading and writing body responses for zero-impulse rows.
-    if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
-        if read_int(constraints, _OFF_D6_LIMIT_COUNT, cid) == 0:
-            return
-    elif read_int(constraints, _OFF_CLAMP, cid) == _CLAMP_NONE:
-        if read_float(constraints, _OFF_FRICTION_COEFFICIENT, cid) <= wp.float32(0.0):
-            constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
-            return
+    if not common_d6:
+        if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
+            if read_int(constraints, _OFF_D6_LIMIT_COUNT, cid) == 0:
+                return
+        elif read_int(constraints, _OFF_CLAMP, cid) == _CLAMP_NONE:
+            if read_float(constraints, _OFF_FRICTION_COEFFICIENT, cid) <= wp.float32(0.0):
+                constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
+                return
     (
         velocity1,
         velocity2,
@@ -97,6 +110,37 @@ def joint_constraint_iterate_inequality(
         parallel_id,
         num_bodies,
     )
+
+    if common_d6:
+        velocity1, angular_velocity1, velocity2, angular_velocity2 = iterate_d6_inequalities(
+            constraints.d6,
+            cid,
+            inverse_mass1,
+            inverse_mass2,
+            inverse_inertia1,
+            inverse_inertia2,
+            velocity1,
+            angular_velocity1,
+            velocity2,
+            angular_velocity2,
+            idt,
+            sor_boost,
+        )
+        _ms_store_body_pair(
+            bodies,
+            particles,
+            copy_state,
+            body1,
+            body2,
+            slot1,
+            slot2,
+            num_bodies,
+            velocity1,
+            angular_velocity1,
+            velocity2,
+            angular_velocity2,
+        )
+        return
 
     if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
         angular_velocity1, angular_velocity2 = _d6_angular_limits_block(
