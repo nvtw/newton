@@ -156,6 +156,14 @@ def prepare_contact_tgs(
 ):
     if state.last[first] != state.generation[0]:
         state.keys[first] = wp.vec4i(a, b, reinterpret_float_as_int(mu_s), reinterpret_float_as_int(mu_d))
+        # Normal rows remain active. Zero friction needs no patch history;
+        # the material key prevents reuse if friction returns next generation.
+        if mu_s == 0.0 and mu_d == 0.0:
+            state.current.group_first[first] = -1
+            state.current.group_count[first] = 0
+            state.partition_last[first] = state.generation[0]
+            state.last[first] = state.generation[0]
+            return wp.vec3f(0.0), wp.vec3f(0.0), wp.vec3f(0.0)
         for k in range(first, first + size):
             state.normals[k] = cc_get_normal(cc, k)
             state.points[k] = bodies.position[a] + cc_get_r0(cc, k)
@@ -213,6 +221,8 @@ def get_solve_contact_tgs(record_wrenches: bool = False):
         idt: float,
         biased: bool,
     ):
+        if state.current.group_first[first] < 0:
+            return v0, v1, w0, w1
         for k in range(first, first + size):
             state.loads[k] = cc_get_normal_lambda(cc, k)
         pose0 = wp.transformf(bodies.position[a], body_load_orientation(bodies, a))

@@ -19,6 +19,8 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_set_contact_first,
     contact_set_count1,
     contact_set_count2,
+    contact_set_friction,
+    contact_set_friction_dynamic,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -26,11 +28,13 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     contact_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs import (
+    ContactTGS,
     advance_contact_tgs_generation,
     allocate_contact_tgs,
+    snapshot_contact_tgs,
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs_partition import NormalPatches, allocate, partition_range
-from newton._src.solvers.phoenx.constraints.contact_tgs_prepare import geometry, partition_groups
+from newton._src.solvers.phoenx.constraints.contact_tgs_prepare import geometry, partition_groups, patches
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
@@ -39,6 +43,8 @@ def set_ranges(columns: ContactColumnContainer, first: wp.array[int], count: wp.
     cid = wp.tid()
     contact_set_contact_first(columns, cid, first[cid])
     contact_set_contact_count(columns, cid, count[cid])
+    contact_set_friction(columns, cid, 0.5)
+    contact_set_friction_dynamic(columns, cid, 0.3)
 
 
 @wp.kernel
@@ -60,7 +66,47 @@ def set_geometry_fixture(columns: ContactColumnContainer, cc: ContactContainer):
     cc_set_normal(cc, cid, wp.vec3f(0.0, 0.0, 1.0))
 
 
+@wp.kernel
+def set_friction_fixture(
+    columns: ContactColumnContainer, cc: ContactContainer, state: ContactTGS, mu_s: float, mu_d: float
+):
+    contact_set_body1(columns, 0, 0)
+    contact_set_body2(columns, 0, 1)
+    contact_set_contact_first(columns, 0, 0)
+    contact_set_contact_count(columns, 0, 2)
+    contact_set_friction(columns, 0, mu_s)
+    contact_set_friction_dynamic(columns, 0, mu_d)
+    for k in range(2):
+        cc_set_normal(cc, k, wp.vec3f(0.0, 0.0, 1.0))
+        state.normals[k] = wp.vec3f(0.0, 0.0, 1.0)
+
+
 class TestContactTGSPrepare(unittest.TestCase):
+    def test_frictionless_material_transition(self):
+        """Omit zero-friction patches and rebuild history when friction returns."""
+        for device in ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else []):
+            with self.subTest(device=device):
+                bodies = body_container_zeros(2, device)
+                bodies.orientation.assign([[0, 0, 0, 1], [0, 0, 0, 1]])
+                columns = contact_column_container_zeros(1, device)
+                cc = contact_container_zeros(2, device)
+                state = allocate_contact_tgs(2, 2, 24, device)
+                active = wp.array([1], dtype=int, device=device)
+                for mu_s, mu_d in ((0.5, 0.3), (0.0, 0.0), (0.5, 0.3), (0.0, 0.3), (0.5, 0.0)):
+                    snapshot_contact_tgs(state)
+                    wp.launch(advance_contact_tgs_generation, 1, [state], device=device)
+                    wp.launch(set_friction_fixture, 1, [columns, cc, state, mu_s, mu_d], device=device)
+                    if device != "cpu":
+                        wp.launch(partition_groups, (64, 128), [columns, state, active], block_dim=128, device=device)
+                    wp.launch(patches, 1, [columns, state, active, bodies, cc], device=device)
+                    frictionless = mu_s == 0.0 and mu_d == 0.0
+                    self.assertEqual(state.current.group_count.numpy()[0], 0 if frictionless else 1)
+                    self.assertEqual(state.current.group_first.numpy()[0], -1 if frictionless else 0)
+                    if not frictionless:
+                        self.assertGreater(state.anchors.count.numpy()[0], 0)
+                        self.assertEqual(state.anchors.source.numpy()[0], -1)
+                    np.testing.assert_array_equal(cc.impulses.numpy(), 0)
+
     def test_removed_contacts_clear_temporal_support(self):
         """Clear removed support rows while advancing and preserving prior patch history."""
         for device in ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else []):

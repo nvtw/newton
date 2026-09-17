@@ -161,7 +161,11 @@ def partition_groups(columns: ContactColumnContainer, state: ContactTGS, active:
         first = contact_get_contact_first(columns, cid)
         count = contact_get_contact_count(columns, cid)
         if count > 0 and state.partition_last[first] != state.generation[0]:
-            if count <= CACHE_CAPACITY:
+            if contact_get_friction(columns, cid) == 0.0 and contact_get_friction_dynamic(columns, cid) == 0.0:
+                if lane == 0:
+                    state.current.group_first[first] = -1
+                    state.current.group_count[first] = 0
+            elif count <= CACHE_CAPACITY:
                 partition_cached(first, first, count, state.normals, 0.999, state.current, lane)
             elif lane == 0:
                 partition_range(first, first, count, state.normals, 0.999, state.current)
