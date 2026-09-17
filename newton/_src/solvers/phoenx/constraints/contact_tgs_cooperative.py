@@ -95,20 +95,22 @@ def get_solve_rows_cooperative(record_wrenches: bool = False):
                 effective_mass = shuffle(cached.effective_mass, source)
                 bias = shuffle(cached.bias, source)
                 old = shuffle(prior, source)
-                if lane == 0:
-                    if biased or bias <= 0.0:
-                        if not biased:
-                            bias = 0.0
-                        relative = v1 + wp.cross(w1, r1) - v0 - wp.cross(w0, r0)
-                        speed = wp.dot(relative, normal)
-                        update = block_solve_accumulated_inverse_bounded_1(
-                            effective_mass, speed + bias, old, 1.0, 0.0, 1.0, 0.0, BLOCK_LAMBDA_INF
-                        )
+                # Keep identical ordered arithmetic active across the subgroup;
+                # only lane zero writes impulses and the final body state.
+                if biased or bias <= 0.0:
+                    if not biased:
+                        bias = 0.0
+                    relative = v1 + wp.cross(w1, r1) - v0 - wp.cross(w0, r0)
+                    speed = wp.dot(relative, normal)
+                    update = block_solve_accumulated_inverse_bounded_1(
+                        effective_mass, speed + bias, old, 1.0, 0.0, 1.0, 0.0, BLOCK_LAMBDA_INF
+                    )
+                    if lane == 0:
                         cc_set_normal_lambda(cc, first + base + source, update.lambda_new)
-                        impulse = update.delta * normal
-                        if wp.static(record_wrenches):
-                            record_impulse(state, first + base + source, bodies.position[a] + r0, impulse)
-                        v0, v1, w0, w1 = apply_pair_velocity_impulse(v0, v1, w0, w1, m0, m1, i0, i1, r0, r1, impulse)
+                    impulse = update.delta * normal
+                    if wp.static(record_wrenches) and lane == 0:
+                        record_impulse(state, first + base + source, bodies.position[a] + r0, impulse)
+                    v0, v1, w0, w1 = apply_pair_velocity_impulse(v0, v1, w0, w1, m0, m1, i0, i1, r0, r1, impulse)
         if lane == 0:
             v0, v1, w0, w1 = solve_contact_tgs(
                 state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased

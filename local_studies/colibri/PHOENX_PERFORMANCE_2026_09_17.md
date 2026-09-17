@@ -279,3 +279,57 @@ Run `uv run -m newton.examples phoenx_colibri --viewer optix`; append
 `--no-render-overlap` for serialized execution or `--motor-off` for unpowered
 diagnostics. Five new regression tests fail against the previous implementation;
 the focused Colibri/viewer suite passes 34 tests with one skipped.
+
+
+### Uniform subgroup arithmetic candidate
+
+The cooperative normal solve originally repeatedly entered lane zero for each
+row's velocity arithmetic. Running the identical ordered arithmetic in all
+lanes while retaining lane-zero impulse/wrench/body writes reduces divergence.
+No contact rows, arithmetic expressions, settings, or impulse order change.
+
+The frozen sweep improved from 167.936 to 159.744 microseconds median, with
+identical velocity and impulse bits. Short full-frame candidate/control means
+were 16.337/16.699 ms. Full-minute candidate/control/candidate means were
+16.046/16.416/16.103 ms (about 2.1% throughput improvement for the candidate
+mean). Every pose and velocity bit over all 3,600 frames matches both the
+control and the previously retained trajectory. Peak penetration remains
+0.470375 mm, anchor error 0.630504 mm, and axis error 0.0108056 rad. These are
+powered runs, so support stationarity is intentionally not labeled creep.
+
+Matched Nsight graph-node traces attribute the change to the biased sweep:
+median 184.430 -> 177.487 microseconds, mean 198.011 -> 189.494 microseconds;
+5,760 calls in each trace. Static sweep median remains 16.544 microseconds.
+The initial trace omitted graph nodes and had no kernel attribution; only
+`*_nodes.nsys-rep` supports these kernel measurements.
+
+All three existing dynamic contact tests pass, covering split/unsplit physical
+momentum, full/partial subgroups, and recorded impulse wrenches. No new
+behavioral regression is claimed: the intended change is performance only.
+The motor-off full minute also matches every baseline pose/velocity bit and
+passes unchanged creep, penetration, and joint checks. The reusable saved-run
+performance gate requires at least 1% improvement plus exact trajectory and
+quality parity. Both candidate minutes pass. A fresh old-code repeat measures
+16.473 ms/frame and fails that gate; this is a performance regression
+check on measured runs, not a new behavioral difference. Required global hooks
+encounter existing unrelated issues; their unrelated auto-edits were restored.
+All changed-file hooks pass.
+Artifacts: `/tmp/colibri_uniform_lane_{control,candidate}.{json,npz}`,
+`/tmp/colibri_uniform_lane_minute{,_control,_repeat}.{json,npz}`,
+`/tmp/colibri_uniform_lane_{candidate,control}_nodes.nsys-rep`, and
+`/tmp/colibri_uniform_lane_momentum_tests.log`.
+
+
+Reproduce the performance gate after collecting the above runs:
+
+```bash
+uv run --no-project .venv/bin/python -m local_studies.colibri.check_temporal_performance \
+  --baseline /tmp/colibri_uniform_lane_minute_control \
+  --candidate /tmp/colibri_uniform_lane_minute /tmp/colibri_uniform_lane_minute_repeat \
+  --minimum-speedup 1.01
+```
+
+Replacing the candidate with `/tmp/colibri_uniform_lane_control_repeat` fails
+at the speedup assertion while retaining exact trajectory/quality parity.
+This gate complements the repeated measurements and Nsight attribution; it is
+not a universal timing threshold or a replacement for controlled hardware.
