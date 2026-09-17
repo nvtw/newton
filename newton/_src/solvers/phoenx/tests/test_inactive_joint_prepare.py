@@ -58,20 +58,35 @@ def run(fast, prismatic, split):
         if frame >= 3:
             solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
         if frame == 3:
-            multipliers = solver.world.constraints.multipliers.numpy()
-            for offset in (int(joint._MUL_ACC_LIMIT), int(joint._MUL_ACC_FRICTION)):
-                multipliers[offset // 4, 0, offset % 4] = 0.125
-            solver.world.constraints.multipliers.assign(multipliers)
+            if prismatic:
+                solver.world.constraints.d6.lower_impulse.fill_(0.125)
+                solver.world.constraints.d6.upper_impulse.fill_(-0.125)
+                solver.world.constraints.d6.friction_impulse.fill_(0.125)
+            else:
+                multipliers = solver.world.constraints.multipliers.numpy()
+                for offset in (int(joint._MUL_ACC_LIMIT), int(joint._MUL_ACC_FRICTION)):
+                    multipliers[offset // 4, 0, offset % 4] = 0.125
+                solver.world.constraints.multipliers.assign(multipliers)
         state.clear_forces()
         solver.step(state, state, control, None, 0.01)
         np.testing.assert_allclose(_total_momentum(model, state), momentum, atol=2e-6, rtol=0)
         data = solver.world.constraints.data.numpy()
-        axial_masses.append(float(data[int(joint._OFF_EFF_INV_AXIAL), 0]))
+        if prismatic:
+            axial_masses.append(float(solver.world.constraints.d6.effective_mass_inverse.numpy()[0, 0]))
+        else:
+            axial_masses.append(float(data[int(joint._OFF_EFF_INV_AXIAL), 0]))
         fields = [int(joint._OFF_CLAMP)]
         for offset in (joint._OFF_R1_B1, joint._OFF_R1_B2, joint._OFF_AXIS_WORLD):
             fields.extend(range(int(offset), int(offset) + 3))
         if not prismatic:
             fields.extend([int(joint._OFF_REVOLUTION_COUNTER), int(joint._OFF_PREVIOUS_QUATERNION_ANGLE)])
+        common_state = ()
+        if prismatic:
+            common_state = (
+                solver.world.constraints.d6.lower_impulse.numpy(),
+                solver.world.constraints.d6.upper_impulse.numpy(),
+                solver.world.constraints.d6.friction_impulse.numpy(),
+            )
         snapshots.append(
             (
                 state.body_q.numpy(),
@@ -79,11 +94,12 @@ def run(fast, prismatic, split):
                 data[fields],
                 solver.world.constraints.multipliers.numpy(),
                 solver.world.constraints.bilateral.accumulated.numpy(),
+                *common_state,
             )
         )
-        if frame == 0:
+        if not prismatic and frame == 0:
             assert data.view(np.int32)[int(joint._OFF_CLAMP), 0] == 0
-        if frame == 1:
+        if not prismatic and frame == 1:
             assert data.view(np.int32)[int(joint._OFF_CLAMP), 0] != 0
     return snapshots, axial_masses
 
@@ -97,7 +113,10 @@ class TestInactivePrepare(unittest.TestCase):
                     expected, original_mass = run(False, prismatic, split)
                     actual, skipped_mass = run(True, prismatic, split)
                     self.assertGreater(original_mass[0], 0.0)
-                    self.assertEqual(skipped_mass[0], 0.0)
+                    if prismatic:
+                        self.assertEqual(original_mass[0], skipped_mass[0])
+                    else:
+                        self.assertEqual(skipped_mass[0], 0.0)
                     self.assertEqual(original_mass[1], skipped_mass[1])
                     for frame, (before, after) in enumerate(zip(expected, actual, strict=True)):
                         for a, b in zip(before, after, strict=True):

@@ -1967,7 +1967,8 @@ def _build_d6_inequality_data(
     x_p = np.asarray(model.joint_X_p.numpy(), dtype=np.float32)
     x_c = np.asarray(model.joint_X_c.numpy(), dtype=np.float32)
 
-    for joint in np.flatnonzero(joint_type == int(JointType.D6)):
+    common_joint = (joint_type == int(JointType.D6)) | (joint_type == int(JointType.PRISMATIC))
+    for joint in np.flatnonzero(common_joint):
         cid = int(joint_idx_to_cid[joint])
         if cid < 0:
             continue
