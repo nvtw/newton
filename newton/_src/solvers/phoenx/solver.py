@@ -355,7 +355,9 @@ class SolverPhoenX(SolverBase):
                 ``"multi_world"`` and ``"single_world"`` override the policy.
                 The single-world layout colors all constraints together and can
                 also process multiple independent model worlds, including with
-                temporal color groups. World collision isolation is unchanged.
+                temporal color groups. Temporal sweeps use separate blocks per
+                world when there are no shared global bodies. World collision
+                isolation is unchanged.
             threads_per_world: ``"auto"`` / 32 / 16 / 8 (multi-world).
             multi_world_scheduler: Static multi-world scheduler policy.
                 ``"auto"`` is the default performance policy and resolves
@@ -1049,6 +1051,11 @@ class SolverPhoenX(SolverBase):
                     raise ValueError("solver_scheme='tgs' requires unbounded joint drives")
                 direct.set_temporal_substeps(self.world.substeps)
             world = self.world
+            # Global bodies may couple otherwise separate worlds. Keep the
+            # original ordered schedule for those models; global ground shapes
+            # without a body do not couple the worlds.
+            if np.all(model.body_world.numpy() >= 0):
+                world._temporal_sweep_worlds = num_worlds
             world._temporal_contact_state = allocate_contact_tgs(
                 world.rigid_contact_max, world.bodies.position.shape[0], world.substeps, world.device
             )
