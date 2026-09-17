@@ -107,6 +107,51 @@ class TestD6DirectDispatch(unittest.TestCase):
         self.assertLessEqual(angle_x, 0.2505, msg=f"D6 angular limit remained violated: angle_x={angle_x:.6f}")
         self.assertLessEqual(float(body_qd[3]), 1.0e-4)
 
+    def test_one_axis_d6_limits_use_prepared_common_rows(self) -> None:
+        """Prepare reduced revolute and prismatic D6 limits through common rows."""
+        for angular in (False, True):
+            with self.subTest(angular=angular):
+                builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+                body = _make_body(builder)
+                axis = newton.ModelBuilder.JointDofConfig(
+                    axis=newton.Axis.X,
+                    limit_lower=-0.1,
+                    limit_upper=0.1,
+                )
+                joint = builder.add_joint_d6(
+                    parent=-1,
+                    child=body,
+                    linear_axes=[] if angular else [axis],
+                    angular_axes=[axis] if angular else [],
+                )
+                builder.add_articulation([joint])
+                model = builder.finalize()
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    substeps=5,
+                    solver_iterations=8,
+                    velocity_iterations=1,
+                    articulation_mode="maximal",
+                )
+                self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
+                state = model.state()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                poses = state.body_q.numpy()
+                if angular:
+                    rotation = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.25)
+                    poses[0, 3:] = (rotation[0], rotation[1], rotation[2], rotation[3])
+                else:
+                    poses[0, 0] = 0.25
+                state.body_q.assign(poses)
+                state.body_qd.zero_()
+                state.clear_forces()
+                solver.step(state, state, model.control(), None, 1.0 / 60.0)
+                joint_q = wp.zeros_like(model.joint_q)
+                joint_qd = wp.zeros_like(model.joint_qd)
+                newton.eval_ik(model, state, joint_q, joint_qd)
+                self.assertLessEqual(abs(float(joint_q.numpy()[0])), 0.1005)
+                self.assertLessEqual(float(joint_q.numpy()[0] * joint_qd.numpy()[0]), 2.0e-4)
+
     def test_angular_one_axis_d6_reduces_to_revolute(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         body = _make_body(builder)
