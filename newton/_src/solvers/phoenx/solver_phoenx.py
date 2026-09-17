@@ -130,10 +130,19 @@ from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
     copy_contact_patch_impulses,
     gather_contact_patch_warmstart,
 )
+from newton._src.solvers.phoenx.constraints.contact_tgs import advance_contact_tgs_generation, snapshot_contact_tgs
+from newton._src.solvers.phoenx.constraints.contact_tgs_prepare import (
+    friction_geometry,
+    geometry,
+    partition_groups,
+    patches,
+)
+from newton._src.solvers.phoenx.constraints.contact_tgs_static import build_lists, get_sweep
 from newton._src.solvers.phoenx.dispatch.color_groups import DEFAULT_SWEEP_BLOCK_COUNT as COLOR_GROUP_SWEEP_BLOCK_COUNT
 from newton._src.solvers.phoenx.dispatch.color_groups import get_sweep_block_dim as get_color_group_block_dim
 from newton._src.solvers.phoenx.dispatch.color_groups import get_sweep_kernel as get_color_group_sweep_kernel
 from newton._src.solvers.phoenx.dispatch.color_groups import use_cooperative_joint_rhs
+from newton._src.solvers.phoenx.dispatch.color_groups_tgs import get_sweep_kernel
 from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import (
@@ -911,6 +920,13 @@ class PhoenXWorld:
         if self.base_substeps <= 0:
             raise ValueError(f"substeps must be >= 1 (got {self.base_substeps})")
         self.substeps = self.base_substeps
+        self._temporal_joint_springs = False
+        self._temporal_force_step = False
+        self._temporal_contact_state = None
+        self._temporal_shared_partition = True
+        self._temporal_static_heads = None
+        self._temporal_static_links = None
+        self._temporal_static_phase = "prepare"
         self.solver_iterations = int(solver_iterations)
         if self.solver_iterations < 1:
             raise ValueError(f"solver_iterations must be >= 1 (got {self.solver_iterations})")
@@ -3143,10 +3159,17 @@ class PhoenXWorld:
     def _ingest_and_warmstart_contacts(self, contacts, shape_body, shape_type=None) -> None:
         """Translate Newton ``Contacts`` -> contact columns. Swap prev/current
         per-cid state, ingest -> warm-start -> forward-map stamp, fuse counts."""
+        if self._temporal_contact_state is not None:
+            snapshot_contact_tgs(self._temporal_contact_state)
+            wp.launch(advance_contact_tgs_generation, 1, [self._temporal_contact_state], device=self.device)
         if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
             self._num_active_constraints.fill_(self._contact_offset)
             self._contact_views = None
             self._has_soft_contact_pd = False
+            if self._temporal_contact_state is not None:
+                self._contact_container.impulses.zero_()
+                if self._ingest_scratch is not None:
+                    self._ingest_scratch.num_contact_columns.zero_()
             return
 
         if getattr(contacts, "contact_matching", False) is False:
@@ -3377,6 +3400,10 @@ class PhoenXWorld:
                 self._cid_of_contact_cur,
                 device=self.device,
             )
+        if self._temporal_contact_state is not None:
+            # Cached contact matching must not rewarm a temporal collision step.
+            # Retain these multipliers through every substep until the next ingest.
+            self._contact_container.impulses.zero_()
 
     def _rebuild_partition(self, *, conditional_scan: bool = False) -> None:
         """Build coloring and dependent solver state for the active graph."""
@@ -3508,6 +3535,7 @@ class PhoenXWorld:
                 pair_shape_b,
                 self._partitioner._random_values,
                 wp.int32(1 if self._reuse_rigid_coloring else 0),
+                wp.int32(self._temporal_contact_state is not None),
                 self._elements,
                 self._element_family,
                 self._partitioner._packed_priorities,
@@ -3516,6 +3544,19 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
+        if self._temporal_contact_state is not None and self._ingest_scratch is not None:
+            wp.launch(
+                build_lists,
+                self.num_bodies,
+                [
+                    self._contact_cols,
+                    self.bodies,
+                    self._ingest_scratch.num_contact_columns,
+                    self._temporal_static_heads,
+                    self._temporal_static_links,
+                ],
+                device=self.device,
+            )
 
     def wake_on_external_input(self) -> None:
         """Wake every island whose bodies carry a user-applied force or
@@ -3808,8 +3849,7 @@ class PhoenXWorld:
                 num_bodies=self.num_bodies,
                 inv_dt=inv_dt,
             )
-            return
-        if self._mass_splitting_grouped_average:
+        elif self._mass_splitting_grouped_average:
             launch_average_and_broadcast_grouped(
                 self._copy_state,
                 self.bodies,
@@ -3817,14 +3857,32 @@ class PhoenXWorld:
                 num_bodies=self.num_bodies,
                 inv_dt=inv_dt,
             )
-            return
-        launch_average_and_broadcast(
-            self._copy_state,
-            self.bodies,
-            self._particles_or_sentinel(),
-            num_bodies=self.num_bodies,
-            inv_dt=inv_dt,
-        )
+        else:
+            launch_average_and_broadcast(
+                self._copy_state,
+                self.bodies,
+                self._particles_or_sentinel(),
+                num_bodies=self.num_bodies,
+                inv_dt=inv_dt,
+            )
+        if self._temporal_contact_state is not None:
+            wp.launch(
+                get_sweep(
+                    self._temporal_static_phase, record_wrenches=bool(self._temporal_contact_state.record_wrenches)
+                ),
+                self.num_bodies,
+                [
+                    self._contact_cols,
+                    self._temporal_contact_state,
+                    self.bodies,
+                    self._contact_container_solve,
+                    self._copy_state,
+                    self._temporal_static_heads,
+                    self._temporal_static_links,
+                    1.0 / self.substep_dt,
+                ],
+                device=self.device,
+            )
 
     def _mass_splitting_writeback(self, *, already_averaged: bool = False) -> None:
         """Write each body / particle's slot-0 velocity back to storage.
@@ -4114,11 +4172,16 @@ class PhoenXWorld:
         apply gravity. The two launches are independent and can fuse
         in CUDA-graph capture.
         """
+        force_dt = self.substep_dt
+        if self._temporal_force_step:
+            # Retain the substep-entry launch for pose/access-state snapshots.
+            # External force impulse is applied once per outer collision step.
+            force_dt = self.step_dt if self._current_substep_index == 0 else 0.0
         if self.num_bodies > 0 and self._has_maximal_dynamic_bodies:
             wp.launch(
                 _phoenx_apply_forces_and_gravity_kernel,
                 dim=self.num_bodies,
-                inputs=[self.bodies, self.gravity, wp.float32(self.substep_dt)],
+                inputs=[self.bodies, self.gravity, wp.float32(force_dt)],
                 device=self.device,
             )
         if self.num_particles > 0 and self.particles is not None:
@@ -4778,9 +4841,44 @@ class PhoenXWorld:
         """Sweep independent mass copies, keeping colors within each copy ordered."""
         heads = self._singleworld_kernels()[::2]
         phase = ("prepare", "iterate", "relax")[heads.index(head_kernel)]
+        self._temporal_static_phase = phase
         cc = self._contact_container if contact_container is None else contact_container
         soft_pd = bool(self._dispatch_specialization_flags()["has_soft_contact_pd"])
-        if phase == "prepare" and self.parallel_contact_prepare:
+        if phase == "prepare" and self._temporal_contact_state is not None:
+            if soft_pd:
+                raise ValueError("Temporal rigid contacts do not support soft contact PD rows")
+            if self.max_contact_columns:
+                state = self._temporal_contact_state
+                active = self._ingest_scratch.num_contact_columns
+                wp.launch(
+                    geometry,
+                    (self.max_contact_columns, 128),
+                    [self._contact_cols, state, active, self.bodies, cc, self._active_contact_views(), idt],
+                    device=self.device,
+                )
+                if self.device.is_cuda and self._temporal_shared_partition:
+                    wp.launch(
+                        partition_groups,
+                        (64, 128),
+                        [self._contact_cols, state, active],
+                        block_dim=128,
+                        device=self.device,
+                    )
+                wp.launch(
+                    patches,
+                    self.max_contact_columns,
+                    [self._contact_cols, state, active, self.bodies, cc],
+                    device=self.device,
+                )
+                if state.prepared_friction:
+                    wp.launch(
+                        friction_geometry,
+                        (state.patch_column.shape[0], 2),
+                        [self._contact_cols, state, self.bodies],
+                        device=self.device,
+                    )
+            phase = "cached_prepare"
+        elif phase == "prepare" and self.parallel_contact_prepare:
             if self.max_contact_columns:
                 wp.launch(
                     _get_parallel_contact_prepare_kernel(True, soft_pd),
@@ -4806,26 +4904,41 @@ class PhoenXWorld:
         )
         block_dim = get_color_group_block_dim(cooperative_joints)
         data = self._color_group_data
+        inputs = [
+            self.constraints,
+            self._contact_cols,
+            self.bodies,
+            self._particles_or_sentinel(),
+            cc,
+            self._active_contact_views(),
+            self._copy_state,
+            self.num_joints,
+            self._joint_pgs_enabled,
+            self.num_bodies,
+            idt,
+            data["ids"],
+            data["starts"],
+            data["num_colors"],
+            self.mass_splitting_color_group_size,
+        ]
+        if self._temporal_contact_state is None:
+            kernel = get_color_group_sweep_kernel(
+                phase, soft_pd, cooperative_joints=cooperative_joints, temporal_springs=self._temporal_joint_springs
+            )
+        else:
+            if soft_pd:
+                raise ValueError("Temporal rigid contacts do not support soft contact PD rows")
+            kernel = get_sweep_kernel(
+                phase,
+                cooperative_joints=cooperative_joints,
+                temporal_springs=self._temporal_joint_springs,
+                record_wrenches=bool(self._temporal_contact_state.record_wrenches),
+            )
+            inputs.append(self._temporal_contact_state)
         wp.launch(
-            get_color_group_sweep_kernel(phase, soft_pd, cooperative_joints=cooperative_joints),
+            kernel,
             (COLOR_GROUP_SWEEP_BLOCK_COUNT, block_dim),
-            [
-                self.constraints,
-                self._contact_cols,
-                self.bodies,
-                self._particles_or_sentinel(),
-                cc,
-                self._active_contact_views(),
-                self._copy_state,
-                self.num_joints,
-                self._joint_pgs_enabled,
-                self.num_bodies,
-                idt,
-                data["ids"],
-                data["starts"],
-                data["num_colors"],
-                self.mass_splitting_color_group_size,
-            ],
+            inputs,
             block_dim=block_dim,
             device=self.device,
         )

@@ -33,7 +33,53 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         """Colibri defaults to geometric admission and retains the legacy control."""
         parser = PhoenxExample.create_parser()
         self.assertTrue(parser.parse_args([]).geometric_candidates)
+        self.assertEqual(parser.parse_args([]).substeps, 24)
+        self.assertEqual(parser.parse_args([]).iterations, 1)
         self.assertFalse(parser.parse_args(["--velocity-filtered-candidates"]).geometric_candidates)
+
+    def test_phoenx_settled_support_creep(self):
+        """Reject support translation and rotation after the settling interval."""
+        example = PhoenxExample.__new__(PhoenxExample)
+        example._support_test_enabled = True
+        example._support_reference = None
+        example.model = SimpleNamespace(body_label=["FrameGround"])
+        q = np.array([[0, 0, 0, 0, 0, 0, 1]], dtype=float)
+        example.state_0 = SimpleNamespace(body_q=_array(q))
+        example.sim_time = 1.0
+        example._test_support_stationarity()
+        self.assertIsNone(example._support_reference)
+        example.sim_time = 2.0
+        example._test_support_stationarity()
+        q[0, 0] = 0.000003
+        example._test_support_stationarity()
+        q[0, 0] = 0.0001
+        with self.assertRaisesRegex(AssertionError, "Support creep"):
+            example._test_support_stationarity()
+        q[0, 0] = 0
+        q[0, 3:] = [0, 0, np.sin(0.0005), np.cos(0.0005)]
+        with self.assertRaisesRegex(AssertionError, "Support rotation"):
+            example._test_support_stationarity()
+        example._support_test_enabled = False
+        example._test_support_stationarity()
+
+    def test_phoenx_crank_tracking(self):
+        """Accept the measured drive speed and reject the old contact-order deficit."""
+        example = PhoenxExample.__new__(PhoenxExample)
+        example._support_test_enabled = True
+        example._drive_test_time = None
+        example._drive_test_duration = 0.0
+        example._drive_test_integral = 0.0
+        example.model = SimpleNamespace(joint_label=["Frame/Crank"], joint_qd_start=_array([0]))
+        example.control = SimpleNamespace(joint_target_qd=_array([-3.4906585]))
+        example.state_0 = SimpleNamespace(joint_qd=_array([-3.483]))
+        example.sim_time = 2.0
+        example._test_drive_tracking()
+        example.sim_time = 3.0
+        example._test_drive_tracking()
+        example.state_0.joint_qd = _array([-3.04])
+        example.sim_time = 5.0
+        with self.assertRaisesRegex(AssertionError, "Crank tracking"):
+            example._test_drive_tracking()
 
     def test_free_assembly_rigid_motion(self):
         """Global translation and rotation preserve a free assembly's escape result."""

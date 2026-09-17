@@ -6,14 +6,15 @@
 The shared Python scene describes all bodies, joints, drives, cylinders, and
 meter-scaled OBJ meshes; no USD file is loaded at runtime. The source gravity is
 1 m/s². Bodies start at rest without damping. Contacts refresh at 120 Hz, with
-30 internal physics steps per refresh and neutral SOR (1.0). Sequential groups
+24 internal physics steps per refresh and neutral SOR (1.0). Sequential groups
 of four constraint colors share mass copies for the jointed mechanism.
 
-This example is an experimental solver stress test. Its default configuration
-has passed a 300-second headless run with joint and fresh-contact checks.
-The free assembly still slides and yaws; its escape check measures motion
-relative to FrameGround. These checks screen instability and overlap; they
-do not establish correct support friction or gear engagement.
+The experimental temporal solver keeps material friction anchors between
+contact refreshes and applies paired impulses at common world points. It uses
+one biased solve per internal step, followed by a final velocity relaxation.
+The assembly is free to move. Joint and fresh-contact checks screen instability
+and overlap. Full-assembly tests also bound support motion after two seconds
+of settling and check sustained crank tracking against the authored target.
 
 Command: python -m newton.examples phoenx_colibri
 """
@@ -172,6 +173,8 @@ class Example(ColibriChecks):
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.fix_base = args.fix_base
+        self._support_test_enabled = not args.fix_base and args.body_count == len(BODY_ORDER)
+        self._support_reference = None
         builder = build_scene(
             body_count=args.body_count,
             fix_base=self.fix_base,
@@ -202,9 +205,10 @@ class Example(ColibriChecks):
             collision_pipeline=self.collision_pipeline,
             articulation_mode="maximal",
             joint_solver="block_pgs",
+            solver_scheme="tgs",
             step_layout="single_world",
             parallel_contact_prepare=True,
-            contact_chunk_size=6,
+            contact_chunk_size=0,
             mass_splitting=True,
             mass_splitting_color_group_size=4,
             mass_splitting_batch_size=2,
@@ -218,6 +222,9 @@ class Example(ColibriChecks):
         self.contacts = self.collision_pipeline.contacts()
         self.viewer.set_model(self.model)
         self.viewer.set_camera(wp.vec3(0.4, -0.7, 0.35), pitch=-10, yaw=120)
+        self._drive_test_time = None
+        self._drive_test_duration = 0.0
+        self._drive_test_integral = 0.0
         self._audit_pipeline = None
         self.graph = None
         if self.model.device.is_cuda:
@@ -233,9 +240,45 @@ class Example(ColibriChecks):
             self.viewer.apply_forces(self.state_0)
             self.solver.step(self.state_0, self.state_0, self.control, self.contacts, dt)
 
+    def _test_support_stationarity(self):
+        """Detect secular support motion after the authored assembly settles."""
+        if not self._support_test_enabled or self.sim_time < 2.0:
+            return
+        base = self.model.body_label.index("FrameGround")
+        pose = self.state_0.body_q.numpy()[base].astype(np.float64)
+        if self._support_reference is None:
+            self._support_reference = pose.copy()
+        reference = self._support_reference
+        drift = np.linalg.norm(pose[:2] - reference[:2])
+        alignment = abs(np.dot(pose[3:], reference[3:])) / (np.linalg.norm(pose[3:]) * np.linalg.norm(reference[3:]))
+        rotation = 2.0 * np.arccos(np.clip(alignment, 0.0, 1.0))
+        assert drift < 0.00005, f"Support creep: {drift:.6f} m since settling"
+        assert rotation < 0.0005, f"Support rotation: {rotation:.6f} rad since settling"
+
+    def _test_drive_tracking(self):
+        """Reject stalled or poorly tracking crank motion after settling."""
+        if not self._support_test_enabled or self.sim_time < 2.0:
+            return
+        joint = self.model.joint_label.index("Frame/Crank")
+        dof = int(self.model.joint_qd_start.numpy()[joint])
+        target = float(self.control.joint_target_qd.numpy()[dof])
+        speed = float(self.state_0.joint_qd.numpy()[dof])
+        if self._drive_test_time is not None:
+            dt = self.sim_time - self._drive_test_time
+            self._drive_test_duration += dt
+            self._drive_test_integral += dt * speed
+        self._drive_test_time = self.sim_time
+        if self._drive_test_duration >= 1.0:
+            mean = self._drive_test_integral / self._drive_test_duration
+            assert abs(mean - target) < 0.05 * abs(target), (
+                f"Crank tracking: mean {mean:.4f} rad/s, target {target:.4f} rad/s"
+            )
+
     def test_post_step(self):
         """Check joint attachment and fresh, independently generated contacts."""
         super().test_post_step()
+        self._test_support_stationarity()
+        self._test_drive_tracking()
         if self._audit_pipeline is None:
             # Separate matching and contact buffers leave simulation history intact.
             self._audit_capacity = 16384
@@ -302,8 +345,10 @@ class Example(ColibriChecks):
             action="store_false",
             help="Diagnostic legacy admission: discard candidates receding at contact generation time.",
         )
-        parser.add_argument("--substeps", type=int, default=30, help="Physics steps per 120 Hz contact refresh.")
-        parser.add_argument("--iterations", type=int, default=4, help="Joint/contact sweeps per physics step.")
+        parser.add_argument("--substeps", type=int, default=24, help="Physics steps per 120 Hz contact refresh.")
+        parser.add_argument(
+            "--iterations", type=int, default=1, help="Joint/contact sweeps per substep (temporal mode requires 1)."
+        )
         return parser
 
 

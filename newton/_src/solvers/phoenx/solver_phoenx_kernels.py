@@ -27,7 +27,10 @@ from newton._src.solvers.phoenx.cloth_collision import (
     SHAPE_ENDPOINT_KIND_RIGID,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
 )
-from newton._src.solvers.phoenx.constraints.bilateral_joint import iterate_bilateral_joint_block
+from newton._src.solvers.phoenx.constraints.bilateral_joint import (
+    get_iterate_bilateral_joint_block,
+    iterate_bilateral_joint_block,
+)
 from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
     CLOTH_BENDING_TIME_US_OFFSET,
     cloth_bending_iterate_at,
@@ -118,6 +121,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_side0_bary,
     cc_get_side1_bary,
 )
+from newton._src.solvers.phoenx.constraints.contact_static_ownership import static_owner
 from newton._src.solvers.phoenx.constraints.joint_inequality import (
     joint_constraint_iterate_inequality,
 )
@@ -2624,6 +2628,7 @@ def _constraints_to_elements_kernel(
     pair_shape_b: wp.array[wp.int32],
     random_values: wp.array[wp.int32],
     track_rigid_topology: wp.int32,
+    separate_static_contacts: wp.int32,
     elements: wp.array[ElementInteractionData],
     element_family: wp.array[wp.int32],
     packed_priorities: wp.array[wp.int32],
@@ -2738,6 +2743,11 @@ def _constraints_to_elements_kernel(
     side1_kind = contact_get_side1_kind(contact_cols, local_cid)
     side0_extra = contact_get_side0_nodes_extra(contact_cols, local_cid)
     side1_extra = contact_get_side1_nodes_extra(contact_cols, local_cid)
+    if separate_static_contacts != 0 and static_owner(contact_cols, local_cid, bodies) >= 0:
+        elements[tid] = _element_data_compact2(wp.int32(-1), wp.int32(-1))
+        if track_rigid_topology != 0:
+            _record_rigid_topology(tid, wp.int32(-1), wp.int32(-1), previous_topology, topology_rebuild)
+        return
 
     contact_first = contact_get_contact_first(contact_cols, local_cid)
     contact_count = contact_get_contact_count(contact_cols, local_cid)
@@ -3407,8 +3417,11 @@ def _make_singleworld_rigid_joint_dispatch_func(
     use_bias: bool,
     enable_column_timers: bool,
     bilateral_joint_blocks: bool = False,
+    temporal_springs: bool = False,
 ):
     """Generated rigid-joint dispatch for single-world kernels."""
+
+    temporal_iterate = get_iterate_bilateral_joint_block(False, temporal_springs=True)
 
     @wp.func
     def _dispatch_rigid_joint(
@@ -3432,9 +3445,14 @@ def _make_singleworld_rigid_joint_dispatch_func(
             )
         else:
             if wp.static(bilateral_joint_blocks):
-                iterate_bilateral_joint_block(
-                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, use_bias
-                )
+                if wp.static(temporal_springs):
+                    temporal_iterate(
+                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, use_bias, 0
+                    )
+                else:
+                    iterate_bilateral_joint_block(
+                        constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, use_bias
+                    )
             joint_constraint_iterate_inequality(
                 constraints,
                 cid,
@@ -3473,6 +3491,7 @@ def _make_singleworld_dispatch_func(
     use_bias: bool,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
+    temporal_springs: bool = False,
 ):
     """Per-cid dispatch helper used by head and fused PGS kernels.
 
@@ -3496,6 +3515,7 @@ def _make_singleworld_dispatch_func(
         use_bias=use_bias,
         enable_column_timers=enable_column_timers,
         bilateral_joint_blocks=bilateral_joint_blocks,
+        temporal_springs=temporal_springs,
     )
 
     @wp.func

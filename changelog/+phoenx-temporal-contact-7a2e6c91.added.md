@@ -1,0 +1,1 @@
+Add experimental `SolverPhoenX(solver_scheme="tgs")` with persistent friction anchors, paired momentum-conserving impulses, and optional contact-wrench output. Enable the validated temporal configuration in the Phoenx Colibri example, with settled-support and crank-tracking regression checks and contact-before-joint ordering that preserves drive tracking without retuning gains.

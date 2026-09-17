@@ -22,7 +22,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--frames", type=int, default=1200)
 parser.add_argument("--body-count", type=int, default=len(BODY_ORDER))
 parser.add_argument("--geometric-candidates", action="store_true")
-parser.add_argument("--substeps", type=int, default=30)
+parser.add_argument("--substeps", type=int, default=24)
 parser.add_argument("--iterations", type=int, default=1)
 parser.add_argument("--warmup", type=int, default=30, help="Frames excluded from synchronized step timing")
 parser.add_argument("--output", type=Path)
@@ -48,7 +48,7 @@ def reported_run(example, args):
         "peak_anchor_m": 0.0,
         "peak_axis_rad": 0.0,
         "passed": False,
-        "passed_scope": "Existing geometry/joint checks only; does not establish base stationarity",
+        "passed_scope": "Joint, fresh-contact, settled-support and crank-tracking checks",
     }
     original_check = example.test_post_step
     original_step = example.step
@@ -92,9 +92,7 @@ def reported_run(example, args):
         horizontal = float(np.linalg.norm(delta[:2]))
         base_metrics["final_displacement_m"] = delta.tolist()
         base_metrics["final_rotation_rad"] = angle
-        base_metrics["max_horizontal_displacement_m"] = max(
-            base_metrics["max_horizontal_displacement_m"], horizontal
-        )
+        base_metrics["max_horizontal_displacement_m"] = max(base_metrics["max_horizontal_displacement_m"], horizontal)
         base_metrics["max_rotation_rad"] = max(base_metrics["max_rotation_rad"], angle)
         original_check()
         # test_final calls this check again at the same time; do not duplicate it.
@@ -174,6 +172,7 @@ def reported_run(example, args):
                 contact_derived=world._contact_container.derived.numpy(),
                 contact_anchors=world._contact_container.lambdas.numpy(),
                 contact_headers=world._contact_cols.data.numpy(),
+                contact_column_count=world._ingest_scratch.num_contact_columns.numpy(),
                 shape_body=model.shape_body.numpy(),
                 shape_labels=np.asarray(model.shape_label),
                 body_labels=np.asarray(model.body_label),
@@ -181,6 +180,21 @@ def reported_run(example, args):
                 body_mass=model.body_mass.numpy(),
                 body_inertia=model.body_inertia.numpy(),
             )
+            strong = world._temporal_contact_state
+            if strong is None:
+                strong = getattr(world._contact_cols, "strong", None)
+            if strong is not None and hasattr(strong, "current"):
+                arrays.update(
+                    patch_membership=strong.current.point_patch.numpy(),
+                    patch_member_next=strong.current.point_next.numpy(),
+                    patch_point_count=strong.current.patch_count.numpy(),
+                    patch_group_first=strong.current.group_first.numpy(),
+                    patch_anchor_count=strong.anchors.count.numpy(),
+                    patch_history_source=strong.anchors.source.numpy(),
+                    patch_broken=strong.anchors.broken.numpy(),
+                    patch_impulses=strong.impulse.numpy(),
+                    patch_keys=strong.keys.numpy(),
+                )
         if not report["passed"]:
             # The first assertion can precede worse errors on later joints.
             report["failed_pose_joint_accuracy"] = measure_joint_accuracy(arrays["q"], model.body_label)

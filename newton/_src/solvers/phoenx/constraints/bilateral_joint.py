@@ -279,13 +279,20 @@ def _prepare_bilateral_joint_blocks_cooperative(
 
 
 @functools.cache
-def get_iterate_bilateral_joint_block(cooperative: bool = False):
+def get_iterate_bilateral_joint_block(cooperative: bool = False, *, temporal_springs: bool = False):
     """Build scalar or eight-lane RHS and forward solve with shared back solve.
 
     The cooperative variant requires eight participating CUDA lanes per joint.
     All lanes take the same enabled/count/valid returns, and gather before
     nonleaders exit. Each row retains its original FP64 component and
     subtraction order; backward substitution and impulse scatter stay scalar.
+
+    Temporal springs solve a fresh force increment each substep. Their existing
+    velocity already includes earlier increments, so their residual omits the
+    accumulated-impulse compliance term. The factor and paired wrench scatter
+    are unchanged. This mode requires unbounded drives with zero armature and
+    one spring solve per temporal substep. Velocity relaxation solves only
+    structural rows; applying springs there would advance them beyond the step.
     """
 
     @wp.func
@@ -304,6 +311,15 @@ def get_iterate_bilateral_joint_block(cooperative: bool = False):
         if data.enabled == 0:
             return
         count = data.row_count[cid]
+        if wp.static(temporal_springs):
+            if not use_bias:
+                # Topology orders structural rows before springs. The leading
+                # LDL factor solves the structural block without spring forces,
+                # as PhysX conclude1DStep requires for velocity iterations.
+                for i in range(count):
+                    if data.row_dynamic[data.row_indices[cid, i]]:
+                        count = i
+                        break
         if count == 0 or data.valid[cid] == 0:
             return
         structural = data.structural_index[cid]
@@ -324,7 +340,8 @@ def get_iterate_bilateral_joint_block(cooperative: bool = False):
                 residual = _dot_double(data.wrench0[structural, local], twist0)
                 residual += _dot_double(data.wrench1[structural, local], twist1)
                 if data.row_dynamic[row]:
-                    residual += wp.float64(data.accumulated[row]) / wp.float64(data.dynamic_mass[row])
+                    if wp.static(not temporal_springs):
+                        residual += wp.float64(data.accumulated[row]) / wp.float64(data.dynamic_mass[row])
                     residual -= wp.float64(data.reference[row])
                 elif use_bias:
                     residual += wp.float64(data.bias[structural, local])
@@ -353,7 +370,8 @@ def get_iterate_bilateral_joint_block(cooperative: bool = False):
                 residual = _dot_double(data.wrench0[structural, local], twist0)
                 residual += _dot_double(data.wrench1[structural, local], twist1)
                 if data.row_dynamic[row]:
-                    residual += wp.float64(data.accumulated[row]) / wp.float64(data.dynamic_mass[row])
+                    if wp.static(not temporal_springs):
+                        residual += wp.float64(data.accumulated[row]) / wp.float64(data.dynamic_mass[row])
                     residual -= wp.float64(data.reference[row])
                 elif use_bias:
                     residual += wp.float64(data.bias[structural, local])
