@@ -117,16 +117,21 @@ class TestColibriAssemblyBounds(unittest.TestCase):
             return result
 
         example.state_0 = state()
+        example.contacts = object()
         example._render_states = (state(), state())
         example._render_state_index = 0
+        example._render_contacts = [None, None]
         example._render_state_done = (None, None)
         example.sim_time = 0.25
+        example.viewer = SimpleNamespace(show_contacts=False)
         example.prepare_render_state()
         snapshot = example._render_states[example._render_state_index]
         example.state_0.body_q.assign([[1, 0, 0, 0, 0, 0, 1]])
         np.testing.assert_array_equal(snapshot.body_q.numpy()[0, :3], [0, 0, 0])
         calls = []
         example.viewer = SimpleNamespace(
+            show_contacts=False,
+            log_contacts=lambda contacts, state: None,
             begin_frame=calls.append,
             log_state=calls.append,
             end_frame=lambda: None,
@@ -149,9 +154,13 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         )
         example._render_state_done = (object(), object())
         example._render_state_index = 0
+        example._render_contacts = [None, None]
         example.state_0 = object()
+        example.contacts = object()
         example.sim_time = 0.0
         example.viewer = SimpleNamespace(
+            show_contacts=False,
+            log_contacts=lambda contacts, state: None,
             begin_frame=lambda time: None,
             log_state=lambda state: None,
             end_frame=lambda: calls.append(("render", None)),
@@ -168,6 +177,64 @@ class TestColibriAssemblyBounds(unittest.TestCase):
             event = example._render_state_done[index]
             expected.extend([("wait", event), ("copy", index), ("release", event), ("render", None)])
         self.assertEqual(calls, expected)
+
+    def test_contact_display_snapshots_only_when_enabled(self):
+        """Toggle contact display without racing live buffers or copying when hidden."""
+        example = PhoenxExample.__new__(PhoenxExample)
+        example.contacts = scene.newton.Contacts(2, 0, device="cpu", requested_attributes={"force"})
+        example.contacts.rigid_contact_count.assign([1])
+        example.contacts.rigid_contact_point0.assign([[1, 2, 3], [0, 0, 0]])
+        example.contacts.force.assign(np.ones((2, 6), dtype=np.float32))
+        example.state_0 = scene.newton.State()
+        example._render_states = (scene.newton.State(), scene.newton.State())
+        example._render_state_index = 0
+        example._render_contacts = [None, None]
+        example._render_state_done = (None, None)
+        example.sim_time = 0.25
+        calls = []
+        example.viewer = SimpleNamespace(
+            show_contacts=False,
+            begin_frame=lambda time: calls.append(("time", time)),
+            log_state=lambda state: calls.append(("state", state)),
+            log_contacts=lambda contacts, state: calls.append(("contacts", contacts, state)),
+            end_frame=lambda: None,
+        )
+        example.prepare_render_state()
+        self.assertEqual(example._render_contacts, [None, None])
+        example.render()
+        example.viewer.show_contacts = True
+        for _ in range(3):
+            example.prepare_render_state()
+            index = example._render_state_index
+            snapshot = example._render_contacts[index]
+            self.assertIsNotNone(snapshot)
+            np.testing.assert_array_equal(snapshot.rigid_contact_count.numpy(), [1])
+            np.testing.assert_array_equal(snapshot.rigid_contact_point0.numpy()[0], [1, 2, 3])
+            np.testing.assert_array_equal(snapshot.force.numpy(), 1)
+            example.contacts.rigid_contact_count.zero_()
+            example.contacts.rigid_contact_point0.zero_()
+            example.contacts.force.zero_()
+            calls.clear()
+            example.sim_time = 0.5
+            example.render()
+            self.assertIn(("contacts", snapshot, example._render_states[index]), calls)
+            np.testing.assert_array_equal(snapshot.rigid_contact_count.numpy(), [1])
+            np.testing.assert_array_equal(snapshot.rigid_contact_point0.numpy()[0], [1, 2, 3])
+            np.testing.assert_array_equal(snapshot.force.numpy(), 1)
+            example.contacts.rigid_contact_count.assign([1])
+            example.contacts.rigid_contact_point0.assign([[1, 2, 3], [0, 0, 0]])
+            example.contacts.force.assign(np.ones((2, 6), dtype=np.float32))
+        buffers = tuple(example._render_contacts)
+        example.viewer.show_contacts = False
+        with patch.object(scene.wp, "copy", side_effect=AssertionError("Unexpected contact copy")):
+            example.prepare_render_state()
+        example.render()
+        self.assertEqual(tuple(example._render_contacts), buffers)
+        # Paused and non-overlapping rendering uses matching live data.
+        example.viewer.show_contacts = True
+        calls.clear()
+        example.render()
+        self.assertIn(("contacts", example.contacts, example.state_0), calls)
 
     def test_motor_off_removes_drive_and_servo_damping(self):
         """A zero speed target must not be mistaken for a disabled motor."""
