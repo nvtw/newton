@@ -297,6 +297,9 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             default_clearcoat=default_clearcoat,
             default_clearcoat_roughness=default_clearcoat_roughness,
         )
+        # Prefer overlay arrows for contact debugging. Disks remain opt-in
+        # because they add ray-traced geometry to the scene.
+        self.show_contact_disks = False
         camera_width, camera_height = self.width, self.height
         self.exposure = exposure
         self.tonemap_contrast = contrast
