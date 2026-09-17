@@ -969,6 +969,7 @@ class SolverPhoenX(SolverBase):
                 effective_joint_target_start=joint_target_start,
             )
             self.world._direct_equality_system = self._direct_equality_system
+            self._direct_equality_system.bind_d6_inequalities(self.world.constraints, joint_idx_to_cid)
             if self._direct_equality_system.enabled:
                 if self._direct_tree_contacts:
                     assert self._maximal_tree_projector is not None
@@ -1170,7 +1171,8 @@ class SolverPhoenX(SolverBase):
                 int(JOINT_MODE_CARTESIAN),
                 int(JOINT_MODE_GENERIC_D6),
             ):
-                equality_only = int(d6_limit_count[cid]) == 0
+                common_count = int(direct.d6_inequality_count[cid])
+                equality_only = int(d6_limit_count[cid]) == 0 and common_count == 0
             if equality_only:
                 joint_pgs_enabled[cid] = 0
         self.world.set_joint_pgs_ownership(joint_pgs_enabled)
@@ -1641,6 +1643,10 @@ class SolverPhoenX(SolverBase):
             if self._direct_equality_system is not None:
                 previous_direct_solver = getattr(self._direct_equality_system, "solver", None)
                 self._direct_equality_system.refresh_joint_properties()
+                self._direct_equality_system.bind_d6_inequalities(
+                    self.world.constraints,
+                    self._joint_constraints.joint_idx_to_cid.numpy(),
+                )
                 if previous_direct_solver is not getattr(self._direct_equality_system, "solver", None):
                     self._rebuild_direct_contact_response()
                 self._refresh_direct_joint_ownership()

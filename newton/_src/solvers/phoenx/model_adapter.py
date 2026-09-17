@@ -632,27 +632,6 @@ def build_joint_init_arrays(
 
         if d6_mode_tag == "GENERIC":
             phoenx_mode = int(JOINT_MODE_GENERIC_D6)
-            for dof in range(qd_start, qd_start + n_lin + n_ang):
-                if _is_locked_dof(limit_lower, limit_upper, dof):
-                    continue
-                lo = float(limit_lower[dof]) if limit_lower is not None else -1.0e10
-                hi = float(limit_upper[dof]) if limit_upper is not None else 1.0e10
-                if lo > -1.0e5 or hi < 1.0e5:
-                    raise NotImplementedError(
-                        f"Generic D6 joint {j} has a finite free-axis limit; "
-                        "generic D6 inequalities are not implemented yet."
-                    )
-                if joint_friction is not None and float(joint_friction[dof]) > 0.0:
-                    raise NotImplementedError(
-                        f"Generic D6 joint {j} has Coulomb friction; generic D6 inequalities are not implemented yet."
-                    )
-                if velocity_limit is not None:
-                    raw_velocity_limit = float(velocity_limit[dof])
-                    if np.isfinite(raw_velocity_limit) and 0.0 < raw_velocity_limit < 1.0e5:
-                        raise NotImplementedError(
-                            f"Generic D6 joint {j} has a velocity limit; "
-                            "generic D6 inequalities are not implemented yet."
-                        )
         elif effective_jtype is newton.JointType.DISTANCE:
             phoenx_mode = int(JOINT_MODE_DISTANCE)
             if child_idx >= 0:
@@ -721,20 +700,6 @@ def build_joint_init_arrays(
             linear_rank = int(np.linalg.matrix_rank(linear_axes, tol=1.0e-6))
             if linear_rank != len(lin_free):
                 raise NotImplementedError(f"Cartesian D6 joint {j} has linearly dependent translation axes.")
-            for linear_index in lin_free:
-                dof = qd_start + linear_index
-                lower = float(limit_lower[dof]) if limit_lower is not None else -1.0e10
-                upper = float(limit_upper[dof]) if limit_upper is not None else 1.0e10
-                if lower > -5.0e9 or upper < 5.0e9:
-                    raise NotImplementedError(
-                        f"Cartesian D6 joint {j} has a finite linear limit; "
-                        "Cartesian limit inequalities are not implemented yet."
-                    )
-                if joint_friction is not None and float(joint_friction[dof]) > 0.0:
-                    raise NotImplementedError(
-                        f"Cartesian D6 joint {j} has linear Coulomb friction; "
-                        "Cartesian friction inequalities are not implemented yet."
-                    )
         elif d6_mode_tag in ("CYLINDRICAL", "PLANAR"):
             phoenx_mode = int(JOINT_MODE_CYLINDRICAL) if d6_mode_tag == "CYLINDRICAL" else int(JOINT_MODE_PLANAR)
             lin_free = [i for i, locked in enumerate(locked_lin) if not locked]

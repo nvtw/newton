@@ -13,6 +13,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.constraints.bilateral_joint_data import BilateralJointData
+from newton._src.solvers.phoenx.constraints.d6_joint_data import D6JointData
 from newton._src.solvers.phoenx.helpers.array_access import read2d_f32, write2d_f32
 from newton._src.solvers.phoenx.helpers.data_packing import (
     dword_offset_of,
@@ -168,6 +169,8 @@ class ConstraintContainer:
 
     #: Disabled by default; optional per-joint blocks for colored rigid PGS.
     bilateral: BilateralJointData
+    #: Disabled by default; common unilateral rows for maximal D6 axes.
+    d6: D6JointData
     data: wp.array2d[wp.float32]
     #: Mutable accumulated multipliers, packed as three vec4 groups per constraint.
     multipliers: wp.array2d[wp.vec4f]
