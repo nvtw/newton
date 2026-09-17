@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Load ordered contact rows with an eight-lane CUDA subgroup."""
+"""Load ordered contact rows cooperatively within a CUDA warp."""
 
 import functools
 
@@ -32,23 +32,27 @@ from newton._src.solvers.phoenx.helpers.math_helpers import apply_pair_velocity_
 
 @wp.func_native("""
 #if defined(__CUDA_ARCH__)
-    unsigned int mask = 0xffu << (threadIdx.x & 24);
-    return __shfl_sync(mask, value, source, 8);
+    unsigned int mask = (0xffffffffu >> (32 - width)) << (threadIdx.x & (32 - width));
+    return __shfl_sync(mask, value, source, width);
 #else
     return value;
 #endif
 """)
-def shuffle(value: wp.float32, source: wp.int32) -> wp.float32: ...
+def shuffle(value: wp.float32, source: wp.int32, width: wp.int32) -> wp.float32: ...
 
 
 @wp.func
-def shuffle_vec(value: wp.vec3f, source: int):
-    return wp.vec3f(shuffle(value[0], source), shuffle(value[1], source), shuffle(value[2], source))
+def shuffle_vec(value: wp.vec3f, source: int, width: int):
+    return wp.vec3f(
+        shuffle(value[0], source, width), shuffle(value[1], source, width), shuffle(value[2], source, width)
+    )
 
 
 @functools.cache
-def get_solve_rows_cooperative(record_wrenches: bool = False):
+def get_solve_rows_cooperative(record_wrenches: bool = False, *, lanes: int = 8):
     """Build a cooperative solve with optional impulse-wrench accounting."""
+    if lanes not in (4, 8, 16, 32):
+        raise ValueError("Contact subgroup width must be 4, 8, 16, or 32")
     solve_contact_tgs = get_solve_contact_tgs(record_wrenches)
 
     @wp.func
@@ -74,7 +78,7 @@ def get_solve_rows_cooperative(record_wrenches: bool = False):
         biased: bool,
         lane: int,
     ):
-        for base in range(0, size, 8):
+        for base in range(0, size, wp.static(lanes)):
             k_load = first + base + lane
             cached = NormalRow()
             prior = float(0.0)
@@ -88,13 +92,13 @@ def get_solve_rows_cooperative(record_wrenches: bool = False):
                     cached.effective_mass = cc_get_eff_n(cc, k_load)
                     cached.bias = cc_get_bias(cc, k_load)
                 prior = cc_get_normal_lambda(cc, k_load)
-            for source in range(wp.min(8, size - base)):
-                normal = shuffle_vec(cached.normal, source)
-                r0 = shuffle_vec(cached.r0, source)
-                r1 = shuffle_vec(cached.r1, source)
-                effective_mass = shuffle(cached.effective_mass, source)
-                bias = shuffle(cached.bias, source)
-                old = shuffle(prior, source)
+            for source in range(wp.min(wp.static(lanes), size - base)):
+                normal = shuffle_vec(cached.normal, source, wp.static(lanes))
+                r0 = shuffle_vec(cached.r0, source, wp.static(lanes))
+                r1 = shuffle_vec(cached.r1, source, wp.static(lanes))
+                effective_mass = shuffle(cached.effective_mass, source, wp.static(lanes))
+                bias = shuffle(cached.bias, source, wp.static(lanes))
+                old = shuffle(prior, source, wp.static(lanes))
                 # Keep identical ordered arithmetic active across the subgroup;
                 # only lane zero writes impulses and the final body state.
                 if biased or bias <= 0.0:

@@ -33,7 +33,14 @@ from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContai
 
 
 @functools.cache
-def make_iterate(*, mass_splitting: bool, biased: bool, cooperative: bool = False, record_wrenches: bool = False):
+def make_iterate(
+    *,
+    mass_splitting: bool,
+    biased: bool,
+    cooperative: bool = False,
+    record_wrenches: bool = False,
+    cooperative_lanes: int = 8,
+):
     """Specialize rigid contact dispatch without adding branches to other solvers.
 
     Slots and copy counts must be stamped by the constraint graph. Static
@@ -42,7 +49,7 @@ def make_iterate(*, mass_splitting: bool, biased: bool, cooperative: bool = Fals
     """
 
     solve_contact_rows_tgs = get_solve_contact_rows_tgs(record_wrenches)
-    solve_rows_cooperative = get_solve_rows_cooperative(record_wrenches)
+    solve_rows_cooperative = get_solve_rows_cooperative(record_wrenches, lanes=cooperative_lanes)
 
     @wp.func
     def iterate(

@@ -333,3 +333,93 @@ Replacing the candidate with `/tmp/colibri_uniform_lane_control_repeat` fails
 at the speedup assertion while retaining exact trajectory/quality parity.
 This gate complements the repeated measurements and Nsight attribution; it is
 not a universal timing threshold or a replacement for controlled hardware.
+
+
+Skipping empty joint/contact color phases was rejected. A frame-60 census
+found 19 colors, with ten of their 38 phases empty; IDs were sorted within
+each color. A block-uniform early skip based on the first/last ID preserved
+frozen velocity/impulse bits, but median sweep time increased from 159.744 to
+161.792 microseconds. The candidate was removed. Artifacts:
+`/tmp/colibri_color_phase_census.json` and
+`/tmp/colibri_empty_phase_{candidate,control}.{json,npz}`.
+
+
+### Full-warp contact loading candidate and cross-scene checks
+
+Contact subgroup widths 4/8/16/32 measured frozen sweep medians of
+169.984/159.744/155.648/139.264 microseconds. Joint subgroups remain eight
+lanes. The full-warp contact variant removes inter-contact warp divergence
+while retaining ordered row arithmetic and single-writer impulse/body updates.
+Its first finalized full-minute Colibri run measured 15.0246 ms/frame and
+matched every retained pose/velocity bit, including unchanged penetration and
+joint peaks. The fresh control measured 16.0880 ms/frame; a closing candidate repeat
+measured 15.2141 ms/frame. Both candidate minutes pass the saved-run
+gate requiring 3% improvement and exact trajectory/quality parity. No Colibri-name check or scene-specific physical setting was
+introduced.
+
+Following the user's cross-scene requirement, the candidate was checked
+against the prior implementation on these additional workloads:
+
+| Workload | Candidate/control time | Saved-state comparison |
+| --- | --- | --- |
+| G1, 1,024 worlds, production reduced recipe | 1.9527/1.9501 ms per policy step | All 60 saved joint-position/velocity frames exact |
+| DR Legs hold, 64 worlds, 5 substeps and 8 iterations | 11.5283/11.7488 ms per policy step | All 120 saved body-state samples exact over 240 measured steps |
+| Kapla, 11,341 bodies, 6 substeps and 10 iterations | 28.0930/28.1547 ms per frame | Baseline is not bitwise repeatable; see below |
+
+These runs use 60 warmup frames; robot resets are disabled. G1's physical
+smoke window has no terminations or nonfinite states. DR Legs remains finite,
+with minimum pelvis height 0.253724 m and minimum upright cosine 0.999522.
+The robot timings include environment observation/reward work. They are not
+trained-policy balance acceptance, and small timing differences are not
+claimed as gains. Kapla and DR Legs runtime probes confirm both temporal
+contact state and color-group topology are absent; G1 uses reduced articulation
+kernels, not the changed maximal temporal dispatch.
+
+Kapla candidate/control are initially bitwise equal and first differ at
+measured frame 32. A second unchanged-code control also first differs at frame
+32, with the same maximum pose-component difference (0.0114795) and velocity-
+component difference (1.53025). Candidate/control logs have identical sets of
+loaded kernel hashes. The repeated control takes 28.0041 ms/frame. Final tower
+heights are 2.792855/2.792775/2.792824 m for candidate/control/repeated control.
+This establishes pre-existing nondeterminism in this check; it does not prove
+universal bitwise Kapla determinism or long-duration stability.
+
+The older animated DR Legs benchmark fails before simulation because it
+expects `/DR_Legs/RigidBodies/pelvis`, while the current cached asset contains
+`/dr_legs/pelvis`. The current RL loader supports that asset and was used for
+the comparison above. No asset or robot parameters were rewritten to make the
+old loader pass.
+
+Artifacts: `/tmp/colibri_contact32_{g1,dr,kapla}_{candidate,control}.{json,npz}`,
+`/tmp/colibri_contact32_kapla_control_repeat.{json,npz}`,
+`/tmp/colibri_contact32_kapla_variation.json`,
+`/tmp/colibri_cross_scene_check.py`, and
+`/tmp/colibri_contact32_minute.{json,npz}`. G1 uses the existing
+`local_studies.colibri.check_g1_regressions` command with `--world-count 1024
+--frames 60 --benchmark-frames 120`. Four focused contact tests pass; the new
+full-warp tail-row regression fails against the prior implementation.
+
+
+The full-warp candidate is retained after the closing checks. All 3,600
+motor-off pose/velocity frames also match the retained solver exactly, with
+unchanged 0.240596 mm peak penetration and support stationarity passing.
+Artifact: `/tmp/colibri_contact32_motor_off.{json,npz}`. Its unpowered timing
+is a different workload and is not compared against the powered goal baseline.
+
+Matched Nsight graph-node captures show 5,760 biased sweeps in each run:
+median 178.286 -> 156.254 microseconds, mean 189.596 -> 168.642 microseconds.
+Artifacts: `/tmp/colibri_contact32_{candidate,control}_nodes.nsys-rep` and
+`/tmp/colibri_contact32_{candidate,control}_stats.csv`. All loaded kernel hashes
+match across the G1, DR Legs, and Kapla candidate/control pairs; see
+`/tmp/colibri_contact32_cross_scene_modules.json`.
+
+The expanded suite passes 11 tests, including ragged temporal contact groups
+with multiple batches per color, inter-color ordering, full/partial warp tail
+rows, momentum, joint springs, and force reporting. The new tail-row test was
+verified to fail against the previous implementation. Required repository-wide
+hooks report existing unrelated issues; unrelated auto-edits were restored,
+and all changed-file hooks pass.
+
+The Colibri runs here cover 3,600 total frames: 60 warmup and 3,540 measured.
+The final optimization-goal gate must measure 3,600 frames after warmup, not
+count warmup toward that window. The 9.4 ms target remains unachieved.

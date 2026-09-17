@@ -57,7 +57,7 @@ def get_sweep_kernel(
     )
     contact_iterate = make_iterate(mass_splitting=True, biased=use_bias, record_wrenches=record_wrenches)
     contact_cooperative = make_iterate(
-        mass_splitting=True, biased=use_bias, cooperative=True, record_wrenches=record_wrenches
+        mass_splitting=True, biased=use_bias, cooperative=True, record_wrenches=record_wrenches, cooperative_lanes=32
     )
 
     @wp.func
@@ -113,9 +113,15 @@ def get_sweep_kernel(
                 for local_color in range(slab_width):
                     color = slab * slab_width + local_color
                     if color < num_colors[0]:
-                        for index in range(
-                            starts[color] + lane / lanes_per_constraint, starts[color + 1], CONSTRAINTS_PER_BLOCK
-                        ):
+                        row_lanes = wp.int32(wp.static(lanes_per_constraint))
+                        row_stride = wp.int32(wp.static(CONSTRAINTS_PER_BLOCK))
+                        if wp.static(cooperative_joints):
+                            # Each contact group gets a whole warp; joints retain
+                            # eight lanes for their small block solve.
+                            if kind == 0:
+                                row_lanes = 32
+                                row_stride = 8
+                        for index in range(starts[color] + lane / row_lanes, starts[color + 1], row_stride):
                             cid = ids[index]
                             if wp.static(not preparing):
                                 if (cid < num_joints) == (kind == 0):
@@ -150,9 +156,7 @@ def get_sweep_kernel(
                                 else:
                                     contact = cid - num_joints
                                     if static_owner(columns, contact, bodies) < 0:
-                                        contact_cooperative(
-                                            columns, state, contact, bodies, cc, copies, idt, lane % JOINT_RHS_LANES
-                                        )
+                                        contact_cooperative(columns, state, contact, bodies, cc, copies, idt, lane % 32)
                             else:
                                 dispatch(
                                     constraints,
