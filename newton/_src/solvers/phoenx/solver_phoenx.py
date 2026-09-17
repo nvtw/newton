@@ -1988,13 +1988,6 @@ class PhoenXWorld:
         damping_drive: wp.array,
         min_value: wp.array,
         max_value: wp.array,
-        hertz_limit: wp.array,
-        damping_ratio_limit: wp.array,
-        stiffness_limit: wp.array,
-        damping_limit: wp.array,
-        friction_coefficient: wp.array | None = None,
-        friction_slip_scale: wp.array | None = None,
-        velocity_limit: wp.array | None = None,
     ) -> None:
         """Pack ``num_joints`` actuated-DBS joint columns. Call once after
         :meth:`__init__`, before the first :meth:`step`. All input arrays must
@@ -2017,28 +2010,9 @@ class PhoenXWorld:
                 damping_drive == 0`` disables the drive row.
             min_value, max_value: Limit window (``min > max``
                 disables).
-            hertz_limit, damping_ratio_limit: Soft-constraint limit
-                knobs (used when both PD gains are zero).
-            stiffness_limit, damping_limit: Limit PD gains (SI). Any
-                strictly positive value selects the PD formulation.
-            friction_coefficient: Per-joint Coulomb friction limit on
-                the axial DoF [N*m for revolute, N for prismatic].
-                ``None`` (default) zero-fills, disabling friction on
-                every joint. Operates independently of the drive --
-                total axial impulse is the sum of the clamped drive PD
-                term and the clamped friction term, matching MuJoCo's
-                ``dof_frictionloss + actuator`` decomposition.
-            velocity_limit: Optional symmetric axial speed cap [m/s or rad/s].
-                None disables the cap.
         """
         if self.num_joints <= 0:
             return
-        if friction_coefficient is None:
-            friction_coefficient = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
-        if friction_slip_scale is None:
-            friction_slip_scale = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
-        if velocity_limit is None:
-            velocity_limit = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
         wp.launch(
             joint_constraint_initialize_kernel,
             dim=self.num_joints,
@@ -2061,13 +2035,6 @@ class PhoenXWorld:
                 damping_drive,
                 min_value,
                 max_value,
-                hertz_limit,
-                damping_ratio_limit,
-                stiffness_limit,
-                damping_limit,
-                friction_coefficient,
-                friction_slip_scale,
-                velocity_limit,
             ],
             device=self.device,
         )

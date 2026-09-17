@@ -85,8 +85,29 @@ class TestInvariants(unittest.TestCase):
     def test_joint_columns_omit_bilateral_factor_caches(self) -> None:
         """Keep obsolete bilateral PGS caches out of joint columns."""
         fields = set(JointConstraintData.vars)
-        self.assertTrue(fields.isdisjoint({"structural_direct", "mode_cache", "hertz", "mass_coeff", "impulse_coeff"}))
-        self.assertLessEqual(JOINT_CONSTRAINT_DWORDS, 85)
+        self.assertTrue(
+            fields.isdisjoint(
+                {
+                    "structural_direct",
+                    "mode_cache",
+                    "hertz",
+                    "mass_coeff",
+                    "impulse_coeff",
+                    "velocity_limit",
+                    "friction_coefficient",
+                    "friction_slip_scale",
+                    "hertz_limit",
+                    "damping_ratio_limit",
+                    "stiffness_limit",
+                    "damping_limit",
+                    "eff_inv_axial",
+                    "eff_inv_friction",
+                    "limit_cache",
+                    "clamp",
+                }
+            )
+        )
+        self.assertLessEqual(JOINT_CONSTRAINT_DWORDS, 72)
 
     def test_joint_initialization_omits_legacy_d6_limits(self) -> None:
         """Keep angular limits in the common per-axis D6 representation."""
@@ -469,10 +490,6 @@ class TestPrepareRefreshStride(unittest.TestCase):
             damping_drive=_f(0.0),
             min_value=_f(1.0),
             max_value=_f(-1.0),
-            hertz_limit=_f(60.0),
-            damping_ratio_limit=_f(1.0),
-            stiffness_limit=_f(0.0),
-            damping_limit=_f(0.0),
         )
         self.assertEqual(w.num_joints, 1)
 

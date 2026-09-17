@@ -139,17 +139,6 @@ DRIVE_MODE_VELOCITY = wp.constant(wp.int32(2))
 
 
 # ---------------------------------------------------------------------------
-# Limit-clamp state tags (mirrors constraint_hinge_angle's _CLAMP_*).
-# ---------------------------------------------------------------------------
-
-_CLAMP_NONE = wp.constant(wp.int32(0))
-_CLAMP_MAX = wp.constant(wp.int32(1))
-_CLAMP_MIN = wp.constant(wp.int32(2))
-_CLAMP_VELOCITY_MAX = wp.constant(wp.int32(3))
-_CLAMP_VELOCITY_MIN = wp.constant(wp.int32(4))
-
-
-# ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
 
@@ -212,8 +201,6 @@ class JointConstraintData:
     # ``target_velocity`` is rad/s or m/s.
     target: wp.float32
     target_velocity: wp.float32
-    # Symmetric free-coordinate speed cap [m/s or rad/s]. Zero disables.
-    velocity_limit: wp.float32
     max_force_drive: wp.float32
     # Drive parameters: normal PD only. ``stiffness_drive`` = kp [N/m or
     # N*m/rad], ``damping_drive`` = kd [N*s/m or N*m*s/rad]. Both zero
@@ -225,46 +212,11 @@ class JointConstraintData:
     # storage avoided to keep the constraint footprint compact.
     stiffness_drive: wp.float32
     damping_drive: wp.float32
-    # Joint-axis Coulomb friction limit [N*m for revolute, N for
-    # prismatic]. Implemented as a saturated soft row on the same axial
-    # Jacobian as the drive / limit rows.
-    friction_coefficient: wp.float32
-    # MuJoCo-style slip scale for the friction row. Positive values are
-    # multiplied by the current axial inverse effective mass and friction
-    # limit to get the slip velocity; non-positive values use
-    # :data:`PHOENX_FRICTION_SLIP_VELOCITY` as a solver fallback.
-    friction_slip_scale: wp.float32
     # Limit window: rad (revolute) or m (prismatic). ``min_value >
     # max_value`` disables the limit (matches the standalone
     # angular_limit / linear_limit sentinel).
     min_value: wp.float32
     max_value: wp.float32
-    # Limit softness: dual parameterisation -- if either
-    # ``stiffness_limit`` or ``damping_limit`` is strictly positive the
-    # row uses the Jitter2 PD spring-damper path; otherwise it falls
-    # back to Box2D ``(hertz_limit, damping_ratio_limit)``. Same
-    # discriminator as the standalone angular_limit / linear_limit
-    # (``stiffness > 0 or damping > 0 -> PD``).
-    hertz_limit: wp.float32
-    damping_ratio_limit: wp.float32
-    stiffness_limit: wp.float32
-    damping_limit: wp.float32
-    # Cached scalar inverse effective mass for the axial row,
-    # ``J M^-1 J^T`` (used by the Box2D limit path).
-    eff_inv_axial: wp.float32
-    # Friction may need a direct-structural Schur correction while drives
-    # retain their existing maximal-coordinate response.
-    eff_inv_friction: wp.float32
-    # Aliased per-substep limit cache: 3 dwords shared between the
-    # Box2D and PD limit formulations. The discriminator is
-    # ``stiffness_limit > 0 or damping_limit > 0`` -> PD, else Box2D;
-    # the choice is fixed once stiffness_limit / damping_limit are set
-    # at construction, so the two layouts never collide.
-    #
-    # Box2D layout: [bias_limit_box2d, mass_coeff_limit, impulse_coeff_limit]
-    # PD layout:    [pd_gamma_limit,   pd_beta_limit,    pd_mass_coeff_limit]
-    limit_cache: wp.types.vector(length=3, dtype=wp.float32)
-    clamp: wp.int32
     # Cached world-frame joint axis from the most recent prepare-pass.
     axis_world: wp.vec3f
     #: Opt-in per-column wall-clock accumulator (microseconds). See
@@ -311,31 +263,11 @@ _OFF_REST_LENGTH = wp.constant(dword_offset_of(JointConstraintData, "rest_length
 _OFF_DRIVE_MODE = wp.constant(dword_offset_of(JointConstraintData, "drive_mode"))
 _OFF_TARGET = wp.constant(dword_offset_of(JointConstraintData, "target"))
 _OFF_TARGET_VELOCITY = wp.constant(dword_offset_of(JointConstraintData, "target_velocity"))
-_OFF_VELOCITY_LIMIT = wp.constant(dword_offset_of(JointConstraintData, "velocity_limit"))
 _OFF_MAX_FORCE_DRIVE = wp.constant(dword_offset_of(JointConstraintData, "max_force_drive"))
 _OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(JointConstraintData, "stiffness_drive"))
 _OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(JointConstraintData, "damping_drive"))
-_OFF_FRICTION_COEFFICIENT = wp.constant(dword_offset_of(JointConstraintData, "friction_coefficient"))
-_OFF_FRICTION_SLIP_SCALE = wp.constant(dword_offset_of(JointConstraintData, "friction_slip_scale"))
 _OFF_MIN_VALUE = wp.constant(dword_offset_of(JointConstraintData, "min_value"))
 _OFF_MAX_VALUE = wp.constant(dword_offset_of(JointConstraintData, "max_value"))
-_OFF_HERTZ_LIMIT = wp.constant(dword_offset_of(JointConstraintData, "hertz_limit"))
-_OFF_DAMPING_RATIO_LIMIT = wp.constant(dword_offset_of(JointConstraintData, "damping_ratio_limit"))
-_OFF_STIFFNESS_LIMIT = wp.constant(dword_offset_of(JointConstraintData, "stiffness_limit"))
-_OFF_DAMPING_LIMIT = wp.constant(dword_offset_of(JointConstraintData, "damping_limit"))
-_OFF_EFF_INV_AXIAL = wp.constant(dword_offset_of(JointConstraintData, "eff_inv_axial"))
-_OFF_EFF_INV_FRICTION = wp.constant(dword_offset_of(JointConstraintData, "eff_inv_friction"))
-# Aliased Box2D / PD limit cache: 3 shared dwords. Layouts:
-#   Box2D: [bias_limit_box2d, mass_coeff_limit, impulse_coeff_limit]
-#   PD:    [pd_gamma_limit,   pd_beta_limit,    pd_mass_coeff_limit]
-_OFF_LIMIT_CACHE = wp.constant(dword_offset_of(JointConstraintData, "limit_cache"))
-_OFF_BIAS_LIMIT_BOX2D = wp.constant(int(_OFF_LIMIT_CACHE) + 0)
-_OFF_MASS_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 1)
-_OFF_IMPULSE_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
-_OFF_PD_GAMMA_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 0)
-_OFF_PD_BETA_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 1)
-_OFF_PD_MASS_COEFF_LIMIT = wp.constant(int(_OFF_LIMIT_CACHE) + 2)
-_OFF_CLAMP = wp.constant(dword_offset_of(JointConstraintData, "clamp"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(JointConstraintData, "axis_world"))
 # Family-aliased mutable state in three aligned vec4 groups: impulse.xyz and
 # its correlated limit/friction scalar in w.
@@ -343,7 +275,6 @@ _MUL_ACC_IMP1 = wp.constant(wp.int32(0))
 _MUL_ACC_IMP2 = wp.constant(wp.int32(4))
 _MUL_ACC_LIMIT = wp.constant(wp.int32(7))
 _MUL_ACC_IMP3 = wp.constant(wp.int32(8))
-_MUL_ACC_FRICTION = wp.constant(wp.int32(11))
 JOINT_CONSTRAINT_TIME_US_OFFSET = wp.constant(dword_offset_of(JointConstraintData, "time_us"))
 
 #: Total dword count of one unified joint constraint.
@@ -375,13 +306,6 @@ def joint_constraint_initialize_kernel(
     damping_drive: wp.array[wp.float32],
     min_value: wp.array[wp.float32],
     max_value: wp.array[wp.float32],
-    hertz_limit: wp.array[wp.float32],
-    damping_ratio_limit: wp.array[wp.float32],
-    stiffness_limit: wp.array[wp.float32],
-    damping_limit: wp.array[wp.float32],
-    friction_coefficient: wp.array[wp.float32],
-    friction_slip_scale: wp.array[wp.float32],
-    velocity_limit: wp.array[wp.float32],
 ):
     """Pack one batch of unified joint descriptors.
 
@@ -411,12 +335,6 @@ def joint_constraint_initialize_kernel(
             reuses these slots for ``bend_stiffness`` / ``bend_damping``.
         min_value, max_value: Limit window [rad or m]; ``min > max``
             disables the limit.
-        hertz_limit, damping_ratio_limit: Box2D-style limit knobs;
-            used iff ``stiffness_limit == damping_limit == 0``.
-        stiffness_limit, damping_limit: PD limit gains (absolute SI).
-            If either > 0 the limit uses the Jitter2 spring-damper
-            path and the Box2D knobs are ignored. CABLE mode reuses
-            these slots for ``twist_stiffness`` / ``twist_damping``.
     """
     tid = wp.tid()
     cid = cid_offset + tid
@@ -517,30 +435,13 @@ def joint_constraint_initialize_kernel(
     write_int(constraints, _OFF_DRIVE_MODE, cid, drive_mode[tid])
     write_float(constraints, _OFF_TARGET, cid, target[tid])
     write_float(constraints, _OFF_TARGET_VELOCITY, cid, target_velocity[tid])
-    write_float(constraints, _OFF_VELOCITY_LIMIT, cid, velocity_limit[tid])
     write_float(constraints, _OFF_MAX_FORCE_DRIVE, cid, max_force_drive[tid])
     write_float(constraints, _OFF_STIFFNESS_DRIVE, cid, stiffness_drive[tid])
     write_float(constraints, _OFF_DAMPING_DRIVE, cid, damping_drive[tid])
-    write_float(constraints, _OFF_FRICTION_COEFFICIENT, cid, friction_coefficient[tid])
-    write_float(constraints, _OFF_FRICTION_SLIP_SCALE, cid, friction_slip_scale[tid])
     write_float(constraints, _OFF_MIN_VALUE, cid, min_value[tid])
     write_float(constraints, _OFF_MAX_VALUE, cid, max_value[tid])
-    write_float(constraints, _OFF_HERTZ_LIMIT, cid, hertz_limit[tid])
-    write_float(constraints, _OFF_DAMPING_RATIO_LIMIT, cid, damping_ratio_limit[tid])
-    write_float(constraints, _OFF_STIFFNESS_LIMIT, cid, stiffness_limit[tid])
-    write_float(constraints, _OFF_DAMPING_LIMIT, cid, damping_limit[tid])
-    write_float(constraints, _OFF_EFF_INV_AXIAL, cid, 0.0)
-    write_float(constraints, _OFF_EFF_INV_FRICTION, cid, 0.0)
-    # ``limit_cache`` is mode-aliased Box2D vs PD; one zero-fill of
-    # the 3 shared dwords covers both layouts. Prepare overwrites
-    # them every substep based on the limit type.
-    write_float(constraints, _OFF_LIMIT_CACHE + 0, cid, 0.0)
-    write_float(constraints, _OFF_LIMIT_CACHE + 1, cid, 0.0)
-    write_float(constraints, _OFF_LIMIT_CACHE + 2, cid, 0.0)
-    write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
     constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, 0.0)
-    constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -601,15 +502,8 @@ def _joint_constraint_clear_reset_worlds_kernel(
 
     constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, zero3)
     constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, zero3)
-    write_float(constraints, _OFF_EFF_INV_AXIAL, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_EFF_INV_FRICTION, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_LIMIT_CACHE + 0, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_LIMIT_CACHE + 1, cid, wp.float32(0.0))
-    write_float(constraints, _OFF_LIMIT_CACHE + 2, cid, wp.float32(0.0))
-    write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, zero3)
     constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, wp.float32(0.0))
-    constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
     if constraints.d6.enabled != wp.int32(0):
         for row in range(6):
             constraints.d6.lower_impulse[cid, row] = wp.float32(0.0)
@@ -889,29 +783,19 @@ def joint_constraint_world_wrench_at(
     r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
     r3_b2 = read_vec3(constraints, base_offset + _OFF_R3_B2, cid)
     n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
-    acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)
-    acc_axial = acc_limit + acc_friction
-
     if joint_mode == JOINT_MODE_REVOLUTE:
         force = (acc1 + acc2) * idt
         torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt)
-        # Axial block is a torque about -n_hat.
-        torque = torque - n_hat * (acc_axial * idt)
     elif joint_mode == JOINT_MODE_DISTANCE:
-        axial_force = n_hat * (acc_limit * idt)
-        force = -axial_force
-        torque = -wp.cross(r1_b2, axial_force)
+        force = wp.vec3f(0.0, 0.0, 0.0)
+        torque = wp.vec3f(0.0, 0.0, 0.0)
     elif joint_mode == JOINT_MODE_PRISMATIC:
         force = (acc1 + acc2 + acc3) * idt
         torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
-        # Axial block is a linear force along -n_hat.
-        axial_force = n_hat * (acc_axial * idt)
-        force = force - axial_force
-        torque = torque - wp.cross(r1_b2, axial_force)
     elif joint_mode == JOINT_MODE_UNIVERSAL:
+        acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
         force = acc1 * idt
-        torque = wp.cross(r1_b2, acc1 * idt) - n_hat * (acc_axial * idt) - acc2 * idt
+        torque = wp.cross(r1_b2, acc1 * idt) - n_hat * (acc_limit * idt) - acc2 * idt
     elif joint_mode == JOINT_MODE_FIXED or joint_mode == JOINT_MODE_CABLE:
         # Same anchor layout (anchor-1 3-row + anchor-2 tangent 2-row +
         # anchor-3 scalar 1-row); no axial block. CABLE's PD softness
