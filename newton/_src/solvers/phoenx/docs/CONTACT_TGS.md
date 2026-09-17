@@ -3,8 +3,11 @@
 `SolverPhoenX(solver_scheme="tgs")` uses persistent two-anchor friction
 patches, temporal joint springs, and one external-force update per collision
 step. The existing `"soft"` scheme remains the solver default. The Colibri
-example selects the temporal scheme with 24 substeps and one biased solve per
-substep; velocity relaxation follows the final substep.
+example selects the temporal scheme with 24 substeps per 120 Hz collision
+refresh and one biased solve per substep; velocity relaxation follows the
+final substep. It uses `contact_matching="latest"` to refresh normal points
+and normals while TGS retains its own material friction anchors. Sticky
+normal geometry can become inconsistent on moving curved gear/pin surfaces.
 
 Run the standard interactive OpenGL viewer:
 
@@ -39,11 +42,12 @@ damping, base pinning, contact deletion, or extra support sweep.
 
 ## Colibri mass and attachment options
 
-The Phoenx example defaults to `--counterweight-density-scale 0.9`.
-This scales only `Frame/Cylinder` from its authored 5,000 kg/m³ density to
-4,500 kg/m³ before shape mass properties are accumulated. The containing
+The Phoenx example defaults to `--counterweight-density-scale 1.0`, retaining
+`Frame/Cylinder`'s authored 5,000 kg/m³ density. Adjusting the factor scales only
+this cylinder before shape mass properties are accumulated. The containing
 `Frame` body's mass, center of mass and inertia are consequently rebuilt
-consistently. Use `--counterweight-density-scale 1.0` for the authored density.
+consistently. The base/frame axle's authored 20-degree position spring and damper
+are disabled, allowing passive rotation under gravity and contact forces.
 The factor must be finite and nonnegative.
 
 Flower and slider helper geometry belong to the dynamic `FrameGround` body
@@ -79,6 +83,10 @@ all PhysX scenes use those distances. This mode has not been validated across
 arbitrary scene scales or large multi-world robot fleets.
 
 ## Validation of the revised scene
+
+The following simulation results used density scale 0.9 with the axle drive
+enabled. The current density scale 1.0 and passive axle configuration has not
+been subjected to the same full-minute validation.
 
 All eight scene tests and a 600-frame headless OpenGL run pass.
 The density and attachment regressions confirm that counterweight density scales its
@@ -117,3 +125,23 @@ anchors, friction budgets, physical momentum after mass-copy averaging,
 static support, contact removal, force timing, temporal springs, cached friction
 geometry, and unsupported public configurations. Kapla and G1 retain their
 existing solver settings and passed their regression runs.
+
+## Penetration history
+
+Use the optional CSV monitor during an interactive or headless run:
+
+```bash
+uv run -m newton.examples phoenx_colibri --penetration-log /tmp/colibri-penetration.csv
+```
+
+Each frame records simulation time, the deepest fresh contact and its shape
+labels, and the deepest hypocycloid-gear/cylinder contact. Depths are in meters.
+The monitor uses a separate collision pipeline and leaves solver contact history
+unchanged. It adds collision detection and CPU synchronization overhead only
+when enabled. The file is replaced when the example starts.
+
+Inspect peaks over the whole trajectory, not just the final depth: a gear can
+pass through a pin and subsequently report a shallow contact again. The
+example's existing 1 mm penetration test remains an overlap screen, not proof
+of correct tooth engagement. Joint attachment, support motion, and crank
+tracking checks remain necessary.

@@ -13,12 +13,16 @@ The experimental temporal solver keeps material friction anchors between
 contact refreshes and applies paired impulses at common world points. It uses
 one biased solve per internal step, followed by a final velocity relaxation.
 The assembly is free to move. Flower and slider geometry belong to the base
-body; the counterweight cylinder defaults to 90% of its authored density.
+body; the counterweight cylinder uses its authored density. The base/frame axle
+has no position spring or damper.
 Joint and fresh-contact checks screen instability and overlap. Full-assembly tests also bound support motion after two seconds
 of settling and check sustained crank tracking against the authored target.
 
 Command: python -m newton.examples phoenx_colibri
 """
+
+import csv
+from pathlib import Path
 
 import numpy as np
 import warp as wp
@@ -169,6 +173,9 @@ class Example(ColibriChecks):
     def __init__(self, viewer, args):
         if args.substeps < 1 or args.iterations < 1:
             raise ValueError("Substeps and iterations must be positive")
+        if args.contact_updates_per_frame < 1:
+            raise ValueError("Contact updates per frame must be positive")
+        self.contact_updates = args.contact_updates_per_frame
         self.viewer = viewer
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -185,6 +192,7 @@ class Example(ColibriChecks):
             sdf_resolution=0,
             counterweight_density_scale=args.counterweight_density_scale,
             attach_flower_to_base=True,
+            enable_frame_drive=False,
         )
         for index, label in enumerate(builder.shape_label):
             if label in CONTACT_OFFSETS:
@@ -198,7 +206,9 @@ class Example(ColibriChecks):
         self.control = self.model.control()
         self.collision_pipeline = newton.CollisionPipeline(
             self.model,
-            contact_matching="sticky",
+            # TGS retains friction anchors separately. Reusing normal geometry
+            # across refreshes can make curved gear/pin contacts inconsistent.
+            contact_matching="latest",
             rigid_contact_max=8192,
             speculative_contact_gap_max=0.005,
             speculative_contact_velocity_filter=not getattr(args, "geometric_candidates", True),
@@ -229,6 +239,12 @@ class Example(ColibriChecks):
         self._drive_test_duration = 0.0
         self._drive_test_integral = 0.0
         self._audit_pipeline = None
+        self._penetration_log = args.penetration_log
+        if self._penetration_log is not None:
+            with self._penetration_log.open("w", newline="") as stream:
+                csv.writer(stream).writerow(
+                    ["time_s", "penetration_m", "shape0", "shape1", "gear_cylinder_penetration_m"]
+                )
         self.graph = None
         if self.model.device.is_cuda:
             with wp.ScopedCapture() as capture:
@@ -236,8 +252,8 @@ class Example(ColibriChecks):
             self.graph = capture.graph
 
     def simulate(self):
-        for _ in range(2):
-            dt = self.frame_dt / 2
+        for _ in range(self.contact_updates):
+            dt = self.frame_dt / self.contact_updates
             self.collision_pipeline.collide(self.state_0, self.contacts, dt=dt)
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
@@ -282,6 +298,19 @@ class Example(ColibriChecks):
         super().test_post_step()
         self._test_support_stationarity()
         self._test_drive_tracking()
+        depth, labels, _gear_depth = self._measure_contact_penetration()
+        # This screens substantial overlap; it does not prove tooth engagement.
+        assert depth < 0.001, f"Fresh penetration {depth:.6f} m between {labels}"
+
+    def step(self):
+        super().step()
+        if self._penetration_log is not None:
+            depth, labels, gear_depth = self._measure_contact_penetration()
+            with self._penetration_log.open("a", newline="") as stream:
+                csv.writer(stream).writerow([self.sim_time, depth, *labels, gear_depth])
+
+    def _measure_contact_penetration(self):
+        """Measure fresh contact depths without changing simulation history."""
         if self._audit_pipeline is None:
             # Separate matching and contact buffers leave simulation history intact.
             self._audit_capacity = 16384
@@ -296,7 +325,7 @@ class Example(ColibriChecks):
         count = int(contacts.rigid_contact_count.numpy()[0])
         assert count < self._audit_capacity, f"Fresh contact capacity reached: {count}/{self._audit_capacity}"
         if count == 0:
-            return
+            return 0.0, ("", ""), 0.0
         wp.launch(
             _contact_separation,
             dim=count,
@@ -322,12 +351,21 @@ class Example(ColibriChecks):
             assert tuple(sorted((a, b))) not in self._audit_filtered_pairs, f"Filtered contact pair: {a}, {b}"
         worst = int(np.argmin(gaps))
         labels = (self.model.shape_label[shape0[worst]], self.model.shape_label[shape1[worst]])
-        # This screens substantial overlap; it does not prove tooth engagement.
-        assert gaps[worst] > -0.001, f"Fresh penetration {-gaps[worst]:.6f} m between {labels}"
+        gear_depth = 0.0
+        for index in np.flatnonzero(gaps < 0.0):
+            pair = (self.model.shape_label[shape0[index]], self.model.shape_label[shape1[index]])
+            if any("Hypocycloid" in label for label in pair) and any("Cylinder" in label for label in pair):
+                gear_depth = max(gear_depth, -float(gaps[index]))
+        return max(0.0, -float(gaps[worst])), labels, gear_depth
 
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--penetration-log",
+            type=Path,
+            help="Write fresh contact depth and worst shape pair per frame to CSV (adds diagnostic overhead).",
+        )
         parser.add_argument(
             "--body-count",
             type=int,
@@ -337,7 +375,7 @@ class Example(ColibriChecks):
         parser.add_argument(
             "--counterweight-density-scale",
             type=float,
-            default=0.9,
+            default=1.0,
             help="Density multiplier for Frame/Cylinder; scales its mass and inertia before body assembly (1.0 = authored).",
         )
         parser.add_argument("--fix-base", action="store_true", help="Anchor the base for diagnostics.")
@@ -354,7 +392,13 @@ class Example(ColibriChecks):
             action="store_false",
             help="Diagnostic legacy admission: discard candidates receding at contact generation time.",
         )
-        parser.add_argument("--substeps", type=int, default=24, help="Physics steps per 120 Hz contact refresh.")
+        parser.add_argument(
+            "--contact-updates-per-frame",
+            type=int,
+            default=2,
+            help="Diagnostic contact refreshes per 60 Hz frame; substeps apply to each refresh.",
+        )
+        parser.add_argument("--substeps", type=int, default=24, help="Physics steps per contact refresh.")
         parser.add_argument(
             "--iterations", type=int, default=1, help="Joint/contact sweeps per substep (temporal mode requires 1)."
         )

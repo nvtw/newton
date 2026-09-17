@@ -2,6 +2,9 @@
 
 The earlier validated configuration was ready for interactive visual inspection.
 The subsequent requested scene changes have the qualification below.
+The latest 120 Hz gear-contact investigation is recorded in
+[PENETRATION_VALIDATION.md](PENETRATION_VALIDATION.md); penetration improved,
+but the strict support-stationarity check still fails.
 It uses the standard Newton renderer:
 
 ```bash
@@ -10,7 +13,11 @@ uv run -m newton.examples phoenx_colibri
 
 ## Subsequent counterweight and flower changes
 
-The example now defaults to `--counterweight-density-scale 0.9`, applied to
+The default is now restored to 1.0, and the base/frame axle's 20-degree position
+spring and damper are disabled. The simulation results in this section refer
+to the earlier 0.9 setting with the drive enabled, not the new configuration.
+
+This revision used `--counterweight-density-scale 0.9`, applied to
 `Frame/Cylinder` before mass-property assembly. Flower and slider helper shapes
 are merged into the dynamic `FrameGround` body. The source USD has a separate
 kinematic flower and a disabled connecting joint; the revised attachment is
