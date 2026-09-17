@@ -12,7 +12,7 @@ from newton._src.sim.articulation import (
     transform_3d_rotational_axes,
 )
 from newton._src.solvers.phoenx.body import BodyContainer
-from newton._src.solvers.phoenx.constraints.d6_joint_data import D6_AXIS_COUNT, D6JointData
+from newton._src.solvers.phoenx.constraints.d6_joint_data import D6_AXIS_COUNT, D6_ROW_DISTANCE, D6JointData
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     extract_rotation_angle,
     inv_sym3,
@@ -181,7 +181,19 @@ def prepare_d6_inequalities(
             wrench0 = wp.spatial_vector()
             wrench1 = wp.spatial_vector()
             coordinate = wp.float32(0.0)
-            if axis_index < linear_count:
+            if data.row_kind[cid, row] == wp.int32(D6_ROW_DISTANCE):
+                distance2 = wp.dot(separation, separation)
+                direction = wp.normalize(wp.quat_rotate(orientation0, data.axis[cid, axis_index]))
+                if distance2 > wp.float32(1.0e-20):
+                    direction = separation / wp.sqrt(distance2)
+                lever0 = point0 - bodies.position[body0]
+                lever1 = point1 - bodies.position[body1]
+                force0 = -direction
+                force1 = direction
+                wrench0 = wp.spatial_vector(force0, wp.cross(lever0, force0))
+                wrench1 = wp.spatial_vector(force1, wp.cross(lever1, force1))
+                coordinate = wp.sqrt(wp.max(distance2, wp.float32(0.0)))
+            elif axis_index < linear_count:
                 direction = wp.normalize(wp.quat_rotate(orientation0, data.axis[cid, axis_index]))
                 force0 = -direction
                 force1 = direction

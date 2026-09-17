@@ -6,6 +6,8 @@
 import warp as wp
 
 D6_AXIS_COUNT = 6
+D6_ROW_AXIS = 0
+D6_ROW_DISTANCE = 1
 
 
 @wp.struct
@@ -19,6 +21,7 @@ class D6JointData:
     enabled: wp.int32
     row_count: wp.array[wp.int32]
     row_axis: wp.array2d[wp.int32]
+    row_kind: wp.array2d[wp.int32]
     linear_count: wp.array[wp.int32]
     angular_count: wp.array[wp.int32]
     axis: wp.array2d[wp.vec3f]

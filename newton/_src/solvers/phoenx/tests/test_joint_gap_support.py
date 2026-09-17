@@ -11,6 +11,8 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.constraints.d6_joint_data import D6_ROW_DISTANCE
+from newton._src.solvers.phoenx.tests.test_contact_coupling import _total_momentum
 
 _INERTIA = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
@@ -51,6 +53,31 @@ def _distance_model(*, position: float, lower: float, upper: float) -> newton.Mo
         min_distance=lower,
         max_distance=upper,
     )
+    return builder.finalize(device=wp.get_preferred_device())
+
+
+def _two_body_distance_model() -> newton.Model:
+    """Build two dynamic bodies whose radial stop starts one metre violated."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+    parent = builder.add_link(
+        xform=wp.transform(wp.vec3(-1.0, 0.0, 0.0), wp.quat_identity()),
+        mass=1.0,
+        inertia=_INERTIA,
+    )
+    child = builder.add_link(
+        xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()),
+        mass=1.0,
+        inertia=_INERTIA,
+    )
+    joint = builder.add_joint_distance(
+        parent=parent,
+        child=child,
+        parent_xform=wp.transform_identity(),
+        child_xform=wp.transform_identity(),
+        min_distance=1.0,
+        max_distance=1.0,
+    )
+    builder.add_articulation([joint])
     return builder.finalize(device=wp.get_preferred_device())
 
 
@@ -97,6 +124,9 @@ class TestJointGapSupport(unittest.TestCase):
         distance = float(np.linalg.norm(state.body_q.numpy()[0, :3]))
         self.assertAlmostEqual(distance, 1.0, delta=0.025)
         self.assertFalse(solver._direct_equality_system.enabled)
+        data = solver.world.constraints.d6
+        self.assertEqual(int(data.row_count.numpy()[0]), 1)
+        self.assertEqual(int(data.row_kind.numpy()[0, 0]), D6_ROW_DISTANCE)
         np.testing.assert_array_equal(solver.world._joint_pgs_enabled.numpy(), [1])
 
     def test_distance_minimum(self) -> None:
@@ -106,6 +136,17 @@ class TestJointGapSupport(unittest.TestCase):
         distance = float(np.linalg.norm(state.body_q.numpy()[0, :3]))
         self.assertAlmostEqual(distance, 1.0, delta=0.025)
         self.assertFalse(solver._direct_equality_system.enabled)
+
+    def test_distance_pair_preserves_momentum(self) -> None:
+        """Apply radial correction through equal-and-opposite endpoint wrenches."""
+        model = _two_body_distance_model()
+        initial = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, initial)
+        momentum = _total_momentum(model, initial)
+        state, _solver = _run(model)
+        np.testing.assert_allclose(_total_momentum(model, state), momentum, atol=2.0e-6, rtol=0.0)
+        distance = float(np.linalg.norm(state.body_q.numpy()[1, :3] - state.body_q.numpy()[0, :3]))
+        self.assertAlmostEqual(distance, 1.0, delta=0.025)
 
     def test_revolute_velocity_limit(self) -> None:
         """Clamp a free hinge to its authored maximum angular speed."""

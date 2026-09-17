@@ -47,7 +47,12 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     revolution_tracker_angle,
     revolution_tracker_update,
 )
-from newton._src.solvers.phoenx.constraints.d6_joint_data import D6_AXIS_COUNT, D6JointData
+from newton._src.solvers.phoenx.constraints.d6_joint_data import (
+    D6_AXIS_COUNT,
+    D6_ROW_AXIS,
+    D6_ROW_DISTANCE,
+    D6JointData,
+)
 from newton._src.solvers.phoenx.helpers.math_helpers import create_orthonormal
 
 _MAX_ROWS = 6
@@ -1944,6 +1949,7 @@ def _build_d6_inequality_data(
     cid_count = max(int(joint_idx_to_cid.max(initial=-1)) + 1, 1)
     counts = np.zeros(cid_count, dtype=np.int32)
     row_axis = np.full((cid_count, D6_AXIS_COUNT), -1, dtype=np.int32)
+    row_kind = np.full((cid_count, D6_AXIS_COUNT), D6_ROW_AXIS, dtype=np.int32)
     linear_count = np.zeros(cid_count, dtype=np.int32)
     angular_count = np.zeros(cid_count, dtype=np.int32)
     axes = np.zeros((cid_count, D6_AXIS_COUNT, 3), dtype=np.float32)
@@ -1969,7 +1975,10 @@ def _build_d6_inequality_data(
     x_p = np.asarray(model.joint_X_p.numpy(), dtype=np.float32)
     x_c = np.asarray(model.joint_X_c.numpy(), dtype=np.float32)
 
-    common_joint = np.isin(joint_type, (int(JointType.D6), int(JointType.PRISMATIC), int(JointType.REVOLUTE)))
+    common_joint = np.isin(
+        joint_type,
+        (int(JointType.D6), int(JointType.PRISMATIC), int(JointType.REVOLUTE), int(JointType.DISTANCE)),
+    )
     for joint in np.flatnonzero(common_joint):
         cid = int(joint_idx_to_cid[joint])
         if cid < 0:
@@ -1983,6 +1992,22 @@ def _build_d6_inequality_data(
         joint_x_c[cid] = x_c[joint]
         total = min(n_linear + n_angular, D6_AXIS_COUNT)
         axes[cid, :total] = model_axis[start : start + total]
+        if joint_type[joint] == int(JointType.DISTANCE):
+            linear_count[cid] = 0
+            angular_count[cid] = 0
+            lo = float(lower[start])
+            hi = float(upper[start])
+            if lo >= 0.0 or hi >= 0.0:
+                row_axis[cid, 0] = 0
+                row_kind[cid, 0] = D6_ROW_DISTANCE
+                lower_rows[cid, 0] = max(lo, 0.0)
+                upper_rows[cid, 0] = hi if hi >= 0.0 else 1.0e10
+                speed_limit = float(velocity[start])
+                if np.isfinite(speed_limit) and 0.0 < speed_limit < 1.0e5:
+                    velocity_rows[cid, 0] = speed_limit
+                friction_rows[cid, 0] = max(float(friction[start]), 0.0)
+                counts[cid] = 1
+            continue
         for local in range(total):
             dof = start + local
             if float(lower[dof]) > float(upper[dof]):
@@ -2009,6 +2034,7 @@ def _build_d6_inequality_data(
     data.enabled = int(np.any(counts))
     data.row_count = wp.array(counts, dtype=wp.int32, device=device)
     data.row_axis = wp.array(row_axis, dtype=wp.int32, device=device)
+    data.row_kind = wp.array(row_kind, dtype=wp.int32, device=device)
     data.linear_count = wp.array(linear_count, dtype=wp.int32, device=device)
     data.angular_count = wp.array(angular_count, dtype=wp.int32, device=device)
     data.axis = wp.array(axes, dtype=wp.vec3f, device=device)
