@@ -54,9 +54,13 @@ or two also failed short contact and crank-tracking checks and was not adopted.
 
 ## Validation and remaining limitation
 
-The new `newton.tests.test_colibri_contacts` regression failed before the
-fix at 1.085 mm penetration and passed afterward, at the same 120 Hz update
-rate. Nineteen focused tests passed, including scene, temporal policy,
+The `newton.tests.test_colibri_contacts` regressions cover both the first
+second and a full simulated minute at 120 Hz, checking every frame. The
+full-minute test also checks joint attachment and sustained crank tracking;
+support stationarity remains a separate acceptance check. Both tests are
+discovered by the normal test runner and require CUDA plus the Colibri assets.
+The old sticky geometry fails these tests at 1.085 mm penetration; the fresh
+geometry passes. Nineteen original focused tests passed, including scene, temporal policy,
 dynamic contact, and friction tests with paired momentum checks.
 
 The full-minute fixed run passed finite/bounded assembly, joint attachment,
@@ -87,3 +91,9 @@ Temporary evidence:
 
 The CSV histories must be inspected over time: final poses alone can hide
 a gear that has already passed through a pin.
+
+Run both automated contact regressions with:
+
+```bash
+uv run -m unittest newton.tests.test_colibri_contacts
+```
