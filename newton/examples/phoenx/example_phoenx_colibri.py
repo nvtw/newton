@@ -266,6 +266,8 @@ class Example(ColibriChecks):
         self._render_state_done = tuple(
             wp.Event(self.model.device) if self.model.device.is_cuda else None for _ in range(2)
         )
+        self._render_contacts = [None, None]
+        self._render_contact_snapshot = None
         self._render_state_index = 0
         self._render_state_prepared = False
         self._render_time = self.sim_time
@@ -277,6 +279,34 @@ class Example(ColibriChecks):
         if done is not None:
             wp.wait_event(done)
         self._render_states[self._render_state_index].assign(self.state_0)
+        self._render_contact_snapshot = None
+        if self.viewer.show_contacts:
+            contacts = self._render_contacts[self._render_state_index]
+            if contacts is None:
+                contacts = newton.Contacts(
+                    self.contacts.rigid_contact_max,
+                    0,
+                    device=self.contacts.device,
+                    requested_attributes={"force"} if self.contacts.force is not None else None,
+                )
+                self._render_contacts[self._render_state_index] = contacts
+            # Copy only the fields consumed by Viewer.log_contacts. Use the
+            # state buffer's reuse event for both snapshots, before physics
+            # overwrites its live contact data on this stream.
+            for name in (
+                "rigid_contact_count",
+                "rigid_contact_shape0",
+                "rigid_contact_shape1",
+                "rigid_contact_point0",
+                "rigid_contact_point1",
+                "rigid_contact_offset0",
+                "rigid_contact_normal",
+                "force",
+            ):
+                source = getattr(self.contacts, name)
+                if source is not None:
+                    wp.copy(getattr(contacts, name), source)
+            self._render_contact_snapshot = contacts
         self._render_time = self.sim_time
         self._render_state_prepared = True
 
@@ -284,6 +314,12 @@ class Example(ColibriChecks):
         state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state_0
         self.viewer.begin_frame(self._render_time if self._render_state_prepared else self.sim_time)
         self.viewer.log_state(state)
+        contacts = self._render_contact_snapshot if self._render_state_prepared else self.contacts
+        if contacts is not None or not self.viewer.show_contacts:
+            # The disabled call hides old glyphs without reading live arrays.
+            # If the GUI enables contacts after snapshotting, show them on the
+            # next frame rather than reading contacts from advancing physics.
+            self.viewer.log_contacts(contacts if contacts is not None else self.contacts, state)
         if self._render_state_prepared:
             done = self._render_state_done[self._render_state_index]
             if done is not None:

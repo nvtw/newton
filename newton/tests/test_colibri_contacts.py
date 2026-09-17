@@ -4,7 +4,9 @@
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
 import warp as wp
 
 import newton.examples
@@ -23,6 +25,29 @@ class TestColibriContacts(unittest.TestCase):
             ["--contact-updates-per-frame", "2", "--substeps", "24", "--counterweight-density-scale", "1.0"]
         )
         return Example(ViewerNull(), args)
+
+    def test_contact_visualization_uses_snapshot(self):
+        """Generate contact arrows from a snapshot after live buffers change."""
+        example = self._make_example()
+        example.step()
+        example._render_states = (example.model.state(), example.model.state())
+        example.viewer.show_contacts = True
+        example.viewer.show_contact_disks = False
+        example.viewer.show_contact_forces = False
+        example.prepare_render_state()
+        count = int(example.contacts.rigid_contact_count.numpy()[0])
+        self.assertGreater(count, 0)
+        example.contacts.rigid_contact_count.zero_()
+        with patch.object(example.viewer, "log_arrows") as arrows:
+            example.render()
+        normals = [call for call in arrows.call_args_list if call.args[0] == "/contacts/normals"]
+        self.assertEqual(len(normals), 1)
+        starts, ends = normals[0].args[1:3]
+        self.assertIsNotNone(starts)
+        self.assertEqual(len(starts), count)
+        self.assertTrue(np.isfinite(starts.numpy()).all())
+        self.assertTrue(np.isfinite(ends.numpy()).all())
+        self.assertTrue(np.any(starts.numpy() != ends.numpy()))
 
     def test_gear_pins_at_120_hz(self):
         """Keep the gear engaged during the initial passive-frame motion."""
