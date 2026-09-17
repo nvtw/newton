@@ -16,7 +16,6 @@ from newton._src.solvers.phoenx.body import (
     MOTION_STATIC,
     BodyContainer,
     body_load_inv_inertia_sym6,
-    body_load_orientation,
     body_load_vw,
     body_set_access_mode,
     body_store_vw,
@@ -33,12 +32,9 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_set_type,
     constraint_write_multiplier,
     constraint_write_multiplier_vec3,
-    pd_coefficients,
     read_float,
     read_int,
-    read_quat,
     read_vec3,
-    soft_constraint_coefficients,
     write_float,
     write_int,
     write_quat,
@@ -49,12 +45,7 @@ from newton._src.solvers.phoenx.constraints.d6_joint_data import D6_AXIS_COUNT
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     create_orthonormal,
-    extract_rotation_angle,
-    inv_sym3,
-    mul_sym3,
     revolution_tracker_angle,
-    revolution_tracker_update,
-    sym6_from_mat33_upper,
 )
 from newton._src.solvers.phoenx.mass_splitting.access import (
     read_angular_velocity_unified,
@@ -64,11 +55,6 @@ from newton._src.solvers.phoenx.mass_splitting.access import (
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
-from newton._src.solvers.phoenx.solver_config import (
-    PHOENX_BOOST_PRISMATIC_LIMIT,
-    PHOENX_BOOST_REVOLUTE_LIMIT,
-    PHOENX_FRICTION_SLIP_VELOCITY,
-)
 
 __all__ = [
     "DRIVE_MODE_OFF",
@@ -757,167 +743,6 @@ def _ms_store_body_pair(
 
 
 # ---------------------------------------------------------------------------
-# Shared axial limit and friction iterate helper
-# ---------------------------------------------------------------------------
-
-
-@wp.func
-def _axial_limit_friction_iterate(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    jv_axial: wp.float32,
-    clamp: wp.int32,
-    idt: wp.float32,
-    sor_boost: wp.float32,
-    store_friction: wp.bool,
-) -> wp.float32:
-    """Drive-free axial PGS step for direct-owned scalar joints."""
-    lam_limit = wp.float32(0.0)
-    if clamp != _CLAMP_NONE:
-        stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
-        damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
-        acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
-        velocity_clamp = clamp == _CLAMP_VELOCITY_MAX or clamp == _CLAMP_VELOCITY_MIN
-        if not velocity_clamp and (stiffness_limit > wp.float32(0.0) or damping_limit > wp.float32(0.0)):
-            pd_mass = read_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid)
-            pd_gamma = read_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid)
-            pd_beta = read_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid)
-            if pd_mass > wp.float32(0.0):
-                lam_limit = -pd_mass * (jv_axial - pd_beta + pd_gamma * acc_limit)
-        else:
-            eff_inv = read_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid)
-            if eff_inv > wp.float32(0.0):
-                bias_box = read_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid)
-                mass_coeff = read_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid)
-                impulse_coeff = read_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid)
-                lam_unsoft = -(jv_axial + bias_box) / eff_inv
-                lam_limit = mass_coeff * lam_unsoft - impulse_coeff * acc_limit
-        old_acc_limit = acc_limit
-        acc_limit += lam_limit * sor_boost
-        if clamp == _CLAMP_MAX or clamp == _CLAMP_VELOCITY_MAX:
-            acc_limit = wp.max(wp.float32(0.0), acc_limit)
-        else:
-            acc_limit = wp.min(wp.float32(0.0), acc_limit)
-        lam_limit = acc_limit - old_acc_limit
-        constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, acc_limit)
-
-    lam_friction = wp.float32(0.0)
-    friction = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
-    acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)
-    if friction > wp.float32(0.0):
-        eff_inv_friction = read_float(constraints, base_offset + _OFF_EFF_INV_FRICTION, cid)
-        max_lambda_friction = friction / idt
-        if eff_inv_friction > wp.float32(0.0) and max_lambda_friction > wp.float32(0.0):
-            slip_velocity = PHOENX_FRICTION_SLIP_VELOCITY
-            slip_scale = read_float(constraints, base_offset + _OFF_FRICTION_SLIP_SCALE, cid)
-            if slip_scale > wp.float32(0.0):
-                slip_velocity = slip_scale * eff_inv_friction * friction
-            gamma_friction = slip_velocity / max_lambda_friction
-            effective_mass = wp.float32(1.0) / (eff_inv_friction + gamma_friction)
-            lam_friction = -effective_mass * (jv_axial + gamma_friction * acc_friction) * sor_boost
-            old_acc_friction = acc_friction
-            acc_friction = wp.clamp(
-                acc_friction + lam_friction,
-                -max_lambda_friction,
-                max_lambda_friction,
-            )
-            lam_friction = acc_friction - old_acc_friction
-            if store_friction:
-                constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, acc_friction)
-    else:
-        constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
-
-    return lam_limit + lam_friction
-
-
-# ---------------------------------------------------------------------------
-# Shared axial limit and friction prepare helper
-# ---------------------------------------------------------------------------
-
-
-@wp.func
-def _axial_limit_friction_prepare_at(
-    constraints: ConstraintContainer,
-    cid: wp.int32,
-    base_offset: wp.int32,
-    cumulative_value: wp.float32,
-    axial_velocity: wp.float32,
-    eff_inv: wp.float32,
-    eff_inv_friction: wp.float32,
-    dt: wp.float32,
-    limit_boost: wp.float32,
-) -> wp.float32:
-    """Prepare unilateral limit and friction state for one free axial row."""
-    min_value = read_float(constraints, base_offset + _OFF_MIN_VALUE, cid)
-    max_value = read_float(constraints, base_offset + _OFF_MAX_VALUE, cid)
-    hertz_limit = read_float(constraints, base_offset + _OFF_HERTZ_LIMIT, cid)
-    damping_ratio_limit = read_float(constraints, base_offset + _OFF_DAMPING_RATIO_LIMIT, cid)
-    stiffness_limit = read_float(constraints, base_offset + _OFF_STIFFNESS_LIMIT, cid)
-    damping_limit = read_float(constraints, base_offset + _OFF_DAMPING_LIMIT, cid)
-
-    write_float(constraints, base_offset + _OFF_EFF_INV_AXIAL, cid, eff_inv)
-    write_float(constraints, base_offset + _OFF_EFF_INV_FRICTION, cid, eff_inv_friction)
-
-    # ---- Limit (dual convention) -------------------------------------
-    clamp = _CLAMP_NONE
-    limit_C = float(0.0)
-    velocity_bias = float(0.0)
-    if min_value <= max_value:
-        if cumulative_value > max_value:
-            clamp = _CLAMP_MAX
-            limit_C = cumulative_value - max_value
-        elif cumulative_value < min_value:
-            clamp = _CLAMP_MIN
-            limit_C = cumulative_value - min_value
-
-    # The axial Jacobian is -qdot. Position correction takes precedence.
-    velocity_limit = read_float(constraints, base_offset + _OFF_VELOCITY_LIMIT, cid)
-    if clamp == _CLAMP_NONE and velocity_limit > wp.float32(0.0):
-        if axial_velocity < -velocity_limit:
-            clamp = _CLAMP_VELOCITY_MAX
-            velocity_bias = velocity_limit
-        elif axial_velocity > velocity_limit:
-            clamp = _CLAMP_VELOCITY_MIN
-            velocity_bias = -velocity_limit
-    write_int(constraints, base_offset + _OFF_CLAMP, cid, clamp)
-
-    # ``limit_cache`` is mode-aliased Box2D / PD: writing both layouts
-    # would clobber the active one (same 3 dwords). Iterate gates on
-    # ``stiffness_limit > 0 or damping_limit > 0`` to pick the layout,
-    # so only the active triple is filled.
-    if clamp == _CLAMP_VELOCITY_MAX or clamp == _CLAMP_VELOCITY_MIN:
-        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, velocity_bias)
-        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, wp.float32(1.0))
-        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, wp.float32(0.0))
-    elif stiffness_limit > 0.0 or damping_limit > 0.0:
-        pd_gamma_limit, pd_beta_limit, pd_m_soft = pd_coefficients(
-            stiffness_limit, damping_limit, limit_C, eff_inv, dt, limit_boost
-        )
-        write_float(constraints, base_offset + _OFF_PD_GAMMA_LIMIT, cid, pd_gamma_limit)
-        write_float(constraints, base_offset + _OFF_PD_BETA_LIMIT, cid, pd_beta_limit)
-        write_float(constraints, base_offset + _OFF_PD_MASS_COEFF_LIMIT, cid, pd_m_soft)
-    else:
-        br_limit, mc_limit, ic_limit = soft_constraint_coefficients(hertz_limit, damping_ratio_limit, dt)
-        write_float(constraints, base_offset + _OFF_BIAS_LIMIT_BOX2D, cid, -limit_C * br_limit)
-        write_float(constraints, base_offset + _OFF_MASS_COEFF_LIMIT, cid, mc_limit)
-        write_float(constraints, base_offset + _OFF_IMPULSE_COEFF_LIMIT, cid, ic_limit)
-
-    # Warm-start the active limit and friction impulses, with
-    # ``acc_limit`` forcibly zeroed when the limit is inactive.
-    acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
-    if clamp == _CLAMP_NONE:
-        acc_limit = 0.0
-        constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, 0.0)
-    acc_friction = constraint_read_multiplier(constraints, _MUL_ACC_FRICTION, cid)
-    friction = read_float(constraints, base_offset + _OFF_FRICTION_COEFFICIENT, cid)
-    if friction <= 0.0:
-        acc_friction = 0.0
-        constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
-    return acc_limit + acc_friction
-
-
-# ---------------------------------------------------------------------------
 # Shared tangent-basis-from-anchor-3 helper
 # ---------------------------------------------------------------------------
 
@@ -988,16 +813,14 @@ def _joint_constraint_prepare_inequality_full(
     parallel_id: wp.int32,
     idt: wp.float32,
 ):
-    """Prepare only free-axis limit and friction rows."""
+    """Prepare common D6 limit, speed-cap, and friction rows."""
+    if constraints.d6.enabled == wp.int32(0) or constraints.d6.row_count[cid] == wp.int32(0):
+        return
+
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
-    mode = read_int(constraints, _OFF_JOINT_MODE, cid)
-    orientation1 = body_load_orientation(bodies, b1)
-    orientation2 = body_load_orientation(bodies, b2)
-    position1 = bodies.position[b1]
-    position2 = bodies.position[b2]
     (
         velocity1,
         velocity2,
@@ -1011,134 +834,21 @@ def _joint_constraint_prepare_inequality_full(
         slot2,
     ) = _ms_load_body_pair(bodies, particles, copy_state, b1, b2, parallel_id, num_bodies)
 
-    la1_b1 = read_vec3(constraints, _OFF_LA1_B1, cid)
-    la1_b2 = read_vec3(constraints, _OFF_LA1_B2, cid)
-    r1_b1 = wp.quat_rotate(orientation1, la1_b1)
-    r1_b2 = wp.quat_rotate(orientation2, la1_b2)
-    write_vec3(constraints, _OFF_R1_B1, cid, r1_b1)
-    write_vec3(constraints, _OFF_R1_B2, cid, r1_b2)
-    axis = wp.normalize(wp.quat_rotate(orientation1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)))
-    write_vec3(constraints, _OFF_AXIS_WORLD, cid, axis)
-    dt = wp.float32(1.0) / idt
-
-    if constraints.d6.enabled != 0 and constraints.d6.row_count[cid] > wp.int32(0):
-        velocity1, angular_velocity1, velocity2, angular_velocity2 = prepare_d6_inequalities(
-            constraints.d6,
-            cid,
-            bodies,
-            b1,
-            b2,
-            inv_mass1,
-            inv_mass2,
-            inv_inertia1,
-            inv_inertia2,
-            velocity1,
-            angular_velocity1,
-            velocity2,
-            angular_velocity2,
-        )
-    elif mode == JOINT_MODE_DISTANCE:
-        point1 = position1 + r1_b1
-        point2 = position2 + r1_b2
-        separation = point2 - point1
-        distance2 = wp.dot(separation, separation)
-        if distance2 > wp.float32(1.0e-20):
-            axis = separation / wp.sqrt(distance2)
-        write_vec3(constraints, _OFF_AXIS_WORLD, cid, axis)
-        metric = _d6_metric_anchor_block(
-            inv_mass1,
-            inv_mass2,
-            inv_inertia1,
-            inv_inertia2,
-            r1_b1,
-            r1_b2,
-            r1_b1,
-            r1_b2,
-        )
-        eff_inv = wp.dot(axis, metric @ axis)
-        anchor_velocity1 = velocity1 + wp.cross(angular_velocity1, r1_b1)
-        anchor_velocity2 = velocity2 + wp.cross(angular_velocity2, r1_b2)
-        distance = wp.sqrt(wp.max(distance2, wp.float32(0.0)))
-        axial_impulse = _axial_limit_friction_prepare_at(
-            constraints,
-            cid,
-            wp.int32(0),
-            distance,
-            wp.dot(axis, anchor_velocity1 - anchor_velocity2),
-            eff_inv,
-            eff_inv,
-            dt,
-            PHOENX_BOOST_PRISMATIC_LIMIT,
-        )
-        impulse = axis * axial_impulse
-        velocity1 += inv_mass1 * impulse
-        angular_velocity1 += inv_inertia1 @ wp.cross(r1_b1, impulse)
-        velocity2 -= inv_mass2 * impulse
-        angular_velocity2 -= inv_inertia2 @ wp.cross(r1_b2, impulse)
-    elif mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_PRISMATIC:
-        metric = _d6_metric_anchor_block(
-            inv_mass1,
-            inv_mass2,
-            inv_inertia1,
-            inv_inertia2,
-            r1_b1,
-            r1_b2,
-            r1_b1,
-            r1_b2,
-        )
-        if mode == JOINT_MODE_PRISMATIC:
-            eff_inv = wp.dot(axis, metric @ axis)
-            slide = wp.dot(axis, position2 + r1_b2 - position1 - r1_b1)
-            axial_impulse = _axial_limit_friction_prepare_at(
-                constraints,
-                cid,
-                wp.int32(0),
-                slide,
-                wp.dot(
-                    axis,
-                    velocity1 + wp.cross(angular_velocity1, r1_b1) - velocity2 - wp.cross(angular_velocity2, r1_b2),
-                ),
-                eff_inv,
-                eff_inv,
-                dt,
-                PHOENX_BOOST_PRISMATIC_LIMIT,
-            )
-            impulse = axis * axial_impulse
-            velocity1 += inv_mass1 * impulse
-            angular_velocity1 += inv_inertia1 @ wp.cross(r1_b1, impulse)
-            velocity2 -= inv_mass2 * impulse
-            angular_velocity2 -= inv_inertia2 @ wp.cross(r1_b2, impulse)
-        else:
-            eff_inv = wp.dot(axis, inv_inertia1 @ axis) + wp.dot(axis, inv_inertia2 @ axis)
-            coupling = wp.cross(r1_b1, inv_inertia1 @ axis) + wp.cross(r1_b2, inv_inertia2 @ axis)
-            metric_inverse = inv_sym3(sym6_from_mat33_upper(metric))
-            eff_inv_friction = wp.max(
-                wp.float32(0.0),
-                eff_inv - wp.dot(coupling, mul_sym3(metric_inverse, coupling)),
-            )
-            inv_initial = read_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid)
-            difference = orientation2 * inv_initial * wp.quat_inverse(orientation1)
-            wrapped = extract_rotation_angle(difference, axis)
-            old_counter = read_int(constraints, _OFF_REVOLUTION_COUNTER, cid)
-            old_previous = read_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
-            counter, previous = revolution_tracker_update(wrapped, old_counter, old_previous)
-            write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, counter)
-            write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, previous)
-            coordinate = revolution_tracker_angle(counter, previous)
-            axial_impulse = _axial_limit_friction_prepare_at(
-                constraints,
-                cid,
-                wp.int32(0),
-                coordinate,
-                wp.dot(axis, angular_velocity1 - angular_velocity2),
-                eff_inv,
-                eff_inv_friction,
-                dt,
-                PHOENX_BOOST_REVOLUTE_LIMIT,
-            )
-            angular_velocity1 += inv_inertia1 @ (axis * axial_impulse)
-            angular_velocity2 -= inv_inertia2 @ (axis * axial_impulse)
-
+    velocity1, angular_velocity1, velocity2, angular_velocity2 = prepare_d6_inequalities(
+        constraints.d6,
+        cid,
+        bodies,
+        b1,
+        b2,
+        inv_mass1,
+        inv_mass2,
+        inv_inertia1,
+        inv_inertia2,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+    )
     _ms_store_body_pair(
         bodies,
         particles,
@@ -1384,55 +1094,7 @@ def joint_constraint_prepare_inequality(
     parallel_id: wp.int32,
     idt: wp.float32,
 ):
-    """Prepare active axial rows while retaining geometry and tracker updates."""
-    mode = read_int(constraints, _OFF_JOINT_MODE, cid)
-    common_d6 = constraints.d6.enabled != 0 and constraints.d6.row_count[cid] > wp.int32(0)
-    if (
-        constraints.bilateral.enabled != 0
-        and not common_d6
-        and bodies.has_position_level_writers[0] == 0
-        and (mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_PRISMATIC)
-    ):
-        friction = read_float(constraints, _OFF_FRICTION_COEFFICIENT, cid)
-        speed_limit = read_float(constraints, _OFF_VELOCITY_LIMIT, cid)
-        if friction <= 0.0 and speed_limit <= 0.0:
-            b1 = read_int(constraints, _OFF_BODY1, cid)
-            b2 = read_int(constraints, _OFF_BODY2, cid)
-            orientation1 = body_load_orientation(bodies, b1)
-            orientation2 = body_load_orientation(bodies, b2)
-            r1 = wp.quat_rotate(orientation1, read_vec3(constraints, _OFF_LA1_B1, cid))
-            r2 = wp.quat_rotate(orientation2, read_vec3(constraints, _OFF_LA1_B2, cid))
-            axis = wp.normalize(wp.quat_rotate(orientation1, read_vec3(constraints, _OFF_AXIS_LOCAL1, cid)))
-            coordinate = float(0.0)
-            counter = int(0)
-            previous = float(0.0)
-            if mode == JOINT_MODE_REVOLUTE:
-                inv_initial = read_quat(constraints, _OFF_INV_INITIAL_ORIENTATION, cid)
-                difference = orientation2 * inv_initial * wp.quat_inverse(orientation1)
-                wrapped = extract_rotation_angle(difference, axis)
-                old_counter = read_int(constraints, _OFF_REVOLUTION_COUNTER, cid)
-                old_previous = read_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid)
-                counter, previous = revolution_tracker_update(wrapped, old_counter, old_previous)
-                coordinate = revolution_tracker_angle(counter, previous)
-            else:
-                coordinate = wp.dot(axis, bodies.position[b2] + r2 - bodies.position[b1] - r1)
-            lower = read_float(constraints, _OFF_MIN_VALUE, cid)
-            upper = read_float(constraints, _OFF_MAX_VALUE, cid)
-            # Match _axial_limit_friction_prepare_at: only current position
-            # outside an enabled interval activates a position limit.
-            if lower > upper or (coordinate >= lower and coordinate <= upper):
-                body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
-                body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
-                write_vec3(constraints, _OFF_R1_B1, cid, r1)
-                write_vec3(constraints, _OFF_R1_B2, cid, r2)
-                write_vec3(constraints, _OFF_AXIS_WORLD, cid, axis)
-                if mode == JOINT_MODE_REVOLUTE:
-                    write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, counter)
-                    write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, previous)
-                write_int(constraints, _OFF_CLAMP, cid, _CLAMP_NONE)
-                constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, 0.0)
-                constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, 0.0)
-                return
+    """Prepare common D6 limit, speed-cap, and friction rows."""
     _joint_constraint_prepare_inequality_full(
         constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
     )

@@ -242,8 +242,9 @@ class SolverPhoenX(SolverBase):
     Supports REVOLUTE / PRISMATIC (PD drive, position/velocity limit), BALL,
     FIXED, CABLE (soft fixed with PD bend/twist; stretch DoF is rigid), FREE
     (no column), DISTANCE bounds, and D6 bilateral lock patterns and drives.
-    Finite limits and friction on otherwise generic maximal D6 layouts remain
-    unsupported. Reduced-coordinate ownership is available independently.
+    Common D6 inequality rows handle per-axis limits, velocity caps, and
+    friction for maximal-coordinate joints. Reduced-coordinate ownership is
+    available independently.
 
     Newton :class:`Picking` works out of the box: pick force/torque is
     added to ``state.body_f``, which :meth:`step` imports into PhoenX's

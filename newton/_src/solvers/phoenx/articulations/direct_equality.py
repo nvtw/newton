@@ -43,11 +43,13 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
+)
+from newton._src.solvers.phoenx.helpers.math_helpers import (
+    create_orthonormal,
     extract_rotation_angle,
     revolution_tracker_angle,
     revolution_tracker_update,
 )
-from newton._src.solvers.phoenx.helpers.math_helpers import create_orthonormal
 
 _MAX_ROWS = 6
 
