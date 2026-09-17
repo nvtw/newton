@@ -11,6 +11,7 @@ The example does not load or require USD.
 
 import argparse
 import tempfile
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -2312,6 +2313,20 @@ def build_scene(
                 color=color,
                 label=label,
             )
+
+    # Neighboring feathers overlap as the tail fans; retain collisions between
+    # non-neighbors and with the rest of the mechanism.
+    tail_feathers = (
+        "Tail/Tail_Feather_A__2x_",
+        "Tail/Tail_Feather_B__2x_",
+        "Tail/Tail_Feather_C",
+        "Tail/Tail_Feather_B__2x__mirrored",
+        "Tail/Tail_Feather_A__2x__mirrored",
+    )
+    shape_ids = {label: index for index, label in enumerate(builder.shape_label)}
+    for first, second in pairwise(tail_feathers):
+        if first in shape_ids and second in shape_ids:
+            builder.add_shape_collision_filter_pair(shape_ids[first], shape_ids[second])
 
     if fix_base:
         root_joint = builder.add_joint_fixed(
