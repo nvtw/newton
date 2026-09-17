@@ -18,6 +18,8 @@ has no position spring or damper.
 Joint and fresh-contact checks screen instability and overlap. Full-assembly tests also bound support motion after two seconds
 of settling and check sustained crank tracking against the authored target.
 
+The default viewer is OptiX, as in the Kapla tower example.
+
 Command: python -m newton.examples phoenx_colibri
 """
 
@@ -361,6 +363,7 @@ class Example(ColibriChecks):
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
+        parser.set_defaults(viewer="optix")
         parser.add_argument(
             "--penetration-log",
             type=Path,

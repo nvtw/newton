@@ -87,6 +87,23 @@ class TestViewerOptix(unittest.TestCase):
         batch.model_shapes = [1]
         self.assertTrue(ViewerOptix._has_authored_mesh_material(model, batch))
 
+    def test_opaque_instance_and_capsule_batches(self):
+        """Accept opacity arrays passed by the common Newton shape logger."""
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        viewer._optix_ground_meshes = set()
+        viewer._optix_default_material_meshes = set()
+        xforms = wp.array([wp.transform_identity()], dtype=wp.transform, device="cpu")
+        opacities = wp.ones(1, dtype=wp.float32, device="cpu")
+        for method in (viewer.log_instances, viewer.log_capsules):
+            with self.subTest(method=method.__name__):
+                with mock.patch(
+                    "newton._src.viewer.viewer_optix._PathTracingViewerBackend.log_instances", autospec=True
+                ) as log_instances:
+                    method("shape", "mesh", xforms, None, None, None, opacities=opacities)
+                    log_instances.assert_called_once_with(
+                        viewer, "shape", "mesh", xforms, None, None, None, hidden=False
+                    )
+
     def test_simulation_render_overlap_disabled(self):
         """Keep OptiX simulation and rendering serialized for stable scene updates."""
         viewer = ViewerOptix.__new__(ViewerOptix)
@@ -325,10 +342,14 @@ class TestViewerOptix(unittest.TestCase):
             self.assertEqual(reset_calls, [True])
             self.assertEqual(api.temporal_reset_count, 1)
 
+            pixels = np.full((api.height, api.width, 4), 127, dtype=np.uint8)
+            pixels[0, :, :3] = (255, 0, 0)
+            pixels[-1, :, :3] = (0, 0, 255)
+            api.get_frame_uint8 = lambda: pixels
             frame = viewer.get_frame()
             self.assertEqual(frame.shape, (api.height, api.width, 3))
             self.assertEqual(frame.dtype, wp.uint8)
-            np.testing.assert_array_equal(frame.numpy(), 127)
+            np.testing.assert_array_equal(frame.numpy(), pixels[::-1, :, :3])
         finally:
             viewer.close()
 

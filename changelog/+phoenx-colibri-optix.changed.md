@@ -1,0 +1,1 @@
+Use the OptiX renderer by default in the Phoenx Colibri example, matching the Kapla tower. Other viewers remain selectable with `--viewer`. Accept the common viewer opacity argument when rendering opaque OptiX instance and capsule batches. Return OptiX frame captures with the documented top-left origin.

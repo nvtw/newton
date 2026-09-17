@@ -9,11 +9,14 @@ final substep. It uses `contact_matching="latest"` to refresh normal points
 and normals while TGS retains its own material friction anchors. Sticky
 normal geometry can become inconsistent on moving curved gear/pin surfaces.
 
-Run the standard interactive OpenGL viewer:
+Run the default OptiX viewer (the same renderer as the Kapla tower):
 
 ```bash
 uv run -m newton.examples phoenx_colibri
 ```
+
+Use `--viewer gl` to select OpenGL explicitly. OptiX requires `pyoptix` and
+`warp_optix` from the local otk-pyoptix installation.
 
 For a headless minute of simulation with physical checks:
 
