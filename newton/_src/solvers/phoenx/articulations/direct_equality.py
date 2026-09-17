@@ -1955,6 +1955,8 @@ def _build_d6_inequality_data(
     upper_rows = np.zeros((cid_count, D6_AXIS_COUNT), dtype=np.float32)
     velocity_rows = np.zeros((cid_count, D6_AXIS_COUNT), dtype=np.float32)
     friction_rows = np.zeros((cid_count, D6_AXIS_COUNT), dtype=np.float32)
+    unwrap_rows = np.zeros((cid_count, D6_AXIS_COUNT), dtype=np.int32)
+    condense_translation_rows = np.zeros((cid_count, D6_AXIS_COUNT), dtype=np.int32)
 
     joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
     qd_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
@@ -1967,7 +1969,7 @@ def _build_d6_inequality_data(
     x_p = np.asarray(model.joint_X_p.numpy(), dtype=np.float32)
     x_c = np.asarray(model.joint_X_c.numpy(), dtype=np.float32)
 
-    common_joint = (joint_type == int(JointType.D6)) | (joint_type == int(JointType.PRISMATIC))
+    common_joint = np.isin(joint_type, (int(JointType.D6), int(JointType.PRISMATIC), int(JointType.REVOLUTE)))
     for joint in np.flatnonzero(common_joint):
         cid = int(joint_idx_to_cid[joint])
         if cid < 0:
@@ -1996,6 +1998,10 @@ def _build_d6_inequality_data(
             upper_rows[cid, row] = upper[dof]
             velocity_rows[cid, row] = speed_limit
             friction_rows[cid, row] = axis_friction
+            unwrap_rows[cid, row] = int(n_angular == 1 and local >= n_linear)
+            condense_translation_rows[cid, row] = int(
+                joint_type[joint] == int(JointType.REVOLUTE) and local >= n_linear
+            )
             counts[cid] += 1
 
     device = model.device
@@ -2012,6 +2018,10 @@ def _build_d6_inequality_data(
     data.upper = wp.array(upper_rows, dtype=wp.float32, device=device)
     data.velocity_limit = wp.array(velocity_rows, dtype=wp.float32, device=device)
     data.friction = wp.array(friction_rows, dtype=wp.float32, device=device)
+    data.unwrap_angle = wp.array(unwrap_rows, dtype=wp.int32, device=device)
+    data.condense_translation = wp.array(condense_translation_rows, dtype=wp.int32, device=device)
+    data.revolution_counter = wp.zeros((cid_count, D6_AXIS_COUNT), dtype=wp.int32, device=device)
+    data.previous_angle = wp.zeros((cid_count, D6_AXIS_COUNT), dtype=wp.float32, device=device)
     data.wrench0 = wp.zeros((cid_count, D6_AXIS_COUNT), dtype=wp.spatial_vector, device=device)
     data.wrench1 = wp.zeros((cid_count, D6_AXIS_COUNT), dtype=wp.spatial_vector, device=device)
     data.coordinate = wp.zeros((cid_count, D6_AXIS_COUNT), dtype=wp.float32, device=device)

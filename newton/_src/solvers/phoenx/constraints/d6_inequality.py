@@ -13,7 +13,14 @@ from newton._src.sim.articulation import (
 )
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.d6_joint_data import D6_AXIS_COUNT, D6JointData
-from newton._src.solvers.phoenx.helpers.math_helpers import extract_rotation_angle
+from newton._src.solvers.phoenx.helpers.math_helpers import (
+    extract_rotation_angle,
+    inv_sym3,
+    mul_sym3,
+    revolution_tracker_angle,
+    revolution_tracker_update,
+    sym6_from_mat33_upper,
+)
 from newton._src.solvers.phoenx.solver_config import PHOENX_FRICTION_SLIP_VELOCITY
 
 
@@ -118,7 +125,9 @@ def prepare_d6_inequalities(
     angular_direction0 = wp.vec3f(1.0, 0.0, 0.0)
     angular_direction1 = wp.vec3f(0.0, 1.0, 0.0)
     angular_direction2 = wp.vec3f(0.0, 0.0, 1.0)
-    if angular_count == wp.int32(2):
+    if angular_count == wp.int32(1):
+        angular_direction0 = data.axis[cid, linear_count]
+    elif angular_count == wp.int32(2):
         angular_start = linear_count
         coordinates_two, _rates_two = invert_2d_rotational_dofs(
             data.axis[cid, angular_start],
@@ -188,7 +197,17 @@ def prepare_d6_inequalities(
                     direction_local = angular_direction2
                 direction = wp.quat_rotate(orientation0, direction_local)
                 if angular_count == wp.int32(1):
-                    coordinate = extract_rotation_angle(orientation1 * wp.quat_inverse(orientation0), direction)
+                    wrapped = extract_rotation_angle(orientation1 * wp.quat_inverse(orientation0), direction)
+                    coordinate = wrapped
+                    if data.unwrap_angle[cid, row] != wp.int32(0):
+                        counter, previous = revolution_tracker_update(
+                            wrapped,
+                            data.revolution_counter[cid, row],
+                            data.previous_angle[cid, row],
+                        )
+                        data.revolution_counter[cid, row] = counter
+                        data.previous_angle[cid, row] = previous
+                        coordinate = revolution_tracker_angle(counter, previous)
                 else:
                     coordinate = angular_coordinates[angular_axis]
                 wrench0 = wp.spatial_vector(wp.vec3f(0.0), -direction)
@@ -210,6 +229,25 @@ def prepare_d6_inequalities(
                 + wp.dot(wp.spatial_top(wrench1), wp.spatial_top(response1))
                 + wp.dot(wp.spatial_bottom(wrench1), wp.spatial_bottom(response1))
             )
+            if data.condense_translation[cid, row] != wp.int32(0):
+                eye = wp.identity(3, dtype=wp.float32)
+                lever0 = point0 - bodies.position[body0]
+                lever1 = point1 - bodies.position[body1]
+                cross0 = wp.skew(lever0)
+                cross1 = wp.skew(lever1)
+                metric = (
+                    (inverse_mass0 + inverse_mass1) * eye
+                    + cross0 @ (inverse_inertia0 @ wp.transpose(cross0))
+                    + cross1 @ (inverse_inertia1 @ wp.transpose(cross1))
+                )
+                coupling = wp.cross(lever0, inverse_inertia0 @ direction) + wp.cross(
+                    lever1, inverse_inertia1 @ direction
+                )
+                effective_mass_inverse = wp.max(
+                    wp.float32(0.0),
+                    effective_mass_inverse
+                    - wp.dot(coupling, mul_sym3(inv_sym3(sym6_from_mat33_upper(metric)), coupling)),
+                )
             data.effective_mass_inverse[cid, row] = effective_mass_inverse
             warm_start = data.lower_impulse[cid, row] + data.upper_impulse[cid, row] + data.friction_impulse[cid, row]
             v0, w0, v1, w1 = _d6_apply_row_impulse(
@@ -255,7 +293,6 @@ def iterate_d6_inequalities(
                 lower = data.lower[cid, row]
                 upper = data.upper[cid, row]
                 speed_limit = data.velocity_limit[cid, row]
-
                 upper_enabled = upper < wp.float32(5.0e9)
                 if upper_enabled or speed_limit > wp.float32(0.0):
                     upper_velocity = wp.float32(1.0e30)
