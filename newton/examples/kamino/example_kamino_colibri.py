@@ -2202,8 +2202,18 @@ def build_scene(
     source_contact_offsets: bool = True,
     mesh_cylinders: bool = False,
     sdf_resolution: int = 0,
+    counterweight_density_scale: float = 1.0,
+    attach_flower_to_base: bool = False,
 ):
-    """Build a connected prefix of the mechanism, starting at FrameGround."""
+    """Build a connected prefix with optional counterweight and flower changes.
+
+    ``counterweight_density_scale`` multiplies only Frame/Cylinder's authored
+    density before accumulating body mass properties. ``attach_flower_to_base``
+    merges the flower/slider shapes into FrameGround; the default preserves the
+    source's separate kinematic flower.
+    """
+    if not np.isfinite(counterweight_density_scale) or counterweight_density_scale < 0.0:
+        raise ValueError("counterweight_density_scale must be finite and nonnegative")
     if body_count is None:
         body_count = len(BODY_ORDER)
 
@@ -2220,9 +2230,12 @@ def build_scene(
     builder.default_shape_cfg.gap = contact_gap
     selected = BODY_ORDER[:body_count]
     bodies = {name: builder.add_link(xform=_transform(BODY_POSES[name]), label=name) for name in selected}
-    # The flower is a separate kinematic rigid body in the source stage.
-    # Its geometry is stored in FrameGround coordinates, so reuse that pose.
-    flower = builder.add_link(xform=_transform(BODY_POSES["FrameGround"]), label="Flower", is_kinematic=True)
+    # The source flower is kinematic with a disabled base joint. Its geometry
+    # already uses FrameGround coordinates, so a physical attachment can use
+    # the base body directly, including all flower/slider mass contributions.
+    flower = bodies["FrameGround"]
+    if not attach_flower_to_base:
+        flower = builder.add_link(xform=_transform(BODY_POSES["FrameGround"]), label="Flower", is_kinematic=True)
     assets = Path(newton.examples.get_asset_directory()) / "colibri"
     for name, kind, label, data, dimensions in SHAPES:
         if name not in bodies:
@@ -2235,6 +2248,8 @@ def build_scene(
         shape_sdf_resolution = sdf_resolution or SHAPE_SDF_RESOLUTIONS.get(label, 128)
         cfg.is_visible = label not in HIDDEN_SHAPES
         cfg.density, cfg.mu = SHAPE_MATERIALS.get(label, (1000.0, 0.5))
+        if label == "Frame/Cylinder":
+            cfg.density *= counterweight_density_scale
         if not cfg.has_shape_collision:
             cfg.density = 0.0
         color = SHAPE_COLORS.get(label, (0.62, 0.39, 0.18))
@@ -2341,8 +2356,9 @@ def build_scene(
     if "TailRack" in bodies:
         joint = builder.add_joint_free(bodies["TailRack"], label="TailRack/free")
         builder.add_articulation([joint], label="TailRack")
-    flower_joint = builder.add_joint_free(flower, label="Flower/free")
-    builder.add_articulation([flower_joint], label="Flower")
+    if not attach_flower_to_base:
+        flower_joint = builder.add_joint_free(flower, label="Flower/free")
+        builder.add_articulation([flower_joint], label="Flower")
     builder.add_ground_plane(height=0.002965275)
     return builder
 

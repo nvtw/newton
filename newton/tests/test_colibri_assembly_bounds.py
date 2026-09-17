@@ -4,9 +4,11 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
+from newton.examples.kamino import example_kamino_colibri as scene
 from newton.examples.kamino.example_kamino_colibri import Example
 from newton.examples.phoenx.example_phoenx_colibri import Example as PhoenxExample
 
@@ -36,6 +38,57 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         self.assertEqual(parser.parse_args([]).substeps, 24)
         self.assertEqual(parser.parse_args([]).iterations, 1)
         self.assertFalse(parser.parse_args(["--velocity-filtered-candidates"]).geometric_candidates)
+
+    def test_counterweight_density_scales_composite_mass_properties(self):
+        """Scale only the counterweight contribution, including its parallel-axis moment."""
+        shapes = [shape for shape in scene.SHAPES if shape[2] in ("Frame/Cylinder", "Frame/Cylinders/Cylinder")]
+        self.assertEqual(len(shapes), 2)
+        properties = []
+        with patch.object(scene, "SHAPES", shapes):
+            for scale in (0.0, 0.9, 1.0):
+                builder = scene.build_scene(body_count=2, counterweight_density_scale=scale)
+                body = builder.body_label.index("Frame")
+                mass = builder.body_mass[body]
+                center = np.asarray(builder.body_com[body], dtype=float)
+                inertia = np.asarray(builder.body_inertia[body], dtype=float).reshape(3, 3)
+                origin_inertia = inertia + mass * (np.dot(center, center) * np.eye(3) - np.outer(center, center))
+                properties.append((mass, mass * center, origin_inertia))
+        for component in range(3):
+            low, scaled, full = (item[component] for item in properties)
+            np.testing.assert_allclose(scaled, low + 0.9 * (full - low), rtol=2e-5, atol=1e-10)
+        self.assertGreater(properties[0][0], 0.0)
+        self.assertGreater(properties[2][0], properties[1][0])
+        self.assertEqual(PhoenxExample.create_parser().parse_args([]).counterweight_density_scale, 0.9)
+
+    def test_attached_flower_and_slider_belong_to_base(self):
+        """Make flower and helper shapes contribute to the moving base body."""
+        flower_shapes = [
+            shape
+            for shape in scene.SHAPES
+            if shape[2]
+            in (
+                "FrameGround/Flower/Flower_Stem",
+                "FrameGround/Flower/Slider/Cube",
+            )
+        ]
+        self.assertEqual(len(flower_shapes), 2)
+        # Use primitive stand-ins to isolate body ownership from mesh assets.
+        shapes = [
+            (name, "cylinder", label, (0, 0, 0, 0, 0, 0, 1), (0.01, 0.02)) for name, _, label, _, _ in flower_shapes
+        ]
+        with patch.object(scene, "SHAPES", shapes):
+            builder = scene.build_scene(body_count=1, attach_flower_to_base=True)
+            source = scene.build_scene(body_count=1)
+        source_flower = source.body_label.index("Flower")
+        self.assertIn("Flower/free", source.joint_label)
+        for _, _, label, _, _ in shapes:
+            self.assertEqual(source.shape_body[source.shape_label.index(label)], source_flower)
+        self.assertNotIn("Flower", builder.body_label)
+        self.assertNotIn("Flower/free", builder.joint_label)
+        base = builder.body_label.index("FrameGround")
+        self.assertGreater(builder.body_mass[base], 0.0)
+        for _, _, label, _, _ in shapes:
+            self.assertEqual(builder.shape_body[builder.shape_label.index(label)], base)
 
     def test_phoenx_settled_support_creep(self):
         """Reject support translation and rotation after the settling interval."""

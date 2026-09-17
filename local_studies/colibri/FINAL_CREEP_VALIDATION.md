@@ -1,11 +1,31 @@
 # Colibri readiness validation
 
-The public Phoenx Colibri example is ready for interactive visual inspection.
+The earlier validated configuration was ready for interactive visual inspection.
+The subsequent requested scene changes have the qualification below.
 It uses the standard Newton renderer:
 
 ```bash
 uv run -m newton.examples phoenx_colibri
 ```
+
+## Subsequent counterweight and flower changes
+
+The example now defaults to `--counterweight-density-scale 0.9`, applied to
+`Frame/Cylinder` before mass-property assembly. Flower and slider helper shapes
+are merged into the dynamic `FrameGround` body. The source USD has a separate
+kinematic flower and a disabled connecting joint; the revised attachment is
+physical and carries the shapes' mass/inertia on the base.
+
+All eight scene tests, including mass/COM/inertia and body-ownership regressions,
+and a 600-frame headless OpenGL run pass. However, the
+revised full-minute run fails the unchanged 1 mm fresh-contact limit at
+29.3167 seconds, with 1.135 mm penetration between the second hypocycloid gear
+and `Frame/Cylinders/Cylinder_11`. Base-support and drive checks passed up to
+that point. Artifact: `/tmp/colibri_density_flower3600.{json,npz,log}`.
+Thirty substeps and eight-color grouping also failed contact checks, so neither
+experiment was adopted. The default solver remains at 24 substeps/four colors.
+Do not apply the earlier minute-long readiness claim below to these revised
+mass/attachment defaults.
 
 ## Final measured behavior
 

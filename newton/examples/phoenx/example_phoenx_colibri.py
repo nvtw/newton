@@ -12,8 +12,9 @@ of four constraint colors share mass copies for the jointed mechanism.
 The experimental temporal solver keeps material friction anchors between
 contact refreshes and applies paired impulses at common world points. It uses
 one biased solve per internal step, followed by a final velocity relaxation.
-The assembly is free to move. Joint and fresh-contact checks screen instability
-and overlap. Full-assembly tests also bound support motion after two seconds
+The assembly is free to move. Flower and slider geometry belong to the base
+body; the counterweight cylinder defaults to 90% of its authored density.
+Joint and fresh-contact checks screen instability and overlap. Full-assembly tests also bound support motion after two seconds
 of settling and check sustained crank tracking against the authored target.
 
 Command: python -m newton.examples phoenx_colibri
@@ -182,6 +183,8 @@ class Example(ColibriChecks):
             source_contact_offsets=True,
             mesh_cylinders=True,
             sdf_resolution=0,
+            counterweight_density_scale=args.counterweight_density_scale,
+            attach_flower_to_base=True,
         )
         for index, label in enumerate(builder.shape_label):
             if label in CONTACT_OFFSETS:
@@ -330,6 +333,12 @@ class Example(ColibriChecks):
             type=int,
             default=len(BODY_ORDER),
             help="Build the first N mechanism bodies, starting at FrameGround.",
+        )
+        parser.add_argument(
+            "--counterweight-density-scale",
+            type=float,
+            default=0.9,
+            help="Density multiplier for Frame/Cylinder; scales its mass and inertia before body assembly (1.0 = authored).",
         )
         parser.add_argument("--fix-base", action="store_true", help="Anchor the base for diagnostics.")
         admission = parser.add_mutually_exclusive_group()
