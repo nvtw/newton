@@ -651,11 +651,16 @@ def _prepare_direct_rows(
     elif parent > wp.int32(0):
         point_error = point1 - bodies.position[parent] - point0_com
 
-    # Evaluate linear constraint impulses at one shared world point. Using each
-    # drifted anchor separately creates an artificial force couple in closed
-    # loops; the midpoint is identical to both anchors on the constraint manifold.
-    point0_com += wp.float32(0.5) * point_error
-    point1_com -= wp.float32(0.5) * point_error
+    # Evaluate paired linear impulses at one shared world point to avoid
+    # artificial force couples when the anchors differ.
+    if mode == JOINT_MODE_GENERIC_D6:
+        # Linear axes rotate with the parent frame. Their derivative includes
+        # the full anchor separation, including permitted sliding motion, in
+        # the parent lever arm. Apply both impulses at the child anchor.
+        point0_com += point_error
+    else:
+        point0_com += wp.float32(0.5) * point_error
+        point1_com -= wp.float32(0.5) * point_error
 
     for row in range(_MAX_ROWS):
         row_wrench0[structural_index, row] = wp.spatial_vector()
