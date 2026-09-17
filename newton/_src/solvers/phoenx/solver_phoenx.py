@@ -1994,12 +1994,6 @@ class PhoenXWorld:
         damping_limit: wp.array,
         friction_coefficient: wp.array | None = None,
         friction_slip_scale: wp.array | None = None,
-        d6_limit_axis0: wp.array | None = None,
-        d6_limit_axis1: wp.array | None = None,
-        d6_limit_axis2: wp.array | None = None,
-        d6_limit_lower: wp.array | None = None,
-        d6_limit_upper: wp.array | None = None,
-        d6_limit_count: wp.array | None = None,
         velocity_limit: wp.array | None = None,
     ) -> None:
         """Pack ``num_joints`` actuated-DBS joint columns. Call once after
@@ -2034,11 +2028,6 @@ class PhoenXWorld:
                 total axial impulse is the sum of the clamped drive PD
                 term and the clamped friction term, matching MuJoCo's
                 ``dof_frictionloss + actuator`` decomposition.
-            d6_limit_axis0, d6_limit_axis1, d6_limit_axis2: Optional
-                world-frame angular limit axes for D6 BALL/UNIVERSAL.
-            d6_limit_lower, d6_limit_upper: Optional per-axis limit
-                windows [rad].
-            d6_limit_count: Optional number of D6 angular limit axes.
             velocity_limit: Optional symmetric axial speed cap [m/s or rad/s].
                 None disables the cap.
         """
@@ -2048,18 +2037,6 @@ class PhoenXWorld:
             friction_coefficient = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
         if friction_slip_scale is None:
             friction_slip_scale = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
-        if d6_limit_axis0 is None:
-            d6_limit_axis0 = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
-        if d6_limit_axis1 is None:
-            d6_limit_axis1 = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
-        if d6_limit_axis2 is None:
-            d6_limit_axis2 = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
-        if d6_limit_lower is None:
-            d6_limit_lower = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
-        if d6_limit_upper is None:
-            d6_limit_upper = wp.zeros(self.num_joints, dtype=wp.vec3f, device=self.device)
-        if d6_limit_count is None:
-            d6_limit_count = wp.zeros(self.num_joints, dtype=wp.int32, device=self.device)
         if velocity_limit is None:
             velocity_limit = wp.zeros(self.num_joints, dtype=wp.float32, device=self.device)
         wp.launch(
@@ -2090,12 +2067,6 @@ class PhoenXWorld:
                 damping_limit,
                 friction_coefficient,
                 friction_slip_scale,
-                d6_limit_axis0,
-                d6_limit_axis1,
-                d6_limit_axis2,
-                d6_limit_lower,
-                d6_limit_upper,
-                d6_limit_count,
                 velocity_limit,
             ],
             device=self.device,

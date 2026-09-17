@@ -333,9 +333,11 @@ class TestD6Detection(unittest.TestCase):
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5)
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
-        self.assertEqual(int(solver._joint_constraints.d6_limit_count.numpy()[0]), 1)
-        np.testing.assert_allclose(solver._joint_constraints.d6_limit_lower.numpy()[0], [-0.25, 0.0, 0.0], atol=1.0e-6)
-        np.testing.assert_allclose(solver._joint_constraints.d6_limit_upper.numpy()[0], [0.30, 0.0, 0.0], atol=1.0e-6)
+        data = solver.world.constraints.d6
+        self.assertEqual(int(data.row_count.numpy()[0]), 1)
+        self.assertEqual(int(data.row_axis.numpy()[0, 0]), 0)
+        self.assertAlmostEqual(float(data.lower.numpy()[0, 0]), -0.25, delta=1.0e-6)
+        self.assertAlmostEqual(float(data.upper.numpy()[0, 0]), 0.30, delta=1.0e-6)
 
     def test_d6_revolute_pattern_dispatches_to_revolute(self) -> None:
         model = _build_d6_pendulum_revolute_equivalent(free_angular_index=1)
