@@ -12,6 +12,7 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton._src.viewer.picking import Picking
 from newton.viewer import ViewerBase, ViewerGL, ViewerOptix
 
 try:
@@ -74,6 +75,64 @@ class _FakeOptixApi:
 
 
 class TestViewerOptix(unittest.TestCase):
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_multi_world_pick_without_drag(self):
+        """Keep mouse-down forces gentle and isolated to the picked world."""
+        world = newton.ModelBuilder()
+        body = world.add_body(
+            mass=1.0, inertia=wp.mat33(0.004, 0.0, 0.0, 0.0, 0.004, 0.0, 0.0, 0.0, 0.004), lock_inertia=True
+        )
+        world.add_shape_sphere(body, radius=0.1)
+        builder = newton.ModelBuilder()
+        builder.replicate(world, 4)
+        model = builder.finalize(device="cpu")
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=_FakeOptixApi())
+        try:
+            # Exercise the backend picking initialization without building an OptiX scene.
+            viewer.model = model
+            viewer._initialize_picking(model)
+            viewer.set_world_offsets((0.65, 0.65, 0.0))
+            reference = Picking(model, world_offsets=viewer.world_offsets)
+            for index, offset in enumerate(viewer.world_offsets.numpy()):
+                for speed in (0.0, 0.001):
+                    with self.subTest(world=index, speed=speed):
+                        state = model.state()
+                        velocity = np.zeros((4, 6), dtype=np.float32)
+                        velocity[index, 2] = speed
+                        state.body_qd.assign(velocity)
+                        origin = wp.vec3(*offset) + wp.vec3(0.0, 0.0, 1.0)
+                        direction = wp.vec3(0.0, 0.0, -1.0)
+                        viewer.picking.pick(state, origin, direction)
+                        self.assertEqual(int(viewer.picking.pick_body.numpy()[0]), index)
+                        viewer.picking.update(origin, direction)
+                        viewer.apply_forces(state)
+                        actual = state.body_f.numpy().copy()
+                        state.clear_forces()
+                        reference.pick(state, origin, direction)
+                        reference.update(origin, direction)
+                        reference._apply_picking_force(state)
+                        np.testing.assert_allclose(actual, state.body_f.numpy(), atol=1.0e-6)
+                        np.testing.assert_array_equal(np.delete(actual, index, axis=0), 0.0)
+                        if speed:
+                            next_speed = speed + actual[index, 2] / float(model.body_mass.numpy()[index]) / 120.0
+                            self.assertGreaterEqual(next_speed, 0.0)
+                            self.assertLess(next_speed, speed)
+                        else:
+                            np.testing.assert_allclose(actual, 0.0, atol=1.0e-6)
+                        # Dragging still produces the standard spring force.
+                        moved_origin = origin + wp.vec3(0.001, 0.0, 0.0)
+                        state.clear_forces()
+                        viewer.picking.update(moved_origin, direction)
+                        viewer.apply_forces(state)
+                        actual = state.body_f.numpy().copy()
+                        state.clear_forces()
+                        reference.update(moved_origin, direction)
+                        reference._apply_picking_force(state)
+                        np.testing.assert_allclose(actual, state.body_f.numpy(), atol=1.0e-6)
+                        self.assertGreater(actual[index, 0], 0.0)
+        finally:
+            viewer.close()
+
     def test_authored_mesh_material_detection(self):
         """Apply fallback materials only to meshes without authored PBR data."""
         model = SimpleNamespace(
