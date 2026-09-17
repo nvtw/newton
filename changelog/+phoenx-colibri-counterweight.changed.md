@@ -1,0 +1,1 @@
+Add `--counterweight-density-scale` (default `0.9`) to the Phoenx Colibri example, rebuilding composite mass, center of mass and inertia from the adjusted `Frame/Cylinder` density. Attach the flower and slider helper geometry physically to the base instead of using a separate world-kinematic body.

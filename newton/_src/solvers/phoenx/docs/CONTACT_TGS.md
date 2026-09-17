@@ -37,6 +37,22 @@ Normal rows are loaded cooperatively on CUDA, and friction geometry is prepared
 in parallel; the ordered impulse solve is preserved. There is no added body
 damping, base pinning, contact deletion, or extra support sweep.
 
+## Colibri mass and attachment options
+
+The Phoenx example defaults to `--counterweight-density-scale 0.9`.
+This scales only `Frame/Cylinder` from its authored 5,000 kg/m³ density to
+4,500 kg/m³ before shape mass properties are accumulated. The containing
+`Frame` body's mass, center of mass and inertia are consequently rebuilt
+consistently. Use `--counterweight-density-scale 1.0` for the authored density.
+The factor must be finite and nonnegative.
+
+Flower and slider helper geometry belong to the dynamic `FrameGround` body
+in this example. The source USD instead nests a kinematic `Flower` beneath
+the base and disables its connecting revolute joint. Combining those shapes
+with the base gives a physical attachment, including their mass and inertia,
+without kinematically anchoring the flower to the world. The shared Kamino
+scene builder retains the authored behavior by default.
+
 ## Supported configuration
 
 This experimental mode currently requires one rigid CUDA world, maximal
@@ -62,7 +78,23 @@ These are explicit limits of the experimental configuration, not a claim that
 all PhysX scenes use those distances. This mode has not been validated across
 arbitrary scene scales or large multi-world robot fleets.
 
-## Colibri validation
+## Validation of the revised scene
+
+All eight scene tests and a 600-frame headless OpenGL run pass.
+The density and attachment regressions confirm that counterweight density scales its
+contribution to composite mass, COM and inertia, and all flower/slider shapes
+share the dynamic base body. Shared-builder defaults preserve the Kamino scene.
+
+The new physical configuration is not yet validated for a full minute. With
+the unchanged 24-substep/four-color-group settings, it passes support and drive
+checks but crosses the existing 1 mm gear-penetration limit at 29.32 seconds:
+1.135 mm between `Hypocycloid_Gear__3x_02/Hypocycloid_Gear__3x_0_mesh` and
+`Frame/Cylinders/Cylinder_11`. Increasing substeps or color-group size did not
+resolve that contact failure; those experimental settings were not adopted.
+The successful minute-long measurements below apply to the earlier mass and
+attachment configuration, not the revised defaults.
+
+## Colibri validation before the mass/attachment adjustment
 
 On an RTX PRO 6000 Blackwell, the final 60-second public-example run passed
 3,601 joint, contact, support and crank-tracking checks. From seconds 10 to 60,
