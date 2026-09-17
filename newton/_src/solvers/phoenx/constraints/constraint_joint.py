@@ -1261,6 +1261,22 @@ def _joint_constraint_prepare_inequality_full(
         angular_velocity1 += inv_inertia1 @ wp.cross(r1_b1, impulse)
         velocity2 -= inv_mass2 * impulse
         angular_velocity2 -= inv_inertia2 @ wp.cross(r1_b2, impulse)
+    elif constraints.d6.enabled != 0 and constraints.d6.row_count[cid] > wp.int32(0):
+        velocity1, angular_velocity1, velocity2, angular_velocity2 = prepare_d6_inequalities(
+            constraints.d6,
+            cid,
+            bodies,
+            b1,
+            b2,
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            velocity1,
+            angular_velocity1,
+            velocity2,
+            angular_velocity2,
+        )
     elif mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_PRISMATIC:
         metric = _d6_metric_anchor_block(
             inv_mass1,
@@ -1324,22 +1340,6 @@ def _joint_constraint_prepare_inequality_full(
             )
             angular_velocity1 += inv_inertia1 @ (axis * axial_impulse)
             angular_velocity2 -= inv_inertia2 @ (axis * axial_impulse)
-    elif constraints.d6.enabled != 0 and constraints.d6.row_count[cid] > wp.int32(0):
-        velocity1, angular_velocity1, velocity2, angular_velocity2 = prepare_d6_inequalities(
-            constraints.d6,
-            cid,
-            bodies,
-            b1,
-            b2,
-            inv_mass1,
-            inv_mass2,
-            inv_inertia1,
-            inv_inertia2,
-            velocity1,
-            angular_velocity1,
-            velocity2,
-            angular_velocity2,
-        )
     elif mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
         count = read_int(constraints, _OFF_D6_LIMIT_COUNT, cid)
         if count > wp.int32(0):
