@@ -39,6 +39,61 @@ def _mode_for(model: newton.Model) -> int:
 
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX direct D6 dispatch tests run on CUDA only")
 class TestD6DirectDispatch(unittest.TestCase):
+    def test_projected_d6_limits_use_common_rows(self) -> None:
+        """Keep D6 inequalities available without the direct equality system."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+        body = _make_body(builder)
+        locked = [
+            newton.ModelBuilder.JointDofConfig(axis=axis, limit_lower=1.0, limit_upper=-1.0)
+            for axis in (newton.Axis.X, newton.Axis.Y, newton.Axis.Z)
+        ]
+        angular = [
+            newton.ModelBuilder.JointDofConfig(axis=newton.Axis.X, limit_lower=-0.2, limit_upper=0.2),
+            newton.ModelBuilder.JointDofConfig.create_unlimited(newton.Axis.Y),
+            newton.ModelBuilder.JointDofConfig(
+                axis=newton.Axis.Z,
+                limit_lower=1.0,
+                limit_upper=-1.0,
+            ),
+        ]
+        joint = builder.add_joint_d6(parent=-1, child=body, linear_axes=locked, angular_axes=angular)
+        builder.add_articulation([joint])
+        model = builder.finalize(device=wp.get_preferred_device())
+        coordinates = model.joint_q.numpy()
+        coordinates[3] = 0.5
+        model.joint_q.assign(coordinates)
+
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal_projected",
+            substeps=4,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+
+        self.assertIsNone(solver._direct_equality_system)
+        data = solver.world.constraints.d6
+        self.assertEqual(int(data.row_count.numpy()[0]), 1)
+        self.assertEqual(int(data.row_axis.numpy()[0, 0]), 3)
+        self.assertAlmostEqual(float(data.lower.numpy()[0, 0]), -0.2, delta=1.0e-6)
+        self.assertAlmostEqual(float(data.upper.numpy()[0, 0]), 0.2, delta=1.0e-6)
+
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        state.clear_forces()
+        solver.step(state, state, model.control(), None, 1.0 / 120.0)
+        self.assertLessEqual(abs(float(state.joint_q.numpy()[3])), 0.2005)
+
+        lower = model.joint_limit_lower.numpy()
+        upper = model.joint_limit_upper.numpy()
+        lower[3] = -1.0e6
+        upper[3] = 1.0e6
+        model.joint_limit_lower.assign(lower)
+        model.joint_limit_upper.assign(upper)
+        solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+        self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 0)
+
     def test_angular_three_axis_d6_reduces_to_ball_socket_with_limits(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         body = _make_body(builder)
