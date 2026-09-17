@@ -110,13 +110,16 @@ def _backward_bilateral_impulses(
     solution: Vec6d,
 ):
     lower = data.lower[cid]
-    # Preserve ascending inner subtraction order in each descending solve row.
-    for reverse in range(count):
-        i = count - reverse - 1
-        value = solution[i]
-        for j in range(i + 1, count):
-            value -= lower[j, i] * solution[j]
-        solution[i] = value
+    # Constant bounds let Warp unroll matrix indexing without changing
+    # descending solve rows or ascending subtractions within each row.
+    for reverse in range(6):
+        i = 5 - reverse
+        if i < count:
+            value = solution[i]
+            for j in range(6):
+                if j > i and j < count:
+                    value -= lower[j, i] * solution[j]
+            solution[i] = value
 
     impulse0 = wp.spatial_vector()
     impulse1 = wp.spatial_vector()

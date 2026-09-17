@@ -9,14 +9,20 @@ from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
+    constraint_write_multiplier,
+    read_float,
     read_int,
     read_vec3,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
+    _CLAMP_NONE,
+    _MUL_ACC_FRICTION,
     _OFF_AXIS_WORLD,
     _OFF_BODY1,
     _OFF_BODY2,
     _OFF_CLAMP,
+    _OFF_D6_LIMIT_COUNT,
+    _OFF_FRICTION_COEFFICIENT,
     _OFF_JOINT_MODE,
     _OFF_R1_B1,
     _OFF_R1_B2,
@@ -62,6 +68,15 @@ def joint_constraint_iterate_inequality(
     body2 = read_int(constraints, _OFF_BODY2, cid)
     body_set_access_mode(bodies, body1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, body2, ACCESS_MODE_VELOCITY_LEVEL, idt)
+    # Preserve lazy body-state conversion and stale friction release, but
+    # avoid loading and writing body responses for zero-impulse rows.
+    if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
+        if read_int(constraints, _OFF_D6_LIMIT_COUNT, cid) == 0:
+            return
+    elif read_int(constraints, _OFF_CLAMP, cid) == _CLAMP_NONE:
+        if read_float(constraints, _OFF_FRICTION_COEFFICIENT, cid) <= wp.float32(0.0):
+            constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
+            return
     (
         velocity1,
         velocity2,

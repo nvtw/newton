@@ -173,3 +173,261 @@ contact policy; replicated runs include adjacent-tail collision filters.
 Artifacts: `/tmp/colibri_phase_times_{single,multi}.{log,json}`;
 `/tmp/colibri_phase_times.py`. No competing compute process was present
 when checked during the run. The solver remains the dominant target.
+
+## Bounded joint back-solve follow-up
+
+Replacing the dynamic backward loops by six guarded constant iterations
+preserves descending solve rows and ascending subtractions within each
+row. Frozen sweep: 136.655 -> 133.683 microseconds; all outputs bitwise
+identical. Additional gather/forward/scatter unrolling only reached
+133.243 microseconds, so retain only the minimal candidate for evaluation.
+
+Alternating-order paired full-minute comparisons (3600 measured + 60 warmup):
+
+| Mode | Control ms/frame | Candidate ms/frame | Ratio |
+| --- | ---: | ---: | ---: |
+| Powered | 17.306374 | 17.200335 | 1.006165x |
+| Motor off | 16.053879 | 15.969297 | 1.005297x |
+
+Every pose and velocity matched bitwise on all 3660 frames in both modes;
+all penetration, assembly, drive/support and joint checks passed. Powered
+one-second block savings averaged 0.106039 ms (standard error 0.022235 ms),
+positive in 47 of 60 blocks. These alternating measurements use two live
+models and are not replacements for standalone throughput baselines.
+
+Artifacts: `/tmp/colibri_joint_{unrolled,bounds}_frozen.*`,
+`/tmp/colibri_joint_unrolled_paired_{short,minute,unpowered}.*`.
+Candidate helper: `/tmp/colibri_joint_unrolled.py`; sweep:
+`/tmp/colibri_sweep_joint_unrolled.py`; full-frame adapter and driver:
+`/tmp/colibri_joint_unrolled_live.py`, `/tmp/colibri_joint_unrolled_paired.py`.
+No production change yet: broader regressions and standalone/Nsight
+confirmation remain before deciding to retain it.
+
+A frozen experiment omitting dynamic friction code failed the velocity
+bitwise gate (`/tmp/colibri_normal_only_frozen.log`), so do not assume that
+all dynamic contacts are frictionless. No friction behavior was changed
+in production.
+
+Nsight Compute 2025.4.0 was found under `/usr/local/cuda/`; it is not on
+PATH. Both attempted launch orders failed during Python startup before
+kernel profiling (`/tmp/colibri_ncu_sweep{,_direct}.log`). The driver also
+reports `RmProfilingAdminOnly: 1`. No usable counter profile was obtained
+and no driver configuration was changed. Nsight Systems remains available.
+
+### Actual-helper validation
+
+The minimal bounded-loop change was applied to the isolated checkout's
+canonical `bilateral_joint.py` (not the working example). All 22 tests in
+bilateral preparation, direct drive, D6 drive, color-group conservation,
+and temporal contact-force suites pass (`/tmp/colibri_joint_unrolled_tests.log`).
+
+The canonical helper's standalone full-minute run preserves all 3660
+saved states and quality metrics exactly, but measured 16.735662 ms/frame.
+It **fails** the speed gate against the earlier 14.672049 ms control;
+do not use the earlier paired gain as proof that this standalone run improved.
+The actual frozen kernel still measures 133.796 microseconds, consistent
+with the wrapper experiment. A fresh full-minute unchanged control is
+running as `/tmp/colibri_joint_fresh_control_minute`; the isolated helper
+has been restored before that control. The main solver remains unchanged.
+
+A preload of the system libpython allowed a minimal Nsight Compute Python
+startup probe to exit successfully, but the full profiling launch still
+failed with exit code 11 before profiling (`/tmp/colibri_ncu_sweep_preload.log`).
+No usable Nsight Compute counter data is available. No Python packages or
+driver settings were changed for these probes.
+
+
+### Fresh control and Nsight confirmation
+
+The fresh unchanged standalone control completed at 16.846104 ms/frame,
+versus 16.735662 for the canonical candidate (1.00660x). Both include
+3600 measured frames after 60 warmup frames. All 3660 saved states and
+quality metrics match exactly. The earlier 14.672049 ms control is not a
+contemporaneous comparison; timing conditions changed between batches.
+The alternating powered and motor-off comparisons above independently
+support a small improvement, not a large throughput gain.
+
+Nsight Systems, 120 measured frames after 60 warmup frames, confirms
+5760 main biased sweeps in both versions. Their median falls from
+151.839 to 149.7115 microseconds (1.40%); mean falls from 158.5753 to
+157.2770 microseconds (0.82%). Long outliers remain in both traces.
+These kernel gains are not whole-frame speedups. Artifacts:
+`/tmp/colibri_joint_{control,candidate}_trace.nsys-rep`,
+`/tmp/colibri_joint_{control,candidate}_stats.csv`, and
+`/tmp/colibri_joint_fresh_control_minute.{json,npz,log}`.
+
+The minimal candidate is now applied to the main checkout for validation.
+No substep, iteration, collision, material, drive, or constraint policy
+changes are included. Main-checkout joint and momentum regressions pass (24 tests), including
+replicated-world and shared-global-body contact momentum checks; see
+`/tmp/colibri_joint_main_validation.log`. Focused Ruff lint and formatting
+checks pass. The change is not committed; repository-wide hooks and the
+performance regression gate remain before committing.
+The 9.4 ms/frame target remains unmet.
+
+
+### Cooperative backward-row experiment
+
+Distributed descending backward-solve rows across the eight joint lanes,
+broadcasting each solved value while retaining ascending inner subtraction
+order. Frozen outputs remain bitwise identical. Against the minimal
+bounded-loop candidate, the new variant is slower: 134.684800 versus
+134.055361 microseconds (medians 135.168 versus 133.120). Reject it; the
+additional lane communication does not pay for this six-row solve.
+Artifacts: `/tmp/colibri_joint_backward_lanes_frozen.{log,json,npz}`;
+`/tmp/colibri_joint_backward_lanes.py` and
+`/tmp/colibri_profile_joint_backward_lanes.py`. No production change.
+
+The final Nsight Compute bootstrap attempt also failed at Python startup
+with exit 11; `/tmp/colibri_ncu_bootstrap.log`. No counter data or driver
+configuration change resulted. Continue using measured timings and Nsight
+Systems rather than inferring occupancy or register stalls from this failure.
+
+
+Delaying the body-response load until after the cooperative nonleaders exit
+also preserves frozen output bits but loses performance: 135.359360 versus
+134.144481 microseconds. Reject this variant too. It may trade live values
+for additional loads; there is no counter evidence establishing the cause.
+Artifacts: `/tmp/colibri_joint_late_response_frozen.{log,json,npz}` and
+`/tmp/colibri_joint_late_response.py`. Neither experiment changes the retained
+minimal bounded-loop candidate or the 24-substep work configuration.
+
+
+### Register limits after bounded backward substitution
+
+Frozen sweep, 200 samples after 20 warmups per variant, identical restored
+inputs and all outputs bitwise equal. Repeat reverses candidate order.
+These are exploratory kernel measurements, not end-to-end speed claims.
+
+| Maximum registers | Forward order mean us | Reverse order mean us |
+| --- | ---: | ---: |
+| 192 (current) | 134.678401 | 133.937760 |
+| 128 | 133.506400 | 133.118400 |
+| 160 | 133.731361 | 133.279520 |
+| 224 | 134.120320 | 133.824641 |
+| 256 | 133.986081 | 133.748480 |
+
+128 is about 0.6–0.9% faster than 192 in these screens, enough only to
+justify an alternating full-frame screen. No production register limit
+has changed. Artifacts: `/tmp/colibri_registers_bounded_frozen.*`,
+`/tmp/colibri_registers_bounded_reverse.*`, and
+`/tmp/colibri_profile_registers_bounded{,_reverse}.py`.
+
+
+The 128-register bounded-loop variant completes a powered full-minute
+alternating comparison: 14.217925 -> 14.166496 ms/frame
+(1.003630x). All 3660 states are bitwise equal; peak penetration
+0.470375 mm, anchor error 0.630504 mm, axis error 0.012544996 rad, and
+assembly/drive checks pass. This is only a 0.36% paired frame gain; no
+production register setting has changed and standalone/repeat/unpowered
+confirmation remains. Artifacts: `/tmp/colibri_register128_bounded_minute.*`.
+
+
+### Inactive inequality iteration screen
+
+An isolated early return after body-state conversion skips the body load
+and zero-impulse scatter for inactive limits with zero friction, retaining
+the required friction multiplier reset. Ball/universal rows with no
+angular limits likewise skip the no-op body roundtrip. No production
+change yet. Expanded frozen parity includes constraint multipliers and
+body access modes, in addition to velocities/contact/joint impulses.
+
+Two frozen measurements: 133.861761 -> 131.071040 us and
+133.986560 -> 131.070720 us, all checked outputs bitwise equal. Short
+alternating full frames (180 measured + 60 warmup): 14.531424 ->
+14.347068 ms (1.012850x), all 240 states bitwise equal and quality checks
+pass. Full-minute powered/unpowered, transition regressions and Nsight
+confirmation are still required. Artifacts:
+`/tmp/colibri_inactive_inequality_{frozen,state,short}.*`;
+`/tmp/colibri_inactive_inequality.py` and associated sweep/live/paired scripts.
+
+
+Powered full-minute paired confirmation for inactive inequality iteration:
+14.334873 -> 14.175937 ms/frame (1.011212x).
+All 3660 poses/velocities match bitwise; penetration 0.470375 mm, joint
+anchor error 0.630504 mm and axis error 0.012544996 rad match control;
+assembly/drive checks pass. Artifact:
+`/tmp/colibri_inactive_inequality_minute.*`. Motor-off full-minute comparison
+is running sequentially as `/tmp/colibri_inactive_inequality_unpowered.*`.
+No production early-return change yet. This approximately 1.1% gain does
+not meet the 9.4 ms/frame objective.
+
+
+Motor-off full-minute paired confirmation completed: 13.064452
+-> 12.956495 ms/frame (1.008332x). All 3660 states
+match bitwise; support-stationarity checks pass unchanged. Peak penetration
+0.240596 mm, anchor error 0.267415 mm and axis error 0.004304540 rad match
+control. Artifact: `/tmp/colibri_inactive_inequality_unpowered.*`.
+The early return is now applied to the main checkout for broader regression
+validation (`/tmp/phoenx_inactive_inequality_tests.log`), not committed yet.
+Standalone repeated throughput and Nsight confirmation remain outstanding.
+
+
+The main-checkout inactive-inequality change passes all 28 tests in joint
+position limits, Coulomb friction/drives, distance and velocity bounds, D6
+dispatch, and temporal contact momentum (69.498 s). Artifact:
+`/tmp/phoenx_inactive_inequality_tests.log`. Keep the change uncommitted
+until standalone repeat/Nsight and performance acceptance are complete.
+
+
+### Reuse resolved body slots (isolated screen only)
+
+The common joint body loader resolves each body slot in the linear read
+and again in the angular read. Reusing the existing
+`read_angular_velocity_with_slot` helper preserves all frozen output bits.
+Forward order: 133.486081 -> 133.120160 us; reverse order:
+134.172160 -> 133.256802 us. This small kernel difference is not a proven
+frame improvement; no production body-loader edit was made. Artifacts:
+`/tmp/colibri_body_pair_slots_{frozen,reverse}.*`,
+`/tmp/colibri_body_pair_slots.py`, and the corresponding joint/sweep/profile
+wrappers. Assess end-to-end cost before retaining this optional follow-up.
+
+
+### Combined standalone confirmation in progress
+
+Runner: `/tmp/colibri_joint_combined_confirmation.py`. It snapshots the
+main checkout's two pending helper edits, compares them against the
+`5ccefea2a` versions of `bilateral_joint.py` and `joint_inequality.py`,
+and runs control A, candidate A, candidate B, control B sequentially in
+the original-policy isolated checkout. Each run uses 3600 measured frames,
+60 warmup frames and `--validate`. It then collects 120-frame Nsight traces
+for control and candidate, and restores the isolated files in `finally`.
+No register-limit or slot-reuse experiment is included.
+
+Control A completed at 14.307503 ms/frame. Candidate A is now running;
+all remaining acceptance comparisons are pending. Artifacts use
+`/tmp/colibri_joint_combined_*`; orchestration log:
+`/tmp/colibri_joint_combined_confirmation.log`. Do not infer a combined
+speedup from the earlier separate or paired measurements.
+
+
+Combined standalone ABBA sequence completed:
+
+| Run | Mean ms/frame |
+| --- | ---: |
+| Control A | 14.307503 |
+| Candidate A | 14.052157 |
+| Candidate B | 14.398756 |
+| Control B | 14.522045 |
+
+The existing saved-trajectory gate passes for each adjacent pair: 1.01817x
+and 1.00856x, all states and quality metrics exact. Conditions drifted
+across the sequence; candidate B is slower than control A, so do not
+claim every cross-comparison wins or present the average as noise-free.
+
+Nsight main biased sweep: 5760 instances in each trace; median
+151.710 -> 145.679 us, mean 161.7902 -> 155.2003 us. Long outliers remain.
+Artifacts: `/tmp/colibri_joint_combined_{control,candidate}_stats.csv`
+and corresponding traces. This supports a modest combined improvement,
+not achievement of the 9.4 ms/frame target. The runner restored the
+isolated source files after completion.
+
+
+Retention gate: both adjacent standalone pairs pass the existing
+`check_temporal_performance` with `--minimum-speedup 1.005`, exact saved
+trajectory and quality checks enabled. Comparing unchanged control B
+against unchanged control A fails this improvement gate, as expected
+(`/tmp/colibri_joint_combined_old_gate.log`). This is a measured performance
+acceptance check, not a deterministic correctness unit test; control
+variation and the paired/full-minute/Nsight evidence above remain essential.
+Correctness suites for the two changes passed 24 and 28 tests respectively.
