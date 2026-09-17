@@ -21,50 +21,64 @@ BLOCK_SIZE = 128
     __shared__ int seeds[1024];
     __shared__ int tails[1024];
     __shared__ int sizes[1024];
+    __shared__ int next_point[1024];
+    __shared__ int point_seed[1024];
     const wp::vec3* input = (const wp::vec3*)normals.data;
     for (int i = lane; i < count; i += 128)
         cache[i] = input[first + i];
+    __shared__ int used;
+    __shared__ int warp_best[4];
+    if (lane == 0) used = 0;
     __syncthreads();
-    if (lane == 0) {
-        int* point_patch = (int*)state.point_patch.data;
-        int* point_next = (int*)state.point_next.data;
-        int* patch_first = (int*)state.patch_first.data;
-        int* patch_last = (int*)state.patch_last.data;
-        int* patch_count = (int*)state.patch_count.data;
-        int* patch_next = (int*)state.patch_next.data;
-        wp::vec3* patch_normal = (wp::vec3*)state.patch_normal.data;
-        int* group_first = (int*)state.group_first.data;
-        int* group_count = (int*)state.group_count.data;
-        int used = 0;
-        for (int i = 0; i < count; ++i) {
-            int selected = -1;
-            for (int j = 0; j < used; ++j) {
-                if (wp::dot(cache[i], cache[seeds[j]]) > cosine) {
-                    selected = j;
-                    break;
-                }
-            }
-            if (selected < 0) {
+    int* point_patch = (int*)state.point_patch.data;
+    int* point_next = (int*)state.point_next.data;
+    int* patch_first = (int*)state.patch_first.data;
+    int* patch_last = (int*)state.patch_last.data;
+    int* patch_count = (int*)state.patch_count.data;
+    int* patch_next = (int*)state.patch_next.data;
+    wp::vec3* patch_normal = (wp::vec3*)state.patch_normal.data;
+    int* group_first = (int*)state.group_first.data;
+    int* group_count = (int*)state.group_count.data;
+    for (int i = 0; i < count; ++i) {
+        int best = 1024;
+        for (int j = lane; j < used; j += 128) {
+            if (wp::dot(cache[i], cache[seeds[j]]) > cosine)
+                best = min(best, j);
+        }
+        for (int offset = 16; offset > 0; offset /= 2)
+            best = min(best, __shfl_down_sync(0xffffffffu, best, offset));
+        if ((lane & 31) == 0) warp_best[lane / 32] = best;
+        __syncthreads();
+        if (lane == 0) {
+            int selected = min(min(warp_best[0], warp_best[1]), min(warp_best[2], warp_best[3]));
+            if (selected == 1024) {
                 selected = used++;
                 seeds[selected] = i;
                 tails[selected] = -1;
                 sizes[selected] = 0;
             }
             if (tails[selected] >= 0)
-                point_next[first + tails[selected]] = first + i;
-            point_next[first + i] = -1;
-            point_patch[first + i] = first + seeds[selected];
+                next_point[tails[selected]] = first + i;
+            next_point[i] = -1;
+            point_seed[i] = first + seeds[selected];
             tails[selected] = i;
             ++sizes[selected];
         }
-        for (int j = 0; j < used; ++j) {
-            int patch = first + seeds[j];
-            patch_first[patch] = patch;
-            patch_last[patch] = first + tails[j];
-            patch_count[patch] = sizes[j];
-            patch_next[patch] = j + 1 < used ? first + seeds[j + 1] : -1;
-            patch_normal[patch] = cache[seeds[j]];
-        }
+        __syncthreads();
+    }
+    for (int i = lane; i < count; i += 128) {
+        point_next[first + i] = next_point[i];
+        point_patch[first + i] = point_seed[i];
+    }
+    for (int j = lane; j < used; j += 128) {
+        int patch = first + seeds[j];
+        patch_first[patch] = patch;
+        patch_last[patch] = first + tails[j];
+        patch_count[patch] = sizes[j];
+        patch_next[patch] = j + 1 < used ? first + seeds[j + 1] : -1;
+        patch_normal[patch] = cache[seeds[j]];
+    }
+    if (lane == 0) {
         group_first[group] = used > 0 ? first : -1;
         group_count[group] = used;
     }

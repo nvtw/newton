@@ -18,7 +18,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_bias,
     cc_get_eff_n,
     cc_get_normal,
-    cc_get_normal_lambda,
+    cc_get_normal_lambdas,
     cc_get_r0,
     cc_get_r1,
     cc_get_start_gap,
@@ -59,6 +59,11 @@ class ContactTGS:
     keys: wp.array[wp.vec4i]
     previous_keys: wp.array[wp.vec4i]
     previous_active: wp.array[int]
+    current_group_count: wp.array[int]
+    current_groups: wp.array[int]
+    previous_groups: wp.array[int]
+    solve_first: wp.array[int]
+    solve_next: wp.array[int]
     current: NormalPatches
     previous: NormalPatches
     anchors: PatchAnchors
@@ -85,7 +90,12 @@ def allocate_contact_tgs(capacity: int, body_count: int, substeps: int, device: 
     state.last = wp.full(capacity, -1, dtype=int, device=device)
     state.keys = wp.full(capacity, wp.vec4i(-1), dtype=wp.vec4i, device=device)
     state.previous_keys = wp.full(capacity, wp.vec4i(-1), dtype=wp.vec4i, device=device)
-    state.previous_active = wp.array([capacity], dtype=int, device=device)
+    state.previous_active = wp.zeros(1, dtype=int, device=device)
+    state.current_group_count = wp.zeros(1, dtype=int, device=device)
+    state.current_groups = wp.zeros(capacity, dtype=int, device=device)
+    state.previous_groups = wp.zeros(capacity, dtype=int, device=device)
+    state.solve_first = wp.full(capacity, -1, dtype=int, device=device)
+    state.solve_next = wp.full(capacity, -1, dtype=int, device=device)
     state.current = allocate_partition(capacity, capacity, device)
     state.previous = allocate_partition(capacity, capacity, device)
     state.anchors = allocate_anchors(capacity, device)
@@ -117,6 +127,9 @@ def snapshot_contact_tgs(state: ContactTGS) -> None:
         wp.copy(getattr(state.previous, field), getattr(state.current, field))
     for field in ("count", "broken", "source", "normal0", "normal1", "local0", "local1"):
         wp.copy(getattr(state.previous_anchors, field), getattr(state.anchors, field))
+    wp.copy(state.previous_groups, state.current_groups)
+    wp.copy(state.previous_active, state.current_group_count)
+    state.current_group_count.zero_()
     wp.copy(state.previous_keys, state.keys)
     state.keys.fill_(wp.vec4i(-1))
     state.impulse.zero_()
@@ -156,6 +169,9 @@ def prepare_contact_tgs(
 ):
     if state.last[first] != state.generation[0]:
         state.keys[first] = wp.vec4i(a, b, reinterpret_float_as_int(mu_s), reinterpret_float_as_int(mu_d))
+        state.solve_first[first] = -1
+        group_slot = wp.atomic_add(state.current_group_count, 0, 1)
+        state.current_groups[group_slot] = first
         # Normal rows remain active. Zero friction needs no patch history;
         # the material key prevents reuse if friction returns next generation.
         if mu_s == 0.0 and mu_d == 0.0:
@@ -180,6 +196,8 @@ def prepare_contact_tgs(
             state.keys,
             state.previous_keys,
             state.previous_active,
+            state.previous_groups,
+            True,
             pose0,
             pose1,
             state.points,
@@ -191,6 +209,17 @@ def prepare_contact_tgs(
             state.previous_anchors,
             state.anchors,
         )
+        tail = int(-1)
+        patch = state.current.group_first[first]
+        while patch >= 0:
+            if state.anchors.count[patch] > 0:
+                if tail < 0:
+                    state.solve_first[first] = patch
+                else:
+                    state.solve_next[tail] = patch
+                state.solve_next[patch] = -1
+                tail = patch
+            patch = state.current.patch_next[patch]
         state.last[first] = state.generation[0]
     return wp.vec3f(0.0), wp.vec3f(0.0), wp.vec3f(0.0)
 
@@ -221,13 +250,12 @@ def get_solve_contact_tgs(record_wrenches: bool = False):
         idt: float,
         biased: bool,
     ):
-        if state.current.group_first[first] < 0:
+        if state.solve_first[first] < 0:
             return v0, v1, w0, w1
-        for k in range(first, first + size):
-            state.loads[k] = cc_get_normal_lambda(cc, k)
+        normal_impulses = cc_get_normal_lambdas(cc)
         pose0 = wp.transformf(bodies.position[a], body_load_orientation(bodies, a))
         pose1 = wp.transformf(bodies.position[b], body_load_orientation(bodies, b))
-        patch = state.current.group_first[first]
+        patch = state.solve_first[first]
         while patch >= 0:
             prior0 = wp.vec3f(0.0)
             prior1 = wp.vec3f(0.0)
@@ -239,7 +267,7 @@ def get_solve_contact_tgs(record_wrenches: bool = False):
                     state.current,
                     state.anchors,
                     patch,
-                    state.loads,
+                    normal_impulses,
                     state.impulse,
                     pose0,
                     pose1,
@@ -263,7 +291,7 @@ def get_solve_contact_tgs(record_wrenches: bool = False):
                     state.current,
                     state.anchors,
                     patch,
-                    state.loads,
+                    normal_impulses,
                     state.impulse,
                     pose0,
                     pose1,
@@ -293,7 +321,7 @@ def get_solve_contact_tgs(record_wrenches: bool = False):
                             + wp.transform_point(pose1, state.anchors.local1[patch, j])
                         )
                     record_impulse(state, state.current.patch_first[patch], common, state.impulse[patch, j] - prior)
-            patch = state.current.patch_next[patch]
+            patch = state.solve_next[patch]
         return v0, v1, w0, w1
 
     return solve_contact_tgs
