@@ -17,18 +17,50 @@ from newton.viewer import ViewerNull
 
 @unittest.skipUnless(wp.is_cuda_available(), "Phoenx Colibri requires CUDA")
 class TestColibriContacts(unittest.TestCase):
-    def _make_example(self):
+    def _make_example(self, num_worlds=1):
         assets = Path(newton.examples.get_asset_directory()) / "colibri"
         if not assets.is_dir():
             self.skipTest("Colibri mesh assets are not installed")
         args = Example.create_parser().parse_args(
-            ["--contact-updates-per-frame", "2", "--substeps", "24", "--counterweight-density-scale", "1.0"]
+            [
+                "--num-worlds",
+                str(num_worlds),
+                "--contact-updates-per-frame",
+                "2",
+                "--substeps",
+                "24",
+                "--counterweight-density-scale",
+                "1.0",
+            ]
         )
         return Example(ViewerNull(), args)
 
+    def test_replicated_worlds_keep_contacts_local(self):
+        """Replicate at the origin, separate only in the viewer, and audit every world."""
+        example = self._make_example(4)
+        self.assertEqual(example.model.world_count, 4)
+        q = example.initial_q.reshape(4, -1, 7)
+        for world in range(1, 4):
+            np.testing.assert_array_equal(q[world], q[0])
+        offsets = example.viewer.world_offsets.numpy()
+        self.assertEqual(len(np.unique(offsets[:, 0])), 2)
+        self.assertEqual(len(np.unique(offsets[:, 1])), 2)
+        worlds = example.model.shape_world.numpy()
+        for _ in range(60):
+            example.step()
+            example.test_post_step()
+            contacts = example.contacts
+            count = int(contacts.rigid_contact_count.numpy()[0])
+            self.assertGreater(count, 0)
+            self.assertLess(count, contacts.rigid_contact_max)
+            first = worlds[contacts.rigid_contact_shape0.numpy()[:count]]
+            second = worlds[contacts.rigid_contact_shape1.numpy()[:count]]
+            np.testing.assert_array_equal(first, second)
+            np.testing.assert_array_equal(np.unique(first), np.arange(4))
+
     def test_contact_visualization_uses_snapshot(self):
         """Generate contact arrows from a snapshot after live buffers change."""
-        example = self._make_example()
+        example = self._make_example(4)
         example.step()
         example._render_states = (example.model.state(), example.model.state())
         example.viewer.show_contacts = True

@@ -19,13 +19,15 @@ Joint and fresh-contact checks screen instability and overlap. Powered runs
 check sustained crank tracking. With --motor-off, the crank is passive and
 support stationarity is checked after an initial two-second settling window.
 
-The default viewer is OptiX, as in the Kapla tower example.
+The default viewer is OptiX, with four independent worlds in a 2x2 grid.
+Use --num-worlds N to change the count, or --num-worlds 1 for one mechanism.
 
 Command: python -m newton.examples phoenx_colibri
 """
 
 import argparse
 import csv
+import math
 from pathlib import Path
 
 import numpy as np
@@ -175,6 +177,9 @@ class Example(ColibriChecks):
     """Simulate the source assembly using ordinary rigid joint/contact blocks."""
 
     def __init__(self, viewer, args):
+        if args.num_worlds < 1:
+            raise ValueError("Number of worlds must be positive")
+        self.num_worlds = args.num_worlds
         if args.substeps < 1 or args.iterations < 1:
             raise ValueError("Substeps and iterations must be positive")
         if args.contact_updates_per_frame < 1:
@@ -204,6 +209,10 @@ class Example(ColibriChecks):
         for index, label in enumerate(builder.shape_label):
             if label in CONTACT_OFFSETS:
                 builder.shape_gap[index] = CONTACT_OFFSETS[label]
+        if self.num_worlds > 1:
+            scene = newton.ModelBuilder()
+            scene.replicate(builder, self.num_worlds)
+            builder = scene
         # The authored closed loops have small initial attachment residuals.
         self.model = builder.finalize(skip_validation_joints=True)
         newton.eval_ik(self.model, self.model, self.model.joint_q, self.model.joint_qd)
@@ -216,7 +225,7 @@ class Example(ColibriChecks):
             # TGS retains friction anchors separately. Reusing normal geometry
             # across refreshes can make curved gear/pin contacts inconsistent.
             contact_matching="latest",
-            rigid_contact_max=8192,
+            rigid_contact_max=8192 * self.num_worlds,
             speculative_contact_gap_max=0.005,
             speculative_contact_velocity_filter=not getattr(args, "geometric_candidates", True),
         )
@@ -226,6 +235,8 @@ class Example(ColibriChecks):
             articulation_mode="maximal",
             joint_solver="block_pgs",
             solver_scheme="tgs",
+            # Use the global color-group scheduler across independent worlds;
+            # the per-world fast-tail scheduler does not support temporal mass copies.
             step_layout="single_world",
             parallel_contact_prepare=True,
             contact_chunk_size=0,
@@ -241,7 +252,9 @@ class Example(ColibriChecks):
         )
         self.contacts = self.collision_pipeline.contacts()
         self.viewer.set_model(self.model)
-        self.viewer.set_camera(wp.vec3(0.4, -0.7, 0.35), pitch=-10, yaw=120)
+        self.viewer.set_world_offsets((0.65, 0.65, 0.0))
+        extent = math.ceil(math.sqrt(self.num_worlds))
+        self.viewer.set_camera(wp.vec3(0.4 * extent, -0.7 * extent, 0.2 + 0.15 * extent), pitch=-10, yaw=120)
         self._drive_test_time = None
         self._drive_test_duration = 0.0
         self._drive_test_integral = 0.0
@@ -339,14 +352,16 @@ class Example(ColibriChecks):
         """Check unpowered support motion after the initial settling window."""
         if self.motor_enabled or not self._support_test_enabled or self.sim_time < 2.0:
             return
-        base = self.model.body_label.index("FrameGround")
-        pose = self.state_0.body_q.numpy()[base].astype(np.float64)
+        bases = [i for i, label in enumerate(self.model.body_label) if label == "FrameGround"]
+        pose = self.state_0.body_q.numpy()[bases].astype(np.float64)
         if self._support_reference is None:
             self._support_reference = pose.copy()
         reference = self._support_reference
-        drift = np.linalg.norm(pose[:2] - reference[:2])
-        alignment = abs(np.dot(pose[3:], reference[3:])) / (np.linalg.norm(pose[3:]) * np.linalg.norm(reference[3:]))
-        rotation = 2.0 * np.arccos(np.clip(alignment, 0.0, 1.0))
+        drift = np.max(np.linalg.norm(pose[:, :2] - reference[:, :2], axis=1))
+        alignment = np.abs(np.sum(pose[:, 3:] * reference[:, 3:], axis=1)) / (
+            np.linalg.norm(pose[:, 3:], axis=1) * np.linalg.norm(reference[:, 3:], axis=1)
+        )
+        rotation = np.max(2.0 * np.arccos(np.clip(alignment, 0.0, 1.0)))
         assert drift < 0.00005, f"Support creep: {drift:.6f} m since settling"
         assert rotation < 0.0005, f"Support rotation: {rotation:.6f} rad since settling"
 
@@ -354,10 +369,10 @@ class Example(ColibriChecks):
         """Reject stalled or poorly tracking crank motion after settling."""
         if not self.motor_enabled or not self._support_test_enabled or self.sim_time < 2.0:
             return
-        joint = self.model.joint_label.index("Frame/Crank")
-        dof = int(self.model.joint_qd_start.numpy()[joint])
-        target = float(self.control.joint_target_qd.numpy()[dof])
-        speed = float(self.state_0.joint_qd.numpy()[dof])
+        joints = [i for i, label in enumerate(self.model.joint_label) if label == "Frame/Crank"]
+        dofs = self.model.joint_qd_start.numpy()[joints].astype(int)
+        target = self.control.joint_target_qd.numpy()[dofs]
+        speed = self.state_0.joint_qd.numpy()[dofs]
         if self._drive_test_time is not None:
             dt = self.sim_time - self._drive_test_time
             self._drive_test_duration += dt
@@ -365,8 +380,8 @@ class Example(ColibriChecks):
         self._drive_test_time = self.sim_time
         if self._drive_test_duration >= 1.0:
             mean = self._drive_test_integral / self._drive_test_duration
-            assert abs(mean - target) < 0.05 * abs(target), (
-                f"Crank tracking: mean {mean:.4f} rad/s, target {target:.4f} rad/s"
+            assert np.all(np.abs(mean - target) < 0.05 * np.abs(target)), (
+                f"Crank tracking: mean {mean} rad/s, target {target} rad/s"
             )
 
     def test_post_step(self):
@@ -389,7 +404,7 @@ class Example(ColibriChecks):
         """Measure fresh contact depths without changing simulation history."""
         if self._audit_pipeline is None:
             # Separate matching and contact buffers leave simulation history intact.
-            self._audit_capacity = 16384
+            self._audit_capacity = 16384 * self.num_worlds
             self._audit_pipeline = newton.CollisionPipeline(
                 self.model, rigid_contact_max=self._audit_capacity, contact_matching="disabled"
             )
@@ -438,6 +453,9 @@ class Example(ColibriChecks):
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(viewer="optix")
+        parser.add_argument(
+            "--num-worlds", "--world-count", type=int, default=4, help="Number of independent Colibris (default: 4)."
+        )
         parser.add_argument(
             "--penetration-log",
             type=Path,

@@ -39,6 +39,29 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         self.assertEqual(parser.parse_args([]).iterations, 1)
         self.assertFalse(parser.parse_args(["--velocity-filtered-candidates"]).geometric_candidates)
 
+    def test_world_count_default_and_override(self):
+        parser = PhoenxExample.create_parser()
+        self.assertEqual(parser.parse_args([]).num_worlds, 4)
+        self.assertEqual(parser.parse_args(["--num-worlds", "3"]).num_worlds, 3)
+        self.assertEqual(parser.parse_args(["--world-count", "3"]).num_worlds, 3)
+        for count in (0, -1):
+            with self.assertRaisesRegex(ValueError, "Number of worlds"):
+                PhoenxExample(None, parser.parse_args(["--num-worlds", str(count)]))
+
+    def test_replicated_assembly_checks_each_base(self):
+        example = _example()
+        labels = example.model.body_label * 2
+        example.model.body_label = labels
+        example.initial_q = np.tile(example.initial_q, (2, 1))
+        q = example.initial_q.copy()
+        example.state_0 = SimpleNamespace(body_q=_array(q), body_qd=_array(np.zeros((6, 6))))
+        # Each independent world may undergo its own rigid translation.
+        q[3:, 0] += 2.0
+        example.test_post_step()
+        q[4, 1] += 0.6
+        with self.assertRaisesRegex(AssertionError, "escaped"):
+            example.test_post_step()
+
     def test_authored_mesh_colors(self):
         """Preserve white unbound meshes and explicitly colored USD parts."""
         labels = ("Frame/FrameMesh", "FrameGround/Flower/Flower_Stem", "FrameGround/Base")
@@ -293,6 +316,36 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         example.motor_enabled = False
         example._support_test_enabled = False
         example._test_support_stationarity()
+
+    def test_phoenx_checks_support_in_later_world(self):
+        example = PhoenxExample.__new__(PhoenxExample)
+        example._support_test_enabled = True
+        example._support_reference = None
+        example.motor_enabled = False
+        example.model = SimpleNamespace(body_label=["FrameGround", "FrameGround"])
+        q = np.tile([0, 0, 0, 0, 0, 0, 1.0], (2, 1))
+        example.state_0 = SimpleNamespace(body_q=_array(q))
+        example.sim_time = 2.0
+        example._test_support_stationarity()
+        q[1, 0] = 0.0001
+        with self.assertRaisesRegex(AssertionError, "Support creep"):
+            example._test_support_stationarity()
+
+    def test_phoenx_checks_drive_in_later_world(self):
+        example = PhoenxExample.__new__(PhoenxExample)
+        example._support_test_enabled = True
+        example.motor_enabled = True
+        example._drive_test_time = None
+        example._drive_test_duration = 0.0
+        example._drive_test_integral = 0.0
+        example.model = SimpleNamespace(joint_label=["Frame/Crank"] * 2, joint_qd_start=_array([0, 1]))
+        example.control = SimpleNamespace(joint_target_qd=_array([-3.4906585] * 2))
+        example.state_0 = SimpleNamespace(joint_qd=_array([-3.483, 0.0]))
+        example.sim_time = 2.0
+        example._test_drive_tracking()
+        example.sim_time = 3.0
+        with self.assertRaisesRegex(AssertionError, "Crank tracking"):
+            example._test_drive_tracking()
 
     def test_phoenx_crank_tracking(self):
         """Accept the measured drive speed and reject the old contact-order deficit."""
