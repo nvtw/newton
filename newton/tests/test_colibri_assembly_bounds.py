@@ -236,6 +236,25 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         example.render()
         self.assertIn(("contacts", example.contacts, example.state_0), calls)
 
+    def test_only_adjacent_tail_feathers_are_collision_filtered(self):
+        """Preserve non-neighbor collisions and handle partial assemblies."""
+        feathers = sorted(
+            (name for name in scene.BODY_ORDER if name.startswith("Tail_Feather_")),
+            key=lambda name: scene.BODY_POSES[name][1],
+        )
+        self.assertEqual(len(feathers), 5)
+        shapes = [(name, "cylinder", "Tail/" + name, (0, 0, 0, 0, 0, 0, 1), (0.001, 0.001)) for name in feathers]
+        for body_count in (len(scene.BODY_ORDER), scene.BODY_ORDER.index("Tail_Feather_C") + 1):
+            with self.subTest(body_count=body_count), patch.object(scene, "SHAPES", shapes):
+                builder = scene.build_scene(body_count=body_count)
+                ids = {label: index for index, label in enumerate(builder.shape_label)}
+                pairs = {frozenset(pair) for pair in builder.shape_collision_filter_pairs}
+                for i, first in enumerate(feathers):
+                    for j, second in enumerate(feathers[i + 1 :], start=i + 1):
+                        if "Tail/" + first in ids and "Tail/" + second in ids:
+                            pair = frozenset((ids["Tail/" + first], ids["Tail/" + second]))
+                            self.assertEqual(pair in pairs, j == i + 1, (first, second))
+
     def test_motor_off_removes_drive_and_servo_damping(self):
         """A zero speed target must not be mistaken for a disabled motor."""
         with patch.object(scene, "SHAPES", []):
