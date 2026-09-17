@@ -231,6 +231,68 @@ class TestD6DirectDispatch(unittest.TestCase):
         np.testing.assert_allclose(final_qd[[0, 4, 5]], initial_qd[0, [0, 4, 5]], rtol=1.0e-4, atol=1.0e-4)
         np.testing.assert_allclose(final_qd[[1, 2, 3]], 0.0, rtol=0.0, atol=2.0e-4)
 
+    def test_sliding_d6_rows_match_rotated_frame_derivative(self) -> None:
+        """Match the sliding Jacobian and conserve each floating-pair row's momentum."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        orientation = wp.quat_from_axis_angle(wp.normalize(wp.vec3(1.0, 2.0, -1.0)), 0.7)
+        origin = np.asarray((0.3, -0.2, 0.5), dtype=np.float32)
+        separation = np.asarray(wp.quat_rotate(orientation, wp.vec3(0.4, 0.0, 0.0)))
+        positions = (origin, origin + separation)
+        links = []
+        for index, position in enumerate(positions):
+            body = builder.add_link(
+                xform=wp.transform(wp.vec3(*position), orientation),
+                mass=float(index + 1),
+                inertia=wp.mat33(np.eye(3, dtype=np.float32) * 0.02),
+            )
+            builder.add_shape_box(body, hx=0.02, hy=0.02, hz=0.02, cfg=builder.ShapeConfig(density=0.0))
+            links.append(body)
+        builder.add_joint_d6(
+            parent=links[0],
+            child=links[1],
+            linear_axes=[builder.JointDofConfig.create_unlimited(newton.Axis.X)],
+            angular_axes=[
+                builder.JointDofConfig.create_unlimited(newton.Axis.Y),
+                builder.JointDofConfig.create_unlimited(newton.Axis.Z),
+            ],
+        )
+        builder.add_articulation(list(range(builder.joint_count)))
+        solver = newton.solvers.SolverPhoenX(builder.finalize(), articulation_mode="maximal")
+        system = solver._direct_equality_system
+        # Articulation initialization evaluates its zero coordinates; set the
+        # intended separated geometry explicitly before preparing the rows.
+        body_positions = solver.world.bodies.position.numpy()
+        body_orientations = solver.world.bodies.orientation.numpy()
+        for body, position in zip(links, positions, strict=True):
+            body_positions[body + 1] = position
+            body_orientations[body + 1] = np.asarray(orientation)
+        solver.world.bodies.position.assign(body_positions)
+        solver.world.bodies.orientation.assign(body_orientations)
+        system.refresh_geometry(wp.float32(60.0))
+        wrench0 = system.row_wrench0.numpy()[0, :3].astype(np.float64)
+        wrench1 = system.row_wrench1.numpy()[0, :3].astype(np.float64)
+        # Independently differentiate n(parent orientation) dot (p1 - p0).
+        epsilon = 1.0e-4
+        for row in range(2):
+            direction = wrench1[row, :3]
+            for axis in np.eye(3):
+                cross = np.cross(axis, direction)
+                parallel = axis * np.dot(axis, direction)
+                plus = direction * np.cos(epsilon) + cross * np.sin(epsilon) + parallel * (1 - np.cos(epsilon))
+                minus = direction * np.cos(epsilon) - cross * np.sin(epsilon) + parallel * (1 - np.cos(epsilon))
+                derivative = np.dot(plus - minus, separation) / (2 * epsilon)
+                self.assertAlmostEqual(float(np.dot(wrench0[row, 3:], axis)), float(derivative), delta=2.0e-6)
+            np.testing.assert_allclose(wrench1[row, 3:], 0.0, atol=2.0e-6, rtol=0.0)
+        # Each unit row impulse must have zero net force and world torque.
+        np.testing.assert_allclose(wrench0[:, :3] + wrench1[:, :3], 0.0, atol=2.0e-6, rtol=0.0)
+        torque = (
+            wrench0[:, 3:]
+            + np.cross(positions[0], wrench0[:, :3])
+            + wrench1[:, 3:]
+            + np.cross(positions[1], wrench1[:, :3])
+        )
+        np.testing.assert_allclose(torque, 0.0, atol=2.0e-6, rtol=0.0)
+
     def test_cartesian_d6_finite_limit_raises_explicitly(self) -> None:
         """Reject Cartesian limits until their inequality row is implemented."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
