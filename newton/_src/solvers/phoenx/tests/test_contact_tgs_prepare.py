@@ -25,6 +25,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_set_normal,
+    cc_set_start_gap,
     contact_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs import (
@@ -81,7 +82,110 @@ def set_friction_fixture(
         state.normals[k] = wp.vec3f(0.0, 0.0, 1.0)
 
 
+@wp.kernel
+def set_sparse_history_fixture(
+    columns: ContactColumnContainer, cc: ContactContainer, state: ContactTGS, first: wp.array[int]
+):
+    cid = wp.tid()
+    point = first[cid]
+    contact_set_body1(columns, cid, 0)
+    contact_set_body2(columns, cid, 1)
+    contact_set_contact_first(columns, cid, point)
+    contact_set_contact_count(columns, cid, 1)
+    contact_set_friction(columns, cid, 0.5)
+    contact_set_friction_dynamic(columns, cid, 0.3)
+    cc_set_normal(cc, point, wp.vec3f(0.0, 0.0, 1.0))
+    state.normals[point] = wp.vec3f(0.0, 0.0, 1.0)
+
+
+@wp.kernel
+def set_empty_patch_fixture(columns: ContactColumnContainer, cc: ContactContainer, state: ContactTGS, flip: int):
+    contact_set_body1(columns, 0, 0)
+    contact_set_body2(columns, 0, 1)
+    contact_set_contact_first(columns, 0, 0)
+    contact_set_contact_count(columns, 0, 3)
+    contact_set_friction(columns, 0, 0.5)
+    contact_set_friction_dynamic(columns, 0, 0.3)
+    for k in range(3):
+        normal = wp.vec3f(0.0, 0.0, 1.0)
+        if k == 1:
+            normal = wp.vec3f(1.0, 0.0, 0.0)
+        elif k == 2:
+            normal = wp.vec3f(0.0, 0.0, -1.0)
+        cc_set_normal(cc, k, normal)
+        state.normals[k] = normal
+        cc_set_start_gap(cc, k, wp.float32((k + flip) % 2))
+
+
 class TestContactTGSPrepare(unittest.TestCase):
+    def test_empty_friction_patches_keep_complete_history(self):
+        """Skip empty solve work while retaining every patch and normal row."""
+        for device in ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else []):
+            with self.subTest(device=device):
+                bodies = body_container_zeros(2, device)
+                bodies.orientation.assign([[0, 0, 0, 1], [0, 0, 0, 1]])
+                columns = contact_column_container_zeros(1, device)
+                cc = contact_container_zeros(3, device)
+                cc.impulses.fill_(0.25)
+                original_impulses = cc.impulses.numpy()
+                state = allocate_contact_tgs(3, 2, 24, device)
+                active = wp.array([1], dtype=int, device=device)
+                for flip in (0, 1):
+                    snapshot_contact_tgs(state)
+                    wp.launch(advance_contact_tgs_generation, 1, [state], device=device)
+                    state.previous_anchors.broken.fill_(1)
+                    wp.launch(set_empty_patch_fixture, 1, [columns, cc, state, flip], device=device)
+                    wp.launch(patches, 1, [columns, state, active, bodies, cc], device=device)
+                    np.testing.assert_array_equal(state.current.point_patch.numpy(), [0, 1, 2])
+                    np.testing.assert_array_equal(state.current.patch_next.numpy(), [1, 2, -1])
+                    self.assertEqual(state.current.group_count.numpy()[0], 3)
+                    self.assertEqual(state.solve_first.numpy()[0], flip)
+                    if flip == 0:
+                        self.assertEqual(state.solve_next.numpy()[0], 2)
+                        self.assertEqual(state.solve_next.numpy()[2], -1)
+                    else:
+                        self.assertEqual(state.solve_next.numpy()[1], -1)
+                    np.testing.assert_array_equal(state.anchors.broken.numpy(), 0)
+                    np.testing.assert_array_equal(cc.impulses.numpy(), original_impulses)
+
+    def test_compact_history_tracks_live_groups(self):
+        """Keep sparse history indices once per generation and remove stale groups."""
+        for device in ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else []):
+            with self.subTest(device=device):
+                bodies = body_container_zeros(2, device)
+                bodies.orientation.assign([[0, 0, 0, 1], [0, 0, 0, 1]])
+                columns = contact_column_container_zeros(2, device)
+                cc = contact_container_zeros(32, device)
+                state = allocate_contact_tgs(32, 2, 24, device)
+                active = wp.array([2], dtype=int, device=device)
+                first = wp.array([3, 17], dtype=int, device=device)
+                wp.launch(set_sparse_history_fixture, 2, [columns, cc, state, first], device=device)
+                for _ in range(2):
+                    wp.launch(patches, 2, [columns, state, active, bodies, cc], device=device)
+                self.assertEqual(state.current_group_count.numpy()[0], 2)
+                np.testing.assert_array_equal(np.sort(state.current_groups.numpy()[:2]), [3, 17])
+                snapshot_contact_tgs(state)
+                wp.launch(advance_contact_tgs_generation, 1, [state], device=device)
+                self.assertEqual(state.previous_active.numpy()[0], 2)
+                np.testing.assert_array_equal(np.sort(state.previous_groups.numpy()[:2]), [3, 17])
+                # Match the lowest original slot even when compact order is reversed.
+                reversed_groups = np.zeros(32, dtype=np.int32)
+                reversed_groups[:2] = [17, 3]
+                state.previous_groups.assign(reversed_groups)
+                self.assertEqual(state.current_group_count.numpy()[0], 0)
+                active.assign([1])
+                first.assign([8, 23])
+                wp.launch(set_sparse_history_fixture, 2, [columns, cc, state, first], device=device)
+                wp.launch(patches, 2, [columns, state, active, bodies, cc], device=device)
+                self.assertEqual(state.current_group_count.numpy()[0], 1)
+                self.assertEqual(state.current_groups.numpy()[0], 8)
+                self.assertEqual(state.anchors.source.numpy()[8], 3)
+                snapshot_contact_tgs(state)
+                self.assertEqual(state.previous_active.numpy()[0], 1)
+                self.assertEqual(state.previous_groups.numpy()[0], 8)
+                snapshot_contact_tgs(state)
+                self.assertEqual(state.previous_active.numpy()[0], 0)
+
     def test_frictionless_material_transition(self):
         """Omit zero-friction patches and rebuild history when friction returns."""
         for device in ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else []):

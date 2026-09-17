@@ -75,6 +75,12 @@ equal across all 3,600 frames. The known support-stationarity failure is unchang
 See `local_studies/colibri/PHOENX_PERFORMANCE_2026_09_17.md` for reproduction,
 quality checks, and rejected scalar/unrolled loading experiments.
 
+Compact live-group history, ordered parallel normal partitioning, solve-only
+anchor lists, and direct normal-impulse views further reduce a fresh paired
+full-minute run from 19.441 to 16.176 ms/frame. All 3,600 poses and velocities
+match the preceding baseline bitwise; penetration and joint peaks are unchanged.
+The same report documents the kernel breakdown and quality measurements.
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,

@@ -32,6 +32,7 @@ __all__ = [
     "cc_get_friction_anchor1",
     "cc_get_normal",
     "cc_get_normal_lambda",
+    "cc_get_normal_lambdas",
     "cc_get_pd_bias",
     "cc_get_pd_eff_soft",
     "cc_get_pd_gamma",
@@ -209,6 +210,12 @@ def _contact_container_clear_reset_worlds_kernel(
 @wp.func
 def cc_get_normal_lambda(cc: ContactContainer, k: wp.int32) -> wp.float32:
     return read2d_f32(cc.impulses, _CC_OFF_NORMAL_LAMBDA, k)
+
+
+@wp.func
+def cc_get_normal_lambdas(cc: ContactContainer) -> wp.array[wp.float32]:
+    """Return the normal-impulse row without copying its values."""
+    return cc.impulses[_CC_OFF_NORMAL_LAMBDA]
 
 
 @wp.func

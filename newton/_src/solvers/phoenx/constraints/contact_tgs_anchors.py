@@ -53,6 +53,8 @@ def prepare_group(
     keys: wp.array[wp.vec4i],
     previous_keys: wp.array[wp.vec4i],
     previous_active: wp.array[wp.int32],
+    previous_groups: wp.array[wp.int32],
+    indexed: bool,
     pose0: wp.transformf,
     pose1: wp.transformf,
     points: wp.array[wp.vec3f],
@@ -66,10 +68,16 @@ def prepare_group(
     inv0 = wp.transform_inverse(pose0)
     inv1 = wp.transform_inverse(pose1)
     old_group = int(-1)
-    for candidate in range(previous_active[0]):
+    for slot in range(previous_active[0]):
+        candidate = slot
+        if indexed:
+            candidate = previous_groups[slot]
         if same_key(key, previous_keys[candidate]):
-            old_group = candidate
-            break
+            # Preserve the dense scan's first match despite atomic append order.
+            if old_group < 0 or candidate < old_group:
+                old_group = candidate
+            if not indexed:
+                break
     first_candidate = int(-1)
     last_candidate = int(-1)
     if old_group >= 0:
@@ -201,6 +209,8 @@ def prepare(
             keys,
             previous_keys,
             previous_active,
+            previous_active,
+            False,
             poses[key[1]],
             poses[key[2]],
             points,

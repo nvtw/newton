@@ -94,3 +94,70 @@ stationarity failure separately without changing that acceptance threshold.
 
 Profiler artifacts: `/tmp/colibri_baseline_nsys.nsys-rep` and
 `/tmp/colibri_optimized_nsys.nsys-rep`, with corresponding stats CSV files.
+
+## Follow-up: reduce preparation and memory traffic
+
+The next candidates retain the same arithmetic and simulation settings:
+
+- Correlate history through a compact list of live group indices, choosing the
+  lowest matching original index to preserve dense-scan ordering.
+- Parallelize first-fit normal comparisons while retaining the earliest seed;
+  build point membership in shared memory and export it coalescently.
+- Build a solve-only list of patches with anchors. Preserve the complete
+  partition and history, including empty patches.
+- Read the normal-impulse row directly instead of serially copying it before
+  every friction solve.
+
+The combined full-minute candidate measured 15.933 ms/frame (median 15.887,
+p95 17.579), compared with the preceding retained baseline of 18.846 ms/frame.
+Every pose and velocity across all 3,600 frames is bitwise identical to that
+baseline. Peak penetration remains 0.470375 mm and the same support-creep
+failure first appears at frame 404. A fresh paired full-minute baseline/candidate run measured 19.441/16.176
+ms per frame: 16.80% less time, or 20.19% more throughput. Candidate final
+poses and velocities also match the paired baseline exactly. Artifacts are
+`/tmp/colibri_preparation_paired_{baseline,candidate}.{json,npz}`.
+
+Nsight supports the intended reduction in work: average partition kernel time
+falls from 28.58 to 4.95 microseconds, history preparation from 23.60 to 15.42,
+and the dominant biased sweep from 219.27 to 195.29. Each still runs 8,640 times
+in the 180-frame trace. The combined trace is
+`/tmp/colibri_combined_preparation_nsys.nsys-rep`; full-minute states and metrics
+are `/tmp/colibri_combined_preparation_minute.{npz,json}`.
+
+Rejected experiments include splitting contact and joint sweeps, staging
+normal rows in shared memory, skipping zero normal-velocity updates, and
+deferring normal-impulse stores: none earned a reproducible gain sufficient
+to retain. Parallel angular-response preparation also changed trajectories
+and was discarded.
+
+Kernel work, data movement, and layout remain the preferred optimization
+route. Solver improvements that support fewer substeps may count only with
+independent stability and physical-accuracy evidence; reducing the setting
+alone does not qualify. No tolerance relaxation, damping, pinning, or contact
+pruning is part of this work.
+
+### Joint accuracy audit
+
+The inherited assembly test checks joint-anchor separation (<2 mm) and
+revolute-axis chord error (<0.03) on every validated frame. The harness now
+also reports actual source-joint anchor and angular peaks, their joint names,
+and frame indices; it stores body labels with the trajectory. These are
+geometric measurements outside physics timing, not solver-internal residuals.
+
+An audit of all 3,600 saved candidate frames found:
+
+| Metric | Peak | Joint | Frame index |
+| --- | ---: | --- | ---: |
+| Anchor separation | 0.630504 mm | Gear_Large__3x_02/Hypocycloid_Gear__3x_02 | 3265 |
+| Axis misalignment | 0.0108056 rad (0.6191 degrees) | GearedSpinner/WingLinkArcLeft | 1121 |
+
+These errors are identical to the baseline because every body pose is
+bitwise identical. Existing bounds passing does not imply negligible error;
+these measured peaks, contact penetration, and drive/support behavior must
+all be considered when evaluating any future arithmetic or substep change.
+Joint audit: `/tmp/colibri_combined_joint_peaks.json`. The updated reporting
+passed a one-frame validation smoke run. The combined candidate passed all
+29 focused tests (one module was rerun after correcting a command-line typo).
+
+All changed-file hooks passed. The required repository-wide hook run found
+pre-existing lint/format issues; unrelated auto-format edits were restored.

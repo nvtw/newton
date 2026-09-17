@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 
+from local_studies.colibri.joint_accuracy import measure as measure_joints
 from newton.examples.kamino.example_kamino_colibri import Example as AssemblyChecks
 from newton.examples.phoenx.example_phoenx_colibri import Example
 from newton.viewer import ViewerNull
@@ -36,6 +37,7 @@ def main():
     times, poses, velocities = [], [], []
     peak_depth = 0.0
     support_failure = None
+    joint_peaks = {}
     cuda = ctypes.CDLL("/usr/local/cuda/lib64/libcudart.so") if args.profile else None
     for frame in range(args.warmup + args.frames):
         if frame == args.warmup:
@@ -59,7 +61,13 @@ def main():
             except AssertionError as exc:
                 if support_failure is None:
                     support_failure = {"frame": frame, "error": str(exc)}
-            poses.append(example.state_0.body_q.numpy())
+            body_q = example.state_0.body_q.numpy()
+            joint_errors = measure_joints(body_q, example.model.body_label)
+            for row in joint_errors["joints"]:
+                for metric in ("anchor_error_m", "axis_error_rad"):
+                    if metric in row and (metric not in joint_peaks or row[metric] > joint_peaks[metric]["value"]):
+                        joint_peaks[metric] = {"value": row[metric], "joint": row["joint"], "frame": frame}
+            poses.append(body_q)
             velocities.append(example.state_0.body_qd.numpy())
         if frame % 600 == 0:
             print(f"Frame {frame}: {elapsed:.3f} ms", flush=True)
@@ -73,6 +81,7 @@ def main():
         "p95_ms": float(np.percentile(times, 95)),
         "peak_depth_m": peak_depth if args.validate else None,
         "support_failure": support_failure,
+        "joint_peaks": joint_peaks if args.validate else None,
         "collision_hz": 120,
         "substeps_per_refresh": 24,
         "rendering": False,
@@ -81,6 +90,7 @@ def main():
     np.savez_compressed(
         args.output.with_suffix(".npz"),
         times_ms=times,
+        labels=example.model.body_label,
         poses=poses if args.validate else example.state_0.body_q.numpy(),
         velocities=velocities if args.validate else example.state_0.body_qd.numpy(),
     )
