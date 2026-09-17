@@ -3,6 +3,7 @@
 
 import inspect
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest import mock
 
@@ -104,10 +105,59 @@ class TestViewerOptix(unittest.TestCase):
                         viewer, "shape", "mesh", xforms, None, None, None, hidden=False
                     )
 
-    def test_simulation_render_overlap_disabled(self):
-        """Keep OptiX simulation and rendering serialized for stable scene updates."""
+    def test_simulation_render_overlap_capability(self):
+        """Advertise overlap only when CUDA nonblocking streams are available."""
         viewer = ViewerOptix.__new__(ViewerOptix)
-        self.assertFalse(viewer.supports_simulation_render_overlap)
+        for supported in (False, True):
+            with mock.patch.object(ViewerOptix, "_supports_cuda_simulation_render_overlap", return_value=supported):
+                self.assertEqual(viewer.supports_simulation_render_overlap, supported)
+
+    def test_snapshot_wait_does_not_drain_physics(self):
+        """Rendering waits for the snapshot, while the next step remains asynchronous."""
+        calls = []
+        render_stream, simulation_stream = object(), object()
+        viewer = SimpleNamespace(
+            supports_simulation_render_overlap=True,
+            _deferred_simulation_in_flight=False,
+            _deferred_simulation_stream=simulation_stream,
+            device=object(),
+        )
+        with (
+            mock.patch.object(wp, "get_stream", return_value=render_stream),
+            mock.patch.object(wp, "ScopedStream", side_effect=lambda *args, **kwargs: nullcontext()),
+            mock.patch.object(wp, "wait_stream", side_effect=calls.append),
+        ):
+            ViewerBase.launch_simulation_step(
+                viewer,
+                lambda: calls.append("step"),
+                prepare_render_state=lambda: calls.append("snapshot"),
+            )
+        self.assertEqual(calls, ["snapshot", simulation_stream, "step"])
+        self.assertTrue(viewer._deferred_simulation_in_flight)
+
+    def test_simulation_stream_uses_highest_available_priority(self):
+        """Favor physics with a nonblocking stream using the device's range."""
+        try:
+            from cuda.bindings import runtime  # noqa: PLC0415
+        except ImportError:
+            self.skipTest("CUDA runtime bindings are unavailable")
+        viewer = SimpleNamespace(
+            supports_simulation_render_overlap=True,
+            _deferred_simulation_in_flight=False,
+            _deferred_simulation_stream=None,
+            device=object(),
+        )
+        with (
+            mock.patch.object(runtime, "cudaDeviceGetStreamPriorityRange", return_value=(0, 0, -5)),
+            mock.patch.object(runtime, "cudaStreamCreateWithPriority", return_value=(0, 1234)) as create,
+            mock.patch.object(runtime, "cudaStreamCreateWithFlags", return_value=(0, 1234)),
+            mock.patch.object(wp, "Stream", return_value=object()),
+            mock.patch.object(wp, "get_stream", return_value=object()),
+            mock.patch.object(wp, "ScopedStream", side_effect=lambda *args, **kwargs: nullcontext()),
+            mock.patch.object(wp, "wait_stream"),
+        ):
+            ViewerBase.launch_simulation_step(viewer, lambda: None, prepare_render_state=lambda: None)
+        create.assert_called_once_with(runtime.cudaStreamNonBlocking, -5)
 
     def test_public_viewer_and_example_option(self):
         """Expose ViewerOptix through the public API and example parser."""

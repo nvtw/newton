@@ -380,8 +380,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     @property
     @override
     def supports_simulation_render_overlap(self) -> bool:
-        """Whether this viewer can overlap a CUDA step with OptiX rendering."""
-        return False
+        """Whether nonblocking CUDA simulation can overlap OptiX rendering."""
+        return self._supports_cuda_simulation_render_overlap()
 
     def should_step(self) -> bool:
         """Return whether the simulation should advance by one step."""

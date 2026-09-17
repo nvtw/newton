@@ -15,14 +15,16 @@ one biased solve per internal step, followed by a final velocity relaxation.
 The assembly is free to move. Flower and slider geometry belong to the base
 body; the counterweight cylinder uses its authored density. The base/frame axle
 has no position spring or damper.
-Joint and fresh-contact checks screen instability and overlap. Full-assembly tests also bound support motion after two seconds
-of settling and check sustained crank tracking against the authored target.
+Joint and fresh-contact checks screen instability and overlap. Powered runs
+check sustained crank tracking. With --motor-off, the crank is passive and
+support stationarity is checked after an initial two-second settling window.
 
 The default viewer is OptiX, as in the Kapla tower example.
 
 Command: python -m newton.examples phoenx_colibri
 """
 
+import argparse
 import csv
 from pathlib import Path
 
@@ -179,10 +181,12 @@ class Example(ColibriChecks):
             raise ValueError("Contact updates per frame must be positive")
         self.contact_updates = args.contact_updates_per_frame
         self.viewer = viewer
+        self.overlap_simulation_render = args.render_overlap
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.fix_base = args.fix_base
+        self.motor_enabled = not args.motor_off
         self._support_test_enabled = not args.fix_base and args.body_count == len(BODY_ORDER)
         self._support_reference = None
         builder = build_scene(
@@ -195,6 +199,7 @@ class Example(ColibriChecks):
             counterweight_density_scale=args.counterweight_density_scale,
             attach_flower_to_base=True,
             enable_frame_drive=False,
+            enable_crank_drive=self.motor_enabled,
         )
         for index, label in enumerate(builder.shape_label):
             if label in CONTACT_OFFSETS:
@@ -253,6 +258,39 @@ class Example(ColibriChecks):
                 self.simulate()
             self.graph = capture.graph
 
+        self._render_states = (
+            (self.model.state(), self.model.state())
+            if self.overlap_simulation_render and self.viewer.supports_simulation_render_overlap
+            else None
+        )
+        self._render_state_done = tuple(
+            wp.Event(self.model.device) if self.model.device.is_cuda else None for _ in range(2)
+        )
+        self._render_state_index = 0
+        self._render_state_prepared = False
+        self._render_time = self.sim_time
+
+    def prepare_render_state(self):
+        """Snapshot state before physics advances on the separate stream."""
+        self._render_state_index = 1 - self._render_state_index
+        done = self._render_state_done[self._render_state_index]
+        if done is not None:
+            wp.wait_event(done)
+        self._render_states[self._render_state_index].assign(self.state_0)
+        self._render_time = self.sim_time
+        self._render_state_prepared = True
+
+    def render(self):
+        state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state_0
+        self.viewer.begin_frame(self._render_time if self._render_state_prepared else self.sim_time)
+        self.viewer.log_state(state)
+        if self._render_state_prepared:
+            done = self._render_state_done[self._render_state_index]
+            if done is not None:
+                wp.record_event(done)
+        self.viewer.end_frame()
+        self._render_state_prepared = False
+
     def simulate(self):
         for _ in range(self.contact_updates):
             dt = self.frame_dt / self.contact_updates
@@ -262,8 +300,8 @@ class Example(ColibriChecks):
             self.solver.step(self.state_0, self.state_0, self.control, self.contacts, dt)
 
     def _test_support_stationarity(self):
-        """Detect secular support motion after the authored assembly settles."""
-        if not self._support_test_enabled or self.sim_time < 2.0:
+        """Check unpowered support motion after the initial settling window."""
+        if self.motor_enabled or not self._support_test_enabled or self.sim_time < 2.0:
             return
         base = self.model.body_label.index("FrameGround")
         pose = self.state_0.body_q.numpy()[base].astype(np.float64)
@@ -278,7 +316,7 @@ class Example(ColibriChecks):
 
     def _test_drive_tracking(self):
         """Reject stalled or poorly tracking crank motion after settling."""
-        if not self._support_test_enabled or self.sim_time < 2.0:
+        if not self.motor_enabled or not self._support_test_enabled or self.sim_time < 2.0:
             return
         joint = self.model.joint_label.index("Frame/Crank")
         dof = int(self.model.joint_qd_start.numpy()[joint])
@@ -380,6 +418,17 @@ class Example(ColibriChecks):
             type=float,
             default=1.0,
             help="Density multiplier for Frame/Cylinder; scales its mass and inertia before body assembly (1.0 = authored).",
+        )
+        parser.add_argument(
+            "--render-overlap",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Overlap rendering of a state snapshot with the next physics frame when supported by the viewer.",
+        )
+        parser.add_argument(
+            "--motor-off",
+            action="store_true",
+            help="Disable crank actuation, including servo damping, for unpowered creep diagnostics.",
         )
         parser.add_argument("--fix-base", action="store_true", help="Anchor the base for diagnostics.")
         admission = parser.add_mutually_exclusive_group()
