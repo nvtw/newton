@@ -336,6 +336,93 @@ class TestD6DirectDispatch(unittest.TestCase):
         self.assertLessEqual(float(velocity[0]), 1.0e-4)
         np.testing.assert_allclose(velocity[1:], 0.0, rtol=0.0, atol=2.0e-4)
 
+    def test_six_axis_d6_limits_share_common_rows(self) -> None:
+        """Prepare and solve all six bounded D6 axes through one representation."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        body = _make_body(builder)
+
+        def bounded(axis):
+            return newton.ModelBuilder.JointDofConfig(axis=axis, limit_lower=-0.1, limit_upper=0.1)
+
+        joint = builder.add_joint_d6(
+            parent=-1,
+            child=body,
+            linear_axes=[bounded(newton.Axis.X), bounded(newton.Axis.Y), bounded(newton.Axis.Z)],
+            angular_axes=[bounded(newton.Axis.X), bounded(newton.Axis.Y), bounded(newton.Axis.Z)],
+        )
+        builder.add_articulation([joint])
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=5,
+            solver_iterations=8,
+            velocity_iterations=1,
+            articulation_mode="maximal",
+        )
+        data = solver.world.constraints.d6
+        self.assertEqual(int(data.row_count.numpy()[0]), 6)
+
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        poses = state.body_q.numpy()
+        poses[0, :3] = (0.2, -0.2, 0.2)
+        rotation = wp.quat_rpy(0.2, -0.2, 0.2)
+        poses[0, 3:] = (rotation[0], rotation[1], rotation[2], rotation[3])
+        state.body_q.assign(poses)
+        state.body_qd.zero_()
+        joint_q = wp.zeros_like(model.joint_q)
+        joint_qd = wp.zeros_like(model.joint_qd)
+
+        state.clear_forces()
+        solver.step(state, state, model.control(), None, 1.0 / 60.0)
+        newton.eval_ik(model, state, joint_q, joint_qd)
+        first_coordinates = joint_q.numpy()[:6]
+        first_rates = joint_qd.numpy()[:6]
+        self.assertLessEqual(float(np.max(first_coordinates * first_rates)), 2.0e-3)
+
+        state.clear_forces()
+        solver.step(state, state, model.control(), None, 1.0 / 60.0)
+        newton.eval_ik(model, state, joint_q, joint_qd)
+        coordinates = joint_q.numpy()[:6]
+        self.assertTrue(np.isfinite(coordinates).all())
+        self.assertLessEqual(float(np.max(np.abs(coordinates))), 0.1005)
+        rates = joint_qd.numpy()[:6]
+        self.assertTrue(np.isfinite(rates).all())
+        self.assertLessEqual(
+            float(np.max(coordinates * rates)),
+            2.0e-4,
+            msg=f"outward D6 rate: coordinates={coordinates}, rates={rates}",
+        )
+
+    def test_three_axis_d6_limits_remain_finite_at_gimbal_singularity(self) -> None:
+        """Use the bounded reciprocal-axis fallback at singular pitch."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        body = _make_body(builder)
+        axes = [
+            newton.ModelBuilder.JointDofConfig(axis=newton.Axis.X, limit_lower=-0.2, limit_upper=0.2),
+            newton.ModelBuilder.JointDofConfig(axis=newton.Axis.Y, limit_lower=-2.0, limit_upper=2.0),
+            newton.ModelBuilder.JointDofConfig(axis=newton.Axis.Z, limit_lower=-0.2, limit_upper=0.2),
+        ]
+        joint = builder.add_joint_d6(parent=-1, child=body, angular_axes=axes)
+        builder.add_articulation([joint])
+        model = builder.finalize()
+        coordinates = np.asarray((0.0, np.pi / 2.0, 0.0), dtype=np.float32)
+        model.joint_q.assign(coordinates)
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=5,
+            solver_iterations=8,
+            velocity_iterations=1,
+            articulation_mode="maximal",
+        )
+        for _ in range(20):
+            state.clear_forces()
+            solver.step(state, state, model.control(), None, 1.0 / 60.0)
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
+
     def test_d6_warm_start_clears_on_world_reset(self) -> None:
         """Clear every common D6 impulse when its world resets."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))

@@ -60,6 +60,34 @@ def _d6_apply_row_impulse(
 
 
 @wp.func
+def _d6_reciprocal_axes_2(axis0: wp.vec3f, axis1: wp.vec3f):
+    """Return coordinate gradients dual to two transported motion axes."""
+    coupling = wp.dot(axis0, axis1)
+    determinant = wp.float32(1.0) - coupling * coupling
+    reciprocal0 = axis0
+    reciprocal1 = axis1
+    if determinant > wp.float32(1.0e-4):
+        reciprocal0 = (axis0 - coupling * axis1) / determinant
+        reciprocal1 = (axis1 - coupling * axis0) / determinant
+    return reciprocal0, reciprocal1
+
+
+@wp.func
+def _d6_reciprocal_axes_3(axis0: wp.vec3f, axis1: wp.vec3f, axis2: wp.vec3f):
+    """Return coordinate gradients dual to three transported motion axes."""
+    cross12 = wp.cross(axis1, axis2)
+    determinant = wp.dot(axis0, cross12)
+    reciprocal0 = axis0
+    reciprocal1 = axis1
+    reciprocal2 = axis2
+    if wp.abs(determinant) > wp.float32(1.0e-4):
+        reciprocal0 = cross12 / determinant
+        reciprocal1 = wp.cross(axis2, axis0) / determinant
+        reciprocal2 = wp.cross(axis0, axis1) / determinant
+    return reciprocal0, reciprocal1, reciprocal2
+
+
+@wp.func
 def prepare_d6_inequalities(
     data: D6JointData,
     cid: wp.int32,
@@ -105,8 +133,9 @@ def prepare_d6_inequalities(
             coordinates_two[0],
         )
         angular_coordinates = wp.vec3f(coordinates_two[0], coordinates_two[1], 0.0)
-        angular_direction0 = wp.vec3f(direction0_two[0], direction0_two[1], direction0_two[2])
-        angular_direction1 = wp.vec3f(direction1_two[0], direction1_two[1], direction1_two[2])
+        motion0 = wp.vec3f(direction0_two[0], direction0_two[1], direction0_two[2])
+        motion1 = wp.vec3f(direction1_two[0], direction1_two[1], direction1_two[2])
+        angular_direction0, angular_direction1 = _d6_reciprocal_axes_2(motion0, motion1)
     elif angular_count == wp.int32(3):
         angular_start = linear_count
         coordinates_three, _rates_three = invert_3d_rotational_dofs(
@@ -125,9 +154,10 @@ def prepare_d6_inequalities(
             coordinates_three[1],
         )
         angular_coordinates = wp.vec3f(coordinates_three[0], coordinates_three[1], coordinates_three[2])
-        angular_direction0 = wp.vec3f(direction0_three[0], direction0_three[1], direction0_three[2])
-        angular_direction1 = wp.vec3f(direction1_three[0], direction1_three[1], direction1_three[2])
-        angular_direction2 = wp.vec3f(direction2_three[0], direction2_three[1], direction2_three[2])
+        motion0 = wp.vec3f(direction0_three[0], direction0_three[1], direction0_three[2])
+        motion1 = wp.vec3f(direction1_three[0], direction1_three[1], direction1_three[2])
+        motion2 = wp.vec3f(direction2_three[0], direction2_three[1], direction2_three[2])
+        angular_direction0, angular_direction1, angular_direction2 = _d6_reciprocal_axes_3(motion0, motion1, motion2)
 
     parent_lever = wp.vec3f(0.0, 0.0, 0.0)
     child_lever = wp.vec3f(0.0, 0.0, 0.0)
@@ -156,7 +186,7 @@ def prepare_d6_inequalities(
                     direction_local = angular_direction1
                 elif angular_axis == wp.int32(2):
                     direction_local = angular_direction2
-                direction = wp.normalize(wp.quat_rotate(orientation0, direction_local))
+                direction = wp.quat_rotate(orientation0, direction_local)
                 if angular_count == wp.int32(1):
                     coordinate = extract_rotation_angle(orientation1 * wp.quat_inverse(orientation0), direction)
                 else:
