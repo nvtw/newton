@@ -661,6 +661,8 @@ def _joint_constraint_clear_reset_worlds_kernel(
             constraints.d6.lower_impulse[cid, row] = wp.float32(0.0)
             constraints.d6.upper_impulse[cid, row] = wp.float32(0.0)
             constraints.d6.friction_impulse[cid, row] = wp.float32(0.0)
+            constraints.d6.revolution_counter[cid, row] = wp.int32(0)
+            constraints.d6.previous_angle[cid, row] = wp.float32(0.0)
 
 
 def joint_constraint_clear_reset_worlds(

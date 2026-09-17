@@ -26,6 +26,8 @@ def _build_hinge(
     damping: float = 0.0,
     effort: float = 0.0,
     gravity: bool = True,
+    limit_lower: float = -np.inf,
+    limit_upper: float = np.inf,
 ) -> tuple[newton.Model, int]:
     gravity_vector = (0.0, -9.81, 0.0) if gravity else (0.0, 0.0, 0.0)
     builder = newton.ModelBuilder(gravity=gravity_vector, up_axis=newton.Axis.Y)
@@ -47,8 +49,8 @@ def _build_hinge(
         actuator_mode=(
             newton.JointTargetMode.VELOCITY if kp == 0.0 and kd > 0.0 else newton.JointTargetMode.POSITION_VELOCITY
         ),
-        limit_lower=-np.inf,
-        limit_upper=np.inf,
+        limit_lower=limit_lower,
+        limit_upper=limit_upper,
     )
     builder.add_articulation([joint])
     return builder.finalize(device=wp.get_preferred_device()), body
@@ -110,6 +112,18 @@ class TestHingeJoint(unittest.TestCase):
                 self.assertAlmostEqual(coordinate, 0.0, delta=0.08)
                 self.assertAlmostEqual(speed, 0.0, delta=0.08)
                 self.assertLess(float(np.linalg.norm(state.body_qd.numpy()[body, 3:5])), 2.0e-3)
+
+    def test_limits_use_common_d6_response(self) -> None:
+        """Pack the authored hinge axis and its anchor-condensed response."""
+        model, _body = _build_hinge(gravity=False, limit_lower=-0.5, limit_upper=0.5)
+        _state, solver = _rollout(model, layout="single_world", frames=1, qd=1.0)
+        data = solver.world.constraints.d6
+        self.assertEqual(int(data.row_count.numpy()[0]), 1)
+        np.testing.assert_array_equal(data.row_axis.numpy()[0, :1], [0])
+        np.testing.assert_allclose(data.axis.numpy()[0, 0], [0.0, 0.0, 1.0], atol=0.0, rtol=0.0)
+        self.assertEqual(int(data.condense_translation.numpy()[0, 0]), 1)
+        self.assertGreater(float(data.coordinate.numpy()[0, 0]), 0.0)
+        self.assertGreater(float(data.effective_mass_inverse.numpy()[0, 0]), 0.0)
 
     def test_pd_brake_kills_axial_spin(self) -> None:
         """Brake initial hinge spin with a direct implicit velocity drive."""
