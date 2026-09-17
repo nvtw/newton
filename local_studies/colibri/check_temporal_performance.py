@@ -27,6 +27,7 @@ def main():
             report = json.loads(path.with_suffix(".json").read_text())
             for name in ("frames", "warmup", "collision_hz", "substeps_per_refresh", "rendering", "motor_enabled"):
                 assert report[name] == baseline[name], (path, name)
+            assert report.get("num_worlds", 1) == baseline.get("num_worlds", 1), (path, "num_worlds")
             assert not report["rendering"]
             for name in ("peak_depth_m", "joint_peaks", "support_failure"):
                 assert report[name] == baseline[name], (path, name)

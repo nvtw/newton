@@ -1021,7 +1021,6 @@ class PhoenXWorld:
         if self.mass_splitting_color_group_size and (
             not mass_splitting
             or step_layout != "single_world"
-            or self.num_worlds != 1
             or not self.device.is_cuda
             or self.num_particles
             or self.num_cloth_triangles

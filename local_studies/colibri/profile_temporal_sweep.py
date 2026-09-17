@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=200)
     args = parser.parse_args()
-    example = Example(ViewerNull(), Example.create_parser().parse_args([]))
+    example = Example(ViewerNull(), Example.create_parser().parse_args(["--num-worlds", "1"]))
     for _ in range(60):
         example.step()
     world = example.solver.world

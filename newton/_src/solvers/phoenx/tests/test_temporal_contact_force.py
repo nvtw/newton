@@ -20,7 +20,11 @@ class TestTemporalContactForce(unittest.TestCase):
         """Include paired dynamic-anchor forces and moments under graph replay."""
         self._check_wrenches(True)
 
-    def _check_wrenches(self, dynamic_support):
+    def test_replicated_contacts_preserve_each_world_momentum(self):
+        """Keep overlapping worlds independent, including gravity and contact moments."""
+        self._check_wrenches(True, world_count=3)
+
+    def _check_wrenches(self, dynamic_support, world_count=1):
         builder = newton.ModelBuilder()
         if not dynamic_support:
             builder.add_ground_plane()
@@ -39,6 +43,11 @@ class TestTemporalContactForce(unittest.TestCase):
             builder.add_shape_box(
                 support, hx=0.1, hy=0.1, hz=0.1, cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.6)
             )
+        if world_count > 1:
+            scene = newton.ModelBuilder()
+            scene.replicate(builder, world_count)
+            scene.world_gravity = [(0.0, 0.0, -float(i)) for i in range(world_count)]
+            builder = scene
         model = builder.finalize(device="cuda:0")
         model.request_contact_attributes("force")
         pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
@@ -59,11 +68,16 @@ class TestTemporalContactForce(unittest.TestCase):
         )
         state = model.state()
         initial = np.zeros((model.body_count, 6), dtype=np.float32)
-        initial[body] = [0.7, 0.2, -0.1, 0.1, 0.3, 0.2]
+        bodies_per_world = model.body_count // world_count
+        for world in range(world_count):
+            initial[world * bodies_per_world + body] = [0.7 + 0.1 * world, 0.2, -0.1, 0.1, 0.3, 0.2]
         state.body_qd.assign(initial)
         masses = model.body_mass.numpy()
         dt = 1.0 / 120
         shape_body = model.shape_body.numpy()
+        shape_world = model.shape_world.numpy()
+        body_world = np.maximum(model.body_world.numpy(), 0)
+        gravity_vectors = model.gravity.numpy()[body_world]
         graph = None
 
         def advance():
@@ -92,13 +106,14 @@ class TestTemporalContactForce(unittest.TestCase):
             shapes1 = contacts.rigid_contact_shape1.numpy()
             for k, wrench in enumerate(contacts.force.numpy()[:count].astype(float) * dt):
                 b0, b1 = shape_body[shapes0[k]], shape_body[shapes1[k]]
+                self.assertEqual(shape_world[shapes0[k]], shape_world[shapes1[k]])
                 origin = q1[b0] if b0 >= 0 else np.zeros(3)
                 world_moment = wrench[3:] + np.cross(origin, wrench[:3])
                 for endpoint, sign in ((b0, 1), (b1, -1)):
                     if endpoint >= 0:
                         impulse[endpoint] += sign * wrench[:3]
                         moment[endpoint] += sign * world_moment
-            gravity = masses[:, None] * np.array([0, 0, -9.81]) * dt
+            gravity = masses[:, None] * gravity_vectors * dt
             np.testing.assert_allclose(impulse, masses[:, None] * (v1[:, :3] - v0[:, :3]) - gravity, atol=3e-6)
             expected = masses[:, None] * (
                 0.01 * (v1[:, 3:] - v0[:, 3:]) + np.cross(q1, v1[:, :3]) - np.cross(q0, v0[:, :3])
@@ -109,7 +124,7 @@ class TestTemporalContactForce(unittest.TestCase):
                 self.assertGreater(np.linalg.norm(impulse[body, :2]), 1e-5)
 
         lifted = state.body_q.numpy()
-        lifted[0, 2] = 1.0
+        lifted[::bodies_per_world, 2] = 1.0
         state.body_q.assign(lifted)
         wp.capture_launch(graph)
         np.testing.assert_array_equal(contacts.force.numpy(), 0.0)

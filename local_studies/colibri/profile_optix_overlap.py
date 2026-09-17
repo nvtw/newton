@@ -22,11 +22,12 @@ def main():
     parser.add_argument("--mode", choices=("serial", "overlap", "priority"), required=True)
     parser.add_argument("--frames", type=int, default=120)
     parser.add_argument("--warmup", type=int, default=30)
+    parser.add_argument("--num-worlds", type=int, default=1)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--profile", action="store_true")
     args = parser.parse_args()
     viewer = ViewerOptix(headless=True, width=1920, height=1080, vsync=False)
-    example = Example(viewer, Example.create_parser().parse_args([]))
+    example = Example(viewer, Example.create_parser().parse_args(["--num-worlds", str(args.num_worlds)]))
     render_stream = wp.get_stream(example.model.device)
     create_stream = runtime.cudaStreamCreateWithPriority
     cuda = ctypes.CDLL("/usr/local/cuda/lib64/libcudart.so") if args.profile else None
@@ -64,6 +65,7 @@ def main():
         "render_priority": render_priority,
         "simulation_priority": simulation_priority,
         "mode": args.mode,
+        "num_worlds": args.num_worlds,
         "frames": args.frames,
         "warmup": args.warmup,
         "width": 1920,

@@ -1,0 +1,1 @@
+Add independent PhoenX Colibri worlds with a default 2×2 display and `--num-worlds` to select the count. Extend temporal color groups to replicated worlds while retaining contact isolation and per-world accuracy checks; use `--num-worlds 1` for the previous single-mechanism example.

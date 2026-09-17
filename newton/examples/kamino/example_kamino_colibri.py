@@ -2494,24 +2494,28 @@ class Example:
         else:
             # Global sliding/yaw does not detach a body from this free assembly.
             # This bound tests attachment, not the accuracy of support friction.
-            base = self.model.body_label.index("FrameGround")
-            relative = []
-            for poses in (q, self.initial_q):
-                vectors = poses[:, :3] - poses[base, :3]
-                inverse_xyz = -poses[base, 3:6]
-                relative.append(
-                    vectors + 2.0 * np.cross(inverse_xyz, np.cross(inverse_xyz, vectors) + poses[base, 6] * vectors)
-                )
-            assembly = np.array([name != "Flower" for name in self.model.body_label])
-            displacement = (relative[0] - relative[1])[assembly]
+            bases = [i for i, name in enumerate(self.model.body_label) if name == "FrameGround"]
+            displacements = []
+            for base, end in zip(bases, [*bases[1:], len(q)], strict=True):
+                relative = []
+                for poses in (q, self.initial_q):
+                    vectors = poses[base:end, :3] - poses[base, :3]
+                    inverse_xyz = -poses[base, 3:6]
+                    relative.append(
+                        vectors + 2.0 * np.cross(inverse_xyz, np.cross(inverse_xyz, vectors) + poses[base, 6] * vectors)
+                    )
+                assembly = np.array([name != "Flower" for name in self.model.body_label[base:end]])
+                displacements.append((relative[0] - relative[1])[assembly])
+            displacement = np.concatenate(displacements)
         assert np.max(np.linalg.norm(displacement, axis=1)) < 0.5, "Body escaped assembly"
         assert np.max(np.linalg.norm(qd[:, :3], axis=1)) < 10.0, "Excessive linear velocity"
         assert np.max(np.linalg.norm(qd[:, 3:], axis=1)) < 100.0, "Excessive angular velocity"
         if getattr(self, "fix_base", True):
-            np.testing.assert_allclose(q[0], self.initial_q[0], atol=1.0e-5, err_msg="Base moved")
-        if "TailRack" in self.model.body_label:
-            rack = self.model.body_label.index("TailRack")
-            mount = self.model.body_label.index("TailMount")
+            bases = [i for i, name in enumerate(self.model.body_label) if name == "FrameGround"]
+            np.testing.assert_allclose(q[bases], self.initial_q[bases], atol=1.0e-5, err_msg="Base moved")
+        racks = [i for i, name in enumerate(self.model.body_label) if name == "TailRack"]
+        mounts = [i for i, name in enumerate(self.model.body_label) if name == "TailMount"]
+        for rack, mount in zip(racks, mounts[: len(racks)], strict=True):
             separation = np.linalg.norm(q[rack, :3] - q[mount, :3])
             assert separation < 0.05, f"Tail rack lost its contact support: {separation:.4f} m"
 

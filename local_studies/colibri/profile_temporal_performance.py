@@ -25,6 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--frames", type=int, default=180)
     parser.add_argument("--warmup", type=int, default=60)
+    parser.add_argument("--num-worlds", type=int, default=1)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--validate", action="store_true")
@@ -38,7 +39,12 @@ def main():
         parser.error("frames must be positive and warmup must be nonnegative")
     if args.profile and args.validate:
         parser.error("Run profiling and validation separately to keep audit kernels out of the trace")
-    example = Example(ViewerNull(), Example.create_parser().parse_args(["--motor-off"] if args.motor_off else []))
+    example = Example(
+        ViewerNull(),
+        Example.create_parser().parse_args(
+            ["--num-worlds", str(args.num_worlds)] + (["--motor-off"] if args.motor_off else [])
+        ),
+    )
     times, poses, velocities = [], [], []
     peak_depth = 0.0
     support_failure = None
@@ -67,11 +73,16 @@ def main():
                 if support_failure is None:
                     support_failure = {"frame": frame, "error": str(exc)}
             body_q = example.state_0.body_q.numpy()
-            joint_errors = measure_joints(body_q, example.model.body_label)
-            for row in joint_errors["joints"]:
-                for metric in ("anchor_error_m", "axis_error_rad"):
-                    if metric in row and (metric not in joint_peaks or row[metric] > joint_peaks[metric]["value"]):
-                        joint_peaks[metric] = {"value": row[metric], "joint": row["joint"], "frame": frame}
+            bodies_per_world = example.model.body_count // args.num_worlds
+            for world in range(args.num_worlds):
+                body_slice = slice(world * bodies_per_world, (world + 1) * bodies_per_world)
+                joint_errors = measure_joints(body_q[body_slice], example.model.body_label[body_slice])
+                for row in joint_errors["joints"]:
+                    for metric in ("anchor_error_m", "axis_error_rad"):
+                        if metric in row and (metric not in joint_peaks or row[metric] > joint_peaks[metric]["value"]):
+                            joint_peaks[metric] = {"value": row[metric], "joint": row["joint"], "frame": frame}
+                            if args.num_worlds > 1:
+                                joint_peaks[metric]["world"] = world
             poses.append(body_q)
             velocities.append(example.state_0.body_qd.numpy())
         if frame % 600 == 0:
@@ -79,6 +90,7 @@ def main():
     if cuda is not None:
         cuda.cudaProfilerStop()
     report = {
+        "num_worlds": args.num_worlds,
         "frames": args.frames,
         "warmup": args.warmup,
         "mean_ms": float(np.mean(times)),

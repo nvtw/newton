@@ -300,7 +300,8 @@ class SolverPhoenX(SolverBase):
             solver_scheme: ``"soft"`` preserves the existing solver. Experimental
                 ``"tgs"`` uses persistent two-anchor friction patches, temporal
                 joint springs and one external-force update per outer step.
-                Requires CUDA, one maximal rigid world, ``joint_solver="block_pgs"``,
+                Requires CUDA, maximal rigid worlds, ``step_layout="single_world"``,
+                ``joint_solver="block_pgs"``,
                 mass splitting with color groups, one solver iteration, prepare
                 stride 1, SOR 1, physical ``substep_end`` velocity readout,
                 no contact chunks, sleeping, partition reuse or unrolled dispatch.
@@ -331,7 +332,7 @@ class SolverPhoenX(SolverBase):
             mass_splitting_color_group_size: Experimental number of sequential
                 colors sharing each mass copy. Zero preserves existing scheduling.
                 Positive values use deterministic color groups for small CUDA
-                single-world rigid mechanisms with block PGS joints and point
+                rigid mechanisms in the single-world layout with block PGS joints and point
                 friction. Requires mass splitting and sor_boost=1.0; incompatible with sleeping,
                 packed contacts, deformables, and unrolled mass splitting.
             parallel_contact_prepare: Experimental parallel geometry preparation
@@ -352,6 +353,9 @@ class SolverPhoenX(SolverBase):
                 for one rigid contact-only world with at least 2,048 bodies,
                 where it selects ``"single_world"``. Explicit
                 ``"multi_world"`` and ``"single_world"`` override the policy.
+                The single-world layout colors all constraints together and can
+                also process multiple independent model worlds, including with
+                temporal color groups. World collision isolation is unchanged.
             threads_per_world: ``"auto"`` / 32 / 16 / 8 (multi-world).
             multi_world_scheduler: Static multi-world scheduler policy.
                 ``"auto"`` is the default performance policy and resolves
@@ -499,7 +503,6 @@ class SolverPhoenX(SolverBase):
         if solver_scheme == "tgs":
             if (
                 not model.device.is_cuda
-                or num_worlds != 1
                 or step_layout != "single_world"
                 or articulation_mode != "maximal"
                 or joint_solver != "block_pgs"
@@ -522,12 +525,11 @@ class SolverPhoenX(SolverBase):
             or articulation_mode != "maximal"
             or joint_solver != "block_pgs"
             or step_layout != "single_world"
-            or num_worlds != 1
             or has_deformables
             or contact_friction_model != "point"
         ):
             raise ValueError(
-                "mass_splitting_color_group_size requires one maximal rigid world "
+                "mass_splitting_color_group_size requires maximal rigid worlds in the single_world layout "
                 "with mass splitting, point contacts, and joint_solver='block_pgs'"
             )
         if contact_chunk_size and has_constraint_joints and joint_solver != "block_pgs":
