@@ -21,7 +21,7 @@ from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, Joi
 from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import DirectContactRunSchedule
 from newton._src.solvers.phoenx.articulations.direct_contact_response import DirectContactResponse
-from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem
+from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem, _drive_dof_masks
 from newton._src.solvers.phoenx.articulations.maximal_contact_gs import MaximalContactRunSchedule
 from newton._src.solvers.phoenx.articulations.maximal_contact_response import MaximalContactResponse
 from newton._src.solvers.phoenx.articulations.maximal_projector import (
@@ -31,6 +31,11 @@ from newton._src.solvers.phoenx.articulations.maximal_projector import (
 from newton._src.solvers.phoenx.articulations.maximal_projector_general import GeneralMaximalTreeProjector
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation, _get_reduced_model
 from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
+from newton._src.solvers.phoenx.cloth_collision import (
+    PhoenXClothShareVertexFilterData,
+    build_phoenx_share_vertex_filter_data,
+    phoenx_cloth_share_vertex_filter,
+)
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_DAMPING_DRIVE,
     _OFF_DRIVE_MODE,
@@ -50,10 +55,13 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
 )
+from newton._src.solvers.phoenx.constraints.contact_tgs import allocate_contact_tgs, export_contact_wrenches
+from newton._src.solvers.phoenx.materials import CombineMode, Material, material_table_from_list
 from newton._src.solvers.phoenx.model_adapter import (
     JointInitArrays,
     build_joint_init_arrays,
 )
+from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 from newton._src.solvers.phoenx.solver_kernels import (
     _apply_joint_drive_control_kernel,
     _apply_joint_forces_kernel,
@@ -248,6 +256,7 @@ class SolverPhoenX(SolverBase):
         collision_pipeline: CollisionPipeline | None = None,
         substeps: int = 1,
         solver_iterations: int = 8,
+        solver_scheme: str = "soft",
         velocity_iterations: int = 1,
         velocity_relaxation: str = "each_substep",
         joint_friction_model: str = "hard",
@@ -288,6 +297,19 @@ class SolverPhoenX(SolverBase):
                 instead of creating a default sticky pipeline.
             substeps: PhoenX internal substeps per :meth:`step` call.
             solver_iterations: PGS iterations per substep.
+            solver_scheme: ``"soft"`` preserves the existing solver. Experimental
+                ``"tgs"`` uses persistent two-anchor friction patches, temporal
+                joint springs and one external-force update per outer step.
+                Requires CUDA, one maximal rigid world, ``joint_solver="block_pgs"``,
+                mass splitting with color groups, one solver iteration, prepare
+                stride 1, SOR 1, physical ``substep_end`` velocity readout,
+                no contact chunks, sleeping, partition reuse or unrolled dispatch.
+                Restitution, soft contacts, armature and bounded drives are unsupported.
+                Requested contact forces include persistent-anchor friction and torque,
+                averaged over the outer step.
+                This is a runtime solver policy, not a Model or USD attribute.
+                Anchor correlation and friction admission tolerances are currently
+                fixed at 0.00025 m and 0.0004 m, respectively.
             velocity_iterations: TGS-soft relax sweeps at each selected relaxation phase.
             velocity_relaxation: ``"each_substep"`` relaxes after every temporal
                 substep (the default). ``"final_substep"`` relaxes only after
@@ -401,6 +423,9 @@ class SolverPhoenX(SolverBase):
                 topology-proven cross-phase articulation fusion on CUDA.
         """
         super().__init__(model)
+        if solver_scheme not in ("soft", "tgs"):
+            raise ValueError("solver_scheme must be 'soft' or 'tgs'")
+        self.solver_scheme = solver_scheme
         if solver_flavor is not None:
             warnings.warn(
                 "SolverPhoenX.solver_flavor is deprecated; omit it to use the production solver.",
@@ -471,6 +496,27 @@ class SolverPhoenX(SolverBase):
             raise ValueError(
                 "joint_solver='block_pgs' requires single-world maximal rigid point contacts without cable joints"
             )
+        if solver_scheme == "tgs":
+            if (
+                not model.device.is_cuda
+                or num_worlds != 1
+                or step_layout != "single_world"
+                or articulation_mode != "maximal"
+                or joint_solver != "block_pgs"
+                or has_deformables
+                or contact_friction_model != "point"
+                or not mass_splitting
+                or mass_splitting_color_group_size <= 0
+                or mass_splitting_unrolled
+                or solver_iterations != 1
+                or velocity_readout != "substep_end"
+                or prepare_refresh_stride != 1
+                or sor_boost != 1.0
+                or sleeping_velocity_threshold != 0.0
+                or contact_chunk_size != 0
+            ):
+                raise ValueError("solver_scheme='tgs' requires the documented temporal rigid color-group configuration")
+            self._validate_temporal_model_properties()
         if mass_splitting_color_group_size and (
             not mass_splitting
             or articulation_mode != "maximal"
@@ -667,21 +713,12 @@ class SolverPhoenX(SolverBase):
                 if existing_filter is None:
                     needs_new_cp = True
             if needs_new_cp:
-                import newton as _newton
-
                 # PhoenX-tight rigid_contact_max from shape_contact_pair_count;
                 # Newton's default ignores COLLIDE_SHAPES filter and overshoots
                 # ~15x with visual-only meshes.
                 tight_rcm = _estimate_rigid_contact_max_phoenx(model)
                 if tight_rcm is not None:
                     model.rigid_contact_max = 0  # bypass "already sized" short-circuit
-                from newton._src.solvers.phoenx.cloth_collision import (
-                    PhoenXClothShareVertexFilterData,
-                    phoenx_cloth_share_vertex_filter,
-                )
-                from newton._src.solvers.phoenx.solver_config import (
-                    PHOENX_CONTACT_MATCHING,
-                )
 
                 cp_kwargs = {
                     "contact_matching": PHOENX_CONTACT_MATCHING,
@@ -692,7 +729,7 @@ class SolverPhoenX(SolverBase):
                         phoenx_cloth_share_vertex_filter,
                         PhoenXClothShareVertexFilterData,
                     )
-                model._collision_pipeline = _newton.CollisionPipeline(model, **cp_kwargs)
+                model._collision_pipeline = newton.CollisionPipeline(model, **cp_kwargs)
                 model._collision_pipeline.contacts()  # forces buffer sizing
         if self._has_deformable_collision and int(model.rigid_contact_max) <= 0:
             deformable_shapes = num_cloth_triangles + num_soft_tetrahedra
@@ -748,7 +785,8 @@ class SolverPhoenX(SolverBase):
             threads_per_world=threads_per_world,
             multi_world_scheduler=multi_world_scheduler,
             max_thread_blocks=max_thread_blocks,
-            enable_body_pair_grouping=has_compound_bodies and (step_layout == "single_world" or num_worlds == 1),
+            enable_body_pair_grouping=(has_compound_bodies or solver_scheme == "tgs")
+            and (step_layout == "single_world" or num_worlds == 1),
             mass_splitting=mass_splitting,
             max_colored_partitions=max_colored_partitions,
             contact_friction_model=contact_friction_model if articulation_mode == "maximal" else "point",
@@ -778,10 +816,6 @@ class SolverPhoenX(SolverBase):
         # call ``build_phoenx_share_vertex_filter_data`` themselves and
         # overwrite this binding without losing the sleeping fields.
         if self._sleeping_enabled and int(model.shape_count) > 0 and not self._has_deformable_collision:
-            from newton._src.solvers.phoenx.cloth_collision import (
-                build_phoenx_share_vertex_filter_data,
-            )
-
             tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
             tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
             filter_data = build_phoenx_share_vertex_filter_data(
@@ -1006,18 +1040,40 @@ class SolverPhoenX(SolverBase):
         self._has_joint_forces = model.joint_dof_count > 0
         self._last_dt: float = 0.0
 
+        if solver_scheme == "tgs":
+            direct = self._direct_equality_system
+            if direct is not None:
+                if direct.has_bounded_drives:
+                    raise ValueError("solver_scheme='tgs' requires unbounded joint drives")
+                direct.set_temporal_substeps(self.world.substeps)
+            world = self.world
+            world._temporal_contact_state = allocate_contact_tgs(
+                world.rigid_contact_max, world.bodies.position.shape[0], world.substeps, world.device
+            )
+            world._temporal_static_heads = wp.full(world.num_bodies, -1, dtype=int, device=world.device)
+            world._temporal_static_links = wp.full(
+                world._contact_cols.data.shape[1], -1, dtype=int, device=world.device
+            )
+            world._temporal_contact_state.prepared_friction = 1
+            world._temporal_joint_springs = True
+            world._temporal_force_step = True
+
         # Placeholder for _contact_impulse_to_force_wrapper_kernel when grouping
         # is off (has_perm=0 makes the kernel ignore it).
         self._sort_perm_placeholder = wp.zeros(1, dtype=wp.int32, device=self.device)
 
+    def _validate_temporal_model_properties(self) -> None:
+        """Reject unsupported temporal properties before refreshing cached rows."""
+        for field in ("joint_armature", "shape_material_restitution"):
+            values = getattr(self.model, field, None)
+            if values is not None and np.any(values.numpy()):
+                raise ValueError(f"solver_scheme='tgs' requires zero {field}")
+        if self.model.joint_dof_count and np.any(_drive_dof_masks(self.model)[1]):
+            raise ValueError("solver_scheme='tgs' requires unbounded joint drives")
+
     def _install_shape_materials(self) -> None:
         """Stream Model's per-shape (mu_static, mu_dynamic, restitution) into
         PhoenX's material table; each shape gets its own material index."""
-        from newton._src.solvers.phoenx.materials import (
-            CombineMode,
-            Material,
-            material_table_from_list,
-        )
 
         mu_np = self.model.shape_material_mu.numpy()
         restitution = (
@@ -1419,6 +1475,8 @@ class SolverPhoenX(SolverBase):
                 ``state_in.body_qd`` already match its generalized state.
                 Defaults to ``False``.
         """
+        if self.solver_scheme == "tgs" and bool(getattr(self, "reuse_partition", False)):
+            raise ValueError("solver_scheme='tgs' requires contact ingestion on every outer step")
         if control is None:
             # Alias Model per-DOF arrays (no clone). Matches XPBD/Featherstone.
             control = self.model.control(clone_variables=False)
@@ -1481,9 +1539,13 @@ class SolverPhoenX(SolverBase):
             shape_aabb_lower = getattr(np_, "shape_aabb_lower", None)
             shape_aabb_upper = getattr(np_, "shape_aabb_upper", None)
 
+        if self.solver_scheme == "tgs":
+            self.world._temporal_contact_state.record_wrenches = int(
+                contacts is not None and contacts.force is not None
+            )
         self.world.step(
             dt=float(dt),
-            contacts=contacts,
+            contacts=contacts if self._shape_body is not None else None,
             shape_body=self._shape_body,
             shape_type=self.model.shape_type,
             vel_accum=world_vel_accum,
@@ -1495,7 +1557,7 @@ class SolverPhoenX(SolverBase):
             # graph colouring instead of re-colouring an unchanged graph.
             reuse_partition=bool(getattr(self, "reuse_partition", False)),
         )
-        self._last_dt = float(dt) / max(1, self.world.substeps)
+        self._last_dt = float(dt) if self.solver_scheme == "tgs" else float(dt) / max(1, self.world.substeps)
 
         self._export_body_state(state_out, dt=float(dt))
         self._export_particle_state(state_out)
@@ -1550,6 +1612,8 @@ class SolverPhoenX(SolverBase):
     def notify_model_changed(self, flags: int) -> None:
         """Refresh state on Model edits. Joint-property changes rebuild the joint constraint
         init arrays from scratch; gravity is reread from ``model.gravity``."""
+        if self.solver_scheme == "tgs":
+            self._validate_temporal_model_properties()
         joint_props_changed = bool(flags & (int(ModelFlags.JOINT_PROPERTIES) | int(ModelFlags.JOINT_DOF_PROPERTIES)))
         if joint_props_changed:
             self._joint_constraints = build_joint_init_arrays(
@@ -1619,22 +1683,45 @@ class SolverPhoenX(SolverBase):
         :attr:`Contacts.force` if the user opted in via
         :meth:`Model.request_contact_attributes('force')`.
 
-        Forces are reported at the contact point in world frame;
-        torque is always zero (a per-point force has no torque about
-        its own application point). When the compound-body grouping
-        optimization is active, the writeback honors the ingest sort
-        permutation so ``contacts.force[k]`` aligns with
-        ``contacts.rigid_contact_shape0[k]`` and
-        ``contacts.rigid_contact_normal[k]`` -- matching the layout
-        consumed by :class:`~newton.sensors.SensorContact`.
+        Temporal forces are outer-step average world-frame wrenches on body0,
+        about its current COM. Each patch's anchor friction is assigned to its
+        first contact row; its moment includes the true anchor application
+        points throughout the step. Thus body-pair wrench sums are preserved,
+        while the per-point friction distribution is a reporting convention.
+        Request forces before stepping to enable this optional accounting.
+
+        The legacy soft scheme reports point forces with zero torque. Both
+        schemes restore the original collision-pipeline contact ordering.
         """
         if contacts.force is None:
             raise ValueError(
                 "contacts.force is not allocated. Call model.request_contact_attributes('force') "
                 "before creating the Contacts object."
             )
-        if self._last_dt <= 0.0:
+        if self._last_dt <= 0.0 or self._shape_body is None or contacts.rigid_contact_max == 0:
             contacts.force.zero_()
+            return
+
+        if self.solver_scheme == "tgs":
+            temporal = self.world._temporal_contact_state
+            if not temporal.record_wrenches:
+                raise ValueError("Request contact force before stepping so temporal impulse wrenches are recorded")
+            contacts.force.zero_()
+            wp.launch(
+                export_contact_wrenches,
+                dim=int(contacts.rigid_contact_max),
+                inputs=[
+                    contacts.rigid_contact_count,
+                    temporal,
+                    self.bodies,
+                    self._shape_body,
+                    contacts.rigid_contact_shape0,
+                    self.world._ingest_scratch.sort_perm,
+                    1.0 / self._last_dt,
+                ],
+                outputs=[contacts.force],
+                device=self.device,
+            )
             return
 
         cc = self.world._contact_container

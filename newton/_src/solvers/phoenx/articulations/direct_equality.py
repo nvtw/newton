@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import functools
 from collections import deque
 from dataclasses import dataclass
 
@@ -1012,69 +1013,89 @@ def _prepare_direct_rows(
     return wp.int32(5) if mode == JOINT_MODE_PRISMATIC else wp.int32(6)
 
 
-@wp.kernel(enable_backward=False)
-def _prepare_direct_equality_rows_kernel(
-    structural_joints: wp.array[wp.int32],
-    effective_joint_mode: wp.array[wp.int32],
-    effective_joint_axis: wp.array[wp.vec3],
-    generic_linear_axes: wp.array[wp.vec3],
-    generic_angular_axes: wp.array[wp.vec3],
-    generic_linear_count: wp.array[wp.int32],
-    generic_angular_count: wp.array[wp.int32],
-    joint_parent: wp.array[wp.int32],
-    joint_child: wp.array[wp.int32],
-    joint_qd_start: wp.array[wp.int32],
-    joint_dof_dim: wp.array2d[wp.int32],
-    joint_x_p: wp.array[wp.transform],
-    joint_x_c: wp.array[wp.transform],
-    cable_rest_relative_orientation: wp.array[wp.quat],
-    joint_target_ke: wp.array[wp.float32],
-    joint_target_kd: wp.array[wp.float32],
-    bodies: BodyContainer,
-    idt: wp.float32,
-    row_count: wp.array[wp.int32],
-    row_wrench0: wp.array2d[wp.spatial_vector],
-    row_wrench1: wp.array2d[wp.spatial_vector],
-    row_bias: wp.array2d[wp.float32],
-    row_error: wp.array2d[wp.float32],
-    row_stiffness: wp.array2d[wp.float32],
-    row_damping: wp.array2d[wp.float32],
-):
-    structural_index = wp.tid()
-    bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
-        DEFAULT_HERTZ_LINEAR,
-        DEFAULT_DAMPING_RATIO,
-        wp.float32(1.0) / idt,
-    )
-    joint = structural_joints[structural_index]
-    count = _prepare_direct_rows(
-        structural_index,
-        joint,
-        effective_joint_mode,
-        effective_joint_axis,
-        generic_linear_axes,
-        generic_angular_axes,
-        generic_linear_count,
-        generic_angular_count,
-        joint_parent,
-        joint_child,
-        joint_qd_start,
-        joint_dof_dim,
-        joint_x_p,
-        joint_x_c,
-        cable_rest_relative_orientation,
-        joint_target_ke,
-        joint_target_kd,
-        bodies,
-        bias_rate,
-        row_wrench0,
-        row_wrench1,
-        row_bias,
-        row_error,
-        row_stiffness,
-        row_damping,
-    )
-    row_count[structural_index] = count
+@functools.cache
+def get_prepare_direct_equality_rows_kernel(temporal_substeps: int | None = None):
+    """Specialize joint correction for soft rows or PhysX-style temporal steps.
+
+    Temporal hard rows use half the joint bias coefficient, with the source
+    coefficient capped at 0.9 and scaled by the number of temporal substeps.
+    Wrenches and dynamic spring rows retain their existing preparation.
+    """
+    if temporal_substeps is not None and temporal_substeps < 1:
+        raise ValueError("Temporal substeps must be positive")
+    temporal_erp = 0.0 if temporal_substeps is None else 0.5 * min(0.9, 2.0 / temporal_substeps**0.5)
+
+    @wp.kernel(enable_backward=False)
+    def prepare_rows(
+        structural_joints: wp.array[wp.int32],
+        effective_joint_mode: wp.array[wp.int32],
+        effective_joint_axis: wp.array[wp.vec3],
+        generic_linear_axes: wp.array[wp.vec3],
+        generic_angular_axes: wp.array[wp.vec3],
+        generic_linear_count: wp.array[wp.int32],
+        generic_angular_count: wp.array[wp.int32],
+        joint_parent: wp.array[wp.int32],
+        joint_child: wp.array[wp.int32],
+        joint_qd_start: wp.array[wp.int32],
+        joint_dof_dim: wp.array2d[wp.int32],
+        joint_x_p: wp.array[wp.transform],
+        joint_x_c: wp.array[wp.transform],
+        cable_rest_relative_orientation: wp.array[wp.quat],
+        joint_target_ke: wp.array[wp.float32],
+        joint_target_kd: wp.array[wp.float32],
+        bodies: BodyContainer,
+        idt: wp.float32,
+        row_count: wp.array[wp.int32],
+        row_wrench0: wp.array2d[wp.spatial_vector],
+        row_wrench1: wp.array2d[wp.spatial_vector],
+        row_bias: wp.array2d[wp.float32],
+        row_error: wp.array2d[wp.float32],
+        row_stiffness: wp.array2d[wp.float32],
+        row_damping: wp.array2d[wp.float32],
+    ):
+        structural_index = wp.tid()
+        if wp.static(temporal_substeps is None):
+            bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
+                DEFAULT_HERTZ_LINEAR,
+                DEFAULT_DAMPING_RATIO,
+                wp.float32(1.0) / idt,
+            )
+        else:
+            bias_rate = wp.float32(temporal_erp) * idt
+        joint = structural_joints[structural_index]
+        count = _prepare_direct_rows(
+            structural_index,
+            joint,
+            effective_joint_mode,
+            effective_joint_axis,
+            generic_linear_axes,
+            generic_angular_axes,
+            generic_linear_count,
+            generic_angular_count,
+            joint_parent,
+            joint_child,
+            joint_qd_start,
+            joint_dof_dim,
+            joint_x_p,
+            joint_x_c,
+            cable_rest_relative_orientation,
+            joint_target_ke,
+            joint_target_kd,
+            bodies,
+            bias_rate,
+            row_wrench0,
+            row_wrench1,
+            row_bias,
+            row_error,
+            row_stiffness,
+            row_damping,
+        )
+        row_count[structural_index] = count
+
+    return prepare_rows
+
+
+_prepare_direct_equality_rows_kernel = get_prepare_direct_equality_rows_kernel()
 
 
 @wp.kernel(enable_backward=False)
@@ -1915,9 +1936,11 @@ class DirectEqualitySystem:
         effective_joint_dof_start: np.ndarray | None = None,
         effective_joint_target_start: np.ndarray | None = None,
         regularization: float = _FP32_BASE_REGULARIZATION,
+        temporal_substeps: int | None = None,
     ):
         self.model = model
         self.bodies = bodies
+        self.set_temporal_substeps(temporal_substeps)
         joint_types = np.asarray(model.joint_type.numpy(), dtype=np.int32)
         joint_mode = (
             _default_joint_modes(joint_types)
@@ -2240,12 +2263,17 @@ class DirectEqualitySystem:
         self.control_target_q = target_q
         self.control_target_qd = target_qd
 
+    def set_temporal_substeps(self, substeps: int | None) -> None:
+        """Select joint correction before graph capture; None restores soft rows."""
+        self._prepare_rows_kernel = get_prepare_direct_equality_rows_kernel(substeps)
+        self._joint_correction_dt_scale = _DIRECT_BAUMGARTE if substeps is None else 1.0
+
     def refresh_geometry(self, idt: wp.float32) -> None:
         """Refresh body-space rows without changing impulses or drive references."""
         if not self.enabled:
             return
         wp.launch(
-            _prepare_direct_equality_rows_kernel,
+            self._prepare_rows_kernel,
             dim=len(self.topology.joints),
             inputs=[
                 self.structural_joints,
@@ -2265,7 +2293,7 @@ class DirectEqualitySystem:
                 self.joint_target_ke,
                 self.joint_target_kd,
                 self.bodies,
-                wp.float32(_DIRECT_BAUMGARTE) * idt,
+                wp.float32(self._joint_correction_dt_scale) * idt,
                 self.row_count,
                 self.row_wrench0,
                 self.row_wrench1,

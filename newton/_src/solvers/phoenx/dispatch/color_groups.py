@@ -37,14 +37,16 @@ def get_sweep_block_dim(cooperative_joints: bool) -> int:
 
 
 @functools.cache
-def get_sweep_kernel(phase, soft_pd, block_count=DEFAULT_SWEEP_BLOCK_COUNT, *, cooperative_joints=False):
+def get_sweep_kernel(
+    phase, soft_pd, block_count=DEFAULT_SWEEP_BLOCK_COUNT, *, cooperative_joints=False, temporal_springs=False
+):
     """Build an ordered sweep within each independent color group."""
     if block_count < 1:
         raise ValueError("Color-group dispatch requires at least one block")
     if cooperative_joints and phase not in ("iterate", "relax"):
         raise ValueError("Cooperative joint RHS is only available for iteration and relaxation")
     lanes_per_constraint = JOINT_RHS_LANES if cooperative_joints else 1
-    joint_iterate = get_iterate_bilateral_joint_block(True)
+    joint_iterate = get_iterate_bilateral_joint_block(True, temporal_springs=temporal_springs)
     use_bias = phase == "iterate"
     dispatch, _ = _make_singleworld_dispatch_func(
         cloth_support=False,
@@ -61,6 +63,7 @@ def get_sweep_kernel(phase, soft_pd, block_count=DEFAULT_SWEEP_BLOCK_COUNT, *, c
         use_bias=phase == "iterate",
         patch_friction=False,
         bilateral_joint_blocks=True,
+        temporal_springs=temporal_springs,
     )
 
     @wp.kernel(enable_backward=False, module="unique")
