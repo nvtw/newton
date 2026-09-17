@@ -495,3 +495,57 @@ sample strictly after two simulated seconds), peak horizontal base motion
 is 1.2163 um and final displacement is 0.1281 um; peak rotation is
 5.8820e-6 rad. These drift values depend on the stated reference sample and
 do not indicate a physics change from the earlier bitwise-identical run.
+
+
+A fresh Nsight trace confirms one physics graph replay per frame: 120
+`cudaGraphLaunch` calls for 120 measured frames. Rendering is disabled.
+The 5,760 biased sweep calls are graph kernel nodes (48 substeps per frame),
+not separate graph launches. Graph launch API time averages 0.244 ms/frame;
+the temporal biased sweep still accounts for 55.6% of recorded kernel time.
+Artifacts: `/tmp/colibri_retained_fresh_trace.{nsys-rep,sqlite}` and
+`/tmp/colibri_retained_fresh_stats.csv`.
+
+An explicit 192-register ceiling was evaluated in the isolated temporal
+sweep and retained. The compiler selects 146 registers/thread for the biased kernel rather
+than the control's 128; Nsight reports zero local-memory bytes/thread for both.
+A 96-register ceiling was neutral in the frozen screen. At 192, frozen median
+is 135.168 us versus roughly 139 us retained, and matched 180-frame means are
+15.0121 ms candidate versus 15.4095 ms control, with exact trajectories.
+
+Full measured-minute candidate/control/candidate times are 14.8859 / 15.1226 /
+14.8667 ms. Both candidates pass the existing 1% speedup gate with every saved
+pose/velocity bit and quality diagnostic identical. Candidate motor-off states
+also match the full-minute unpowered reference bitwise. All 11 focused tests
+pass, covering physical momentum, recorded wrench, full/partial warp tails,
+ragged temporal scheduling, joint springs, and force reporting.
+
+In the matched Nsight runs, the biased-sweep median falls from 156.0465 to
+152.591 us (mean 169.4096 to 165.3156 us), with exactly 5,760 calls each.
+Trace artifacts: `/tmp/colibri_register192_trace.{nsys-rep,sqlite}` and
+`/tmp/colibri_register192_stats.csv`. Validation artifacts:
+`/tmp/colibri_register192_{minute,minute_repeat,motor_off}.{json,npz,log}`
+and `/tmp/colibri_register_control_minute.{json,npz,log}`. The independent
+old-code repeat (`/tmp/colibri_register_control_minute_repeat.*`) measures
+15.0232 ms and fails the preselected 1% performance gate against the first
+control (1.00661x). Both candidate runs beat both controls, spanning roughly
+0.9–1.7% improvement depending on the pairing. This is a modest gain; it does
+not close the 9.4 ms goal. No arithmetic, contact policy, or solver counts
+change. Reproduce the gate with:
+
+```bash
+uv run --no-project .venv/bin/python -m local_studies.colibri.check_temporal_performance --baseline /tmp/colibri_register_control_minute --candidate /tmp/colibri_register192_minute /tmp/colibri_register192_minute_repeat --minimum-speedup 1.01
+```
+
+Replacing the candidate prefixes with the independent old-code repeat fails.
+
+These runs intentionally use the pre-tail-filter scene in the isolated
+checkout; the requested adjacent-feather exclusions are not solver speedups.
+
+
+After applying the compiler setting to the main checkout, all 15 current-scene
+assembly/filter and 120 Hz gear-contact checks pass with the requested tail
+filters enabled. Changed-file hooks pass. Required repository-wide hooks
+still report pre-existing unrelated issues; their unrelated edits were
+restored. The setting changes only the temporal sweep's CUDA register ceiling;
+other dispatch paths, including those used by the earlier Kapla/G1/DR checks,
+are not modified.

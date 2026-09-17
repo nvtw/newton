@@ -84,7 +84,8 @@ def get_sweep_kernel(
             if static_owner(columns, contact, bodies) < 0:
                 contact_iterate(columns, state, contact, bodies, cc, copies, idt, 0)
 
-    @wp.kernel(enable_backward=False, module="unique")
+    # Allow the ordered sweep to keep more intermediates in registers.
+    @wp.kernel(enable_backward=False, module="unique", cuda_max_registers=192)
     def sweep(
         constraints: ConstraintContainer,
         columns: ContactColumnContainer,
