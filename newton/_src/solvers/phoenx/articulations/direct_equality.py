@@ -1227,6 +1227,13 @@ def _prepare_direct_dynamic_rows_kernel(
                     bodies.orientation[child],
                     wp.transform_get_translation(joint_x_c[joint]) - bodies.body_com[child],
                 )
+            if joint_type[joint] == JointType.D6:
+                # Match the derivative of the parent-frame linear coordinate
+                # and apply the paired drive impulses at one world point.
+                separation = point1_world - point0_world
+                if parent > wp.int32(0) and child > wp.int32(0):
+                    separation = bodies.position[child] - bodies.position[parent] + point1_com - point0_com
+                point0_com += separation
             _set_direct_point_row(
                 structural_index,
                 local_row,
