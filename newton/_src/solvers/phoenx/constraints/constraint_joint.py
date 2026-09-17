@@ -45,6 +45,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     write_vec3,
 )
 from newton._src.solvers.phoenx.constraints.d6_inequality import prepare_d6_inequalities
+from newton._src.solvers.phoenx.constraints.d6_joint_data import D6_AXIS_COUNT
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of, num_dwords
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     create_orthonormal,
@@ -1213,6 +1214,22 @@ def joint_constraint_world_wrench_at(
         # Ball-socket: only the anchor-1 impulse contributes here.
         force = acc1 * idt
         torque = wp.cross(r1_b2, acc1 * idt)
+
+    # Common D6 inequalities keep their warm-start impulses outside the
+    # legacy joint column. Include the exact wrench applied to body 2 so
+    # diagnostics report limits, speed caps, and friction on every D6 axis.
+    if constraints.d6.enabled != wp.int32(0):
+        row_count = constraints.d6.row_count[cid]
+        for row in range(D6_AXIS_COUNT):
+            if wp.int32(row) < row_count:
+                impulse = (
+                    constraints.d6.lower_impulse[cid, row]
+                    + constraints.d6.upper_impulse[cid, row]
+                    + constraints.d6.friction_impulse[cid, row]
+                )
+                wrench = constraints.d6.wrench1[cid, row]
+                force += wp.spatial_top(wrench) * (impulse * idt)
+                torque += wp.spatial_bottom(wrench) * (impulse * idt)
     return force, torque
 
 

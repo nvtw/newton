@@ -85,6 +85,12 @@ class TestD6DirectDispatch(unittest.TestCase):
         solver.step(state, state, model.control(), None, 1.0 / 120.0)
         self.assertLessEqual(abs(float(state.joint_q.numpy()[3])), 0.2005)
 
+        impulses = data.lower_impulse.numpy()[0] + data.upper_impulse.numpy()[0] + data.friction_impulse.numpy()[0]
+        expected_wrench = np.sum(data.wrench1.numpy()[0] * impulses[:, None], axis=0) / solver.world.substep_dt
+        reported_wrench = wp.zeros(solver.world.num_constraints, dtype=wp.spatial_vector, device=model.device)
+        solver.world.gather_constraint_wrenches(reported_wrench)
+        np.testing.assert_allclose(reported_wrench.numpy()[0], expected_wrench, rtol=2.0e-6, atol=2.0e-5)
+
         lower = model.joint_limit_lower.numpy()
         upper = model.joint_limit_upper.numpy()
         lower[3] = -1.0e6
