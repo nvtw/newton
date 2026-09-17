@@ -7,6 +7,8 @@ import functools
 import warp as wp
 
 from newton._src.solvers.phoenx.constraints.bilateral_joint import get_iterate_bilateral_joint_block
+from newton._src.solvers.phoenx.constraints.constraint_contact import contact_get_body1, contact_get_body2
+from newton._src.solvers.phoenx.constraints.constraint_container import constraint_get_body1, constraint_get_body2
 from newton._src.solvers.phoenx.constraints.contact_static_ownership import static_owner
 from newton._src.solvers.phoenx.constraints.contact_tgs import ContactTGS
 from newton._src.solvers.phoenx.constraints.contact_tgs_dynamic import make_iterate
@@ -37,10 +39,14 @@ def get_sweep_kernel(
     cooperative_joints=False,
     temporal_springs=True,
     record_wrenches=False,
+    world_count=1,
 ):
-    """Solve rigid groups after parallel contact preparation; static contacts run separately."""
-    if phase not in ("prepare", "cached_prepare", "iterate", "relax") or block_count < 1:
-        raise ValueError("Expected a valid temporal sweep phase and positive block count")
+    """Solve rigid groups after parallel preparation; static contacts run separately.
+
+    Multiple sweep worlds require disjoint body sets, without shared global bodies.
+    """
+    if phase not in ("prepare", "cached_prepare", "iterate", "relax") or block_count < 1 or world_count < 1:
+        raise ValueError("Expected a valid temporal sweep phase and positive block/world counts")
     if cooperative_joints and phase not in ("iterate", "relax"):
         raise ValueError("Cooperative joints require iterate or relax")
     lanes_per_constraint = JOINT_RHS_LANES if cooperative_joints else 1
@@ -105,7 +111,9 @@ def get_sweep_kernel(
         state: ContactTGS,
     ):
         block, lane = wp.tid()
-        for slab in range(block, (num_colors[0] + slab_width - 1) / slab_width, block_count):
+        # Independent worlds can advance the same color slab on separate blocks.
+        # Keep each world's row order and mass-copy ownership unchanged.
+        for slab in range(block / world_count, (num_colors[0] + slab_width - 1) / slab_width, block_count):
             # Springs advance once per substep. Solve contacts before joints
             # within each copy group so later contact rows cannot immediately
             # erase the freshly solved drive velocity before integration.
@@ -124,6 +132,18 @@ def get_sweep_kernel(
                                 row_stride = 8
                         for index in range(starts[color] + lane / row_lanes, starts[color + 1], row_stride):
                             cid = ids[index]
+                            if wp.static(world_count > 1):
+                                a = int(0)
+                                b = int(0)
+                                if cid < num_joints:
+                                    a = constraint_get_body1(constraints, cid)
+                                    b = constraint_get_body2(constraints, cid)
+                                else:
+                                    a = contact_get_body1(columns, cid - num_joints)
+                                    b = contact_get_body2(columns, cid - num_joints)
+                                owner = wp.max(bodies.world_id[wp.max(a, 0)], bodies.world_id[wp.max(b, 0)])
+                                if owner != block % world_count:
+                                    continue
                             if wp.static(not preparing):
                                 if (cid < num_joints) == (kind == 0):
                                     continue

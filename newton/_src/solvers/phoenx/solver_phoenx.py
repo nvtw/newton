@@ -920,6 +920,7 @@ class PhoenXWorld:
         if self.base_substeps <= 0:
             raise ValueError(f"substeps must be >= 1 (got {self.base_substeps})")
         self.substeps = self.base_substeps
+        self._temporal_sweep_worlds = 1
         self._temporal_joint_springs = False
         self._temporal_force_step = False
         self._temporal_contact_state = None
@@ -4932,11 +4933,12 @@ class PhoenXWorld:
                 cooperative_joints=cooperative_joints,
                 temporal_springs=self._temporal_joint_springs,
                 record_wrenches=bool(self._temporal_contact_state.record_wrenches),
+                world_count=self._temporal_sweep_worlds,
             )
             inputs.append(self._temporal_contact_state)
         wp.launch(
             kernel,
-            (COLOR_GROUP_SWEEP_BLOCK_COUNT, block_dim),
+            (COLOR_GROUP_SWEEP_BLOCK_COUNT * self._temporal_sweep_worlds, block_dim),
             inputs,
             block_dim=block_dim,
             device=self.device,

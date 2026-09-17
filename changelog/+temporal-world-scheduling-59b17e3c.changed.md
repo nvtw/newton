@@ -1,0 +1,1 @@
+Accelerate PhoenX temporal color-group sweeps by assigning independent worlds to separate CUDA blocks, preserving ordered solves and paired impulses. Retain the original schedule for models containing shared global bodies.

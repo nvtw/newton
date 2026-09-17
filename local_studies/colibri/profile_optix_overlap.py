@@ -71,6 +71,7 @@ def main():
         "width": 1920,
         "height": 1080,
         "dlss_enabled": viewer._api.dlss_enabled,
+        "optix_graph_active": viewer._api.cuda_graph_active,
         "dlss_quality": viewer.dlss_quality,
         "mean_ms": float(np.mean(times)),
         "median_ms": float(np.median(times)),

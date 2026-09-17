@@ -17,7 +17,7 @@ from newton.viewer import ViewerNull
 
 @unittest.skipUnless(wp.is_cuda_available(), "Phoenx Colibri requires CUDA")
 class TestColibriContacts(unittest.TestCase):
-    def _make_example(self, num_worlds=1):
+    def _make_example(self, num_worlds=1, fix_base=False):
         assets = Path(newton.examples.get_asset_directory()) / "colibri"
         if not assets.is_dir():
             self.skipTest("Colibri mesh assets are not installed")
@@ -33,7 +33,27 @@ class TestColibriContacts(unittest.TestCase):
                 "1.0",
             ]
         )
+        args.fix_base = fix_base
         return Example(ViewerNull(), args)
+
+    def test_replicated_fixed_roots_match_ordered_sweep(self):
+        """Match the ordered reference for world-anchor joints and a partial grid."""
+        example = self._make_example(3, fix_base=True)
+        reference = self._make_example(3, fix_base=True)
+        reference.solver.world._temporal_sweep_worlds = 1
+        with wp.ScopedCapture(device=reference.model.device) as capture:
+            reference.simulate()
+        reference.graph = capture.graph
+        # The existing strict fixed-base pose tolerance fails in both paths.
+        # Preserve that diagnostic; this checks scheduling parity instead.
+        for _ in range(60):
+            example.step()
+            reference.step()
+            for name in ("body_q", "body_qd"):
+                np.testing.assert_array_equal(
+                    getattr(example.state_0, name).numpy().view(np.uint32),
+                    getattr(reference.state_0, name).numpy().view(np.uint32),
+                )
 
     def test_replicated_worlds_keep_contacts_local(self):
         """Replicate at the origin, separate only in the viewer, and audit every world."""
