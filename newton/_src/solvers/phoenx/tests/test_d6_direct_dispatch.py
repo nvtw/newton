@@ -100,6 +100,30 @@ class TestD6DirectDispatch(unittest.TestCase):
         solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
         self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 0)
 
+    def test_ball_limits_use_common_d6_rows(self) -> None:
+        """Keep native BALL limits on the common D6 inequality path."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        body = _make_body(builder)
+        joint = builder.add_joint_ball(parent=-1, child=body)
+        builder.add_articulation([joint])
+        model = builder.finalize()
+
+        lower = model.joint_limit_lower.numpy()
+        upper = model.joint_limit_upper.numpy()
+        lower[:3] = [-0.4, -0.5, -0.6]
+        upper[:3] = [0.4, 0.5, 0.6]
+        model.joint_limit_lower.assign(lower)
+        model.joint_limit_upper.assign(upper)
+
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        data = solver.world.constraints.d6
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_BALL_SOCKET))
+        self.assertEqual(int(data.row_count.numpy()[0]), 3)
+        np.testing.assert_array_equal(data.row_axis.numpy()[0, :3], [0, 1, 2])
+        np.testing.assert_allclose(data.lower.numpy()[0, :3], lower[:3], atol=1.0e-6)
+        np.testing.assert_allclose(data.upper.numpy()[0, :3], upper[:3], atol=1.0e-6)
+        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 1)
+
     def test_angular_three_axis_d6_reduces_to_ball_socket_with_limits(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         body = _make_body(builder)

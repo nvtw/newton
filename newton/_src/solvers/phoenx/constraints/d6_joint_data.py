@@ -83,7 +83,13 @@ def build_d6_inequality_data(
 
     common_joint = np.isin(
         joint_type,
-        (int(JointType.D6), int(JointType.PRISMATIC), int(JointType.REVOLUTE), int(JointType.DISTANCE)),
+        (
+            int(JointType.BALL),
+            int(JointType.D6),
+            int(JointType.PRISMATIC),
+            int(JointType.REVOLUTE),
+            int(JointType.DISTANCE),
+        ),
     )
     for joint in np.flatnonzero(common_joint):
         cid = int(joint_idx_to_cid[joint])

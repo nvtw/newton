@@ -1,41 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Lean limit and friction iteration for direct-equality joints."""
+"""Iterate common maximal-coordinate D6 inequality rows."""
 
 import warp as wp
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    ConstraintContainer,
-    constraint_write_multiplier,
-    read_float,
-    read_int,
-    read_vec3,
-)
+from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer, read_int
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    _CLAMP_NONE,
-    _MUL_ACC_FRICTION,
-    _OFF_AXIS_WORLD,
     _OFF_BODY1,
     _OFF_BODY2,
-    _OFF_CLAMP,
-    _OFF_FRICTION_COEFFICIENT,
-    _OFF_JOINT_MODE,
-    _OFF_R1_B1,
-    _OFF_R1_B2,
-    JOINT_MODE_BALL_SOCKET,
-    JOINT_MODE_CARTESIAN,
-    JOINT_MODE_CARTESIAN_PLANE,
-    JOINT_MODE_CYLINDRICAL,
-    JOINT_MODE_DISTANCE,
-    JOINT_MODE_GENERIC_D6,
-    JOINT_MODE_PLANAR,
-    JOINT_MODE_PRISMATIC,
-    JOINT_MODE_REVOLUTE,
-    JOINT_MODE_UNIVERSAL,
-    _axial_limit_friction_iterate,
     _ms_load_body_pair,
     _ms_store_body_pair,
 )
@@ -57,36 +32,14 @@ def joint_constraint_iterate_inequality(
     sor_boost: wp.float32,
     use_bias: wp.bool,
 ):
-    """Iterate only free-axis limit and friction rows."""
-    mode = read_int(constraints, _OFF_JOINT_MODE, cid)
-    if (
-        mode != JOINT_MODE_REVOLUTE
-        and mode != JOINT_MODE_PRISMATIC
-        and mode != JOINT_MODE_DISTANCE
-        and mode != JOINT_MODE_BALL_SOCKET
-        and mode != JOINT_MODE_UNIVERSAL
-        and mode != JOINT_MODE_CYLINDRICAL
-        and mode != JOINT_MODE_PLANAR
-        and mode != JOINT_MODE_CARTESIAN_PLANE
-        and mode != JOINT_MODE_CARTESIAN
-        and mode != JOINT_MODE_GENERIC_D6
-    ):
+    """Iterate common D6 limit, speed-cap, and friction rows."""
+    if constraints.d6.enabled == wp.int32(0) or constraints.d6.row_count[cid] == wp.int32(0):
         return
 
-    common_d6 = constraints.d6.enabled != 0 and constraints.d6.row_count[cid] > wp.int32(0)
     body1 = read_int(constraints, _OFF_BODY1, cid)
     body2 = read_int(constraints, _OFF_BODY2, cid)
     body_set_access_mode(bodies, body1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, body2, ACCESS_MODE_VELOCITY_LEVEL, idt)
-    # Preserve lazy body-state conversion and stale friction release, but
-    # avoid loading and writing body responses for zero-impulse rows.
-    if not common_d6:
-        if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
-            return
-        if read_int(constraints, _OFF_CLAMP, cid) == _CLAMP_NONE:
-            if read_float(constraints, _OFF_FRICTION_COEFFICIENT, cid) <= wp.float32(0.0):
-                constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
-                return
     (
         velocity1,
         velocity2,
@@ -107,76 +60,20 @@ def joint_constraint_iterate_inequality(
         parallel_id,
         num_bodies,
     )
-
-    if common_d6:
-        velocity1, angular_velocity1, velocity2, angular_velocity2 = iterate_d6_inequalities(
-            constraints.d6,
-            cid,
-            inverse_mass1,
-            inverse_mass2,
-            inverse_inertia1,
-            inverse_inertia2,
-            velocity1,
-            angular_velocity1,
-            velocity2,
-            angular_velocity2,
-            idt,
-            sor_boost,
-        )
-        _ms_store_body_pair(
-            bodies,
-            particles,
-            copy_state,
-            body1,
-            body2,
-            slot1,
-            slot2,
-            num_bodies,
-            velocity1,
-            angular_velocity1,
-            velocity2,
-            angular_velocity2,
-        )
-        return
-
-    axis = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
-    clamp = read_int(constraints, _OFF_CLAMP, cid)
-    if mode == JOINT_MODE_REVOLUTE:
-        axial_velocity = wp.dot(axis, angular_velocity1 - angular_velocity2)
-        impulse = _axial_limit_friction_iterate(
-            constraints,
-            cid,
-            wp.int32(0),
-            axial_velocity,
-            clamp,
-            idt,
-            sor_boost,
-            use_bias,
-        )
-        angular_velocity1 += inverse_inertia1 @ (axis * impulse)
-        angular_velocity2 -= inverse_inertia2 @ (axis * impulse)
-    else:
-        lever1 = read_vec3(constraints, _OFF_R1_B1, cid)
-        lever2 = read_vec3(constraints, _OFF_R1_B2, cid)
-        anchor_velocity1 = velocity1 + wp.cross(angular_velocity1, lever1)
-        anchor_velocity2 = velocity2 + wp.cross(angular_velocity2, lever2)
-        axial_velocity = wp.dot(axis, anchor_velocity1 - anchor_velocity2)
-        impulse = _axial_limit_friction_iterate(
-            constraints,
-            cid,
-            wp.int32(0),
-            axial_velocity,
-            clamp,
-            idt,
-            sor_boost,
-            use_bias,
-        )
-        linear_impulse = axis * impulse
-        velocity1 += inverse_mass1 * linear_impulse
-        angular_velocity1 += inverse_inertia1 @ wp.cross(lever1, linear_impulse)
-        velocity2 -= inverse_mass2 * linear_impulse
-        angular_velocity2 -= inverse_inertia2 @ wp.cross(lever2, linear_impulse)
-
+    velocity1, angular_velocity1, velocity2, angular_velocity2 = iterate_d6_inequalities(
+        constraints.d6,
+        cid,
+        inverse_mass1,
+        inverse_mass2,
+        inverse_inertia1,
+        inverse_inertia2,
+        velocity1,
+        angular_velocity1,
+        velocity2,
+        angular_velocity2,
+        idt,
+        sor_boost,
+    )
     _ms_store_body_pair(
         bodies,
         particles,
