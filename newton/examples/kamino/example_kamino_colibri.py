@@ -2255,7 +2255,8 @@ def build_scene(
             cfg.density *= counterweight_density_scale
         if not cfg.has_shape_collision:
             cfg.density = 0.0
-        color = SHAPE_COLORS.get(label, (0.62, 0.39, 0.18))
+        # Unbound meshes in the source USD have white displayColor primvars.
+        color = SHAPE_COLORS.get(label, (1.0, 1.0, 1.0))
         if kind == "cylinder":
             if mesh_cylinders:
                 source = trimesh.creation.cylinder(radius=dimensions[0], height=2.0 * dimensions[1], sections=32)
