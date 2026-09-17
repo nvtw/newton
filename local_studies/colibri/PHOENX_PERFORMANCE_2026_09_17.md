@@ -549,3 +549,76 @@ still report pre-existing unrelated issues; their unrelated edits were
 restored. The setting changes only the temporal sweep's CUDA register ceiling;
 other dispatch paths, including those used by the earlier Kapla/G1/DR checks,
 are not modified.
+
+### Rejected cached-friction transform-load removal
+
+The biased temporal sweep reconstructs body transforms before friction even
+when prepared friction rows are active. An isolated candidate constructed them
+only for the uncached branch; contact arithmetic, order, impulses, and solver
+work were unchanged. Frozen candidate/control/candidate medians improved from
+133.120 to 131.072/131.072 microseconds, and 1,200-frame candidate/control/
+candidate means were 13.9163/13.9525/13.8687 ms. All 240 saved validation
+poses and velocities matched byte-for-byte, with identical penetration and
+joint metrics.
+
+The required 3,600-frame measured-minute comparison reversed the result:
+candidate 14.0894 ms/frame versus control 13.9723 ms/frame, about 0.84% slower.
+Reject the candidate despite its frozen-kernel result. A follow-up specialized
+the biased cooperative kernel at compile time, removing the unused uncached
+branch and transform live ranges entirely. It reproduced the 131.072 us frozen
+median, but its 3,600-frame mean was 13.9679 ms versus 13.9723 ms control,
+effectively identical. That version was also restored.
+
+No source or changelog fragment is retained. Artifacts use
+/tmp/colibri_cached_pose_* and /tmp/colibri_cached_static_*. This does not
+advance the 9.4 ms throughput gate.
+
+### Rejected color-local friction phase
+
+A color-local prototype solved ordered normal rows with the retained full-warp
+path, stored each independent endpoint state, synchronized the block, and then
+used scalar lanes for the per-contact friction continuation. Per-contact
+normal-before-friction order and paired impulses were unchanged; color
+independence made the cross-contact scheduling legal. Frictionless contacts
+returned before the second body load.
+
+The frozen outputs remained byte-identical, but median sweep time increased
+from roughly 133 us to 143.360 us. The additional endpoint store/reload and
+mid-color barrier cost more than the scalar-lane utilization recovered.
+Reject this layout; any future friction parallelism must keep endpoint state
+resident rather than externalizing it between phases. Artifact:
+/tmp/colibri_color_friction_candidate_frozen.
+
+### Rejected cooperative friction endpoint updates
+
+A full-warp cached-friction prototype retained sequential patch/anchor order
+and lane-zero trial arithmetic, but split the two independent paired-body
+velocity updates between lanes zero and one before broadcasting the results.
+Frozen velocities and impulses remained byte-identical. The added shuffles and
+full-warp live state increased median sweep time from roughly 133 us to
+176.128 us. The prototype was removed without full-frame testing. Artifact:
+/tmp/colibri_friction_endpoints_candidate_frozen.
+
+
+### Retained three-color mass-splitting slabs
+
+The settled single-world graph has 19 colors but at most eight contacts in a
+color. Four-color slabs expose only five sweep blocks, leaving most of the RTX
+PRO 6000 Blackwell idle. Two-color slabs measured 10.9441 ms/frame over 360
+frames, but failed the existing crank-tracking check (mean -3.1787 rad/s versus
+the -3.4907 rad/s target). Reject that setting without relaxing the quality
+gate.
+
+Three-color slabs retain all 24 substeps, solver iterations, contacts, and
+paired impulse arithmetic while exposing seven independent sweep blocks. A
+3,600-frame powered validation measured 12.4727 ms/frame versus the current
+13.9723 ms/frame control. It retained crank tracking and support, with 0.607 mm
+peak penetration, 0.543 mm peak anchor error, and 0.0113 rad peak axis error.
+The control peaks were 0.470 mm, 0.631 mm, and 0.0125 rad respectively. A
+separate 1,200-frame repeat measured 12.3772 ms/frame.
+
+The required 3,600-frame motor-off run passed with 0.200 mm peak penetration,
+0.328 mm peak anchor error, 0.00358 rad peak axis error, and no support failure.
+Thirteen focused temporal/contact momentum tests and 42 subtests pass. This is
+a Colibri scene configuration change; global PhoenX scheduling defaults and
+other examples are unchanged. Artifacts use `/tmp/colibri_slab{2,3}_*`.

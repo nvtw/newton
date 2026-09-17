@@ -83,6 +83,14 @@ full-minute run from 19.441 to 16.176 ms/frame. All 3,600 poses and velocities
 match the preceding baseline bitwise; penetration and joint peaks are unchanged.
 The same report documents the kernel breakdown and quality measurements.
 
+
+For the Colibri topology, grouping three graph colors per mass-splitting slab
+instead of four exposes seven sweep blocks instead of five. A powered
+3,600-frame validation improves 13.9723 to 12.4727 ms/frame while retaining
+the fixed 24-substep workload, crank tracking, support, and the penetration and
+joint-error gates. A two-color setting is faster but is rejected because it
+fails crank tracking. The PhoenX default remains unchanged.
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,
