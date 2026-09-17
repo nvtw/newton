@@ -63,6 +63,18 @@ Detailed experiment histories belong in benchmark output, not here.
 | RL activations | BF16 MinGRU projection slabs with FP32 recurrence/accumulation | Production storage 151.0 -> 75.5 MB; isolated forward/backward 0.776 -> 0.730 ms; full A/B/B/A 1.887M -> 1.902M samples/s. Seed 42 passed the 131.072M-sample frozen gate. |
 | Diagnostics | Fixed-order rollout reductions | Deterministic and much faster than contended atomics at production scale. |
 
+## Frictionless temporal contacts
+
+On the 120 Hz Colibri scene, omit friction-patch construction and solving only
+when both friction coefficients are zero. Keep normal rows and their paired
+common-point impulses unchanged; preserve material keys so friction returning
+rebuilds history. Nsight identifies the ordered temporal sweep as the dominant
+cost. A full-minute comparison on RTX PRO 6000 Blackwell reduces physics from
+22.581 to 18.846 ms/frame (16.54%), with every body pose and velocity bitwise
+equal across all 3,600 frames. The known support-stationarity failure is unchanged.
+See `local_studies/colibri/PHOENX_PERFORMANCE_2026_09_17.md` for reproduction,
+quality checks, and rejected scalar/unrolled loading experiments.
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,
