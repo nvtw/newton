@@ -158,6 +158,35 @@ def _implicit_reduced_d6_step(physical_mass: float) -> tuple[float, float]:
 class TestD6DirectDrive(unittest.TestCase):
     """Compare each gimbal-axis drive against its scalar analytical solution."""
 
+    def test_gimbal_drive_equilibrium_at_singular_pitch(self) -> None:
+        """Keep a driven gimbal finite and stationary at either singular pitch."""
+        for left_handed in (False, True):
+            for pitch in (-np.pi / 2.0, np.pi / 2.0):
+                with self.subTest(left_handed=left_handed, pitch=pitch):
+                    model = _make_gimbal(None, left_handed=left_handed)
+                    coordinates = np.asarray((0.4, pitch, -0.3), dtype=np.float32)
+                    model.joint_q.assign(coordinates)
+                    state = model.state()
+                    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                    initial = state.body_q.numpy().copy()
+                    control = model.control()
+                    control.joint_target_q.assign(coordinates)
+                    solver = newton.solvers.SolverPhoenX(
+                        model, substeps=5, solver_iterations=2, articulation_mode="maximal"
+                    )
+                    with wp.ScopedCapture(model.device) as capture:
+                        state.clear_forces()
+                        solver.step(state, state, control, None, 1.0 / 60.0)
+                    for _ in range(20):
+                        wp.capture_launch(capture.graph)
+                    pose = state.body_q.numpy()
+                    velocity = state.body_qd.numpy()
+                    self.assertTrue(np.isfinite(pose).all())
+                    self.assertTrue(np.isfinite(velocity).all())
+                    np.testing.assert_allclose(velocity, 0.0, atol=1.0e-4, rtol=0.0)
+                    np.testing.assert_allclose(pose[:, :3], initial[:, :3], atol=1.0e-6, rtol=0.0)
+                    self.assertAlmostEqual(abs(float(np.dot(pose[0, 3:], initial[0, 3:]))), 1.0, delta=2.0e-6)
+
     def test_single_axis_pd_matches_implicit_euler(self) -> None:
         """Match right- and left-handed D6 PD rows over five implicit substeps."""
         expected_q, expected_qd = _implicit_scalar_step()
