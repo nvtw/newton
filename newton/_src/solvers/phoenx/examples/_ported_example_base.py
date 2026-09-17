@@ -294,6 +294,9 @@ class PortedExample:
 
         self.state = self.model.state()
         self._render_states = (self.model.state(), self.model.state())
+        self._render_state_done = tuple(
+            wp.Event(self.model.device) if self.model.device.is_cuda else None for _ in range(2)
+        )
         self._render_state_index = 0
         self._render_state_prepared = False
         self._render_time = self.sim_time
@@ -401,6 +404,9 @@ class PortedExample:
     def prepare_render_state(self) -> None:
         """Snapshot positions before the next asynchronous physics step."""
         self._render_state_index = 1 - self._render_state_index
+        done = self._render_state_done[self._render_state_index]
+        if done is not None:
+            wp.wait_event(done)
         render_state = self._render_states[self._render_state_index]
         for name in ("body_q", "particle_q"):
             destination = getattr(render_state, name)
@@ -422,6 +428,10 @@ class PortedExample:
                 self.viewer.synchronize_simulation_step()
             self.viewer.log_contacts(self.contacts, render_state)
         self.viewer.end_frame()
+        if self._render_state_prepared:
+            done = self._render_state_done[self._render_state_index]
+            if done is not None:
+                wp.record_event(done)
         self._render_state_prepared = False
 
     def test_final(self) -> None:

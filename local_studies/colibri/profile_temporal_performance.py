@@ -28,12 +28,17 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--validate", action="store_true")
+    parser.add_argument(
+        "--motor-off",
+        action="store_true",
+        help="Measure the unpowered mechanism; exclude powered shaking from creep tests.",
+    )
     args = parser.parse_args()
     if args.frames < 1 or args.warmup < 0:
         parser.error("frames must be positive and warmup must be nonnegative")
     if args.profile and args.validate:
         parser.error("Run profiling and validation separately to keep audit kernels out of the trace")
-    example = Example(ViewerNull(), Example.create_parser().parse_args([]))
+    example = Example(ViewerNull(), Example.create_parser().parse_args(["--motor-off"] if args.motor_off else []))
     times, poses, velocities = [], [], []
     peak_depth = 0.0
     support_failure = None
@@ -81,6 +86,7 @@ def main():
         "p95_ms": float(np.percentile(times, 95)),
         "peak_depth_m": peak_depth if args.validate else None,
         "support_failure": support_failure,
+        "motor_enabled": example.motor_enabled,
         "joint_peaks": joint_peaks if args.validate else None,
         "collision_hz": 120,
         "substeps_per_refresh": 24,

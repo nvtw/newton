@@ -2229,7 +2229,7 @@ class ViewerBase(ABC):
             from cuda.bindings import runtime as cuda_runtime  # noqa: PLC0415
         except ImportError:
             return False
-        return hasattr(cuda_runtime, "cudaStreamCreateWithFlags")
+        return hasattr(cuda_runtime, "cudaStreamCreateWithPriority")
 
     def synchronize_simulation_step(self) -> None:
         """Wait for a previously deferred simulation step to complete."""
@@ -2264,8 +2264,12 @@ class ViewerBase(ABC):
     ) -> None:
         """Launch a simulation step concurrently with subsequent rendering.
 
-        When supplied, the render snapshot is copied first on the simulation
-        stream. Rendering waits only for that copy; the simulation step then
+        The simulation stream has higher scheduling priority than the default
+        render stream. Priorities do not preempt running GPU work.
+
+        When supplied, the callback copies a render snapshot on the simulation
+        stream. It must wait for the last reader before reusing a snapshot buffer.
+        Rendering waits only for that copy; the simulation step then
         continues on the same stream without waiting for rendering.
 
         Args:
@@ -2279,7 +2283,12 @@ class ViewerBase(ABC):
         if self._deferred_simulation_stream is None:
             from cuda.bindings import runtime as cuda_runtime  # noqa: PLC0415
 
-            error, raw_stream = cuda_runtime.cudaStreamCreateWithFlags(cuda_runtime.cudaStreamNonBlocking)
+            error, _least_priority, greatest_priority = cuda_runtime.cudaDeviceGetStreamPriorityRange()
+            if int(error) != 0:
+                raise RuntimeError(f"Failed to query CUDA stream priorities: {error}")
+            error, raw_stream = cuda_runtime.cudaStreamCreateWithPriority(
+                cuda_runtime.cudaStreamNonBlocking, greatest_priority
+            )
             if int(error) != 0:
                 raise RuntimeError(f"Failed to create a nonblocking CUDA stream: {error}")
             self._deferred_simulation_raw_stream = raw_stream

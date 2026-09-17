@@ -107,11 +107,84 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         for _, _, label, _, _ in shapes:
             self.assertEqual(builder.shape_body[builder.shape_label.index(label)], base)
 
+    def test_render_snapshot_is_independent_of_live_state(self):
+        """Render the copied state and its timestamp while physics advances."""
+        example = PhoenxExample.__new__(PhoenxExample)
+
+        def state():
+            result = scene.newton.State()
+            result.body_q = scene.wp.array([[0, 0, 0, 0, 0, 0, 1]], dtype=scene.wp.transform, device="cpu")
+            return result
+
+        example.state_0 = state()
+        example._render_states = (state(), state())
+        example._render_state_index = 0
+        example._render_state_done = (None, None)
+        example.sim_time = 0.25
+        example.prepare_render_state()
+        snapshot = example._render_states[example._render_state_index]
+        example.state_0.body_q.assign([[1, 0, 0, 0, 0, 0, 1]])
+        np.testing.assert_array_equal(snapshot.body_q.numpy()[0, :3], [0, 0, 0])
+        calls = []
+        example.viewer = SimpleNamespace(
+            begin_frame=calls.append,
+            log_state=calls.append,
+            end_frame=lambda: None,
+        )
+        example.sim_time = 0.5
+        example.render()
+        self.assertEqual(calls[0], 0.25)
+        self.assertIs(calls[1], snapshot)
+        self.assertFalse(example._render_state_prepared)
+        example.render()
+        self.assertEqual(calls[2], 0.5)
+        self.assertIs(calls[3], example.state_0)
+
+    def test_render_snapshot_waits_only_for_its_own_reader(self):
+        """Two buffers wait for their own reuse events, not the other frame."""
+        calls = []
+        example = PhoenxExample.__new__(PhoenxExample)
+        example._render_states = tuple(
+            SimpleNamespace(assign=lambda state, index=index: calls.append(("copy", index))) for index in range(2)
+        )
+        example._render_state_done = (object(), object())
+        example._render_state_index = 0
+        example.state_0 = object()
+        example.sim_time = 0.0
+        example.viewer = SimpleNamespace(
+            begin_frame=lambda time: None,
+            log_state=lambda state: None,
+            end_frame=lambda: calls.append(("render", None)),
+        )
+        with (
+            patch.object(scene.wp, "wait_event", side_effect=lambda event: calls.append(("wait", event))),
+            patch.object(scene.wp, "record_event", side_effect=lambda event: calls.append(("release", event))),
+        ):
+            for _ in range(3):
+                example.prepare_render_state()
+                example.render()
+        expected = []
+        for index in (1, 0, 1):
+            event = example._render_state_done[index]
+            expected.extend([("wait", event), ("copy", index), ("release", event), ("render", None)])
+        self.assertEqual(calls, expected)
+
+    def test_motor_off_removes_drive_and_servo_damping(self):
+        """A zero speed target must not be mistaken for a disabled motor."""
+        with patch.object(scene, "SHAPES", []):
+            builder = scene.build_scene(enable_frame_drive=False, enable_crank_drive=False)
+        self.assertTrue(all(mode == scene.newton.JointTargetMode.NONE for mode in builder.joint_target_mode))
+        np.testing.assert_array_equal(builder.joint_target_ke, 0)
+        np.testing.assert_array_equal(builder.joint_target_kd, 0)
+        self.assertFalse(PhoenxExample.create_parser().parse_args([]).motor_off)
+        self.assertTrue(PhoenxExample.create_parser().parse_args(["--motor-off"]).motor_off)
+
     def test_phoenx_settled_support_creep(self):
         """Reject support translation and rotation after the settling interval."""
         example = PhoenxExample.__new__(PhoenxExample)
         example._support_test_enabled = True
         example._support_reference = None
+        example.motor_enabled = False
         example.model = SimpleNamespace(body_label=["FrameGround"])
         q = np.array([[0, 0, 0, 0, 0, 0, 1]], dtype=float)
         example.state_0 = SimpleNamespace(body_q=_array(q))
@@ -129,6 +202,9 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         q[0, 3:] = [0, 0, np.sin(0.0005), np.cos(0.0005)]
         with self.assertRaisesRegex(AssertionError, "Support rotation"):
             example._test_support_stationarity()
+        example.motor_enabled = True
+        example._test_support_stationarity()
+        example.motor_enabled = False
         example._support_test_enabled = False
         example._test_support_stationarity()
 
@@ -136,6 +212,7 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         """Accept the measured drive speed and reject the old contact-order deficit."""
         example = PhoenxExample.__new__(PhoenxExample)
         example._support_test_enabled = True
+        example.motor_enabled = True
         example._drive_test_time = None
         example._drive_test_duration = 0.0
         example._drive_test_integral = 0.0

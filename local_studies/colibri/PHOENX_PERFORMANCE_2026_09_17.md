@@ -161,3 +161,121 @@ passed a one-frame validation smoke run. The combined candidate passed all
 
 All changed-file hooks passed. The required repository-wide hook run found
 pre-existing lint/format issues; unrelated auto-format edits were restored.
+
+A follow-up experiment accumulated each patch's normal load during the
+cooperative normal solve, in the original point order. The final short-run
+poses and velocities remained bitwise equal, but time increased to 19.820
+ms/frame versus the preceding roughly 16.4 ms short candidate run. The extra
+per-row patch loads/stores did not pay for removing the friction-list walk;
+the experiment was reverted. Artifact: `/tmp/colibri_fused_normal_load.json`.
+
+A structure-of-arrays normal cache (11 contiguous scalar rows) measured
+16.419 ms/frame with exact final pose/velocity parity, essentially unchanged
+from the 16.419 ms short run with the original layout. It was reverted rather
+than introducing extra load/store helpers for no demonstrated gain. Artifact:
+`/tmp/colibri_soa_normal_rows.json`.
+
+Temporary clock64 instrumentation after 60 warmup frames attributed 45.7% of
+summed subgroup cycles to normal solving and 54.3% to friction. These include
+SIMT waiting between eight-lane groups and are attribution evidence, not an
+additive frame-time breakdown. Counters were removed after collecting
+`/tmp/colibri_contact_cycle_profile.npy` and its log.
+
+Skipping paired velocity updates for exactly zero friction impulse changes
+also preserved exact final states. Short runs measured 16.213 ms initially,
+16.326 ms for the matched original implementation, and 16.299 ms for the
+closing candidate repeat; candidate median/p95 were not better. This is not
+a convincing reproducible gain, so the extra branch was reverted. Artifacts:
+`/tmp/colibri_zero_friction_update.json`,
+`/tmp/colibri_zero_update_{control,repeat}.json`.
+
+Friction-row prefetching preserved exact final states but measured 16.909
+ms/frame and was reverted. Moving reciprocal friction responses into parallel
+preparation measured 16.179 ms/frame, too close to the recent 16.326 ms control
+to justify changed rounding and further numerical complexity. That experiment
+was also reverted without claiming full-minute quality validation. PhysX's
+`source/gpusolver/src/CUDA/solverBlockTGS.cuh` motivated the prefetch/response
+comparison; its impulse arithmetic was not copied into PhoenX. Artifacts:
+`/tmp/colibri_friction_{prefetch,reciprocal}.{json,npz}`.
+
+An explicitly bounded two-anchor cached-friction loop was also rejected:
+19.286 ms/frame with exact final states. This exposed the existing maximum
+without omitting anchors, but increased time substantially. The original
+loop remains in production. Artifact: `/tmp/colibri_friction_bounded_loop.json`.
+
+At frame 60, a read-only census found 231 active friction patches, 341 anchors,
+and 211 patches with both zero normal load and zero stored friction impulse
+(`/tmp/colibri_patch_load_census.json`). An experimental zero-load fast path
+still computed the trial and preserved broken-anchor decisions before skipping
+zero clamp/update work. Final body bit patterns matched, but times were
+19.090 ms initially (noisy) and 17.648 ms on repeat, so it was reverted.
+Artifacts: `/tmp/colibri_unloaded_friction{,_repeat}.json`.
+
+The retained full-minute candidate/baseline comparison was also rechecked as
+uint32 bit patterns rather than numeric array equality: every pose and
+velocity bit, including zero signs, matches.
+
+A contiguous active-patch index list measured 16.174 ms in a short run versus
+16.571 ms for its following control, but its full-minute result was 16.261
+ms/frame, within the existing baseline variation. Every full-minute body bit
+and all penetration/joint metrics matched. Frozen sweep medians were 165.888
+versus 167.936 microseconds, too small to establish a useful frame-time gain.
+The representation change and its provisional tests were not retained.
+Artifacts: `/tmp/colibri_flat_list_minute.{json,npz}` and
+`/tmp/colibri_{flat,linked}_sweep.json`.
+
+### Revised creep interpretation
+
+Powered support displacement is not by itself evidence of creep: shaking and
+reaction to crank torque can move a free assembly. Following the user's
+clarification, stationarity is evaluated only in motor-off diagnostics;
+powered motion still undergoes penetration, joint, and drive tracking checks.
+Historical support-failure entries above describe powered displacement under
+the old criterion and must not be read as measured unpowered creep. Numerical
+parity still proves these optimizations did not alter that powered trajectory.
+
+
+### Unpowered validation and asynchronous rendering
+
+The new `--motor-off` option removes crank drive stiffness and damping. A
+60-second run passed all checks: maximum penetration 0.240596 mm, joint anchor
+separation 0.267415 mm, and joint axis error 0.00430454 rad. After the initial
+two seconds, maximum horizontal base displacement was 1.31 micrometers and
+final displacement was 0.16 micrometers. Artifacts:
+`/tmp/colibri_motor_off_minute.{json,npz}` and
+`/tmp/colibri_motor_off_drift.json`. Its 15.068 ms/frame is a different workload,
+not a solver speedup relative to the powered benchmark.
+
+Colibri defaults to double-buffered render snapshots when supported. Per-buffer
+CUDA events protect reuse; rendering waits for the snapshot copy while physics
+continues on a nonblocking stream. Rigid snapshots are released after
+`log_state`; shared ported examples retain particle snapshots through
+`end_frame`. OptiX owns previous instance transforms for motion vectors.
+Physics uses the highest available priority (-5 on this GPU), rendering 0.
+Priority is a scheduling hint, not preemption.
+
+`profile_optix_overlap.py` measures completed headless 1920x1080 frames with
+DLSS performance mode, 30 warmup frames and 120 measured frames:
+
+| Configuration | Mean frame time | FPS |
+| --- | ---: | ---: |
+| Serialized, two runs | 19.737–20.137 ms | 49.66–50.67 |
+| Overlap, equal priorities | 19.184 ms | 52.13 |
+| Overlap, priority physics, per-buffer events | 18.811 ms | 53.16 |
+
+All modes render the same pre-step snapshot. Every measured body pose/velocity
+bit and the final rendered image match exactly. These rates exclude window
+presentation and do not replace the physics-only optimization target.
+Artifacts: `/tmp/colibri_optix_serial_repeat.{json,npz}` and
+`/tmp/colibri_optix_minimal_priority.{json,npz}`.
+
+Nsight confirms overlapping GPU execution with stream-scoped waits and no
+context-wide synchronization in the measured frame loop. The trace used the
+earlier conservative buffer wait; subsequent per-buffer events retained image
+and physics parity. Trace: `/tmp/colibri_optix_priority_nsys.nsys-rep`.
+The installed renderer is the editable `otk-pyoptix` checkout at `49e540d`.
+
+Run `uv run -m newton.examples phoenx_colibri --viewer optix`; append
+`--no-render-overlap` for serialized execution or `--motor-off` for unpowered
+diagnostics. Five new regression tests fail against the previous implementation;
+the focused Colibri/viewer suite passes 34 tests with one skipped.

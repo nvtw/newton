@@ -280,6 +280,9 @@ class Example:
 
         self.state = self.model.state()
         self._render_states = (self.model.state(), self.model.state())
+        self._render_state_done = tuple(
+            wp.Event(self.model.device) if self.model.device.is_cuda else None for _ in range(2)
+        )
         self._render_state_index = 0
         self._render_state_prepared = False
         self._render_time = self.sim_time
@@ -590,6 +593,9 @@ class Example:
     def prepare_render_state(self) -> None:
         """Snapshot live body transforms before the next asynchronous step."""
         self._render_state_index = 1 - self._render_state_index
+        done = self._render_state_done[self._render_state_index]
+        if done is not None:
+            wp.wait_event(done)
         wp.copy(self._render_states[self._render_state_index].body_q, self.state.body_q)
         self._render_time = self.sim_time
         self._render_state_prepared = True
@@ -644,6 +650,10 @@ class Example:
             # correct by waiting for the deferred step instead of racing it.
             self.viewer.synchronize_simulation_step()
         self.viewer.log_contacts(self.contacts, render_state)
+        if self._render_state_prepared:
+            done = self._render_state_done[self._render_state_index]
+            if done is not None:
+                wp.record_event(done)
         self.viewer.end_frame()
         self._render_state_prepared = False
 
