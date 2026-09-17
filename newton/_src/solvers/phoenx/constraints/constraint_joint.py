@@ -1225,7 +1225,23 @@ def _joint_constraint_prepare_inequality_full(
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, axis)
     dt = wp.float32(1.0) / idt
 
-    if mode == JOINT_MODE_DISTANCE:
+    if constraints.d6.enabled != 0 and constraints.d6.row_count[cid] > wp.int32(0):
+        velocity1, angular_velocity1, velocity2, angular_velocity2 = prepare_d6_inequalities(
+            constraints.d6,
+            cid,
+            bodies,
+            b1,
+            b2,
+            inv_mass1,
+            inv_mass2,
+            inv_inertia1,
+            inv_inertia2,
+            velocity1,
+            angular_velocity1,
+            velocity2,
+            angular_velocity2,
+        )
+    elif mode == JOINT_MODE_DISTANCE:
         point1 = position1 + r1_b1
         point2 = position2 + r1_b2
         separation = point2 - point1
@@ -1263,22 +1279,6 @@ def _joint_constraint_prepare_inequality_full(
         angular_velocity1 += inv_inertia1 @ wp.cross(r1_b1, impulse)
         velocity2 -= inv_mass2 * impulse
         angular_velocity2 -= inv_inertia2 @ wp.cross(r1_b2, impulse)
-    elif constraints.d6.enabled != 0 and constraints.d6.row_count[cid] > wp.int32(0):
-        velocity1, angular_velocity1, velocity2, angular_velocity2 = prepare_d6_inequalities(
-            constraints.d6,
-            cid,
-            bodies,
-            b1,
-            b2,
-            inv_mass1,
-            inv_mass2,
-            inv_inertia1,
-            inv_inertia2,
-            velocity1,
-            angular_velocity1,
-            velocity2,
-            angular_velocity2,
-        )
     elif mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_PRISMATIC:
         metric = _d6_metric_anchor_block(
             inv_mass1,
