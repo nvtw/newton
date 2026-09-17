@@ -22,6 +22,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
+    cc_set_bias,
     cc_set_eff_n,
     cc_set_normal,
     cc_set_r0,
@@ -44,6 +45,7 @@ def setup(
     count1: int,
     effective_mass: float,
     size: int,
+    first_active: int,
 ):
     contact_set_body1(columns, 0, 0)
     contact_set_body2(columns, 0, 1)
@@ -59,6 +61,8 @@ def setup(
     row.r1 = wp.vec3f(1.0, 0.0, -1.0)
     row.effective_mass = effective_mass
     for k in range(size):
+        row.bias = wp.where(k < first_active, 100.0, 0.0)
+        cc_set_bias(cc, k, row.bias)
         state.normal_rows[k] = row
         cc_set_normal(cc, k, row.normal)
         cc_set_eff_n(cc, k, row.effective_mass)
@@ -66,9 +70,13 @@ def setup(
         cc_set_r1(cc, k, row.r1)
 
 
-def kernel(mass_splitting, biased, cooperative=False, record_wrenches=False):
+def kernel(mass_splitting, biased, cooperative=False, record_wrenches=False, cooperative_lanes=8):
     iterate = make_iterate(
-        mass_splitting=mass_splitting, biased=biased, cooperative=cooperative, record_wrenches=record_wrenches
+        mass_splitting=mass_splitting,
+        biased=biased,
+        cooperative=cooperative,
+        record_wrenches=record_wrenches,
+        cooperative_lanes=cooperative_lanes,
     )
 
     @wp.kernel(module="unique")
@@ -102,6 +110,28 @@ class TestContactTGSDynamic(unittest.TestCase):
                 with self.subTest(size=size, biased=biased):
                     self._check_case("cuda:0", True, biased, 0, 3, 3, 2, True, size)
 
+    def test_full_warp_tail_preserves_physical_momenta(self):
+        """Solve the last active row across full and partial warp boundaries."""
+        if not wp.is_cuda_available():
+            self.skipTest("Cooperative row loading requires CUDA")
+        for size in (1, 7, 31, 32, 33, 65):
+            for biased in (False, True):
+                with self.subTest(size=size, biased=biased):
+                    self._check_case(
+                        "cuda:0",
+                        True,
+                        biased,
+                        0,
+                        3,
+                        3,
+                        2,
+                        True,
+                        size,
+                        True,
+                        cooperative_lanes=32,
+                        first_active=size - 1,
+                    )
+
     def test_recorded_wrench_matches_copy_response(self):
         """Match physical impulse and world moment in scalar and cooperative solves."""
         for cooperative in (False, True):
@@ -112,7 +142,19 @@ class TestContactTGSDynamic(unittest.TestCase):
                 self._check_case(device, True, biased, 0, 3, 3, 2, cooperative, 9, True)
 
     def _check_case(
-        self, device, split, biased, slot0, slot1, count0, count1, cooperative=False, size=1, record_wrenches=False
+        self,
+        device,
+        split,
+        biased,
+        slot0,
+        slot1,
+        count0,
+        count1,
+        cooperative=False,
+        size=1,
+        record_wrenches=False,
+        cooperative_lanes=8,
+        first_active=0,
     ):
         bodies = body_container_zeros(2, device)
         bodies.inverse_mass.assign([1.0, 0.5])
@@ -129,10 +171,10 @@ class TestContactTGSDynamic(unittest.TestCase):
         state = allocate_contact_tgs(size, 2, 3, device)
         state.record_wrenches = int(record_wrenches)
         eff = 1.0 / (1.5 * count0 + 0.75 * count1)
-        wp.launch(setup, 1, [columns, cc, state, slot0, slot1, count0, count1, eff, size], device=device)
+        wp.launch(setup, 1, [columns, cc, state, slot0, slot1, count0, count1, eff, size, first_active], device=device)
         wp.launch(
-            kernel(split, biased, cooperative, record_wrenches),
-            8 if cooperative else 1,
+            kernel(split, biased, cooperative, record_wrenches, cooperative_lanes),
+            cooperative_lanes if cooperative else 1,
             [columns, state, bodies, cc, copies],
             device=device,
         )
@@ -148,7 +190,7 @@ class TestContactTGSDynamic(unittest.TestCase):
         np.testing.assert_allclose(v[0] + 2 * v[1], initial[0] + 2 * initial[1], atol=2e-7)
         angular = 2 * w[0] + 4 * w[1] + np.cross([0, 0, 1], 2 * v[1])
         np.testing.assert_allclose(angular, 0, atol=2e-7)
-        np.testing.assert_allclose(cc.impulses.numpy()[0, 0], 2 * eff, rtol=1e-6)
+        np.testing.assert_allclose(cc.impulses.numpy()[0, first_active], 2 * eff, rtol=1e-6)
         if record_wrenches:
             wrench = state.wrenches.numpy().sum(axis=0)
             np.testing.assert_allclose(wrench[:3], 2 * (v[1] - initial[1]), atol=2e-7)
