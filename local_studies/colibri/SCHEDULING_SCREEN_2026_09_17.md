@@ -41,3 +41,135 @@ sweep successfully in fresh processes. Both passed the restored-state
 bitwise check. The proposed tooling change was unnecessary and removed.
 Results: `/tmp/colibri_factory_before.log` and
 `/tmp/colibri_factory_after.log`.
+
+## GPU construction follow-up
+
+An isolated prototype now rebuilds components on the GPU once per contact
+refresh. One thread owns each slab's union-find; four blocks solve its
+components with unchanged row ordering. This is research code, not enabled
+in the production solver.
+
+- Matching-policy short control: 15.041695 ms/frame.
+- Dense GPU component prototype: 14.466245 ms/frame (1.03978x).
+- Dense full minute, 3600 measured after 60 warmup: 14.527612 ms/frame.
+  All 3660 poses and velocities, and all recorded quality metrics, match
+  `/tmp/colibri_register192_minute` bitwise/exactly. Speedup against that
+  earlier full-minute reference is 1.02466x; contemporaneous repeats remain
+  necessary. Peak penetration is 0.470375 mm.
+- A sparse variant indexes parents by existing body-copy slots, avoiding
+  bodies-times-slabs allocation. Its short run measured 14.622051 ms/frame
+  (1.02870x against the same short control), with exact trajectory and
+  quality parity. Its full-minute and motor-off checks are still pending.
+
+Nsight on the sparse variant captured 5760 biased sweeps over 120 frames.
+Their median was 139.673 microseconds, compared with 152.591 microseconds
+in the earlier retained-control trace. These captures are not interleaved
+repeat measurements and do not establish the final speedup by themselves.
+
+Artifacts: `/tmp/colibri_components_{live,original_control,minute,sparse}`
+JSON/NPZ reports; `/tmp/colibri_components_sparse_trace.nsys-rep` and
+`/tmp/colibri_components_sparse_stats.csv`. Drivers:
+`/tmp/colibri_components_live.py`, `/tmp/colibri_components_sparse_live.py`;
+GPU builders: `/tmp/colibri_gpu_components.py`,
+`/tmp/colibri_gpu_components_sparse.py`. Run with the isolated checkout on
+`PYTHONPATH` and Newton's venv Python. For a module-based control invocation,
+set the working directory to the isolated checkout too: otherwise the main
+checkout takes precedence and silently uses its newer collision policy.
+The mismatched `/tmp/colibri_components_control` run is excluded.
+
+Before retaining: repeat full-minute control/candidate timing, validate the
+sparse variant for a full powered and unpowered minute, verify scheduling
+and momentum regressions, and check generality and setup/memory cost.
+The 9.4 ms target remains unmet.
+
+### Sparse full-minute validation
+
+`/tmp/colibri_components_sparse_minute`: 14.538932 ms/frame over 3600
+measured frames after 60 warmup. All 3660 states and quality metrics match
+the retained reference exactly (1.02386x against the earlier reference).
+The sparse builder's Nsight median is 65.3085 microseconds per refresh,
+240 calls over 120 frames. It runs once per collision refresh, not once
+per substep.
+
+`/tmp/colibri_component_momentum_covered.log`: four existing tests pass.
+Two exercise the experimental temporal scheduler, with 16 intercepted
+sweeps each, checking static/dynamic contact impulse wrenches against
+physical momentum changes and captured replay. The two ordinary solver
+conservation tests do not use the temporal scheduler and are not evidence
+of the new scheduling path. The temporary hook covers serial/cooperative
+and force-recording factory variants explicitly.
+
+A fresh full-minute control is running as
+`/tmp/colibri_components_control_minute`. A further candidate reuses
+existing joint/contact slot caches instead of performing repeated slot
+searches: `/tmp/colibri_gpu_components_cached.py` and
+`/tmp/colibri_components_cached_live.py`. It has not yet been measured.
+
+### Fresh control and cached-slot guard
+
+The fresh full-minute control completed at 14.672049 ms/frame. Against
+that reference, the dense and sparse prototypes improve by only 1.00994x
+and 1.00916x respectively, while preserving all saved states and quality
+metrics. These small gains require better-controlled repeat measurements;
+the earlier 2.4% estimate is not confirmed by this control.
+
+The first cached-slot prototype failed the penetration gate at frame 7
+(1.389416 mm). Investigation showed that the generic constraint slot cache
+is populated for soft constraints, not rigid joints. The experiment had
+therefore omitted joint connectivity. This failed prototype was never
+installed in production. The corrected variant reuses contact slots and
+keeps the valid body-copy lookup for joints. Its 240-state short comparison
+passes bitwise trajectory and exact quality parity (1.02870x against the
+short control), recorded in `/tmp/colibri_components_cached_corrected`.
+
+`/tmp/colibri_components_paired.py` now runs the corrected candidate and
+control sequentially for each frame, alternating which goes first, with
+both motors off. It checks every body's pose and velocity bitwise each
+frame and runs penetration, assembly, joint-error, and support-stationarity
+checks. The full-minute result is pending in
+`/tmp/colibri_components_paired_motor_off.{log,json,npz}`. This test keeps
+the collision policy, refresh frequency, substeps and iterations fixed.
+
+### Alternating-order decision
+
+The full unpowered comparison completed with every pose and velocity
+bitwise equal across all 3660 steps, and all quality checks passing.
+Control: 13.586743 ms/frame; corrected cached-slot candidate: 13.678358
+ms/frame (0.99330x, approximately 0.7% slower). Peak penetration:
+0.240596 mm; maximum joint anchor error: 0.267415 mm; maximum axis error:
+0.00430454 rad. The support-stationarity test passed unchanged.
+
+Do not retain the component scheduler: the powered gain against a fresh
+control was below 1%, and the alternating unpowered comparison regressed.
+The frozen-kernel gain does not justify extra GPU scheduling and scratch
+storage. Production solver code remains unchanged by this experiment.
+
+## Uniform joint backward-solve screen
+
+A separate frozen-sweep candidate kept backward substitution and impulse
+arithmetic active in all eight joint lanes, with only lane zero writing
+accumulated impulses and body states. All checked outputs remained bitwise
+identical, but mean sweep time increased from 136.454 to 137.161 microseconds
+(medians both 137.216). Reject it. Artifacts:
+`/tmp/colibri_joint_uniform_frozen.{log,json,npz}`; experimental sources
+`/tmp/colibri_joint_uniform.py`, `/tmp/colibri_sweep_joint_uniform.py`,
+`/tmp/colibri_profile_joint_uniform.py`.
+
+## Collision phase attribution
+
+CUDA events around the collision pipeline and solver calls, inside the
+captured graph, measured the following GPU fractions over 120 frames after
+60 warmup frames. This is a short instrumented phase diagnostic, not a new
+full-minute throughput baseline. The one-world run uses the original
+contact policy; replicated runs include adjacent-tail collision filters.
+
+| Worlds | Collision | Solver including preparation/integration |
+| --- | ---: | ---: |
+| 1 | 2.8% | 97.2% |
+| 4 | 3.8% | 96.2% |
+| 16 | 4.8% | 95.2% |
+| 64 | 7.5% | 92.5% |
+
+Artifacts: `/tmp/colibri_phase_times_{single,multi}.{log,json}`;
+`/tmp/colibri_phase_times.py`. No competing compute process was present
+when checked during the run. The solver remains the dominant target.
