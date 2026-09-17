@@ -423,3 +423,75 @@ and all changed-file hooks pass.
 The Colibri runs here cover 3,600 total frames: 60 warmup and 3,540 measured.
 The final optimization-goal gate must measure 3,600 frames after warmup, not
 count warmup toward that window. The 9.4 ms target remains unachieved.
+
+
+Coalescing normal-impulse stores was screened and removed. Each lane retained
+its row result, wrote it after the ordered chunk solve, and synchronized the
+subgroup before friction. Frozen sweep median improved from 140.144 to 137.216
+microseconds with identical velocity/impulse bits. The matched short full-frame
+means were 15.128 ms candidate versus 15.254 ms control (about 0.8%), too small
+in this screen to justify retaining the added scheduling and synchronization.
+The retained solver was restored; no full-minute or low-substep improvement
+is claimed. Artifacts: `/tmp/colibri_store_coalesce_{control,candidate}.{json,npz}`
+and `/tmp/colibri_store_coalesce_short{,_control}.{json,npz}`.
+
+
+Additional frozen-sweep screens (all removed from the working solver):
+
+- Full-warp structure-of-arrays normal rows: median 139.264 us versus
+  140.144 us control. All four saved velocity/impulse arrays match bitwise;
+  the small difference does not justify retaining the layout change.
+- Skip velocity updates for exactly zero normal impulse changes: median
+  139.120 us versus 139.264 us fresh control, again identical saved outputs.
+  No convincing gain; removed.
+- PhysX-style precomputed angular normal Jacobians with reassociated normal
+  speed and torque arithmetic: median 174.080 us versus the retained roughly
+  139 us sweep. Removed before trajectory validation because it is slower.
+  This arithmetic experiment is not evidence of numerical equivalence.
+
+Artifacts are `/tmp/colibri_fullwarp_soa_candidate.*`,
+`/tmp/colibri_zero_delta_{candidate,control}.*`, and
+`/tmp/colibri_jacobian_candidate.*`. None changes substeps, contact frequency,
+iterations, or retained physics. Further candidate edits now live in the
+isolated `/tmp/newton-phoenx-optimization` checkout so interactive use of the
+main checkout cannot accidentally load experimental solver code.
+
+A new retained-code validation corrects the measurement window: 60 warmup
+frames followed by 3,600 measured frames (3,660 saved states). Reproduce with:
+
+```bash
+uv run --no-project .venv/bin/python -m local_studies.colibri.profile_temporal_performance --frames 3600 --warmup 60 --validate --output /tmp/colibri_retained_full_measured_minute
+```
+
+On this run, mean physics time is 17.2778 ms (57.9 FPS), median 17.2559 ms,
+and p95 19.7752 ms. This is slower than the earlier roughly 15 ms runs;
+those earlier measurements should not be treated as guaranteed throughput.
+No competing compute process appeared in the GPU process query. Rendering
+is disabled. Fresh contact, assembly, and powered-drive checks pass. Peak
+penetration stays at 0.470375 mm and peak joint anchor error at 0.630504 mm.
+The extra measured frames expose a larger maximum joint-axis error:
+0.0125450 rad at frame 3603, GearedSpinner/WingLinkArcLeft. The first 3,600
+pose and velocity states match `/tmp/colibri_contact32_minute.npz` bitwise.
+Powered support motion is not reported as creep. The 9.4 ms objective is
+still unachieved.
+
+
+Fully unrolling the 32-lane normal-row source loop also loses: frozen median
+147.424 us versus 141.312 us fresh control, with all saved velocity/impulse
+bits identical. The isolated candidate was restored to the retained code;
+no larger generated kernel was kept. Artifacts:
+`/tmp/colibri_unroll32_{candidate,control}.{json,npz,log}`.
+
+
+The matching motor-off validation also measures 3,600 frames after 60 warmup
+frames, using the same command with `--motor-off` and output prefix
+`/tmp/colibri_retained_motor_off_full_minute`. It passes fresh-contact,
+assembly, and unpowered support checks. Mean time is 15.8777 ms; this is a
+different, unpowered workload, not a powered throughput improvement. Peak
+penetration is 0.240596 mm, joint anchor error 0.267415 mm, and joint-axis
+error 0.00430454 rad. Its first 3,600 pose/velocity states match the previous
+motor-off reference bitwise. Relative to saved state index 120 (the first
+sample strictly after two simulated seconds), peak horizontal base motion
+is 1.2163 um and final displacement is 0.1281 um; peak rotation is
+5.8820e-6 rad. These drift values depend on the stated reference sample and
+do not indicate a physics change from the earlier bitwise-identical run.
