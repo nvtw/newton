@@ -39,6 +39,23 @@ class TestColibriAssemblyBounds(unittest.TestCase):
         self.assertEqual(parser.parse_args([]).iterations, 1)
         self.assertFalse(parser.parse_args(["--velocity-filtered-candidates"]).geometric_candidates)
 
+    def test_authored_mesh_colors(self):
+        """Preserve white unbound meshes and explicitly colored USD parts."""
+        labels = ("Frame/FrameMesh", "FrameGround/Flower/Flower_Stem", "FrameGround/Base")
+        shapes = [shape for shape in scene.SHAPES if shape[2] in labels]
+        self.assertEqual(len(shapes), len(labels))
+        # Substitute small geometry so this color check needs no external assets or SDFs.
+        mesh = scene.trimesh.creation.box()
+        with (
+            patch.object(scene, "SHAPES", shapes),
+            patch.object(scene, "COLLISION_LABELS", []),
+            patch.object(scene.trimesh, "load", return_value=mesh),
+        ):
+            builder = scene.build_scene(body_count=2, attach_flower_to_base=True)
+        for label in labels:
+            expected = (1e-6, 1e-6, 1e-6) if label == "FrameGround/Base" else (1.0, 1.0, 1.0)
+            np.testing.assert_allclose(builder.shape_color[builder.shape_label.index(label)], expected)
+
     def test_counterweight_density_scales_composite_mass_properties(self):
         """Scale only the counterweight contribution, including its parallel-axis moment."""
         shapes = [shape for shape in scene.SHAPES if shape[2] in ("Frame/Cylinder", "Frame/Cylinders/Cylinder")]
