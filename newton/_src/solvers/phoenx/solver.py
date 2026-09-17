@@ -1147,7 +1147,6 @@ class SolverPhoenX(SolverBase):
         friction = self._joint_constraints.friction_coefficient.numpy()
         lower_limit = self._joint_constraints.min_value.numpy()
         upper_limit = self._joint_constraints.max_value.numpy()
-        d6_limit_count = self._joint_constraints.d6_limit_count.numpy()
         velocity_limit = self._joint_constraints.velocity_limit.numpy()
         for joint in np.flatnonzero(direct.joint_mask):
             cid = int(joint_idx_to_cid[joint])
@@ -1172,7 +1171,7 @@ class SolverPhoenX(SolverBase):
                 int(JOINT_MODE_GENERIC_D6),
             ):
                 common_count = int(direct.d6_inequality_count[cid])
-                equality_only = int(d6_limit_count[cid]) == 0 and common_count == 0
+                equality_only = common_count == 0
             if equality_only:
                 joint_pgs_enabled[cid] = 0
         self.world.set_joint_pgs_ownership(joint_pgs_enabled)

@@ -14,6 +14,7 @@ the invariants actually fire when a mis-shaped container is passed.
 
 from __future__ import annotations
 
+import inspect
 import unittest
 
 import warp as wp
@@ -86,6 +87,22 @@ class TestInvariants(unittest.TestCase):
         fields = set(JointConstraintData.vars)
         self.assertTrue(fields.isdisjoint({"structural_direct", "mode_cache", "hertz", "mass_coeff", "impulse_coeff"}))
         self.assertLessEqual(JOINT_CONSTRAINT_DWORDS, 85)
+
+    def test_joint_initialization_omits_legacy_d6_limits(self) -> None:
+        """Keep angular limits in the common per-axis D6 representation."""
+        parameters = inspect.signature(PhoenXWorld.initialize_joint_constraints).parameters
+        self.assertTrue(
+            set(parameters).isdisjoint(
+                {
+                    "d6_limit_axis0",
+                    "d6_limit_axis1",
+                    "d6_limit_axis2",
+                    "d6_limit_lower",
+                    "d6_limit_upper",
+                    "d6_limit_count",
+                }
+            )
+        )
 
     def test_correct_construction_accepted(self) -> None:
         """A correctly-built world constructs without raising."""

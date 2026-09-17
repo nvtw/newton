@@ -215,50 +215,6 @@ def _friction_slip_scale_from_mujoco(solref: np.ndarray | None, solimp: np.ndarr
     return float(((1.0 - imp) / max(1.0e-15, imp)) / max(1.0e-15, damping))
 
 
-def _append_d6_angular_limit(
-    qd: int,
-    coord_offset: int,
-    *,
-    limit_lower: np.ndarray | None,
-    limit_upper: np.ndarray | None,
-    joint_axis: np.ndarray,
-    joint_q_arr: np.ndarray,
-    joint_q_start: np.ndarray,
-    joint_index: int,
-    joint_world_xform: np.ndarray,
-    d6_limit_axes: list[np.ndarray],
-    d6_limit_lower: np.ndarray,
-    d6_limit_upper: np.ndarray,
-    d6_limit_count: int,
-) -> int:
-    """Pack one finite D6 angular limit and return the next write slot."""
-    if d6_limit_count >= 3 or limit_lower is None or limit_upper is None:
-        return d6_limit_count
-    if qd < 0 or qd >= len(limit_lower) or qd >= len(limit_upper):
-        return d6_limit_count
-    lo = float(limit_lower[qd])
-    hi = float(limit_upper[qd])
-    if not (np.isfinite(lo) and np.isfinite(hi) and lo <= hi):
-        return d6_limit_count
-    if lo <= -2.0 * np.pi and hi >= 2.0 * np.pi:
-        return d6_limit_count
-    axis_local = (
-        np.asarray(joint_axis[qd], dtype=np.float32)
-        if len(joint_axis) and qd < len(joint_axis)
-        else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
-    )
-    axis_len = _norm3_np(axis_local)
-    if axis_len <= 1.0e-12:
-        return d6_limit_count
-    axis_world = _quat_rotate_np(joint_world_xform[3:], axis_local / axis_len)
-    q_idx = int(joint_q_start[joint_index]) + coord_offset
-    init_axis_q = float(joint_q_arr[q_idx]) if len(joint_q_arr) > q_idx else 0.0
-    d6_limit_axes[d6_limit_count] = axis_world
-    d6_limit_lower[d6_limit_count] = lo - init_axis_q
-    d6_limit_upper[d6_limit_count] = hi - init_axis_q
-    return d6_limit_count + 1
-
-
 class JointInitArrays:
     """joint constraint init kwargs plus joint-index -> cid map for per-step control writeback.
     ``joint_idx_to_cid`` is ``-1`` for joints without a constraint column."""
@@ -288,12 +244,6 @@ class JointInitArrays:
         damping_limit: wp.array,
         friction_coefficient: wp.array,
         friction_slip_scale: wp.array,
-        d6_limit_axis0: wp.array,
-        d6_limit_axis1: wp.array,
-        d6_limit_axis2: wp.array,
-        d6_limit_lower: wp.array,
-        d6_limit_upper: wp.array,
-        d6_limit_count: wp.array,
         joint_idx_to_cid: wp.array,
         joint_idx_to_dof_start: wp.array,
         joint_q_at_init: wp.array,
@@ -327,12 +277,6 @@ class JointInitArrays:
         self.damping_limit = damping_limit
         self.friction_coefficient = friction_coefficient
         self.friction_slip_scale = friction_slip_scale
-        self.d6_limit_axis0 = d6_limit_axis0
-        self.d6_limit_axis1 = d6_limit_axis1
-        self.d6_limit_axis2 = d6_limit_axis2
-        self.d6_limit_lower = d6_limit_lower
-        self.d6_limit_upper = d6_limit_upper
-        self.d6_limit_count = d6_limit_count
         self.joint_idx_to_cid = joint_idx_to_cid
         self.joint_idx_to_dof_start = joint_idx_to_dof_start
         #: Per-joint-column initial Newton joint coordinate. PhoenX measures
@@ -372,12 +316,6 @@ class JointInitArrays:
             "damping_limit": self.damping_limit,
             "friction_coefficient": self.friction_coefficient,
             "friction_slip_scale": self.friction_slip_scale,
-            "d6_limit_axis0": self.d6_limit_axis0,
-            "d6_limit_axis1": self.d6_limit_axis1,
-            "d6_limit_axis2": self.d6_limit_axis2,
-            "d6_limit_lower": self.d6_limit_lower,
-            "d6_limit_upper": self.d6_limit_upper,
-            "d6_limit_count": self.d6_limit_count,
             "velocity_limit": self.velocity_limit,
         }
 
@@ -457,12 +395,6 @@ def build_joint_init_arrays(
             damping_limit=empty_f,
             friction_coefficient=empty_f,
             friction_slip_scale=empty_f,
-            d6_limit_axis0=empty_v,
-            d6_limit_axis1=empty_v,
-            d6_limit_axis2=empty_v,
-            d6_limit_lower=empty_v,
-            d6_limit_upper=empty_v,
-            d6_limit_count=empty_i,
             joint_idx_to_cid=joint_idx_to_cid,
             joint_idx_to_dof_start=joint_idx_to_dof_start,
             joint_q_at_init=empty_f,
@@ -612,24 +544,6 @@ def build_joint_init_arrays(
         # Armature only applies to REVOLUTE/PRISMATIC axial rows; 0 elsewhere.
         friction_val = 0.0
         friction_slip_scale_val = -1.0
-        d6_limit_axes = [np.zeros(3, dtype=np.float32) for _ in range(3)]
-        d6_limit_lower = np.zeros(3, dtype=np.float32)
-        d6_limit_upper = np.zeros(3, dtype=np.float32)
-        d6_limit_count = 0
-
-        d6_limit_kwargs = {
-            "limit_lower": limit_lower,
-            "limit_upper": limit_upper,
-            "joint_axis": joint_axis,
-            "joint_q_arr": joint_q_arr,
-            "joint_q_start": joint_q_start,
-            "joint_index": j,
-            "joint_world_xform": X_w_p,
-            "d6_limit_axes": d6_limit_axes,
-            "d6_limit_lower": d6_limit_lower,
-            "d6_limit_upper": d6_limit_upper,
-        }
-
         if d6_mode_tag == "GENERIC":
             phoenx_mode = int(JOINT_MODE_GENERIC_D6)
         elif effective_jtype is newton.JointType.DISTANCE:
@@ -654,15 +568,6 @@ def build_joint_init_arrays(
                 max_val = hi if hi >= 0.0 else 1.0e10
         elif effective_jtype is newton.JointType.BALL:
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
-            if d6_mode_tag == "BALL":
-                for ai, locked in enumerate(locked_ang):
-                    if not locked:
-                        d6_limit_count = _append_d6_angular_limit(
-                            qd_start + n_lin + ai,
-                            n_lin + ai,
-                            d6_limit_count=d6_limit_count,
-                            **d6_limit_kwargs,
-                        )
         elif effective_jtype is newton.JointType.CABLE:
             phoenx_mode = int(JOINT_MODE_CABLE)
             # Newton CABLE has 2 DoFs (linear stretch + isotropic angular bend/twist).
@@ -750,13 +655,6 @@ def build_joint_init_arrays(
 
             axis_world = _quat_rotate_np(X_w_p[3:], axis_local)
             anchor2_world = anchor1_world + axis_world
-            for ai in ang_free:
-                d6_limit_count = _append_d6_angular_limit(
-                    qd_start + n_lin + ai,
-                    n_lin + ai,
-                    d6_limit_count=d6_limit_count,
-                    **d6_limit_kwargs,
-                )
         elif d6_mode_tag == "UNIVERSAL":
             phoenx_mode = int(JOINT_MODE_UNIVERSAL)
             if d6_locked_axis_offset >= 0:
@@ -779,23 +677,6 @@ def build_joint_init_arrays(
             anchor2_world = anchor1_world + axis_world
             min_val = 0.0
             max_val = 0.0
-            if n_ang == 2 and d6_locked_axis_offset < 0:
-                for ai in range(2):
-                    d6_limit_count = _append_d6_angular_limit(
-                        qd_start + ai,
-                        ai,
-                        d6_limit_count=d6_limit_count,
-                        **d6_limit_kwargs,
-                    )
-            else:
-                for ai, locked in enumerate(locked_ang):
-                    if not locked:
-                        d6_limit_count = _append_d6_angular_limit(
-                            qd_start + n_lin + ai,
-                            n_lin + ai,
-                            d6_limit_count=d6_limit_count,
-                            **d6_limit_kwargs,
-                        )
         elif effective_jtype is newton.JointType.FIXED:
             phoenx_mode = int(JOINT_MODE_FIXED)
             # Pick joint-frame X axis so the anchor-3 basis is well-defined.
@@ -902,12 +783,6 @@ def build_joint_init_arrays(
                 "damping_limit": damp_limit,
                 "friction_coefficient": friction_val,
                 "friction_slip_scale": friction_slip_scale_val,
-                "d6_limit_axis0": d6_limit_axes[0],
-                "d6_limit_axis1": d6_limit_axes[1],
-                "d6_limit_axis2": d6_limit_axes[2],
-                "d6_limit_lower": d6_limit_lower,
-                "d6_limit_upper": d6_limit_upper,
-                "d6_limit_count": d6_limit_count,
                 "joint_q_at_init": init_q,
             }
         )
@@ -965,12 +840,6 @@ def build_joint_init_arrays(
         damping_limit=_stack_f("damping_limit"),
         friction_coefficient=_stack_f("friction_coefficient"),
         friction_slip_scale=_stack_f("friction_slip_scale"),
-        d6_limit_axis0=_stack_v("d6_limit_axis0"),
-        d6_limit_axis1=_stack_v("d6_limit_axis1"),
-        d6_limit_axis2=_stack_v("d6_limit_axis2"),
-        d6_limit_lower=_stack_v("d6_limit_lower"),
-        d6_limit_upper=_stack_v("d6_limit_upper"),
-        d6_limit_count=_stack_i("d6_limit_count"),
         joint_idx_to_cid=wp.array(joint_idx_to_cid_np, dtype=wp.int32, device=device),
         joint_idx_to_dof_start=wp.array(joint_idx_to_dof_start_np, dtype=wp.int32, device=device),
         joint_q_at_init=_stack_f("joint_q_at_init"),

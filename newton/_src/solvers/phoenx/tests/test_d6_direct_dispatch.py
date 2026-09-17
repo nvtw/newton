@@ -54,9 +54,11 @@ class TestD6DirectDispatch(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
 
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_BALL_SOCKET))
-        self.assertEqual(int(solver._joint_constraints.d6_limit_count.numpy()[0]), 3)
-        np.testing.assert_allclose(solver._joint_constraints.d6_limit_lower.numpy()[0], [-1.0, -1.0, -1.0], atol=1.0e-6)
-        np.testing.assert_allclose(solver._joint_constraints.d6_limit_upper.numpy()[0], [1.0, 1.0, 1.0], atol=1.0e-6)
+        data = solver.world.constraints.d6
+        self.assertEqual(int(data.row_count.numpy()[0]), 3)
+        np.testing.assert_array_equal(data.row_axis.numpy()[0, :3], [0, 1, 2])
+        np.testing.assert_allclose(data.lower.numpy()[0, :3], [-1.0, -1.0, -1.0], atol=1.0e-6)
+        np.testing.assert_allclose(data.upper.numpy()[0, :3], [1.0, 1.0, 1.0], atol=1.0e-6)
 
     def test_angular_two_axis_mjcf_style_d6_reduces_to_universal_with_limits(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -72,9 +74,11 @@ class TestD6DirectDispatch(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
 
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
-        self.assertEqual(int(solver._joint_constraints.d6_limit_count.numpy()[0]), 2)
-        np.testing.assert_allclose(solver._joint_constraints.d6_limit_lower.numpy()[0], [-0.8, -1.3, 0.0], atol=1.0e-6)
-        np.testing.assert_allclose(solver._joint_constraints.d6_limit_upper.numpy()[0], [0.8, 0.5, 0.0], atol=1.0e-6)
+        data = solver.world.constraints.d6
+        self.assertEqual(int(data.row_count.numpy()[0]), 2)
+        np.testing.assert_array_equal(data.row_axis.numpy()[0, :2], [0, 1])
+        np.testing.assert_allclose(data.lower.numpy()[0, :2], [-0.8, -1.3], atol=1.0e-6)
+        np.testing.assert_allclose(data.upper.numpy()[0, :2], [0.8, 0.5], atol=1.0e-6)
 
     def test_angular_two_axis_d6_limit_row_reacts_to_violation(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)

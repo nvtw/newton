@@ -21,7 +21,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_BODY1,
     _OFF_BODY2,
     _OFF_CLAMP,
-    _OFF_D6_LIMIT_COUNT,
     _OFF_FRICTION_COEFFICIENT,
     _OFF_JOINT_MODE,
     _OFF_R1_B1,
@@ -37,7 +36,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
     _axial_limit_friction_iterate,
-    _d6_angular_limits_block,
     _ms_load_body_pair,
     _ms_store_body_pair,
 )
@@ -84,9 +82,8 @@ def joint_constraint_iterate_inequality(
     # avoid loading and writing body responses for zero-impulse rows.
     if not common_d6:
         if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
-            if read_int(constraints, _OFF_D6_LIMIT_COUNT, cid) == 0:
-                return
-        elif read_int(constraints, _OFF_CLAMP, cid) == _CLAMP_NONE:
+            return
+        if read_int(constraints, _OFF_CLAMP, cid) == _CLAMP_NONE:
             if read_float(constraints, _OFF_FRICTION_COEFFICIENT, cid) <= wp.float32(0.0):
                 constraint_write_multiplier(constraints, _MUL_ACC_FRICTION, cid, wp.float32(0.0))
                 return
@@ -123,37 +120,6 @@ def joint_constraint_iterate_inequality(
             angular_velocity1,
             velocity2,
             angular_velocity2,
-            idt,
-            sor_boost,
-        )
-        _ms_store_body_pair(
-            bodies,
-            particles,
-            copy_state,
-            body1,
-            body2,
-            slot1,
-            slot2,
-            num_bodies,
-            velocity1,
-            angular_velocity1,
-            velocity2,
-            angular_velocity2,
-        )
-        return
-
-    if mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_UNIVERSAL:
-        angular_velocity1, angular_velocity2 = _d6_angular_limits_block(
-            constraints,
-            cid,
-            wp.int32(0),
-            bodies,
-            body1,
-            mode,
-            angular_velocity1,
-            angular_velocity2,
-            inverse_inertia1,
-            inverse_inertia2,
             idt,
             sor_boost,
         )

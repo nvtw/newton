@@ -275,7 +275,7 @@ Important knobs:
 ## 8. Current Boundaries
 Keep these constraints explicit when changing solver dispatch or adding examples:
 - Public `SolverPhoenX` construction covers rigid bodies, contacts, Newton rigid joints, particles, cloth triangles/bending, and soft tetrahedra from `Model`. Soft hexahedra still use the internal `PhoenXWorld` array path.
-- D6 joints are not a generic six-DoF row type in PhoenX. `model_adapter.py` reduces only the legacy-compatible lock patterns to fixed, ball, revolute, prismatic, or universal joint modes; unsupported D6 shapes fail early.
+- D6 structural equalities use compact lock-pattern modes in the direct system. Free-axis limits, speed caps, and friction use one common six-axis D6 row representation; unsupported structural shapes fail early.
 - Mass splitting is single-world only. It can coexist with joints and cloth-triangle rows, but `mass_splitting=True` still rejects `step_layout="multi_world"`.
 - `prepare_refresh_stride="auto"` is a graph-capture-safe optimization for rigid contact/joint worlds. Contact worlds refresh at least every third substep, and joint-only worlds may use larger fixed strides.
 - Auto-selection heuristics belong near construction-time policy helpers in `solver_phoenx.py` (`_choose_initial_threads_per_world`, `_choose_auto_prepare_refresh_stride`, `_choose_multi_world_scheduler`) plus the small GPU lane picker. Keep scheduler choices graph-stable after construction.

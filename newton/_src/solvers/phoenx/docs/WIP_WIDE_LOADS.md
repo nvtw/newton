@@ -36,7 +36,7 @@ Fields widened (all lossless — same bytes, fewer load requests):
   helpers (both sites consistent).
 - `constraints/constraint_joint.py` — `_ms_load_body_pair` /
   `_ms_store_body_pair` fast paths (covers all D6/revolute multi iterates);
-  `_d6_prepare_rows_at` + `_d6_angular_limits_block` orientation loads.
+  common D6 inequality-row orientation loads.
 - `constraints/constraint_contact.py` — `contact_iterate_at_multi` (fast-tail
   multi-sweep contact path): vw pair load/store, quat, sym6.
 - `constraints/constraint_contact_cloth.py` — rigid lean prepare
