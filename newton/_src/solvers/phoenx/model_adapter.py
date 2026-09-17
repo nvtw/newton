@@ -310,13 +310,6 @@ class JointInitArrays:
             "damping_drive": self.damping_drive,
             "min_value": self.min_value,
             "max_value": self.max_value,
-            "hertz_limit": self.hertz_limit,
-            "damping_ratio_limit": self.damping_ratio_limit,
-            "stiffness_limit": self.stiffness_limit,
-            "damping_limit": self.damping_limit,
-            "friction_coefficient": self.friction_coefficient,
-            "friction_slip_scale": self.friction_slip_scale,
-            "velocity_limit": self.velocity_limit,
         }
 
 

@@ -1,1 +1,1 @@
-Preserve PhoenX D6 limits, live limit updates, and reported inequality wrenches in projected full-coordinate articulation modes. Route native BALL limits, velocity caps, and friction through the same common D6 rows.
+Preserve PhoenX D6 limits, live limit updates, and reported inequality wrenches in projected full-coordinate articulation modes. Route native BALL limits, velocity caps, and friction through the same common D6 rows, and remove the superseded scalar inequality caches from joint columns.

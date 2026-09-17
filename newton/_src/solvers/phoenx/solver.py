@@ -43,17 +43,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_STIFFNESS_DRIVE,
     _OFF_TARGET,
     _OFF_TARGET_VELOCITY,
-    JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
-    JOINT_MODE_CARTESIAN,
-    JOINT_MODE_CARTESIAN_PLANE,
-    JOINT_MODE_CYLINDRICAL,
-    JOINT_MODE_FIXED,
-    JOINT_MODE_GENERIC_D6,
-    JOINT_MODE_PLANAR,
-    JOINT_MODE_PRISMATIC,
-    JOINT_MODE_REVOLUTE,
-    JOINT_MODE_UNIVERSAL,
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs import allocate_contact_tgs, export_contact_wrenches
 from newton._src.solvers.phoenx.constraints.d6_joint_data import build_d6_inequality_data
@@ -1148,35 +1138,9 @@ class SolverPhoenX(SolverBase):
             self.world.set_joint_pgs_ownership(self._direct_base_joint_pgs_enabled.copy())
             return
         joint_pgs_enabled = self._direct_base_joint_pgs_enabled.copy()
-        friction = self._joint_constraints.friction_coefficient.numpy()
-        lower_limit = self._joint_constraints.min_value.numpy()
-        upper_limit = self._joint_constraints.max_value.numpy()
-        velocity_limit = self._joint_constraints.velocity_limit.numpy()
         for joint in np.flatnonzero(direct.joint_mask):
             cid = int(joint_idx_to_cid[joint])
-            if cid < 0:
-                continue
-            mode = int(self._direct_effective_joint_mode[joint])
-            equality_only = mode in (int(JOINT_MODE_FIXED), int(JOINT_MODE_CABLE))
-            if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
-                has_friction = float(friction[cid]) > 0.0
-                lower = float(lower_limit[cid])
-                upper = float(upper_limit[cid])
-                has_limit = lower <= upper and (lower > -5.0e9 or upper < 5.0e9)
-                has_velocity_limit = float(velocity_limit[cid]) > 0.0
-                equality_only = not (has_friction or has_limit or has_velocity_limit)
-            elif mode in (
-                int(JOINT_MODE_BALL_SOCKET),
-                int(JOINT_MODE_UNIVERSAL),
-                int(JOINT_MODE_CYLINDRICAL),
-                int(JOINT_MODE_PLANAR),
-                int(JOINT_MODE_CARTESIAN_PLANE),
-                int(JOINT_MODE_CARTESIAN),
-                int(JOINT_MODE_GENERIC_D6),
-            ):
-                common_count = int(direct.d6_inequality_count[cid])
-                equality_only = common_count == 0
-            if equality_only:
+            if cid >= 0 and int(direct.d6_inequality_count[cid]) == 0:
                 joint_pgs_enabled[cid] = 0
         self.world.set_joint_pgs_ownership(joint_pgs_enabled)
 

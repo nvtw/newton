@@ -33,7 +33,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_BIAS1,
     _OFF_BIAS2,
     _OFF_BIAS3,
-    _OFF_BIAS_LIMIT_BOX2D,
     _OFF_DAMPING_DRIVE,
     _OFF_DRIVE_MODE,
     _OFF_JOINT_MODE,
@@ -298,7 +297,7 @@ def _gather_general_maximal_tree_thread(
             joint_motion = _set_motion_column(joint_motion, wp.int32(0), wp.cross(r_child, tangent1), tangent1)
             joint_motion = _set_motion_column(joint_motion, wp.int32(1), wp.cross(r_child, tangent2), tangent2)
             if use_bias:
-                locked_angular = read_float(constraints, _OFF_BIAS_LIMIT_BOX2D, cid) * axis
+                locked_angular = wp.vec3f(0.0, 0.0, 0.0)
                 target1 = -read_vec3(constraints, _OFF_BIAS1, cid)
                 locked_linear = target1 + wp.cross(r_child, locked_angular)
                 affine_offset = wp.spatial_vectorf(
