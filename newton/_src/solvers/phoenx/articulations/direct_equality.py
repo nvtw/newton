@@ -32,13 +32,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_HERTZ_LINEAR,
     soft_constraint_coefficients,
 )
-from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    JOINT_MODE_BALL_SOCKET,
-    JOINT_MODE_FIXED,
-    JOINT_MODE_GENERIC_D6,
-    JOINT_MODE_PRISMATIC,
-    JOINT_MODE_REVOLUTE,
-)
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     create_orthonormal,
     extract_rotation_angle,
@@ -113,29 +106,8 @@ def _select_panel_block_size(
     return _PANEL_BLOCK_SIZE
 
 
-def _default_joint_modes(joint_types: np.ndarray) -> np.ndarray:
-    modes = np.full(len(joint_types), -1, dtype=np.int32)
-    modes[joint_types == int(JointType.BALL)] = int(JOINT_MODE_BALL_SOCKET)
-    modes[joint_types == int(JointType.REVOLUTE)] = int(JOINT_MODE_REVOLUTE)
-    modes[joint_types == int(JointType.PRISMATIC)] = int(JOINT_MODE_PRISMATIC)
-    modes[joint_types == int(JointType.FIXED)] = int(JOINT_MODE_FIXED)
-    modes[joint_types == int(JointType.ROD)] = int(JOINT_MODE_GENERIC_D6)
-    return modes
-
-
-def _structural_row_count(mode: int) -> int:
-    if mode == int(JOINT_MODE_BALL_SOCKET):
-        return 3
-    if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
-        return 5
-    if mode == int(JOINT_MODE_FIXED):
-        return 6
-    return 0
-
-
 def _generic_d6_constraint_bases(
     model: Model,
-    joint_mode: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Precompute orthonormal complements of generic D6 free-axis spans."""
     joint_count = int(model.joint_count)
@@ -143,7 +115,7 @@ def _generic_d6_constraint_bases(
     angular_axes = np.zeros((joint_count, 3, 3), dtype=np.float32)
     linear_count = np.zeros(joint_count, dtype=np.int32)
     angular_count = np.zeros(joint_count, dtype=np.int32)
-    structural_count = np.asarray([_structural_row_count(int(mode)) for mode in joint_mode], dtype=np.int32)
+    structural_count = np.zeros(joint_count, dtype=np.int32)
 
     joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
     model_axes = np.asarray(model.joint_axis.numpy(), dtype=np.float32)
@@ -173,7 +145,17 @@ def _generic_d6_constraint_bases(
                 basis[basis_index] = -row
         return basis
 
-    common_rows = (joint_mode == int(JOINT_MODE_GENERIC_D6)) | (structural_count > 0)
+    common_rows = np.isin(
+        joint_type,
+        (
+            int(JointType.BALL),
+            int(JointType.D6),
+            int(JointType.FIXED),
+            int(JointType.PRISMATIC),
+            int(JointType.REVOLUTE),
+            int(JointType.ROD),
+        ),
+    )
     for joint in np.flatnonzero(common_rows):
         if joint_type[joint] == int(JointType.ROD):
             # Rod DoFs are material-property slots rather than free motion
@@ -211,14 +193,6 @@ def _generic_d6_constraint_bases(
     return linear_axes, angular_axes, linear_count, angular_count, structural_count
 
 
-_MULTI_AXIS_D6_MODES = frozenset(
-    (
-        int(JOINT_MODE_BALL_SOCKET),
-        int(JOINT_MODE_GENERIC_D6),
-    )
-)
-
-
 def _drive_dof_masks(model: Model) -> tuple[np.ndarray, np.ndarray]:
     """Return active and finite-effort implicit-drive masks per DoF."""
     target_mode = np.asarray(model.joint_target_mode.numpy(), dtype=np.int32)
@@ -236,13 +210,13 @@ def _drive_dof_masks(model: Model) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _axial_joint_dofs(
-    joint_mode: np.ndarray,
+    joint_type: np.ndarray,
     joint_dof_start: np.ndarray,
     dof_count: int,
     excluded: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return the axial-joint mask plus valid joint and DoF indices."""
-    axial = (joint_mode == int(JOINT_MODE_REVOLUTE)) | (joint_mode == int(JOINT_MODE_PRISMATIC))
+    axial = (joint_type == int(JointType.REVOLUTE)) | (joint_type == int(JointType.PRISMATIC))
     if excluded is not None:
         axial &= ~excluded
     joints = np.flatnonzero(axial)
@@ -253,7 +227,6 @@ def _axial_joint_dofs(
 
 def _dynamic_joint_masks(
     model: Model,
-    joint_mode: np.ndarray,
     joint_dof_start: np.ndarray,
     excluded: np.ndarray,
     drive_dof: np.ndarray,
@@ -271,13 +244,12 @@ def _dynamic_joint_masks(
     dynamic = np.zeros(joint_count, dtype=bool)
     direct_drive = np.zeros(joint_count, dtype=bool)
     bounded_drive = np.zeros(joint_count, dtype=bool)
-    axial, axial_joints, axial_dofs = _axial_joint_dofs(joint_mode, joint_dof_start, len(armature), excluded)
+    axial, axial_joints, axial_dofs = _axial_joint_dofs(joint_type, joint_dof_start, len(armature), excluded)
     direct_drive[axial_joints] = drive_dof[axial_dofs]
     bounded_drive[axial_joints] = bounded_dof[axial_dofs]
     dynamic[axial_joints] = (armature[axial_dofs] > 0.0) | (damping[axial_dofs] > 0.0) | drive_dof[axial_dofs]
 
-    multi_axis = np.isin(joint_mode, tuple(_MULTI_AXIS_D6_MODES))
-    for joint in np.flatnonzero(~excluded & ~axial & (joint_type == int(JointType.D6)) & multi_axis):
+    for joint in np.flatnonzero(~excluded & ~axial & (joint_type == int(JointType.D6))):
         start = int(qd_start[joint])
         count = int(dof_dim[joint, 0] + dof_dim[joint, 1])
         candidates = tuple(
@@ -295,7 +267,6 @@ def _dynamic_joint_masks(
 
 def _active_dynamic_dofs(
     model: Model,
-    joint_mode: np.ndarray,
     joint_dof_start: np.ndarray,
     excluded: np.ndarray,
     drive_dof: np.ndarray,
@@ -310,12 +281,12 @@ def _active_dynamic_dofs(
     lower = np.asarray(model.joint_limit_lower.numpy(), dtype=np.float32)
     upper = np.asarray(model.joint_limit_upper.numpy(), dtype=np.float32)
     result: list[tuple[int, ...]] = [()] * joint_count
-    axial, axial_joints, axial_dofs = _axial_joint_dofs(joint_mode, joint_dof_start, len(armature), excluded)
+    axial, axial_joints, axial_dofs = _axial_joint_dofs(joint_type, joint_dof_start, len(armature), excluded)
     active = (armature[axial_dofs] > 0.0) | (damping[axial_dofs] > 0.0) | drive_dof[axial_dofs]
     for joint, dof in zip(axial_joints[active], axial_dofs[active], strict=True):
         result[int(joint)] = (int(dof),)
 
-    multi_axis = np.isin(joint_mode, tuple(_MULTI_AXIS_D6_MODES))
+    multi_axis = np.isin(joint_type, (int(JointType.BALL), int(JointType.D6)))
     for joint in np.flatnonzero(~excluded & ~axial & multi_axis):
         start = int(qd_start[joint])
         count = int(dof_dim[joint, 0] + dof_dim[joint, 1])
@@ -337,7 +308,6 @@ def build_direct_equality_topology(
     model: Model,
     *,
     excluded_joint_mask: np.ndarray | None = None,
-    effective_joint_mode: np.ndarray | None = None,
     dynamic_joint_mask: np.ndarray | None = None,
     dynamic_joint_dofs: tuple[tuple[int, ...], ...] | None = None,
     structural_row_counts: np.ndarray | None = None,
@@ -345,18 +315,8 @@ def build_direct_equality_topology(
     """Find disconnected maximal-coordinate mechanisms and their equality rows."""
     body_count = int(model.body_count)
     joint_count = int(model.joint_count)
-    joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
-    joint_mode = (
-        _default_joint_modes(joint_type)
-        if effective_joint_mode is None
-        else np.asarray(effective_joint_mode, dtype=np.int32)
-    )
-    if joint_mode.shape != (joint_count,):
-        raise ValueError(f"effective_joint_mode must have shape ({joint_count},), got {joint_mode.shape}")
     if structural_row_counts is None:
-        _lin_axes, _ang_axes, _lin_count, _ang_count, structural_counts = _generic_d6_constraint_bases(
-            model, joint_mode
-        )
+        _lin_axes, _ang_axes, _lin_count, _ang_count, structural_counts = _generic_d6_constraint_bases(model)
     else:
         structural_counts = np.asarray(structural_row_counts, dtype=np.int32)
     if structural_counts.shape != (joint_count,):
@@ -594,7 +554,6 @@ def _set_direct_point_row(
 def _prepare_direct_rows(
     structural_index: wp.int32,
     joint: wp.int32,
-    effective_joint_mode: wp.array[wp.int32],
     effective_joint_axis: wp.array[wp.vec3],
     generic_linear_axes: wp.array[wp.vec3],
     generic_angular_axes: wp.array[wp.vec3],
@@ -627,7 +586,6 @@ def _prepare_direct_rows(
     point1 = wp.transform_get_translation(x_wcj)
     q0 = wp.transform_get_rotation(x_wpj)
     q1 = wp.transform_get_rotation(x_wcj)
-    mode = effective_joint_mode[joint]
     point0_com = point0
     point1_com = point1
     if parent > wp.int32(0):
@@ -750,7 +708,7 @@ def _prepare_direct_rows(
     # structural block. Preparing that row here avoids a separate kernel in
     # scenes dominated by hinges while using the same paired row primitives.
     axis = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
-    if mode == JOINT_MODE_REVOLUTE:
+    if joint_type[joint] == JointType.REVOLUTE:
         _set_angular_row(
             structural_index,
             row,
@@ -761,7 +719,7 @@ def _prepare_direct_rows(
             row_wrench1,
             row_bias,
         )
-    elif mode == JOINT_MODE_PRISMATIC:
+    elif joint_type[joint] == JointType.PRISMATIC:
         _set_direct_point_row(
             structural_index,
             row,
@@ -792,7 +750,6 @@ def get_prepare_direct_equality_rows_kernel(temporal_substeps: int | None = None
     @wp.kernel(enable_backward=False)
     def prepare_rows(
         structural_joints: wp.array[wp.int32],
-        effective_joint_mode: wp.array[wp.int32],
         effective_joint_axis: wp.array[wp.vec3],
         generic_linear_axes: wp.array[wp.vec3],
         generic_angular_axes: wp.array[wp.vec3],
@@ -831,7 +788,6 @@ def get_prepare_direct_equality_rows_kernel(temporal_substeps: int | None = None
         count = _prepare_direct_rows(
             structural_index,
             joint,
-            effective_joint_mode,
             effective_joint_axis,
             generic_linear_axes,
             generic_angular_axes,
@@ -1262,7 +1218,6 @@ def _snapshot_direct_dynamic_velocity_kernel(
     row_dof: wp.array[wp.int32],
     row_direct_drive: wp.array[wp.bool],
     joint_to_structural: wp.array[wp.int32],
-    effective_joint_mode: wp.array[wp.int32],
     effective_joint_axis: wp.array[wp.vec3],
     joint_type: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
@@ -1335,7 +1290,6 @@ def _snapshot_direct_dynamic_velocity_kernel(
             drive_damping = wp.float32(0.0)
             target_velocity = wp.float32(0.0)
 
-        mode = effective_joint_mode[joint]
         x_wpj = _body_origin_transform(bodies, body0) * joint_x_p[joint]
         x_wcj = _body_origin_transform(bodies, body1) * joint_x_c[joint]
         point0 = wp.transform_get_translation(x_wpj)
@@ -1350,7 +1304,7 @@ def _snapshot_direct_dynamic_velocity_kernel(
         is_single_d6_angular = (
             joint_type[joint] == JointType.D6 and angular_count == wp.int32(1) and dof >= qd_start + linear_count
         )
-        if mode == JOINT_MODE_REVOLUTE or is_single_d6_angular:
+        if joint_type[joint] == JointType.REVOLUTE or is_single_d6_angular:
             coordinate_axis = axis
             if is_single_d6_angular:
                 coordinate_axis = wp.normalize(wp.spatial_bottom(row_wrench1[structural_index, local_row]))
@@ -1363,7 +1317,7 @@ def _snapshot_direct_dynamic_velocity_kernel(
             coordinate_revolutions[row] = counter
             previous_coordinate[row] = previous
             coordinate = revolution_tracker_angle(counter, previous)
-        elif mode == JOINT_MODE_PRISMATIC:
+        elif joint_type[joint] == JointType.PRISMATIC:
             coordinate = wp.dot(axis, point1 - point0)
         dynamic_coordinate[row] = coordinate
 
@@ -1578,7 +1532,6 @@ def _apply_direct_bias_velocity_kernel(
 
 def _effective_joint_axes(
     model: Model,
-    joint_mode: np.ndarray,
     joint_dof_start: np.ndarray,
 ) -> np.ndarray:
     axes = np.zeros((int(model.joint_count), 3), dtype=np.float32)
@@ -1588,7 +1541,8 @@ def _effective_joint_axes(
         if model.joint_axis is not None
         else np.empty((0, 3), dtype=np.float32)
     )
-    _axial, axial_joints, axial_dofs = _axial_joint_dofs(joint_mode, joint_dof_start, len(model_axes))
+    joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
+    _axial, axial_joints, axial_dofs = _axial_joint_dofs(joint_type, joint_dof_start, len(model_axes))
     axes[axial_joints] = model_axes[axial_dofs]
 
     lengths = np.linalg.norm(axes, axis=1)
@@ -1598,7 +1552,7 @@ def _effective_joint_axes(
     return axes
 
 
-def _material_rest_relative_orientations(model: Model, joint_mode: np.ndarray) -> np.ndarray:
+def _material_rest_relative_orientations(model: Model) -> np.ndarray:
     """Snapshot each rod parent-to-child anchor rotation at zero strain."""
     rest = np.zeros((int(model.joint_count), 4), dtype=np.float32)
     rest[:, 3] = 1.0
@@ -1646,7 +1600,6 @@ class DirectEqualitySystem:
         bodies: BodyContainer,
         *,
         excluded_joint_mask: np.ndarray | None = None,
-        effective_joint_mode: np.ndarray | None = None,
         effective_joint_dof_start: np.ndarray | None = None,
         effective_joint_target_start: np.ndarray | None = None,
         regularization: float = _FP32_BASE_REGULARIZATION,
@@ -1656,19 +1609,14 @@ class DirectEqualitySystem:
         self.bodies = bodies
         self.set_temporal_substeps(temporal_substeps)
         joint_types = np.asarray(model.joint_type.numpy(), dtype=np.int32)
-        joint_mode = (
-            _default_joint_modes(joint_types)
-            if effective_joint_mode is None
-            else np.asarray(effective_joint_mode, dtype=np.int32)
-        )
         joint_dof_start = (
             np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
             if effective_joint_dof_start is None
             else np.asarray(effective_joint_dof_start, dtype=np.int32)
         )
         joint_count = int(model.joint_count)
-        if joint_mode.shape != (joint_count,) or joint_dof_start.shape != (joint_count,):
-            raise ValueError("effective joint mode and DoF arrays must contain one entry per Newton joint")
+        if joint_dof_start.shape != (joint_count,):
+            raise ValueError("effective joint DoF array must contain one entry per Newton joint")
         joint_target_start = (
             joint_dof_start
             if effective_joint_target_start is None
@@ -1687,19 +1635,18 @@ class DirectEqualitySystem:
             generic_linear_count_np,
             generic_angular_count_np,
             structural_row_counts,
-        ) = _generic_d6_constraint_bases(model, joint_mode)
+        ) = _generic_d6_constraint_bases(model)
         drive_dof_mask, bounded_dof_mask = _drive_dof_masks(model)
         dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
-            model, joint_mode, joint_dof_start, excluded, drive_dof_mask, bounded_dof_mask
+            model, joint_dof_start, excluded, drive_dof_mask, bounded_dof_mask
         )
-        dynamic_joint_dofs = list(_active_dynamic_dofs(model, joint_mode, joint_dof_start, excluded, drive_dof_mask))
+        dynamic_joint_dofs = list(_active_dynamic_dofs(model, joint_dof_start, excluded, drive_dof_mask))
         for joint in np.flatnonzero(dynamic_joint_mask):
             if not dynamic_joint_dofs[joint]:
                 dynamic_joint_dofs[joint] = (int(joint_dof_start[joint]),)
         dynamic_joint_dofs = tuple(dynamic_joint_dofs)
         dynamic_joint_mask |= np.asarray([bool(dofs) for dofs in dynamic_joint_dofs], dtype=bool)
         self._excluded_joint_mask = excluded
-        self._joint_mode_np = joint_mode.copy()
         self._joint_dof_start_np = joint_dof_start.copy()
         self._joint_target_start_np = joint_target_start.copy()
         self.dynamic_joint_mask = dynamic_joint_mask
@@ -1708,14 +1655,13 @@ class DirectEqualitySystem:
         self.bounded_drive_joint_mask = bounded_drive_joint_mask
         self.has_dynamic_rows = bool(np.any(dynamic_joint_mask))
         self.has_multi_axis_dynamic_rows = any(
-            dofs and joint_mode[joint] not in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC))
+            dofs and joint_types[joint] not in (int(JointType.REVOLUTE), int(JointType.PRISMATIC))
             for joint, dofs in enumerate(dynamic_joint_dofs)
         )
         self.has_bounded_drives = bool(np.any(bounded_drive_joint_mask))
         self.topology = build_direct_equality_topology(
             model,
             excluded_joint_mask=excluded,
-            effective_joint_mode=joint_mode,
             dynamic_joint_mask=dynamic_joint_mask,
             dynamic_joint_dofs=dynamic_joint_dofs,
             structural_row_counts=structural_row_counts,
@@ -1761,9 +1707,8 @@ class DirectEqualitySystem:
         joint_to_structural[self.topology.joints] = np.arange(structural_count, dtype=np.int32)
 
         self.structural_joints = wp.array(self.topology.joints, dtype=wp.int32, device=device)
-        self.effective_joint_mode = wp.array(joint_mode, dtype=wp.int32, device=device)
         self.effective_joint_axis = wp.array(
-            _effective_joint_axes(model, joint_mode, joint_dof_start),
+            _effective_joint_axes(model, joint_dof_start),
             dtype=wp.vec3,
             device=device,
         )
@@ -1780,7 +1725,7 @@ class DirectEqualitySystem:
         self.generic_linear_count = wp.array(generic_linear_count_np, dtype=wp.int32, device=device)
         self.generic_angular_count = wp.array(generic_angular_count_np, dtype=wp.int32, device=device)
         self.material_rest_relative_orientation = wp.array(
-            _material_rest_relative_orientations(model, joint_mode),
+            _material_rest_relative_orientations(model),
             dtype=wp.quat,
             device=device,
         )
@@ -1808,11 +1753,10 @@ class DirectEqualitySystem:
         joint_types = np.asarray(model.joint_type.numpy(), dtype=np.int32)
         for row, (joint, dof) in enumerate(zip(self.topology.row_joint, self.topology.row_dof, strict=True)):
             if self.topology.row_dynamic[row] and dof >= 0:
-                mode = int(joint_mode[joint])
-                drive_supported = mode in (
-                    int(JOINT_MODE_REVOLUTE),
-                    int(JOINT_MODE_PRISMATIC),
-                ) or (joint_types[joint] == int(JointType.D6) and mode in _MULTI_AXIS_D6_MODES)
+                drive_supported = joint_types[joint] in (
+                    int(JointType.REVOLUTE),
+                    int(JointType.PRISMATIC),
+                ) or joint_types[joint] == int(JointType.D6)
                 row_direct_drive[row] = drive_supported and drive_dof_mask[dof]
                 row_bounded_drive[row] = drive_supported and bounded_dof_mask[dof]
                 row_target_q[row] = int(joint_target_q_start[joint]) + dof - int(model_qd_start[joint])
@@ -1836,14 +1780,13 @@ class DirectEqualitySystem:
         for row, (joint, dof) in enumerate(zip(self.topology.row_joint, self.topology.row_dof, strict=True)):
             if not self.topology.row_dynamic[row]:
                 continue
-            mode = int(joint_mode[joint])
             dof_offset = int(dof) - int(joint_qd_start[joint])
             is_single_d6_angular = (
                 joint_type[joint] == int(JointType.D6)
                 and int(joint_dof_dim[joint, 1]) == 1
                 and dof_offset >= int(joint_dof_dim[joint, 0])
             )
-            if mode != int(JOINT_MODE_REVOLUTE) and not is_single_d6_angular:
+            if joint_type[joint] != int(JointType.REVOLUTE) and not is_single_d6_angular:
                 continue
             q = float(joint_q[int(joint_q_start[joint]) + dof_offset])
             turns = int(np.floor((q + np.pi) / (2.0 * np.pi)))
@@ -1922,7 +1865,6 @@ class DirectEqualitySystem:
         drive_dof_mask, bounded_dof_mask = _drive_dof_masks(self.model)
         dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
             self.model,
-            self._joint_mode_np,
             self._joint_dof_start_np,
             self._excluded_joint_mask,
             drive_dof_mask,
@@ -1931,7 +1873,6 @@ class DirectEqualitySystem:
         dynamic_joint_dofs = list(
             _active_dynamic_dofs(
                 self.model,
-                self._joint_mode_np,
                 self._joint_dof_start_np,
                 self._excluded_joint_mask,
                 drive_dof_mask,
@@ -1956,7 +1897,6 @@ class DirectEqualitySystem:
             self.model,
             self.bodies,
             excluded_joint_mask=self._excluded_joint_mask,
-            effective_joint_mode=self._joint_mode_np,
             effective_joint_dof_start=self._joint_dof_start_np,
             effective_joint_target_start=self._joint_target_start_np,
             regularization=self.regularization,
@@ -1966,9 +1906,7 @@ class DirectEqualitySystem:
         """Refresh rod zero-strain rotations after joint or body pose edits."""
         if not self.enabled:
             return
-        self.material_rest_relative_orientation.assign(
-            _material_rest_relative_orientations(self.model, self._joint_mode_np)
-        )
+        self.material_rest_relative_orientation.assign(_material_rest_relative_orientations(self.model))
 
     def set_control_targets(
         self,
@@ -1993,7 +1931,6 @@ class DirectEqualitySystem:
             dim=len(self.topology.joints),
             inputs=[
                 self.structural_joints,
-                self.effective_joint_mode,
                 self.effective_joint_axis,
                 self.generic_linear_axes,
                 self.generic_angular_axes,
@@ -2063,7 +2000,6 @@ class DirectEqualitySystem:
                 self.row_dof,
                 self.row_direct_drive,
                 self.joint_to_structural,
-                self.effective_joint_mode,
                 self.effective_joint_axis,
                 self.model.joint_type,
                 self.model.joint_qd_start,

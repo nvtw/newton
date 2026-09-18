@@ -18,11 +18,7 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     FixedPatternPanelLLT,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    JOINT_MODE_BALL_SOCKET,
-    JOINT_MODE_FIXED,
     JOINT_MODE_GENERIC_D6,
-    JOINT_MODE_PRISMATIC,
-    JOINT_MODE_REVOLUTE,
 )
 
 _INERTIA = ((0.7, 0.0, 0.0), (0.0, 0.8, 0.0), (0.0, 0.0, 0.9))
@@ -439,10 +435,10 @@ class TestDirectJointTypes(unittest.TestCase):
         self.assertTrue(direct.enabled)
         self.assertEqual(direct.topology.dimensions, (3, 5, 5, 6, 4, 4, 3, 12))
         expected_modes = {
-            "ball": int(JOINT_MODE_BALL_SOCKET),
-            "revolute": int(JOINT_MODE_REVOLUTE),
-            "prismatic": int(JOINT_MODE_PRISMATIC),
-            "fixed": int(JOINT_MODE_FIXED),
+            "ball": int(JOINT_MODE_GENERIC_D6),
+            "revolute": int(JOINT_MODE_GENERIC_D6),
+            "prismatic": int(JOINT_MODE_GENERIC_D6),
+            "fixed": int(JOINT_MODE_GENERIC_D6),
             "universal": int(JOINT_MODE_GENERIC_D6),
             "cylindrical": int(JOINT_MODE_GENERIC_D6),
             "planar": int(JOINT_MODE_GENERIC_D6),

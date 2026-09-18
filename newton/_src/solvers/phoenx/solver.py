@@ -957,7 +957,6 @@ class SolverPhoenX(SolverBase):
                 model,
                 self.bodies,
                 excluded_joint_mask=excluded_joint_mask,
-                effective_joint_mode=effective_joint_mode,
                 effective_joint_dof_start=effective_joint_dof_start,
                 effective_joint_target_start=joint_target_start,
             )
@@ -976,7 +975,6 @@ class SolverPhoenX(SolverBase):
                 # Equality- and direct-drive-only columns leave coloring.
                 # Axial friction and limits retain the lean PGS iteration.
                 self._direct_base_joint_pgs_enabled = self.world._joint_pgs_enabled.numpy()[:num_joints].copy()
-                self._direct_effective_joint_mode = effective_joint_mode
                 self._refresh_direct_joint_ownership()
                 if joint_solver == "block_pgs":
                     self._direct_equality_system.bind_world(self.world, joint_idx_to_cid)
