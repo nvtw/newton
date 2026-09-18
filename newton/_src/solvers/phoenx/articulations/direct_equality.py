@@ -16,6 +16,7 @@ from newton._src.sim import JointTargetMode, JointType, Model
 from newton._src.sim.articulation import (
     invert_2d_rotational_dofs,
     invert_3d_rotational_dofs,
+    reciprocal_3d_rotational_axes,
     transform_2d_rotational_axes,
     transform_3d_rotational_axes,
 )
@@ -1194,13 +1195,14 @@ def _prepare_direct_dynamic_rows_kernel(
         axis0 = wp.vec3f(axis0_raw[0], axis0_raw[1], axis0_raw[2])
         axis1 = wp.vec3f(axis1_raw[0], axis1_raw[1], axis1_raw[2])
         axis2 = wp.vec3f(axis2_raw[0], axis2_raw[1], axis2_raw[2])
+        reciprocal0, reciprocal1, reciprocal2 = reciprocal_3d_rotational_axes(axis0, axis1, axis2)
         angular_offset = dof - angular_start
-        direction_local = axis0
+        direction_local = reciprocal0
         if angular_offset == wp.int32(1):
-            direction_local = axis1
+            direction_local = reciprocal1
         elif angular_offset == wp.int32(2):
-            direction_local = axis2
-        direction_gimbal = wp.normalize(wp.quat_rotate(q0, direction_local))
+            direction_local = reciprocal2
+        direction_gimbal = wp.quat_rotate(q0, direction_local)
         _set_angular_row(
             structural_index,
             local_row,
