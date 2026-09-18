@@ -430,10 +430,10 @@ def build_joint_init_arrays(
             locked_lin = [_is_locked_dof(limit_lower, limit_upper, qd_start + i) for i in range(n_lin)]
             locked_ang = [_is_locked_dof(limit_lower, limit_upper, qd_start + n_lin + i) for i in range(n_ang)]
             classified_tag, classified_offset = _classify_d6_legacy_mode(n_lin, n_ang, locked_lin, locked_ang)
-            # Keep locked and ball-shaped D6 joints on the common D6 representation.
-            # Native FIXED and BALL joints retain their compact layouts while
-            # D6 no longer depends on those mode-specific row builders.
-            if classified_tag in ("FIXED", "BALL"):
+            # Keep D6 joints on the common D6 representation as their row
+            # layouts are migrated. Native joint types retain their compact
+            # modes.
+            if classified_tag in ("FIXED", "BALL", "REVOLUTE", "PRISMATIC"):
                 classified_tag = "GENERIC"
             if classified_tag is None:
                 if reduced_articulations and int(joint_articulation[j]) >= 0:

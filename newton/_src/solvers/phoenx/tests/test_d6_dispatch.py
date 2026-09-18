@@ -20,8 +20,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_GENERIC_D6,
     JOINT_MODE_PLANAR,
-    JOINT_MODE_PRISMATIC,
-    JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
 )
 
@@ -288,7 +286,7 @@ class TestD6Detection(unittest.TestCase):
         """Route revolute passive damping through its direct axial row."""
         model = _build_d6_pendulum_revolute_equivalent(free_angular_index=1, free_damping=4.0)
         solver = newton.solvers.SolverPhoenX(model, substeps=5)
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_REVOLUTE))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(int(solver._joint_constraints.drive_mode.numpy()[0]), int(DRIVE_MODE_OFF))
         self.assertEqual(solver._direct_equality_system.dynamic_joint_dofs[0], (4,))
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (6,))
@@ -345,9 +343,12 @@ class TestD6Detection(unittest.TestCase):
         self.assertAlmostEqual(float(data.lower.numpy()[0, 0]), -0.25, delta=1.0e-6)
         self.assertAlmostEqual(float(data.upper.numpy()[0, 0]), 0.30, delta=1.0e-6)
 
-    def test_d6_revolute_pattern_dispatches_to_revolute(self) -> None:
+    def test_d6_revolute_pattern_uses_common_d6_rows(self) -> None:
         model = _build_d6_pendulum_revolute_equivalent(free_angular_index=1)
-        self.assertEqual(self._joint_constraints_mode_for(model), int(JOINT_MODE_REVOLUTE))
+        solver = newton.solvers.SolverPhoenX(model, substeps=5)
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+        self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 3)
+        self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 2)
 
     def test_d6_revolute_pattern_picks_correct_free_axis(self) -> None:
         """The free angular axis can be at any of the 3 angular-sublist
@@ -355,14 +356,11 @@ class TestD6Detection(unittest.TestCase):
         vector regardless. Tests offset 0, 1, 2."""
         for free_idx in (0, 1, 2):
             with self.subTest(free_idx=free_idx):
-                model = _build_d6_pendulum_revolute_equivalent(free_angular_index=free_idx)
+                model = _build_d6_pendulum_revolute_equivalent(free_angular_index=free_idx, free_damping=1.0)
                 solver = newton.solvers.SolverPhoenX(model, substeps=5)
-                self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_REVOLUTE))
-                # joint_idx_to_dof_start must point at the free DoF.
-                # joint_qd_start == 0 for the only joint; free axis at
-                # offset (3 lin + free_idx).
-                expected_dof_start = 3 + free_idx
-                self.assertEqual(int(solver._joint_constraints.joint_idx_to_dof_start.numpy()[0]), expected_dof_start)
+                self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+                self.assertEqual(solver._direct_equality_system.dynamic_joint_dofs[0], (3 + free_idx,))
+                self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 2)
 
     def test_coord_layout_drive_uses_target_q_index(self) -> None:
         prev = newton.use_coord_layout_targets
@@ -393,7 +391,7 @@ class TestD6Detection(unittest.TestCase):
         self.assertEqual(int(solver._joint_constraints.drive_target_q_index.numpy()[0]), 7)
         self.assertAlmostEqual(float(solver._joint_constraints.target.numpy()[0]), 0.7, places=6)
 
-    def test_d6_prismatic_pattern_dispatches_to_prismatic(self) -> None:
+    def test_d6_prismatic_pattern_uses_common_d6_rows(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
@@ -411,7 +409,10 @@ class TestD6Detection(unittest.TestCase):
         j = builder.add_joint_d6(parent=-1, child=body, linear_axes=lin, angular_axes=ang)
         builder.add_articulation([j])
         model = builder.finalize()
-        self.assertEqual(self._joint_constraints_mode_for(model), int(JOINT_MODE_PRISMATIC))
+        solver = newton.solvers.SolverPhoenX(model, substeps=5)
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+        self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 2)
+        self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 3)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX D6 tests run on CUDA only")
