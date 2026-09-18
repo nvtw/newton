@@ -9,7 +9,7 @@ from unittest.mock import Mock
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import SingleWorldMassSplittingDispatcher
 
 
-def make_world(requires_projection=False):
+def make_world(requires_projection=False, solver_iterations=1):
     direct = SimpleNamespace(
         enabled=True,
         requires_global_projection=requires_projection,
@@ -25,8 +25,10 @@ def make_world(requires_projection=False):
         _maximal_tree_projector=None,
         _reduced_constraints_active_this_step=False,
         substep_dt=0.01,
-        solver_iterations=1,
+        solver_iterations=solver_iterations,
+        joint_refinement_iterations=0,
         _colored_contact_rows=False,
+        _color_group_data=None,
         _contact_container_solve=None,
         _partitioner=SimpleNamespace(begin_sweep=Mock()),
         _singleworld_kernels=Mock(return_value=(None,) * 6),
@@ -72,6 +74,14 @@ class TestBlockCopyRoundTrips(unittest.TestCase):
                 SingleWorldMassSplittingDispatcher(world).solve(100.0)
                 self.assertEqual(world._mass_splitting_broadcast.call_count, 3)
                 self.assertEqual(world._direct_equality_system.solve.call_count, 3)
+
+    def test_global_projection_runs_after_final_iteration_only(self):
+        """Keep mass-copy PGS iterations contiguous before exact projection."""
+        world = make_world(True, solver_iterations=3)
+        SingleWorldMassSplittingDispatcher(world).solve(100.0)
+        self.assertEqual(world._direct_equality_system.solve.call_count, 3)
+        self.assertEqual(world._mass_splitting_writeback.call_count, 2)
+        self.assertEqual(world._mass_splitting_broadcast.call_count, 3)
 
     def test_global_corrections_retain_copy_synchronization(self):
         """Preserve direct and finite-drive correction round trips."""

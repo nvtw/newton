@@ -111,11 +111,12 @@ class SingleWorldMassSplittingDispatcher:
                 contact_container=w._contact_container_solve,
             )
             w._mass_splitting_average_and_broadcast(inv_dt)
-            if direct is not None and direct.enabled:
+            # Keep the local PGS iterations contiguous.  Intermediate exact
+            # projections are superseded by the final projection and require
+            # another full body-copy round trip.
+            if direct is not None and direct.enabled and iteration == w.solver_iterations - 1:
                 w._mass_splitting_writeback(already_averaged=True)
-                direct.solve(use_bias=iteration == w.solver_iterations - 1)
-                if iteration + 1 < w.solver_iterations:
-                    w._mass_splitting_broadcast()
+                direct.solve(use_bias=True)
 
         # Keep each joint's original copy ownership and reconcile its paired
         # impulse before the next refinement or body writeback.
