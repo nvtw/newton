@@ -2685,6 +2685,7 @@ def _body_body_contact_damping_ignores_penalty_ramp(test, device):
         shape1 = wp.ones(4, dtype=int, device=device)
         point0 = wp.zeros(4, dtype=wp.vec3, device=device)
         point1 = wp.zeros(4, dtype=wp.vec3, device=device)
+        surface_velocity = wp.zeros(4, dtype=wp.vec3, device=device)
         offset0 = wp.zeros(4, dtype=wp.vec3, device=device)
         offset1 = wp.zeros(4, dtype=wp.vec3, device=device)
         normal = wp.array([[0.0, 0.0, 1.0]] * 4, dtype=wp.vec3, device=device)
@@ -2725,6 +2726,7 @@ def _body_body_contact_damping_ignores_penalty_ramp(test, device):
                 shape1,
                 point0,
                 point1,
+                surface_velocity,
                 offset0,
                 offset1,
                 normal,
