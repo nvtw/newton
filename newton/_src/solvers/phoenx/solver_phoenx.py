@@ -668,6 +668,7 @@ class PhoenXWorld:
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
         mass_splitting_color_group_size: int = 0,
+        joint_refinement_iterations: int = 0,
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
@@ -752,6 +753,8 @@ class PhoenXWorld:
                 the existing regular/overflow schedule. Requires one world,
                 ordinary point contacts, block joints, and no packed contacts,
                 sleeping, symmetric sweeps, deformables, or unrolled dispatch.
+            joint_refinement_iterations: Additional joint-only sweeps with mass-copy
+                reconciliation after the mixed iterations. Set by SolverPhoenX.
             partitioner_algorithm: ``"greedy"`` (default) constructs the
                 interaction graph, ``"endpoint_owner"`` uses adjacency-free
                 endpoint elections for single-world mass splitting, and
@@ -1024,6 +1027,7 @@ class PhoenXWorld:
             or mass_splitting_color_group_size < 0
         ):
             raise ValueError("mass_splitting_color_group_size must be a nonnegative integer")
+        self.joint_refinement_iterations = joint_refinement_iterations
         self.mass_splitting_color_group_size = mass_splitting_color_group_size
         if self.mass_splitting_color_group_size and (
             not mass_splitting
@@ -4786,7 +4790,7 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _color_group_sweep(self, head_kernel, idt, contact_container=None) -> None:
+    def _color_group_sweep(self, head_kernel, idt, contact_container=None, *, joint_only=False) -> None:
         """Sweep independent mass copies, keeping colors within each copy ordered."""
         heads = self._singleworld_kernels()[::2]
         phase = ("prepare", "iterate", "relax")[heads.index(head_kernel)]
@@ -4872,7 +4876,11 @@ class PhoenXWorld:
         ]
         if self._temporal_contact_state is None:
             kernel = get_color_group_sweep_kernel(
-                phase, soft_pd, cooperative_joints=cooperative_joints, temporal_springs=self._temporal_joint_springs
+                phase,
+                soft_pd,
+                cooperative_joints=cooperative_joints,
+                temporal_springs=self._temporal_joint_springs,
+                joint_only=joint_only,
             )
         else:
             if soft_pd:
