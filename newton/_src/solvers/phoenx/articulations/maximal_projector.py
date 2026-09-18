@@ -20,19 +20,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     read_vec3,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    _OFF_AXIS_WORLD,
-    _OFF_BIAS1,
-    _OFF_BIAS2,
     _OFF_LA1_B1,
     _OFF_LA1_B2,
     _OFF_LA2_B1,
     _OFF_LA2_B2,
-    _OFF_R1_B1,
-    _OFF_R1_B2,
-    _OFF_R2_B2,
-    _OFF_T1,
-    _OFF_T2,
-    JOINT_MODE_REVOLUTE,
 )
 from newton._src.solvers.phoenx.solver_phoenx_kernels import _rotation_quaternion
 
@@ -161,8 +152,11 @@ def _gather_maximal_tree_generalized_mass_kernel(
 @wp.kernel(enable_backward=False)
 def _gather_maximal_tree_kernel(
     use_bias: wp.bool,
-    joint_to_cid: wp.array[wp.int32],
-    constraints: ConstraintContainer,
+    joint_parent: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_qd_start: wp.array[wp.int32],
     bodies: BodyContainer,
     data: MaximalTreeProjectorData,
 ):
@@ -192,45 +186,30 @@ def _gather_maximal_tree_kernel(
 
     joint_shift = wp.vec3f(0.0)
     joint_motion = wp.spatial_vectorf(0.0)
-    affine_offset = wp.spatial_vectorf(0.0)
     if lane > wp.int32(0):
-        cid = joint_to_cid[joint]
-        r_parent = read_vec3(constraints, _OFF_R1_B1, cid)
-        r_child = read_vec3(constraints, _OFF_R1_B2, cid)
-        joint_shift = r_child - r_parent
-        axis = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
+        parent = joint_parent[joint] + wp.int32(1)
+        parent_orientation = bodies.orientation[parent]
+        child_orientation = bodies.orientation[body]
+        r_parent = wp.quat_rotate(
+            parent_orientation, wp.transform_get_translation(joint_x_p[joint]) - bodies.body_com[parent]
+        )
+        r_child = wp.quat_rotate(
+            child_orientation, wp.transform_get_translation(joint_x_c[joint]) - bodies.body_com[body]
+        )
+        axis = wp.normalize(
+            wp.quat_rotate(
+                parent_orientation * wp.transform_get_rotation(joint_x_p[joint]), joint_axis[joint_qd_start[joint]]
+            )
+        )
         linear_motion = wp.cross(r_child, axis)
+        joint_shift = r_child - r_parent
         joint_motion = wp.spatial_vectorf(
             linear_motion[0], linear_motion[1], linear_motion[2], axis[0], axis[1], axis[2]
         )
 
-        if use_bias:
-            bias1 = read_vec3(constraints, _OFF_BIAS1, cid)
-            bias2 = read_vec3(constraints, _OFF_BIAS2, cid)
-            tangent1 = read_vec3(constraints, _OFF_T1, cid)
-            tangent2 = read_vec3(constraints, _OFF_T2, cid)
-            target1 = -bias1
-            target2_tangent = -bias2[0] * tangent1 - bias2[1] * tangent2
-            target1_tangent = wp.dot(target1, tangent1) * tangent1 + wp.dot(target1, tangent2) * tangent2
-            tangent_delta = target2_tangent - target1_tangent
-            r2_child = read_vec3(constraints, _OFF_R2_B2, cid)
-            lever_length = wp.dot(r2_child - r_child, axis)
-            locked_angular = wp.vec3f(0.0, 0.0, 0.0)
-            if wp.abs(lever_length) > wp.float32(1.0e-8):
-                locked_angular = wp.cross(axis, tangent_delta) / lever_length
-            locked_linear = target1 + wp.cross(r_child, locked_angular)
-            affine_offset = wp.spatial_vectorf(
-                locked_linear[0],
-                locked_linear[1],
-                locked_linear[2],
-                locked_angular[0],
-                locked_angular[1],
-                locked_angular[2],
-            )
-
     data.shift[articulation, lane] = joint_shift
     data.motion[articulation, lane] = joint_motion
-    data.affine_offset[articulation, lane] = affine_offset
+    data.affine_offset[articulation, lane] = wp.spatial_vectorf(0.0)
 
 
 @wp.kernel(enable_backward=False)
@@ -292,8 +271,7 @@ def _gather_position_lane(
 
     Like :func:`_gather_maximal_tree_kernel` with ``use_bias=True`` except the
     input twist is zero and the affine targets are the FULL position errors
-    recomputed at the CURRENT (post-integrate) pose from body-local anchors —
-    the prepared ``r1_b1`` / ``bias1`` fields are stale after integration.
+    recomputed at the CURRENT (post-integrate) pose from body-local anchors.
     """
     joint = data.joint_index[articulation, lane]
     body = data.body_slot[articulation, lane]
@@ -324,8 +302,7 @@ def _gather_position_lane(
         p2_b1 = position1 + r2_b1
         p2_b2 = position2 + r2_b2
 
-        # Current-pose hinge axis: same anchor-pair construction the joint
-        # prepare pass uses for ``axis_world``.
+        # Reconstruct the current-pose hinge axis from its anchor pair.
         hinge_vec = p2_b2 - p1_b2
         hinge_len2 = wp.dot(hinge_vec, hinge_vec)
         axis = wp.vec3f(1.0, 0.0, 0.0)
@@ -591,13 +568,10 @@ def _project_maximal_tree_positions_kernel(
         _sync_tree()
 
 
-def find_full_coordinate_revolute_trees(
-    model: Model,
-    effective_joint_mode: np.ndarray,
-) -> tuple[tuple[int, ...], ...]:
+def find_full_coordinate_revolute_trees(model: Model) -> tuple[tuple[int, ...], ...]:
     """Find free-root revolute trees from enabled full-coordinate joints.
 
-    The graph, joint modes, body dynamics, and world ownership are the only
+    The graph, joint types, body dynamics, and world ownership are the only
     inputs. Newton articulation ranges are deliberately not consulted because
     they describe a reduced-coordinate decomposition and may omit loop-closing
     joints.
@@ -616,10 +590,6 @@ def find_full_coordinate_revolute_trees(
     )
     body_inv_mass = np.asarray(model.body_inv_mass.numpy())
     body_world = np.asarray(model.body_world.numpy(), dtype=np.int32)
-    effective_joint_mode = np.asarray(effective_joint_mode, dtype=np.int32)
-    if effective_joint_mode.shape != (joint_count,):
-        raise ValueError("effective_joint_mode must contain one entry per model joint")
-
     active = [joint for joint in range(joint_count) if joint_enabled[joint] and joint_child[joint] >= 0]
     adjacency: dict[int, list[int]] = {}
     candidate_bodies: set[int] = set()
@@ -684,7 +654,7 @@ def find_full_coordinate_revolute_trees(
         for joint in internal:
             parent = int(joint_parent[joint])
             child = int(joint_child[joint])
-            if int(effective_joint_mode[joint]) != int(JOINT_MODE_REVOLUTE) or child == root_body or child in incoming:
+            if int(joint_type[joint]) != int(JointType.REVOLUTE) or child == root_body or child in incoming:
                 supported = False
                 break
             incoming.add(child)
@@ -946,7 +916,16 @@ class MaximalTreeProjector:
             _gather_maximal_tree_kernel,
             dim=self.launch_dim,
             block_dim=self.block_dim,
-            inputs=[use_bias, self.joint_to_cid, self.constraints, self.bodies, self.data],
+            inputs=[
+                use_bias,
+                self.model.joint_parent,
+                self.model.joint_X_p,
+                self.model.joint_X_c,
+                self.model.joint_axis,
+                self.model.joint_qd_start,
+                self.bodies,
+                self.data,
+            ],
             device=self.model.device,
         )
         wp.launch(

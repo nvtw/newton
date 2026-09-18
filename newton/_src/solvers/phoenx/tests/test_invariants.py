@@ -104,6 +104,10 @@ class TestInvariants(unittest.TestCase):
             self.assertNotIn("_MUL_ACC_IMP", module_source)
             self.assertIn("reaction_wrench", module_source)
             self.assertIn("constraints", source)
+            self.assertNotIn("_OFF_R", module_source)
+            self.assertNotIn("_OFF_BIAS", module_source)
+            self.assertNotIn("_OFF_T1", module_source)
+            self.assertNotIn("_OFF_T2", module_source)
 
     def test_joint_columns_omit_bilateral_factor_caches(self) -> None:
         """Keep obsolete bilateral PGS caches out of joint columns."""
@@ -113,8 +117,17 @@ class TestInvariants(unittest.TestCase):
                 {
                     "structural_direct",
                     "mode_cache",
+                    "r1_b1",
+                    "r1_b2",
                     "r2_b1",
+                    "r2_b2",
                     "r3_b1",
+                    "r3_b2",
+                    "t1",
+                    "t2",
+                    "bias1",
+                    "bias2",
+                    "axis_world",
                     "hertz",
                     "mass_coeff",
                     "impulse_coeff",
@@ -132,7 +145,7 @@ class TestInvariants(unittest.TestCase):
                 }
             )
         )
-        self.assertLessEqual(JOINT_CONSTRAINT_DWORDS, 63)
+        self.assertLessEqual(JOINT_CONSTRAINT_DWORDS, 35)
 
     def test_joint_initialization_omits_legacy_d6_limits(self) -> None:
         """Keep angular limits in the common per-axis D6 representation."""

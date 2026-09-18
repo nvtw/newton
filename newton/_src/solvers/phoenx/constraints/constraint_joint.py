@@ -140,25 +140,13 @@ class JointConstraintData:
     local_anchor1_b2: wp.vec3f
     local_anchor2_b1: wp.vec3f
     local_anchor2_b2: wp.vec3f
-    # Runtime (per-substep) lever arms for the two shared anchors.
-    r1_b1: wp.vec3f
-    r1_b2: wp.vec3f
-    r2_b2: wp.vec3f
-    # Runtime tangent basis perpendicular to the current world joint axis.
-    t1: wp.vec3f
-    t2: wp.vec3f
-    # Runtime bias vectors retained by the experimental tree projector;
-    bias1: wp.vec3f
-    bias2: wp.vec3f
-    # Mode-specific extras, same alias trick. Ten dwords fit the larger
-    # prismatic layout.
+    # Mode-specific local state; both layouts use six dwords.
     #
-    # Prismatic (10 used): [0..2] local_anchor3_b1, [3..5] local_anchor3_b2,
-    #     [6..8] r3_b2, [9] bias3.
-    # Revolute  (6 used, 4 unused tail):
+    # Prismatic: [0..2] local_anchor3_b1, [3..5] local_anchor3_b2.
+    # Revolute:
     #     [0..3] inv_initial_orientation (quat),
     #     [4] revolution_counter, [5] previous_quaternion_angle.
-    mode_extras: wp.types.vector(length=10, dtype=wp.float32)
+    mode_extras: wp.types.vector(length=6, dtype=wp.float32)
     # ---- Free-coordinate inequality state ----------------------------
     # Body-1-local joint axis snapshot. Used by revolute for a
     # single-axis Jacobian (matching the standalone angular motor /
@@ -194,8 +182,6 @@ class JointConstraintData:
     # angular_limit / linear_limit sentinel).
     min_value: wp.float32
     max_value: wp.float32
-    # Cached world-frame joint axis from the most recent prepare-pass.
-    axis_world: wp.vec3f
     #: Opt-in per-column wall-clock accumulator (microseconds). See
     #: :func:`constraint_accumulate_time_us`.
     time_us: wp.float32
@@ -212,24 +198,15 @@ _OFF_LA1_B1 = wp.constant(dword_offset_of(JointConstraintData, "local_anchor1_b1
 _OFF_LA1_B2 = wp.constant(dword_offset_of(JointConstraintData, "local_anchor1_b2"))
 _OFF_LA2_B1 = wp.constant(dword_offset_of(JointConstraintData, "local_anchor2_b1"))
 _OFF_LA2_B2 = wp.constant(dword_offset_of(JointConstraintData, "local_anchor2_b2"))
-_OFF_R1_B1 = wp.constant(dword_offset_of(JointConstraintData, "r1_b1"))
-_OFF_R1_B2 = wp.constant(dword_offset_of(JointConstraintData, "r1_b2"))
-_OFF_R2_B2 = wp.constant(dword_offset_of(JointConstraintData, "r2_b2"))
-_OFF_T1 = wp.constant(dword_offset_of(JointConstraintData, "t1"))
-_OFF_T2 = wp.constant(dword_offset_of(JointConstraintData, "t2"))
-_OFF_BIAS1 = wp.constant(dword_offset_of(JointConstraintData, "bias1"))
-_OFF_BIAS2 = wp.constant(dword_offset_of(JointConstraintData, "bias2"))
-# Aliased mode-extras block. Prismatic packs anchor-3 / r3 / bias3;
-# revolute packs the twist-tracker scratch
+# Aliased mode-extras block. Prismatic packs anchor 3; revolute packs
+# the twist-tracker scratch
 # (inv_initial_orientation + revolution_counter + previous_quaternion_angle
 # = 6 dwords). Mutually exclusive, so they share one compact block.
 _OFF_MODE_EXTRAS = wp.constant(dword_offset_of(JointConstraintData, "mode_extras"))
-# Prismatic-only fields, dwords 0..9 of mode_extras:
+# Prismatic-only fields, dwords 0..5 of mode_extras:
 _OFF_LA3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
 _OFF_LA3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 3)
-_OFF_R3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
-_OFF_BIAS3 = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
-# Revolute / universal fields, dwords 0..5 of mode_extras (4 unused tail):
+# Revolute / universal fields, dwords 0..5 of mode_extras:
 _OFF_INV_INITIAL_ORIENTATION = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
 _OFF_REVOLUTION_COUNTER = wp.constant(int(_OFF_MODE_EXTRAS) + 4)
 _OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(int(_OFF_MODE_EXTRAS) + 5)
@@ -243,7 +220,6 @@ _OFF_STIFFNESS_DRIVE = wp.constant(dword_offset_of(JointConstraintData, "stiffne
 _OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(JointConstraintData, "damping_drive"))
 _OFF_MIN_VALUE = wp.constant(dword_offset_of(JointConstraintData, "min_value"))
 _OFF_MAX_VALUE = wp.constant(dword_offset_of(JointConstraintData, "max_value"))
-_OFF_AXIS_WORLD = wp.constant(dword_offset_of(JointConstraintData, "axis_world"))
 JOINT_CONSTRAINT_TIME_US_OFFSET = wp.constant(dword_offset_of(JointConstraintData, "time_us"))
 
 #: Total dword count of one unified joint constraint.
@@ -364,25 +340,14 @@ def joint_constraint_initialize_kernel(
     write_vec3(constraints, _OFF_LA2_B1, cid, la2_b1)
     write_vec3(constraints, _OFF_LA2_B2, cid, la2_b2)
 
-    zero3 = wp.vec3f(0.0, 0.0, 0.0)
-    write_vec3(constraints, _OFF_R1_B1, cid, zero3)
-    write_vec3(constraints, _OFF_R1_B2, cid, zero3)
-    write_vec3(constraints, _OFF_R2_B2, cid, zero3)
-    write_vec3(constraints, _OFF_T1, cid, zero3)
-    write_vec3(constraints, _OFF_T2, cid, zero3)
-    write_vec3(constraints, _OFF_BIAS1, cid, zero3)
-    write_vec3(constraints, _OFF_BIAS2, cid, zero3)
-
     # ``mode_extras`` block is mode-aliased: REVOLUTE / UNIVERSAL store the
     # twist-tracker scratch (inv_initial_orientation, revolution_counter,
     # previous_quaternion_angle); PRISMATIC / FIXED store the
-    # anchor-3 snapshot + bias3. Writing both layouts
+    # anchor-3 snapshot. Writing both layouts
     # unconditionally would clobber the alias, so we branch.
     if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED:
         write_vec3(constraints, _OFF_LA3_B1, cid, la3_b1)
         write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
-        write_vec3(constraints, _OFF_R3_B2, cid, zero3)
-        write_float(constraints, _OFF_BIAS3, cid, 0.0)
     else:
         # REVOLUTE / BALL_SOCKET / UNIVERSAL: zero out the anchor-3 slots
         # via the twist-tracker layout.
@@ -404,7 +369,6 @@ def joint_constraint_initialize_kernel(
     write_float(constraints, _OFF_DAMPING_DRIVE, cid, damping_drive[tid])
     write_float(constraints, _OFF_MIN_VALUE, cid, min_value[tid])
     write_float(constraints, _OFF_MAX_VALUE, cid, max_value[tid])
-    write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
 
 
 # ---------------------------------------------------------------------------
@@ -444,23 +408,11 @@ def _joint_constraint_clear_reset_worlds_kernel(
     if world < wp.int32(0) or world >= dones.shape[0] or dones[world] <= wp.float32(0.5):
         return
 
-    zero3 = wp.vec3f(0.0, 0.0, 0.0)
-    write_vec3(constraints, _OFF_R1_B1, cid, zero3)
-    write_vec3(constraints, _OFF_R1_B2, cid, zero3)
-    write_vec3(constraints, _OFF_R2_B2, cid, zero3)
-    write_vec3(constraints, _OFF_T1, cid, zero3)
-    write_vec3(constraints, _OFF_T2, cid, zero3)
-    write_vec3(constraints, _OFF_BIAS1, cid, zero3)
-    write_vec3(constraints, _OFF_BIAS2, cid, zero3)
     mode = read_int(constraints, _OFF_JOINT_MODE, cid)
-    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED:
-        write_vec3(constraints, _OFF_R3_B2, cid, zero3)
-        write_float(constraints, _OFF_BIAS3, cid, wp.float32(0.0))
-    else:
+    if mode != JOINT_MODE_PRISMATIC and mode != JOINT_MODE_FIXED:
         write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, wp.int32(0))
         write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, wp.float32(0.0))
 
-    write_vec3(constraints, _OFF_AXIS_WORLD, cid, zero3)
     if constraints.d6.enabled != wp.int32(0):
         for row in range(6):
             constraints.d6.lower_impulse[cid, row] = wp.float32(0.0)
@@ -777,6 +729,10 @@ def joint_constraint_world_error_at(
     pos2 = bodies.position[b2]
 
     joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
+    axis_local1 = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
+    n_hat = wp.normalize(wp.quat_rotate(q1, axis_local1))
+    t1 = create_orthonormal(n_hat)
+    t2 = wp.cross(n_hat, t1)
 
     la1_b1 = read_vec3(constraints, base_offset + _OFF_LA1_B1, cid)
     la1_b2 = read_vec3(constraints, base_offset + _OFF_LA1_B2, cid)
@@ -784,9 +740,8 @@ def joint_constraint_world_error_at(
     p1_b2 = pos2 + wp.quat_rotate(q2, la1_b2)
     anchor1_drift = p1_b2 - p1_b1
 
-    # Anchor 2 tangent drift (revolute / prismatic only). Project onto
-    # the persisted tangent basis written by the last prepare pass; the
-    # basis is stable across substeps.
+    # Anchor 2 tangent drift (revolute / prismatic only), projected onto
+    # a current-pose basis perpendicular to the persisted body-local axis.
     drift_t1 = wp.float32(0.0)
     drift_t2 = wp.float32(0.0)
     if joint_mode != JOINT_MODE_BALL_SOCKET and joint_mode != JOINT_MODE_UNIVERSAL:
@@ -794,8 +749,6 @@ def joint_constraint_world_error_at(
         la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
         p2_b1 = pos1 + wp.quat_rotate(q1, la2_b1)
         p2_b2 = pos2 + wp.quat_rotate(q2, la2_b2)
-        t1 = read_vec3(constraints, base_offset + _OFF_T1, cid)
-        t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
         anchor2_drift = p2_b2 - p2_b1
         drift_t1 = wp.dot(t1, anchor2_drift)
         drift_t2 = wp.dot(t2, anchor2_drift)
@@ -823,13 +776,11 @@ def joint_constraint_world_error_at(
         # as the D6 linear-slider prepare rows). The axial sign matches the
         # prepare convention: slide > 0 when anchor 2 on body 2 has
         # moved past its rest position along the world axis.
-        axis_local1 = read_vec3(constraints, base_offset + _OFF_AXIS_LOCAL1, cid)
         rest_length = read_float(constraints, base_offset + _OFF_REST_LENGTH, cid)
         la2_b1 = read_vec3(constraints, base_offset + _OFF_LA2_B1, cid)
         la2_b2 = read_vec3(constraints, base_offset + _OFF_LA2_B2, cid)
         p2_b1 = pos1 + wp.quat_rotate(q1, la2_b1)
         p2_b2 = pos2 + wp.quat_rotate(q2, la2_b2)
-        n_hat = wp.quat_rotate(q1, axis_local1)
         slide = wp.dot(n_hat, p2_b2 - p2_b1) - rest_length
         if drive_mode == DRIVE_MODE_POSITION:
             actuator_err = actuator_err + (slide - target)
@@ -839,14 +790,13 @@ def joint_constraint_world_error_at(
             elif slide < min_value:
                 actuator_err = actuator_err + (slide - min_value)
     elif joint_mode == JOINT_MODE_FIXED:
-        # Anchor-3 scalar drift along the persisted ``t2`` (the 6th
+        # Anchor-3 scalar drift along ``t2`` (the 6th
         # locked DoF). FIXED has no drive or limit. Report its sixth locked row in
         # the actuator slot for consistency with the other joint modes.
         la3_b1 = read_vec3(constraints, base_offset + _OFF_LA3_B1, cid)
         la3_b2 = read_vec3(constraints, base_offset + _OFF_LA3_B2, cid)
         p3_b1 = pos1 + wp.quat_rotate(q1, la3_b1)
         p3_b2 = pos2 + wp.quat_rotate(q2, la3_b2)
-        t2 = read_vec3(constraints, base_offset + _OFF_T2, cid)
         actuator_err = wp.dot(t2, p3_b2 - p3_b1)
 
     return wp.spatial_vector(anchor1_drift, wp.vec3f(drift_t1, drift_t2, actuator_err))
