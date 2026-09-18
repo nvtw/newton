@@ -833,6 +833,11 @@ class GlobalContactReducerData:
     # non-deterministic contact_id.
     deterministic: int
 
+    # Whether mesh/SDF reduction may retain the deepest contact in each
+    # mesh-local voxel. Normal-bin depth and spatial-extreme slots remain
+    # active when this is zero.
+    voxel_depth_enabled: int
+
 
 @wp.kernel(enable_backward=False)
 def _clear_active_kernel(
@@ -1025,6 +1030,7 @@ class GlobalContactReducer:
         hashtable_size_factor: float = 0.25,
         enable_contact_reclamation: bool = False,
         enable_reduction: bool = True,
+        voxel_depth_enabled: bool = True,
     ):
         """Initialize the global contact reducer.
 
@@ -1043,6 +1049,8 @@ class GlobalContactReducer:
                 by predictive contact reduction.
             enable_reduction: Allocate hashtable values and aggregate arrays.
                 Disable when the contact buffer is decoded without reduction.
+            voxel_depth_enabled: Retain deepest-per-voxel contacts in addition
+                to normal-bin depth and spatial-extreme contacts.
         """
         hashtable_size_factor = float(hashtable_size_factor)
         if not hashtable_size_factor > 0.0:
@@ -1081,6 +1089,7 @@ class GlobalContactReducer:
         self.hashtable_size_factor = hashtable_size_factor
         self.enable_contact_reclamation = enable_contact_reclamation
         self.enable_reduction = enable_reduction
+        self.voxel_depth_enabled = bool(voxel_depth_enabled)
 
         self.values_per_key = NUM_SPATIAL_DIRECTIONS + 1
 
@@ -1267,6 +1276,7 @@ class GlobalContactReducer:
         data.ht_capacity = self.hashtable.capacity
         data.ht_values_per_key = self.values_per_key
         data.deterministic = 1 if self.deterministic else 0
+        data.voxel_depth_enabled = 1 if self.voxel_depth_enabled else 0
         return data
 
     def advance_export_epoch(self):
@@ -1689,8 +1699,9 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
     # available; deleting a speculative key after publication would race with
     # concurrent threads that have already found it.
     entry_idx = hashtable_find_or_insert(key, reducer_data.ht_keys, reducer_data.ht_active_slots)
+    use_voxel_depth = use_inner and reducer_data.voxel_depth_enabled != 0
     voxel_entry_idx = -1
-    if use_inner:
+    if use_voxel_depth:
         voxel_entry_idx = hashtable_find(voxel_key, reducer_data.ht_keys)
 
     might_win = False
@@ -1710,9 +1721,9 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
                 max_depth_probe = _make_contact_value_fast(-depth, 0, 0)
             if slot_values[wp.static(NUM_SPATIAL_DIRECTIONS)] < max_depth_probe:
                 might_win = True
-            if voxel_entry_idx >= 0 and voxel_slot_value < max_depth_probe:
+            if use_voxel_depth and voxel_entry_idx >= 0 and voxel_slot_value < max_depth_probe:
                 might_win = True
-            if voxel_entry_idx < 0:
+            if use_voxel_depth and voxel_entry_idx < 0:
                 might_win = True
 
         for dir_i in range(wp.static(NUM_SPATIAL_DIRECTIONS)):
@@ -1723,7 +1734,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
                 might_win = True
     else:
         wp.atomic_add(reducer_data.ht_insert_failures, 0, 1)
-        if voxel_entry_idx >= 0:
+        if use_voxel_depth and voxel_entry_idx >= 0:
             if deterministic != 0:
                 voxel_probe = _make_preprune_probe_det(-depth, fingerprint)
             else:
@@ -1771,7 +1782,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
                 won_mask |= 1 << dir_i
                 replaced_values[dir_i] = previous_value
 
-    if use_inner and voxel_entry_idx >= 0:
+    if use_voxel_depth and voxel_entry_idx >= 0:
         provisional_value = make_contact_value(-depth, fingerprint, 0, deterministic)
         previous_value = reduction_try_update_slot(
             voxel_entry_idx, voxel_local_slot, provisional_value, reducer_data.ht_values, ht_capacity
@@ -1780,7 +1791,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
             won_mask |= 1 << wp.static(NUM_SPATIAL_DIRECTIONS + 1)
             replaced_values[wp.static(NUM_SPATIAL_DIRECTIONS + 1)] = previous_value
 
-    voxel_entry_missing = use_inner and voxel_entry_idx < 0
+    voxel_entry_missing = use_voxel_depth and voxel_entry_idx < 0
     if won_mask == 0 and not voxel_entry_missing:
         return -1
 
@@ -1802,7 +1813,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
 
     if (
         not still_wins
-        and use_inner
+        and use_voxel_depth
         and voxel_entry_idx >= 0
         and (won_mask & (1 << wp.static(NUM_SPATIAL_DIRECTIONS + 1))) != 0
     ):
@@ -1842,7 +1853,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
                     reducer_data.ht_values,
                     ht_capacity,
                 )
-        if use_inner and voxel_entry_idx >= 0 and (won_mask & (1 << wp.static(NUM_SPATIAL_DIRECTIONS + 1))) != 0:
+        if use_voxel_depth and voxel_entry_idx >= 0 and (won_mask & (1 << wp.static(NUM_SPATIAL_DIRECTIONS + 1))) != 0:
             provisional_value = make_contact_value(-depth, fingerprint, 0, deterministic)
             reduction_rollback_slot(
                 voxel_entry_idx,
@@ -1872,7 +1883,7 @@ def _export_and_reduce_contact_centered_two_spatial_depths(
             value = make_spatial_contact_value(score, use_priority, fingerprint, contact_id, deterministic)
             reduction_update_slot(entry_idx, dir_i, value, reducer_data.ht_values, ht_capacity)
 
-    if use_inner:
+    if use_voxel_depth:
         if voxel_entry_idx < 0:
             voxel_entry_idx = hashtable_find_or_insert(voxel_key, reducer_data.ht_keys, reducer_data.ht_active_slots)
         if voxel_entry_idx >= 0:
