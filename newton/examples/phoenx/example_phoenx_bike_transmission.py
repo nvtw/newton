@@ -22,9 +22,23 @@ from newton.solvers import SolverPhoenX
 
 ASSETS = Path(newton.examples.get_asset_directory()) / "bike_transmission"
 
+STEEL_DENSITY = 7850.0
+ALUMINUM_DENSITY = 2700.0
+DEFAULT_DENSITY = 1000.0
+CHAIN_JOINT_FRICTION = 1.0e-5
+
 
 def _transform(values):
     return wp.transform(values[:3], values[3:])
+
+
+def _body_density(label):
+    """Return the SI density for parts with a known source material."""
+    if "/Chain/" in label:
+        return STEEL_DENSITY
+    if label.endswith(("/FrontGears", "/BackGears")) or "SmallGear" in label:
+        return ALUMINUM_DENSITY
+    return DEFAULT_DENSITY
 
 
 def _load_mesh(path, roughness):
@@ -51,7 +65,7 @@ def _load_mesh(path, roughness):
     )
 
 
-def build_scene(*, sdf_resolution=0, motor_off=False):
+def build_scene(*, sdf_resolution=0, motor_off=False, chain_joint_friction=CHAIN_JOINT_FRICTION):
     """Build the authored closed mechanism with SDF mesh collisions in SI units."""
     scene = SCENE
     builder = newton.ModelBuilder(gravity=tuple(scene["gravity"]))
@@ -69,8 +83,9 @@ def build_scene(*, sdf_resolution=0, motor_off=False):
                     cache_dir=str(Path(tempfile.gettempdir()) / "newton_bike_transmission_sdf"),
                 )
             meshes[key] = mesh
+        body_label = scene["bodies"][shape["body"]]["label"]
         cfg = newton.ModelBuilder.ShapeConfig(
-            density=1000.0 if shape["collision"] else 0.0,
+            density=_body_density(body_label) if shape["collision"] else 0.0,
             mu=0.5,
             margin=0.0,
             gap=0.0005,
@@ -106,6 +121,7 @@ def build_scene(*, sdf_resolution=0, motor_off=False):
             actuator_mode=mode,
             effort_limit=float("inf"),
             velocity_limit=float("inf"),
+            friction=chain_joint_friction if "/Chain/" in joint["label"] else 0.0,
             limit_lower=joint["lower"],
             limit_upper=joint["upper"],
             collision_filter_parent=True,
@@ -120,6 +136,8 @@ def build_scene(*, sdf_resolution=0, motor_off=False):
 class Example:
     """Drive the chain and sprockets using mesh contacts and authored revolute joints."""
 
+    overlap_simulation_render = True
+
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.sim_time = 0.0
@@ -127,11 +145,13 @@ class Example:
         self.frame_dt = 1.0 / 60.0
         if args.substeps < 1 or args.iterations < 1:
             raise ValueError("substeps and iterations must be positive")
-        if args.contact_chunk_size < 0:
-            raise ValueError("contact chunk size must be nonnegative")
-        self.model = build_scene(sdf_resolution=args.sdf_resolution, motor_off=args.motor_off).finalize(
-            skip_validation_joints=True
-        )
+        if args.contact_chunk_size < 0 or args.chain_joint_friction < 0.0:
+            raise ValueError("contact chunk size and chain joint friction must be nonnegative")
+        self.model = build_scene(
+            sdf_resolution=args.sdf_resolution,
+            motor_off=args.motor_off,
+            chain_joint_friction=args.chain_joint_friction,
+        ).finalize(skip_validation_joints=True)
         self.state = self.model.state()
         self.control = self.model.control()
         self.pipeline = newton.CollisionPipeline(
@@ -167,6 +187,52 @@ class Example:
                 self.simulate()
             self.graph = capture.graph
 
+        overlap = self.overlap_simulation_render and self.viewer.supports_simulation_render_overlap
+        self._render_states = (self.model.state(), self.model.state()) if overlap else None
+        self._render_state_done = tuple(
+            wp.Event(self.model.device) if self.model.device.is_cuda else None for _ in range(2)
+        )
+        self._render_contacts = [None, None]
+        self._render_contact_snapshot = None
+        self._render_state_index = 0
+        self._render_state_prepared = False
+        self._render_time = self.sim_time
+
+    def prepare_render_state(self):
+        """Copy a device-resident pose snapshot before asynchronous physics."""
+        self._render_state_index = 1 - self._render_state_index
+        done = self._render_state_done[self._render_state_index]
+        if done is not None:
+            wp.wait_event(done)
+        wp.copy(self._render_states[self._render_state_index].body_q, self.state.body_q)
+        self._render_contact_snapshot = None
+        if self.viewer.show_contacts:
+            contacts = self._render_contacts[self._render_state_index]
+            if contacts is None:
+                contacts = newton.Contacts(
+                    self.contacts.rigid_contact_max,
+                    0,
+                    device=self.contacts.device,
+                    requested_attributes={"force"} if self.contacts.force is not None else None,
+                )
+                self._render_contacts[self._render_state_index] = contacts
+            for name in (
+                "rigid_contact_count",
+                "rigid_contact_shape0",
+                "rigid_contact_shape1",
+                "rigid_contact_point0",
+                "rigid_contact_point1",
+                "rigid_contact_offset0",
+                "rigid_contact_normal",
+                "force",
+            ):
+                source = getattr(self.contacts, name)
+                if source is not None:
+                    wp.copy(getattr(contacts, name), source)
+            self._render_contact_snapshot = contacts
+        self._render_time = self.sim_time
+        self._render_state_prepared = True
+
     def simulate(self):
         for _ in range(2):
             dt = self.frame_dt / 2
@@ -190,10 +256,18 @@ class Example:
             )
 
     def render(self):
-        self.viewer.begin_frame(self.sim_time)
-        self.viewer.log_state(self.state)
-        self.viewer.log_contacts(self.contacts, self.state)
+        state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state
+        self.viewer.begin_frame(self._render_time if self._render_state_prepared else self.sim_time)
+        self.viewer.log_state(state)
+        contacts = self._render_contact_snapshot if self._render_state_prepared else self.contacts
+        if contacts is not None or not self.viewer.show_contacts:
+            self.viewer.log_contacts(contacts if contacts is not None else self.contacts, state)
+        if self._render_state_prepared:
+            done = self._render_state_done[self._render_state_index]
+            if done is not None:
+                wp.record_event(done)
         self.viewer.end_frame()
+        self._render_state_prepared = False
 
     def test_post_step(self):
         """Check attachment and hinge errors twice per simulated second."""
@@ -238,7 +312,7 @@ class Example:
             help="Maximum contact rows per solver column (0 keeps whole shape pairs).",
         )
         parser.add_argument("--iterations", type=int, default=2, help="Solver iterations per physics substep.")
-        parser.add_argument("--substeps", type=int, default=16, help="Physics substeps per 120 Hz contact refresh.")
+        parser.add_argument("--substeps", type=int, default=14, help="Physics substeps per 120 Hz contact refresh.")
         parser.add_argument(
             "--sdf-voxel-depth-contacts",
             action=argparse.BooleanOptionalAction,
@@ -249,6 +323,12 @@ class Example:
             "--sdf-resolution", type=int, default=0, help="Override source SDF resolutions (0 uses authored values)."
         )
         parser.add_argument("--motor-off", action="store_true", help="Disable the crank drive for passive diagnostics.")
+        parser.add_argument(
+            "--chain-joint-friction",
+            type=float,
+            default=CHAIN_JOINT_FRICTION,
+            help="Coulomb friction torque at each chain pin in N m.",
+        )
         return parser
 
 

@@ -8,15 +8,36 @@ import numpy as np
 import warp as wp
 
 from newton.examples.phoenx.bike_transmission_scene import SCENE
-from newton.examples.phoenx.example_phoenx_bike_transmission import ASSETS, Example, _load_mesh, _transform
+from newton.examples.phoenx.example_phoenx_bike_transmission import (
+    ALUMINUM_DENSITY,
+    ASSETS,
+    CHAIN_JOINT_FRICTION,
+    STEEL_DENSITY,
+    Example,
+    _body_density,
+    _load_mesh,
+    _transform,
+)
 
 
 class TestBikeTransmission(unittest.TestCase):
     def test_measured_solver_defaults(self):
         """Keep the validated low-work solver configuration."""
         args = Example.create_parser().parse_args([])
-        self.assertEqual(args.substeps, 16)
+        self.assertEqual(args.substeps, 14)
         self.assertEqual(args.iterations, 2)
+
+    def test_physical_materials_and_pin_friction(self):
+        """Use SI material densities and a small chain-pin Coulomb torque."""
+        self.assertEqual(_body_density("/World/Xform/Chain/A0"), STEEL_DENSITY)
+        self.assertEqual(_body_density("/World/Xform/FrontGears"), ALUMINUM_DENSITY)
+        self.assertEqual(_body_density("/World/Xform/BackGears"), ALUMINUM_DENSITY)
+        self.assertEqual(
+            _body_density("/World/Xform/Changer/RD_R9250_CAGE/UpperSmallGearCOMPOUND037"),
+            ALUMINUM_DENSITY,
+        )
+        self.assertEqual(CHAIN_JOINT_FRICTION, 1.0e-5)
+        self.assertTrue(Example.overlap_simulation_render)
 
     def test_joint_frames_and_closed_chain(self):
         """Preserve the closed 120-link chain and coincident hinge frames."""
