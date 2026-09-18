@@ -17,7 +17,6 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_OFF,
-    JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_GENERIC_D6,
     JOINT_MODE_PLANAR,
@@ -225,7 +224,7 @@ class TestD6Detection(unittest.TestCase):
         self.assertEqual(int(direct.generic_angular_count.numpy()[0]), 3)
         np.testing.assert_array_equal(direct.topology.row_local, np.arange(6, dtype=np.int32))
 
-    def test_d6_ball_pattern_dispatches_to_ball_socket(self) -> None:
+    def test_d6_ball_pattern_uses_common_d6_rows(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
@@ -243,9 +242,9 @@ class TestD6Detection(unittest.TestCase):
         j = builder.add_joint_d6(parent=-1, child=body, linear_axes=lin, angular_axes=ang)
         builder.add_articulation([j])
         model = builder.finalize()
-        self.assertEqual(self._joint_constraints_mode_for(model), int(JOINT_MODE_BALL_SOCKET))
+        self.assertEqual(self._joint_constraints_mode_for(model), int(JOINT_MODE_GENERIC_D6))
 
-    def test_d6_angular_only_ball_dispatches_to_ball_socket(self) -> None:
+    def test_d6_angular_only_ball_uses_common_d6_rows(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
@@ -258,7 +257,7 @@ class TestD6Detection(unittest.TestCase):
         j = builder.add_joint_d6(parent=-1, child=body, angular_axes=ang)
         builder.add_articulation([j])
         model = builder.finalize()
-        self.assertEqual(self._joint_constraints_mode_for(model), int(JOINT_MODE_BALL_SOCKET))
+        self.assertEqual(self._joint_constraints_mode_for(model), int(JOINT_MODE_GENERIC_D6))
 
     def test_d6_ball_passive_damping_uses_direct_rows(self) -> None:
         """Route every free ball-axis damping term through a direct row."""
@@ -280,7 +279,7 @@ class TestD6Detection(unittest.TestCase):
         builder.add_articulation([j])
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5)
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_BALL_SOCKET))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(int(solver._joint_constraints.drive_mode.numpy()[0]), int(DRIVE_MODE_OFF))
         self.assertEqual(solver._direct_equality_system.dynamic_joint_dofs[0], (3, 4, 5))
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (6,))
