@@ -13,8 +13,6 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_BALL_SOCKET,
-    JOINT_MODE_CARTESIAN,
-    JOINT_MODE_CARTESIAN_PLANE,
     JOINT_MODE_GENERIC_D6,
     joint_constraint_clear_reset_worlds,
 )
@@ -305,7 +303,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
         self.assertEqual(int(solver.world.constraints.d6.row_axis.numpy()[0, 0]), 0)
 
-    def test_two_axis_cartesian_d6_uses_four_direct_rows(self) -> None:
+    def test_two_axis_cartesian_d6_uses_common_rows(self) -> None:
         """Preserve only the two authored Cartesian translation directions."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
         body = _make_body(builder)
@@ -324,7 +322,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         )
         direct = solver._direct_equality_system
 
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_CARTESIAN_PLANE))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(direct.topology.dimensions, (4,))
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
 
@@ -342,7 +340,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         np.testing.assert_allclose(final_qd[:2], initial_qd[0, :2], rtol=1.0e-4, atol=1.0e-4)
         np.testing.assert_allclose(final_qd[2:], 0.0, rtol=0.0, atol=2.0e-4)
 
-    def test_three_axis_cartesian_d6_uses_three_direct_rows(self) -> None:
+    def test_three_axis_cartesian_d6_uses_common_rows(self) -> None:
         """Lock rotation while leaving all Cartesian translations free."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         body = _make_body(builder)
@@ -356,7 +354,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5, solver_iterations=2, articulation_mode="maximal")
 
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_CARTESIAN))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (3,))
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
 
@@ -483,7 +481,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             solver_iterations=8,
             articulation_mode="maximal",
         )
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_CARTESIAN_PLANE))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 1)
 
         state_0 = model.state()

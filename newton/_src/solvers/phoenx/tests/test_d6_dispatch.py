@@ -17,9 +17,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_OFF,
-    JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_GENERIC_D6,
-    JOINT_MODE_PLANAR,
 )
 
 _FPS = 240
@@ -528,10 +526,12 @@ class TestD6Cylindrical(unittest.TestCase):
     * Stay locked in the 4 perpendicular DoFs (no perpendicular
       translation, no off-axis rotation)."""
 
-    def test_dispatches_to_cylindrical_mode(self) -> None:
+    def test_cylindrical_uses_common_d6_rows(self) -> None:
         model = _build_d6_cylindrical_piston()
         solver = newton.solvers.SolverPhoenX(model, substeps=5)
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_CYLINDRICAL))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+        self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 2)
+        self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 2)
 
     def test_body_translates_and_rotates_only_along_axis(self) -> None:
         """Seed a body with linear velocity along Z and angular velocity
@@ -846,14 +846,26 @@ def _build_d6_planar_puck(
     )
     builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.02, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
 
+    normal_direction = np.asarray(normal, dtype=np.float32)
+    normal_direction /= np.linalg.norm(normal_direction)
+    reference = np.eye(3, dtype=np.float32)[int(np.argmin(np.abs(normal_direction)))]
+    plane_directions = [np.cross(normal_direction, reference), np.zeros(3, dtype=np.float32)]
+    plane_directions[0] /= np.linalg.norm(plane_directions[0])
+    plane_directions[1] = np.cross(normal_direction, plane_directions[0])
+    plane_index = 0
     lin_axes = []
     for k in range(3):
         if k == locked_lin_index:
             lin_axes.append(newton.ModelBuilder.JointDofConfig(axis=normal, limit_lower=1.0, limit_upper=-1.0))
         else:
             lin_axes.append(
-                newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0), limit_lower=-1.0e6, limit_upper=1.0e6)
+                newton.ModelBuilder.JointDofConfig(
+                    axis=tuple(plane_directions[plane_index]),
+                    limit_lower=-1.0e6,
+                    limit_upper=1.0e6,
+                )
             )
+            plane_index += 1
     ang_axes = []
     for k in range(3):
         if k == free_ang_index:
@@ -886,10 +898,12 @@ class TestD6Planar(unittest.TestCase):
     * Stay locked in pitch / roll (rotation perpendicular to the normal = 0).
     """
 
-    def test_dispatches_to_planar_mode(self) -> None:
+    def test_planar_uses_common_d6_rows(self) -> None:
         model = _build_d6_planar_puck()
         solver = newton.solvers.SolverPhoenX(model, substeps=5)
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_PLANAR))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+        self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 1)
+        self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 2)
 
     def test_body_stays_in_plane_with_free_in_plane_motion(self) -> None:
         """Seed a puck with linear velocity in the plane (X+Y) and
@@ -988,7 +1002,7 @@ class TestD6GenericFallback(unittest.TestCase):
         self._assert_velocity_subspace(model, solver, (2, 3))
 
     # Planar pattern with parallel locked-lin and free-ang axes is now
-    # supported via JOINT_MODE_PLANAR -- see :class:`TestD6Planar`.
+    # supported by common D6 rows -- see :class:`TestD6Planar`.
 
     def test_planar_pattern_with_nonparallel_axes_uses_generic_d6(self) -> None:
         """Use common generic rows when planar-pattern axes differ."""
