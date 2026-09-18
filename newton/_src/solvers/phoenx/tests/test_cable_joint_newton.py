@@ -10,9 +10,8 @@ common D6 rows with the right material stiffness and damping wiring.
 The rows preserve Newton's authored stretch, shear, bend, and twist gains.
 The tests assert (a) the rigid ball-socket holds
 the parent and child attachments coincident under load and (b) the
-user-supplied isotropic bend stiffness produces a measurable
-restoring torque on the rotation between the two bodies, scaling
-correctly with the bend gain.
+user-supplied bend and twist stiffnesses produce restoring torques on the
+corresponding rotations between the two bodies.
 """
 
 from __future__ import annotations
@@ -223,6 +222,27 @@ class TestNewtonCableAdapter(unittest.TestCase):
         for _ in range(40):
             expected = 9.81 * math.cos(expected) / stiffness
         self.assertAlmostEqual(measured, expected, delta=2.0e-3)
+
+    def test_cable_twist_stiffness_restores_rest_angle(self) -> None:
+        """Restore axial twist while a zero-stiffness rod retains it."""
+        initial_twist = 0.35
+
+        def final_twist(stiffness: float) -> float:
+            model, solver = _two_body_cable_world(
+                bend_stiffness=0.0,
+                bend_damping=0.0,
+                twist_stiffness=stiffness,
+                twist_damping=2.0,
+                gravity=(0.0, 0.0, 0.0),
+            )
+            body_q = model.body_q.numpy()
+            body_q[1, 3:7] = (0.0, 0.0, math.sin(0.5 * initial_twist), math.cos(0.5 * initial_twist))
+            model.body_q.assign(body_q)
+            body_q = _step_n(model, solver, frames=240, dt=1.0 / 240.0)
+            return 2.0 * math.atan2(abs(float(body_q[1, 5])), abs(float(body_q[1, 6])))
+
+        self.assertAlmostEqual(final_twist(0.0), initial_twist, delta=2.0e-3)
+        self.assertLess(final_twist(30.0), 2.0e-3)
 
     def test_cable_preserves_authored_curved_rest_state(self) -> None:
         """Preserve a non-straight cable rest orientation without external load."""
