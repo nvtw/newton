@@ -27,13 +27,9 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
-    JOINT_MODE_CARTESIAN,
-    JOINT_MODE_CARTESIAN_PLANE,
-    JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_DISTANCE,
     JOINT_MODE_FIXED,
     JOINT_MODE_GENERIC_D6,
-    JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
@@ -543,58 +539,6 @@ def build_joint_init_arrays(
             bend_kd = float(target_kd[bend_qd]) if (target_kd is not None and bend_qd < len(target_kd)) else 0.0
             stiff_drive = bend_ke
             damp_drive = bend_kd
-        elif d6_mode_tag in ("CARTESIAN_PLANE", "CARTESIAN"):
-            phoenx_mode = (
-                int(JOINT_MODE_CARTESIAN_PLANE) if d6_mode_tag == "CARTESIAN_PLANE" else int(JOINT_MODE_CARTESIAN)
-            )
-            lin_free = [i for i, locked in enumerate(locked_lin) if not locked]
-            linear_axes = np.asarray([joint_axis[qd_start + i] for i in lin_free], dtype=np.float32)
-            linear_rank = int(np.linalg.matrix_rank(linear_axes, tol=1.0e-6))
-            if linear_rank != len(lin_free):
-                raise NotImplementedError(f"Cartesian D6 joint {j} has linearly dependent translation axes.")
-        elif d6_mode_tag in ("CYLINDRICAL", "PLANAR"):
-            phoenx_mode = int(JOINT_MODE_CYLINDRICAL) if d6_mode_tag == "CYLINDRICAL" else int(JOINT_MODE_PLANAR)
-            lin_free = [i for i, locked in enumerate(locked_lin) if not locked]
-            ang_free = [i for i, locked in enumerate(locked_ang) if not locked]
-            angular_axis = np.asarray(joint_axis[qd_start + n_lin + ang_free[0]], dtype=np.float32)
-            angular_length = _norm3_np(angular_axis)
-            if angular_length <= 1.0e-12:
-                raise NotImplementedError(f"D6 joint {j} has a zero-length free angular axis.")
-            angular_axis /= angular_length
-
-            if d6_mode_tag == "CYLINDRICAL":
-                linear_axis = np.asarray(joint_axis[qd_start + lin_free[0]], dtype=np.float32)
-                linear_length = _norm3_np(linear_axis)
-                if linear_length <= 1.0e-12:
-                    raise NotImplementedError(f"D6 joint {j} has a zero-length free linear axis.")
-                linear_axis /= linear_length
-                if abs(float(np.dot(linear_axis, angular_axis))) < 1.0 - 1.0e-4:
-                    phoenx_mode = int(JOINT_MODE_GENERIC_D6)
-                axis_local = linear_axis
-            else:
-                axis_local = angular_axis
-                locked_linear = [i for i, locked in enumerate(locked_lin) if locked]
-                if locked_linear:
-                    linear_axis = np.asarray(joint_axis[qd_start + locked_linear[0]], dtype=np.float32)
-                    linear_length = _norm3_np(linear_axis)
-                    if linear_length <= 1.0e-12:
-                        raise NotImplementedError(f"D6 joint {j} has a zero-length locked plane-normal axis.")
-                    linear_axis /= linear_length
-                    if abs(float(np.dot(linear_axis, angular_axis))) < 1.0 - 1.0e-4:
-                        phoenx_mode = int(JOINT_MODE_GENERIC_D6)
-                    axis_local = linear_axis
-                else:
-                    for linear_index in lin_free:
-                        linear_axis = np.asarray(joint_axis[qd_start + linear_index], dtype=np.float32)
-                        linear_length = _norm3_np(linear_axis)
-                        if (
-                            linear_length <= 1.0e-12
-                            or abs(float(np.dot(linear_axis / linear_length, axis_local))) > 1.0e-4
-                        ):
-                            phoenx_mode = int(JOINT_MODE_GENERIC_D6)
-
-            axis_world = _quat_rotate_np(X_w_p[3:], axis_local)
-            anchor2_world = anchor1_world + axis_world
         elif d6_mode_tag == "UNIVERSAL":
             phoenx_mode = int(JOINT_MODE_UNIVERSAL)
             if d6_locked_axis_offset >= 0:

@@ -64,13 +64,9 @@ __all__ = [
     "JOINT_CONSTRAINT_TIME_US_OFFSET",
     "JOINT_MODE_BALL_SOCKET",
     "JOINT_MODE_CABLE",
-    "JOINT_MODE_CARTESIAN",
-    "JOINT_MODE_CARTESIAN_PLANE",
-    "JOINT_MODE_CYLINDRICAL",
     "JOINT_MODE_DISTANCE",
     "JOINT_MODE_FIXED",
     "JOINT_MODE_GENERIC_D6",
-    "JOINT_MODE_PLANAR",
     "JOINT_MODE_PRISMATIC",
     "JOINT_MODE_REVOLUTE",
     "JOINT_MODE_UNIVERSAL",
@@ -108,12 +104,6 @@ JOINT_MODE_CABLE = wp.constant(wp.int32(4))
 #: twist axis. D6-dispatched universal joints may also carry angular
 #: limit rows on their two free axes.
 JOINT_MODE_UNIVERSAL = wp.constant(wp.int32(5))
-JOINT_MODE_CYLINDRICAL = wp.constant(wp.int32(6))
-JOINT_MODE_PLANAR = wp.constant(wp.int32(7))
-#: Cartesian translation joint with two free in-plane linear axes.
-JOINT_MODE_CARTESIAN_PLANE = wp.constant(wp.int32(8))
-#: Cartesian translation joint with all three linear axes free.
-JOINT_MODE_CARTESIAN = wp.constant(wp.int32(9))
 #: Radial distance interval. This mode has no bilateral structural rows.
 JOINT_MODE_DISTANCE = wp.constant(wp.int32(10))
 #: Generic D6 whose locked row basis is precomputed by the direct solver.
