@@ -587,6 +587,9 @@ def build_joint_init_arrays(
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
+        if common_d6_rows and effective_jtype is not newton.JointType.DISTANCE:
+            phoenx_mode = int(JOINT_MODE_GENERIC_D6)
+
         # Init joint coord for this joint's first DOF. BALL/FIXED publish 0 to
         # keep the per-joint array length aligned with the joint constraint column array.
         q_start_idx = int(joint_q_start[j])

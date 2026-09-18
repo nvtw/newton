@@ -15,11 +15,6 @@ from newton._src.solvers.phoenx.articulations.direct_equality import (
     _dynamic_joint_masks,
     _effective_joint_axes,
 )
-from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    JOINT_MODE_FIXED,
-    JOINT_MODE_PRISMATIC,
-    JOINT_MODE_REVOLUTE,
-)
 
 
 def _host_array(values, dtype):
@@ -56,14 +51,14 @@ class TestDirectSetup(unittest.TestCase):
         """Gather common axial joint axes and retain the fixed-joint default."""
         model = SimpleNamespace(
             joint_count=3,
+            joint_type=_host_array((JointType.REVOLUTE, JointType.PRISMATIC, JointType.FIXED), np.int32),
             joint_axis=_host_array(((0.0, 3.0, 0.0), (0.0, 0.0, -2.0)), np.float32),
             joint_qd_start=_host_array((0, 1, 2), np.int32),
             joint_dof_dim=_host_array(((0, 1), (1, 0), (0, 0)), np.int32),
             joint_limit_lower=_host_array((-np.inf, -np.inf), np.float32),
             joint_limit_upper=_host_array((np.inf, np.inf), np.float32),
         )
-        modes = np.asarray((JOINT_MODE_REVOLUTE, JOINT_MODE_PRISMATIC, JOINT_MODE_FIXED), dtype=np.int32)
-        axes = _effective_joint_axes(model, modes, np.asarray((0, 1, 2), dtype=np.int32))
+        axes = _effective_joint_axes(model, np.asarray((0, 1, 2), dtype=np.int32))
         np.testing.assert_allclose(axes, ((0.0, 1.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, 0.0)))
 
     def test_dynamic_rows_reuse_drive_masks(self) -> None:
@@ -78,14 +73,13 @@ class TestDirectSetup(unittest.TestCase):
             joint_armature=_host_array((0.0, 1.0), np.float32),
             joint_damping=_host_array((0.0, 0.0), np.float32),
         )
-        modes = np.asarray((JOINT_MODE_REVOLUTE, JOINT_MODE_PRISMATIC), dtype=np.int32)
         dof_start = np.asarray((0, 1), dtype=np.int32)
         excluded = np.zeros(2, dtype=bool)
         drive = np.asarray((True, False))
         bounded = np.asarray((True, False))
 
-        dynamic, direct_drive, bounded_drive = _dynamic_joint_masks(model, modes, dof_start, excluded, drive, bounded)
-        dynamic_dofs = _active_dynamic_dofs(model, modes, dof_start, excluded, drive)
+        dynamic, direct_drive, bounded_drive = _dynamic_joint_masks(model, dof_start, excluded, drive, bounded)
+        dynamic_dofs = _active_dynamic_dofs(model, dof_start, excluded, drive)
         np.testing.assert_array_equal(dynamic, (True, True))
         np.testing.assert_array_equal(direct_drive, (True, False))
         np.testing.assert_array_equal(bounded_drive, (True, False))

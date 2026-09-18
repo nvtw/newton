@@ -12,7 +12,6 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_GENERIC_D6,
     joint_constraint_clear_reset_worlds,
 )
@@ -140,7 +139,7 @@ class TestD6DirectDispatch(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
         data = solver.world.constraints.d6
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_BALL_SOCKET))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(int(data.row_count.numpy()[0]), 3)
         np.testing.assert_array_equal(data.row_axis.numpy()[0, :3], [0, 1, 2])
         np.testing.assert_allclose(data.lower.numpy()[0, :3], lower[:3], atol=1.0e-6)
