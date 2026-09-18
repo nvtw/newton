@@ -1001,6 +1001,15 @@ contact accuracy are still being investigated.
       <br><code>python -m newton.examples phoenx_analog_digital_clock</code>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_caterpillar.jpg" alt="PhoenX Caterpillar excavator">
+      <br><b>Caterpillar excavator</b>
+      <br><code>python -m newton.examples phoenx_caterpillar</code>
+    </td>
+    <td align="center" width="33%"></td>
+    <td align="center" width="33%"></td>
+  </tr>
 </table>
 
 ### Example Options
