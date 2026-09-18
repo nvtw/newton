@@ -1,17 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Newton-side ``JointType.CABLE`` -> PhoenX ``JointMode.CABLE`` adapter
-tests.
+"""Newton rod material-row tests for the PhoenX common D6 path.
 
-This module exercises the PhoenX cable constraint analytically and checks
-the adapter glue: that
-:meth:`ModelBuilder.add_joint_cable` survives ``model.finalize()`` and
-lands on PhoenX's cable mode with the right anchor / stiffness /
-damping wiring.
+This module exercises the PhoenX rod constraint analytically and checks that
+:meth:`ModelBuilder.add_joint_rod` survives ``model.finalize()`` and lands on
+common D6 rows with the right material stiffness and damping wiring.
 
-PhoenX has no axial-length compliance, so Newton's stretch DoF is
-treated as rigid. The tests assert (a) the rigid ball-socket holds
+The rows preserve Newton's authored stretch, shear, bend, and twist gains.
+The tests assert (a) the rigid ball-socket holds
 the parent and child attachments coincident under load and (b) the
 user-supplied isotropic bend stiffness produces a measurable
 restoring torque on the rotation between the two bodies, scaling
@@ -27,15 +24,19 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    JOINT_MODE_CABLE,
-)
+from newton._src.solvers.phoenx.constraints.constraint_joint import JOINT_MODE_GENERIC_D6
 
 
 def _two_body_cable_world(
     *,
     bend_stiffness: float,
     bend_damping: float,
+    stretch_stiffness: float = 1.0e9,
+    stretch_damping: float = 0.0,
+    shear_stiffness: float | None = None,
+    shear_damping: float | None = None,
+    twist_stiffness: float | None = None,
+    twist_damping: float | None = None,
     gravity: tuple[float, float, float] = (0.0, 0.0, -9.81),
     rest_bend: float = 0.0,
 ) -> tuple[newton.Model, newton.solvers.SolverPhoenX]:
@@ -79,17 +80,21 @@ def _two_body_cable_world(
     )
     mb.add_shape_box(bob, hx=0.05, hy=0.05, hz=0.05, cfg=box_cfg)
 
-    cable = mb.add_joint_cable(
+    cable = mb.add_joint_rod(
         parent=anchor,
         child=bob,
         parent_xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
         child_xform=(
             wp.transform_identity() if bob_at_anchor else wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity())
         ),
-        stretch_stiffness=1.0e9,
-        stretch_damping=0.0,
+        stretch_stiffness=stretch_stiffness,
+        stretch_damping=stretch_damping,
+        shear_stiffness=shear_stiffness,
+        shear_damping=shear_damping,
         bend_stiffness=float(bend_stiffness),
         bend_damping=float(bend_damping),
+        twist_stiffness=twist_stiffness,
+        twist_damping=twist_damping,
     )
     mb.add_articulation([cable])
 
@@ -121,27 +126,56 @@ def _step_n(model: newton.Model, solver: newton.solvers.SolverPhoenX, frames: in
 
 @unittest.skipUnless(
     wp.get_preferred_device().is_cuda,
-    "PhoenX cable tests run on CUDA only (graph-capture path).",
+    "PhoenX rod tests run on CUDA only (graph-capture path).",
 )
 class TestNewtonCableAdapter(unittest.TestCase):
-    """Verify ``add_joint_cable`` -> PhoenX cable wiring."""
+    """Verify Newton rod material behavior on common PhoenX D6 rows."""
 
     def test_cable_constructs_without_error(self) -> None:
-        """``add_joint_cable`` must build a valid solver column."""
+        """``add_joint_rod`` must build a valid solver column."""
         model, solver = _two_body_cable_world(bend_stiffness=10.0, bend_damping=0.5)
         self.assertEqual(int(model.joint_count), 2)  # FIXED + CABLE
         types = model.joint_type.numpy()
-        self.assertIn(int(newton.JointType.CABLE), types.tolist())
+        self.assertIn(int(newton.JointType.ROD), types.tolist())
         self.assertEqual(int(solver._joint_constraints.num_joint_columns), 2)
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (12,))
         np.testing.assert_array_equal(solver.world._joint_pgs_enabled.numpy(), [0, 0])
 
-    def test_phoenx_cable_mode_id_set(self) -> None:
-        """The descriptor for the Newton cable joint must end up
-        tagged as PhoenX :data:`JOINT_MODE_CABLE`."""
+    def test_phoenx_rod_uses_common_d6_rows(self) -> None:
+        """Rod material rows use the common maximal-coordinate D6 path."""
         _model, solver = _two_body_cable_world(bend_stiffness=10.0, bend_damping=0.5)
         modes = solver._joint_constraints.joint_mode.numpy()
-        self.assertIn(int(JOINT_MODE_CABLE), modes.tolist())
+        self.assertIn(int(JOINT_MODE_GENERIC_D6), modes.tolist())
+
+    def test_rod_d6_rows_preserve_material_slots_and_momentum(self) -> None:
+        """Map all four material slots without introducing an impulse couple."""
+        model, solver = _two_body_cable_world(
+            stretch_stiffness=101.0,
+            stretch_damping=11.0,
+            shear_stiffness=202.0,
+            shear_damping=22.0,
+            bend_stiffness=303.0,
+            bend_damping=33.0,
+            twist_stiffness=404.0,
+            twist_damping=44.0,
+        )
+        direct = solver._direct_equality_system
+        direct.refresh_geometry(wp.float32(1000.0))
+        wp.synchronize_device(model.device)
+
+        np.testing.assert_allclose(direct.row_stiffness.numpy()[1], [101.0, 202.0, 202.0, 404.0, 303.0, 303.0])
+        np.testing.assert_allclose(direct.row_damping.numpy()[1], [11.0, 22.0, 22.0, 44.0, 33.0, 33.0])
+        wrench0 = direct.row_wrench0.numpy()[1]
+        wrench1 = direct.row_wrench1.numpy()[1]
+        np.testing.assert_allclose(wrench0[:, :3] + wrench1[:, :3], 0.0, atol=1.0e-7)
+        body_position = solver.bodies.position.numpy()
+        world_torque = (
+            wrench0[:, 3:]
+            + np.cross(body_position[1], wrench0[:, :3])
+            + wrench1[:, 3:]
+            + np.cross(body_position[2], wrench1[:, :3])
+        )
+        np.testing.assert_allclose(world_torque, 0.0, atol=1.0e-7)
 
     def test_cable_holds_attachment_under_gravity(self) -> None:
         """Rigid ball-socket: under gravity the bob may swing about

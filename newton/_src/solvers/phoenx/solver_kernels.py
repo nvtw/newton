@@ -389,7 +389,7 @@ def _apply_joint_forces_kernel(
     type = joint_type[tid]
     if not joint_enabled[tid]:
         return
-    if type == JointType.FIXED or type == JointType.CABLE:
+    if type == JointType.FIXED or type == JointType.ROD:
         return
 
     id_c = joint_child[tid]

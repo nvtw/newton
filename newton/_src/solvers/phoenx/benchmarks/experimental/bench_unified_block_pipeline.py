@@ -51,7 +51,6 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_JOINT_MODE,
     JOINT_MODE_BALL_SOCKET,
-    JOINT_MODE_CABLE,
     JOINT_MODE_FIXED,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
@@ -83,7 +82,6 @@ _JOINT_MODE_REVOLUTE_HOST = int(JOINT_MODE_REVOLUTE)
 _JOINT_MODE_PRISMATIC_HOST = int(JOINT_MODE_PRISMATIC)
 _JOINT_MODE_BALL_SOCKET_HOST = int(JOINT_MODE_BALL_SOCKET)
 _JOINT_MODE_FIXED_HOST = int(JOINT_MODE_FIXED)
-_JOINT_MODE_CABLE_HOST = int(JOINT_MODE_CABLE)
 _JOINT_MODE_UNIVERSAL_HOST = int(JOINT_MODE_UNIVERSAL)
 _JOINT_MODE_OFFSET_HOST = int(_OFF_JOINT_MODE)
 
@@ -1378,8 +1376,6 @@ def _ops_for_joint_mode(mode: int) -> tuple[int, ...]:
         return (_OP_POINT3_HOST,)
     if mode == _JOINT_MODE_FIXED_HOST:
         return (_OP_POINT3_HOST, _OP_ANGULAR3_HOST, _OP_SCALAR_LINEAR_HOST)
-    if mode == _JOINT_MODE_CABLE_HOST:
-        return (_OP_POINT3_HOST, _OP_ANGULAR3_HOST, _OP_SCALAR_ANGULAR_HOST)
     if mode == _JOINT_MODE_UNIVERSAL_HOST:
         return (_OP_POINT3_HOST, _OP_SCALAR_ANGULAR_HOST)
     return (_OP_POINT3_HOST,)

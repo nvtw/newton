@@ -19,7 +19,6 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_BALL_SOCKET,
-    JOINT_MODE_CABLE,
     JOINT_MODE_FIXED,
     JOINT_MODE_GENERIC_D6,
     JOINT_MODE_PRISMATIC,
@@ -137,7 +136,7 @@ def _build_all_joint_types() -> tuple[newton.Model, dict[str, tuple[int, int]]]:
         child=parent,
         parent_xform=wp.transform(wp.vec3(x, 0.0, 0.0), wp.quat_identity()),
     )
-    cable = builder.add_joint_cable(
+    cable = builder.add_joint_rod(
         parent=parent,
         child=child,
         parent_xform=wp.transform_identity(),
@@ -447,7 +446,7 @@ class TestDirectJointTypes(unittest.TestCase):
             "universal": int(JOINT_MODE_GENERIC_D6),
             "cylindrical": int(JOINT_MODE_GENERIC_D6),
             "planar": int(JOINT_MODE_GENERIC_D6),
-            "cable": int(JOINT_MODE_CABLE),
+            "cable": int(JOINT_MODE_GENERIC_D6),
         }
         for kind, expected_mode in expected_modes.items():
             with self.subTest(kind=kind):

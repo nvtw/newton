@@ -43,7 +43,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_STIFFNESS_DRIVE,
     _OFF_TARGET,
     _OFF_TARGET_VELOCITY,
-    JOINT_MODE_CABLE,
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs import allocate_contact_tgs, export_contact_wrenches
 from newton._src.solvers.phoenx.constraints.d6_joint_data import build_d6_inequality_data
@@ -452,7 +451,7 @@ class SolverPhoenX(SolverBase):
             )
             reduced_supported = (
                 declared_constraint_articulation
-                and not np.any(joint_types_for_mode == int(JointType.CABLE))
+                and not np.any(joint_types_for_mode == int(JointType.ROD))
                 and not multi_world_scheduler.startswith("block_world")
             )
             articulation_mode = "reduced" if reduced_supported else "maximal"
@@ -489,10 +488,10 @@ class SolverPhoenX(SolverBase):
             or has_deformables
             or contact_friction_model != "point"
             or step_layout != "single_world"
-            or np.any(joint_types == int(JointType.CABLE))
+            or np.any(joint_types == int(JointType.ROD))
         ):
             raise ValueError(
-                "joint_solver='block_pgs' requires single-world maximal rigid point contacts without cable joints"
+                "joint_solver='block_pgs' requires single-world maximal rigid point contacts without rod joints"
             )
         if solver_scheme == "tgs":
             if (
@@ -946,10 +945,10 @@ class SolverPhoenX(SolverBase):
             joint_target_start = np.full(int(model.joint_count), -1, dtype=np.int32)
             drive_joint_mask = active_joint & (effective_joint_dof_start >= 0)
             joint_target_start[drive_joint_mask] = effective_joint_target_start
-            cable_joint = effective_joint_mode == int(JOINT_MODE_CABLE)
-            if np.any(cable_joint):
-                effective_joint_dof_start[cable_joint] = model.joint_qd_start.numpy()[: int(model.joint_count)][
-                    cable_joint
+            material_joint = model.joint_type.numpy()[: int(model.joint_count)] == int(newton.JointType.ROD)
+            if np.any(material_joint):
+                effective_joint_dof_start[material_joint] = model.joint_qd_start.numpy()[: int(model.joint_count)][
+                    material_joint
                 ]
             equality_system_type = DirectEqualitySystem
             if joint_solver == "block_pgs":

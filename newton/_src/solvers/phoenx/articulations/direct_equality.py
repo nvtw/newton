@@ -34,7 +34,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_BALL_SOCKET,
-    JOINT_MODE_CABLE,
     JOINT_MODE_FIXED,
     JOINT_MODE_GENERIC_D6,
     JOINT_MODE_PRISMATIC,
@@ -120,7 +119,7 @@ def _default_joint_modes(joint_types: np.ndarray) -> np.ndarray:
     modes[joint_types == int(JointType.REVOLUTE)] = int(JOINT_MODE_REVOLUTE)
     modes[joint_types == int(JointType.PRISMATIC)] = int(JOINT_MODE_PRISMATIC)
     modes[joint_types == int(JointType.FIXED)] = int(JOINT_MODE_FIXED)
-    modes[joint_types == int(JointType.CABLE)] = int(JOINT_MODE_CABLE)
+    modes[joint_types == int(JointType.ROD)] = int(JOINT_MODE_GENERIC_D6)
     return modes
 
 
@@ -129,7 +128,7 @@ def _structural_row_count(mode: int) -> int:
         return 3
     if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
         return 5
-    if mode in (int(JOINT_MODE_FIXED), int(JOINT_MODE_CABLE)):
+    if mode == int(JOINT_MODE_FIXED):
         return 6
     return 0
 
@@ -146,6 +145,7 @@ def _generic_d6_constraint_bases(
     angular_count = np.zeros(joint_count, dtype=np.int32)
     structural_count = np.asarray([_structural_row_count(int(mode)) for mode in joint_mode], dtype=np.int32)
 
+    joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
     model_axes = np.asarray(model.joint_axis.numpy(), dtype=np.float32)
     qd_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
     dof_dim = np.asarray(model.joint_dof_dim.numpy(), dtype=np.int32)
@@ -174,6 +174,15 @@ def _generic_d6_constraint_bases(
         return basis
 
     for joint in np.flatnonzero(joint_mode == int(JOINT_MODE_GENERIC_D6)):
+        if joint_type[joint] == int(JointType.ROD):
+            # Rod DoFs are material-property slots rather than free motion
+            # axes. Emit its complete material frame as common D6 rows.
+            linear_axes[joint] = np.eye(3, dtype=np.float32)[[2, 0, 1]]
+            angular_axes[joint] = np.eye(3, dtype=np.float32)[[2, 0, 1]]
+            linear_count[joint] = 3
+            angular_count[joint] = 3
+            structural_count[joint] = 6
+            continue
         start = int(qd_start[joint])
         n_linear = int(dof_dim[joint, 0])
         n_angular = int(dof_dim[joint, 1])
@@ -588,13 +597,14 @@ def _prepare_direct_rows(
     generic_angular_axes: wp.array[wp.vec3],
     generic_linear_count: wp.array[wp.int32],
     generic_angular_count: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
     joint_dof_dim: wp.array2d[wp.int32],
     joint_x_p: wp.array[wp.transform],
     joint_x_c: wp.array[wp.transform],
-    cable_rest_relative_orientation: wp.array[wp.quat],
+    material_rest_relative_orientation: wp.array[wp.quat],
     joint_target_ke: wp.array[wp.float32],
     joint_target_kd: wp.array[wp.float32],
     bodies: BodyContainer,
@@ -638,7 +648,8 @@ def _prepare_direct_rows(
 
     # Evaluate paired linear impulses at one shared world point to avoid
     # artificial force couples when the anchors differ.
-    if mode == JOINT_MODE_GENERIC_D6:
+    material_rows = joint_type[joint] == wp.int32(JointType.ROD)
+    if mode == JOINT_MODE_GENERIC_D6 and not material_rows:
         # Linear axes rotate with the parent frame. Their derivative includes
         # the full anchor separation, including permitted sliding motion, in
         # the parent lever arm. Apply both impulses at the child anchor.
@@ -662,61 +673,16 @@ def _prepare_direct_rows(
             if wp.int32(axis_index) < linear_count:
                 direction = wp.quat_rotate(q0, generic_linear_axes[joint * wp.int32(3) + wp.int32(axis_index)])
                 error = wp.dot(point_error, direction)
-                _set_direct_point_row(
-                    structural_index,
-                    row,
-                    point0_com,
-                    point1_com,
-                    direction,
-                    error,
-                    bias_rate,
-                    row_wrench0,
-                    row_wrench1,
-                    row_bias,
-                )
-                row_error[structural_index, row] = error
-                row += wp.int32(1)
-        rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
-        angular_count = generic_angular_count[joint]
-        for axis_index in range(3):
-            if wp.int32(axis_index) < angular_count:
-                direction = wp.quat_rotate(q0, generic_angular_axes[joint * wp.int32(3) + wp.int32(axis_index)])
-                error = wp.dot(rotation_error, direction)
-                _set_angular_row(
-                    structural_index,
-                    row,
-                    direction,
-                    error,
-                    bias_rate,
-                    row_wrench0,
-                    row_wrench1,
-                    row_bias,
-                )
-                row_error[structural_index, row] = error
-                row += wp.int32(1)
-        return row
-
-    has_point_lock = (
-        mode == JOINT_MODE_BALL_SOCKET
-        or mode == JOINT_MODE_REVOLUTE
-        or mode == JOINT_MODE_FIXED
-        or mode == JOINT_MODE_CABLE
-    )
-    if has_point_lock:
-        if mode == JOINT_MODE_CABLE:
-            material_axis = wp.normalize(wp.quat_rotate(q0, wp.vec3(0.0, 0.0, 1.0)))
-            material_tangent0 = create_orthonormal(material_axis)
-            material_tangent1 = wp.cross(material_axis, material_tangent0)
-            for row in range(3):
-                direction = material_axis if row == 0 else (material_tangent0 if row == 1 else material_tangent1)
-                dof = joint_qd_start[joint] + (wp.int32(0) if row == 0 else wp.int32(1))
-                stiffness = joint_target_ke[dof]
-                damping = joint_target_kd[dof]
-                if stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
-                    error = wp.dot(point_error, direction)
+                stiffness = wp.float32(0.0)
+                damping = wp.float32(0.0)
+                if material_rows:
+                    dof = joint_qd_start[joint] + (wp.int32(0) if axis_index == 0 else wp.int32(1))
+                    stiffness = joint_target_ke[dof]
+                    damping = joint_target_kd[dof]
+                if not material_rows or stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
                     _set_direct_point_row(
                         structural_index,
-                        wp.int32(row),
+                        row,
                         point0_com,
                         point1_com,
                         direction,
@@ -729,23 +695,59 @@ def _prepare_direct_rows(
                     row_error[structural_index, row] = error
                     row_stiffness[structural_index, row] = stiffness
                     row_damping[structural_index, row] = damping
-        else:
-            for row in range(3):
-                direction = wp.vec3(0.0)
-                direction[row] = wp.float32(1.0)
-                _set_direct_point_row(
-                    structural_index,
-                    wp.int32(row),
-                    point0_com,
-                    point1_com,
-                    direction,
-                    point_error[row],
-                    bias_rate,
-                    row_wrench0,
-                    row_wrench1,
-                    row_bias,
-                )
-                row_error[structural_index, row] = point_error[row]
+                row += wp.int32(1)
+        rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
+        if material_rows:
+            rotation_error = _quat_log(
+                q1 * wp.quat_inverse(material_rest_relative_orientation[joint]) * wp.quat_inverse(q0)
+            )
+        angular_count = generic_angular_count[joint]
+        for axis_index in range(3):
+            if wp.int32(axis_index) < angular_count:
+                direction = wp.quat_rotate(q0, generic_angular_axes[joint * wp.int32(3) + wp.int32(axis_index)])
+                error = wp.dot(rotation_error, direction)
+                stiffness = wp.float32(0.0)
+                damping = wp.float32(0.0)
+                if material_rows:
+                    linear_dofs = joint_dof_dim[joint, 0]
+                    dof = joint_qd_start[joint] + linear_dofs + (wp.int32(1) if axis_index == 0 else wp.int32(0))
+                    stiffness = joint_target_ke[dof]
+                    damping = joint_target_kd[dof]
+                if not material_rows or stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
+                    _set_angular_row(
+                        structural_index,
+                        row,
+                        direction,
+                        error,
+                        bias_rate,
+                        row_wrench0,
+                        row_wrench1,
+                        row_bias,
+                    )
+                    row_error[structural_index, row] = error
+                    row_stiffness[structural_index, row] = stiffness
+                    row_damping[structural_index, row] = damping
+                row += wp.int32(1)
+        return row
+
+    has_point_lock = mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_FIXED
+    if has_point_lock:
+        for row in range(3):
+            direction = wp.vec3(0.0)
+            direction[row] = wp.float32(1.0)
+            _set_direct_point_row(
+                structural_index,
+                wp.int32(row),
+                point0_com,
+                point1_com,
+                direction,
+                point_error[row],
+                bias_rate,
+                row_wrench0,
+                row_wrench1,
+                row_bias,
+            )
+            row_error[structural_index, row] = point_error[row]
         if mode == JOINT_MODE_BALL_SOCKET:
             return wp.int32(3)
 
@@ -793,36 +795,6 @@ def _prepare_direct_rows(
         return wp.int32(5)
 
     rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
-    if mode == JOINT_MODE_CABLE:
-        rotation_error = _quat_log(q1 * wp.quat_inverse(cable_rest_relative_orientation[joint]) * wp.quat_inverse(q0))
-        material_axis = wp.normalize(wp.quat_rotate(q0, wp.vec3(0.0, 0.0, 1.0)))
-        material_tangent0 = create_orthonormal(material_axis)
-        material_tangent1 = wp.cross(material_axis, material_tangent0)
-        linear_count = joint_dof_dim[joint, 0]
-        for angular_row in range(3):
-            direction = (
-                material_axis if angular_row == 0 else (material_tangent0 if angular_row == 1 else material_tangent1)
-            )
-            dof = joint_qd_start[joint] + linear_count + (wp.int32(1) if angular_row == 0 else wp.int32(0))
-            stiffness = joint_target_ke[dof]
-            damping = joint_target_kd[dof]
-            if stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
-                row = wp.int32(angular_row + 3)
-                error = wp.dot(rotation_error, direction)
-                _set_angular_row(
-                    structural_index,
-                    row,
-                    direction,
-                    error,
-                    bias_rate,
-                    row_wrench0,
-                    row_wrench1,
-                    row_bias,
-                )
-                row_error[structural_index, row] = error
-                row_stiffness[structural_index, row] = stiffness
-                row_damping[structural_index, row] = damping
-        return wp.int32(6)
     if mode == JOINT_MODE_PRISMATIC:
         tangent0 = create_orthonormal(axis0)
         tangent1 = wp.cross(axis0, tangent0)
@@ -913,13 +885,14 @@ def get_prepare_direct_equality_rows_kernel(temporal_substeps: int | None = None
         generic_angular_axes: wp.array[wp.vec3],
         generic_linear_count: wp.array[wp.int32],
         generic_angular_count: wp.array[wp.int32],
+        joint_type: wp.array[wp.int32],
         joint_parent: wp.array[wp.int32],
         joint_child: wp.array[wp.int32],
         joint_qd_start: wp.array[wp.int32],
         joint_dof_dim: wp.array2d[wp.int32],
         joint_x_p: wp.array[wp.transform],
         joint_x_c: wp.array[wp.transform],
-        cable_rest_relative_orientation: wp.array[wp.quat],
+        material_rest_relative_orientation: wp.array[wp.quat],
         joint_target_ke: wp.array[wp.float32],
         joint_target_kd: wp.array[wp.float32],
         bodies: BodyContainer,
@@ -951,13 +924,14 @@ def get_prepare_direct_equality_rows_kernel(temporal_substeps: int | None = None
             generic_angular_axes,
             generic_linear_count,
             generic_angular_count,
+            joint_type,
             joint_parent,
             joint_child,
             joint_qd_start,
             joint_dof_dim,
             joint_x_p,
             joint_x_c,
-            cable_rest_relative_orientation,
+            material_rest_relative_orientation,
             joint_target_ke,
             joint_target_kd,
             bodies,
@@ -1711,11 +1685,12 @@ def _effective_joint_axes(
     return axes
 
 
-def _cable_rest_relative_orientations(model: Model, joint_mode: np.ndarray) -> np.ndarray:
-    """Snapshot each cable parent-to-child anchor rotation at zero strain."""
+def _material_rest_relative_orientations(model: Model, joint_mode: np.ndarray) -> np.ndarray:
+    """Snapshot each rod parent-to-child anchor rotation at zero strain."""
     rest = np.zeros((int(model.joint_count), 4), dtype=np.float32)
     rest[:, 3] = 1.0
     body_q = np.asarray(model.body_q.numpy(), dtype=np.float32)
+    joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
     joint_parent = np.asarray(model.joint_parent.numpy(), dtype=np.int32)
     joint_child = np.asarray(model.joint_child.numpy(), dtype=np.int32)
     joint_x_p = np.asarray(model.joint_X_p.numpy(), dtype=np.float32)
@@ -1734,7 +1709,7 @@ def _cable_rest_relative_orientations(model: Model, joint_mode: np.ndarray) -> n
             dtype=np.float32,
         )
 
-    for joint in np.flatnonzero(joint_mode == int(JOINT_MODE_CABLE)):
+    for joint in np.flatnonzero(joint_type == int(JointType.ROD)):
         parent = int(joint_parent[joint])
         child = int(joint_child[joint])
         q0 = joint_x_p[joint, 3:] if parent < 0 else multiply(body_q[parent, 3:], joint_x_p[joint, 3:])
@@ -1891,8 +1866,8 @@ class DirectEqualitySystem:
         )
         self.generic_linear_count = wp.array(generic_linear_count_np, dtype=wp.int32, device=device)
         self.generic_angular_count = wp.array(generic_angular_count_np, dtype=wp.int32, device=device)
-        self.cable_rest_relative_orientation = wp.array(
-            _cable_rest_relative_orientations(model, joint_mode),
+        self.material_rest_relative_orientation = wp.array(
+            _material_rest_relative_orientations(model, joint_mode),
             dtype=wp.quat,
             device=device,
         )
@@ -2075,10 +2050,12 @@ class DirectEqualitySystem:
         )
 
     def refresh_cable_rest_state(self) -> None:
-        """Refresh cable zero-strain rotations after joint or body pose edits."""
+        """Refresh rod zero-strain rotations after joint or body pose edits."""
         if not self.enabled:
             return
-        self.cable_rest_relative_orientation.assign(_cable_rest_relative_orientations(self.model, self._joint_mode_np))
+        self.material_rest_relative_orientation.assign(
+            _material_rest_relative_orientations(self.model, self._joint_mode_np)
+        )
 
     def set_control_targets(
         self,
@@ -2109,13 +2086,14 @@ class DirectEqualitySystem:
                 self.generic_angular_axes,
                 self.generic_linear_count,
                 self.generic_angular_count,
+                self.model.joint_type,
                 self.model.joint_parent,
                 self.model.joint_child,
                 self.effective_joint_dof_start,
                 self.model.joint_dof_dim,
                 self.model.joint_X_p,
                 self.model.joint_X_c,
-                self.cable_rest_relative_orientation,
+                self.material_rest_relative_orientation,
                 self.joint_target_ke,
                 self.joint_target_kd,
                 self.bodies,

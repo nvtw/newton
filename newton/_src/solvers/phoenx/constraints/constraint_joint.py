@@ -63,7 +63,6 @@ __all__ = [
     "JOINT_CONSTRAINT_DWORDS",
     "JOINT_CONSTRAINT_TIME_US_OFFSET",
     "JOINT_MODE_BALL_SOCKET",
-    "JOINT_MODE_CABLE",
     "JOINT_MODE_DISTANCE",
     "JOINT_MODE_FIXED",
     "JOINT_MODE_GENERIC_D6",
@@ -97,9 +96,6 @@ JOINT_MODE_BALL_SOCKET = wp.constant(wp.int32(2))
 #: Fixed (weld) joint: all six structural rows are solved by the direct
 #: mechanism system. It has no PGS inequality row.
 JOINT_MODE_FIXED = wp.constant(wp.int32(3))
-#: Cable joint: its structural spring-damper rows are solved by the direct
-#: mechanism system. It has no PGS inequality row.
-JOINT_MODE_CABLE = wp.constant(wp.int32(4))
 #: Universal (Hooke) joint: locks anchor translation and one angular
 #: twist axis. D6-dispatched universal joints may also carry angular
 #: limit rows on their two free axes.
@@ -399,10 +395,10 @@ def joint_constraint_initialize_kernel(
 
     # ``mode_extras`` block is mode-aliased: REVOLUTE / UNIVERSAL store the
     # twist-tracker scratch (inv_initial_orientation, revolution_counter,
-    # previous_quaternion_angle); PRISMATIC / FIXED / CABLE store the
+    # previous_quaternion_angle); PRISMATIC / FIXED store the
     # anchor-3 snapshot + bias3 + acc_imp3. Writing both layouts
     # unconditionally would clobber the alias, so we branch.
-    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED or mode == JOINT_MODE_CABLE:
+    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED:
         write_vec3(constraints, _OFF_LA3_B1, cid, la3_b1)
         write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
         write_vec3(constraints, _OFF_R3_B1, cid, zero3)
@@ -481,7 +477,7 @@ def _joint_constraint_clear_reset_worlds_kernel(
     write_vec3(constraints, _OFF_BIAS1, cid, zero3)
     write_vec3(constraints, _OFF_BIAS2, cid, zero3)
     mode = read_int(constraints, _OFF_JOINT_MODE, cid)
-    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED or mode == JOINT_MODE_CABLE:
+    if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED:
         write_vec3(constraints, _OFF_R3_B1, cid, zero3)
         write_vec3(constraints, _OFF_R3_B2, cid, zero3)
         constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, zero3)
@@ -786,12 +782,9 @@ def joint_constraint_world_wrench_at(
         acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
         force = acc1 * idt
         torque = wp.cross(r1_b2, acc1 * idt) - n_hat * (acc_limit * idt) - acc2 * idt
-    elif joint_mode == JOINT_MODE_FIXED or joint_mode == JOINT_MODE_CABLE:
-        # Same anchor layout (anchor-1 3-row + anchor-2 tangent 2-row +
-        # anchor-3 scalar 1-row); no axial block. CABLE's PD softness
-        # is already baked into the accumulated impulses, so the
-        # wrench reflects the actual reaction the joint applied this
-        # substep.
+    elif joint_mode == JOINT_MODE_FIXED:
+        # Fixed anchor layout: anchor-1 3-row + anchor-2 tangent 2-row +
+        # anchor-3 scalar 1-row, with no axial block.
         force = (acc1 + acc2 + acc3) * idt
         torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
     else:
@@ -927,13 +920,10 @@ def joint_constraint_world_error_at(
                 actuator_err = actuator_err + (slide - max_value)
             elif slide < min_value:
                 actuator_err = actuator_err + (slide - min_value)
-    elif joint_mode == JOINT_MODE_FIXED or joint_mode == JOINT_MODE_CABLE:
+    elif joint_mode == JOINT_MODE_FIXED:
         # Anchor-3 scalar drift along the persisted ``t2`` (the 6th
-        # locked DoF). FIXED has no drive / limit; CABLE has no axial
-        # drive / limit either (its bend / twist gains live in the
-        # drive / limit slots but enter the iterate as PD soft
-        # coefficients on the anchor-2 / anchor-3 rows). Reported in
-        # the "actuator" slot for consistency with FIXED.
+        # locked DoF). FIXED has no drive or limit. Report its sixth locked row in
+        # the actuator slot for consistency with the other joint modes.
         la3_b1 = read_vec3(constraints, base_offset + _OFF_LA3_B1, cid)
         la3_b2 = read_vec3(constraints, base_offset + _OFF_LA3_B2, cid)
         p3_b1 = pos1 + wp.quat_rotate(q1, la3_b1)

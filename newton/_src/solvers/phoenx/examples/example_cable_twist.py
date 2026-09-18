@@ -21,7 +21,7 @@ class Example(ExampleVBD):
     """Exact VBD cable-twist scene translated to PhoenX."""
 
     def create_solver(self):
-        """Use direct PhoenX cable equalities with PGS contacts."""
+        """Use common PhoenX D6 rod rows with PGS contacts."""
         return newton.solvers.SolverPhoenX(
             self.model,
             # The inherited frame loop supplies ten contact-refresh substeps.
