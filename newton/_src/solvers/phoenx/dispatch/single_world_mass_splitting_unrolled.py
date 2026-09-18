@@ -62,7 +62,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 direct.resolve_bounded_drives(idt, use_bias=True)
             w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
             if w._maximal_tree_projector is not None:
-                w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
+                w._maximal_tree_projector.project(use_bias=True)
                 w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
             if w._reduced_constraints_active_this_step:
                 w._reduced_articulation.solve_constraints(w, idt, relax=False)
@@ -105,7 +105,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             direct.resolve_bounded_drives(idt, use_bias=True)
         w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
         if w._maximal_tree_projector is not None:
-            w._maximal_tree_projector.project(use_bias=True, dt=w.substep_dt)
+            w._maximal_tree_projector.project(use_bias=True)
             w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
         if w._reduced_constraints_active_this_step:
             w._reduced_articulation.solve_constraints(w, idt, relax=False)
@@ -122,7 +122,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 direct.resolve_bounded_drives(idt, use_bias=False)
             w._solve_direct_contacts(use_bias=False, refresh_mobility=False)
             if w._maximal_tree_projector is not None:
-                w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
+                w._maximal_tree_projector.project(use_bias=False)
                 w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
             if w._reduced_constraints_active_this_step:
                 w._reduced_articulation.solve_constraints(w, idt, relax=True)
@@ -147,7 +147,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             direct.resolve_bounded_drives(idt, use_bias=False)
         w._solve_direct_contacts(use_bias=False, refresh_mobility=False)
         if w._maximal_tree_projector is not None:
-            w._maximal_tree_projector.project(use_bias=False, dt=w.substep_dt)
+            w._maximal_tree_projector.project(use_bias=False)
             w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
         if w._reduced_constraints_active_this_step:
             w._reduced_articulation.solve_constraints(w, idt, relax=True)
