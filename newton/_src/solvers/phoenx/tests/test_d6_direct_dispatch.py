@@ -16,8 +16,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_CARTESIAN,
     JOINT_MODE_CARTESIAN_PLANE,
     JOINT_MODE_GENERIC_D6,
-    JOINT_MODE_PRISMATIC,
-    JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
     joint_constraint_clear_reset_worlds,
 )
@@ -242,7 +240,7 @@ class TestD6DirectDispatch(unittest.TestCase):
                 self.assertLessEqual(abs(float(joint_q.numpy()[0])), 0.1005)
                 self.assertLessEqual(float(joint_q.numpy()[0] * joint_qd.numpy()[0]), 2.0e-4)
 
-    def test_angular_one_axis_d6_reduces_to_revolute(self) -> None:
+    def test_angular_one_axis_d6_uses_common_rows(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         body = _make_body(builder)
         axes = [
@@ -260,18 +258,26 @@ class TestD6DirectDispatch(unittest.TestCase):
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
 
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_REVOLUTE))
-        self.assertEqual(int(solver._joint_constraints.joint_idx_to_dof_start.numpy()[0]), 0)
-        self.assertAlmostEqual(float(solver._joint_constraints.target.numpy()[0]), 0.1, places=6)
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+        self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 3)
+        self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 2)
+        self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
+        self.assertEqual(int(solver.world.constraints.d6.row_axis.numpy()[0, 0]), 0)
 
-    def test_linear_one_axis_d6_reduces_to_prismatic(self) -> None:
+    def test_linear_one_axis_d6_uses_common_rows(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         body = _make_body(builder)
         axes = [newton.ModelBuilder.JointDofConfig(axis=(0.0, 0.0, 1.0), limit_lower=-0.2, limit_upper=0.3)]
         joint = builder.add_joint_d6(parent=-1, child=body, linear_axes=axes)
         builder.add_articulation([joint])
 
-        self.assertEqual(_mode_for(builder.finalize()), int(JOINT_MODE_PRISMATIC))
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+        self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 2)
+        self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 3)
+        self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
+        self.assertEqual(int(solver.world.constraints.d6.row_axis.numpy()[0, 0]), 0)
 
     def test_two_axis_cartesian_d6_uses_four_direct_rows(self) -> None:
         """Preserve only the two authored Cartesian translation directions."""
