@@ -22,6 +22,11 @@ import warp as wp
 if not wp.get_preferred_device().is_cuda:
     raise unittest.SkipTest("PhoenX tests require CUDA")
 
+from newton._src.solvers.phoenx.articulations.maximal_projector import MaximalTreeProjector, MaximalTreeProjectorData
+from newton._src.solvers.phoenx.articulations.maximal_projector_general import (
+    GeneralMaximalTreeProjector,
+    GeneralMaximalTreeProjectorData,
+)
 from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
@@ -81,6 +86,14 @@ def _make_kwargs(
 
 class TestInvariants(unittest.TestCase):
     """``_assert_invariants`` traps four classes of caller mistake."""
+
+    def test_maximal_projectors_omit_abandoned_drive_state(self) -> None:
+        """Keep the disabled single-axis drive prototype out of projector storage."""
+        for data_type in (MaximalTreeProjectorData, GeneralMaximalTreeProjectorData):
+            self.assertNotIn("drive_diag", data_type.vars)
+            self.assertNotIn("drive_bias", data_type.vars)
+        for projector_type in (MaximalTreeProjector, GeneralMaximalTreeProjector):
+            self.assertNotIn("dt", inspect.signature(projector_type.project).parameters)
 
     def test_joint_columns_omit_bilateral_factor_caches(self) -> None:
         """Keep obsolete bilateral PGS caches out of joint columns."""
