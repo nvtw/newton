@@ -72,7 +72,7 @@ def _build_model(num_links: int = NUM_LINKS) -> newton.Model:
     joints.append(root)
 
     for index in range(1, num_links):
-        joint = builder.add_joint_cable(
+        joint = builder.add_joint_rod(
             parent=bodies[index - 1],
             child=bodies[index],
             parent_xform=wp.transform(wp.vec3(0.0, 0.0, CAPSULE_HALF_HEIGHT), wp.quat_identity()),

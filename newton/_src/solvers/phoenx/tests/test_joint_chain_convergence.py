@@ -63,7 +63,7 @@ def _build_cantilever(
                 child_xform=child_xform,
             )
         else:
-            joint = builder.add_joint_cable(
+            joint = builder.add_joint_rod(
                 parent=parent,
                 child=child,
                 parent_xform=parent_xform,
@@ -191,7 +191,7 @@ class TestJointChainConvergence(unittest.TestCase):
         """Keep a rigid-bend cable within one millimetre of straight."""
         for layout in _STEP_LAYOUTS:
             with self.subTest(step_layout=layout):
-                cable_model = _build_cantilever(wp.get_preferred_device(), newton.JointType.CABLE)
+                cable_model = _build_cantilever(wp.get_preferred_device(), newton.JointType.ROD)
                 cable, cable_solver = _rollout(cable_model, layout=layout)
                 self.assertTrue(np.isfinite(cable.body_q.numpy()).all(), "non-finite cable pose")
                 self.assertEqual(cable_solver._direct_equality_system.topology.dimensions, (6 * NUM_LINKS,))

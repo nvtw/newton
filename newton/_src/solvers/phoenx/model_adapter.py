@@ -26,7 +26,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_POSITION,
     DRIVE_MODE_VELOCITY,
     JOINT_MODE_BALL_SOCKET,
-    JOINT_MODE_CABLE,
     JOINT_MODE_DISTANCE,
     JOINT_MODE_FIXED,
     JOINT_MODE_GENERIC_D6,
@@ -513,32 +512,8 @@ def build_joint_init_arrays(
                 max_val = hi if hi >= 0.0 else 1.0e10
         elif effective_jtype is newton.JointType.BALL:
             phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
-        elif effective_jtype is newton.JointType.CABLE:
-            phoenx_mode = int(JOINT_MODE_CABLE)
-            # Newton CABLE has 2 DoFs (linear stretch + isotropic angular bend/twist).
-            # PhoenX cable is a soft fixed joint (3+2+1 rows) with PD bend/twist; the
-            # axial bond is treated as rigid (PhoenX has no axial compliance) and
-            # Newton's isotropic angular gain feeds both bend AND twist slots.
-            # If anchor1 and anchor2 coincide, synthesize a 1 m offset along the
-            # joint X axis so the bend basis stays well-defined.
-            if child_idx >= 0:
-                X_w_c = _transform_multiply(
-                    np.asarray(body_q[child_idx], dtype=np.float32),
-                    np.asarray(joint_X_c[j], dtype=np.float32),
-                )
-            else:  # pragma: no cover
-                X_w_c = np.asarray(joint_X_c[j], dtype=np.float32)
-            anchor2_world = _transform_translation(X_w_c)
-            if _norm3_np(anchor2_world - anchor1_world) < 1e-6:
-                axis_world = _quat_rotate_np(X_w_p[3:], np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
-                anchor2_world = anchor1_world + axis_world
-
-            # Bend/twist gains live on the angular DoF (qd_start + 1).
-            bend_qd = qd_start + 1
-            bend_ke = float(target_ke[bend_qd]) if (target_ke is not None and bend_qd < len(target_ke)) else 0.0
-            bend_kd = float(target_kd[bend_qd]) if (target_kd is not None and bend_qd < len(target_kd)) else 0.0
-            stiff_drive = bend_ke
-            damp_drive = bend_kd
+        elif effective_jtype is newton.JointType.ROD:
+            phoenx_mode = int(JOINT_MODE_GENERIC_D6)
         elif d6_mode_tag == "UNIVERSAL":
             phoenx_mode = int(JOINT_MODE_UNIVERSAL)
             if d6_locked_axis_offset >= 0:
