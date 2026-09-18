@@ -41,6 +41,7 @@ class D6JointData:
     condense_translation: wp.array2d[wp.int32]
     revolution_counter: wp.array2d[wp.int32]
     previous_angle: wp.array2d[wp.float32]
+    reaction_wrench: wp.array[wp.spatial_vector]
     wrench0: wp.array2d[wp.spatial_vector]
     wrench1: wp.array2d[wp.spatial_vector]
     coordinate: wp.array2d[wp.float32]
@@ -212,6 +213,7 @@ def build_d6_inequality_data(
     data.condense_translation = wp.array(condense_translation_rows, dtype=wp.int32, device=device)
     data.revolution_counter = wp.zeros((cid_count, D6_AXIS_COUNT), dtype=wp.int32, device=device)
     data.previous_angle = wp.zeros((cid_count, D6_AXIS_COUNT), dtype=wp.float32, device=device)
+    data.reaction_wrench = wp.zeros(cid_count, dtype=wp.spatial_vector, device=device)
     data.wrench0 = wp.zeros((cid_count, D6_AXIS_COUNT), dtype=wp.spatial_vector, device=device)
     data.wrench1 = wp.zeros((cid_count, D6_AXIS_COUNT), dtype=wp.spatial_vector, device=device)
     data.coordinate = wp.zeros((cid_count, D6_AXIS_COUNT), dtype=wp.float32, device=device)

@@ -15,19 +15,11 @@ from newton._src.solvers.phoenx.articulations.maximal_projector import _solve_sp
 from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
-    constraint_read_multiplier,
-    constraint_read_multiplier_vec3,
-    constraint_write_multiplier,
-    constraint_write_multiplier_vec3,
     read_float,
     read_int,
     read_vec3,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    _MUL_ACC_IMP1,
-    _MUL_ACC_IMP2,
-    _MUL_ACC_IMP3,
-    _MUL_ACC_LIMIT,
     _OFF_AXIS_WORLD,
     _OFF_BIAS1,
     _OFF_BIAS2,
@@ -428,6 +420,7 @@ def _project_general_maximal_tree_thread(tid: wp.int32, data: GeneralMaximalTree
 @wp.func
 def _publish_general_maximal_tree_thread(
     tid: wp.int32,
+    use_bias: wp.bool,
     joint_to_cid: wp.array[wp.int32],
     constraints: ConstraintContainer,
     bodies: BodyContainer,
@@ -447,63 +440,11 @@ def _publish_general_maximal_tree_thread(
 
     joint = data.joint_index[articulation, lane]
     cid = joint_to_cid[joint]
-    mode = read_int(constraints, _OFF_JOINT_MODE, cid)
     impulse = data.reaction[articulation, lane]
-    linear = wp.vec3f(impulse[0], impulse[1], impulse[2])
-    angular = wp.vec3f(impulse[3], impulse[4], impulse[5])
-    r1 = read_vec3(constraints, _OFF_R1_B2, cid)
-
-    lambda1 = linear
-    lambda2 = wp.vec3f(0.0, 0.0, 0.0)
-    lambda3 = wp.vec3f(0.0, 0.0, 0.0)
-    if mode == JOINT_MODE_UNIVERSAL:
-        axis = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
-        locked_torque = angular - wp.cross(r1, linear)
-        constraint_write_multiplier(
-            constraints,
-            _MUL_ACC_LIMIT,
-            cid,
-            constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid) - wp.dot(axis, locked_torque),
-        )
-    elif mode == JOINT_MODE_REVOLUTE:
-        r2 = read_vec3(constraints, _OFF_R2_B2, cid)
-        axis = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
-        torque_after_r1 = angular - wp.cross(r1, linear)
-        lever_length = wp.dot(r2 - r1, axis)
-        if wp.abs(lever_length) > wp.float32(1.0e-8):
-            lambda2 = wp.cross(torque_after_r1, axis) / lever_length
-        lambda1 = linear - lambda2
-    elif mode == JOINT_MODE_FIXED or mode == JOINT_MODE_PRISMATIC:
-        r2 = read_vec3(constraints, _OFF_R2_B2, cid)
-        r3 = read_vec3(constraints, _OFF_R3_B2, cid)
-        tangent1 = read_vec3(constraints, _OFF_T1, cid)
-        tangent2 = read_vec3(constraints, _OFF_T2, cid)
-        mapping = _reaction_map(r2 - r1, r3 - r1, tangent1, tangent2)
-        coefficients = wp.inverse(mapping) @ (angular - wp.cross(r1, linear))
-        lambda2 = coefficients[0] * tangent1 + coefficients[1] * tangent2
-        lambda3 = coefficients[2] * tangent2
-        lambda1 = linear - lambda2 - lambda3
-
-    constraint_write_multiplier_vec3(
-        constraints,
-        _MUL_ACC_IMP1,
-        cid,
-        constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid) + lambda1,
-    )
-    if mode != JOINT_MODE_BALL_SOCKET and mode != JOINT_MODE_UNIVERSAL:
-        constraint_write_multiplier_vec3(
-            constraints,
-            _MUL_ACC_IMP2,
-            cid,
-            constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid) + lambda2,
-        )
-    if mode == JOINT_MODE_FIXED or mode == JOINT_MODE_PRISMATIC:
-        constraint_write_multiplier_vec3(
-            constraints,
-            _MUL_ACC_IMP3,
-            cid,
-            constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid) + lambda3,
-        )
+    if use_bias:
+        constraints.d6.reaction_wrench[cid] = impulse
+    else:
+        constraints.d6.reaction_wrench[cid] += impulse
 
 
 @wp.kernel(enable_backward=False)
@@ -519,7 +460,7 @@ def _project_general_maximal_tree_fused_kernel(
     _sync_warp()
     _project_general_maximal_tree_thread(tid, data)
     _sync_warp()
-    _publish_general_maximal_tree_thread(tid, joint_to_cid, constraints, bodies, data)
+    _publish_general_maximal_tree_thread(tid, use_bias, joint_to_cid, constraints, bodies, data)
 
 
 class GeneralMaximalTreeProjector:
