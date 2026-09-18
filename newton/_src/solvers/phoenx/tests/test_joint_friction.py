@@ -242,6 +242,52 @@ def _build_pendulum(
 
 
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX joint-friction tests run on CUDA only")
+class TestCommonD6FrictionSlip(unittest.TestCase):
+    """MuJoCo friction regularization belongs to the common D6 row."""
+
+    @staticmethod
+    def _set_soft_friction_metadata(model: newton.Model) -> None:
+        model.mujoco.solreffriction.assign(np.array([[10.0, 1.0]], dtype=np.float32))
+        model.mujoco.solimpfriction.assign(np.array([[0.01, 0.9, 0.001, 0.5, 2.0]], dtype=np.float32))
+
+    def test_mujoco_slip_reaches_common_row_and_changes_response(self) -> None:
+        hard_model = _build_rotor(inertia=0.25, friction=0.5)
+        mujoco_model = _build_rotor(inertia=0.25, friction=0.5)
+        self._set_soft_friction_metadata(hard_model)
+        self._set_soft_friction_metadata(mujoco_model)
+
+        hard_solver = newton.solvers.SolverPhoenX(
+            hard_model,
+            substeps=1,
+            solver_iterations=1,
+            joint_friction_model="hard",
+        )
+        mujoco_solver = newton.solvers.SolverPhoenX(
+            mujoco_model,
+            substeps=1,
+            solver_iterations=1,
+            joint_friction_model="mujoco",
+        )
+
+        hard_data = hard_solver.world.constraints.d6
+        mujoco_data = mujoco_solver.world.constraints.d6
+        self.assertEqual(int(hard_data.row_count.numpy()[0]), 1)
+        self.assertEqual(int(mujoco_data.row_count.numpy()[0]), 1)
+        self.assertLess(float(hard_data.friction_slip_scale.numpy()[0, 0]), 0.0)
+        initial_slip = float(mujoco_data.friction_slip_scale.numpy()[0, 0])
+        self.assertGreater(initial_slip, 1.0)
+
+        mujoco_model.mujoco.solreffriction.assign(np.array([[5.0, 1.0]], dtype=np.float32))
+        mujoco_solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+        refreshed_slip = float(mujoco_solver.world.constraints.d6.friction_slip_scale.numpy()[0, 0])
+        self.assertAlmostEqual(refreshed_slip, 0.5 * initial_slip, delta=1.0e-4 * initial_slip)
+
+        _, hard_qd = _capture_steps(hard_model, hard_solver, n_frames=1, init_joint_qd=1.0)
+        _, mujoco_qd = _capture_steps(mujoco_model, mujoco_solver, n_frames=1, init_joint_qd=1.0)
+        self.assertLess(float(hard_qd[-1]), float(mujoco_qd[-1]) - 5.0e-3)
+
+
+@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX joint-friction tests run on CUDA only")
 class TestFrictionStiction(unittest.TestCase):
     """Friction must hold the joint against an applied torque smaller than μ.
     The pendulum's gravity torque ``τ_g(θ) = m*g*L*sin(θ)`` is the loading;

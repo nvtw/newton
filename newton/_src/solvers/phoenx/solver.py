@@ -669,7 +669,6 @@ class SolverPhoenX(SolverBase):
         self._joint_constraints: JointInitArrays = build_joint_init_arrays(
             model,
             device=self.device,
-            joint_friction_model=self._joint_friction_model,
             reduced_articulations=self._uses_reduced_joint_ownership,
         )
         num_joints = self._joint_constraints.num_joint_columns
@@ -858,7 +857,7 @@ class SolverPhoenX(SolverBase):
             self.world.initialize_joint_constraints(**joint_kwargs)
 
         joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
-        d6_data, d6_inequality_count = build_d6_inequality_data(model, joint_idx_to_cid)
+        d6_data, d6_inequality_count = build_d6_inequality_data(model, joint_idx_to_cid, self._joint_friction_model)
         self.world.constraints.d6 = d6_data
         effective_joint_mode = np.full(int(model.joint_count), -1, dtype=np.int32)
         active_joint = joint_idx_to_cid >= 0
@@ -1597,7 +1596,6 @@ class SolverPhoenX(SolverBase):
             self._joint_constraints = build_joint_init_arrays(
                 self.model,
                 device=self.device,
-                joint_friction_model=self._joint_friction_model,
                 reduced_articulations=self._uses_reduced_joint_ownership,
             )
             self.world._combine_direct_prepare_projection = _can_combine_direct_prepare_projection(
@@ -1608,7 +1606,9 @@ class SolverPhoenX(SolverBase):
             if self._joint_constraints.num_joint_columns > 0:
                 self.world.initialize_joint_constraints(**self._joint_constraints.to_initialize_kwargs())
             d6_data, d6_inequality_count = build_d6_inequality_data(
-                self.model, self._joint_constraints.joint_idx_to_cid.numpy()
+                self.model,
+                self._joint_constraints.joint_idx_to_cid.numpy(),
+                self._joint_friction_model,
             )
             self.world.constraints.d6 = d6_data
             if self._direct_equality_system is not None:

@@ -368,7 +368,11 @@ def iterate_d6_inequalities(
                     relative_velocity = _d6_row_velocity(wrench0, wrench1, v0, w0, v1, w1)
                     old_impulse = data.friction_impulse[cid, row]
                     impulse_limit = friction / idt
-                    gamma = PHOENX_FRICTION_SLIP_VELOCITY / impulse_limit
+                    slip_velocity = PHOENX_FRICTION_SLIP_VELOCITY
+                    slip_scale = data.friction_slip_scale[cid, row]
+                    if slip_scale > wp.float32(0.0):
+                        slip_velocity = slip_scale * effective_mass_inverse * friction
+                    gamma = slip_velocity / impulse_limit
                     effective_mass = wp.float32(1.0) / (effective_mass_inverse + gamma)
                     new_impulse = wp.clamp(
                         old_impulse - sor_boost * effective_mass * (relative_velocity + gamma * old_impulse),

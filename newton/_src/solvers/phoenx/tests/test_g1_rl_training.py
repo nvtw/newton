@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
     benchmark_train_to_gate,
 )
+from newton._src.solvers.phoenx.constraints.d6_joint_data import build_d6_inequality_data
 from newton._src.solvers.phoenx.experimental.nanog1_import import (
     PufferNetWeights,
     assign_puffernet_weights,
@@ -736,15 +737,20 @@ class TestG1PhoenXRL(unittest.TestCase):
             atol=1.0e-6,
         )
         self.assertEqual(env.config.joint_friction_model, "mujoco")
-        hard_joint_constraints = build_joint_init_arrays(env.model, device=device, joint_friction_model="hard")
-        mujoco_joint_constraints = build_joint_init_arrays(env.model, device=device, joint_friction_model="mujoco")
-        np.testing.assert_allclose(
-            hard_joint_constraints.friction_slip_scale.numpy()[: rl.ACTION_DIM_G1],
-            -np.ones(rl.ACTION_DIM_G1, dtype=np.float32),
-            rtol=0.0,
-            atol=0.0,
-        )
-        self.assertGreater(float(np.min(mujoco_joint_constraints.friction_slip_scale.numpy()[: rl.ACTION_DIM_G1])), 0.0)
+        joint_constraints = build_joint_init_arrays(env.model, device=device)
+        joint_map = joint_constraints.joint_idx_to_cid.numpy()
+        hard_d6, _ = build_d6_inequality_data(env.model, joint_map, "hard")
+        mujoco_d6, _ = build_d6_inequality_data(env.model, joint_map, "mujoco")
+        counts = hard_d6.row_count.numpy()
+        friction = hard_d6.friction.numpy()
+        hard_slip = hard_d6.friction_slip_scale.numpy()
+        mujoco_slip = mujoco_d6.friction_slip_scale.numpy()
+        active = np.zeros_like(friction, dtype=bool)
+        for cid, count in enumerate(counts):
+            active[cid, : int(count)] = friction[cid, : int(count)] > 0.0
+        self.assertGreaterEqual(int(np.count_nonzero(active)), rl.ACTION_DIM_G1)
+        np.testing.assert_allclose(hard_slip[active], -1.0, rtol=0.0, atol=0.0)
+        self.assertGreater(float(np.min(mujoco_slip[active])), 0.0)
         self.assertEqual(deploy.NU, rl.ACTION_DIM_G1)
         self.assertEqual(deploy.LEG_DOF, g1_recipe.CONTROLLED_ACTION_COUNT)
         self.assertAlmostEqual(deploy.CONTROL_DT, g1_recipe.FRAME_DT)
