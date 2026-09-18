@@ -20,6 +20,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
+    JOINT_MODE_GENERIC_D6,
     JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
@@ -923,48 +924,28 @@ class TestD6Planar(unittest.TestCase):
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX D6 tests run on CUDA only")
-class TestD6Unsupported(unittest.TestCase):
-    """Configurations outside Phase 1's pattern set must raise a
-    descriptive ``NotImplementedError`` rather than silently misroute."""
+class TestD6GenericFallback(unittest.TestCase):
+    """Noncanonical axis layouts retain their exact free D6 subspace."""
 
-    def _make_d6(self, lin_locks: list[bool], ang_locks: list[bool]) -> newton.Model:
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
-        body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
-        builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
-        # Axis 0 -> X, 1 -> Y, 2 -> Z. LOCKED uses limit_lower > limit_upper.
-        axes = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
-        lin = [
-            newton.ModelBuilder.JointDofConfig(
-                axis=axes[i],
-                limit_lower=1.0 if lin_locks[i] else -1.0e6,
-                limit_upper=-1.0 if lin_locks[i] else 1.0e6,
-            )
-            for i in range(3)
-        ]
-        ang = [
-            newton.ModelBuilder.JointDofConfig(
-                axis=axes[i],
-                limit_lower=1.0 if ang_locks[i] else -1.0e6,
-                limit_upper=-1.0 if ang_locks[i] else 1.0e6,
-            )
-            for i in range(3)
-        ]
-        j = builder.add_joint_d6(parent=-1, child=body, linear_axes=lin, angular_axes=ang)
-        builder.add_articulation([j])
-        return builder.finalize()
+    def _assert_velocity_subspace(
+        self,
+        model: newton.Model,
+        solver: newton.solvers.SolverPhoenX,
+        free: tuple[int, ...],
+    ) -> None:
+        state = model.state()
+        initial = np.asarray(((1.0, 2.0, 3.0, 4.0, 5.0, 6.0),), dtype=np.float32)
+        state.body_qd.assign(initial)
+        state.clear_forces()
+        solver.step(state, state, model.control(), None, 1.0 / 60.0)
+        final = state.body_qd.numpy()[0]
+        locked = tuple(axis for axis in range(6) if axis not in free)
+        np.testing.assert_allclose(final[list(free)], initial[0, list(free)], rtol=1.0e-4, atol=1.0e-4)
+        np.testing.assert_allclose(final[list(locked)], 0.0, rtol=0.0, atol=2.0e-4)
 
-    # Cylindrical (1 lin + 1 ang free along same axis) and universal
-    # (1 ang locked + 2 ang free) are now supported via JOINT_MODE_CYLINDRICAL
-    # and JOINT_MODE_UNIVERSAL respectively -- see TestD6Cylindrical and
-    # TestD6Universal classes for their end-to-end coverage.
-
-    def test_cylindrical_with_non_parallel_axes_raises(self) -> None:
-        """A "cylindrical-shaped" lock pattern (2 lin + 1 lin free,
-        2 ang + 1 ang free) with the free axes NOT parallel is not a
-        physical cylindrical joint -- it's a more general D6. The
-        adapter must reject it with a Phase 2+ message."""
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    def test_cylindrical_pattern_with_nonparallel_axes_uses_generic_d6(self) -> None:
+        """Use common generic rows when cylindrical-pattern axes differ."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
         builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
@@ -982,17 +963,17 @@ class TestD6Unsupported(unittest.TestCase):
         j = builder.add_joint_d6(parent=-1, child=body, linear_axes=lin, angular_axes=ang)
         builder.add_articulation([j])
         model = builder.finalize()
-        with self.assertRaisesRegex(NotImplementedError, "not a cylindrical joint"):
-            newton.solvers.SolverPhoenX(model, substeps=5)
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, (4,))
+        self._assert_velocity_subspace(model, solver, (2, 3))
 
     # Planar pattern with parallel locked-lin and free-ang axes is now
     # supported via JOINT_MODE_PLANAR -- see :class:`TestD6Planar`.
 
-    def test_planar_pattern_non_parallel_axes_raises(self) -> None:
-        """A planar-shaped lock pattern with the locked-lin axis NOT
-        parallel to the free-ang axis is not a physical planar joint
-        and must be rejected."""
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    def test_planar_pattern_with_nonparallel_axes_uses_generic_d6(self) -> None:
+        """Use common generic rows when planar-pattern axes differ."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
         builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
@@ -1010,8 +991,10 @@ class TestD6Unsupported(unittest.TestCase):
         j = builder.add_joint_d6(parent=-1, child=body, linear_axes=lin, angular_axes=ang)
         builder.add_articulation([j])
         model = builder.finalize()
-        with self.assertRaisesRegex(NotImplementedError, "not a planar joint"):
-            newton.solvers.SolverPhoenX(model, substeps=5)
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+        self.assertEqual(solver._direct_equality_system.topology.dimensions, (3,))
+        self._assert_velocity_subspace(model, solver, (0, 1, 4))
 
 
 if __name__ == "__main__":
