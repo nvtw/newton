@@ -334,6 +334,9 @@ showcontent = true
 [tool.typos]
 files.extend-exclude = ["/examples/assets", "*.urdf", "*.usd", "*.usda", "*.mjcf", "*.js"]
 
+[tool.typos.default]
+extend-ignore-re = ["mesh_[0-9a-f]{16}"]
+
 [tool.typos.default.extend-words]
 arange = "arange"
 precess = "precess"
