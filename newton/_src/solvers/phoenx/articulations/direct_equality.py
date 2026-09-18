@@ -173,7 +173,8 @@ def _generic_d6_constraint_bases(
                 basis[basis_index] = -row
         return basis
 
-    for joint in np.flatnonzero(joint_mode == int(JOINT_MODE_GENERIC_D6)):
+    common_rows = (joint_mode == int(JOINT_MODE_GENERIC_D6)) | (structural_count > 0)
+    for joint in np.flatnonzero(common_rows):
         if joint_type[joint] == int(JointType.ROD):
             # Rod DoFs are material-property slots rather than free motion
             # axes. Emit its complete material frame as common D6 rows.
@@ -203,6 +204,8 @@ def _generic_d6_constraint_bases(
         angular_count[joint] = len(locked_angular)
         linear_axes[joint, : len(locked_linear)] = locked_linear
         angular_axes[joint, : len(locked_angular)] = locked_angular
+        if len(locked_angular) == 2:
+            angular_axes[joint, 2] = np.cross(locked_angular[0], locked_angular[1])
         structural_count[joint] = len(locked_linear) + len(locked_angular)
 
     return linear_axes, angular_axes, linear_count, angular_count, structural_count
@@ -649,7 +652,7 @@ def _prepare_direct_rows(
     # Evaluate paired linear impulses at one shared world point to avoid
     # artificial force couples when the anchors differ.
     material_rows = joint_type[joint] == wp.int32(JointType.ROD)
-    if mode == JOINT_MODE_GENERIC_D6 and not material_rows:
+    if not material_rows:
         # Linear axes rotate with the parent frame. Their derivative includes
         # the full anchor separation, including permitted sliding motion, in
         # the parent lever arm. Apply both impulses at the child anchor.
@@ -666,202 +669,112 @@ def _prepare_direct_rows(
         row_stiffness[structural_index, row] = wp.float32(0.0)
         row_damping[structural_index, row] = wp.float32(0.0)
 
-    if mode == JOINT_MODE_GENERIC_D6:
-        row = wp.int32(0)
-        linear_count = generic_linear_count[joint]
-        for axis_index in range(3):
-            if wp.int32(axis_index) < linear_count:
-                direction = wp.quat_rotate(q0, generic_linear_axes[joint * wp.int32(3) + wp.int32(axis_index)])
-                error = wp.dot(point_error, direction)
-                stiffness = wp.float32(0.0)
-                damping = wp.float32(0.0)
-                if material_rows:
-                    dof = joint_qd_start[joint] + (wp.int32(0) if axis_index == 0 else wp.int32(1))
-                    stiffness = joint_target_ke[dof]
-                    damping = joint_target_kd[dof]
-                if not material_rows or stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
-                    _set_direct_point_row(
-                        structural_index,
-                        row,
-                        point0_com,
-                        point1_com,
-                        direction,
-                        error,
-                        bias_rate,
-                        row_wrench0,
-                        row_wrench1,
-                        row_bias,
-                    )
-                    row_error[structural_index, row] = error
-                    row_stiffness[structural_index, row] = stiffness
-                    row_damping[structural_index, row] = damping
-                row += wp.int32(1)
-        rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
-        if material_rows:
-            rotation_error = _quat_log(
-                q1 * wp.quat_inverse(material_rest_relative_orientation[joint]) * wp.quat_inverse(q0)
-            )
-        angular_count = generic_angular_count[joint]
-        for axis_index in range(3):
-            if wp.int32(axis_index) < angular_count:
-                direction = wp.quat_rotate(q0, generic_angular_axes[joint * wp.int32(3) + wp.int32(axis_index)])
-                error = wp.dot(rotation_error, direction)
-                stiffness = wp.float32(0.0)
-                damping = wp.float32(0.0)
-                if material_rows:
-                    linear_dofs = joint_dof_dim[joint, 0]
-                    dof = joint_qd_start[joint] + linear_dofs + (wp.int32(1) if axis_index == 0 else wp.int32(0))
-                    stiffness = joint_target_ke[dof]
-                    damping = joint_target_kd[dof]
-                if not material_rows or stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
-                    _set_angular_row(
-                        structural_index,
-                        row,
-                        direction,
-                        error,
-                        bias_rate,
-                        row_wrench0,
-                        row_wrench1,
-                        row_bias,
-                    )
-                    row_error[structural_index, row] = error
-                    row_stiffness[structural_index, row] = stiffness
-                    row_damping[structural_index, row] = damping
-                row += wp.int32(1)
-        return row
-
-    has_point_lock = mode == JOINT_MODE_BALL_SOCKET or mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_FIXED
-    if has_point_lock:
-        for row in range(3):
-            direction = wp.vec3(0.0)
-            direction[row] = wp.float32(1.0)
-            _set_direct_point_row(
-                structural_index,
-                wp.int32(row),
-                point0_com,
-                point1_com,
-                direction,
-                point_error[row],
-                bias_rate,
-                row_wrench0,
-                row_wrench1,
-                row_bias,
-            )
-            row_error[structural_index, row] = point_error[row]
-        if mode == JOINT_MODE_BALL_SOCKET:
-            return wp.int32(3)
-
-    local_axis = effective_joint_axis[joint]
-    axis0 = wp.normalize(wp.quat_rotate(q0, local_axis))
-    if mode == JOINT_MODE_REVOLUTE:
-        axis1 = wp.normalize(wp.quat_rotate(q1, local_axis))
-        tangent0 = create_orthonormal(axis0)
-        tangent1 = wp.cross(axis0, tangent0)
-        alignment_error = wp.cross(axis0, axis1)
-        error0 = wp.dot(alignment_error, tangent0)
-        error1 = wp.dot(alignment_error, tangent1)
-        _set_angular_row(
-            structural_index,
-            wp.int32(3),
-            tangent0,
-            error0,
-            bias_rate,
-            row_wrench0,
-            row_wrench1,
-            row_bias,
-        )
-        _set_angular_row(
-            structural_index,
-            wp.int32(4),
-            tangent1,
-            error1,
-            bias_rate,
-            row_wrench0,
-            row_wrench1,
-            row_bias,
-        )
-        row_error[structural_index, 3] = error0
-        row_error[structural_index, 4] = error1
-        _set_angular_row(
-            structural_index,
-            wp.int32(5),
-            axis0,
-            wp.float32(0.0),
-            wp.float32(0.0),
-            row_wrench0,
-            row_wrench1,
-            row_bias,
-        )
-        return wp.int32(5)
-
+    row = wp.int32(0)
+    linear_count = generic_linear_count[joint]
+    for axis_index in range(3):
+        if wp.int32(axis_index) < linear_count:
+            direction = wp.quat_rotate(q0, generic_linear_axes[joint * wp.int32(3) + wp.int32(axis_index)])
+            error = wp.dot(point_error, direction)
+            stiffness = wp.float32(0.0)
+            damping = wp.float32(0.0)
+            if material_rows:
+                dof = joint_qd_start[joint] + (wp.int32(0) if axis_index == 0 else wp.int32(1))
+                stiffness = joint_target_ke[dof]
+                damping = joint_target_kd[dof]
+            if not material_rows or stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
+                _set_direct_point_row(
+                    structural_index,
+                    row,
+                    point0_com,
+                    point1_com,
+                    direction,
+                    error,
+                    bias_rate,
+                    row_wrench0,
+                    row_wrench1,
+                    row_bias,
+                )
+                row_error[structural_index, row] = error
+                row_stiffness[structural_index, row] = stiffness
+                row_damping[structural_index, row] = damping
+            row += wp.int32(1)
     rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
-    if mode == JOINT_MODE_PRISMATIC:
-        tangent0 = create_orthonormal(axis0)
-        tangent1 = wp.cross(axis0, tangent0)
-        error0 = wp.dot(point_error, tangent0)
-        error1 = wp.dot(point_error, tangent1)
-        _set_direct_point_row(
-            structural_index,
-            wp.int32(0),
-            point0_com,
-            point1_com,
-            tangent0,
-            error0,
-            bias_rate,
-            row_wrench0,
-            row_wrench1,
-            row_bias,
+    if material_rows:
+        rotation_error = _quat_log(
+            q1 * wp.quat_inverse(material_rest_relative_orientation[joint]) * wp.quat_inverse(q0)
         )
-        _set_direct_point_row(
-            structural_index,
-            wp.int32(1),
-            point0_com,
-            point1_com,
-            tangent1,
-            error1,
-            bias_rate,
-            row_wrench0,
-            row_wrench1,
-            row_bias,
-        )
-        row_error[structural_index, 0] = error0
-        row_error[structural_index, 1] = error1
-        _set_direct_point_row(
-            structural_index,
-            wp.int32(5),
-            point0_com,
-            point1_com,
-            axis0,
-            wp.float32(0.0),
-            wp.float32(0.0),
-            row_wrench0,
-            row_wrench1,
-            row_bias,
-        )
+    angular_count = generic_angular_count[joint]
+    alignment_error = wp.vec3f(0.0)
+    tangent0 = wp.vec3f(0.0)
+    tangent1 = wp.vec3f(0.0)
+    if angular_count == wp.int32(2):
+        free_axis_local = generic_angular_axes[joint * wp.int32(3) + wp.int32(2)]
+        free_axis0 = wp.quat_rotate(q0, free_axis_local)
+        free_axis1 = wp.quat_rotate(q1, free_axis_local)
+        tangent0 = create_orthonormal(free_axis0)
+        tangent1 = wp.cross(free_axis0, tangent0)
+        alignment_error = wp.cross(free_axis0, free_axis1)
+    for axis_index in range(3):
+        if wp.int32(axis_index) < angular_count:
+            direction = wp.quat_rotate(q0, generic_angular_axes[joint * wp.int32(3) + wp.int32(axis_index)])
+            error = wp.dot(rotation_error, direction)
+            if angular_count == wp.int32(2):
+                direction = tangent0
+                if axis_index == 1:
+                    direction = tangent1
+                error = wp.dot(alignment_error, direction)
+            stiffness = wp.float32(0.0)
+            damping = wp.float32(0.0)
+            if material_rows:
+                linear_dofs = joint_dof_dim[joint, 0]
+                dof = joint_qd_start[joint] + linear_dofs + (wp.int32(1) if axis_index == 0 else wp.int32(0))
+                stiffness = joint_target_ke[dof]
+                damping = joint_target_kd[dof]
+            if not material_rows or stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
+                _set_angular_row(
+                    structural_index,
+                    row,
+                    direction,
+                    error,
+                    bias_rate,
+                    row_wrench0,
+                    row_wrench1,
+                    row_bias,
+                )
+                row_error[structural_index, row] = error
+                row_stiffness[structural_index, row] = stiffness
+                row_damping[structural_index, row] = damping
+            row += wp.int32(1)
 
-    for angular_row in range(3):
-        direction = wp.quat_rotate(
-            q0,
-            wp.vec3(
-                wp.float32(1.0) if angular_row == 0 else wp.float32(0.0),
-                wp.float32(1.0) if angular_row == 1 else wp.float32(0.0),
-                wp.float32(1.0) if angular_row == 2 else wp.float32(0.0),
-            ),
-        )
-        row = wp.int32(angular_row + 2) if mode == JOINT_MODE_PRISMATIC else wp.int32(angular_row + 3)
-        error = wp.dot(rotation_error, direction)
+    # Native one-axis joints keep their dynamic row adjacent to the compact
+    # structural block. Preparing that row here avoids a separate kernel in
+    # scenes dominated by hinges while using the same paired row primitives.
+    axis = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
+    if mode == JOINT_MODE_REVOLUTE:
         _set_angular_row(
             structural_index,
             row,
-            direction,
-            error,
-            bias_rate,
+            axis,
+            wp.float32(0.0),
+            wp.float32(0.0),
             row_wrench0,
             row_wrench1,
             row_bias,
         )
-        row_error[structural_index, row] = error
-    return wp.int32(5) if mode == JOINT_MODE_PRISMATIC else wp.int32(6)
+    elif mode == JOINT_MODE_PRISMATIC:
+        _set_direct_point_row(
+            structural_index,
+            row,
+            point0_com,
+            point1_com,
+            axis,
+            wp.float32(0.0),
+            wp.float32(0.0),
+            row_wrench0,
+            row_wrench1,
+            row_bias,
+        )
+    return row
 
 
 @functools.cache

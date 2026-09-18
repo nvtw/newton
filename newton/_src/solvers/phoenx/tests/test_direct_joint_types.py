@@ -457,6 +457,27 @@ class TestDirectJointTypes(unittest.TestCase):
                 self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[cid]), expected_mode)
                 self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[cid]), 0)
 
+    def test_every_supported_bilateral_mode_uses_common_d6_basis(self) -> None:
+        """Represent native and generic joints with the same compact D6 rows."""
+        model, joints = _build_all_joint_types()
+        direct = _make_solver(model)._direct_equality_system
+        expected_counts = {
+            "ball": (3, 0),
+            "revolute": (3, 2),
+            "prismatic": (2, 3),
+            "fixed": (3, 3),
+            "universal": (3, 1),
+            "cylindrical": (2, 2),
+            "planar": (1, 2),
+            "cable": (3, 3),
+        }
+        linear = direct.generic_linear_count.numpy()
+        angular = direct.generic_angular_count.numpy()
+        for kind, expected in expected_counts.items():
+            with self.subTest(kind=kind):
+                joint, _body = joints[kind]
+                self.assertEqual((int(linear[joint]), int(angular[joint])), expected)
+
     def test_every_supported_bilateral_mode_rejects_locked_velocity(self) -> None:
         """Reject locked velocity components with one direct mechanism solve."""
         model, joints = _build_all_joint_types()
