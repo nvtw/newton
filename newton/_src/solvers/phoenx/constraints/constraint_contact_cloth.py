@@ -322,9 +322,10 @@ def rebase_ordinary_contact_relax_kernel(
     element_ids_by_color: wp.array[wp.int32],
     contact_offset: wp.int32,
     packed_headers: wp.bool,
+    rows_per_column: wp.int32,
 ):
     """Retain each prepared world impulse point as body COMs advance."""
-    cid = wp.tid()
+    cid, lane = wp.tid()
     if cid >= column_count[0]:
         return
     owner_cid = cid
@@ -349,7 +350,8 @@ def rebase_ordinary_contact_relax_kernel(
     inverse_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * factor2
     first = contact_get_contact_first(columns, cid)
     count = contact_get_contact_count(columns, cid)
-    for k in range(first, first + count):
+    # Rebase rows independently; no impulse or body velocity is modified.
+    for k in range(first + lane, first + count, rows_per_column):
         r1 = cc_get_r0(cc, k) + shift1
         r2 = cc_get_r1(cc, k) + shift2
         cc_set_r0(cc, k, r1)

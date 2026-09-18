@@ -85,7 +85,8 @@ class SingleWorldMassSplittingDispatcher:
         # Prepare applies the warm-start impulse to each body's slots;
         # average so the iterate phase starts from converged slot values.
         if w._refresh_prepare_this_substep():
-            w._partitioner.begin_sweep()
+            if w._color_group_data is None:
+                w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(
                 prepare_head,
                 prepare_fused,
@@ -101,7 +102,8 @@ class SingleWorldMassSplittingDispatcher:
             direct.solve(use_bias=False)
             w._mass_splitting_broadcast()
         for iteration in range(w.solver_iterations):
-            w._partitioner.begin_sweep()
+            if w._color_group_data is None:
+                w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(
                 iterate_head,
                 iterate_fused,
@@ -155,7 +157,8 @@ class SingleWorldMassSplittingDispatcher:
         inv_dt = 1.0 / w.substep_dt
         _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
         for iteration in range(w._active_velocity_iterations):
-            w._partitioner.begin_sweep()
+            if w._color_group_data is None:
+                w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(
                 relax_head,
                 relax_fused,
