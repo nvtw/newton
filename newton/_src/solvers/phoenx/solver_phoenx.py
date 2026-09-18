@@ -4983,57 +4983,6 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _solve_main_singleworld(self) -> None:
-        """Single-world prepare + main PGS iterate. Each sweep alternates the fused tail
-        (small colours) and persistent head (large colours).
-
-        When mass splitting is enabled, an
-        :func:`launch_average_and_broadcast` runs after every full
-        color sweep (prepare and each iterate iteration). This is the
-        C# ``MassSplitting.RunMethodParallelIterate`` +
-        ``AverageAndBroadcast`` pattern: every iteration leaves
-        divergent slots merged back to their mean, so the next
-        iteration starts from a consistent state and Jacobi-block
-        convergence on the overflow bucket actually converges.
-        """
-        if self._constraint_capacity == 0:
-            return
-        idt = wp.float32(1.0 / self.substep_dt)
-
-        prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = self._singleworld_kernels()
-
-        if self._refresh_prepare_this_substep():
-            if self._color_group_data is None:
-                self._partitioner.begin_sweep()
-            self._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
-            if self.mass_splitting_enabled:
-                # Prepare applies the warm-start impulse to each body's
-                # slots. Average it so the iterate phase starts from
-                # converged slot values.
-                self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
-        else:
-            self._run_cached_prepare_bookkeeping(idt)
-
-        for _ in range(self.solver_iterations):
-            if self._color_group_data is None:
-                self._partitioner.begin_sweep()
-            self._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
-            if self.mass_splitting_enabled:
-                self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
-
-    def _relax_velocities_singleworld(self) -> None:
-        """Single-world TGS-soft relax sweeps (bias OFF)."""
-        if self._constraint_capacity == 0 or self._active_velocity_iterations <= 0:
-            return
-        idt = wp.float32(1.0 / self.substep_dt)
-        _, _, _, _, relax_head, relax_fused = self._singleworld_kernels()
-        for _ in range(self._active_velocity_iterations):
-            if self._color_group_data is None:
-                self._partitioner.begin_sweep()
-            self._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
-            if self.mass_splitting_enabled:
-                self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
-
     def _skip_all_joint_pgs(self) -> bool:
         """Return whether reduced coordinates own every joint column."""
         return self._joint_pgs_ownership_active and self._joint_pgs_all_disabled

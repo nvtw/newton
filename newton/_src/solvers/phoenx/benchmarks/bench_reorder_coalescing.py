@@ -25,7 +25,7 @@ proportional speedup on the hot inner loop.
 
 This script measures whether that speedup is real and worth the
 implementation cost. It isolates the inner solve (``_solve_main`` for
-multi-world layout, ``_solve_main_singleworld`` for single-world) so
+multi-world layout, the live dispatcher for single-world) so
 the result reflects the kernel-level coalescing impact, not the
 end-to-end step throughput. After applying an offline cluster-by-color
 permutation to all per-cid containers (joint constraints,
@@ -434,7 +434,12 @@ def _bench_solve_main(world: PhoenXWorld, n_runs: int, warmup: int, trials: int)
     isolates the kernel-level access pattern.
     """
     device = wp.get_device()
-    solve_fn = world._solve_main_singleworld if world.step_layout == "single_world" else world._solve_main
+
+    def solve_fn():
+        if world.step_layout == "single_world":
+            world._dispatcher.solve(wp.float32(1.0 / world.substep_dt))
+        else:
+            world._solve_main()
 
     for _ in range(warmup):
         solve_fn()
