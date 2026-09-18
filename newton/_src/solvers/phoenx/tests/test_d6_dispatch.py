@@ -20,7 +20,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_GENERIC_D6,
     JOINT_MODE_PLANAR,
-    JOINT_MODE_UNIVERSAL,
 )
 
 _FPS = 240
@@ -291,7 +290,7 @@ class TestD6Detection(unittest.TestCase):
         self.assertEqual(solver._direct_equality_system.dynamic_joint_dofs[0], (4,))
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (6,))
 
-    def test_d6_angular_only_universal_dispatches_to_universal(self) -> None:
+    def test_d6_angular_only_universal_uses_common_d6_rows(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
@@ -303,7 +302,10 @@ class TestD6Detection(unittest.TestCase):
         j = builder.add_joint_d6(parent=-1, child=body, angular_axes=ang)
         builder.add_articulation([j])
         model = builder.finalize()
-        self.assertEqual(self._joint_constraints_mode_for(model), int(JOINT_MODE_UNIVERSAL))
+        solver = newton.solvers.SolverPhoenX(model, substeps=5)
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+        self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 3)
+        self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 1)
 
     def test_d6_universal_passive_damping_uses_direct_rows(self) -> None:
         """Route every free universal-axis damping term through a direct row."""
@@ -319,7 +321,7 @@ class TestD6Detection(unittest.TestCase):
         builder.add_articulation([j])
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5)
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(solver._direct_equality_system.dynamic_joint_dofs[0], (0, 1))
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (6,))
 
@@ -336,7 +338,7 @@ class TestD6Detection(unittest.TestCase):
         builder.add_articulation([j])
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5)
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         data = solver.world.constraints.d6
         self.assertEqual(int(data.row_count.numpy()[0]), 1)
         self.assertEqual(int(data.row_axis.numpy()[0, 0]), 0)
@@ -604,8 +606,7 @@ def _build_d6_universal_pendulum(
     ``locked_axis`` is the world-frame axis that's locked; the two
     perpendicular axes are free to swing. ``locked_angular_index``
     picks which of the 3 angular slots in the D6 spec holds the locked
-    axis (the other two get an arbitrary perpendicular direction; their
-    direction is irrelevant since they're not constrained)."""
+    axis."""
     builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
     newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
     bob = builder.add_link(
@@ -620,14 +621,26 @@ def _build_d6_universal_pendulum(
         newton.ModelBuilder.JointDofConfig(axis=(0.0, 1.0, 0.0), limit_lower=1.0, limit_upper=-1.0),
         newton.ModelBuilder.JointDofConfig(axis=(0.0, 0.0, 1.0), limit_lower=1.0, limit_upper=-1.0),
     ]
+    locked_direction = np.asarray(locked_axis, dtype=np.float32)
+    locked_direction /= np.linalg.norm(locked_direction)
+    reference = np.eye(3, dtype=np.float32)[int(np.argmin(np.abs(locked_direction)))]
+    free_directions = [np.cross(locked_direction, reference), np.zeros(3, dtype=np.float32)]
+    free_directions[0] /= np.linalg.norm(free_directions[0])
+    free_directions[1] = np.cross(locked_direction, free_directions[0])
+    free_index = 0
     ang_axes = []
     for k in range(3):
         if k == locked_angular_index:
             ang_axes.append(newton.ModelBuilder.JointDofConfig(axis=locked_axis, limit_lower=1.0, limit_upper=-1.0))
         else:
             ang_axes.append(
-                newton.ModelBuilder.JointDofConfig(axis=(1.0, 0.0, 0.0), limit_lower=-1.0e6, limit_upper=1.0e6)
+                newton.ModelBuilder.JointDofConfig(
+                    axis=tuple(free_directions[free_index]),
+                    limit_lower=-1.0e6,
+                    limit_upper=1.0e6,
+                )
             )
+            free_index += 1
 
     j = builder.add_joint_d6(
         parent=-1,
@@ -668,19 +681,19 @@ def _build_d6_universal_pendulum(
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX D6 tests run on CUDA only")
 class TestD6Universal(unittest.TestCase):
     """A D6 with 3 lin locked + 1 ang locked + 2 ang free dispatches to
-    JOINT_MODE_UNIVERSAL. The simulated body must:
+    common D6 equality rows. The simulated body must:
 
     * Stay attached at the joint anchor (3 lin locked is enforced).
     * Stay un-twisted about the locked axis (1 ang locked is enforced
-      via the rigid Box2D path on the axial row).
+      by the common angular row).
     * Swing freely about the 2 perpendicular angular axes (no rotational
       constraint there).
     """
 
-    def test_universal_pattern_dispatches_to_universal(self) -> None:
+    def test_universal_pattern_uses_common_d6_rows(self) -> None:
         model = _build_d6_universal_pendulum(locked_angular_index=2)
         solver = newton.solvers.SolverPhoenX(model, substeps=5)
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
 
     def test_universal_locked_axis_stays_zero(self) -> None:
         """A bob suspended from a universal joint, released with an

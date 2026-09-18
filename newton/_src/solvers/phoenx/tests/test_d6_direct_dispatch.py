@@ -16,7 +16,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_CARTESIAN,
     JOINT_MODE_CARTESIAN_PLANE,
     JOINT_MODE_GENERIC_D6,
-    JOINT_MODE_UNIVERSAL,
     joint_constraint_clear_reset_worlds,
 )
 
@@ -171,7 +170,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         np.testing.assert_allclose(data.lower.numpy()[0, :3], [-1.0, -1.0, -1.0], atol=1.0e-6)
         np.testing.assert_allclose(data.upper.numpy()[0, :3], [1.0, 1.0, 1.0], atol=1.0e-6)
 
-    def test_angular_two_axis_mjcf_style_d6_reduces_to_universal_with_limits(self) -> None:
+    def test_angular_two_axis_d6_uses_common_rows_with_limits(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         body = _make_body(builder)
         axes = [
@@ -184,7 +183,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
 
-        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_UNIVERSAL))
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         data = solver.world.constraints.d6
         self.assertEqual(int(data.row_count.numpy()[0]), 2)
         np.testing.assert_array_equal(data.row_axis.numpy()[0, :2], [0, 1])
