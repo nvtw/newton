@@ -1593,7 +1593,10 @@ def _snapshot_direct_dynamic_velocity_kernel(
             joint_type[joint] == JointType.D6 and angular_count == wp.int32(1) and dof >= qd_start + linear_count
         )
         if mode == JOINT_MODE_REVOLUTE or is_single_d6_angular:
-            wrapped = extract_rotation_angle(q1 * wp.quat_inverse(q0), axis)
+            coordinate_axis = axis
+            if is_single_d6_angular:
+                coordinate_axis = wp.normalize(wp.spatial_bottom(row_wrench1[structural_index, local_row]))
+            wrapped = extract_rotation_angle(q1 * wp.quat_inverse(q0), coordinate_axis)
             counter, previous = revolution_tracker_update(
                 wrapped,
                 coordinate_revolutions[row],
