@@ -2941,6 +2941,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
             and filtered.per_contact_shape_properties == contacts.per_contact_shape_properties
             and (filtered.force is not None) == (contacts.force is not None)
             and (filtered.rigid_contact_match_index is not None) == (contacts.rigid_contact_match_index is not None)
+            and (len(filtered.rigid_contact_surface_velocity) > 0) == (len(contacts.rigid_contact_surface_velocity) > 0)
         )
 
     def _refresh_model_view_overrides(self, flags: int) -> None:

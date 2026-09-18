@@ -844,7 +844,17 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         options = {"deterministic": effective_deterministic, "deterministic_max_records": 0}
         if integrates_rigid_bodies:
-            self._set_module_options(options, module=rigid_vbd_kernels)
+            rigid_modules = (
+                rigid_vbd_kernels,
+                accumulate_body_body_contacts_per_body.module,
+                accumulate_body_body_contacts_per_body_surface_velocity.module,
+                compute_rigid_contact_forces.module,
+                compute_rigid_contact_forces_surface_velocity.module,
+                update_duals_body_body_contacts.module,
+                update_duals_body_body_contacts_surface_velocity.module,
+            )
+            for module in rigid_modules:
+                self._set_module_options(options, module=module)
         if model.joint_count > 0:
             self._set_module_options(
                 {"deterministic": effective_deterministic, "deterministic_max_records": 0},

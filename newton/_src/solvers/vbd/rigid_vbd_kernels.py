@@ -5347,6 +5347,8 @@ def create_accumulate_body_body_contacts_per_body(has_surface_velocity: bool):
         wp.atomic_add(body_hessian_al, body_id, h_al_acc)
         wp.atomic_add(body_hessian_aa, body_id, h_aa_acc)
 
+    # ``module="unique"`` kernels do not inherit this file's module options.
+    wp.set_module_options({"enable_backward": False}, module=accumulate_body_body_contacts_per_body.module)
     return accumulate_body_body_contacts_per_body
 
 
@@ -5516,6 +5518,8 @@ def create_compute_rigid_contact_forces(has_surface_velocity: bool):
 
         out_force_on_body1[contact_idx] = force_1
 
+    # ``module="unique"`` kernels do not inherit this file's module options.
+    wp.set_module_options({"enable_backward": False}, module=compute_rigid_contact_forces.module)
     return compute_rigid_contact_forces
 
 
@@ -6706,6 +6710,8 @@ def create_update_duals_body_body_contacts(has_surface_velocity: bool):
         if contact_compliant_alm == 0 and C_n_raw > 0.0:
             contact_penalty_k[idx] = _ramp_penalty_k(contact_penalty_k[idx], contact_material_ke[idx], beta, C_n_raw)
 
+    # ``module="unique"`` kernels do not inherit this file's module options.
+    wp.set_module_options({"enable_backward": False}, module=update_duals_body_body_contacts.module)
     return update_duals_body_body_contacts
 
 

@@ -84,7 +84,12 @@ def test_mesh_surface_velocity_moves_rigid_body(test, device, solver_name):
 
 
 class TestMeshSurfaceVelocity(unittest.TestCase):
-    pass
+    def test_mesh_copy_preserves_surface_velocity_opt_in(self):
+        """Preserve the surface-velocity opt-in when copying a mesh."""
+        mesh = newton.Mesh.create_plane(1.0, 1.0, compute_inertia=False)
+        mesh.enable_surface_velocity = True
+
+        self.assertTrue(mesh.copy().enable_surface_velocity)
 
 
 devices = get_test_devices()

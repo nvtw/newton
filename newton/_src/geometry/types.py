@@ -809,6 +809,7 @@ class Mesh:
         m = Mesh(
             vertices,
             indices,
+            enable_surface_velocity=self.enable_surface_velocity,
             compute_inertia=recompute_inertia,
             is_solid=self.is_solid,
             maxhullvert=self.maxhullvert,
