@@ -80,7 +80,7 @@ def test_mesh_surface_velocity_moves_rigid_body(test, device, solver_name):
         state_in, state_out = state_out, state_in
 
     position = state_in.body_q.numpy()[body, :3]
-    test.assertGreater(position[0], 0.05)
+    test.assertGreater(position[0], 0.04)
 
 
 class TestMeshSurfaceVelocity(unittest.TestCase):

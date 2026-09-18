@@ -4882,7 +4882,11 @@ class TestSolverVBD(unittest.TestCase):
         builder.color()
         model = builder.finalize(device="cpu")
 
-        newton.solvers.SolverVBD(model, deterministic=wp.DeterministicMode.RUN_TO_RUN)
+        newton.solvers.SolverVBD(
+            model,
+            deterministic=wp.DeterministicMode.RUN_TO_RUN,
+            rigid_compliant_alm=True,
+        )
 
         kernels = (
             accumulate_body_body_contacts_per_body,
