@@ -8,6 +8,7 @@ import warp as wp
 from newton._src.sim.articulation import (
     invert_2d_rotational_dofs,
     invert_3d_rotational_dofs,
+    reciprocal_3d_rotational_axes,
     transform_2d_rotational_axes,
     transform_3d_rotational_axes,
 )
@@ -77,21 +78,6 @@ def _d6_reciprocal_axes_2(axis0: wp.vec3f, axis1: wp.vec3f):
         reciprocal0 = (axis0 - coupling * axis1) / determinant
         reciprocal1 = (axis1 - coupling * axis0) / determinant
     return reciprocal0, reciprocal1
-
-
-@wp.func
-def _d6_reciprocal_axes_3(axis0: wp.vec3f, axis1: wp.vec3f, axis2: wp.vec3f):
-    """Return coordinate gradients dual to three transported motion axes."""
-    cross12 = wp.cross(axis1, axis2)
-    determinant = wp.dot(axis0, cross12)
-    reciprocal0 = axis0
-    reciprocal1 = axis1
-    reciprocal2 = axis2
-    if wp.abs(determinant) > wp.float32(1.0e-4):
-        reciprocal0 = cross12 / determinant
-        reciprocal1 = wp.cross(axis2, axis0) / determinant
-        reciprocal2 = wp.cross(axis0, axis1) / determinant
-    return reciprocal0, reciprocal1, reciprocal2
 
 
 @wp.func
@@ -166,7 +152,9 @@ def prepare_d6_inequalities(
         motion0 = wp.vec3f(direction0_three[0], direction0_three[1], direction0_three[2])
         motion1 = wp.vec3f(direction1_three[0], direction1_three[1], direction1_three[2])
         motion2 = wp.vec3f(direction2_three[0], direction2_three[1], direction2_three[2])
-        angular_direction0, angular_direction1, angular_direction2 = _d6_reciprocal_axes_3(motion0, motion1, motion2)
+        angular_direction0, angular_direction1, angular_direction2 = reciprocal_3d_rotational_axes(
+            motion0, motion1, motion2
+        )
 
     parent_lever = wp.vec3f(0.0, 0.0, 0.0)
     child_lever = wp.vec3f(0.0, 0.0, 0.0)

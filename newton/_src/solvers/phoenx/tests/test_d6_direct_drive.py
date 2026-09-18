@@ -158,6 +158,73 @@ def _implicit_reduced_d6_step(physical_mass: float) -> tuple[float, float]:
 class TestD6DirectDrive(unittest.TestCase):
     """Compare each gimbal-axis drive against its scalar analytical solution."""
 
+    def test_gimbal_rows_recover_coordinate_rates(self) -> None:
+        """Use the reciprocal or minimum-norm Euler-rate map in drive rows."""
+        frame = wp.quat_from_axis_angle(wp.normalize(wp.vec3(1.0, -2.0, 0.5)), 0.6)
+        rotation = np.asarray(wp.quat_to_matrix(frame), dtype=np.float64).reshape(3, 3)
+        cases = ((False, 0.7), (True, 1.4), (False, np.pi / 2.0), (True, -np.pi / 2.0))
+        for left_handed, pitch in cases:
+            with self.subTest(left_handed=left_handed, pitch=pitch):
+                angles = (0.4, pitch, -0.3)
+                model = _make_gimbal(None, left_handed=left_handed)
+                model.joint_X_p.assign([wp.transform(wp.vec3(), frame)])
+                solver = newton.solvers.SolverPhoenX(model, articulation_mode="maximal")
+                sign = -1.0 if left_handed else 1.0
+                orientation = (
+                    frame
+                    * wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), angles[0])
+                    * wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), angles[1])
+                    * wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, sign), angles[2])
+                )
+                orientations = solver.world.bodies.orientation.numpy()
+                orientations[1] = np.asarray(orientation)
+                solver.world.bodies.orientation.assign(orientations)
+                system = solver._direct_equality_system
+                system.refresh_geometry(wp.float32(60.0))
+                dynamic_rows = np.flatnonzero(system.topology.row_dynamic)
+                self.assertEqual(len(dynamic_rows), 3)
+                coordinates = system.dynamic_coordinate.numpy()[dynamic_rows]
+                parent = system.row_wrench0.numpy()[0, 3:6, 3:].astype(np.float64)
+                child = system.row_wrench1.numpy()[0, 3:6, 3:].astype(np.float64)
+                q0, q1 = (float(coordinates[0]), float(coordinates[1]))
+                sx, cx = np.sin(q0), np.cos(q0)
+                sy, cy = np.sin(q1), np.cos(q1)
+                motion = rotation @ np.asarray(
+                    ((1.0, 0.0, sign * sy), (0.0, cx, -sign * sx * cy), (0.0, sx, sign * cx * cy))
+                )
+                expected = np.linalg.pinv(motion, rcond=1.0e-4)
+                np.testing.assert_allclose(child, expected, atol=4.0e-5, rtol=0.0)
+                np.testing.assert_allclose(parent + child, 0.0, atol=3.0e-6, rtol=0.0)
+
+    def test_inverse_kinematics_returns_minimum_norm_gimbal_rates(self) -> None:
+        """Keep D6 inverse kinematics finite and defined at gimbal lock."""
+        for left_handed in (False, True):
+            with self.subTest(left_handed=left_handed):
+                model = _make_gimbal(None, left_handed=left_handed)
+                coordinates = np.asarray((0.4, np.pi / 2.0, -0.3), dtype=np.float32)
+                model.joint_q.assign(coordinates)
+                state = model.state()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                sign = -1.0 if left_handed else 1.0
+                omega = np.asarray((0.8, -0.4, 0.6), dtype=np.float64)
+                body_qd = np.zeros((1, 6), dtype=np.float32)
+                body_qd[0, 3:] = omega
+                state.body_qd.assign(body_qd)
+                joint_q = wp.zeros_like(model.joint_q)
+                joint_qd = wp.zeros_like(model.joint_qd)
+                newton.eval_ik(model, state, joint_q, joint_qd)
+                recovered = joint_q.numpy()
+                sx, cx = np.sin(recovered[0]), np.cos(recovered[0])
+                sy, cy = np.sin(recovered[1]), np.cos(recovered[1])
+                motion = np.asarray(
+                    ((1.0, 0.0, sign * sy), (0.0, cx, -sign * sx * cy), (0.0, sx, sign * cx * cy)),
+                    dtype=np.float64,
+                )
+                expected = np.linalg.pinv(motion, rcond=1.0e-4) @ omega
+                rates = joint_qd.numpy()
+                self.assertTrue(np.isfinite(rates).all())
+                np.testing.assert_allclose(rates, expected, atol=4.0e-5, rtol=0.0)
+
     def test_gimbal_drive_equilibrium_at_singular_pitch(self) -> None:
         """Keep a driven gimbal finite and stationary at either singular pitch."""
         for left_handed in (False, True):

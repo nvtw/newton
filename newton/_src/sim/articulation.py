@@ -149,6 +149,26 @@ def transform_3d_rotational_axes(
 
 
 @wp.func
+def reciprocal_3d_rotational_axes(axis_0: wp.vec3, axis_1: wp.vec3, axis_2: wp.vec3):
+    """Return gradients that map angular velocity to three rotational coordinate rates.
+
+    The full-rank result is the basis reciprocal to the intrinsic-Euler
+    motion axes. At gimbal lock, where the first and third motion axes are
+    parallel, return their Moore-Penrose minimum-norm inverse.
+    """
+    cross_12 = wp.cross(axis_1, axis_2)
+    determinant = wp.dot(axis_0, cross_12)
+    reciprocal_0 = wp.float32(0.5) * axis_0
+    reciprocal_1 = axis_1
+    reciprocal_2 = wp.float32(0.5) * wp.dot(axis_0, axis_2) * axis_0
+    if wp.abs(determinant) > wp.float32(1.0e-4):
+        reciprocal_0 = cross_12 / determinant
+        reciprocal_1 = wp.cross(axis_2, axis_0) / determinant
+        reciprocal_2 = wp.cross(axis_0, axis_1) / determinant
+    return reciprocal_0, reciprocal_1, reciprocal_2
+
+
+@wp.func
 def compute_3d_rotational_dofs(
     axis_0: wp.vec3,
     axis_1: wp.vec3,
@@ -217,15 +237,13 @@ def invert_3d_rotational_dofs(
     # convert angular velocity to local space
     w_err_p = wp.quat_rotate_inv(q_p, w_err)
 
-    # given joint axes and angular velocity error, solve for joint velocities in the canonical basis
-    c12 = wp.cross(a1, a2)
-    c02 = wp.cross(a0, a2)
-    c01 = wp.cross(a0, a1)
-
+    # Map angular velocity to intrinsic-Euler rates with the reciprocal
+    # motion basis, using its minimum-norm inverse at gimbal lock.
+    reciprocal_0, reciprocal_1, reciprocal_2 = reciprocal_3d_rotational_axes(a0, a1, a2)
     velocities = wp.vec3(
-        wp.dot(w_err_p, c12) / wp.dot(a0, c12),
-        wp.dot(w_err_p, c02) / wp.dot(a1, c02),
-        wp.dot(w_err_p, c01) / wp.dot(a2, c01),
+        wp.dot(w_err_p, reciprocal_0),
+        wp.dot(w_err_p, reciprocal_1),
+        wp.dot(w_err_p, reciprocal_2),
     )
 
     # Map canonical-basis result back to the user's axes: rotation/velocity around axis_2 equals
