@@ -12,7 +12,6 @@ slot 0 is the static world anchor, so Newton body ``i`` maps to PhoenX slot
 from __future__ import annotations
 
 import math
-from typing import Literal
 
 import numpy as np
 import warp as wp
@@ -20,7 +19,6 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
-    DEFAULT_HERTZ_LIMIT,
     DEFAULT_HERTZ_LINEAR,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
@@ -186,35 +184,6 @@ def _classify_d6_legacy_mode(
     return None, -1
 
 
-def _friction_slip_scale_from_mujoco(solref: np.ndarray | None, solimp: np.ndarray | None) -> float:
-    """Return MuJoCo friction slip scale from ``solreffriction/solimpfriction``.
-
-    MuJoCo frictionloss rows use ``R = (1 - impedance) / impedance * dA`` and
-    ``B = 2 / (dmax * timeconst)`` for positive-format ``solref``. PhoenX does
-    not know the row inverse effective mass until prepare, so the adapter stores
-    ``R / (B * dA)`` and the device row later multiplies by the current axial
-    inverse effective mass and friction limit.
-    """
-
-    if solref is None or solimp is None:
-        return -1.0
-    solref = np.asarray(solref, dtype=np.float32).reshape(-1)
-    solimp = np.asarray(solimp, dtype=np.float32).reshape(-1)
-    if len(solref) < 2 or len(solimp) < 2:
-        return -1.0
-    imp = float(np.clip(float(solimp[0]), 0.0001, 0.9999))
-    dmax = float(np.clip(float(solimp[1]), 0.0001, 0.9999))
-    timeconst = float(solref[0])
-    direct_damping = float(solref[1])
-    if timeconst > 0.0:
-        damping = 2.0 / max(1.0e-15, dmax * timeconst)
-    elif direct_damping < 0.0:
-        damping = -direct_damping / max(1.0e-15, dmax)
-    else:
-        return -1.0
-    return float(((1.0 - imp) / max(1.0e-15, imp)) / max(1.0e-15, damping))
-
-
 class JointInitArrays:
     """joint constraint init kwargs plus joint-index -> cid map for per-step control writeback.
     ``joint_idx_to_cid`` is ``-1`` for joints without a constraint column."""
@@ -232,18 +201,11 @@ class JointInitArrays:
         drive_mode: wp.array,
         target: wp.array,
         target_velocity: wp.array,
-        velocity_limit: wp.array,
         max_force_drive: wp.array,
         stiffness_drive: wp.array,
         damping_drive: wp.array,
         min_value: wp.array,
         max_value: wp.array,
-        hertz_limit: wp.array,
-        damping_ratio_limit: wp.array,
-        stiffness_limit: wp.array,
-        damping_limit: wp.array,
-        friction_coefficient: wp.array,
-        friction_slip_scale: wp.array,
         joint_idx_to_cid: wp.array,
         joint_idx_to_dof_start: wp.array,
         joint_q_at_init: wp.array,
@@ -265,18 +227,11 @@ class JointInitArrays:
         self.drive_mode = drive_mode
         self.target = target
         self.target_velocity = target_velocity
-        self.velocity_limit = velocity_limit
         self.max_force_drive = max_force_drive
         self.stiffness_drive = stiffness_drive
         self.damping_drive = damping_drive
         self.min_value = min_value
         self.max_value = max_value
-        self.hertz_limit = hertz_limit
-        self.damping_ratio_limit = damping_ratio_limit
-        self.stiffness_limit = stiffness_limit
-        self.damping_limit = damping_limit
-        self.friction_coefficient = friction_coefficient
-        self.friction_slip_scale = friction_slip_scale
         self.joint_idx_to_cid = joint_idx_to_cid
         self.joint_idx_to_dof_start = joint_idx_to_dof_start
         #: Per-joint-column initial Newton joint coordinate. PhoenX measures
@@ -336,7 +291,6 @@ def build_joint_init_arrays(
     model: newton.Model,
     device: wp.context.Devicelike | None = None,
     *,
-    joint_friction_model: Literal["hard", "mujoco"] = "hard",
     reduced_articulations: bool = False,
 ) -> JointInitArrays:
     """Convert ``model``'s joints to joint constraint init arrays on ``device``.
@@ -344,8 +298,6 @@ def build_joint_init_arrays(
     Args:
         model: Newton model to convert.
         device: Device for the generated Warp arrays.
-        joint_friction_model: ``"hard"`` keeps PhoenX Coulomb friction;
-            ``"mujoco"`` maps MuJoCo solref/solimp friction metadata.
         reduced_articulations: Whether tree joints are owned by the reduced
             articulation solver instead of maximal-coordinate joint constraint columns.
 
@@ -355,9 +307,6 @@ def build_joint_init_arrays(
     """
     if device is None:
         device = model.device
-    if joint_friction_model not in ("hard", "mujoco"):
-        raise ValueError('joint_friction_model must be "hard" or "mujoco"')
-
     n_joints = int(model.joint_count)
     if n_joints == 0:
         empty_i = wp.zeros(0, dtype=wp.int32, device=device)
@@ -376,18 +325,11 @@ def build_joint_init_arrays(
             drive_mode=empty_i,
             target=empty_f,
             target_velocity=empty_f,
-            velocity_limit=empty_f,
             max_force_drive=empty_f,
             stiffness_drive=empty_f,
             damping_drive=empty_f,
             min_value=empty_f,
             max_value=empty_f,
-            hertz_limit=empty_f,
-            damping_ratio_limit=empty_f,
-            stiffness_limit=empty_f,
-            damping_limit=empty_f,
-            friction_coefficient=empty_f,
-            friction_slip_scale=empty_f,
             joint_idx_to_cid=joint_idx_to_cid,
             joint_idx_to_dof_start=joint_idx_to_dof_start,
             joint_q_at_init=empty_f,
@@ -430,10 +372,6 @@ def build_joint_init_arrays(
     velocity_limit = _pull_dof_f(model.joint_velocity_limit)
     target_ke = _pull_dof_f(model.joint_target_ke)
     target_kd = _pull_dof_f(model.joint_target_kd)
-    joint_friction = _pull_dof_f(model.joint_friction)
-    mujoco_attrs = getattr(model, "mujoco", None) if joint_friction_model == "mujoco" else None
-    friction_solref = _pull_dof_f(getattr(mujoco_attrs, "solreffriction", None)) if mujoco_attrs is not None else None
-    friction_solimp = _pull_dof_f(getattr(mujoco_attrs, "solimpfriction", None)) if mujoco_attrs is not None else None
     effort_limit = _pull_dof_f(model.joint_effort_limit)
     limit_lower = _pull_dof_f(model.joint_limit_lower)
     limit_upper = _pull_dof_f(model.joint_limit_upper)
@@ -448,6 +386,7 @@ def build_joint_init_arrays(
 
     # ---- Walk joints --------------------------------------------------
     descriptors: list[dict] = []
+    has_velocity_limits = False
     joint_idx_to_cid_np = np.full(n_joints, -1, dtype=np.int32)
     joint_idx_to_dof_start_np = np.full(n_joints, -1, dtype=np.int32)
     joint_idx_to_target_q_index_np = np.full(n_joints, -1, dtype=np.int32)
@@ -476,6 +415,12 @@ def build_joint_init_arrays(
 
         anchor1_world = _transform_translation(X_w_p)
         qd_start = int(joint_qd_start[j])
+        dof_count = int(np.sum(joint_dof_dim[j]))
+        if velocity_limit is not None and dof_count > 0:
+            authored_speed = velocity_limit[qd_start : qd_start + dof_count]
+            has_velocity_limits |= bool(
+                np.any(np.isfinite(authored_speed) & (authored_speed > 0.0) & (authored_speed < 1.0e5))
+            )
         effective_jtype = jtype
         effective_dof_offset = 0
         effective_qd = qd_start
@@ -524,19 +469,11 @@ def build_joint_init_arrays(
         drive_mode = int(DRIVE_MODE_OFF)
         target_val = 0.0
         target_vel_val = 0.0
-        velocity_limit_val = 0.0
         stiff_drive = 0.0
         damp_drive = 0.0
         max_force = 0.0
         min_val = 1.0  # disabled: min > max
         max_val = -1.0
-        stiff_limit = 0.0
-        damp_limit = 0.0
-        hertz_limit_val = float(DEFAULT_HERTZ_LIMIT)
-        damping_ratio_limit_val = float(DEFAULT_DAMPING_RATIO)
-        # Armature only applies to REVOLUTE/PRISMATIC axial rows; 0 elsewhere.
-        friction_val = 0.0
-        friction_slip_scale_val = -1.0
         if d6_mode_tag == "GENERIC":
             phoenx_mode = int(JOINT_MODE_GENERIC_D6)
         elif effective_jtype is newton.JointType.DISTANCE:
@@ -587,8 +524,6 @@ def build_joint_init_arrays(
             bend_kd = float(target_kd[bend_qd]) if (target_kd is not None and bend_qd < len(target_kd)) else 0.0
             stiff_drive = bend_ke
             damp_drive = bend_kd
-            stiff_limit = bend_ke
-            damp_limit = bend_kd
         elif d6_mode_tag in ("CARTESIAN_PLANE", "CARTESIAN"):
             phoenx_mode = (
                 int(JOINT_MODE_CARTESIAN_PLANE) if d6_mode_tag == "CARTESIAN_PLANE" else int(JOINT_MODE_CARTESIAN)
@@ -702,10 +637,6 @@ def build_joint_init_arrays(
                 target_val = float(target_pos[target_q_index_for_control])
             if target_vel is not None:
                 target_vel_val = float(target_vel[effective_qd])
-            if velocity_limit is not None:
-                raw_velocity_limit = float(velocity_limit[effective_qd])
-                if np.isfinite(raw_velocity_limit) and 0.0 < raw_velocity_limit < 1.0e5:
-                    velocity_limit_val = raw_velocity_limit
             if effort_limit is not None:
                 # PhoenX reads 0 as "unlimited" for POSITION drives, so clamp inf/NaN to 0.
                 raw = float(effort_limit[effective_qd])
@@ -714,22 +645,14 @@ def build_joint_init_arrays(
                 drive_mode = _newton_target_mode_to_joint_drive_mode(
                     int(target_mode[effective_qd]), stiff_drive, damp_drive
                 )
-            # Limits are hard stops via DEFAULT_HERTZ_LIMIT (matches SolverXPBD's
-            # rigid-limit contract; Newton's limit_ke/limit_kd are XPBD-only soft
-            # penalties that don't map to PhoenX's absolute SI PD path). Users who
-            # want soft PD limits should drive joint constraint init directly.
+            # Maximal-coordinate limits are rigid predictive stops. Newton's
+            # limit_ke/limit_kd remain reduced/XPBD metadata.
             if limit_lower is not None and limit_upper is not None:
                 lo = float(limit_lower[effective_qd])
                 hi = float(limit_upper[effective_qd])
                 if lo <= hi:
                     min_val = lo
                     max_val = hi
-            if joint_friction is not None and effective_qd < len(joint_friction):
-                friction_val = float(joint_friction[effective_qd])
-            if friction_solref is not None and friction_solimp is not None and effective_qd < len(friction_solref):
-                friction_slip_scale_val = _friction_slip_scale_from_mujoco(
-                    friction_solref[effective_qd], friction_solimp[effective_qd]
-                )
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
@@ -764,18 +687,11 @@ def build_joint_init_arrays(
                 # re-applies the offset on each control update.
                 "target": target_val - init_q,
                 "target_velocity": target_vel_val,
-                "velocity_limit": velocity_limit_val,
                 "max_force_drive": max_force,
                 "stiffness_drive": stiff_drive,
                 "damping_drive": damp_drive,
                 "min_value": min_val,
                 "max_value": max_val,
-                "hertz_limit": hertz_limit_val,
-                "damping_ratio_limit": damping_ratio_limit_val,
-                "stiffness_limit": stiff_limit,
-                "damping_limit": damp_limit,
-                "friction_coefficient": friction_val,
-                "friction_slip_scale": friction_slip_scale_val,
                 "joint_q_at_init": init_q,
             }
         )
@@ -821,18 +737,11 @@ def build_joint_init_arrays(
         drive_mode=_stack_i("drive_mode"),
         target=_stack_f("target"),
         target_velocity=_stack_f("target_velocity"),
-        velocity_limit=_stack_f("velocity_limit"),
         max_force_drive=_stack_f("max_force_drive"),
         stiffness_drive=_stack_f("stiffness_drive"),
         damping_drive=_stack_f("damping_drive"),
         min_value=_stack_f("min_value"),
         max_value=_stack_f("max_value"),
-        hertz_limit=_stack_f("hertz_limit"),
-        damping_ratio_limit=_stack_f("damping_ratio_limit"),
-        stiffness_limit=_stack_f("stiffness_limit"),
-        damping_limit=_stack_f("damping_limit"),
-        friction_coefficient=_stack_f("friction_coefficient"),
-        friction_slip_scale=_stack_f("friction_slip_scale"),
         joint_idx_to_cid=wp.array(joint_idx_to_cid_np, dtype=wp.int32, device=device),
         joint_idx_to_dof_start=wp.array(joint_idx_to_dof_start_np, dtype=wp.int32, device=device),
         joint_q_at_init=_stack_f("joint_q_at_init"),
@@ -842,5 +751,5 @@ def build_joint_init_arrays(
         drive_q_at_init=wp.array(drive_q_at_init_np, dtype=wp.float32, device=device),
         num_joint_columns=num_cols,
         num_drive_columns=int(drive_cid_np.size),
-        has_velocity_limits=any(float(d["velocity_limit"]) > 0.0 for d in descriptors),
+        has_velocity_limits=has_velocity_limits,
     )
