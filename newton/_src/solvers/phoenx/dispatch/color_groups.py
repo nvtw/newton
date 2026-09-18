@@ -38,7 +38,13 @@ def get_sweep_block_dim(cooperative_joints: bool) -> int:
 
 @functools.cache
 def get_sweep_kernel(
-    phase, soft_pd, block_count=DEFAULT_SWEEP_BLOCK_COUNT, *, cooperative_joints=False, temporal_springs=False
+    phase,
+    soft_pd,
+    block_count=DEFAULT_SWEEP_BLOCK_COUNT,
+    *,
+    cooperative_joints=False,
+    temporal_springs=False,
+    joint_only=False,
 ):
     """Build an ordered sweep within each independent color group."""
     if block_count < 1:
@@ -120,7 +126,7 @@ def get_sweep_kernel(
                                             1.0,
                                             use_bias,
                                         )
-                            elif lane % JOINT_RHS_LANES == 0:
+                            elif wp.static(not joint_only) and lane % JOINT_RHS_LANES == 0:
                                 dispatch(
                                     constraints,
                                     columns,
@@ -142,7 +148,7 @@ def get_sweep_kernel(
                                     index,
                                     slab,
                                 )
-                        else:
+                        elif wp.static(not joint_only) or cid < num_joints:
                             dispatch(
                                 constraints,
                                 columns,

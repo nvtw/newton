@@ -263,6 +263,7 @@ class SolverPhoenX(SolverBase):
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
         mass_splitting_color_group_size: int = 0,
+        joint_refinement_iterations: int = 0,
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
@@ -326,6 +327,10 @@ class SolverPhoenX(SolverBase):
                 rigid mechanisms in the single-world layout with block PGS joints and point
                 friction. Requires mass splitting and sor_boost=1.0; incompatible with sleeping,
                 packed contacts, deformables, and unrolled mass splitting.
+            joint_refinement_iterations: Additional joint-only biased sweeps after
+                the mixed constraint iterations, reconciling mass copies after
+                each sweep. Defaults to zero. Requires the soft scheme, grouped
+                single-world mass splitting, and block PGS joints.
             parallel_contact_prepare: Experimental parallel geometry preparation
                 for CUDA single-world maximal rigid point contacts. Preserves
                 ordered contact warm starts, including mass-split copy states.
@@ -441,6 +446,12 @@ class SolverPhoenX(SolverBase):
             raise ValueError("joint_solver must be 'direct' or 'block_pgs'")
         if isinstance(contact_chunk_size, bool) or not isinstance(contact_chunk_size, int) or contact_chunk_size < 0:
             raise ValueError("contact_chunk_size must be a nonnegative integer")
+        if (
+            isinstance(joint_refinement_iterations, bool)
+            or not isinstance(joint_refinement_iterations, int)
+            or joint_refinement_iterations < 0
+        ):
+            raise ValueError("joint_refinement_iterations must be a nonnegative integer")
         self.joint_solver = joint_solver
         gravity_np = self._read_model_gravity_np(model)
         if articulation_mode == "auto":
@@ -524,6 +535,18 @@ class SolverPhoenX(SolverBase):
             raise ValueError(
                 "mass_splitting_color_group_size requires maximal rigid worlds in the single_world layout "
                 "with mass splitting, point contacts, and joint_solver='block_pgs'"
+            )
+        if joint_refinement_iterations and (
+            solver_scheme != "soft"
+            or joint_solver != "block_pgs"
+            or step_layout != "single_world"
+            or not mass_splitting
+            or mass_splitting_color_group_size <= 0
+            or solver_iterations <= 0
+        ):
+            raise ValueError(
+                "joint_refinement_iterations requires soft grouped single-world mass splitting "
+                "with block PGS joints and positive solver_iterations"
             )
         if contact_chunk_size and has_constraint_joints and joint_solver != "block_pgs":
             raise ValueError("contact_chunk_size with joints requires joint_solver='block_pgs'")
@@ -789,6 +812,7 @@ class SolverPhoenX(SolverBase):
             ),
             mass_splitting_batch_size=mass_splitting_batch_size,
             mass_splitting_color_group_size=mass_splitting_color_group_size,
+            joint_refinement_iterations=joint_refinement_iterations,
             mass_splitting_unrolled=mass_splitting_unrolled,
             partitioner_algorithm=partitioner_algorithm,
             max_greedy_outer_iters=max_greedy_outer_iters,

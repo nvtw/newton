@@ -117,6 +117,12 @@ class SingleWorldMassSplittingDispatcher:
                 if iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
 
+        # Keep each joint's original copy ownership and reconcile its paired
+        # impulse before the next refinement or body writeback.
+        for _ in range(w.joint_refinement_iterations):
+            w._color_group_sweep(iterate_head, idt, contact_container=w._contact_container_solve, joint_only=True)
+            w._mass_splitting_average_and_broadcast(inv_dt)
+
         # Writeback slot[0].velocity -> body.velocity. step()'s
         # integrate_positions then advances bodies with the post-PGS
         # velocity.
