@@ -324,8 +324,10 @@ class SolverPhoenX(SolverBase):
             mass_splitting_color_group_size: Experimental number of sequential
                 colors sharing each mass copy. Zero preserves existing scheduling.
                 Positive values use deterministic color groups for small CUDA
-                rigid mechanisms in the single-world layout with block PGS joints and point
-                friction. Requires mass splitting and sor_boost=1.0; incompatible with sleeping,
+                rigid mechanisms in the single-world layout with block PGS or direct joints
+                and point friction. Direct joints are projected exactly between grouped contact
+                sweeps instead of coupling contacts through the complete mechanism response.
+                Requires mass splitting and sor_boost=1.0; incompatible with sleeping,
                 packed contacts, deformables, and unrolled mass splitting.
             joint_refinement_iterations: Additional joint-only biased sweeps after
                 the mixed constraint iterations, reconciling mass copies after
@@ -527,14 +529,14 @@ class SolverPhoenX(SolverBase):
         if mass_splitting_color_group_size and (
             not mass_splitting
             or articulation_mode != "maximal"
-            or joint_solver != "block_pgs"
+            or joint_solver not in ("block_pgs", "direct")
             or step_layout != "single_world"
             or has_deformables
             or contact_friction_model != "point"
         ):
             raise ValueError(
                 "mass_splitting_color_group_size requires maximal rigid worlds in the single_world layout "
-                "with mass splitting, point contacts, and joint_solver='block_pgs'"
+                "with mass splitting, point contacts, and a rigid joint solver"
             )
         if joint_refinement_iterations and (
             solver_scheme != "soft"
@@ -548,8 +550,15 @@ class SolverPhoenX(SolverBase):
                 "joint_refinement_iterations requires soft grouped single-world mass splitting "
                 "with block PGS joints and positive solver_iterations"
             )
-        if contact_chunk_size and has_constraint_joints and joint_solver != "block_pgs":
-            raise ValueError("contact_chunk_size with joints requires joint_solver='block_pgs'")
+        if (
+            contact_chunk_size
+            and has_constraint_joints
+            and joint_solver != "block_pgs"
+            and not (joint_solver == "direct" and mass_splitting_color_group_size)
+        ):
+            raise ValueError(
+                "contact_chunk_size with joints requires joint_solver='block_pgs' or grouped direct contacts"
+            )
         valid_articulation_modes = ("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced")
         if articulation_mode not in valid_articulation_modes:
             raise ValueError(f"articulation_mode must be one of {valid_articulation_modes}, got {articulation_mode!r}")
@@ -618,6 +627,7 @@ class SolverPhoenX(SolverBase):
             joint_solver == "direct"
             and articulation_mode == "maximal"
             and contact_friction_model == "point"
+            and mass_splitting_color_group_size == 0
             and not has_deformables
             and has_rigid_collision_shapes
         )

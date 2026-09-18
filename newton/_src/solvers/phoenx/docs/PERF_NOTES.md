@@ -994,3 +994,15 @@ These later results supersede the early FP16/contact-row prioritization:
   versus control 80-frame state differences stayed within control-repeat CUDA
   variance, and the shock, direct-contact coupling, high-mass-ratio,
   multi-world graph-capture, and 600-frame DR Legs walking tests passed.
+
+- Grouped mass-split contact PGS can now alternate with the exact direct joint
+  projection. This avoids propagating every contact through a complete
+  mechanism while retaining the mass-metric joint solve and equal-and-opposite
+  contact impulses. On BikeTransmission, the conservative 16-substep,
+  2-iteration configuration measured 20.93--21.10 FPS with 0.066 mm maximum
+  sampled joint attachment error and 0.753 mm maximum sampled penetration. The
+  former 48-substep, 8-iteration block-PGS configuration measured 11.49 FPS,
+  0.624 mm joint error, and 0.293 mm penetration. A 12-by-2 configuration
+  reached 27.00 FPS but increased sampled penetration to 1.10 mm, so the
+  example uses 16-by-2. A reduced 120-link chain articulation was rejected:
+  contact response through the complete chain made it substantially slower.

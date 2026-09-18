@@ -116,6 +116,70 @@ class TestColorGroupPolicy(unittest.TestCase):
                 np.testing.assert_allclose(_total_momentum(model, state), before, atol=2e-6, rtol=0)
                 self.assertLessEqual(energy(model, state), before_energy + 1e-6)
 
+    def test_grouped_direct_joints_use_ordinary_contacts_and_conserve_momentum(self):
+        """Alternate exact joint projection with grouped contact PGS under capture."""
+        builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+        inertia = wp.mat33(0.2, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.2)
+        body0 = builder.add_body(mass=1.0, inertia=inertia)
+        body1 = builder.add_body(
+            mass=1.0,
+            inertia=inertia,
+            xform=wp.transform(wp.vec3(0.9, 0.0, 0.0), wp.quat_identity()),
+        )
+        follower = builder.add_body(
+            mass=1.0,
+            inertia=inertia,
+            xform=wp.transform(wp.vec3(-1.0, 0.0, 0.0), wp.quat_identity()),
+        )
+        cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.0, gap=0.001)
+        builder.add_shape_sphere(body0, radius=0.5, cfg=cfg)
+        builder.add_shape_sphere(body1, radius=0.5, cfg=cfg)
+        builder.add_joint_fixed(
+            body0,
+            follower,
+            parent_xform=wp.transform(wp.vec3(-0.5, 0.0, 0.0), wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(0.5, 0.0, 0.0), wp.quat_identity()),
+        )
+        model = builder.finalize(device="cuda:0")
+        state = model.state()
+        velocity = state.body_qd.numpy()
+        velocity[body0, :3] = (0.5, 0.1, 0.0)
+        velocity[follower, :3] = velocity[body0, :3]
+        velocity[body1, :3] = (-1.0, -0.2, 0.0)
+        state.body_qd.assign(velocity)
+        pipeline = newton.CollisionPipeline(model, rigid_contact_max=16, contact_matching="sticky")
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            collision_pipeline=pipeline,
+            articulation_mode="maximal",
+            joint_solver="direct",
+            step_layout="single_world",
+            mass_splitting=True,
+            max_colored_partitions=0,
+            mass_splitting_batch_size=1,
+            mass_splitting_color_group_size=2,
+            parallel_contact_prepare=True,
+            contact_chunk_size=1,
+            substeps=2,
+            solver_iterations=2,
+            velocity_iterations=1,
+            sor_boost=1.0,
+        )
+        self.assertIsNone(solver._direct_contact_response)
+        self.assertIsNotNone(solver._direct_equality_system)
+        before = _total_momentum(model, state)
+        with wp.ScopedCapture(device=model.device) as capture:
+            state.clear_forces()
+            solver.step(state, state, model.control(), contacts, 1.0e-4)
+        for _ in range(8):
+            wp.capture_launch(capture.graph)
+            np.testing.assert_allclose(_total_momentum(model, state), before, atol=3e-6, rtol=0)
+        self.assertIsNotNone(solver.world._color_group_data)
+        positions = state.body_q.numpy()[:, :3]
+        self.assertAlmostEqual(float(np.linalg.norm(positions[body0] - positions[follower])), 1.0, delta=2e-5)
+
     def test_invalid_group_options_are_rejected(self):
         """Unsupported modes must fail explicitly instead of changing callbacks silently."""
         model = make_model(0.0)
