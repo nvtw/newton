@@ -82,6 +82,7 @@ def build_d6_inequality_data(
     model: Model,
     joint_idx_to_cid: np.ndarray,
     joint_friction_model: Literal["hard", "mujoco"] = "hard",
+    friction_dof_owned: np.ndarray | None = None,
 ) -> tuple[D6JointData, np.ndarray]:
     """Pack active D6 inequalities without inflating every joint column."""
     if joint_friction_model not in ("hard", "mujoco"):
@@ -113,6 +114,12 @@ def build_d6_inequality_data(
     upper = np.asarray(model.joint_limit_upper.numpy(), dtype=np.float32)
     velocity = np.asarray(model.joint_velocity_limit.numpy(), dtype=np.float32)
     friction = np.asarray(model.joint_friction.numpy(), dtype=np.float32)
+    if friction_dof_owned is None:
+        friction_dof_owned = np.zeros_like(friction, dtype=bool)
+    else:
+        friction_dof_owned = np.asarray(friction_dof_owned, dtype=bool)
+        if friction_dof_owned.shape != friction.shape:
+            raise ValueError(f"friction_dof_owned must have shape {friction.shape}, got {friction_dof_owned.shape}")
     friction_solref = None
     friction_solimp = None
     if joint_friction_model == "mujoco":
@@ -161,7 +168,7 @@ def build_d6_inequality_data(
                 speed_limit = float(velocity[start])
                 if np.isfinite(speed_limit) and 0.0 < speed_limit < 1.0e5:
                     velocity_rows[cid, 0] = speed_limit
-                friction_rows[cid, 0] = max(float(friction[start]), 0.0)
+                friction_rows[cid, 0] = 0.0 if friction_dof_owned[start] else max(float(friction[start]), 0.0)
                 if friction_solref is not None and friction_solimp is not None:
                     friction_slip_rows[cid, 0] = friction_slip_scale_from_mujoco(
                         friction_solref[start], friction_solimp[start]
@@ -174,7 +181,7 @@ def build_d6_inequality_data(
                 continue
             finite_limit = float(lower[dof]) > -1.0e5 or float(upper[dof]) < 1.0e5
             speed_limit = float(velocity[dof]) if np.isfinite(velocity[dof]) and 0.0 < velocity[dof] < 1.0e5 else 0.0
-            axis_friction = max(float(friction[dof]), 0.0)
+            axis_friction = 0.0 if friction_dof_owned[dof] else max(float(friction[dof]), 0.0)
             if not finite_limit and speed_limit == 0.0 and axis_friction == 0.0:
                 continue
             row = int(counts[cid])
