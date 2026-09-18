@@ -550,9 +550,7 @@ def build_joint_init_arrays(
                     raise NotImplementedError(f"D6 joint {j} has a zero-length free linear axis.")
                 linear_axis /= linear_length
                 if abs(float(np.dot(linear_axis, angular_axis))) < 1.0 - 1.0e-4:
-                    raise NotImplementedError(
-                        f"D6 joint {j} has non-parallel free linear and angular axes; it is not a cylindrical joint."
-                    )
+                    phoenx_mode = int(JOINT_MODE_GENERIC_D6)
                 axis_local = linear_axis
             else:
                 axis_local = angular_axis
@@ -564,10 +562,7 @@ def build_joint_init_arrays(
                         raise NotImplementedError(f"D6 joint {j} has a zero-length locked plane-normal axis.")
                     linear_axis /= linear_length
                     if abs(float(np.dot(linear_axis, angular_axis))) < 1.0 - 1.0e-4:
-                        raise NotImplementedError(
-                            f"D6 joint {j} has non-parallel locked-linear and free-angular axes; "
-                            "it is not a planar joint."
-                        )
+                        phoenx_mode = int(JOINT_MODE_GENERIC_D6)
                     axis_local = linear_axis
                 else:
                     for linear_index in lin_free:
@@ -577,9 +572,7 @@ def build_joint_init_arrays(
                             linear_length <= 1.0e-12
                             or abs(float(np.dot(linear_axis / linear_length, axis_local))) > 1.0e-4
                         ):
-                            raise NotImplementedError(
-                                f"D6 joint {j} has an in-plane axis that is not perpendicular to its normal."
-                            )
+                            phoenx_mode = int(JOINT_MODE_GENERIC_D6)
 
             axis_world = _quat_rotate_np(X_w_p[3:], axis_local)
             anchor2_world = anchor1_world + axis_world
