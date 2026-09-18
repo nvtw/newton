@@ -61,11 +61,13 @@ from .rigid_vbd_kernels import (
     _count_num_adjacent_joints,
     _fill_adjacent_joints,
     accumulate_body_body_contacts_per_body,
+    accumulate_body_body_contacts_per_body_surface_velocity,
     accumulate_body_particle_contacts_per_body,
     build_body_body_contact_lists,
     build_body_particle_contact_lists,
     check_contact_overflow,
     compute_rigid_contact_forces,
+    compute_rigid_contact_forces_surface_velocity,
     compute_rod_dahl_parameters,
     forward_step_rigid_bodies,
     init_body_body_contact_materials,
@@ -81,6 +83,7 @@ from .rigid_vbd_kernels import (
     step_joint_C0_lambda_rho,
     update_body_velocity,
     update_duals_body_body_contacts,
+    update_duals_body_body_contacts_surface_velocity,
     update_duals_body_particle_contacts,
     update_duals_joint,
     update_rod_dahl_state,
@@ -3493,7 +3496,11 @@ class SolverVBD(SolverBase, CouplingInterface):
             # Accumulate body-body (rigid-rigid) contact forces and Hessians on bodies (per-body, per-color)
             if contacts is not None:
                 wp.launch(
-                    kernel=accumulate_body_body_contacts_per_body,
+                    kernel=(
+                        accumulate_body_body_contacts_per_body_surface_velocity
+                        if len(contacts.rigid_contact_surface_velocity) > 0
+                        else accumulate_body_body_contacts_per_body
+                    ),
                     dim=color_group.size * _NUM_CONTACT_THREADS_PER_BODY,
                     inputs=[
                         dt,
@@ -3519,6 +3526,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         contacts.rigid_contact_shape1,
                         contacts.rigid_contact_point0,
                         contacts.rigid_contact_point1,
+                        contacts.rigid_contact_surface_velocity,
                         contacts.rigid_contact_offset0,
                         contacts.rigid_contact_offset1,
                         contacts.rigid_contact_normal,
@@ -3617,7 +3625,11 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         if contacts is not None and contacts.rigid_contact_max > 0:
             wp.launch(
-                kernel=update_duals_body_body_contacts,
+                kernel=(
+                    update_duals_body_body_contacts_surface_velocity
+                    if len(contacts.rigid_contact_surface_velocity) > 0
+                    else update_duals_body_body_contacts
+                ),
                 dim=contacts.rigid_contact_max,
                 inputs=[
                     contacts.rigid_contact_count,
@@ -3625,6 +3637,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     contacts.rigid_contact_shape1,
                     contacts.rigid_contact_point0,
                     contacts.rigid_contact_point1,
+                    contacts.rigid_contact_surface_velocity,
                     contacts.rigid_contact_offset0,
                     contacts.rigid_contact_offset1,
                     contacts.rigid_contact_normal,
@@ -3633,6 +3646,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     model.shape_body,
                     state_in.body_q,
                     self.body_q_prev,
+                    dt,
                     self.body_body_contact_material_mu,
                     self.body_body_contact_C0,
                     self.rigid_contact_alpha,
@@ -3820,7 +3834,11 @@ class SolverVBD(SolverBase, CouplingInterface):
             self._rigid_contact_point1_world = wp.zeros(max_contacts, dtype=wp.vec3, device=self.device)
 
         wp.launch(
-            kernel=compute_rigid_contact_forces,
+            kernel=(
+                compute_rigid_contact_forces_surface_velocity
+                if len(contacts.rigid_contact_surface_velocity) > 0
+                else compute_rigid_contact_forces
+            ),
             dim=max_contacts,
             inputs=[
                 float(dt),
@@ -3829,6 +3847,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 contacts.rigid_contact_shape1,
                 contacts.rigid_contact_point0,
                 contacts.rigid_contact_point1,
+                contacts.rigid_contact_surface_velocity,
                 contacts.rigid_contact_offset0,
                 contacts.rigid_contact_offset1,
                 contacts.rigid_contact_normal,
