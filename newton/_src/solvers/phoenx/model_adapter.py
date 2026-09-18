@@ -437,7 +437,17 @@ def build_joint_init_arrays(
             # Keep D6 joints on the common D6 representation as their row
             # layouts are migrated. Native joint types retain their compact
             # modes.
-            if common_d6_rows and classified_tag in ("FIXED", "BALL", "UNIVERSAL", "REVOLUTE", "PRISMATIC"):
+            if common_d6_rows and classified_tag in (
+                "FIXED",
+                "BALL",
+                "UNIVERSAL",
+                "REVOLUTE",
+                "PRISMATIC",
+                "CYLINDRICAL",
+                "PLANAR",
+                "CARTESIAN_PLANE",
+                "CARTESIAN",
+            ):
                 classified_tag = "GENERIC"
             if classified_tag is None:
                 if reduced_articulations and int(joint_articulation[j]) >= 0:
