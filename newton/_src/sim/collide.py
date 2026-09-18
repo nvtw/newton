@@ -1413,6 +1413,7 @@ class CollisionPipeline:
         unified_shape_flags: wp.array[int] | None = None,
         broad_phase_filter: tuple[Any, Any] | None = None,
         contact_reduction_hashtable_size_factor: float = 0.25,
+        contact_reduction_voxel_depth: bool = True,
         speculative_contact_gap_max: float | None = None,
         speculative_contact_velocity_filter: bool = True,
     ):
@@ -1441,6 +1442,9 @@ class CollisionPipeline:
                 ``max_triangle_pairs`` when allocating the global contact
                 reduction hashtable. Increase this if hashtable fill/failure
                 warnings appear. Defaults to ``0.25`` for memory compatibility.
+            contact_reduction_voxel_depth: Whether mesh/SDF contact reduction
+                retains the deepest contact in each mesh-local voxel in addition
+                to normal-bin depth and spatial-extreme contacts. Defaults to True.
             soft_contact_max: Maximum number of soft contacts to allocate.
                 If None, defaults to ``soft_contact_pair_count``, the number
                 of precomputed soft-rigid (particle-shape) pairs launched for soft
@@ -2068,6 +2072,7 @@ class CollisionPipeline:
                 contact_max=rigid_contact_max,
                 verify_buffers=verify_buffers,
                 contact_reduction_hashtable_size_factor=contact_reduction_hashtable_size_factor,
+                contact_reduction_voxel_depth=contact_reduction_voxel_depth,
                 speculative=self._speculative_enabled,
                 speculative_contact_velocity_filter=speculative_contact_velocity_filter,
                 contact_writer_supports_speculative=self._speculative_enabled,

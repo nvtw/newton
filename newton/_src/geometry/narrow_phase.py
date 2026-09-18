@@ -2255,6 +2255,7 @@ class NarrowPhase:
         contact_max: int | None = None,
         verify_buffers: bool = True,
         contact_reduction_hashtable_size_factor: float = 0.25,
+        contact_reduction_voxel_depth: bool = True,
         speculative: bool = False,
         contact_writer_supports_speculative: bool = False,
         speculative_contact_velocity_filter: bool = True,
@@ -2333,6 +2334,9 @@ class NarrowPhase:
                 ``max_triangle_pairs`` when allocating the global contact
                 reduction hashtable. Increase this if hashtable fill/failure
                 warnings appear. Defaults to ``0.25`` for memory compatibility.
+            contact_reduction_voxel_depth: Whether mesh/SDF contact reduction
+                retains the deepest contact in each mesh-local voxel in addition
+                to normal-bin depth and spatial-extreme contacts. Defaults to True.
             speculative: Whether the caller provides velocity-expanded search
                 gaps and exact speculative-contact data. Defaults to False.
             speculative_contact_velocity_filter: Whether initial velocity filters
@@ -2580,6 +2584,7 @@ class NarrowPhase:
                 deterministic=deterministic,
                 hashtable_size_factor=contact_reduction_hashtable_size_factor,
                 enable_contact_reclamation=speculative,
+                voxel_depth_enabled=contact_reduction_voxel_depth,
             )
         else:
             self.export_reduced_contacts_kernel = None
