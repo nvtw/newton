@@ -19,7 +19,6 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_OFF,
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CYLINDRICAL,
-    JOINT_MODE_FIXED,
     JOINT_MODE_GENERIC_D6,
     JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
@@ -199,7 +198,7 @@ class TestD6Detection(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(model, substeps=5)
         return int(solver._joint_constraints.joint_mode.numpy()[0])
 
-    def test_d6_all_locked_dispatches_to_fixed(self) -> None:
+    def test_d6_all_locked_uses_common_d6_rows(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         body = builder.add_link(xform=wp.transform_identity(), mass=1.0)
@@ -217,7 +216,14 @@ class TestD6Detection(unittest.TestCase):
         j = builder.add_joint_d6(parent=-1, child=body, linear_axes=lin, angular_axes=ang)
         builder.add_articulation([j])
         model = builder.finalize()
-        self.assertEqual(self._joint_constraints_mode_for(model), int(JOINT_MODE_FIXED))
+        solver = newton.solvers.SolverPhoenX(model, substeps=5)
+        self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
+        direct = solver._direct_equality_system
+        self.assertIsNotNone(direct)
+        assert direct is not None
+        self.assertEqual(int(direct.generic_linear_count.numpy()[0]), 3)
+        self.assertEqual(int(direct.generic_angular_count.numpy()[0]), 3)
+        np.testing.assert_array_equal(direct.topology.row_local, np.arange(6, dtype=np.int32))
 
     def test_d6_ball_pattern_dispatches_to_ball_socket(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
