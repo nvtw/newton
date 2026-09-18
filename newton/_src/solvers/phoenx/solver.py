@@ -670,6 +670,7 @@ class SolverPhoenX(SolverBase):
             model,
             device=self.device,
             reduced_articulations=self._uses_reduced_joint_ownership,
+            common_d6_rows=not self._uses_maximal_tree_projector,
         )
         num_joints = self._joint_constraints.num_joint_columns
         num_particles = int(getattr(model, "particle_count", 0) or 0)
@@ -1597,6 +1598,7 @@ class SolverPhoenX(SolverBase):
                 self.model,
                 device=self.device,
                 reduced_articulations=self._uses_reduced_joint_ownership,
+                common_d6_rows=not self._uses_maximal_tree_projector,
             )
             self.world._combine_direct_prepare_projection = _can_combine_direct_prepare_projection(
                 self._joint_constraints.has_velocity_limits,

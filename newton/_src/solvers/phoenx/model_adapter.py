@@ -292,6 +292,7 @@ def build_joint_init_arrays(
     device: wp.context.Devicelike | None = None,
     *,
     reduced_articulations: bool = False,
+    common_d6_rows: bool = True,
 ) -> JointInitArrays:
     """Convert ``model``'s joints to joint constraint init arrays on ``device``.
 
@@ -300,6 +301,9 @@ def build_joint_init_arrays(
         device: Device for the generated Warp arrays.
         reduced_articulations: Whether tree joints are owned by the reduced
             articulation solver instead of maximal-coordinate joint constraint columns.
+        common_d6_rows: Whether migrated D6 layouts use the common equality-row
+            representation. Disable this for the maximal tree projector until it
+            consumes common D6 rows directly.
 
     Raises:
         NotImplementedError: If a non-reduced D6 configuration cannot be
@@ -433,7 +437,7 @@ def build_joint_init_arrays(
             # Keep D6 joints on the common D6 representation as their row
             # layouts are migrated. Native joint types retain their compact
             # modes.
-            if classified_tag in ("FIXED", "BALL", "REVOLUTE", "PRISMATIC"):
+            if common_d6_rows and classified_tag in ("FIXED", "BALL", "REVOLUTE", "PRISMATIC"):
                 classified_tag = "GENERIC"
             if classified_tag is None:
                 if reduced_articulations and int(joint_articulation[j]) >= 0:

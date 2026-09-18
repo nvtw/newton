@@ -99,6 +99,33 @@ class TestD6DirectDispatch(unittest.TestCase):
         solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
         self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 0)
 
+    def test_projected_prismatic_d6_retains_free_axis(self) -> None:
+        """Keep one-axis D6 motion and limits intact in the maximal projector."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        body = _make_body(builder)
+        axis = newton.ModelBuilder.JointDofConfig(
+            axis=newton.Axis.X,
+            limit_lower=-0.1,
+            limit_upper=0.1,
+        )
+        joint = builder.add_joint_d6(parent=-1, child=body, linear_axes=[axis])
+        builder.add_articulation([joint])
+        model = builder.finalize()
+        model.joint_q.assign(np.asarray((0.25,), dtype=np.float32))
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal_projected",
+            substeps=4,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+
+        state.clear_forces()
+        solver.step(state, state, model.control(), None, 1.0 / 120.0)
+        self.assertLessEqual(abs(float(state.joint_q.numpy()[0])), 0.1005)
+
     def test_ball_limits_use_common_d6_rows(self) -> None:
         """Keep native BALL limits on the common D6 inequality path."""
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
