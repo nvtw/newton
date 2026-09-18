@@ -106,6 +106,11 @@ class TestColorGroupConservation(unittest.TestCase):
                     with (
                         patch.object(dispatcher_type, "solve", observed(original_solve, "biased")),
                         patch.object(dispatcher_type, "relax", observed(original_relax, "relax")),
+                        patch.object(
+                            type(world._partitioner),
+                            "begin_sweep",
+                            side_effect=AssertionError("Grouped sweeps must not launch ordinary cursor bookkeeping"),
+                        ),
                     ):
                         for _ in range(4):
                             state.clear_forces()

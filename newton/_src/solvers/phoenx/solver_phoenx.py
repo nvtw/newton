@@ -4207,9 +4207,13 @@ class PhoenXWorld:
             and not self.num_particles
             and not self._contact_patch_enabled
         ):
+            rows_per_column = 32 if self.device.is_cuda else 1
             wp.launch(
                 rebase_ordinary_contact_relax_kernel,
-                dim=self._constraint_capacity if self._colored_contact_headers else self.max_contact_columns,
+                dim=(
+                    self._constraint_capacity if self._colored_contact_headers else self.max_contact_columns,
+                    rows_per_column,
+                ),
                 inputs=[
                     self._contact_cols_packed if self._colored_contact_headers else self._contact_cols,
                     self._contact_container_solve if self._colored_contact_rows else self._contact_container,
@@ -4222,6 +4226,7 @@ class PhoenXWorld:
                     self._partitioner.element_ids_by_color,
                     wp.int32(self._contact_offset),
                     wp.bool(self._colored_contact_headers),
+                    wp.int32(rows_per_column),
                 ],
                 device=self.device,
             )
@@ -4998,7 +5003,8 @@ class PhoenXWorld:
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = self._singleworld_kernels()
 
         if self._refresh_prepare_this_substep():
-            self._partitioner.begin_sweep()
+            if self._color_group_data is None:
+                self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
             if self.mass_splitting_enabled:
                 # Prepare applies the warm-start impulse to each body's
@@ -5009,7 +5015,8 @@ class PhoenXWorld:
             self._run_cached_prepare_bookkeeping(idt)
 
         for _ in range(self.solver_iterations):
-            self._partitioner.begin_sweep()
+            if self._color_group_data is None:
+                self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
             if self.mass_splitting_enabled:
                 self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
@@ -5021,7 +5028,8 @@ class PhoenXWorld:
         idt = wp.float32(1.0 / self.substep_dt)
         _, _, _, _, relax_head, relax_fused = self._singleworld_kernels()
         for _ in range(self._active_velocity_iterations):
-            self._partitioner.begin_sweep()
+            if self._color_group_data is None:
+                self._partitioner.begin_sweep()
             self._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
             if self.mass_splitting_enabled:
                 self._mass_splitting_average_and_broadcast(1.0 / self.substep_dt)
