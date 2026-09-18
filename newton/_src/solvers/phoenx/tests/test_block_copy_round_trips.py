@@ -73,13 +73,13 @@ class TestBlockCopyRoundTrips(unittest.TestCase):
                     world._reduced_articulation = SimpleNamespace(solve_constraints=Mock())
                 SingleWorldMassSplittingDispatcher(world).solve(100.0)
                 self.assertEqual(world._mass_splitting_broadcast.call_count, 3)
-                self.assertEqual(world._direct_equality_system.solve.call_count, 3)
+                self.assertEqual(world._direct_equality_system.solve.call_count, 2)
 
     def test_global_projection_runs_after_final_iteration_only(self):
         """Keep mass-copy PGS iterations contiguous before exact projection."""
         world = make_world(True, solver_iterations=3)
         SingleWorldMassSplittingDispatcher(world).solve(100.0)
-        self.assertEqual(world._direct_equality_system.solve.call_count, 3)
+        self.assertEqual(world._direct_equality_system.solve.call_count, 2)
         self.assertEqual(world._mass_splitting_writeback.call_count, 2)
         self.assertEqual(world._mass_splitting_broadcast.call_count, 3)
 
@@ -88,7 +88,7 @@ class TestBlockCopyRoundTrips(unittest.TestCase):
         world = make_world(True)
         SingleWorldMassSplittingDispatcher(world).solve(100.0)
         self.assertEqual(world._mass_splitting_broadcast.call_count, 3)
-        self.assertEqual(world._direct_equality_system.solve.call_count, 3)
+        self.assertEqual(world._direct_equality_system.solve.call_count, 2)
         self.assertEqual(world._direct_equality_system.resolve_bounded_drives.call_count, 2)
 
 

@@ -78,7 +78,9 @@ class SingleWorldMassSplittingDispatcher:
 
         inv_dt = 1.0 / w.substep_dt
         if direct is not None and direct.enabled:
-            direct.solve(use_bias=False)
+            # The post-warm-start solve below supersedes an exact projection
+            # here. Refresh the copy slots because direct pre-solve operations
+            # may still update physical body velocities.
             direct.resolve_bounded_drives(idt, use_bias=False)
             w._mass_splitting_broadcast()
         prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
