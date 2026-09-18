@@ -95,6 +95,16 @@ class TestInvariants(unittest.TestCase):
         for projector_type in (MaximalTreeProjector, GeneralMaximalTreeProjector):
             self.assertNotIn("dt", inspect.signature(projector_type.project).parameters)
 
+    def test_maximal_projectors_publish_native_reaction_wrenches(self) -> None:
+        """Keep projector diagnostics independent of legacy anchor multipliers."""
+        for projector_type in (MaximalTreeProjector, GeneralMaximalTreeProjector):
+            source = inspect.getsource(projector_type.project)
+            module_source = inspect.getsource(inspect.getmodule(projector_type))
+            self.assertNotIn("constraint_write_multiplier", module_source)
+            self.assertNotIn("_MUL_ACC_IMP", module_source)
+            self.assertIn("reaction_wrench", module_source)
+            self.assertIn("constraints", source)
+
     def test_joint_columns_omit_bilateral_factor_caches(self) -> None:
         """Keep obsolete bilateral PGS caches out of joint columns."""
         fields = set(JointConstraintData.vars)

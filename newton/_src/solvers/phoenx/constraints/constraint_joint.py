@@ -27,11 +27,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     assert_constraint_header,
     constraint_bodies_make,
-    constraint_read_multiplier,
-    constraint_read_multiplier_vec3,
     constraint_set_type,
-    constraint_write_multiplier,
-    constraint_write_multiplier_vec3,
     read_float,
     read_int,
     read_vec3,
@@ -158,15 +154,11 @@ class JointConstraintData:
     # prismatic layout.
     #
     # Prismatic (10 used): [0..2] local_anchor3_b1, [3..5] local_anchor3_b2,
-    #     [6..8] r3_b2, [9] bias3. The third impulse lives in the
-    #     multiplier sidecar.
+    #     [6..8] r3_b2, [9] bias3.
     # Revolute  (6 used, 4 unused tail):
     #     [0..3] inv_initial_orientation (quat),
     #     [4] revolution_counter, [5] previous_quaternion_angle.
     mode_extras: wp.types.vector(length=10, dtype=wp.float32)
-    # Mutable warm-start impulses live in the family-aliased
-    # ``ConstraintContainer.multipliers`` sidecar.
-
     # ---- Free-coordinate inequality state ----------------------------
     # Body-1-local joint axis snapshot. Used by revolute for a
     # single-axis Jacobian (matching the standalone angular motor /
@@ -227,8 +219,8 @@ _OFF_T1 = wp.constant(dword_offset_of(JointConstraintData, "t1"))
 _OFF_T2 = wp.constant(dword_offset_of(JointConstraintData, "t2"))
 _OFF_BIAS1 = wp.constant(dword_offset_of(JointConstraintData, "bias1"))
 _OFF_BIAS2 = wp.constant(dword_offset_of(JointConstraintData, "bias2"))
-# Aliased mode-extras block. Prismatic packs anchor-3 / r3 / acc_imp3
-# / bias3 (16 dwords); revolute packs the twist-tracker scratch
+# Aliased mode-extras block. Prismatic packs anchor-3 / r3 / bias3;
+# revolute packs the twist-tracker scratch
 # (inv_initial_orientation + revolution_counter + previous_quaternion_angle
 # = 6 dwords). Mutually exclusive, so they share one compact block.
 _OFF_MODE_EXTRAS = wp.constant(dword_offset_of(JointConstraintData, "mode_extras"))
@@ -252,12 +244,6 @@ _OFF_DAMPING_DRIVE = wp.constant(dword_offset_of(JointConstraintData, "damping_d
 _OFF_MIN_VALUE = wp.constant(dword_offset_of(JointConstraintData, "min_value"))
 _OFF_MAX_VALUE = wp.constant(dword_offset_of(JointConstraintData, "max_value"))
 _OFF_AXIS_WORLD = wp.constant(dword_offset_of(JointConstraintData, "axis_world"))
-# Family-aliased mutable state in three aligned vec4 groups: impulse.xyz and
-# its correlated limit/friction scalar in w.
-_MUL_ACC_IMP1 = wp.constant(wp.int32(0))
-_MUL_ACC_IMP2 = wp.constant(wp.int32(4))
-_MUL_ACC_LIMIT = wp.constant(wp.int32(7))
-_MUL_ACC_IMP3 = wp.constant(wp.int32(8))
 JOINT_CONSTRAINT_TIME_US_OFFSET = wp.constant(dword_offset_of(JointConstraintData, "time_us"))
 
 #: Total dword count of one unified joint constraint.
@@ -386,19 +372,16 @@ def joint_constraint_initialize_kernel(
     write_vec3(constraints, _OFF_T2, cid, zero3)
     write_vec3(constraints, _OFF_BIAS1, cid, zero3)
     write_vec3(constraints, _OFF_BIAS2, cid, zero3)
-    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, zero3)
-    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, zero3)
 
     # ``mode_extras`` block is mode-aliased: REVOLUTE / UNIVERSAL store the
     # twist-tracker scratch (inv_initial_orientation, revolution_counter,
     # previous_quaternion_angle); PRISMATIC / FIXED store the
-    # anchor-3 snapshot + bias3 + acc_imp3. Writing both layouts
+    # anchor-3 snapshot + bias3. Writing both layouts
     # unconditionally would clobber the alias, so we branch.
     if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED:
         write_vec3(constraints, _OFF_LA3_B1, cid, la3_b1)
         write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
         write_vec3(constraints, _OFF_R3_B2, cid, zero3)
-        constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, zero3)
         write_float(constraints, _OFF_BIAS3, cid, 0.0)
     else:
         # REVOLUTE / BALL_SOCKET / UNIVERSAL: zero out the anchor-3 slots
@@ -422,7 +405,6 @@ def joint_constraint_initialize_kernel(
     write_float(constraints, _OFF_MIN_VALUE, cid, min_value[tid])
     write_float(constraints, _OFF_MAX_VALUE, cid, max_value[tid])
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, n_hat_init)
-    constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -473,16 +455,12 @@ def _joint_constraint_clear_reset_worlds_kernel(
     mode = read_int(constraints, _OFF_JOINT_MODE, cid)
     if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED:
         write_vec3(constraints, _OFF_R3_B2, cid, zero3)
-        constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, zero3)
         write_float(constraints, _OFF_BIAS3, cid, wp.float32(0.0))
     else:
         write_int(constraints, _OFF_REVOLUTION_COUNTER, cid, wp.int32(0))
         write_float(constraints, _OFF_PREVIOUS_QUATERNION_ANGLE, cid, wp.float32(0.0))
 
-    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid, zero3)
-    constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid, zero3)
     write_vec3(constraints, _OFF_AXIS_WORLD, cid, zero3)
-    constraint_write_multiplier(constraints, _MUL_ACC_LIMIT, cid, wp.float32(0.0))
     if constraints.d6.enabled != wp.int32(0):
         for row in range(6):
             constraints.d6.lower_impulse[cid, row] = wp.float32(0.0)
@@ -490,6 +468,7 @@ def _joint_constraint_clear_reset_worlds_kernel(
             constraints.d6.friction_impulse[cid, row] = wp.float32(0.0)
             constraints.d6.revolution_counter[cid, row] = wp.int32(0)
             constraints.d6.previous_angle[cid, row] = wp.float32(0.0)
+    constraints.d6.reaction_wrench[cid] = wp.spatial_vector(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 
 def joint_constraint_clear_reset_worlds(
@@ -723,43 +702,13 @@ def joint_constraint_world_wrench_at(
 ):
     """World-frame wrench the joint applies on body 2.
 
-    Sums the anchor impulses (converted to force via ``idt``) and the
-    axial drive / limit contribution where applicable. Revolute reports
-    the axial impulse as a torque about ``-n_hat``; prismatic reports
-    it as a force along ``-n_hat`` (same sign convention as the
-    iterate). Ball-socket has no anchor-2/anchor-3 rows and no axial
-    block, so only the anchor-1 impulse contributes.
+    Combines the native D6 bilateral reaction with common D6 limit, speed-cap,
+    and friction impulses. ``base_offset`` is retained for packed constraint
+    callers; native D6 state is indexed directly by ``cid``.
     """
-    joint_mode = read_int(constraints, base_offset + _OFF_JOINT_MODE, cid)
-    acc1 = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid)
-    acc2 = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid)
-    acc3 = constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid)
-    r1_b2 = read_vec3(constraints, base_offset + _OFF_R1_B2, cid)
-    r2_b2 = read_vec3(constraints, base_offset + _OFF_R2_B2, cid)
-    r3_b2 = read_vec3(constraints, base_offset + _OFF_R3_B2, cid)
-    n_hat = read_vec3(constraints, base_offset + _OFF_AXIS_WORLD, cid)
-    if joint_mode == JOINT_MODE_REVOLUTE:
-        force = (acc1 + acc2) * idt
-        torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt)
-    elif joint_mode == JOINT_MODE_DISTANCE:
-        force = wp.vec3f(0.0, 0.0, 0.0)
-        torque = wp.vec3f(0.0, 0.0, 0.0)
-    elif joint_mode == JOINT_MODE_PRISMATIC:
-        force = (acc1 + acc2 + acc3) * idt
-        torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
-    elif joint_mode == JOINT_MODE_UNIVERSAL:
-        acc_limit = constraint_read_multiplier(constraints, _MUL_ACC_LIMIT, cid)
-        force = acc1 * idt
-        torque = wp.cross(r1_b2, acc1 * idt) - n_hat * (acc_limit * idt) - acc2 * idt
-    elif joint_mode == JOINT_MODE_FIXED:
-        # Fixed anchor layout: anchor-1 3-row + anchor-2 tangent 2-row +
-        # anchor-3 scalar 1-row, with no axial block.
-        force = (acc1 + acc2 + acc3) * idt
-        torque = wp.cross(r1_b2, acc1 * idt) + wp.cross(r2_b2, acc2 * idt) + wp.cross(r3_b2, acc3 * idt)
-    else:
-        # Ball-socket: only the anchor-1 impulse contributes here.
-        force = acc1 * idt
-        torque = wp.cross(r1_b2, acc1 * idt)
+    reaction = constraints.d6.reaction_wrench[cid]
+    force = wp.spatial_top(reaction) * idt
+    torque = wp.spatial_bottom(reaction) * idt
 
     # Common D6 inequalities keep their warm-start impulses outside the
     # legacy joint column. Include the exact wrench applied to body 2 so

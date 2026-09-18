@@ -17,13 +17,9 @@ from newton._src.solvers.phoenx.body import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
-    constraint_read_multiplier_vec3,
-    constraint_write_multiplier_vec3,
     read_vec3,
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    _MUL_ACC_IMP1,
-    _MUL_ACC_IMP2,
     _OFF_AXIS_WORLD,
     _OFF_BIAS1,
     _OFF_BIAS2,
@@ -507,6 +503,7 @@ def _factor_maximal_tree_response_kernel(data: MaximalTreeProjectorData):
 
 @wp.kernel(enable_backward=False)
 def _publish_maximal_tree_kernel(
+    use_bias: wp.bool,
     joint_to_cid: wp.array[wp.int32],
     constraints: ConstraintContainer,
     bodies: BodyContainer,
@@ -528,29 +525,10 @@ def _publish_maximal_tree_kernel(
     joint = data.joint_index[articulation, lane]
     cid = joint_to_cid[joint]
     impulse = data.reaction[articulation, lane]
-    linear = wp.vec3f(impulse[0], impulse[1], impulse[2])
-    angular = wp.vec3f(impulse[3], impulse[4], impulse[5])
-    r1 = read_vec3(constraints, _OFF_R1_B2, cid)
-    r2 = read_vec3(constraints, _OFF_R2_B2, cid)
-    axis = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
-    torque_after_r1 = angular - wp.cross(r1, linear)
-    lever_length = wp.dot(r2 - r1, axis)
-    lambda2 = wp.vec3f(0.0, 0.0, 0.0)
-    if wp.abs(lever_length) > wp.float32(1.0e-8):
-        lambda2 = wp.cross(torque_after_r1, axis) / lever_length
-    lambda1 = linear - lambda2
-    constraint_write_multiplier_vec3(
-        constraints,
-        _MUL_ACC_IMP1,
-        cid,
-        constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP1, cid) + lambda1,
-    )
-    constraint_write_multiplier_vec3(
-        constraints,
-        _MUL_ACC_IMP2,
-        cid,
-        constraint_read_multiplier_vec3(constraints, _MUL_ACC_IMP2, cid) + lambda2,
-    )
+    if use_bias:
+        constraints.d6.reaction_wrench[cid] = impulse
+    else:
+        constraints.d6.reaction_wrench[cid] += impulse
 
 
 @wp.func
@@ -982,7 +960,7 @@ class MaximalTreeProjector:
             _publish_maximal_tree_kernel,
             dim=self.launch_dim,
             block_dim=self.block_dim,
-            inputs=[self.joint_to_cid, self.constraints, self.bodies, self.data],
+            inputs=[use_bias, self.joint_to_cid, self.constraints, self.bodies, self.data],
             device=self.model.device,
         )
 
