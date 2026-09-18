@@ -90,6 +90,8 @@ class TestInvariants(unittest.TestCase):
                 {
                     "structural_direct",
                     "mode_cache",
+                    "r2_b1",
+                    "r3_b1",
                     "hertz",
                     "mass_coeff",
                     "impulse_coeff",
@@ -107,7 +109,7 @@ class TestInvariants(unittest.TestCase):
                 }
             )
         )
-        self.assertLessEqual(JOINT_CONSTRAINT_DWORDS, 72)
+        self.assertLessEqual(JOINT_CONSTRAINT_DWORDS, 63)
 
     def test_joint_initialization_omits_legacy_d6_limits(self) -> None:
         """Keep angular limits in the common per-axis D6 representation."""

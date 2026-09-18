@@ -147,7 +147,6 @@ class JointConstraintData:
     # Runtime (per-substep) lever arms for the two shared anchors.
     r1_b1: wp.vec3f
     r1_b2: wp.vec3f
-    r2_b1: wp.vec3f
     r2_b2: wp.vec3f
     # Runtime tangent basis perpendicular to the current world joint axis.
     t1: wp.vec3f
@@ -155,16 +154,16 @@ class JointConstraintData:
     # Runtime bias vectors retained by the experimental tree projector;
     bias1: wp.vec3f
     bias2: wp.vec3f
-    # Mode-specific extras, same alias trick. 16 dwords sized for the
-    # larger (prismatic) layout.
+    # Mode-specific extras, same alias trick. Ten dwords fit the larger
+    # prismatic layout.
     #
-    # Prismatic (13 used): [0..2] local_anchor3_b1, [3..5] local_anchor3_b2,
-    #     [6..8] r3_b1, [9..11] r3_b2, [15] bias3. Dwords [12..14]
-    #     are free here; the third impulse lives in the multiplier sidecar.
-    # Revolute  (6 used, 10 unused tail):
+    # Prismatic (10 used): [0..2] local_anchor3_b1, [3..5] local_anchor3_b2,
+    #     [6..8] r3_b2, [9] bias3. The third impulse lives in the
+    #     multiplier sidecar.
+    # Revolute  (6 used, 4 unused tail):
     #     [0..3] inv_initial_orientation (quat),
     #     [4] revolution_counter, [5] previous_quaternion_angle.
-    mode_extras: wp.types.vector(length=16, dtype=wp.float32)
+    mode_extras: wp.types.vector(length=10, dtype=wp.float32)
     # Mutable warm-start impulses live in the family-aliased
     # ``ConstraintContainer.multipliers`` sidecar.
 
@@ -223,7 +222,6 @@ _OFF_LA2_B1 = wp.constant(dword_offset_of(JointConstraintData, "local_anchor2_b1
 _OFF_LA2_B2 = wp.constant(dword_offset_of(JointConstraintData, "local_anchor2_b2"))
 _OFF_R1_B1 = wp.constant(dword_offset_of(JointConstraintData, "r1_b1"))
 _OFF_R1_B2 = wp.constant(dword_offset_of(JointConstraintData, "r1_b2"))
-_OFF_R2_B1 = wp.constant(dword_offset_of(JointConstraintData, "r2_b1"))
 _OFF_R2_B2 = wp.constant(dword_offset_of(JointConstraintData, "r2_b2"))
 _OFF_T1 = wp.constant(dword_offset_of(JointConstraintData, "t1"))
 _OFF_T2 = wp.constant(dword_offset_of(JointConstraintData, "t2"))
@@ -232,15 +230,14 @@ _OFF_BIAS2 = wp.constant(dword_offset_of(JointConstraintData, "bias2"))
 # Aliased mode-extras block. Prismatic packs anchor-3 / r3 / acc_imp3
 # / bias3 (16 dwords); revolute packs the twist-tracker scratch
 # (inv_initial_orientation + revolution_counter + previous_quaternion_angle
-# = 6 dwords). Mutually exclusive, so we share the 16-dword block.
+# = 6 dwords). Mutually exclusive, so they share one compact block.
 _OFF_MODE_EXTRAS = wp.constant(dword_offset_of(JointConstraintData, "mode_extras"))
-# Prismatic-only fields, dwords 0..15 of mode_extras:
+# Prismatic-only fields, dwords 0..9 of mode_extras:
 _OFF_LA3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
 _OFF_LA3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 3)
-_OFF_R3_B1 = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
-_OFF_R3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
-_OFF_BIAS3 = wp.constant(int(_OFF_MODE_EXTRAS) + 15)
-# Revolute / universal fields, dwords 0..5 of mode_extras (10 unused tail):
+_OFF_R3_B2 = wp.constant(int(_OFF_MODE_EXTRAS) + 6)
+_OFF_BIAS3 = wp.constant(int(_OFF_MODE_EXTRAS) + 9)
+# Revolute / universal fields, dwords 0..5 of mode_extras (4 unused tail):
 _OFF_INV_INITIAL_ORIENTATION = wp.constant(int(_OFF_MODE_EXTRAS) + 0)
 _OFF_REVOLUTION_COUNTER = wp.constant(int(_OFF_MODE_EXTRAS) + 4)
 _OFF_PREVIOUS_QUATERNION_ANGLE = wp.constant(int(_OFF_MODE_EXTRAS) + 5)
@@ -384,7 +381,6 @@ def joint_constraint_initialize_kernel(
     zero3 = wp.vec3f(0.0, 0.0, 0.0)
     write_vec3(constraints, _OFF_R1_B1, cid, zero3)
     write_vec3(constraints, _OFF_R1_B2, cid, zero3)
-    write_vec3(constraints, _OFF_R2_B1, cid, zero3)
     write_vec3(constraints, _OFF_R2_B2, cid, zero3)
     write_vec3(constraints, _OFF_T1, cid, zero3)
     write_vec3(constraints, _OFF_T2, cid, zero3)
@@ -401,7 +397,6 @@ def joint_constraint_initialize_kernel(
     if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED:
         write_vec3(constraints, _OFF_LA3_B1, cid, la3_b1)
         write_vec3(constraints, _OFF_LA3_B2, cid, la3_b2)
-        write_vec3(constraints, _OFF_R3_B1, cid, zero3)
         write_vec3(constraints, _OFF_R3_B2, cid, zero3)
         constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, zero3)
         write_float(constraints, _OFF_BIAS3, cid, 0.0)
@@ -470,7 +465,6 @@ def _joint_constraint_clear_reset_worlds_kernel(
     zero3 = wp.vec3f(0.0, 0.0, 0.0)
     write_vec3(constraints, _OFF_R1_B1, cid, zero3)
     write_vec3(constraints, _OFF_R1_B2, cid, zero3)
-    write_vec3(constraints, _OFF_R2_B1, cid, zero3)
     write_vec3(constraints, _OFF_R2_B2, cid, zero3)
     write_vec3(constraints, _OFF_T1, cid, zero3)
     write_vec3(constraints, _OFF_T2, cid, zero3)
@@ -478,7 +472,6 @@ def _joint_constraint_clear_reset_worlds_kernel(
     write_vec3(constraints, _OFF_BIAS2, cid, zero3)
     mode = read_int(constraints, _OFF_JOINT_MODE, cid)
     if mode == JOINT_MODE_PRISMATIC or mode == JOINT_MODE_FIXED:
-        write_vec3(constraints, _OFF_R3_B1, cid, zero3)
         write_vec3(constraints, _OFF_R3_B2, cid, zero3)
         constraint_write_multiplier_vec3(constraints, _MUL_ACC_IMP3, cid, zero3)
         write_float(constraints, _OFF_BIAS3, cid, wp.float32(0.0))
@@ -625,30 +618,6 @@ def _ms_store_body_pair(
 # ---------------------------------------------------------------------------
 # Shared tangent-basis-from-anchor-3 helper
 # ---------------------------------------------------------------------------
-
-
-@wp.func
-def _d6_metric_anchor_block(
-    inv_mass1: wp.float32,
-    inv_mass2: wp.float32,
-    inv_inertia1: wp.mat33f,
-    inv_inertia2: wp.mat33f,
-    ri_b1: wp.vec3f,
-    ri_b2: wp.vec3f,
-    rj_b1: wp.vec3f,
-    rj_b2: wp.vec3f,
-) -> wp.mat33f:
-    """Effective-mass block for two metric helper-point rows."""
-    eye3 = wp.identity(3, dtype=wp.float32)
-    cri_b1 = wp.skew(ri_b1)
-    cri_b2 = wp.skew(ri_b2)
-    crj_b1 = wp.skew(rj_b1)
-    crj_b2 = wp.skew(rj_b2)
-    return (
-        (inv_mass1 + inv_mass2) * eye3
-        + cri_b1 @ (inv_inertia1 @ wp.transpose(crj_b1))
-        + cri_b2 @ (inv_inertia2 @ wp.transpose(crj_b2))
-    )
 
 
 # ---------------------------------------------------------------------------
