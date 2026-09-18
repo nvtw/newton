@@ -13,31 +13,8 @@ import warp as wp
 from newton._src.sim import JointType, Model
 from newton._src.solvers.phoenx.articulations.maximal_projector import _solve_spd6, _sync_warp
 from newton._src.solvers.phoenx.body import BodyContainer, mat33_from_sym6
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    ConstraintContainer,
-    read_float,
-    read_int,
-    read_vec3,
-)
-from newton._src.solvers.phoenx.constraints.constraint_joint import (
-    _OFF_AXIS_WORLD,
-    _OFF_BIAS1,
-    _OFF_BIAS2,
-    _OFF_BIAS3,
-    _OFF_JOINT_MODE,
-    _OFF_R1_B1,
-    _OFF_R1_B2,
-    _OFF_R2_B2,
-    _OFF_R3_B2,
-    _OFF_T1,
-    _OFF_T2,
-    JOINT_MODE_BALL_SOCKET,
-    JOINT_MODE_FIXED,
-    JOINT_MODE_PRISMATIC,
-    JOINT_MODE_REVOLUTE,
-    JOINT_MODE_UNIVERSAL,
-)
-from newton._src.solvers.phoenx.model_adapter import _classify_d6_legacy_mode, _is_locked_dof
+from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer
+from newton._src.solvers.phoenx.model_adapter import _is_locked_dof
 
 _WARP_SIZE = 32
 
@@ -64,55 +41,6 @@ def _set_motion_column(
     motion[4, column] = angular[1]
     motion[5, column] = angular[2]
     return motion
-
-
-@wp.func
-def _orthonormal_tangents(normal: wp.vec3f):
-    seed = wp.vec3f(1.0, 0.0, 0.0)
-    if wp.abs(normal[0]) > wp.float32(0.577350269):
-        seed = wp.vec3f(0.0, 1.0, 0.0)
-    tangent1 = wp.normalize(wp.cross(normal, seed))
-    return tangent1, wp.cross(normal, tangent1)
-
-
-@wp.func
-def _reaction_map(
-    lever2: wp.vec3f,
-    lever3: wp.vec3f,
-    tangent1: wp.vec3f,
-    tangent2: wp.vec3f,
-):
-    result = wp.mat33f(0.0)
-    column0 = wp.cross(lever2, tangent1)
-    column1 = wp.cross(lever2, tangent2)
-    column2 = wp.cross(lever3, tangent2)
-    for row in range(3):
-        result[row, 0] = column0[row]
-        result[row, 1] = column1[row]
-        result[row, 2] = column2[row]
-    return result
-
-
-@wp.func
-def _locked_offset_three_anchor(
-    target1: wp.vec3f,
-    target2: wp.vec3f,
-    target3: wp.float32,
-    r1_child: wp.vec3f,
-    r2_child: wp.vec3f,
-    r3_child: wp.vec3f,
-    tangent1: wp.vec3f,
-    tangent2: wp.vec3f,
-):
-    mapping = _reaction_map(r2_child - r1_child, r3_child - r1_child, tangent1, tangent2)
-    rhs = wp.vec3f(
-        wp.dot(tangent1, target2 - target1),
-        wp.dot(tangent2, target2 - target1),
-        target3 - wp.dot(tangent2, target1),
-    )
-    angular = wp.inverse(wp.transpose(mapping)) @ rhs
-    linear = target1 + wp.cross(r1_child, angular)
-    return wp.spatial_vectorf(linear[0], linear[1], linear[2], angular[0], angular[1], angular[2])
 
 
 @wp.struct
@@ -145,8 +73,14 @@ class GeneralMaximalTreeProjectorData:
 def _gather_general_maximal_tree_thread(
     tid: wp.int32,
     use_bias: wp.bool,
-    joint_to_cid: wp.array[wp.int32],
-    constraints: ConstraintContainer,
+    joint_parent: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_qd_start: wp.array[wp.int32],
+    joint_dof_dim: wp.array2d[wp.int32],
+    joint_limit_lower: wp.array[wp.float32],
+    joint_limit_upper: wp.array[wp.float32],
     bodies: BodyContainer,
     data: GeneralMaximalTreeProjectorData,
 ):
@@ -180,114 +114,44 @@ def _gather_general_maximal_tree_thread(
     for diagonal in range(6):
         joint_transform[diagonal, diagonal] = wp.float32(1.0)
     joint_motion = wp.spatial_matrixf(0.0)
-    affine_offset = wp.spatial_vectorf(0.0)
     dof_count = wp.int32(0)
 
     if data.floating_root[articulation] == wp.int32(0) or lane > wp.int32(0):
-        cid = joint_to_cid[joint]
-        mode = read_int(constraints, _OFF_JOINT_MODE, cid)
-        r_parent = read_vec3(constraints, _OFF_R1_B1, cid)
-        r_child = read_vec3(constraints, _OFF_R1_B2, cid)
+        parent = joint_parent[joint] + wp.int32(1)
+        parent_orientation = bodies.orientation[parent]
+        child_orientation = bodies.orientation[body]
+        r_parent = wp.quat_rotate(
+            parent_orientation, wp.transform_get_translation(joint_x_p[joint]) - bodies.body_com[parent]
+        )
+        r_child = wp.quat_rotate(
+            child_orientation, wp.transform_get_translation(joint_x_c[joint]) - bodies.body_com[body]
+        )
         shift = wp.skew(r_child - r_parent)
         for row in range(3):
             for column in range(3):
                 joint_transform[row, column + wp.int32(3)] = shift[row, column]
 
-        axis = read_vec3(constraints, _OFF_AXIS_WORLD, cid)
-        if mode == JOINT_MODE_REVOLUTE:
-            dof_count = wp.int32(1)
-            joint_motion = _set_motion_column(joint_motion, wp.int32(0), wp.cross(r_child, axis), axis)
-            if use_bias:
-                bias1 = read_vec3(constraints, _OFF_BIAS1, cid)
-                bias2 = read_vec3(constraints, _OFF_BIAS2, cid)
-                tangent1 = read_vec3(constraints, _OFF_T1, cid)
-                tangent2 = read_vec3(constraints, _OFF_T2, cid)
-                target1 = -bias1
-                target2 = -bias2[0] * tangent1 - bias2[1] * tangent2
-                target1_tangent = wp.dot(target1, tangent1) * tangent1 + wp.dot(target1, tangent2) * tangent2
-                tangent_delta = target2 - target1_tangent
-                r2_child = read_vec3(constraints, _OFF_R2_B2, cid)
-                lever_length = wp.dot(r2_child - r_child, axis)
-                locked_angular = wp.vec3f(0.0, 0.0, 0.0)
-                if wp.abs(lever_length) > wp.float32(1.0e-8):
-                    locked_angular = wp.cross(axis, tangent_delta) / lever_length
-                locked_linear = target1 + wp.cross(r_child, locked_angular)
-                affine_offset = wp.spatial_vectorf(
-                    locked_linear[0],
-                    locked_linear[1],
-                    locked_linear[2],
-                    locked_angular[0],
-                    locked_angular[1],
-                    locked_angular[2],
-                )
-        elif mode == JOINT_MODE_PRISMATIC:
-            dof_count = wp.int32(1)
-            joint_motion = _set_motion_column(joint_motion, wp.int32(0), axis, wp.vec3f(0.0, 0.0, 0.0))
-            if use_bias:
-                tangent1 = read_vec3(constraints, _OFF_T1, cid)
-                tangent2 = read_vec3(constraints, _OFF_T2, cid)
-                bias1 = read_vec3(constraints, _OFF_BIAS1, cid)
-                bias2 = read_vec3(constraints, _OFF_BIAS2, cid)
-                target1 = -bias1[0] * tangent1 - bias1[1] * tangent2
-                target2 = -bias2[0] * tangent1 - bias2[1] * tangent2
-                affine_offset = _locked_offset_three_anchor(
-                    target1,
-                    target2,
-                    -read_float(constraints, _OFF_BIAS3, cid),
-                    r_child,
-                    read_vec3(constraints, _OFF_R2_B2, cid),
-                    read_vec3(constraints, _OFF_R3_B2, cid),
-                    tangent1,
-                    tangent2,
-                )
-        elif mode == JOINT_MODE_UNIVERSAL:
-            dof_count = wp.int32(2)
-            tangent1, tangent2 = _orthonormal_tangents(axis)
-            joint_motion = _set_motion_column(joint_motion, wp.int32(0), wp.cross(r_child, tangent1), tangent1)
-            joint_motion = _set_motion_column(joint_motion, wp.int32(1), wp.cross(r_child, tangent2), tangent2)
-            if use_bias:
-                locked_angular = wp.vec3f(0.0, 0.0, 0.0)
-                target1 = -read_vec3(constraints, _OFF_BIAS1, cid)
-                locked_linear = target1 + wp.cross(r_child, locked_angular)
-                affine_offset = wp.spatial_vectorf(
-                    locked_linear[0],
-                    locked_linear[1],
-                    locked_linear[2],
-                    locked_angular[0],
-                    locked_angular[1],
-                    locked_angular[2],
-                )
-        elif mode == JOINT_MODE_BALL_SOCKET:
-            dof_count = wp.int32(3)
-            axis0 = wp.vec3f(1.0, 0.0, 0.0)
-            axis1 = wp.vec3f(0.0, 1.0, 0.0)
-            axis2 = wp.vec3f(0.0, 0.0, 1.0)
-            joint_motion = _set_motion_column(joint_motion, wp.int32(0), wp.cross(r_child, axis0), axis0)
-            joint_motion = _set_motion_column(joint_motion, wp.int32(1), wp.cross(r_child, axis1), axis1)
-            joint_motion = _set_motion_column(joint_motion, wp.int32(2), wp.cross(r_child, axis2), axis2)
-            if use_bias:
-                target1 = -read_vec3(constraints, _OFF_BIAS1, cid)
-                affine_offset = wp.spatial_vectorf(target1[0], target1[1], target1[2], 0.0, 0.0, 0.0)
-        elif mode == JOINT_MODE_FIXED:
-            if use_bias:
-                tangent1 = read_vec3(constraints, _OFF_T1, cid)
-                tangent2 = read_vec3(constraints, _OFF_T2, cid)
-                bias2 = read_vec3(constraints, _OFF_BIAS2, cid)
-                affine_offset = _locked_offset_three_anchor(
-                    -read_vec3(constraints, _OFF_BIAS1, cid),
-                    -bias2[0] * tangent1 - bias2[1] * tangent2,
-                    -read_float(constraints, _OFF_BIAS3, cid),
-                    r_child,
-                    read_vec3(constraints, _OFF_R2_B2, cid),
-                    read_vec3(constraints, _OFF_R3_B2, cid),
-                    tangent1,
-                    tangent2,
-                )
+        axis_rotation = parent_orientation * wp.transform_get_rotation(joint_x_p[joint])
+        qd_start = joint_qd_start[joint]
+        linear_count = joint_dof_dim[joint, 0]
+        total_count = linear_count + joint_dof_dim[joint, 1]
+        for local in range(6):
+            if wp.int32(local) < total_count:
+                dof = qd_start + wp.int32(local)
+                if joint_limit_lower[dof] <= joint_limit_upper[dof] and dof_count < wp.int32(3):
+                    axis = wp.normalize(wp.quat_rotate(axis_rotation, joint_axis[dof]))
+                    linear_axis = axis
+                    angular_axis = wp.vec3f(0.0)
+                    if wp.int32(local) >= linear_count:
+                        linear_axis = wp.cross(r_child, axis)
+                        angular_axis = axis
+                    joint_motion = _set_motion_column(joint_motion, dof_count, linear_axis, angular_axis)
+                    dof_count += wp.int32(1)
 
     data.dof_count[articulation, lane] = dof_count
     data.transform[articulation, lane] = joint_transform
     data.motion[articulation, lane] = joint_motion
-    data.affine_offset[articulation, lane] = affine_offset
+    data.affine_offset[articulation, lane] = wp.spatial_vectorf(0.0)
 
 
 @wp.func
@@ -450,13 +314,34 @@ def _publish_general_maximal_tree_thread(
 @wp.kernel(enable_backward=False)
 def _project_general_maximal_tree_fused_kernel(
     use_bias: wp.bool,
+    joint_parent: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_qd_start: wp.array[wp.int32],
+    joint_dof_dim: wp.array2d[wp.int32],
+    joint_limit_lower: wp.array[wp.float32],
+    joint_limit_upper: wp.array[wp.float32],
     joint_to_cid: wp.array[wp.int32],
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     data: GeneralMaximalTreeProjectorData,
 ):
     tid = wp.tid()
-    _gather_general_maximal_tree_thread(tid, use_bias, joint_to_cid, constraints, bodies, data)
+    _gather_general_maximal_tree_thread(
+        tid,
+        use_bias,
+        joint_parent,
+        joint_x_p,
+        joint_x_c,
+        joint_axis,
+        joint_qd_start,
+        joint_dof_dim,
+        joint_limit_lower,
+        joint_limit_upper,
+        bodies,
+        data,
+    )
     _sync_warp()
     _project_general_maximal_tree_thread(tid, data)
     _sync_warp()
@@ -536,13 +421,8 @@ class GeneralMaximalTreeProjector:
                         _is_locked_dof(limit_lower, limit_upper, qd_start + linear_count + offset)
                         for offset in range(angular_count)
                     ]
-                    reduced_mode, _ = _classify_d6_legacy_mode(
-                        linear_count,
-                        angular_count,
-                        locked_linear,
-                        locked_angular,
-                    )
-                    if reduced_mode not in ("FIXED", "BALL", "UNIVERSAL", "REVOLUTE", "PRISMATIC"):
+                    free_count = locked_linear.count(False) + locked_angular.count(False)
+                    if free_count > 3:
                         return False
                 if kind != int(JointType.REVOLUTE) and np.any(armature[qd_start : qd_start + dof_count] > 0.0):
                     return False
@@ -673,6 +553,14 @@ class GeneralMaximalTreeProjector:
             block_dim=_WARP_SIZE,
             inputs=[
                 use_bias,
+                self.model.joint_parent,
+                self.model.joint_X_p,
+                self.model.joint_X_c,
+                self.model.joint_axis,
+                self.model.joint_qd_start,
+                self.model.joint_dof_dim,
+                self.model.joint_limit_lower,
+                self.model.joint_limit_upper,
                 self.joint_to_cid,
                 self.constraints,
                 self.bodies,

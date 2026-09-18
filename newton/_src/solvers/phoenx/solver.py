@@ -669,7 +669,6 @@ class SolverPhoenX(SolverBase):
             model,
             device=self.device,
             reduced_articulations=self._uses_reduced_joint_ownership,
-            common_d6_rows=not self._uses_maximal_tree_projector,
         )
         num_joints = self._joint_constraints.num_joint_columns
         num_particles = int(getattr(model, "particle_count", 0) or 0)
@@ -859,15 +858,10 @@ class SolverPhoenX(SolverBase):
         joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
         d6_data, d6_inequality_count = build_d6_inequality_data(model, joint_idx_to_cid, self._joint_friction_model)
         self.world.constraints.d6 = d6_data
-        effective_joint_mode = np.full(int(model.joint_count), -1, dtype=np.int32)
         active_joint = joint_idx_to_cid >= 0
-        if np.any(active_joint):
-            effective_joint_mode[active_joint] = self._joint_constraints.joint_mode.numpy()[
-                joint_idx_to_cid[active_joint]
-            ]
         full_coordinate_tree_joints: tuple[tuple[int, ...], ...] = ()
         if direct_tree_contact_candidate:
-            full_coordinate_tree_joints = find_full_coordinate_revolute_trees(model, effective_joint_mode)
+            full_coordinate_tree_joints = find_full_coordinate_revolute_trees(model)
             self._direct_tree_contacts = bool(full_coordinate_tree_joints)
             if self._direct_tree_contacts:
                 self._maximal_tree_projector_cls = MaximalTreeProjector
@@ -1595,7 +1589,6 @@ class SolverPhoenX(SolverBase):
                 self.model,
                 device=self.device,
                 reduced_articulations=self._uses_reduced_joint_ownership,
-                common_d6_rows=not self._uses_maximal_tree_projector,
             )
             self.world._combine_direct_prepare_projection = _can_combine_direct_prepare_projection(
                 self._joint_constraints.has_velocity_limits,

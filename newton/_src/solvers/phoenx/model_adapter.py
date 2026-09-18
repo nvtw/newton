@@ -25,13 +25,8 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     DRIVE_MODE_OFF,
     DRIVE_MODE_POSITION,
     DRIVE_MODE_VELOCITY,
-    JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_DISTANCE,
-    JOINT_MODE_FIXED,
     JOINT_MODE_GENERIC_D6,
-    JOINT_MODE_PRISMATIC,
-    JOINT_MODE_REVOLUTE,
-    JOINT_MODE_UNIVERSAL,
 )
 
 __all__ = [
@@ -126,57 +121,6 @@ def _is_locked_dof(limit_lower: np.ndarray | None, limit_upper: np.ndarray | Non
     if limit_lower is None or limit_upper is None or qd >= len(limit_lower) or qd >= len(limit_upper):
         return False
     return float(limit_lower[qd]) > float(limit_upper[qd])
-
-
-def _classify_d6_legacy_mode(
-    n_lin: int,
-    n_ang: int,
-    locked_lin: list[bool],
-    locked_ang: list[bool],
-) -> tuple[str | None, int]:
-    """Map D6 axes to the supported joint constraint mode set.
-
-    Missing axes are locked by construction in Newton's D6 kinematics.
-    ``dof_offset`` is the scalar DoF within the D6 joint used for the
-    reduced REVOLUTE/PRISMATIC axis. For UNIVERSAL, ``dof_offset`` is
-    the locked angular axis when it is explicitly authored, or ``-1``
-    for MJCF-style two-axis angular-only D6 joints.
-    """
-    lin_free = [i for i, locked in enumerate(locked_lin) if not locked]
-    ang_free = [i for i, locked in enumerate(locked_ang) if not locked]
-
-    if not lin_free and not ang_free:
-        return "FIXED", -1
-
-    if not lin_free and len(ang_free) == 3:
-        return "BALL", -1
-
-    if n_lin == 0 and n_ang == 2 and len(ang_free) == 2:
-        return "UNIVERSAL", -1
-
-    if n_lin == 3 and n_ang == 3 and not lin_free and len(ang_free) == 2:
-        locked_ang_idx = next(i for i, locked in enumerate(locked_ang) if locked)
-        return "UNIVERSAL", n_lin + locked_ang_idx
-
-    if not lin_free and len(ang_free) == 1:
-        return "REVOLUTE", n_lin + ang_free[0]
-
-    if len(lin_free) == 1 and not ang_free:
-        return "PRISMATIC", lin_free[0]
-
-    if len(lin_free) == 1 and len(ang_free) == 1:
-        return "CYLINDRICAL", -1
-
-    if len(lin_free) == 2 and len(ang_free) == 1:
-        return "PLANAR", -1
-
-    if len(lin_free) == 2 and not ang_free:
-        return "CARTESIAN_PLANE", -1
-
-    if len(lin_free) == 3 and not ang_free:
-        return "CARTESIAN", -1
-
-    return None, -1
 
 
 class JointInitArrays:
@@ -287,7 +231,6 @@ def build_joint_init_arrays(
     device: wp.context.Devicelike | None = None,
     *,
     reduced_articulations: bool = False,
-    common_d6_rows: bool = True,
 ) -> JointInitArrays:
     """Convert ``model``'s joints to joint constraint init arrays on ``device``.
 
@@ -296,9 +239,6 @@ def build_joint_init_arrays(
         device: Device for the generated Warp arrays.
         reduced_articulations: Whether tree joints are owned by the reduced
             articulation solver instead of maximal-coordinate joint constraint columns.
-        common_d6_rows: Whether migrated D6 layouts use the common equality-row
-            representation. Disable this for the maximal tree projector until it
-            consumes common D6 rows directly.
 
     Raises:
         NotImplementedError: If a non-reduced D6 configuration cannot be
@@ -423,46 +363,9 @@ def build_joint_init_arrays(
         effective_jtype = jtype
         effective_dof_offset = 0
         effective_qd = qd_start
-        if jtype is newton.JointType.D6:
-            n_lin = int(joint_dof_dim[j, 0])
-            n_ang = int(joint_dof_dim[j, 1])
-            locked_lin = [_is_locked_dof(limit_lower, limit_upper, qd_start + i) for i in range(n_lin)]
-            locked_ang = [_is_locked_dof(limit_lower, limit_upper, qd_start + n_lin + i) for i in range(n_ang)]
-            classified_tag, classified_offset = _classify_d6_legacy_mode(n_lin, n_ang, locked_lin, locked_ang)
-            # Keep D6 joints on the common D6 representation as their row
-            # layouts are migrated. Native joint types retain their compact
-            # modes.
-            if common_d6_rows and classified_tag in (
-                "FIXED",
-                "BALL",
-                "UNIVERSAL",
-                "REVOLUTE",
-                "PRISMATIC",
-                "CYLINDRICAL",
-                "PLANAR",
-                "CARTESIAN_PLANE",
-                "CARTESIAN",
-            ):
-                classified_tag = "GENERIC"
-            if classified_tag is None:
-                if reduced_articulations and int(joint_articulation[j]) >= 0:
-                    continue
-                classified_tag = "GENERIC"
-            if classified_tag == "BALL":
-                effective_jtype = newton.JointType.BALL
-            elif classified_tag == "FIXED":
-                effective_jtype = newton.JointType.FIXED
-            elif classified_tag == "REVOLUTE":
-                effective_jtype = newton.JointType.REVOLUTE
-            elif classified_tag == "PRISMATIC":
-                effective_jtype = newton.JointType.PRISMATIC
-            elif classified_tag == "UNIVERSAL":
-                effective_jtype = newton.JointType.D6
-            effective_dof_offset = classified_offset if classified_offset >= 0 else 0
-            if classified_offset >= 0 and classified_tag in ("REVOLUTE", "PRISMATIC"):
-                effective_qd = qd_start + classified_offset
 
-        # FIXED/BALL have no 1-axis DoF; -1 lets the control kernel skip them.
+        # Scalar native joints retain their control-array mapping. Multi-axis
+        # D6 drives are owned by the common direct rows.
         dof_start_for_control = (
             effective_qd if effective_jtype in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC) else -1
         )
@@ -471,12 +374,6 @@ def build_joint_init_arrays(
             target_q_index_for_control = int(joint_target_q_start[j]) + effective_dof_offset
         joint_idx_to_dof_start_np[j] = dof_start_for_control
         joint_idx_to_target_q_index_np[j] = target_q_index_for_control
-
-        d6_mode_tag: str | None = None
-        d6_locked_axis_offset = -1
-        if jtype is newton.JointType.D6:
-            d6_mode_tag = classified_tag
-            d6_locked_axis_offset = classified_offset
 
         # Per-mode anchor2 and drive/limit defaults.
         anchor2_world = anchor1_world.copy()
@@ -488,7 +385,7 @@ def build_joint_init_arrays(
         max_force = 0.0
         min_val = 1.0  # disabled: min > max
         max_val = -1.0
-        if d6_mode_tag == "GENERIC":
+        if jtype is newton.JointType.D6:
             phoenx_mode = int(JOINT_MODE_GENERIC_D6)
         elif effective_jtype is newton.JointType.DISTANCE:
             phoenx_mode = int(JOINT_MODE_DISTANCE)
@@ -511,40 +408,16 @@ def build_joint_init_arrays(
                 min_val = max(0.0, lo)
                 max_val = hi if hi >= 0.0 else 1.0e10
         elif effective_jtype is newton.JointType.BALL:
-            phoenx_mode = int(JOINT_MODE_BALL_SOCKET)
+            phoenx_mode = int(JOINT_MODE_GENERIC_D6)
         elif effective_jtype is newton.JointType.ROD:
             phoenx_mode = int(JOINT_MODE_GENERIC_D6)
-        elif d6_mode_tag == "UNIVERSAL":
-            phoenx_mode = int(JOINT_MODE_UNIVERSAL)
-            if d6_locked_axis_offset >= 0:
-                locked_qd = qd_start + d6_locked_axis_offset
-                axis_local = (
-                    np.asarray(joint_axis[locked_qd], dtype=np.float32)
-                    if len(joint_axis) and locked_qd < len(joint_axis)
-                    else np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
-                )
-            else:
-                axis_a = np.asarray(joint_axis[qd_start], dtype=np.float32)
-                axis_b = np.asarray(joint_axis[qd_start + 1], dtype=np.float32)
-                axis_local = _cross3_np(axis_a, axis_b)
-            axis_len = _norm3_np(axis_local)
-            if axis_len <= 1.0e-12:
-                raise NotImplementedError(
-                    f"D6 joint {j} has two angular axes that cannot define a universal locked twist axis."
-                )
-            axis_world = _quat_rotate_np(X_w_p[3:], axis_local / axis_len)
-            anchor2_world = anchor1_world + axis_world
-            min_val = 0.0
-            max_val = 0.0
         elif effective_jtype is newton.JointType.FIXED:
-            phoenx_mode = int(JOINT_MODE_FIXED)
+            phoenx_mode = int(JOINT_MODE_GENERIC_D6)
             # Pick joint-frame X axis so the anchor-3 basis is well-defined.
             axis_world = _quat_rotate_np(X_w_p[3:], np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
             anchor2_world = anchor1_world + axis_world
         elif effective_jtype is newton.JointType.REVOLUTE or effective_jtype is newton.JointType.PRISMATIC:
-            phoenx_mode = (
-                int(JOINT_MODE_REVOLUTE) if effective_jtype is newton.JointType.REVOLUTE else int(JOINT_MODE_PRISMATIC)
-            )
+            phoenx_mode = int(JOINT_MODE_GENERIC_D6)
             axis_local = (
                 np.asarray(joint_axis[effective_qd], dtype=np.float32)
                 if len(joint_axis) and effective_qd < len(joint_axis)
@@ -587,7 +460,7 @@ def build_joint_init_arrays(
         else:  # pragma: no cover -- defensive
             raise NotImplementedError(f"joint {j}: unhandled joint type {jtype}")
 
-        if common_d6_rows and effective_jtype is not newton.JointType.DISTANCE:
+        if effective_jtype is not newton.JointType.DISTANCE:
             phoenx_mode = int(JOINT_MODE_GENERIC_D6)
 
         # Init joint coord for this joint's first DOF. BALL/FIXED publish 0 to

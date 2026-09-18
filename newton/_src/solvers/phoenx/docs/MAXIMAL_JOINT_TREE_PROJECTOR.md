@@ -71,9 +71,9 @@ r_i = M_i (v_i - v_i*) + sum_child X_child^T r_child.
 
 Optimality gives `S_i^T r_i = 0`: the projector applies no impulse along an
 allowed coordinate. A floating root has zero reaction, which is the momentum
-conservation condition. Reactions are decomposed into the existing joint constraint
-anchor/axial representation for fixed, revolute, prismatic, ball, and
-universal rows, then added to their accumulated multipliers.
+conservation condition. The recovered spatial impulse is published directly as the native D6 reaction
+wrench. Common D6 limit, speed-cap, and friction impulses are added only when
+constraint diagnostics gather the final wrench.
 
 ## Current evidence
 
@@ -92,13 +92,15 @@ universal rows, then added to their accumulated multipliers.
 - The same free-root/revolute path reduces joint error on ANYmal and H1 without
   robot-specific tuning.
 - Production CUDA-graph tests cover multiple articulations per world,
-  fixed/revolute/prismatic/ball mixtures, reducible D6 universal joints,
-  generic-D6 pure-reduced fallback, loop-joint exclusion, active rigid
+  fixed/revolute/prismatic/ball mixtures, universal and cylindrical D6
+  joints, generic-D6 reduced fallback above three free axes, loop-joint
+  exclusion, active rigid
   contacts, exact reaction recovery, floating momentum, and bitwise
   determinism.
-- Correcting stale world inertia on non-continuation state imports reduces the
-  repeated floating-tree angular-momentum error from about `9.3e-3` to
-  `8e-6` in both maximal and projected-maximal execution.
+- Projector motion subspaces are rebuilt from the model D6 frames and authored
+  axes instead of cached anchor geometry. The floating revolute and mixed-D6
+  graph tests conserve both linear and angular momentum at their analytical
+  tolerances.
 - The retained ideal GPU benchmark processes 8,192 branched 29-body trees and
   recovers all reactions in about `325 us` per captured replay on RTX PRO 6000
   Blackwell. In a separate 512-world mixed-tree contact bracket with 6,656

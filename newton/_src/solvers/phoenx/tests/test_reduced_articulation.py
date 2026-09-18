@@ -2310,7 +2310,7 @@ class TestReducedArticulation(unittest.TestCase):
                             self.assertLess(float(np.max(np.abs(basis.T @ reaction[body]))), 3.0e-5)
                         self.assertLess(float(np.linalg.norm(delta)), 3.0e-5)
 
-    def test_maximal_projected_cylindrical_d6_uses_reduced_fallback_inside_graph(self):
+    def test_maximal_projected_cylindrical_d6_uses_native_projector_inside_graph(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
             self.skipTest("projected articulation tests require CUDA graph capture")
@@ -2329,10 +2329,10 @@ class TestReducedArticulation(unittest.TestCase):
             solver_iterations=2,
             velocity_iterations=1,
         )
-        self.assertIsNone(solver._maximal_tree_projector)
-        self.assertIsNotNone(solver._reduced_articulation)
-        self.assertTrue(solver._uses_reduced_joint_ownership)
-        self.assertEqual(solver._joint_constraints.num_joint_columns, 0)
+        self.assertIsInstance(solver._maximal_tree_projector, GeneralMaximalTreeProjector)
+        self.assertIsNone(solver._reduced_articulation)
+        self.assertFalse(solver._uses_reduced_joint_ownership)
+        self.assertEqual(solver._joint_constraints.num_joint_columns, 1)
 
         with wp.ScopedCapture(device=device) as capture:
             solver.step(state0, state1, None, None, 1.0 / 1000.0)
