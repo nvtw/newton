@@ -14,18 +14,13 @@ the same regularized PD math as the drive, with ``stiffness = 0``,
 so the slip velocity at saturation equals the configured constant
 regardless of joint impedance.
 
-All analytical fixtures here use a **rotor** (a body anchored at the
-joint origin so the body's COM-frame axial inertia equals the joint
-effective inertia). PhoenX's friction iterate operates in maximal
-coordinates and scales with the body's COM-frame inverse inertia
-``n . I_com^-1 . n``; for a body offset from the joint the parallel-axis
-term ``m * L^2`` is *not* folded into that scalar, so the impulse-domain
-friction would not match the analytical Coulomb model on a point-mass
-pendulum. Rotor fixtures sidestep this by collocating the COM with the
-joint. The stiction test still uses a pendulum because "joint locked"
-is parallel-axis-invariant (the joint doesn't rotate either way).
+Hard friction on direct-owned axial joints is applied as an
+equal-and-opposite wrench before the mechanism projection. The projection
+therefore includes the locked coordinates and the parallel-axis inertia of
+offset bodies while preserving total momentum. Other solver modes retain the
+common D6 inequality row.
 
-Four analytical fixtures, all CUDA + graph-captured:
+Six analytical fixtures, all CUDA + graph-captured:
 
 * :class:`TestFrictionStiction` -- friction large enough to overcome
   gravity. A pendulum released at a non-equilibrium angle must stay
@@ -36,6 +31,10 @@ Four analytical fixtures, all CUDA + graph-captured:
   and inertia ``I``, must decelerate at ``alpha = -μ / I`` and reach zero
   velocity after ``t_stop = I * ω_0 / μ``. The post-stop state must
   remain stationary (saturated friction holds qd=0 once reached).
+
+* :class:`TestFrictionOffsetBody` -- the same decay with the center of
+  mass offset from the hinge. The measured acceleration must include the
+  body parallel-axis inertia.
 
 * :class:`TestFrictionConstantTorque` -- dual of free-spin decay. A
   rotor driven by a constant applied torque ``τ > μ`` in zero gravity
@@ -271,9 +270,12 @@ class TestCommonD6FrictionSlip(unittest.TestCase):
 
         hard_data = hard_solver.world.constraints.d6
         mujoco_data = mujoco_solver.world.constraints.d6
-        self.assertEqual(int(hard_data.row_count.numpy()[0]), 1)
+        # Hard friction owned by the direct mechanism solve does not leave a
+        # duplicate common D6 row. MuJoCo friction retains its authored soft
+        # regularization in the common path.
+        self.assertEqual(int(hard_data.row_count.numpy()[0]), 0)
+        self.assertTrue(bool(hard_solver._direct_equality_system.direct_friction_dof_mask[0]))
         self.assertEqual(int(mujoco_data.row_count.numpy()[0]), 1)
-        self.assertLess(float(hard_data.friction_slip_scale.numpy()[0, 0]), 0.0)
         initial_slip = float(mujoco_data.friction_slip_scale.numpy()[0, 0])
         self.assertGreater(initial_slip, 1.0)
 
@@ -380,6 +382,32 @@ class TestFrictionFreeSpinDecay(unittest.TestCase):
                     "friction is not holding qd=0 after the body should have halted"
                 ),
             )
+
+
+@unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX joint-friction tests run on CUDA only")
+class TestFrictionOffsetBody(unittest.TestCase):
+    """Projected friction must include an offset body's parallel-axis inertia."""
+
+    def test_free_spin_uses_joint_space_inertia(self) -> None:
+        mass = 1.0
+        length = 0.5
+        inertia_com = 1.0e-4
+        inertia_joint = inertia_com + mass * length * length
+        friction = 0.2
+        omega_0 = 1.0
+        model = _build_pendulum(mass=mass, length=length, friction=friction, gravity=0.0)
+        solver = _solver(model)
+        _q_traj, qd_traj = _capture_steps(model, solver, n_frames=40, init_joint_qd=omega_0)
+
+        fit = np.arange(1, len(qd_traj))
+        measured_alpha = -float(np.polyfit(fit * _DT, qd_traj[fit], 1)[0])
+        expected_alpha = friction / inertia_joint
+        self.assertAlmostEqual(
+            measured_alpha,
+            expected_alpha,
+            delta=0.1 * expected_alpha,
+            msg=(f"offset-body deceleration {measured_alpha:.4f} rad/s² vs μ/(I_com + mL²) = {expected_alpha:.4f}"),
+        )
 
 
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX joint-friction tests run on CUDA only")

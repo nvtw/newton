@@ -38,6 +38,7 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
     revolution_tracker_angle,
     revolution_tracker_update,
 )
+from newton._src.solvers.phoenx.solver_config import PHOENX_FRICTION_SLIP_VELOCITY
 
 _MAX_ROWS = 6
 
@@ -1211,6 +1212,88 @@ def _build_direct_equality_rhs_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _apply_direct_joint_friction_kernel(
+    friction_joints: wp.array[wp.int32],
+    friction_dofs: wp.array[wp.int32],
+    effective_joint_axis: wp.array[wp.vec3],
+    joint_type: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    joint_friction: wp.array[wp.float32],
+    dt: wp.float32,
+    bodies: BodyContainer,
+):
+    row = wp.tid()
+    joint = friction_joints[row]
+    dof = friction_dofs[row]
+    parent = joint_parent[joint] + wp.int32(1)
+    child = joint_child[joint] + wp.int32(1)
+    x_wpj = _body_origin_transform(bodies, parent) * joint_x_p[joint]
+    x_wcj = _body_origin_transform(bodies, child) * joint_x_c[joint]
+    q0 = wp.transform_get_rotation(x_wpj)
+    axis = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
+
+    wrench0 = wp.spatial_vector(wp.vec3f(0.0), -axis)
+    wrench1 = wp.spatial_vector(wp.vec3f(0.0), axis)
+    if joint_type[joint] == JointType.PRISMATIC:
+        point0 = wp.transform_get_translation(x_wpj)
+        point1 = wp.transform_get_translation(x_wcj)
+        point0_com = point0
+        point1_com = point1
+        if parent > wp.int32(0):
+            point0_com = wp.quat_rotate(
+                bodies.orientation[parent],
+                wp.transform_get_translation(joint_x_p[joint]) - bodies.body_com[parent],
+            )
+        if child > wp.int32(0):
+            point1_com = wp.quat_rotate(
+                bodies.orientation[child],
+                wp.transform_get_translation(joint_x_c[joint]) - bodies.body_com[child],
+            )
+        point_error = point1 - point0
+        if parent > wp.int32(0) and child > wp.int32(0):
+            point_error = bodies.position[child] - bodies.position[parent] + point1_com - point0_com
+        elif child > wp.int32(0):
+            point_error = bodies.position[child] - point0 + point1_com
+        elif parent > wp.int32(0):
+            point_error = point1 - bodies.position[parent] - point0_com
+        point0_com += point_error
+        wrench0 = wp.spatial_vector(-axis, wp.cross(point0_com, -axis))
+        wrench1 = wp.spatial_vector(axis, wp.cross(point1_com, axis))
+
+    relative_velocity = wp.float32(0.0)
+    if parent > wp.int32(0):
+        relative_velocity += wp.dot(wrench0, _body_com_twist(bodies, parent))
+    if child > wp.int32(0):
+        relative_velocity += wp.dot(wrench1, _body_com_twist(bodies, child))
+    friction = joint_friction[dof]
+    effort = -friction * wp.clamp(
+        relative_velocity / PHOENX_FRICTION_SLIP_VELOCITY,
+        wp.float32(-1.0),
+        wp.float32(1.0),
+    )
+    impulse = dt * effort
+    if parent > wp.int32(0):
+        response0 = _direct_wrench_response(
+            impulse * wrench0,
+            bodies.inverse_mass[parent],
+            mat33_from_sym6(bodies.inverse_inertia_world[parent]),
+        )
+        wp.atomic_add(bodies.velocity, parent, wp.spatial_top(response0))
+        wp.atomic_add(bodies.angular_velocity, parent, wp.spatial_bottom(response0))
+    if child > wp.int32(0):
+        response1 = _direct_wrench_response(
+            impulse * wrench1,
+            bodies.inverse_mass[child],
+            mat33_from_sym6(bodies.inverse_inertia_world[child]),
+        )
+        wp.atomic_add(bodies.velocity, child, wp.spatial_top(response1))
+        wp.atomic_add(bodies.angular_velocity, child, wp.spatial_bottom(response1))
+
+
+@wp.kernel(enable_backward=False)
 def _snapshot_direct_dynamic_velocity_kernel(
     row_joint: wp.array[wp.int32],
     row_local: wp.array[wp.int32],
@@ -1604,8 +1687,10 @@ class DirectEqualitySystem:
         effective_joint_target_start: np.ndarray | None = None,
         regularization: float = _FP32_BASE_REGULARIZATION,
         temporal_substeps: int | None = None,
+        direct_joint_friction: bool = False,
     ):
         self.model = model
+        self._direct_joint_friction = bool(direct_joint_friction)
         self.bodies = bodies
         self.set_temporal_substeps(temporal_substeps)
         joint_types = np.asarray(model.joint_type.numpy(), dtype=np.int32)
@@ -1637,6 +1722,27 @@ class DirectEqualitySystem:
             structural_row_counts,
         ) = _generic_d6_constraint_bases(model)
         drive_dof_mask, bounded_dof_mask = _drive_dof_masks(model)
+        model_dof_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
+        friction_dof_mask = np.zeros(int(model.joint_dof_count), dtype=bool)
+        friction_joints = np.empty(0, dtype=np.int32)
+        friction_dofs = np.empty(0, dtype=np.int32)
+        if self._direct_joint_friction:
+            model_friction = np.asarray(model.joint_friction.numpy(), dtype=np.float32)
+            enabled = (
+                np.asarray(model.joint_enabled.numpy(), dtype=bool)
+                if model.joint_enabled is not None
+                else np.ones(joint_count, dtype=bool)
+            )
+            axial = np.isin(joint_types, (int(JointType.REVOLUTE), int(JointType.PRISMATIC)))
+            friction_joints = np.flatnonzero(axial & enabled & ~excluded)
+            friction_dofs = model_dof_start[friction_joints]
+            active = (friction_dofs >= 0) & (friction_dofs < len(model_friction))
+            friction_joints = friction_joints[active]
+            friction_dofs = friction_dofs[active]
+            active = model_friction[friction_dofs] > 0.0
+            friction_joints = friction_joints[active]
+            friction_dofs = friction_dofs[active]
+            friction_dof_mask[friction_dofs] = True
         dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
             model, joint_dof_start, excluded, drive_dof_mask, bounded_dof_mask
         )
@@ -1653,6 +1759,8 @@ class DirectEqualitySystem:
         self.dynamic_joint_dofs = dynamic_joint_dofs
         self.direct_drive_joint_mask = direct_drive_joint_mask
         self.bounded_drive_joint_mask = bounded_drive_joint_mask
+        self.direct_friction_dof_mask = friction_dof_mask
+        self.has_direct_friction = bool(len(friction_joints))
         self.has_dynamic_rows = bool(np.any(dynamic_joint_mask))
         self.has_multi_axis_dynamic_rows = any(
             dofs and joint_types[joint] not in (int(JointType.REVOLUTE), int(JointType.PRISMATIC))
@@ -1763,6 +1871,8 @@ class DirectEqualitySystem:
         self.row_direct_drive = wp.array(row_direct_drive, dtype=wp.bool, device=device)
         self.row_bounded_drive = wp.array(row_bounded_drive, dtype=wp.bool, device=device)
         self.row_target_q = wp.array(row_target_q, dtype=wp.int32, device=device)
+        self.friction_joints = wp.array(friction_joints, dtype=wp.int32, device=device)
+        self.friction_dofs = wp.array(friction_dofs, dtype=wp.int32, device=device)
         self.dynamic_mass = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.dynamic_old_velocity = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.dynamic_coordinate = wp.zeros(row_count, dtype=wp.float32, device=device)
@@ -1808,6 +1918,11 @@ class DirectEqualitySystem:
         self.joint_damping = (
             model.joint_damping
             if model.joint_damping is not None
+            else wp.zeros(dof_count, dtype=wp.float32, device=device)
+        )
+        self.joint_friction = (
+            model.joint_friction
+            if model.joint_friction is not None
             else wp.zeros(dof_count, dtype=wp.float32, device=device)
         )
         self.control_target_q = model.joint_target_q
@@ -1863,6 +1978,22 @@ class DirectEqualitySystem:
     def refresh_joint_properties(self) -> None:
         """Rebuild topology only when scalar dynamics rows change ownership."""
         drive_dof_mask, bounded_dof_mask = _drive_dof_masks(self.model)
+        friction_dof_mask = np.zeros(int(self.model.joint_dof_count), dtype=bool)
+        if self._direct_joint_friction:
+            joint_type = np.asarray(self.model.joint_type.numpy(), dtype=np.int32)
+            model_dof_start = np.asarray(self.model.joint_qd_start.numpy(), dtype=np.int32)
+            model_friction = np.asarray(self.model.joint_friction.numpy(), dtype=np.float32)
+            enabled = (
+                np.asarray(self.model.joint_enabled.numpy(), dtype=bool)
+                if self.model.joint_enabled is not None
+                else np.ones(int(self.model.joint_count), dtype=bool)
+            )
+            axial = np.isin(joint_type, (int(JointType.REVOLUTE), int(JointType.PRISMATIC)))
+            joints = np.flatnonzero(axial & enabled & ~self._excluded_joint_mask)
+            dofs = model_dof_start[joints]
+            valid = (dofs >= 0) & (dofs < len(model_friction))
+            dofs = dofs[valid]
+            friction_dof_mask[dofs[model_friction[dofs] > 0.0]] = True
         dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
             self.model,
             self._joint_dof_start_np,
@@ -1891,6 +2022,7 @@ class DirectEqualitySystem:
                 self.direct_drive_joint_mask,
             )
             and np.array_equal(bounded_drive_joint_mask, self.bounded_drive_joint_mask)
+            and np.array_equal(friction_dof_mask, self.direct_friction_dof_mask)
         ):
             return
         self.__init__(
@@ -1900,6 +2032,7 @@ class DirectEqualitySystem:
             effective_joint_dof_start=self._joint_dof_start_np,
             effective_joint_target_start=self._joint_target_start_np,
             regularization=self.regularization,
+            direct_joint_friction=self._direct_joint_friction,
         )
 
     def refresh_cable_rest_state(self) -> None:
@@ -2032,6 +2165,26 @@ class DirectEqualitySystem:
             ],
             device=self.model.device,
         )
+
+        if self.has_direct_friction:
+            wp.launch(
+                _apply_direct_joint_friction_kernel,
+                dim=len(self.friction_joints),
+                inputs=[
+                    self.friction_joints,
+                    self.friction_dofs,
+                    self.effective_joint_axis,
+                    self.model.joint_type,
+                    self.model.joint_parent,
+                    self.model.joint_child,
+                    self.model.joint_X_p,
+                    self.model.joint_X_c,
+                    self.joint_friction,
+                    wp.float32(1.0) / idt,
+                    self.bodies,
+                ],
+                device=self.model.device,
+            )
 
     def resolve_bounded_drives(self, idt: wp.float32, *, use_bias: bool) -> None:
         """Activate finite effort bounds and correct the direct solution."""

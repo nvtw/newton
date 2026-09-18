@@ -987,8 +987,17 @@ class SolverPhoenX(SolverBase):
                 excluded_joint_mask=excluded_joint_mask,
                 effective_joint_dof_start=effective_joint_dof_start,
                 effective_joint_target_start=joint_target_start,
+                direct_joint_friction=joint_solver == "direct" and self._joint_friction_model == "hard",
             )
             self.world._direct_equality_system = self._direct_equality_system
+            if np.any(self._direct_equality_system.direct_friction_dof_mask):
+                d6_data, d6_inequality_count = build_d6_inequality_data(
+                    model,
+                    joint_idx_to_cid,
+                    self._joint_friction_model,
+                    friction_dof_owned=self._direct_equality_system.direct_friction_dof_mask,
+                )
+                self.world.constraints.d6 = d6_data
             self._direct_equality_system.d6_inequality_count = d6_inequality_count
             if self._direct_equality_system.enabled:
                 if self._direct_tree_contacts:
@@ -1631,15 +1640,20 @@ class SolverPhoenX(SolverBase):
             )
             if self._joint_constraints.num_joint_columns > 0:
                 self.world.initialize_joint_constraints(**self._joint_constraints.to_initialize_kwargs())
+            if self._direct_equality_system is not None:
+                previous_direct_solver = getattr(self._direct_equality_system, "solver", None)
+                self._direct_equality_system.refresh_joint_properties()
+                friction_dof_owned = self._direct_equality_system.direct_friction_dof_mask
+            else:
+                friction_dof_owned = None
             d6_data, d6_inequality_count = build_d6_inequality_data(
                 self.model,
                 self._joint_constraints.joint_idx_to_cid.numpy(),
                 self._joint_friction_model,
+                friction_dof_owned=friction_dof_owned,
             )
             self.world.constraints.d6 = d6_data
             if self._direct_equality_system is not None:
-                previous_direct_solver = getattr(self._direct_equality_system, "solver", None)
-                self._direct_equality_system.refresh_joint_properties()
                 self._direct_equality_system.d6_inequality_count = d6_inequality_count
                 if previous_direct_solver is not getattr(self._direct_equality_system, "solver", None):
                     self._rebuild_direct_contact_response()
