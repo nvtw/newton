@@ -35,15 +35,10 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_BALL_SOCKET,
     JOINT_MODE_CABLE,
-    JOINT_MODE_CARTESIAN,
-    JOINT_MODE_CARTESIAN_PLANE,
-    JOINT_MODE_CYLINDRICAL,
     JOINT_MODE_FIXED,
     JOINT_MODE_GENERIC_D6,
-    JOINT_MODE_PLANAR,
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
-    JOINT_MODE_UNIVERSAL,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     create_orthonormal,
@@ -134,16 +129,8 @@ def _structural_row_count(mode: int) -> int:
         return 3
     if mode in (int(JOINT_MODE_REVOLUTE), int(JOINT_MODE_PRISMATIC)):
         return 5
-    if mode in (int(JOINT_MODE_CYLINDRICAL), int(JOINT_MODE_CARTESIAN_PLANE)):
-        return 4
-    if mode == int(JOINT_MODE_CARTESIAN):
-        return 3
-    if mode == int(JOINT_MODE_PLANAR):
-        return 3
     if mode in (int(JOINT_MODE_FIXED), int(JOINT_MODE_CABLE)):
         return 6
-    if mode == int(JOINT_MODE_UNIVERSAL):
-        return 4
     return 0
 
 
@@ -215,11 +202,6 @@ def _generic_d6_constraint_bases(
 _MULTI_AXIS_D6_MODES = frozenset(
     (
         int(JOINT_MODE_BALL_SOCKET),
-        int(JOINT_MODE_UNIVERSAL),
-        int(JOINT_MODE_CYLINDRICAL),
-        int(JOINT_MODE_PLANAR),
-        int(JOINT_MODE_CARTESIAN_PLANE),
-        int(JOINT_MODE_CARTESIAN),
         int(JOINT_MODE_GENERIC_D6),
     )
 )
@@ -714,56 +696,11 @@ def _prepare_direct_rows(
                 row += wp.int32(1)
         return row
 
-    if mode == JOINT_MODE_CARTESIAN_PLANE or mode == JOINT_MODE_CARTESIAN:
-        angular_start = wp.int32(0)
-        if mode == JOINT_MODE_CARTESIAN_PLANE:
-            normal = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
-            normal_error = wp.dot(point_error, normal)
-            _set_direct_point_row(
-                structural_index,
-                wp.int32(0),
-                point0_com,
-                point1_com,
-                normal,
-                normal_error,
-                bias_rate,
-                row_wrench0,
-                row_wrench1,
-                row_bias,
-            )
-            row_error[structural_index, 0] = normal_error
-            angular_start = wp.int32(1)
-        rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
-        for angular_row in range(3):
-            direction = wp.quat_rotate(
-                q0,
-                wp.vec3(
-                    wp.float32(1.0) if angular_row == 0 else wp.float32(0.0),
-                    wp.float32(1.0) if angular_row == 1 else wp.float32(0.0),
-                    wp.float32(1.0) if angular_row == 2 else wp.float32(0.0),
-                ),
-            )
-            row = angular_start + wp.int32(angular_row)
-            error = wp.dot(rotation_error, direction)
-            _set_angular_row(
-                structural_index,
-                row,
-                direction,
-                error,
-                bias_rate,
-                row_wrench0,
-                row_wrench1,
-                row_bias,
-            )
-            row_error[structural_index, row] = error
-        return angular_start + wp.int32(3)
-
     has_point_lock = (
         mode == JOINT_MODE_BALL_SOCKET
         or mode == JOINT_MODE_REVOLUTE
         or mode == JOINT_MODE_FIXED
         or mode == JOINT_MODE_CABLE
-        or mode == JOINT_MODE_UNIVERSAL
     )
     if has_point_lock:
         if mode == JOINT_MODE_CABLE:
@@ -814,63 +751,16 @@ def _prepare_direct_rows(
 
     local_axis = effective_joint_axis[joint]
     axis0 = wp.normalize(wp.quat_rotate(q0, local_axis))
-    if mode == JOINT_MODE_REVOLUTE or mode == JOINT_MODE_CYLINDRICAL or mode == JOINT_MODE_PLANAR:
+    if mode == JOINT_MODE_REVOLUTE:
         axis1 = wp.normalize(wp.quat_rotate(q1, local_axis))
         tangent0 = create_orthonormal(axis0)
         tangent1 = wp.cross(axis0, tangent0)
         alignment_error = wp.cross(axis0, axis1)
         error0 = wp.dot(alignment_error, tangent0)
         error1 = wp.dot(alignment_error, tangent1)
-        angular_start = wp.int32(3)
-        if mode == JOINT_MODE_CYLINDRICAL:
-            point_error0 = wp.dot(point_error, tangent0)
-            point_error1 = wp.dot(point_error, tangent1)
-            _set_direct_point_row(
-                structural_index,
-                wp.int32(0),
-                point0_com,
-                point1_com,
-                tangent0,
-                point_error0,
-                bias_rate,
-                row_wrench0,
-                row_wrench1,
-                row_bias,
-            )
-            _set_direct_point_row(
-                structural_index,
-                wp.int32(1),
-                point0_com,
-                point1_com,
-                tangent1,
-                point_error1,
-                bias_rate,
-                row_wrench0,
-                row_wrench1,
-                row_bias,
-            )
-            row_error[structural_index, 0] = point_error0
-            row_error[structural_index, 1] = point_error1
-            angular_start = wp.int32(2)
-        elif mode == JOINT_MODE_PLANAR:
-            point_axis_error = wp.dot(point_error, axis0)
-            _set_direct_point_row(
-                structural_index,
-                wp.int32(0),
-                point0_com,
-                point1_com,
-                axis0,
-                point_axis_error,
-                bias_rate,
-                row_wrench0,
-                row_wrench1,
-                row_bias,
-            )
-            row_error[structural_index, 0] = point_axis_error
-            angular_start = wp.int32(1)
         _set_angular_row(
             structural_index,
-            angular_start,
+            wp.int32(3),
             tangent0,
             error0,
             bias_rate,
@@ -880,7 +770,7 @@ def _prepare_direct_rows(
         )
         _set_angular_row(
             structural_index,
-            angular_start + wp.int32(1),
+            wp.int32(4),
             tangent1,
             error1,
             bias_rate,
@@ -888,23 +778,19 @@ def _prepare_direct_rows(
             row_wrench1,
             row_bias,
         )
-        row_error[structural_index, angular_start] = error0
-        row_error[structural_index, angular_start + wp.int32(1)] = error1
-        if mode == JOINT_MODE_REVOLUTE:
-            _set_angular_row(
-                structural_index,
-                wp.int32(5),
-                axis0,
-                wp.float32(0.0),
-                wp.float32(0.0),
-                row_wrench0,
-                row_wrench1,
-                row_bias,
-            )
-            return wp.int32(5)
-        if mode == JOINT_MODE_CYLINDRICAL:
-            return wp.int32(4)
-        return wp.int32(3)
+        row_error[structural_index, 3] = error0
+        row_error[structural_index, 4] = error1
+        _set_angular_row(
+            structural_index,
+            wp.int32(5),
+            axis0,
+            wp.float32(0.0),
+            wp.float32(0.0),
+            row_wrench0,
+            row_wrench1,
+            row_bias,
+        )
+        return wp.int32(5)
 
     rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
     if mode == JOINT_MODE_CABLE:
@@ -937,21 +823,6 @@ def _prepare_direct_rows(
                 row_stiffness[structural_index, row] = stiffness
                 row_damping[structural_index, row] = damping
         return wp.int32(6)
-    if mode == JOINT_MODE_UNIVERSAL:
-        error = wp.dot(rotation_error, axis0)
-        _set_angular_row(
-            structural_index,
-            wp.int32(3),
-            axis0,
-            error,
-            bias_rate,
-            row_wrench0,
-            row_wrench1,
-            row_bias,
-        )
-        row_error[structural_index, 3] = error
-        return wp.int32(4)
-
     if mode == JOINT_MODE_PRISMATIC:
         tangent0 = create_orthonormal(axis0)
         tangent1 = wp.cross(axis0, tangent0)
@@ -1830,73 +1701,9 @@ def _effective_joint_axes(
         if model.joint_axis is not None
         else np.empty((0, 3), dtype=np.float32)
     )
-    qd_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
-    dof_dim = np.asarray(model.joint_dof_dim.numpy(), dtype=np.int32)
-    lower = model.joint_limit_lower.numpy() if model.joint_limit_lower is not None else None
-    upper = model.joint_limit_upper.numpy() if model.joint_limit_upper is not None else None
-
     _axial, axial_joints, axial_dofs = _axial_joint_dofs(joint_mode, joint_dof_start, len(model_axes))
     axes[axial_joints] = model_axes[axial_dofs]
 
-    special_modes = (
-        int(JOINT_MODE_CYLINDRICAL),
-        int(JOINT_MODE_CARTESIAN_PLANE),
-        int(JOINT_MODE_PLANAR),
-        int(JOINT_MODE_UNIVERSAL),
-    )
-    for joint in np.flatnonzero(np.isin(joint_mode, special_modes)):
-        mode = int(joint_mode[joint])
-        if mode == int(JOINT_MODE_CYLINDRICAL):
-            start = int(qd_start[joint])
-            linear_count = int(dof_dim[joint, 0])
-            for linear_axis in range(linear_count):
-                dof = start + linear_axis
-                if lower is None or upper is None or float(lower[dof]) <= float(upper[dof]):
-                    axes[joint] = model_axes[dof]
-                    break
-        elif mode == int(JOINT_MODE_CARTESIAN_PLANE):
-            start = int(qd_start[joint])
-            linear_count = int(dof_dim[joint, 0])
-            free_axes = []
-            for linear_axis in range(linear_count):
-                dof = start + linear_axis
-                if lower is None or upper is None or float(lower[dof]) <= float(upper[dof]):
-                    free_axes.append(model_axes[dof])
-            if len(free_axes) == 2:
-                axes[joint] = np.cross(free_axes[0], free_axes[1])
-        elif mode == int(JOINT_MODE_PLANAR):
-            start = int(qd_start[joint])
-            linear_count = int(dof_dim[joint, 0])
-            angular_count = int(dof_dim[joint, 1])
-            axis_found = False
-            if lower is not None and upper is not None:
-                for linear_axis in range(linear_count):
-                    dof = start + linear_axis
-                    if float(lower[dof]) > float(upper[dof]):
-                        axes[joint] = model_axes[dof]
-                        axis_found = True
-                        break
-            if not axis_found:
-                for angular_axis in range(angular_count):
-                    dof = start + linear_count + angular_axis
-                    if lower is None or upper is None or float(lower[dof]) <= float(upper[dof]):
-                        axes[joint] = model_axes[dof]
-                        break
-        elif mode == int(JOINT_MODE_UNIVERSAL):
-            start = int(qd_start[joint])
-            linear_count = int(dof_dim[joint, 0])
-            angular_count = int(dof_dim[joint, 1])
-            locked_axis = -1
-            if lower is not None and upper is not None:
-                for axis in range(angular_count):
-                    dof = start + linear_count + axis
-                    if float(lower[dof]) > float(upper[dof]):
-                        locked_axis = dof
-                        break
-            if locked_axis >= 0:
-                axes[joint] = model_axes[locked_axis]
-            elif angular_count == 2:
-                axes[joint] = np.cross(model_axes[start], model_axes[start + 1])
     lengths = np.linalg.norm(axes, axis=1)
     nonzero = lengths > 1.0e-12
     axes[nonzero] /= lengths[nonzero, None]
