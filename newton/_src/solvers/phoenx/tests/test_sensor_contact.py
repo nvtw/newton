@@ -194,7 +194,15 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
         wp.launch(
             _contact_impulse_to_force_wrapper_kernel,
             dim=n,
-            inputs=[rigid_contact_count, cc, wp.float32(idt), sort_perm_wp, wp.int32(has_perm)],
+            inputs=[
+                rigid_contact_count,
+                cc,
+                wp.float32(idt),
+                sort_perm_wp,
+                wp.int32(has_perm),
+                wp.zeros(n, dtype=wp.int32, device=device),
+                wp.zeros(n, dtype=wp.int32, device=device),
+            ],
             outputs=[force_out],
             device=device,
         )
@@ -277,7 +285,7 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
         wp.launch(
             _contact_impulse_to_force_wrapper_kernel,
             dim=n,
-            inputs=[rigid_contact_count, cc, wp.float32(idt), sort_perm, wp.int32(0)],
+            inputs=[rigid_contact_count, cc, wp.float32(idt), sort_perm, wp.int32(0), sort_perm, sort_perm],
             outputs=[force_out],
             device=device,
         )

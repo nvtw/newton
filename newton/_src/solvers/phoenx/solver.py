@@ -1691,6 +1691,7 @@ class SolverPhoenX(SolverBase):
                     self.bodies,
                     self._shape_body,
                     contacts.rigid_contact_shape0,
+                    self.world._ingest_scratch.sorted_shape0,
                     self.world._ingest_scratch.sort_perm,
                     1.0 / self._last_dt,
                 ],
@@ -1704,9 +1705,11 @@ class SolverPhoenX(SolverBase):
         scratch = self.world._ingest_scratch
         if scratch is not None and scratch.sort_perm is not None:
             sort_perm = scratch.sort_perm
+            sorted_shape0 = scratch.sorted_shape0
             has_perm = wp.int32(1)
         else:
             sort_perm = self._sort_perm_placeholder
+            sorted_shape0 = contacts.rigid_contact_shape0
             has_perm = wp.int32(0)
         contacts.force.zero_()
         wp.launch(
@@ -1718,6 +1721,8 @@ class SolverPhoenX(SolverBase):
                 wp.float32(1.0 / self._last_dt),
                 sort_perm,
                 has_perm,
+                contacts.rigid_contact_shape0,
+                sorted_shape0,
             ],
             outputs=[contacts.force],
             device=self.device,
