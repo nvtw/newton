@@ -328,6 +328,7 @@ def _gather_sorted_contacts_kernel(
     rigid_contact_count: wp.array[wp.int32],
     sort_perm: wp.array[wp.int32],
     # Newton-order narrow-phase arrays.
+    shape_body: wp.array[wp.int32],
     src_shape0: wp.array[wp.int32],
     src_shape1: wp.array[wp.int32],
     src_match_index: wp.array[wp.int32],
@@ -373,8 +374,11 @@ def _gather_sorted_contacts_kernel(
     if tid >= n:
         return
     newton_k = sort_perm[tid]
-    sorted_shape0[tid] = src_shape0[newton_k]
-    sorted_shape1[tid] = src_shape1[newton_k]
+    shape0 = src_shape0[newton_k]
+    shape1 = src_shape1[newton_k]
+    reverse = shape_body[shape0] > shape_body[shape1]
+    sorted_shape0[tid] = shape1 if reverse else shape0
+    sorted_shape1[tid] = shape0 if reverse else shape1
     # Translate match index through prev frame's inverse permutation:
     # match[newton_k] = prev_newton_k -> prev_sorted_k.
     raw_match = src_match_index[newton_k]
@@ -382,11 +386,12 @@ def _gather_sorted_contacts_kernel(
         sorted_match_index[tid] = prev_inv_sort_perm[raw_match]
     else:
         sorted_match_index[tid] = raw_match
-    sorted_normal[tid] = src_normal[newton_k]
-    sorted_point0[tid] = src_point0[newton_k]
-    sorted_point1[tid] = src_point1[newton_k]
-    sorted_margin0[tid] = src_margin0[newton_k]
-    sorted_margin1[tid] = src_margin1[newton_k]
+    # All rows in a body-pair column must use the same endpoint frames.
+    sorted_normal[tid] = -src_normal[newton_k] if reverse else src_normal[newton_k]
+    sorted_point0[tid] = src_point1[newton_k] if reverse else src_point0[newton_k]
+    sorted_point1[tid] = src_point0[newton_k] if reverse else src_point1[newton_k]
+    sorted_margin0[tid] = src_margin1[newton_k] if reverse else src_margin0[newton_k]
+    sorted_margin1[tid] = src_margin0[newton_k] if reverse else src_margin1[newton_k]
     # Per-contact override arrays may be size-1 sentinel buffers; only
     # gather when the source array actually addresses this index.
     if newton_k < src_stiffness.shape[0]:
@@ -1186,6 +1191,7 @@ def ingest_contacts(
             inputs=[
                 contacts.rigid_contact_count,
                 scratch.sort_perm,
+                shape_body,
                 contacts.rigid_contact_shape0,
                 contacts.rigid_contact_shape1,
                 contacts.rigid_contact_match_index,

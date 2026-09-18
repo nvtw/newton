@@ -435,6 +435,7 @@ def export_contact_wrenches(
     bodies: BodyContainer,
     shape_body: wp.array[int],
     shape0: wp.array[int],
+    sorted_shape0: wp.array[int],
     sort_perm: wp.array[int],
     inverse_dt: float,
     force: wp.array[wp.spatial_vector],
@@ -449,4 +450,7 @@ def export_contact_wrenches(
     wrench = state.wrenches[k]
     impulse = wp.spatial_top(wrench)
     moment = wp.spatial_bottom(wrench) - wp.cross(center, impulse)
-    force[out_k] = -inverse_dt * wp.spatial_vector(impulse, moment)
+    sign = float(-1.0)
+    if sorted_shape0[k] != shape0[out_k]:
+        sign = float(1.0)
+    force[out_k] = sign * inverse_dt * wp.spatial_vector(impulse, moment)

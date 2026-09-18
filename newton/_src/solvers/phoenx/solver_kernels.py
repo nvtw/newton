@@ -548,6 +548,8 @@ def _contact_impulse_to_force_wrapper_kernel(
     idt: wp.float32,
     sort_perm: wp.array[wp.int32],
     has_perm: wp.int32,
+    shape0: wp.array[wp.int32],
+    sorted_shape0: wp.array[wp.int32],
     # out
     force_out: wp.array[wp.spatial_vector],
 ):
@@ -555,7 +557,8 @@ def _contact_impulse_to_force_wrapper_kernel(
 
     Re-permutes from sorted_k (compound-body grouping) to newton narrow-phase
     order via ``sort_perm``. Sign: container lambdas are impulse on shape1;
-    Newton stores force on shape0, so we negate before writing.
+    Newton stores force on shape0, so we negate before writing and restore
+    the narrow-phase endpoint orientation when compound grouping reversed it.
     """
     k = wp.tid()
     # Clamp the count against the output buffer capacity. On narrow-phase
@@ -579,6 +582,8 @@ def _contact_impulse_to_force_wrapper_kernel(
     f = -(lam_n * n + lam_t1 * t1 + lam_t2 * t2) * idt
     if has_perm != 0:
         out_k = sort_perm[k]
+        if sorted_shape0[k] != shape0[out_k]:
+            f = -f
     else:
         out_k = k
     force_out[out_k] = wp.spatial_vector(f, wp.vec3f(0.0, 0.0, 0.0))
