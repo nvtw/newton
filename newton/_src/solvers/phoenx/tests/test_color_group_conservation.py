@@ -72,6 +72,7 @@ class TestColorGroupConservation(unittest.TestCase):
                         step_layout="single_world",
                         mass_splitting=True,
                         mass_splitting_color_group_size=width,
+                        max_colored_partitions=1,
                         contact_chunk_size=1,
                         parallel_contact_prepare=True,
                         substeps=1,
@@ -110,6 +111,18 @@ class TestColorGroupConservation(unittest.TestCase):
                             state.clear_forces()
                             pipeline.collide(state, contacts)
                             solver.step(state, state, model.control(), contacts, 0.001)
+                    report = solver.step_report()
+                    topology = world._color_group_data
+                    color_count = int(topology["num_colors"].numpy()[0])
+                    color_sizes = np.diff(topology["starts"].numpy()[: color_count + 1]).tolist()
+                    self.assertEqual(report.num_colors, color_count)
+                    self.assertEqual(report.color_sizes, color_sizes)
+                    self.assertEqual(world.num_colors_used(), color_count)
+                    self.assertEqual(report.overflow_size, 0)
+                    self.assertEqual(
+                        report.color_group_sizes,
+                        [sum(color_sizes[i : i + width]) for i in range(0, color_count, width)],
+                    )
                     self.assertEqual([r[0] for r in records], ["biased", "relax"] * 4)
                     counts = world._copy_state.count_per_node.numpy()
                     dynamic_counts = counts[world.bodies.inverse_mass.numpy() > 0.0]
@@ -250,6 +263,9 @@ class TestColorGroupConservation(unittest.TestCase):
                 state.clear_forces()
                 pipeline.collide(state, contacts)
                 solver.step(state, state, model.control(), contacts, 0.001)
+        report = solver.step_report()
+        self.assertEqual(report.overflow_size, overflow_activity[-1])
+        self.assertIsNone(report.color_group_sizes)
         self.assertIn("biased", records)
         self.assertIn("relax", records)
         self.assertTrue(any(warm_history), "No persistent warm impulse exercised")

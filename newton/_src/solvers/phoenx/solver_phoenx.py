@@ -631,6 +631,12 @@ class PhoenXWorld:
         """Total wall-clock microseconds spent in soft-hex dispatches.
         ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
 
+        overflow_size: int = 0
+        """Constraint count in the mass-splitting overflow bucket; zero for grouped coloring."""
+
+        color_group_sizes: list[int] | None = None
+        """Constraint counts per sequential color group; None when grouped coloring is disabled."""
+
     def __init__(
         self,
         bodies: BodyContainer,
@@ -5526,6 +5532,8 @@ class PhoenXWorld:
 
     def num_colors_used(self) -> int:
         """Number of graph colours from the last PGS. Triggers D2H copy."""
+        if self._color_group_data is not None:
+            return int(self._color_group_data["num_colors"].numpy()[0])
         if self.step_layout == "single_world":
             return int(self._partitioner.num_colors.numpy()[0])
         return int(self._world_num_colors.numpy().max(initial=0))
@@ -5564,14 +5572,28 @@ class PhoenXWorld:
             max_body_degree = 0
 
         if self.step_layout == "single_world":
-            nc = int(self._partitioner.num_colors.numpy()[0])
+            nc = self.num_colors_used()
             if nc > 0:
-                starts = self._partitioner.color_starts.numpy()
+                starts = (
+                    self._color_group_data["starts"]
+                    if self._color_group_data is not None
+                    else self._partitioner.color_starts
+                ).numpy()
                 color_sizes = [int(starts[c + 1] - starts[c]) for c in range(nc)]
             else:
                 color_sizes = []
+            group_sizes = None
+            overflow_size = 0
+            if self._color_group_data is not None:
+                width = self.mass_splitting_color_group_size
+                group_sizes = [sum(color_sizes[i : i + width]) for i in range(0, nc, width)]
+            elif self.mass_splitting_enabled and self.max_colored_partitions is not None:
+                if nc > self.max_colored_partitions:
+                    overflow_size = color_sizes[self.max_colored_partitions]
             return self.StepReport(
                 num_colors=nc,
+                overflow_size=overflow_size,
+                color_group_sizes=group_sizes,
                 color_sizes=color_sizes,
                 per_world_num_colors=None,
                 per_world_color_sizes=None,
