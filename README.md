@@ -990,6 +990,11 @@ contact accuracy are still being investigated.
       <br><b>Colibri mechanism</b>
       <br><code>python -m newton.examples phoenx_colibri</code>
     </td>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_analog_digital_clock.jpg" alt="PhoenX analog-digital clock">
+      <br><b>Analog-digital clock</b>
+      <br><code>python -m newton.examples phoenx_analog_digital_clock</code>
+    </td>
   </tr>
 </table>
 
