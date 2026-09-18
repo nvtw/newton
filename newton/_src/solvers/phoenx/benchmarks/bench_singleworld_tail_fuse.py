@@ -80,7 +80,9 @@ def _tail_stats(world: PhoenXWorld, threshold: int) -> tuple[int, int, int, int]
 
 
 def _bench_solve(world: PhoenXWorld, *, n_runs: int, warmup: int, trials: int) -> tuple[float, float]:
-    solve = world._solve_main_singleworld
+    def solve():
+        world._dispatcher.solve(wp.float32(1.0 / world.substep_dt))
+
     for _ in range(warmup):
         solve()
     wp.synchronize_device()
