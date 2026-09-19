@@ -1068,6 +1068,13 @@ class ViewerBase(ABC):
         if self.model is None:
             return
 
+        self._log_shapes(state)
+        self._log_gaussian_shapes(state)
+        self._log_non_shape_state(state)
+        self.model_changed = False
+
+    def _log_shapes(self, state: newton.State) -> None:
+        """Update model shape transforms and appearance for one frame."""
         self._sync_shape_colors_from_model()
         self._sync_shape_opacities_from_model()
 
@@ -1112,10 +1119,6 @@ class ViewerBase(ABC):
 
             shapes.colors_changed = False
             shapes.opacities_changed = False
-
-        self._log_gaussian_shapes(state)
-        self._log_non_shape_state(state)
-        self.model_changed = False
 
     def _sync_shape_colors_from_model(self):
         """Propagate model-owned shape colors into viewer batches.

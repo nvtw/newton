@@ -171,6 +171,33 @@ class TestViewerOptix(unittest.TestCase):
             with mock.patch.object(ViewerOptix, "_supports_cuda_simulation_render_overlap", return_value=supported):
                 self.assertEqual(viewer.supports_simulation_render_overlap, supported)
 
+    def test_cuda_shape_updates_replay_as_one_graph(self):
+        """Capture stable per-batch updates once and replay one graph launch."""
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        viewer.device = SimpleNamespace(is_cuda=True)
+        viewer._scene_dirty = False
+        viewer._transforms_dirty = False
+        viewer.model_changed = False
+        viewer._shape_instances = {}
+        viewer._shape_update_graphs = {}
+        viewer._shape_update_graph_signature = None
+        state = SimpleNamespace(body_q=SimpleNamespace(ptr=17))
+        graph = object()
+        capture = SimpleNamespace(graph=graph)
+
+        with (
+            mock.patch.object(viewer, "_shape_update_signature", return_value=("stable",)),
+            mock.patch.object(ViewerBase, "_log_shapes", autospec=True) as log_shapes,
+            mock.patch.object(wp, "ScopedCapture", return_value=nullcontext(capture)),
+            mock.patch.object(wp, "capture_launch") as launch,
+        ):
+            viewer._log_shapes_graphed(state)
+            viewer._log_shapes_graphed(state)
+
+        log_shapes.assert_called_once_with(viewer, state)
+        launch.assert_called_once_with(graph)
+        self.assertTrue(viewer._transforms_dirty)
+
     def test_snapshot_wait_does_not_drain_physics(self):
         """Rendering waits for the snapshot, while the next step remains asynchronous."""
         calls = []

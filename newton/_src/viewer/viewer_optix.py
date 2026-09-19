@@ -257,6 +257,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._optix_palette_device_metadata: dict[str, tuple[wp.array, wp.array, wp.array]] = {}
         self._optix_palette_color_arrays: dict[str, wp.array[wp.vec3]] = {}
         self._optix_palette_array: wp.array[wp.vec3] | None = None
+        self._shape_update_graphs = {}
+        self._shape_update_graph_signature = None
         self._default_color_palette = self._validate_color_palette(
             self._DEFAULT_COLOR_PALETTE if default_color_palette is None else default_color_palette
         )
@@ -385,6 +387,71 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     def supports_simulation_render_overlap(self) -> bool:
         """Whether nonblocking CUDA simulation can overlap OptiX rendering."""
         return self._supports_cuda_simulation_render_overlap()
+
+    def _invalidate_shape_update_graphs(self) -> None:
+        """Discard captured shape updates after scene topology changes."""
+        self._shape_update_graphs.clear()
+        self._shape_update_graph_signature = None
+
+    def _shape_update_signature(self) -> tuple:
+        """Return host-side state that changes the captured shape update."""
+        layer_xform = self.layer.xform
+        world_offsets = self.world_offsets
+        return (
+            id(self.model),
+            self._active_layer_id,
+            bool(self.layer.visible),
+            bool(self.show_collision),
+            bool(self.show_visual),
+            bool(self.show_ground),
+            bool(self.show_static),
+            tuple(float(value) for value in (*layer_xform.p, *layer_xform.q)),
+            0 if world_offsets is None else int(world_offsets.ptr),
+            len(self._shape_instances),
+        )
+
+    def _log_shapes_graphed(self, state) -> None:
+        """Replay stable CUDA shape updates with one host launch."""
+        signature = self._shape_update_signature()
+        appearance_changed = any(
+            shapes.colors_changed or shapes.opacities_changed for shapes in self._shape_instances.values()
+        )
+        stable = self.device.is_cuda and not self._scene_dirty and not self.model_changed and not appearance_changed
+        if not stable or signature != self._shape_update_graph_signature:
+            self._invalidate_shape_update_graphs()
+            self._shape_update_graph_signature = signature
+
+        graph_key = int(state.body_q.ptr)
+        graph = self._shape_update_graphs.get(graph_key) if stable else None
+        if graph is not None:
+            wp.capture_launch(graph)
+            self._transforms_dirty = True
+            return
+
+        if stable:
+            with wp.ScopedCapture() as capture:
+                ViewerBase._log_shapes(self, state)
+            self._shape_update_graphs[graph_key] = capture.graph
+        else:
+            ViewerBase._log_shapes(self, state)
+
+    @override
+    def log_state(self, state) -> None:
+        """Update shapes efficiently while leaving debug geometry live."""
+        self._last_state = state
+        if self.model is None:
+            return
+        self._log_shapes_graphed(state)
+        self._log_gaussian_shapes(state)
+        self._log_non_shape_state(state)
+        self.model_changed = False
+
+    @override
+    def end_frame(self):
+        """Invalidate update graphs when OptiX rebuilds device scene storage."""
+        if self._scene_dirty:
+            self._invalidate_shape_update_graphs()
+        return super().end_frame()
 
     def should_step(self) -> bool:
         """Return whether the simulation should advance by one step."""
@@ -683,6 +750,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     @override
     def clear_model(self) -> None:
         """Clear the active Newton model and its OptiX scene resources."""
+        self._invalidate_shape_update_graphs()
         owns = self._is_layer_owned_path
         for batches in (getattr(self, "lines", {}), getattr(self, "arrows", {})):
             for name in list(batches):
