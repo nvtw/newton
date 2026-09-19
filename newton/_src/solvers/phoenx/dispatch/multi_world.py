@@ -38,7 +38,7 @@ class MultiWorldDispatcher:
             and direct.enabled
             and self._world._regular_pgs_active_this_step
             and self._world._combine_direct_prepare_projection
-            and direct.factor_stream is not None
+            and direct.supports_async_factor
         )
         if direct is not None and direct.enabled:
             if overlap_factor:

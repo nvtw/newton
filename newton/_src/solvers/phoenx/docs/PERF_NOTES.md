@@ -995,14 +995,14 @@ These later results supersede the early FP16/contact-row prioritization:
   variance, and the shock, direct-contact coupling, high-mass-ratio,
   multi-world graph-capture, and 600-frame DR Legs walking tests passed.
 
-- Grouped mass-split contact PGS can now alternate with the exact direct joint
-  projection. This avoids propagating every contact through a complete
-  mechanism while retaining the mass-metric joint solve and equal-and-opposite
-  contact impulses. On BikeTransmission, the conservative 16-substep,
-  2-iteration configuration measured 20.93--21.10 FPS with 0.066 mm maximum
-  sampled joint attachment error and 0.753 mm maximum sampled penetration. The
-  former 48-substep, 8-iteration block-PGS configuration measured 11.49 FPS,
-  0.624 mm joint error, and 0.293 mm penetration. A 12-by-2 configuration
-  reached 27.00 FPS but increased sampled penetration to 1.10 mm, so the
-  example uses 16-by-2. A reduced 120-link chain articulation was rejected:
-  contact response through the complete chain made it substantially slower.
+- Grouped mass-split contact PGS alternates with the exact direct joint
+  projection. Dynamic contact groups retain both body states in registers for
+  symmetric forward/reverse manifold sweeps and two normal residual
+  corrections. Each row still applies equal-and-opposite impulses. A single
+  bias-off velocity sweep reuses the current D6 tangent, while an independent
+  global D6 factor overlaps contact preparation. On BikeTransmission, the
+  11-substep, 2-iteration configuration measured 44.5--46.5 FPS with 0.040 mm
+  maximum sampled joint attachment error, 0.0021 degree hinge error, and
+  0.778 mm maximum sampled penetration after startup. The earlier 14-by-2
+  configuration measured 29.4 FPS. A 10-by-2 configuration reached 48.5 FPS
+  but exceeded the 0.8 mm penetration target and was rejected.

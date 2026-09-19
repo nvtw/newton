@@ -13,6 +13,11 @@ def make_world(requires_projection=False, solver_iterations=1):
     direct = SimpleNamespace(
         enabled=True,
         requires_global_projection=requires_projection,
+        supports_async_factor=False,
+        has_bounded_drives=False,
+        prepare_matrix=Mock(),
+        factor_async=Mock(),
+        wait_factor=Mock(),
         prepare_and_factor=Mock(),
         solve=Mock(),
         resolve_bounded_drives=Mock(),
@@ -21,6 +26,7 @@ def make_world(requires_projection=False, solver_iterations=1):
         _constraint_capacity=1,
         _direct_equality_system=direct,
         _regular_pgs_active_this_step=True,
+        _combine_direct_prepare_projection=True,
         _direct_contact_response=None,
         _maximal_tree_projector=None,
         _reduced_constraints_active_this_step=False,
@@ -43,6 +49,7 @@ def make_world(requires_projection=False, solver_iterations=1):
         "_warm_start_owned_contacts",
         "_solve_direct_contacts",
         "_run_cached_prepare_bookkeeping",
+        "_wait_direct_factor",
     ):
         setattr(world, name, Mock())
     return world
@@ -57,6 +64,17 @@ class TestBlockCopyRoundTrips(unittest.TestCase):
         self.assertEqual(world._mass_splitting_broadcast.call_count, 1)
         self.assertEqual(world._mass_splitting_writeback.call_count, 1)
         world._direct_equality_system.solve.assert_not_called()
+
+    def test_direct_factor_overlaps_contact_preparation(self):
+        """Launch an independent D6 factor before contact preparation and wait once."""
+        world = make_world(requires_projection=True)
+        direct = world._direct_equality_system
+        direct.supports_async_factor = True
+        SingleWorldMassSplittingDispatcher(world).solve(100.0)
+        direct.prepare_and_factor.assert_not_called()
+        direct.prepare_matrix.assert_called_once_with(100.0)
+        direct.factor_async.assert_called_once_with()
+        direct.wait_factor.assert_called_once_with()
 
     def test_owned_contact_paths_keep_original_synchronization(self):
         """Retain round trips whenever an articulated contact path is active."""

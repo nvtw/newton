@@ -1005,6 +1005,7 @@ class PhoenXWorld:
         self._direct_contact_response: DirectContactResponse | None = None
         self._direct_contact_schedule: DirectContactRunSchedule | None = None
         self._direct_tree_contacts = False
+        self._direct_factor_pending = False
         self._contact_input_active_this_step = False
         self._regular_pgs_active_this_step = True
         self._reduced_contacts_active_this_step = False
@@ -4203,6 +4204,18 @@ class PhoenXWorld:
                 device=self.device,
             )
 
+    def _can_reuse_direct_relax_tangent(self, direct) -> bool:
+        """Return whether one relaxation sweep may reuse the biased D6 tangent."""
+        return bool(
+            self._active_velocity_iterations == 1
+            and self.mass_splitting_enabled
+            and self._regular_pgs_active_this_step
+            and self._combine_direct_prepare_projection
+            and not direct.has_bounded_drives
+            and self._direct_contact_response is None
+            and self._maximal_contact_response is None
+        )
+
     def _refresh_owned_relax_geometry(self, idt: wp.float32) -> None:
         """Refresh maximal constraint responses at the integrated configuration."""
         if (
@@ -4237,8 +4250,25 @@ class PhoenXWorld:
         direct = getattr(self, "_direct_equality_system", None)
         if direct is None or not direct.enabled or self._active_velocity_iterations <= 0:
             return
+        if self._can_reuse_direct_relax_tangent(direct):
+            return
         direct.refresh_geometry(idt)
-        direct.prepare_and_factor(idt)
+        overlap_factor = bool(
+            self.mass_splitting_enabled
+            and self._regular_pgs_active_this_step
+            and self._combine_direct_prepare_projection
+            and direct.supports_async_factor
+            and not direct.has_bounded_drives
+            and self._direct_contact_response is None
+            and self._maximal_contact_response is None
+        )
+        if overlap_factor:
+            direct.prepare_matrix(idt)
+            direct.factor_async()
+            self._direct_factor_pending = True
+        else:
+            direct.prepare_and_factor(idt)
+            self._direct_factor_pending = False
         if self._contact_input_active_this_step:
             for schedule in (self._direct_contact_schedule, self._maximal_contact_schedule):
                 if schedule is not None and schedule.section_end.size > 0:
@@ -4255,10 +4285,20 @@ class PhoenXWorld:
                         device=self.device,
                     )
         if self._direct_contact_response is not None:
+            self._wait_direct_factor()
             self._direct_contact_response.compute(self._contact_container)
         if self._direct_tree_contacts and self._maximal_tree_projector is not None:
             self._maximal_tree_projector.factor_contact_response()
             self._maximal_contact_response.compute_mobility()
+
+    def _wait_direct_factor(self) -> None:
+        """Wait once for an asynchronously prepared direct factor."""
+        if not self._direct_factor_pending:
+            return
+        direct = getattr(self, "_direct_equality_system", None)
+        if direct is not None:
+            direct.wait_factor()
+        self._direct_factor_pending = False
 
     def _solve_direct_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
         """Run deterministic contact sweeps through the direct equality mobility."""

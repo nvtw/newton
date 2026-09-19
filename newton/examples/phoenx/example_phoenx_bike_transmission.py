@@ -312,7 +312,7 @@ class Example:
             help="Maximum contact rows per solver column (0 keeps whole shape pairs).",
         )
         parser.add_argument("--iterations", type=int, default=2, help="Solver iterations per physics substep.")
-        parser.add_argument("--substeps", type=int, default=14, help="Physics substeps per 120 Hz contact refresh.")
+        parser.add_argument("--substeps", type=int, default=11, help="Physics substeps per 120 Hz contact refresh.")
         parser.add_argument(
             "--sdf-voxel-depth-contacts",
             action=argparse.BooleanOptionalAction,

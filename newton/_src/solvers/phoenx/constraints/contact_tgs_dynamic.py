@@ -27,8 +27,8 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_slot2,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
-from newton._src.solvers.phoenx.constraints.contact_tgs import ContactTGS, get_solve_contact_rows_tgs
-from newton._src.solvers.phoenx.constraints.contact_tgs_cooperative import get_solve_rows_cooperative
+from newton._src.solvers.phoenx.constraints.contact_tgs import ContactTGS, get_solve_contact_pair_tgs
+from newton._src.solvers.phoenx.constraints.contact_tgs_cooperative import get_solve_pair_cooperative
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 
 
@@ -48,8 +48,8 @@ def make_iterate(
     constraints, the caller averages each body's copies before integration.
     """
 
-    solve_contact_rows_tgs = get_solve_contact_rows_tgs(record_wrenches)
-    solve_rows_cooperative = get_solve_rows_cooperative(record_wrenches, lanes=cooperative_lanes)
+    solve_contact_pair_tgs = get_solve_contact_pair_tgs(record_wrenches)
+    solve_pair_cooperative = get_solve_pair_cooperative(record_wrenches, lanes=cooperative_lanes)
 
     @wp.func
     def iterate(
@@ -65,6 +65,9 @@ def make_iterate(
         size = contact_get_contact_count(columns, cid)
         if size == 0:
             return
+        first = contact_get_contact_first(columns, cid)
+        mu_s = contact_get_friction(columns, cid)
+        mu_d = contact_get_friction_dynamic(columns, cid)
         a = contact_get_body1(columns, cid)
         b = contact_get_body2(columns, cid)
         slot0 = int(-1)
@@ -98,10 +101,10 @@ def make_iterate(
             i0 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, a))
             i1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, b))
         if wp.static(cooperative):
-            v0, v1, w0, w1 = solve_rows_cooperative(
+            v0, v1, w0, w1 = solve_pair_cooperative(
                 state,
                 cc,
-                contact_get_contact_first(columns, cid),
+                first,
                 size,
                 bodies,
                 a,
@@ -114,8 +117,8 @@ def make_iterate(
                 m1,
                 i0,
                 i1,
-                contact_get_friction(columns, cid),
-                contact_get_friction_dynamic(columns, cid),
+                mu_s,
+                mu_d,
                 idt,
                 wp.bool(wp.static(biased)),
                 lane,
@@ -123,10 +126,10 @@ def make_iterate(
             if lane != 0:
                 return
         else:
-            v0, v1, w0, w1 = solve_contact_rows_tgs(
+            v0, v1, w0, w1 = solve_contact_pair_tgs(
                 state,
                 cc,
-                contact_get_contact_first(columns, cid),
+                first,
                 size,
                 bodies,
                 a,
@@ -139,8 +142,8 @@ def make_iterate(
                 m1,
                 i0,
                 i1,
-                contact_get_friction(columns, cid),
-                contact_get_friction_dynamic(columns, cid),
+                mu_s,
+                mu_d,
                 idt,
                 wp.bool(wp.static(biased)),
             )
