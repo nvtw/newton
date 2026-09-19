@@ -55,6 +55,11 @@ class SingleWorldMassSplittingDispatcher:
             and w._combine_direct_prepare_projection
             and direct.supports_async_factor
             and not direct.has_bounded_drives
+            # The ordinary-color dispatcher uses capture_while(), which
+            # pauses graph capture between its tail and persistent head.
+            # CUDA cannot pause while factor_stream is an unjoined fork.
+            # Color groups use one fixed launch and can overlap safely.
+            and w._color_group_data is not None
         )
         if direct is not None and direct.enabled:
             if overlap_factor:
