@@ -17,6 +17,7 @@ from newton.examples.phoenx.example_phoenx_bike_transmission import (
     DEFAULT_REAR_LOAD_DAMPING,
     DERAILLEUR_DAMPING_SCALE,
     DERAILLEUR_PRELOAD_SCALE,
+    DRIVETRAIN_CONTACT_FRICTION,
     Example,
 )
 from newton.viewer import ViewerNull
@@ -40,22 +41,23 @@ class TestBikeTransmission(unittest.TestCase):
             motor_off=False,
             rear_load_damping=DEFAULT_REAR_LOAD_DAMPING,
             sdf_resolution=0,
-            sdf_voxel_depth_contacts=True,
+            sdf_voxel_depth_contacts=False,
             solver_stats=False,
             substeps=8,
         )
         example = Example(ViewerNull(), args)
-        for _ in range(120):
+        for _ in range(300):
             example.step()
 
         example.test_final()
         metrics = example.drivetrain_metrics()
         chain_y = example.state.body_q.numpy()[example.chain_bodies, 1]
         self.assertTrue(np.isfinite(tuple(metrics.values())).all())
-        self.assertGreater(metrics["rear_load_power_w"], 0.5)
+        self.assertGreater(metrics["rear_load_power_w"], 3.0)
         self.assertGreater(metrics["speed_ratio"], 2.5)
         self.assertLess(metrics["speed_ratio"], 4.5)
         self.assertLess(float(np.ptp(chain_y)), 0.005)
+        self.assertTrue(np.allclose(example.model.shape_material_mu.numpy(), DRIVETRAIN_CONTACT_FRICTION))
 
 
 if __name__ == "__main__":
