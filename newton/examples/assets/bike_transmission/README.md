@@ -29,7 +29,7 @@ The default viewer is OptiX. To run an accuracy smoke test without rendering:
 uv run --extra examples -m newton.examples phoenx_bike_transmission --viewer null --num-frames 240 --test
 ```
 
-The default configuration uses 120 Hz collision detection, 16 physics substeps
+The default configuration uses 120 Hz collision detection, 11 physics substeps
 per collision refresh, 2 grouped contact iterations, one velocity iteration,
 and the direct joint solver. Exact mass-metric joint projections alternate with
 grouped mass-split contact PGS. Parallel contact preparation is enabled on CUDA,
@@ -41,9 +41,11 @@ and `--iterations N` permit convergence experiments.
 Geometry is in metres and the scene is Z-up, converted from centimetres/Y-up.
 Gravity is 9.8 m/s². Angular targets are converted from degrees to radians and
 angular gains from source torque/degree to N·m/rad. The asset has no authored
-mass or density values; collision geometry supplies mass and inertia at
-1000 kg/m³. Visual-only geometry contributes no mass. The authored body poses
-are preserved; saved transient body velocities are replaced with rest startup.
+mass or density values. Chain collision geometry uses steel density, gears use
+aluminum density, and other collision geometry uses 1000 kg/m³; each density
+sets both mass and inertia. Visual-only geometry contributes no mass. The
+authored body poses are preserved; saved transient body velocities are replaced
+with rest startup.
 
 OBJ files retain the triangle geometry, explicit transformed normals, UVs when
 present, and split vertices at authored normal discontinuities. Negative-scale
@@ -63,19 +65,18 @@ uv run ruff format newton/examples/phoenx/bike_transmission_scene.py
 
 The generated Python data records the source SHA-256.
 
-A 240-frame measured run of the default configuration sampled joint gaps up
-to 0.066 mm, hinge-axis misalignment up to 0.0084 degrees, and contact
-penetration up to 0.753 mm after startup. The source pose begins with about
+A 600-frame measured run of the default configuration sampled joint gaps up
+to 0.040 mm, hinge-axis misalignment up to 0.0021 degrees, and contact
+penetration up to 0.778 mm after startup. The source pose begins with about
 1.70 mm of contact overlap. The penetration probe uses a separate collision
 pipeline so it cannot alter live contact matching. These are sampled
 diagnostics, not bounds over every substep or a validation of interactive gear
 shifts.
 
-On an RTX PRO 6000 Blackwell, headless simulation measured 20.87--21.10 FPS,
-excluding startup and diagnostic reads. The former 48-substep, 8-iteration
-block-PGS configuration measured 11.49 FPS with 0.624 mm sampled joint error.
-A 12-substep, 2-iteration configuration reached 27.00 FPS but increased sampled
-penetration to 1.10 mm, so it is not the default.
+On an RTX PRO 6000 Blackwell, headless simulation measured 44.5--46.5 FPS,
+excluding startup and diagnostic reads. The earlier 14-substep, 2-iteration
+configuration measured 29.4 FPS. Symmetric body-pair contact refinement permits
+the lower substep count while preserving equal-and-opposite impulses.
 
 Use `--solver-stats` to print the actual color sizes, sequential color-group
 sizes, and overflow count once per simulated second. This opt-in diagnostic

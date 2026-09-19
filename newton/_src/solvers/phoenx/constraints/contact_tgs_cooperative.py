@@ -49,7 +49,9 @@ def shuffle_vec(value: wp.vec3f, source: int, width: int):
 
 
 @functools.cache
-def get_solve_rows_cooperative(record_wrenches: bool = False, *, lanes: int = 8):
+def get_solve_rows_cooperative(
+    record_wrenches: bool = False, *, lanes: int = 8, reverse: bool = False, solve_friction: bool = True
+):
     """Build a cooperative solve with optional impulse-wrench accounting."""
     if lanes not in (4, 8, 16, 32):
         raise ValueError("Contact subgroup width must be 4, 8, 16, or 32")
@@ -80,6 +82,8 @@ def get_solve_rows_cooperative(record_wrenches: bool = False, *, lanes: int = 8)
     ):
         for base in range(0, size, wp.static(lanes)):
             k_load = first + base + lane
+            if wp.static(reverse):
+                k_load = first + size - wp.int32(1) - base - lane
             cached = NormalRow()
             prior = float(0.0)
             if base + lane < size:
@@ -110,15 +114,68 @@ def get_solve_rows_cooperative(record_wrenches: bool = False, *, lanes: int = 8)
                         effective_mass, speed + bias, old, 1.0, 0.0, 1.0, 0.0, BLOCK_LAMBDA_INF
                     )
                     if lane == 0:
-                        cc_set_normal_lambda(cc, first + base + source, update.lambda_new)
+                        k_store = first + base + source
+                        if wp.static(reverse):
+                            k_store = first + size - wp.int32(1) - base - source
+                        cc_set_normal_lambda(cc, k_store, update.lambda_new)
                     impulse = update.delta * normal
                     if wp.static(record_wrenches) and lane == 0:
-                        record_impulse(state, first + base + source, bodies.position[a] + r0, impulse)
+                        k_record = first + base + source
+                        if wp.static(reverse):
+                            k_record = first + size - wp.int32(1) - base - source
+                        record_impulse(state, k_record, bodies.position[a] + r0, impulse)
                     v0, v1, w0, w1 = apply_pair_velocity_impulse(v0, v1, w0, w1, m0, m1, i0, i1, r0, r1, impulse)
-        if lane == 0:
+        if wp.static(solve_friction) and lane == 0:
             v0, v1, w0, w1 = solve_contact_tgs(
                 state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased
             )
         return v0, v1, w0, w1
 
     return solve_rows_cooperative
+
+
+@functools.cache
+def get_solve_pair_cooperative(record_wrenches: bool = False, *, lanes: int = 8):
+    """Build the cooperative form of the symmetric body-pair contact solve."""
+    solve_forward = get_solve_rows_cooperative(record_wrenches, lanes=lanes)
+    solve_reverse = get_solve_rows_cooperative(record_wrenches, lanes=lanes, reverse=True)
+    correct_forward = get_solve_rows_cooperative(record_wrenches, lanes=lanes, solve_friction=False)
+    correct_reverse = get_solve_rows_cooperative(record_wrenches, lanes=lanes, reverse=True, solve_friction=False)
+
+    @wp.func
+    def solve_pair_cooperative(
+        state: ContactTGS,
+        cc: ContactContainer,
+        first: int,
+        size: int,
+        bodies: BodyContainer,
+        a: int,
+        b: int,
+        v0: wp.vec3f,
+        v1: wp.vec3f,
+        w0: wp.vec3f,
+        w1: wp.vec3f,
+        m0: float,
+        m1: float,
+        i0: wp.mat33f,
+        i1: wp.mat33f,
+        mu_s: float,
+        mu_d: float,
+        idt: float,
+        biased: bool,
+        lane: int,
+    ):
+        v0, v1, w0, w1 = solve_forward(
+            state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased, lane
+        )
+        v0, v1, w0, w1 = solve_reverse(
+            state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased, lane
+        )
+        v0, v1, w0, w1 = correct_forward(
+            state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased, lane
+        )
+        return correct_reverse(
+            state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased, lane
+        )
+
+    return solve_pair_cooperative

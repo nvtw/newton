@@ -144,6 +144,11 @@ class BlockJointSystem(DirectEqualitySystem):
         """Whether finite drive bounds need corrections on the original body state."""
         return self.has_bounded_drives
 
+    @property
+    def supports_async_factor(self) -> bool:
+        """Local block preparation is one kernel and has no separate factor."""
+        return False
+
     def bind_world(self, world, joint_idx_to_cid):
         self._block_world = world
         world._block_joint_contact_columns = wp.array(

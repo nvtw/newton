@@ -58,7 +58,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         events = []
         direct = SimpleNamespace(
             enabled=True,
-            factor_stream=None,
+            supports_async_factor=False,
             prepare_and_factor=lambda _idt: events.append("factor"),
             solve=lambda *, use_bias: events.append(("solve", use_bias)),
             resolve_bounded_drives=lambda _idt, *, use_bias: events.append(("bounds", use_bias)),
@@ -78,6 +78,24 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         )
         MultiWorldDispatcher(world).solve(wp.float32(1.0))
         self.assertEqual(events[:5], ["factor", "prepare", "warm", ("solve", False), ("bounds", False)])
+
+    def test_direct_relax_tangent_reuse_requires_one_safe_sweep(self) -> None:
+        """Reuse the D6 tangent only for one unconstrained local relaxation sweep."""
+        world = SimpleNamespace(
+            _active_velocity_iterations=1,
+            mass_splitting_enabled=True,
+            _regular_pgs_active_this_step=True,
+            _combine_direct_prepare_projection=True,
+            _direct_contact_response=None,
+            _maximal_contact_response=None,
+        )
+        direct = SimpleNamespace(has_bounded_drives=False)
+        self.assertTrue(PhoenXWorld._can_reuse_direct_relax_tangent(world, direct))
+        world._active_velocity_iterations = 2
+        self.assertFalse(PhoenXWorld._can_reuse_direct_relax_tangent(world, direct))
+        world._active_velocity_iterations = 1
+        direct.has_bounded_drives = True
+        self.assertFalse(PhoenXWorld._can_reuse_direct_relax_tangent(world, direct))
 
     def test_direct_contact_sweeps_share_one_launch(self) -> None:
         """Keep sequential direct-contact iterations inside one mechanism launch."""

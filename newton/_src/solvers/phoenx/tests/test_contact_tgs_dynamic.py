@@ -29,7 +29,13 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_r1,
     contact_container_zeros,
 )
-from newton._src.solvers.phoenx.constraints.contact_tgs import ContactTGS, NormalRow, allocate_contact_tgs
+from newton._src.solvers.phoenx.constraints.contact_tgs import (
+    ContactTGS,
+    NormalRow,
+    allocate_contact_tgs,
+    get_solve_contact_pair_tgs,
+    get_solve_contact_rows_tgs,
+)
 from newton._src.solvers.phoenx.constraints.contact_tgs_dynamic import make_iterate
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer, copy_state_container_zeros
 
@@ -92,7 +98,104 @@ def kernel(mass_splitting, biased, cooperative=False, record_wrenches=False, coo
     return run
 
 
+@wp.kernel
+def setup_residual_fixture(
+    state: ContactTGS,
+    normals: wp.array[wp.vec3f],
+    r0s: wp.array[wp.vec3f],
+    r1s: wp.array[wp.vec3f],
+):
+    k = wp.tid()
+    row = NormalRow()
+    row.normal = normals[k]
+    row.r0 = r0s[k]
+    row.r1 = r1s[k]
+    a0 = wp.cross(row.r0, row.normal)
+    a1 = wp.cross(row.r1, row.normal)
+    row.effective_mass = 1.0 / (2.0 + wp.dot(a0, a0) + wp.dot(a1, a1))
+    state.normal_rows[k] = row
+
+
+def residual_kernel(refined: bool):
+    solve = get_solve_contact_pair_tgs() if refined else get_solve_contact_rows_tgs(solve_friction=False)
+
+    @wp.kernel(module="unique")
+    def run(state: ContactTGS, bodies: BodyContainer, cc: ContactContainer, result: wp.array[wp.vec3f]):
+        v0 = wp.vec3f(1.0, -1.0, 0.0)
+        v1 = wp.vec3f(0.0)
+        w0 = wp.vec3f(0.0, 1.0, 0.0)
+        w1 = wp.vec3f(1.0, -1.0, 0.0)
+        v0, v1, w0, w1 = solve(
+            state,
+            cc,
+            0,
+            4,
+            bodies,
+            0,
+            1,
+            v0,
+            v1,
+            w0,
+            w1,
+            1.0,
+            1.0,
+            wp.mat33f(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+            wp.mat33f(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+            0.0,
+            0.0,
+            100.0,
+            True,
+        )
+        result[0] = v0
+        result[1] = v1
+        result[2] = w0
+        result[3] = w1
+
+    return run
+
+
 class TestContactTGSDynamic(unittest.TestCase):
+    def test_symmetric_pair_refinement_reduces_normal_residual(self):
+        """Reduce coupled manifold error while both body states remain local."""
+        device = "cpu"
+        normals = np.array([[0, -1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0]], dtype=np.float32)
+        r0s = np.array([[1, 1, 1], [1, 0, 1], [1, -1, 0], [0, 0, 1]], dtype=np.float32)
+        r1s = np.array([[0, -1, -1], [-1, 1, 1], [0, -1, 1], [0, 1, -1]], dtype=np.float32)
+        state = allocate_contact_tgs(4, 2, 3, device)
+        bodies = body_container_zeros(2, device)
+        wp.launch(
+            setup_residual_fixture,
+            4,
+            [
+                state,
+                wp.array(normals, dtype=wp.vec3f, device=device),
+                wp.array(r0s, dtype=wp.vec3f, device=device),
+                wp.array(r1s, dtype=wp.vec3f, device=device),
+            ],
+            device=device,
+        )
+
+        def solve_and_residual(refined):
+            result = wp.zeros(4, dtype=wp.vec3f, device=device)
+            wp.launch(
+                residual_kernel(refined),
+                1,
+                [state, bodies, contact_container_zeros(4, device), result],
+                device=device,
+            )
+            v0, v1, w0, w1 = result.numpy()
+            speeds = [
+                np.dot(v1 + np.cross(w1, r1) - v0 - np.cross(w0, r0), normal)
+                for normal, r0, r1 in zip(normals, r0s, r1s, strict=True)
+            ]
+            return max(0.0, -min(speeds))
+
+        single_residual = solve_and_residual(False)
+        refined_residual = solve_and_residual(True)
+        self.assertGreater(single_residual, 0.3)
+        self.assertLess(refined_residual, 0.01)
+        self.assertLess(refined_residual, 0.02 * single_residual)
+
     def test_copy_response_preserves_physical_momenta(self):
         """Conserve both physical momenta after averaging split and unsplit endpoints."""
         for device in ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else []):

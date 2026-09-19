@@ -331,7 +331,7 @@ solve_contact_tgs = get_solve_contact_tgs()
 
 
 @functools.cache
-def get_solve_contact_rows_tgs(record_wrenches: bool = False):
+def get_solve_contact_rows_tgs(record_wrenches: bool = False, *, reverse: bool = False, solve_friction: bool = True):
     """Specialize the solve so disabled force reporting has no arithmetic cost."""
     solve_contact_tgs = get_solve_contact_tgs(record_wrenches)
 
@@ -363,15 +363,12 @@ def get_solve_contact_rows_tgs(record_wrenches: bool = False):
         reads the common-point lever arms rebased after body integration. Both
         stages apply equal-and-opposite impulses through the same spatial point.
         """
-        # Fetch the next immutable row before the dependent velocity update.
-        next_row = NormalRow()
-        if biased and size > 0:
-            next_row = state.normal_rows[first]
-        for k in range(first, first + size):
+        for offset in range(size):
+            k = first + offset
+            if wp.static(reverse):
+                k = first + size - wp.int32(1) - offset
             if biased:
-                row = next_row
-                if k + 1 < first + size:
-                    next_row = state.normal_rows[k + 1]
+                row = state.normal_rows[k]
                 normal = row.normal
                 r0 = row.r0
                 r1 = row.r1
@@ -418,14 +415,67 @@ def get_solve_contact_rows_tgs(record_wrenches: bool = False):
                 r1,
                 impulse,
             )
-        return solve_contact_tgs(
-            state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased
-        )
+        if wp.static(solve_friction):
+            v0, v1, w0, w1 = solve_contact_tgs(
+                state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased
+            )
+        return v0, v1, w0, w1
 
     return solve_contact_rows_tgs
 
 
 solve_contact_rows_tgs = get_solve_contact_rows_tgs()
+
+
+@functools.cache
+def get_solve_contact_pair_tgs(record_wrenches: bool = False):
+    """Build a symmetric local solve for all contacts in one body pair.
+
+    Forward and reverse frictional sweeps remove ordering bias. Two normal-only
+    correction sweeps then reduce the residual introduced by friction without
+    loading or storing either body's velocity between sweeps.
+    """
+    solve_forward = get_solve_contact_rows_tgs(record_wrenches)
+    solve_reverse = get_solve_contact_rows_tgs(record_wrenches, reverse=True)
+    correct_forward = get_solve_contact_rows_tgs(record_wrenches, solve_friction=False)
+    correct_reverse = get_solve_contact_rows_tgs(record_wrenches, reverse=True, solve_friction=False)
+
+    @wp.func
+    def solve_contact_pair_tgs(
+        state: ContactTGS,
+        cc: ContactContainer,
+        first: int,
+        size: int,
+        bodies: BodyContainer,
+        a: int,
+        b: int,
+        v0: wp.vec3f,
+        v1: wp.vec3f,
+        w0: wp.vec3f,
+        w1: wp.vec3f,
+        m0: float,
+        m1: float,
+        i0: wp.mat33f,
+        i1: wp.mat33f,
+        mu_s: float,
+        mu_d: float,
+        idt: float,
+        biased: bool,
+    ):
+        v0, v1, w0, w1 = solve_forward(
+            state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased
+        )
+        v0, v1, w0, w1 = solve_reverse(
+            state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased
+        )
+        v0, v1, w0, w1 = correct_forward(
+            state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased
+        )
+        return correct_reverse(
+            state, cc, first, size, bodies, a, b, v0, v1, w0, w1, m0, m1, i0, i1, mu_s, mu_d, idt, biased
+        )
+
+    return solve_contact_pair_tgs
 
 
 @wp.kernel

@@ -2312,6 +2312,11 @@ class DirectEqualitySystem:
         self.prepare_matrix(idt)
         self.factor()
 
+    @property
+    def supports_async_factor(self) -> bool:
+        """Return whether matrix preparation and factorization are separable."""
+        return self.factor_stream is not None
+
     def factor_async(self) -> None:
         """Factor on the private stream after current-stream preparation."""
         if not self.enabled or self.factor_stream is None:

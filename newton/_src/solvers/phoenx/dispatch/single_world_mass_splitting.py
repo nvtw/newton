@@ -48,8 +48,20 @@ class SingleWorldMassSplittingDispatcher:
             w._mass_splitting_writeback()
             return
         direct = getattr(w, "_direct_equality_system", None)
+        overlap_factor = bool(
+            direct is not None
+            and direct.enabled
+            and w._regular_pgs_active_this_step
+            and w._combine_direct_prepare_projection
+            and direct.supports_async_factor
+            and not direct.has_bounded_drives
+        )
         if direct is not None and direct.enabled:
-            direct.prepare_and_factor(idt)
+            if overlap_factor:
+                direct.prepare_matrix(idt)
+                direct.factor_async()
+            else:
+                direct.prepare_and_factor(idt)
             # Unbounded local blocks are solved by the colored callbacks.
             # Keep their preparation, but avoid copy round trips around a
             # global solve that cannot change body velocities.
@@ -100,6 +112,8 @@ class SingleWorldMassSplittingDispatcher:
             w._run_cached_prepare_bookkeeping(idt)
         if direct is not None and direct.enabled:
             w._mass_splitting_writeback(already_averaged=True)
+            if overlap_factor:
+                direct.wait_factor()
             w._warm_start_owned_contacts()
             direct.solve(use_bias=False)
             w._mass_splitting_broadcast()
@@ -177,6 +191,7 @@ class SingleWorldMassSplittingDispatcher:
             w._mass_splitting_average_and_broadcast(inv_dt)
             if direct is not None and direct.enabled:
                 w._mass_splitting_writeback(already_averaged=True)
+                w._wait_direct_factor()
                 direct.solve(use_bias=False)
                 if iteration + 1 < w._active_velocity_iterations:
                     w._mass_splitting_broadcast()
@@ -186,6 +201,7 @@ class SingleWorldMassSplittingDispatcher:
         if direct is None or not direct.enabled:
             w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
+            w._wait_direct_factor()
             direct.resolve_bounded_drives(idt, use_bias=False)
 
         w._solve_direct_contacts(use_bias=False, refresh_mobility=False)
