@@ -12,9 +12,13 @@ from newton.examples.phoenx.example_phoenx_bike_transmission import (
     ALUMINUM_DENSITY,
     ASSETS,
     CHAIN_JOINT_FRICTION,
+    DERAILLEUR_DAMPING_SCALE,
+    DERAILLEUR_PRELOAD_SCALE,
+    DERAILLEUR_SPRING_LABELS,
     STEEL_DENSITY,
     Example,
     _body_density,
+    _joint_drive_parameters,
     _load_mesh,
     _transform,
 )
@@ -24,8 +28,30 @@ class TestBikeTransmission(unittest.TestCase):
     def test_measured_solver_defaults(self):
         """Keep the validated low-work solver configuration."""
         args = Example.create_parser().parse_args([])
-        self.assertEqual(args.substeps, 14)
-        self.assertEqual(args.iterations, 2)
+        self.assertEqual(args.substeps, 8)
+        self.assertEqual(args.iterations, 4)
+
+    def test_derailleur_spring_preload(self):
+        """Increase derailleur preload without stiffening its dynamic response."""
+        self.assertEqual(DERAILLEUR_PRELOAD_SCALE, 3.0)
+        self.assertEqual(DERAILLEUR_DAMPING_SCALE, 2.0)
+        for joint in SCENE["joints"]:
+            stiffness, damping, target = _joint_drive_parameters(
+                joint, DERAILLEUR_PRELOAD_SCALE, DERAILLEUR_DAMPING_SCALE
+            )
+            self.assertEqual(stiffness, joint["stiffness"])
+            expected_damping = (
+                joint["damping"] * DERAILLEUR_DAMPING_SCALE
+                if joint["label"] in DERAILLEUR_SPRING_LABELS
+                else joint["damping"]
+            )
+            self.assertEqual(damping, expected_damping)
+            expected_target = (
+                joint["target"] * DERAILLEUR_PRELOAD_SCALE
+                if joint["label"] in DERAILLEUR_SPRING_LABELS
+                else joint["target"]
+            )
+            self.assertAlmostEqual(target, expected_target)
 
     def test_physical_materials_and_pin_friction(self):
         """Use SI material densities and a small chain-pin Coulomb torque."""

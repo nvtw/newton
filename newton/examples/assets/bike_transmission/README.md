@@ -20,7 +20,12 @@ The source has 134 bodies (including two stationary kinematic mounts), 134
 revolute joints, and a closed chain of 120 links. There are 492 mechanism meshes;
 three environment meshes and the source lighting/OmniGraph are not imported.
 The six authored joint drives remain active. `--motor-off` disables only the
-front crank drive, leaving derailleur springs and rear load damping active.
+front crank drive, leaving derailleur springs and rear load damping active. The
+two rear-derailleur springs keep their authored rates, while their preload
+angles default to three times the unusually low source values and their damping
+defaults to twice the source values. This stays clear of the revolute angle-wrap
+boundary while reducing chain sag and spring oscillation. Use
+`--derailleur-preload-scale 1 --derailleur-damping-scale 1` to reproduce the source values.
 Interactive gear-changing OmniGraph logic is not reproduced.
 
 The default viewer is OptiX. To run an accuracy smoke test without rendering:
@@ -29,10 +34,12 @@ The default viewer is OptiX. To run an accuracy smoke test without rendering:
 uv run --extra examples -m newton.examples phoenx_bike_transmission --viewer null --num-frames 240 --test
 ```
 
-The default configuration uses 120 Hz collision detection, 11 physics substeps
-per collision refresh, 2 grouped contact iterations, one velocity iteration,
-and the direct joint solver. Exact mass-metric joint projections alternate with
-grouped mass-split contact PGS. Parallel contact preparation is enabled on CUDA,
+The default configuration uses 120 Hz collision detection, 8 physics substeps
+per collision refresh, 4 grouped contact iterations, one velocity iteration,
+and the direct joint solver. Grouped PGS alternates forward and reverse color
+order between iterations to reduce directional bias without adding work. Exact
+mass-metric joint projections alternate with grouped mass-split contact PGS.
+Parallel contact preparation is enabled on CUDA,
 and contact columns are capped at 64 rows. Every contact row is retained; the
 cap distributes long shape-pair columns across more solver work.
 `--contact-chunk-size 0` restores whole shape-pair columns. `--substeps N`

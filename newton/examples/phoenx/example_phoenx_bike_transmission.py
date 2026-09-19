@@ -26,6 +26,14 @@ STEEL_DENSITY = 7850.0
 ALUMINUM_DENSITY = 2700.0
 DEFAULT_DENSITY = 1000.0
 CHAIN_JOINT_FRICTION = 1.0e-5
+DERAILLEUR_PRELOAD_SCALE = 3.0
+DERAILLEUR_DAMPING_SCALE = 2.0
+DERAILLEUR_SPRING_LABELS = frozenset(
+    {
+        "/World/Xform/Changer/RD_R9250_BASE/ShiftUpper/Swivel/RevoluteJoint",
+        "/World/Xform/Changer/RD_R9250_CAGE/SmallGearFrame/RevoluteJoint",
+    }
+)
 
 
 def _transform(values):
@@ -39,6 +47,16 @@ def _body_density(label):
     if label.endswith(("/FrontGears", "/BackGears")) or "SmallGear" in label:
         return ALUMINUM_DENSITY
     return DEFAULT_DENSITY
+
+
+def _joint_drive_parameters(joint, derailleur_preload_scale, derailleur_damping_scale):
+    """Return SI drive parameters, including calibrated derailleur preload."""
+    target = joint["target"]
+    damping = joint["damping"]
+    if joint["label"] in DERAILLEUR_SPRING_LABELS:
+        target *= derailleur_preload_scale
+        damping *= derailleur_damping_scale
+    return joint["stiffness"], damping, target
 
 
 def _load_mesh(path, roughness):
@@ -65,7 +83,14 @@ def _load_mesh(path, roughness):
     )
 
 
-def build_scene(*, sdf_resolution=0, motor_off=False, chain_joint_friction=CHAIN_JOINT_FRICTION):
+def build_scene(
+    *,
+    sdf_resolution=0,
+    motor_off=False,
+    chain_joint_friction=CHAIN_JOINT_FRICTION,
+    derailleur_preload_scale=DERAILLEUR_PRELOAD_SCALE,
+    derailleur_damping_scale=DERAILLEUR_DAMPING_SCALE,
+):
     """Build the authored closed mechanism with SDF mesh collisions in SI units."""
     scene = SCENE
     builder = newton.ModelBuilder(gravity=tuple(scene["gravity"]))
@@ -102,7 +127,7 @@ def build_scene(*, sdf_resolution=0, motor_off=False, chain_joint_friction=CHAIN
         )
 
     def add_source_joint(joint):
-        stiffness, damping = joint["stiffness"], joint["damping"]
+        stiffness, damping, target = _joint_drive_parameters(joint, derailleur_preload_scale, derailleur_damping_scale)
         if motor_off and joint["label"].endswith("/FrontGears/RevoluteJoint"):
             stiffness = damping = 0.0
         mode = newton.JointTargetMode.POSITION if stiffness else newton.JointTargetMode.VELOCITY
@@ -114,7 +139,7 @@ def build_scene(*, sdf_resolution=0, motor_off=False, chain_joint_friction=CHAIN
             parent_xform=_transform(parent_frame),
             child_xform=_transform(child_frame),
             axis={"X": newton.Axis.X, "Y": newton.Axis.Y, "Z": newton.Axis.Z}[joint["axis"]],
-            target_pos=joint["target"],
+            target_pos=target,
             target_vel=joint["velocity"],
             target_ke=stiffness,
             target_kd=damping,
@@ -145,12 +170,21 @@ class Example:
         self.frame_dt = 1.0 / 60.0
         if args.substeps < 1 or args.iterations < 1:
             raise ValueError("substeps and iterations must be positive")
-        if args.contact_chunk_size < 0 or args.chain_joint_friction < 0.0:
-            raise ValueError("contact chunk size and chain joint friction must be nonnegative")
+        if (
+            args.contact_chunk_size < 0
+            or args.chain_joint_friction < 0.0
+            or args.derailleur_preload_scale <= 0.0
+            or args.derailleur_damping_scale <= 0.0
+        ):
+            raise ValueError(
+                "contact chunk size and chain joint friction must be nonnegative; derailleur scales must be positive"
+            )
         self.model = build_scene(
             sdf_resolution=args.sdf_resolution,
             motor_off=args.motor_off,
             chain_joint_friction=args.chain_joint_friction,
+            derailleur_preload_scale=args.derailleur_preload_scale,
+            derailleur_damping_scale=args.derailleur_damping_scale,
         ).finalize(skip_validation_joints=True)
         self.state = self.model.state()
         self.control = self.model.control()
@@ -311,8 +345,8 @@ class Example:
             default=64,
             help="Maximum contact rows per solver column (0 keeps whole shape pairs).",
         )
-        parser.add_argument("--iterations", type=int, default=2, help="Solver iterations per physics substep.")
-        parser.add_argument("--substeps", type=int, default=11, help="Physics substeps per 120 Hz contact refresh.")
+        parser.add_argument("--iterations", type=int, default=4, help="Solver iterations per physics substep.")
+        parser.add_argument("--substeps", type=int, default=8, help="Physics substeps per 120 Hz contact refresh.")
         parser.add_argument(
             "--sdf-voxel-depth-contacts",
             action=argparse.BooleanOptionalAction,
@@ -328,6 +362,18 @@ class Example:
             type=float,
             default=CHAIN_JOINT_FRICTION,
             help="Coulomb friction torque at each chain pin in N m.",
+        )
+        parser.add_argument(
+            "--derailleur-preload-scale",
+            type=float,
+            default=DERAILLEUR_PRELOAD_SCALE,
+            help="Scale both rear-derailleur spring preload angles (default: 3).",
+        )
+        parser.add_argument(
+            "--derailleur-damping-scale",
+            type=float,
+            default=DERAILLEUR_DAMPING_SCALE,
+            help="Scale both rear-derailleur spring damping values (default: 2).",
         )
         return parser
 
