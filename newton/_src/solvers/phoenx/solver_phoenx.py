@@ -4830,7 +4830,9 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _color_group_sweep(self, head_kernel, idt, contact_container=None, *, joint_only=False) -> None:
+    def _color_group_sweep(
+        self, head_kernel, idt, contact_container=None, *, joint_only=False, reverse_colors=False
+    ) -> None:
         """Sweep independent mass copies, keeping colors within each copy ordered."""
         heads = self._singleworld_kernels()[::2]
         phase = ("prepare", "iterate", "relax")[heads.index(head_kernel)]
@@ -4921,6 +4923,7 @@ class PhoenXWorld:
                 cooperative_joints=cooperative_joints,
                 temporal_springs=self._temporal_joint_springs,
                 joint_only=joint_only,
+                reverse_colors=reverse_colors,
             )
         else:
             if soft_pd:
@@ -4947,6 +4950,8 @@ class PhoenXWorld:
         tail_kernel,
         idt: wp.float32,
         contact_container: ContactContainer | None = None,
+        *,
+        reverse_colors: bool = False,
     ) -> None:
         """Drain small colours before launching the persistent grid.
 
@@ -4957,7 +4962,7 @@ class PhoenXWorld:
         """
 
         if self._color_group_data is not None:
-            self._color_group_sweep(head_kernel, idt, contact_container)
+            self._color_group_sweep(head_kernel, idt, contact_container, reverse_colors=reverse_colors)
             return
 
         if self.parallel_contact_prepare and head_kernel is self._singleworld_kernels()[0]:

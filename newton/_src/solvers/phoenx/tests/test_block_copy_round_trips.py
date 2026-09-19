@@ -101,6 +101,16 @@ class TestBlockCopyRoundTrips(unittest.TestCase):
         self.assertEqual(world._mass_splitting_writeback.call_count, 2)
         self.assertEqual(world._mass_splitting_broadcast.call_count, 3)
 
+    def test_solver_iterations_alternate_color_order(self):
+        """Remove persistent directional bias without adding solver sweeps."""
+        world = make_world(solver_iterations=4)
+        SingleWorldMassSplittingDispatcher(world).solve(100.0)
+        iteration_calls = world._singleworld_head_plus_tail_sweep.call_args_list[1:]
+        self.assertEqual(
+            [call.kwargs["reverse_colors"] for call in iteration_calls],
+            [False, True, False, True],
+        )
+
     def test_global_corrections_retain_copy_synchronization(self):
         """Preserve direct and finite-drive correction round trips."""
         world = make_world(True)

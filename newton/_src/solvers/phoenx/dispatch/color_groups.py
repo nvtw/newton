@@ -45,6 +45,7 @@ def get_sweep_kernel(
     cooperative_joints=False,
     temporal_springs=False,
     joint_only=False,
+    reverse_colors=False,
 ):
     """Build an ordered sweep within each independent color group."""
     if block_count < 1:
@@ -93,7 +94,10 @@ def get_sweep_kernel(
         block, lane = wp.tid()
         for slab in range(block, (num_colors[0] + slab_width - 1) / slab_width, block_count):
             for local_color in range(slab_width):
-                color = slab * slab_width + local_color
+                ordered_color = local_color
+                if wp.static(reverse_colors):
+                    ordered_color = slab_width - wp.int32(1) - local_color
+                color = slab * slab_width + ordered_color
                 if color < num_colors[0]:
                     for index in range(
                         starts[color] + lane / lanes_per_constraint, starts[color + 1], CONSTRAINTS_PER_BLOCK

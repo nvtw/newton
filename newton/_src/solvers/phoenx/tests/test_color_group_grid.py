@@ -133,6 +133,53 @@ class TestColorGroupGrid(unittest.TestCase):
                     results.append(actual.tobytes())
             self.assertEqual(results[0], results[1])
 
+    def test_reverse_order_keeps_partial_groups_ordered(self):
+        """Process every row once when a partial final group runs backward."""
+        width = 3
+        colors = 5
+        sizes = np.arange(colors, dtype=np.int32) + 1
+        starts = np.r_[0, np.cumsum(sizes)].astype(np.int32)
+        count = int(starts[-1])
+        previous = np.full(count, -1, dtype=np.int32)
+        expected_depth = np.zeros(count, dtype=np.float32)
+        for color in range(colors):
+            begin, end = starts[color : color + 2]
+            slab_end = min((color // width + 1) * width, colors)
+            expected_depth[begin:end] = slab_end - color
+            if color + 1 < slab_end:
+                previous[begin:end] = starts[color + 1]
+
+        with patch.object(groups, "_make_singleworld_dispatch_func", return_value=(record, None)):
+            kernel = groups.get_sweep_kernel("reverse_order_test", False, reverse_colors=True)
+        cc = ContactContainer()
+        cc.impulses = wp.zeros((3, count), dtype=wp.float32, device="cuda:0")
+        wp.launch(
+            kernel,
+            (64, 32),
+            [
+                ConstraintContainer(),
+                ContactColumnContainer(),
+                BodyContainer(),
+                ParticleContainer(),
+                cc,
+                ContactViews(),
+                CopyStateContainer(),
+                0,
+                wp.array(previous, dtype=wp.int32, device="cuda:0"),
+                0,
+                1.0,
+                wp.array(np.arange(count), dtype=wp.int32, device="cuda:0"),
+                wp.array(starts, dtype=wp.int32, device="cuda:0"),
+                wp.array([colors], dtype=wp.int32, device="cuda:0"),
+                width,
+            ],
+            block_dim=32,
+            device="cuda:0",
+        )
+        actual = cc.impulses.numpy()
+        np.testing.assert_array_equal(actual[0], np.ones(count))
+        np.testing.assert_array_equal(actual[2], expected_depth)
+
     def test_temporal_contacts_cover_ragged_groups_in_order(self):
         """Cover multiple contact batches and preserve dependencies between colors."""
         with (
