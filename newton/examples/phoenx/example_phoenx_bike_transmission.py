@@ -26,8 +26,9 @@ STEEL_DENSITY = 7850.0
 ALUMINUM_DENSITY = 2700.0
 DEFAULT_DENSITY = 1000.0
 CHAIN_JOINT_FRICTION = 1.0e-5
+DRIVETRAIN_CONTACT_FRICTION = 0.1
 DEFAULT_CADENCE_RPM = 60.0
-DEFAULT_REAR_LOAD_DAMPING = 0.005729578
+DEFAULT_REAR_LOAD_DAMPING = 0.020053523
 DERAILLEUR_PRELOAD_SCALE = 3.0
 DERAILLEUR_DAMPING_SCALE = 2.0
 DERAILLEUR_SPRING_LABELS = frozenset(
@@ -126,7 +127,9 @@ def build_scene(
         body_label = scene["bodies"][shape["body"]]["label"]
         cfg = newton.ModelBuilder.ShapeConfig(
             density=_body_density(body_label) if shape["collision"] else 0.0,
-            mu=0.5,
+            # A bicycle drivetrain is lubricated; dry-contact friction makes
+            # tooth engagement stick laterally instead of transmitting load normally.
+            mu=DRIVETRAIN_CONTACT_FRICTION,
             margin=0.0,
             gap=0.0005,
             has_shape_collision=shape["collision"],
@@ -224,7 +227,7 @@ class Example:
         )
         self.pipeline = newton.CollisionPipeline(
             self.model,
-            contact_matching="latest",
+            contact_matching="sticky",
             rigid_contact_max=32768,
             speculative_contact_gap_max=0.002,
             speculative_contact_velocity_filter=False,
@@ -240,7 +243,7 @@ class Example:
             substeps=args.substeps,
             solver_iterations=args.iterations,
             velocity_iterations=1,
-            parallel_contact_prepare=self.model.device.is_cuda,
+            parallel_contact_prepare=False,
             contact_chunk_size=args.contact_chunk_size,
             mass_splitting=True,
             mass_splitting_color_group_size=3,
@@ -420,8 +423,8 @@ class Example:
         parser.add_argument(
             "--sdf-voxel-depth-contacts",
             action=argparse.BooleanOptionalAction,
-            default=True,
-            help="Retain deepest-per-voxel SDF contacts during contact reduction.",
+            default=False,
+            help="Retain deepest-per-voxel SDF contacts during contact reduction (disabled by default).",
         )
         parser.add_argument(
             "--sdf-resolution", type=int, default=0, help="Override source SDF resolutions (0 uses authored values)."
