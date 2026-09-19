@@ -19,11 +19,14 @@ uv run --extra examples -m newton.examples phoenx_bike_transmission
 The source has 134 bodies (including two stationary kinematic mounts), 134
 revolute joints, and a closed chain of 120 links. There are 492 mechanism meshes;
 three environment meshes and the source lighting/OmniGraph are not imported.
-The six authored joint drives remain active. `--motor-off` disables only the
-front crank drive, leaving derailleur springs and rear load damping active. The
-two rear-derailleur springs keep their authored rates, while their preload
-angles default to three times the unusually low source values and their damping
-defaults to twice the source values. This stays clear of the revolute angle-wrap
+The six authored joint drives remain active. The front drive defaults to a
+60 rpm bicycle cadence, and the rear drive acts as a 0.005729578 N m s/rad
+viscous dynamometer load. Use `--cadence-rpm` and `--rear-load-damping` to
+change them. `--motor-off` disables only the front crank drive, leaving
+derailleur springs and rear load damping active. The two rear-derailleur springs
+keep their authored rates, while their preload angles default to three times
+the unusually low source values and their damping defaults to twice the source
+values. This stays clear of the revolute angle-wrap
 boundary while reducing chain sag and spring oscillation. Use
 `--derailleur-preload-scale 1 --derailleur-damping-scale 1` to reproduce the source values.
 Interactive gear-changing OmniGraph logic is not reproduced.
@@ -72,13 +75,14 @@ uv run ruff format newton/examples/phoenx/bike_transmission_scene.py
 
 The generated Python data records the source SHA-256.
 
-A 600-frame measured run of the default configuration sampled joint gaps up
-to 0.040 mm, hinge-axis misalignment up to 0.0021 degrees, and contact
-penetration up to 0.778 mm after startup. The source pose begins with about
-1.70 mm of contact overlap. The penetration probe uses a separate collision
-pipeline so it cannot alter live contact matching. These are sampled
-diagnostics, not bounds over every substep or a validation of interactive gear
-shifts.
+A 270-frame measured run of the 60 rpm loaded default configuration sampled
+joint gaps up to 0.120 mm, hinge-axis misalignment up to 0.0056 degrees,
+contact penetration up to 1.10 mm after startup, and lateral chain span up to
+2.77 mm. The rear dynamometer absorbed roughly 1.5--2 W while the chain stayed
+engaged. The source pose begins with about 1.70 mm of contact overlap. The
+penetration probe uses a separate collision pipeline so it cannot alter live
+contact matching. These are sampled diagnostics, not bounds over every substep
+or a validation of interactive gear shifts.
 
 On an RTX PRO 6000 Blackwell, headless simulation measured 44.5--46.5 FPS,
 excluding startup and diagnostic reads. The earlier 14-substep, 2-iteration

@@ -26,6 +26,8 @@ STEEL_DENSITY = 7850.0
 ALUMINUM_DENSITY = 2700.0
 DEFAULT_DENSITY = 1000.0
 CHAIN_JOINT_FRICTION = 1.0e-5
+DEFAULT_CADENCE_RPM = 60.0
+DEFAULT_REAR_LOAD_DAMPING = 0.005729578
 DERAILLEUR_PRELOAD_SCALE = 3.0
 DERAILLEUR_DAMPING_SCALE = 2.0
 DERAILLEUR_SPRING_LABELS = frozenset(
@@ -49,14 +51,25 @@ def _body_density(label):
     return DEFAULT_DENSITY
 
 
-def _joint_drive_parameters(joint, derailleur_preload_scale, derailleur_damping_scale):
+def _joint_drive_parameters(
+    joint,
+    derailleur_preload_scale,
+    derailleur_damping_scale,
+    cadence_rpm=DEFAULT_CADENCE_RPM,
+    rear_load_damping=DEFAULT_REAR_LOAD_DAMPING,
+):
     """Return SI drive parameters, including calibrated derailleur preload."""
     target = joint["target"]
     damping = joint["damping"]
+    velocity = joint["velocity"]
     if joint["label"] in DERAILLEUR_SPRING_LABELS:
         target *= derailleur_preload_scale
         damping *= derailleur_damping_scale
-    return joint["stiffness"], damping, target
+    elif joint["label"].endswith("/FrontGears/RevoluteJoint"):
+        velocity = -cadence_rpm * 2.0 * np.pi / 60.0
+    elif joint["label"].endswith("/BackGears/LoadRevoluteJoint"):
+        damping = rear_load_damping
+    return joint["stiffness"], damping, target, velocity
 
 
 def _load_mesh(path, roughness):
@@ -90,6 +103,8 @@ def build_scene(
     chain_joint_friction=CHAIN_JOINT_FRICTION,
     derailleur_preload_scale=DERAILLEUR_PRELOAD_SCALE,
     derailleur_damping_scale=DERAILLEUR_DAMPING_SCALE,
+    cadence_rpm=DEFAULT_CADENCE_RPM,
+    rear_load_damping=DEFAULT_REAR_LOAD_DAMPING,
 ):
     """Build the authored closed mechanism with SDF mesh collisions in SI units."""
     scene = SCENE
@@ -127,7 +142,13 @@ def build_scene(
         )
 
     def add_source_joint(joint):
-        stiffness, damping, target = _joint_drive_parameters(joint, derailleur_preload_scale, derailleur_damping_scale)
+        stiffness, damping, target, velocity = _joint_drive_parameters(
+            joint,
+            derailleur_preload_scale,
+            derailleur_damping_scale,
+            cadence_rpm,
+            rear_load_damping,
+        )
         if motor_off and joint["label"].endswith("/FrontGears/RevoluteJoint"):
             stiffness = damping = 0.0
         mode = newton.JointTargetMode.POSITION if stiffness else newton.JointTargetMode.VELOCITY
@@ -140,7 +161,7 @@ def build_scene(
             child_xform=_transform(child_frame),
             axis={"X": newton.Axis.X, "Y": newton.Axis.Y, "Z": newton.Axis.Z}[joint["axis"]],
             target_pos=target,
-            target_vel=joint["velocity"],
+            target_vel=velocity,
             target_ke=stiffness,
             target_kd=damping,
             actuator_mode=mode,
@@ -168,6 +189,8 @@ class Example:
         self.sim_time = 0.0
         self.solver_stats = getattr(args, "solver_stats", False)
         self.frame_dt = 1.0 / 60.0
+        self.cadence_rpm = getattr(args, "cadence_rpm", DEFAULT_CADENCE_RPM)
+        self.rear_load_damping = getattr(args, "rear_load_damping", DEFAULT_REAR_LOAD_DAMPING)
         if args.substeps < 1 or args.iterations < 1:
             raise ValueError("substeps and iterations must be positive")
         if (
@@ -175,9 +198,12 @@ class Example:
             or args.chain_joint_friction < 0.0
             or args.derailleur_preload_scale <= 0.0
             or args.derailleur_damping_scale <= 0.0
+            or self.cadence_rpm <= 0.0
+            or self.rear_load_damping < 0.0
         ):
             raise ValueError(
-                "contact chunk size and chain joint friction must be nonnegative; derailleur scales must be positive"
+                "contact chunk size, chain joint friction, and rear load damping must be nonnegative; "
+                "cadence and derailleur scales must be positive"
             )
         self.model = build_scene(
             sdf_resolution=args.sdf_resolution,
@@ -185,9 +211,17 @@ class Example:
             chain_joint_friction=args.chain_joint_friction,
             derailleur_preload_scale=args.derailleur_preload_scale,
             derailleur_damping_scale=args.derailleur_damping_scale,
+            cadence_rpm=self.cadence_rpm,
+            rear_load_damping=self.rear_load_damping,
         ).finalize(skip_validation_joints=True)
         self.state = self.model.state()
         self.control = self.model.control()
+        labels = list(self.model.joint_label)
+        self._front_joint = labels.index("/World/Xform/FrontGears/RevoluteJoint")
+        self._rear_joint = labels.index("/World/Xform/BackGears/LoadRevoluteJoint")
+        self.chain_bodies = np.asarray(
+            [i for i, label in enumerate(self.model.body_label) if "/Chain/" in label], dtype=np.int32
+        )
         self.pipeline = newton.CollisionPipeline(
             self.model,
             contact_matching="latest",
@@ -283,11 +317,47 @@ class Example:
         self.sim_time += self.frame_dt
         if self.solver_stats and round(self.sim_time / self.frame_dt) % 60 == 0:
             report = self.solver.step_report()
+            drivetrain = self.drivetrain_metrics()
             print(
                 f"PhoenX: {report.num_joints} joints, {report.num_contact_columns} contact columns, "
                 f"{report.num_colors} colors; sizes={report.color_sizes}; "
-                f"group sizes={report.color_group_sizes}; overflow={report.overflow_size}"
+                f"group sizes={report.color_group_sizes}; overflow={report.overflow_size}; "
+                f"crank={drivetrain['crank_rpm']:.1f} rpm, rear={drivetrain['rear_rpm']:.1f} rpm, "
+                f"rear load={drivetrain['rear_load_power_w']:.2f} W"
             )
+
+    def drivetrain_metrics(self):
+        """Return host-side drivetrain speed and rear dynamometer load diagnostics."""
+        poses = self.state.body_q.numpy()
+        velocities = self.state.body_qd.numpy()
+        parents = self.model.joint_parent.numpy()
+        children = self.model.joint_child.numpy()
+        parent_frames = self.model.joint_X_p.numpy()
+        dof_starts = self.model.joint_qd_start.numpy()
+        axes = self.model.joint_axis.numpy()
+
+        def angular_speed(joint):
+            frame = _transform(parent_frames[joint])
+            parent = int(parents[joint])
+            if parent >= 0:
+                frame = _transform(poses[parent]) * frame
+            axis = axes[int(dof_starts[joint])]
+            world_axis = np.asarray(wp.transform_vector(frame, wp.vec3(*axis)))
+            relative_omega = velocities[int(children[joint]), 3:]
+            if parent >= 0:
+                relative_omega = relative_omega - velocities[parent, 3:]
+            return float(np.dot(world_axis, relative_omega))
+
+        front_speed = angular_speed(self._front_joint)
+        rear_speed = angular_speed(self._rear_joint)
+        speed_ratio = abs(rear_speed / front_speed) if abs(front_speed) > 1.0e-6 else 0.0
+        return {
+            "crank_rpm": abs(front_speed) * 60.0 / (2.0 * np.pi),
+            "rear_rpm": abs(rear_speed) * 60.0 / (2.0 * np.pi),
+            "speed_ratio": speed_ratio,
+            "rear_load_torque_nm": abs(rear_speed) * self.rear_load_damping,
+            "rear_load_power_w": rear_speed * rear_speed * self.rear_load_damping,
+        }
 
     def render(self):
         state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state
@@ -357,6 +427,15 @@ class Example:
             "--sdf-resolution", type=int, default=0, help="Override source SDF resolutions (0 uses authored values)."
         )
         parser.add_argument("--motor-off", action="store_true", help="Disable the crank drive for passive diagnostics.")
+        parser.add_argument(
+            "--cadence-rpm", type=float, default=DEFAULT_CADENCE_RPM, help="Crank velocity-drive target in rpm."
+        )
+        parser.add_argument(
+            "--rear-load-damping",
+            type=float,
+            default=DEFAULT_REAR_LOAD_DAMPING,
+            help="Viscous rear dynamometer load in N m s/rad.",
+        )
         parser.add_argument(
             "--chain-joint-friction",
             type=float,
