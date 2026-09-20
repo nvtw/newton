@@ -1062,6 +1062,7 @@ class SolverPhoenX(SolverBase):
                         self._direct_contact_response = DirectContactResponse(
                             self._direct_equality_system,
                             self.world.rigid_contact_max,
+                            self.world.max_contact_columns,
                             active_mechanisms=active_mechanisms,
                         )
                         self._direct_contact_schedule = DirectContactRunSchedule(
@@ -1178,6 +1179,7 @@ class SolverPhoenX(SolverBase):
         self._direct_contact_response = DirectContactResponse(
             direct,
             self.world.rigid_contact_max,
+            self.world.max_contact_columns,
             active_mechanisms=active_mechanisms,
         )
         self._direct_contact_schedule = DirectContactRunSchedule(

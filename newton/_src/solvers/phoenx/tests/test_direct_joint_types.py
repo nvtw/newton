@@ -626,7 +626,7 @@ class TestDirectJointTypes(unittest.TestCase):
         response = solver._direct_contact_response
         self.assertEqual(
             response.endpoint_response_dim,
-            (response.contact_batch.item_capacity, 2, 3),
+            (solver.world.max_contact_columns, 2, 12),
         )
         self.assertEqual(response.data.endpoint_response.shape, response.endpoint_response_dim)
 
@@ -672,18 +672,23 @@ class TestDirectJointTypes(unittest.TestCase):
                 local_column = int(column - row_start)
                 matrix[local_row, local_column] = matrix_storage[address]
                 matrix[local_column, local_row] = matrix_storage[address]
-        workspace_offset = contact * response.contact_batch.item_workspace_stride
+        column = int(response.contact_column.numpy()[contact])
         rhs_storage = response.contact_batch.rhs.numpy()
-        rhs = np.stack(
-            [
-                rhs_storage[
-                    workspace_offset + GROUPED_RHS_ITEM_WIDTH * row : workspace_offset
-                    + GROUPED_RHS_ITEM_WIDTH * row
-                    + 3
-                ]
-                for row in range(dimension)
-            ]
-        )
+        basis_rhs = np.empty((dimension, 12), dtype=np.float64)
+        for endpoint in range(2):
+            for half in range(2):
+                item = 4 * column + 2 * endpoint + half
+                workspace_offset = item * response.contact_batch.item_workspace_stride
+                basis_rhs[:, 6 * endpoint + 3 * half : 6 * endpoint + 3 * (half + 1)] = np.stack(
+                    [
+                        rhs_storage[
+                            workspace_offset + GROUPED_RHS_ITEM_WIDTH * row : workspace_offset
+                            + GROUPED_RHS_ITEM_WIDTH * row
+                            + 3
+                        ]
+                        for row in range(dimension)
+                    ]
+                )
         lambdas = solver.world._contact_container.lambdas.numpy()
         derived = solver.world._contact_container.derived.numpy()
         normal = lambdas[0:3, contact]
@@ -691,6 +696,16 @@ class TestDirectJointTypes(unittest.TestCase):
         directions = np.stack((normal, tangent0, np.cross(normal, tangent0)))
         r0 = derived[9:12, contact]
         r1 = derived[12:15, contact]
+        endpoint_wrenches = np.concatenate(
+            (
+                -directions,
+                np.cross(np.broadcast_to(r0, directions.shape), -directions),
+                directions,
+                np.cross(np.broadcast_to(r1, directions.shape), directions),
+            ),
+            axis=1,
+        )
+        rhs = basis_rhs @ endpoint_wrenches.T
         body0 = int(response.contact_body0.numpy()[contact])
         body1 = int(response.contact_body1.numpy()[contact])
         inverse_mass = solver.bodies.inverse_mass.numpy()

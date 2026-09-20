@@ -10,11 +10,11 @@ import warp as wp
 from newton._src.solvers.phoenx.articulations.direct_contact_response import (
     DirectContactResponse,
     DirectContactResponseData,
+    _contact_twist_delta,
 )
 from newton._src.solvers.phoenx.articulations.direct_equality import _row_wrench_for_body
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     GROUPED_RHS_ITEM_WIDTH,
-    GROUPED_RHS_ITEMS_PER_TASK,
 )
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync
 from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, BodyContainer, mat33_from_sym6
@@ -96,6 +96,9 @@ def _build_direct_contact_schedule_kernel(
         keys[column] = wp.int64(_INT64_MAX)
         return
     columns.articulation_owner[column] = owner
+    response.column_mechanism[column] = owner
+    response.column_body0[column] = body0
+    response.column_body1[column] = body1
     keys[column] = wp.int64(owner) * key_stride + wp.int64(column)
     wp.atomic_add(section_end, owner, wp.int32(1))
     first = contact_get_contact_first(columns, column)
@@ -103,14 +106,13 @@ def _build_direct_contact_schedule_kernel(
     for offset in range(count):
         contact = first + offset
         response.contact_mechanism[contact] = owner
+        response.contact_column[contact] = column
         response.contact_body0[contact] = body0
         response.contact_body1[contact] = body1
 
 
 @wp.kernel(enable_backward=False)
 def _count_direct_contact_rhs_tasks_kernel(
-    columns: ContactColumnContainer,
-    scheduled_column: wp.array[wp.int32],
     section_end: wp.array[wp.int32],
     rhs_task_section_end: wp.array[wp.int32],
 ):
@@ -118,17 +120,12 @@ def _count_direct_contact_rhs_tasks_kernel(
     begin = wp.int32(0)
     if mechanism > wp.int32(0):
         begin = section_end[mechanism - wp.int32(1)]
-    end = section_end[mechanism]
-    contact_count = wp.int32(0)
-    for scheduled in range(begin, end):
-        contact_count += contact_get_contact_count(columns, scheduled_column[scheduled])
-    group_size = wp.int32(GROUPED_RHS_ITEMS_PER_TASK)
-    rhs_task_section_end[mechanism] = (contact_count + group_size - wp.int32(1)) // group_size
+    rhs_task_section_end[mechanism] = section_end[mechanism] - begin
 
 
 @wp.kernel(enable_backward=False)
 def _fill_direct_contact_rhs_tasks_kernel(
-    columns: ContactColumnContainer,
+    response: DirectContactResponseData,
     scheduled_column: wp.array[wp.int32],
     section_end: wp.array[wp.int32],
     rhs_task_section_end: wp.array[wp.int32],
@@ -142,17 +139,19 @@ def _fill_direct_contact_rhs_tasks_kernel(
         column_begin = section_end[mechanism - wp.int32(1)]
         task_begin = rhs_task_section_end[mechanism - wp.int32(1)]
     column_end = section_end[mechanism]
-    local_item = wp.int32(0)
     for scheduled in range(column_begin, column_end):
         column = scheduled_column[scheduled]
-        first = contact_get_contact_first(columns, column)
-        count = contact_get_contact_count(columns, column)
-        for offset in range(count):
-            group_size = wp.int32(GROUPED_RHS_ITEMS_PER_TASK)
-            task = task_begin + local_item // group_size
-            task_mechanism[task] = mechanism
-            task_item[task * group_size + local_item % group_size] = first + offset
-            local_item += wp.int32(1)
+        task = task_begin + scheduled - column_begin
+        task_mechanism[task] = mechanism
+        body0 = response.column_body0[column]
+        body1 = response.column_body1[column]
+        for slot in range(4):
+            endpoint = wp.int32(slot // 2)
+            body = body0
+            if endpoint == wp.int32(1):
+                body = body1
+            if response.body_mechanism[body] == mechanism:
+                task_item[task * wp.int32(4) + wp.int32(slot)] = column * wp.int32(4) + wp.int32(slot)
 
 
 @wp.func
@@ -220,6 +219,44 @@ def _apply_deferred_equality_thread(
         bodies.angular_velocity[body] = wp.spatial_bottom(corrected)
 
 
+@wp.func
+def _make_spatial_wrench(force: wp.vec3, torque: wp.vec3) -> wp.spatial_vector:
+    return wp.spatial_vectorf(force[0], force[1], force[2], torque[0], torque[1], torque[2])
+
+
+@wp.func
+def _row_correction_from_wrenches(
+    response: DirectContactResponseData,
+    mechanism: wp.int32,
+    column: wp.int32,
+    local_row: wp.int32,
+    wrench0: wp.spatial_vector,
+    wrench1: wp.spatial_vector,
+) -> wp.float32:
+    correction = wp.float32(0.0)
+    body0 = response.column_body0[column]
+    body1 = response.column_body1[column]
+    for endpoint in range(2):
+        body = body0
+        wrench = wrench0
+        if endpoint == wp.int32(1):
+            body = body1
+            wrench = wrench1
+        if response.body_mechanism[body] == mechanism:
+            item = column * wp.int32(4) + endpoint * wp.int32(2)
+            force = wp.spatial_top(wrench)
+            torque = wp.spatial_bottom(wrench)
+            base = item * response.workspace_stride + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)
+            correction += response.solution[base] * force[0]
+            correction += response.solution[base + wp.int32(1)] * force[1]
+            correction += response.solution[base + wp.int32(2)] * force[2]
+            base += response.workspace_stride
+            correction += response.solution[base] * torque[0]
+            correction += response.solution[base + wp.int32(1)] * torque[1]
+            correction += response.solution[base + wp.int32(2)] * torque[2]
+    return correction
+
+
 @wp.kernel(enable_backward=False)
 def warm_start_direct_contact_runs_kernel(
     active_mechanism: wp.array[wp.int32],
@@ -248,36 +285,46 @@ def warm_start_direct_contact_runs_kernel(
         body1 = contact_get_body2(columns, column)
         first = contact_get_contact_first(columns, column)
         count = contact_get_contact_count(columns, column)
-        for offset in range(count):
-            contact = first + offset
-            if lane == wp.int32(0):
+        if lane == wp.int32(0):
+            wrench0 = wp.spatial_vectorf(0.0)
+            wrench1 = wp.spatial_vectorf(0.0)
+            for offset in range(count):
+                contact = first + offset
                 normal = cc_get_normal(contacts, contact)
                 tangent = cc_get_tangent1(contacts, contact)
                 normal_lambda = cc_get_normal_lambda(contacts, contact)
                 if response.mobility[0, contact] <= wp.float32(1.0e-12):
                     normal_lambda = wp.float32(0.0)
                     cc_set_normal_lambda(contacts, contact, normal_lambda)
-                delta = wp.vec3(
-                    normal_lambda, cc_get_tangent1_lambda(contacts, contact), cc_get_tangent2_lambda(contacts, contact)
+                impulse = (
+                    normal_lambda * normal
+                    + cc_get_tangent1_lambda(contacts, contact) * tangent
+                    + cc_get_tangent2_lambda(contacts, contact) * wp.cross(normal, tangent)
                 )
-                response.delta_coordinate[contact] = delta
-                impulse = delta[0] * normal + delta[1] * tangent + delta[2] * wp.cross(normal, tangent)
-                _apply_raw_contact_impulse(bodies, body0, cc_get_r0(contacts, contact), -impulse)
-                _apply_raw_contact_impulse(bodies, body1, cc_get_r1(contacts, contact), impulse)
-            _block_sync()
-            delta = response.delta_coordinate[contact]
-            task_offset = contact * response.workspace_stride
-            for local_row in range(lane, row_end - row_begin, wp.block_dim()):
-                row = row_begin + local_row
-                base = task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)
-                correction = (
-                    response.solution[base] * delta[0]
-                    + response.solution[base + wp.int32(1)] * delta[1]
-                    + response.solution[base + wp.int32(2)] * delta[2]
-                )
-                response.accumulated_solution[row] += correction
-                response.accumulated_impulse[row] -= response.row_scale[row] * correction
-            _block_sync()
+                r0 = cc_get_r0(contacts, contact)
+                r1 = cc_get_r1(contacts, contact)
+                _apply_raw_contact_impulse(bodies, body0, r0, -impulse)
+                _apply_raw_contact_impulse(bodies, body1, r1, impulse)
+                wrench0 += _make_spatial_wrench(-impulse, -wp.cross(r0, impulse))
+                wrench1 += _make_spatial_wrench(impulse, wp.cross(r1, impulse))
+            response.delta_wrench[column, 0] = wrench0
+            response.delta_wrench[column, 1] = wrench1
+        _block_sync()
+        wrench0 = response.delta_wrench[column, 0]
+        wrench1 = response.delta_wrench[column, 1]
+        for local_row in range(lane, row_end - row_begin, wp.block_dim()):
+            row = row_begin + local_row
+            correction = _row_correction_from_wrenches(
+                response,
+                mechanism,
+                column,
+                local_row,
+                wrench0,
+                wrench1,
+            )
+            response.accumulated_solution[row] += correction
+            response.accumulated_impulse[row] -= response.row_scale[row] * correction
+        _block_sync()
     _apply_deferred_equality_thread(response, bodies, mechanism, lane)
 
 
@@ -325,9 +372,10 @@ def iterate_direct_contact_runs_kernel(
                 velocity_body0 = _body_velocity_with_deferred_equality(response, bodies, mechanism, body0)
                 velocity_body1 = _body_velocity_with_deferred_equality(response, bodies, mechanism, body1)
             if lane == wp.int32(0):
+                wrench0 = wp.spatial_vectorf(0.0)
+                wrench1 = wp.spatial_vectorf(0.0)
                 for offset in range(count):
                     contact = first + offset
-                    task_offset = contact * response.workspace_stride
                     normal = cc_get_normal(contacts, contact)
                     tangent0 = cc_get_tangent1(contacts, contact)
                     tangent1 = wp.cross(normal, tangent0)
@@ -426,36 +474,41 @@ def iterate_direct_contact_runs_kernel(
                     response.delta_coordinate[contact] = delta_coordinate
                     _apply_raw_contact_impulse(bodies, body0, r0, -impulse)
                     _apply_raw_contact_impulse(bodies, body1, r1, impulse)
-                    velocity_body0 += (
-                        delta_coordinate[0] * response.endpoint_response[contact, 0, 0]
-                        + delta_coordinate[1] * response.endpoint_response[contact, 0, 1]
-                        + delta_coordinate[2] * response.endpoint_response[contact, 0, 2]
+                    delta_wrench0 = _make_spatial_wrench(-impulse, -wp.cross(r0, impulse))
+                    delta_wrench1 = _make_spatial_wrench(impulse, wp.cross(r1, impulse))
+                    wrench0 += delta_wrench0
+                    wrench1 += delta_wrench1
+                    velocity_body0 += _contact_twist_delta(
+                        response,
+                        contact,
+                        wp.int32(0),
+                        delta_coordinate,
                     )
-                    velocity_body1 += (
-                        delta_coordinate[0] * response.endpoint_response[contact, 1, 0]
-                        + delta_coordinate[1] * response.endpoint_response[contact, 1, 1]
-                        + delta_coordinate[2] * response.endpoint_response[contact, 1, 2]
+                    velocity_body1 += _contact_twist_delta(
+                        response,
+                        contact,
+                        wp.int32(1),
+                        delta_coordinate,
                     )
+                response.delta_wrench[column, 0] = wrench0
+                response.delta_wrench[column, 1] = wrench1
             # One column is a body-pair manifold. Accumulate its equality
             # correction once after the ordered point solve; linearity makes
             # this identical to updating every joint row after every point,
             # while reducing block barriers from O(points) to O(1).
             _block_sync()
+            wrench0 = response.delta_wrench[column, 0]
+            wrench1 = response.delta_wrench[column, 1]
             for local_row in range(lane, row_end - row_begin, wp.block_dim()):
                 row = row_begin + local_row
-                correction = wp.float32(0.0)
-                for offset in range(count):
-                    contact = first + offset
-                    task_offset = contact * response.workspace_stride
-                    delta_coordinate = response.delta_coordinate[contact]
-                    correction += (
-                        response.solution[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)]
-                        * delta_coordinate[0]
-                        + response.solution[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + wp.int32(1)]
-                        * delta_coordinate[1]
-                        + response.solution[task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + wp.int32(2)]
-                        * delta_coordinate[2]
-                    )
+                correction = _row_correction_from_wrenches(
+                    response,
+                    mechanism,
+                    column,
+                    local_row,
+                    wrench0,
+                    wrench1,
+                )
                 response.accumulated_solution[row] += correction
                 response.accumulated_impulse[row] -= response.row_scale[row] * correction
             _block_sync()
@@ -487,6 +540,8 @@ class DirectContactRunSchedule:
         self.section_end.zero_()
         self.rhs_task_section_end.zero_()
         self.response.contact_mechanism.fill_(-1)
+        self.response.contact_column.fill_(-1)
+        self.response.column_mechanism.fill_(-1)
         self.response.contact_batch.task_mechanism.fill_(-1)
         self.response.contact_batch.task_item.fill_(-1)
         wp.launch(
@@ -510,8 +565,6 @@ class DirectContactRunSchedule:
             _count_direct_contact_rhs_tasks_kernel,
             dim=self.section_end.size,
             inputs=[
-                columns,
-                self.columns,
                 self.section_end,
                 self.rhs_task_section_end,
             ],
@@ -526,7 +579,7 @@ class DirectContactRunSchedule:
             _fill_direct_contact_rhs_tasks_kernel,
             dim=self.section_end.size,
             inputs=[
-                columns,
+                self.response.data,
                 self.columns,
                 self.section_end,
                 self.rhs_task_section_end,
