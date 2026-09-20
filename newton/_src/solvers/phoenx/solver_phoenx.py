@@ -3204,6 +3204,7 @@ class PhoenXWorld:
         ingest_contacts(
             contacts=contacts,
             shape_body=shape_body,
+            bodies=self.bodies,
             contact_cols=self._contact_cols,
             scratch=self._ingest_scratch,
             max_contact_columns=self.max_contact_columns,

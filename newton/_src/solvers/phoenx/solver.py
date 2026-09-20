@@ -1735,6 +1735,7 @@ class SolverPhoenX(SolverBase):
                 dim=int(contacts.rigid_contact_max),
                 inputs=[
                     contacts.rigid_contact_count,
+                    self.world._cid_of_contact_cur,
                     temporal,
                     self.bodies,
                     self._shape_body,
@@ -1765,6 +1766,7 @@ class SolverPhoenX(SolverBase):
             dim=int(contacts.rigid_contact_max),
             inputs=[
                 contacts.rigid_contact_count,
+                self.world._cid_of_contact_cur,
                 cc,
                 wp.float32(1.0 / self._last_dt),
                 sort_perm,
