@@ -990,6 +990,7 @@ class SolverPhoenX(SolverBase):
                 direct_joint_friction=joint_solver == "direct" and self._joint_friction_model == "hard",
             )
             self.world._direct_equality_system = self._direct_equality_system
+            self._direct_equality_system.bind_constraint_indices(self._joint_constraints.joint_idx_to_cid)
             if np.any(self._direct_equality_system.direct_friction_dof_mask):
                 d6_data, d6_inequality_count = build_d6_inequality_data(
                     model,
@@ -1643,6 +1644,7 @@ class SolverPhoenX(SolverBase):
             if self._direct_equality_system is not None:
                 previous_direct_solver = getattr(self._direct_equality_system, "solver", None)
                 self._direct_equality_system.refresh_joint_properties()
+                self._direct_equality_system.bind_constraint_indices(self._joint_constraints.joint_idx_to_cid)
                 friction_dof_owned = self._direct_equality_system.direct_friction_dof_mask
             else:
                 friction_dof_owned = None

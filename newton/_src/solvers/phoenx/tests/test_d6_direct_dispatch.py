@@ -34,6 +34,54 @@ def _mode_for(model: newton.Model) -> int:
 
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX direct D6 dispatch tests run on CUDA only")
 class TestD6DirectDispatch(unittest.TestCase):
+    def test_direct_drive_reports_constraint_wrench(self) -> None:
+        """Report direct D6 reactions through the common diagnostics path."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        body = _make_body(builder)
+        joint = builder.add_joint_revolute(
+            parent=-1,
+            child=body,
+            axis=newton.Axis.Z,
+            target_vel=2.0,
+            target_kd=4.0,
+            actuator_mode=newton.JointTargetMode.VELOCITY,
+            friction=0.5,
+        )
+        builder.add_articulation([joint])
+        model = builder.finalize(device=wp.get_preferred_device())
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            articulation_mode="maximal",
+            joint_solver="direct",
+            substeps=2,
+            solver_iterations=2,
+            velocity_iterations=1,
+        )
+        state = model.state()
+        state.clear_forces()
+        solver.step(state, state, model.control(), None, 1.0 / 120.0)
+
+        direct = solver._direct_equality_system
+        impulses = direct.accumulated_impulse.numpy()
+        wrenches = direct.row_wrench1.numpy()
+        structural = int(direct.joint_to_structural.numpy()[joint])
+        expected = np.zeros(6, dtype=np.float32)
+        for row, (row_joint, local_row) in enumerate(
+            zip(direct.topology.row_joint, direct.topology.row_local, strict=True)
+        ):
+            if row_joint == joint:
+                expected += impulses[row] * wrenches[structural, local_row] / solver.world.substep_dt
+        friction_impulses = direct.friction_impulse.numpy()
+        self.assertGreater(float(np.linalg.norm(friction_impulses)), 1.0e-6)
+        for row, friction_joint in enumerate(direct.friction_joints.numpy()):
+            if friction_joint == joint:
+                expected += friction_impulses[row] / solver.world.substep_dt
+
+        reported = wp.zeros(solver.world.num_constraints, dtype=wp.spatial_vector, device=model.device)
+        solver.world.gather_constraint_wrenches(reported)
+        self.assertGreater(float(np.linalg.norm(expected)), 1.0e-3)
+        np.testing.assert_allclose(reported.numpy()[0], expected, rtol=2.0e-6, atol=2.0e-5)
+
     def test_projected_d6_limits_use_common_rows(self) -> None:
         """Keep D6 inequalities available without the direct equality system."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)

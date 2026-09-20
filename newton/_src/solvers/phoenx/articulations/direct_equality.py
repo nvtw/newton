@@ -1224,6 +1224,7 @@ def _apply_direct_joint_friction_kernel(
     joint_friction: wp.array[wp.float32],
     dt: wp.float32,
     bodies: BodyContainer,
+    friction_impulse: wp.array[wp.spatial_vector],
 ):
     row = wp.tid()
     joint = friction_joints[row]
@@ -1275,6 +1276,7 @@ def _apply_direct_joint_friction_kernel(
         wp.float32(1.0),
     )
     impulse = dt * effort
+    friction_impulse[row] = impulse * wrench1
     if parent > wp.int32(0):
         response0 = _direct_wrench_response(
             impulse * wrench0,
@@ -1496,6 +1498,45 @@ def _accumulate_direct_impulse_kernel(
 ):
     row = wp.tid()
     accumulated_impulse[row] += row_scale[row] * delta[row]
+
+
+@wp.kernel(enable_backward=False)
+def _gather_direct_reaction_wrenches_kernel(
+    structural_joints: wp.array[wp.int32],
+    joint_row_start: wp.array[wp.int32],
+    joint_row_count: wp.array[wp.int32],
+    joint_idx_to_cid: wp.array[wp.int32],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    accumulated_impulse: wp.array[wp.float32],
+    idt: wp.float32,
+    out: wp.array[wp.spatial_vector],
+):
+    structural = wp.tid()
+    joint = structural_joints[structural]
+    cid = joint_idx_to_cid[joint]
+    if cid < wp.int32(0):
+        return
+    reaction = wp.spatial_vectorf(0.0)
+    start = joint_row_start[structural]
+    count = joint_row_count[structural]
+    for local in range(_MAX_ROWS):
+        if wp.int32(local) < count:
+            reaction += accumulated_impulse[start + wp.int32(local)] * row_wrench1[structural, local]
+    out[cid] += idt * reaction
+
+
+@wp.kernel(enable_backward=False)
+def _gather_direct_friction_wrenches_kernel(
+    friction_joints: wp.array[wp.int32],
+    joint_idx_to_cid: wp.array[wp.int32],
+    friction_impulse: wp.array[wp.spatial_vector],
+    idt: wp.float32,
+    out: wp.array[wp.spatial_vector],
+):
+    row = wp.tid()
+    cid = joint_idx_to_cid[friction_joints[row]]
+    if cid >= wp.int32(0):
+        out[cid] += idt * friction_impulse[row]
 
 
 @wp.kernel(enable_backward=False)
@@ -1815,6 +1856,15 @@ class DirectEqualitySystem:
         joint_to_structural[self.topology.joints] = np.arange(structural_count, dtype=np.int32)
 
         self.structural_joints = wp.array(self.topology.joints, dtype=wp.int32, device=device)
+        joint_row_start = np.empty(structural_count, dtype=np.int32)
+        joint_row_count = np.empty(structural_count, dtype=np.int32)
+        for structural, joint in enumerate(self.topology.joints):
+            rows = np.flatnonzero(self.topology.row_joint == joint)
+            joint_row_start[structural] = rows[0]
+            joint_row_count[structural] = len(rows)
+        self.joint_row_start = wp.array(joint_row_start, dtype=wp.int32, device=device)
+        self.joint_row_count = wp.array(joint_row_count, dtype=wp.int32, device=device)
+        self.constraint_cids = None
         self.effective_joint_axis = wp.array(
             _effective_joint_axes(model, joint_dof_start),
             dtype=wp.vec3,
@@ -1873,6 +1923,7 @@ class DirectEqualitySystem:
         self.row_target_q = wp.array(row_target_q, dtype=wp.int32, device=device)
         self.friction_joints = wp.array(friction_joints, dtype=wp.int32, device=device)
         self.friction_dofs = wp.array(friction_dofs, dtype=wp.int32, device=device)
+        self.friction_impulse = wp.zeros(len(friction_joints), dtype=wp.spatial_vector, device=device)
         self.dynamic_mass = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.dynamic_old_velocity = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.dynamic_coordinate = wp.zeros(row_count, dtype=wp.float32, device=device)
@@ -2041,6 +2092,43 @@ class DirectEqualitySystem:
             return
         self.material_rest_relative_orientation.assign(_material_rest_relative_orientations(self.model))
 
+    def bind_constraint_indices(self, joint_idx_to_cid: wp.array[wp.int32]) -> None:
+        """Bind Newton joint indices to the world's diagnostic columns."""
+        self.constraint_cids = joint_idx_to_cid
+
+    def gather_constraint_wrenches(self, out: wp.array[wp.spatial_vector], idt: wp.float32) -> None:
+        """Add direct equality reactions to the common per-column diagnostics."""
+        if not self.enabled or self.constraint_cids is None:
+            return
+        wp.launch(
+            _gather_direct_reaction_wrenches_kernel,
+            dim=len(self.topology.joints),
+            inputs=[
+                self.structural_joints,
+                self.joint_row_start,
+                self.joint_row_count,
+                self.constraint_cids,
+                self.row_wrench1,
+                self.accumulated_impulse,
+                idt,
+            ],
+            outputs=[out],
+            device=self.model.device,
+        )
+        if self.has_direct_friction:
+            wp.launch(
+                _gather_direct_friction_wrenches_kernel,
+                dim=len(self.friction_joints),
+                inputs=[
+                    self.friction_joints,
+                    self.constraint_cids,
+                    self.friction_impulse,
+                    idt,
+                ],
+                outputs=[out],
+                device=self.model.device,
+            )
+
     def set_control_targets(
         self,
         target_q: wp.array[wp.float32],
@@ -2183,6 +2271,7 @@ class DirectEqualitySystem:
                     wp.float32(1.0) / idt,
                     self.bodies,
                 ],
+                outputs=[self.friction_impulse],
                 device=self.model.device,
             )
 
