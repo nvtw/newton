@@ -17,9 +17,8 @@ runtime overhead. Changing them requires restarting the process (standard Warp
 kernel-caching behavior).
 
 .. note::
-   Only the default ``"icosahedron"`` polyhedron configuration is currently
-   tested on CI. Other polyhedra (dodecahedron, octahedron, hexahedron) are
-   functional but should be considered experimental.
+   The default ``"dodecahedron"`` configuration is covered on CPU and CUDA.
+   The octahedron and hexahedron configurations remain experimental.
 
 **Contact Reduction Strategy Overview:**
 
@@ -58,15 +57,14 @@ import warp as wp
 # Contact Reduction Configuration
 # =====================================================================
 # Polyhedron for normal binning.  Determines NUM_NORMAL_BINS.
-#   "icosahedron"  -> 20 bins  (default, finer normal resolution)
-#   "dodecahedron" -> 12 bins  (good balance)
+#   "icosahedron"  -> 20 bins  (finer normal resolution)
+#   "dodecahedron" -> 12 bins  (default, good balance)
 #   "octahedron"   ->  8 bins  (cheaper, coarser)
 #   "hexahedron"   ->  6 bins  (cheapest, coarsest)
 #
-# NOTE: Only the default "icosahedron" configuration is currently tested
-# on CI. Other polyhedra are functional but should be considered
-# experimental. Use at your own discretion.
-NORMAL_BINNING_POLYHEDRON = "icosahedron"
+# NOTE: The default dodecahedron configuration is tested on CPU and CUDA.
+# Octahedron and hexahedron remain experimental.
+NORMAL_BINNING_POLYHEDRON = "dodecahedron"
 
 # Scan directions per normal bin (2D extremes on each face plane).
 # Range 3-6. More directions = more accurate convex hull but more slots.

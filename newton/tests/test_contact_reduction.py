@@ -3,9 +3,9 @@
 
 """Tests for contact reduction functionality.
 
-All tests are written against the *configured* polyhedron (set via
-``NORMAL_BINNING_POLYHEDRON`` in ``contact_reduction.py``) so they pass
-regardless of which polyhedron or slot counts are selected.
+Geometry tests are written against the configured polyhedron.  The default
+configuration also has an explicit regression because it controls the contact
+count, storage footprint, and solver work in every mesh collision pipeline.
 """
 
 import unittest
@@ -48,7 +48,11 @@ def _get_face_normal_kernel(normals: wp.array[wp.vec3]):
 class TestContactReduction(unittest.TestCase):
     """Tests for contact reduction functionality."""
 
-    pass
+    def test_default_configuration(self):
+        """Keep the validated default contact budget from growing silently."""
+        self.assertEqual(NORMAL_BINNING_POLYHEDRON, "dodecahedron")
+        self.assertEqual(NUM_NORMAL_BINS, 12)
+        self.assertEqual(compute_num_reduction_slots(), 184)
 
 
 # =============================================================================
