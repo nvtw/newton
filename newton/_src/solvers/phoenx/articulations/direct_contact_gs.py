@@ -15,6 +15,7 @@ from newton._src.solvers.phoenx.articulations.direct_contact_response import (
 from newton._src.solvers.phoenx.articulations.direct_equality import _row_wrench_for_body
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     GROUPED_RHS_ITEM_WIDTH,
+    GROUPED_RHS_ITEMS_PER_TASK,
 )
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync
 from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, BodyContainer, mat33_from_sym6
@@ -57,27 +58,23 @@ from newton._src.solvers.phoenx.constraints.contact_projection import (
     contact_project_normal_velocity_update,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
+from newton._src.solvers.phoenx.islands.island_builder import UnionFindIslandBuilder
 
 _INT64_MAX = 0x7FFFFFFFFFFFFFFF
 
 
 @wp.kernel(enable_backward=False)
-def _build_direct_contact_schedule_kernel(
+def _build_direct_contact_candidates_kernel(
     columns: ContactColumnContainer,
     response: DirectContactResponseData,
     num_columns: wp.array[wp.int32],
-    key_stride: wp.int64,
-    keys: wp.array[wp.int64],
-    scheduled_column: wp.array[wp.int32],
-    section_end: wp.array[wp.int32],
+    interactions: wp.array2d[wp.int32],
     reset_owner: wp.bool,
 ):
     column = wp.tid()
-    scheduled_column[column] = column
     if reset_owner:
         columns.articulation_owner[column] = wp.int32(-1)
     if column >= num_columns[0] or columns.articulation_owner[column] >= wp.int32(0):
-        keys[column] = wp.int64(_INT64_MAX)
         return
     body0 = contact_get_body1(columns, column)
     body1 = contact_get_body2(columns, column)
@@ -85,73 +82,80 @@ def _build_direct_contact_schedule_kernel(
     mechanism1 = response.body_mechanism[body1]
     constraint_mechanism0 = response.body_constraint_mechanism[body0]
     constraint_mechanism1 = response.body_constraint_mechanism[body1]
-    owner = wp.int32(-1)
-    if mechanism0 >= wp.int32(0):
-        if mechanism1 == mechanism0 or constraint_mechanism1 < wp.int32(0):
-            owner = mechanism0
-    if mechanism1 >= wp.int32(0):
-        if mechanism0 == mechanism1 or constraint_mechanism0 < wp.int32(0):
-            owner = mechanism1
-    if owner < wp.int32(0):
-        keys[column] = wp.int64(_INT64_MAX)
+    if (
+        (mechanism0 < wp.int32(0) and constraint_mechanism0 >= wp.int32(0))
+        or (mechanism1 < wp.int32(0) and constraint_mechanism1 >= wp.int32(0))
+        or (mechanism0 < wp.int32(0) and mechanism1 < wp.int32(0))
+    ):
         return
-    columns.articulation_owner[column] = owner
-    response.column_mechanism[column] = owner
+    response.column_mechanism0[column] = mechanism0
+    response.column_mechanism1[column] = mechanism1
     response.column_body0[column] = body0
     response.column_body1[column] = body1
-    keys[column] = wp.int64(owner) * key_stride + wp.int64(column)
-    wp.atomic_add(section_end, owner, wp.int32(1))
+    first = mechanism0
+    second = mechanism1
+    if first < wp.int32(0):
+        first = second
+        second = wp.int32(-1)
+    elif second == first:
+        second = wp.int32(-1)
+    interactions[column, 0] = first
+    interactions[column, 1] = second
+
+
+@wp.kernel(enable_backward=False)
+def _finalize_direct_contact_schedule_kernel(
+    columns: ContactColumnContainer,
+    response: DirectContactResponseData,
+    num_columns: wp.array[wp.int32],
+    mechanism_component: wp.array[wp.int32],
+    key_stride: wp.int64,
+    keys: wp.array[wp.int64],
+    scheduled_column: wp.array[wp.int32],
+    section_end: wp.array[wp.int32],
+):
+    column = wp.tid()
+    scheduled_column[column] = column
+    mechanism0 = response.column_mechanism0[column]
+    mechanism1 = response.column_mechanism1[column]
+    if column >= num_columns[0] or (mechanism0 < wp.int32(0) and mechanism1 < wp.int32(0)):
+        keys[column] = wp.int64(_INT64_MAX)
+        return
+    mechanism = mechanism0
+    if mechanism < wp.int32(0):
+        mechanism = mechanism1
+    component = mechanism_component[mechanism]
+    columns.articulation_owner[column] = component
+    keys[column] = wp.int64(component) * key_stride + wp.int64(column)
+    wp.atomic_add(section_end, component, wp.int32(1))
     first = contact_get_contact_first(columns, column)
     count = contact_get_contact_count(columns, column)
     for offset in range(count):
         contact = first + offset
-        response.contact_mechanism[contact] = owner
+        response.contact_mechanism[contact] = component
         response.contact_column[contact] = column
-        response.contact_body0[contact] = body0
-        response.contact_body1[contact] = body1
-
-
-@wp.kernel(enable_backward=False)
-def _count_direct_contact_rhs_tasks_kernel(
-    section_end: wp.array[wp.int32],
-    rhs_task_section_end: wp.array[wp.int32],
-):
-    mechanism = wp.tid()
-    begin = wp.int32(0)
-    if mechanism > wp.int32(0):
-        begin = section_end[mechanism - wp.int32(1)]
-    rhs_task_section_end[mechanism] = section_end[mechanism] - begin
+        response.contact_body0[contact] = response.column_body0[column]
+        response.contact_body1[contact] = response.column_body1[column]
 
 
 @wp.kernel(enable_backward=False)
 def _fill_direct_contact_rhs_tasks_kernel(
     response: DirectContactResponseData,
-    scheduled_column: wp.array[wp.int32],
-    section_end: wp.array[wp.int32],
-    rhs_task_section_end: wp.array[wp.int32],
     task_mechanism: wp.array[wp.int32],
     task_item: wp.array[wp.int32],
 ):
-    mechanism = wp.tid()
-    column_begin = wp.int32(0)
-    task_begin = wp.int32(0)
-    if mechanism > wp.int32(0):
-        column_begin = section_end[mechanism - wp.int32(1)]
-        task_begin = rhs_task_section_end[mechanism - wp.int32(1)]
-    column_end = section_end[mechanism]
-    for scheduled in range(column_begin, column_end):
-        column = scheduled_column[scheduled]
-        task = task_begin + scheduled - column_begin
+    column = wp.tid()
+    for endpoint in range(2):
+        task = column * wp.int32(2) + wp.int32(endpoint)
+        mechanism = response.column_mechanism0[column]
+        if endpoint == wp.int32(1):
+            mechanism = response.column_mechanism1[column]
+        if mechanism < wp.int32(0):
+            continue
+        item = column * wp.int32(4) + wp.int32(endpoint) * wp.int32(2)
         task_mechanism[task] = mechanism
-        body0 = response.column_body0[column]
-        body1 = response.column_body1[column]
-        for slot in range(4):
-            endpoint = wp.int32(slot // 2)
-            body = body0
-            if endpoint == wp.int32(1):
-                body = body1
-            if response.body_mechanism[body] == mechanism:
-                task_item[task * wp.int32(4) + wp.int32(slot)] = column * wp.int32(4) + wp.int32(slot)
+        task_item[task * wp.int32(GROUPED_RHS_ITEMS_PER_TASK)] = item
+        task_item[task * wp.int32(GROUPED_RHS_ITEMS_PER_TASK) + wp.int32(1)] = item + wp.int32(1)
 
 
 @wp.func
@@ -175,12 +179,12 @@ def _apply_raw_contact_impulse(
 def _body_velocity_with_deferred_equality(
     response: DirectContactResponseData,
     bodies: BodyContainer,
-    mechanism: wp.int32,
     body: wp.int32,
 ):
     linear = bodies.velocity[body]
     angular = bodies.angular_velocity[body]
-    if response.body_mechanism[body] != mechanism:
+    mechanism = response.body_mechanism[body]
+    if mechanism < wp.int32(0):
         return wp.spatial_vectorf(linear[0], linear[1], linear[2], angular[0], angular[1], angular[2])
 
     wrench = wp.spatial_vectorf(0.0)
@@ -214,7 +218,7 @@ def _apply_deferred_equality_thread(
     end = response.mechanism_body_start[mechanism + wp.int32(1)]
     for local_body in range(lane, end - begin, wp.block_dim()):
         body = response.mechanism_body[begin + local_body]
-        corrected = _body_velocity_with_deferred_equality(response, bodies, mechanism, body)
+        corrected = _body_velocity_with_deferred_equality(response, bodies, body)
         bodies.velocity[body] = wp.spatial_top(corrected)
         bodies.angular_velocity[body] = wp.spatial_bottom(corrected)
 
@@ -257,9 +261,75 @@ def _row_correction_from_wrenches(
     return correction
 
 
+@wp.func
+def _reset_component_solution_thread(
+    response: DirectContactResponseData,
+    component: wp.int32,
+    component_mechanism: wp.array[wp.int32],
+    component_end: wp.array[wp.int32],
+    lane: wp.int32,
+):
+    begin = wp.int32(0)
+    if component > wp.int32(0):
+        begin = component_end[component - wp.int32(1)]
+    end = component_end[component]
+    for item in range(begin, end):
+        mechanism = component_mechanism[item]
+        row_begin = response.mechanism_row_start[mechanism]
+        row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
+        for local_row in range(lane, row_end - row_begin, wp.block_dim()):
+            response.accumulated_solution[row_begin + local_row] = wp.float32(0.0)
+
+
+@wp.func
+def _accumulate_column_equality_thread(
+    response: DirectContactResponseData,
+    mechanism: wp.int32,
+    column: wp.int32,
+    wrench0: wp.spatial_vector,
+    wrench1: wp.spatial_vector,
+    lane: wp.int32,
+):
+    if mechanism < wp.int32(0):
+        return
+    row_begin = response.mechanism_row_start[mechanism]
+    row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
+    for local_row in range(lane, row_end - row_begin, wp.block_dim()):
+        row = row_begin + local_row
+        correction = _row_correction_from_wrenches(
+            response,
+            mechanism,
+            column,
+            local_row,
+            wrench0,
+            wrench1,
+        )
+        response.accumulated_solution[row] += correction
+        response.accumulated_impulse[row] -= response.row_scale[row] * correction
+
+
+@wp.func
+def _apply_component_equality_thread(
+    response: DirectContactResponseData,
+    bodies: BodyContainer,
+    component: wp.int32,
+    component_mechanism: wp.array[wp.int32],
+    component_end: wp.array[wp.int32],
+    lane: wp.int32,
+):
+    begin = wp.int32(0)
+    if component > wp.int32(0):
+        begin = component_end[component - wp.int32(1)]
+    end = component_end[component]
+    for item in range(begin, end):
+        _apply_deferred_equality_thread(response, bodies, component_mechanism[item], lane)
+
+
 @wp.kernel(enable_backward=False)
 def warm_start_direct_contact_runs_kernel(
-    active_mechanism: wp.array[wp.int32],
+    component_mechanism: wp.array[wp.int32],
+    component_end: wp.array[wp.int32],
+    num_components: wp.array[wp.int32],
     response: DirectContactResponseData,
     bodies: BodyContainer,
     columns: ContactColumnContainer,
@@ -267,18 +337,16 @@ def warm_start_direct_contact_runs_kernel(
     scheduled_column: wp.array[wp.int32],
     section_end: wp.array[wp.int32],
 ):
-    task, lane = wp.tid()
-    mechanism = active_mechanism[task]
-    row_begin = response.mechanism_row_start[mechanism]
-    row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
-    for local_row in range(lane, row_end - row_begin, wp.block_dim()):
-        response.accumulated_solution[row_begin + local_row] = wp.float32(0.0)
+    component, lane = wp.tid()
+    if component >= num_components[0]:
+        return
+    _reset_component_solution_thread(response, component, component_mechanism, component_end, lane)
     _block_sync()
 
     begin = wp.int32(0)
-    if mechanism > wp.int32(0):
-        begin = section_end[mechanism - wp.int32(1)]
-    end = section_end[mechanism]
+    if component > wp.int32(0):
+        begin = section_end[component - wp.int32(1)]
+    end = section_end[component]
     for scheduled in range(begin, end):
         column = scheduled_column[scheduled]
         body0 = contact_get_body1(columns, column)
@@ -312,25 +380,20 @@ def warm_start_direct_contact_runs_kernel(
         _block_sync()
         wrench0 = response.delta_wrench[column, 0]
         wrench1 = response.delta_wrench[column, 1]
-        for local_row in range(lane, row_end - row_begin, wp.block_dim()):
-            row = row_begin + local_row
-            correction = _row_correction_from_wrenches(
-                response,
-                mechanism,
-                column,
-                local_row,
-                wrench0,
-                wrench1,
-            )
-            response.accumulated_solution[row] += correction
-            response.accumulated_impulse[row] -= response.row_scale[row] * correction
+        mechanism0 = response.column_mechanism0[column]
+        mechanism1 = response.column_mechanism1[column]
+        _accumulate_column_equality_thread(response, mechanism0, column, wrench0, wrench1, lane)
+        if mechanism1 != mechanism0:
+            _accumulate_column_equality_thread(response, mechanism1, column, wrench0, wrench1, lane)
         _block_sync()
-    _apply_deferred_equality_thread(response, bodies, mechanism, lane)
+    _apply_component_equality_thread(response, bodies, component, component_mechanism, component_end, lane)
 
 
 @wp.kernel(enable_backward=False)
 def iterate_direct_contact_runs_kernel(
-    active_mechanism: wp.array[wp.int32],
+    component_mechanism: wp.array[wp.int32],
+    component_end: wp.array[wp.int32],
+    num_components: wp.array[wp.int32],
     response: DirectContactResponseData,
     bodies: BodyContainer,
     columns: ContactColumnContainer,
@@ -342,19 +405,17 @@ def iterate_direct_contact_runs_kernel(
     iteration_count: wp.int32,
     use_bias: wp.bool,
 ):
-    task, lane = wp.tid()
-    mechanism = active_mechanism[task]
-    row_begin = response.mechanism_row_start[mechanism]
-    row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
+    component, lane = wp.tid()
+    if component >= num_components[0]:
+        return
     for _iteration in range(iteration_count):
-        for local_row in range(lane, row_end - row_begin, wp.block_dim()):
-            response.accumulated_solution[row_begin + local_row] = wp.float32(0.0)
+        _reset_component_solution_thread(response, component, component_mechanism, component_end, lane)
         _block_sync()
 
         begin = wp.int32(0)
-        if mechanism > wp.int32(0):
-            begin = section_end[mechanism - wp.int32(1)]
-        end = section_end[mechanism]
+        if component > wp.int32(0):
+            begin = section_end[component - wp.int32(1)]
+        end = section_end[component]
         dt = wp.float32(1.0) / inverse_dt
         _, mass_coeff, impulse_coeff = soft_constraint_coefficients(DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt)
 
@@ -369,9 +430,8 @@ def iterate_direct_contact_runs_kernel(
             velocity_body0 = wp.spatial_vectorf(0.0)
             velocity_body1 = wp.spatial_vectorf(0.0)
             if lane == wp.int32(0):
-                velocity_body0 = _body_velocity_with_deferred_equality(response, bodies, mechanism, body0)
-                velocity_body1 = _body_velocity_with_deferred_equality(response, bodies, mechanism, body1)
-            if lane == wp.int32(0):
+                velocity_body0 = _body_velocity_with_deferred_equality(response, bodies, body0)
+                velocity_body1 = _body_velocity_with_deferred_equality(response, bodies, body1)
                 wrench0 = wp.spatial_vectorf(0.0)
                 wrench1 = wp.spatial_vectorf(0.0)
                 for offset in range(count):
@@ -474,10 +534,8 @@ def iterate_direct_contact_runs_kernel(
                     response.delta_coordinate[contact] = delta_coordinate
                     _apply_raw_contact_impulse(bodies, body0, r0, -impulse)
                     _apply_raw_contact_impulse(bodies, body1, r1, impulse)
-                    delta_wrench0 = _make_spatial_wrench(-impulse, -wp.cross(r0, impulse))
-                    delta_wrench1 = _make_spatial_wrench(impulse, wp.cross(r1, impulse))
-                    wrench0 += delta_wrench0
-                    wrench1 += delta_wrench1
+                    wrench0 += _make_spatial_wrench(-impulse, -wp.cross(r0, impulse))
+                    wrench1 += _make_spatial_wrench(impulse, wp.cross(r1, impulse))
                     velocity_body0 += _contact_twist_delta(
                         response,
                         contact,
@@ -499,25 +557,18 @@ def iterate_direct_contact_runs_kernel(
             _block_sync()
             wrench0 = response.delta_wrench[column, 0]
             wrench1 = response.delta_wrench[column, 1]
-            for local_row in range(lane, row_end - row_begin, wp.block_dim()):
-                row = row_begin + local_row
-                correction = _row_correction_from_wrenches(
-                    response,
-                    mechanism,
-                    column,
-                    local_row,
-                    wrench0,
-                    wrench1,
-                )
-                response.accumulated_solution[row] += correction
-                response.accumulated_impulse[row] -= response.row_scale[row] * correction
+            mechanism0 = response.column_mechanism0[column]
+            mechanism1 = response.column_mechanism1[column]
+            _accumulate_column_equality_thread(response, mechanism0, column, wrench0, wrench1, lane)
+            if mechanism1 != mechanism0:
+                _accumulate_column_equality_thread(response, mechanism1, column, wrench0, wrench1, lane)
             _block_sync()
-        _apply_deferred_equality_thread(response, bodies, mechanism, lane)
+        _apply_component_equality_thread(response, bodies, component, component_mechanism, component_end, lane)
         _block_sync()
 
 
 class DirectContactRunSchedule:
-    """Group rigid contact columns by direct equality mechanism."""
+    """Group direct mechanisms into contact-connected solve components."""
 
     def __init__(self, response: DirectContactResponse, column_capacity: int):
         self.response = response
@@ -527,7 +578,9 @@ class DirectContactRunSchedule:
         self.columns = wp.empty(2 * self.capacity, dtype=wp.int32, device=device)
         mechanism_count = len(response.active_mechanisms)
         self.section_end = wp.zeros(mechanism_count, dtype=wp.int32, device=device)
-        self.rhs_task_section_end = wp.zeros(mechanism_count, dtype=wp.int32, device=device)
+        self.interactions = wp.full((self.capacity, 8), -1, dtype=wp.int32, device=device)
+        self.num_mechanisms = wp.array([mechanism_count], dtype=wp.int32, device=device)
+        self.islands = UnionFindIslandBuilder(mechanism_count, device=device)
 
     def build(
         self,
@@ -538,51 +591,52 @@ class DirectContactRunSchedule:
     ) -> None:
         """Group immutable contacts without changing another response owner's columns."""
         self.section_end.zero_()
-        self.rhs_task_section_end.zero_()
         self.response.contact_mechanism.fill_(-1)
         self.response.contact_column.fill_(-1)
-        self.response.column_mechanism.fill_(-1)
+        self.response.column_mechanism0.fill_(-1)
+        self.response.column_mechanism1.fill_(-1)
         self.response.contact_batch.task_mechanism.fill_(-1)
         self.response.contact_batch.task_item.fill_(-1)
+        self.interactions.fill_(-1)
         wp.launch(
-            _build_direct_contact_schedule_kernel,
+            _build_direct_contact_candidates_kernel,
             dim=self.capacity,
             inputs=[
                 columns,
                 self.response.data,
                 num_columns,
+                self.interactions,
+                wp.bool(reset_owner),
+            ],
+            device=self.response.direct.model.device,
+        )
+        self.islands.build_islands(
+            self.interactions,
+            num_columns,
+            self.num_mechanisms,
+        )
+        wp.launch(
+            _finalize_direct_contact_schedule_kernel,
+            dim=self.capacity,
+            inputs=[
+                columns,
+                self.response.data,
+                num_columns,
+                self.islands.set_nr,
                 wp.int64(self.capacity + 1),
                 self.keys,
                 self.columns,
                 self.section_end,
-                wp.bool(reset_owner),
             ],
             device=self.response.direct.model.device,
         )
         sort_variable_length_int64(self.keys, self.columns, num_columns)
         wp.utils.array_scan(self.section_end, self.section_end, inclusive=True)
         wp.launch(
-            _count_direct_contact_rhs_tasks_kernel,
-            dim=self.section_end.size,
-            inputs=[
-                self.section_end,
-                self.rhs_task_section_end,
-            ],
-            device=self.response.direct.model.device,
-        )
-        wp.utils.array_scan(
-            self.rhs_task_section_end,
-            self.rhs_task_section_end,
-            inclusive=True,
-        )
-        wp.launch(
             _fill_direct_contact_rhs_tasks_kernel,
-            dim=self.section_end.size,
+            dim=self.capacity,
             inputs=[
                 self.response.data,
-                self.columns,
-                self.section_end,
-                self.rhs_task_section_end,
                 self.response.contact_batch.task_mechanism,
                 self.response.contact_batch.task_item,
             ],

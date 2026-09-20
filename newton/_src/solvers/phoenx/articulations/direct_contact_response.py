@@ -48,7 +48,8 @@ class DirectContactResponseData:
     contact_column: wp.array[wp.int32]
     contact_body0: wp.array[wp.int32]
     contact_body1: wp.array[wp.int32]
-    column_mechanism: wp.array[wp.int32]
+    column_mechanism0: wp.array[wp.int32]
+    column_mechanism1: wp.array[wp.int32]
     column_body0: wp.array[wp.int32]
     column_body1: wp.array[wp.int32]
     workspace_stride: wp.int32
@@ -145,9 +146,10 @@ def _build_endpoint_equality_rhs(
     slot = item - column * wp.int32(4)
     endpoint = slot // wp.int32(2)
     angular_basis = slot - endpoint * wp.int32(2)
-    mechanism = response.column_mechanism[column]
+    mechanism = response.column_mechanism0[column]
     body = response.column_body0[column]
     if endpoint == wp.int32(1):
+        mechanism = response.column_mechanism1[column]
         body = response.column_body1[column]
 
     row_begin = response.mechanism_row_start[mechanism]
@@ -362,10 +364,14 @@ def _compute_column_endpoint_response_kernel(
     bodies: BodyContainer,
 ):
     column, target_endpoint, source = wp.tid()
-    mechanism = response.column_mechanism[column]
-    if mechanism < wp.int32(0):
-        return
     source_endpoint = source // wp.int32(6)
+    source_mechanism = response.column_mechanism0[column]
+    target_mechanism = response.column_mechanism0[column]
+    if source_endpoint == wp.int32(1):
+        source_mechanism = response.column_mechanism1[column]
+    if target_endpoint == wp.int32(1):
+        target_mechanism = response.column_mechanism1[column]
+    mechanism = source_mechanism
     component = source - source_endpoint * wp.int32(6)
     source_body = response.column_body0[column]
     target_body = response.column_body0[column]
@@ -384,7 +390,7 @@ def _compute_column_endpoint_response_kernel(
         torque = _unit_axis(axis)
 
     corrected_wrench = wp.spatial_vectorf(0.0)
-    if response.body_mechanism[source_body] == mechanism and response.body_mechanism[target_body] == mechanism:
+    if source_mechanism >= wp.int32(0) and target_mechanism == source_mechanism:
         item = column * wp.int32(4) + source_endpoint * wp.int32(2)
         item_column = component
         if component >= wp.int32(3):
@@ -482,18 +488,14 @@ class DirectContactResponse:
         capacity = max(1, int(contact_capacity))
         column_capacity = max(1, int(column_capacity))
         self.active_mechanisms = tuple(active_mechanisms)
-        self.active_mechanism = wp.array(
-            np.flatnonzero(np.asarray(active_mechanisms, dtype=bool)).astype(np.int32),
-            dtype=wp.int32,
-            device=device,
-        )
         item_capacity = 4 * column_capacity
-        self.contact_batch = direct.solver.create_grouped_rhs_batch(item_capacity, column_capacity)
+        self.contact_batch = direct.solver.create_grouped_rhs_batch(item_capacity, 2 * column_capacity)
         self.contact_mechanism = wp.full(capacity, -1, dtype=wp.int32, device=device)
         self.contact_column = wp.full(capacity, -1, dtype=wp.int32, device=device)
         self.contact_body0 = wp.zeros(capacity, dtype=wp.int32, device=device)
         self.contact_body1 = wp.zeros(capacity, dtype=wp.int32, device=device)
-        self.column_mechanism = wp.full(column_capacity, -1, dtype=wp.int32, device=device)
+        self.column_mechanism0 = wp.full(column_capacity, -1, dtype=wp.int32, device=device)
+        self.column_mechanism1 = wp.full(column_capacity, -1, dtype=wp.int32, device=device)
         self.column_body0 = wp.zeros(column_capacity, dtype=wp.int32, device=device)
         self.column_body1 = wp.zeros(column_capacity, dtype=wp.int32, device=device)
         self.data = DirectContactResponseData()
@@ -511,7 +513,8 @@ class DirectContactResponse:
         self.data.contact_column = self.contact_column
         self.data.contact_body0 = self.contact_body0
         self.data.contact_body1 = self.contact_body1
-        self.data.column_mechanism = self.column_mechanism
+        self.data.column_mechanism0 = self.column_mechanism0
+        self.data.column_mechanism1 = self.column_mechanism1
         self.data.column_body0 = self.column_body0
         self.data.column_body1 = self.column_body1
         self.data.workspace_stride = wp.int32(self.contact_batch.item_workspace_stride)

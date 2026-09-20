@@ -4183,10 +4183,12 @@ class PhoenXWorld:
             response.compute(self._contact_container)
             wp.launch_tiled(
                 warm_start_direct_contact_runs_kernel,
-                dim=response.active_mechanism.size,
+                dim=schedule.section_end.size,
                 block_dim=64,
                 inputs=[
-                    response.active_mechanism,
+                    schedule.islands.set_sizes,
+                    schedule.islands.set_sizes_compact,
+                    schedule.islands.num_sets,
                     response.data,
                     self.bodies,
                     self._contact_cols,
@@ -4331,10 +4333,12 @@ class PhoenXWorld:
                 direct.apply_bias_velocity(-1.0)
             wp.launch_tiled(
                 iterate_direct_contact_runs_kernel,
-                dim=response.active_mechanism.size,
+                dim=schedule.section_end.size,
                 block_dim=64,
                 inputs=[
-                    response.active_mechanism,
+                    schedule.islands.set_sizes,
+                    schedule.islands.set_sizes_compact,
+                    schedule.islands.num_sets,
                     response.data,
                     self.bodies,
                     self._contact_cols,
