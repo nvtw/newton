@@ -5521,6 +5521,9 @@ class PhoenXWorld:
             outputs=[out],
             device=self.device,
         )
+        direct = getattr(self, "_direct_equality_system", None)
+        if direct is not None:
+            direct.gather_constraint_wrenches(out, idt)
 
     def gather_constraint_errors(self, out: wp.array) -> None:
         """Per-cid position-level residual."""
