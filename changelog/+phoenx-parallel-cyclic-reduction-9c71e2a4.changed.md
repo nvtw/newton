@@ -1,1 +1,1 @@
-Accelerate long block-tridiagonal PhoenX direct-joint systems with topology-selected parallel cyclic reduction and adaptive mixed-precision refinement.
+Accelerate long block-tridiagonal PhoenX direct-joint systems with topology-selected parallel cyclic reduction, adaptive mixed-precision refinement, and lazy grouped-contact LLT factors.

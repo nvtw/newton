@@ -946,14 +946,24 @@ class FixedPatternPanelLLT:
                             offdiag_update_right.append(right_panel)
                     offdiag_update_start.append(len(offdiag_update_left))
         use_cooperative_factor = all_narrow or len(dimensions) >= self.device.sm_count
+        all_mechanisms = np.arange(len(dimensions), dtype=np.int32)
         cooperative_factor_mechanisms = (
-            np.arange(len(dimensions), dtype=np.int32) if use_cooperative_factor else np.empty(0, dtype=np.int32)
+            np.setdiff1d(all_mechanisms, pcr_mechanisms, assume_unique=True)
+            if use_cooperative_factor
+            else np.empty(0, dtype=np.int32)
         )
+        grouped_rhs_factor_mechanisms = pcr_mechanisms if use_cooperative_factor else np.empty(0, dtype=np.int32)
         self.cooperative_factor_mechanism = wp.array(
             cooperative_factor_mechanisms,
             dtype=wp.int32,
             device=self.device,
         )
+        self.grouped_rhs_factor_mechanism = wp.array(
+            grouped_rhs_factor_mechanisms,
+            dtype=wp.int32,
+            device=self.device,
+        )
+        self._grouped_rhs_factor_required = False
         self.offdiag_update_start = wp.array(offdiag_update_start, dtype=wp.int32, device=self.device)
         self.offdiag_update_left = wp.array(offdiag_update_left, dtype=wp.int32, device=self.device)
         self.offdiag_update_right = wp.array(offdiag_update_right, dtype=wp.int32, device=self.device)
@@ -1036,17 +1046,23 @@ class FixedPatternPanelLLT:
         task_capacity: int,
     ) -> FixedPatternGroupedRHSBatch:
         """Allocate runtime-selected groups of narrow RHS items."""
+        self._grouped_rhs_factor_required = True
         return FixedPatternGroupedRHSBatch(self, item_capacity, task_capacity)
 
     def compute(self) -> None:
         """Factor narrow mechanisms cooperatively or use the ready queue."""
-        if self.cooperative_factor_mechanism.size > 0:
+        factor_mechanisms = [self.cooperative_factor_mechanism]
+        if self._grouped_rhs_factor_required:
+            factor_mechanisms.append(self.grouped_rhs_factor_mechanism)
+        for mechanisms in factor_mechanisms:
+            if mechanisms.size == 0:
+                continue
             wp.launch_tiled(
                 self._factor_cooperative,
-                dim=self.cooperative_factor_mechanism.size,
+                dim=mechanisms.size,
                 block_dim=128,
                 inputs=[
-                    self.cooperative_factor_mechanism,
+                    mechanisms,
                     self.dimension,
                     self.panel_table_offset,
                     self.tile_count,
@@ -1065,13 +1081,17 @@ class FixedPatternPanelLLT:
                 ],
                 device=self.device,
             )
-        elif self._use_product_factor:
+        if (
+            self.cooperative_factor_mechanism.size == 0
+            and self.grouped_rhs_factor_mechanism.size == 0
+            and self._use_product_factor
+        ):
             assert self._product_factor_schedule is not None
             self._product_factor_schedule.compute(
                 self.matrix,
                 self.factor,
             )
-        else:
+        elif self.cooperative_factor_mechanism.size == 0 and self.grouped_rhs_factor_mechanism.size == 0:
             assert self._persistent_schedule is not None
             self._persistent_schedule.compute(
                 self.matrix,
