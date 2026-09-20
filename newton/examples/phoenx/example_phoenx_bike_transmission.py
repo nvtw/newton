@@ -198,6 +198,8 @@ class Example:
         self.rear_load_damping = getattr(args, "rear_load_damping", DEFAULT_REAR_LOAD_DAMPING)
         if args.substeps < 1 or args.iterations < 1:
             raise ValueError("substeps and iterations must be positive")
+        if not 1 <= args.direct_joint_projection_passes <= args.iterations:
+            raise ValueError("direct joint projection passes must be between 1 and iterations")
         if (
             args.contact_chunk_size < 0
             or args.chain_joint_friction < 0.0
@@ -245,6 +247,7 @@ class Example:
             substeps=args.substeps,
             solver_iterations=args.iterations,
             velocity_iterations=1,
+            direct_joint_projection_passes=args.direct_joint_projection_passes,
             parallel_contact_prepare=False,
             contact_chunk_size=args.contact_chunk_size,
             mass_splitting=True,
@@ -421,6 +424,12 @@ class Example:
             help="Maximum contact rows per solver column (0 keeps whole shape pairs).",
         )
         parser.add_argument("--iterations", type=int, default=4, help="Solver iterations per physics substep.")
+        parser.add_argument(
+            "--direct-joint-projection-passes",
+            type=int,
+            default=2,
+            help="Exact D6 projections distributed across each contact solve (default: 2).",
+        )
         parser.add_argument("--substeps", type=int, default=8, help="Physics substeps per 120 Hz contact refresh.")
         parser.add_argument(
             "--sdf-voxel-depth-contacts",

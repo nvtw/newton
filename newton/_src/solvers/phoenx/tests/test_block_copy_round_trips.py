@@ -9,7 +9,7 @@ from unittest.mock import Mock
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import SingleWorldMassSplittingDispatcher
 
 
-def make_world(requires_projection=False, solver_iterations=1):
+def make_world(requires_projection=False, solver_iterations=1, direct_joint_projection_passes=1):
     direct = SimpleNamespace(
         enabled=True,
         requires_global_projection=requires_projection,
@@ -32,6 +32,11 @@ def make_world(requires_projection=False, solver_iterations=1):
         _reduced_constraints_active_this_step=False,
         substep_dt=0.01,
         solver_iterations=solver_iterations,
+        direct_joint_projection_passes=direct_joint_projection_passes,
+        _direct_joint_projection_iterations=frozenset(
+            block * solver_iterations // direct_joint_projection_passes - 1
+            for block in range(1, direct_joint_projection_passes + 1)
+        ),
         joint_refinement_iterations=0,
         _colored_contact_rows=False,
         _color_group_data=None,
@@ -70,6 +75,7 @@ class TestBlockCopyRoundTrips(unittest.TestCase):
         world = make_world(requires_projection=True)
         direct = world._direct_equality_system
         direct.supports_async_factor = True
+        world._color_group_data = object()
         SingleWorldMassSplittingDispatcher(world).solve(100.0)
         direct.prepare_and_factor.assert_not_called()
         direct.prepare_matrix.assert_called_once_with(100.0)
@@ -100,6 +106,17 @@ class TestBlockCopyRoundTrips(unittest.TestCase):
         self.assertEqual(world._direct_equality_system.solve.call_count, 2)
         self.assertEqual(world._mass_splitting_writeback.call_count, 2)
         self.assertEqual(world._mass_splitting_broadcast.call_count, 3)
+
+    def test_direct_projection_passes_temporally_block_contact_sweeps(self):
+        """Feed contact impulses back through exact joints between sweep blocks."""
+        world = make_world(True, solver_iterations=4, direct_joint_projection_passes=2)
+        SingleWorldMassSplittingDispatcher(world).solve(100.0)
+        self.assertEqual(
+            [call.kwargs["use_bias"] for call in world._direct_equality_system.solve.call_args_list],
+            [False, False, True],
+        )
+        self.assertEqual(world._mass_splitting_writeback.call_count, 3)
+        self.assertEqual(world._mass_splitting_broadcast.call_count, 4)
 
     def test_solver_iterations_alternate_color_order(self):
         """Remove persistent directional bias without adding solver sweeps."""
