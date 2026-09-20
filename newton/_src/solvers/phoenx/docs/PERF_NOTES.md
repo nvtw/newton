@@ -1006,3 +1006,16 @@ These later results supersede the early FP16/contact-row prioritization:
   0.778 mm maximum sampled penetration after startup. The earlier 14-by-2
   configuration measured 29.4 FPS. A 10-by-2 configuration reached 48.5 FPS
   but exceeded the 0.8 mm penetration target and was rejected.
+
+- Long block-tridiagonal direct-joint components now use block-16 parallel
+  cyclic reduction. Selection depends only on the symbolic panel graph; other
+  sparse graphs retain panel LLT. Two FP64-residual refinement passes are the
+  fast path, with a per-mechanism correction-norm test conditionally adding two
+  passes for ill-conditioned systems. The unchanged equality matrix and
+  equal-and-opposite `J^T` impulse application preserve momentum. On the
+  8-substep, 4-position-iteration, 1-velocity-iteration BikeTransmission
+  benchmark, an identical 300-frame A/B improved from 49.99 to 54.54 FPS. A
+  600-frame run sustained 54.92 FPS with 0.0173 mm maximum sampled joint gap,
+  0.897 mm maximum sampled penetration, and finite state throughout. The two
+  100-link direct-equality drift/impulse regressions exercise the conditional
+  accuracy path and pass their existing analytic thresholds.
