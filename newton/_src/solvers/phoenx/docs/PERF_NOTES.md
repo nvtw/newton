@@ -1019,3 +1019,12 @@ These later results supersede the early FP16/contact-row prioritization:
   0.897 mm maximum sampled penetration, and finite state throughout. The two
   100-link direct-equality drift/impulse regressions exercise the conditional
   accuracy path and pass their existing analytic thresholds.
+
+- PCR mechanisms now omit their duplicate LLT factorization unless a grouped
+  direct-contact response batch requests it. Non-PCR mechanisms retain their
+  existing factor path, and creating a grouped batch enables the required LLT
+  factors before graph capture. The BikeTransmission trace had no grouped-RHS
+  contact kernel, so its 10.0% LLT factor cost was dead work. Removing it raised
+  the identical 300-frame benchmark from 54.54 to 58.48 FPS; two 600-frame runs
+  sustained 58.65 and 58.78 FPS. Both remained finite with 0.010--0.013 mm
+  maximum sampled joint gap and 0.878--0.994 mm maximum sampled penetration.

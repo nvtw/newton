@@ -356,8 +356,8 @@ class TestDirectEquality(unittest.TestCase):
         self.assertGreaterEqual(int(roots[0]), 0)
         self.assertEqual(int(roots[0]), int(roots[1]))
 
-    def test_large_mechanism_uses_cooperative_factorization(self):
-        """Solve a large narrow mechanism with cooperative factorization."""
+    def test_large_mechanism_uses_parallel_cyclic_reduction(self):
+        """Solve a large narrow mechanism without an unused LLT factor."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
@@ -374,7 +374,10 @@ class TestDirectEquality(unittest.TestCase):
         self.assertEqual(direct.solver.symbolic.tile_counts, (9,))
         self.assertGreater(direct.solver.symbolic.panel_count, 9)
         self.assertLess(direct.matrix.size, 130 * 130)
-        np.testing.assert_array_equal(direct.solver.cooperative_factor_mechanism.numpy(), np.array([0], dtype=np.int32))
+        self.assertEqual(direct.solver.cooperative_factor_mechanism.size, 0)
+        np.testing.assert_array_equal(direct.solver.grouped_rhs_factor_mechanism.numpy(), np.array([0], dtype=np.int32))
+        self.assertFalse(direct.solver._grouped_rhs_factor_required)
+        self.assertIsNotNone(direct.solver._pcr)
 
         state = model.state()
         _run_captured_steps(solver, state, model.control(), 1)
@@ -636,7 +639,11 @@ class TestDirectEquality(unittest.TestCase):
         symbolic = direct.solver.symbolic
         self.assertEqual(direct.matrix.size, symbolic.panel_count * direct.solver.block_size**2)
         self.assertLess(direct.matrix.size, 10 * 10 + 40 * 40 + 130 * 130)
-        np.testing.assert_array_equal(direct.solver.cooperative_factor_mechanism.numpy(), np.arange(3, dtype=np.int32))
+        np.testing.assert_array_equal(
+            direct.solver.cooperative_factor_mechanism.numpy(), np.array([0, 1], dtype=np.int32)
+        )
+        np.testing.assert_array_equal(direct.solver.grouped_rhs_factor_mechanism.numpy(), np.array([2], dtype=np.int32))
+        self.assertFalse(direct.solver._grouped_rhs_factor_required)
 
         state = model.state()
         _run_captured_steps(solver, state, model.control(), 20)

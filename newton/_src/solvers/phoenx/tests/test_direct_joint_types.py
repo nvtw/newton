@@ -811,6 +811,11 @@ class TestDirectJointTypes(unittest.TestCase):
         )
         self.assertIsNotNone(getattr(panel, "_pcr", None))
         np.testing.assert_array_equal(panel._pcr.mechanisms, [0, 1])
+        self.assertEqual(panel.cooperative_factor_mechanism.size, 0)
+        np.testing.assert_array_equal(panel.grouped_rhs_factor_mechanism.numpy(), [0, 1])
+        self.assertFalse(panel._grouped_rhs_factor_required)
+        panel.create_grouped_rhs_batch(item_capacity=1, task_capacity=1)
+        self.assertTrue(panel._grouped_rhs_factor_required)
 
         rng = np.random.default_rng(9127)
         matrices = []
