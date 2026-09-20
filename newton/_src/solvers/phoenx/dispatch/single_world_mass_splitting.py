@@ -133,12 +133,15 @@ class SingleWorldMassSplittingDispatcher:
                 reverse_colors=bool(iteration % 2),
             )
             w._mass_splitting_average_and_broadcast(inv_dt)
-            # Keep the local PGS iterations contiguous.  Intermediate exact
-            # projections are superseded by the final projection and require
-            # another full body-copy round trip.
-            if direct is not None and direct.enabled and iteration == w.solver_iterations - 1:
+            # Divide contact sweeps into temporal blocks when requested. An
+            # unbiased intermediate projection feeds contact impulses through
+            # the exact joint graph; only the final projection applies bias.
+            direct_projection = iteration in w._direct_joint_projection_iterations
+            if direct is not None and direct.enabled and direct_projection:
                 w._mass_splitting_writeback(already_averaged=True)
-                direct.solve(use_bias=True)
+                direct.solve(use_bias=iteration == w.solver_iterations - 1)
+                if iteration + 1 < w.solver_iterations:
+                    w._mass_splitting_broadcast()
 
         # Keep each joint's original copy ownership and reconcile its paired
         # impulse before the next refinement or body writeback.
