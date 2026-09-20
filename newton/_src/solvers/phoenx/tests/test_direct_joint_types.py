@@ -623,6 +623,13 @@ class TestDirectJointTypes(unittest.TestCase):
         self.assertIsNotNone(solver._direct_contact_schedule)
         self.assertFalse(solver._direct_tree_contacts)
 
+        response = solver._direct_contact_response
+        self.assertEqual(
+            response.endpoint_response_dim,
+            (response.contact_batch.item_capacity, 2, 3),
+        )
+        self.assertEqual(response.data.endpoint_response.shape, response.endpoint_response_dim)
+
         state_0 = model.state()
         state_1 = model.state()
         control = model.control()
