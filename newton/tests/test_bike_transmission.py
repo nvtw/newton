@@ -12,6 +12,7 @@ from newton.examples.phoenx.example_phoenx_bike_transmission import (
     ALUMINUM_DENSITY,
     ASSETS,
     CHAIN_JOINT_FRICTION,
+    DEFAULT_REAR_LOAD_DAMPING,
     DERAILLEUR_DAMPING_SCALE,
     DERAILLEUR_PRELOAD_SCALE,
     DERAILLEUR_SPRING_LABELS,
@@ -36,14 +37,18 @@ class TestBikeTransmission(unittest.TestCase):
         self.assertEqual(DERAILLEUR_PRELOAD_SCALE, 3.0)
         self.assertEqual(DERAILLEUR_DAMPING_SCALE, 2.0)
         for joint in SCENE["joints"]:
-            stiffness, damping, target = _joint_drive_parameters(
+            stiffness, damping, target, _ = _joint_drive_parameters(
                 joint, DERAILLEUR_PRELOAD_SCALE, DERAILLEUR_DAMPING_SCALE
             )
             self.assertEqual(stiffness, joint["stiffness"])
             expected_damping = (
                 joint["damping"] * DERAILLEUR_DAMPING_SCALE
                 if joint["label"] in DERAILLEUR_SPRING_LABELS
-                else joint["damping"]
+                else (
+                    DEFAULT_REAR_LOAD_DAMPING
+                    if joint["label"].endswith("/BackGears/LoadRevoluteJoint")
+                    else joint["damping"]
+                )
             )
             self.assertEqual(damping, expected_damping)
             expected_target = (
@@ -62,7 +67,7 @@ class TestBikeTransmission(unittest.TestCase):
             _body_density("/World/Xform/Changer/RD_R9250_CAGE/UpperSmallGearCOMPOUND037"),
             ALUMINUM_DENSITY,
         )
-        self.assertEqual(CHAIN_JOINT_FRICTION, 1.0e-5)
+        self.assertEqual(CHAIN_JOINT_FRICTION, 5.0e-4)
         self.assertTrue(Example.overlap_simulation_render)
 
     def test_joint_frames_and_closed_chain(self):

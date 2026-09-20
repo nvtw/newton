@@ -25,7 +25,9 @@ ASSETS = Path(newton.examples.get_asset_directory()) / "bike_transmission"
 STEEL_DENSITY = 7850.0
 ALUMINUM_DENSITY = 2700.0
 DEFAULT_DENSITY = 1000.0
-CHAIN_JOINT_FRICTION = 1.0e-5
+# Calibrated at the default rear load. A tension-dependent pin-loss model can
+# replace this constant once joint reaction magnitudes are exposed to examples.
+CHAIN_JOINT_FRICTION = 5.0e-4
 DRIVETRAIN_CONTACT_FRICTION = 0.1
 DEFAULT_CADENCE_RPM = 60.0
 DEFAULT_REAR_LOAD_DAMPING = 0.020053523
