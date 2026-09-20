@@ -98,13 +98,16 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         self.assertFalse(PhoenXWorld._can_reuse_direct_relax_tangent(world, direct))
 
     def test_direct_contact_sweeps_share_one_launch(self) -> None:
-        """Keep sequential direct-contact iterations inside one mechanism launch."""
+        """Keep sequential direct-contact iterations inside one component launch."""
         response = SimpleNamespace(
-            active_mechanism=SimpleNamespace(size=7),
             data=object(),
             compute=lambda _contacts: None,
         )
-        schedule = SimpleNamespace(columns=object(), section_end=object())
+        schedule = SimpleNamespace(
+            columns=object(),
+            section_end=SimpleNamespace(size=7),
+            islands=SimpleNamespace(set_sizes=object(), set_sizes_compact=object(), num_sets=object()),
+        )
         world = SimpleNamespace(
             _contact_input_active_this_step=True,
             _direct_contact_response=response,

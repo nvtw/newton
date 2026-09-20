@@ -283,6 +283,28 @@ def _build_two_mechanism_contact_model() -> newton.Model:
     return builder.finalize(device=wp.get_preferred_device())
 
 
+def _build_two_prismatic_mechanism_contact_model() -> newton.Model:
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+    shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.0)
+    for x in (-0.009, 0.009):
+        body = builder.add_link(
+            xform=wp.transform(wp.vec3(x, 0.0, 0.0), wp.quat_identity()),
+            mass=1.0,
+            inertia=_INERTIA,
+        )
+        builder.add_shape_sphere(body, radius=0.01, cfg=shape_cfg)
+        builder.add_joint_prismatic(
+            parent=-1,
+            child=body,
+            axis=newton.Axis.X,
+            parent_xform=wp.transform(wp.vec3(x, 0.0, 0.0), wp.quat_identity()),
+            limit_lower=-np.inf,
+            limit_upper=np.inf,
+        )
+    builder.color()
+    return builder.finalize(device=wp.get_preferred_device())
+
+
 def _build_two_grounded_mechanisms() -> tuple[newton.Model, tuple[int, ...]]:
     builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
     builder.add_ground_plane()
@@ -361,8 +383,8 @@ class TestDirectJointTypes(unittest.TestCase):
         np.testing.assert_allclose(actual[:, :3], reference[:, :3], rtol=0.0, atol=1.0e-6)
         np.testing.assert_array_equal(actual[:, 3:], reference[:, 3:])
 
-    def test_shared_world_mechanisms_keep_contacts_in_coupled_pgs(self) -> None:
-        """Keep cross-mechanism contacts in the coupled colored solve."""
+    def test_shared_world_mechanisms_own_cross_contacts(self) -> None:
+        """Solve cross-mechanism contacts in one exact direct component."""
         model = _build_two_mechanism_contact_model()
         solver = _make_solver(model)
         state = model.state()
@@ -373,12 +395,43 @@ class TestDirectJointTypes(unittest.TestCase):
         solver.step(state, state, model.control(), contacts, 1.0 / 60.0)
 
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (6, 6))
-        self.assertIsNotNone(solver._direct_contact_response)
-        self.assertEqual(solver._direct_contact_response.active_mechanisms, (True, True))
+        response = solver._direct_contact_response
+        self.assertIsNotNone(response)
+        self.assertEqual(response.active_mechanisms, (True, True))
         count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
         self.assertGreater(count, 0)
         owners = solver.world._contact_cols.articulation_owner.numpy()[:count]
-        self.assertTrue(np.all(owners < 0))
+        self.assertTrue(np.all(owners >= 0))
+        self.assertEqual(int(solver._direct_contact_schedule.islands.num_sets.numpy()[0]), 1)
+        mechanism0 = response.column_mechanism0.numpy()[:count]
+        mechanism1 = response.column_mechanism1.numpy()[:count]
+        self.assertTrue(np.all(mechanism0 >= 0))
+        self.assertTrue(np.all(mechanism1 >= 0))
+        self.assertTrue(np.all(mechanism0 != mechanism1))
+
+    def test_cross_mechanism_contact_combines_constrained_mobility(self) -> None:
+        """Add both prismatic endpoint mobilities to the contact response."""
+        model = _build_two_prismatic_mechanism_contact_model()
+        solver = _make_solver(model)
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        contacts = model._collision_pipeline.contacts()
+        model._collision_pipeline.collide(state, contacts)
+        solver.step(state, state, model.control(), contacts, 1.0 / 600.0)
+
+        response = solver._direct_contact_response
+        self.assertIsNotNone(response)
+        self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
+        expected_mass = 1.0 / float(np.sum(1.0 / model.body_mass.numpy()))
+        self.assertAlmostEqual(float(response.data.mobility.numpy()[0, 0]), expected_mass, places=5)
+        mechanisms = (
+            int(response.column_mechanism0.numpy()[0]),
+            int(response.column_mechanism1.numpy()[0]),
+        )
+        self.assertGreaterEqual(min(mechanisms), 0)
+        self.assertNotEqual(*mechanisms)
+        momentum = np.sum(model.body_mass.numpy()[:, None] * state.body_qd.numpy()[:, :3], axis=0)
+        np.testing.assert_allclose(momentum, np.zeros(3), rtol=0.0, atol=1.0e-6)
 
     def test_shared_world_mechanisms_own_independent_ground_contacts(self) -> None:
         """Couple independent same-world mechanisms to ground separately."""
@@ -401,6 +454,8 @@ class TestDirectJointTypes(unittest.TestCase):
         self.assertGreaterEqual(count, 2)
         owners = solver.world._contact_cols.articulation_owner.numpy()[:count]
         self.assertTrue(np.all(owners >= 0))
+        self.assertEqual(int(solver._direct_contact_schedule.islands.num_sets.numpy()[0]), 2)
+        self.assertEqual(len(np.unique(owners)), 2)
         body_q = state.body_q.numpy()[list(bodies)]
         self.assertTrue(np.isfinite(body_q).all())
         self.assertGreater(float(np.min(body_q[:, 2])), 0.09)
