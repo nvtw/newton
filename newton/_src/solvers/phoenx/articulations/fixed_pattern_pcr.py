@@ -113,19 +113,20 @@ def _reduce_rhs_kernel(
     level: wp.int32,
     stride: wp.int32,
     n: wp.int32,
+    solve: wp.bool,
     segment_begin: wp.array[wp.int32],
     segment_end: wp.array[wp.int32],
     alpha: wp.array[wp.float32],
     gamma: wp.array[wp.float32],
+    factors: wp.array[wp.float32],
     rhs: wp.array[wp.float32],
+    x: wp.array[wp.float32],
 ):
     i, _lane = wp.tid()
     begin = segment_begin[i]
     end = segment_end[i]
     base = (level * n + i) * BS
-    out = ((level + 1) * n + i) * BS
     dm = wp.array(ptr=_offset_ptr(rhs, base), shape=(BS, 1), dtype=wp.float32)
-    dn = wp.array(ptr=_offset_ptr(rhs, out), shape=(BS, 1), dtype=wp.float32)
     v = wp.tile_load(dm, shape=(BS, 1), storage="shared")
     if i - stride >= begin:
         am = wp.array(ptr=_offset_ptr(alpha, (level * n + i) * wp.int32(E)), shape=(BS, BS), dtype=wp.float32)
@@ -135,22 +136,16 @@ def _reduce_rhs_kernel(
         gm = wp.array(ptr=_offset_ptr(gamma, (level * n + i) * wp.int32(E)), shape=(BS, BS), dtype=wp.float32)
         dr = wp.array(ptr=_offset_ptr(rhs, (level * n + i + stride) * BS), shape=(BS, 1), dtype=wp.float32)
         wp.tile_matmul(wp.tile_load(gm, shape=(BS, BS)), wp.tile_load(dr, shape=(BS, 1)), v, alpha=-1.0)
-    wp.tile_store(dn, v)
-
-
-@wp.kernel(enable_backward=False)
-def _final_solve_kernel(
-    level: wp.int32, n: wp.int32, factors: wp.array[wp.float32], rhs: wp.array[wp.float32], x: wp.array[wp.float32]
-):
-    i, _lane = wp.tid()
-    fb = wp.array(ptr=_offset_ptr(factors, (level * n + i) * wp.int32(E)), shape=(BS, BS), dtype=wp.float32)
-    dm = wp.array(ptr=_offset_ptr(rhs, (level * n + i) * BS), shape=(BS, 1), dtype=wp.float32)
-    xm = wp.array(ptr=_offset_ptr(x, i * BS), shape=(BS, 1), dtype=wp.float32)
-    f = wp.tile_load(fb, shape=(BS, BS))
-    v = wp.tile_load(dm, shape=(BS, 1), storage="shared")
-    wp.tile_lower_solve_inplace(f, v)
-    wp.tile_upper_solve_inplace(wp.tile_transpose(f), v)
-    wp.tile_store(xm, v)
+    if solve:
+        fb = wp.array(ptr=_offset_ptr(factors, ((level + 1) * n + i) * wp.int32(E)), shape=(BS, BS), dtype=wp.float32)
+        xm = wp.array(ptr=_offset_ptr(x, i * BS), shape=(BS, 1), dtype=wp.float32)
+        factor = wp.tile_load(fb, shape=(BS, BS))
+        wp.tile_lower_solve_inplace(factor, v)
+        wp.tile_upper_solve_inplace(wp.tile_transpose(factor), v)
+        wp.tile_store(xm, v)
+    else:
+        dn = wp.array(ptr=_offset_ptr(rhs, ((level + 1) * n + i) * BS), shape=(BS, 1), dtype=wp.float32)
+        wp.tile_store(dn, v)
 
 
 @wp.func
@@ -454,21 +449,17 @@ class BlockTridiagonalPCR:
                     level,
                     1 << level,
                     self.task_count,
+                    level == self.reductions - 1,
                     self.segment_begin,
                     self.segment_end,
                     self.alpha,
                     self.gamma,
+                    self.factors,
                     self.rhs,
+                    self.delta,
                 ],
                 device=self.device,
             )
-        wp.launch_tiled(
-            _final_solve_kernel,
-            dim=self.task_count,
-            block_dim=128,
-            inputs=[self.reductions, self.task_count, self.factors, self.rhs, self.delta],
-            device=self.device,
-        )
 
     def _refine_twice(self) -> None:
         """Apply two additional mixed-precision residual corrections."""

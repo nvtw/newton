@@ -1028,3 +1028,10 @@ These later results supersede the early FP16/contact-row prioritization:
   the identical 300-frame benchmark from 54.54 to 58.48 FPS; two 600-frame runs
   sustained 58.65 and 58.78 FPS. Both remained finite with 0.010--0.013 mm
   maximum sampled joint gap and 0.878--0.994 mm maximum sampled penetration.
+
+- The final PCR right-hand-side reduction now performs its independent tile
+  solve before leaving the same kernel. This removes one graph node per PCR
+  solve without changing the reduction, factor, refinement, or momentum path.
+  A fresh 300-frame source-level A/B improved from 59.05 to 59.93 FPS; the
+  candidate 600-frame run sustained 59.48 FPS with finite state, 0.0190 mm
+  maximum sampled joint gap, and 0.997 mm maximum sampled penetration.
