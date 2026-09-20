@@ -178,6 +178,7 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
         has_perm: int,
         n_active: int | None = None,
         idt: float = 1.0,
+        active_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         """Run one kernel launch and return ``force_out`` linear part as
         ``(n, 3)`` numpy array. ``n_active`` defaults to ``n``.
@@ -191,11 +192,15 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
             device=device,
         )
         force_out = wp.zeros(n, dtype=wp.spatial_vector, device=device)
+        if active_mask is None:
+            active_mask = np.zeros(n, dtype=np.int32)
+        cid_of_contact = wp.array(active_mask.astype(np.int32), dtype=wp.int32, device=device)
         wp.launch(
             _contact_impulse_to_force_wrapper_kernel,
             dim=n,
             inputs=[
                 rigid_contact_count,
+                cid_of_contact,
                 cc,
                 wp.float32(idt),
                 sort_perm_wp,
@@ -235,6 +240,22 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
         for sorted_k in range(n):
             newton_k = int(sort_perm[sorted_k])
             expected[newton_k, 2] = -lam_n[sorted_k]
+        np.testing.assert_allclose(out, expected, atol=1.0e-5, rtol=0.0)
+
+    def test_inactive_contact_hole_is_left_zero(self) -> None:
+        """A discarded manifold point must not export a stale force."""
+        n = 3
+        active_mask = np.array([0, -1, 0], dtype=np.int32)
+        out = self._launch_readback(
+            n=n,
+            lam_n=[1.0, 20.0, 3.0],
+            sort_perm=np.arange(n, dtype=np.int32),
+            has_perm=1,
+            active_mask=active_mask,
+        )
+
+        expected = np.zeros((n, 3), dtype=np.float32)
+        expected[[0, 2], 2] = (-1.0, -3.0)
         np.testing.assert_allclose(out, expected, atol=1.0e-5, rtol=0.0)
 
     def test_has_perm_zero_writes_at_thread_index(self) -> None:
@@ -285,7 +306,16 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
         wp.launch(
             _contact_impulse_to_force_wrapper_kernel,
             dim=n,
-            inputs=[rigid_contact_count, cc, wp.float32(idt), sort_perm, wp.int32(0), sort_perm, sort_perm],
+            inputs=[
+                rigid_contact_count,
+                wp.zeros(n, dtype=wp.int32, device=device),
+                cc,
+                wp.float32(idt),
+                sort_perm,
+                wp.int32(0),
+                sort_perm,
+                sort_perm,
+            ],
             outputs=[force_out],
             device=device,
         )

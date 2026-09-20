@@ -481,6 +481,7 @@ def get_solve_contact_pair_tgs(record_wrenches: bool = False):
 @wp.kernel
 def export_contact_wrenches(
     count: wp.array[int],
+    cid_of_contact: wp.array[int],
     state: ContactTGS,
     bodies: BodyContainer,
     shape_body: wp.array[int],
@@ -492,7 +493,7 @@ def export_contact_wrenches(
 ):
     """Export outer-step average wrenches on body0, about its current COM."""
     k = wp.tid()
-    if k >= wp.min(count[0], wp.min(force.shape[0], state.wrenches.shape[0])):
+    if k >= wp.min(count[0], wp.min(force.shape[0], state.wrenches.shape[0])) or cid_of_contact[k] < wp.int32(0):
         return
     out_k = sort_perm[k]
     body0 = shape_body[shape0[out_k]]

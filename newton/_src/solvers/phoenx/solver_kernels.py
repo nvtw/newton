@@ -544,6 +544,7 @@ def _apply_joint_drive_control_kernel(
 @wp.kernel(enable_backward=False)
 def _contact_impulse_to_force_wrapper_kernel(
     rigid_contact_count: wp.array[wp.int32],
+    cid_of_contact: wp.array[wp.int32],
     cc: ContactContainer,
     idt: wp.float32,
     sort_perm: wp.array[wp.int32],
@@ -571,7 +572,7 @@ def _contact_impulse_to_force_wrapper_kernel(
     n_active = rigid_contact_count[0]
     if n_active > force_out.shape[0]:
         n_active = force_out.shape[0]
-    if k >= n_active:
+    if k >= n_active or cid_of_contact[k] < wp.int32(0):
         return
     n = cc_get_normal(cc, k)
     t1 = cc_get_tangent1(cc, k)

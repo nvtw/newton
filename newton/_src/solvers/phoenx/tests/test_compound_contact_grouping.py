@@ -30,6 +30,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.geometry.contact_reduction import NUM_NORMAL_BINS
 from newton._src.solvers.phoenx.tests._test_helpers import make_solver_graph_stepper
 
 
@@ -94,6 +95,30 @@ def _build_compound_scene(
     model = mb.finalize()
     model.set_gravity((0.0, 0.0, -9.81))
     return model
+
+
+def _build_dense_ground_manifold_scene():
+    """One compound body whose ground manifold exceeds one solver chunk."""
+    mb = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    mb.add_ground_plane()
+    body = mb.add_link(
+        xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.049), q=wp.quat_identity()),
+        mass=1.0,
+        inertia=((1.0e-2, 0, 0), (0, 1.0e-2, 0), (0, 0, 1.0e-2)),
+    )
+    joint = mb.add_joint_free(parent=-1, child=body)
+    cfg = mb.ShapeConfig(density=1000.0)
+    for index in range(20):
+        mb.add_shape_box(
+            body,
+            xform=wp.transform(p=wp.vec3((index - 9.5) * 0.105, 0.0, 0.0), q=wp.quat_identity()),
+            hx=0.05,
+            hy=0.05,
+            hz=0.05,
+            cfg=cfg,
+        )
+    mb.add_articulation([joint])
+    return mb.finalize()
 
 
 def _build_single_shape_scene():
@@ -249,6 +274,46 @@ class TestCompoundContactGrouping(unittest.TestCase):
         expected_friction = np.array([0.6, 0.9], dtype=np.float32)
         np.testing.assert_allclose(np.sort(column_data[3, :column_count]), expected_friction)
         np.testing.assert_allclose(np.sort(column_data[4, :column_count]), expected_friction)
+
+    def test_dense_body_pair_manifold_is_reduced(self) -> None:
+        """Dense compound manifolds retain at most one contact solver chunk."""
+        model = _build_dense_ground_manifold_scene()
+        solver = _make_solver(model, step_layout="single_world")
+
+        state_0 = model.state()
+        state_1 = model.state()
+        contacts = model.contacts()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+        model.collide(state_0, contacts)
+        solver.step(state_0, state_1, model.control(), contacts, 1.0 / 240.0)
+
+        scratch = solver.world._ingest_scratch
+        column_count = int(scratch.num_contact_columns.numpy()[0])
+        pair_source = scratch.pair_source_idx.numpy()[:column_count]
+        point_counts = scratch.pair_count.numpy()[pair_source]
+        self.assertGreater(column_count, 0)
+        self.assertLessEqual(int(np.max(point_counts)), 2 * NUM_NORMAL_BINS)
+
+        sort_perm = scratch.sort_perm.numpy()
+        inv_sort_perm = scratch.inv_sort_perm.numpy()
+        shape_body = model.shape_body.numpy()
+        shape0 = scratch.sorted_shape0.numpy()
+        point0 = scratch.sorted_point0.numpy()
+        point1 = scratch.sorted_point1.numpy()
+        retained_points = []
+        for pair in pair_source:
+            first = int(scratch.pair_first.numpy()[pair])
+            count = int(scratch.pair_count.numpy()[pair])
+            destinations = np.arange(first, first + count)
+            np.testing.assert_array_equal(inv_sort_perm[sort_perm[destinations]], destinations)
+            retained_points.extend(
+                point0[contact] if shape_body[shape0[contact]] >= 0 else point1[contact] for contact in destinations
+            )
+
+        # Spatial support contacts must retain both ends of the long compound,
+        # including when the canonical first endpoint is the static ground.
+        retained_points = np.asarray(retained_points)
+        self.assertGreater(float(np.ptp(retained_points[:, 0])), 1.9)
 
     def test_compound_scene_steps_without_nan(self) -> None:
         """Step the compound scene for ~0.5 s; assert finite poses and
