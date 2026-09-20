@@ -791,6 +791,71 @@ class TestDirectJointTypes(unittest.TestCase):
             relative_residual = np.linalg.norm(residual) / np.linalg.norm(rhs_np[begin:end])
             self.assertLess(relative_residual, 5.0e-3)
 
+    def test_parallel_cyclic_reduction_solves_batched_linear_panel_graphs(self) -> None:
+        """Solve heterogeneous partial-tail chains through the parallel path."""
+        dimensions = (157, 129)
+        starts = np.cumsum(np.asarray((0, *dimensions), dtype=np.int32))
+        permutation = np.concatenate([np.arange(dimension, dtype=np.int32) for dimension in dimensions])
+        row_bodies = []
+        for mechanism, dimension in enumerate(dimensions):
+            body_offset = 1000 * mechanism
+            for row in range(dimension):
+                tile = row // 16
+                row_bodies.append(frozenset((body_offset + tile, body_offset + tile + 1)))
+        panel = FixedPatternPanelLLT(
+            dimensions,
+            starts,
+            permutation,
+            tuple(row_bodies),
+            device=wp.get_preferred_device(),
+        )
+        self.assertIsNotNone(getattr(panel, "_pcr", None))
+        np.testing.assert_array_equal(panel._pcr.mechanisms, [0, 1])
+
+        rng = np.random.default_rng(9127)
+        matrices = []
+        expected_rhs = []
+        for dimension in dimensions:
+            factor = np.zeros((dimension, dimension), dtype=np.float64)
+            for begin in range(0, dimension, 16):
+                end = min(begin + 16, dimension)
+                width = end - begin
+                diagonal = np.tril(rng.normal(scale=0.01, size=(width, width)))
+                diagonal[np.diag_indices(width)] += np.linspace(0.8, 1.2, width)
+                factor[begin:end, begin:end] = diagonal
+                if begin:
+                    previous = slice(begin - 16, begin)
+                    factor[begin:end, previous] = rng.normal(scale=0.015, size=(width, 16))
+            matrices.append(factor @ factor.T)
+            expected_rhs.append(rng.normal(size=dimension))
+
+        storage = np.zeros(panel.matrix.size, dtype=np.float32)
+        for row, column, address in zip(
+            panel.symbolic.matrix_row,
+            panel.symbolic.matrix_column,
+            panel.symbolic.matrix_storage,
+            strict=True,
+        ):
+            mechanism = int(np.searchsorted(starts[1:], row, side="right"))
+            storage[address] = matrices[mechanism][row - starts[mechanism], column - starts[mechanism]]
+        rhs_np = np.concatenate(expected_rhs).astype(np.float32)
+        rhs = wp.array(rhs_np, dtype=wp.float32, device=wp.get_preferred_device())
+        solution = wp.zeros_like(rhs)
+        panel.matrix.assign(storage)
+
+        with wp.ScopedCapture(wp.get_preferred_device()) as capture:
+            panel.compute()
+            panel.solve(rhs, solution)
+        wp.capture_launch(capture.graph)
+        solution_np = solution.numpy()
+
+        for mechanism, matrix in enumerate(matrices):
+            begin = int(starts[mechanism])
+            end = int(starts[mechanism + 1])
+            residual = matrix @ solution_np[begin:end] - rhs_np[begin:end]
+            relative_residual = np.linalg.norm(residual) / np.linalg.norm(rhs_np[begin:end])
+            self.assertLess(relative_residual, 2.0e-5, msg=f"mechanism {mechanism}: {relative_residual}")
+
     def test_grouped_rhs_limits_tile_width_for_occupancy(self) -> None:
         """Limit grouped contact solves to the measured occupancy width."""
         self.assertEqual(GROUPED_RHS_ITEMS_PER_TASK * GROUPED_RHS_ITEM_WIDTH, 12)

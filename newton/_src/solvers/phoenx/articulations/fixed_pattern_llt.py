@@ -17,11 +17,13 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_schedule import 
     PersistentProductFactorSchedule,
     PersistentPushSolveSchedule,
 )
+from newton._src.solvers.phoenx.articulations.fixed_pattern_pcr import BlockTridiagonalPCR
 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 GROUPED_RHS_ITEMS_PER_TASK = 4
 GROUPED_RHS_ITEM_WIDTH = 3
+_MIN_PCR_TILE_COUNT = 8
 
 _GET_ARRAY_PTR = """return (uint64_t)arr.data;"""
 
@@ -798,6 +800,22 @@ class FixedPatternGroupedRHSBatch:
         )
 
 
+def _find_block_tridiagonal_mechanisms(panel_tables: list[np.ndarray], block_size: int) -> np.ndarray:
+    """Return long panel graphs supported by the parallel cyclic solver."""
+    if block_size != 16:
+        return np.empty(0, dtype=np.int32)
+    mechanisms = []
+    for mechanism, table in enumerate(panel_tables):
+        tile_count = table.shape[0]
+        if tile_count < _MIN_PCR_TILE_COUNT:
+            continue
+        expected = np.eye(tile_count, dtype=bool)
+        expected[np.arange(1, tile_count), np.arange(tile_count - 1)] = True
+        if np.array_equal(table >= 0, expected):
+            mechanisms.append(mechanism)
+    return np.asarray(mechanisms, dtype=np.int32)
+
+
 class FixedPatternPanelLLT:
     """Factor and solve fixed-topology mechanism matrices in compact panels."""
 
@@ -864,6 +882,20 @@ class FixedPatternPanelLLT:
             size = tile_count * tile_count
             panel_tables.append(self.symbolic.panel_index[offset : offset + size].reshape(tile_count, tile_count))
             offset += size
+
+        pcr_mechanisms = _find_block_tridiagonal_mechanisms(panel_tables, block_size)
+        self._pcr = (
+            BlockTridiagonalPCR(
+                panel_tables,
+                pcr_mechanisms,
+                dimensions,
+                vector_offsets,
+                permutation,
+                self.device,
+            )
+            if pcr_mechanisms.size
+            else None
+        )
 
         tile_adjacency_offset: list[int] = []
         forward_start = [0]
@@ -952,14 +984,15 @@ class FixedPatternPanelLLT:
                 self.device,
             )
 
-        mechanism_count = len(large_mechanisms)
+        remaining_large_mechanisms = np.setdiff1d(large_mechanisms, pcr_mechanisms, assume_unique=True)
+        mechanism_count = len(remaining_large_mechanisms)
         self._push_forward_schedule = None
         self._push_backward_schedule = None
         self._use_push_solve = False
         if 0 < mechanism_count < self.device.sm_count:
             push_forward_schedule = PersistentPushSolveSchedule(
                 panel_tables,
-                large_mechanisms,
+                remaining_large_mechanisms,
                 workspace_rhs_index,
                 block_size,
                 self.device,
@@ -967,7 +1000,7 @@ class FixedPatternPanelLLT:
             )
             push_backward_schedule = PersistentPushSolveSchedule(
                 panel_tables,
-                large_mechanisms,
+                remaining_large_mechanisms,
                 workspace_rhs_index,
                 block_size,
                 self.device,
@@ -982,7 +1015,13 @@ class FixedPatternPanelLLT:
                 self._push_forward_schedule = push_forward_schedule
                 self._push_backward_schedule = push_backward_schedule
         cooperative_mechanisms = (
-            small_mechanisms if self._use_push_solve else np.arange(len(dimensions), dtype=np.int32)
+            small_mechanisms
+            if self._use_push_solve
+            else np.setdiff1d(
+                np.arange(len(dimensions), dtype=np.int32),
+                pcr_mechanisms,
+                assume_unique=True,
+            )
         )
         self.cooperative_mechanism = wp.array(cooperative_mechanisms, dtype=wp.int32, device=self.device)
         self._factor_cooperative = _make_cooperative_factor_kernel(block_size)
@@ -1038,6 +1077,10 @@ class FixedPatternPanelLLT:
                 self.matrix,
                 self.factor,
             )
+        # Grouped contact response still consumes the LLT factor; PCR replaces
+        # only the latency-bound scalar right-hand-side solve.
+        if self._pcr is not None:
+            self._pcr.compute(self.matrix)
 
     def solve(self, rhs: wp.array[wp.float32], solution: wp.array[wp.float32]) -> None:
         """Solve all mechanism blocks and unpermute the result."""
@@ -1101,6 +1144,8 @@ class FixedPatternPanelLLT:
                 self.solution_permuted,
                 solution,
             )
+        if self._pcr is not None:
+            self._pcr.solve(rhs, solution)
 
 
 __all__ = ["FixedPanelSymbolic", "FixedPatternGroupedRHSBatch", "FixedPatternPanelLLT", "build_fixed_panel_symbolic"]
