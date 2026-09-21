@@ -51,11 +51,12 @@ ordered Gauss-Seidel updates inside each partition. Grouped PGS alternates
 forward and reverse color order between iterations to reduce directional bias
 without adding work. Exact
 mass-metric joint projections alternate with grouped mass-split contact PGS.
-Contact columns are capped at 64 rows. Every retained contact row is solved; the
-cap distributes long shape-pair columns across more solver work. Body-pair
-manifold merging is disabled because separate sprocket shapes form disconnected,
-strongly nonconvex contact patches. Independent shape pairs remain graph-colored
-and run in parallel. `--contact-chunk-size 0` restores whole shape-pair columns.
+Contact columns are capped at 64 rows. Every retained contact row is solved.
+Material-aware body-pair manifolds retain one deepest point in each of 12 normal
+bins plus spatial extrema in all 26 nonzero directions of a local 3x3x3 stencil.
+The diagonal support directions preserve separated regions of nonconvex compound
+sprockets while reducing redundant graph colors. `--contact-chunk-size 0`
+restores whole columns.
 `--iterations N` permits additional convergence experiments.
 
 Velocity-filtered speculative contacts cover up to 6 mm of predicted travel per
@@ -104,13 +105,14 @@ The final crank-to-dynamometer power efficiencies were approximately 92%, 86%,
 and 89% at the 60, 90, and 120 rpm targets. These diagnostics are sampled rather
 than bounds over every substep, and do not validate interactive gear shifts.
 
-On an RTX PRO 6000 Blackwell, the steady-state 60 rpm default measured 63.45
+On an RTX PRO 6000 Blackwell, the steady-state 60 rpm default measured 69.64
 headless FPS, excluding startup and diagnostic reads. A separate 240-frame
-1920x1080 OptiX run with asynchronous simulation/render overlap measured 56.69
-FPS. The 90 and 120 rpm schedules measured 52.90 and 40.86 headless FPS,
-and 48.47 and 38.28 FPS with asynchronous 1920x1080 OptiX rendering.
-Shape-pair manifolds preserve disconnected sprocket contacts while grouped mass
-splitting parallelizes independent interactions with equal-and-opposite impulses.
+1920x1080 OptiX run with asynchronous simulation/render overlap measured 60.09
+FPS. The 90 and 120 rpm schedules measured 58.15 and 44.44 headless FPS,
+and 52.09 and 40.84 FPS with asynchronous 1920x1080 OptiX rendering.
+The expanded body-pair support stencil preserves disconnected sprocket regions
+while grouped mass splitting parallelizes independent interactions with
+equal-and-opposite impulses.
 
 Use `--solver-stats` to print the actual color sizes, sequential color-group
 sizes, and overflow count once per simulated second. This opt-in diagnostic

@@ -31,8 +31,17 @@ import warp as wp
 
 import newton
 from newton._src.geometry.contact_reduction import NUM_NORMAL_BINS
-from newton._src.solvers.phoenx.constraints.contact_ingest import _BODY_PAIR_CONTACT_CAP
+from newton._src.solvers.phoenx.constraints.contact_ingest import (
+    _BODY_PAIR_CONTACT_CAP,
+    _body_pair_support_direction,
+)
 from newton._src.solvers.phoenx.tests._test_helpers import make_solver_graph_stepper
+
+
+@wp.kernel
+def _write_body_pair_support_directions(directions: wp.array[wp.vec3f]):
+    direction = wp.tid()
+    directions[direction] = _body_pair_support_direction(direction)
 
 
 def _build_compound_scene(
@@ -284,6 +293,17 @@ class TestCompoundContactGrouping(unittest.TestCase):
         np.testing.assert_allclose(np.sort(column_data[3, :column_count]), expected_friction)
         np.testing.assert_allclose(np.sort(column_data[4, :column_count]), expected_friction)
 
+    def test_body_pair_support_stencil_covers_diagonals(self) -> None:
+        # Use all signed axis, face-diagonal, and corner directions.
+        self.assertEqual(_BODY_PAIR_CONTACT_CAP, NUM_NORMAL_BINS + 26)
+        directions = wp.empty(26, dtype=wp.vec3f)
+        wp.launch(_write_body_pair_support_directions, 26, [directions])
+        values = directions.numpy()
+        np.testing.assert_allclose(np.linalg.norm(values, axis=1), 1.0, atol=1.0e-6)
+        quantized = {tuple(np.rint(value * np.sqrt(3.0)).astype(np.int32)) for value in values}
+        self.assertEqual(len(quantized), 26)
+        self.assertTrue(all(tuple(-component for component in value) in quantized for value in quantized))
+
     def test_dense_body_pair_manifold_is_reduced(self) -> None:
         """Dense compound manifolds retain at most one contact solver chunk."""
         model = _build_dense_ground_manifold_scene()
@@ -301,7 +321,7 @@ class TestCompoundContactGrouping(unittest.TestCase):
         pair_source = scratch.pair_source_idx.numpy()[:column_count]
         point_counts = scratch.pair_count.numpy()[pair_source]
         self.assertGreater(column_count, 0)
-        self.assertEqual(_BODY_PAIR_CONTACT_CAP, NUM_NORMAL_BINS + 6)
+        self.assertEqual(_BODY_PAIR_CONTACT_CAP, NUM_NORMAL_BINS + 26)
         self.assertLessEqual(int(np.max(point_counts)), _BODY_PAIR_CONTACT_CAP)
 
         sort_perm = scratch.sort_perm.numpy()
