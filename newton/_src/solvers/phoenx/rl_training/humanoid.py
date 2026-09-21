@@ -346,7 +346,7 @@ class ConfigEnvHumanoidPhoenX:
         angular_velocity_scale: Base angular velocity observation scale [s/rad].
         ground_friction: Ground-plane friction coefficient.
         auto_reset: Reset terminal worlds after each policy step.
-        articulation_mode: PhoenX articulation mode, ``"reduced"`` or ``"maximal"``.
+        joint_mode: PhoenX articulation mode, ``"reduced"`` or ``"maximal_direct"``.
             Reduced mode represents armature on every multi-axis motor. Maximal
             mode uses zero armature because static body inertia cannot represent
             intermediate D6 rotor axes without virtual rotor bodies.
@@ -370,7 +370,7 @@ class ConfigEnvHumanoidPhoenX:
     angular_velocity_scale: float = 0.25
     ground_friction: float = 1.0
     auto_reset: bool = True
-    articulation_mode: str = "reduced"
+    joint_mode: str = "reduced"
 
 
 def default_humanoid_flash_sac_config(**overrides: Any) -> ConfigFlashSAC:
@@ -414,8 +414,8 @@ class EnvHumanoidPhoenX:
             raise ValueError("world_count must be positive")
         if int(self.config.sim_substeps) <= 0:
             raise ValueError("sim_substeps must be positive")
-        if self.config.articulation_mode not in ("maximal", "reduced"):
-            raise ValueError("articulation_mode must be 'maximal' or 'reduced'")
+        if self.config.joint_mode not in ("maximal_direct", "reduced"):
+            raise ValueError("joint_mode must be 'maximal_direct' or 'reduced'")
 
         self.model = self._build_model()
         self.coord_stride = int(self.model.joint_coord_count) // self.world_count
@@ -429,7 +429,7 @@ class EnvHumanoidPhoenX:
             substeps=1,
             solver_iterations=int(self.config.solver_iterations),
             velocity_iterations=int(self.config.velocity_iterations),
-            articulation_mode=self.config.articulation_mode,
+            joint_mode=self.config.joint_mode,
         )
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -463,7 +463,7 @@ class EnvHumanoidPhoenX:
     def _build_model(self):
         robot = newton.ModelBuilder(up_axis=newton.Axis.Z)
         robot.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
-            armature=0.01 if self.config.articulation_mode == "reduced" else 0.0,
+            armature=0.01 if self.config.joint_mode == "reduced" else 0.0,
             limit_ke=1.0e3,
             limit_kd=1.0e1,
         )

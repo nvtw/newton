@@ -228,7 +228,7 @@ def _run_one(
         substeps=substeps,
         solver_iterations=solver_iterations,
         velocity_iterations=0,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
         step_layout="single_world",
     )
     state_0 = model.state()
@@ -296,7 +296,7 @@ def _run_heterogeneous(
         substeps=substeps,
         solver_iterations=solver_iterations,
         velocity_iterations=0,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
         step_layout="single_world",
     )
     state_0 = model.state()

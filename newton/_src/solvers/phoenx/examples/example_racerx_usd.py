@@ -878,7 +878,7 @@ class Example:
             mass_splitting=ENABLE_MASS_SPLITTING,
             mass_splitting_unrolled=ENABLE_MASS_SPLITTING,
             step_layout="single_world" if ENABLE_MASS_SPLITTING else "multi_world",
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
 
         self.viewer.set_model(self.model)

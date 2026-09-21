@@ -45,7 +45,7 @@ POINTS_PATH = RESULTS_DIR / "points.jsonl"
 RUNS_PATH = RESULTS_DIR / "runs.jsonl"
 
 _PHOENX_SOLVER_VARIANTS = {
-    "phoenx_maximal": "maximal",
+    "phoenx_maximal": "maximal_direct",
     "phoenx_reduced": "reduced",
 }
 _MUJOCO_SOLVER_VARIANTS = {"mujoco_sized": 320}
@@ -221,7 +221,7 @@ def run_sweep(cfg: SweepConfig, clear_existing: bool) -> None:
                 build_solver = "phoenx"
             elif solver in _PHOENX_SOLVER_VARIANTS:
                 build_solver = "phoenx"
-                build_kwargs["articulation_mode"] = _PHOENX_SOLVER_VARIANTS[solver]
+                build_kwargs["joint_mode"] = _PHOENX_SOLVER_VARIANTS[solver]
             elif solver in _MUJOCO_SOLVER_VARIANTS:
                 build_solver = "mujoco"
                 build_kwargs["mujoco_contact_capacity"] = _MUJOCO_SOLVER_VARIANTS[solver]

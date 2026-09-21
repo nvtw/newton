@@ -74,13 +74,12 @@ class TestColorGroupPolicy(unittest.TestCase):
                 solver = newton.solvers.SolverPhoenX(
                     model,
                     collision_pipeline=pipeline,
-                    articulation_mode="maximal",
                     step_layout="single_world",
                     mass_splitting=True,
                     max_colored_partitions=0,
                     mass_splitting_batch_size=1,
                     mass_splitting_color_group_size=2,
-                    joint_solver="block_pgs",
+                    joint_mode="maximal_pgs",
                     parallel_contact_prepare=True,
                     substeps=1,
                     solver_iterations=1,
@@ -153,8 +152,7 @@ class TestColorGroupPolicy(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="maximal",
-            joint_solver="direct",
+            joint_mode="maximal_direct",
             step_layout="single_world",
             mass_splitting=True,
             max_colored_partitions=0,
@@ -196,8 +194,7 @@ class TestColorGroupPolicy(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "sor_boost must be 1.0"):
             newton.solvers.SolverPhoenX(
                 model,
-                articulation_mode="maximal",
-                joint_solver="block_pgs",
+                joint_mode="maximal_pgs",
                 step_layout="single_world",
                 mass_splitting=True,
                 mass_splitting_color_group_size=8,

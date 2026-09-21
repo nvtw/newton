@@ -87,7 +87,7 @@ def _rollout(model: newton.Model, *, layout: str) -> tuple[newton.State, newton.
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         velocity_iterations=1,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
         step_layout=layout,
     )
     with wp.ScopedCapture(model.device) as capture:
@@ -168,7 +168,7 @@ class TestJointChainConvergence(unittest.TestCase):
             substeps=SUBSTEPS,
             solver_iterations=SOLVER_ITERATIONS,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             step_layout="multi_world",
         )
         control = model.control()

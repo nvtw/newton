@@ -265,7 +265,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=1,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (12, 18))
         state = model.state()
@@ -273,8 +273,8 @@ class TestDirectEquality(unittest.TestCase):
         self.assertTrue(np.isfinite(state.body_q.numpy()).all())
         self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
-    def test_declared_articulation_remains_reduced_with_mass_splitting(self):
-        """Keep declared articulations reduced with mass splitting enabled."""
+    def test_joint_mode_explicitly_selects_reduced_coordinates(self):
+        """Keep the coordinate representation under explicit caller control."""
         if not wp.get_device().is_cuda:
             self.skipTest("PhoenX requires CUDA")
 
@@ -285,10 +285,10 @@ class TestDirectEquality(unittest.TestCase):
             solver_iterations=2,
             velocity_iterations=1,
             mass_splitting=True,
-            articulation_mode="auto",
+            joint_mode="reduced",
             step_layout="single_world",
         )
-        self.assertEqual(solver.articulation_mode, "reduced")
+        self.assertEqual(solver.joint_mode, "reduced")
         self.assertIsNotNone(solver._reduced_articulation)
         self.assertFalse(solver._direct_equality_system.enabled)
 
@@ -308,7 +308,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=4,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             mass_splitting=True,
             step_layout="single_world",
         )
@@ -331,7 +331,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=1,
             velocity_iterations=0,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             sleeping_velocity_threshold=0.05,
             sleeping_frames_required=1,
         )
@@ -367,7 +367,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=1,
             velocity_iterations=0,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         direct = solver._direct_equality_system
         self.assertEqual(direct.topology.dimensions, (130,))
@@ -395,7 +395,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=2,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         direct = solver._direct_equality_system
         self.assertEqual(direct.topology.dimensions, (36,))
@@ -441,7 +441,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=1,
             velocity_iterations=0,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         direct = solver._direct_equality_system
         self.assertEqual(direct.topology.dimensions, (9,))
@@ -468,7 +468,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         state = model.state()
         _run_captured_steps(solver, state, model.control(), 1)
@@ -488,7 +488,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=2,
             solver_iterations=4,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         self.assertTrue(solver._direct_equality_system.enabled)
         self.assertTrue(solver._direct_equality_system.direct_drive_joint_mask[0])
@@ -521,7 +521,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=2,
             solver_iterations=4,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         self.assertTrue(solver._direct_equality_system.direct_drive_joint_mask[0])
         np.testing.assert_array_equal(
@@ -540,7 +540,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=1,
             velocity_iterations=0,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         state = model.state()
         _run_captured_steps(solver, state, model.control(), 20)
@@ -558,7 +558,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=1,
             velocity_iterations=0,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         state = model.state()
         _run_captured_steps(solver, state, model.control(), 20)
@@ -584,7 +584,7 @@ class TestDirectEquality(unittest.TestCase):
                 substeps=5,
                 solver_iterations=1,
                 velocity_iterations=0,
-                articulation_mode="maximal",
+                joint_mode="maximal_direct",
             )
             state = model.state()
             _run_captured_steps(solver, state, model.control(), 20)
@@ -632,7 +632,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=2,
             velocity_iterations=0,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         direct = solver._direct_equality_system
         self.assertEqual(direct.topology.dimensions, (10, 40, 130))
@@ -662,7 +662,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=2,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         self.assertEqual(solver._direct_equality_system.solver.block_size, 16)
         state = model.state()
@@ -703,7 +703,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=2,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         state = model.state()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state)
@@ -762,7 +762,7 @@ class TestDirectEquality(unittest.TestCase):
             substeps=5,
             solver_iterations=2,
             velocity_iterations=1,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             step_layout="multi_world",
         )
 

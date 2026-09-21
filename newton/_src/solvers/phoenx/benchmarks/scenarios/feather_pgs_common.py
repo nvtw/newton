@@ -221,7 +221,7 @@ def build(
     substeps: int,
     solver_iterations: int,
     *,
-    articulation_mode: str = "maximal",
+    joint_mode: str = "maximal_direct",
     mujoco_contact_capacity: int | None = None,
 ) -> SceneHandle:
     """Build one copied FeatherPGS scene for PhoenX or MuJoCo Warp."""
@@ -233,7 +233,7 @@ def build(
             model,
             substeps=1,
             solver_iterations=solver_iterations,
-            articulation_mode=articulation_mode,
+            joint_mode=joint_mode,
             step_layout="multi_world",
         )
         measured_iterations = solver_iterations

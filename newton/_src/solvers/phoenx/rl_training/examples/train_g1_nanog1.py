@@ -41,7 +41,7 @@ def _nanog1_env_config(
     command_x: float,
     sim_substeps: int,
     solver_iterations: int,
-    articulation_mode: str,
+    joint_mode: str,
     ground_friction: float,
     randomize_commands: bool,
     command_x_range: tuple[float, float],
@@ -54,7 +54,7 @@ def _nanog1_env_config(
         command=(float(command_x), 0.0, 0.0),
         sim_substeps=sim_substeps,
         solver_iterations=solver_iterations,
-        articulation_mode=articulation_mode,
+        joint_mode=joint_mode,
         ground_friction=ground_friction,
         # nanoG1 reward weights
         reward_mode="nanog1_dense",
@@ -220,8 +220,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sim-substeps", type=int, default=g1_recipe.SIM_SUBSTEPS)
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument(
-        "--articulation-mode",
-        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        "--joint-mode",
+        choices=("maximal_direct", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
         help="PhoenX articulation dynamics mode (default: %(default)s)",
     )
@@ -264,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         f"  walk_gate_at_iter≈{walk_gate_iter}  "
         f"({_WALK_GATE_SAMPLES / 1e6:.0f}M samples)\n"
         f"  execution={args.execution_mode}  "
-        f"articulation={args.articulation_mode}  "
+        f"joint_mode={args.joint_mode}  "
         f"command_x={args.command_x:.2f}  "
         f"randomize_commands={args.randomize_commands}\n"
         f"  output_dir={output_dir}"
@@ -275,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         command_x=float(args.command_x),
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
-        articulation_mode=str(args.articulation_mode),
+        joint_mode=str(args.joint_mode),
         ground_friction=float(args.ground_friction),
         randomize_commands=bool(args.randomize_commands),
         command_x_range=(float(args.command_x_min), float(args.command_x_max)),

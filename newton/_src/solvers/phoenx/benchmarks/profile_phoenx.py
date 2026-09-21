@@ -114,7 +114,7 @@ def _build_via_benchmarks_factory(
     build_solver = solver
     if solver in ("phoenx_maximal", "phoenx_reduced"):
         build_solver = "phoenx"
-        build_kwargs["articulation_mode"] = solver.removeprefix("phoenx_")
+        build_kwargs["joint_mode"] = solver.removeprefix("phoenx_")
     handle = module.build(
         num_worlds=num_worlds,
         solver_name=build_solver,

@@ -29,9 +29,8 @@ class TestJointRefinement(unittest.TestCase):
         for mixed, refinement in ((3, 0), (1, 2), (1, 0)):
             solver = newton.solvers.SolverPhoenX(
                 model,
-                articulation_mode="maximal",
                 step_layout="single_world",
-                joint_solver="block_pgs",
+                joint_mode="maximal_pgs",
                 mass_splitting=True,
                 mass_splitting_color_group_size=1,
                 solver_iterations=mixed,
@@ -66,7 +65,7 @@ class TestJointRefinement(unittest.TestCase):
         for options in (
             {},
             {"mass_splitting": True},
-            {"joint_solver": "block_pgs", "articulation_mode": "maximal", "step_layout": "single_world"},
+            {"joint_mode": "maximal_pgs", "step_layout": "single_world"},
         ):
             with self.subTest(options=options), self.assertRaisesRegex(ValueError, "joint_refinement_iterations"):
                 newton.solvers.SolverPhoenX(model, joint_refinement_iterations=1, **options)

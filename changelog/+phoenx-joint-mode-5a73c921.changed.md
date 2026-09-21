@@ -1,0 +1,1 @@
+Replace the overlapping PhoenX ``articulation_mode`` and ``joint_solver`` options with one explicit ``joint_mode`` string. Use ``"maximal_direct"``, ``"maximal_pgs"``, or ``"reduced"`` to select the joint representation and solve strategy.

@@ -28,7 +28,7 @@ def _make_body(builder: newton.ModelBuilder) -> int:
 
 
 def _mode_for(model: newton.Model) -> int:
-    solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+    solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
     return int(solver._joint_constraints.joint_mode.numpy()[0])
 
 
@@ -51,8 +51,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         model = builder.finalize(device=wp.get_preferred_device())
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal",
-            joint_solver="direct",
+            joint_mode="maximal_direct",
             substeps=2,
             solver_iterations=2,
             velocity_iterations=1,
@@ -109,7 +108,7 @@ class TestD6DirectDispatch(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=4,
             solver_iterations=2,
             velocity_iterations=1,
@@ -160,7 +159,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         newton.eval_fk(model, model.joint_q, model.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=4,
             solver_iterations=2,
             velocity_iterations=1,
@@ -185,7 +184,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         model.joint_limit_lower.assign(lower)
         model.joint_limit_upper.assign(upper)
 
-        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
         data = solver.world.constraints.d6
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(int(data.row_count.numpy()[0]), 3)
@@ -206,7 +205,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         builder.add_articulation([joint])
 
         model = builder.finalize()
-        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
 
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         data = solver.world.constraints.d6
@@ -226,7 +225,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         builder.add_articulation([joint])
 
         model = builder.finalize()
-        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
 
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         data = solver.world.constraints.d6
@@ -246,7 +245,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         builder.add_articulation([joint])
         model = builder.finalize()
         model.set_gravity((0.0, 0.0, 0.0))
-        solver = newton.solvers.SolverPhoenX(model, substeps=5, solver_iterations=8, articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, solver_iterations=8, joint_mode="maximal_direct")
 
         state_0 = model.state()
         state_1 = model.state()
@@ -290,7 +289,7 @@ class TestD6DirectDispatch(unittest.TestCase):
                     substeps=5,
                     solver_iterations=8,
                     velocity_iterations=1,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                 )
                 self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
                 state = model.state()
@@ -327,7 +326,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         joint = builder.add_joint_d6(parent=-1, child=body, angular_axes=axes)
         builder.add_articulation([joint])
         model = builder.finalize()
-        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
 
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 3)
@@ -343,7 +342,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         builder.add_articulation([joint])
 
         model = builder.finalize()
-        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 2)
         self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 3)
@@ -365,7 +364,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             model,
             substeps=5,
             solver_iterations=2,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         direct = solver._direct_equality_system
 
@@ -399,7 +398,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         joint = builder.add_joint_d6(parent=-1, child=body, linear_axes=axes)
         builder.add_articulation([joint])
         model = builder.finalize()
-        solver = newton.solvers.SolverPhoenX(model, substeps=5, solver_iterations=2, articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, solver_iterations=2, joint_mode="maximal_direct")
 
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (3,))
@@ -425,7 +424,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             model,
             substeps=5,
             solver_iterations=2,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
 
         self.assertEqual(solver._direct_equality_system.topology.dimensions, (3,))
@@ -473,7 +472,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             ],
         )
         builder.add_articulation(list(range(builder.joint_count)))
-        solver = newton.solvers.SolverPhoenX(builder.finalize(), articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(builder.finalize(), joint_mode="maximal_direct")
         system = solver._direct_equality_system
         # Articulation initialization evaluates its zero coordinates; set the
         # intended separated geometry explicitly before preparing the rows.
@@ -526,7 +525,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             model,
             substeps=5,
             solver_iterations=8,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 1)
@@ -569,7 +568,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             substeps=5,
             solver_iterations=8,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         data = solver.world.constraints.d6
         self.assertEqual(int(data.row_count.numpy()[0]), 6)
@@ -627,7 +626,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             substeps=5,
             solver_iterations=8,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         for _ in range(20):
             state.clear_forces()
@@ -652,7 +651,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         joint = builder.add_joint_d6(parent=-1, child=body, linear_axes=axes)
         builder.add_articulation([joint])
         model = builder.finalize()
-        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
         data = solver.world.constraints.d6
         data.lower_impulse.fill_(1.0)
         data.upper_impulse.fill_(-2.0)
@@ -680,7 +679,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         joint = builder.add_joint_d6(parent=-1, child=body, linear_axes=axes)
         builder.add_articulation([joint])
         model = builder.finalize()
-        solver = newton.solvers.SolverPhoenX(model, substeps=5, articulation_mode="maximal")
+        solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
         self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 0)
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
 
@@ -725,7 +724,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             substeps=5,
             solver_iterations=8,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         direct = solver._direct_equality_system
         self.assertTrue(direct.enabled)
@@ -773,7 +772,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             substeps=5,
             solver_iterations=8,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         self.assertFalse(solver._direct_equality_system.enabled)
         self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
@@ -814,7 +813,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             substeps=5,
             solver_iterations=8,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         self.assertFalse(solver._direct_equality_system.enabled)
         self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
@@ -873,7 +872,7 @@ class TestD6DirectDispatch(unittest.TestCase):
                     substeps=5,
                     solver_iterations=1,
                     velocity_iterations=1,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                 )
                 direct = solver._direct_equality_system
                 self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))

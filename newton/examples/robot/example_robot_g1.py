@@ -94,7 +94,7 @@ class Example:
                 substeps=5,
                 solver_iterations=2,
                 velocity_iterations=2,
-                articulation_mode="reduced" if self.phoenx_reduced_coordinates else "maximal",
+                joint_mode="reduced" if self.phoenx_reduced_coordinates else "maximal_direct",
             )
         elif solver_name == "kamino":
             solver_config = newton.solvers.SolverKamino.Config.from_model(

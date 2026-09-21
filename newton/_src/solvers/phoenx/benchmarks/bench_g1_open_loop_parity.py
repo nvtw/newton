@@ -440,7 +440,7 @@ def _make_phoenx_env(setting: PhoenXSetting, args: argparse.Namespace, device: w
             sim_substeps=int(setting.sim_substeps),
             solver_iterations=int(setting.solver_iterations),
             velocity_iterations=int(setting.velocity_iterations),
-            articulation_mode=str(args.articulation_mode),
+            joint_mode=str(args.joint_mode),
             actuation_model=str(args.actuation_model),
             joint_friction_model=str(args.joint_friction_model),
             joint_friction_scale=float(args.joint_friction_scale),
@@ -753,7 +753,7 @@ def benchmark_open_loop_parity(args: argparse.Namespace) -> dict[str, Any]:
         "foot_box_xy_scale": float(args.foot_box_xy_scale),
         "joint_friction_model": str(args.joint_friction_model),
         "joint_friction_scale": float(args.joint_friction_scale),
-        "articulation_mode": str(args.articulation_mode),
+        "joint_mode": str(args.joint_mode),
         "actuation_model": str(args.actuation_model),
         "initial_base_z": None if args.initial_base_z is None else float(args.initial_base_z),
         "nanog1_stepper": str(args.nanog1_stepper),
@@ -803,8 +803,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--joint-friction-model", choices=("hard", "mujoco"), default=g1_recipe.JOINT_FRICTION_MODEL)
     parser.add_argument("--joint-friction-scale", type=float, default=g1_recipe.JOINT_FRICTION_SCALE)
     parser.add_argument(
-        "--articulation-mode",
-        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        "--joint-mode",
+        choices=("maximal_direct", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
         help="PhoenX articulation response used for the comparison.",
     )

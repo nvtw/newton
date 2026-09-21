@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,6 +20,12 @@ from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
+    def test_solver_exposes_one_explicit_joint_mode(self):
+        parameters = inspect.signature(newton.solvers.SolverPhoenX).parameters
+        self.assertEqual(parameters["joint_mode"].default, "maximal_direct")
+        self.assertNotIn("articulation_mode", parameters)
+        self.assertNotIn("joint_solver", parameters)
+
     def _resolve(self, **overrides):
         options = {
             "step_layout": "auto",

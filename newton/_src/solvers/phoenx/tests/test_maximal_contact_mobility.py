@@ -169,7 +169,7 @@ class TestMaximalContactMobility(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             step_layout="single_world",
             sor_boost=1.0,
             substeps=1,
@@ -226,7 +226,7 @@ class TestMaximalContactMobility(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             step_layout="single_world",
             sor_boost=1.0,
             substeps=1,
@@ -272,7 +272,7 @@ class TestMaximalContactMobility(unittest.TestCase):
         model.articulation_count = 0
         pipeline = newton.CollisionPipeline(model, rigid_contact_max=32, contact_matching="sticky")
         solver = newton.solvers.SolverPhoenX(
-            model, collision_pipeline=pipeline, articulation_mode="maximal", step_layout="single_world", sor_boost=1.0
+            model, collision_pipeline=pipeline, joint_mode="maximal_direct", step_layout="single_world", sor_boost=1.0
         )
         # Inspect the prepared response at the same poses as its Jacobian.
         solver.world._integrate_positions = lambda: None

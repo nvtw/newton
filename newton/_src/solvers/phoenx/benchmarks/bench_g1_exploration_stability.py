@@ -33,7 +33,7 @@ class Setting:
     """Solver schedule exercised by the diagnostic."""
 
     name: str
-    articulation_mode: str
+    joint_mode: str
     sim_substeps: int
     solver_iterations: int
     velocity_iterations: int
@@ -42,9 +42,9 @@ class Setting:
 SETTINGS = {
     setting.name: setting
     for setting in (
-        Setting("maximal_10x8_v1", "maximal", 10, 8, 1),
-        Setting("maximal_20x4_v1", "maximal", 20, 4, 1),
-        Setting("maximal_40x2_v1", "maximal", 40, 2, 1),
+        Setting("maximal_10x8_v1", "maximal_direct", 10, 8, 1),
+        Setting("maximal_20x4_v1", "maximal_direct", 20, 4, 1),
+        Setting("maximal_40x2_v1", "maximal_direct", 40, 2, 1),
         Setting("maximal_projected_5x2_v1", "maximal_projected", 5, 2, 1),
         Setting("maximal_articulated_5x2_v1", "maximal_articulated", 5, 2, 1),
         Setting("maximal_articulated_4x2_v1", "maximal_articulated", 4, 2, 1),
@@ -92,7 +92,7 @@ def _run_setting(
     env = rl.EnvG1PhoenX(
         g1_recipe.default_g1_env_config(
             world_count=worlds,
-            articulation_mode=setting.articulation_mode,
+            joint_mode=setting.joint_mode,
             actuation_model="explicit_torque",
             sim_substeps=setting.sim_substeps,
             solver_iterations=setting.solver_iterations,

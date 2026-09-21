@@ -279,8 +279,7 @@ class SolverPhoenX(SolverBase):
         enable_body_pair_grouping: bool | None = None,
         solver_flavor: str | None = None,
         jacobi_max_colors: int | None = None,
-        articulation_mode: str = "maximal",
-        joint_solver: str = "direct",
+        joint_mode: str = "maximal_direct",
         reduced_articulation_path: str = "reference",
     ):
         """Build the PhoenX solver from ``model``.
@@ -295,7 +294,7 @@ class SolverPhoenX(SolverBase):
                 ``"tgs"`` uses persistent two-anchor friction patches, temporal
                 joint springs and one external-force update per outer step.
                 Requires CUDA, maximal rigid worlds, ``step_layout="single_world"``,
-                ``joint_solver="block_pgs"``,
+                ``joint_mode="maximal_pgs"``,
                 mass splitting with color groups, one solver iteration, prepare
                 stride 1, SOR 1, physical ``substep_end`` velocity readout,
                 no contact chunks, sleeping, partition reuse or unrolled dispatch.
@@ -405,16 +404,15 @@ class SolverPhoenX(SolverBase):
                 threshold before being flagged sleeping. Default 30
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
                 ``0`` recovers single-frame sleep.
-            joint_solver: ``"direct"`` preserves the existing joint strategy.
-                Experimental ``"block_pgs"`` solves physical joint blocks in
-                the contact color sweeps; requires maximal coordinates, rigid
-                point contacts and single-world layout. Direct solves remain
-                preferable for difficult mass ratios.
-            articulation_mode: ``"auto"`` selects reduced coordinates for
-                supported declared articulations and maximal coordinates
-                otherwise. ``"maximal"`` keeps independent-body tree
-                dynamics; structural joint rows use one direct mechanism
-                system and inequality rows remain in PhoenX PGS. With the direct equality solver, revolute and
+            joint_mode: Joint representation and solve strategy. ``"maximal_direct"``
+                (default) keeps independent-body dynamics, solves structural
+                joint rows as one sparse mechanism system, and leaves inequality
+                rows in PhoenX PGS. ``"maximal_pgs"`` solves physical D6 joint
+                blocks in the contact color sweeps; it requires maximal
+                coordinates, rigid point contacts, and the single-world layout.
+                ``"reduced"`` lets generalized coordinates own declared tree
+                joints. The solver never changes this choice from model topology.
+                With ``"maximal_direct"``, revolute and
                 prismatic ``joint_armature`` use exact generalized dynamic
                 rows, reflected through ``joint_gear`` squared, in each
                 mechanism system. Experimental maximal-projector paths retain
@@ -428,8 +426,7 @@ class SolverPhoenX(SolverBase):
                 Common anchored/floating mixed rigid joints use a general
                 projector; other topologies use pure reduced ownership without
                 redundant maximal joint rows. ``"hybrid"`` retains the
-                articulated-body preconditioner, and
-                ``"reduced"`` lets generalized coordinates own tree joints.
+                articulated-body preconditioner.
             solver_flavor: Deprecated compatibility argument. Omit it or pass
                 ``"standard"``. The experimental ``"simple"`` Jacobi solver
                 moved out of production PhoenX; use PhoenX Mini for solver experiments.
@@ -456,8 +453,20 @@ class SolverPhoenX(SolverBase):
                 DeprecationWarning,
                 stacklevel=2,
             )
-        if joint_solver not in ("direct", "block_pgs"):
-            raise ValueError("joint_solver must be 'direct' or 'block_pgs'")
+        joint_modes = {
+            "maximal_direct": ("maximal", "direct"),
+            "maximal_pgs": ("maximal", "block_pgs"),
+            "reduced": ("reduced", "direct"),
+            "maximal_projected": ("maximal_projected", "direct"),
+            "maximal_articulated": ("maximal_articulated", "direct"),
+            "hybrid": ("hybrid", "direct"),
+        }
+        if joint_mode not in joint_modes:
+            raise ValueError(f"joint_mode must be one of {tuple(joint_modes)}, got {joint_mode!r}")
+        articulation_mode, joint_solver = joint_modes[joint_mode]
+        self.joint_mode = joint_mode
+        self._joint_solver = joint_solver
+        self._articulation_mode = articulation_mode
         if isinstance(contact_chunk_size, bool) or not isinstance(contact_chunk_size, int) or contact_chunk_size < 0:
             raise ValueError("contact_chunk_size must be a nonnegative integer")
         if enable_body_pair_grouping is not None and not isinstance(enable_body_pair_grouping, bool):
@@ -474,20 +483,7 @@ class SolverPhoenX(SolverBase):
             or not 1 <= direct_joint_projection_passes <= solver_iterations
         ):
             raise ValueError("direct_joint_projection_passes must be an integer between 1 and solver_iterations")
-        self.joint_solver = joint_solver
         gravity_np = self._read_model_gravity_np(model)
-        if articulation_mode == "auto":
-            joint_types_for_mode = np.asarray(model.joint_type.numpy(), dtype=np.int32)
-            joint_articulation = np.asarray(model.joint_articulation.numpy(), dtype=np.int32)
-            declared_constraint_articulation = np.any(
-                (joint_types_for_mode != int(JointType.FREE)) & (joint_articulation >= 0)
-            )
-            reduced_supported = (
-                declared_constraint_articulation
-                and not np.any(joint_types_for_mode == int(JointType.ROD))
-                and not multi_world_scheduler.startswith("block_world")
-            )
-            articulation_mode = "reduced" if reduced_supported else "maximal"
 
         num_worlds = max(1, int(gravity_np.shape[0]))
         has_deformables = any(
@@ -524,7 +520,7 @@ class SolverPhoenX(SolverBase):
             or np.any(joint_types == int(JointType.ROD))
         ):
             raise ValueError(
-                "joint_solver='block_pgs' requires single-world maximal rigid point contacts without rod joints"
+                "joint_mode='maximal_pgs' requires single-world maximal rigid point contacts without rod joints"
             )
         if solver_scheme == "tgs":
             if (
@@ -588,11 +584,8 @@ class SolverPhoenX(SolverBase):
             and not (joint_solver == "direct" and mass_splitting_color_group_size)
         ):
             raise ValueError(
-                "contact_chunk_size with joints requires joint_solver='block_pgs' or grouped direct contacts"
+                "contact_chunk_size with joints requires joint_mode='maximal_pgs' or grouped maximal-direct contacts"
             )
-        valid_articulation_modes = ("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced")
-        if articulation_mode not in valid_articulation_modes:
-            raise ValueError(f"articulation_mode must be one of {valid_articulation_modes}, got {articulation_mode!r}")
         if reduced_articulation_path not in ("reference", "persistent"):
             raise ValueError(
                 f"reduced_articulation_path must be 'reference' or 'persistent', got {reduced_articulation_path!r}"
@@ -601,7 +594,7 @@ class SolverPhoenX(SolverBase):
             articulation_mode in ("maximal", "maximal_projected", "maximal_articulated")
             and reduced_articulation_path != "reference"
         ):
-            raise ValueError("reduced_articulation_path requires articulation_mode='hybrid' or 'reduced'")
+            raise ValueError("reduced_articulation_path requires joint_mode='hybrid' or 'reduced'")
         valid_combine_modes = ("average", "min", "multiply", "max")
         if friction_combine_mode not in valid_combine_modes:
             raise ValueError(
@@ -611,9 +604,7 @@ class SolverPhoenX(SolverBase):
         if contact_friction_model not in ("point", "patch"):
             raise ValueError(f"contact_friction_model must be 'point' or 'patch', got {contact_friction_model!r}")
         if contact_friction_model == "patch" and articulation_mode not in ("maximal", "reduced"):
-            raise ValueError(
-                "contact_friction_model='patch' currently requires articulation_mode='maximal' or 'reduced'"
-            )
+            raise ValueError("contact_friction_model='patch' requires a maximal or reduced joint_mode")
         if (
             contact_friction_model == "patch"
             and articulation_mode == "reduced"
@@ -636,7 +627,6 @@ class SolverPhoenX(SolverBase):
             and multi_world_scheduler == "auto"
         ):
             multi_world_scheduler = "fast_tail"
-        self.articulation_mode = articulation_mode
         self.reduced_articulation_path = reduced_articulation_path
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
         self._maximal_tree_projector: MaximalTreeProjector | GeneralMaximalTreeProjector | None = None
@@ -983,7 +973,7 @@ class SolverPhoenX(SolverBase):
                                 joint_pgs_enabled[cid] = 2
                     self.world.set_joint_pgs_ownership(joint_pgs_enabled)
         elif (
-            self.articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid", "reduced")
+            self._articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid", "reduced")
             and int(model.articulation_count) > 0
         ):
             reduced_model = _get_reduced_model(model)
@@ -1214,7 +1204,7 @@ class SolverPhoenX(SolverBase):
         if direct is None or not direct.enabled:
             return
         joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
-        if self.joint_solver == "block_pgs":
+        if self._joint_solver == "block_pgs":
             self.world.set_joint_pgs_ownership(self._direct_base_joint_pgs_enabled.copy())
             return
         joint_pgs_enabled = self._direct_base_joint_pgs_enabled.copy()
@@ -1682,7 +1672,7 @@ class SolverPhoenX(SolverBase):
             self.world._combine_direct_prepare_projection = _can_combine_direct_prepare_projection(
                 self._joint_constraints.has_velocity_limits,
                 self.world.contact_friction_model,
-                self.articulation_mode,
+                self._articulation_mode,
             )
             if self._joint_constraints.num_joint_columns > 0:
                 self.world.initialize_joint_constraints(**self._joint_constraints.to_initialize_kwargs())
@@ -1715,7 +1705,7 @@ class SolverPhoenX(SolverBase):
         # rebuilt joint rows above and does not mutate body inertia.
         body_refresh_mask = int(ModelFlags.BODY_INERTIAL_PROPERTIES | ModelFlags.BODY_PROPERTIES)
         body_properties_changed = bool(flags & body_refresh_mask)
-        uses_maximal_mass = self.articulation_mode == "maximal" or self._uses_maximal_tree_projector
+        uses_maximal_mass = self._articulation_mode == "maximal" or self._uses_maximal_tree_projector
         maximal_joint_properties_changed = joint_props_changed and uses_maximal_mass
         reduced_joint_properties_changed = joint_props_changed and self._reduced_articulation is not None
         uses_legacy_body_armature = self._uses_maximal_tree_projector

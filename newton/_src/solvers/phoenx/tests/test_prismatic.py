@@ -60,7 +60,7 @@ def _rollout(
         substeps=SUBSTEPS,
         solver_iterations=2,
         velocity_iterations=1,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
         step_layout=layout,
     )
     with wp.ScopedCapture(model.device) as capture:

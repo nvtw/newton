@@ -168,7 +168,7 @@ class TestD6DirectDrive(unittest.TestCase):
                 angles = (0.4, pitch, -0.3)
                 model = _make_gimbal(None, left_handed=left_handed)
                 model.joint_X_p.assign([wp.transform(wp.vec3(), frame)])
-                solver = newton.solvers.SolverPhoenX(model, articulation_mode="maximal")
+                solver = newton.solvers.SolverPhoenX(model, joint_mode="maximal_direct")
                 sign = -1.0 if left_handed else 1.0
                 orientation = (
                     frame
@@ -239,7 +239,7 @@ class TestD6DirectDrive(unittest.TestCase):
                     control = model.control()
                     control.joint_target_q.assign(coordinates)
                     solver = newton.solvers.SolverPhoenX(
-                        model, substeps=5, solver_iterations=2, articulation_mode="maximal"
+                        model, substeps=5, solver_iterations=2, joint_mode="maximal_direct"
                     )
                     with wp.ScopedCapture(model.device) as capture:
                         state.clear_forces()
@@ -272,7 +272,7 @@ class TestD6DirectDrive(unittest.TestCase):
                         substeps=SUBSTEPS,
                         solver_iterations=1,
                         velocity_iterations=0,
-                        articulation_mode="maximal",
+                        joint_mode="maximal_direct",
                     )
                     with wp.ScopedCapture(model.device) as capture:
                         state.clear_forces()
@@ -305,7 +305,7 @@ class TestD6DirectDrive(unittest.TestCase):
                     substeps=SUBSTEPS,
                     solver_iterations=1,
                     velocity_iterations=0,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                 )
                 with wp.ScopedCapture(model.device) as capture:
                     state.clear_forces()
@@ -344,7 +344,7 @@ class TestD6DirectDrive(unittest.TestCase):
                         substeps=SUBSTEPS,
                         solver_iterations=2,
                         velocity_iterations=1,
-                        articulation_mode="maximal",
+                        joint_mode="maximal_direct",
                     )
                     with wp.ScopedCapture(model.device) as capture:
                         state.clear_forces()
@@ -378,7 +378,7 @@ class TestD6DirectDrive(unittest.TestCase):
                     substeps=SUBSTEPS,
                     solver_iterations=1,
                     velocity_iterations=0,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                 )
                 with wp.ScopedCapture(model.device) as capture:
                     state.clear_forces()
@@ -406,7 +406,7 @@ class TestD6DirectDrive(unittest.TestCase):
                     substeps=SUBSTEPS,
                     solver_iterations=1,
                     velocity_iterations=0,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                 )
                 with wp.ScopedCapture(model.device) as capture:
                     state.clear_forces()

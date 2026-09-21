@@ -27,8 +27,7 @@ def make_model(kp):
 def make_solver(model, **options):
     return newton.solvers.SolverPhoenX(
         model,
-        joint_solver="block_pgs",
-        articulation_mode="maximal",
+        joint_mode="maximal_pgs",
         step_layout="single_world",
         substeps=1,
         solver_iterations=1,
@@ -99,10 +98,9 @@ class TestBlockJointPolicy(unittest.TestCase):
     def test_unsupported_policy_combinations_are_rejected(self):
         model = make_model(10.0)
         for options in (
-            {"joint_solver": "unknown"},
-            {"joint_solver": "block_pgs", "step_layout": "multi_world"},
-            {"joint_solver": "block_pgs", "articulation_mode": "reduced", "step_layout": "single_world"},
-            {"joint_solver": "block_pgs", "contact_friction_model": "patch", "step_layout": "single_world"},
+            {"joint_mode": "unknown"},
+            {"joint_mode": "maximal_pgs", "step_layout": "multi_world"},
+            {"joint_mode": "maximal_pgs", "contact_friction_model": "patch", "step_layout": "single_world"},
         ):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 newton.solvers.SolverPhoenX(model, **options)

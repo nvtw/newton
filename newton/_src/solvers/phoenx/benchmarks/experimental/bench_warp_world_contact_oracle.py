@@ -666,7 +666,7 @@ def _build_scene(world_count: int, device: wp.context.Device):
     model = builder.finalize(device=device)
     solver = newton.solvers.SolverPhoenX(
         model,
-        articulation_mode="reduced",
+        joint_mode="reduced",
         contact_friction_model="point",
         substeps=1,
         solver_iterations=2,

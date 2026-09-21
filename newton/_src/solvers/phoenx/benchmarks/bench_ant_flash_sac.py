@@ -93,7 +93,7 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int) -> _EnvConfi
     if args.task == "go2":
         values = {
             "world_count": int(world_count),
-            "articulation_mode": str(args.articulation_mode),
+            "joint_mode": str(args.joint_mode),
             "auto_reset": True,
             "reward_mode": "dense_command",
             "command": (0.8 if forward_command is None else float(forward_command), 0.0, 0.0, 0.0),
@@ -101,7 +101,7 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int) -> _EnvConfi
         if sim_substeps is not None:
             values["sim_substeps"] = int(sim_substeps)
         return ConfigEnvGo2PhoenX(**values)
-    common = {"world_count": int(world_count), "articulation_mode": str(args.articulation_mode), "auto_reset": True}
+    common = {"world_count": int(world_count), "joint_mode": str(args.joint_mode), "auto_reset": True}
     if sim_substeps is not None:
         common["sim_substeps"] = int(sim_substeps)
     if args.task == "h1":
@@ -345,7 +345,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "seed": int(args.seed),
         "task": args.task,
         "world_count": env.world_count,
-        "articulation_mode": args.articulation_mode,
+        "joint_mode": args.joint_mode,
         "sim_substeps": env_config.sim_substeps,
         "updates_per_step": int(args.updates_per_step),
         "setup_seconds": setup_seconds,
@@ -372,8 +372,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--world-count", type=int, default=None)
     parser.add_argument(
-        "--articulation-mode",
-        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        "--joint-mode",
+        choices=("maximal_direct", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
     )
     parser.add_argument("--sim-substeps", type=int, default=None)

@@ -128,7 +128,7 @@ def _make_env(setting: SolverSetting, args: argparse.Namespace, *, device: wp.co
         solver_iterations=int(setting.solver_iterations),
         velocity_iterations=int(setting.velocity_iterations),
         actuation_model=str(args.actuation_model),
-        articulation_mode=str(args.articulation_mode),
+        joint_mode=str(args.joint_mode),
         command=(0.0, 0.0, 0.0),
         max_episode_steps=0,
         auto_reset=False,
@@ -522,7 +522,7 @@ def benchmark_g1_drive_convergence(args: argparse.Namespace) -> dict[str, Any]:
         "joint_friction_model": str(args.joint_friction_model),
         "joint_friction_scale": float(args.joint_friction_scale),
         "actuation_model": str(args.actuation_model),
-        "articulation_mode": str(args.articulation_mode),
+        "joint_mode": str(args.joint_mode),
         "armature_scale": float(args.armature_scale),
         "initial_base_z": None if args.initial_base_z is None else float(args.initial_base_z),
         "reference_setting": reference_name,
@@ -566,9 +566,9 @@ def _parse_args() -> argparse.Namespace:
         default=g1_recipe.ACTUATION_MODEL,
     )
     parser.add_argument(
-        "--articulation-mode",
-        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
-        default=g1_recipe.ARTICULATION_MODE,
+        "--joint-mode",
+        choices=("maximal_direct", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        default=g1_recipe.JOINT_MODE,
     )
     parser.add_argument("--armature-scale", type=float, default=1.0)
     parser.add_argument("--parse-meshes", action="store_true")

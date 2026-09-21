@@ -323,7 +323,7 @@ class PortedExample:
             max_greedy_outer_iters=self.max_greedy_outer_iters,
             enable_warm_start_coloring=self.enable_warm_start_coloring,
             enable_column_timers=self.enable_column_timers,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         # Retain diagnostic aliases used by specialized example checks.
         self.world = self.solver.world

@@ -133,7 +133,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
             step_layout=args.phoenx_step_layout,
             threads_per_world=args.phoenx_threads_per_world,
             multi_world_scheduler=args.phoenx_scheduler,
-            articulation_mode=args.phoenx_articulation_mode,
+            joint_mode=args.phoenx_joint_mode,
         )
         if args.disable_phoenx_color_reuse:
             solver.world._reuse_rigid_coloring = False
@@ -248,7 +248,7 @@ def _run(args: argparse.Namespace) -> dict[str, float | int | str | None]:
         "phoenx_scheduler": phoenx_scheduler,
         "phoenx_threads_per_world": phoenx_tpw,
         "phoenx_friction_model": args.phoenx_friction_model if args.solver == "phoenx" else None,
-        "phoenx_articulation_mode": args.phoenx_articulation_mode if args.solver == "phoenx" else None,
+        "phoenx_joint_mode": args.phoenx_joint_mode if args.solver == "phoenx" else None,
         "contact_matching": contact_matching,
         "roofline_basis": roofline_model,
         "device": device.name,
@@ -312,9 +312,9 @@ def main() -> None:
     parser.add_argument("--phoenx-scheduler", choices=("auto", "fast_tail", "block_world"), default="auto")
     parser.add_argument("--phoenx-friction-model", choices=("point", "patch"), default="point")
     parser.add_argument(
-        "--phoenx-articulation-mode",
-        choices=("maximal", "maximal_projected"),
-        default="maximal",
+        "--phoenx-joint-mode",
+        choices=("maximal_direct", "maximal_projected"),
+        default="maximal_direct",
     )
     parser.add_argument(
         "--phoenx-step-layout",

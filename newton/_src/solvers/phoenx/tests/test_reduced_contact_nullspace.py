@@ -32,7 +32,7 @@ class TestReducedContactNullspace(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             step_layout="single_world",
             sor_boost=1.0,
             substeps=1,
@@ -71,7 +71,7 @@ class TestReducedContactNullspace(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             step_layout="single_world",
             sor_boost=1.0,
             substeps=1,
@@ -106,7 +106,7 @@ class TestReducedContactNullspace(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             step_layout="single_world",
             sor_boost=1.0,
             substeps=1,
@@ -143,7 +143,7 @@ class TestReducedContactNullspace(unittest.TestCase):
                 solver = newton.solvers.SolverPhoenX(
                     model,
                     collision_pipeline=pipeline,
-                    articulation_mode="reduced",
+                    joint_mode="reduced",
                     step_layout="single_world",
                     sor_boost=1.0,
                     substeps=1,

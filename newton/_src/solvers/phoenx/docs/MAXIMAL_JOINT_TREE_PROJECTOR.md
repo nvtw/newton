@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The experimental `articulation_mode="maximal_projected"` path keeps
+The experimental `joint_mode="maximal_projected"` path keeps
 PhoenX body state and transient contact handling in maximal coordinates while
 removing slow constraint propagation through a known acyclic joint graph.
 Eligible free-root revolute forests use a branch-light specialization.

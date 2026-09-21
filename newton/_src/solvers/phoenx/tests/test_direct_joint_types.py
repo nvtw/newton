@@ -359,7 +359,7 @@ def _make_solver(
         substeps=5,
         solver_iterations=1,
         velocity_iterations=1,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
         mass_splitting=mass_splitting,
         mass_splitting_unrolled=mass_splitting_unrolled,
         step_layout="single_world" if mass_splitting else "auto",

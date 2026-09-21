@@ -45,7 +45,7 @@ class TestBenchG1Train(unittest.TestCase):
         self.assertEqual(args.sim_substeps, g1_recipe.SIM_SUBSTEPS)
         self.assertEqual(args.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
         self.assertEqual(args.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
-        self.assertEqual(args.articulation_mode, g1_recipe.ARTICULATION_MODE)
+        self.assertEqual(args.joint_mode, g1_recipe.JOINT_MODE)
         self.assertEqual(args.reduced_articulation_path, g1_recipe.REDUCED_ARTICULATION_PATH)
         self.assertEqual(args.actuation_model, g1_recipe.ACTUATION_MODEL)
         self.assertEqual(args.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
@@ -92,7 +92,7 @@ class TestBenchG1Train(unittest.TestCase):
         args = build_leapfrog_arg_parser().parse_args([])
         config = _g1_env_config(args)
 
-        self.assertEqual(config.articulation_mode, g1_recipe.ARTICULATION_MODE)
+        self.assertEqual(config.joint_mode, g1_recipe.JOINT_MODE)
         self.assertEqual(config.reduced_articulation_path, g1_recipe.REDUCED_ARTICULATION_PATH)
         self.assertEqual(config.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
         self.assertEqual(config.contact_friction_model, g1_recipe.CONTACT_FRICTION_MODEL)
@@ -108,7 +108,7 @@ class TestBenchG1Train(unittest.TestCase):
         self.assertEqual(setting.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
         self.assertEqual(setting.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
         self.assertEqual(args.actuation_model, g1_recipe.ACTUATION_MODEL)
-        self.assertEqual(args.articulation_mode, g1_recipe.ARTICULATION_MODE)
+        self.assertEqual(args.joint_mode, g1_recipe.JOINT_MODE)
 
 
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "G1 training dynamics validation requires CUDA.")
@@ -127,7 +127,7 @@ class TestBenchG1TrainAnalyticalDynamics(unittest.TestCase):
         self.assertEqual(env.config.sim_substeps, g1_recipe.SIM_SUBSTEPS)
         self.assertEqual(env.config.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
         self.assertEqual(env.config.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
-        self.assertEqual(env.config.articulation_mode, g1_recipe.ARTICULATION_MODE)
+        self.assertEqual(env.config.joint_mode, g1_recipe.JOINT_MODE)
         self.assertEqual(env.config.actuation_model, g1_recipe.ACTUATION_MODEL)
         self.assertEqual(env.config.contact_friction_model, g1_recipe.CONTACT_FRICTION_MODEL)
         self.assertEqual(env.solver.world.substeps, 1)
@@ -208,7 +208,7 @@ class TestBenchG1TrainAnalyticalDynamics(unittest.TestCase):
             substeps=1,
             solver_iterations=g1_recipe.SOLVER_ITERATIONS,
             velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
-            articulation_mode=g1_recipe.ARTICULATION_MODE,
+            joint_mode=g1_recipe.JOINT_MODE,
             reduced_articulation_path=g1_recipe.REDUCED_ARTICULATION_PATH,
         )
 

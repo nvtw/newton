@@ -2249,7 +2249,7 @@ class ConfigEnvG1PhoenX:
     threads_per_world: int | str = g1_recipe.THREADS_PER_WORLD
     multi_world_scheduler: str = g1_recipe.MULTI_WORLD_SCHEDULER
     prepare_refresh_stride: int | str = g1_recipe.PREPARE_REFRESH_STRIDE
-    articulation_mode: str = "maximal"
+    joint_mode: str = "maximal_direct"
     reduced_articulation_path: str = "reference"
 
 
@@ -2560,7 +2560,7 @@ class EnvG1PhoenX:
             threads_per_world=self.config.threads_per_world,
             multi_world_scheduler=self.config.multi_world_scheduler,
             prepare_refresh_stride=self.config.prepare_refresh_stride,
-            articulation_mode=str(self.config.articulation_mode),
+            joint_mode=str(self.config.joint_mode),
             reduced_articulation_path=str(self.config.reduced_articulation_path),
         )
 

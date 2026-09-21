@@ -78,7 +78,7 @@ class TestMaximalContactConservation(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             step_layout="single_world",
             substeps=1,
             solver_iterations=8,

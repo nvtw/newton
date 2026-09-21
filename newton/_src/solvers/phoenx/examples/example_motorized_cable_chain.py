@@ -114,7 +114,7 @@ class Example:
             substeps=5,
             solver_iterations=2,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
 
         direct = self.solver._direct_equality_system

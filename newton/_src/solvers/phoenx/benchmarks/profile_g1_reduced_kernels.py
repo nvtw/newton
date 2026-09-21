@@ -43,7 +43,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--world-count", type=int, default=8192)
     parser.add_argument(
-        "--articulation-mode",
+        "--joint-mode",
         choices=("reduced", "maximal_projected"),
         default="reduced",
     )
@@ -75,7 +75,7 @@ def main() -> int:
             sim_substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
-            articulation_mode=args.articulation_mode,
+            joint_mode=args.joint_mode,
             actuation_model=g1_recipe.ACTUATION_MODEL,
             controlled_action_count=g1_recipe.CONTROLLED_ACTION_COUNT,
             parse_meshes=False,
@@ -88,10 +88,10 @@ def main() -> int:
         device=device,
     )
     if args.scalar_patch_rows:
-        if args.articulation_mode != "reduced":
-            parser.error("--scalar-patch-rows requires --articulation-mode reduced")
+        if args.joint_mode != "reduced":
+            parser.error("--scalar-patch-rows requires --joint-mode reduced")
         env.solver._reduced_articulation.contact_block_system.build_patch_rows_warp_kernel = None
-    if args.articulation_mode == "maximal_projected":
+    if args.joint_mode == "maximal_projected":
         projector = env.solver._maximal_tree_projector
         if projector is None:
             raise RuntimeError("maximal_projected profiling requires a supported maximal tree projector")
@@ -127,7 +127,7 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "articulation_mode": args.articulation_mode,
+                "joint_mode": args.joint_mode,
                 "world_count": args.world_count,
                 "sim_substeps": args.sim_substeps,
                 "scalar_patch_rows": bool(args.scalar_patch_rows),

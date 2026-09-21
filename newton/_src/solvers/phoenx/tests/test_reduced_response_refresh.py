@@ -27,7 +27,7 @@ class TestReducedResponseRefresh(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             step_layout="single_world",
             substeps=2,
             solver_iterations=4,

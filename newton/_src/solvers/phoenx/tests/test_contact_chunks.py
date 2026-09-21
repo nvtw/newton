@@ -217,7 +217,7 @@ class TestContactChunks(unittest.TestCase):
                 solver = newton.solvers.SolverPhoenX(
                     model,
                     collision_pipeline=pipeline,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                     step_layout="single_world",
                     mass_splitting=True,
                     max_colored_partitions=0,

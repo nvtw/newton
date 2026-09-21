@@ -227,7 +227,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
-        articulation_mode=str(args.articulation_mode),
+        joint_mode=str(args.joint_mode),
         reduced_articulation_path=str(args.reduced_articulation_path),
         actuation_model=str(args.actuation_model),
         controlled_action_count=int(args.controlled_action_count),
@@ -370,7 +370,7 @@ def benchmark_train(args: argparse.Namespace) -> dict[str, Any]:
         "solver_internal_substeps": int(world.substeps),
         "solver_iterations": int(args.solver_iterations),
         "velocity_iterations": int(args.velocity_iterations),
-        "articulation_mode": str(args.articulation_mode),
+        "joint_mode": str(args.joint_mode),
         "reduced_articulation_path": str(args.reduced_articulation_path),
         "actuation_model": str(args.actuation_model),
         "reward_mode": str(args.reward_mode),
@@ -516,8 +516,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument(
-        "--articulation-mode",
-        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        "--joint-mode",
+        choices=("maximal_direct", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
         help="PhoenX articulation mode used by the training benchmark.",
     )

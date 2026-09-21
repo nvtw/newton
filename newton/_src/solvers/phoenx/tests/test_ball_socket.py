@@ -48,7 +48,7 @@ def _make_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
         substeps=SUBSTEPS,
         solver_iterations=SOLVER_ITERATIONS,
         velocity_iterations=1,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
     )
 
 
