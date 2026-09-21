@@ -9,7 +9,7 @@
 #
 # Run:
 #   python -m newton._src.solvers.phoenx.examples.example_humanoid_pile
-#   python -m newton._src.solvers.phoenx.examples.example_humanoid_pile --articulation-mode reduced
+#   python -m newton._src.solvers.phoenx.examples.example_humanoid_pile --joint-mode reduced
 ###########################################################################
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ class Example:
         self.control = self.model.control()
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
-            articulation_mode=args.articulation_mode,
+            joint_mode=args.joint_mode,
             substeps=args.sim_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,
@@ -116,9 +116,9 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.add_argument(
-            "--articulation-mode",
-            choices=("maximal", "reduced"),
-            default="maximal",
+            "--joint-mode",
+            choices=("maximal_direct", "reduced"),
+            default="maximal_direct",
             help="PhoenX articulation representation: full-coordinate 'maximal' or 'reduced'.",
         )
         parser.add_argument("--humanoid-count", type=int, default=12, help="Humanoids in the shared collision world.")

@@ -27,7 +27,7 @@ def build(
     solver_iterations: int,
     velocity_iterations: int = 1,
     *,
-    articulation_mode: str = "maximal",
+    joint_mode: str = "maximal_direct",
     step_layout: str = "multi_world",
     prepare_refresh_stride: int | str = "auto",
 ) -> SceneHandle:
@@ -79,7 +79,7 @@ def build(
             velocity_iterations=velocity_iterations,
             step_layout=step_layout,
             prepare_refresh_stride=prepare_refresh_stride,
-            articulation_mode=articulation_mode,
+            joint_mode=joint_mode,
         )
         outer_steps = substeps
         call_dt = frame_dt / substeps

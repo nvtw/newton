@@ -42,7 +42,7 @@ def benchmark_phoenx(
     sim_substeps: int,
     solver_iterations: int,
     velocity_iterations: int,
-    articulation_mode: str,
+    joint_mode: str,
     reduced_articulation_path: str,
     actuation_model: str,
     parse_meshes: bool,
@@ -64,7 +64,7 @@ def benchmark_phoenx(
         sim_substeps=int(sim_substeps),
         solver_iterations=int(solver_iterations),
         velocity_iterations=int(velocity_iterations),
-        articulation_mode=str(articulation_mode),
+        joint_mode=str(joint_mode),
         reduced_articulation_path=str(reduced_articulation_path),
         actuation_model=str(actuation_model),
         parse_meshes=bool(parse_meshes),
@@ -101,7 +101,7 @@ def benchmark_phoenx(
         "solver_internal_substeps": int(env.solver.world.substeps),
         "solver_iterations": int(solver_iterations),
         "velocity_iterations": int(velocity_iterations),
-        "articulation_mode": str(articulation_mode),
+        "joint_mode": str(joint_mode),
         "reduced_articulation_path": str(reduced_articulation_path),
         "actuation_model": str(actuation_model),
         "parse_meshes": bool(parse_meshes),
@@ -169,8 +169,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--solver-iterations", type=int, default=2)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument(
-        "--articulation-mode",
-        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        "--joint-mode",
+        choices=("maximal_direct", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
         help="PhoenX articulation mode used by the environment-step benchmark.",
     )
@@ -208,7 +208,7 @@ def main() -> int:
         sim_substeps=args.sim_substeps,
         solver_iterations=args.solver_iterations,
         velocity_iterations=args.velocity_iterations,
-        articulation_mode=args.articulation_mode,
+        joint_mode=args.joint_mode,
         reduced_articulation_path=args.reduced_articulation_path,
         actuation_model=args.actuation_model,
         parse_meshes=args.parse_meshes,

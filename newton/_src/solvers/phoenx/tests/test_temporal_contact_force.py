@@ -65,8 +65,7 @@ class TestTemporalContactForce(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             solver_scheme="tgs",
-            joint_solver="block_pgs",
-            articulation_mode="maximal",
+            joint_mode="maximal_pgs",
             step_layout="single_world",
             substeps=4,
             solver_iterations=1,

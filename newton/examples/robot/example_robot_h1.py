@@ -85,7 +85,7 @@ class Example:
                 substeps=4,
                 solver_iterations=8,
                 velocity_iterations=1,
-                articulation_mode="reduced" if PHOENX_USE_REDUCED_COORDINATES else "maximal",
+                joint_mode="reduced" if PHOENX_USE_REDUCED_COORDINATES else "maximal_direct",
             )
         else:
             self.solver = newton.solvers.SolverMuJoCo(

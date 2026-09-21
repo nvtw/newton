@@ -73,8 +73,8 @@ def main() -> int:
         default="point",
     )
     parser.add_argument(
-        "--articulation-mode",
-        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        "--joint-mode",
+        choices=("maximal_direct", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
     )
     parser.add_argument(
@@ -133,7 +133,7 @@ def main() -> int:
     model = builder.finalize(device=device)
     solver = newton.solvers.SolverPhoenX(
         model,
-        articulation_mode=args.articulation_mode,
+        joint_mode=args.joint_mode,
         reduced_articulation_path=args.reduced_articulation_path,
         contact_friction_model=args.contact_friction_model,
         substeps=1,
@@ -212,7 +212,7 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "articulation_mode": args.articulation_mode,
+                "joint_mode": args.joint_mode,
                 "reduced_articulation_path": args.reduced_articulation_path,
                 "contact_friction_model": args.contact_friction_model,
                 "active_contact_count": contact_count,

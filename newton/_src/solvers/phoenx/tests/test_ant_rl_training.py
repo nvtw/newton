@@ -22,7 +22,7 @@ class TestAntPhoenXRL(unittest.TestCase):
                 task_profile="mraksha",
                 frame_dt=1.0 / 60.0,
                 sim_substeps=2,
-                articulation_mode="reduced",
+                joint_mode="reduced",
                 torque_limit=7.5,
                 max_episode_steps=900,
                 min_height=0.31,
@@ -41,7 +41,7 @@ class TestAntPhoenXRL(unittest.TestCase):
         )
 
         self.assertEqual(env.obs.shape, (2, 36))
-        self.assertEqual(env.solver.articulation_mode, "reduced")
+        self.assertEqual(env.solver.joint_mode, "reduced")
         np.testing.assert_allclose(env.obs.numpy()[:, 0], 0.5, rtol=0.0, atol=1.0e-6)
         expected_joint_q = np.array([0.0, np.pi / 4.0, 0.0, -np.pi / 4.0, 0.0, -np.pi / 4.0, 0.0, np.pi / 4.0])
         joint_q = env.state_0.joint_q.numpy().reshape(env.world_count, env.coord_stride)
@@ -53,7 +53,7 @@ class TestAntPhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.model.joint_damping.numpy()[6:14], 0.1, rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(env.model.joint_armature.numpy()[6:14], 0.05, rtol=0.0, atol=1.0e-6)
         args = _make_parser().parse_args([])
-        self.assertEqual(args.articulation_mode, "reduced")
+        self.assertEqual(args.joint_mode, "reduced")
         self.assertEqual(args.solver_iterations, 8)
         self.assertEqual(args.iterations, 1000)
         self.assertEqual(args.rollout_steps, 32)

@@ -437,7 +437,7 @@ class ConfigEnvH1PhoenX:
     termination_weight: float = -200.0
     ground_friction: float = 1.0
     auto_reset: bool = True
-    articulation_mode: str = "reduced"
+    joint_mode: str = "reduced"
 
 
 def default_h1_flash_sac_config(**overrides: Any) -> ConfigFlashSAC:
@@ -476,8 +476,8 @@ class EnvH1PhoenX:
             raise ValueError("world_count must be positive")
         if int(self.config.sim_substeps) <= 0:
             raise ValueError("sim_substeps must be positive")
-        if self.config.articulation_mode not in ("maximal", "reduced"):
-            raise ValueError("articulation_mode must be 'maximal' or 'reduced'")
+        if self.config.joint_mode not in ("maximal_direct", "reduced"):
+            raise ValueError("joint_mode must be 'maximal_direct' or 'reduced'")
         for name, limits in (
             ("x", self.config.command_x_range),
             ("y", self.config.command_y_range),
@@ -497,7 +497,7 @@ class EnvH1PhoenX:
             substeps=1,
             solver_iterations=int(self.config.solver_iterations),
             velocity_iterations=int(self.config.velocity_iterations),
-            articulation_mode=self.config.articulation_mode,
+            joint_mode=self.config.joint_mode,
         )
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()

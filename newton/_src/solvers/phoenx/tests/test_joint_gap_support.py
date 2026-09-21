@@ -26,7 +26,7 @@ def _run(model: newton.Model, frames: int = 30) -> tuple[newton.State, newton.so
         substeps=5,
         solver_iterations=2,
         velocity_iterations=1,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
     )
     control = model.control()
     with wp.ScopedCapture(model.device) as capture:

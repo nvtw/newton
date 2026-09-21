@@ -44,7 +44,7 @@ def _phoenx_factory(step_layout: str, multi_world_scheduler: str = "auto"):
             step_layout=step_layout,
             multi_world_scheduler=multi_world_scheduler,
             prepare_refresh_stride=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
 
     return make
@@ -250,7 +250,7 @@ class TestMultiWorldPgsOrder(unittest.TestCase):
                 velocity_iterations=0,
                 contact_friction_model="point",
                 step_layout="multi_world",
-                articulation_mode="maximal",
+                joint_mode="maximal_direct",
             )
             solver.world._reuse_rigid_coloring = reuse_coloring
             return model, pipeline, contacts, state_0, state_1, solver, model.control()

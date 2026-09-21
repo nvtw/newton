@@ -281,8 +281,7 @@ class Example:
         self.solver = SolverPhoenX(
             self.model,
             collision_pipeline=self.pipeline,
-            articulation_mode="maximal",
-            joint_solver="direct",
+            joint_mode="maximal_direct",
             step_layout="single_world",
             substeps=self.substeps,
             solver_iterations=args.iterations,

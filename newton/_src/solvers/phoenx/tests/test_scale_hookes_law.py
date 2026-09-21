@@ -43,7 +43,7 @@ def _settle_slider(*, mass: float, limit_ke: float) -> tuple[float, float, newto
         substeps=SUBSTEPS,
         solver_iterations=2,
         velocity_iterations=1,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
     )
     control = model.control()
     with wp.ScopedCapture(model.device) as capture:

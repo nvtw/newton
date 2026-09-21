@@ -43,7 +43,7 @@ def _build_n_pendulums(*, num_worlds: int, pendulums_per_world: int = 1, multi_w
         substeps=5,
         solver_iterations=1,
         velocity_iterations=1,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
         step_layout="multi_world",
         multi_world_scheduler=multi_world_scheduler,
     )

@@ -442,7 +442,7 @@ class ConfigEnvAntPhoenX:
     sim_substeps: int = 4
     solver_iterations: int = 8
     velocity_iterations: int = 1
-    articulation_mode: str = "maximal"
+    joint_mode: str = "maximal_direct"
     torque_limit: float = 15.0
     max_episode_steps: int = 500
     min_height: float = 0.25
@@ -536,7 +536,7 @@ class EnvAntPhoenX:
             substeps=1,
             solver_iterations=int(self.config.solver_iterations),
             velocity_iterations=int(self.config.velocity_iterations),
-            articulation_mode=str(self.config.articulation_mode),
+            joint_mode=str(self.config.joint_mode),
         )
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -931,7 +931,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
-        articulation_mode=str(args.articulation_mode),
+        joint_mode=str(args.joint_mode),
         torque_limit=float(args.torque_limit),
         max_episode_steps=int(args.max_episode_steps),
         min_height=float(args.min_height),
@@ -1126,8 +1126,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sim-substeps", type=int, default=2)
     parser.add_argument("--solver-iterations", type=int, default=8)
     parser.add_argument(
-        "--articulation-mode",
-        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        "--joint-mode",
+        choices=("maximal_direct", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
     )
     parser.add_argument("--velocity-iterations", type=int, default=1)

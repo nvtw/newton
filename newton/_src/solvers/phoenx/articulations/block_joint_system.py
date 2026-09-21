@@ -227,7 +227,10 @@ class BlockJointSystem(DirectEqualitySystem):
                     device=self.model.device,
                 )
 
-    def solve(self, *, use_bias):
+    def solve(self, *, use_bias, refine=True):
+        # Match the direct equality solve interface. Block systems always
+        # perform their complete local correction, so refine has no effect.
+        del refine
         if not self.enabled or not self._resolving_bounds:
             return
         wp.launch(

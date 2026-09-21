@@ -115,7 +115,7 @@ def _step_scalar(
         substeps=1,
         solver_iterations=1,
         velocity_iterations=0,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
         mass_splitting=mass_splitting,
         step_layout="single_world" if mass_splitting else "multi_world",
     )
@@ -240,7 +240,7 @@ class TestDirectDriveAnalytical(unittest.TestCase):
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             step_layout="multi_world",
         )
         state_0.clear_forces()
@@ -330,7 +330,7 @@ class TestDirectDriveAnalytical(unittest.TestCase):
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         state_0.clear_forces()
         solver.step(state_0, state_1, control, None, dt)
@@ -436,7 +436,7 @@ class TestDirectDriveAnalytical(unittest.TestCase):
             substeps=substeps,
             solver_iterations=2,
             velocity_iterations=1,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
         result_q = wp.zeros(1, dtype=wp.float32, device=model.device)
         result_qd = wp.zeros(1, dtype=wp.float32, device=model.device)

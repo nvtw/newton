@@ -61,7 +61,7 @@ def _settle(layout: str) -> newton.solvers.SolverPhoenX:
         substeps=SUBSTEPS,
         solver_iterations=1,
         velocity_iterations=0,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
         step_layout=layout,
     )
     control = model.control()

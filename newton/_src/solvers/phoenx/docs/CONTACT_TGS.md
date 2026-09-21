@@ -63,7 +63,7 @@ scene builder retains the authored behavior by default.
 ## Supported configuration
 
 This experimental mode currently requires one rigid CUDA world, maximal
-coordinates, `joint_solver="block_pgs"`, point-contact storage, mass splitting
+coordinates, `joint_mode="maximal_pgs"`, point-contact storage, mass splitting
 with color groups, `solver_iterations=1`, `prepare_refresh_stride=1`, SOR 1,
 and `velocity_readout="substep_end"`. It rejects armature, bounded active drives,
 restitution, soft contact rows, sleeping, deformables, contact chunks, unrolled

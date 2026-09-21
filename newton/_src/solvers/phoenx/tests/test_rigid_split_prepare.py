@@ -55,7 +55,7 @@ def run_scene(parallel, mass_splitting=True, *, chunk_size=0):
     solver = newton.solvers.SolverPhoenX(
         model,
         collision_pipeline=pipeline,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
         step_layout="single_world",
         mass_splitting=mass_splitting,
         parallel_contact_prepare=parallel,
@@ -151,7 +151,7 @@ class TestParallelPrepareSplit(unittest.TestCase):
         for options in (
             {"step_layout": "multi_world"},
             {"step_layout": "single_world", "contact_friction_model": "patch"},
-            {"step_layout": "single_world", "articulation_mode": "reduced"},
+            {"step_layout": "single_world", "joint_mode": "reduced"},
             {"step_layout": "single_world", "sleeping_velocity_threshold": 0.01},
             {"step_layout": "single_world", "mass_splitting_unrolled": True},
         ):

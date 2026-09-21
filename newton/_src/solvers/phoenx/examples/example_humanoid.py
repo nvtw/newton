@@ -82,7 +82,7 @@ class Example:
         self.solver = newton.solvers.SolverPhoenX(
             self.model,
             collision_pipeline=self.collision_pipeline,
-            articulation_mode="reduced" if args.reduced_coordinates else "maximal",
+            joint_mode="reduced" if args.reduced_coordinates else "maximal_direct",
             substeps=args.solver_substeps,
             solver_iterations=args.solver_iterations,
             velocity_iterations=args.velocity_iterations,

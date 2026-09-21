@@ -56,7 +56,7 @@ def _make_env_config(args: argparse.Namespace, *, world_count: int | None = None
         sim_substeps=int(args.sim_substeps),
         solver_iterations=int(args.solver_iterations),
         velocity_iterations=int(args.velocity_iterations),
-        articulation_mode=str(getattr(args, "articulation_mode", "reduced")),
+        joint_mode=str(getattr(args, "joint_mode", "reduced")),
         actuation_model=str(getattr(args, "actuation_model", g1_recipe.ACTUATION_MODEL)),
         action_scale=float(args.action_scale),
         controlled_action_count=int(args.controlled_action_count),
@@ -536,7 +536,7 @@ def benchmark_train_to_gate(args: argparse.Namespace) -> dict[str, Any]:
         "w_joint_pos_limit_ankle": float(args.w_joint_pos_limit_ankle),
         "ground_friction": float(args.ground_friction),
         "foot_box_xy_scale": float(args.foot_box_xy_scale),
-        "articulation_mode": str(getattr(args, "articulation_mode", "reduced")),
+        "joint_mode": str(getattr(args, "joint_mode", "reduced")),
         "command_curriculum_start": float(command_curriculum_start),
         "command_curriculum_samples": int(command_curriculum_samples),
         "command_zero_probability": float(args.command_zero_probability),
@@ -711,8 +711,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--solver-iterations", type=int, default=g1_recipe.SOLVER_ITERATIONS)
     parser.add_argument("--velocity-iterations", type=int, default=g1_recipe.VELOCITY_ITERATIONS)
     parser.add_argument(
-        "--articulation-mode",
-        choices=("maximal", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
+        "--joint-mode",
+        choices=("maximal_direct", "maximal_projected", "maximal_articulated", "hybrid", "reduced"),
         default="reduced",
         help="PhoenX articulation mode used by both training and the frozen quality gate.",
     )

@@ -168,7 +168,7 @@ class Example:
                 substeps=self.sim_substeps,
                 solver_iterations=8,
                 velocity_iterations=1,
-                articulation_mode="reduced" if PHOENX_USE_REDUCED_COORDINATES else "maximal",
+                joint_mode="reduced" if PHOENX_USE_REDUCED_COORDINATES else "maximal_direct",
             )
             self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
             self.contacts = self.collision_pipeline.contacts()

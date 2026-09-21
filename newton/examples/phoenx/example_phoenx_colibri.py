@@ -234,8 +234,7 @@ class Example(ColibriChecks):
         self.solver = SolverPhoenX(
             self.model,
             collision_pipeline=self.collision_pipeline,
-            articulation_mode="maximal",
-            joint_solver="block_pgs",
+            joint_mode="maximal_pgs",
             solver_scheme="tgs",
             # Use the global color-group scheduler across independent worlds;
             # the per-world fast-tail scheduler does not support temporal mass copies.

@@ -579,7 +579,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             command_x=0.8,
             sim_substeps=g1_recipe.SIM_SUBSTEPS,
             solver_iterations=g1_recipe.SOLVER_ITERATIONS,
-            articulation_mode=g1_recipe.ARTICULATION_MODE,
+            joint_mode=g1_recipe.JOINT_MODE,
             ground_friction=g1_recipe.GROUND_FRICTION,
             randomize_commands=True,
             command_x_range=g1_recipe.COMMAND_X_RANGE,
@@ -4552,10 +4552,10 @@ class TestG1PhoenXRL(unittest.TestCase):
 
     def test_maximal_projected_g1_joint_step_response_is_stable_inside_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX G1 joint step-response tests")
-        train_to_gate_args = make_g1_train_to_gate_parser().parse_args(["--articulation-mode", "maximal_projected"])
-        example_args = train_g1_nanog1._make_parser().parse_args(["--articulation-mode", "maximal_projected"])
-        self.assertEqual(train_to_gate_args.articulation_mode, "maximal_projected")
-        self.assertEqual(example_args.articulation_mode, "maximal_projected")
+        train_to_gate_args = make_g1_train_to_gate_parser().parse_args(["--joint-mode", "maximal_projected"])
+        example_args = train_g1_nanog1._make_parser().parse_args(["--joint-mode", "maximal_projected"])
+        self.assertEqual(train_to_gate_args.joint_mode, "maximal_projected")
+        self.assertEqual(example_args.joint_mode, "maximal_projected")
 
         env = rl.EnvG1PhoenX(
             rl.ConfigEnvG1PhoenX(
@@ -4566,13 +4566,13 @@ class TestG1PhoenXRL(unittest.TestCase):
                 max_episode_steps=0,
                 auto_reset=False,
                 controlled_action_count=rl.ACTION_DIM_G1,
-                articulation_mode="maximal_projected",
+                joint_mode="maximal_projected",
                 contact_friction_model="point",
             ),
             device=device,
         )
         self.assertEqual(env.config.actuation_model, "explicit_torque")
-        self.assertEqual(env.config.articulation_mode, "maximal_projected")
+        self.assertEqual(env.config.joint_mode, "maximal_projected")
         self.assertIsNotNone(env.solver._maximal_tree_projector)
         self.assertIsNone(env.solver._reduced_articulation)
         np.testing.assert_array_equal(
@@ -4623,7 +4623,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 randomize_commands_on_reset=False,
                 reset_noise=0.0,
                 actuation_model="constraint_drive",
-                articulation_mode="maximal",
+                joint_mode="maximal_direct",
                 joint_friction_scale=0.0,
             ),
             device=device,
@@ -5945,7 +5945,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             sim_substeps=1,
             solver_iterations=1,
             velocity_iterations=1,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             max_episode_steps=0,
             auto_reset=False,
         )
@@ -6001,7 +6001,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             sim_substeps=2,
             solver_iterations=1,
             velocity_iterations=1,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             reward_mode="sparse_target",
             randomize_commands_on_reset=True,
             command_resample_steps=2,
@@ -6121,7 +6121,7 @@ class TestG1PhoenXRL(unittest.TestCase):
                 sim_substeps=10,
                 solver_iterations=8,
                 velocity_iterations=1,
-                articulation_mode="maximal",
+                joint_mode="maximal_direct",
                 actuation_model="explicit_torque",
                 reset_noise=0.0,
                 auto_reset=False,
@@ -6328,7 +6328,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         env = rl.EnvG1PhoenX(
             rl.ConfigEnvG1PhoenX(
                 world_count=2,
-                articulation_mode="reduced",
+                joint_mode="reduced",
                 sim_substeps=4,
                 solver_iterations=2,
                 velocity_iterations=1,
@@ -6471,7 +6471,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             )
             defaults = vars(make_g1_train_to_gate_parser().parse_args([]))
             defaults.update(vars(args))
-            defaults["articulation_mode"] = "reduced"
+            defaults["joint_mode"] = "reduced"
             defaults["angular_fine_tune_start_samples"] = 4
             defaults["late_replay_ratio"] = 2.0
             defaults["late_replay_start_samples"] = 2
@@ -6501,7 +6501,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual(result["angular_fine_tune_iteration"], 2)
             self.assertEqual(result["solver_iterations"], 1)
             self.assertEqual(result["velocity_iterations"], g1_recipe.VELOCITY_ITERATIONS)
-            self.assertEqual(result["articulation_mode"], "reduced")
+            self.assertEqual(result["joint_mode"], "reduced")
             self.assertFalse(result["readback_diagnostics"])
             self.assertEqual(result["squash_actions"], g1_recipe.SQUASH_ACTIONS)
             self.assertEqual(result["log_std_init"], g1_recipe.LOG_STD_INIT)
@@ -6548,7 +6548,7 @@ class TestG1PhoenXRL(unittest.TestCase):
             self.assertEqual([item["replay_ratio"] for item in result["train_history"]], [1.0, 2.0, 2.0])
             self.assertFalse(result["pass_gate"])
             self.assertTrue(eval_result["evaluate_only"])
-            self.assertEqual(eval_result["articulation_mode"], "reduced")
+            self.assertEqual(eval_result["joint_mode"], "reduced")
             self.assertEqual(eval_result["new_trained_samples"], 0)
             self.assertEqual(len(eval_result["gate_history"]), 1)
             self.assertGreater(result["train_env_samples_per_s"], 0.0)

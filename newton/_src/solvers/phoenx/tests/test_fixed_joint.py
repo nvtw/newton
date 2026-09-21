@@ -43,7 +43,7 @@ def _rollout(
         substeps=SUBSTEPS,
         solver_iterations=2,
         velocity_iterations=1,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
     )
     state = model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state)

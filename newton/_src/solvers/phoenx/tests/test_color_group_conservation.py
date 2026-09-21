@@ -67,8 +67,7 @@ class TestColorGroupConservation(unittest.TestCase):
                     solver = newton.solvers.SolverPhoenX(
                         model,
                         collision_pipeline=pipeline,
-                        articulation_mode="maximal",
-                        joint_solver="block_pgs",
+                        joint_mode="maximal_pgs",
                         step_layout="single_world",
                         mass_splitting=True,
                         mass_splitting_color_group_size=width,
@@ -171,8 +170,7 @@ class TestColorGroupConservation(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="maximal",
-            joint_solver="block_pgs",
+            joint_mode="maximal_pgs",
             step_layout="single_world",
             mass_splitting=True,
             mass_splitting_color_group_size=0,

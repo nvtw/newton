@@ -105,7 +105,7 @@ def _two_body_cable_world(
         substeps=5,
         solver_iterations=1,
         velocity_iterations=0,
-        articulation_mode="maximal",
+        joint_mode="maximal_direct",
     )
     return model, solver
 

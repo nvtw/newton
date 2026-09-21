@@ -34,7 +34,7 @@ class TestHumanoidPhoenXRL(unittest.TestCase):
         env_config = rl.ConfigEnvHumanoidPhoenX()
         trainer_config = default_humanoid_flash_sac_config()
 
-        self.assertEqual(env_config.articulation_mode, "reduced")
+        self.assertEqual(env_config.joint_mode, "reduced")
         self.assertEqual(env_config.sim_substeps, 4)
         self.assertEqual(env_config.frame_dt / env_config.sim_substeps, 1.0 / 240.0)
         self.assertEqual(trainer_config.sample_batch_size, 2048)

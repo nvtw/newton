@@ -163,7 +163,7 @@ def _build_handle(
     if solver_name == "reduced":
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             reduced_articulation_path=reduced_articulation_path,
             substeps=substeps,
             solver_iterations=solver_iterations,

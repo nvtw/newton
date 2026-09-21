@@ -1154,7 +1154,7 @@ class TestReducedArticulation(unittest.TestCase):
                 control.joint_target_qd.assign(np.array([target_qd], dtype=np.float32))
                 solver = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="reduced",
+                    joint_mode="reduced",
                     substeps=substeps,
                     solver_iterations=1,
                     velocity_iterations=1,
@@ -1384,14 +1384,14 @@ class TestReducedArticulation(unittest.TestCase):
         control.joint_f.assign(np.linspace(0.25, -0.15, int(model.joint_dof_count), dtype=np.float32))
         full_solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=2,
             velocity_iterations=1,
         )
         continued_solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=2,
             velocity_iterations=1,
@@ -1461,7 +1461,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -1565,7 +1565,7 @@ class TestReducedArticulation(unittest.TestCase):
         model = builder.finalize(device=device)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -1630,7 +1630,7 @@ class TestReducedArticulation(unittest.TestCase):
                 )
                 solver = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="reduced",
+                    joint_mode="reduced",
                     substeps=1,
                     solver_iterations=1,
                     velocity_iterations=0,
@@ -1686,7 +1686,7 @@ class TestReducedArticulation(unittest.TestCase):
 
                 solver = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="reduced",
+                    joint_mode="reduced",
                     substeps=1,
                     solver_iterations=1,
                     velocity_iterations=0,
@@ -1733,7 +1733,7 @@ class TestReducedArticulation(unittest.TestCase):
         initial_energy = _kinetic_energy(model, state0)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -1782,7 +1782,7 @@ class TestReducedArticulation(unittest.TestCase):
         momentum_before = _total_momentum(model, state0)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -1818,7 +1818,7 @@ class TestReducedArticulation(unittest.TestCase):
         momentum_before = _total_momentum(model, state0)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=1,
             solver_iterations=2,
             velocity_iterations=1,
@@ -1851,7 +1851,7 @@ class TestReducedArticulation(unittest.TestCase):
         state1 = model.state()
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=1,
             solver_iterations=2,
             velocity_iterations=1,
@@ -2019,7 +2019,7 @@ class TestReducedArticulation(unittest.TestCase):
                 model, joints = _make_undeclared_floating_tree(device, declare_root_only=declare_root_only)
                 solver = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                     substeps=5,
                     solver_iterations=2,
                     velocity_iterations=1,
@@ -2042,7 +2042,7 @@ class TestReducedArticulation(unittest.TestCase):
         model, loop_joint = _make_floating_triangle_loop(device)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             substeps=5,
             solver_iterations=2,
             velocity_iterations=1,
@@ -2067,7 +2067,7 @@ class TestReducedArticulation(unittest.TestCase):
                 state1 = model.state()
                 solver = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="maximal_articulated",
+                    joint_mode="maximal_articulated",
                     substeps=4,
                     solver_iterations=2,
                     velocity_iterations=1,
@@ -2144,7 +2144,7 @@ class TestReducedArticulation(unittest.TestCase):
             state1 = model.state()
             solver = newton.solvers.SolverPhoenX(
                 model,
-                articulation_mode="maximal_articulated",
+                joint_mode="maximal_articulated",
                 substeps=1,
                 solver_iterations=2,
                 velocity_iterations=velocity_iterations,
@@ -2176,14 +2176,14 @@ class TestReducedArticulation(unittest.TestCase):
         states_b = (model.state(), model.state())
         solver_a = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_articulated",
+            joint_mode="maximal_articulated",
             substeps=4,
             solver_iterations=2,
             velocity_iterations=1,
         )
         solver_b = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_articulated",
+            joint_mode="maximal_articulated",
             substeps=4,
             solver_iterations=2,
             velocity_iterations=1,
@@ -2226,7 +2226,7 @@ class TestReducedArticulation(unittest.TestCase):
         state1 = model.state()
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_articulated",
+            joint_mode="maximal_articulated",
             substeps=4,
             solver_iterations=2,
             velocity_iterations=1,
@@ -2262,8 +2262,8 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("hybrid articulation tests require CUDA graph capture")
 
-        for articulation_mode in ("maximal_projected", "hybrid"):
-            with self.subTest(articulation_mode=articulation_mode):
+        for joint_mode in ("maximal_projected", "hybrid"):
+            with self.subTest(joint_mode=joint_mode):
                 model = _make_mixed_tree(device)
                 state0 = model.state()
                 state1 = model.state()
@@ -2273,12 +2273,12 @@ class TestReducedArticulation(unittest.TestCase):
                     newton.eval_fk(model, state.joint_q, state.joint_qd, state)
                 solver = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode=articulation_mode,
+                    joint_mode=joint_mode,
                     substeps=1,
                     solver_iterations=2,
                     velocity_iterations=1,
                 )
-                if articulation_mode == "maximal_projected":
+                if joint_mode == "maximal_projected":
                     self.assertIsInstance(solver._maximal_tree_projector, GeneralMaximalTreeProjector)
                     self.assertIsNone(solver._reduced_articulation)
                 else:
@@ -2290,7 +2290,7 @@ class TestReducedArticulation(unittest.TestCase):
                 wp.capture_launch(capture.graph)
                 self.assertTrue(np.isfinite(state1.body_q.numpy()).all())
                 self.assertTrue(np.isfinite(state1.body_qd.numpy()).all())
-                if articulation_mode == "maximal_projected":
+                if joint_mode == "maximal_projected":
                     projector = solver._maximal_tree_projector
                     output = projector.data.velocity_out.numpy()[0]
                     transform = projector.data.transform.numpy()[0]
@@ -2324,7 +2324,7 @@ class TestReducedArticulation(unittest.TestCase):
             newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=1,
             solver_iterations=2,
             velocity_iterations=1,
@@ -2359,7 +2359,7 @@ class TestReducedArticulation(unittest.TestCase):
         state1.body_qd.assign(initial_velocity)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=1,
             solver_iterations=2,
             velocity_iterations=1,
@@ -2401,7 +2401,7 @@ class TestReducedArticulation(unittest.TestCase):
         momentum_before = _total_momentum(model, state0)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=1,
             solver_iterations=2,
             velocity_iterations=1,
@@ -2460,14 +2460,14 @@ class TestReducedArticulation(unittest.TestCase):
             newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver_a = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=1,
             solver_iterations=2,
             velocity_iterations=1,
         )
         solver_b = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=1,
             solver_iterations=2,
             velocity_iterations=1,
@@ -2507,7 +2507,7 @@ class TestReducedArticulation(unittest.TestCase):
         momentum_before = _total_momentum(model, state0)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -2548,7 +2548,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=3,
             solver_iterations=2,
             velocity_iterations=1,
@@ -2595,7 +2595,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -2632,7 +2632,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -2668,7 +2668,7 @@ class TestReducedArticulation(unittest.TestCase):
                 newton.eval_fk(model, state.joint_q, state.joint_qd, state)
                 solver = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="reduced",
+                    joint_mode="reduced",
                     substeps=1,
                     solver_iterations=2,
                     velocity_iterations=0,
@@ -2707,7 +2707,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=2,
             velocity_iterations=0,
@@ -2744,7 +2744,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -2789,7 +2789,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
             velocity_iterations=1,
@@ -2844,7 +2844,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="maximal_projected",
+            joint_mode="maximal_projected",
             substeps=1,
             solver_iterations=8,
             velocity_iterations=1,
@@ -2896,7 +2896,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -2959,7 +2959,7 @@ class TestReducedArticulation(unittest.TestCase):
 
                 solver = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="reduced",
+                    joint_mode="reduced",
                     substeps=1,
                     solver_iterations=4,
                     velocity_iterations=1,
@@ -2989,7 +2989,7 @@ class TestReducedArticulation(unittest.TestCase):
         state = model.state()
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -3030,7 +3030,7 @@ class TestReducedArticulation(unittest.TestCase):
         state = model.state()
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -3190,7 +3190,7 @@ class TestReducedArticulation(unittest.TestCase):
                 state = model.state()
                 solver = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="reduced",
+                    joint_mode="reduced",
                     contact_friction_model="patch",
                     substeps=1,
                     solver_iterations=1,
@@ -3335,7 +3335,7 @@ class TestReducedArticulation(unittest.TestCase):
                 output = model.state()
                 solver = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="reduced",
+                    joint_mode="reduced",
                     substeps=1,
                     solver_iterations=1,
                     velocity_iterations=0,
@@ -3363,7 +3363,7 @@ class TestReducedArticulation(unittest.TestCase):
         state = model.state()
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -3412,7 +3412,7 @@ class TestReducedArticulation(unittest.TestCase):
         control = model.control()
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -3449,7 +3449,7 @@ class TestReducedArticulation(unittest.TestCase):
         control = model.control()
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -3513,14 +3513,14 @@ class TestReducedArticulation(unittest.TestCase):
         control.joint_f.assign(np.linspace(0.4, -0.3, int(model.joint_dof_count), dtype=np.float32))
         solver_fk = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
         )
         solver_valid = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -3565,14 +3565,14 @@ class TestReducedArticulation(unittest.TestCase):
         control.joint_f.assign(np.linspace(0.6, -0.4, int(model.joint_dof_count), dtype=np.float32))
         serial = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
         )
         warp = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -3621,14 +3621,14 @@ class TestReducedArticulation(unittest.TestCase):
                 control.joint_f.assign(np.linspace(0.4, -0.3, int(model.joint_dof_count), dtype=np.float32))
                 serial = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="reduced",
+                    joint_mode="reduced",
                     substeps=1,
                     solver_iterations=1,
                     velocity_iterations=0,
                 )
                 warp = newton.solvers.SolverPhoenX(
                     model,
-                    articulation_mode="reduced",
+                    joint_mode="reduced",
                     substeps=1,
                     solver_iterations=1,
                     velocity_iterations=0,
@@ -3697,7 +3697,7 @@ class TestReducedArticulation(unittest.TestCase):
         control.joint_f.assign(np.array([0.7, -0.4, 0.2, -0.3, 0.5], dtype=np.float32))
         phoenx = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=1,
@@ -3753,7 +3753,7 @@ class TestReducedArticulation(unittest.TestCase):
         control = model.control()
         control.joint_f.assign(np.array([0.2, -0.1, 0.15, -0.3, 0.25, 0.1, 0.6], dtype=np.float32))
         phoenx = newton.solvers.SolverPhoenX(
-            model, articulation_mode="reduced", substeps=1, solver_iterations=1, velocity_iterations=1
+            model, joint_mode="reduced", substeps=1, solver_iterations=1, velocity_iterations=1
         )
         featherstone = newton.solvers.SolverFeatherstone(model)
         dt = 1.0 / 240.0
@@ -3814,7 +3814,7 @@ class TestReducedArticulation(unittest.TestCase):
         control.joint_f.assign(joint_f.reshape(-1))
         phoenx = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=1,
@@ -3858,7 +3858,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
             velocity_iterations=0,
@@ -3903,14 +3903,14 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver_colored = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
         )
         solver_serial = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -3957,14 +3957,14 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver_colored = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
         )
         solver_serial = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -4002,7 +4002,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=3,
             solver_iterations=2,
             velocity_iterations=1,
@@ -4047,7 +4047,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=2,
             solver_iterations=2,
             velocity_iterations=1,
@@ -4081,7 +4081,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -4124,7 +4124,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
             velocity_iterations=1,
@@ -4168,7 +4168,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
             velocity_iterations=1,
@@ -4209,7 +4209,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
             velocity_iterations=1,
@@ -4283,14 +4283,14 @@ class TestReducedArticulation(unittest.TestCase):
 
         separate = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
             velocity_iterations=1,
         )
         fused = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
             velocity_iterations=1,
@@ -4350,7 +4350,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         reference = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             reduced_articulation_path="reference",
             substeps=2,
             solver_iterations=4,
@@ -4358,7 +4358,7 @@ class TestReducedArticulation(unittest.TestCase):
         )
         persistent = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             reduced_articulation_path="persistent",
             substeps=2,
             solver_iterations=4,
@@ -4398,8 +4398,8 @@ class TestReducedArticulation(unittest.TestCase):
             self.skipTest("reduced articulation tests require CUDA")
 
         model = _make_grounded_articulation_cluster(device, worlds=1, articulations_per_world=1)
-        point = newton.solvers.SolverPhoenX(model, articulation_mode="reduced", contact_friction_model="point")
-        patch = newton.solvers.SolverPhoenX(model, articulation_mode="reduced", contact_friction_model="patch")
+        point = newton.solvers.SolverPhoenX(model, joint_mode="reduced", contact_friction_model="point")
+        patch = newton.solvers.SolverPhoenX(model, joint_mode="reduced", contact_friction_model="patch")
 
         self.assertFalse(point._reduced_articulation.contact_block_system.patch_rows)
         self.assertTrue(patch._reduced_articulation.contact_block_system.patch_rows)
@@ -4408,7 +4408,7 @@ class TestReducedArticulation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "persistent reduced articulation path"):
             newton.solvers.SolverPhoenX(
                 model,
-                articulation_mode="reduced",
+                joint_mode="reduced",
                 contact_friction_model="patch",
                 reduced_articulation_path="persistent",
             )
@@ -4429,10 +4429,10 @@ class TestReducedArticulation(unittest.TestCase):
         state_optimized.body_q.assign(state_reference.body_q)
         state_optimized.body_qd.assign(state_reference.body_qd)
         reference = newton.solvers.SolverPhoenX(
-            model, articulation_mode="reduced", substeps=2, solver_iterations=2, velocity_iterations=1
+            model, joint_mode="reduced", substeps=2, solver_iterations=2, velocity_iterations=1
         )
         optimized = newton.solvers.SolverPhoenX(
-            model, articulation_mode="reduced", substeps=2, solver_iterations=2, velocity_iterations=1
+            model, joint_mode="reduced", substeps=2, solver_iterations=2, velocity_iterations=1
         )
         reference_reduced = reference._reduced_articulation
         reference_reduced.finish_relax = lambda: reference_reduced._publish_state(0.0)
@@ -4473,7 +4473,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=6,
             velocity_iterations=0,
@@ -4523,7 +4523,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=0,
@@ -4575,7 +4575,7 @@ class TestReducedArticulation(unittest.TestCase):
 
             solver = newton.solvers.SolverPhoenX(
                 model,
-                articulation_mode="reduced",
+                joint_mode="reduced",
                 substeps=1,
                 solver_iterations=8,
                 velocity_iterations=0,
@@ -4610,7 +4610,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=3,
             velocity_iterations=0,
@@ -4660,7 +4660,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         solver = newton.solvers.SolverPhoenX(
             model,
-            articulation_mode="reduced",
+            joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
             velocity_iterations=0,

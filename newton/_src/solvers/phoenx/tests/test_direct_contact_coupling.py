@@ -211,7 +211,7 @@ class TestDirectContactCoupling(unittest.TestCase):
                     substeps=5,
                     solver_iterations=2,
                     velocity_iterations=1,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                     mass_splitting=True,
                     mass_splitting_unrolled=unrolled,
                     step_layout="single_world",
@@ -249,7 +249,7 @@ class TestDirectContactCoupling(unittest.TestCase):
                     substeps=5,
                     solver_iterations=2,
                     velocity_iterations=1,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                     mass_splitting=True,
                     mass_splitting_unrolled=unrolled,
                     step_layout="single_world",
@@ -298,7 +298,7 @@ class TestDirectContactCoupling(unittest.TestCase):
                     velocity_iterations=1,
                     step_layout="multi_world",
                     multi_world_scheduler=scheduler,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                 )
                 self.assertEqual(solver._direct_equality_system.topology.dimensions, (66, 66))
                 self.assertTrue(solver.world._skip_all_joint_pgs())

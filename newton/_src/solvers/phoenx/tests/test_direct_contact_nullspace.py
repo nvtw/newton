@@ -29,7 +29,7 @@ class TestDirectContactNullspace(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             step_layout="single_world",
             sor_boost=1.0,
             substeps=1,
@@ -59,7 +59,7 @@ class TestDirectContactNullspace(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             step_layout="single_world",
             sor_boost=1.0,
             substeps=1,
@@ -164,7 +164,7 @@ class TestDirectContactNullspace(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             collision_pipeline=pipeline,
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             step_layout="single_world",
             sor_boost=1.0,
             substeps=1,
@@ -202,7 +202,7 @@ class TestDirectContactNullspace(unittest.TestCase):
         model = builder.finalize(device="cuda:0")
         pipeline = newton.CollisionPipeline(model, rigid_contact_max=32, contact_matching="sticky")
         solver = newton.solvers.SolverPhoenX(
-            model, collision_pipeline=pipeline, articulation_mode="maximal", step_layout="single_world", sor_boost=1.0
+            model, collision_pipeline=pipeline, joint_mode="maximal_direct", step_layout="single_world", sor_boost=1.0
         )
         state = model.state()
         contacts = pipeline.contacts()

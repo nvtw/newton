@@ -370,7 +370,7 @@ class TestHeavyPendulum(unittest.TestCase):
                     substeps=PENDULUM_SUBSTEPS,
                     solver_iterations=1,
                     velocity_iterations=0,
-                    articulation_mode="maximal",
+                    joint_mode="maximal_direct",
                     step_layout=layout,
                 )
                 self.assertEqual(solver._direct_equality_system.topology.dimensions, (11,))

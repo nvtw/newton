@@ -46,7 +46,7 @@ class ConfigEnvGo2PhoenX(ConfigEnvAnymalPhoenX):
     world_count: int = 1024
     frame_dt: float = 1.0 / 50.0
     sim_substeps: int = 4
-    articulation_mode: str = "reduced"
+    joint_mode: str = "reduced"
     action_scale: float = 0.5
     target_base_height: float = 0.4
     min_base_height: float = 0.18

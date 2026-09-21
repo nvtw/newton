@@ -149,7 +149,7 @@ class Example:
             solver_iterations=self.solver_iterations,
             velocity_iterations=self.velocity_iterations,
             step_layout="single_world",
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
             mass_splitting=mass_splitting,
             mass_splitting_unrolled=mass_splitting_unrolled,
         )

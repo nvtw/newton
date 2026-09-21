@@ -361,7 +361,7 @@ class Example:
             velocity_iterations=1,
             default_friction=0.5,
             step_layout="multi_world",
-            articulation_mode="maximal",
+            joint_mode="maximal_direct",
         )
 
         self.viewer.set_model(self.model)
