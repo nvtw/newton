@@ -31,6 +31,7 @@ import warp as wp
 
 import newton
 from newton._src.geometry.contact_reduction import NUM_NORMAL_BINS
+from newton._src.solvers.phoenx.constraints.contact_ingest import _BODY_PAIR_CONTACT_CAP
 from newton._src.solvers.phoenx.tests._test_helpers import make_solver_graph_stepper
 
 
@@ -292,7 +293,8 @@ class TestCompoundContactGrouping(unittest.TestCase):
         pair_source = scratch.pair_source_idx.numpy()[:column_count]
         point_counts = scratch.pair_count.numpy()[pair_source]
         self.assertGreater(column_count, 0)
-        self.assertLessEqual(int(np.max(point_counts)), 2 * NUM_NORMAL_BINS)
+        self.assertEqual(_BODY_PAIR_CONTACT_CAP, NUM_NORMAL_BINS + 6)
+        self.assertLessEqual(int(np.max(point_counts)), _BODY_PAIR_CONTACT_CAP)
 
         sort_perm = scratch.sort_perm.numpy()
         inv_sort_perm = scratch.inv_sort_perm.numpy()

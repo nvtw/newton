@@ -15,7 +15,6 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.geometry.contact_reduction import (
-    FACE_NORMALS,
     NUM_NORMAL_BINS,
     float_flip,
     get_slot,
@@ -78,9 +77,19 @@ __all__ = [
 ]
 
 
-# One deepest point per normal bin plus one spatial support point per
-# polyhedron direction. Ordinary manifolds bypass these kernels unchanged.
-_BODY_PAIR_CONTACT_CAP = 2 * NUM_NORMAL_BINS
+# One deepest point per normal bin plus support along each signed local axis.
+# Ordinary manifolds bypass these kernels unchanged.
+_BODY_PAIR_SPATIAL_DIRECTIONS = 6
+_BODY_PAIR_CONTACT_CAP = NUM_NORMAL_BINS + _BODY_PAIR_SPATIAL_DIRECTIONS
+
+
+@wp.func
+def _body_pair_support_direction(direction: wp.int32) -> wp.vec3f:
+    axis = direction // wp.int32(2)
+    sign = wp.float32(-1.0) if direction & wp.int32(1) else wp.float32(1.0)
+    result = wp.vec3f(0.0)
+    result[axis] = sign
+    return result
 
 
 class IngestScratch:
@@ -606,8 +615,8 @@ def _select_body_pair_manifold_kernel(
     if gap < wp.static(BETA_THRESHOLD):
         local_point = point0[contact] if body0 >= wp.int32(0) else point1[contact]
         local_point -= bodies.body_com[reference_body]
-        for direction in range(wp.static(NUM_NORMAL_BINS)):
-            projection = wp.dot(local_point, FACE_NORMALS[direction])
+        for direction in range(wp.static(_BODY_PAIR_SPATIAL_DIRECTIONS)):
+            projection = wp.dot(local_point, _body_pair_support_direction(direction))
             wp.atomic_max(
                 selected_contact,
                 first + wp.static(NUM_NORMAL_BINS) + direction,
