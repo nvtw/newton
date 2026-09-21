@@ -37,6 +37,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_PRISMATIC,
     JointConstraintData,
 )
+from newton._src.solvers.phoenx.diagnostics import StepReport
 from newton._src.solvers.phoenx.execution_policy import (
     _choose_auto_prepare_refresh_stride,
     _choose_fast_tail_family_split_for_scene,
@@ -162,6 +163,10 @@ class TestInvariants(unittest.TestCase):
                 }
             )
         )
+
+    def test_step_report_type_has_stable_world_alias(self) -> None:
+        """Keep diagnostics separate without changing the existing type name."""
+        self.assertIs(PhoenXWorld.StepReport, StepReport)
 
     def test_correct_construction_accepted(self) -> None:
         """A correctly-built world constructs without raising."""
