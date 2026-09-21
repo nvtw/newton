@@ -383,7 +383,8 @@ class Example:
                 f"{report.num_colors} colors; sizes={report.color_sizes}; "
                 f"group sizes={report.color_group_sizes}; overflow={report.overflow_size}; "
                 f"crank={drivetrain['crank_rpm']:.1f} rpm, rear={drivetrain['rear_rpm']:.1f} rpm, "
-                f"rear load={drivetrain['rear_load_power_w']:.2f} W"
+                f"input={drivetrain['crank_drive_power_w']:.2f} W, rear={drivetrain['rear_load_power_w']:.2f} W, "
+                f"efficiency={100.0 * drivetrain['drivetrain_efficiency']:.1f}%"
             )
 
     def drivetrain_metrics(self):
@@ -411,12 +412,21 @@ class Example:
         front_speed = angular_speed(self._front_joint)
         rear_speed = angular_speed(self._rear_joint)
         speed_ratio = abs(rear_speed / front_speed) if abs(front_speed) > 1.0e-6 else 0.0
+        drive_target = float(self.control.joint_target_qd.numpy()[self._front_dof])
+        drive_damping = float(self.model.joint_target_kd.numpy()[self._front_dof])
+        crank_torque = drive_damping * (drive_target - front_speed)
+        crank_power = crank_torque * front_speed
+        rear_power = rear_speed * rear_speed * self.rear_load_damping
+        efficiency = rear_power / crank_power if crank_power > 1.0e-6 else 0.0
         return {
             "crank_rpm": abs(front_speed) * 60.0 / (2.0 * np.pi),
             "rear_rpm": abs(rear_speed) * 60.0 / (2.0 * np.pi),
             "speed_ratio": speed_ratio,
+            "crank_drive_torque_nm": crank_torque,
+            "crank_drive_power_w": crank_power,
             "rear_load_torque_nm": abs(rear_speed) * self.rear_load_damping,
-            "rear_load_power_w": rear_speed * rear_speed * self.rear_load_damping,
+            "rear_load_power_w": rear_power,
+            "drivetrain_efficiency": efficiency,
         }
 
     def render(self):

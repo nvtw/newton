@@ -84,6 +84,9 @@ class TestBikeTransmission(unittest.TestCase):
         chain_y = example.state.body_q.numpy()[example.chain_bodies, 1]
         self.assertTrue(np.isfinite(tuple(metrics.values())).all())
         self.assertGreater(metrics["rear_load_power_w"], 3.0)
+        self.assertGreater(metrics["crank_drive_power_w"], metrics["rear_load_power_w"])
+        self.assertGreater(metrics["drivetrain_efficiency"], 0.5)
+        self.assertLess(metrics["drivetrain_efficiency"], 1.0)
         self.assertGreater(metrics["speed_ratio"], 2.5)
         self.assertLess(metrics["speed_ratio"], 4.5)
         self.assertLess(float(np.ptp(chain_y)), 0.005)
@@ -109,6 +112,9 @@ class TestBikeTransmission(unittest.TestCase):
         chain_y = example.state.body_q.numpy()[example.chain_bodies, 1]
         self.assertTrue(np.isfinite(tuple(metrics.values())).all())
         self.assertGreater(metrics["rear_load_power_w"], 10.0)
+        self.assertGreater(metrics["crank_drive_power_w"], metrics["rear_load_power_w"])
+        self.assertGreater(metrics["drivetrain_efficiency"], 0.5)
+        self.assertLess(metrics["drivetrain_efficiency"], 1.0)
         self.assertGreater(metrics["speed_ratio"], 2.5)
         self.assertLess(metrics["speed_ratio"], 4.5)
         self.assertLess(float(np.ptp(chain_y)), 0.005)
