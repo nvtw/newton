@@ -23,6 +23,7 @@ from .broad_phase_common import (
     check_aabb_overlap_moving,
     is_pair_excluded,
     is_shape_pair_immovable_filtered,
+    is_shape_pair_same_body_filtered,
     keep_all_filter,
     precompute_world_map,
     test_world_and_group_pair,
@@ -63,6 +64,9 @@ def create_nxn_broadphase_precomputed_pairs_kernel(filter_func: Any, filter_data
         pair = nxn_shape_pair[elementid]
         shape1 = pair[0]
         shape2 = pair[1]
+
+        if is_shape_pair_same_body_filtered(shape1, shape2, shape_body):
+            return
 
         if is_shape_pair_immovable_filtered(shape1, shape2, shape_body, body_flags, include_static_kinematic_pairs):
             return
@@ -217,6 +221,9 @@ def create_nxn_broadphase_kernel(filter_func: Any, filter_data_type: Any):
             return
 
         if not test_world_and_group_pair(world1, world2, collision_group1, collision_group2):
+            return
+
+        if is_shape_pair_same_body_filtered(shape1, shape2, shape_body):
             return
 
         if is_shape_pair_immovable_filtered(shape1, shape2, shape_body, body_flags, include_static_kinematic_pairs):
@@ -411,11 +418,11 @@ class BroadPhaseAllPairs:
                 the counter was zeroed by a preceding fused kernel).  Defaults to False so
                 the launch remains self-contained.
             shape_body: Optional array mapping each shape to its body index. Negative body indices are static shapes.
-                Omitting this array disables immovable-pair filtering for expert callers.
+                Omitting this array disables same-body and immovable-pair filtering for expert callers.
             body_flags: Optional body flag array used to identify kinematic bodies. An empty array is valid for
                 an all-static model when ``shape_body`` is provided.
-            include_static_kinematic_pairs: Whether to include pairs where both shapes are immovable. Set to
-                ``False`` to filter static-static, static-kinematic, and kinematic-kinematic pairs.
+            include_static_kinematic_pairs: Whether to include static-kinematic and kinematic-kinematic pairs.
+                Set to false to filter those pairs. Static-static pairs are always filtered.
 
         The method will populate candidate_pair with the indices of shape pairs (i,j) where i < j whose AABBs overlap
         (with optional margin expansion), whose collision groups allow interaction, and whose world indices are
@@ -563,11 +570,11 @@ class BroadPhaseExplicit:
                 the counter was zeroed by a preceding fused kernel).  Defaults to False so
                 the launch remains self-contained.
             shape_body: Optional array mapping each shape to its body index. Negative body indices are static shapes.
-                Omitting this array disables immovable-pair filtering for expert callers.
+                Omitting this array disables same-body and immovable-pair filtering for expert callers.
             body_flags: Optional body flag array used to identify kinematic bodies. An empty array is valid for
                 an all-static model when ``shape_body`` is provided.
-            include_static_kinematic_pairs: Whether to include pairs where both shapes are immovable. Set to
-                ``False`` to filter static-static, static-kinematic, and kinematic-kinematic pairs.
+            include_static_kinematic_pairs: Whether to include static-kinematic and kinematic-kinematic pairs.
+                Set to false to filter those pairs. Static-static pairs are always filtered.
 
         The method will populate candidate_pair with the indices of shape pairs whose AABBs overlap
         (with optional margin expansion), but only checking the explicitly provided pairs.
