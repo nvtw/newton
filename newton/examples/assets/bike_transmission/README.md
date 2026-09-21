@@ -37,19 +37,26 @@ The default viewer is OptiX. To run an accuracy smoke test without rendering:
 uv run --extra examples -m newton.examples phoenx_bike_transmission --viewer null --num-frames 240 --test
 ```
 
-The default configuration uses 120 Hz collision detection, 8 physics substeps
-per collision refresh, 4 grouped contact iterations, one velocity iteration,
-and the direct joint solver. Two-color mass-copy partitions expose independent
-GPU work while retaining ordered Gauss-Seidel updates inside each partition.
-Grouped PGS alternates forward and reverse color
-order between iterations to reduce directional bias without adding work. Exact
+At the default 60 rpm cadence, the configuration uses 120 Hz collision
+detection, 8 physics substeps per collision refresh, 4 grouped contact
+iterations, one velocity iteration, and the direct joint solver. Higher cadence
+automatically raises contact refresh frequency by 60 Hz per 30 rpm and uses 6
+substeps per refresh. This keeps sprocket travel near 5 mm per collision update.
+The crank drive reaches its target over two seconds to avoid an unphysical
+startup impulse. `--contact-updates-per-frame`, `--substeps`, and
+`--startup-ramp-time` provide explicit experimental overrides.
+
+Two-color mass-copy partitions expose independent GPU work while retaining
+ordered Gauss-Seidel updates inside each partition. Grouped PGS alternates
+forward and reverse color order between iterations to reduce directional bias
+without adding work. Exact
 mass-metric joint projections alternate with grouped mass-split contact PGS.
 Contact columns are capped at 64 rows. Every retained contact row is solved; the
 cap distributes long shape-pair columns across more solver work. Body-pair
 manifold merging is disabled because separate sprocket shapes form disconnected,
 strongly nonconvex contact patches. Independent shape pairs remain graph-colored
 and run in parallel. `--contact-chunk-size 0` restores whole shape-pair columns.
-`--substeps N` and `--iterations N` permit convergence experiments.
+`--iterations N` permits additional convergence experiments.
 
 Velocity-filtered speculative contacts cover up to 6 mm of predicted travel per
 collision refresh, enough for one front-tooth transit at the default cadence.
@@ -83,16 +90,24 @@ uv run ruff format newton/examples/phoenx/bike_transmission_scene.py
 
 The generated Python data records the source SHA-256.
 
-A 630-frame measured run of the 60 rpm loaded default configuration sampled
-joint gaps up to 0.050 mm, hinge-axis misalignment up to 0.0043 degrees, and
-lateral chain span up to 2.01 mm. At the final sample the crank and rear speeds
-were 40.1 rpm and 147.6 rpm, a 3.68 ratio, while the rear dynamometer absorbed
-4.79 W. These are sampled diagnostics, not bounds over every substep or a
-validation of interactive gear shifts.
+A ten-second run of the ramped 60 rpm default ended at 44.0 crank rpm and
+136.6 rear rpm, a 3.11 ratio, with 4.10 W absorbed by the rear dynamometer. Its
+final chain span was 1.14 mm, joint attachment error was 0.042 mm, and hinge-axis
+misalignment was 0.0025 degrees.
 
-On an RTX PRO 6000 Blackwell, the same ten-second headless run measured 62.77
-FPS, excluding startup and diagnostic reads. A separate 240-frame 1920x1080
-OptiX run with asynchronous simulation/render overlap measured 56.01 FPS.
+Cadence-scaled ten-second runs also remained engaged under the same rear load.
+The 90 rpm target ended at a 3.79 ratio and 10.16 W with a 2.3 mm chain span and
+0.058 mm joint gap. The 120 rpm target ended at a 4.15 ratio and 19.80 W with a
+0.7 mm span and 0.053 mm joint gap. A non-mutating live-contact audit at 120 rpm
+sampled at most 1.54 mm penetration, localized to rear-sprocket tooth contact.
+These diagnostics are sampled rather than bounds over every substep, and do not
+validate interactive gear shifts.
+
+On an RTX PRO 6000 Blackwell, the steady-state 60 rpm default measured 63.45
+headless FPS, excluding startup and diagnostic reads. A separate 240-frame
+1920x1080 OptiX run with asynchronous simulation/render overlap measured 56.69
+FPS. The 90 and 120 rpm schedules measured 52.90 and 40.86 headless FPS,
+and 48.47 and 38.28 FPS with asynchronous 1920x1080 OptiX rendering.
 Shape-pair manifolds preserve disconnected sprocket contacts while grouped mass
 splitting parallelizes independent interactions with equal-and-opposite impulses.
 
