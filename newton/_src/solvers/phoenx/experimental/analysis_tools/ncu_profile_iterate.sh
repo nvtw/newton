@@ -30,9 +30,9 @@ SCENE="${1:-dr_legs}"
 NUM_WORLDS="${2:-4096}"
 OUT="${3:-/tmp/phoenx_ncu_report.txt}"
 
-# Repo root = five levels up from this file (.../newton/_src/solvers/phoenx/analysis_tools).
+# Repo root = six levels up from this file (.../newton/_src/solvers/phoenx/experimental/analysis_tools).
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../../.." && pwd)"
+REPO="$(cd "$HERE/../../../../../.." && pwd)"
 PY="${PHOENX_PY:-$REPO/.venv/bin/python3}"
 NCU="$(command -v ncu || echo /usr/local/cuda/bin/ncu)"
 RUNNER="$(mktemp /tmp/phoenx_ncu_runner.XXXXXX.py)"

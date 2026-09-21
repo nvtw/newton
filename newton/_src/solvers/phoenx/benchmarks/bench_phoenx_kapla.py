@@ -260,7 +260,7 @@ def _run_one(
             "minimum useful-byte rate divided by calibrated sequential-copy ceiling; not measured DRAM utilization"
         ),
         roofline_ceiling_source=(
-            "RTX PRO 6000 Blackwell full-size CUDA-graph calibration via newton._src.solvers.phoenx.sol_calibration"
+            "RTX PRO 6000 Blackwell full-size CUDA-graph calibration via newton._src.solvers.phoenx.experimental.sol_calibration"
         ),
         blocks_per_sm=blocks_per_sm,
         colored_contact_layout=colored_contact_layout,

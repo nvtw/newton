@@ -32,7 +32,7 @@ LAUNCH_COUNT="${2:-6}"
 OUT="${3:-/tmp/phoenx_anymal_ncu.txt}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../../.." && pwd)"
+REPO="$(cd "$HERE/../../../../../.." && pwd)"
 PY="${PHOENX_PY:-$REPO/.venv/bin/python3}"
 NCU="$(command -v ncu || echo /usr/local/cuda/bin/ncu)"
 RUNNER="$(mktemp /tmp/phoenx_anymal_runner.XXXXXX.py)"

@@ -2,17 +2,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 #
-# Profile exactly one steady-state projected-maximal tree recurrence launch.
-# Warmup and graph capture occur before the CUDA profiler-API window.
+# Profile exactly one steady-state reduced-coordinate factorization launch.
+# Eager warmup occurs before the CUDA profiler-API window because graph-node
+# kernel replay is unreliable under Nsight Compute.
 #
 # Run from anywhere:
-#   sudo bash newton/_src/solvers/phoenx/analysis_tools/ncu_profile_maximal_projector.sh
+#   sudo bash newton/_src/solvers/phoenx/experimental/analysis_tools/ncu_profile_reduced_factor.sh
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../../.." && pwd)"
+REPO="$(cd "$HERE/../../../../../.." && pwd)"
 PY="${PHOENX_PY:-$REPO/.venv/bin/python3}"
-OUT_BASE="${1:-/tmp/phoenx_g1_maximal_projector_latest}"
+OUT_BASE="${1:-/tmp/phoenx_g1_reduced_factor_latest}"
 REPORT="${OUT_BASE}.ncu-rep"
 
 if [ -x /usr/local/cuda-13.2/bin/ncu ]; then
@@ -40,29 +41,26 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH="$REPO"
 export PYTHONUTF8=1
 
-printf "Profiling one projected-maximal recurrence launch\n  ncu: %s\n  python: %s\n  report: %s\n" "$NCU" "$PY" "$REPORT"
+printf "Profiling one reduced factorization launch\n  ncu: %s\n  python: %s\n  report: %s\n" "$NCU" "$PY" "$REPORT"
 
 "$NCU" \
   --target-processes all \
   --replay-mode kernel \
   --profile-from-start off \
-  --kernel-name "regex:_project_maximal_tree_kernel.*" \
+  --kernel-name "regex:_factor_reduced_warp_kernel.*" \
   --launch-count 1 \
   --kill 1 \
   --section SpeedOfLight \
-  --section MemoryWorkloadAnalysis \
+  --section MemoryWorkloadAnalysis_Tables \
   --section Occupancy \
   --section WarpStateStats \
   --section SchedulerStats \
   --force-overwrite \
   --export "$OUT_BASE" \
   "$PY" -m newton._src.solvers.phoenx.benchmarks.profile_g1_reduced_kernels \
-    --articulation-mode maximal_projected \
-    --projector-block-dim 128 \
-    --world-count 8192 \
+    --eager \
     --replays 1 \
     --warmup-replays 2 \
-    --sim-substeps 5 \
     --solver-iterations 2 \
     --velocity-iterations 1
 NCU_RC=$?
