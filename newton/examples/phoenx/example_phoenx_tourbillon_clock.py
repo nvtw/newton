@@ -184,7 +184,7 @@ class Example:
         self.control = self.model.control()
         self.pipeline = newton.CollisionPipeline(
             self.model,
-            contact_matching="sticky",
+            contact_matching="latest",
             rigid_contact_max=32768,
             speculative_contact_gap_max=0.002,
             speculative_contact_velocity_filter=False,

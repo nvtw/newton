@@ -31,7 +31,9 @@ authored springs. PhoenX uses its direct maximal-coordinate D6 joint solve and
 momentum-conserving paired contact impulses. Clock pivots use 0.01 N m of
 Coulomb friction; the low-loss oscillator pivot uses 0.0005 N m. The equal and
 opposite friction impulses preserve angular momentum. Contacts refresh at 120 Hz
-and the renderer receives device-resident double-buffered transforms.
+and the renderer receives device-resident double-buffered transforms. Fresh
+contact matching avoids carrying warm-start identity across successive ratchet
+teeth.
 
 OBJ files are copyrighted source assets and are deliberately ignored by Git.
 The local links point to:
