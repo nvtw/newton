@@ -3,7 +3,6 @@
 """Process-local diagnostic giving bilateral rows first choice of colors."""
 
 import warp as wp
-
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
@@ -34,4 +33,3 @@ def install():
 
     rebuild._joint_first = True
     PhoenXWorld._rebuild_elements = rebuild
-

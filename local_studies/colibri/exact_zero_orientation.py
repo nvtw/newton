@@ -1,7 +1,6 @@
 """Local native integration clone with an exact-zero angular-velocity guard."""
 
 import warp as wp
-
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     MOTION_DYNAMIC,
     BodyContainer,
@@ -54,4 +53,3 @@ def exact_zero_integrate(
     bodies.orientation[i] = q1
     bodies.inverse_inertia_world[i] = sym6_from_mat33(inv_inertia1)
     bodies.angular_velocity[i] = inv_inertia1 * angular_momentum
-

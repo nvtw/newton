@@ -1,13 +1,19 @@
 """Compare saved live witnesses with the failed pose without regenerating geometry."""
+
 import json
 from pathlib import Path
+
 import numpy as np
 
 prefix = "/tmp/colibri_physical_head12_batch1024"
 reference = np.load(prefix + ".npz")
 data = np.load(prefix + "_contacts.npz")
-gate = {key: reference[key].shape == data[key].shape and reference[key].dtype == data[key].dtype
-        and reference[key].tobytes() == data[key].tobytes() for key in reference.files}
+gate = {
+    key: reference[key].shape == data[key].shape
+    and reference[key].dtype == data[key].dtype
+    and reference[key].tobytes() == data[key].tobytes()
+    for key in reference.files
+}
 assert all(gate.values()), gate
 count = int(data["contact_count"][0])
 a, b = data["contact_shape0"][:count], data["contact_shape1"][:count]
@@ -38,4 +44,4 @@ report = {
     "conclusion": "Retained witness directions do not describe the deepest fresh feature. Raw generation versus reduction remains unresolved.",
 }
 Path(prefix + "_witness_audit.json").write_text(json.dumps(report, indent=2))
-print(json.dumps({k:v for k,v in report.items() if k not in ("transported_final_gaps_m", "contact_ids")}, indent=2))
+print(json.dumps({k: v for k, v in report.items() if k not in ("transported_final_gaps_m", "contact_ids")}, indent=2))

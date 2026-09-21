@@ -29,9 +29,7 @@ def install():
         "color = slab * slab_width + local_color",
         "color = slab + local_color * ((num_colors[0] + slab_width - 1) / slab_width)",
     )
-    solver_phoenx.get_color_group_sweep_kernel = _compile_function(
-        source, dispatch, "get_interleaved_sweep_kernel"
-    )
+    solver_phoenx.get_color_group_sweep_kernel = _compile_function(source, dispatch, "get_interleaved_sweep_kernel")
 
 
 if __name__ == "__main__":

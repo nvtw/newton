@@ -5,8 +5,8 @@ import hashlib
 import json
 import runpy
 import sys
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -14,19 +14,20 @@ import warp as wp
 from local_studies.colibri.check_native_velocity_iterations import validate_reference
 from newton._src.solvers.phoenx.solver import SolverPhoenX
 
+
 @wp.kernel(enable_backward=False)
-def advance(counter: wp.array(dtype=wp.int32)):
+def advance(counter: wp.array[wp.int32]):
     counter[0] = counter[0] + 1
 
 
 @wp.kernel(enable_backward=False)
-def record1(source: wp.array(dtype=Any), target: wp.array2d(dtype=Any), counter: wp.array(dtype=wp.int32)):
+def record1(source: wp.array[Any], target: wp.array2d[Any], counter: wp.array[wp.int32]):
     i = wp.tid()
     target[counter[0] % 60, i] = source[i]
 
 
 @wp.kernel(enable_backward=False)
-def record2(source: wp.array2d(dtype=Any), target: wp.array3d(dtype=Any), counter: wp.array(dtype=wp.int32)):
+def record2(source: wp.array2d[Any], target: wp.array3d[Any], counter: wp.array[wp.int32]):
     i, j = wp.tid()
     target[counter[0] % 60, i, j] = source[i, j]
 
@@ -107,10 +108,14 @@ def initialize(self, *pos, **kw):
     def record(label, full=True):
         names = list(arrays) if full else ["position", "orientation", "velocity", "angular_velocity", "inverse_inertia"]
         if label not in slots:
-            slots[label] = {name: wp.empty((60, *arrays[name].shape), dtype=arrays[name].dtype, device=w.device) for name in names}
+            slots[label] = {
+                name: wp.empty((60, *arrays[name].shape), dtype=arrays[name].dtype, device=w.device) for name in names
+            }
         for name, target in slots[label].items():
             source = arrays[name]
-            wp.launch(record1 if source.ndim == 1 else record2, source.shape, [source, target, counter], device=w.device)
+            wp.launch(
+                record1 if source.ndim == 1 else record2, source.shape, [source, target, counter], device=w.device
+            )
 
     old_sweep = w._color_group_sweep
     last_phase = [None]

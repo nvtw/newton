@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import warp as wp
+from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
@@ -33,7 +34,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_bias_t1,
     cc_set_bias_t2,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 @wp.kernel(enable_backward=False)
@@ -74,8 +74,9 @@ def shift_tangent_target(
 
 def install():
     """Wrap only the native maximal/direct contact split boundary."""
-    import newton._src.solvers.phoenx.articulations.maximal_contact_gs as owned
     import newton._src.solvers.phoenx.solver_phoenx as solver_module
+
+    import newton._src.solvers.phoenx.articulations.maximal_contact_gs as owned
     from local_studies.colibri.check_owned_friction_binding import check
 
     gate = check(owned)

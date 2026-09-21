@@ -50,8 +50,11 @@ def main():
                 ]
             )
         for name, a, b in zip(("linear", "angular", "lambda"), *outputs, strict=False):
-            print(name, "bitexact", np.array_equal(a.view(np.uint32), b.view(np.uint32)), "numeric", np.array_equal(a, b))
+            print(
+                name, "bitexact", np.array_equal(a.view(np.uint32), b.view(np.uint32)), "numeric", np.array_equal(a, b)
+            )
             np.testing.assert_array_equal(a.view(np.uint32), b.view(np.uint32))
+
 
 if __name__ == "__main__":
     main()

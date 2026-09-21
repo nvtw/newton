@@ -13,10 +13,10 @@ from newton._src.solvers.phoenx.helpers.math_helpers import apply_pair_velocity_
 @wp.kernel
 def _native_support(
     cc: ContactContainer,
-    state: wp.array(dtype=wp.vec3f),
+    state: wp.array[wp.vec3f],
     copies: wp.float32,
     reverse: wp.int32,
-    impulses: wp.array(dtype=wp.vec3f),
+    impulses: wp.array[wp.vec3f],
 ):
     v = state[0]
     w = state[1]

@@ -81,7 +81,11 @@ for name in ("warm", "biased", "relax"):
                 bias = float(solved["derived"][3, k])
                 eff = float(solved["derived"][0, k])
                 subtraction = 0.9417003989219666 * eff * bias
-                load = float(np.clip(lam[0] + subtraction, 0, lam[0])) if name != "relax" and args.normal_load == "legacy" else float(lam[0])
+                load = (
+                    float(np.clip(lam[0] + subtraction, 0, lam[0]))
+                    if name != "relax" and args.normal_load == "legacy"
+                    else float(lam[0])
+                )
                 ground.append(
                     {
                         "point": int(k),

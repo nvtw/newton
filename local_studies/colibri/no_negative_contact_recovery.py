@@ -14,7 +14,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import ContactCont
 
 
 @wp.kernel(enable_backward=False)
-def clamp_recovery(columns: ContactColumnContainer, active: wp.array(dtype=wp.int32), cc: ContactContainer):
+def clamp_recovery(columns: ContactColumnContainer, active: wp.array[wp.int32], cc: ContactContainer):
     col = wp.tid()
     if col < active[0]:
         first = contact_get_contact_first(columns, col)

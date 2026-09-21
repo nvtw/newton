@@ -10,6 +10,10 @@ deformable contacts through endpoint helpers.
 from __future__ import annotations
 
 import warp as wp
+from newton._src.solvers.phoenx.cloth_collision import (
+    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
+    SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
+)
 
 from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.body import (
@@ -20,10 +24,6 @@ from newton._src.solvers.phoenx.body import (
     body_load_vw,
     body_store_vw,
     mat33_from_sym6,
-)
-from newton._src.solvers.phoenx.cloth_collision import (
-    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
-    SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
 )
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
@@ -1062,6 +1062,7 @@ def _make_normal_delta_load(has_soft_contact_pd: bool):
 
 _normal_delta_load = _make_normal_delta_load(True)
 _normal_delta_load_no_pd = _make_normal_delta_load(False)
+
 
 @wp.func
 def _tangent_delta(

@@ -1,4 +1,5 @@
 """Compare first-fit coloring with an exact five-step first-free-bit search."""
+
 import argparse
 import json
 import time
@@ -6,8 +7,8 @@ import time
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import ElementInteractionData
 from local_studies.colibri import color_groups_linear_reference as reference
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import ElementInteractionData
 from newton._src.solvers.phoenx.mass_splitting import color_groups as candidate
 
 

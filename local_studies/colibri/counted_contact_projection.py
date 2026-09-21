@@ -252,7 +252,9 @@ def _make_contact_project_friction_metric(scalar_type):
                     if old_length_sq > scalar_type(0.0):
                         old_length = wp.sqrt(old_length_sq)
                         old_k_old = old_x * (a * old_x + b * old_y) + old_y * (b * old_x + c * old_y)
-                        estimate = (old_x * target_x + old_y * target_y) / (radius * old_length) - old_k_old / old_length_sq
+                        estimate = (old_x * target_x + old_y * target_y) / (
+                            radius * old_length
+                        ) - old_k_old / old_length_sq
                         if estimate > lower and estimate < upper:
                             alpha = estimate
                     # The norm bound supplies a feasible upper bracket. Newton

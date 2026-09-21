@@ -121,7 +121,9 @@ def main():
     report = {
         "case": failure["case"],
         "differences": differences,
-        "instrumented_outputs_equal": {name: outputs[0][name].tobytes() == outputs[1][name].tobytes() for name in FIELDS},
+        "instrumented_outputs_equal": {
+            name: outputs[0][name].tobytes() == outputs[1][name].tobytes() for name in FIELDS
+        },
         "instrumentation_preserves_original_outputs": [
             {name: outputs[i][name].tobytes() == failure["outputs"][i][name].tobytes() for name in FIELDS}
             for i in (0, 1)

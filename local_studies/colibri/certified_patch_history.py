@@ -93,12 +93,13 @@ def update(domain: Domain, bodies: BodyContainer, contacts: ContactViews, cc: Co
         if domain.previous_member[k] != 0:
             normal_load = wp.abs(cc.prev_impulses[0, k])
             tangential_load = wp.sqrt(
-                cc.prev_impulses[1, k] * cc.prev_impulses[1, k]
-                + cc.prev_impulses[2, k] * cc.prev_impulses[2, k]
+                cc.prev_impulses[1, k] * cc.prev_impulses[1, k] + cc.prev_impulses[2, k] * cc.prev_impulses[2, k]
             )
-            if (cc.prev_lambdas[12, k] != 0.0
-                    and normal_load > wp.float32(1.0e-7)
-                    and tangential_load > wp.float32(1.0e-8)):
+            if (
+                cc.prev_lambdas[12, k] != 0.0
+                and normal_load > wp.float32(1.0e-7)
+                and tangential_load > wp.float32(1.0e-8)
+            ):
                 broken = True
     domain.stats[0] += 1
     if first < 0 or conflict:

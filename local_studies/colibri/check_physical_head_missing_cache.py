@@ -2,9 +2,9 @@
 
 import importlib.util
 import os
-from pathlib import Path
 import sys
 import unittest
+from pathlib import Path
 
 source = Path("local_studies/colibri/physical_head_overflow.py").read_text()
 start = source.index("        if cid < contact_offset:")

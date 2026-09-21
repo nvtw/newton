@@ -40,10 +40,10 @@ class Schedule:
 def build_schedule(endpoints, num_bodies, colors_per_slab=8, order=None):
     """Greedily color every row, then group consecutive colors into slabs.
 
-Negative endpoints denote prescribed/world bodies and require no mutable
-copy. ``order`` is an optional permutation, never a filter of physical rows.
-This is an ordering experiment, not the current solver's exact coloring.
-"""
+    Negative endpoints denote prescribed/world bodies and require no mutable
+    copy. ``order`` is an optional permutation, never a filter of physical rows.
+    This is an ordering experiment, not the current solver's exact coloring.
+    """
     endpoints = np.asarray(endpoints, dtype=np.int64)
     if endpoints.ndim != 2 or colors_per_slab < 1:
         raise ValueError("Expected a row-by-endpoint array and positive slab width")
@@ -95,10 +95,10 @@ def validate_schedule(schedule, endpoints):
 def project_scalar_rows(schedule, endpoints, inverse_mass, velocity, sweeps=1):
     """Reference unit-J fixed-relative-velocity solves with physical averaging.
 
-This scalar model checks the copy algebra independently of geometry. Each
-copy's inverse mass is its body's physical inverse mass times its number
-of active slabs. There is no added damping, regularization, or mass cap.
-"""
+    This scalar model checks the copy algebra independently of geometry. Each
+    copy's inverse mass is its body's physical inverse mass times its number
+    of active slabs. There is no added damping, regularization, or mass cap.
+    """
     inverse_mass = np.asarray(inverse_mass, dtype=np.float64)
     velocity = np.asarray(velocity, dtype=np.float64).copy()
     counts = np.array([len(s) for s in schedule.body_slabs])

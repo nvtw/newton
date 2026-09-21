@@ -16,7 +16,7 @@ def relative(a, b):
 def world_relative(a, b):
     a = np.asarray(a, dtype=float) / np.linalg.norm(a)
     b = np.asarray(b, dtype=float) / np.linalg.norm(b)
-    return np.r_[a[3]*b[:3] - b[3]*a[:3] + np.cross(a[:3], b[:3]), a[3]*b[3] + a[:3]@b[:3]]
+    return np.r_[a[3] * b[:3] - b[3] * a[:3] + np.cross(a[:3], b[:3]), a[3] * b[3] + a[:3] @ b[:3]]
 
 
 def angles(q):
@@ -52,7 +52,7 @@ def main():
             "xy_um": float(np.linalg.norm(delta[:2]) * 1e6),
             "xy_um_s": float(np.linalg.norm(delta[:2]) * 1e6 / (times[-1] - times[i])),
             "body_local_roll_pitch_yaw_deg": angles(rotation),
-            "world_roll_pitch_yaw_deg": angles(world_relative(q[i,0,3:], q[-1,0,3:])),
+            "world_roll_pitch_yaw_deg": angles(world_relative(q[i, 0, 3:], q[-1, 0, 3:])),
             "max_xy_excursion_um": float(np.max(np.linalg.norm(q[i:, 0, :2] - q[i, 0, :2], axis=1)) * 1e6),
         }
     report["final_base_world_roll_pitch_yaw_deg"] = angles(world_relative(a["initial_q"][0, 3:], q[-1, 0, 3:]))

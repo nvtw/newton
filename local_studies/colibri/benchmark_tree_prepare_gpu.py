@@ -64,25 +64,25 @@ from local_studies.colibri.benchmark_small_tree_qr import small_qr
 #endif
 """)
 def prepare(
-    mass: wp.array(dtype=wp.float64),
-    rows: wp.array(dtype=wp.float64),
-    drive: wp.array(dtype=wp.float64),
-    output: wp.array(dtype=wp.float64),
-    status: wp.array(dtype=wp.int32),
-    cholout: wp.array(dtype=wp.float64),
+    mass: wp.array[wp.float64],
+    rows: wp.array[wp.float64],
+    drive: wp.array[wp.float64],
+    output: wp.array[wp.float64],
+    status: wp.array[wp.int32],
+    cholout: wp.array[wp.float64],
 ): ...
 
 
 @wp.kernel
 def prepare_and_factor(
-    mass: wp.array(dtype=wp.float64),
-    rows: wp.array(dtype=wp.float64),
-    drive: wp.array(dtype=wp.float64),
-    output: wp.array(dtype=wp.float64),
-    status: wp.array(dtype=wp.int32),
-    cholout: wp.array(dtype=wp.float64),
-    q: wp.array(dtype=wp.float64),
-    r: wp.array(dtype=wp.float64),
+    mass: wp.array[wp.float64],
+    rows: wp.array[wp.float64],
+    drive: wp.array[wp.float64],
+    output: wp.array[wp.float64],
+    status: wp.array[wp.int32],
+    cholout: wp.array[wp.float64],
+    q: wp.array[wp.float64],
+    r: wp.array[wp.float64],
 ):
     prepare(mass, rows, drive, output, status, cholout)
     if status[0] == 1:

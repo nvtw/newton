@@ -4,12 +4,6 @@ import functools
 import types
 
 import warp as wp
-
-from newton._src.solvers.phoenx.constraints.constraint_contact import contact_get_body1, contact_get_body2
-from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import ElementInteractionData
-from newton._src.solvers.phoenx.mass_splitting import color_groups as topology
-from newton._src.solvers.phoenx.mass_splitting.interaction_graph import build_interaction_graph
-from newton._src.solvers.phoenx.mass_splitting.slot_cache import build_partition_slot_cache_kernel
 from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     BodyContainer,
     ConstraintContainer,
@@ -21,6 +15,12 @@ from newton._src.solvers.phoenx.solver_phoenx_kernels import (
     _make_singleworld_dispatch_func,
     _sync_threads,
 )
+
+from newton._src.solvers.phoenx.constraints.constraint_contact import contact_get_body1, contact_get_body2
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import ElementInteractionData
+from newton._src.solvers.phoenx.mass_splitting import color_groups as topology
+from newton._src.solvers.phoenx.mass_splitting.interaction_graph import build_interaction_graph
+from newton._src.solvers.phoenx.mass_splitting.slot_cache import build_partition_slot_cache_kernel
 
 
 @wp.kernel(enable_backward=False)

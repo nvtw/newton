@@ -1,4 +1,5 @@
 """Exercise arbitrary mask occupancy through exact first-fit graph schedules."""
+
 import unittest
 
 import numpy as np

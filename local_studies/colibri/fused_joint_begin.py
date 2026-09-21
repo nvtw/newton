@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Local fused joint preparation; helpers preserve source expressions exactly."""
 
-import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.articulations import direct_equality as _direct
@@ -13,16 +12,111 @@ for _name, _value in vars(_direct).items():
     if not _name.startswith("__"):
         globals()[_name] = _value
 
-@wp.func
-def _prepare_at(_index: wp.int32, structural_joints: wp.array[wp.int32], effective_joint_mode: wp.array[wp.int32], effective_joint_axis: wp.array[wp.vec3], generic_linear_axes: wp.array[wp.vec3], generic_angular_axes: wp.array[wp.vec3], generic_linear_count: wp.array[wp.int32], generic_angular_count: wp.array[wp.int32], joint_parent: wp.array[wp.int32], joint_child: wp.array[wp.int32], joint_qd_start: wp.array[wp.int32], joint_dof_dim: wp.array2d[wp.int32], joint_x_p: wp.array[wp.transform], joint_x_c: wp.array[wp.transform], cable_rest_relative_orientation: wp.array[wp.quat], joint_target_ke: wp.array[wp.float32], joint_target_kd: wp.array[wp.float32], bodies: BodyContainer, idt: wp.float32, row_count: wp.array[wp.int32], row_wrench0: wp.array2d[wp.spatial_vector], row_wrench1: wp.array2d[wp.spatial_vector], row_bias: wp.array2d[wp.float32], row_error: wp.array2d[wp.float32], row_stiffness: wp.array2d[wp.float32], row_damping: wp.array2d[wp.float32]):
-    structural_index = _index
-    bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(DEFAULT_HERTZ_LINEAR, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt)
-    joint = structural_joints[structural_index]
-    count = _prepare_direct_rows(structural_index, joint, effective_joint_mode, effective_joint_axis, generic_linear_axes, generic_angular_axes, generic_linear_count, generic_angular_count, joint_parent, joint_child, joint_qd_start, joint_dof_dim, joint_x_p, joint_x_c, cable_rest_relative_orientation, joint_target_ke, joint_target_kd, bodies, bias_rate, row_wrench0, row_wrench1, row_bias, row_error, row_stiffness, row_damping)
-    row_count[structural_index] = count
 
 @wp.func
-def _snapshot_at(_index: wp.int32, row_joint: wp.array[wp.int32], row_local: wp.array[wp.int32], row_dynamic: wp.array[wp.bool], row_dof: wp.array[wp.int32], row_direct_drive: wp.array[wp.bool], joint_to_structural: wp.array[wp.int32], effective_joint_mode: wp.array[wp.int32], effective_joint_axis: wp.array[wp.vec3], joint_type: wp.array[wp.int32], joint_qd_start: wp.array[wp.int32], joint_dof_dim: wp.array2d[wp.int32], row_target_q: wp.array[wp.int32], joint_parent: wp.array[wp.int32], joint_child: wp.array[wp.int32], joint_x_p: wp.array[wp.transform], joint_x_c: wp.array[wp.transform], row_wrench0: wp.array2d[wp.spatial_vector], row_wrench1: wp.array2d[wp.spatial_vector], joint_armature: wp.array[wp.float32], joint_damping: wp.array[wp.float32], joint_gear: wp.array[wp.float32], joint_target_mode: wp.array[wp.int32], joint_target_ke: wp.array[wp.float32], joint_target_kd: wp.array[wp.float32], control_target_q: wp.array[wp.float32], control_target_qd: wp.array[wp.float32], dt: wp.float32, bodies: BodyContainer, previous_coordinate: wp.array[wp.float32], coordinate_revolutions: wp.array[wp.int32], dynamic_mass: wp.array[wp.float32], dynamic_old_velocity: wp.array[wp.float32], dynamic_coordinate: wp.array[wp.float32], velocity_reference: wp.array[wp.float32], accumulated_impulse: wp.array[wp.float32], drive_saturated: wp.array[wp.bool]):
+def _prepare_at(
+    _index: wp.int32,
+    structural_joints: wp.array[wp.int32],
+    effective_joint_mode: wp.array[wp.int32],
+    effective_joint_axis: wp.array[wp.vec3],
+    generic_linear_axes: wp.array[wp.vec3],
+    generic_angular_axes: wp.array[wp.vec3],
+    generic_linear_count: wp.array[wp.int32],
+    generic_angular_count: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_dof_dim: wp.array2d[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    cable_rest_relative_orientation: wp.array[wp.quat],
+    joint_target_ke: wp.array[wp.float32],
+    joint_target_kd: wp.array[wp.float32],
+    bodies: BodyContainer,
+    idt: wp.float32,
+    row_count: wp.array[wp.int32],
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    row_bias: wp.array2d[wp.float32],
+    row_error: wp.array2d[wp.float32],
+    row_stiffness: wp.array2d[wp.float32],
+    row_damping: wp.array2d[wp.float32],
+):
+    structural_index = _index
+    bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
+        DEFAULT_HERTZ_LINEAR, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
+    )
+    joint = structural_joints[structural_index]
+    count = _prepare_direct_rows(
+        structural_index,
+        joint,
+        effective_joint_mode,
+        effective_joint_axis,
+        generic_linear_axes,
+        generic_angular_axes,
+        generic_linear_count,
+        generic_angular_count,
+        joint_parent,
+        joint_child,
+        joint_qd_start,
+        joint_dof_dim,
+        joint_x_p,
+        joint_x_c,
+        cable_rest_relative_orientation,
+        joint_target_ke,
+        joint_target_kd,
+        bodies,
+        bias_rate,
+        row_wrench0,
+        row_wrench1,
+        row_bias,
+        row_error,
+        row_stiffness,
+        row_damping,
+    )
+    row_count[structural_index] = count
+
+
+@wp.func
+def _snapshot_at(
+    _index: wp.int32,
+    row_joint: wp.array[wp.int32],
+    row_local: wp.array[wp.int32],
+    row_dynamic: wp.array[wp.bool],
+    row_dof: wp.array[wp.int32],
+    row_direct_drive: wp.array[wp.bool],
+    joint_to_structural: wp.array[wp.int32],
+    effective_joint_mode: wp.array[wp.int32],
+    effective_joint_axis: wp.array[wp.vec3],
+    joint_type: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_dof_dim: wp.array2d[wp.int32],
+    row_target_q: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_x_c: wp.array[wp.transform],
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    joint_armature: wp.array[wp.float32],
+    joint_damping: wp.array[wp.float32],
+    joint_gear: wp.array[wp.float32],
+    joint_target_mode: wp.array[wp.int32],
+    joint_target_ke: wp.array[wp.float32],
+    joint_target_kd: wp.array[wp.float32],
+    control_target_q: wp.array[wp.float32],
+    control_target_qd: wp.array[wp.float32],
+    dt: wp.float32,
+    bodies: BodyContainer,
+    previous_coordinate: wp.array[wp.float32],
+    coordinate_revolutions: wp.array[wp.int32],
+    dynamic_mass: wp.array[wp.float32],
+    dynamic_old_velocity: wp.array[wp.float32],
+    dynamic_coordinate: wp.array[wp.float32],
+    velocity_reference: wp.array[wp.float32],
+    accumulated_impulse: wp.array[wp.float32],
+    drive_saturated: wp.array[wp.bool],
+):
     row = _index
     accumulated_impulse[row] = wp.float32(0.0)
     drive_saturated[row] = False
@@ -75,10 +169,14 @@ def _snapshot_at(_index: wp.int32, row_joint: wp.array[wp.int32], row_local: wp.
         qd_start = joint_qd_start[joint]
         linear_count = joint_dof_dim[joint, 0]
         angular_count = joint_dof_dim[joint, 1]
-        is_single_d6_angular = joint_type[joint] == JointType.D6 and angular_count == wp.int32(1) and (dof >= qd_start + linear_count)
+        is_single_d6_angular = (
+            joint_type[joint] == JointType.D6 and angular_count == wp.int32(1) and (dof >= qd_start + linear_count)
+        )
         if mode == JOINT_MODE_REVOLUTE or is_single_d6_angular:
             wrapped = extract_rotation_angle(q1 * wp.quat_inverse(q0), axis)
-            counter, previous = revolution_tracker_update(wrapped, coordinate_revolutions[row], previous_coordinate[row])
+            counter, previous = revolution_tracker_update(
+                wrapped, coordinate_revolutions[row], previous_coordinate[row]
+            )
             coordinate_revolutions[row] = counter
             previous_coordinate[row] = previous
             coordinate = revolution_tracker_angle(counter, previous)
@@ -90,12 +188,143 @@ def _snapshot_at(_index: wp.int32, row_joint: wp.array[wp.int32], row_local: wp.
     dynamic_mass[row] = wp.max(mass, wp.float32(1e-10))
     velocity_reference[row] = momentum / dynamic_mass[row]
 
+
 @wp.kernel(enable_backward=False)
-def fused_begin(row_starts: wp.array[wp.int32], row_ids: wp.array[wp.int32], p_structural_joints: wp.array[wp.int32], p_effective_joint_mode: wp.array[wp.int32], p_effective_joint_axis: wp.array[wp.vec3], p_generic_linear_axes: wp.array[wp.vec3], p_generic_angular_axes: wp.array[wp.vec3], p_generic_linear_count: wp.array[wp.int32], p_generic_angular_count: wp.array[wp.int32], p_joint_parent: wp.array[wp.int32], p_joint_child: wp.array[wp.int32], p_joint_qd_start: wp.array[wp.int32], p_joint_dof_dim: wp.array2d[wp.int32], p_joint_x_p: wp.array[wp.transform], p_joint_x_c: wp.array[wp.transform], p_cable_rest_relative_orientation: wp.array[wp.quat], p_joint_target_ke: wp.array[wp.float32], p_joint_target_kd: wp.array[wp.float32], p_bodies: BodyContainer, p_idt: wp.float32, p_row_count: wp.array[wp.int32], p_row_wrench0: wp.array2d[wp.spatial_vector], p_row_wrench1: wp.array2d[wp.spatial_vector], p_row_bias: wp.array2d[wp.float32], p_row_error: wp.array2d[wp.float32], p_row_stiffness: wp.array2d[wp.float32], p_row_damping: wp.array2d[wp.float32], s_row_joint: wp.array[wp.int32], s_row_local: wp.array[wp.int32], s_row_dynamic: wp.array[wp.bool], s_row_dof: wp.array[wp.int32], s_row_direct_drive: wp.array[wp.bool], s_joint_to_structural: wp.array[wp.int32], s_effective_joint_mode: wp.array[wp.int32], s_effective_joint_axis: wp.array[wp.vec3], s_joint_type: wp.array[wp.int32], s_joint_qd_start: wp.array[wp.int32], s_joint_dof_dim: wp.array2d[wp.int32], s_row_target_q: wp.array[wp.int32], s_joint_parent: wp.array[wp.int32], s_joint_child: wp.array[wp.int32], s_joint_x_p: wp.array[wp.transform], s_joint_x_c: wp.array[wp.transform], s_row_wrench0: wp.array2d[wp.spatial_vector], s_row_wrench1: wp.array2d[wp.spatial_vector], s_joint_armature: wp.array[wp.float32], s_joint_damping: wp.array[wp.float32], s_joint_gear: wp.array[wp.float32], s_joint_target_mode: wp.array[wp.int32], s_joint_target_ke: wp.array[wp.float32], s_joint_target_kd: wp.array[wp.float32], s_control_target_q: wp.array[wp.float32], s_control_target_qd: wp.array[wp.float32], s_dt: wp.float32, s_bodies: BodyContainer, s_previous_coordinate: wp.array[wp.float32], s_coordinate_revolutions: wp.array[wp.int32], s_dynamic_mass: wp.array[wp.float32], s_dynamic_old_velocity: wp.array[wp.float32], s_dynamic_coordinate: wp.array[wp.float32], s_velocity_reference: wp.array[wp.float32], s_accumulated_impulse: wp.array[wp.float32], s_drive_saturated: wp.array[wp.bool]):
+def fused_begin(
+    row_starts: wp.array[wp.int32],
+    row_ids: wp.array[wp.int32],
+    p_structural_joints: wp.array[wp.int32],
+    p_effective_joint_mode: wp.array[wp.int32],
+    p_effective_joint_axis: wp.array[wp.vec3],
+    p_generic_linear_axes: wp.array[wp.vec3],
+    p_generic_angular_axes: wp.array[wp.vec3],
+    p_generic_linear_count: wp.array[wp.int32],
+    p_generic_angular_count: wp.array[wp.int32],
+    p_joint_parent: wp.array[wp.int32],
+    p_joint_child: wp.array[wp.int32],
+    p_joint_qd_start: wp.array[wp.int32],
+    p_joint_dof_dim: wp.array2d[wp.int32],
+    p_joint_x_p: wp.array[wp.transform],
+    p_joint_x_c: wp.array[wp.transform],
+    p_cable_rest_relative_orientation: wp.array[wp.quat],
+    p_joint_target_ke: wp.array[wp.float32],
+    p_joint_target_kd: wp.array[wp.float32],
+    p_bodies: BodyContainer,
+    p_idt: wp.float32,
+    p_row_count: wp.array[wp.int32],
+    p_row_wrench0: wp.array2d[wp.spatial_vector],
+    p_row_wrench1: wp.array2d[wp.spatial_vector],
+    p_row_bias: wp.array2d[wp.float32],
+    p_row_error: wp.array2d[wp.float32],
+    p_row_stiffness: wp.array2d[wp.float32],
+    p_row_damping: wp.array2d[wp.float32],
+    s_row_joint: wp.array[wp.int32],
+    s_row_local: wp.array[wp.int32],
+    s_row_dynamic: wp.array[wp.bool],
+    s_row_dof: wp.array[wp.int32],
+    s_row_direct_drive: wp.array[wp.bool],
+    s_joint_to_structural: wp.array[wp.int32],
+    s_effective_joint_mode: wp.array[wp.int32],
+    s_effective_joint_axis: wp.array[wp.vec3],
+    s_joint_type: wp.array[wp.int32],
+    s_joint_qd_start: wp.array[wp.int32],
+    s_joint_dof_dim: wp.array2d[wp.int32],
+    s_row_target_q: wp.array[wp.int32],
+    s_joint_parent: wp.array[wp.int32],
+    s_joint_child: wp.array[wp.int32],
+    s_joint_x_p: wp.array[wp.transform],
+    s_joint_x_c: wp.array[wp.transform],
+    s_row_wrench0: wp.array2d[wp.spatial_vector],
+    s_row_wrench1: wp.array2d[wp.spatial_vector],
+    s_joint_armature: wp.array[wp.float32],
+    s_joint_damping: wp.array[wp.float32],
+    s_joint_gear: wp.array[wp.float32],
+    s_joint_target_mode: wp.array[wp.int32],
+    s_joint_target_ke: wp.array[wp.float32],
+    s_joint_target_kd: wp.array[wp.float32],
+    s_control_target_q: wp.array[wp.float32],
+    s_control_target_qd: wp.array[wp.float32],
+    s_dt: wp.float32,
+    s_bodies: BodyContainer,
+    s_previous_coordinate: wp.array[wp.float32],
+    s_coordinate_revolutions: wp.array[wp.int32],
+    s_dynamic_mass: wp.array[wp.float32],
+    s_dynamic_old_velocity: wp.array[wp.float32],
+    s_dynamic_coordinate: wp.array[wp.float32],
+    s_velocity_reference: wp.array[wp.float32],
+    s_accumulated_impulse: wp.array[wp.float32],
+    s_drive_saturated: wp.array[wp.bool],
+):
     index = wp.tid()
-    _prepare_at(index, p_structural_joints, p_effective_joint_mode, p_effective_joint_axis, p_generic_linear_axes, p_generic_angular_axes, p_generic_linear_count, p_generic_angular_count, p_joint_parent, p_joint_child, p_joint_qd_start, p_joint_dof_dim, p_joint_x_p, p_joint_x_c, p_cable_rest_relative_orientation, p_joint_target_ke, p_joint_target_kd, p_bodies, p_idt, p_row_count, p_row_wrench0, p_row_wrench1, p_row_bias, p_row_error, p_row_stiffness, p_row_damping)
+    _prepare_at(
+        index,
+        p_structural_joints,
+        p_effective_joint_mode,
+        p_effective_joint_axis,
+        p_generic_linear_axes,
+        p_generic_angular_axes,
+        p_generic_linear_count,
+        p_generic_angular_count,
+        p_joint_parent,
+        p_joint_child,
+        p_joint_qd_start,
+        p_joint_dof_dim,
+        p_joint_x_p,
+        p_joint_x_c,
+        p_cable_rest_relative_orientation,
+        p_joint_target_ke,
+        p_joint_target_kd,
+        p_bodies,
+        p_idt,
+        p_row_count,
+        p_row_wrench0,
+        p_row_wrench1,
+        p_row_bias,
+        p_row_error,
+        p_row_stiffness,
+        p_row_damping,
+    )
     for pointer in range(row_starts[index], row_starts[index + 1]):
-        _snapshot_at(row_ids[pointer], s_row_joint, s_row_local, s_row_dynamic, s_row_dof, s_row_direct_drive, s_joint_to_structural, s_effective_joint_mode, s_effective_joint_axis, s_joint_type, s_joint_qd_start, s_joint_dof_dim, s_row_target_q, s_joint_parent, s_joint_child, s_joint_x_p, s_joint_x_c, s_row_wrench0, s_row_wrench1, s_joint_armature, s_joint_damping, s_joint_gear, s_joint_target_mode, s_joint_target_ke, s_joint_target_kd, s_control_target_q, s_control_target_qd, s_dt, s_bodies, s_previous_coordinate, s_coordinate_revolutions, s_dynamic_mass, s_dynamic_old_velocity, s_dynamic_coordinate, s_velocity_reference, s_accumulated_impulse, s_drive_saturated)
+        _snapshot_at(
+            row_ids[pointer],
+            s_row_joint,
+            s_row_local,
+            s_row_dynamic,
+            s_row_dof,
+            s_row_direct_drive,
+            s_joint_to_structural,
+            s_effective_joint_mode,
+            s_effective_joint_axis,
+            s_joint_type,
+            s_joint_qd_start,
+            s_joint_dof_dim,
+            s_row_target_q,
+            s_joint_parent,
+            s_joint_child,
+            s_joint_x_p,
+            s_joint_x_c,
+            s_row_wrench0,
+            s_row_wrench1,
+            s_joint_armature,
+            s_joint_damping,
+            s_joint_gear,
+            s_joint_target_mode,
+            s_joint_target_ke,
+            s_joint_target_kd,
+            s_control_target_q,
+            s_control_target_qd,
+            s_dt,
+            s_bodies,
+            s_previous_coordinate,
+            s_coordinate_revolutions,
+            s_dynamic_mass,
+            s_dynamic_old_velocity,
+            s_dynamic_coordinate,
+            s_velocity_reference,
+            s_accumulated_impulse,
+            s_drive_saturated,
+        )
+
 
 _original_init = BlockJointSystem.__init__
 _original_begin = BlockJointSystem.begin_substep

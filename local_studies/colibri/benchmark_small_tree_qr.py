@@ -63,11 +63,11 @@ import warp as wp
     for(int i=lane; i<48*48; i+=256) qout.data[i]=q[(i/48)*49+i%48];
 #endif
 """)
-def small_qr(input: wp.array(dtype=wp.float64), qout: wp.array(dtype=wp.float64), rout: wp.array(dtype=wp.float64)): ...
+def small_qr(input: wp.array[wp.float64], qout: wp.array[wp.float64], rout: wp.array[wp.float64]): ...
 
 
 @wp.kernel
-def factor(input: wp.array(dtype=wp.float64), qout: wp.array(dtype=wp.float64), rout: wp.array(dtype=wp.float64)):
+def factor(input: wp.array[wp.float64], qout: wp.array[wp.float64], rout: wp.array[wp.float64]):
     small_qr(input, qout, rout)
 
 

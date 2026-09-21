@@ -18,6 +18,7 @@ def main():
 
     from local_studies.colibri.certified_patch_history import install
     from newton.solvers import SolverPhoenX
+
     output = Path(sys.argv[sys.argv.index("--output") + 1])
     original_init = SolverPhoenX.__init__
     installed = []

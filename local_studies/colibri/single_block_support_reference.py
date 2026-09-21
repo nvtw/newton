@@ -5,10 +5,12 @@ This is a linear reference, not a production Coulomb outer solver.
 
 import json
 from pathlib import Path
+
 import numpy as np
 import warp as wp
-from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync
+
 from local_studies.colibri.coulomb_semismooth import natural_map_evaluator
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue import _block_sync
 
 
 @wp.kernel(enable_backward=False)
