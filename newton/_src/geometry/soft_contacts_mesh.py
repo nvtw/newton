@@ -220,9 +220,10 @@ def _face_valid(
 
 
 def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: wp.array):
-    """Build fixed incident-feature spans and canonical face ownership."""
+    """Build fixed incident-feature spans, ownership, and per-shape component counts."""
     et = edge_table.numpy()
     offsets = np.zeros(model.shape_count, dtype=np.int32)
+    component_counts = np.zeros(model.shape_count, dtype=np.int32)
     vertex_spans, edge_spans, neighbors = [], [], []
     vertex_bounds, vertex_errors, edge_bounds, edge_errors = [], [], [], []
     ee = np.zeros(len(et), dtype=np.int32)
@@ -246,6 +247,16 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
                 key = tuple(sorted((a, b)))
                 opposite.setdefault(key, set()).add(v)
                 edge_owner.setdefault(key, face)
+
+        unvisited = set(incident)
+        component_count = 0
+        while unvisited:
+            component_count += 1
+            pending = [unvisited.pop()]
+            while pending:
+                connected = incident[pending.pop()] & unvisited
+                unvisited.difference_update(connected)
+                pending.extend(connected)
 
         def span(vertices, owner, representatives=representative):
             start = len(neighbors)
@@ -286,7 +297,7 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
         keys = sorted(es)
         edge_keys = np.asarray([(a << 32) | b for a, b in keys], dtype=np.int64)
         edge_data = np.asarray([edge_slots[key] for key in keys], dtype=np.int32)
-        return offset, canon, edge_keys, edge_data
+        return offset, canon, edge_keys, edge_data, component_count
 
     # Shape instances share immutable local topology. Only the feature rows
     # carry a shape id; constructing full adjacency per world is unnecessary.
@@ -296,8 +307,9 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
         key = id(mesh)
         if key not in cache:
             cache[key] = build(mesh)
-        offset, canon, edge_keys, edge_data = cache[key]
+        offset, canon, edge_keys, edge_data, component_count = cache[key]
         offsets[shape] = offset
+        component_counts[shape] = component_count
         start, end = np.searchsorted(et[:, 0], (shape, shape + 1))
         edge_canon = np.sort(canon[et[start:end, 1:]].astype(np.int64), axis=1)
         keys = (edge_canon[:, 0] << 32) | edge_canon[:, 1]
@@ -320,7 +332,7 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
             (edge_errors, 3, wp.vec3),
         )
     )
-    return arrays
+    return arrays, component_counts
 
 
 CONTACT_NORMAL_DEGENERATE_EPS = wp.constant(1.0e-6)
@@ -1244,7 +1256,8 @@ class MeshContactData:
         vertices, vertex_normals, edges, edge_normals = self.rigid_features
         if max(_MESH_QUERY_PARTITIONS * len(vertex_pairs), len(vertices), len(edges)) > np.iinfo(np.int32).max:
             raise ValueError("Mesh contact queries exceed 32-bit indexing capacity.")
-        self.adjacency = [*_build_feature_adjacency(model, vertices, edges), vertex_normals, edge_normals]
+        adjacency, component_counts = _build_feature_adjacency(model, vertices, edges)
+        self.adjacency = [*adjacency, vertex_normals, edge_normals]
         # A query emits at most one contact per feature pair. Bound the wide
         # append counter before allocating; final writes remain capacity checked.
         max_faces = max(len(model.shape_source[s].indices) // 3 for s in np.flatnonzero(shape_mask))
@@ -1272,4 +1285,6 @@ class MeshContactData:
             )
 
         surface_pairs = len(vertex_pairs) + count_pairs(model.tri_indices, 0) + count_pairs(model.edge_indices, 2)
-        self.contact_capacity_hint = max(4 * len(vertex_pairs), surface_pairs, len(vertices) + len(edges))
+        vertex_pair_shapes = vertex_pairs.numpy()[:, 1]
+        vertex_patch_hint = int((4 * component_counts[vertex_pair_shapes]).sum(dtype=np.int64))
+        self.contact_capacity_hint = max(vertex_patch_hint, surface_pairs, len(vertices) + len(edges))

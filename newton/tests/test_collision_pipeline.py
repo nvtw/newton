@@ -5003,8 +5003,7 @@ def test_full_surface_replay_spans_candidate_space(test, device):
         pipeline.soft_contact_pair_count
         + len(pipeline.soft_edge_rigid_pairs)
         + len(pipeline.soft_face_rigid_pairs)
-        + len(pipeline.soft_mesh_face_pairs)
-        + len(pipeline.soft_heightfield_face_pairs)
+        + len(pipeline._soft_heightfield_face_pairs)
     )
     test.assertGreater(candidate, 1, "test needs a candidate space larger than the capacity override")
     test.assertEqual(contacts.soft_contact_max, 1, "explicit soft_contact_max capacity must be honored")
@@ -5054,7 +5053,7 @@ def test_full_surface_supports_heightfield(test, device):
     _add_soft_triangle(builder)
     model = builder.finalize(device=device)
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn", enable_rigid_soft_full_surface_contact=True)
-    face_shapes = {int(s) for s in pipeline.soft_heightfield_face_pairs.numpy()[:, 1]}
+    face_shapes = {int(s) for s in pipeline._soft_heightfield_face_pairs.numpy()[:, 1]}
     test.assertIn(hf, face_shapes)
 
 

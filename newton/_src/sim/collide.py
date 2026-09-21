@@ -1713,7 +1713,6 @@ class CollisionPipeline:
         self.enable_rigid_soft_full_surface_contact = enable_rigid_soft_full_surface_contact
         self._soft_mesh_contact_data = None
         empty_pairs = wp.empty(0, dtype=wp.vec2i, device=model.device)
-        self.soft_mesh_face_pairs = empty_pairs
 
         if enable_rigid_soft_full_surface_contact and model.shape_count:
             shape_types = model.shape_type.numpy()
@@ -1726,14 +1725,14 @@ class CollisionPipeline:
             self._soft_edge_sdf_geo_types = self._soft_face_sdf_geo_types
             self.soft_edge_rigid_pairs = _build_soft_edge_rigid_contact_pairs(model, common_capable)
             self.soft_face_rigid_pairs = _build_soft_face_rigid_contact_pairs(model, common_capable)
-            self.soft_heightfield_face_pairs = _build_soft_face_rigid_contact_pairs(model, heightfield_capable)
+            self._soft_heightfield_face_pairs = _build_soft_face_rigid_contact_pairs(model, heightfield_capable)
             mesh_vertex_pairs = _build_soft_particle_rigid_contact_pairs(model, shape_ok=mesh_mask)
             if len(mesh_vertex_pairs):
                 self._soft_mesh_contact_data = MeshContactData(model, mesh_mask, mesh_vertex_pairs)
         else:
             self.soft_edge_rigid_pairs = empty_pairs
             self.soft_face_rigid_pairs = empty_pairs
-            self.soft_heightfield_face_pairs = empty_pairs
+            self._soft_heightfield_face_pairs = empty_pairs
             self._soft_face_sdf_geo_types = ()
             self._soft_edge_sdf_geo_types = ()
 
@@ -1742,13 +1741,13 @@ class CollisionPipeline:
             for pairs in (
                 self.soft_edge_rigid_pairs,
                 self.soft_face_rigid_pairs,
-                self.soft_heightfield_face_pairs,
+                self._soft_heightfield_face_pairs,
             )
         )
         if self._soft_contact_tids_size > np.iinfo(np.int32).max:
             raise ValueError("Soft contact candidates exceed the 32-bit contact indexing capacity.")
         self._soft_heightfield_large_scan = False
-        if len(self.soft_heightfield_face_pairs):
+        if len(self._soft_heightfield_face_pairs):
             terrain = model.heightfield_data.numpy()
             self._soft_heightfield_large_scan = bool(
                 np.any((terrain["nrow"] - 1) * (terrain["ncol"] - 1) > _HEIGHTFIELD_CELLS_PER_TASK)
@@ -1920,7 +1919,7 @@ class CollisionPipeline:
         # Differentiable contacts retain the serial feature loop's existing replay behavior.
         contacts._soft_heightfield_work = None
         if self._soft_heightfield_large_scan and not self.requires_grad:
-            count = len(self.soft_heightfield_face_pairs)
+            count = len(self._soft_heightfield_face_pairs)
             contacts._soft_heightfield_work = (
                 wp.zeros(count + 1, dtype=wp.int64, device=self.model.device),
                 wp.empty(count + 1, dtype=wp.int64, device=self.model.device),
@@ -2628,11 +2627,10 @@ class CollisionPipeline:
                 contacts=contacts,
                 margin=soft_contact_gap,
                 device=self.device,
-                face_pairs=self.soft_heightfield_face_pairs,
+                face_pairs=self._soft_heightfield_face_pairs,
                 tid_base=self.soft_contact_pair_count
                 + len(self.soft_edge_rigid_pairs)
-                + len(self.soft_face_rigid_pairs)
-                + len(self.soft_mesh_face_pairs),
+                + len(self.soft_face_rigid_pairs),
             )
             # Run the variable-output mesh pass last so its saturated overflow
             # sentinel cannot be incremented by a subsequent contact producer.

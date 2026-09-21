@@ -153,6 +153,40 @@ def test_soft_contact_workspace_storage(test, device):
         newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
 
 
+def test_disconnected_mesh_contact_capacity(test, device):
+    """Reserve default contact storage for each nearby disconnected mesh patch."""
+    base = newton.Mesh.create_box(0.02, 0.02, 0.02, compute_inertia=False)
+    centers = np.array(
+        (
+            (0.06, 0.0, 0.0),
+            (-0.06, 0.0, 0.0),
+            (0.0, 0.06, 0.0),
+            (0.0, -0.06, 0.0),
+            (0.0, 0.0, 0.06),
+            (0.0, 0.0, -0.06),
+        ),
+        dtype=np.float32,
+    )
+    vertices = np.concatenate([np.asarray(base.vertices) + center for center in centers])
+    indices = np.concatenate(
+        [np.asarray(base.indices) + component * len(base.vertices) for component in range(len(centers))]
+    )
+
+    builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+    builder.add_shape_mesh(body=-1, mesh=newton.Mesh(vertices, indices, compute_inertia=False))
+    builder.add_particle(wp.vec3(0.0), wp.vec3(0.0), mass=1.0, radius=0.0)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(
+        model, broad_phase="nxn", soft_contact_gap=0.05, enable_rigid_soft_full_surface_contact=True
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+
+    contact_count = int(contacts.soft_contact_count.numpy()[0])
+    test.assertEqual(contact_count, len(centers))
+    test.assertLessEqual(contact_count, contacts.soft_contact_max)
+
+
 def test_soft_contact_accumulation_thread_counts(test, device):
     """Preserve coupled body and cloth updates when increasing contact accumulation lanes."""
     builder = newton.ModelBuilder()
@@ -421,6 +455,7 @@ def test_mixed_mesh_edge_dispatch(test, device):
 
 for device in get_test_devices():
     for fn in (
+        test_disconnected_mesh_contact_capacity,
         test_soft_contact_accumulation_thread_counts,
         test_soft_contact_workspace_storage,
         test_particle_gradient_after_pipeline_reuse,
