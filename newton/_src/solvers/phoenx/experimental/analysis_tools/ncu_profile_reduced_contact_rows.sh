@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 #
-# Profile exactly one steady-state reduced-coordinate factorization launch.
-# Eager warmup occurs before the CUDA profiler-API window because graph-node
-# kernel replay is unreliable under Nsight Compute.
+# Profile exactly one steady-state reduced-coordinate generalized contact-row
+# builder launch. Eager warmup precedes the CUDA profiler-API window because
+# graph-node kernel replay is unreliable under Nsight Compute.
 #
 # Run from anywhere:
-#   sudo bash newton/_src/solvers/phoenx/analysis_tools/ncu_profile_reduced_factor.sh
+#   sudo bash newton/_src/solvers/phoenx/experimental/analysis_tools/ncu_profile_reduced_contact_rows.sh
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../../.." && pwd)"
+REPO="$(cd "$HERE/../../../../../.." && pwd)"
 PY="${PHOENX_PY:-$REPO/.venv/bin/python3}"
-OUT_BASE="${1:-/tmp/phoenx_g1_reduced_factor_latest}"
+OUT_BASE="${1:-/tmp/phoenx_g1_contact_rows_latest}"
 REPORT="${OUT_BASE}.ncu-rep"
 
 if [ -x /usr/local/cuda-13.2/bin/ncu ]; then
@@ -41,13 +41,13 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH="$REPO"
 export PYTHONUTF8=1
 
-printf "Profiling one reduced factorization launch\n  ncu: %s\n  python: %s\n  report: %s\n" "$NCU" "$PY" "$REPORT"
+printf "Profiling one contact-row builder launch\n  ncu: %s\n  python: %s\n  report: %s\n" "$NCU" "$PY" "$REPORT"
 
 "$NCU" \
   --target-processes all \
   --replay-mode kernel \
   --profile-from-start off \
-  --kernel-name "regex:_factor_reduced_warp_kernel.*" \
+  --kernel-name "regex:_build_packed_generalized_contact_rows_kernel.*" \
   --launch-count 1 \
   --kill 1 \
   --section SpeedOfLight \

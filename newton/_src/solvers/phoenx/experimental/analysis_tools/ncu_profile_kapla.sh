@@ -44,7 +44,7 @@ REPORT="${REPORT_BASE}.ncu-rep"
 SOURCE_OUT="${REPORT_BASE}_source.csv"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../../.." && pwd)"
+REPO="$(cd "$HERE/../../../../../.." && pwd)"
 PY="${PHOENX_PY:-$REPO/.venv/bin/python3}"
 NCU="$(command -v ncu || echo /usr/local/cuda/bin/ncu)"
 RUNNER="$(mktemp /tmp/phoenx_kapla_runner.XXXXXX.py)"

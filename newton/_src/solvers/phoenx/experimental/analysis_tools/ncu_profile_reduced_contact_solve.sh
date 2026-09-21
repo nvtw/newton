@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 #
-# Profile exactly one steady-state fused reduced-coordinate advance/publish launch.
-# Eager warmup occurs before the CUDA profiler-API window because graph-node
-# kernel replay is unreliable under Nsight Compute.
+# Profile both steady-state reduced-coordinate patch contact-solve
+# variants. Eager warmup precedes the CUDA profiler-API window because
+# graph-node kernel replay is unreliable under Nsight Compute.
 #
 # Run from anywhere:
-#   sudo bash newton/_src/solvers/phoenx/analysis_tools/ncu_profile_reduced_advance_publish.sh
+#   sudo bash newton/_src/solvers/phoenx/experimental/analysis_tools/ncu_profile_reduced_contact_solve.sh
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../../.." && pwd)"
+REPO="$(cd "$HERE/../../../../../.." && pwd)"
 PY="${PHOENX_PY:-$REPO/.venv/bin/python3}"
-OUT_BASE="${1:-/tmp/phoenx_g1_reduced_advance_publish_latest}"
+OUT_BASE="${1:-/tmp/phoenx_g1_contact_solve_latest}"
 REPORT="${OUT_BASE}.ncu-rep"
 
 if [ -x /usr/local/cuda-13.2/bin/ncu ]; then
@@ -41,14 +41,14 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH="$REPO"
 export PYTHONUTF8=1
 
-printf "Profiling one fused reduced advance/publish launch\n  ncu: %s\n  python: %s\n  report: %s\n" "$NCU" "$PY" "$REPORT"
+printf "Profiling both patch contact-solve variants\n  ncu: %s\n  python: %s\n  report: %s\n" "$NCU" "$PY" "$REPORT"
 
 "$NCU" \
   --target-processes all \
   --replay-mode kernel \
   --profile-from-start off \
-  --kernel-name "regex:_advance_and_publish_reduced_articulations_warp_kernel.*" \
-  --launch-count 1 \
+  --kernel-name "regex:_solve_patch_contact_tile_kernel.*" \
+  --launch-count 2 \
   --kill 1 \
   --section SpeedOfLight \
   --section MemoryWorkloadAnalysis_Tables \

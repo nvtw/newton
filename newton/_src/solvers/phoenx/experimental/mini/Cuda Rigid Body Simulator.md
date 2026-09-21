@@ -1,6 +1,6 @@
 **You:**
 
-How to make a full coordinate rigid body simulator as fast as possible in cuda. Be very specific, i'm cuda developper
+How to make a full coordinate rigid body simulator as fast as possible in cuda. Be very specific, i'm CUDA developer
 
 * * *
 

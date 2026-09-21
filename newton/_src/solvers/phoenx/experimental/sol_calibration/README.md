@@ -6,7 +6,7 @@ PhoenX profiles. They are not part of CI or the ASV benchmark suite.
 Run the complete suite:
 
 ```bash
-uv run -m newton._src.solvers.phoenx.sol_calibration
+uv run -m newton._src.solvers.phoenx.experimental.sol_calibration
 ```
 
 The memory suite includes the `bfloat16` scalar type used by PhoenX RL as well as
@@ -21,10 +21,10 @@ and execution check is available with `--quick`.
 Each benchmark can also be run separately:
 
 ```bash
-uv run -m newton._src.solvers.phoenx.sol_calibration.bench_memory
-uv run -m newton._src.solvers.phoenx.sol_calibration.bench_random_access
-uv run -m newton._src.solvers.phoenx.sol_calibration.bench_compute
-uv run -m newton._src.solvers.phoenx.sol_calibration.bench_tensor
+uv run -m newton._src.solvers.phoenx.experimental.sol_calibration.bench_memory
+uv run -m newton._src.solvers.phoenx.experimental.sol_calibration.bench_random_access
+uv run -m newton._src.solvers.phoenx.experimental.sol_calibration.bench_compute
+uv run -m newton._src.solvers.phoenx.experimental.sol_calibration.bench_tensor
 ```
 
 For stable peak numbers, stop other GPU work and lock the GPU clocks. The tables

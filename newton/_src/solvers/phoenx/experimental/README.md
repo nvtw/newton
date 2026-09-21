@@ -9,6 +9,15 @@ Code here should still be readable and reproducible, but it may depend on local
 checkouts or temporary assumptions. Document those assumptions at the top of the
 file that needs them.
 
+## Contents
+
+- `mini` contains the limited, throughput-oriented rigid-body solver experiments.
+- `sol_calibration` contains hardware calibration microbenchmarks.
+- `analysis_tools` contains profiling and structural-analysis scripts.
+
+These packages are internal research tools and are not imported by the production
+PhoenX solver.
+
 ## G1 Training Search
 
 bench_g1_pbt.py is a pure-Warp outer-loop probe inspired by Sample Factory PBT

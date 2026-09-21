@@ -429,7 +429,7 @@ class SolverPhoenX(SolverBase):
                 articulated-body preconditioner.
             solver_flavor: Deprecated compatibility argument. Omit it or pass
                 ``"standard"``. The experimental ``"simple"`` Jacobi solver
-                moved out of production PhoenX; use PhoenX Mini for solver experiments.
+                moved out of production PhoenX; use PhoenX Mini under ``phoenx.experimental.mini`` for solver experiments.
             jacobi_max_colors: Deprecated compatibility argument with no effect.
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
@@ -446,7 +446,9 @@ class SolverPhoenX(SolverBase):
                 stacklevel=2,
             )
             if solver_flavor != "standard":
-                raise ValueError("solver_flavor='simple' was removed from production PhoenX; use PhoenX Mini")
+                raise ValueError(
+                    "solver_flavor='simple' was removed from production PhoenX; use PhoenX Mini under phoenx.experimental.mini"
+                )
         if jacobi_max_colors is not None:
             warnings.warn(
                 "SolverPhoenX.jacobi_max_colors is deprecated and has no effect.",

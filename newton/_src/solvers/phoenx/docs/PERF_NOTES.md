@@ -400,7 +400,7 @@ Do not retry without new evidence or a materially different design.
 | Further lossy inertia packing | Precision/range risk without a measured gain. |
 | Contact-major/AoS body layouts | Larger footprint or conversion passes lost. |
 | Cooperative grid-sync iterate megakernel | Direct CUDA cooperative launch was bitwise correct but 3.0--3.3x slower: captured launches took 12.65 us for 9 phases and 112.65 us for 90, versus 38.54 and 371.27 us with hardware grid barriers. |
-| Single-block resident subdomain block GS | Morton-partition census of the settled tower (73,572 live contact columns) measured 55.3% interior contacts at `P = 188`, below the 60% gate; `P = 94` reaches 64.6% but idles half the SMs. Shared memory was never the limit (3.1 KB/part). Surface-to-volume rejects one block per part. `analysis_tools/kapla_subdomain_feasibility.py`. |
+| Single-block resident subdomain block GS | Morton-partition census of the settled tower (73,572 live contact columns) measured 55.3% interior contacts at `P = 188`, below the 60% gate; `P = 94` reaches 64.6% but idles half the SMs. Shared memory was never the limit (3.1 KB/part). Surface-to-volume rejects one block per part. `experimental/analysis_tools/kapla_subdomain_feasibility.py`. |
 | Eight-lane cooperative contact manifold | Bitwise-exact scalar and cooperative probes were neutral at 4.095 and 4.099 us; allocating lanes to cached row streams reduces independent columns without helping scattered endpoints. |
 | Cross-item Kapla prefetch by shrinking the grid | Settled regular colors have 4,294--5,529 rows and overflow has 32,247, all below the 48,128-thread production grid. Creating two-row regular-color work would use fewer than 87 of 188 SMs; the prior 4-blocks/SM A/B also lost. |
 | Separate regular-color launch grid | Reducing regular colors from 48,128 to 11,360 threads measured 82.40 FPS versus fresh 82.76--82.78 FPS baselines. Lower launch waste did not repay lost latency hiding; removed. |
@@ -439,7 +439,7 @@ Do not retry without new evidence or a materially different design.
   threshold 0.15 and 31.2% at 0.3. Granularity is the defect, not the idea --
   a contact is skippable iff *both* endpoints are dormant, which is per-body
   state, and dormant endpoints behave as infinite mass (what copy-state slots
-  already express). `analysis_tools/kapla_census.py --mode dormancy`.
+  already express). `experimental/analysis_tools/kapla_census.py --mode dormancy`.
 - Cluster-scale resident subdomain block GS. The census that rejected one-block
   subdomains measures 83.8% interior at `P = 12` and 78.7% at `P = 24` -- part
   sizes reachable only with Blackwell clusters (16 blocks sharing distributed

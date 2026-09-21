@@ -9,7 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.mini import MiniSolver, MiniSolverConfig
+from newton._src.solvers.phoenx.experimental.mini import MiniSolver, MiniSolverConfig
 
 
 def _make_stacks(world_count: int, bodies_per_world: int = 4):
@@ -262,7 +262,7 @@ class TestMiniSolver(unittest.TestCase):
         self.assertEqual(int(solvers[1]._contact_topology_stable.numpy()[0]), 1)
 
     def test_mixed_schedule_is_deterministic(self) -> None:
-        from newton._src.solvers.phoenx.mini.benchmark import _make_robot_model  # noqa: PLC0415
+        from newton._src.solvers.phoenx.experimental.mini.benchmark import _make_robot_model  # noqa: PLC0415
 
         device = wp.get_preferred_device()
         model = _make_robot_model(8, 4, str(device))

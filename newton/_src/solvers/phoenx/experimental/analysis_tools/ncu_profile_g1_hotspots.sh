@@ -4,11 +4,11 @@
 #
 # Capture targeted counter reports for the five current G1 physics hotspots.
 # Run from anywhere with one command:
-#   sudo bash /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/analysis_tools/ncu_profile_g1_hotspots.sh
+#   sudo bash /home/twidmer/Documents/git/newton/newton/_src/solvers/phoenx/experimental/analysis_tools/ncu_profile_g1_hotspots.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../../.." && pwd)"
+REPO="$(cd "$HERE/../../../../../.." && pwd)"
 OUT=/tmp/phoenx_g1_ncu_production_latest
 REAL_USER="${SUDO_USER:-${USER:-root}}"
 mkdir -p "$OUT"

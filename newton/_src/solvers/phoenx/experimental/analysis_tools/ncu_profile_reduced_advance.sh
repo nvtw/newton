@@ -7,11 +7,11 @@
 # kernel replay is unreliable under Nsight Compute.
 #
 # Run from anywhere:
-#   sudo bash newton/_src/solvers/phoenx/analysis_tools/ncu_profile_reduced_advance.sh
+#   sudo bash newton/_src/solvers/phoenx/experimental/analysis_tools/ncu_profile_reduced_advance.sh
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../../.." && pwd)"
+REPO="$(cd "$HERE/../../../../../.." && pwd)"
 PY="${PHOENX_PY:-$REPO/.venv/bin/python3}"
 OUT_BASE="${1:-/tmp/phoenx_g1_reduced_advance_latest}"
 REPORT="${OUT_BASE}.ncu-rep"

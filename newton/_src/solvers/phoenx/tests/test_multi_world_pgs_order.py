@@ -17,8 +17,8 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx import solver_phoenx, solver_phoenx_kernels
 from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.experimental.mini.benchmark import _make_stack_model
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import ElementInteractionData
-from newton._src.solvers.phoenx.mini.benchmark import _make_stack_model
 from newton._src.solvers.phoenx.solver_phoenx import _choose_fast_tail_solve_schedule
 from newton._src.solvers.phoenx.tests.test_robot_policy_parity import (
     _g1_29dof_yaml,
