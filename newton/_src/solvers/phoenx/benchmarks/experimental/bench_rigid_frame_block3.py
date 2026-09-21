@@ -32,8 +32,8 @@ from newton._src.solvers.phoenx.benchmarks.experimental.bench_rigid_rows3_world_
     _build_schedule,
     _parse_scenes,
 )
-from newton._src.solvers.phoenx.constraints.constraint_block import (
-    BLOCK_LAMBDA_INF,
+from newton._src.solvers.phoenx.constraints.constraint_block import BLOCK_LAMBDA_INF
+from newton._src.solvers.phoenx.experimental.block3 import (
     VELOCITY_BLOCK_PROJECT_IDENTITY,
     VELOCITY_ROWS3_PROJECT_BOUNDS,
     VELOCITY_ROWS3_PROJECT_CONTACT_CONE,

@@ -22,12 +22,15 @@ import warp as wp
 if not wp.get_preferred_device().is_cuda:
     raise unittest.SkipTest("PhoenX tests require CUDA")
 
+from newton._src.solvers.phoenx import model_adapter, simulation_kernels
+from newton._src.solvers.phoenx.articulations import reduced as reduced_articulation
 from newton._src.solvers.phoenx.articulations.maximal_projector import MaximalTreeProjector, MaximalTreeProjectorData
 from newton._src.solvers.phoenx.articulations.maximal_projector_general import (
     GeneralMaximalTreeProjector,
     GeneralMaximalTreeProjectorData,
 )
 from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.constraints import constraint_block
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     constraint_container_zeros,
 )
@@ -163,6 +166,21 @@ class TestInvariants(unittest.TestCase):
                 }
             )
         )
+
+    def test_core_modules_omit_unreferenced_helpers(self) -> None:
+        """Keep abandoned conversion and launch helpers out of production modules."""
+        self.assertFalse(hasattr(model_adapter, "_cross3_np"))
+        self.assertFalse(hasattr(simulation_kernels, "_reset_head_active_kernel"))
+        self.assertFalse(hasattr(reduced_articulation, "_spatial_to_vec6"))
+        self.assertFalse(hasattr(reduced_articulation, "_vec6_to_spatial"))
+        self.assertFalse(hasattr(reduced_articulation, "_advance_generalized_velocity_kernel"))
+
+    def test_constraint_blocks_omit_unreachable_legacy_families(self) -> None:
+        """Keep superseded dimension-specific block solvers out of the core."""
+        self.assertFalse(hasattr(constraint_block, "VelocityBlock1"))
+        self.assertFalse(hasattr(constraint_block, "VelocityBlock3"))
+        self.assertFalse(hasattr(constraint_block, "RigidFrameBlock4"))
+        self.assertFalse(hasattr(constraint_block, "block_solve_rigid_frame_schur32"))
 
     def test_step_report_type_has_stable_world_alias(self) -> None:
         """Keep diagnostics separate without changing the existing type name."""

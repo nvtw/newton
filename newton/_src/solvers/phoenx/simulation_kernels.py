@@ -3211,12 +3211,6 @@ def _singleworld_color_range(
 # first colour > FUSE_TAIL_MAX_COLOR_SIZE without decrementing the cursor.
 
 
-@wp.kernel(enable_backward=False)
-def _reset_head_active_kernel(head_active: wp.array[wp.int32]):
-    """Reset head_active[0] = 1 so the next capture_while gets at least one launch."""
-    head_active[0] = 1
-
-
 @wp.func
 def _singleworld_color_range_from_cursor(
     color_starts: wp.array[wp.int32],

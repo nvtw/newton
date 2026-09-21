@@ -52,16 +52,6 @@ _mat66 = wp.types.matrix(shape=(6, 6), dtype=wp.float32)
 
 
 @wp.func
-def _spatial_to_vec6(value: wp.spatial_vector) -> _vec6:
-    return _vec6(value[0], value[1], value[2], value[3], value[4], value[5])
-
-
-@wp.func
-def _vec6_to_spatial(value: _vec6) -> wp.spatial_vector:
-    return wp.spatial_vector(value[0], value[1], value[2], value[3], value[4], value[5])
-
-
-@wp.func
 def _pack_symmetric_mat66(matrix: wp.spatial_matrix) -> _sym_mat66:
     packed = _sym_mat66(0.0)
     index = wp.int32(0)
@@ -206,16 +196,6 @@ def _sync_reduced_bodies_kernel(
     twist = body_qd[body]
     bodies.velocity[slot] = wp.spatial_top(twist)
     bodies.angular_velocity[slot] = wp.spatial_bottom(twist)
-
-
-@wp.kernel(enable_backward=False)
-def _advance_generalized_velocity_kernel(
-    acceleration: wp.array[wp.float32],
-    dt: wp.float32,
-    velocity: wp.array[wp.float32],
-):
-    dof = wp.tid()
-    velocity[dof] += acceleration[dof] * dt
 
 
 @wp.kernel(enable_backward=False)

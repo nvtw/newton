@@ -42,12 +42,7 @@ from newton._src.solvers.phoenx.benchmarks.experimental.bench_rigid_rows3_sideca
     _max_err,
 )
 from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower
-from newton._src.solvers.phoenx.constraints.constraint_block import (
-    BLOCK_LAMBDA_INF,
-    VELOCITY_ROWS3_PROJECT_CONTACT_CONE,
-    VelocityRows3Op,
-    block_solve_velocity_rows3_op,
-)
+from newton._src.solvers.phoenx.constraints.constraint_block import BLOCK_LAMBDA_INF
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_JOINT_MODE,
     JOINT_MODE_BALL_SOCKET,
@@ -55,6 +50,11 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_PRISMATIC,
     JOINT_MODE_REVOLUTE,
     JOINT_MODE_UNIVERSAL,
+)
+from newton._src.solvers.phoenx.experimental.block3 import (
+    VELOCITY_ROWS3_PROJECT_CONTACT_CONE,
+    VelocityRows3Op,
+    block_solve_velocity_rows3_op,
 )
 
 _OP_CONTACT3 = wp.constant(wp.int32(1))
