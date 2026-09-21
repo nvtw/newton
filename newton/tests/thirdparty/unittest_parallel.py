@@ -68,9 +68,28 @@ except ImportError:
 # The following variables are NVIDIA Modifications
 START_DIRECTORY = os.path.dirname(__file__)  # The directory to start test discovery
 
-# Add warning-clean test modules incrementally. Eventually this should cover
-# the entire test_* surface and be replaced by a single test_.* filter.
-_STRICT_WARNING_TEST_MODULES = ("test_actuators",)
+_TEST_MODULE_PREFIX = r"(?:.*\.)?"
+_STRICT_WARNING_TEST_MODULE = rf"{_TEST_MODULE_PREFIX}test_.*$"
+
+# Keep each exception narrow so warning-cleanup PRs can remove debt without
+# leaving an entire test module permissive.
+_KNOWN_WARNING_DEBT = (
+    {
+        "message": (
+            r"Inertia validation corrected \d+ bodies\. Set validate_inertia_detailed=True for detailed per-body "
+            r"warnings\."
+        ),
+        "category": UserWarning,
+        "module": (
+            rf"{_TEST_MODULE_PREFIX}"
+            r"(?:test_collision_cloth|test_collision_pipeline|test_controllers_joint_impedance|"
+            r"test_controllers_joint_selection|test_controllers_operational_space|test_convex_support|"
+            r"test_coupled_solver|test_custom_attributes|test_ik|test_ik_lbfgs|"
+            r"test_import_mjcf|test_jacobian_mass_matrix|test_kinematic_links|test_model|test_mujoco_solver|"
+            r"test_off_origin_convex_hull_contacts|test_rigid_contact)$"
+        ),
+    },
+)
 
 
 def _enable_strict_warnings():
@@ -81,8 +100,9 @@ def _enable_strict_warnings():
     """
     warnings.filterwarnings("error", category=DeprecationWarning)
     warnings.filterwarnings("error", module=r"newton(\.|$)")
-    for module in _STRICT_WARNING_TEST_MODULES:
-        warnings.filterwarnings("error", module=rf"{module}$")
+    warnings.filterwarnings("error", module=_STRICT_WARNING_TEST_MODULE)
+    for warning_filter in _KNOWN_WARNING_DEBT:
+        warnings.filterwarnings("default", **warning_filter)
 
 
 def main(argv=None):
@@ -140,9 +160,9 @@ def main(argv=None):
         "--strict-warnings",
         action="store_true",
         default=False,
-        help="Treat warnings we can act on as errors: all DeprecationWarnings (from Newton or its "
-        "dependencies) and any warning attributed to a newton.* module. Off by default so verifying an "
-        "installation does not fail on warnings the user cannot act on; enabled in CI to surface warning debt.",
+        help="Treat all DeprecationWarnings and warnings attributed to newton.* or test_* modules as errors, "
+        "except narrowly tracked known debt. Off by default so verifying an installation does not fail on "
+        "warnings the user cannot act on; enabled in CI to surface warning debt.",
     )  # NVIDIA Modification
     group_parallel = parser.add_argument_group("parallelization options")
     group_parallel.add_argument(

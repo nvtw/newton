@@ -24,6 +24,7 @@ from .broad_phase_common import (
     check_aabb_overlap_moving,
     is_pair_excluded,
     is_shape_pair_immovable_filtered,
+    is_shape_pair_same_body_filtered,
     keep_all_filter,
     precompute_world_map,
     test_group_pair,
@@ -553,6 +554,8 @@ def _make_sap_process_pair_func(filter_func: Any):
             return
 
         pair = wp.vec2i(shape1, shape2)
+        if is_shape_pair_same_body_filtered(shape1, shape2, shape_body):
+            return
         if is_shape_pair_immovable_filtered(shape1, shape2, shape_body, body_flags, include_static_kinematic_pairs):
             return
         if num_filter_pairs > wp.int32(0) and is_pair_excluded(pair, filter_pairs, num_filter_pairs):
@@ -1115,11 +1118,11 @@ class BroadPhaseSAP:
                 the counter was zeroed by a preceding fused kernel).  Defaults to False so
                 the launch remains self-contained.
             shape_body: Optional array mapping each shape to its body index. Negative body indices are static shapes.
-                Omitting this array disables immovable-pair filtering for expert callers.
+                Omitting this array disables same-body and immovable-pair filtering for expert callers.
             body_flags: Optional body flag array used to identify kinematic bodies. An empty array is valid for
                 an all-static model when ``shape_body`` is provided.
-            include_static_kinematic_pairs: Whether to include pairs where both shapes are immovable. Set to
-                ``False`` to filter static-static, static-kinematic, and kinematic-kinematic pairs.
+            include_static_kinematic_pairs: Whether to include static-kinematic and kinematic-kinematic pairs.
+                Set to false to filter those pairs. Static-static pairs are always filtered.
 
         The method will populate candidate_pair with the indices of shape pairs whose AABBs overlap
         (with optional margin expansion), whose collision groups allow interaction, and whose worlds are
