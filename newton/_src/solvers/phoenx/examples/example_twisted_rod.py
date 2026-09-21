@@ -4,16 +4,18 @@
 ###########################################################################
 # PhoenX twisted rod
 #
-# A slender elastic rod hangs between two fixed supports in a double-looped
-# shape.  The centerline and material frames are assembled through the public
-# newton.Rod API; its circular section and nylon-like material determine the
-# joint stretch, shear, bend, and twist stiffnesses.
+# A stress-free elastic rod hangs between two rotating support cubes. The
+# left cube rotates around the rod tangent, building torsion until the rod
+# buckles into loops. Collision-free material stripes expose local frame
+# rotation while the capsule centerline supplies self-collision.
 #
 # Run:
 #   python -m newton._src.solvers.phoenx.examples.example_twisted_rod
 ###########################################################################
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import warp as wp
@@ -27,105 +29,103 @@ from newton._src.solvers.phoenx.examples._ported_example_base import (
 
 ROD_RADIUS = 0.018
 ROD_DENSITY = 1100.0
-ROD_YOUNGS_MODULUS = 1.0e9
-ROD_POISSONS_RATIO = 0.40
+ROD_YOUNGS_MODULUS = 0.2e9
+ROD_SHEAR_MODULUS = 0.1e9
+ROD_BEND_RIGIDITY_SCALE = 0.50
 
-NUM_SEGMENTS = 96
-SUPPORT_HALF_EXTENTS = (0.16, 0.20, 0.20)
+NUM_SEGMENTS = 400
+ROD_SPAN = 6.0
+ROD_SAG = 1.10
+SUPPORT_HALF_EXTENT = 0.14
+DRIVE_DURATION = 20.0
+SUPPORT_TWIST_RATE = 20.0 * 2.0 * math.pi / DRIVE_DURATION
+SUPPORT_APPROACH_DISTANCE = 4.2
+SUPPORT_APPROACH_RATE = SUPPORT_APPROACH_DISTANCE / DRIVE_DURATION
+STRIPE_HALF_WIDTH = 0.004
+STRIPE_HALF_THICKNESS = 0.0025
 
-ROD_COLORS = ((0.90, 0.82, 0.25), (0.30, 0.58, 0.63))
-SUPPORT_COLOR = (0.72, 0.65, 0.57)
-
-
-def _catmull_rom(control_points: np.ndarray, samples_per_span: int = 20) -> np.ndarray:
-    """Sample an interpolating Catmull-Rom curve through control points."""
-    padded = np.vstack((control_points[0], control_points, control_points[-1]))
-    samples = []
-    for span in range(len(control_points) - 1):
-        p0, p1, p2, p3 = padded[span : span + 4]
-        for value in np.linspace(0.0, 1.0, samples_per_span, endpoint=False):
-            value2 = value * value
-            value3 = value2 * value
-            samples.append(
-                0.5
-                * (
-                    2.0 * p1
-                    + (-p0 + p2) * value
-                    + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * value2
-                    + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * value3
-                )
-            )
-    samples.append(control_points[-1])
-    return np.asarray(samples, dtype=np.float64)
+ROD_COLOR = (0.90, 0.82, 0.25)
+STRIPE_COLOR = (0.30, 0.58, 0.63)
+SUPPORT_COLORS = ((0.76, 0.68, 0.58), (0.58, 0.68, 0.76))
 
 
-def _resample_curve(points: np.ndarray, segment_count: int) -> np.ndarray:
-    """Resample a polyline at nearly uniform arc-length intervals."""
-    lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
-    cumulative = np.concatenate(([0.0], np.cumsum(lengths)))
-    targets = np.linspace(0.0, cumulative[-1], segment_count + 1)
-    result = np.empty((segment_count + 1, 3), dtype=np.float32)
-    for axis in range(3):
-        result[:, axis] = np.interp(targets, cumulative, points[:, axis])
-    return result
+@wp.kernel(enable_backward=False)
+def _rotate_supports_kernel(
+    body_indices: wp.array[wp.int32],
+    twist_rates: wp.array[wp.float32],
+    approach_rates: wp.array[wp.float32],
+    target_x: wp.array[wp.float32],
+    dt: float,
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+):
+    support = wp.tid()
+    body = body_indices[support]
+    pose = body_q[body]
+    position = wp.transform_get_translation(pose)
+    approach_speed = approach_rates[support]
+    translation_dt = wp.float32(0.0)
+    if approach_speed > 0.0:
+        translation_dt = wp.clamp((target_x[support] - position[0]) / approach_speed, 0.0, dt)
+    linear_velocity = wp.vec3(approach_speed, 0.0, 0.0)
+    position += linear_velocity * translation_dt
+    rotation = wp.transform_get_rotation(pose)
+    axis = wp.quat_rotate(rotation, wp.vec3(0.0, 0.0, 1.0))
+    angular_speed = twist_rates[support]
+    delta = wp.quat_from_axis_angle(axis, angular_speed * dt)
+    body_q[body] = wp.transform(position, wp.normalize(wp.mul(delta, rotation)))
+    if translation_dt == 0.0:
+        linear_velocity = wp.vec3()
+    body_qd[body] = wp.spatial_vector(linear_velocity, axis * angular_speed)
 
 
-def _double_loop_centerline() -> np.ndarray:
-    """Return the smooth, slightly out-of-plane double-loop centerline."""
-    control_points = np.asarray(
-        [
-            (-1.55, 0.00, 1.35),
-            (-1.30, 0.00, 1.29),
-            (-1.03, 0.01, 1.08),
-            (-0.72, 0.05, 0.88),
-            (-0.61, 0.07, 0.50),
-            (-0.82, 0.04, 0.22),
-            (-1.08, -0.03, 0.40),
-            (-1.02, -0.07, 0.80),
-            (-0.70, -0.05, 1.08),
-            (-0.36, -0.01, 1.23),
-            (-0.04, 0.01, 1.12),
-            (0.19, 0.05, 0.89),
-            (0.39, 0.07, 0.59),
-            (0.28, 0.04, 0.30),
-            (0.01, -0.03, 0.36),
-            (-0.07, -0.07, 0.70),
-            (0.17, -0.05, 1.00),
-            (0.55, -0.01, 1.18),
-            (0.94, 0.00, 1.27),
-            (1.25, 0.00, 1.30),
-            (1.55, 0.00, 1.35),
-        ],
-        dtype=np.float64,
-    )
-    return _resample_curve(_catmull_rom(control_points), NUM_SEGMENTS)
+def _hanging_centerline() -> np.ndarray:
+    """Return a smooth, untwisted centerline hanging between supports."""
+    parameter = np.linspace(-1.0, 1.0, NUM_SEGMENTS + 1, dtype=np.float64)
+    points = np.empty((NUM_SEGMENTS + 1, 3), dtype=np.float32)
+    points[:, 0] = 0.5 * ROD_SPAN * parameter
+    # A small out-of-plane imperfection selects a repeatable torsional
+    # buckling direction without adding initial material twist.
+    points[:, 1] = 0.008 * np.sin(math.pi * (parameter + 1.0))
+    points[:, 2] = 1.45 - ROD_SAG * (1.0 - parameter * parameter)
+    return points
 
 
 class Example(PortedExample):
-    """Simulate a double-looped elastic rod suspended between supports."""
+    """Twist a freely hanging rod by rotating its left support cube."""
 
     fps = 60
-    sim_substeps = 8
+    collision_updates_per_frame = 2
+    sim_substeps = 15
     solver_iterations = 8
     velocity_iterations = 1
-    default_friction = 0.6
+    default_friction = 0.5
     broad_phase = "sap"
     step_layout = "single_world"
-    shape_pairs_max = 16384
-    show_contacts = False
+    mass_splitting = True
+    mass_splitting_color_group_size = 3
+    max_colored_partitions = 8
+    shape_pairs_max = 32768
+    speculative_contact_gap_max = 0.05
+    show_contacts = True
     evaluate_fk = False
     step_report_label = "TwistedRod"
 
     def build_scene(self, builder: newton.ModelBuilder):
-        """Build the material-defined rod and its two fixed supports."""
-        points = _double_loop_centerline()
+        """Build an initially stress-free hanging rod and driven supports."""
+        points = _hanging_centerline()
+        section_area = math.pi * ROD_RADIUS**2
+        area_moment = 0.25 * math.pi * ROD_RADIUS**4
+        polar_moment = 2.0 * area_moment
         rod = newton.Rod(
             points,
             radius=ROD_RADIUS,
-            youngs_modulus=ROD_YOUNGS_MODULUS,
-            poissons_ratio=ROD_POISSONS_RATIO,
+            stretch_rigidity=ROD_YOUNGS_MODULUS * section_area,
+            shear_rigidity=0.9 * ROD_SHEAR_MODULUS * section_area,
+            bend_rigidity=ROD_BEND_RIGIDITY_SCALE * ROD_YOUNGS_MODULUS * area_moment,
+            twist_rigidity=ROD_SHEAR_MODULUS * polar_moment,
         )
-        shape_cfg = newton.ModelBuilder.ShapeConfig(
+        rod_cfg = newton.ModelBuilder.ShapeConfig(
             density=ROD_DENSITY,
             mu=self.default_friction,
             restitution=0.0,
@@ -133,7 +133,7 @@ class Example(PortedExample):
         )
         bodies, _ = builder.add_rod(
             rod=rod,
-            cfg=shape_cfg,
+            cfg=rod_cfg,
             stretch_damping=2.0,
             shear_damping=2.0,
             bend_damping=0.25,
@@ -141,84 +141,133 @@ class Example(PortedExample):
             label="twisted_rod",
             wrap_in_articulation=True,
             body_frame_origin="com",
+            color=ROD_COLOR,
         )
         self.rod_bodies = [int(body) for body in bodies]
-
-        # The support-connected end capsules are kinematic anchors. Their rod
-        # joints still transmit all four elastic modes to the dynamic span.
         self.anchor_bodies = (self.rod_bodies[0], self.rod_bodies[-1])
+
         for body in self.anchor_bodies:
             builder.body_mass[body] = 0.0
             builder.body_inv_mass[body] = 0.0
             builder.body_inertia[body] = wp.mat33(0.0)
             builder.body_inv_inertia[body] = wp.mat33(0.0)
 
-        # Alternating colors make the rod deformation and individual elements
-        # readable, as in the reference rendering.
-        for index, body in enumerate(self.rod_bodies):
-            color = ROD_COLORS[(index // 2) % len(ROD_COLORS)]
-            for shape in builder.body_shapes[body]:
-                builder.shape_color[shape] = color
-
-        static_cfg = newton.ModelBuilder.ShapeConfig(
-            density=0.0,
-            mu=self.default_friction,
-            restitution=0.0,
-            gap=0.002,
-        )
-        hx, hy, hz = SUPPORT_HALF_EXTENTS
-        for index, point in enumerate((points[0], points[-1])):
-            side = -1.0 if index == 0 else 1.0
+        segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        visual_cfg = newton.ModelBuilder.ShapeConfig(density=0.0, has_shape_collision=False)
+        for index, (body, segment_length) in enumerate(zip(self.rod_bodies, segment_lengths, strict=True)):
             builder.add_shape_box(
-                -1,
+                body,
                 xform=wp.transform(
-                    wp.vec3(float(point[0] + side * hx), float(point[1]), float(point[2])),
+                    wp.vec3(ROD_RADIUS + STRIPE_HALF_THICKNESS, 0.0, 0.0),
                     wp.quat_identity(),
                 ),
-                hx=hx,
-                hy=hy,
-                hz=hz,
-                cfg=static_cfg,
-                color=SUPPORT_COLOR,
-                label=f"support_{index}",
+                hx=STRIPE_HALF_THICKNESS,
+                hy=STRIPE_HALF_WIDTH,
+                hz=0.42 * float(segment_length),
+                cfg=visual_cfg,
+                color=STRIPE_COLOR,
+                label=f"material_stripe_{index}",
+            )
+
+        for support, body in enumerate(self.anchor_bodies):
+            outward = -1.0 if support == 0 else 1.0
+            half_length = 0.5 * float(segment_lengths[0 if support == 0 else -1])
+            builder.add_shape_box(
+                body,
+                xform=wp.transform(
+                    wp.vec3(
+                        0.0,
+                        0.0,
+                        outward * (half_length + SUPPORT_HALF_EXTENT),
+                    ),
+                    wp.quat_identity(),
+                ),
+                hx=SUPPORT_HALF_EXTENT,
+                hy=SUPPORT_HALF_EXTENT,
+                hz=SUPPORT_HALF_EXTENT,
+                cfg=visual_cfg,
+                color=SUPPORT_COLORS[support],
+                label=f"rotating_support_{support}",
             )
 
         self.initial_anchor_poses = np.asarray(
             [builder.body_q[body] for body in self.anchor_bodies],
             dtype=np.float32,
         )
-        self.initial_centerline_min_z = float(points[:, 2].min())
-        segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        self.kinematic_bodies = wp.array(
+            self.anchor_bodies,
+            dtype=wp.int32,
+            device=self.device,
+        )
+        self.twist_rates = wp.array(
+            (SUPPORT_TWIST_RATE, 0.0),
+            dtype=wp.float32,
+            device=self.device,
+        )
+        self.approach_rates = wp.array(
+            (SUPPORT_APPROACH_RATE, 0.0),
+            dtype=wp.float32,
+            device=self.device,
+        )
+        self.target_x = wp.array(
+            (
+                self.initial_anchor_poses[0, 0] + SUPPORT_APPROACH_RATE * DRIVE_DURATION,
+                self.initial_anchor_poses[1, 0],
+            ),
+            dtype=wp.float32,
+            device=self.device,
+        )
         return [default_capsule_half_extents(ROD_RADIUS, 0.5 * float(length)) for length in segment_lengths]
 
+    def prepare_collision_update(self, dt: float) -> None:
+        """Drive the supports at the 120 Hz collision cadence."""
+        wp.launch(
+            _rotate_supports_kernel,
+            dim=2,
+            inputs=(
+                self.kinematic_bodies,
+                self.twist_rates,
+                self.approach_rates,
+                self.target_x,
+                dt,
+                self.state.body_q,
+                self.state.body_qd,
+            ),
+            device=self.device,
+        )
+
     def configure_camera(self, viewer) -> None:
-        """Frame both suspended loops and their supports."""
+        """Frame the complete hanging span and both rotating cubes."""
         viewer.set_camera(
-            pos=wp.vec3(0.0, -4.2, 1.45),
-            pitch=-2.0,
+            pos=wp.vec3(0.0, -8.2, 1.70),
+            pitch=-8.0,
             yaw=90.0,
         )
 
     def test_final(self) -> None:
-        """Verify the rod stays finite, bounded, and attached at both ends."""
+        """Verify driven anchors, bounded motion, and stable attachment."""
         super().test_final()
         body_q = self.state.body_q.numpy()
         rod_q = body_q[self.rod_bodies]
         anchor_q = body_q[list(self.anchor_bodies)]
 
-        np.testing.assert_allclose(anchor_q, self.initial_anchor_poses, rtol=0.0, atol=1.0e-5)
+        drive_time = min(self.sim_time, DRIVE_DURATION)
+        expected_left_x = self.initial_anchor_poses[0, 0] + SUPPORT_APPROACH_RATE * drive_time
+        np.testing.assert_allclose(anchor_q[0, 0], expected_left_x, rtol=0.0, atol=2.0e-4)
+        np.testing.assert_allclose(anchor_q[0, 1:3], self.initial_anchor_poses[0, 1:3], rtol=0.0, atol=1.0e-5)
+        np.testing.assert_allclose(anchor_q[1], self.initial_anchor_poses[1], rtol=0.0, atol=1.0e-5)
+        if self.sim_time > DRIVE_DURATION:
+            orientation_dot = float(abs(np.dot(anchor_q[0, 3:7], self.initial_anchor_poses[0, 3:7])))
+            expected_dot = abs(math.cos(0.5 * SUPPORT_TWIST_RATE * self.sim_time))
+            np.testing.assert_allclose(orientation_dot, expected_dot, rtol=0.0, atol=2.0e-4)
         if float(np.max(np.abs(rod_q[:, :3]))) > 4.0:
             raise AssertionError("twisted rod left the expected scene bounds")
-        min_z = float(np.min(rod_q[:, 2]))
-        if min_z < self.initial_centerline_min_z - 0.75:
-            raise AssertionError(
-                "twisted rod sagged beyond the supported span "
-                f"(initial_min_z={self.initial_centerline_min_z:.3f}, final_min_z={min_z:.3f})"
-            )
+        if float(np.min(rod_q[:, 2])) < -1.5:
+            raise AssertionError("twisted rod snapped or fell below the expected hanging span")
 
 
 def _configure_parser(parser) -> None:
-    parser.set_defaults(viewer="optix", num_frames=300)
+    parser.set_defaults(viewer="optix", num_frames=1230)
 
 
 if __name__ == "__main__":
