@@ -27,7 +27,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     ElementInteractionData,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 def _make_minimal_world(*, mass_splitting: bool, device) -> PhoenXWorld:
@@ -223,9 +223,9 @@ def _build_box_stack_scene(num_boxes: int, mass_splitting: bool, device, max_col
     The scene is rigid-only (no joints, no cloth) so it's compatible
     with the current mass-splitting guards.
     """
-    import newton
-    from newton._src.solvers.phoenx.body import body_container_zeros
-    from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
+    import newton  # noqa: PLC0415
+    from newton._src.solvers.phoenx.body import body_container_zeros  # noqa: PLC0415
+    from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING  # noqa: PLC0415
 
     mb = newton.ModelBuilder()
     mb.default_shape_cfg.gap = 0.05
@@ -246,7 +246,7 @@ def _build_box_stack_scene(num_boxes: int, mass_splitting: bool, device, max_col
 
     num_bodies_phx = model.body_count + 1  # +1 for static-world slot 0
     bodies = body_container_zeros(num_bodies_phx, device=device)
-    from newton._src.solvers.phoenx.examples.example_common import init_phoenx_bodies_kernel
+    from newton._src.solvers.phoenx.examples.example_common import init_phoenx_bodies_kernel  # noqa: PLC0415
 
     wp.launch(
         init_phoenx_bodies_kernel,
@@ -288,7 +288,7 @@ def _build_box_stack_scene(num_boxes: int, mass_splitting: bool, device, max_col
 
 
 def _sync_newton_to_phoenx(model, state, bodies, device):
-    from newton._src.solvers.phoenx.examples.example_common import (
+    from newton._src.solvers.phoenx.examples.example_common import (  # noqa: PLC0415
         newton_to_phoenx_kernel,
     )
 
@@ -311,7 +311,7 @@ def _sync_newton_to_phoenx(model, state, bodies, device):
 
 def _sync_phoenx_to_newton(model, state, bodies, device):
     """Publish solved rigid state so the next collision/update advances time."""
-    from newton._src.solvers.phoenx.examples.example_common import phoenx_to_newton_kernel
+    from newton._src.solvers.phoenx.examples.example_common import phoenx_to_newton_kernel  # noqa: PLC0415
 
     n = model.body_count
     wp.launch(
@@ -431,7 +431,7 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         # math is identity vs ``mass_splitting=False`` (modulo float
         # ordering). Covers the joint refactor end-to-end.
         device = wp.get_preferred_device()
-        import newton
+        import newton  # noqa: PLC0415
 
         def _build(mass_splitting: bool):
             mb = newton.ModelBuilder()
@@ -496,9 +496,9 @@ class TestMassSplittingPhysicsEquivalence(unittest.TestCase):
         # prepare-time mass scaling is identity. End-state particle
         # positions must match the ``mass_splitting=False`` reference.
         device = wp.get_preferred_device()
-        import newton
-        from newton._src.solvers.phoenx.body import body_container_zeros
-        from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
+        import newton  # noqa: PLC0415
+        from newton._src.solvers.phoenx.body import body_container_zeros  # noqa: PLC0415
+        from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (  # noqa: PLC0415
             cloth_lame_from_youngs_poisson_plane_stress,
         )
 

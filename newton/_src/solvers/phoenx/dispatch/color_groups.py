@@ -7,7 +7,7 @@ import functools
 import warp as wp
 
 from newton._src.solvers.phoenx.constraints.bilateral_joint import get_iterate_bilateral_joint_block
-from newton._src.solvers.phoenx.solver_phoenx_kernels import (
+from newton._src.solvers.phoenx.simulation_kernels import (
     BodyContainer,
     ConstraintContainer,
     ContactColumnContainer,

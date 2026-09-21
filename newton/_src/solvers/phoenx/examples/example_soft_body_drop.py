@@ -53,7 +53,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
     newton_to_phoenx_kernel,
     phoenx_to_newton_kernel,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.timer import print_column_timings
 
 # Tonge mass splitting (C# PhoenX default). When ``True`` the

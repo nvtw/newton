@@ -37,14 +37,14 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_PRISMATIC,
     JointConstraintData,
 )
-from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES
-from newton._src.solvers.phoenx.solver_phoenx import (
-    PhoenXWorld,
+from newton._src.solvers.phoenx.execution_policy import (
     _choose_auto_prepare_refresh_stride,
     _choose_fast_tail_family_split_for_scene,
     _choose_fast_tail_worlds_per_block_for_scene,
     _choose_multi_world_scheduler,
 )
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import MAX_BODIES
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 def _make_kwargs(

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import warp as wp
 
 if TYPE_CHECKING:
-    from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+    from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 class MultiWorldDispatcher:

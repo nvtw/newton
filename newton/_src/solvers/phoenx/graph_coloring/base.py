@@ -25,7 +25,7 @@ To add a new implementation:
    :mod:`graph_coloring_common` if helpful; the coloring step itself
    is the lever.
 3. Add a ``partitioner_algorithm`` branch in
-   :class:`newton._src.solvers.phoenx.solver_phoenx.PhoenXWorld`.
+   :class:`newton._src.solvers.phoenx.simulation.PhoenXWorld`.
 4. Bench head-to-head via :mod:`benchmarks.bench_graph_coloring`.
 """
 

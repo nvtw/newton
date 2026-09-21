@@ -183,7 +183,7 @@ flowchart TD
 flowchart TD
     classDef file fill:#ecfeff,stroke:#0891b2,stroke-width:1.2px,color:#0e3440
     A("<b>solver.py</b><br/>Newton-facing state handoff"):::file
-    B("<b>solver_phoenx.py</b><br/>Frame timeline and substep order"):::file
+    B("<b>world.py</b><br/>Frame timeline and substep order"):::file
     C("<b>constraints/contact_ingest.py</b><br/>Contact compaction and warm start"):::file
     D("<b>constraints/constraint_contact.py</b><br/>Normal and friction rows"):::file
     E("<b>model_adapter.py</b><br/>Joint import and drive mapping"):::file
@@ -278,7 +278,7 @@ Keep these constraints explicit when changing solver dispatch or adding examples
 - D6 structural equalities use compact lock-pattern modes in the direct system. Free-axis limits, speed caps, and friction use one common six-axis D6 row representation; unsupported structural shapes fail early.
 - Mass splitting is single-world only. It can coexist with joints and cloth-triangle rows, but `mass_splitting=True` still rejects `step_layout="multi_world"`.
 - `prepare_refresh_stride="auto"` is a graph-capture-safe optimization for rigid contact/joint worlds. Contact worlds refresh at least every third substep, and joint-only worlds may use larger fixed strides.
-- Auto-selection heuristics belong near construction-time policy helpers in `solver_phoenx.py` (`_choose_initial_threads_per_world`, `_choose_auto_prepare_refresh_stride`, `_choose_multi_world_scheduler`) plus the small GPU lane picker. Keep scheduler choices graph-stable after construction.
+- Auto-selection heuristics belong near construction-time policy helpers in `world.py` (`_choose_initial_threads_per_world`, `_choose_auto_prepare_refresh_stride`, `_choose_multi_world_scheduler`) plus the small GPU lane picker. Keep scheduler choices graph-stable after construction.
 
 ## 9. Minimal Public Usage
 Internal tests may instantiate `PhoenXWorld` directly, but examples and docs should show the public solver.
@@ -343,7 +343,7 @@ Use these checks before changing core flow:
 
 Good local checks:
 ```bash
-uv run --extra dev -m newton.tests -k test_solver_phoenx
+uv run --extra dev -m newton.tests -k test_invariants
 uv run --extra dev -m newton.tests -k test_graph_coloring
 uv run --extra dev -m newton.tests -k test_soft_body_mass_splitting_determinism
 uv run --extra dev -m newton.tests -k test_soft_body_mass_splitting_momentum

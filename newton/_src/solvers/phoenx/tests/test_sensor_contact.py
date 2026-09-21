@@ -50,11 +50,11 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.adapter_kernels import (
+    _contact_impulse_to_force_wrapper_kernel,
+)
 from newton._src.solvers.phoenx.constraints.contact_container import (
     contact_container_zeros,
-)
-from newton._src.solvers.phoenx.solver_kernels import (
-    _contact_impulse_to_force_wrapper_kernel,
 )
 from newton.sensors import SensorContact
 

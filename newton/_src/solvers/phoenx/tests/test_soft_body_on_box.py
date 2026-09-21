@@ -24,7 +24,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.body import body_container_zeros
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 @unittest.skipUnless(

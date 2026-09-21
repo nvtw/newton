@@ -33,7 +33,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
     newton_to_phoenx_kernel,
     phoenx_to_newton_kernel,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 ENABLE_MASS_SPLITTING: bool = True
 MASS_SPLITTING_MAX_COLORED_PARTITIONS: int = 12

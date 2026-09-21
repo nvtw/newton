@@ -22,7 +22,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
     phoenx_to_newton_kernel,
 )
 from newton._src.solvers.phoenx.helpers.data_packing import dword_offset_of
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 @unittest.skipUnless(

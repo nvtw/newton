@@ -46,7 +46,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
     newton_to_phoenx_kernel,
     phoenx_to_newton_kernel,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 CLOTH_DIM_X = 16  # 16x8 cloth -> 17x9 = 153 particles, 256 tris
 CLOTH_DIM_Y = 8

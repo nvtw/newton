@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Per-shape material tests for :mod:`solver_phoenx`.
+"""Per-shape material tests for :mod:`world`.
 
 Ports the jitter-side :mod:`test_materials`: the host-side combine
 modes / validation tests copy over verbatim (they never touch the

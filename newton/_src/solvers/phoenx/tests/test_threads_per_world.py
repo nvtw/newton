@@ -29,8 +29,8 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.execution_policy import _choose_initial_threads_per_world
 from newton._src.solvers.phoenx.solver import SolverPhoenX
-from newton._src.solvers.phoenx.solver_phoenx import _choose_initial_threads_per_world
 from newton._src.solvers.phoenx.tests._test_helpers import make_solver_graph_stepper
 from newton._src.solvers.phoenx.tests.test_multi_world import _build_direct_pendulums, _make_direct_solver
 

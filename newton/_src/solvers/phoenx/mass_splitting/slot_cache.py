@@ -49,7 +49,7 @@ from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContai
 
 #: ConstraintContainer body-field offsets per type. Must match the
 #: schemas in :mod:`constraints.constraint_*` (kept in sync with
-#: ``_<TYPE>_OFF_BODY*`` in :mod:`solver_phoenx_kernels`). The natural
+#: ``_<TYPE>_OFF_BODY*`` in :mod:`simulation_kernels`). The natural
 #: body order matters because the iterate / prepare functions read
 #: ``slot_cache[cid, v]`` indexed by the SAME ordinal that they read
 #: ``body{v+1}`` from the constraint row -- if the cache stored

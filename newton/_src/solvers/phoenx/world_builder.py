@@ -31,7 +31,7 @@ from newton._src.solvers.phoenx.body import (
     inertia_sym6_pack_np,
     reduced_articulation_data_zeros,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 __all__ = [
     "WORLD_BODY",

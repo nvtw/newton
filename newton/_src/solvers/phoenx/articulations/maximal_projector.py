@@ -25,7 +25,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_LA2_B1,
     _OFF_LA2_B2,
 )
-from newton._src.solvers.phoenx.solver_phoenx_kernels import _rotation_quaternion
+from newton._src.solvers.phoenx.simulation_kernels import _rotation_quaternion
 
 _TREE_WIDTH = 64
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Stacking-stability tests for :mod:`solver_phoenx`.
+"""Stacking-stability tests for :mod:`world`.
 
 Covers the fundamental solver behaviours the
 ``example_tower`` scene relies on, scaled down so each test
@@ -47,10 +47,10 @@ from newton._src.solvers.phoenx.examples.example_common import (
     phoenx_to_newton_kernel as _phoenx_to_newton_kernel,
 )
 from newton._src.solvers.phoenx.model_adapter import build_joint_init_arrays
+from newton._src.solvers.phoenx.simulation import DEFAULT_SHAPE_GAP, PhoenXWorld
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_CONTACT_MATCHING,
 )
-from newton._src.solvers.phoenx.solver_phoenx import DEFAULT_SHAPE_GAP, PhoenXWorld
 
 _G = 9.81
 

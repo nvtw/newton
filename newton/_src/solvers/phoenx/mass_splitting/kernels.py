@@ -482,7 +482,7 @@ _MASS_SPLITTING_GROUPED_LANES_PER_NODE_WP = wp.constant(wp.int32(_MASS_SPLITTING
 
 # Per-node mass-splitting kernels iterate sequentially over a small
 # slot range and have no cross-thread sync, so they follow the same
-# rule as :data:`solver_phoenx._SINGLEWORLD_BLOCK_DIM`: one warp per
+# rule as :data:`world._SINGLEWORLD_BLOCK_DIM`: one warp per
 # block maximises blocks-in-flight per SM and hides the global memory
 # latency on the slot reads / writes.
 _MASS_SPLITTING_PER_NODE_BLOCK_DIM: int = 32

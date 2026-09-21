@@ -34,7 +34,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
     newton_to_phoenx_kernel,
     phoenx_to_newton_kernel,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 # Scene constants. Same shape as test_cloth_mass_splitting's regression
 # scene, picked so the cube-vs-cloth contact set genuinely overflows

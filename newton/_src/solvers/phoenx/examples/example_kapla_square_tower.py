@@ -40,8 +40,8 @@ from newton._src.solvers.phoenx.picking import (
     Picking,
     register_with_viewer_gl,
 )
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 # Step/solver settings taken from ``example_kapla_tower.py``.
 USE_BIG_WORLD_MODE: bool = True

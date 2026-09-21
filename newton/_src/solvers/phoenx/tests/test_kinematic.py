@@ -310,7 +310,7 @@ class TestKinematicNewtonCollisionPipeline(unittest.TestCase):
             init_phoenx_bodies_kernel,
             newton_to_phoenx_kernel,
         )
-        from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld  # noqa: PLC0415
+        from newton._src.solvers.phoenx.simulation import PhoenXWorld  # noqa: PLC0415
 
         device = wp.get_device("cuda:0")
         radius = 0.2

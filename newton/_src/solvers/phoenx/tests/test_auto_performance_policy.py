@@ -11,12 +11,12 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldDispatcher
 from newton._src.solvers.phoenx.examples.example_humanoid import Example as HumanoidExample
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.solver import (
     _can_combine_direct_prepare_projection,
     _estimate_contact_column_max_phoenx,
     _resolve_auto_step_layout,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 class TestPhoenXAutoPerformancePolicy(unittest.TestCase):

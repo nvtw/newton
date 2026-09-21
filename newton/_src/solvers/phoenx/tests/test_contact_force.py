@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Contact-force accuracy tests for :mod:`solver_phoenx`.
+"""Contact-force accuracy tests for :mod:`world`.
 
 Mirrors the jitter-solver tests in
 :mod:`test_contact_force_accuracy` /

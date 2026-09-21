@@ -67,7 +67,7 @@ import warp as wp
 sys.argv = ["kapla", "--viewer", "null", "--num-frames", "100"]
 
 import newton.examples  # noqa: E402
-from newton._src.solvers.phoenx import solver_phoenx as _sp  # noqa: E402
+from newton._src.solvers.phoenx import simulation as _sp  # noqa: E402
 from newton._src.solvers.phoenx.examples import example_kapla_tower as ex  # noqa: E402
 
 # Force a conditional-free graph so ncu can replay the persistent kernels:

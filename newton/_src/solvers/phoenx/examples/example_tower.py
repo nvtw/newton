@@ -4,7 +4,7 @@
 ###########################################################################
 # Example PhoenX Tower of Jitter
 #
-# First example for :mod:`solver_phoenx`. Replicates PhoenX's
+# First example for :mod:`world`. Replicates PhoenX's
 # ``Demo02: Tower of Jitter`` (see
 # ``PhoenX/src/Viewer/Demos/Demo02.cs`` and ``Common.BuildTower`` in
 # ``PhoenX/src/Viewer/Demos/Common.cs``): a 40-layer circular stack of
@@ -48,10 +48,10 @@ from newton._src.solvers.phoenx.picking import (
     Picking,
     register_with_viewer_gl,
 )
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_CONTACT_MATCHING,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 # ---- Step layout toggle ----
 # Flip this to switch between the two PhoenX dispatch strategies:
@@ -102,7 +102,7 @@ PLANK_DENSITY = 1000.0
 
 
 class Example:
-    """PhoenX Tower of Jitter -- first example for :mod:`solver_phoenx`.
+    """PhoenX Tower of Jitter -- first example for :mod:`world`.
 
     Pipeline per frame:
         1. Sync Newton state -> PhoenX body container.

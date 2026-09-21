@@ -11,7 +11,7 @@ import warp as wp
 from newton._src.solvers.phoenx.constraints.contact_tgs import ContactTGS
 from newton._src.solvers.phoenx.dispatch import color_groups as groups
 from newton._src.solvers.phoenx.dispatch import color_groups_tgs as temporal_groups
-from newton._src.solvers.phoenx.solver_phoenx_kernels import (
+from newton._src.solvers.phoenx.simulation_kernels import (
     BodyContainer,
     ConstraintContainer,
     ContactColumnContainer,
