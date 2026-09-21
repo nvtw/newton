@@ -1102,8 +1102,18 @@ class FixedPatternPanelLLT:
         if self._pcr is not None:
             self._pcr.compute(self.matrix)
 
-    def solve(self, rhs: wp.array[wp.float32], solution: wp.array[wp.float32]) -> None:
-        """Solve all mechanism blocks and unpermute the result."""
+    def solve(
+        self,
+        rhs: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+        *,
+        refine: bool = True,
+    ) -> None:
+        """Solve all mechanism blocks and unpermute the result.
+
+        The refine option affects only long block-tridiagonal mechanisms using
+        PCR; all other factor paths retain their existing solve.
+        """
         if self.cooperative_mechanism.size > 0:
             wp.launch_tiled(
                 self._solve_cooperative,
@@ -1165,7 +1175,7 @@ class FixedPatternPanelLLT:
                 solution,
             )
         if self._pcr is not None:
-            self._pcr.solve(rhs, solution)
+            self._pcr.solve(rhs, solution, refine=refine)
 
 
 __all__ = ["FixedPanelSymbolic", "FixedPatternGroupedRHSBatch", "FixedPatternPanelLLT", "build_fixed_panel_symbolic"]

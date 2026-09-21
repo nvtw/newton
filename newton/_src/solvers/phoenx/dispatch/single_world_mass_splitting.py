@@ -133,13 +133,15 @@ class SingleWorldMassSplittingDispatcher:
                 reverse_colors=bool(iteration % 2),
             )
             w._mass_splitting_average_and_broadcast(inv_dt)
-            # Divide contact sweeps into temporal blocks when requested. An
-            # unbiased intermediate projection feeds contact impulses through
-            # the exact joint graph; only the final projection applies bias.
+            # Divide contact sweeps into temporal blocks when requested. A
+            # complete PCR pass transfers intermediate contact impulses through
+            # the joint graph. Final position recovery and the velocity pass
+            # retain residual refinement.
             direct_projection = iteration in w._direct_joint_projection_iterations
             if direct is not None and direct.enabled and direct_projection:
                 w._mass_splitting_writeback(already_averaged=True)
-                direct.solve(use_bias=iteration == w.solver_iterations - 1)
+                final_projection = iteration == w.solver_iterations - 1
+                direct.solve(use_bias=final_projection, refine=final_projection)
                 if iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
 

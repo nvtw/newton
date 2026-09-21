@@ -923,20 +923,28 @@ class TestDirectJointTypes(unittest.TestCase):
         rhs_np = np.concatenate(expected_rhs).astype(np.float32)
         rhs = wp.array(rhs_np, dtype=wp.float32, device=wp.get_preferred_device())
         solution = wp.zeros_like(rhs)
+        intermediate_solution = wp.zeros_like(rhs)
         panel.matrix.assign(storage)
 
         with wp.ScopedCapture(wp.get_preferred_device()) as capture:
             panel.compute()
             panel.solve(rhs, solution)
+            panel.solve(rhs, intermediate_solution, refine=False)
         wp.capture_launch(capture.graph)
         solution_np = solution.numpy()
+        intermediate_np = intermediate_solution.numpy()
 
         for mechanism, matrix in enumerate(matrices):
             begin = int(starts[mechanism])
             end = int(starts[mechanism + 1])
-            residual = matrix @ solution_np[begin:end] - rhs_np[begin:end]
-            relative_residual = np.linalg.norm(residual) / np.linalg.norm(rhs_np[begin:end])
+            rhs_slice = rhs_np[begin:end]
+            rhs_norm = np.linalg.norm(rhs_slice)
+            residual = matrix @ solution_np[begin:end] - rhs_slice
+            relative_residual = np.linalg.norm(residual) / rhs_norm
             self.assertLess(relative_residual, 2.0e-5, msg=f"mechanism {mechanism}: {relative_residual}")
+            intermediate_residual = matrix @ intermediate_np[begin:end] - rhs_slice
+            intermediate_relative = np.linalg.norm(intermediate_residual) / rhs_norm
+            self.assertLess(intermediate_relative, 5.0e-3, msg=f"intermediate {mechanism}: {intermediate_relative}")
 
     def test_grouped_rhs_limits_tile_width_for_occupancy(self) -> None:
         """Limit grouped contact solves to the measured occupancy width."""
