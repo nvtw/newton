@@ -100,8 +100,9 @@ The 90 rpm target ended at a 3.79 ratio and 10.16 W with a 2.3 mm chain span and
 0.058 mm joint gap. The 120 rpm target ended at a 4.15 ratio and 19.80 W with a
 0.7 mm span and 0.053 mm joint gap. A non-mutating live-contact audit at 120 rpm
 sampled at most 1.54 mm penetration, localized to rear-sprocket tooth contact.
-These diagnostics are sampled rather than bounds over every substep, and do not
-validate interactive gear shifts.
+The final crank-to-dynamometer power efficiencies were approximately 92%, 86%,
+and 89% at the 60, 90, and 120 rpm targets. These diagnostics are sampled rather
+than bounds over every substep, and do not validate interactive gear shifts.
 
 On an RTX PRO 6000 Blackwell, the steady-state 60 rpm default measured 63.45
 headless FPS, excluding startup and diagnostic reads. A separate 240-frame
