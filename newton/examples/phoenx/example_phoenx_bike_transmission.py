@@ -190,6 +190,8 @@ def build_scene(
 class Example:
     """Drive the chain and sprockets using mesh contacts and authored revolute joints."""
 
+    color_group_size = 2
+
     overlap_simulation_render = True
 
     def __init__(self, viewer, args):
@@ -258,7 +260,7 @@ class Example:
             enable_body_pair_grouping=False,
             contact_chunk_size=args.contact_chunk_size,
             mass_splitting=True,
-            mass_splitting_color_group_size=3,
+            mass_splitting_color_group_size=self.color_group_size,
             mass_splitting_batch_size=2,
             max_colored_partitions=8,
         )

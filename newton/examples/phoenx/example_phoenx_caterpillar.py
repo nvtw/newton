@@ -156,6 +156,8 @@ def build_scene(*, sdf_resolution=128, motor_off=False):
 class Example:
     """Run the full-scale excavator and its two articulated track loops."""
 
+    color_group_size = 2
+
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.sim_time = 0.0
@@ -189,7 +191,7 @@ class Example:
             parallel_contact_prepare=self.model.device.is_cuda,
             contact_chunk_size=args.contact_chunk_size,
             mass_splitting=True,
-            mass_splitting_color_group_size=3,
+            mass_splitting_color_group_size=self.color_group_size,
             mass_splitting_batch_size=2,
             max_colored_partitions=8,
         )

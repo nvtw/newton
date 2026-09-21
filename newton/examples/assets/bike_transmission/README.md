@@ -39,7 +39,9 @@ uv run --extra examples -m newton.examples phoenx_bike_transmission --viewer nul
 
 The default configuration uses 120 Hz collision detection, 8 physics substeps
 per collision refresh, 4 grouped contact iterations, one velocity iteration,
-and the direct joint solver. Grouped PGS alternates forward and reverse color
+and the direct joint solver. Two-color mass-copy partitions expose independent
+GPU work while retaining ordered Gauss-Seidel updates inside each partition.
+Grouped PGS alternates forward and reverse color
 order between iterations to reduce directional bias without adding work. Exact
 mass-metric joint projections alternate with grouped mass-split contact PGS.
 Contact columns are capped at 64 rows. Every retained contact row is solved; the
@@ -82,16 +84,17 @@ uv run ruff format newton/examples/phoenx/bike_transmission_scene.py
 The generated Python data records the source SHA-256.
 
 A 630-frame measured run of the 60 rpm loaded default configuration sampled
-joint gaps up to 0.057 mm, hinge-axis misalignment up to 0.0024 degrees, and
-lateral chain span up to 2.91 mm. At the final sample the crank and rear speeds
-were 38.1 rpm and 134.8 rpm, a 3.54 ratio, while the rear dynamometer absorbed
-3.99 W. These are sampled diagnostics, not bounds over every substep or a
+joint gaps up to 0.050 mm, hinge-axis misalignment up to 0.0043 degrees, and
+lateral chain span up to 2.01 mm. At the final sample the crank and rear speeds
+were 40.1 rpm and 147.6 rpm, a 3.68 ratio, while the rear dynamometer absorbed
+4.79 W. These are sampled diagnostics, not bounds over every substep or a
 validation of interactive gear shifts.
 
-On an RTX PRO 6000 Blackwell, the same ten-second headless run measured 58.85
-FPS, excluding startup and diagnostic reads. Shape-pair manifolds preserve the
-disconnected sprocket contacts while graph coloring and the overflow partition
-parallelize independent interactions with equal-and-opposite impulses.
+On an RTX PRO 6000 Blackwell, the same ten-second headless run measured 62.77
+FPS, excluding startup and diagnostic reads. A separate 240-frame 1920x1080
+OptiX run with asynchronous simulation/render overlap measured 56.01 FPS.
+Shape-pair manifolds preserve disconnected sprocket contacts while grouped mass
+splitting parallelizes independent interactions with equal-and-opposite impulses.
 
 Use `--solver-stats` to print the actual color sizes, sequential color-group
 sizes, and overflow count once per simulated second. This opt-in diagnostic

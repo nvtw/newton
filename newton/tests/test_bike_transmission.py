@@ -33,6 +33,7 @@ class TestBikeTransmission(unittest.TestCase):
         args = Example.create_parser().parse_args([])
         self.assertEqual(args.substeps, 8)
         self.assertEqual(args.iterations, 4)
+        self.assertEqual(Example.color_group_size, 2)
         self.assertEqual(args.speculative_contact_gap_max, SPECULATIVE_CONTACT_GAP_MAX)
 
     def test_loaded_chain_transmits_power_at_bicycle_cadence(self):
