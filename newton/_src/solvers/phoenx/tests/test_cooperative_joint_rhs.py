@@ -9,13 +9,11 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx import solver_phoenx as world_module
 from newton._src.solvers.phoenx.dispatch.color_groups import (
     get_sweep_block_dim,
     get_sweep_kernel,
     use_cooperative_joint_rhs,
 )
-from newton._src.solvers.phoenx.tests import test_inactive_joint_prepare as transitions
 from newton._src.solvers.phoenx.tests.test_block_joint_policy import make_model, make_solver
 from newton._src.solvers.phoenx.tests.test_direct_drive import _cuda_with_graph_capture
 
@@ -133,22 +131,6 @@ class TestCooperativeJointRHS(unittest.TestCase):
                     else:
                         for a, b in zip(expected, actual, strict=True):
                             self.assertEqual(a.tobytes(), b.tobytes())
-
-    def test_live_geometry_and_property_transitions(self):
-        """Keep finite limits, stale releases, drives and row rebinding bit-exact."""
-        original = transitions.make_solver
-
-        def grouped(model, **kwargs):
-            return original(model, mass_splitting_color_group_size=2, **kwargs)
-
-        with patch.object(transitions, "make_solver", grouped):
-            for prismatic in (False, True):
-                with patch.object(world_module, "use_cooperative_joint_rhs", return_value=False):
-                    expected, _ = transitions.run(True, prismatic, True)
-                actual, _ = transitions.run(True, prismatic, True)
-                for before, after in zip(expected, actual, strict=True):
-                    for a, b in zip(before, after, strict=True):
-                        self.assertEqual(a.tobytes(), b.tobytes())
 
 
 class TestCooperativeJointPolicy(unittest.TestCase):

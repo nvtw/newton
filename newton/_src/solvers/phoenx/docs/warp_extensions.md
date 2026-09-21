@@ -6,10 +6,10 @@ Keep new native snippets tiny, GPU-scoped, and documented here.
 
 ## Synchronization Intrinsics
 
-- `solver_phoenx_kernels._sync_threads`: wraps `__syncthreads()` for generated
+- `simulation_kernels._sync_threads`: wraps `__syncthreads()` for generated
   fast-tail kernels whose block-local phases cannot be expressed with a Warp
   builtin.
-- `solver_phoenx_kernels._sync_warp` and `_sync_warp_mask`: wrap
+- `simulation_kernels._sync_warp` and `_sync_warp_mask`: wrap
   `__syncwarp()` for one-warp-per-world fast-tail kernels. The block size is
   kept at an integer number of warps so the synchronization scope is explicit.
 

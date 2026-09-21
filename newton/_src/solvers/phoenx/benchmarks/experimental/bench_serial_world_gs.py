@@ -30,7 +30,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import Constrai
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
-from newton._src.solvers.phoenx.solver_phoenx_kernels import (
+from newton._src.solvers.phoenx.simulation_kernels import (
     _make_multiworld_rigid_iterate_dispatch_funcs,
     _make_multiworld_rigid_prepare_dispatch_func,
 )

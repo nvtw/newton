@@ -32,7 +32,7 @@ from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 _GRAVITY = 9.81
 _SUBSTEPS = 4

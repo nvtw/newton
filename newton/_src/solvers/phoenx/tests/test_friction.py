@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Friction tests for :mod:`solver_phoenx`.
+"""Friction tests for :mod:`world`.
 
 Ports the jitter-solver friction checks in :mod:`test_friction` and
 :mod:`test_friction_slide`:

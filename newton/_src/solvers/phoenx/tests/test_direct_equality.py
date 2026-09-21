@@ -10,7 +10,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx import solver_phoenx_kernels
+from newton._src.solvers.phoenx import simulation_kernels
 from newton._src.solvers.phoenx.articulations.direct_equality import (
     _select_panel_block_size,
     build_direct_equality_topology,
@@ -792,9 +792,9 @@ class TestDirectEquality(unittest.TestCase):
                 self.assertFalse(hasattr(constraint_joint, entry))
 
         for factory in (
-            solver_phoenx_kernels.get_singleworld_kernel,
-            solver_phoenx_kernels.get_fast_tail_kernel,
-            solver_phoenx_kernels.get_block_world_kernel,
+            simulation_kernels.get_singleworld_kernel,
+            simulation_kernels.get_fast_tail_kernel,
+            simulation_kernels.get_block_world_kernel,
         ):
             with self.subTest(factory=factory.__name__):
                 parameters = inspect.signature(factory).parameters

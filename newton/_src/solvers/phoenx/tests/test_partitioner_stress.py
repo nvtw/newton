@@ -4,7 +4,7 @@
 """Stress / regression tests for :class:`IncrementalContactPartitioner`.
 
 This is the partitioner :class:`PhoenXWorld` calls every step from
-``solver_phoenx.py:2056`` to color the constraint graph. The
+``world.py:2056`` to color the constraint graph. The
 ``example_soft_body_drop`` scene was observed to hang for many minutes
 in :meth:`build_csr_greedy_with_jp_fallback` (specifically inside
 ``wp.capture_while(self._num_remaining, self._capture_speculative_step)``

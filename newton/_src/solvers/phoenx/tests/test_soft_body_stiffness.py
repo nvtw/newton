@@ -18,7 +18,7 @@ from newton._src.solvers.phoenx.constraints.constraint_soft_tet_neohookean impor
 from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     soft_tet_lame_from_youngs_poisson,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 _BLOCK_SIZE = 0.30
 _GRID_DIM = 2

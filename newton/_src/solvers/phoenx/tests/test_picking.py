@@ -30,7 +30,7 @@ from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
 )
 from newton._src.solvers.phoenx.examples.example_common import init_phoenx_bodies_kernel
 from newton._src.solvers.phoenx.picking import Picking, register_with_viewer_gl
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 def _build_scene(device, *, kinematic_occluder: bool = False):

@@ -42,7 +42,7 @@ from newton._src.solvers.phoenx.picking import (
     Picking,
     register_with_viewer_gl,
 )
-from newton._src.solvers.phoenx.solver_phoenx import (
+from newton._src.solvers.phoenx.simulation import (
     DEFAULT_SHAPE_GAP,
     PhoenXWorld,
     pack_body_xforms_kernel,

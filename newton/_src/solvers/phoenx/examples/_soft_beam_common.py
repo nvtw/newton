@@ -20,7 +20,7 @@ from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     soft_tet_lame_from_youngs_poisson,
 )
 from newton._src.solvers.phoenx.particle import ParticleContainer
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 def _get_arg(args, name: str, default):

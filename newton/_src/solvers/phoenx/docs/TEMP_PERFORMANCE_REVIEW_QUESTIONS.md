@@ -61,7 +61,7 @@ Both software and hardware grid-barrier megakernels have now been rejected. A di
 
 Hot implementation areas:
 
-- `solver_phoenx_kernels.py:_make_singleworld_persistent_kernel`
+- `simulation_kernels.py:_make_singleworld_persistent_kernel`
 - `constraints/constraint_contact_cloth.py:_make_contact_iterate_at`
 - `mass_splitting/kernels.py:_make_average_and_broadcast_kernel`
 - `graph_coloring/graph_coloring_incremental.py:_sort_csr_by_body_locality`

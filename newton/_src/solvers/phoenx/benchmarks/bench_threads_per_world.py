@@ -5,7 +5,7 @@
 
 The PhoenX ``multi_world`` fast-tail kernels read their effective
 threads-per-world from a 1-element GPU buffer that the per-step picker
-writes (see :func:`solver_phoenx_kernels._pick_threads_per_world_kernel`).
+writes (see :func:`simulation_kernels._pick_threads_per_world_kernel`).
 This script sweeps representative scenes across the four meaningful
 configurations:
 

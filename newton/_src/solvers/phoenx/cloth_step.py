@@ -6,7 +6,7 @@
 Cloth integrates with the rigid PGS pipeline via the partitioner-driven
 graph coloring -- see ``_constraints_to_elements_kernel`` and the
 ``cloth_support=True`` factory variants of the singleworld iterate /
-prepare / relax kernels in ``solver_phoenx_kernels.py``. The kernels
+prepare / relax kernels in ``simulation_kernels.py``. The kernels
 in this file are the bookkeeping pieces that don't fit into the per-cid
 type-tag dispatch:
 

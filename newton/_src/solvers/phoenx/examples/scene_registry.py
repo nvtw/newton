@@ -37,7 +37,7 @@ class Scene:
     """State the visualizer needs to render + step a registered scene.
 
     Attributes:
-        world: Finalised :class:`~newton._src.solvers.phoenx.solver_phoenx.PhoenXWorld`.
+        world: Finalised :class:`~newton._src.solvers.phoenx.simulation.PhoenXWorld`.
         body_half_extents: ``(num_bodies, 3)`` ``np.float32`` half-extents
             in body-local space. Bodies with any component ``<= 0``
             are treated as non-renderable / non-pickable (typical for

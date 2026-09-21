@@ -970,7 +970,7 @@ class TestSleepingKinematicWake(unittest.TestCase):
             newton_to_phoenx_kernel,
             phoenx_to_newton_kernel,
         )
-        from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld  # noqa: PLC0415
+        from newton._src.solvers.phoenx.simulation import PhoenXWorld  # noqa: PLC0415
 
         device = wp.get_device("cuda:0")
 

@@ -55,10 +55,10 @@ from newton._src.solvers.phoenx.picking import (
     Picking,
     register_with_viewer_gl,
 )
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.solver_config import (
     PHOENX_CONTACT_MATCHING,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
 # Patch ``state.body_q`` for the camera collider so Newton's

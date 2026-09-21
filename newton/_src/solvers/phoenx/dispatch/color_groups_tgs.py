@@ -17,7 +17,7 @@ from newton._src.solvers.phoenx.dispatch.color_groups import (
     DEFAULT_SWEEP_BLOCK_COUNT,
     JOINT_RHS_LANES,
 )
-from newton._src.solvers.phoenx.solver_phoenx_kernels import (
+from newton._src.solvers.phoenx.simulation_kernels import (
     BodyContainer,
     ConstraintContainer,
     ContactColumnContainer,

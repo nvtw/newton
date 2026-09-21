@@ -103,8 +103,8 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.benchmarks.scenarios import h1_flat, tower
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.solver import SolverPhoenX
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 _SEQUENTIAL_GBPS = 1489.14
 _RANDOM_VEC4_GBPS = 1036.82

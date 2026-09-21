@@ -42,7 +42,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 from newton._src.solvers.phoenx.constraints.constraint_soft_tet_neohookean import (
     SoftBodyConstraintType,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 def _build_soft_cube(

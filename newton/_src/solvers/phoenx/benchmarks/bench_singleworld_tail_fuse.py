@@ -24,7 +24,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver
 from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower, tower_grid
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 def _parse_csv_ints(value: str) -> tuple[int, ...]:

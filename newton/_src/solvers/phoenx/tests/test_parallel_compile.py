@@ -32,7 +32,7 @@ import warp as wp
 if not wp.get_preferred_device().is_cuda:
     raise unittest.SkipTest("PhoenX tests require CUDA")
 
-from newton._src.solvers.phoenx.solver_phoenx_kernels import (
+from newton._src.solvers.phoenx.simulation_kernels import (
     get_block_world_kernel,
     get_fast_tail_kernel,
 )

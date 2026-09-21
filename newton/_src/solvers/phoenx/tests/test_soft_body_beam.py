@@ -20,7 +20,7 @@ from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     soft_tet_lame_from_youngs_poisson,
 )
 from newton._src.solvers.phoenx.particle import ParticleContainer
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.tests._test_helpers import require_cuda_graph_capture
 
 _TAU = 2.0 * math.pi

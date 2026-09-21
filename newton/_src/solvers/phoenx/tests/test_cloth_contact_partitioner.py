@@ -36,7 +36,7 @@ from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     cloth_lame_from_youngs_poisson_plane_stress,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 @unittest.skipUnless(

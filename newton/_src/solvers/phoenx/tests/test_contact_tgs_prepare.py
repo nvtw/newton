@@ -36,7 +36,7 @@ from newton._src.solvers.phoenx.constraints.contact_tgs import (
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs_partition import NormalPatches, allocate, partition_range
 from newton._src.solvers.phoenx.constraints.contact_tgs_prepare import geometry, partition_groups, patches
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 @wp.kernel

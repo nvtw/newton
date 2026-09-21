@@ -19,7 +19,7 @@ occupancy-bound in the usual sense. It is **memory-latency-bound while running
 at roughly one work item per thread with ~2.4x of the register file unused**.
 The profile numbers say this quite directly, and the code says why.
 
-`_singleworld_total_threads` (`solver_phoenx.py:510`) sizes the persistent grid
+`_singleworld_total_threads` (`world.py:510`) sizes the persistent grid
 from *constraint capacity*, not from per-colour work:
 
 ```python
@@ -143,7 +143,7 @@ Two changes, both static kernel-factory knobs, both bitwise exact.
 work, not to total capacity:
 
 ```python
-# solver_phoenx.py:_singleworld_total_threads
+# world.py:_singleworld_total_threads
 expected_partition = ceil(constraint_capacity / max(1, max_colored_partitions + 1))
 capacity_blocks = ceil(expected_partition * OVERSUBSCRIBE / block_dim)   # OVERSUBSCRIBE ~ 1.0-2.0
 ```
@@ -389,7 +389,7 @@ one number, and it is the *only* manifold-related experiment I would fund.
   needs producer and consumer co-resident in a block with shared-memory
   handoff. At 8 one-warp blocks/SM there is no block to specialise inside; you
   would have to abandon `_SINGLEWORLD_BLOCK_DIM = 32`, and the note at
-  `solver_phoenx.py:500` records that Kapla FPS scales *monotonically* as block
+  `world.py:500` records that Kapla FPS scales *monotonically* as block
   dim falls 256 → 32 (+97%). Reject.
 - **`cp.async` / TMA staged copies** move *contiguous* tiles. The problematic
   access is a gather over 11k bodies. Not applicable without §1.4's renumbering,

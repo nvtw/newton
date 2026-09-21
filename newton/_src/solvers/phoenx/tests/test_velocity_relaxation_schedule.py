@@ -13,7 +13,7 @@ import newton
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation
 from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.tests.test_rigid_split_prepare import run_scene
 
 

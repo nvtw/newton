@@ -51,7 +51,7 @@ from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     soft_tet_lame_from_youngs_poisson,
 )
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 #: Standard 8-corner sign triplets matching the constraint's canonical
 #: isoparametric ordering. Used to lay out rest particle positions in

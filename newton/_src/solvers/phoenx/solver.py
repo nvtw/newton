@@ -18,6 +18,21 @@ import warp as wp
 
 import newton
 from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
+from newton._src.solvers.phoenx.adapter_kernels import (
+    _apply_joint_drive_control_kernel,
+    _apply_joint_forces_kernel,
+    _contact_impulse_to_force_wrapper_kernel,
+    _export_body_qdd_kernel,
+    _export_body_state_avg_kernel,
+    _export_body_state_fd_kernel,
+    _export_body_state_kernel,
+    _import_body_forces_kernel,
+    _import_body_state_kernel,
+    _init_phoenx_body_container_kernel,
+    _seed_kinematic_initial_pose_kernel,
+    _snapshot_pre_step_pose_kernel,
+    _snapshot_pre_step_velocity_kernel,
+)
 from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import DirectContactRunSchedule
 from newton._src.solvers.phoenx.articulations.direct_contact_response import DirectContactResponse
@@ -51,23 +66,8 @@ from newton._src.solvers.phoenx.model_adapter import (
     JointInitArrays,
     build_joint_init_arrays,
 )
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
-from newton._src.solvers.phoenx.solver_kernels import (
-    _apply_joint_drive_control_kernel,
-    _apply_joint_forces_kernel,
-    _contact_impulse_to_force_wrapper_kernel,
-    _export_body_qdd_kernel,
-    _export_body_state_avg_kernel,
-    _export_body_state_fd_kernel,
-    _export_body_state_kernel,
-    _import_body_forces_kernel,
-    _import_body_state_kernel,
-    _init_phoenx_body_container_kernel,
-    _seed_kinematic_initial_pose_kernel,
-    _snapshot_pre_step_pose_kernel,
-    _snapshot_pre_step_velocity_kernel,
-)
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 from newton._src.solvers.solver import SolverBase
 
 __all__ = ["SolverPhoenX"]

@@ -9,7 +9,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_STATIC, body_container_zeros
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 class TestTemporalForceTiming(unittest.TestCase):

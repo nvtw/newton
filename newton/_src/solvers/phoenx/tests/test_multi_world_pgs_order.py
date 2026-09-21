@@ -15,11 +15,11 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx import solver_phoenx, solver_phoenx_kernels
+from newton._src.solvers.phoenx import simulation, simulation_kernels
 from newton._src.solvers.phoenx.body import body_container_zeros
+from newton._src.solvers.phoenx.execution_policy import _choose_fast_tail_solve_schedule
 from newton._src.solvers.phoenx.experimental.mini.benchmark import _make_stack_model
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import ElementInteractionData
-from newton._src.solvers.phoenx.solver_phoenx import _choose_fast_tail_solve_schedule
 from newton._src.solvers.phoenx.tests.test_robot_policy_parity import (
     _g1_29dof_yaml,
     _g1_robot_model,
@@ -98,7 +98,7 @@ class TestMultiWorldStableBucketing(unittest.TestCase):
         output = wp.full(element_count, -1, dtype=wp.int32, device=device)
 
         wp.launch(
-            solver_phoenx_kernels._count_and_mark_world_runs_kernel,
+            simulation_kernels._count_and_mark_world_runs_kernel,
             dim=element_count,
             inputs=[
                 elements,
@@ -113,14 +113,14 @@ class TestMultiWorldStableBucketing(unittest.TestCase):
         wp.utils.array_scan(shifted, offsets, inclusive=True)
         wp.utils.array_scan(run_flags, run_ids, inclusive=True)
         wp.launch(
-            solver_phoenx_kernels._scatter_monotone_world_run_starts_kernel,
+            simulation_kernels._scatter_monotone_world_run_starts_kernel,
             dim=element_count,
             inputs=[num_elements, run_flags, run_ids],
             outputs=[run_starts, num_runs],
             device=device,
         )
         wp.launch(
-            solver_phoenx_kernels._merge_monotone_world_runs_kernel,
+            simulation_kernels._merge_monotone_world_runs_kernel,
             dim=4,
             inputs=[
                 elements,
@@ -147,18 +147,18 @@ class TestMultiWorldStableBucketing(unittest.TestCase):
 
 class TestMultiWorldColoringContract(unittest.TestCase):
     def test_per_world_greedy_overflow_flag_is_cleared_before_build(self) -> None:
-        source = inspect.getsource(solver_phoenx.PhoenXWorld._finish_per_world_coloring)
+        source = inspect.getsource(simulation.PhoenXWorld._finish_per_world_coloring)
         clear_idx = source.index("self._per_world_greedy_overflow.zero_()")
         launch_idx = source.index("get_per_world_greedy_coloring_kernel")
         self.assertLess(clear_idx, launch_idx)
 
     def test_direct_greedy_path_skips_adjacency_but_fallback_rebuilds_it(self) -> None:
-        rebuild_source = inspect.getsource(solver_phoenx.PhoenXWorld._rebuild_partition)
+        rebuild_source = inspect.getsource(simulation.PhoenXWorld._rebuild_partition)
         self.assertIn(
             'if self.step_layout == "single_world" or not self._use_greedy_coloring:',
             rebuild_source,
         )
-        fallback_source = inspect.getsource(solver_phoenx.PhoenXWorld._maybe_fallback_from_per_world_greedy_overflow)
+        fallback_source = inspect.getsource(simulation.PhoenXWorld._maybe_fallback_from_per_world_greedy_overflow)
         reset_idx = fallback_source.index("self._partitioner.reset")
         fallback_idx = fallback_source.index("_per_world_jp_coloring_kernel")
         self.assertLess(reset_idx, fallback_idx)
@@ -170,17 +170,17 @@ class TestMultiWorldFastTailSolveContract(unittest.TestCase):
         self.assertEqual(_choose_fast_tail_solve_schedule(substeps=20), (1, 1, 1))
 
     def test_relax_schedule_traverses_all_colors_per_iteration(self) -> None:
-        source = inspect.getsource(solver_phoenx_kernels._make_fast_tail_relax_kernel)
+        source = inspect.getsource(simulation_kernels._make_fast_tail_relax_kernel)
         self.assertIn("relax_iterations = num_iterations", source)
         self.assertNotIn("sweeps_per_dispatch = num_iterations", source)
-        self.assertEqual(solver_phoenx_kernels._BLOCK_WORLD_SOLVE_INNER_SWEEPS, 1)
+        self.assertEqual(simulation_kernels._BLOCK_WORLD_SOLVE_INNER_SWEEPS, 1)
 
     def test_multi_world_kernels_alternate_color_direction(self) -> None:
         factories = (
-            solver_phoenx_kernels._make_fast_tail_prepare_plus_iterate_kernel,
-            solver_phoenx_kernels._make_fast_tail_relax_kernel,
-            solver_phoenx_kernels._make_block_world_prepare_plus_iterate_kernel,
-            solver_phoenx_kernels._make_block_world_relax_kernel,
+            simulation_kernels._make_fast_tail_prepare_plus_iterate_kernel,
+            simulation_kernels._make_fast_tail_relax_kernel,
+            simulation_kernels._make_block_world_prepare_plus_iterate_kernel,
+            simulation_kernels._make_block_world_relax_kernel,
         )
         reverse_index = "color = n_colors - wp.int32(1) - c"
         for factory in factories:
@@ -188,11 +188,11 @@ class TestMultiWorldFastTailSolveContract(unittest.TestCase):
                 self.assertIn(reverse_index, inspect.getsource(factory))
 
     def test_single_world_forward_color_order_is_default(self) -> None:
-        parameter = inspect.signature(solver_phoenx.PhoenXWorld).parameters["symmetric_color_sweep"]
+        parameter = inspect.signature(simulation.PhoenXWorld).parameters["symmetric_color_sweep"]
         self.assertIs(parameter.default, False)
 
     def test_ordered_solve_dispatch_uses_selected_inner_sweeps(self) -> None:
-        source = textwrap.dedent(inspect.getsource(solver_phoenx_kernels._make_fast_tail_prepare_plus_iterate_kernel))
+        source = textwrap.dedent(inspect.getsource(simulation_kernels._make_fast_tail_prepare_plus_iterate_kernel))
         tree = ast.parse(source)
         dispatches: list[tuple[str, str | None]] = []
         outer_chunk_exprs: list[str | None] = []

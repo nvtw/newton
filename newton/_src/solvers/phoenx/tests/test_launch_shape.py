@@ -27,7 +27,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.solver_phoenx_kernels import (
+from newton._src.solvers.phoenx.simulation_kernels import (
     _STRAGGLER_BLOCK_DIM,
     get_fast_tail_kernel,
     get_singleworld_kernel,
@@ -95,7 +95,7 @@ def _collect_launches(world, *, step_dt: float = 1.0 / 60.0) -> list[dict]:
         )
         return real_launch(*args, **kwargs)
 
-    with patch("warp.launch", spy), patch("newton._src.solvers.phoenx.solver_phoenx.wp.launch", spy):
+    with patch("warp.launch", spy), patch("newton._src.solvers.phoenx.simulation.wp.launch", spy):
         world.step(dt=step_dt, contacts=None, shape_body=None)
     return captured
 

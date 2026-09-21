@@ -34,7 +34,7 @@ from newton._src.solvers.phoenx.examples.scene_registry import (
     registered_scenes,
 )
 from newton._src.solvers.phoenx.picking import Picking, register_with_viewer_gl
-from newton._src.solvers.phoenx.solver_phoenx import pack_body_xforms_kernel
+from newton._src.solvers.phoenx.simulation import pack_body_xforms_kernel
 
 
 @wp.kernel

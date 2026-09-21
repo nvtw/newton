@@ -36,7 +36,7 @@ from newton._src.solvers.phoenx.examples.example_common import (
     phoenx_to_newton_kernel,
 )
 from newton._src.solvers.phoenx.picking import Picking, register_with_viewer_gl
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 # Tonge mass splitting (C# PhoenX default). When ``True`` the
 # partitioner caps at :data:`MASS_SPLITTING_MAX_COLORED_PARTITIONS`

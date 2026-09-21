@@ -11,8 +11,8 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx import solver_phoenx
-from newton._src.solvers.phoenx import solver_phoenx_kernels as kernels
+from newton._src.solvers.phoenx import simulation
+from newton._src.solvers.phoenx import simulation_kernels as kernels
 from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.tests import test_cloth_mass_splitting as fixture
 
@@ -83,7 +83,7 @@ def _candidate_sweep(enabled):
     if enabled:
         yield
     else:
-        with patch.object(solver_phoenx.PhoenXWorld, "_singleworld_head_plus_tail_sweep", _legacy_head_first_sweep):
+        with patch.object(simulation.PhoenXWorld, "_singleworld_head_plus_tail_sweep", _legacy_head_first_sweep):
             yield
 
 
@@ -190,7 +190,7 @@ def _run_schedule(sizes, reverse, overflow, batch, candidate):
             _capture_singleworld_tail_sweep=tail_sweep,
         )
         with wp.ScopedCapture(device="cuda:0") as capture:
-            solver_phoenx.PhoenXWorld._singleworld_head_plus_tail_sweep(world, head, tail, wp.float32(120))
+            simulation.PhoenXWorld._singleworld_head_plus_tail_sweep(world, head, tail, wp.float32(120))
         wp.capture_launch(capture.graph)
         actual = bodies.position.numpy()
         np.testing.assert_array_equal(actual, expected)
@@ -244,7 +244,7 @@ class TestTailFirstDispatch(unittest.TestCase):
                 )
                 # Force both paths on this compact version of the hanging-cloth
                 # reproducer; the cube begins just above the cloth for prompt impact.
-                world._fuse_threshold = 8
+                simulation._fuse_threshold = 8
                 rest_positions = model.particle_q.numpy().copy()
                 pinned = model.particle_inv_mass.numpy() == 0
                 # Match the fixture initialization: materialize lazy buffers
@@ -267,7 +267,7 @@ class TestTailFirstDispatch(unittest.TestCase):
                             )
                         )
                     )
-                    self.assertEqual(int(world._partitioner.color_cursor.numpy()[0]), 0)
+                    self.assertEqual(int(simulation._partitioner.color_cursor.numpy()[0]), 0)
                 self.assertGreater(contact_peak, 0, "The cube never contacted the cloth")
                 self.assertTrue(np.isfinite(history).all())
                 positions = state.particle_q.numpy()
