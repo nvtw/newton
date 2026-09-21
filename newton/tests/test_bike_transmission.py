@@ -16,6 +16,7 @@ from newton.examples.phoenx.example_phoenx_bike_transmission import (
     DERAILLEUR_DAMPING_SCALE,
     DERAILLEUR_PRELOAD_SCALE,
     DERAILLEUR_SPRING_LABELS,
+    SPECULATIVE_CONTACT_GAP_MAX,
     STEEL_DENSITY,
     Example,
     _body_density,
@@ -23,6 +24,7 @@ from newton.examples.phoenx.example_phoenx_bike_transmission import (
     _load_mesh,
     _transform,
 )
+from newton.viewer import ViewerNull
 
 
 class TestBikeTransmission(unittest.TestCase):
@@ -31,6 +33,28 @@ class TestBikeTransmission(unittest.TestCase):
         args = Example.create_parser().parse_args([])
         self.assertEqual(args.substeps, 8)
         self.assertEqual(args.iterations, 4)
+        self.assertEqual(args.speculative_contact_gap_max, SPECULATIVE_CONTACT_GAP_MAX)
+
+    def test_loaded_chain_transmits_power_at_bicycle_cadence(self):
+        """Keep the loaded 60 rpm drivetrain engaged and laterally bounded."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+        if not (ASSETS / SCENE["shapes"][0]["mesh"]).is_file():
+            self.skipTest("BikeTransmission meshes are local copyrighted assets")
+
+        args = Example.create_parser().parse_args([])
+        example = Example(ViewerNull(), args)
+        for _ in range(600):
+            example.step()
+
+        example.test_final()
+        metrics = example.drivetrain_metrics()
+        chain_y = example.state.body_q.numpy()[example.chain_bodies, 1]
+        self.assertTrue(np.isfinite(tuple(metrics.values())).all())
+        self.assertGreater(metrics["rear_load_power_w"], 3.0)
+        self.assertGreater(metrics["speed_ratio"], 2.5)
+        self.assertLess(metrics["speed_ratio"], 4.5)
+        self.assertLess(float(np.ptp(chain_y)), 0.005)
 
     def test_derailleur_spring_preload(self):
         """Increase derailleur preload without stiffening its dynamic response."""

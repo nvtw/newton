@@ -31,6 +31,9 @@ CHAIN_JOINT_FRICTION = 5.0e-4
 DRIVETRAIN_CONTACT_FRICTION = 0.1
 DEFAULT_CADENCE_RPM = 60.0
 DEFAULT_REAR_LOAD_DAMPING = 0.020053523
+# The 120 Hz collision cadence advances a front tooth by about 5 mm at
+# 60 rpm. Keep one update of travel in the velocity-derived search envelope.
+SPECULATIVE_CONTACT_GAP_MAX = 0.006
 DERAILLEUR_PRELOAD_SCALE = 3.0
 DERAILLEUR_DAMPING_SCALE = 2.0
 DERAILLEUR_SPRING_LABELS = frozenset(
@@ -196,6 +199,7 @@ class Example:
         self.frame_dt = 1.0 / 60.0
         self.cadence_rpm = getattr(args, "cadence_rpm", DEFAULT_CADENCE_RPM)
         self.rear_load_damping = getattr(args, "rear_load_damping", DEFAULT_REAR_LOAD_DAMPING)
+        self.speculative_contact_gap_max = getattr(args, "speculative_contact_gap_max", SPECULATIVE_CONTACT_GAP_MAX)
         if args.substeps < 1 or args.iterations < 1:
             raise ValueError("substeps and iterations must be positive")
         if not 1 <= args.direct_joint_projection_passes <= args.iterations:
@@ -207,9 +211,11 @@ class Example:
             or args.derailleur_damping_scale <= 0.0
             or self.cadence_rpm <= 0.0
             or self.rear_load_damping < 0.0
+            or self.speculative_contact_gap_max < 0.0
         ):
             raise ValueError(
-                "contact chunk size, chain joint friction, and rear load damping must be nonnegative; "
+                "contact chunk size, chain joint friction, rear load damping, and speculative contact gap "
+                "must be nonnegative; "
                 "cadence and derailleur scales must be positive"
             )
         self.model = build_scene(
@@ -233,8 +239,8 @@ class Example:
             self.model,
             contact_matching="sticky",
             rigid_contact_max=32768,
-            speculative_contact_gap_max=0.002,
-            speculative_contact_velocity_filter=False,
+            speculative_contact_gap_max=self.speculative_contact_gap_max,
+            speculative_contact_velocity_filter=True,
             contact_reduction_voxel_depth=args.sdf_voxel_depth_contacts,
         )
         self.contacts = self.pipeline.contacts()
@@ -249,6 +255,7 @@ class Example:
             velocity_iterations=1,
             direct_joint_projection_passes=args.direct_joint_projection_passes,
             parallel_contact_prepare=False,
+            enable_body_pair_grouping=False,
             contact_chunk_size=args.contact_chunk_size,
             mass_splitting=True,
             mass_splitting_color_group_size=3,
@@ -449,6 +456,12 @@ class Example:
             type=float,
             default=DEFAULT_REAR_LOAD_DAMPING,
             help="Viscous rear dynamometer load in N m s/rad.",
+        )
+        parser.add_argument(
+            "--speculative-contact-gap-max",
+            type=float,
+            default=SPECULATIVE_CONTACT_GAP_MAX,
+            help="Maximum velocity-derived collision search extension in metres.",
         )
         parser.add_argument(
             "--chain-joint-friction",

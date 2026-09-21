@@ -276,6 +276,7 @@ class SolverPhoenX(SolverBase):
         prepare_refresh_stride: int | str = "auto",
         parallel_contact_prepare: bool = False,
         contact_chunk_size: int = 0,
+        enable_body_pair_grouping: bool | None = None,
         solver_flavor: str | None = None,
         jacobi_max_colors: int | None = None,
         articulation_mode: str = "maximal",
@@ -349,6 +350,11 @@ class SolverPhoenX(SolverBase):
                 Zero preserves existing grouping. Positive values preserve every
                 contact row while splitting long columns for scheduling. Requires
                 maximal rigid point contacts without deformables.
+            enable_body_pair_grouping: Experimental contact-column policy. None
+                automatically groups compound-body contacts in eligible single-scene
+                layouts. True requests the grouped path, while False preserves
+                separate shape-pair manifolds. Shape-pair manifolds are appropriate for
+                disconnected or strongly nonconvex compound contact patches.
             default_friction: Fallback when Contacts/shapes carry no material.
             friction_combine_mode: Rule used to combine per-shape friction.
                 Supported values are ``"average"``, ``"min"``, ``"multiply"``,
@@ -454,6 +460,8 @@ class SolverPhoenX(SolverBase):
             raise ValueError("joint_solver must be 'direct' or 'block_pgs'")
         if isinstance(contact_chunk_size, bool) or not isinstance(contact_chunk_size, int) or contact_chunk_size < 0:
             raise ValueError("contact_chunk_size must be a nonnegative integer")
+        if enable_body_pair_grouping is not None and not isinstance(enable_body_pair_grouping, bool):
+            raise TypeError("enable_body_pair_grouping must be a bool or None")
         if (
             isinstance(joint_refinement_iterations, bool)
             or not isinstance(joint_refinement_iterations, int)
@@ -800,15 +808,27 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
-        # Body-pair grouping pays a sort/gather cost. Use it for
-        # single-scene compound contact graphs, not multi-world fleets.
+        # Body-pair grouping pays a sort/gather cost and reduces all shape-pair
+        # patches between two bodies into one manifold. Keep an explicit opt-out
+        # for disconnected or strongly nonconvex compound geometry.
+        body_pair_grouping_eligible = step_layout == "single_world" or num_worlds == 1
+        if enable_body_pair_grouping and not body_pair_grouping_eligible:
+            raise ValueError("enable_body_pair_grouping requires a single-scene layout")
+        if solver_scheme == "tgs" and enable_body_pair_grouping is False:
+            raise ValueError("solver_scheme='tgs' requires body-pair contact grouping")
+
         has_compound_bodies = False
-        if model.shape_body is not None and model.shape_count > 0 and model.body_count > 0:
+        if enable_body_pair_grouping is None and model.shape_body is not None and model.shape_count > 0:
             sb = model.shape_body.numpy()
             sb = sb[sb >= 0]
             if sb.size > 0:
                 counts = np.bincount(sb, minlength=int(model.body_count))
                 has_compound_bodies = bool((counts > 1).any())
+        use_body_pair_grouping = body_pair_grouping_eligible and (
+            solver_scheme == "tgs"
+            or enable_body_pair_grouping is True
+            or (enable_body_pair_grouping is None and has_compound_bodies)
+        )
 
         self.world = PhoenXWorld(
             bodies=self.bodies,
@@ -835,8 +855,7 @@ class SolverPhoenX(SolverBase):
             threads_per_world=threads_per_world,
             multi_world_scheduler=multi_world_scheduler,
             max_thread_blocks=max_thread_blocks,
-            enable_body_pair_grouping=(has_compound_bodies or solver_scheme == "tgs")
-            and (step_layout == "single_world" or num_worlds == 1),
+            enable_body_pair_grouping=use_body_pair_grouping,
             mass_splitting=mass_splitting,
             max_colored_partitions=max_colored_partitions,
             contact_friction_model=contact_friction_model if articulation_mode == "maximal" else "point",
