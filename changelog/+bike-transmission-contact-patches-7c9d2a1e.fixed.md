@@ -1,1 +1,1 @@
-Keep the PhoenX BikeTransmission chain engaged under load by preserving sprocket shape-pair manifolds and covering tooth travel with velocity-filtered speculative contacts.
+Keep the PhoenX BikeTransmission chain engaged under load by retaining nonconvex sprocket regions with a 26-direction body-pair support stencil and covering tooth travel with velocity-filtered speculative contacts.

@@ -209,6 +209,7 @@ class Example:
     """Drive the chain and sprockets using mesh contacts and authored revolute joints."""
 
     color_group_size = 2
+    body_pair_grouping = True
 
     overlap_simulation_render = True
 
@@ -288,7 +289,7 @@ class Example:
             velocity_iterations=1,
             direct_joint_projection_passes=args.direct_joint_projection_passes,
             parallel_contact_prepare=False,
-            enable_body_pair_grouping=False,
+            enable_body_pair_grouping=self.body_pair_grouping,
             contact_chunk_size=args.contact_chunk_size,
             mass_splitting=True,
             mass_splitting_color_group_size=self.color_group_size,

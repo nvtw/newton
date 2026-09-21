@@ -77,19 +77,26 @@ __all__ = [
 ]
 
 
-# One deepest point per normal bin plus support along each signed local axis.
+# One deepest point per normal bin plus support along the 26 nonzero directions of a local 3x3x3 stencil.
 # Ordinary manifolds bypass these kernels unchanged.
-_BODY_PAIR_SPATIAL_DIRECTIONS = 6
+_BODY_PAIR_SPATIAL_DIRECTIONS = 26
 _BODY_PAIR_CONTACT_CAP = NUM_NORMAL_BINS + _BODY_PAIR_SPATIAL_DIRECTIONS
 
 
 @wp.func
 def _body_pair_support_direction(direction: wp.int32) -> wp.vec3f:
-    axis = direction // wp.int32(2)
-    sign = wp.float32(-1.0) if direction & wp.int32(1) else wp.float32(1.0)
-    result = wp.vec3f(0.0)
-    result[axis] = sign
-    return result
+    # Enumerate the 26 nonzero directions of a 3x3x3 stencil. Axes,
+    # face diagonals and corner diagonals retain spatially separated
+    # regions of nonconvex compound manifolds.
+    code = direction
+    if code >= wp.int32(13):
+        code += wp.int32(1)
+    x = wp.float32(code % wp.int32(3) - wp.int32(1))
+    code /= wp.int32(3)
+    y = wp.float32(code % wp.int32(3) - wp.int32(1))
+    z = wp.float32(code / wp.int32(3) - wp.int32(1))
+    result = wp.vec3f(x, y, z)
+    return result / wp.length(result)
 
 
 class IngestScratch:
