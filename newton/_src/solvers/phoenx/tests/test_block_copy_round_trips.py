@@ -108,12 +108,14 @@ class TestBlockCopyRoundTrips(unittest.TestCase):
         self.assertEqual(world._mass_splitting_broadcast.call_count, 3)
 
     def test_direct_projection_passes_temporally_block_contact_sweeps(self):
-        """Feed contact impulses back through exact joints between sweep blocks."""
+        """Use a lean intermediate solve and fully refine the final projection."""
         world = make_world(True, solver_iterations=4, direct_joint_projection_passes=2)
         SingleWorldMassSplittingDispatcher(world).solve(100.0)
+        calls = world._direct_equality_system.solve.call_args_list
+        self.assertEqual([call.kwargs["use_bias"] for call in calls], [False, False, True])
         self.assertEqual(
-            [call.kwargs["use_bias"] for call in world._direct_equality_system.solve.call_args_list],
-            [False, False, True],
+            [call.kwargs.get("refine", True) for call in calls],
+            [True, False, True],
         )
         self.assertEqual(world._mass_splitting_writeback.call_count, 3)
         self.assertEqual(world._mass_splitting_broadcast.call_count, 4)

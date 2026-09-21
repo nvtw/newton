@@ -2474,7 +2474,7 @@ class DirectEqualitySystem:
             device=self.model.device,
         )
 
-    def solve(self, *, use_bias: bool) -> None:
+    def solve(self, *, use_bias: bool, refine: bool = True) -> None:
         if not self.enabled:
             return
         self.solve_active.fill_(int(use_bias))
@@ -2504,7 +2504,7 @@ class DirectEqualitySystem:
         )
 
         def solve_active_system() -> None:
-            self.solver.solve(self.rhs, self.delta)
+            self.solver.solve(self.rhs, self.delta, refine=refine)
             wp.launch(
                 _accumulate_direct_impulse_kernel,
                 dim=len(self.topology.row_joint),

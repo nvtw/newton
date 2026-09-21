@@ -564,8 +564,19 @@ class BlockTridiagonalPCR:
             device=self.device,
         )
 
-    def solve(self, rhs: wp.array[wp.float32], solution: wp.array[wp.float32]) -> None:
-        """Solve and adapt refinement to each batch's correction norm."""
+    def solve(
+        self,
+        rhs: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+        *,
+        refine: bool = True,
+    ) -> None:
+        """Solve the block systems, optionally omitting residual refinement.
+
+        The unrefined path still performs the complete parallel cyclic
+        reduction. It is intended for conservative intermediate projections
+        that are followed by a fully refined solve.
+        """
         wp.launch(
             _initialize_rhs_kernel,
             dim=(self.task_count, BS),
@@ -583,6 +594,22 @@ class BlockTridiagonalPCR:
         )
         self._solve_workspace()
         wp.copy(self.accumulated, self.delta)
+        if not refine:
+            wp.launch(
+                _unpermute_solution_kernel,
+                dim=(self.task_count, BS),
+                inputs=[
+                    self.task_mechanism,
+                    self.task_tile,
+                    self.dimensions,
+                    self.vector_offsets,
+                    self.permutation,
+                    self.accumulated,
+                    solution,
+                ],
+                device=self.device,
+            )
+            return
         wp.launch(
             _residual_kernel,
             dim=self.task_count * BS,
