@@ -154,12 +154,15 @@ def _build_settling_scene(
     )
     world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
     world.populate_soft_tetrahedra_from_model(model)
-    collision_pipeline = world.setup_cloth_collision_pipeline(
+    collision_pipeline = newton.CollisionPipeline(
         model,
-        soft_body_thickness=0.005,
-        soft_body_gap=0.010,
         rigid_contact_max=1024 * cube_resolution * cube_resolution * num_piles,
+        contact_matching="sticky",
+        soft_contact_gap=0.010,
+        enable_rigid_soft_full_surface_contact=True,
     )
+    collision_pipeline.init_soft_self_contact(margin=0.005, gap=0.010)
+    world.setup_official_deformable_contacts(model, collision_pipeline)
     contacts = collision_pipeline.contacts()
     state = model.state()
     return model, world, contacts, collision_pipeline, state

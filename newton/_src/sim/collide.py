@@ -1388,8 +1388,9 @@ class CollisionPipeline:
                 the per-vertex (particle) contacts. Catches rigid features that pass between soft
                 vertices (e.g. a thin box edge or heightfield cell inside a coarse cloth triangle),
                 which the per-particle path misses. Meshes use exact, locally valid feature contacts
-                without requiring a volume SDF. These full-surface contacts are consumed only by
-                :class:`~newton.solvers.SolverVBD`; other solvers raise on such contacts. Records are
+                without requiring a volume SDF. These full-surface contacts are consumed by
+                :class:`~newton.solvers.SolverVBD` and :class:`~newton.solvers.SolverPhoenX`;
+                other solvers raise on such contacts. Records are
                 emitted into :attr:`Contacts.soft_contact_indices`. Defaults to False. Fixed at
                 construction because it sizes the soft-contact buffer headroom.
             requires_grad: Whether pipeline-generated soft contacts and the

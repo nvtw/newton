@@ -22,11 +22,6 @@ from newton._src.solvers.phoenx.body import (
     mat33_from_sym6,
     sym6_from_mat33,
 )
-from newton._src.solvers.phoenx.cloth_collision import (
-    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
-    SHAPE_ENDPOINT_KIND_RIGID,
-    SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
-)
 from newton._src.solvers.phoenx.constraints.bilateral_joint import (
     get_iterate_bilateral_joint_block,
     iterate_bilateral_joint_block,
@@ -124,6 +119,11 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 from newton._src.solvers.phoenx.constraints.contact_static_ownership import static_owner
 from newton._src.solvers.phoenx.constraints.joint_inequality import (
     joint_constraint_iterate_inequality,
+)
+from newton._src.solvers.phoenx.contact_endpoints import (
+    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
+    SHAPE_ENDPOINT_KIND_RIGID,
+    SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,

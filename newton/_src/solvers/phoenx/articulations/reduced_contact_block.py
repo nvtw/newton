@@ -20,7 +20,6 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     reduced_contact_prepare,
 )
 from newton._src.solvers.phoenx.body import BodyContainer, ReducedArticulationData, mat33_from_sym6
-from newton._src.solvers.phoenx.cloth_collision import SHAPE_ENDPOINT_KIND_RIGID
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
     block_solve_accumulated_inverse_bounded_1,
@@ -68,6 +67,7 @@ from newton._src.solvers.phoenx.constraints.contact_patch_friction import contac
 from newton._src.solvers.phoenx.constraints.contact_projection import (
     contact_project_coupled_velocity_update_no_soft_pd,
 )
+from newton._src.solvers.phoenx.contact_endpoints import SHAPE_ENDPOINT_KIND_RIGID
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
     element_interaction_data_make,

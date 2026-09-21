@@ -1,0 +1,1 @@
+Change experimental PhoenX deformable contacts to consume the standard `CollisionPipeline` full-surface and self-contact buffers. Construct and configure `CollisionPipeline` directly, then pass it to `PhoenXWorld.setup_official_deformable_contacts()` when using the low-level world API.

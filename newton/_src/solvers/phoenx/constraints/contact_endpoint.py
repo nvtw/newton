@@ -68,7 +68,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.solvers.phoenx.body import MOTION_ARTICULATED, BodyContainer, mat33_from_sym6
-from newton._src.solvers.phoenx.cloth_collision import (
+from newton._src.solvers.phoenx.contact_endpoints import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
 )

@@ -6,16 +6,16 @@ correctly: no two elements in the same colour share any unified-index
 node.
 
 Builds two overlapping cloth grids dropping onto a dynamic box --
-the two grids have disjoint particle sets, so the share-vertex
-broad-phase filter passes their cloth-vs-cloth pairs through, giving
-6-node cloth-cloth elements. The dynamic box gives 4-node cloth-rigid
-elements (against a static box the rigid node would correctly
-collapse to -1 and the element would only have 3 nodes).
+the two grids have disjoint particle sets, so the official shared
+surface tree detects their vertex-triangle and edge-edge contacts.
+Those contacts use four particle endpoints. The dynamic box also gives
+4-node cloth-rigid elements (against a static box the rigid node would
+correctly collapse to -1 and the element would only have 3 nodes).
 
 Asserts:
 
-* The element-emission kernel produces cloth-tri (3-node),
-  cloth-rigid (4-node), and cloth-cloth (6-node) elements.
+* The element-emission kernel produces cloth-tri (3-node) and
+  contact (up to 4-node) elements.
 * For every colour, the pairwise intersection of element node sets
   is empty -- the necessary correctness condition for the per-colour
   parallel iterate to be race-free.
@@ -53,10 +53,8 @@ class TestClothContactPartitioner(unittest.TestCase):
         b = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()), mass=1.0)
         builder.add_shape_box(body=b, hx=0.5, hy=0.5, hz=0.1)
         tri_ka, tri_ke = cloth_lame_from_youngs_poisson_plane_stress(5.0e8, 0.3)
-        # Two stacked cloth grids: their particle sets are disjoint,
-        # so the share-vertex broad-phase filter passes their
-        # cross-cloth tri pairs through, giving genuine 6-node
-        # cloth-cloth elements when the two grids overlap.
+        # Two stacked cloth grids with disjoint particle sets. The
+        # official shared surface tree detects cross-grid contacts.
         builder.add_cloth_grid(
             pos=wp.vec3(-0.5, -0.5, 0.11),
             rot=wp.quat_identity(),
@@ -88,9 +86,7 @@ class TestClothContactPartitioner(unittest.TestCase):
         model = builder.finalize(device=device)
 
         # Standard PhoenX convention: slot 0 is the world-anchor body,
-        # Newton body i lands at PhoenX slot i+1. The cloth-aware
-        # ``setup_cloth_collision_pipeline`` defaults to
-        # ``phoenx_body_offset=1`` to match this layout.
+        # and Newton body i lands at PhoenX slot i+1.
         num_phoenx_bodies = int(model.body_count) + 1
         bodies = body_container_zeros(num_phoenx_bodies, device=device)
         # Populate the dynamic box's inverse mass at PhoenX slot 1 so
@@ -120,7 +116,15 @@ class TestClothContactPartitioner(unittest.TestCase):
         )
         world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
         world.populate_cloth_triangles_from_model(model)
-        pipeline = world.setup_cloth_collision_pipeline(model, rigid_contact_max=4096)
+        pipeline = newton.CollisionPipeline(
+            model,
+            rigid_contact_max=4096,
+            contact_matching="sticky",
+            soft_contact_gap=0.010,
+            enable_rigid_soft_full_surface_contact=True,
+        )
+        pipeline.init_soft_self_contact(margin=0.005, gap=0.010)
+        world.setup_official_deformable_contacts(model, pipeline)
 
         state = model.state()
         contacts = pipeline.contacts()
@@ -157,18 +161,16 @@ class TestClothContactPartitioner(unittest.TestCase):
         ids_by_color = world._partitioner.element_ids_by_color.numpy()
         elements = world._elements.numpy()
 
-        # Sanity: at least one cloth-cloth (6-node), one cloth-rigid
-        # (4-node), and zero rigid-rigid (2-node) elements -- the
-        # 8x8-on-box scene has 645 cloth-cloth + 128 cloth-rigid + 0
-        # rigid-rigid contact columns.
+        # Internal cloth rows use three endpoints. Official rigid-soft,
+        # vertex-triangle, and edge-edge contacts use at most four.
         node_counts = []
         for cid in range(n_active):
             arr = elements[cid]["bodies"]
             node_counts.append(int(np.sum(arr >= 0)))
         node_counts = np.asarray(node_counts)
-        self.assertIn(3, node_counts.tolist(), "expected at least one 3-node (cloth-tri) element")
-        self.assertIn(4, node_counts.tolist(), "expected at least one 4-node (cloth-rigid contact) element")
-        self.assertIn(6, node_counts.tolist(), "expected at least one 6-node (cloth-cloth contact) element")
+        self.assertIn(3, node_counts.tolist(), "expected at least one 3-node cloth element")
+        self.assertIn(4, node_counts.tolist(), "expected at least one 4-node contact element")
+        self.assertLessEqual(int(node_counts.max()), 4)
 
         # Pairwise check within each colour.
         violations = 0

@@ -1658,7 +1658,7 @@ def test_pipeline_soft_self_contact(test, device):
 
 def test_soft_self_contact_buffer_validation(test, device):
     """Reject invalid self-contact mesh sizes and incompatible result buffers."""
-    for particle_count, tri_count, edge_count in ((0, 1, 1), (1, 0, 1), (1, 1, 0)):
+    for particle_count, tri_count, edge_count in ((0, 1, 1), (1, 0, 1)):
         with test.assertRaisesRegex(ValueError, "requires positive mesh counts"):
             newton.Contacts(
                 0,
@@ -1669,6 +1669,17 @@ def test_soft_self_contact_buffer_validation(test, device):
                 edge_count=edge_count,
                 device=device,
             )
+
+    vertex_triangle_only = newton.Contacts(
+        0,
+        0,
+        soft_self_contact=True,
+        particle_count=3,
+        tri_count=1,
+        edge_count=0,
+        device=device,
+    )
+    test.assertEqual(vertex_triangle_only.soft_self_contact_data.edge_colliding_edges.shape[0], 0)
 
     info = build_tri_mesh_collision_info(3, 1, 3, device=device)
     assert_np_equal(info.vertex_colliding_triangles_count.numpy(), np.zeros(3, dtype=np.int32))

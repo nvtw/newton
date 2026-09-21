@@ -191,12 +191,15 @@ class Example:
         self._frame_index = 0
         self.world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
         self.world.populate_soft_tetrahedra_from_model(self.model)
-        self.collision_pipeline = self.world.setup_cloth_collision_pipeline(
+        self.collision_pipeline = newton.CollisionPipeline(
             self.model,
-            soft_body_thickness=soft_body_thickness,
-            soft_body_gap=soft_body_gap,
             rigid_contact_max=2 * int(self.model.tet_count),
+            contact_matching="sticky",
+            soft_contact_gap=soft_body_gap,
+            enable_rigid_soft_full_surface_contact=True,
         )
+        self.collision_pipeline.init_soft_self_contact(margin=soft_body_thickness, gap=soft_body_gap)
+        self.world.setup_official_deformable_contacts(self.model, self.collision_pipeline)
         self.contacts = self.collision_pipeline.contacts()
 
         self.state = self.model.state()
