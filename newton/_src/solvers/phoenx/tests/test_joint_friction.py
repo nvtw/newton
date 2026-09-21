@@ -32,6 +32,9 @@ Six analytical fixtures, all CUDA + graph-captured:
   velocity after ``t_stop = I * ω_0 / μ``. The post-stop state must
   remain stationary (saturated friction holds qd=0 once reached).
 
+* :class:`TestFrictionFreeSpinDecay` also checks that friction cannot reverse
+  a low-inertia rotor through rest and inject kinetic energy.
+
 * :class:`TestFrictionOffsetBody` -- the same decay with the center of
   mass offset from the hinge. The measured acceleration must include the
   body parallel-axis inertia.
@@ -382,6 +385,36 @@ class TestFrictionFreeSpinDecay(unittest.TestCase):
                     "friction is not holding qd=0 after the body should have halted"
                 ),
             )
+
+    def test_small_inertia_does_not_reverse_at_rest(self) -> None:
+        """Keep direct friction dissipative when one step can stop the rotor."""
+        inertia = 2.3e-6
+        omega_0 = 0.02
+        model = _build_rotor(inertia=inertia, friction=0.01)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            joint_mode="maximal_direct",
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+
+        model.joint_qd.assign(np.array([omega_0], dtype=np.float32))
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        control = model.control()
+
+        angular_speeds = []
+        for _ in range(8):
+            state.clear_forces()
+            solver.step(state, state, control, None, _DT / 4.0)
+            angular_speeds.append(float(np.linalg.norm(state.body_qd.numpy()[0, 3:])))
+
+        self.assertLessEqual(
+            max(angular_speeds),
+            omega_0 + 1.0e-6,
+            msg=f"friction increased angular speed from {omega_0} to {max(angular_speeds)} rad/s",
+        )
 
 
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX joint-friction tests run on CUDA only")

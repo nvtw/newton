@@ -14,6 +14,7 @@ from newton.examples.phoenx.example_phoenx_tourbillon_clock import (
     BEARING_FRICTION,
     OSCILLATOR_FRICTION_SCALE,
     REDUNDANT_BEARING_JOINT,
+    Example,
     _active_joints,
     _load_mesh,
     _transform,
@@ -25,6 +26,15 @@ HAS_LOCAL_ASSETS = any(ASSETS.glob("*.obj"))
 
 
 class TestTourbillonClock(unittest.TestCase):
+    def test_joint_projection_defaults(self):
+        """Project bearings after every grouped contact sweep."""
+        args = Example.create_parser().parse_args([])
+        self.assertEqual(Example.color_group_size, 2)
+        self.assertEqual(args.contact_chunk_size, 64)
+        self.assertEqual(args.iterations, 4)
+        self.assertEqual(args.direct_joint_projection_passes, args.iterations)
+        self.assertEqual(args.substeps, 4)
+
     def test_scene_and_joint_frames(self):
         """Retain the complete SI mechanism and coincident hinge frames."""
         bodies, joints = SCENE["bodies"], SCENE["joints"]
