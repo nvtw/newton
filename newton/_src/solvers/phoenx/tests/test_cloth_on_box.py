@@ -38,7 +38,7 @@ from newton._src.solvers.phoenx.simulation import PhoenXWorld
 class TestClothOnBox(unittest.TestCase):
     def test_cloth_settles_on_static_box(self):
         device = wp.get_preferred_device()
-        cloth_thickness = 0.005  # 5 mm, default in setup_cloth_collision_pipeline
+        cloth_thickness = 0.005
         box_top_z = 0.1
         box_h = 0.1
 
@@ -90,12 +90,15 @@ class TestClothOnBox(unittest.TestCase):
         )
         world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
         world.populate_cloth_triangles_from_model(model)
-        pipeline = world.setup_cloth_collision_pipeline(
+        pipeline = newton.CollisionPipeline(
             model,
-            cloth_thickness=cloth_thickness,
-            cloth_gap=0.010,
             rigid_contact_max=4096,
+            contact_matching="sticky",
+            soft_contact_gap=0.010,
+            enable_rigid_soft_full_surface_contact=True,
         )
+        pipeline.init_soft_self_contact(margin=cloth_thickness, gap=0.010)
+        world.setup_official_deformable_contacts(model, pipeline)
 
         state = model.state()
         contacts = pipeline.contacts()
@@ -111,7 +114,7 @@ class TestClothOnBox(unittest.TestCase):
 
         # Cloth should rest on the box top at z ~= box_top + cloth_thickness.
         # Allow some slack for numerical settling and the speculative gap.
-        expected_z = box_top_z + cloth_thickness
+        expected_z = box_top_z + float(model.particle_max_radius)
         mean_z = float(p_final[:, 2].mean())
         min_z = float(p_final[:, 2].min())
         max_z = float(p_final[:, 2].max())

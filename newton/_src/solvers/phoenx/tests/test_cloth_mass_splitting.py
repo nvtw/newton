@@ -163,9 +163,15 @@ def _build_scene(*, mass_splitting: bool, device):
     )
     world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
     world.populate_cloth_triangles_from_model(model)
-    pipeline = world.setup_cloth_collision_pipeline(
-        model, cloth_thickness=0.005, cloth_gap=0.010, rigid_contact_max=4096
+    pipeline = newton.CollisionPipeline(
+        model,
+        rigid_contact_max=4096,
+        contact_matching="sticky",
+        soft_contact_gap=0.010,
+        enable_rigid_soft_full_surface_contact=True,
     )
+    pipeline.init_soft_self_contact(margin=0.005, gap=0.010)
+    world.setup_official_deformable_contacts(model, pipeline)
 
     state = model.state()
     contacts = pipeline.contacts()

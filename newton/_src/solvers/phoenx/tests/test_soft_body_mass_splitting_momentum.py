@@ -177,9 +177,15 @@ class _SoftCubeMassSplittingScene:
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, -_GRAVITY]], dtype=np.float32))
         self.world.populate_soft_tetrahedra_from_model(self.model, beta_mu=_BETA_MU)
-        self.pipeline = self.world.setup_cloth_collision_pipeline(
-            self.model, soft_body_thickness=0.005, soft_body_gap=0.010, rigid_contact_max=4096
+        self.pipeline = newton.CollisionPipeline(
+            self.model,
+            rigid_contact_max=4096,
+            contact_matching="sticky",
+            soft_contact_gap=0.010,
+            enable_rigid_soft_full_surface_contact=True,
         )
+        self.pipeline.init_soft_self_contact(margin=0.005, gap=0.010)
+        self.world.setup_official_deformable_contacts(self.model, self.pipeline)
         self.contacts = self.pipeline.contacts()
         self.state = self.model.state()
 

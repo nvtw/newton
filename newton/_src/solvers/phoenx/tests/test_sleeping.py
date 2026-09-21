@@ -960,17 +960,17 @@ class TestSleepingKinematicWake(unittest.TestCase):
             MOTION_KINEMATIC,
             body_container_zeros,
         )
-        from newton._src.solvers.phoenx.cloth_collision import (  # noqa: PLC0415
-            PhoenXClothShareVertexFilterData,
-            build_phoenx_share_vertex_filter_data,
-            phoenx_cloth_share_vertex_filter,
-        )
         from newton._src.solvers.phoenx.examples.example_common import (  # noqa: PLC0415
             init_phoenx_bodies_kernel,
             newton_to_phoenx_kernel,
             phoenx_to_newton_kernel,
         )
         from newton._src.solvers.phoenx.simulation import PhoenXWorld  # noqa: PLC0415
+        from newton._src.solvers.phoenx.sleeping_filter import (  # noqa: PLC0415
+            PhoenXSleepingFilterData,
+            build_phoenx_sleeping_filter_data,
+            phoenx_sleeping_filter,
+        )
 
         device = wp.get_device("cuda:0")
 
@@ -1007,8 +1007,8 @@ class TestSleepingKinematicWake(unittest.TestCase):
             model,
             contact_matching="sticky",
             broad_phase_filter=(
-                phoenx_cloth_share_vertex_filter,
-                PhoenXClothShareVertexFilterData,
+                phoenx_sleeping_filter,
+                PhoenXSleepingFilterData,
             ),
         )
         contacts = collision_pipeline.contacts()
@@ -1090,13 +1090,7 @@ class TestSleepingKinematicWake(unittest.TestCase):
 
         # Sleeping-aware filter data, post-PhoenXWorld so it can read
         # ``bodies.island_root``.
-        tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=device)
-        tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=device)
-        filter_data = build_phoenx_share_vertex_filter_data(
-            num_rigid_shapes=int(model.shape_count),
-            num_cloth_triangles=0,
-            tri_indices=tri_sentinel,
-            tet_indices=tet_sentinel,
+        filter_data = build_phoenx_sleeping_filter_data(
             sleeping_enabled=True,
             phoenx_body_offset=1,
             shape_body=model.shape_body,

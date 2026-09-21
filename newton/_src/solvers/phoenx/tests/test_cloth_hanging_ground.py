@@ -35,32 +35,17 @@ class TestClothHangingGroundContact(unittest.TestCase):
         with wp.ScopedDevice(device):
             scene = _GroundCubeClothScene(device)
             self.assertIsNotNone(scene.graph, "expected CUDA graph-captured stepping")
+            self.assertIsNotNone(scene.pipeline._soft_self_contact_detector)
+            self.assertEqual(scene.pipeline.extra_shape_count, 0)
 
-            groups = scene.pipeline.unified_shape_collision_group.numpy()
-            rigid_count = int(scene.model.shape_count)
-            tri_count = int(scene.model.tri_count)
-            cloth_groups = groups[rigid_count : rigid_count + tri_count]
-
-            self.assertTrue(np.all(cloth_groups == 1))
-
-    def test_cloth_thickness_uses_virtual_shape_margin(self):
+    def test_cloth_thickness_configures_self_contact_margin(self):
         device = wp.get_preferred_device()
         with wp.ScopedDevice(device):
             scene = _GroundCubeClothScene(device, cloth_thickness=0.025)
+            self.assertAlmostEqual(scene.pipeline.soft_self_contact_margin, 0.025)
+            self.assertEqual(scene.pipeline.extra_shape_count, 0)
 
-            rigid_count = int(scene.model.shape_count)
-            tri_count = int(scene.model.tri_count)
-            margins = scene.pipeline.unified_shape_margin.numpy()
-            self.assertTrue(np.allclose(margins[rigid_count : rigid_count + tri_count], 0.025))
-
-            margins[rigid_count : rigid_count + tri_count] = 0.04
-            scene.pipeline.unified_shape_margin.assign(margins)
-            scene.world.update_cloth_shape_geometry()
-            geom = scene.pipeline.geom_data.numpy()
-
-            self.assertTrue(np.allclose(geom[rigid_count : rigid_count + tri_count, 3], 0.04))
-
-    def test_soft_body_self_collision_defaults_enabled(self):
+    def test_soft_body_uses_official_self_contact_detector(self):
         device = wp.get_preferred_device()
         with wp.ScopedDevice(device):
             builder = newton.ModelBuilder()
@@ -101,37 +86,23 @@ class TestClothHangingGroundContact(unittest.TestCase):
                 device=device,
             )
             world.populate_soft_tetrahedra_from_model(model)
-            pipeline = world.setup_cloth_collision_pipeline(model)
-
-            groups = pipeline.unified_shape_collision_group.numpy()
-            rigid_count = int(model.shape_count)
-            tet_count = int(model.tet_count)
-            tet_groups = groups[rigid_count : rigid_count + tet_count]
-
-            self.assertTrue(np.all(tet_groups == 1))
-
-            margins = pipeline.unified_shape_margin.numpy()
-            self.assertTrue(np.allclose(margins[rigid_count : rigid_count + tet_count], 0.005))
-
-            margins[rigid_count : rigid_count + tet_count] = 0.03
-            pipeline.unified_shape_margin.assign(margins)
-            world.update_cloth_shape_geometry()
-            geom = pipeline.geom_data.numpy()
-
-            self.assertTrue(np.allclose(geom[rigid_count : rigid_count + tet_count, 3], 0.03))
+            pipeline = newton.CollisionPipeline(
+                model,
+                contact_matching="sticky",
+                soft_contact_gap=0.010,
+                enable_rigid_soft_full_surface_contact=True,
+            )
+            pipeline.init_soft_self_contact(margin=0.005, gap=0.010)
+            world.setup_official_deformable_contacts(model, pipeline)
+            self.assertIsNotNone(pipeline._soft_self_contact_detector)
+            self.assertEqual(pipeline.extra_shape_count, 0)
 
     def test_cloth_self_collision_can_be_disabled(self):
         device = wp.get_preferred_device()
         with wp.ScopedDevice(device):
             scene = _GroundCubeClothScene(device, cloth_self_collision=False)
             self.assertIsNotNone(scene.graph, "expected CUDA graph-captured stepping")
-
-            groups = scene.pipeline.unified_shape_collision_group.numpy()
-            rigid_count = int(scene.model.shape_count)
-            tri_count = int(scene.model.tri_count)
-            cloth_groups = groups[rigid_count : rigid_count + tri_count]
-
-            self.assertTrue(np.all(cloth_groups == -2))
+            self.assertIsNone(scene.pipeline._soft_self_contact_detector)
 
     def test_cube_stays_on_ground_with_cloth_pipeline(self):
         device = wp.get_preferred_device()
@@ -272,13 +243,16 @@ class _GroundCubeClothScene:
         )
         self.world.gravity.assign(np.array([[0.0, 0.0, -9.81]], dtype=np.float32))
         self.world.populate_cloth_triangles_from_model(self.model)
-        self.pipeline = self.world.setup_cloth_collision_pipeline(
+        self.pipeline = newton.CollisionPipeline(
             self.model,
-            cloth_thickness=cloth_thickness,
-            cloth_gap=0.010,
-            cloth_self_collision=cloth_self_collision,
             rigid_contact_max=1024,
+            contact_matching="sticky",
+            soft_contact_gap=0.010,
+            enable_rigid_soft_full_surface_contact=True,
         )
+        if cloth_self_collision:
+            self.pipeline.init_soft_self_contact(margin=cloth_thickness, gap=0.010)
+        self.world.setup_official_deformable_contacts(self.model, self.pipeline)
         self.contacts = self.pipeline.contacts()
         self.state = self.model.state()
 

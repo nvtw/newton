@@ -23,10 +23,6 @@ from newton._src.solvers.phoenx.body import (
     body_store_vw,
     mat33_from_sym6,
 )
-from newton._src.solvers.phoenx.cloth_collision import (
-    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
-    SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
-)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -129,6 +125,10 @@ from newton._src.solvers.phoenx.constraints.contact_projection import (
     contact_project_tangent_delta,
     contact_project_velocity_update,
     contact_project_velocity_update_no_soft_pd,
+)
+from newton._src.solvers.phoenx.contact_endpoints import (
+    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
+    SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     apply_pair_spatial_impulse,

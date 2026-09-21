@@ -416,7 +416,7 @@ class Contacts:
 
             # Private capability flag: set by the collision pipeline when full-surface (edge/face)
             # soft contacts are enabled, so soft_contact_indices may hold edge/face records. Solvers
-            # that only consume particle contacts (everything but VBD) raise on this rather than
+            # that only consume particle contacts (solvers without full-surface support) raise on this rather than
             # silently misreading edge/face records -- the pipeline is solver-agnostic, so the check
             # lives at the consuming solver. Kept private to avoid a public API/deprecation surface.
             self._enable_rigid_soft_full_surface_contact = False
@@ -450,10 +450,15 @@ class Contacts:
                 "tri_count": tri_count,
                 "edge_count": edge_count,
             }
-            invalid_counts = {name: count for name, count in mesh_counts.items() if count <= 0}
+            invalid_counts = {
+                name: count for name, count in mesh_counts.items() if count < 0 or (name != "edge_count" and count == 0)
+            }
             if invalid_counts:
                 values = ", ".join(f"{name}={count}" for name, count in invalid_counts.items())
-                raise ValueError(f"soft_self_contact=True requires positive mesh counts; got {values}")
+                raise ValueError(
+                    "soft_self_contact=True requires positive mesh counts for particles and triangles "
+                    f"and a nonnegative edge count; got {values}"
+                )
             self.soft_self_contact_data = build_tri_mesh_collision_info(
                 particle_count,
                 tri_count,
@@ -629,5 +634,5 @@ class Contacts:
             raise NotImplementedError(
                 f"{solver_name} does not support full-surface soft contacts "
                 "(CollisionPipeline was built with enable_rigid_soft_full_surface_contact=True); "
-                "only SolverVBD consumes edge/face soft contacts. Disable the flag or use SolverVBD."
+                "only SolverVBD and SolverPhoenX consume edge/face soft contacts. Disable the flag or use one of those solvers."
             )

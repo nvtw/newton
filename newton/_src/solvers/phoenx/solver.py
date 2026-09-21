@@ -46,11 +46,6 @@ from newton._src.solvers.phoenx.articulations.maximal_projector import (
 from newton._src.solvers.phoenx.articulations.maximal_projector_general import GeneralMaximalTreeProjector
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation, _get_reduced_model
 from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
-from newton._src.solvers.phoenx.cloth_collision import (
-    PhoenXClothShareVertexFilterData,
-    build_phoenx_share_vertex_filter_data,
-    phoenx_cloth_share_vertex_filter,
-)
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_DAMPING_DRIVE,
     _OFF_DRIVE_MODE,
@@ -67,6 +62,11 @@ from newton._src.solvers.phoenx.model_adapter import (
     build_joint_init_arrays,
 )
 from newton._src.solvers.phoenx.simulation import PhoenXWorld
+from newton._src.solvers.phoenx.sleeping_filter import (
+    PhoenXSleepingFilterData,
+    build_phoenx_sleeping_filter_data,
+    phoenx_sleeping_filter,
+)
 from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 from newton._src.solvers.solver import SolverBase
 
@@ -206,23 +206,6 @@ def _build_maximal_motor_body_inv_inertia(model: Model) -> wp.array[wp.mat33f]:
     for body in np.flatnonzero(dynamic):
         body_inv[body] = np.linalg.inv(body_inertia[body])
     return wp.array(body_inv.astype(np.float32), dtype=wp.mat33f, device=model.device)
-
-
-class _PhoenXCollisionPipelineAdapter:
-    """Route explicit pipeline collisions through PhoenX deformable refresh."""
-
-    def __init__(self, solver: SolverPhoenX, pipeline):
-        self._solver = solver
-        self._pipeline = pipeline
-
-    def __getattr__(self, name: str):
-        return getattr(self._pipeline, name)
-
-    def contacts(self):
-        return self._pipeline.contacts()
-
-    def collide(self, state: State, contacts: Contacts, *, soft_contact_margin: float | None = None) -> None:
-        self._solver.collide(state, contacts)
 
 
 class SolverPhoenX(SolverBase):
@@ -776,15 +759,41 @@ class SolverPhoenX(SolverBase):
                 }
                 if self._sleeping_enabled:
                     cp_kwargs["broad_phase_filter"] = (
-                        phoenx_cloth_share_vertex_filter,
-                        PhoenXClothShareVertexFilterData,
+                        phoenx_sleeping_filter,
+                        PhoenXSleepingFilterData,
                     )
                 model._collision_pipeline = newton.CollisionPipeline(model, **cp_kwargs)
                 model._collision_pipeline.contacts()  # forces buffer sizing
-        if self._has_deformable_collision and int(model.rigid_contact_max) <= 0:
-            deformable_shapes = num_cloth_triangles + num_soft_tetrahedra
-            model.rigid_contact_max = max(1000, 8 * (int(model.shape_count) + deformable_shapes))
-        rigid_contact_max = int(model.rigid_contact_max)
+        self._deformable_self_contact_enabled = False
+        if self._has_deformable_collision:
+            existing_cp = getattr(model, "_collision_pipeline", None)
+            created_pipeline = existing_cp is None or not getattr(existing_cp, "contact_matching", False)
+            if created_pipeline:
+                existing_cp = newton.CollisionPipeline(
+                    model,
+                    contact_matching=PHOENX_CONTACT_MATCHING,
+                    enable_rigid_soft_full_surface_contact=True,
+                )
+                if int(model.tri_count) > 0:
+                    existing_cp.init_soft_self_contact(
+                        margin=max(0.005, float(model.particle_max_radius)),
+                        gap=0.01,
+                    )
+                model._collision_pipeline = existing_cp
+            rigid_contact_capacity = int(existing_cp.rigid_contact_max)
+            soft_contact_capacity = int(existing_cp.soft_contact_max)
+            detector = getattr(existing_cp, "_soft_self_contact_detector", None)
+            self_contact_capacity = 0
+            if detector is not None:
+                self_contact_capacity = int(model.particle_count) * int(
+                    detector.vertex_collision_buffer_pre_alloc
+                ) + int(model.edge_count) * int(detector.edge_collision_buffer_pre_alloc)
+                self._deformable_self_contact_enabled = True
+            # PhoenX normalizes the public rigid, rigid-soft, and soft-soft
+            # buffers into one internal PGS row space.
+            rigid_contact_max = rigid_contact_capacity + soft_contact_capacity + self_contact_capacity
+        else:
+            rigid_contact_max = int(model.rigid_contact_max)
 
         gravity_tuples = [tuple(float(x) for x in row) for row in gravity_np]
         if len(gravity_tuples) == 1:
@@ -872,20 +881,9 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
-        # When sleeping is on (and not already wired by a downstream
-        # ``setup_cloth_collision_pipeline``), bind the share-vertex
-        # filter data with sleeping fields populated. The pipeline's
-        # filter func is shared with cloth setups; cloth setup paths
-        # call ``build_phoenx_share_vertex_filter_data`` themselves and
-        # overwrite this binding without losing the sleeping fields.
+        # Bind the rigid broad phase to the live sleeping state.
         if self._sleeping_enabled and int(model.shape_count) > 0 and not self._has_deformable_collision:
-            tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
-            tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
-            filter_data = build_phoenx_share_vertex_filter_data(
-                num_rigid_shapes=int(model.shape_count),
-                num_cloth_triangles=0,
-                tri_indices=tri_sentinel,
-                tet_indices=tet_sentinel,
+            filter_data = build_phoenx_sleeping_filter_data(
                 sleeping_enabled=True,
                 phoenx_body_offset=1,
                 shape_body=model.shape_body,
@@ -894,8 +892,8 @@ class SolverPhoenX(SolverBase):
                 device=self.device,
             )
             model._collision_pipeline.set_broad_phase_filter_data(filter_data)
-            self._share_vertex_filter_data = filter_data
-            self.world._share_vertex_filter_data = filter_data
+            self._sleeping_filter_data = filter_data
+            self.world._sleeping_filter_data = filter_data
 
         # Seed body pose BEFORE joint init — joint constraint init reads body positions to
         # snapshot body-local anchors. Without this, welds pull child to origin.
@@ -1090,8 +1088,10 @@ class SolverPhoenX(SolverBase):
         if num_soft_tetrahedra > 0:
             self.world.populate_soft_tetrahedra_from_model(model)
         if self._has_deformable_collision:
-            pipeline = self.world.setup_cloth_collision_pipeline(model, rigid_contact_max=rigid_contact_max)
-            model._collision_pipeline = _PhoenXCollisionPipelineAdapter(self, pipeline)
+            pipeline = getattr(model, "_collision_pipeline", None)
+            if pipeline is None:
+                raise RuntimeError("PhoenX deformable contacts require a CollisionPipeline")
+            self.world.setup_official_deformable_contacts(model, pipeline)
         self._collision_pipeline = getattr(model, "_collision_pipeline", None)
 
         if model.shape_material_mu is not None and model.shape_count > 0:
@@ -1352,14 +1352,16 @@ class SolverPhoenX(SolverBase):
         wp.copy(state_out.particle_qd, particles.velocity)
 
     def collide(self, state: State, contacts: Contacts) -> None:
-        """Run PhoenX deformable-aware collision."""
-        if not self._has_deformable_collision:
-            if self._collision_pipeline is None:
-                raise RuntimeError("SolverPhoenX.collide() requires a model with collision shapes.")
-            self._collision_pipeline.collide(state, contacts)
-            return
-        self._import_particle_state(state, force=True)
-        self.world.collide(state, contacts)
+        """Run the configured Newton collision pipeline."""
+        if self._collision_pipeline is None:
+            raise RuntimeError("SolverPhoenX.collide() requires a collision pipeline.")
+        if self._has_deformable_collision:
+            self._import_particle_state(state, force=True)
+        self._collision_pipeline.collide(
+            state,
+            contacts,
+            soft_self_contact=self._deformable_self_contact_enabled,
+        )
 
     def _snapshot_pre_step_pose(self) -> None:
         """Snapshot pre-step COM-in-world pose for the FD readout."""
@@ -1668,8 +1670,8 @@ class SolverPhoenX(SolverBase):
         if joint_props_changed:
             self._joint_constraints = build_joint_init_arrays(
                 self.model,
-                device=self.device,
                 reduced_articulations=self._uses_reduced_joint_ownership,
+                device=self.device,
             )
             self.world._combine_direct_prepare_projection = _can_combine_direct_prepare_projection(
                 self._joint_constraints.has_velocity_limits,

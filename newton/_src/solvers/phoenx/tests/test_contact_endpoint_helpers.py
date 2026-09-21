@@ -32,14 +32,14 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros, inertia_sym6_pack_np
-from newton._src.solvers.phoenx.cloth_collision import (
-    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
-    SHAPE_ENDPOINT_KIND_RIGID,
-)
 from newton._src.solvers.phoenx.constraints.contact_endpoint import (
     contact_endpoint_apply_impulse,
     contact_endpoint_inv_mass_along,
     contact_endpoint_velocity_at_point,
+)
+from newton._src.solvers.phoenx.contact_endpoints import (
+    SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
+    SHAPE_ENDPOINT_KIND_RIGID,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import effective_mass_scalar
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer, copy_state_container_zeros

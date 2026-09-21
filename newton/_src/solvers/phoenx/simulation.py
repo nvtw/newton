@@ -9,9 +9,9 @@ from collections.abc import Iterable
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.flags import ShapeFlags
 from newton._src.geometry.types import GeoType
 from newton._src.sim.collide import CollisionPipeline
+from newton._src.sim.contacts import Contacts
 from newton._src.solvers.phoenx import diagnostics
 from newton._src.solvers.phoenx.adapter_kernels import (
     _accumulate_substep_velocity_kernel,
@@ -34,17 +34,6 @@ from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
     BodyContainer,
-)
-from newton._src.solvers.phoenx.cloth_collision import (
-    PhoenXClothShareVertexFilterData,
-    _phoenx_pack_cloth_contact_barycentric_kernel,
-    _phoenx_pack_cloth_contact_endpoints_kernel,
-    _phoenx_populate_shape_endpoints_kernel,
-    _phoenx_update_cloth_shape_geometry_kernel,
-    _phoenx_update_soft_tet_shape_geometry_kernel,
-    build_phoenx_share_vertex_filter_data,
-    phoenx_cloth_share_vertex_filter,
-    shape_endpoints_zeros,
 )
 from newton._src.solvers.phoenx.cloth_step import (
     cloth_init_triangle_rows_kernel,
@@ -131,6 +120,12 @@ from newton._src.solvers.phoenx.constraints.contact_tgs_prepare import (
     patches,
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs_static import build_lists, get_sweep
+from newton._src.solvers.phoenx.contact_endpoints import (
+    pack_contact_barycentric_kernel,
+    pack_contact_endpoints_kernel,
+    populate_shape_endpoints_kernel,
+    shape_endpoints_zeros,
+)
 from newton._src.solvers.phoenx.dispatch.color_groups import DEFAULT_SWEEP_BLOCK_COUNT as COLOR_GROUP_SWEEP_BLOCK_COUNT
 from newton._src.solvers.phoenx.dispatch.color_groups import get_sweep_block_dim as get_color_group_block_dim
 from newton._src.solvers.phoenx.dispatch.color_groups import get_sweep_kernel as get_color_group_sweep_kernel
@@ -189,6 +184,14 @@ from newton._src.solvers.phoenx.mass_splitting.slot_cache import (
     build_partition_slot_cache_kernel,
 )
 from newton._src.solvers.phoenx.materials import MaterialData
+from newton._src.solvers.phoenx.official_contacts import (
+    override_soft_contact_column_friction_kernel,
+    overwrite_contact_barycentric_kernel,
+    pack_rigid_contact_prefix_kernel,
+    pack_self_edge_edge_kernel,
+    pack_self_vertex_triangle_kernel,
+    pack_soft_contact_suffix_kernel,
+)
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
 from newton._src.solvers.phoenx.simulation_kernels import (
     _BLOCK_WORLD_SOLVE_INNER_SWEEPS,
@@ -219,6 +222,11 @@ from newton._src.solvers.phoenx.simulation_kernels import (
     get_per_world_greedy_coloring_kernel,
     get_singleworld_kernel,
     pack_body_xforms_kernel,
+)
+from newton._src.solvers.phoenx.sleeping_filter import (
+    PhoenXSleepingFilterData,
+    build_phoenx_sleeping_filter_data,
+    phoenx_sleeping_filter,
 )
 from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_apply_island_wake_kernel,
@@ -568,7 +576,7 @@ class PhoenXWorld:
         # Stamp the scene-wide ``has_position_level_writers`` flag on the
         # body container so :func:`body_set_access_mode` can warp-uniform
         # short-circuit in rigid-only scenes. Re-stamped by
-        # :meth:`setup_cloth_collision_pipeline` and
+        # :meth:`setup_official_deformable_contacts` and
         # :meth:`populate_soft_tetrahedra_from_model` whenever the cloth /
         # soft-tet counts change.
         self._refresh_has_position_level_writers()
@@ -594,13 +602,10 @@ class PhoenXWorld:
         # bind to even when the cloth branch is dead-eliminated.
         self._particle_sentinel: ParticleContainer | None = None
         # Cloth-aware collision pipeline (constructed by
-        # :meth:`setup_cloth_collision_pipeline`). ``None`` means the
+        # :meth:`setup_official_deformable_contacts`). ``None`` means the
         # world is rigid-only or cloth-only-with-no-contacts; in either
         # case :meth:`collide` is a no-op.
         self._collision_pipeline = None
-        self._cloth_shape_offset: int = 0
-        self._cloth_gap: float = 0.0
-        self._cloth_tri_indices = None
         # Per-shape endpoint table -- length S + T, populated alongside
         # the collision pipeline. Read by the contact-ingest kernel to
         # translate ``(shape_a, shape_b)`` into unified body-or-particle
@@ -611,6 +616,16 @@ class PhoenXWorld:
         # ``shape_body``); cloth-aware setups install a custom array
         # so distinct cloth tris don't collapse into one filter group.
         self._shape_filter_id: wp.array | None = None
+        # Standard Newton soft contacts are normalized into the existing
+        # PhoenX contact-column representation. Rigid-only worlds leave these
+        # fields unset and retain their direct zero-copy ingest path.
+        self._official_contact_model = None
+        self._normalized_contacts: Contacts | None = None
+        self._official_soft_capacity: int = 0
+        self._official_self_vertex_capacity: int = 0
+        self._official_self_edge_capacity: int = 0
+        self._official_bary0 = None
+        self._official_bary1 = None
 
         self.base_substeps = int(substeps)
         if self.base_substeps <= 0:
@@ -970,12 +985,12 @@ class PhoenXWorld:
             self._partitioner = IncrementalContactPartitioner(
                 max_num_interactions=self._constraint_capacity,
                 max_num_nodes=max(1, self.num_bodies + self.num_particles),
-                device=self.device,
                 use_tile_scan=True,
                 max_colored_partitions=self.max_colored_partitions,
                 max_greedy_outer_iters=max_greedy_outer_iters,
                 enable_warm_start=_warm_start_active,
                 endpoint_owner_coloring=self.partitioner_algorithm == "endpoint_owner",
+                device=self.device,
             )
             self._partitioner.set_locality_family(self._element_family)
             self._partitioner.set_symmetric_sweep(bool(symmetric_color_sweep))
@@ -1000,8 +1015,8 @@ class PhoenXWorld:
             self._partitioner = FixedIterationLubyPartitioner(
                 max_num_interactions=self._constraint_capacity,
                 max_num_nodes=max(1, self.num_bodies + self.num_particles),
-                device=self.device,
                 max_colored_partitions=self.max_colored_partitions,
+                device=self.device,
             )
         else:
             raise ValueError(
@@ -1104,14 +1119,14 @@ class PhoenXWorld:
             )
             self._contact_cols: ContactColumnContainer = contact_column_container_zeros(
                 self.max_contact_columns,
-                device=self.device,
                 enable_patch_friction=self._contact_patch_enabled,
+                device=self.device,
             )
             self._contact_cols_packed = (
                 contact_column_container_zeros(
                     self._constraint_capacity,
-                    device=self.device,
                     data_dwords=RIGID_CONTACT_SOLVE_DWORDS,
+                    device=self.device,
                 )
                 if self._colored_contact_headers
                 else self._contact_cols
@@ -1121,8 +1136,8 @@ class PhoenXWorld:
             self._contact_container_solve = (
                 contact_solve_container_zeros(
                     self.rigid_contact_max,
-                    device=self.device,
                     rigid_only=self._singleworld_rigid_direct(),
+                    device=self.device,
                 )
                 if self._colored_contact_rows
                 else self._contact_container
@@ -1137,8 +1152,8 @@ class PhoenXWorld:
             self._ingest_scratch: IngestScratch | None = IngestScratch(
                 rigid_contact_max=self.rigid_contact_max,
                 max_contact_columns=self.max_contact_columns,
-                device=self.device,
                 enable_body_pair_grouping=self._enable_body_pair_grouping,
+                device=self.device,
             )
             self._cid_of_contact_cur = wp.full(self.rigid_contact_max, -1, dtype=wp.int32, device=self.device)
             self._cid_of_contact_prev = wp.full(self.rigid_contact_max, -1, dtype=wp.int32, device=self.device)
@@ -1187,9 +1202,9 @@ class PhoenXWorld:
         # Lazy sentinel for optional per-contact stiffness/damping/friction.
         self._soft_contact_sentinel: wp.array[wp.float32] | None = None
 
-        # Reference to the share-vertex / sleeping filter data, kept alive
+        # Reference to the sleeping broad-phase filter data, kept alive
         # so the Warp ABI sees a stable wp.struct binding across steps.
-        self._share_vertex_filter_data: PhoenXClothShareVertexFilterData | None = None
+        self._sleeping_filter_data: PhoenXSleepingFilterData | None = None
 
         # Sleeping pipeline. Activated by ``sleeping_velocity_threshold > 0``;
         # zero leaves every helper at ``None`` so the per-step hot path skips
@@ -1466,7 +1481,7 @@ class PhoenXWorld:
 
         Required only when sleeping is enabled or the scene contains
         cloth / soft-body deformables (the same filter handles both
-        rigid-frozen-pair culling and deformable share-vertex skip)::
+        rigid frozen-pair culling)::
 
             cp = newton.CollisionPipeline(
                 model,
@@ -1479,7 +1494,7 @@ class PhoenXWorld:
         caches the pipeline's narrow-phase AABB arrays so
         :meth:`step` doesn't need them as args.
         """
-        return (phoenx_cloth_share_vertex_filter, PhoenXClothShareVertexFilterData)
+        return (phoenx_sleeping_filter, PhoenXSleepingFilterData)
 
     def attach_collision_pipeline(
         self,
@@ -1492,7 +1507,7 @@ class PhoenXWorld:
         """Wire a rigid-only Newton :class:`~newton.CollisionPipeline`
         into PhoenX's sleeping pipeline.
 
-        Builds the share-vertex filter data with sleeping fields
+        Builds the sleeping filter data with runtime fields
         populated, installs it on the pipeline, and caches the
         pipeline's per-shape AABB arrays + a PhoenX-offset shape_body
         map. After this call, the per-frame loop is the same regardless
@@ -1505,9 +1520,8 @@ class PhoenXWorld:
         Pre-requisites:
           * ``collision_pipeline`` was constructed with
             ``broad_phase_filter=PhoenXWorld.broad_phase_filter()``.
-          * Scene is rigid-only -- cloth / soft-tet scenes use
-            :meth:`setup_cloth_collision_pipeline` which performs the
-            equivalent wiring and adds the deformable suffix.
+          * Scene is rigid-only -- deformable scenes use the standard collision pipeline through
+            :meth:`setup_official_deformable_contacts`.
 
         Args:
             collision_pipeline: The Newton CollisionPipeline.
@@ -1522,7 +1536,7 @@ class PhoenXWorld:
         if self.num_cloth_triangles > 0 or self.num_soft_tetrahedra > 0 or self.num_soft_hexahedra > 0:
             raise RuntimeError(
                 "attach_collision_pipeline is rigid-only; cloth / soft-tet / soft-hex scenes "
-                "use setup_cloth_collision_pipeline()"
+                "use setup_official_deformable_contacts()"
             )
 
         shape_body_np = shape_body.numpy() if isinstance(shape_body, wp.array) else np.asarray(shape_body)
@@ -1532,13 +1546,7 @@ class PhoenXWorld:
         if getattr(collision_pipeline, "unified_shape_type", None) is not None:
             self.set_shape_type(collision_pipeline.unified_shape_type)
 
-        tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
-        tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
-        filter_data = build_phoenx_share_vertex_filter_data(
-            num_rigid_shapes=int(num_rigid_shapes),
-            num_cloth_triangles=0,
-            tri_indices=tri_sentinel,
-            tet_indices=tet_sentinel,
+        filter_data = build_phoenx_sleeping_filter_data(
             sleeping_enabled=self._sleeping_enabled,
             phoenx_body_offset=int(phoenx_body_offset),
             shape_body=shape_body if self._sleeping_enabled else None,
@@ -1547,7 +1555,7 @@ class PhoenXWorld:
             device=self.device,
         )
         collision_pipeline.set_broad_phase_filter_data(filter_data)
-        self._share_vertex_filter_data = filter_data
+        self._sleeping_filter_data = filter_data
 
         if self._sleeping_enabled:
             nphase = collision_pipeline.narrow_phase
@@ -2185,338 +2193,232 @@ class PhoenXWorld:
         )
         self._num_active_constraints.fill_(self._contact_offset)
 
-    def setup_cloth_collision_pipeline(
-        self,
-        model,
-        *,
-        cloth_thickness: float = 0.005,
-        cloth_gap: float = 0.010,
-        cloth_self_collision: bool = True,
-        soft_body_thickness: float = 0.005,
-        soft_body_gap: float = 0.010,
-        broad_phase: str = "sap",
-        contact_matching: str = "sticky",
-        rigid_contact_max: int | None = None,
-        shape_pairs_max: int | None = None,
-        phoenx_body_offset: int = 1,
-    ):
-        """Construct (and stash on ``model._collision_pipeline``) a
-        unified rigid + cloth-triangle + soft-tet :class:`CollisionPipeline`.
+    def setup_official_deformable_contacts(self, model, pipeline: CollisionPipeline) -> None:
+        """Bind Newton's standard soft-contact buffers to PhoenX.
 
-        Allocates ``extra_shape_count = num_cloth_triangles +
-        num_soft_tetrahedra`` virtual shape slots, stamps static metadata
-        for two suffixes:
-
-        * Cloth-triangle suffix ``[S, S + T)`` -- ``shape_type=TRIANGLE``.
-        * Soft-tet suffix ``[S + T, S + T + Tet)`` -- ``shape_type=TETRAHEDRON``.
-
-        Per-step :meth:`update_cloth_shape_geometry` refreshes
-        ``geom_transform`` / ``geom_data`` / ``shape_aabb_*`` / (tet only)
-        ``shape_source`` from current particle positions.
-
-        Narrow-phase reuses Newton's existing GeoType.TRIANGLE / TETRAHEDRON
-        support-function dispatch unchanged.
-
-        Args:
-            model: Finalised :class:`~newton.Model` with ``model.shape_*``
-                populated. Must have ``model.tri_count ==
-                self.num_cloth_triangles`` and ``model.tet_count ==
-                self.num_soft_tetrahedra``.
-            cloth_thickness: Geometric Minkowski-skin half-thickness
-                added to each cloth triangle [m]. Default 5 mm.
-            cloth_gap: Speculative-contact enlargement on top of the
-                thickness [m]. Default 10 mm. Total contact-detection
-                radius is ``thickness + gap``.
-            cloth_self_collision: Enable cloth triangle self-collision.
-            soft_body_thickness: Per-tet skin half-thickness [m].
-            soft_body_gap: Per-tet speculative-contact gap [m].
-            broad_phase: ``"sap"`` (default), ``"nxn"``, or ``"explicit"``.
-            contact_matching: PhoenX requires ``"sticky"`` (default) or
-                ``"latest"`` so warm-starting works.
-            rigid_contact_max: Override Newton's contact-buffer size.
-            shape_pairs_max: Broad-phase candidate-pair budget override.
-
-        Returns:
-            The constructed :class:`CollisionPipeline`.
+        The collision pipeline keeps its public rigid and soft buffers. A
+        device-only normalization pass packs their live prefixes into PhoenX's
+        common contact row space before PGS ingest.
         """
-
-        def _soft_tet_collision_mask(tet_indices: np.ndarray) -> np.ndarray:
-            tets = np.asarray(tet_indices, dtype=np.int32).reshape(-1, 4)
-            if tets.shape[0] == 0:
-                return np.zeros(0, dtype=bool)
-
-            face_counts: dict[tuple[int, int, int], int] = {}
-            for a, b, c, d in tets:
-                for face in ((a, b, c), (a, d, b), (b, d, c), (a, c, d)):
-                    key = tuple(sorted((int(face[0]), int(face[1]), int(face[2]))))
-                    face_counts[key] = face_counts.get(key, 0) + 1
-
-            surface_vertices: set[int] = set()
-            for face, count in face_counts.items():
-                if count == 1:
-                    surface_vertices.update(face)
-            if not surface_vertices:
-                return np.ones(tets.shape[0], dtype=bool)
-            surface = np.fromiter(surface_vertices, dtype=np.int32)
-            return np.isin(tets, surface).any(axis=1)
-
-        if self.num_cloth_triangles == 0 and self.num_soft_tetrahedra == 0:
-            raise RuntimeError(
-                "setup_cloth_collision_pipeline requires num_cloth_triangles > 0 "
-                "or num_soft_tetrahedra > 0; rigid-only scenes use "
-                "newton.CollisionPipeline directly"
-            )
-        S = int(model.shape_count)
-        T = int(self.num_cloth_triangles)
-        Tet = int(self.num_soft_tetrahedra)
-
-        # Unified shape_world / shape_flags arrays of length S+T+Tet.
-        # Rigid prefix mirrors model.shape_*; suffix lands in world 0
-        # with default flags (= same flag value as a typical dynamic
-        # rigid shape so the broad phase doesn't cull cloth tris).
-        unified_shape_world = wp.zeros(S + T + Tet, dtype=wp.int32, device=self.device)
-        if S > 0 and getattr(model, "shape_world", None) is not None:
-            wp.copy(unified_shape_world, model.shape_world, count=S)
-        unified_shape_flags = None
-        if getattr(model, "shape_flags", None) is not None:
-            shape_flags = model.shape_flags
-            # Suffix flags = take the most permissive flag set we see
-            # in the prefix so deformable shapes participate in broad phase.
-            unified_shape_flags = wp.zeros(S + T + Tet, dtype=shape_flags.dtype, device=self.device)
-            if S > 0:
-                wp.copy(unified_shape_flags, shape_flags, count=S)
-                seed_value = int(shape_flags.numpy()[0])
-                if seed_value != 0:
-                    arr = unified_shape_flags.numpy()
-                    arr[S:] = seed_value
-                    if Tet > 0:
-                        tet_collides = _soft_tet_collision_mask(model.tet_indices.numpy())
-                        collide_bit = int(ShapeFlags.COLLIDE_SHAPES)
-                        tet_flags = arr[S + T : S + T + Tet]
-                        tet_flags[~tet_collides] &= ~collide_bit
-                    unified_shape_flags.assign(arr)
-
-        # Length-1 sentinel for the unused mesh-indices argument in the
-        # share-vertex filter when the matching deformable category is
-        # absent (Warp arrays must be non-empty to be bound).
-        if T == 0:
-            tri_indices_for_filter = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
-        else:
-            tri_indices_for_filter = model.tri_indices
-        if Tet == 0:
-            tet_indices_for_filter = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
-        else:
-            tet_indices_for_filter = model.tet_indices
-
-        pipeline = CollisionPipeline(
-            model,
-            broad_phase=broad_phase,
-            contact_matching=contact_matching,
-            rigid_contact_max=rigid_contact_max,
-            shape_pairs_max=shape_pairs_max,
-            extra_shape_count=T + Tet,
-            unified_shape_world=unified_shape_world,
-            unified_shape_flags=unified_shape_flags,
-            broad_phase_filter=(
-                phoenx_cloth_share_vertex_filter,
-                PhoenXClothShareVertexFilterData,
-            ),
-        )
-
-        # Bind the share-vertex filter's per-step data: tri/tet index
-        # arrays + offsets, plus optional sleeping-aware fields. The
-        # filter callback reads this at every broad-phase pair test to
-        # drop pairs of deformables (cloth or soft-tet) that share at
-        # least one particle, and (when sleeping is on) rigid-rigid
-        # pairs where both bodies are flagged sleeping.
-        share_vertex_data = build_phoenx_share_vertex_filter_data(
-            num_rigid_shapes=S,
-            num_cloth_triangles=T,
-            tri_indices=tri_indices_for_filter,
-            tet_indices=tet_indices_for_filter,
-            sleeping_enabled=self._sleeping_enabled,
-            phoenx_body_offset=int(phoenx_body_offset),
-            shape_body=model.shape_body if self._sleeping_enabled else None,
-            body_island_root=self.bodies.island_root if self._sleeping_enabled else None,
-            body_motion_type=self.bodies.motion_type if self._sleeping_enabled else None,
-            device=self.device,
-        )
-        pipeline.set_broad_phase_filter_data(share_vertex_data)
-        self._share_vertex_filter_data = share_vertex_data
-        if self._sleeping_enabled:
-            self._sleeping_shape_aabb_lower = pipeline.narrow_phase.shape_aabb_lower
-            self._sleeping_shape_aabb_upper = pipeline.narrow_phase.shape_aabb_upper
-
-        # Stamp the static deformable-shape suffix metadata. Per-step
-        # quantities (geom_xform, geom_data, AABB, shape_source for tets)
-        # are written by :meth:`update_cloth_shape_geometry`.
-        triangle_type = int(GeoType.TRIANGLE)
-        tetrahedron_type = int(GeoType.TETRAHEDRON)
-
-        def _fill_range_int(arr: wp.array, lo: int, hi: int, value: int) -> None:
-            host = arr.numpy()
-            host[lo:hi] = value
-            arr.assign(host)
-
-        def _fill_range_float(arr: wp.array, lo: int, hi: int, value: float) -> None:
-            host = arr.numpy()
-            host[lo:hi] = value
-            arr.assign(host)
-
-        if T > 0:
-            _fill_range_int(pipeline.unified_shape_type, S, S + T, triangle_type)
-            _fill_range_float(pipeline.unified_shape_margin, S, S + T, float(cloth_thickness))
-            _fill_range_float(pipeline.unified_shape_gap, S, S + T, float(cloth_gap))
-            _fill_range_float(pipeline.unified_shape_collision_radius, S, S + T, 0.0)
-            cloth_collision_group = 1 if cloth_self_collision else -2
-            _fill_range_int(pipeline.unified_shape_collision_group, S, S + T, cloth_collision_group)
-        if Tet > 0:
-            _fill_range_int(pipeline.unified_shape_type, S + T, S + T + Tet, tetrahedron_type)
-            _fill_range_float(pipeline.unified_shape_margin, S + T, S + T + Tet, float(soft_body_thickness))
-            _fill_range_float(pipeline.unified_shape_gap, S + T, S + T + Tet, float(soft_body_gap))
-            _fill_range_float(pipeline.unified_shape_collision_radius, S + T, S + T + Tet, 0.0)
-            _fill_range_int(pipeline.unified_shape_collision_group, S + T, S + T + Tet, 1)
-        # ``unified_shape_body`` was already filled to -1 in both
-        # suffixes by :meth:`CollisionPipeline._build_unified_shape_arrays`.
-        # ``unified_shape_source_ptr`` defaults to 0; the per-step tet
-        # geometry kernel writes the encoded 4th-vertex into it.
-
-        # Stash for :meth:`update_cloth_shape_geometry` and downstream
-        # collision dispatch.
+        if pipeline.model is not model:
+            raise ValueError("pipeline must have been created for model")
+        if not pipeline.contact_matching:
+            raise ValueError("PhoenX deformable contacts require contact matching")
+        if not pipeline.enable_rigid_soft_full_surface_contact:
+            raise ValueError("PhoenX deformable contacts require enable_rigid_soft_full_surface_contact=True")
+        soft_capacity = int(pipeline.soft_contact_max)
+        shape_count = int(model.shape_count)
+        detector = getattr(pipeline, "_soft_self_contact_detector", None)
+        vertex_capacity = 0
+        edge_capacity = 0
+        if detector is not None:
+            vertex_capacity = int(model.particle_count) * int(detector.vertex_collision_buffer_pre_alloc)
+            edge_capacity = int(model.edge_count) * int(detector.edge_collision_buffer_pre_alloc)
+        # Two transient feature descriptors are needed for each soft-soft
+        # contact. Index them by canonical row so packing remains atomic and
+        # graph-safe without a second shape-id allocation pass.
+        total_shapes = shape_count + soft_capacity + 2 * self.rigid_contact_max
+        self._official_contact_model = model
         self._collision_pipeline = pipeline
-        self._cloth_shape_offset: int = S
-        self._soft_tet_shape_offset: int = S + T
-        self._cloth_gap: float = float(cloth_gap)
-        self._soft_body_gap: float = float(soft_body_gap)
-        self._cloth_tri_indices = tri_indices_for_filter if T > 0 else None
-        self._soft_tet_indices = tet_indices_for_filter if Tet > 0 else None
+        self._official_soft_capacity = soft_capacity
+        self._official_self_vertex_capacity = vertex_capacity
+        self._official_self_edge_capacity = edge_capacity
+        self._official_bary0 = wp.zeros(self.rigid_contact_max, dtype=wp.vec3f, device=self.device)
+        self._official_bary1 = wp.zeros(self.rigid_contact_max, dtype=wp.vec3f, device=self.device)
+        self._normalized_contacts = Contacts(
+            rigid_contact_max=self.rigid_contact_max,
+            soft_contact_max=0,
+            per_contact_shape_properties=True,
+            contact_matching=True,
+        )
 
-        # Per-shape filter id array. Length S + T + Tet. Rigid prefix
-        # mirrors model.shape_body so the existing same-body collision
-        # filter behaviour is preserved. Deformable suffixes get unique
-        # negative ids ``-(2 + i)`` so distinct deformables (each
-        # nominally anchored to the world via shape_body=-1) don't
-        # collapse into a single filter group.
-        S_int = int(S)
-        T_int = int(T)
-        Tet_int = int(Tet)
-        filter_host = np.zeros(S_int + T_int + Tet_int, dtype=np.int32)
-        if S_int > 0 and getattr(model, "shape_body", None) is not None:
-            filter_host[:S_int] = model.shape_body.numpy()
-        for i in range(T_int + Tet_int):
-            filter_host[S_int + i] = -(2 + i)
+        shape_body_host = np.zeros(total_shapes, dtype=np.int32)
+        if shape_count > 0:
+            raw_body = model.shape_body.numpy()
+            shape_body_host[:shape_count] = np.where(raw_body < 0, 0, raw_body + 1)
+        for j in range(soft_capacity):
+            shape_body_host[shape_count + j] = -(2 + j)
+        self.set_shape_body(wp.array(shape_body_host, dtype=wp.int32, device=self.device))
+
+        shape_type_host = np.full(total_shapes, int(GeoType.TRIANGLE), dtype=np.int32)
+        if shape_count > 0:
+            shape_type_host[:shape_count] = model.shape_type.numpy()
+        self.set_shape_type(wp.array(shape_type_host, dtype=wp.int32, device=self.device))
+
+        filter_host = np.zeros(total_shapes, dtype=np.int32)
+        if shape_count > 0:
+            filter_host[:shape_count] = model.shape_body.numpy()
+        for j in range(total_shapes - shape_count):
+            filter_host[shape_count + j] = -(2 + j)
         self._shape_filter_id = wp.array(filter_host, dtype=wp.int32, device=self.device)
 
-        # Contact ingest operates on PhoenX body slots, not Newton body
-        # ids. The collision pipeline's ``unified_shape_body`` must stay
-        # in Newton indexing for narrow phase, so keep a separate map for
-        # warm-start/contact-column ingest. Static and virtual deformable
-        # shapes use the slot-0 world anchor until the endpoint overlay
-        # replaces deformable sides with particle nodes.
-        shape_body_phx = np.zeros(S_int + T_int + Tet_int, dtype=np.int32)
-        if S_int > 0 and getattr(model, "shape_body", None) is not None:
-            shape_body_raw = model.shape_body.numpy()
-            shape_body_phx[:S_int] = np.where(shape_body_raw < 0, 0, shape_body_raw + int(phoenx_body_offset))
-        self.set_shape_body(wp.array(shape_body_phx, dtype=wp.int32, device=self.device))
-        self.set_shape_type(pipeline.unified_shape_type)
-
-        # Per-shape endpoint table for cloth-aware contact ingest.
-        # Allocated for the full unified shape range and populated once:
-        # rigid prefix copies model.shape_body; cloth suffix decodes
-        # tri_indices into 3-particle nodes; soft-tet suffix decodes
-        # tet_indices into 4-particle nodes.
-        self._shape_endpoints = shape_endpoints_zeros(S + T + Tet, device=self.device)
+        self._shape_endpoints = shape_endpoints_zeros(total_shapes, device=self.device)
+        tri_sentinel = wp.zeros((1, 3), dtype=wp.int32, device=self.device)
+        tet_sentinel = wp.zeros((1, 4), dtype=wp.int32, device=self.device)
         wp.launch(
-            _phoenx_populate_shape_endpoints_kernel,
-            dim=S + T + Tet,
+            populate_shape_endpoints_kernel,
+            dim=max(1, shape_count),
             inputs=[
                 model.shape_body,
-                tri_indices_for_filter,
-                tet_indices_for_filter,
-                wp.int32(S),
-                wp.int32(T),
-                wp.int32(S + T),
-                wp.int32(Tet),
+                tri_sentinel,
+                tet_sentinel,
+                wp.int32(shape_count),
+                wp.int32(0),
+                wp.int32(shape_count),
+                wp.int32(0),
                 wp.int32(self.num_bodies),
-                wp.int32(phoenx_body_offset),
+                wp.int32(1),
             ],
             outputs=[self._shape_endpoints],
             device=self.device,
         )
 
-        # Retain the pipeline for backward compatibility. The user calls
-        # :meth:`collide` on this world for the cloth-aware path.
-        model._collision_pipeline = pipeline
-        return pipeline
+    def _normalize_official_contacts(self, contacts):
+        normalized = self._normalized_contacts
+        model = self._official_contact_model
+        if normalized is None or model is None:
+            return contacts
 
-    def update_cloth_shape_geometry(self) -> None:
-        """Per-step refresh of the cloth-triangle + soft-tet shape suffixes.
+        wp.copy(normalized.contact_generation, contacts.contact_generation, count=1)
+        wp.launch(
+            pack_rigid_contact_prefix_kernel,
+            dim=max(1, int(contacts.rigid_contact_max)),
+            inputs=[
+                contacts.rigid_contact_count,
+                contacts.rigid_contact_point0,
+                contacts.rigid_contact_point1,
+                contacts.rigid_contact_normal,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                contacts.rigid_contact_match_index,
+                contacts.rigid_contact_margin0,
+                contacts.rigid_contact_margin1,
+            ],
+            outputs=[
+                normalized.rigid_contact_point0,
+                normalized.rigid_contact_point1,
+                normalized.rigid_contact_normal,
+                normalized.rigid_contact_shape0,
+                normalized.rigid_contact_shape1,
+                normalized.rigid_contact_match_index,
+                normalized.rigid_contact_margin0,
+                normalized.rigid_contact_margin1,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            pack_soft_contact_suffix_kernel,
+            dim=max(1, self._official_soft_capacity),
+            inputs=[
+                contacts.rigid_contact_count,
+                contacts.soft_contact_count,
+                contacts.soft_contact_indices,
+                contacts.soft_contact_barycentric,
+                contacts.soft_contact_shape,
+                contacts.soft_contact_body_pos,
+                contacts.soft_contact_normal,
+                self.particles.position,
+                model.particle_radius,
+                model.shape_margin,
+                wp.int32(model.shape_count),
+                wp.int32(self.num_bodies),
+                wp.int32(self.rigid_contact_max),
+            ],
+            outputs=[
+                normalized.rigid_contact_count,
+                normalized.rigid_contact_point0,
+                normalized.rigid_contact_point1,
+                normalized.rigid_contact_normal,
+                normalized.rigid_contact_shape0,
+                normalized.rigid_contact_shape1,
+                normalized.rigid_contact_match_index,
+                normalized.rigid_contact_margin0,
+                normalized.rigid_contact_margin1,
+                normalized.rigid_contact_stiffness,
+                normalized.rigid_contact_damping,
+                normalized.rigid_contact_friction,
+                self._shape_endpoints,
+                self._shape_body_internal,
+                self._shape_type_internal,
+                self._official_bary0,
+                self._official_bary1,
+            ],
+            device=self.device,
+        )
 
-        Reads current particle positions and re-canonicalises each
-        deformable shape into its slot in the unified shape arrays.
-        Cloth triangles get :func:`_phoenx_update_cloth_shape_geometry_kernel`;
-        soft tets get :func:`_phoenx_update_soft_tet_shape_geometry_kernel`.
-        Must be called once per step before
-        :meth:`CollisionPipeline.collide_with_external_aabbs`.
-        """
-        if self._collision_pipeline is None:
-            return
-        pipeline = self._collision_pipeline
-        if self.num_cloth_triangles > 0:
-            wp.launch(
-                _phoenx_update_cloth_shape_geometry_kernel,
-                dim=self.num_cloth_triangles,
-                inputs=[
-                    self.particles,
-                    self._cloth_tri_indices,
-                    wp.int32(self._cloth_shape_offset),
-                    pipeline.unified_shape_margin,
-                    wp.float32(self._cloth_gap),
-                ],
-                outputs=[
-                    pipeline.geom_transform,
-                    pipeline.geom_data,
-                    pipeline.narrow_phase.shape_aabb_lower,
-                    pipeline.narrow_phase.shape_aabb_upper,
-                ],
-                device=self.device,
-            )
-        if self.num_soft_tetrahedra > 0:
-            wp.launch(
-                _phoenx_update_soft_tet_shape_geometry_kernel,
-                dim=self.num_soft_tetrahedra,
-                inputs=[
-                    self.particles,
-                    self._soft_tet_indices,
-                    wp.int32(self._soft_tet_shape_offset),
-                    pipeline.unified_shape_margin,
-                    wp.float32(self._soft_body_gap),
-                ],
-                outputs=[
-                    pipeline.geom_transform,
-                    pipeline.geom_data,
-                    pipeline.unified_shape_source_ptr,
-                    pipeline.narrow_phase.shape_aabb_lower,
-                    pipeline.narrow_phase.shape_aabb_upper,
-                ],
-                device=self.device,
-            )
+        self_data = contacts.soft_self_contact_data
+        detector = getattr(self._collision_pipeline, "_soft_self_contact_detector", None)
+        if self_data is not None and detector is not None:
+            shape_base = int(model.shape_count) + self._official_soft_capacity
+            common_outputs = [
+                normalized.rigid_contact_count,
+                normalized.rigid_contact_point0,
+                normalized.rigid_contact_point1,
+                normalized.rigid_contact_normal,
+                normalized.rigid_contact_shape0,
+                normalized.rigid_contact_shape1,
+                normalized.rigid_contact_match_index,
+                normalized.rigid_contact_margin0,
+                normalized.rigid_contact_margin1,
+                normalized.rigid_contact_stiffness,
+                normalized.rigid_contact_damping,
+                normalized.rigid_contact_friction,
+                self._shape_endpoints,
+                self._shape_body_internal,
+                self._shape_type_internal,
+                self._official_bary0,
+                self._official_bary1,
+            ]
+            if self._official_self_vertex_capacity > 0:
+                wp.launch(
+                    pack_self_vertex_triangle_kernel,
+                    dim=self._official_self_vertex_capacity,
+                    inputs=[
+                        self_data.vertex_colliding_triangles,
+                        model.tri_indices,
+                        self.particles.position,
+                        wp.float32(self._collision_pipeline.soft_self_contact_margin),
+                        wp.float32(self._collision_pipeline.soft_self_contact_gap),
+                        wp.int32(shape_base),
+                        wp.int32(self.num_bodies),
+                        wp.int32(self.rigid_contact_max),
+                    ],
+                    outputs=common_outputs,
+                    device=self.device,
+                )
+            if self._official_self_edge_capacity > 0:
+                wp.launch(
+                    pack_self_edge_edge_kernel,
+                    dim=self._official_self_edge_capacity,
+                    inputs=[
+                        self_data.edge_colliding_edges,
+                        model.edge_indices,
+                        self.particles.position,
+                        wp.float32(self._collision_pipeline.soft_self_contact_margin),
+                        wp.float32(self._collision_pipeline.soft_self_contact_gap),
+                        wp.float32(detector.edge_edge_parallel_epsilon),
+                        wp.int32(shape_base),
+                        wp.int32(self.num_bodies),
+                        wp.int32(self.rigid_contact_max),
+                    ],
+                    outputs=common_outputs,
+                    device=self.device,
+                )
+        return normalized
 
     def collide(self, state, contacts) -> None:
-        """Run the unified rigid + cloth-triangle collision pipeline.
-
-        Updates the cloth-triangle shape suffix from current particle
-        positions, then dispatches to
-        :meth:`CollisionPipeline.collide_with_external_aabbs`. Use this
-        in place of :meth:`Model.collide` when the world has cloth
-        triangles. CUDA-graph capture safe.
-        """
+        """Run the configured standard Newton collision pipeline."""
         if self._collision_pipeline is None:
-            raise RuntimeError(
-                "PhoenXWorld.collide requires setup_cloth_collision_pipeline() to have been called first"
-            )
-        self.update_cloth_shape_geometry()
-        self._collision_pipeline.collide_with_external_aabbs(state, contacts)
+            raise RuntimeError("PhoenXWorld.collide requires setup_official_deformable_contacts()")
+        if self.particles is not None and state.particle_q is not None:
+            wp.copy(state.particle_q, self.particles.position)
+            if state.particle_qd is not None:
+                wp.copy(state.particle_qd, self.particles.velocity)
+        self._collision_pipeline.collide(
+            state,
+            contacts,
+            soft_self_contact=getattr(self._collision_pipeline, "_soft_self_contact_detector", None) is not None,
+        )
 
     def _make_placeholder_contact_views(self) -> ContactViews:
         """Size-1 dummy ContactViews for contact-free steps."""
@@ -2610,7 +2512,7 @@ class PhoenXWorld:
         ``shape_aabb_lower`` / ``shape_aabb_upper`` are read only when
         :attr:`sleeping_velocity_threshold` > 0. When ``None``, falls
         back to the arrays cached by :meth:`attach_collision_pipeline`
-        (or :meth:`setup_cloth_collision_pipeline`); pass explicit
+        (or :meth:`setup_official_deformable_contacts`); pass explicit
         arrays only if you need to point at a different pipeline.
         """
         if dt < 0.0:
@@ -2809,6 +2711,9 @@ class PhoenXWorld:
         if self._temporal_contact_state is not None:
             snapshot_contact_tgs(self._temporal_contact_state)
             wp.launch(advance_contact_tgs_generation, 1, [self._temporal_contact_state], device=self.device)
+        source_contacts = contacts
+        if contacts is not None and self._normalized_contacts is not None:
+            contacts = self._normalize_official_contacts(contacts)
         if contacts is None or self.max_contact_columns == 0 or self._ingest_scratch is None:
             self._num_active_constraints.fill_(self._contact_offset)
             self._contact_views = None
@@ -2827,7 +2732,7 @@ class PhoenXWorld:
             shape_type = self._shape_type_internal
         # When the cloth-aware pipeline is active, contact slots can
         # reference shape indices up to S + T. Use the PhoenX-indexed
-        # full-length map stamped by setup_cloth_collision_pipeline.
+        # full-length map stamped by setup_official_deformable_contacts.
         # Fall back to the pipeline map only for legacy callers; that
         # map remains Newton-indexed for narrow-phase contact generation.
         if (
@@ -3007,7 +2912,7 @@ class PhoenXWorld:
             )
 
         # Cloth-aware overlay: when shape_endpoints is populated
-        # (i.e. setup_cloth_collision_pipeline was called), re-stamp
+        # (i.e. setup_official_deformable_contacts was called), re-stamp
         # the contact column header with unified-index nodes + kind
         # tags, and compute barycentric weights for any cloth-side
         # contacts. Rigid-only scenes skip this -- the existing
@@ -3015,7 +2920,7 @@ class PhoenXWorld:
         # rigid-rigid headers.
         if self._shape_endpoints is not None:
             wp.launch(
-                _phoenx_pack_cloth_contact_endpoints_kernel,
+                pack_contact_endpoints_kernel,
                 dim=max(1, self.max_contact_columns),
                 inputs=[
                     self._ingest_scratch.pair_source_idx,
@@ -3028,7 +2933,21 @@ class PhoenXWorld:
                 device=self.device,
             )
             wp.launch(
-                _phoenx_pack_cloth_contact_barycentric_kernel,
+                override_soft_contact_column_friction_kernel,
+                dim=max(1, self.max_contact_columns),
+                inputs=[
+                    self._ingest_scratch.pair_source_idx,
+                    self._ingest_scratch.pair_shape_a,
+                    self._ingest_scratch.pair_shape_b,
+                    self._ingest_scratch.num_contact_columns,
+                    wp.int32(self._official_contact_model.shape_count),
+                    wp.float32(self._official_contact_model.soft_contact_mu),
+                    self._contact_cols,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                pack_contact_barycentric_kernel,
                 dim=max(1, self.rigid_contact_max),
                 inputs=[
                     self._contact_views,
@@ -3039,6 +2958,22 @@ class PhoenXWorld:
                 outputs=[self._contact_container],
                 device=self.device,
             )
+            if source_contacts is not None and source_contacts is not contacts:
+                wp.launch(
+                    overwrite_contact_barycentric_kernel,
+                    dim=max(1, self.rigid_contact_max),
+                    inputs=[
+                        contacts.rigid_contact_count,
+                        contacts.rigid_contact_shape0,
+                        contacts.rigid_contact_shape1,
+                        self._shape_endpoints,
+                        self._official_bary0,
+                        self._official_bary1,
+                        wp.int32(self.rigid_contact_max),
+                    ],
+                    outputs=[self._contact_container],
+                    device=self.device,
+                )
 
         if self._contact_chunk_scratch is not None:
             restamp_contact_chunk_owners(
