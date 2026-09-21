@@ -44,6 +44,12 @@ devices = get_test_devices()
 
 
 _INVALID_ARTICULATION_DESC = "Warning: Invalid ArticulationDesc descriptor"
+_MIRRORED_BODY_WARNING = (
+    r"Rigid body prim /World/Negative/Complete has a mirrored \(negative-determinant\) world transform\."
+)
+_PARTIAL_EQ_SOLREF_WARNING = (
+    r"Custom attribute 'mujoco:eq_solref' has 1 values but frequency 'mujoco:equality_constraint' expects 2\."
+)
 
 
 def _expect_jointless_articulation_warning(test):
@@ -7281,7 +7287,7 @@ def Xform "World"
 
     @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
     def test_ref_attribute_parsing(self):
-        """Test that 'mjc:ref' attribute is parsed."""
+        """Interpret an unauthored-angle revolute ``mjc:ref`` in degrees."""
         from pxr import Usd
 
         usd_content = """#usda 1.0
@@ -7334,7 +7340,64 @@ def Xform "Articulation" (
         qd_start = model.joint_qd_start.numpy()
 
         revolute_joint_idx = model.joint_label.index("/Articulation/revolute_joint")
-        self.assertAlmostEqual(dof_ref[qd_start[revolute_joint_idx]], 90.0, places=4)
+        self.assertAlmostEqual(dof_ref[qd_start[revolute_joint_idx]], np.deg2rad(90.0), places=4)
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_ref_does_not_change_usd_drive_target(self):
+        """Keep a standard USD drive target unchanged when ``mjc:ref`` is present."""
+        from pxr import Usd
+
+        usd_content = """#usda 1.0
+(
+    upAxis = "Z"
+)
+
+def PhysicsScene "physicsScene"
+{
+}
+
+def Xform "Articulation" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI"]
+)
+{
+    def Cube "base" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsCollisionAPI"]
+    )
+    {
+    }
+
+    def Cube "child" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsCollisionAPI"]
+    )
+    {
+        double3 xformOp:translate = (0, 0, 1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def PhysicsRevoluteJoint "joint" (
+        prepend apiSchemas = ["PhysicsDriveAPI:angular"]
+    )
+    {
+        token physics:axis = "Y"
+        rel physics:body0 = </Articulation/base>
+        rel physics:body1 = </Articulation/child>
+        float drive:angular:physics:stiffness = 10.0
+        float drive:angular:physics:targetPosition = 20.0
+        float mjc:ref = 30.0
+    }
+}
+"""
+        stage = Usd.Stage.CreateInMemory()
+        stage.GetRootLayer().ImportFromString(usd_content)
+
+        builder = newton.ModelBuilder()
+        SolverMuJoCo.register_custom_attributes(builder)
+        builder.add_usd(stage)
+        model = builder.finalize()
+
+        joint_idx = model.joint_label.index("/Articulation/joint")
+        target_idx = model.joint_target_q_start.numpy()[joint_idx]
+        self.assertAlmostEqual(model.joint_target_q.numpy()[target_idx], np.deg2rad(20.0), places=5)
 
     @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
     def test_springref_attribute_parsing(self):
@@ -7428,10 +7491,118 @@ def Xform "Articulation" (
         qd_start = model.joint_qd_start.numpy()
 
         revolute_joint_idx = model.joint_label.index("/Articulation/revolute_joint")
-        self.assertAlmostEqual(springref[qd_start[revolute_joint_idx]], 30.0, places=4)
+        self.assertAlmostEqual(springref[qd_start[revolute_joint_idx]], np.deg2rad(30.0), places=4)
 
         prismatic_joint_idx = model.joint_label.index("/Articulation/prismatic_joint")
         self.assertAlmostEqual(springref[qd_start[prismatic_joint_idx]], 0.25, places=4)
+
+    @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+    def test_converter_degree_joint_angles_are_converted(self):
+        """Convert declared degree refs and springrefs while preserving prismatic lengths.
+
+        Both are native MuJoCo scalar joint coordinates, so ``mjc:compiler:angle = "degree"`` authors them in
+        degrees. Prismatic values are lengths and must stay unchanged.
+        """
+        from pxr import Usd
+
+        usd_content = """#usda 1.0
+(
+    upAxis = "Z"
+)
+
+def PhysicsScene "physicsScene"
+{
+    uniform token mjc:compiler:angle = "degree"
+}
+
+def Xform "Articulation" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI"]
+)
+{
+    def Xform "Body0" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "Collision0" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            double size = 0.2
+        }
+    }
+
+    def Xform "Body1" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+        double3 xformOp:translate = (1, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "Collision1" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            double size = 0.2
+        }
+    }
+
+    def Xform "Body2" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+        double3 xformOp:translate = (2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "Collision2" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            double size = 0.2
+        }
+    }
+
+    def PhysicsRevoluteJoint "revolute_joint"
+    {
+        token physics:axis = "Y"
+        rel physics:body0 = </Articulation/Body0>
+        rel physics:body1 = </Articulation/Body1>
+        float mjc:ref = 30.0
+        float mjc:springref = 45.0
+    }
+
+    def PhysicsPrismaticJoint "prismatic_joint"
+    {
+        token physics:axis = "Z"
+        rel physics:body0 = </Articulation/Body1>
+        rel physics:body1 = </Articulation/Body2>
+        float mjc:ref = 0.5
+        float mjc:springref = 0.25
+    }
+}
+"""
+        stage = Usd.Stage.CreateInMemory()
+        stage.GetRootLayer().ImportFromString(usd_content)
+
+        builder = newton.ModelBuilder()
+        SolverMuJoCo.register_custom_attributes(builder)
+        builder.add_usd(stage)
+        model = builder.finalize()
+
+        qd_start = model.joint_qd_start.numpy()
+        dof_ref = model.mujoco.dof_ref.numpy()
+        springref = model.mujoco.dof_springref.numpy()
+
+        revolute_dof = qd_start[model.joint_label.index("/Articulation/revolute_joint")]
+        prismatic_dof = qd_start[model.joint_label.index("/Articulation/prismatic_joint")]
+
+        for name, value, expected in (
+            ("revolute dof_ref", dof_ref[revolute_dof], np.deg2rad(30.0)),
+            ("revolute dof_springref", springref[revolute_dof], np.deg2rad(45.0)),
+            ("prismatic dof_ref", dof_ref[prismatic_dof], 0.5),
+            ("prismatic dof_springref", springref[prismatic_dof], 0.25),
+        ):
+            with self.subTest(name):
+                self.assertAlmostEqual(value, expected, places=5)
 
     @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
     def test_material_parsing(self):
@@ -8717,7 +8888,15 @@ def Xform "Articulation" (
                 UsdPhysics.CollisionAPI.Apply(collider.GetPrim())
 
         builder = newton.ModelBuilder()
-        result = builder.add_usd(stage)
+        with warnings.catch_warnings(record=True) as caught:
+            # This fixture deliberately covers negative scale. Record only its
+            # expected diagnostic while preserving the ambient warning policy.
+            warnings.filterwarnings("always", message=_MIRRORED_BODY_WARNING, category=UserWarning)
+            result = builder.add_usd(stage)
+
+        self.assertEqual(len(caught), 1)
+        self.assertEqual(caught[0].category, UserWarning)
+        self.assertRegex(str(caught[0].message), _MIRRORED_BODY_WARNING)
 
         for case_name, _scale, _angle, _com, include_partial in cases:
             for mass_name, _author_all_mass_properties in mass_cases if include_partial else mass_cases[:1]:
@@ -10375,7 +10554,15 @@ def Xform "Articulation" (
         self.assertEqual(builder.joint_type.count(newton.JointType.FREE), 2)
         self.assertEqual(builder.joint_dof_count, 12)
         self.assertEqual(builder.joint_coord_count, 14)
-        model = builder.finalize()
+        with warnings.catch_warnings(record=True) as caught:
+            # The body-to-world row intentionally omits solref to exercise the
+            # registered default. Keep all unrelated warnings under the ambient policy.
+            warnings.filterwarnings("always", message=_PARTIAL_EQ_SOLREF_WARNING, category=UserWarning)
+            model = builder.finalize()
+
+        self.assertEqual(len(caught), 1)
+        self.assertEqual(caught[0].category, UserWarning)
+        self.assertRegex(str(caught[0].message), _PARTIAL_EQ_SOLREF_WARNING)
 
         self.assertNotIn("/World/EqualityConnect", result["path_joint_map"])
         self.assertNotIn("/World/EqualityConnectBodyToWorld", result["path_joint_map"])
@@ -10405,6 +10592,7 @@ def Xform "Articulation" (
             atol=1e-6,
         )
         np.testing.assert_allclose(model.mujoco.eq_solref.numpy()[site_eq], np.array([0.04, 0.7], dtype=np.float32))
+        np.testing.assert_allclose(model.mujoco.eq_solref.numpy()[world_eq], np.array([0.02, 1.0], dtype=np.float32))
         np.testing.assert_allclose(
             model.mujoco.eq_solimp.numpy()[site_eq],
             np.array([0.9, 0.95, 0.001, 0.5, 2.0], dtype=np.float32),
