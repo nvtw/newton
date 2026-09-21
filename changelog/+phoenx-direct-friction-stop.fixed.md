@@ -1,0 +1,1 @@
+Prevent PhoenX maximal-direct joint friction from reversing low-inertia joints through rest and injecting kinetic energy. Project the Tourbillon clock bearings after every grouped contact sweep to suppress gear jitter while retaining parallel contact solving.

@@ -1211,6 +1211,27 @@ def _build_direct_equality_rhs_kernel(
         wp.atomic_max(solve_active, wp.int32(0), wp.int32(1))
 
 
+@wp.func
+def _direct_joint_inverse_effective_mass(
+    bodies: BodyContainer,
+    body: wp.int32,
+    joint_type: wp.int32,
+    joint_point: wp.vec3,
+    axis: wp.vec3,
+) -> wp.float32:
+    if body <= wp.int32(0) or bodies.inverse_mass[body] <= wp.float32(0.0):
+        return wp.float32(0.0)
+    inverse_mass = bodies.inverse_mass[body]
+    if joint_type == JointType.PRISMATIC:
+        return inverse_mass
+    inverse_inertia = mat33_from_sym6(bodies.inverse_inertia_world[body])
+    inertia = wp.inverse(inverse_inertia)
+    lever = joint_point - bodies.position[body]
+    axis_inertia = wp.dot(axis, inertia * axis)
+    axis_inertia += wp.dot(wp.cross(lever, axis), wp.cross(lever, axis)) / inverse_mass
+    return wp.float32(1.0) / wp.max(axis_inertia, wp.float32(1.0e-10))
+
+
 @wp.kernel(enable_backward=False)
 def _apply_direct_joint_friction_kernel(
     friction_joints: wp.array[wp.int32],
@@ -1269,6 +1290,31 @@ def _apply_direct_joint_friction_kernel(
         relative_velocity += wp.dot(wrench0, _body_com_twist(bodies, parent))
     if child > wp.int32(0):
         relative_velocity += wp.dot(wrench1, _body_com_twist(bodies, child))
+    # Bound Coulomb friction by the impulse that reaches rest. The permitted
+    # joint coordinate sees inertia about the hinge, including COM offset; using
+    # unconstrained COM mobility here would under-damp offset bodies.
+    inverse_effective_mass = wp.float32(0.0)
+    response0 = wp.spatial_vector()
+    response1 = wp.spatial_vector()
+    if parent > wp.int32(0):
+        response0 = _direct_wrench_response(
+            wrench0,
+            bodies.inverse_mass[parent],
+            mat33_from_sym6(bodies.inverse_inertia_world[parent]),
+        )
+    if child > wp.int32(0):
+        response1 = _direct_wrench_response(
+            wrench1,
+            bodies.inverse_mass[child],
+            mat33_from_sym6(bodies.inverse_inertia_world[child]),
+        )
+    inverse_effective_mass += _direct_joint_inverse_effective_mass(
+        bodies, parent, joint_type[joint], wp.transform_get_translation(x_wpj), axis
+    )
+    inverse_effective_mass += _direct_joint_inverse_effective_mass(
+        bodies, child, joint_type[joint], wp.transform_get_translation(x_wcj), axis
+    )
+
     friction = joint_friction[dof]
     effort = -friction * wp.clamp(
         relative_velocity / PHOENX_FRICTION_SLIP_VELOCITY,
@@ -1276,23 +1322,16 @@ def _apply_direct_joint_friction_kernel(
         wp.float32(1.0),
     )
     impulse = dt * effort
+    if inverse_effective_mass > wp.float32(1.0e-10):
+        stop_impulse = wp.abs(relative_velocity) / inverse_effective_mass
+        impulse = wp.clamp(impulse, -stop_impulse, stop_impulse)
     friction_impulse[row] = impulse * wrench1
     if parent > wp.int32(0):
-        response0 = _direct_wrench_response(
-            impulse * wrench0,
-            bodies.inverse_mass[parent],
-            mat33_from_sym6(bodies.inverse_inertia_world[parent]),
-        )
-        wp.atomic_add(bodies.velocity, parent, wp.spatial_top(response0))
-        wp.atomic_add(bodies.angular_velocity, parent, wp.spatial_bottom(response0))
+        wp.atomic_add(bodies.velocity, parent, impulse * wp.spatial_top(response0))
+        wp.atomic_add(bodies.angular_velocity, parent, impulse * wp.spatial_bottom(response0))
     if child > wp.int32(0):
-        response1 = _direct_wrench_response(
-            impulse * wrench1,
-            bodies.inverse_mass[child],
-            mat33_from_sym6(bodies.inverse_inertia_world[child]),
-        )
-        wp.atomic_add(bodies.velocity, child, wp.spatial_top(response1))
-        wp.atomic_add(bodies.angular_velocity, child, wp.spatial_bottom(response1))
+        wp.atomic_add(bodies.velocity, child, impulse * wp.spatial_top(response1))
+        wp.atomic_add(bodies.angular_velocity, child, impulse * wp.spatial_bottom(response1))
 
 
 @wp.kernel(enable_backward=False)

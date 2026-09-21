@@ -156,6 +156,9 @@ def build_scene(*, sdf_resolution=0, motor_off=False, bearing_friction=BEARING_F
 class Example:
     """Drive the clock train and nested tourbillon through authored gear contacts."""
 
+    # Project the direct joint system after every contact sweep. This retains
+    # parallel grouped contacts while preventing gear impulses from accumulating
+    # bearing error between projections.
     color_group_size = 2
     overlap_simulation_render = True
 
@@ -346,10 +349,10 @@ class Example:
         parser.add_argument(
             "--direct-joint-projection-passes",
             type=int,
-            default=2,
+            default=4,
             help="Exact D6 projections distributed across each contact solve.",
         )
-        parser.add_argument("--substeps", type=int, default=8, help="Physics substeps per 120 Hz contact refresh.")
+        parser.add_argument("--substeps", type=int, default=4, help="Physics substeps per 120 Hz contact refresh.")
         parser.add_argument(
             "--sdf-resolution",
             type=int,
