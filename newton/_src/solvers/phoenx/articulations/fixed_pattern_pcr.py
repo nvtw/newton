@@ -148,6 +148,56 @@ def _reduce_rhs_kernel(
         wp.tile_store(dn, v)
 
 
+# Iterative refinement needs the cancellation accuracy of an FP64 residual,
+# while native FP64 products dominate this small kernel on GPUs with limited FP64 throughput.
+# Keep the rounded sum in ``hi`` and accumulate both its rounding error and
+# the FMA-recovered product error in ``lo``. Explicit CUDA rounding prevents
+# compiler contraction from erasing either error term.
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+    return __fadd_rn(value, -__fmul_rn(left, right));
+#else
+    return value - left * right;
+#endif
+""")
+def _compensated_product_hi(value: wp.float32, left: wp.float32, right: wp.float32) -> wp.float32: ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+    float product = __fmul_rn(left, right);
+    float term = -product;
+    float recovered = __fsub_rn(updated, value);
+    float sum_error = __fadd_rn(
+        __fsub_rn(value, __fsub_rn(updated, recovered)),
+        __fsub_rn(term, recovered));
+    float product_error = __fmaf_rn(left, right, -product);
+    return __fsub_rn(__fadd_rn(error, sum_error), product_error);
+#else
+    float product = left * right;
+    float term = -product;
+    float recovered = updated - value;
+    float sum_error = (value - (updated - recovered)) + (term - recovered);
+    float product_error = fma(left, right, -product);
+    return (error + sum_error) - product_error;
+#endif
+""")
+def _compensated_product_lo(
+    value: wp.float32,
+    error: wp.float32,
+    left: wp.float32,
+    right: wp.float32,
+    updated: wp.float32,
+) -> wp.float32: ...
+
+
+@wp.func
+def _subtract_compensated_product(value: wp.vec2f, left: wp.float32, right: wp.float32) -> wp.vec2f:
+    updated = _compensated_product_hi(value[0], left, right)
+    error = _compensated_product_lo(value[0], value[1], left, right, updated)
+    return wp.vec2f(updated, error)
+
+
 @wp.func
 def _row_residual(
     index: wp.int32,
@@ -158,22 +208,26 @@ def _row_residual(
     upper: wp.array[wp.float32],
     source: wp.array[wp.float32],
     x: wp.array[wp.float32],
-) -> wp.float64:
+) -> wp.float32:
     block = index // wp.int32(BS)
     row = index % wp.int32(BS)
     begin = segment_begin[block]
     end = segment_end[block]
-    value = wp.float64(source[index])
+    value = wp.vec2f(source[index], wp.float32(0.0))
     base = block * wp.int32(E) + row * wp.int32(BS)
     for column in range(BS):
-        value -= wp.float64(blocks[base + column]) * wp.float64(x[block * wp.int32(BS) + column])
+        value = _subtract_compensated_product(value, blocks[base + column], x[block * wp.int32(BS) + column])
     if block > begin:
         for column in range(BS):
-            value -= wp.float64(lower[base + column]) * wp.float64(x[(block - wp.int32(1)) * wp.int32(BS) + column])
+            value = _subtract_compensated_product(
+                value, lower[base + column], x[(block - wp.int32(1)) * wp.int32(BS) + column]
+            )
     if block + wp.int32(1) < end:
         for column in range(BS):
-            value -= wp.float64(upper[base + column]) * wp.float64(x[(block + wp.int32(1)) * wp.int32(BS) + column])
-    return value
+            value = _subtract_compensated_product(
+                value, upper[base + column], x[(block + wp.int32(1)) * wp.int32(BS) + column]
+            )
+    return value[0] + value[1]
 
 
 @wp.kernel(enable_backward=False)
