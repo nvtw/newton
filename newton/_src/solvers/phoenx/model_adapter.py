@@ -53,18 +53,6 @@ def _quat_rotate_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     return np.asarray([vx, vy, vz], dtype=np.float32)
 
 
-def _cross3_np(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Return the cross product of two host-side 3-vectors."""
-    return np.asarray(
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ],
-        dtype=np.float32,
-    )
-
-
 def _norm3_np(v: np.ndarray) -> float:
     """Return the Euclidean norm of a host-side 3-vector."""
     return math.sqrt(float(v[0]) ** 2 + float(v[1]) ** 2 + float(v[2]) ** 2)

@@ -43,7 +43,7 @@ from newton._src.solvers.phoenx.benchmarks.experimental.bench_rigid_rows3_sideca
     _make_projection_op,
     _max_err,
 )
-from newton._src.solvers.phoenx.constraints.constraint_block import (
+from newton._src.solvers.phoenx.experimental.block3 import (
     RigidFrameRows3,
     RigidFrameRows3State,
     block_solve_rigid_frame_rows3,

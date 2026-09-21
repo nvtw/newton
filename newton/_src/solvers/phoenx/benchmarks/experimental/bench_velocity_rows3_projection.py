@@ -20,8 +20,8 @@ import time
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.constraint_block import (
-    BLOCK_LAMBDA_INF,
+from newton._src.solvers.phoenx.constraints.constraint_block import BLOCK_LAMBDA_INF
+from newton._src.solvers.phoenx.experimental.block3 import (
     VELOCITY_ROWS3_PROJECT_BOUNDS,
     VELOCITY_ROWS3_PROJECT_CONTACT_CONE,
     VelocityRows3Op,
