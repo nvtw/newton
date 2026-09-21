@@ -134,6 +134,8 @@ def build_scene(*, sdf_resolution=0, motor_off=False):
 class Example:
     """Drive seven digit segments through spring-loaded followers and rotating cams."""
 
+    color_group_size = 2
+
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.sim_time = 0.0
@@ -171,7 +173,7 @@ class Example:
             parallel_contact_prepare=self.model.device.is_cuda,
             contact_chunk_size=args.contact_chunk_size,
             mass_splitting=True,
-            mass_splitting_color_group_size=3,
+            mass_splitting_color_group_size=self.color_group_size,
             mass_splitting_batch_size=2,
             max_colored_partitions=8,
         )

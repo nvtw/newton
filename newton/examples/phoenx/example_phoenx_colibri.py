@@ -176,6 +176,8 @@ def _contact_separation(
 class Example(ColibriChecks):
     """Simulate the source assembly using ordinary rigid joint/contact blocks."""
 
+    color_group_size = 2
+
     def __init__(self, viewer, args):
         if args.num_worlds < 1:
             raise ValueError("Number of worlds must be positive")
@@ -241,7 +243,7 @@ class Example(ColibriChecks):
             parallel_contact_prepare=True,
             contact_chunk_size=0,
             mass_splitting=True,
-            mass_splitting_color_group_size=3,
+            mass_splitting_color_group_size=self.color_group_size,
             mass_splitting_batch_size=2,
             max_colored_partitions=8,
             substeps=args.substeps,
