@@ -4,11 +4,13 @@ import os
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
-import json
 import argparse
+import json
 from pathlib import Path
+
 import numpy as np
-from scipy.optimize import minimize, least_squares
+from scipy.optimize import least_squares, minimize
+
 from local_studies.colibri.coulomb_semismooth import natural_map_evaluator
 
 parser = argparse.ArgumentParser()

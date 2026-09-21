@@ -13,7 +13,11 @@ output = Path(sys.argv[sys.argv.index("--output") + 1])
 removed = [j[-1] for j in original_joints if j[0] == "FrameGround" and j[1] == "Frame"]
 assert len(removed) == 1
 source.JOINTS = [(*j[:-1], {}) if j[0] == "FrameGround" and j[1] == "Frame" else j for j in original_joints]
-metadata = {"removed_drive": removed[0], "scope": "Diagnostic removal of spring and damping drive only; not a proposed scene fix"}
+metadata = {
+    "removed_drive": removed[0],
+    "scope": "Diagnostic removal of spring and damping drive only; not a proposed scene fix",
+}
+
 
 def checked_build(*args, **kwargs):
     assert kwargs["body_count"] == 2
@@ -24,6 +28,7 @@ def checked_build(*args, **kwargs):
     metadata["target_kd"] = list(builder.joint_target_kd)
     print("UNACTUATED_CONTROL", json.dumps(metadata), flush=True)
     return builder
+
 
 source.build_scene = checked_build
 try:

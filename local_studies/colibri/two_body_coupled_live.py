@@ -8,16 +8,18 @@ import argparse
 import json
 import time
 from pathlib import Path
+
 import numpy as np
 import warp as wp
+
 import newton
-from newton.examples.kamino.example_kamino_colibri import build_scene
-from newton.examples.phoenx.example_phoenx_colibri import CONTACT_OFFSETS
+from local_studies.colibri.coulomb_semismooth import natural_map_evaluator
 from local_studies.colibri.coupled_support_online import assemble_snapshot, solve_online
 from local_studies.colibri.single_block_support_reference import coupled_response
-from newton._src.solvers.phoenx.tests.test_color_group_conservation import _physical_totals
-from local_studies.colibri.coulomb_semismooth import natural_map_evaluator
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import SingleWorldMassSplittingDispatcher
+from newton._src.solvers.phoenx.tests.test_color_group_conservation import _physical_totals
+from newton.examples.kamino.example_kamino_colibri import build_scene
+from newton.examples.phoenx.example_phoenx_colibri import CONTACT_OFFSETS
 
 
 def snapshot(w):
@@ -163,8 +165,7 @@ def main():
         wp.capture_launch(capture.graph)
     wp.synchronize()
     ref = np.load(args.reference)
-    reference_state = {key: ref[key+"_history"][329] if key+"_history" in ref else ref[key]
-                       for key in ("q","qd")}
+    reference_state = {key: ref[key + "_history"][329] if key + "_history" in ref else ref[key] for key in ("q", "qd")}
     gate = {
         key: actual.tobytes() == reference_state[key].tobytes()
         for key, actual in (("q", state.body_q.numpy()), ("qd", state.body_qd.numpy()))
@@ -187,22 +188,26 @@ def main():
         outer_start = time.perf_counter()
         if args.contact_solver == "condensed32":
             from local_studies.colibri.two_body_condensed_gpu import solve as solve_condensed
-            lam,iterated_velocity,iterated_joint,response=solve_condensed(a,32)
-            G,vbar,Y=response["response"],response["baseline"],response["joint_solved"]
+
+            lam, iterated_velocity, iterated_joint, response = solve_condensed(a, 32)
+            G, vbar, Y = response["response"], response["baseline"], response["joint_solved"]
         else:
-            G,vbar,Y=gpu_response(a)
+            G, vbar, Y = gpu_response(a)
         A = a["C"] @ G
         rhs = a["rhs"] + a["C"] @ (vbar - a["vbar"])
         if args.contact_solver == "condensed32":
-            error=0.
+            error = 0.0
             if len(lam):
-                evaluate,*_=natural_map_evaluator(A,rhs,a["gamma"],a["mu"])
-                error=float(np.max(np.abs(evaluate(lam)[0])))
-            np.testing.assert_allclose(iterated_velocity,vbar+G@lam,atol=1e-10,rtol=0)
-            np.testing.assert_allclose(iterated_joint,Y[:,0]-Y[:,1:]@lam,atol=1e-10,rtol=0)
-            result=dict(accepted=error<1e-8,final_physical_error=error,
-                        stages=response.get("stages",[dict(contact_sweeps=32,evaluations=0)]),
-                        scope="Bounded condensed solve; exact work and fallback stages recorded")
+                evaluate, *_ = natural_map_evaluator(A, rhs, a["gamma"], a["mu"])
+                error = float(np.max(np.abs(evaluate(lam)[0])))
+            np.testing.assert_allclose(iterated_velocity, vbar + G @ lam, atol=1e-10, rtol=0)
+            np.testing.assert_allclose(iterated_joint, Y[:, 0] - Y[:, 1:] @ lam, atol=1e-10, rtol=0)
+            result = dict(
+                accepted=error < 1e-8,
+                final_physical_error=error,
+                stages=response.get("stages", [dict(contact_sweeps=32, evaluations=0)]),
+                scope="Bounded condensed solve; exact work and fallback stages recorded",
+            )
         else:
             lam, result = solve_online(A, rhs, a["gamma"], a["mu"], a["old"], physical_jacobian=a["C"])
         outer_seconds = time.perf_counter() - outer_start
@@ -249,41 +254,57 @@ def main():
         world.bodies.angular_velocity.assign(omega)
         world._contact_container.impulses.assign(impulses)
         from newton._src.solvers.phoenx.constraints import contact_projection
+
         if hasattr(contact_projection, "contact_project_friction_metric_with_break"):
             from local_studies.colibri.coupled_friction_history import final_break_flags
-            contact_data=d["lambdas"].copy()
-            contact_data[12,a["points"]]=final_break_flags(a,lam,velocity)
+
+            contact_data = d["lambdas"].copy()
+            contact_data[12, a["points"]] = final_break_flags(a, lam, velocity)
             world._contact_container.lambdas.assign(contact_data)
         world.constraints.bilateral.accumulated.assign(accumulated)
         world._mass_splitting_broadcast()
-        actual_velocity = np.concatenate([
-            np.r_[world.bodies.velocity.numpy()[b], world.bodies.angular_velocity.numpy()[b]]
-            for b in a["bodies"]
-        ]).astype(float)
+        actual_velocity = np.concatenate(
+            [np.r_[world.bodies.velocity.numpy()[b], world.bodies.angular_velocity.numpy()[b]] for b in a["bodies"]]
+        ).astype(float)
         actual_lam = world._contact_container.impulses.numpy()[:, a["points"]].T.astype(float).ravel()
-        actual_joint = np.concatenate([
-            world.constraints.bilateral.accumulated.numpy()[d["joint_row_indices"][j, :d["joint_row_count"][j]]]
-            for j in a["joints"]
-        ]).astype(float)
-        actual_delta = a["C"].T @ (actual_lam-a["old"]) + a["B"].T @ (actual_joint-a["old_joint"])
+        actual_joint = np.concatenate(
+            [
+                world.constraints.bilateral.accumulated.numpy()[d["joint_row_indices"][j, : d["joint_row_count"][j]]]
+                for j in a["joints"]
+            ]
+        ).astype(float)
+        actual_delta = a["C"].T @ (actual_lam - a["old"]) + a["B"].T @ (actual_joint - a["old_joint"])
         physical_after, energy_after = _physical_totals(world)
         ground_actual = sum(
-            (g.T @ (actual_lam-a["old"]).reshape(-1,3)[i] for i,g in enumerate(a["ground_wrenches"])),
+            (g.T @ (actual_lam - a["old"]).reshape(-1, 3)[i] for i, g in enumerate(a["ground_wrenches"])),
             np.zeros(6),
         )
-        reaction_actual = np.r_[ground_actual[:3],ground_actual[3:]+np.cross(d["position"][0],ground_actual[:3])]
-        actual_momentum = physical_after-physical_before+reaction_actual
-        actual_work = actual_delta @ ((actual_velocity+a["velocity"])*.5)
-        actual_work_error = abs(energy_after-energy_before-actual_work)
-        response_rounding = actual_velocity-a["velocity"]-a["W"]@actual_delta
-        actual_joint_error = np.max(np.abs(a["B"]@actual_velocity+a["diagonal"]*actual_joint-a["targets"]))
-        actual_kkt = 0.
+        reaction_actual = np.r_[ground_actual[:3], ground_actual[3:] + np.cross(d["position"][0], ground_actual[:3])]
+        actual_momentum = physical_after - physical_before + reaction_actual
+        actual_work = actual_delta @ ((actual_velocity + a["velocity"]) * 0.5)
+        actual_work_error = abs(energy_after - energy_before - actual_work)
+        response_rounding = actual_velocity - a["velocity"] - a["W"] @ actual_delta
+        actual_joint_error = np.max(np.abs(a["B"] @ actual_velocity + a["diagonal"] * actual_joint - a["targets"]))
+        actual_kkt = 0.0
         if len(actual_lam):
-            eval_actual,*_ = natural_map_evaluator(A,rhs+a["C"]@(actual_velocity-vbar-G@actual_lam),a["gamma"],a["mu"])
+            eval_actual, *_ = natural_map_evaluator(
+                A, rhs + a["C"] @ (actual_velocity - vbar - G @ actual_lam), a["gamma"], a["mu"]
+            )
             actual_kkt = float(np.max(np.abs(eval_actual(actual_lam)[0])))
-        if np.max(np.abs(actual_momentum)) >= 1e-8 or actual_work_error >= 1e-10 or actual_kkt >= 1e-6 or actual_joint_error >= 1e-6:
-            np.savez(Path(args.output).with_suffix(".storage_rejected.npz"),**a,
-                     solution=lam,actual_velocity=actual_velocity,actual_lam=actual_lam,actual_joint=actual_joint)
+        if (
+            np.max(np.abs(actual_momentum)) >= 1e-8
+            or actual_work_error >= 1e-10
+            or actual_kkt >= 1e-6
+            or actual_joint_error >= 1e-6
+        ):
+            np.savez(
+                Path(args.output).with_suffix(".storage_rejected.npz"),
+                **a,
+                solution=lam,
+                actual_velocity=actual_velocity,
+                actual_lam=actual_lam,
+                actual_joint=actual_joint,
+            )
             raise AssertionError("FP32 physical storage gate failed")
         records.append(
             dict(
@@ -295,8 +316,8 @@ def main():
                 storage_response_error=float(np.max(np.abs(response_rounding))),
                 outer_seconds=outer_seconds,
                 solver_stages=result["stages"],
-                outer_evaluations=sum(stage.get("evaluations",0) for stage in result["stages"]),
-                normal_seed_iterations=sum(stage.get("normal_iterations",0) for stage in result["stages"]),
+                outer_evaluations=sum(stage.get("evaluations", 0) for stage in result["stages"]),
+                normal_seed_iterations=sum(stage.get("normal_iterations", 0) for stage in result["stages"]),
                 points=len(a["points"]),
                 residual=result["final_physical_error"],
                 joint_error=float(np.max(np.abs(equation))),
@@ -320,13 +341,15 @@ def main():
             correct("relax")
 
     original_integrate = world._integrate_positions
+
     def integrate():
-        before,energy_before = _physical_totals(world)
+        before, energy_before = _physical_totals(world)
         original_integrate()
-        after,energy_after = _physical_totals(world)
-        error = float(np.max(np.abs(after-before)))
-        integration_records.append(dict(momentum_error=error,torque_free_energy_change=energy_after-energy_before))
+        after, energy_after = _physical_totals(world)
+        error = float(np.max(np.abs(after - before)))
+        integration_records.append(dict(momentum_error=error, torque_free_energy_change=energy_after - energy_before))
         assert error < 1e-8, "Native position integration momentum changed beyond FP32 allowance"
+
     world._integrate_positions = integrate
 
     SingleWorldMassSplittingDispatcher.solve = solve
@@ -363,7 +386,11 @@ def main():
             failed_q=state.body_q.numpy(),
             failed_qd=state.body_qd.numpy(),
         )
-        print("COUPLED_FINAL", json.dumps({k: v for k, v in report.items() if k not in ("phases","integration")}), flush=True)
+        print(
+            "COUPLED_FINAL",
+            json.dumps({k: v for k, v in report.items() if k not in ("phases", "integration")}),
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

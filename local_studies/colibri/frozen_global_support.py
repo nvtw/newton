@@ -40,8 +40,10 @@ def main():
     exact = []
     soft = []
     compliance = []
+
     def R(x):
         return sp.Rational(float(x))
+
     for j in range(int(a["num_joints"][0])):
         st = int(d["joint_structural_index"][j])
         rows = d["joint_row_indices"][j, : int(d["joint_row_count"][j])]

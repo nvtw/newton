@@ -196,9 +196,7 @@ def main():
                     "expected_plane_load_N": 401 * GRAVITY,
                 }
                 frame_records.append(row)
-                Path(output_prefix + "live_frames.json").write_text(
-                    json.dumps(frame_records, indent=2)
-                )
+                Path(output_prefix + "live_frames.json").write_text(json.dumps(frame_records, indent=2))
                 print("Completed frame", index, row, flush=True)
     snapshot("live_final")
     print("Completed", args.frames, "frames of collective relaxation; biased integration unchanged")

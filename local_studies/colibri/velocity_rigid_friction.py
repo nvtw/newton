@@ -1,7 +1,10 @@
 """Diagnostic legacy friction adapter; leaves shared solver files untouched."""
+
 import warp as wp
+
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_coupled_velocity_update_no_soft_pd
+
 
 @wp.func
 def velocity_friction_update(
@@ -31,8 +34,36 @@ def velocity_friction_update(
     mobility_nt2: wp.float32,
     mobility_t1t2: wp.float32,
 ) -> wp.vec3f:
-    return contact_project_coupled_velocity_update_no_soft_pd(cc, k, normal, tangent1, tangent2, jv_n, jv_t1, jv_t2, eff_n, eff_t1, eff_t2, bias_n, wp.float32(0.0), wp.float32(0.0), mu_s, mu_k, mass_coeff_n, impulse_coeff_n, sor_boost, pd_eff_soft_n, pd_gamma_n, pd_bias_n, mobility_nt1, mobility_nt2, mobility_t1t2)
+    return contact_project_coupled_velocity_update_no_soft_pd(
+        cc,
+        k,
+        normal,
+        tangent1,
+        tangent2,
+        jv_n,
+        jv_t1,
+        jv_t2,
+        eff_n,
+        eff_t1,
+        eff_t2,
+        bias_n,
+        wp.float32(0.0),
+        wp.float32(0.0),
+        mu_s,
+        mu_k,
+        mass_coeff_n,
+        impulse_coeff_n,
+        sor_boost,
+        pd_eff_soft_n,
+        pd_gamma_n,
+        pd_bias_n,
+        mobility_nt1,
+        mobility_nt2,
+        mobility_t1t2,
+    )
+
 
 def install():
     from newton._src.solvers.phoenx.constraints import constraint_contact_cloth as c
+
     c.contact_project_coupled_velocity_update_no_soft_pd = velocity_friction_update

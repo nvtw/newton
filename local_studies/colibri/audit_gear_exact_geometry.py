@@ -18,6 +18,7 @@ def inverse_point(q, point):
 def distance(mesh, point):
     """Return nearest-triangle distance, solid-angle winding, and normal."""
     import trimesh
+
     triangles = mesh.triangles
     closest = trimesh.triangles.closest_point(triangles, np.broadcast_to(point, (len(triangles), 3)))
     distances = np.linalg.norm(closest - point, axis=1)

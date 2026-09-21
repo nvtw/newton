@@ -103,8 +103,9 @@ def check_storage():
 
 def install():
     """Preallocate save buffers and wrap only biased maximal contact solves."""
-    import newton._src.solvers.phoenx.articulations.maximal_contact_gs as owned
     import newton._src.solvers.phoenx.solver_phoenx as solver_module
+
+    import newton._src.solvers.phoenx.articulations.maximal_contact_gs as owned
     from local_studies.colibri.check_owned_friction_binding import check
 
     gate = check(owned)

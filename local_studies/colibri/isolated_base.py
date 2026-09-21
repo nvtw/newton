@@ -6,6 +6,7 @@ from newton.examples.kamino import example_kamino_colibri as source
 
 original = source.build_scene
 
+
 def build_scene(*args, **kwargs):
     assert kwargs["body_count"] == 1
     assert not kwargs["fix_base"]
@@ -18,6 +19,7 @@ def build_scene(*args, **kwargs):
             removed += 1
     print("ISOLATED_BASE_DISABLED_FLOWER_SHAPES", removed, flush=True)
     return builder
+
 
 source.build_scene = build_scene
 try:

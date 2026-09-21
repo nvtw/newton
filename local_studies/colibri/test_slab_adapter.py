@@ -20,15 +20,19 @@ def suite(width):
 
     namespace["install_fused"] = install_fused
     source = inspect.getsource(fixtures.TestMassSplitBilateral)
-    source = source.replace(
-        "self.assertGreaterEqual(int(counts[ids[0] + 1]), 3)",
-        f"self.assertEqual(int(counts[ids[0] + 1]), {(3 + width - 1) // width})",
-    ).replace(
-        "self.assertEqual(int(counts[links[0] + 1]), 3)",
-        f"self.assertEqual(int(counts[links[0] + 1]), {(3 + width - 1) // width})",
-    ).replace(
-        "self.assertEqual(set(root_counts), {1, 2})",
-        "self.assertEqual(set(root_counts), " + ("{1, 2}" if width < 3 else "{1}") + ")",
+    source = (
+        source.replace(
+            "self.assertGreaterEqual(int(counts[ids[0] + 1]), 3)",
+            f"self.assertEqual(int(counts[ids[0] + 1]), {(3 + width - 1) // width})",
+        )
+        .replace(
+            "self.assertEqual(int(counts[links[0] + 1]), 3)",
+            f"self.assertEqual(int(counts[links[0] + 1]), {(3 + width - 1) // width})",
+        )
+        .replace(
+            "self.assertEqual(set(root_counts), {1, 2})",
+            "self.assertEqual(set(root_counts), " + ("{1, 2}" if width < 3 else "{1}") + ")",
+        )
     )
     exec(compile(source, __file__ + f".width{width}", "exec"), namespace)
     return unittest.defaultTestLoader.loadTestsFromTestCase(namespace["TestMassSplitBilateral"])

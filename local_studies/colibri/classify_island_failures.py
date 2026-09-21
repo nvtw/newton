@@ -13,10 +13,12 @@ def main():
         "rank_abort": lambda a: any("rejected_response_null" in h for h in a["history"]),
         "line_search_abort": lambda a: any(h.get("accepted") is False for h in a["history"]),
         "converged_wrong_face": lambda a: a["kind"] == "face" and a["history"][-1]["face_equation_residual"] < 1e-8,
-        "face_step_cap_with_descent": lambda a: a["kind"] == "face"
-        and len(a["history"]) == 8
-        and a["history"][-1].get("accepted") is True
-        and a["history"][-1]["face_equation_residual"] >= 1e-8,
+        "face_step_cap_with_descent": lambda a: (
+            a["kind"] == "face"
+            and len(a["history"]) == 8
+            and a["history"][-1].get("accepted") is True
+            and a["history"][-1]["face_equation_residual"] >= 1e-8
+        ),
         "cycle_skip": lambda a: a.get("skipped_revisits", 0) > 0,
     }
     report = {"total_failed": len(failed), "categories_overlap": True, "categories": {}}

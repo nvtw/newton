@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Capture exact 120 Hz generation poses and contacts around a late failure."""
 
-import json
 from pathlib import Path
 
 import numpy as np
 import warp as wp
 
-from local_studies.colibri import check_bilateral_pgs as runner
 from newton._src.solvers.phoenx.constraints.constraint_contact import ContactViews
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 
@@ -69,13 +67,15 @@ def _advance(counter: wp.array[wp.int32]):
     counter[0] += 1
 
 
-from newton._src.solvers.phoenx.solver import SolverPhoenX
-import newton.solvers
 import runpy
+
+from newton._src.solvers.phoenx.solver import SolverPhoenX
+
 trace = {}
 
 
 original_init = SolverPhoenX.__init__
+
 
 class TracedExample:
     def __init__(self, model, *args, **kwargs):
@@ -147,5 +147,16 @@ try:
 finally:
     print("TRACE SAVED", bool(trace), flush=True)
     if trace:
-        model=trace["model"]
-        np.savez_compressed(trace["output"], **{k:v.numpy() for k,v in trace["buffers"].items()}, body_labels=model.body_label,shape_labels=model.shape_label,shape_body=model.shape_body.numpy(),body_com=model.body_com.numpy(),shape_gap=model.shape_gap.numpy(),body_mass=model.body_mass.numpy(),body_inertia=model.body_inertia.numpy(),copy_counts=trace["example"].world._copy_state.count_per_node.numpy())
+        model = trace["model"]
+        np.savez_compressed(
+            trace["output"],
+            **{k: v.numpy() for k, v in trace["buffers"].items()},
+            body_labels=model.body_label,
+            shape_labels=model.shape_label,
+            shape_body=model.shape_body.numpy(),
+            body_com=model.body_com.numpy(),
+            shape_gap=model.shape_gap.numpy(),
+            body_mass=model.body_mass.numpy(),
+            body_inertia=model.body_inertia.numpy(),
+            copy_counts=trace["example"].world._copy_state.count_per_node.numpy(),
+        )

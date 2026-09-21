@@ -60,9 +60,7 @@ def main():
                 raise RuntimeError("Production source or assets changed during regression run")
             if not case["passed"] and not args.keep_going:
                 break
-        report["passed"] = len(report["cases"]) == len(args.modules) and all(
-            case["passed"] for case in report["cases"]
-        )
+        report["passed"] = len(report["cases"]) == len(args.modules) and all(case["passed"] for case in report["cases"])
     finally:
         report["source_assets_unchanged"] = fingerprints() == original
         args.output.write_text(json.dumps(report, indent=2))

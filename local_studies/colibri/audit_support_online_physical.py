@@ -1,8 +1,9 @@
 """Independent physical audit of the online all-point biased support solve."""
 
-import json
 import argparse
+import json
 from pathlib import Path
+
 import numpy as np
 
 parser = argparse.ArgumentParser()

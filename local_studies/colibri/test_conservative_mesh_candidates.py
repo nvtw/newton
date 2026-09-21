@@ -24,7 +24,9 @@ def box_separation(q):
         if length < 1e-8:
             continue
         unit_axis = axis / length
-        radius = sum(np.abs(rotation.T @ unit_axis) @ extent for rotation, extent in zip(rotations, extents, strict=True))
+        radius = sum(
+            np.abs(rotation.T @ unit_axis) @ extent for rotation, extent in zip(rotations, extents, strict=True)
+        )
         gaps.append(abs((q[1, :3] - q[0, :3]) @ unit_axis) - radius)
     return float(max(gaps))
 

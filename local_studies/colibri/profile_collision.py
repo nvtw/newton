@@ -20,9 +20,9 @@ def main():
     parser.add_argument("--frames", type=int, default=120)
     parser.add_argument("--output", type=Path, default=Path("/tmp/colibri_collision_profile.json"))
     args = parser.parse_args()
-    model = build_scene(
-        contact_gap=0.001, source_contact_offsets=True, mesh_cylinders=True
-    ).finalize(skip_validation_joints=True)
+    model = build_scene(contact_gap=0.001, source_contact_offsets=True, mesh_cylinders=True).finalize(
+        skip_validation_joints=True
+    )
     state = model.state()
     pipeline = newton.CollisionPipeline(model, rigid_contact_max=8192, contact_matching="sticky")
     contacts = pipeline.contacts()

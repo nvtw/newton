@@ -11,7 +11,13 @@ from scipy.spatial.transform import Rotation  # noqa: TID253
 
 def main():
     rng = np.random.default_rng(8125)
-    maxima = {"unit_linear": 0.0, "unit_angular": 0.0, "scatter_linear": 0.0, "scatter_angular": 0.0, "midpoint_jacobian": 0.0}
+    maxima = {
+        "unit_linear": 0.0,
+        "unit_angular": 0.0,
+        "scatter_linear": 0.0,
+        "scatter_angular": 0.0,
+        "midpoint_jacobian": 0.0,
+    }
     negative = []
     for _ in range(200):
         p = rng.uniform(-0.2, 0.2, (2, 3)).astype(np.float32)

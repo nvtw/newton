@@ -1,11 +1,14 @@
 """CPU attribution of the exact native metric helper during condensed PGS."""
-import hashlib
+
 import json
 from pathlib import Path
+
 import numpy as np
 import warp as wp
+
 from local_studies.colibri.check_d6_frozen_rows import contact_sweep
 from local_studies.colibri.coupled_support_online import assemble_snapshot
+
 
 def _make_counted_metric(scalar_type):
     relative_tolerance = 2.0e-7 if scalar_type == wp.float32 else 1.0e-7
@@ -116,7 +119,7 @@ def _make_counted_metric(scalar_type):
                         alpha = proposal
         if wp.static(scalar_type == wp.float64):
             kind += wp.int32(4)
-        return wp.vec4f(result[0],result[1],wp.float32(root_iterations),wp.float32(kind))
+        return wp.vec4f(result[0], result[1], wp.float32(root_iterations), wp.float32(kind))
 
     return impl
 
@@ -172,21 +175,20 @@ def counted_metric(
     )
 
 
-
 @wp.kernel(enable_backward=False)
 def counted_sweep(
-    c: wp.array2d(dtype=wp.float64),
-    wct: wp.array2d(dtype=wp.float64),
-    h: wp.array2d(dtype=wp.float64),
-    bias: wp.array(dtype=wp.float64),
-    gamma: wp.array(dtype=wp.float64),
-    mu: wp.array(dtype=wp.float64),
-    lam: wp.array(dtype=wp.float64),
-    velocity: wp.array(dtype=wp.float64),
+    c: wp.array2d[wp.float64],
+    wct: wp.array2d[wp.float64],
+    h: wp.array2d[wp.float64],
+    bias: wp.array[wp.float64],
+    gamma: wp.array[wp.float64],
+    mu: wp.array[wp.float64],
+    lam: wp.array[wp.float64],
+    velocity: wp.array[wp.float64],
     first: int,
     count: int,
     size: int,
-    stats: wp.array(dtype=wp.int32),
+    stats: wp.array[wp.int32],
 ):
     """Apply original-order normal and production metric tangent updates."""
     for p in range(first, count):
@@ -222,7 +224,7 @@ def counted_sweep(
         kind = wp.int32(tangent[3])
         stats[kind] += 1
         precision = kind // 4
-        stats[8 + precision*41 + wp.int32(tangent[2])] += 1
+        stats[8 + precision * 41 + wp.int32(tangent[2])] += 1
         lam[row + 1] = wp.float64(tangent[0])
         lam[row + 2] = wp.float64(tangent[1])
         for j in range(size):
@@ -232,42 +234,58 @@ def counted_sweep(
 def main():
     """Require byte-identical original/instrumented outputs at every sweep."""
     wp.init()
-    z=np.load("/tmp/colibri_base_frame_totalnormal_phases330.npz")
-    reports=[]
-    for phase in ("biased","relax"):
-        d={k.split(".",1)[1]:z[k] for k in z.files if k.startswith(phase+"_solved.")}
-        a=assemble_snapshot(d,phase,float(z["dt"][0]),int(z["num_joints"][0]))
-        c,g=a["C"],a["P"]@a["C"].T
-        h=c@g
-        start=a["vbar"]+g@a["old"]
-        arrays=[wp.array(x,dtype=wp.float64,device="cpu") for x in
-                (c,g,h,a["rhs"]-c@a["vbar"],a["gamma"],a["mu"])]
-        la=wp.array(a["old"],dtype=wp.float64,device="cpu")
-        va=wp.array(start,dtype=wp.float64,device="cpu")
-        lb=wp.array(a["old"],dtype=wp.float64,device="cpu")
-        vb=wp.array(start,dtype=wp.float64,device="cpu")
-        stats=wp.zeros(90,dtype=wp.int32,device="cpu")
+    z = np.load("/tmp/colibri_base_frame_totalnormal_phases330.npz")
+    reports = []
+    for phase in ("biased", "relax"):
+        d = {k.split(".", 1)[1]: z[k] for k in z.files if k.startswith(phase + "_solved.")}
+        a = assemble_snapshot(d, phase, float(z["dt"][0]), int(z["num_joints"][0]))
+        c, g = a["C"], a["P"] @ a["C"].T
+        h = c @ g
+        start = a["vbar"] + g @ a["old"]
+        arrays = [
+            wp.array(x, dtype=wp.float64, device="cpu")
+            for x in (c, g, h, a["rhs"] - c @ a["vbar"], a["gamma"], a["mu"])
+        ]
+        la = wp.array(a["old"], dtype=wp.float64, device="cpu")
+        va = wp.array(start, dtype=wp.float64, device="cpu")
+        lb = wp.array(a["old"], dtype=wp.float64, device="cpu")
+        vb = wp.array(start, dtype=wp.float64, device="cpu")
+        stats = wp.zeros(90, dtype=wp.int32, device="cpu")
         for iteration in range(32):
-            wp.launch(contact_sweep,dim=1,inputs=[*arrays,la,va,0,len(a["mu"]),12],device="cpu")
-            wp.launch(counted_sweep,dim=1,inputs=[*arrays,lb,vb,0,len(a["mu"]),12,stats],device="cpu")
-            assert la.numpy().tobytes()==lb.numpy().tobytes()
-            assert va.numpy().tobytes()==vb.numpy().tobytes()
-        count=stats.numpy()
-        precision=[]
+            wp.launch(contact_sweep, dim=1, inputs=[*arrays, la, va, 0, len(a["mu"]), 12], device="cpu")
+            wp.launch(counted_sweep, dim=1, inputs=[*arrays, lb, vb, 0, len(a["mu"]), 12, stats], device="cpu")
+            assert la.numpy().tobytes() == lb.numpy().tobytes()
+            assert va.numpy().tobytes() == vb.numpy().tobytes()
+        count = stats.numpy()
+        precision = []
         for fp in range(2):
-            hist=count[8+41*fp:8+41*(fp+1)]
-            precision.append(dict(bits=32+32*fp,calls=int(count[4*fp:4*fp+3].sum()),
-                inactive=int(count[4*fp]),sticking=int(count[4*fp+1]),sliding=int(count[4*fp+2]),
-                root_iterations_histogram={str(i):int(n) for i,n in enumerate(hist) if n},
-                root_iterations_total=int(np.arange(41)@hist),
-                maximum_iterations=int(np.flatnonzero(hist)[-1]) if hist.any() else 0))
-        assert sum(p["calls"] for p in precision)==32*len(a["mu"])
-        reports.append(dict(phase=phase,sweeps=32,points=len(a["mu"]),precision=precision,
-                            every_sweep_impulse_velocity_byte_equal=True))
-    path=Path("/tmp/colibri_condensed_metric_counts.json")
-    path.write_text(json.dumps(reports,indent=2))
-    print(json.dumps(reports,indent=2))
+            hist = count[8 + 41 * fp : 8 + 41 * (fp + 1)]
+            precision.append(
+                dict(
+                    bits=32 + 32 * fp,
+                    calls=int(count[4 * fp : 4 * fp + 3].sum()),
+                    inactive=int(count[4 * fp]),
+                    sticking=int(count[4 * fp + 1]),
+                    sliding=int(count[4 * fp + 2]),
+                    root_iterations_histogram={str(i): int(n) for i, n in enumerate(hist) if n},
+                    root_iterations_total=int(np.arange(41) @ hist),
+                    maximum_iterations=int(np.flatnonzero(hist)[-1]) if hist.any() else 0,
+                )
+            )
+        assert sum(p["calls"] for p in precision) == 32 * len(a["mu"])
+        reports.append(
+            dict(
+                phase=phase,
+                sweeps=32,
+                points=len(a["mu"]),
+                precision=precision,
+                every_sweep_impulse_velocity_byte_equal=True,
+            )
+        )
+    path = Path("/tmp/colibri_condensed_metric_counts.json")
+    path.write_text(json.dumps(reports, indent=2))
+    print(json.dumps(reports, indent=2))
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()

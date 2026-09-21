@@ -12,14 +12,14 @@ from newton._src.solvers.phoenx.constraints.contact_projection import contact_pr
 
 @wp.kernel(enable_backward=False)
 def skipped_contact_sweep(
-    c: wp.array2d(dtype=wp.float64),
-    wct: wp.array2d(dtype=wp.float64),
-    h: wp.array2d(dtype=wp.float64),
-    bias: wp.array(dtype=wp.float64),
-    gamma: wp.array(dtype=wp.float64),
-    mu: wp.array(dtype=wp.float64),
-    lam: wp.array(dtype=wp.float64),
-    velocity: wp.array(dtype=wp.float64),
+    c: wp.array2d[wp.float64],
+    wct: wp.array2d[wp.float64],
+    h: wp.array2d[wp.float64],
+    bias: wp.array[wp.float64],
+    gamma: wp.array[wp.float64],
+    mu: wp.array[wp.float64],
+    lam: wp.array[wp.float64],
+    velocity: wp.array[wp.float64],
     first: int,
     count: int,
     size: int,

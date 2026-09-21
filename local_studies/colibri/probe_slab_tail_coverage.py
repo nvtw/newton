@@ -50,12 +50,25 @@ for name, reduction, cap in (
             pipeline.collide(state, contacts, dt=1 / 120)
             if name == "reduced_predictive" and step == 746 and repeat == 0:
                 reducer = pipeline.narrow_phase.global_contact_reducer
-                np.savez("/tmp/colibri_slab_tail_746_reducer.npz",
-                    keys=reducer.hashtable.keys.numpy(), values=reducer.ht_values.numpy(),
+                np.savez(
+                    "/tmp/colibri_slab_tail_746_reducer.npz",
+                    keys=reducer.hashtable.keys.numpy(),
+                    values=reducer.ht_values.numpy(),
                     active=reducer.hashtable.active_slots.numpy(),
-                    **{field: getattr(reducer, field).numpy() for field in ("position_depth", "normal", "shape_pairs", "contact_fingerprints", "exported_flags", "contact_count")},
+                    **{
+                        field: getattr(reducer, field).numpy()
+                        for field in (
+                            "position_depth",
+                            "normal",
+                            "shape_pairs",
+                            "contact_fingerprints",
+                            "exported_flags",
+                            "contact_count",
+                        )
+                    },
                     shape_linear_velocity=pipeline._shape_linear_velocity.numpy(),
-                    shape_angular_velocity=pipeline._shape_angular_velocity.numpy())
+                    shape_angular_velocity=pipeline._shape_angular_velocity.numpy(),
+                )
             n = int(contacts.rigid_contact_count.numpy()[0])
             assert n < 32768
             shapes = np.column_stack(

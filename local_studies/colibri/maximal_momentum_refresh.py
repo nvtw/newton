@@ -1,27 +1,31 @@
 """Maximal articulated internal contacts and motors conserve momentum."""
+
 import unittest
 from unittest.mock import patch
+
 import numpy as np
 import warp as wp
+
 import newton
 from newton._src.solvers.phoenx.tests.test_reduced_articulation import _total_momentum
 
+
 class TestMaximalContactConservation(unittest.TestCase):
     def test_tree_post_integration_contact_momentum(self):
-        self._check_self_contact_momentum(steps=1,radius=.2,at_rest=False)
+        self._check_self_contact_momentum(steps=1, radius=0.2, at_rest=False)
 
     def test_direct_post_integration_contact_momentum(self):
-        with patch("newton._src.solvers.phoenx.solver.find_full_coordinate_revolute_trees",return_value=[]):
-            self._check_self_contact_momentum(steps=1,radius=.2,at_rest=False)
+        with patch("newton._src.solvers.phoenx.solver.find_full_coordinate_revolute_trees", return_value=[]):
+            self._check_self_contact_momentum(steps=1, radius=0.2, at_rest=False)
 
     def test_tree_sustained_contact_motor_momentum(self):
-        distance=np.sqrt(.2**2+.15**2+2*.2*.15*np.cos(.3))
-        self._check_self_contact_momentum(steps=200,radius=float(.5*distance+5e-6),at_rest=True)
+        distance = np.sqrt(0.2**2 + 0.15**2 + 2 * 0.2 * 0.15 * np.cos(0.3))
+        self._check_self_contact_momentum(steps=200, radius=float(0.5 * distance + 5e-6), at_rest=True)
 
     def test_direct_sustained_contact_motor_momentum(self):
-        distance=np.sqrt(.2**2+.15**2+2*.2*.15*np.cos(.3))
-        with patch("newton._src.solvers.phoenx.solver.find_full_coordinate_revolute_trees",return_value=[]):
-            self._check_self_contact_momentum(steps=200,radius=float(.5*distance+5e-6),at_rest=True)
+        distance = np.sqrt(0.2**2 + 0.15**2 + 2 * 0.2 * 0.15 * np.cos(0.3))
+        with patch("newton._src.solvers.phoenx.solver.find_full_coordinate_revolute_trees", return_value=[]):
+            self._check_self_contact_momentum(steps=200, radius=float(0.5 * distance + 5e-6), at_rest=True)
 
     def _check_self_contact_momentum(self, *, steps, radius, at_rest):
         if not wp.is_cuda_available():
@@ -74,41 +78,54 @@ class TestMaximalContactConservation(unittest.TestCase):
         before = _total_momentum(model, state)
 
         import functools
+
         def report(label):
-            solver._export_body_state(state, .001)
-            print(label, _total_momentum(model,state)-before, flush=True)
-        def wrap(obj,name):
-            old=getattr(obj,name)
+            solver._export_body_state(state, 0.001)
+            print(label, _total_momentum(model, state) - before, flush=True)
+
+        def wrap(obj, name):
+            old = getattr(obj, name)
+
             @functools.wraps(old)
-            def f(*a,**kw):
-                report(name+" BEFORE "+str(kw))
-                result=old(*a,**kw)
-                report(name+" AFTER "+str(kw))
+            def f(*a, **kw):
+                report(name + " BEFORE " + str(kw))
+                result = old(*a, **kw)
+                report(name + " AFTER " + str(kw))
                 return result
-            setattr(obj,name,f)
-        world=solver.world
-        for name in ["_integrate_forces_and_gravity", "_integrate_positions", "_solve_direct_contacts", "_solve_maximal_articulated_contacts"]:
-            wrap(world,name)
-        wrap(world._direct_equality_system,"solve")
-        old_integrate=world._integrate_positions
+
+            setattr(obj, name, f)
+
+        world = solver.world
+        for name in [
+            "_integrate_forces_and_gravity",
+            "_integrate_positions",
+            "_solve_direct_contacts",
+            "_solve_maximal_articulated_contacts",
+        ]:
+            wrap(world, name)
+        wrap(world._direct_equality_system, "solve")
+        old_integrate = world._integrate_positions
+
         def integrate_refresh():
-            oldpos=world.bodies.position.numpy()
+            oldpos = world.bodies.position.numpy()
             old_integrate()
-            newpos=world.bodies.position.numpy()
-            cc=world._contact_container
-            a=cc.derived.numpy()
-            a[9:12,0] += oldpos[1]-newpos[1]
-            a[12:15,0] += oldpos[3]-newpos[3]
+            newpos = world.bodies.position.numpy()
+            cc = world._contact_container
+            a = cc.derived.numpy()
+            a[9:12, 0] += oldpos[1] - newpos[1]
+            a[12:15, 0] += oldpos[3] - newpos[3]
             cc.derived.assign(a)
-            direct=world._direct_equality_system
+            direct = world._direct_equality_system
             direct.begin_substep(wp.float32(1000))
             direct.prepare_and_factor(wp.float32(1000))
             world._maximal_tree_projector.factor_contact_response()
             world._maximal_contact_response.compute_mobility()
-        world._integrate_positions=integrate_refresh
-        pipeline.collide(state,contacts)
-        solver.step(state,state,control,contacts,.001)
+
+        world._integrate_positions = integrate_refresh
+        pipeline.collide(state, contacts)
+        solver.step(state, state, control, contacts, 0.001)
         report("FINAL")
+
 
 if __name__ == "__main__":
     TestMaximalContactConservation().test_tree_post_integration_contact_momentum()

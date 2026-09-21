@@ -1,6 +1,8 @@
 """Check the experimental temporal schedule against conservation fixtures."""
+
 import unittest
 from unittest.mock import patch
+
 import newton
 from local_studies.colibri.temporal_schedule import install_temporal_schedule
 from newton._src.solvers.phoenx.tests.test_maximal_contact_conservation import TestMaximalContactConservation

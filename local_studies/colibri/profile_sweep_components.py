@@ -46,7 +46,7 @@ def ablated(mode, phase, soft):
 def bilateral_prefix(stage, soft):
     """Keep an observable exact arithmetic prefix; never continue its output."""
     source = inspect.getsource(bilateral_joint.iterate_bilateral_joint_block.func)
-    source = source.replace("    use_bias: wp.bool,", "    use_bias: wp.bool,\n    sink: wp.array2d(dtype=wp.float64),")
+    source = source.replace("    use_bias: wp.bool,", "    use_bias: wp.bool,\n    sink: wp.array2d[wp.float64],")
     if stage == "rhs":
         source = source[: source.index("    lower = data.lower[cid]")]
         source += "    for i in range(count):\n        sink[cid, i] = rhs[i]\n"
@@ -62,7 +62,7 @@ def bilateral_prefix(stage, soft):
         def visit_FunctionDef(self, node):
             if node.name == "sweep":
                 node.args.args.append(
-                    ast.arg(arg="sink", annotation=ast.parse("wp.array2d(dtype=wp.float64)", mode="eval").body)
+                    ast.arg(arg="sink", annotation=ast.parse("wp.array2d[wp.float64]", mode="eval").body)
                 )
             return self.generic_visit(node)
 

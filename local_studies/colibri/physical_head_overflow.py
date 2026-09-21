@@ -8,17 +8,20 @@ import runpy
 from pathlib import Path
 
 import warp as wp
+from newton._src.solvers.phoenx.solver_phoenx_kernels import _make_singleworld_dispatch_func
 
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_contact import ContactColumnContainer, ContactViews
-from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer
+from newton._src.solvers.phoenx.constraints.constraint_container import (
+    ConstraintContainer,
+    constraint_get_body1,
+    constraint_get_body2,
+)
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
-from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.mass_splitting.access import get_state_index
-from newton._src.solvers.phoenx.constraints.constraint_container import constraint_get_body1, constraint_get_body2
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.mass_splitting.slot_cache import _cache_slots_for_partition
 from newton._src.solvers.phoenx.particle import ParticleContainer
-from newton._src.solvers.phoenx.solver_phoenx_kernels import _make_singleworld_dispatch_func
 
 _CONFIGURED = {}
 _INSTALLED = False
@@ -246,8 +249,9 @@ def _install_hooks():
     global _INSTALLED
     if _INSTALLED:
         return
-    from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem
     from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
+
+    from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem
 
     old_rebuild = PhoenXWorld._rebuild_mass_splitting_graph
     old_sweep = PhoenXWorld._singleworld_head_plus_tail_sweep

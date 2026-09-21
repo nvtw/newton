@@ -82,7 +82,7 @@ def main():
                     if law == "original" and phase == "biased" and bias[0] <= 0:
                         load = np.clip(load + 0.9417003989219666 * float(d["derived"][0, p]) * bias[0], 0, load)
                     radius = float(d["headers"][3, col]) * load
-                    if phase == "biased" and d["derived"][3, p] > .002 / float(x["dt"][0]):
+                    if phase == "biased" and d["derived"][3, p] > 0.002 / float(x["dt"][0]):
                         radius = 0.0
                     contacts.append(
                         {

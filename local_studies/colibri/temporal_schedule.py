@@ -1,6 +1,7 @@
 """Opt-in diagnostic: relax only after the final temporal substep."""
 
 from functools import wraps
+
 from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 
@@ -21,9 +22,7 @@ def install_temporal_schedule():
     @wraps(original_forces)
     def forces(world, *args, **kwargs):
         world.velocity_iterations = (
-            world._temporal_velocity_iterations
-            if world._current_substep_index == world.substeps - 1
-            else 0
+            world._temporal_velocity_iterations if world._current_substep_index == world.substeps - 1 else 0
         )
         return original_forces(world, *args, **kwargs)
 

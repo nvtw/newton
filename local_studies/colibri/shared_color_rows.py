@@ -71,33 +71,33 @@ _original_build = color_groups.build
 #endif
 """)
 def _color(
-    elements: wp.array(dtype=ElementInteractionData),
-    active: wp.array(dtype=wp.int32),
+    elements: wp.array[ElementInteractionData],
+    active: wp.array[wp.int32],
     width: wp.int32,
-    masks: wp.array2d(dtype=wp.uint32),
-    row_color: wp.array(dtype=wp.int32),
-    row_partition: wp.array(dtype=wp.int32),
-    counts: wp.array(dtype=wp.int32),
-    starts: wp.array(dtype=wp.int32),
-    cursors: wp.array(dtype=wp.int32),
-    ids: wp.array(dtype=wp.int32),
-    num_colors: wp.array(dtype=wp.int32),
+    masks: wp.array2d[wp.uint32],
+    row_color: wp.array[wp.int32],
+    row_partition: wp.array[wp.int32],
+    counts: wp.array[wp.int32],
+    starts: wp.array[wp.int32],
+    cursors: wp.array[wp.int32],
+    ids: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
 ): ...
 
 
 @wp.kernel(enable_backward=False)
 def color_shared(
-    elements: wp.array(dtype=ElementInteractionData),
-    active: wp.array(dtype=wp.int32),
+    elements: wp.array[ElementInteractionData],
+    active: wp.array[wp.int32],
     width: wp.int32,
-    masks: wp.array2d(dtype=wp.uint32),
-    row_color: wp.array(dtype=wp.int32),
-    row_partition: wp.array(dtype=wp.int32),
-    counts: wp.array(dtype=wp.int32),
-    starts: wp.array(dtype=wp.int32),
-    cursors: wp.array(dtype=wp.int32),
-    ids: wp.array(dtype=wp.int32),
-    num_colors: wp.array(dtype=wp.int32),
+    masks: wp.array2d[wp.uint32],
+    row_color: wp.array[wp.int32],
+    row_partition: wp.array[wp.int32],
+    counts: wp.array[wp.int32],
+    starts: wp.array[wp.int32],
+    cursors: wp.array[wp.int32],
+    ids: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
 ):
     _color(elements, active, width, masks, row_color, row_partition, counts, starts, cursors, ids, num_colors)
 

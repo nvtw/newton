@@ -47,21 +47,41 @@ def query(
     output[i, 5] = world_g[2]
 
 
-
-archive=np.load('/tmp/colibri_public_group4_tail.trace.npz')
-records=json.load(open('/tmp/colibri_public_group4_failed_pose_contacts.json'))
-r=min(records[-2]['contacts'],key=lambda x:x['gap'])
-builder=build_scene(body_count=36,fix_base=False,contact_gap=.001,source_contact_offsets=True,mesh_cylinders=True)
-model=builder.finalize(skip_validation_joints=True)
-slot=int(np.flatnonzero(archive['step_ids']==8147)[0])
-results=[]
-for reverse in (False,True):
- target=np.array([r['shape_ids'][int(reverse)]],dtype=np.int32)
- source=np.array([r['shape_ids'][1-int(reverse)]],dtype=np.int32)
- points=np.array([r['point0'] if reverse else r['point1']],dtype=np.float32)
- out=wp.zeros((1,6),dtype=float,device=model.device)
- wp.launch(query,1,[wp.array(target,dtype=int,device=model.device),wp.array(source,dtype=int,device=model.device),wp.array(points,dtype=wp.vec3,device=model.device),wp.array(archive['pre_q'][slot],dtype=wp.transform,device=model.device),wp.array(archive['pre_qd'][slot],dtype=wp.spatial_vector,device=model.device),model.body_com,model.shape_body,model.shape_transform,model.shape_scale,model.shape_source_ptr,model._shape_sdf_index,model._texture_sdf_data,out],device=model.device)
- results.append(dict(target=int(target[0]),source=int(source[0]),values=out.numpy().tolist()))
-Path=None
-json.dump(results,open('/tmp/colibri_public_8147_pre_sdf.json','w'),indent=2)
+archive = np.load("/tmp/colibri_public_group4_tail.trace.npz")
+records = json.load(open("/tmp/colibri_public_group4_failed_pose_contacts.json"))
+r = min(records[-2]["contacts"], key=lambda x: x["gap"])
+builder = build_scene(
+    body_count=36, fix_base=False, contact_gap=0.001, source_contact_offsets=True, mesh_cylinders=True
+)
+model = builder.finalize(skip_validation_joints=True)
+slot = int(np.flatnonzero(archive["step_ids"] == 8147)[0])
+results = []
+for reverse in (False, True):
+    target = np.array([r["shape_ids"][int(reverse)]], dtype=np.int32)
+    source = np.array([r["shape_ids"][1 - int(reverse)]], dtype=np.int32)
+    points = np.array([r["point0"] if reverse else r["point1"]], dtype=np.float32)
+    out = wp.zeros((1, 6), dtype=float, device=model.device)
+    wp.launch(
+        query,
+        1,
+        [
+            wp.array(target, dtype=int, device=model.device),
+            wp.array(source, dtype=int, device=model.device),
+            wp.array(points, dtype=wp.vec3, device=model.device),
+            wp.array(archive["pre_q"][slot], dtype=wp.transform, device=model.device),
+            wp.array(archive["pre_qd"][slot], dtype=wp.spatial_vector, device=model.device),
+            model.body_com,
+            model.shape_body,
+            model.shape_transform,
+            model.shape_scale,
+            model.shape_source_ptr,
+            model._shape_sdf_index,
+            model._texture_sdf_data,
+            out,
+        ],
+        device=model.device,
+    )
+    results.append(dict(target=int(target[0]), source=int(source[0]), values=out.numpy().tolist()))
+Path = None
+json.dump(results, open("/tmp/colibri_public_8147_pre_sdf.json", "w"), indent=2)
 print(results)

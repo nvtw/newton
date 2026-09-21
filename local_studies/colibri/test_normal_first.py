@@ -149,7 +149,16 @@ class TestNormalFirstContact(unittest.TestCase):
                                             )
                                         )
                                     if any(not np.array_equal(a, b) for a, b in zip(*results, strict=True)):
-                                        print("CASE", friction, dynamic_friction, bias, pd, normal_seed, stale_tangent, separation)
+                                        print(
+                                            "CASE",
+                                            friction,
+                                            dynamic_friction,
+                                            bias,
+                                            pd,
+                                            normal_seed,
+                                            stale_tangent,
+                                            separation,
+                                        )
                                         print("GENERAL", [a[:, :3] for a in results[0]])
                                         print("SPLIT", [a[:, :3] for a in results[1]])
                                     for general, optimized in zip(*results, strict=True):

@@ -116,7 +116,7 @@ def main():
             after = gaps(post, body, shapes, p0, p1, normals, margins)
             if floor == 0 and not reduced:
                 np.testing.assert_allclose(after.min(), baseline["transported_post_gap"].min(), rtol=0, atol=2e-8)
-                assert len(selected) == len(baseline["shapes"]), (len(selected),len(baseline["shapes"]))
+                assert len(selected) == len(baseline["shapes"]), (len(selected), len(baseline["shapes"]))
             artifact = Path(args.output).with_suffix(f".floor{floor:.3f}_{'reduced' if reduced else 'raw'}.npz")
             np.savez(
                 artifact,

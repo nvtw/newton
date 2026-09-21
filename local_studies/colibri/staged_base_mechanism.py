@@ -47,7 +47,10 @@ def build_scene(*args, **kwargs):
 
 source.build_scene = build_scene
 try:
-    runpy.run_module(os.environ.get("COLIBRI_STAGE_RUNNER", "local_studies.colibri.check_public_analytic_gradient"), run_name="__main__")
+    runpy.run_module(
+        os.environ.get("COLIBRI_STAGE_RUNNER", "local_studies.colibri.check_public_analytic_gradient"),
+        run_name="__main__",
+    )
 finally:
     source.build_scene = original
     unchanged = hashlib.sha256(source_path.read_bytes()).hexdigest() == source_hash

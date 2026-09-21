@@ -27,12 +27,40 @@ def compare_paths(
     n = normals[i]
     first = export_contact_to_buffer(2 * i, 2 * i + 1, wp.vec3(0.0), n, 0.01, i, reused)
     ids[i, 0] = export_and_reduce_predictive_contact(
-        2 * i, 2 * i + 1, wp.vec3(0.0), n, 0.01, 0.0, 0.0, 0.0, i,
-        poses, velocities, angular, 0.1, 0.02, first, reused,
+        2 * i,
+        2 * i + 1,
+        wp.vec3(0.0),
+        n,
+        0.01,
+        0.0,
+        0.0,
+        0.0,
+        i,
+        poses,
+        velocities,
+        angular,
+        0.1,
+        0.02,
+        first,
+        reused,
     )
     ids[i, 1] = export_and_reduce_predictive_contact(
-        2 * i, 2 * i + 1, wp.vec3(0.0), n, 0.01, 0.0, 0.0, 0.0, i,
-        poses, velocities, angular, 0.1, 0.02, -1, allocated,
+        2 * i,
+        2 * i + 1,
+        wp.vec3(0.0),
+        n,
+        0.01,
+        0.0,
+        0.0,
+        0.0,
+        i,
+        poses,
+        velocities,
+        angular,
+        0.1,
+        0.02,
+        -1,
+        allocated,
     )
 
 
@@ -50,13 +78,16 @@ if __name__ == "__main__":
     allocated = GlobalContactReducer(capacity=2 * count, device=device, deterministic=True)
     indices = wp.full((count, 2), -1, dtype=wp.int32, device=device)
     wp.launch(
-        compare_paths, count,
+        compare_paths,
+        count,
         [
             wp.array(normals, dtype=wp.vec3, device=device),
             wp.array([wp.transform_identity()] * (2 * count), dtype=wp.transform, device=device),
             wp.array(velocity, dtype=wp.vec3, device=device),
             wp.zeros(2 * count, dtype=wp.vec3, device=device),
-            reused.get_data_struct(), allocated.get_data_struct(), indices,
+            reused.get_data_struct(),
+            allocated.get_data_struct(),
+            indices,
         ],
         device=device,
     )

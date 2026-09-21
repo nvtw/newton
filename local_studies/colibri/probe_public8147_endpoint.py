@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Replay frozen tail pair inputs with raw/reduced predictive generation."""
 
-import json
 import importlib.util
+import json
 import sys
-from newton._src.geometry import narrow_phase
-from newton._src.geometry import sdf_contact
-spec = importlib.util.spec_from_file_location("newton._src.geometry._old_endpoint_diagnostic", "/tmp/sdf_contact_before_endpoint_fix.py")
+
+from newton._src.geometry import narrow_phase, sdf_contact
+
+spec = importlib.util.spec_from_file_location(
+    "newton._src.geometry._old_endpoint_diagnostic", "/tmp/sdf_contact_before_endpoint_fix.py"
+)
 old = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = old
 spec.loader.exec_module(old)
@@ -35,11 +38,18 @@ pair = [model.shape_label.index("TailRack/Tail_Rack"), model.shape_label.index("
 shape_body = model.shape_body.numpy()
 records = []
 for name, reduction, cap in (
-    ('old_reduced', True, .005), ('old_raw', False, .005),
-    ('fixed_reduced', True, .005), ('fixed_raw', False, .005),
-    ('old_envelope', True, .005), ('fixed_envelope', True, .005),
+    ("old_reduced", True, 0.005),
+    ("old_raw", False, 0.005),
+    ("fixed_reduced", True, 0.005),
+    ("fixed_raw", False, 0.005),
+    ("old_envelope", True, 0.005),
+    ("fixed_envelope", True, 0.005),
 ):
-    factory = old.create_narrow_phase_process_mesh_mesh_contacts_kernel if name.startswith('old') else sdf_contact.create_narrow_phase_process_mesh_mesh_contacts_kernel
+    factory = (
+        old.create_narrow_phase_process_mesh_mesh_contacts_kernel
+        if name.startswith("old")
+        else sdf_contact.create_narrow_phase_process_mesh_mesh_contacts_kernel
+    )
     narrow_phase.create_narrow_phase_process_mesh_mesh_contacts_kernel = factory
     restore = install_conservative_mesh_candidates() if name.endswith("envelope") else None
     pipeline = newton.CollisionPipeline(

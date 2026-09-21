@@ -123,7 +123,7 @@ class TestRigidFrictionAnchors(unittest.TestCase):
 
 
 @wp.kernel
-def _tangent_cases(cc: ContactContainer, results: wp.array(dtype=wp.vec2f)):
+def _tangent_cases(cc: ContactContainer, results: wp.array[wp.vec2f]):
     i = wp.tid()
     old = wp.float32(0.0)
     rhs = wp.float32(-0.495)

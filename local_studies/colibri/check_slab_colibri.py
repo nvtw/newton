@@ -47,13 +47,13 @@ class SlabExample(speculative.SpeculativeExample):
         world = self.solver.world
         data = self.solver._slab_reference
         n = int(world._num_active_constraints.numpy()[0])
-        expected = build_schedule(world._elements.numpy()["bodies"][:n], world.num_bodies, world.mass_splitting_color_group_size or 8)
+        expected = build_schedule(
+            world._elements.numpy()["bodies"][:n], world.num_bodies, world.mass_splitting_color_group_size or 8
+        )
         np.testing.assert_array_equal(data["row_color"].numpy()[:n], expected.row_color)
         np.testing.assert_array_equal(data["row_slab"].numpy()[:n], expected.row_slab)
         np.testing.assert_array_equal(data["ids"].numpy()[:n], [r for c in expected.colors for r in c])
-        np.testing.assert_array_equal(
-            world._copy_state.count_per_node.numpy(), [len(s) for s in expected.body_slabs]
-        )
+        np.testing.assert_array_equal(world._copy_state.count_per_node.numpy(), [len(s) for s in expected.body_slabs])
         self._slab_summary = expected.summary()
 
 
@@ -71,7 +71,8 @@ if __name__ == "__main__":
             report["joint_accuracy"] = {
                 "max_anchor_error_m": max((p["anchor_error_m"] for p in example._joint_peaks.values()), default=0.0),
                 "max_axis_error_rad": max((p["axis_error_rad"] for p in example._joint_peaks.values()), default=0.0),
-                "per_joint_peaks": example._joint_peaks, "final": example._joint_last,
+                "per_joint_peaks": example._joint_peaks,
+                "final": example._joint_last,
             }
             report["search_envelope"] = {
                 "cap_m": speculative.cap,

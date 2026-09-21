@@ -1,9 +1,9 @@
 """Reusable bounded physical normal seed and all-point Coulomb outer."""
 
 import numpy as np
-from scipy.optimize import minimize, least_squares, root
-from local_studies.colibri.coulomb_semismooth import natural_map_evaluator
+from scipy.optimize import least_squares, minimize, root
 
+from local_studies.colibri.coulomb_semismooth import natural_map_evaluator
 
 
 def polish_active_newton(evaluate, value, ids):
@@ -26,7 +26,7 @@ def polish_active_newton(evaluate, value, ids):
         alpha = 1.0
         closing = delta[::3] < 0
         if np.any(closing):
-            alpha = min(alpha, float(np.min(-.99 * value[ids][::3][closing] / delta[::3][closing])))
+            alpha = min(alpha, float(np.min(-0.99 * value[ids][::3][closing] / delta[::3][closing])))
         merit = residual @ residual
         accepted = False
         for backtrack in range(20):
@@ -37,77 +37,91 @@ def polish_active_newton(evaluate, value, ids):
                 value = trial
                 accepted = True
                 break
-            alpha *= .5
-        history.append(dict(iteration=iteration, residual=error, alpha=alpha,
-                            linear_error=linear_error, accepted=accepted))
+            alpha *= 0.5
+        history.append(
+            dict(iteration=iteration, residual=error, alpha=alpha, linear_error=linear_error, accepted=accepted)
+        )
         if not accepted:
             break
     return value, history
-
 
 
 def cross_contact_boundary(evaluate, value, ids, physical_jacobian, operator, rhs, scale, friction):
     """Explore a friction boundary along a weak response direction, retaining it."""
     trial = value - (operator @ value + rhs) / scale
     sticking = np.flatnonzero(
-        (value[::3] > 1e-12)
-        & (np.linalg.norm(trial.reshape(-1,3)[:,1:],axis=1) <= friction * value[::3])
+        (value[::3] > 1e-12) & (np.linalg.norm(trial.reshape(-1, 3)[:, 1:], axis=1) <= friction * value[::3])
     )
     if len(sticking) < 2:
         return value, []
     feasible = value.copy()
     for point in range(len(friction)):
-        tangent = feasible[3*point+1:3*point+3]
-        radius = friction[point] * max(feasible[3*point],0.)
+        tangent = feasible[3 * point + 1 : 3 * point + 3]
+        radius = friction[point] * max(feasible[3 * point], 0.0)
         length = np.linalg.norm(tangent)
         if length > radius:
             tangent *= radius / length
-    tangents = (3*sticking[:,None]+np.array([1,2])).ravel()
+    tangents = (3 * sticking[:, None] + np.array([1, 2])).ravel()
     # A search direction only: every full physical response mode is retained.
-    _, singular, vt = np.linalg.svd(physical_jacobian.T[:,tangents])
+    _, singular, vt = np.linalg.svd(physical_jacobian.T[:, tangents])
     direction = np.zeros_like(value)
     direction[tangents] = vt[-1]
     best = value.copy()
     best_error = float(np.max(np.abs(evaluate(best)[0])))
     records = []
-    for sign in (-1.,1.):
+    for sign in (-1.0, 1.0):
         z = direction * sign
         limits = []
         for point in sticking:
-            t = feasible[3*point+1:3*point+3]
-            dz = z[3*point+1:3*point+3]
-            radius = friction[point] * feasible[3*point]
-            roots = np.roots([dz@dz,2*t@dz,t@t-radius*radius])
-            positive = [float(r.real) for r in roots if abs(r.imag)<1e-15 and r.real>1e-15]
+            t = feasible[3 * point + 1 : 3 * point + 3]
+            dz = z[3 * point + 1 : 3 * point + 3]
+            radius = friction[point] * feasible[3 * point]
+            roots = np.roots([dz @ dz, 2 * t @ dz, t @ t - radius * radius])
+            positive = [float(r.real) for r in roots if abs(r.imag) < 1e-15 and r.real > 1e-15]
             if positive:
                 limits.append(min(positive))
         if not limits:
             continue
         candidate = feasible + min(limits) * z
-        candidate, polish = polish_active_newton(evaluate,candidate,ids)
-        unit = max(float(np.max(np.abs(candidate[ids]))),1e-12)
+        candidate, polish = polish_active_newton(evaluate, candidate, ids)
+        unit = max(float(np.max(np.abs(candidate[ids]))), 1e-12)
+
         def expand(x):
             out = np.zeros_like(value)
-            out[ids] = unit*x
+            out[ids] = unit * x
             return out
-        solved = root(lambda x:evaluate(expand(x))[0][ids],candidate[ids]/unit,
-            jac=lambda x:evaluate(expand(x))[1][np.ix_(ids,ids)]*unit,
-            method="hybr",options=dict(maxfev=120,xtol=1e-11))
+
+        solved = root(
+            lambda x: evaluate(expand(x))[0][ids],
+            candidate[ids] / unit,
+            jac=lambda x: evaluate(expand(x))[1][np.ix_(ids, ids)] * unit,
+            method="hybr",
+            options=dict(maxfev=120, xtol=1e-11),
+        )
         candidate = expand(solved.x)
         error = float(np.max(np.abs(evaluate(candidate)[0])))
-        records.append(dict(sign=sign,search_singular_values=singular.tolist(),
-                            evaluations=int(solved.nfev),error=error,polish=polish))
+        records.append(
+            dict(
+                sign=sign,
+                search_singular_values=singular.tolist(),
+                evaluations=int(solved.nfev),
+                error=error,
+                polish=polish,
+            )
+        )
         if error < best_error and np.min(candidate[::3]) >= -1e-12:
-            best,best_error = candidate,error
+            best, best_error = candidate, error
         if best_error < 1e-8:
             break
-    return best,records
+    return best, records
 
 
 def solve_online(A, q, gamma, mu, initial, physical_jacobian=None):
     n = len(mu)
     if n == 0:
-        return np.zeros(0), dict(accepted=True, final_physical_error=0.0, stages=[], scope="Joint-only phase; no eligible contact rows")
+        return np.zeros(0), dict(
+            accepted=True, final_physical_error=0.0, stages=[], scope="Joint-only phase; no eligible contact rows"
+        )
     N = A[::3, ::3] + np.diag(gamma)
     qn = q[::3]
     scale = 1 / np.sqrt(np.diag(N))
@@ -174,8 +188,9 @@ def solve_online(A, q, gamma, mu, initial, physical_jacobian=None):
                 error = float(np.max(np.abs(evaluate(lam)[0])))
             boundary_history = []
             if error >= 1e-8 and physical_jacobian is not None:
-                lam,boundary_history = cross_contact_boundary(
-                    evaluate,lam,ids,physical_jacobian,physical_operator,q,natural_scale,friction)
+                lam, boundary_history = cross_contact_boundary(
+                    evaluate, lam, ids, physical_jacobian, physical_operator, q, natural_scale, friction
+                )
                 error = float(np.max(np.abs(evaluate(lam)[0])))
             stages.append(
                 dict(

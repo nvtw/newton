@@ -7,10 +7,10 @@ from unittest.mock import patch
 
 import numpy as np
 import warp as wp
+from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 
 import newton
 from local_studies.colibri.compact_prepare_dispatch import install
-from newton._src.solvers.phoenx.solver_phoenx import PhoenXWorld
 from newton._src.solvers.phoenx.tests.test_rigid_split_prepare import run_scene
 
 
@@ -26,6 +26,7 @@ class TestCompactPrepare(unittest.TestCase):
         for split in (False, True):
             for chunk in (1, 3, 6, 128, 129):
                 with self.subTest(split=split, chunk=chunk):
+
                     def init(solver, *args, chunk_size=chunk, **kwargs):
                         kwargs["contact_chunk_size"] = chunk_size
                         initialize(solver, *args, **kwargs)
