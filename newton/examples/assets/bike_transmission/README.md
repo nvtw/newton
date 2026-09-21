@@ -20,7 +20,7 @@ The source has 134 bodies (including two stationary kinematic mounts), 134
 revolute joints, and a closed chain of 120 links. There are 492 mechanism meshes;
 three environment meshes and the source lighting/OmniGraph are not imported.
 The six authored joint drives remain active. The front drive defaults to a
-60 rpm bicycle cadence, and the rear drive acts as a 0.005729578 N m s/rad
+60 rpm bicycle cadence, and the rear drive acts as a 0.020053523 N m s/rad
 viscous dynamometer load. Use `--cadence-rpm` and `--rear-load-damping` to
 change them. `--motor-off` disables only the front crank drive, leaving
 derailleur springs and rear load damping active. The two rear-derailleur springs
@@ -42,11 +42,17 @@ per collision refresh, 4 grouped contact iterations, one velocity iteration,
 and the direct joint solver. Grouped PGS alternates forward and reverse color
 order between iterations to reduce directional bias without adding work. Exact
 mass-metric joint projections alternate with grouped mass-split contact PGS.
-Parallel contact preparation is enabled on CUDA,
-and contact columns are capped at 64 rows. Every contact row is retained; the
-cap distributes long shape-pair columns across more solver work.
-`--contact-chunk-size 0` restores whole shape-pair columns. `--substeps N`
-and `--iterations N` permit convergence experiments.
+Contact columns are capped at 64 rows. Every retained contact row is solved; the
+cap distributes long shape-pair columns across more solver work. Body-pair
+manifold merging is disabled because separate sprocket shapes form disconnected,
+strongly nonconvex contact patches. Independent shape pairs remain graph-colored
+and run in parallel. `--contact-chunk-size 0` restores whole shape-pair columns.
+`--substeps N` and `--iterations N` permit convergence experiments.
+
+Velocity-filtered speculative contacts cover up to 6 mm of predicted travel per
+collision refresh, enough for one front-tooth transit at the default cadence.
+Use `--speculative-contact-gap-max` to change that cap. The extension only
+changes candidate acquisition; the solver still uses the physical separation.
 
 Geometry is in metres and the scene is Z-up, converted from centimetres/Y-up.
 Gravity is 9.8 m/s². Angular targets are converted from degrees to radians and
@@ -75,19 +81,17 @@ uv run ruff format newton/examples/phoenx/bike_transmission_scene.py
 
 The generated Python data records the source SHA-256.
 
-A 270-frame measured run of the 60 rpm loaded default configuration sampled
-joint gaps up to 0.120 mm, hinge-axis misalignment up to 0.0056 degrees,
-contact penetration up to 1.10 mm after startup, and lateral chain span up to
-2.77 mm. The rear dynamometer absorbed roughly 1.5--2 W while the chain stayed
-engaged. The source pose begins with about 1.70 mm of contact overlap. The
-penetration probe uses a separate collision pipeline so it cannot alter live
-contact matching. These are sampled diagnostics, not bounds over every substep
-or a validation of interactive gear shifts.
+A 630-frame measured run of the 60 rpm loaded default configuration sampled
+joint gaps up to 0.057 mm, hinge-axis misalignment up to 0.0024 degrees, and
+lateral chain span up to 2.91 mm. At the final sample the crank and rear speeds
+were 38.1 rpm and 134.8 rpm, a 3.54 ratio, while the rear dynamometer absorbed
+3.99 W. These are sampled diagnostics, not bounds over every substep or a
+validation of interactive gear shifts.
 
-On an RTX PRO 6000 Blackwell, headless simulation measured 44.5--46.5 FPS,
-excluding startup and diagnostic reads. The earlier 14-substep, 2-iteration
-configuration measured 29.4 FPS. Symmetric body-pair contact refinement permits
-the lower substep count while preserving equal-and-opposite impulses.
+On an RTX PRO 6000 Blackwell, the same ten-second headless run measured 58.85
+FPS, excluding startup and diagnostic reads. Shape-pair manifolds preserve the
+disconnected sprocket contacts while graph coloring and the overflow partition
+parallelize independent interactions with equal-and-opposite impulses.
 
 Use `--solver-stats` to print the actual color sizes, sequential color-group
 sizes, and overflow count once per simulated second. This opt-in diagnostic

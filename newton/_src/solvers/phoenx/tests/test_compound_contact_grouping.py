@@ -193,13 +193,14 @@ def _build_mixed_material_compound_scene():
     return mb.finalize()
 
 
-def _make_solver(model, *, step_layout: str = "multi_world"):
+def _make_solver(model, *, step_layout: str = "multi_world", enable_body_pair_grouping: bool | None = None):
     return newton.solvers.SolverPhoenX(
         model,
         substeps=4,
         solver_iterations=8,
         velocity_iterations=1,
         step_layout=step_layout,
+        enable_body_pair_grouping=enable_body_pair_grouping,
     )
 
 
@@ -234,6 +235,13 @@ class TestCompoundContactGrouping(unittest.TestCase):
             solver.world._ingest_scratch.body_pair_keys,
             "ingest scratch should have allocated body-pair sort buffers",
         )
+
+    def test_compound_scene_allows_shape_pair_opt_out(self) -> None:
+        """Disconnected compound patches can retain shape-pair manifolds."""
+        model = _build_compound_scene()
+        solver = _make_solver(model, step_layout="single_world", enable_body_pair_grouping=False)
+        self.assertFalse(solver.world._enable_body_pair_grouping)
+        self.assertIsNone(solver.world._ingest_scratch.body_pair_keys)
 
     def test_compound_scene_opts_out_for_multi_world_fleet(self) -> None:
         """Multi-world fleets keep robot-style compound scenes on shape-pair ingest."""
