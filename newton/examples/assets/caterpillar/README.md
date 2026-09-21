@@ -30,20 +30,28 @@ The 1,325 rendered meshes reduce to 453 unique compressed OBJ files after
 geometry deduplication. They retain transformed vertices in metres, split
 surface normals, UVs where authored, sharp edges for meshes lacking normals,
 and corrected winding under negative transforms. The example uses 315 authored
-collision meshes: 314 SDFs and one convex hull. The asset has no authored mass
-or density, so closed collision volumes use 1000 kg/m³, matching USD's default
-density. Visual-only meshes do not contribute mass.
+collision meshes: 314 SDFs and one convex hull. The asset has no authored mass or density. Track links use a solid-steel
+density of 7850 kg/m³; the hollow frame and machinery proxies use an effective
+density of 1470 kg/m³. This produces a 71.56 tonne model, close to the 390F L's
+71.51 tonne operating mass, with 157.5 kg links. Visual-only meshes do not
+contribute mass. Each sealed track pin uses 100 N m of Coulomb friction.
 
 The default configuration performs collision detection at 120 Hz, five
 physics substeps per collision refresh, two contact iterations per substep,
 and exactly one velocity iteration. It uses direct momentum-conserving D6 joint
-projection and grouped mass-split PGS contacts. On an RTX PRO 6000 Blackwell,
-an isolated 12-second headless benchmark measured 43.2 FPS. A 20-second
-simulated-duration diagnostic remained finite; maximum joint translation error
-was 0.099 mm and maximum angular error was 0.0018 degrees. The settling tracks
-reached 87 mm of penetration in a 180-frame example test, then converged to
-7--12 mm after three seconds. These are sampled diagnostics rather than bounds
-over every substep.
+projection and grouped mass-split PGS contacts. Simulation and OptiX rendering
+use double-buffered device-resident poses so they can overlap without a host
+transform copy. On an RTX PRO 6000 Blackwell, 240 post-warmup headless frames
+measured 65.0 FPS and 120 frames with 1920x1080 OptiX rendering measured 58.0
+FPS. A five-second diagnostic remained finite, with 0.014 mm maximum joint
+translation error, 0.0017 degree maximum angular error, and 10.7 mm maximum
+contact penetration. These are sampled diagnostics rather than bounds over
+every substep.
+
+The eight source ``OmniGlass`` meshes retain a low-roughness blue glass
+appearance, and the six ``OmniSurface_Chrome`` meshes use a polished metallic
+appearance. The material class is stored in the extracted descriptor, so the
+USD is not needed at runtime.
 
 The default SDF resolution is 128. The source requests resolutions up to 500,
 which cost substantially more memory and startup time; pass

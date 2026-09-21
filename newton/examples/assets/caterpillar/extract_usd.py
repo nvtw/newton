@@ -148,22 +148,26 @@ def extract(source: Path, destination: Path, scene_output: Path):
         color = np.asarray(color)
         color = np.where(color <= 0.0031308, color * 12.92, 1.055 * color ** (1 / 2.4) - 0.055)
         collision = prim.HasAPI(UsdPhysics.CollisionAPI) and bool(value(prim, "physics:collisionEnabled", True))
-        shapes.append(
-            {
-                "label": path,
-                "body": body,
-                "mesh": filename,
-                "center": center.tolist(),
-                "collision": collision,
-                "density": 1000.0 * mass_unit / unit**3,
-                "friction": 0.5,
-                "approximation": str(value(prim, "physics:approximation", "none")),
-                "visible": UsdGeom.Imageable(prim).ComputeVisibility() != "invisible",
-                "color": color.tolist(),
-                "roughness": roughness,
-                "sdf_resolution": int(value(prim, "physxSDFMeshCollision:sdfResolution", 128)),
-            }
+        material_kind = {"OmniGlass": "glass", "OmniSurface_Chrome": "chrome"}.get(
+            material.GetPrim().GetName() if material else ""
         )
+        shape = {
+            "label": path,
+            "body": body,
+            "mesh": filename,
+            "center": center.tolist(),
+            "collision": collision,
+            "density": 1000.0 * mass_unit / unit**3,
+            "friction": 0.5,
+            "approximation": str(value(prim, "physics:approximation", "none")),
+            "visible": UsdGeom.Imageable(prim).ComputeVisibility() != "invisible",
+            "color": color.tolist(),
+            "roughness": roughness,
+            "sdf_resolution": int(value(prim, "physxSDFMeshCollision:sdfResolution", 128)),
+        }
+        if material_kind is not None:
+            shape["material"] = material_kind
+        shapes.append(shape)
 
     for prim in stage.Traverse():
         if not prim.IsA(UsdPhysics.Joint):

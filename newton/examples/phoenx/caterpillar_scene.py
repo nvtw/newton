@@ -17059,6 +17059,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "chrome",
             "sdf_resolution": 128,
         },
         {
@@ -17129,6 +17130,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "glass",
             "sdf_resolution": 128,
         },
         {
@@ -17143,6 +17145,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "glass",
             "sdf_resolution": 128,
         },
         {
@@ -17157,6 +17160,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "glass",
             "sdf_resolution": 128,
         },
         {
@@ -17171,6 +17175,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "glass",
             "sdf_resolution": 128,
         },
         {
@@ -17185,6 +17190,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "glass",
             "sdf_resolution": 128,
         },
         {
@@ -17199,6 +17205,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "glass",
             "sdf_resolution": 128,
         },
         {
@@ -17213,6 +17220,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "glass",
             "sdf_resolution": 128,
         },
         {
@@ -17227,6 +17235,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "glass",
             "sdf_resolution": 128,
         },
         {
@@ -17325,6 +17334,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "chrome",
             "sdf_resolution": 128,
         },
         {
@@ -20041,6 +20051,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "chrome",
             "sdf_resolution": 50,
         },
         {
@@ -20083,6 +20094,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "chrome",
             "sdf_resolution": 50,
         },
         {
@@ -20125,6 +20137,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "chrome",
             "sdf_resolution": 50,
         },
         {
@@ -20153,6 +20166,7 @@ SCENE = {
             "visible": True,
             "color": [0.9999999999999999, 0.9999999999999999, 0.9999999999999999],
             "roughness": 0.5,
+            "material": "chrome",
             "sdf_resolution": 128,
         },
         {

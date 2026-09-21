@@ -9,7 +9,17 @@ import numpy as np
 import warp as wp
 
 from newton.examples.phoenx.caterpillar_scene import SCENE
-from newton.examples.phoenx.example_phoenx_caterpillar import ASSETS, Example, _load_mesh, _transform
+from newton.examples.phoenx.example_phoenx_caterpillar import (
+    ASSETS,
+    STEEL_DENSITY,
+    STRUCTURE_EFFECTIVE_DENSITY,
+    TRACK_PIN_FRICTION,
+    Example,
+    _body_density,
+    _load_mesh,
+    _shape_appearance,
+    _transform,
+)
 
 
 class TestCaterpillar(unittest.TestCase):
@@ -69,6 +79,27 @@ class TestCaterpillar(unittest.TestCase):
         self.assertAlmostEqual(arm["target"], np.deg2rad(10.0))
         self.assertAlmostEqual(arm["stiffness"], 100000.0 * 180.0 / np.pi)
 
+    def test_physical_mass_and_track_pin_defaults(self):
+        """Keep full-scale track inertia and modest sealed-pin friction."""
+        track = next(body["label"] for body in SCENE["bodies"] if "/left_track_chain/" in body["label"])
+        structure = next(body["label"] for body in SCENE["bodies"] if "undercarriage_frame" in body["label"])
+        self.assertEqual(_body_density(track), STEEL_DENSITY)
+        self.assertEqual(_body_density(structure), STRUCTURE_EFFECTIVE_DENSITY)
+        self.assertEqual(STEEL_DENSITY, 7850.0)
+        self.assertEqual(STRUCTURE_EFFECTIVE_DENSITY, 1470.0)
+        self.assertEqual(TRACK_PIN_FRICTION, 100.0)
+        self.assertEqual(Example.create_parser().parse_args([]).track_pin_friction, TRACK_PIN_FRICTION)
+
+    def test_source_material_classes(self):
+        """Retain the USD glass and chrome identities in the runtime descriptor."""
+        materials = Counter(shape.get("material") for shape in SCENE["shapes"])
+        self.assertEqual(materials["glass"], 8)
+        self.assertEqual(materials["chrome"], 6)
+        glass = next(shape for shape in SCENE["shapes"] if shape.get("material") == "glass")
+        chrome = next(shape for shape in SCENE["shapes"] if shape.get("material") == "chrome")
+        self.assertEqual(_shape_appearance(glass), ((0.18, 0.28, 0.36), 0.03, 0.0, 0.28))
+        self.assertEqual(_shape_appearance(chrome), ((0.78, 0.8, 0.82), 0.08, 1.0, 1.0))
+
     def test_mesh_quality(self):
         """Retain finite indexed triangles and normalized explicit normals."""
         first = ASSETS / SCENE["shapes"][0]["mesh"]
@@ -91,6 +122,8 @@ class TestCaterpillar(unittest.TestCase):
         args = Example.create_parser().parse_args([])
         self.assertEqual(args.substeps, 5)
         self.assertEqual(args.iterations, 2)
+        self.assertEqual(args.track_pin_friction, 100.0)
+        self.assertTrue(Example.overlap_simulation_render)
 
 
 if __name__ == "__main__":
