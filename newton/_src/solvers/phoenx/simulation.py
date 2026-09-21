@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
 
 import numpy as np
 import warp as wp
@@ -13,6 +12,7 @@ import warp as wp
 from newton._src.geometry.flags import ShapeFlags
 from newton._src.geometry.types import GeoType
 from newton._src.sim.collide import CollisionPipeline
+from newton._src.solvers.phoenx import diagnostics
 from newton._src.solvers.phoenx.adapter_kernels import (
     _accumulate_substep_velocity_kernel,
 )
@@ -53,16 +53,13 @@ from newton._src.solvers.phoenx.cloth_step import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
     CLOTH_BENDING_DWORDS,
-    CLOTH_BENDING_TIME_US_OFFSET,
     cloth_bending_init_rows_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_triangle import (
     CLOTH_TRIANGLE_DWORDS,
-    CLOTH_TRIANGLE_TIME_US_OFFSET,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     CONTACT_DWORDS,
-    CONTACT_TIME_US_OFFSET,
     RIGID_CONTACT_SOLVE_DWORDS,
     ContactColumnContainer,
     ContactViews,
@@ -70,9 +67,6 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_column_container_zeros,
     contact_gather_colored_rows,
     contact_pack_colored_headers,
-    contact_pair_wrench_kernel,
-    contact_per_contact_error_kernel,
-    contact_per_contact_wrench_kernel,
     contact_scatter_colored_rows,
     contact_views_make,
 )
@@ -87,25 +81,21 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_CONSTRAINT_DWORDS,
-    JOINT_CONSTRAINT_TIME_US_OFFSET,
     joint_constraint_initialize_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_hexahedron import (
     SOFT_HEX_DWORDS,
     SOFT_HEX_STRAIN_MODEL_ARAP,
     SOFT_HEX_STRAIN_MODEL_TRACE,
-    SOFT_HEX_TIME_US_OFFSET,
     soft_hex_init_rows_from_arrays_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_tet_neohookean import (
     SOFT_TET_NEOHOOKEAN_DWORDS,
-    SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET,
     SoftBodyConstraintType,
     soft_tet_neohookean_init_rows_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_soft_tetrahedron import (
     SOFT_TET_DWORDS,
-    SOFT_TET_TIME_US_OFFSET,
     soft_tet_init_rows_kernel,
 )
 from newton._src.solvers.phoenx.constraints.contact_chunks import (
@@ -207,8 +197,6 @@ from newton._src.solvers.phoenx.simulation_kernels import (
     _STRAGGLER_BLOCK_DIM,
     _add_scan_block_offsets_kernel,
     _collapse_direct_equality_elements_kernel,
-    _constraint_gather_errors_kernel,
-    _constraint_gather_wrenches_kernel,
     _constraints_to_elements_kernel,
     _count_and_mark_world_runs_kernel,
     _initialize_rigid_topology_rebuild_kernel,
@@ -222,14 +210,10 @@ from newton._src.solvers.phoenx.simulation_kernels import (
     _phoenx_refresh_world_inertia_kernel,
     _phoenx_update_inertia_and_clear_forces_kernel,
     _pick_threads_per_world_kernel,
-    _reduce_constraint_time_us_kernel,
-    _reduce_contact_time_us_kernel,
     _reduce_total_colours_kernel,
     _scan_blocks_int_kernel,
     _scatter_monotone_world_run_starts_kernel,
     _set_kinematic_pose_batch_kernel,
-    _zero_constraint_time_us_kernel,
-    _zero_contact_time_us_kernel,
     get_block_world_kernel,
     get_fast_tail_kernel,
     get_per_world_greedy_coloring_kernel,
@@ -335,65 +319,7 @@ class PhoenXWorld:
     :class:`ContactColumnContainer`; the rest use :class:`ConstraintContainer`.
     """
 
-    @dataclass
-    class StepReport:
-        """Diagnostic snapshot. Triggers D2H copies; not graph-capture safe."""
-
-        num_colors: int
-        """Graph colour count from the last PGS. Multi-world: max across worlds."""
-
-        color_sizes: list[int]
-        """Element count per colour. Multi-world: sum across worlds per index."""
-
-        per_world_num_colors: list[int] | None
-        """Per-world colour counts; None for single-world."""
-
-        per_world_color_sizes: list[list[int]] | None
-        """Per-world per-colour element counts; None for single-world."""
-
-        num_contact_columns: int
-        """Active contact columns from the last step."""
-
-        num_joints: int
-        """Joint constraint columns (static for the world's lifetime)."""
-
-        num_active_constraints: int
-        """Active cids, including joints, deformables, and contacts."""
-
-        max_body_degree: int
-        """Max constraints incident to any body or particle node. Hard lower
-        bound on the colour count any valid colouring can achieve."""
-
-        time_us_total_joints: float | None = None
-        """Total wall-clock microseconds spent in joint dispatches (sum of
-        every constraint column's ``time_us`` slot). ``None`` unless
-        :attr:`PhoenXWorld.enable_column_timers` is set."""
-
-        time_us_total_cloth_triangles: float | None = None
-        """Total wall-clock microseconds spent in cloth-triangle dispatches.
-        ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
-
-        time_us_total_cloth_bending: float | None = None
-        """Total wall-clock microseconds spent in cloth-bending dispatches.
-        ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
-
-        time_us_total_soft_tetrahedra: float | None = None
-        """Total wall-clock microseconds spent in soft-tet dispatches.
-        ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
-
-        time_us_total_contacts: float | None = None
-        """Total wall-clock microseconds spent in contact dispatches.
-        ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
-
-        time_us_total_soft_hexahedra: float | None = None
-        """Total wall-clock microseconds spent in soft-hex dispatches.
-        ``None`` unless :attr:`PhoenXWorld.enable_column_timers` is set."""
-
-        overflow_size: int = 0
-        """Constraint count in the mass-splitting overflow bucket; zero for grouped coloring."""
-
-        color_group_sizes: list[int] | None = None
-        """Constraint counts per sequential color group; None when grouped coloring is disabled."""
+    StepReport = diagnostics.StepReport
 
     def __init__(
         self,
@@ -5103,105 +5029,12 @@ class PhoenXWorld:
         )
 
     def _gather_column_timers(self, num_contact_columns: int) -> dict[str, float]:
-        """Sum every per-column ``time_us`` slot into per-type totals.
-
-        Reduces on-device into a 5-element scratch buffer
-        (joints / cloth_tri / cloth_bend / soft_tet / contacts) and
-        copies only that 20-byte payload back to host. The previous
-        full-row ``.numpy()`` copy was ``rigid_contact_max * 16 * 4``
-        bytes per call -- megabytes on dense scenes -- which serialised
-        the eager-mode viewer loop.
-        """
-        if self._column_timer_totals is None:
-            self._column_timer_totals = wp.zeros(6, dtype=wp.float32, device=self.device)
-        else:
-            self._column_timer_totals.zero_()
-        if self._contact_offset > 0:
-            # Per-schema time_us dword offset differs between the ARAP
-            # and block Neo-Hookean variants; pick the one the scene
-            # actually populated. Mixed variants in one container would
-            # need a per-cid type-tag read here; not currently supported.
-            soft_tet_time_off = (
-                int(SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET)
-                if self._soft_tet_uses_neohookean
-                else int(SOFT_TET_TIME_US_OFFSET)
-            )
-            wp.launch(
-                _reduce_constraint_time_us_kernel,
-                dim=self._contact_offset,
-                inputs=[
-                    self.constraints,
-                    wp.int32(JOINT_CONSTRAINT_TIME_US_OFFSET),
-                    wp.int32(CLOTH_TRIANGLE_TIME_US_OFFSET),
-                    wp.int32(CLOTH_BENDING_TIME_US_OFFSET),
-                    wp.int32(soft_tet_time_off),
-                    wp.int32(SOFT_HEX_TIME_US_OFFSET),
-                    wp.int32(self.num_joints),
-                    wp.int32(self.num_cloth_triangles),
-                    wp.int32(self.num_cloth_bending),
-                    wp.int32(self.num_soft_tetrahedra),
-                    wp.int32(self.num_soft_hexahedra),
-                    self._column_timer_totals,
-                ],
-                device=self.device,
-            )
-        if num_contact_columns > 0 and self.max_contact_columns > 0:
-            wp.launch(
-                _reduce_contact_time_us_kernel,
-                dim=num_contact_columns,
-                inputs=[
-                    self._contact_cols,
-                    wp.int32(num_contact_columns),
-                    wp.int32(CONTACT_TIME_US_OFFSET),
-                    self._column_timer_totals,
-                ],
-                device=self.device,
-            )
-        totals = self._column_timer_totals.numpy()
-        return {
-            "time_us_total_joints": float(totals[0]),
-            "time_us_total_cloth_triangles": float(totals[1]),
-            "time_us_total_cloth_bending": float(totals[2]),
-            "time_us_total_soft_tetrahedra": float(totals[3]),
-            "time_us_total_contacts": float(totals[4]),
-            "time_us_total_soft_hexahedra": float(totals[5]),
-        }
+        """Collect optional per-column timing totals."""
+        return diagnostics.gather_column_timers(self, num_contact_columns)
 
     def _zero_column_timers(self) -> None:
-        """Zero every per-column ``time_us`` slot. Called at step start
-        when :attr:`enable_column_timers` is set."""
-        if self._contact_offset > 0:
-            soft_tet_time_off = (
-                int(SOFT_TET_NEOHOOKEAN_TIME_US_OFFSET)
-                if self._soft_tet_uses_neohookean
-                else int(SOFT_TET_TIME_US_OFFSET)
-            )
-            wp.launch(
-                _zero_constraint_time_us_kernel,
-                dim=self._contact_offset,
-                inputs=[
-                    self.constraints,
-                    self._num_active_constraints,
-                    wp.int32(JOINT_CONSTRAINT_TIME_US_OFFSET),
-                    wp.int32(CLOTH_TRIANGLE_TIME_US_OFFSET),
-                    wp.int32(CLOTH_BENDING_TIME_US_OFFSET),
-                    wp.int32(soft_tet_time_off),
-                    wp.int32(SOFT_HEX_TIME_US_OFFSET),
-                    wp.int32(self.num_joints),
-                    wp.int32(self.num_cloth_triangles),
-                    wp.int32(self.num_cloth_bending),
-                    wp.int32(self.num_soft_tetrahedra),
-                    wp.int32(self.num_soft_hexahedra),
-                ],
-                device=self.device,
-            )
-        if self.max_contact_columns > 0:
-            wp.launch(
-                _zero_contact_time_us_kernel,
-                dim=self.max_contact_columns,
-                inputs=[self._contact_cols, wp.int32(self.max_contact_columns), wp.int32(CONTACT_TIME_US_OFFSET)],
-                device=self.device,
-            )
+        """Clear optional per-column timers before a measured step."""
+        diagnostics.zero_column_timers(self)
 
     def _update_inertia_and_clear_forces(self) -> None:
         """End-of-step: damping + inertia rebuild + force/torque zeroing (fused)."""
@@ -5274,176 +5107,23 @@ class PhoenXWorld:
 
     def gather_constraint_wrenches(self, out: wp.array) -> None:
         """Per-cid world-frame wrench on body2 (last-substep average)."""
-        if self._constraint_capacity == 0:
-            return
-        out.zero_()
-        if self.substep_dt <= 0.0:
-            return
-        contact_views = self._active_contact_views()
-        idt = wp.float32(1.0 / self.substep_dt)
-        wp.launch(
-            _constraint_gather_wrenches_kernel,
-            dim=self._constraint_capacity,
-            inputs=[
-                self.constraints,
-                self._contact_cols,
-                self.bodies,
-                wp.int32(self._constraint_capacity),
-                wp.int32(self.num_joints),
-                idt,
-                self._contact_container,
-                contact_views,
-            ],
-            outputs=[out],
-            device=self.device,
-        )
-        direct = getattr(self, "_direct_equality_system", None)
-        if direct is not None:
-            direct.gather_constraint_wrenches(out, idt)
+        diagnostics.gather_constraint_wrenches(self, out)
 
     def gather_constraint_errors(self, out: wp.array) -> None:
         """Per-cid position-level residual."""
-        if self._constraint_capacity == 0:
-            return
-        out.zero_()
-        wp.launch(
-            _constraint_gather_errors_kernel,
-            dim=self._constraint_capacity,
-            inputs=[
-                self.constraints,
-                self._contact_cols,
-                self.bodies,
-                wp.int32(self._constraint_capacity),
-                wp.int32(self.num_joints),
-            ],
-            outputs=[out],
-            device=self.device,
-        )
+        diagnostics.gather_constraint_errors(self, out)
 
     def num_colors_used(self) -> int:
         """Number of graph colours from the last PGS. Triggers D2H copy."""
-        if self._color_group_data is not None:
-            return int(self._color_group_data["num_colors"].numpy()[0])
-        if self.step_layout == "single_world":
-            return int(self._partitioner.num_colors.numpy()[0])
-        return int(self._world_num_colors.numpy().max(initial=0))
+        return diagnostics.num_colors_used(self)
 
-    def step_report(self) -> PhoenXWorld.StepReport:
+    def step_report(self) -> diagnostics.StepReport:
         """Diagnostic snapshot of the last step. Triggers D2H copies."""
-        num_contact_columns = (
-            int(self._ingest_scratch.num_contact_columns.numpy()[0])
-            if self._contact_views is not None and self._ingest_scratch is not None
-            else 0
-        )
-        num_active = (
-            int(self._num_active_constraints.numpy()[0])
-            if self._num_active_constraints is not None
-            else self._contact_offset + num_contact_columns
-        )
-
-        if self.enable_column_timers:
-            timer_kwargs = self._gather_column_timers(num_contact_columns)
-        else:
-            timer_kwargs = {}
-
-        # Unified-node degree from the partitioner's adjacency CSR end array.
-        # Rigid bodies occupy [0, num_bodies); particles follow after that.
-        num_nodes = self.num_bodies + self.num_particles
-        if num_active > 0 and num_nodes > 0:
-            ends = self._partitioner._adjacency_section_end_indices.numpy()
-            n_nodes = min(int(num_nodes), int(ends.shape[0]))
-            if n_nodes > 0:
-                degrees = ends[:n_nodes].astype(np.int64, copy=False)
-                degrees[1:] = degrees[1:] - degrees[:-1]
-                max_body_degree = int(degrees.max(initial=0))
-            else:
-                max_body_degree = 0
-        else:
-            max_body_degree = 0
-
-        if self.step_layout == "single_world":
-            nc = self.num_colors_used()
-            if nc > 0:
-                starts = (
-                    self._color_group_data["starts"]
-                    if self._color_group_data is not None
-                    else self._partitioner.color_starts
-                ).numpy()
-                color_sizes = [int(starts[c + 1] - starts[c]) for c in range(nc)]
-            else:
-                color_sizes = []
-            group_sizes = None
-            overflow_size = 0
-            if self._color_group_data is not None:
-                width = self.mass_splitting_color_group_size
-                group_sizes = [sum(color_sizes[i : i + width]) for i in range(0, nc, width)]
-            elif self.mass_splitting_enabled and self.max_colored_partitions is not None:
-                if nc > self.max_colored_partitions:
-                    overflow_size = color_sizes[self.max_colored_partitions]
-            return self.StepReport(
-                num_colors=nc,
-                overflow_size=overflow_size,
-                color_group_sizes=group_sizes,
-                color_sizes=color_sizes,
-                per_world_num_colors=None,
-                per_world_color_sizes=None,
-                num_contact_columns=num_contact_columns,
-                num_joints=self.num_joints,
-                num_active_constraints=num_active,
-                max_body_degree=max_body_degree,
-                **timer_kwargs,
-            )
-
-        nc_per_world = self._world_num_colors.numpy().astype(np.int32, copy=False)
-        starts_2d = self._world_color_starts.numpy().astype(np.int32, copy=False)
-        per_world_num_colors: list[int] = [int(n) for n in nc_per_world]
-        per_world_color_sizes: list[list[int]] = []
-        max_nc = 0
-        for w, n in enumerate(per_world_num_colors):
-            row = starts_2d[w]
-            sizes = [int(row[c + 1] - row[c]) for c in range(n)]
-            per_world_color_sizes.append(sizes)
-            if n > max_nc:
-                max_nc = n
-        agg = [0] * max_nc
-        for sizes in per_world_color_sizes:
-            for c, s in enumerate(sizes):
-                agg[c] += s
-        return self.StepReport(
-            num_colors=max_nc,
-            color_sizes=agg,
-            per_world_num_colors=per_world_num_colors,
-            per_world_color_sizes=per_world_color_sizes,
-            num_contact_columns=num_contact_columns,
-            num_joints=self.num_joints,
-            num_active_constraints=num_active,
-            max_body_degree=max_body_degree,
-            **timer_kwargs,
-        )
+        return diagnostics.step_report(self)
 
     def gather_contact_wrenches(self, out: wp.array) -> None:
         """Per-contact wrench (force + torque) from the last substep."""
-        if self.max_contact_columns == 0:
-            out.zero_()
-            return
-        out.zero_()
-        if self.substep_dt <= 0.0 or self._contact_views is None:
-            return
-        idt = wp.float32(1.0 / self.substep_dt)
-        wp.launch(
-            contact_per_contact_wrench_kernel,
-            dim=self.max_contact_columns,
-            inputs=[
-                self._contact_cols,
-                self.bodies,
-                self._contact_container,
-                self._contact_views,
-                wp.int32(self.max_contact_columns),
-                idt,
-            ],
-            outputs=[out],
-            device=self.device,
-        )
+        diagnostics.gather_contact_wrenches(self, out)
 
     def gather_contact_pair_wrenches(
         self,
@@ -5453,48 +5133,8 @@ class PhoenXWorld:
         contact_count: wp.array,
     ) -> None:
         """Per-contact-column wrench summary."""
-        if self.max_contact_columns == 0:
-            return
-        if self.substep_dt <= 0.0 or self._contact_views is None:
-            wrenches.zero_()
-            body1.fill_(-1)
-            body2.fill_(-1)
-            contact_count.zero_()
-            return
-        idt = wp.float32(1.0 / self.substep_dt)
-        wp.launch(
-            contact_pair_wrench_kernel,
-            dim=self.max_contact_columns,
-            inputs=[
-                self._contact_cols,
-                self.bodies,
-                self._contact_container,
-                self._contact_views,
-                wp.int32(self.max_contact_columns),
-                idt,
-            ],
-            outputs=[wrenches, body1, body2, contact_count],
-            device=self.device,
-        )
+        diagnostics.gather_contact_pair_wrenches(self, wrenches, body1, body2, contact_count)
 
     def gather_contact_errors(self, out: wp.array) -> None:
         """Per-individual-contact position-level residual."""
-        if self.max_contact_columns == 0:
-            out.zero_()
-            return
-        out.zero_()
-        if self._contact_views is None:
-            return
-        wp.launch(
-            contact_per_contact_error_kernel,
-            dim=self.max_contact_columns,
-            inputs=[
-                self._contact_cols,
-                self.bodies,
-                self._contact_container,
-                self._contact_views,
-                wp.int32(self.max_contact_columns),
-            ],
-            outputs=[out],
-            device=self.device,
-        )
+        diagnostics.gather_contact_errors(self, out)
