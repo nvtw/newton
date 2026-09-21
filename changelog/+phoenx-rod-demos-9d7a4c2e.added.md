@@ -1,1 +1,1 @@
-Add PhoenX slinky-stair and suspended double-loop rod examples using the public newton.Rod API.
+Add PhoenX slinky-stair, driven twisted-rod, and Wilberforce-pendulum examples using the public newton.Rod API.

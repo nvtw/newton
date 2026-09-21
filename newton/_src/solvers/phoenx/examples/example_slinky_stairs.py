@@ -6,9 +6,8 @@
 #
 # A capsule-segment helical spring walks down a staircase. Rod joints
 # preserve the helix's elastic rest curvature while allowing it to stretch,
-# bend, twist, and collide with non-neighboring coils. The upper coils start
-# bent over the first tread edge and are released from rest, matching how a
-# physical slinky is started without a scripted actuator or launch impulse.
+# bend, twist, and collide with non-neighboring coils. The undeformed spring
+# starts with a coherent tipping velocity about the first tread edge.
 #
 # Run:
 #   python -m newton._src.solvers.phoenx.examples.example_slinky_stairs
@@ -28,39 +27,35 @@ from newton._src.solvers.phoenx.examples._ported_example_base import (
     run_ported_example,
 )
 
-NUM_STEPS = 8
-STEP_TREAD = 0.42
-STEP_RISE = 0.20
-STAIR_WIDTH = 1.60
-TOP_LANDING_DEPTH = 1.20
+NUM_STEPS = 5
+STEP_TREAD = 0.90
+STEP_RISE = 0.65
+STAIR_WIDTH = 2.00
+TOP_LANDING_DEPTH = 1.80
 
 SLINKY_RADIUS = 0.23
 WIRE_RADIUS = 0.018
-NUM_TURNS = 12
-SEGMENTS_PER_TURN = 8
-TURN_PITCH = 0.043
-SLINKY_DENSITY = 180.0
+NUM_TURNS = 25
+SEGMENTS_PER_TURN = 20
+TURN_PITCH = 0.046
+SLINKY_DENSITY = 1200.0
+SLINKY_CONTACT_GAP = 0.005
 
-STRETCH_STIFFNESS = 2.0e6
+REFERENCE_YOUNGS_MODULUS = 3.6e9
+REFERENCE_SHEAR_MODULUS = 2.4e9
+MATERIAL_STIFFNESS_SCALE = 0.60
 STRETCH_DAMPING = 30.0
-SHEAR_STIFFNESS = 2.0e6
 SHEAR_DAMPING = 30.0
-BEND_STIFFNESS = 1.20
-BEND_DAMPING = 0.025
-TWIST_STIFFNESS = 0.40
-TWIST_DAMPING = 0.02
+BEND_DAMPING = 0.25
+TWIST_DAMPING = 0.25
 
-INITIAL_TIP_ANGLE = math.radians(100.0)
-INITIAL_TIP_START = 0.20
+INITIAL_CENTER_X = -0.45
+INITIAL_HEIGHT_OFFSET = 0.08
+INITIAL_FORWARD_SPEED = 1.0
 
 SLINKY_COLOR = (0.92, 0.50, 0.04)
 STAIR_COLOR = (0.42, 0.45, 0.50)
 GROUND_COLOR = (0.30, 0.32, 0.35)
-
-
-def _smoothstep(value: float) -> float:
-    value = min(max(value, 0.0), 1.0)
-    return value * value * (3.0 - 2.0 * value)
 
 
 class Example(PortedExample):
@@ -80,7 +75,8 @@ class Example(PortedExample):
     mass_splitting_color_group_size = 3
     max_colored_partitions = 8
     shape_pairs_max = 32768
-    show_contacts = False
+    speculative_contact_gap_max = 0.05
+    show_contacts = True
     evaluate_fk = False
     step_report_label = "SlinkyStairs"
 
@@ -95,63 +91,40 @@ class Example(PortedExample):
             density=SLINKY_DENSITY,
             mu=self.default_friction,
             restitution=0.0,
-            gap=0.003,
+            gap=SLINKY_CONTACT_GAP,
         )
-        rod = newton.Rod(points, radius=WIRE_RADIUS)
+        rod = newton.Rod(
+            points,
+            radius=WIRE_RADIUS,
+            youngs_modulus=MATERIAL_STIFFNESS_SCALE * REFERENCE_YOUNGS_MODULUS,
+            shear_modulus=MATERIAL_STIFFNESS_SCALE * REFERENCE_SHEAR_MODULUS,
+        )
         bodies, _ = builder.add_rod(
             rod=rod,
             cfg=shape_cfg,
-            stretch_stiffness=STRETCH_STIFFNESS,
             stretch_damping=STRETCH_DAMPING,
-            shear_stiffness=SHEAR_STIFFNESS,
             shear_damping=SHEAR_DAMPING,
-            bend_stiffness=BEND_STIFFNESS,
             bend_damping=BEND_DAMPING,
-            twist_stiffness=TWIST_STIFFNESS,
             twist_damping=TWIST_DAMPING,
             label="slinky",
             color=SLINKY_COLOR,
             body_frame_origin="com",
         )
         self.slinky_bodies = [int(body) for body in bodies]
-        self.initial_centroid_x = float(np.mean(points[:, 0]))
-        self.initial_min_x = float(np.min(points[:, 0]) - WIRE_RADIUS)
-        self.initial_min_z = float(np.min(points[:, 2]) - WIRE_RADIUS)
+        centers = 0.5 * (points[:-1] + points[1:])
+        linear_velocity = np.asarray((INITIAL_FORWARD_SPEED, 0.0, 0.0), dtype=np.float32)
+        angular_velocity = np.zeros(3, dtype=np.float32)
+        for body in self.slinky_bodies:
+            builder.body_qd[body] = wp.spatial_vector(*linear_velocity, *angular_velocity)
 
-        posed_points = self._initial_pose(points)
-        posed_rod = newton.Rod(posed_points, radius=WIRE_RADIUS)
-        centers = 0.5 * (posed_points[:-1] + posed_points[1:])
-        for body, center, quaternion in zip(self.slinky_bodies, centers, posed_rod.quaternions, strict=True):
-            builder.body_q[body] = wp.transform(wp.vec3(*center), wp.quat(*quaternion))
-            builder.body_qd[body] = wp.spatial_vector()
+        self.initial_centroid_x = float(np.mean(centers[:, 0]))
+        self.initial_min_x = float(np.min(centers[:, 0]) - WIRE_RADIUS)
+        self.initial_min_z = float(np.min(centers[:, 2]) - WIRE_RADIUS)
 
         segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
         extents = [default_capsule_half_extents(WIRE_RADIUS, 0.5 * float(length)) for length in segment_lengths]
 
         return extents
-
-    def _initial_pose(self, rest_points: np.ndarray) -> np.ndarray:
-        """Bend the upper coils over the first edge and release from rest."""
-        posed_points = rest_points.copy()
-        base_z = NUM_STEPS * STEP_RISE + WIRE_RADIUS + 0.003
-        pivot = np.asarray((-2.0 * SLINKY_RADIUS - 0.015, 0.0, base_z), dtype=np.float32)
-        point_count = len(rest_points)
-        for index, point in enumerate(rest_points):
-            height_fraction = index / (point_count - 1)
-            amount = _smoothstep((height_fraction - INITIAL_TIP_START) / (1.0 - INITIAL_TIP_START))
-            angle = INITIAL_TIP_ANGLE * amount
-            cosine = math.cos(angle)
-            sine = math.sin(angle)
-            relative = point - pivot
-            posed_points[index] = pivot + np.asarray(
-                (
-                    cosine * relative[0] + sine * relative[2],
-                    relative[1],
-                    -sine * relative[0] + cosine * relative[2],
-                ),
-                dtype=np.float32,
-            )
-        return posed_points
 
     def _add_stairs(self, builder: newton.ModelBuilder) -> None:
         """Add a top landing followed by descending solid steps."""
@@ -192,19 +165,19 @@ class Example(PortedExample):
             )
 
     def _slinky_points(self) -> np.ndarray:
-        """Return centerline nodes for a compressed upright helix."""
+        """Return a compressed helix whose axis points down the stair flight."""
         segment_count = NUM_TURNS * SEGMENTS_PER_TURN
         top_height = NUM_STEPS * STEP_RISE
-        base_z = top_height + WIRE_RADIUS + 0.003
-        center_x = -SLINKY_RADIUS - 0.015
+        center_z = top_height + SLINKY_RADIUS + WIRE_RADIUS + 0.003 + INITIAL_HEIGHT_OFFSET
+        start_x = INITIAL_CENTER_X - 0.5 * NUM_TURNS * TURN_PITCH
         points = np.empty((segment_count + 1, 3), dtype=np.float32)
         for index in range(segment_count + 1):
             turns = index / SEGMENTS_PER_TURN
             angle = 2.0 * math.pi * turns
             points[index] = (
-                center_x + SLINKY_RADIUS * math.cos(angle),
-                SLINKY_RADIUS * math.sin(angle),
-                base_z + TURN_PITCH * turns,
+                start_x + TURN_PITCH * turns,
+                SLINKY_RADIUS * math.cos(angle),
+                center_z + SLINKY_RADIUS * math.sin(angle),
             )
         return points
 
@@ -224,9 +197,9 @@ class Example(PortedExample):
         min_x = float(np.min(body_q[:, 0]) - WIRE_RADIUS)
         min_z = float(np.min(body_q[:, 2]) - WIRE_RADIUS)
         if (
-            centroid_x <= self.initial_centroid_x + STEP_TREAD
-            or min_x <= self.initial_min_x + 0.25
-            or min_z >= self.initial_min_z - STEP_RISE
+            centroid_x <= self.initial_centroid_x + 4.0 * STEP_TREAD
+            or min_x <= self.initial_min_x + 3.0 * STEP_TREAD
+            or min_z >= self.initial_min_z - (NUM_STEPS - 1) * STEP_RISE
         ):
             raise AssertionError(
                 "slinky did not carry its complete span down the stairs "
@@ -237,7 +210,7 @@ class Example(PortedExample):
 
 
 def _configure_parser(parser) -> None:
-    parser.set_defaults(viewer="optix", num_frames=360)
+    parser.set_defaults(viewer="optix", num_frames=600)
 
 
 if __name__ == "__main__":

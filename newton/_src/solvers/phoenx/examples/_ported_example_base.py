@@ -145,7 +145,8 @@ class PortedExample:
       body (length ``builder.body_count``); pass ``None`` to skip
       picking on a body.
     * :meth:`configure_camera(viewer)` -- ``viewer.set_camera(...)``.
-    * Override :attr:`fps`, :attr:`sim_substeps`, :attr:`solver_iterations`,
+    * Override :attr:`fps`, :attr:`collision_updates_per_frame`,
+      :attr:`sim_substeps`, :attr:`solver_iterations`,
       :attr:`velocity_iterations`, :attr:`gravity`, :attr:`step_layout`,
       :attr:`broad_phase`, :attr:`shape_pairs_max`, :attr:`default_friction`,
       :attr:`default_restitution`, :attr:`show_contacts`,
@@ -154,6 +155,10 @@ class PortedExample:
 
     overlap_simulation_render: bool = True
     fps: int = 60
+    #: Number of collision-and-solve updates per rendered frame. Each
+    #: update advances ``frame_dt / collision_updates_per_frame`` and
+    #: contains :attr:`sim_substeps` solver substeps.
+    collision_updates_per_frame: int = 1
     sim_substeps: int = 4
     solver_iterations: int = 8
     velocity_iterations: int = 1
@@ -161,6 +166,10 @@ class PortedExample:
     step_layout: str = "multi_world"
     broad_phase: str = "nxn"
     shape_pairs_max: int | None = None
+    #: Maximum velocity-derived contact extension [m]. ``None`` keeps
+    #: geometric contact generation; a finite value enables Newton's
+    #: velocity-filtered speculative contacts over one frame.
+    speculative_contact_gap_max: float | None = None
     default_friction: float = 0.5
     default_restitution: float = 0.0
     #: Whether contact arrows may be drawn. Showing them synchronizes a
@@ -271,6 +280,15 @@ class PortedExample:
         does nothing."""
         return
 
+    def prepare_collision_update(self, dt: float) -> None:
+        """Update scene-owned kinematics before one collision query.
+
+        This hook runs once per :attr:`collision_updates_per_frame`, so
+        collision sees the current pose of driven bodies even when its
+        cadence is higher than the rendered frame rate.
+        """
+        return
+
     # ------------------------------------------------------------------
     # Build pipeline
     # ------------------------------------------------------------------
@@ -292,6 +310,8 @@ class PortedExample:
         }
         if self.shape_pairs_max is not None:
             pipeline_kwargs["shape_pairs_max"] = self.shape_pairs_max
+        if self.speculative_contact_gap_max is not None:
+            pipeline_kwargs["speculative_contact_gap_max"] = self.speculative_contact_gap_max
         self.collision_pipeline = newton.CollisionPipeline(self.model, **pipeline_kwargs)
         self.contacts = self.collision_pipeline.contacts()
 
@@ -355,10 +375,13 @@ class PortedExample:
 
     def simulate(self) -> None:
         """Advance one frame through the production SolverPhoenX adapter."""
-        self.state.clear_forces()
-        self.viewer.apply_forces(self.state)
-        self.collision_pipeline.collide(self.state, self.contacts)
-        self.solver.step(self.state, self.state, self.control, self.contacts, self.frame_dt)
+        update_dt = self.frame_dt / self.collision_updates_per_frame
+        for _ in range(self.collision_updates_per_frame):
+            self.state.clear_forces()
+            self.viewer.apply_forces(self.state)
+            self.prepare_collision_update(update_dt)
+            self.collision_pipeline.collide(self.state, self.contacts, dt=update_dt)
+            self.solver.step(self.state, self.state, self.control, self.contacts, update_dt)
 
     def step(self) -> None:
         if self.graph is not None:
