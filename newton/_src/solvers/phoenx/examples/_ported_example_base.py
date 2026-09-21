@@ -195,6 +195,9 @@ class PortedExample:
     #: per-(body, partition) copy states. Requires
     #: ``step_layout = "single_world"``.
     mass_splitting: bool = False
+    #: Number of sequential colors that share one mass-split body copy.
+    #: Zero preserves independent-color scheduling.
+    mass_splitting_color_group_size: int = 0
     #: K — the number of "regular" colour partitions the graph
     #: coloring is capped at when :attr:`mass_splitting` is enabled.
     #: Any constraint that wouldn't fit lands in the overflow bucket.
@@ -318,6 +321,7 @@ class PortedExample:
             step_layout=self.step_layout,
             max_thread_blocks=self.max_thread_blocks,
             mass_splitting=self.mass_splitting,
+            mass_splitting_color_group_size=self.mass_splitting_color_group_size,
             max_colored_partitions=self.max_colored_partitions,
             mass_splitting_unrolled=self.mass_splitting_unrolled,
             max_greedy_outer_iters=self.max_greedy_outer_iters,

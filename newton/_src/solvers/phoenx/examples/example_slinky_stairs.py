@@ -4,11 +4,11 @@
 ###########################################################################
 # PhoenX slinky stairs
 #
-# A capsule-segment helical spring walks down a staircase. Cable joints
+# A capsule-segment helical spring walks down a staircase. Rod joints
 # preserve the helix's elastic rest curvature while allowing it to stretch,
-# bend, twist, and collide with non-neighboring coils. The upper half starts
-# with a graded forward/downward velocity and pitch rate, initiating the
-# familiar end-over-end slinky motion without a scripted actuator.
+# bend, twist, and collide with non-neighboring coils. The upper coils start
+# bent over the first tread edge and are released from rest, matching how a
+# physical slinky is started without a scripted actuator or launch impulse.
 #
 # Run:
 #   python -m newton._src.solvers.phoenx.examples.example_slinky_stairs
@@ -45,14 +45,13 @@ STRETCH_STIFFNESS = 2.0e6
 STRETCH_DAMPING = 30.0
 SHEAR_STIFFNESS = 2.0e6
 SHEAR_DAMPING = 30.0
-BEND_STIFFNESS = 0.25
+BEND_STIFFNESS = 1.20
 BEND_DAMPING = 0.025
-TWIST_STIFFNESS = 0.10
+TWIST_STIFFNESS = 0.40
 TWIST_DAMPING = 0.02
 
-KICK_FORWARD_SPEED = 2.00
-KICK_DOWN_SPEED = 0.50
-KICK_PITCH_RATE = 6.0
+INITIAL_TIP_ANGLE = math.radians(100.0)
+INITIAL_TIP_START = 0.20
 
 SLINKY_COLOR = (0.92, 0.50, 0.04)
 STAIR_COLOR = (0.42, 0.45, 0.50)
@@ -71,9 +70,15 @@ class Example(PortedExample):
     sim_substeps = 10
     solver_iterations = 6
     velocity_iterations = 1
-    default_friction = 0.65
+    default_friction = 0.40
     broad_phase = "sap"
     step_layout = "single_world"
+    # Direct-contact runs otherwise apply one articulation-wide response per
+    # contact. Grouped mass splitting processes independent contact groups in
+    # parallel and restores the exact joint manifold between grouped sweeps.
+    mass_splitting = True
+    mass_splitting_color_group_size = 3
+    max_colored_partitions = 8
     shape_pairs_max = 32768
     show_contacts = False
     evaluate_fk = False
@@ -92,10 +97,9 @@ class Example(PortedExample):
             restitution=0.0,
             gap=0.003,
         )
+        rod = newton.Rod(points, radius=WIRE_RADIUS)
         bodies, _ = builder.add_rod(
-            positions=[wp.vec3(*point) for point in points],
-            quaternions=None,
-            radius=WIRE_RADIUS,
+            rod=rod,
             cfg=shape_cfg,
             stretch_stiffness=STRETCH_STIFFNESS,
             stretch_damping=STRETCH_DAMPING,
@@ -111,27 +115,43 @@ class Example(PortedExample):
         )
         self.slinky_bodies = [int(body) for body in bodies]
         self.initial_centroid_x = float(np.mean(points[:, 0]))
+        self.initial_min_x = float(np.min(points[:, 0]) - WIRE_RADIUS)
         self.initial_min_z = float(np.min(points[:, 2]) - WIRE_RADIUS)
+
+        posed_points = self._initial_pose(points)
+        posed_rod = newton.Rod(posed_points, radius=WIRE_RADIUS)
+        centers = 0.5 * (posed_points[:-1] + posed_points[1:])
+        for body, center, quaternion in zip(self.slinky_bodies, centers, posed_rod.quaternions, strict=True):
+            builder.body_q[body] = wp.transform(wp.vec3(*center), wp.quat(*quaternion))
+            builder.body_qd[body] = wp.spatial_vector()
 
         segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
         extents = [default_capsule_half_extents(WIRE_RADIUS, 0.5 * float(length)) for length in segment_lengths]
 
-        # A graded kick folds the upper coils over the stair edge. Lower coils
-        # remain nearly stationary, so cable tension drives the first transfer.
-        count = len(self.slinky_bodies)
-        for index, body in enumerate(self.slinky_bodies):
-            height_fraction = (index + 0.5) / count
-            kick = _smoothstep((height_fraction - 0.38) / 0.62)
-            builder.body_qd[body] = wp.spatial_vector(
-                KICK_FORWARD_SPEED * kick,
-                0.0,
-                -KICK_DOWN_SPEED * kick,
-                0.0,
-                KICK_PITCH_RATE * kick,
-                0.0,
-            )
-
         return extents
+
+    def _initial_pose(self, rest_points: np.ndarray) -> np.ndarray:
+        """Bend the upper coils over the first edge and release from rest."""
+        posed_points = rest_points.copy()
+        base_z = NUM_STEPS * STEP_RISE + WIRE_RADIUS + 0.003
+        pivot = np.asarray((-2.0 * SLINKY_RADIUS - 0.015, 0.0, base_z), dtype=np.float32)
+        point_count = len(rest_points)
+        for index, point in enumerate(rest_points):
+            height_fraction = index / (point_count - 1)
+            amount = _smoothstep((height_fraction - INITIAL_TIP_START) / (1.0 - INITIAL_TIP_START))
+            angle = INITIAL_TIP_ANGLE * amount
+            cosine = math.cos(angle)
+            sine = math.sin(angle)
+            relative = point - pivot
+            posed_points[index] = pivot + np.asarray(
+                (
+                    cosine * relative[0] + sine * relative[2],
+                    relative[1],
+                    -sine * relative[0] + cosine * relative[2],
+                ),
+                dtype=np.float32,
+            )
+        return posed_points
 
     def _add_stairs(self, builder: newton.ModelBuilder) -> None:
         """Add a top landing followed by descending solid steps."""
@@ -201,11 +221,17 @@ class Example(PortedExample):
         super().test_final()
         body_q = self.state.body_q.numpy()[self.slinky_bodies]
         centroid_x = float(np.mean(body_q[:, 0]))
+        min_x = float(np.min(body_q[:, 0]) - WIRE_RADIUS)
         min_z = float(np.min(body_q[:, 2]) - WIRE_RADIUS)
-        if centroid_x <= self.initial_centroid_x + 0.10 or min_z >= self.initial_min_z - 0.5 * STEP_RISE:
+        if (
+            centroid_x <= self.initial_centroid_x + STEP_TREAD
+            or min_x <= self.initial_min_x + 0.25
+            or min_z >= self.initial_min_z - STEP_RISE
+        ):
             raise AssertionError(
-                "slinky did not begin descending "
+                "slinky did not carry its complete span down the stairs "
                 f"(centroid_dx={centroid_x - self.initial_centroid_x:.3f} m, "
+                f"trailing_dx={min_x - self.initial_min_x:.3f} m, "
                 f"min_dz={min_z - self.initial_min_z:.3f} m)"
             )
 
