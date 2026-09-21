@@ -1393,48 +1393,18 @@ linear and angular velocity at the contact points. Common motion and receding mo
 therefore do not enlarge the gap. Broad phase uses a conservative motion bound; narrow
 phase applies the normal-directed test above.
 
-``e_max`` is one limit for the shape pair, not a per-shape distance to be added
-twice. Likewise, margins do not add to the velocity-derived travel budget: they
-are already removed from the true surface distance when Newton forms
-``d = s - (margin_a + margin_b)``. A conservative caller-provided bound
-``v_bound`` on relative contact-point speed therefore gives the collision-update
-limit
+The configured maximum extension is one limit for the shape pair, not a
+per-shape distance to add twice. If collision detection is skipped between
+solver substeps, sufficiently fast bodies can travel beyond that extension and
+tunnel through one another.
 
-.. math::
-
-   dt_{max} = \frac{\max(g, e_{max})}{v_{bound}}.
-
-For a shape, ``|v_origin| + |omega| r`` bounds contact-point speed when ``r``
-bounds the distance from the shape origin to its collision geometry. A caller
-does not need to inspect every possible pair: if ``v_max`` is the maximum of
-this bound over all shapes, then ``v_bound = 2 v_max`` conservatively covers
-two shapes moving directly toward one another at that maximum speed. For a
-global estimate, ``g`` must likewise be a lower bound on the pair gap of every
-possible collision; using ``g = 0`` and therefore only ``e_max`` is always the
-conservative choice when that pair information is unavailable. This estimate
-uses velocities at the beginning of the interval; callers must use additional
-headroom or update more frequently when forces, impulses, or prescribed motion
-can substantially increase velocity before the next collision pass.
-
-With a fixed frame step ``T`` split into ``N`` solver substeps of length
-``h = T/N``, collision frequency can be adapted without changing either ``N``
-or ``h``. Choose the largest collision interval ``k`` that satisfies
-
-.. math::
-
-   2 v_{max} k h \leq \max(g, e_{max}),
-
-run collision detection before substep zero and every ``k`` substeps
-thereafter, and always execute all ``N`` solver substeps. Restricting ``k`` to
-divisors of ``N`` gives a periodic schedule across frame boundaries. If the
-condition fails even for ``k=1``, the fixed substep count is insufficient for
-the configured speed and detection-distance bounds.
-
-:class:`newton.CollisionSubstepScheduler` implements this schedule without a
-device-to-host copy. It evaluates the global speed bound in one kernel,
-selects a collision interval on the device, calls collision detection before
-substep zero and at that interval, and always consumes the full configured
-substep count:
+:class:`newton.CollisionSubstepScheduler` addresses this by varying how often
+collision detection runs within a frame. The total number of simulation
+substeps remains fixed. The scheduler always runs collision detection at the
+beginning of a frame, tracks a conservative global motion estimate on the
+device, and runs additional collision passes only when needed. The estimate
+assumes that two bodies may move directly toward one another at the maximum
+observed shape speed:
 
 .. code-block:: python
 
@@ -1452,22 +1422,21 @@ substep count:
         solver.step(state_in, state_out, control, contacts, substep_dt)
 
     schedule = newton.CollisionSubstepScheduler(
-        model,
+        pipeline,
         states,
         collision_callback=collide,
         substep_callback=substep,
         frame_dt=1.0 / 60.0,
         substeps=10,
-        speculative_contact_gap_max=0.1,
     )
     schedule.step()
 
-The callbacks and their storage must be safe for CUDA graph capture. The same
-``step()`` call works directly or records the fixed schedule into an active
-outer graph capture. The two states are ping-pong buffers and the substep count
-must be even, so each complete frame begins and ends in ``states[0]``. The device scalar
-``schedule.interval_overflow`` is set to one when even collision detection on
-every substep cannot satisfy the speed bound.
+The same ``step()`` call works directly or inside CUDA graph capture; callbacks
+must therefore be capture-safe and preallocate their storage. The scheduler
+always executes every configured solver substep. Its two states are ping-pong
+buffers, so the substep count must be even. ``schedule.interval_overflow`` is
+set when collision detection on every substep is still insufficient; in that
+case, increase the substep count or the speculative extension limit.
 
 Enable the feature with the keyword-only ``speculative_contact_gap_max`` constructor argument:
 

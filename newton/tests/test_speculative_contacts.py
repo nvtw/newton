@@ -948,7 +948,7 @@ def test_speculative_contacts_prevent_dynamic_tunneling(test, device):
 
 
 def test_adaptive_collision_schedule_prevents_capsule_tunneling(test, device, external_capture=False):
-    """Refresh collision every substep when fixed substeps need the extreme schedule."""
+    """Refresh collisions often enough to prevent opposing capsules from tunneling."""
     frame_dt = 0.01
     substeps = 10
     max_speculative_extension = 0.2
@@ -996,13 +996,12 @@ def test_adaptive_collision_schedule_prevents_capsule_tunneling(test, device, ex
         wp.launch(_increment_counter, dim=1, inputs=[substep_calls], device=device)
 
     scheduler = newton.CollisionSubstepScheduler(
-        adaptive_model,
+        pipeline,
         states,
         collision_callback=collide,
         substep_callback=substep,
         frame_dt=frame_dt,
         substeps=substeps,
-        speculative_contact_gap_max=max_speculative_extension,
     )
     if external_capture:
         with wp.ScopedCapture(device=device) as capture:
@@ -1011,18 +1010,53 @@ def test_adaptive_collision_schedule_prevents_capsule_tunneling(test, device, ex
     else:
         scheduler.step()
 
-    conditions = scheduler._interval_conditions.numpy()
-    active = np.flatnonzero(conditions)
-    selected_index = int(active[0]) if len(active) else len(scheduler.collision_intervals) - 1
-    test.assertEqual(scheduler.collision_intervals[selected_index], 1)
     test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 0)
-    test.assertEqual(int(collision_calls.numpy()[0]), substeps)
+    test.assertGreaterEqual(int(collision_calls.numpy()[0]), 2)
+    test.assertLessEqual(int(collision_calls.numpy()[0]), substeps)
     test.assertEqual(int(substep_calls.numpy()[0]), substeps)
     test.assertEqual(int(detected.numpy()[0]), 1)
     positions = states[0].body_q.numpy()
     adaptive_x_a = float(positions[adaptive_a, 0])
     adaptive_x_b = float(positions[adaptive_b, 0])
     test.assertLess(adaptive_x_a, adaptive_x_b)
+
+
+def test_adaptive_collision_schedule_tracks_acceleration(test, device):
+    """Refresh collision detection when accumulated travel grows during the frame."""
+    frame_dt = 1.0
+    substeps = 10
+    travel_budget = 2.0
+
+    builder = newton.ModelBuilder(gravity=wp.vec3(0.0, -10.0, 0.0))
+    body = builder.add_body()
+    builder.add_shape_sphere(body, radius=0.1)
+    model = builder.finalize(device=device)
+    states = (model.state(), model.state())
+    pipeline = newton.CollisionPipeline(model, speculative_contact_gap_max=travel_budget)
+    solver = newton.solvers.SolverXPBD(model, iterations=1)
+    collision_calls = wp.zeros(1, dtype=wp.int32, device=device)
+
+    def collide(state, dt):
+        del state, dt
+        wp.launch(_increment_counter, dim=1, inputs=[collision_calls], device=device)
+
+    def substep(state_in, state_out, dt):
+        state_in.clear_forces()
+        solver.step(state_in, state_out, None, None, dt)
+
+    scheduler = newton.CollisionSubstepScheduler(
+        pipeline,
+        states,
+        collision_callback=collide,
+        substep_callback=substep,
+        frame_dt=frame_dt,
+        substeps=substeps,
+    )
+    scheduler.step()
+
+    test.assertGreater(int(collision_calls.numpy()[0]), 1)
+    test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 0)
+    test.assertGreater(float(scheduler.travel_estimate.numpy()[0]), 0.0)
 
 
 def test_speculative_narrow_phase_launch(test, device):
@@ -1567,6 +1601,7 @@ for _name, _test in (
         "test_adaptive_collision_schedule_prevents_capsule_tunneling",
         test_adaptive_collision_schedule_prevents_capsule_tunneling,
     ),
+    ("test_adaptive_collision_schedule_tracks_acceleration", test_adaptive_collision_schedule_tracks_acceleration),
     ("test_speculative_narrow_phase_launch", test_speculative_narrow_phase_launch),
     (
         "test_speculative_narrow_phase_rejects_hydroelastic",

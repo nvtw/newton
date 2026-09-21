@@ -146,13 +146,12 @@ class Example:
         )
 
         self.scheduler = newton.CollisionSubstepScheduler(
-            self.model,
+            self.collision_pipeline,
             self.states,
             collision_callback=self._collide,
             substep_callback=self._substep,
             frame_dt=self.frame_dt,
             substeps=SUBSTEPS,
-            speculative_contact_gap_max=SPECULATIVE_GAP_MAX,
         )
 
         self.viewer.set_model(self.model)
