@@ -13,6 +13,7 @@ from newton.examples.phoenx.example_phoenx_bike_transmission import (
     ASSETS,
     CHAIN_JOINT_FRICTION,
     DEFAULT_REAR_LOAD_DAMPING,
+    DEFAULT_STARTUP_RAMP_TIME,
     DERAILLEUR_DAMPING_SCALE,
     DERAILLEUR_PRELOAD_SCALE,
     DERAILLEUR_SPRING_LABELS,
@@ -22,16 +23,46 @@ from newton.examples.phoenx.example_phoenx_bike_transmission import (
     _body_density,
     _joint_drive_parameters,
     _load_mesh,
+    _simulation_schedule,
     _transform,
 )
 from newton.viewer import ViewerNull
+
+
+def _max_live_contact_penetration(example):
+    """Measure current saved contacts without running collision detection again."""
+    contacts = example.contacts
+    count = min(int(contacts.rigid_contact_count.numpy()[0]), contacts.rigid_contact_max)
+    poses = example.state.body_q.numpy()
+    shape_body = example.model.shape_body.numpy()
+    shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+    shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+    point0 = contacts.rigid_contact_point0.numpy()[:count]
+    point1 = contacts.rigid_contact_point1.numpy()[:count]
+    normals = contacts.rigid_contact_normal.numpy()[:count]
+    margin0 = contacts.rigid_contact_margin0.numpy()[:count]
+    margin1 = contacts.rigid_contact_margin1.numpy()[:count]
+    deepest = 0.0
+    for i in range(count):
+        body0 = int(shape_body[shape0[i]])
+        body1 = int(shape_body[shape1[i]])
+        p0 = point0[i] if body0 < 0 else np.asarray(wp.transform_point(_transform(poses[body0]), wp.vec3(*point0[i])))
+        p1 = point1[i] if body1 < 0 else np.asarray(wp.transform_point(_transform(poses[body1]), wp.vec3(*point1[i])))
+        separation = float(np.dot(p1 - p0, normals[i]) - margin0[i] - margin1[i])
+        deepest = max(deepest, -separation)
+    return deepest
 
 
 class TestBikeTransmission(unittest.TestCase):
     def test_measured_solver_defaults(self):
         """Keep the validated low-work solver configuration."""
         args = Example.create_parser().parse_args([])
-        self.assertEqual(args.substeps, 8)
+        self.assertEqual(args.substeps, 0)
+        self.assertEqual(args.contact_updates_per_frame, 0)
+        self.assertEqual(args.startup_ramp_time, DEFAULT_STARTUP_RAMP_TIME)
+        self.assertEqual(_simulation_schedule(60.0), (2, 8))
+        self.assertEqual(_simulation_schedule(90.0), (3, 6))
+        self.assertEqual(_simulation_schedule(120.0), (4, 6))
         self.assertEqual(args.iterations, 4)
         self.assertEqual(Example.color_group_size, 2)
         self.assertEqual(args.speculative_contact_gap_max, SPECULATIVE_CONTACT_GAP_MAX)
@@ -56,6 +87,32 @@ class TestBikeTransmission(unittest.TestCase):
         self.assertGreater(metrics["speed_ratio"], 2.5)
         self.assertLess(metrics["speed_ratio"], 4.5)
         self.assertLess(float(np.ptp(chain_y)), 0.005)
+
+    def test_loaded_chain_transmits_power_at_high_cadence(self):
+        """Keep the drivetrain engaged with cadence-scaled contact refreshes."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+        if not (ASSETS / SCENE["shapes"][0]["mesh"]).is_file():
+            self.skipTest("BikeTransmission meshes are local copyrighted assets")
+
+        args = Example.create_parser().parse_args(["--cadence-rpm", "120"])
+        example = Example(ViewerNull(), args)
+        self.assertEqual((example.contact_updates_per_frame, example.substeps), (4, 6))
+        max_penetration = 0.0
+        for frame in range(360):
+            example.step()
+            if (frame + 1) % 30 == 0:
+                max_penetration = max(max_penetration, _max_live_contact_penetration(example))
+
+        example.test_final()
+        metrics = example.drivetrain_metrics()
+        chain_y = example.state.body_q.numpy()[example.chain_bodies, 1]
+        self.assertTrue(np.isfinite(tuple(metrics.values())).all())
+        self.assertGreater(metrics["rear_load_power_w"], 10.0)
+        self.assertGreater(metrics["speed_ratio"], 2.5)
+        self.assertLess(metrics["speed_ratio"], 4.5)
+        self.assertLess(float(np.ptp(chain_y)), 0.005)
+        self.assertLess(max_penetration, 0.003)
 
     def test_derailleur_spring_preload(self):
         """Increase derailleur preload without stiffening its dynamic response."""

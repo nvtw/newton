@@ -31,6 +31,7 @@ CHAIN_JOINT_FRICTION = 5.0e-4
 DRIVETRAIN_CONTACT_FRICTION = 0.1
 DEFAULT_CADENCE_RPM = 60.0
 DEFAULT_REAR_LOAD_DAMPING = 0.020053523
+DEFAULT_STARTUP_RAMP_TIME = 2.0
 # The 120 Hz collision cadence advances a front tooth by about 5 mm at
 # 60 rpm. Keep one update of travel in the velocity-derived search envelope.
 SPECULATIVE_CONTACT_GAP_MAX = 0.006
@@ -42,6 +43,23 @@ DERAILLEUR_SPRING_LABELS = frozenset(
         "/World/Xform/Changer/RD_R9250_CAGE/SmallGearFrame/RevoluteJoint",
     }
 )
+
+
+@wp.kernel
+def _approach_joint_velocity(targets: wp.array[wp.float32], dof: int, target: float, max_delta: float):
+    error = target - targets[dof]
+    targets[dof] += wp.clamp(error, -max_delta, max_delta)
+
+
+def _simulation_schedule(cadence_rpm: float, contact_updates_per_frame: int = 0, substeps: int = 0) -> tuple[int, int]:
+    """Resolve contact and integration rates from sprocket travel."""
+    if cadence_rpm <= 0.0:
+        raise ValueError("cadence must be positive")
+    if contact_updates_per_frame < 0 or substeps < 0:
+        raise ValueError("contact updates and substeps must be nonnegative")
+    contact_updates = contact_updates_per_frame or max(2, int(np.ceil(cadence_rpm / 30.0)))
+    resolved_substeps = substeps or (8 if contact_updates <= 2 else 6)
+    return contact_updates, resolved_substeps
 
 
 def _transform(values):
@@ -202,8 +220,14 @@ class Example:
         self.cadence_rpm = getattr(args, "cadence_rpm", DEFAULT_CADENCE_RPM)
         self.rear_load_damping = getattr(args, "rear_load_damping", DEFAULT_REAR_LOAD_DAMPING)
         self.speculative_contact_gap_max = getattr(args, "speculative_contact_gap_max", SPECULATIVE_CONTACT_GAP_MAX)
-        if args.substeps < 1 or args.iterations < 1:
-            raise ValueError("substeps and iterations must be positive")
+        self.startup_ramp_time = getattr(args, "startup_ramp_time", DEFAULT_STARTUP_RAMP_TIME)
+        self.contact_updates_per_frame, self.substeps = _simulation_schedule(
+            self.cadence_rpm,
+            getattr(args, "contact_updates_per_frame", 0),
+            args.substeps,
+        )
+        if args.iterations < 1:
+            raise ValueError("iterations must be positive")
         if not 1 <= args.direct_joint_projection_passes <= args.iterations:
             raise ValueError("direct joint projection passes must be between 1 and iterations")
         if (
@@ -214,10 +238,11 @@ class Example:
             or self.cadence_rpm <= 0.0
             or self.rear_load_damping < 0.0
             or self.speculative_contact_gap_max < 0.0
+            or self.startup_ramp_time < 0.0
         ):
             raise ValueError(
-                "contact chunk size, chain joint friction, rear load damping, and speculative contact gap "
-                "must be nonnegative; "
+                "contact chunk size, chain joint friction, rear load damping, speculative contact gap, and startup "
+                "ramp time must be nonnegative; "
                 "cadence and derailleur scales must be positive"
             )
         self.model = build_scene(
@@ -234,6 +259,12 @@ class Example:
         labels = list(self.model.joint_label)
         self._front_joint = labels.index("/World/Xform/FrontGears/RevoluteJoint")
         self._rear_joint = labels.index("/World/Xform/BackGears/LoadRevoluteJoint")
+        self._front_dof = int(self.model.joint_qd_start.numpy()[self._front_joint])
+        self._drive_target_velocity = 0.0 if args.motor_off else -self.cadence_rpm * 2.0 * np.pi / 60.0
+        if self.startup_ramp_time > 0.0 and not args.motor_off:
+            targets = self.control.joint_target_qd.numpy()
+            targets[self._front_dof] = 0.0
+            self.control.joint_target_qd.assign(targets)
         self.chain_bodies = np.asarray(
             [i for i, label in enumerate(self.model.body_label) if "/Chain/" in label], dtype=np.int32
         )
@@ -252,7 +283,7 @@ class Example:
             articulation_mode="maximal",
             joint_solver="direct",
             step_layout="single_world",
-            substeps=args.substeps,
+            substeps=self.substeps,
             solver_iterations=args.iterations,
             velocity_iterations=1,
             direct_joint_projection_passes=args.direct_joint_projection_passes,
@@ -319,8 +350,20 @@ class Example:
         self._render_state_prepared = True
 
     def simulate(self):
-        for _ in range(2):
-            dt = self.frame_dt / 2
+        if self.startup_ramp_time > 0.0 and self._drive_target_velocity != 0.0:
+            wp.launch(
+                _approach_joint_velocity,
+                dim=1,
+                inputs=[
+                    self.control.joint_target_qd,
+                    self._front_dof,
+                    self._drive_target_velocity,
+                    abs(self._drive_target_velocity) * self.frame_dt / self.startup_ramp_time,
+                ],
+                device=self.model.device,
+            )
+        for _ in range(self.contact_updates_per_frame):
+            dt = self.frame_dt / self.contact_updates_per_frame
             self.pipeline.collide(self.state, self.contacts, dt=dt)
             self.state.clear_forces()
             self.viewer.apply_forces(self.state)
@@ -439,7 +482,18 @@ class Example:
             default=2,
             help="Exact D6 projections distributed across each contact solve (default: 2).",
         )
-        parser.add_argument("--substeps", type=int, default=8, help="Physics substeps per 120 Hz contact refresh.")
+        parser.add_argument(
+            "--substeps",
+            type=int,
+            default=0,
+            help="Physics substeps per contact refresh (0 selects 8 at 120 Hz and 6 above it).",
+        )
+        parser.add_argument(
+            "--contact-updates-per-frame",
+            type=int,
+            default=0,
+            help="Collision/contact refreshes per 60 Hz frame (0 scales with cadence, from 120 Hz).",
+        )
         parser.add_argument(
             "--sdf-voxel-depth-contacts",
             action=argparse.BooleanOptionalAction,
@@ -452,6 +506,12 @@ class Example:
         parser.add_argument("--motor-off", action="store_true", help="Disable the crank drive for passive diagnostics.")
         parser.add_argument(
             "--cadence-rpm", type=float, default=DEFAULT_CADENCE_RPM, help="Crank velocity-drive target in rpm."
+        )
+        parser.add_argument(
+            "--startup-ramp-time",
+            type=float,
+            default=DEFAULT_STARTUP_RAMP_TIME,
+            help="Seconds used to ramp the crank drive from rest (0 applies the target immediately).",
         )
         parser.add_argument(
             "--rear-load-damping",
