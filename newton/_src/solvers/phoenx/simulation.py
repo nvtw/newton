@@ -132,6 +132,9 @@ from newton._src.solvers.phoenx.dispatch.color_groups import get_sweep_kernel as
 from newton._src.solvers.phoenx.dispatch.color_groups import use_cooperative_joint_rhs
 from newton._src.solvers.phoenx.dispatch.color_groups_tgs import get_sweep_kernel
 from newton._src.solvers.phoenx.dispatch.multi_world import MultiWorldDispatcher
+from newton._src.solvers.phoenx.dispatch.multi_world_mass_splitting import (
+    MultiWorldMassSplittingDispatcher,
+)
 from newton._src.solvers.phoenx.dispatch.single_world import SingleWorldDispatcher
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting import (
     SingleWorldMassSplittingDispatcher,
@@ -177,6 +180,7 @@ from newton._src.solvers.phoenx.mass_splitting import (
     launch_broadcast_rigid_to_copy_states,
     launch_copy_state_into_rigids,
     record_all_interactions_kernel,
+    record_all_interactions_multiworld_kernel,
 )
 from newton._src.solvers.phoenx.mass_splitting import color_groups as color_group_topology
 from newton._src.solvers.phoenx.mass_splitting.slot_cache import (
@@ -219,6 +223,8 @@ from newton._src.solvers.phoenx.simulation_kernels import (
     _set_kinematic_pose_batch_kernel,
     get_block_world_kernel,
     get_fast_tail_kernel,
+    get_multiworld_mass_splitting_kernel,
+    get_multiworld_mass_splitting_overflow_kernel,
     get_per_world_greedy_coloring_kernel,
     get_singleworld_kernel,
     pack_body_xforms_kernel,
@@ -873,6 +879,7 @@ class PhoenXWorld:
         self._reuse_rigid_coloring = bool(
             PHOENX_USE_GREEDY_COLORING
             and self.step_layout != "single_world"
+            and not bool(mass_splitting)
             and self.device.is_cuda
             and wp.is_conditional_graph_supported()
             and self.num_particles == 0
@@ -902,18 +909,6 @@ class PhoenXWorld:
         # :class:`IncrementalContactPartitioner` ctor validates the cap
         # against ``GREEDY_MAX_COLORS`` / ``MAX_COLORS``.
         self.mass_splitting_enabled: bool = bool(mass_splitting)
-        if self.mass_splitting_enabled:
-            # The multi-world fast-tail kernels run all colours at
-            # ``parallel_id=0`` (they don't track overflow), so mass
-            # splitting still requires the single-world step layout.
-            # Joint and cloth-triangle constraints now route through the
-            # slot-aware helpers, so they're free to coexist with mass
-            # splitting in single-world mode.
-            if step_layout != "single_world":
-                raise NotImplementedError(
-                    "mass_splitting=True currently requires step_layout='single_world' "
-                    "(multi-world fast-tail kernels haven't been refactored yet)."
-                )
         self.max_colored_partitions: int | None = int(max_colored_partitions) if self.mass_splitting_enabled else None
         if self.mass_splitting_enabled and int(mass_splitting_batch_size) < 1:
             raise ValueError(f"mass_splitting_batch_size must be >= 1 (got {mass_splitting_batch_size})")
@@ -1093,6 +1088,11 @@ class PhoenXWorld:
             2 * scan_blocks, dtype=wp.int32, device=self.device
         )
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
+        # Explicit copy-state partition for every row in a multi-world
+        # mass-splitting schedule. Regular colors use zero; overflow rows use
+        # their world-local batch index.
+        self._multiworld_row_partition: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
+        self._multiworld_row_batch_start: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
         self._per_world_node_color_mask: wp.array[wp.uint64] = wp.zeros(
             max(1, self.num_bodies + self.num_particles), dtype=wp.uint64, device=self.device
         )
@@ -1315,9 +1315,9 @@ class PhoenXWorld:
             else:
                 self._dispatcher = SingleWorldDispatcher(self)
         else:
-            # mass_splitting + multi_world is rejected by the earlier
-            # validation in this ctor.
-            self._dispatcher = MultiWorldDispatcher(self)
+            self._dispatcher = (
+                MultiWorldMassSplittingDispatcher(self) if self.mass_splitting_enabled else MultiWorldDispatcher(self)
+            )
 
         self._assert_invariants()
 
@@ -3571,6 +3571,43 @@ class PhoenXWorld:
             ms_batch_size=int(self.mass_splitting_batch_size),
         )
 
+    def _rebuild_multiworld_mass_splitting_graph(self) -> None:
+        """Build copy ownership from the capped per-world CSR schedule."""
+        wp.launch(
+            record_all_interactions_multiworld_kernel,
+            dim=self.num_worlds,
+            inputs=[
+                self._elements,
+                self._contact_cols.articulation_owner,
+                wp.int32(self._contact_offset),
+                self._world_element_ids_by_color,
+                self._world_csr_offsets,
+                self._world_color_starts,
+                self._world_num_colors,
+                wp.int32(int(self.max_colored_partitions)),
+                wp.int32(self.mass_splitting_batch_size),
+                self._multiworld_row_partition,
+                self._multiworld_row_batch_start,
+                self._interaction_graph_scratch,
+            ],
+            device=self.device,
+        )
+        build_interaction_graph(self._interaction_graph_scratch, self._copy_state)
+        wp.launch(
+            build_partition_slot_cache_kernel,
+            dim=self._constraint_capacity,
+            inputs=[
+                self._world_element_ids_by_color,
+                self._multiworld_row_partition,
+                self._num_active_constraints,
+                self._copy_state,
+                self.constraints,
+                self._contact_cols,
+                wp.int32(self._contact_offset),
+            ],
+            device=self.device,
+        )
+
     def _maybe_fallback_from_per_world_greedy_overflow(self, nw: int) -> None:
         """Multi-world analogue of
         :meth:`_maybe_fallback_from_greedy_overflow`. Flips the
@@ -3698,7 +3735,9 @@ class PhoenXWorld:
             self._per_world_greedy_overflow.zero_()
             self._per_world_node_color_mask.zero_()
             wp.launch(
-                get_per_world_greedy_coloring_kernel(self._multi_world_scheduler != "block_world"),
+                get_per_world_greedy_coloring_kernel(
+                    self._multi_world_scheduler != "block_world", self.mass_splitting_enabled
+                ),
                 dim=nw,
                 inputs=[
                     self._per_world_element_offsets,
@@ -3707,7 +3746,7 @@ class PhoenXWorld:
                     self._elements,
                     self._element_family,
                     self._per_world_node_color_mask,
-                    int(GREEDY_MAX_COLORS),
+                    int(self.max_colored_partitions) if self.mass_splitting_enabled else int(GREEDY_MAX_COLORS),
                 ],
                 outputs=[
                     self._per_world_assigned,
@@ -4731,6 +4770,90 @@ class PhoenXWorld:
         if cached_prepare is not None:
             kw["cached_prepare"] = bool(cached_prepare)
         return kw
+
+    def _multiworld_mass_splitting_sweep(
+        self, phase: str, idt: wp.float32, *, reverse_colors: bool = False, joint_only: bool = False
+    ) -> None:
+        """Launch one capped per-world sweep before copy-state reconciliation."""
+        flags = self._dispatch_specialization_flags()
+        kernel = get_multiworld_mass_splitting_kernel(
+            phase=phase,
+            **flags,
+            has_contacts=self.max_contact_columns > 0 and self._reduced_articulation is None,
+            patch_friction=self._contact_patch_enabled,
+            bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
+        )
+        block_dim = 128
+        wp.launch(
+            kernel,
+            dim=self.num_worlds * block_dim,
+            block_dim=block_dim,
+            inputs=[
+                self.constraints,
+                self._contact_cols,
+                self.bodies,
+                self._particles_or_sentinel(),
+                idt,
+                wp.float32(self.sor_boost),
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                self._contact_container_solve,
+                self._active_contact_views(),
+                wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
+                wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_cloth_bending),
+                wp.int32(self.num_soft_tetrahedra),
+                wp.int32(self.num_soft_hexahedra),
+                wp.int32(self.num_bodies),
+                self._copy_state,
+                wp.int32(int(self.max_colored_partitions)),
+                wp.int32(int(reverse_colors)),
+                wp.int32(int(joint_only)),
+            ],
+            device=self.device,
+        )
+        overflow_kernel = get_multiworld_mass_splitting_overflow_kernel(
+            phase=phase,
+            **flags,
+            has_contacts=self.max_contact_columns > 0 and self._reduced_articulation is None,
+            patch_friction=self._contact_patch_enabled,
+            bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
+        )
+        wp.launch(
+            overflow_kernel,
+            dim=self._constraint_capacity,
+            inputs=[
+                self.constraints,
+                self._contact_cols,
+                self.bodies,
+                self._particles_or_sentinel(),
+                idt,
+                wp.float32(self.sor_boost),
+                self._world_element_ids_by_color,
+                self._per_world_assigned,
+                self._multiworld_row_partition,
+                self._multiworld_row_batch_start,
+                self._num_active_constraints,
+                self._contact_container_solve,
+                self._active_contact_views(),
+                wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
+                wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_cloth_bending),
+                wp.int32(self.num_soft_tetrahedra),
+                wp.int32(self.num_soft_hexahedra),
+                wp.int32(self.num_bodies),
+                self._copy_state,
+                wp.int32(int(self.max_colored_partitions)),
+                wp.int32(self.mass_splitting_batch_size),
+                wp.int32(int(joint_only)),
+            ],
+            device=self.device,
+        )
 
     def _singleworld_kernels(self):
         """Return ``(prepare_head, prepare_fused, iterate_head,

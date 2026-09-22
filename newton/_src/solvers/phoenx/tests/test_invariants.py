@@ -649,13 +649,15 @@ class TestMassSplittingConfig(unittest.TestCase):
         )
         self.assertTrue(w.mass_splitting_enabled)
 
-    def test_rejects_mass_splitting_with_multi_world_layout(self) -> None:
-        with self.assertRaisesRegex(NotImplementedError, "step_layout='single_world'"):
-            PhoenXWorld(
-                **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
-                mass_splitting=True,
-                step_layout="multi_world",
-            )
+    def test_accepts_mass_splitting_with_multi_world_layout(self) -> None:
+        world = PhoenXWorld(
+            **_make_kwargs(num_bodies=2, num_joints=0, rigid_contact_max=1),
+            mass_splitting=True,
+            step_layout="multi_world",
+        )
+        self.assertTrue(world.mass_splitting_enabled)
+        self.assertEqual(type(world._dispatcher).__name__, "MultiWorldMassSplittingDispatcher")
+        self.assertEqual(world._multiworld_row_partition.shape[0], world._constraint_capacity)
 
 
 if __name__ == "__main__":
