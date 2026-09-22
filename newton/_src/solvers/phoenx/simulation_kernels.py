@@ -4347,6 +4347,7 @@ def get_multiworld_mass_splitting_kernel(
     skip_joint_pgs: bool = False,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
+    packed_contact_headers: bool = False,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
 ):
@@ -4366,7 +4367,7 @@ def get_multiworld_mass_splitting_kernel(
         has_joints=has_joints,
         skip_joint_pgs=skip_joint_pgs,
         has_mass_splitting=True,
-        packed_contact_headers=False,
+        packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,
@@ -4464,6 +4465,7 @@ def get_multiworld_mass_splitting_overflow_kernel(
     skip_joint_pgs: bool = False,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
+    packed_contact_headers: bool = False,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
 ):
@@ -4477,7 +4479,7 @@ def get_multiworld_mass_splitting_overflow_kernel(
         has_joints=has_joints,
         skip_joint_pgs=skip_joint_pgs,
         has_mass_splitting=True,
-        packed_contact_headers=False,
+        packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         is_prepare=is_prepare,

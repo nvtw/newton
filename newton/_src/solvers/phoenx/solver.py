@@ -252,6 +252,8 @@ class SolverPhoenX(SolverBase):
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
+        colored_contact_headers: bool = False,
+        colored_contact_rows: bool = False,
         enable_column_timers: bool = False,
         sor_boost: float = 1.0,
         sleeping_velocity_threshold: float = 0.0,
@@ -373,6 +375,11 @@ class SolverPhoenX(SolverBase):
                 partition.
             enable_warm_start_coloring: Reuse previous-frame colour
                 assignments. No-op on multi-world.
+            colored_contact_headers: Store rigid-contact column metadata in
+                solver color order. Requires mass splitting and point-friction
+                rigid contacts. Supports single- and multi-world layouts.
+            colored_contact_rows: Also store per-contact solve state in solver
+                color order. Requires ``colored_contact_headers``.
             enable_column_timers: Collect per-constraint-column timing
                 counters for diagnostics. Defaults to ``False``.
             sor_boost: Per-impulse SOR factor. 1.0 = vanilla PGS;
@@ -871,6 +878,8 @@ class SolverPhoenX(SolverBase):
             partitioner_algorithm=partitioner_algorithm,
             max_greedy_outer_iters=max_greedy_outer_iters,
             enable_warm_start_coloring=enable_warm_start_coloring,
+            colored_contact_headers=colored_contact_headers,
+            colored_contact_rows=colored_contact_rows,
             enable_column_timers=enable_column_timers,
             sor_boost=sor_boost,
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),

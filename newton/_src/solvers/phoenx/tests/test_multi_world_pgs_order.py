@@ -353,6 +353,55 @@ class TestMultiWorldFastTailSolveContract(unittest.TestCase):
 class TestMultiWorldPgsOrder(unittest.TestCase):
     """Multi-world and single-world must mean the same PGS iterations."""
 
+    def test_color_ordered_contacts_match_canonical_layout(self) -> None:
+        """Packing headers and rows must preserve multi-world dynamics."""
+        device = wp.get_preferred_device()
+
+        def make_sim(packed: bool):
+            model = _make_stack_model(4, 4, str(device))
+            pipeline = newton.CollisionPipeline(
+                model,
+                rigid_contact_max=4 * 32,
+                contact_matching="sticky",
+                deterministic=True,
+            )
+            contacts = pipeline.contacts()
+            state_0 = model.state()
+            state_1 = model.state()
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                substeps=2,
+                solver_iterations=4,
+                velocity_iterations=1,
+                contact_friction_model="point",
+                step_layout="multi_world",
+                mass_splitting=True,
+                max_colored_partitions=8,
+                mass_splitting_batch_size=1,
+                colored_contact_headers=packed,
+                colored_contact_rows=packed,
+                joint_mode="maximal_direct",
+            )
+            return model, pipeline, contacts, state_0, state_1, solver, model.control()
+
+        def step(sim) -> None:
+            _model, pipeline, contacts, state_0, state_1, solver, control = sim
+            pipeline.collide(state_0, contacts)
+            state_0.clear_forces()
+            solver.step(state_0, state_1, control, contacts, 1.0 / 60.0)
+            wp.copy(state_0.body_q, state_1.body_q)
+            wp.copy(state_0.body_qd, state_1.body_qd)
+
+        canonical = make_sim(False)
+        packed = make_sim(True)
+        for _ in range(12):
+            step(canonical)
+            step(packed)
+
+        np.testing.assert_allclose(packed[3].body_q.numpy(), canonical[3].body_q.numpy(), rtol=1.0e-5, atol=1.0e-6)
+        np.testing.assert_allclose(packed[3].body_qd.numpy(), canonical[3].body_qd.numpy(), rtol=1.0e-5, atol=1.0e-6)
+
     def test_stable_rigid_coloring_matches_forced_rebuild(self) -> None:
         """Cached coloring must preserve an evolving deterministic solve."""
         device = wp.get_preferred_device()
