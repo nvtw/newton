@@ -10,7 +10,6 @@ from functools import cache
 import warp as wp
 
 from ...core.math import FLOAT32_EPS
-from ...linalg.factorize.llt_packed import packed_element_offset
 from ..padmm.math import (
     compute_box_complementarity_residual,
     project_to_coulomb_cone,
@@ -559,30 +558,16 @@ def _compact_schur_fits(njc: int32, nu: int32, stride: int32) -> bool:
     return nu <= (njc * stride) / wp.max(nu, int32(1))
 
 
-@cache
-def _make_bilateral_factor_index(packed: bool):
-    offset_dtype = wp.int64 if packed else int32
-
-    @wp.func
-    def factor_index(base: offset_dtype, dimension: int32, row: int32, column: int32) -> offset_dtype:
-        base = offset_dtype(base)
-        if wp.static(packed):
-            return packed_element_offset(base, row, column)
-        else:
-            return base + dimension * row + column
-
-    return factor_index
+@wp.func
+def _bilateral_factor_index(base: int32, dimension: int32, row: int32, column: int32) -> int32:
+    return base + dimension * row + column
 
 
 @cache
-def make_find_bilateral_factor_row_start_kernel(packed: bool = False):
-    """Specialize factor addresses without changing response arithmetic.
-
-    Packed offsets are int64 panel-slot offsets for fixed 32-by-32 tiles;
-    dense offsets retain their existing int32 element-offset convention.
-    """
-    offset_dtype = wp.int64 if packed else int32
-    factor_index = _make_bilateral_factor_index(packed)
+def make_find_bilateral_factor_row_start_kernel():
+    """Build a response kernel using dense factor element offsets."""
+    offset_dtype = int32
+    factor_index = _bilateral_factor_index
 
     @wp.kernel
     def _find_bilateral_factor_row_start(
@@ -607,14 +592,10 @@ def make_find_bilateral_factor_row_start_kernel(packed: bool = False):
 
 
 @cache
-def make_find_bilateral_factor_row_start_rcm_kernel(packed: bool = False):
-    """Specialize factor addresses without changing response arithmetic.
-
-    Packed offsets are int64 panel-slot offsets for fixed 32-by-32 tiles;
-    dense offsets retain their existing int32 element-offset convention.
-    """
-    offset_dtype = wp.int64 if packed else int32
-    factor_index = _make_bilateral_factor_index(packed)
+def make_find_bilateral_factor_row_start_rcm_kernel():
+    """Build a response kernel using dense factor element offsets."""
+    offset_dtype = int32
+    factor_index = _bilateral_factor_index
 
     @wp.kernel
     def _find_bilateral_factor_row_start_rcm(
@@ -654,14 +635,10 @@ def make_find_bilateral_factor_row_start_rcm_kernel(packed: bool = False):
 
 
 @cache
-def make_solve_bilateral_unilateral_response_compact_kernel(packed: bool = False):
-    """Specialize factor addresses without changing response arithmetic.
-
-    Packed offsets are int64 panel-slot offsets for fixed 32-by-32 tiles;
-    dense offsets retain their existing int32 element-offset convention.
-    """
-    offset_dtype = wp.int64 if packed else int32
-    factor_index = _make_bilateral_factor_index(packed)
+def make_solve_bilateral_unilateral_response_compact_kernel():
+    """Build a response kernel using dense factor element offsets."""
+    offset_dtype = int32
+    factor_index = _bilateral_factor_index
 
     @wp.kernel
     def _solve_bilateral_unilateral_response_compact(
@@ -700,69 +677,11 @@ def make_solve_bilateral_unilateral_response_compact_kernel(packed: bool = False
     return _solve_bilateral_unilateral_response_compact
 
 
-@wp.kernel
-def _solve_bilateral_unilateral_response_symbolic(
-    problem_dim: wp.array[int32],
-    problem_njc: wp.array[int32],
-    bilateral_mio: wp.array[wp.int64],
-    bilateral_vio: wp.array[int32],
-    bilateral_P: wp.array[float32],
-    bilateral_L: wp.array[float32],
-    bilateral_permutation: wp.array[int32],
-    response_mio: wp.array[int32],
-    response_stride: wp.array[int32],
-    coupling: wp.array[float32],
-    response: wp.array[float32],
-    factor_row_start: wp.array[int32],
-    pattern_row_offsets: wp.array[int32],
-    pattern_starts: wp.array[int32],
-    pattern_columns: wp.array[int32],
-):
-    """Whiten packed response columns using the conservative scalar factor pattern."""
-    wid, unilateral = wp.tid()
-    njc = problem_njc[wid]
-    nu = problem_dim[wid] - njc
-    if unilateral >= nu or not _compact_schur_fits(njc, nu, response_stride[wid]):
-        return
-    offset = response_mio[wid]
-    row_offset = pattern_row_offsets[wid]
-    nonfinite = int32(0)
-    for row in range(njc):
-        original_row = bilateral_permutation[bilateral_vio[wid] + row]
-        value = bilateral_P[bilateral_vio[wid] + original_row] * coupling[offset + original_row * nu + unilateral]
-        for entry in range(pattern_starts[row_offset + row], pattern_starts[row_offset + row + 1] - 1):
-            k = pattern_columns[entry]
-            value -= (
-                bilateral_L[packed_element_offset(bilateral_mio[wid], row, k)] * response[offset + k * nu + unilateral]
-            )
-        result = value / bilateral_L[packed_element_offset(bilateral_mio[wid], row, row)]
-        nonfinite = nonfinite | int32(not wp.isfinite(result))
-        response[offset + row * nu + unilateral] = result
-    if nonfinite != int32(0):
-        # Recompute in dependency order so skipped zero products do not hide
-        # propagation from a nonfinite response. Signed zeros may still differ.
-        for row in range(njc):
-            original_row = bilateral_permutation[bilateral_vio[wid] + row]
-            value = bilateral_P[bilateral_vio[wid] + original_row] * coupling[offset + original_row * nu + unilateral]
-            for k in range(factor_row_start[bilateral_vio[wid] + row], row):
-                value -= (
-                    bilateral_L[packed_element_offset(bilateral_mio[wid], row, k)]
-                    * response[offset + k * nu + unilateral]
-                )
-            response[offset + row * nu + unilateral] = (
-                value / bilateral_L[packed_element_offset(bilateral_mio[wid], row, row)]
-            )
-
-
 @cache
-def make_solve_bilateral_unilateral_response_cooperative_kernel(packed: bool = False):
-    """Specialize factor addresses without changing response arithmetic.
-
-    Packed offsets are int64 panel-slot offsets for fixed 32-by-32 tiles;
-    dense offsets retain their existing int32 element-offset convention.
-    """
-    offset_dtype = wp.int64 if packed else int32
-    factor_index = _make_bilateral_factor_index(packed)
+def make_solve_bilateral_unilateral_response_cooperative_kernel():
+    """Build a response kernel using dense factor element offsets."""
+    offset_dtype = int32
+    factor_index = _bilateral_factor_index
 
     @wp.kernel
     def _solve_bilateral_unilateral_response_cooperative(
@@ -881,14 +800,10 @@ def make_solve_bilateral_unilateral_response_cooperative_kernel(packed: bool = F
 
 
 @cache
-def make_solve_bilateral_unilateral_response_kernel(packed: bool = False):
-    """Specialize factor addresses without changing response arithmetic.
-
-    Packed offsets are int64 panel-slot offsets for fixed 32-by-32 tiles;
-    dense offsets retain their existing int32 element-offset convention.
-    """
-    offset_dtype = wp.int64 if packed else int32
-    factor_index = _make_bilateral_factor_index(packed)
+def make_solve_bilateral_unilateral_response_kernel():
+    """Build a response kernel using dense factor element offsets."""
+    offset_dtype = int32
+    factor_index = _bilateral_factor_index
 
     @wp.kernel
     def _solve_bilateral_unilateral_response(

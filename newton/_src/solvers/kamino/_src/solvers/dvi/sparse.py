@@ -23,7 +23,6 @@ from .kernels import (
     _initialize_dvi_status,
     _scatter_bilateral_solution,
     _set_dvi_direct_status_iterations,
-    _solve_bilateral_unilateral_response_symbolic,
     make_find_bilateral_factor_row_start_kernel,
     make_find_bilateral_factor_row_start_rcm_kernel,
     make_solve_bilateral_unilateral_response_compact_kernel,
@@ -63,7 +62,6 @@ from .sparse_kernels import (
     _solve_dvi_sparse_inequalities_pgs_cooperative,
     _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
-    _zero_packed_pattern_tiles,
     make_build_sparse_bilateral_block_kernel,
     make_set_sparse_bilateral_diagonal_kernel,
 )
@@ -201,15 +199,6 @@ class SparseDVIPath:
             ):
                 self.bilateral_solver.configure_sparse_assembly(
                     *self.bilateral_nzb_pairs[:3],
-                    scalar_pattern=(
-                        self.has_unilateral_constraints
-                        and self.use_schur_complement
-                        and self.max_alternating_iterations >= 4
-                        and not any(
-                            self.should_solve_bilateral_after_block(iteration)
-                            for iteration in range(self.max_alternating_iterations)
-                        )
-                    ),
                 )
 
     def solve(self, problem: DualProblem) -> None:
@@ -957,19 +946,8 @@ def _assemble_sparse_bilateral_block(
     """Assemble the bilateral matrix directly in the requested row ordering."""
     operator = path.data.bilateral_operator
     state = path.data.state
-    solver = path.bilateral_solver
-    packed = isinstance(solver, LLTBlockedRCMSolver) and solver._packed is not None and inverse is not None
-    matrix_offsets = solver._packed.slot_offsets if packed else operator.info.mio
-    if packed:
-        max_tiles = (path.size.max_of_num_bilateral_joint_cts + 31) // 32
-        wp.launch(
-            kernel=_zero_packed_pattern_tiles,
-            dim=(path.size.num_worlds, max_tiles * max_tiles, 32),
-            inputs=[problem.data.njc, solver._tpo, solver._structural_pattern, solver._packed.slot_offsets, matrix],
-            device=path.device,
-        )
-    else:
-        matrix.zero_()
+    matrix_offsets = operator.info.mio
+    matrix.zero_()
     state.bilateral_preconditioner.zero_()
     problem.delassus.diagonal(state.scratch)
 
@@ -977,7 +955,7 @@ def _assemble_sparse_bilateral_block(
     if path.bilateral_nzb_pairs is None:
         raise RuntimeError("Sparse DVI topology is not prepared. Call `SparseDVIPath.prepare()` before solving.")
     wp.launch(
-        kernel=make_set_sparse_bilateral_diagonal_kernel(packed),
+        kernel=make_set_sparse_bilateral_diagonal_kernel(),
         dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
         inputs=[
             problem.data.njc,
@@ -995,7 +973,7 @@ def _assemble_sparse_bilateral_block(
     pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j = path.bilateral_nzb_pairs
     if pair_wid.size > 0:
         wp.launch(
-            kernel=make_build_sparse_bilateral_block_kernel(packed),
+            kernel=make_build_sparse_bilateral_block_kernel(),
             dim=pair_wid.size,
             inputs=[
                 path.model.bodies.inv_m_i,
@@ -1250,13 +1228,11 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         and path.max_alternating_iterations >= 4
         and not has_intermediate_bilateral_solve
     )
-    packed = use_permutation and path.bilateral_solver._packed is not None
     cooperative_fused_pgs = _can_use_cooperative_articulation(path)
     reuse_forward_bilateral = (
         enable_compact_schur
         and cooperative_fused_pgs
         and use_permutation
-        and not packed
         and path.size.num_worlds == 1
         and max_unilateral_rows <= max_joint_rows
     )
@@ -1327,22 +1303,22 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         ],
         device=path.device,
     )
-    factor_offsets = path.bilateral_solver._packed.slot_offsets if packed else path.data.bilateral_operator.info.mio
-    factor = path.bilateral_solver._packed_factor if packed else path.bilateral_solver.L
-    response_kernel = make_solve_bilateral_unilateral_response_kernel(packed)
+    factor_offsets = path.data.bilateral_operator.info.mio
+    factor = path.bilateral_solver.L
+    response_kernel = make_solve_bilateral_unilateral_response_kernel()
     response_block_dim = 1
     response_tasks_per_world = 0
     response_dim = path.size.num_worlds
     if path.device.is_cuda:
-        response_kernel = make_solve_bilateral_unilateral_response_cooperative_kernel(packed)
+        response_kernel = make_solve_bilateral_unilateral_response_cooperative_kernel()
         # Pack independent warp workers to avoid limiting occupancy to one warp per block.
         response_block_dim = 256 if path.size.num_worlds >= 128 else 128
         response_tasks_per_world = (max_unilateral_rows + 1) // 2
         response_dim = path.size.num_worlds * response_tasks_per_world * 32
         wp.launch(
-            kernel=make_find_bilateral_factor_row_start_rcm_kernel(packed)
+            kernel=make_find_bilateral_factor_row_start_rcm_kernel()
             if use_permutation
-            else make_find_bilateral_factor_row_start_kernel(packed),
+            else make_find_bilateral_factor_row_start_kernel(),
             dim=(path.size.num_worlds, max_joint_rows),
             inputs=[
                 problem.data.njc,
@@ -1365,11 +1341,8 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     # Independent columns amortize their serial work only in large batches.
     use_scalar_response = enable_compact_schur and use_permutation and path.size.num_worlds >= 2048
     if use_scalar_response:
-        scalar_pattern = path.bilateral_solver._scalar_pattern if packed and path.device.is_capturing else None
         wp.launch(
-            kernel=_solve_bilateral_unilateral_response_symbolic
-            if scalar_pattern is not None
-            else make_solve_bilateral_unilateral_response_compact_kernel(packed),
+            kernel=make_solve_bilateral_unilateral_response_compact_kernel(),
             dim=(path.size.num_worlds, max_unilateral_rows),
             inputs=[
                 problem.data.dim,
@@ -1384,7 +1357,6 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
                 state.bilateral_coupling,
                 state.bilateral_response,
                 state.bilateral_factor_row_start,
-                *(scalar_pattern.inputs if scalar_pattern is not None else []),
             ],
             device=path.device,
             block_dim=128,
@@ -1393,7 +1365,6 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     use_tiled_response = (
         enable_compact_schur
         and use_permutation
-        and not packed
         and path.bilateral_solver.block_size == 32
         and path.size.num_worlds <= 16
     )

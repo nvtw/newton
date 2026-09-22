@@ -13,7 +13,6 @@ from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from ...geometry.keying import build_pair_key2, uint64_sentinel_value
 from ...linalg.factorize.llt_blocked_rcm import get_float32_array_offset_ptr
-from ...linalg.factorize.llt_packed import packed_element_offset
 from .kernels import _FUSED_BILATERAL_BLOCK, _FUSED_INEQUALITY_BLOCK, _compact_schur_fits, _sync_threads
 from .projections import (
     contact_friction_normal_load as _contact_friction_normal_load,
@@ -3039,36 +3038,10 @@ def _solve_dvi_compact_schur_pgs_cooperative(
         solver_status[wid] = status
 
 
-@wp.kernel
-def _zero_packed_pattern_tiles(
-    problem_njc: wp.array[int32],
-    pattern_offsets: wp.array[int32],
-    pattern: wp.array[int32],
-    slot_offsets: wp.array[wp.int64],
-    matrix: wp.array[float32],
-):
-    """Clear only the packed 32x32 tiles inside the structural factor pattern.
-
-    The assembly accumulates into those tiles and the factorization never
-    reads tiles outside the pattern, so the rest of the buffer can stay stale.
-    """
-    wid, tile, lane = wp.tid()
-    tiles = (problem_njc[wid] + int32(31)) / int32(32)
-    if tile >= tiles * tiles:
-        return
-    row = tile / tiles
-    col = tile - row * tiles
-    if col > row or pattern[pattern_offsets[wid] + tile] == int32(0):
-        return
-    base = (slot_offsets[wid] + wp.int64(row) * wp.int64(row + int32(1)) / wp.int64(2) + wp.int64(col)) * wp.int64(1024)
-    for element in range(lane, int32(1024), int32(32)):
-        matrix[base + wp.int64(element)] = float32(0.0)
-
-
 @cache
-def make_build_sparse_bilateral_block_kernel(packed: bool = False):
-    """Specialize bilateral assembly for dense elements or fixed packed tiles."""
-    offset_dtype = wp.int64 if packed else int32
+def make_build_sparse_bilateral_block_kernel():
+    """Build bilateral assembly in dense element storage."""
+    offset_dtype = int32
 
     @wp.kernel
     def _build_sparse_bilateral_block(
@@ -3117,24 +3090,16 @@ def make_build_sparse_bilateral_block_kernel(packed: bool = False):
         if use_permutation:
             row = inverse_permutation[bvio + row]
             col = inverse_permutation[bvio + col]
-        if wp.static(packed):
-            # Diagonal tiles retain both symmetric entries; off-diagonal tiles
-            # store only the lower half of the tile matrix.
-            if row // 32 >= col // 32:
-                wp.atomic_add(bilateral_D, packed_element_offset(bmio, row, col), val)
-            if col // 32 >= row // 32:
-                wp.atomic_add(bilateral_D, packed_element_offset(bmio, col, row), val)
-        else:
-            wp.atomic_add(bilateral_D, bmio + njc * row + col, val)
-            wp.atomic_add(bilateral_D, bmio + njc * col + row, val)
+        wp.atomic_add(bilateral_D, bmio + njc * row + col, val)
+        wp.atomic_add(bilateral_D, bmio + njc * col + row, val)
 
     return _build_sparse_bilateral_block
 
 
 @cache
-def make_set_sparse_bilateral_diagonal_kernel(packed: bool = False):
-    """Specialize bilateral assembly for dense elements or fixed packed tiles."""
-    offset_dtype = wp.int64 if packed else int32
+def make_set_sparse_bilateral_diagonal_kernel():
+    """Build bilateral assembly in dense element storage."""
+    offset_dtype = int32
 
     @wp.kernel
     def _set_sparse_bilateral_diagonal(
@@ -3155,8 +3120,7 @@ def make_set_sparse_bilateral_diagonal_kernel(packed: bool = False):
         njc = problem_njc[wid]
         if njc == 0:
             if row == 0:
-                if wp.static(not packed):
-                    bilateral_D[bilateral_mio[wid]] = float32(1.0)
+                bilateral_D[bilateral_mio[wid]] = float32(1.0)
                 bilateral_P[bilateral_vio[wid]] = float32(1.0)
             return
         if row >= njc:
@@ -3170,10 +3134,7 @@ def make_set_sparse_bilateral_diagonal_kernel(packed: bool = False):
         bilateral_P[bvio + row] = p
         if use_permutation:
             row = inverse_permutation[bvio + row]
-        if wp.static(packed):
-            diagonal_index = packed_element_offset(bmio, row, row)
-        else:
-            diagonal_index = bmio + njc * row + row
+        diagonal_index = bmio + njc * row + row
         bilateral_D[diagonal_index] = p * diag * p + float32(7.0e-7)
 
     return _set_sparse_bilateral_diagonal
