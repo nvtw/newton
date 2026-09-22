@@ -1035,3 +1035,25 @@ These later results supersede the early FP16/contact-row prioritization:
   A fresh 300-frame source-level A/B improved from 59.05 to 59.93 FPS; the
   candidate 600-frame run sustained 59.48 FPS with finite state, 0.0190 mm
   maximum sampled joint gap, and 0.997 mm maximum sampled penetration.
+
+- A 64-world plate-piling workload with 120 SDF plates per world, two collision
+  updates per 60 Hz frame, six integration substeps, eight position sweeps, and
+  one velocity sweep sustained 41.9 FPS. Its sampled maximum penetration was
+  0.0323 mm; settled linear and angular RMS speeds were 0.01484 mm/s and
+  0.001164 rad/s. Nsight Systems attributed about 60% of solver time to the
+  multi-world mass-splitting kernel. Lowering the color cap from 12 to 8 reached
+  44.9 FPS but exceeded all three quality limits. Staged colors, a warp per
+  column, and an iterative projected body-pair block solve reached only
+  26.1, 25.3, and 22.5 FPS and were removed. Reusing the temporal grouped
+  solver began fast but generated an excessive contact workload and fell to
+  0.54 FPS; preserving shape-pair columns still fell to 0.59 FPS. Splitting
+  each world's color across two synchronized blocks reached 40.4 FPS, below
+  baseline, because its device barriers cost more than the extra occupancy
+  saved. A useful next experiment must replace outer sweeps with a bounded
+  small active-set pair solve; adding an iterative pair solve inside every
+  sweep duplicates work and is slower. Two local sweeps per four outer sweeps,
+  a 64-thread world block, and an exact zero-impulse branch reached 41.0, 40.6,
+  and 40.9 FPS. Seven sweeps with 18--20 true colors met the quality limits
+  (0.0138--0.0185 mm penetration), but added serial color work and reached only
+  40.7--41.7 FPS. Six sweeps with 16 colors reached 48.1 FPS but failed settled
+  linear and angular jitter limits.
