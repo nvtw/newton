@@ -3737,9 +3737,12 @@ class PhoenXWorld:
             self._per_world_node_color_mask.zero_()
             wp.launch(
                 get_per_world_greedy_coloring_kernel(
-                    self._multi_world_scheduler != "block_world", self.mass_splitting_enabled
+                    self._multi_world_scheduler != "block_world",
+                    self.mass_splitting_enabled,
+                    self.mass_splitting_enabled and nw >= 32,
                 ),
-                dim=nw,
+                dim=nw * 32 if self.mass_splitting_enabled and nw >= 32 else nw,
+                block_dim=32 if self.mass_splitting_enabled and nw >= 32 else 256,
                 inputs=[
                     self._per_world_element_offsets,
                     self._per_world_element_count,
