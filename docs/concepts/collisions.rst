@@ -1438,8 +1438,10 @@ The same ``step()`` call works directly or inside CUDA graph capture; callbacks
 must therefore be capture-safe and preallocate their storage. The scheduler
 always executes every configured solver substep. Its two states are ping-pong
 buffers, so the substep count must be even. ``schedule.interval_overflow`` is
-set when collision detection on every substep is still insufficient; in that
-case, increase the substep count or the speculative extension limit.
+set when observed per-substep or accumulated travel exceeds the budget; in
+that case, increase the substep count or the speculative extension limit.
+Collision prediction horizons are capped at the next frame boundary, where
+contacts are always refreshed.
 
 The scheduler is an experimental optimization for rigid contacts, not
 continuous collision detection. It does not support particles. It observes

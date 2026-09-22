@@ -79,6 +79,7 @@ def _update_collision_schedule(
         # its starting speed. This bounds that step by its two endpoint speeds.
         accumulated_travel += 2.0 * (speed - previous_speed) * substep_dt
 
+    accumulated_overflow = accumulated_travel > travel_budget
     due = (
         substep_index == 0
         or substep_index >= collision_deadline[0]
@@ -101,7 +102,7 @@ def _update_collision_schedule(
         # The travel budget can outlast the rounded prediction horizon. Never
         # extend an existing horizon merely because the observed speed falls.
         collision_deadline[0] = substep_index + collision_intervals[selected_interval_index]
-    if relative_travel_per_substep > travel_budget or accumulated_travel > travel_budget:
+    if relative_travel_per_substep > travel_budget or accumulated_overflow:
         interval_overflow[0] = 1
 
 
@@ -142,8 +143,8 @@ class CollisionSubstepScheduler:
         states: Two simulation states used as input/output ping-pong buffers.
         collision_callback: Called as ``callback(state, collision_dt)`` before
             each scheduled collision refresh. ``collision_dt`` is the planned
-            horizon until the next refresh [s]; a later speed increase may
-            trigger an earlier refresh.
+            horizon until the next refresh [s], capped at the frame boundary;
+            a later speed increase may trigger an earlier refresh.
         substep_callback: Called as ``callback(state_in, state_out, dt)`` exactly
             ``substeps`` times per frame.
         frame_dt: Fixed frame duration [s].
@@ -228,7 +229,7 @@ class CollisionSubstepScheduler:
         self._previous_max_point_speed = wp.zeros(1, dtype=wp.float32, device=device)
         self._travel_estimate = wp.zeros(1, dtype=wp.float32, device=device)
         self.interval_overflow = wp.zeros(1, dtype=wp.int32, device=device)
-        """Device scalar set to one when collision every substep is still insufficient."""
+        """Device scalar set when observed per-substep or accumulated travel exceeds the budget."""
 
     def _dispatch_collision(self, substep_index: int, interval_index: int | None = None) -> None:
         if interval_index is None:
@@ -244,7 +245,7 @@ class CollisionSubstepScheduler:
                 )
                 return
             interval_index = 0
-        interval = self._collision_intervals[interval_index]
+        interval = min(self._collision_intervals[interval_index], self._substeps - substep_index)
 
         def run_collision():
             self._collision_callback(self._states[substep_index % 2], interval * self._substep_dt)

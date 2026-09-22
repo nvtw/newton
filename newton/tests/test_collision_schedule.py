@@ -36,6 +36,7 @@ def test_collision_schedule_horizon_deadline(test, device, external_capture=Fals
             "reversing",
             "varying",
             "overflow_then_rest",
+            "accumulated_overflow",
         ):
             with test.subTest(substeps=substeps, profile=profile):
                 speeds = np.full(substeps, 2.0, dtype=np.float32)
@@ -54,6 +55,9 @@ def test_collision_schedule_horizon_deadline(test, device, external_capture=Fals
                 elif profile == "overflow_then_rest":
                     speeds = np.zeros(2 * substeps, dtype=np.float32)
                     speeds[0] = 20.0
+                elif profile == "accumulated_overflow":
+                    speeds = np.ones(substeps, dtype=np.float32)
+                    speeds[4] = 8.0
 
                 builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
                 body = builder.add_body()
@@ -110,12 +114,14 @@ def test_collision_schedule_horizon_deadline(test, device, external_capture=Fals
                         relative_travel = 2.0 * speed * dt
                         if i > 0 and speed > previous_speed:
                             travel += 2.0 * (speed - previous_speed) * dt
+                        accumulated_overflow = travel > 0.03
                         if i == 0 or i >= deadline or travel + relative_travel > 0.03:
                             interval = max((j for j in intervals if j * relative_travel <= 0.03), default=1)
+                            interval = min(interval, substeps - i)
                             expected[index] = interval * dt
                             deadline = i + interval
                             travel = 0.0
-                        expected_overflow |= relative_travel > 0.03 or travel > 0.03
+                        expected_overflow |= relative_travel > 0.03 or accumulated_overflow
                         travel += relative_travel
                         previous_speed = speed
                 np.testing.assert_allclose(recorded, expected, rtol=1e-6, atol=0.0)
@@ -126,6 +132,11 @@ def test_collision_schedule_horizon_deadline(test, device, external_capture=Fals
                 for start, end in zip(events, np.append(events[1:], 2 * substeps), strict=True):
                     planned_steps = round(float(recorded[start]) / dt)
                     test.assertLessEqual(int(end - start), planned_steps, f"Expired horizon at substep {start}")
+                    test.assertLessEqual(planned_steps, substeps - int(start) % substeps)
+                if profile == "accumulated_overflow" and substeps == 10:
+                    # Individual steps fit, but correcting prior travel exceeds the budget.
+                    test.assertLess(2.0 * float(np.max(speeds)) * dt, 0.03)
+                    test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 1)
                 if profile == "accelerating":
                     test.assertLess(int(events[1]), substeps, "Retain travel-triggered early refreshes")
                 if profile == "constant" and substeps == 10:

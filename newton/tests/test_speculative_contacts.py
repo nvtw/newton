@@ -1055,7 +1055,8 @@ def test_adaptive_collision_schedule_reacts_to_acceleration(test, device):
     scheduler.step()
 
     test.assertGreater(int(collision_calls.numpy()[0]), 1)
-    test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 0)
+    # Acceleration makes corrected travel exceed the budget before a refresh.
+    test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 1)
 
 
 def test_adaptive_collision_schedule_rejects_unsupported_inputs(test, device):
