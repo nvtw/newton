@@ -59,21 +59,31 @@ def _update_collision_schedule(
     collision_intervals: wp.array[wp.int32],
     interval_conditions: wp.array[wp.int32],
     collision_due: wp.array[wp.int32],
+    collision_deadline: wp.array[wp.int32],
     travel_estimate: wp.array[wp.float32],
     interval_overflow: wp.array[wp.int32],
 ):
     """Accumulate relative travel and select the next collision horizon."""
     speed = max_point_speed[0]
+    # Clear the reduction output for the next substep in the consuming kernel.
+    max_point_speed[0] = 0.0
     previous_speed = previous_max_point_speed[0]
     relative_travel_per_substep = 2.0 * speed * substep_dt
 
     accumulated_travel = travel_estimate[0]
+    if substep_index == 0:
+        accumulated_travel = 0.0
+        interval_overflow[0] = 0
     if substep_index > 0 and speed > previous_speed:
         # Correct the preceding estimate when its ending speed is larger than
         # its starting speed. This bounds that step by its two endpoint speeds.
         accumulated_travel += 2.0 * (speed - previous_speed) * substep_dt
 
-    due = substep_index == 0 or accumulated_travel + relative_travel_per_substep > travel_budget
+    due = (
+        substep_index == 0
+        or substep_index >= collision_deadline[0]
+        or accumulated_travel + relative_travel_per_substep > travel_budget
+    )
     collision_due[0] = int(due)
     if due:
         accumulated_travel = 0.0
@@ -85,8 +95,12 @@ def _update_collision_schedule(
     for interval_index in range(interval_count):
         if float(collision_intervals[interval_index]) * relative_travel_per_substep <= travel_budget:
             selected_interval_index = interval_index
-    for interval_index in range(selected_interval_index, interval_count):
-        interval_conditions[interval_index] = 1
+    for interval_index in range(interval_count):
+        interval_conditions[interval_index] = int(interval_index == selected_interval_index)
+    if due:
+        # The travel budget can outlast the rounded prediction horizon. Never
+        # extend an existing horizon merely because the observed speed falls.
+        collision_deadline[0] = substep_index + collision_intervals[selected_interval_index]
     if relative_travel_per_substep > travel_budget or accumulated_travel > travel_budget:
         interval_overflow[0] = 1
 
@@ -97,9 +111,10 @@ class CollisionSubstepScheduler:
     The scheduler always invokes ``substep_callback`` exactly ``substeps``
     times per frame. It invokes ``collision_callback`` before substep zero and
     thereafter whenever the accumulated global relative-travel estimate would
-    exhaust the configured budget. The speed bound is reevaluated after every
-    substep. Selection stays on the device and uses :func:`warp.capture_if`, so
-    it is compatible with CUDA graph capture.
+    exhaust the configured budget or the previous collision horizon expires.
+    The speed bound is reevaluated after every substep. Selection stays on the
+    device and uses :func:`warp.capture_if`, so it is compatible with CUDA graph
+    capture.
 
     Scheduling is based on instantaneous rigid-shape velocities. It reacts to
     acceleration and impulses after observing their effect on a completed
@@ -208,13 +223,27 @@ class CollisionSubstepScheduler:
             self._interval_conditions[index : index + 1] for index in range(len(self._collision_intervals))
         ]
         self._collision_due = wp.zeros(1, dtype=wp.int32, device=device)
+        self._collision_deadline = wp.zeros(1, dtype=wp.int32, device=device)
         self._max_point_speed = wp.zeros(1, dtype=wp.float32, device=device)
         self._previous_max_point_speed = wp.zeros(1, dtype=wp.float32, device=device)
         self._travel_estimate = wp.zeros(1, dtype=wp.float32, device=device)
         self.interval_overflow = wp.zeros(1, dtype=wp.int32, device=device)
         """Device scalar set to one when collision every substep is still insufficient."""
 
-    def _dispatch_collision(self, substep_index: int, interval_index: int = 0) -> None:
+    def _dispatch_collision(self, substep_index: int, interval_index: int | None = None) -> None:
+        if interval_index is None:
+            if substep_index == 0:
+                # Slow frames need only this refresh. Later refreshes favor short
+                # horizons so fast motion does not pay for the slow-path shortcut.
+                wp.capture_if(
+                    self._interval_condition_views[-1],
+                    on_true=lambda: self._collision_callback(
+                        self._states[0], self._collision_intervals[-1] * self._substep_dt
+                    ),
+                    on_false=lambda: self._dispatch_collision(substep_index, 0),
+                )
+                return
+            interval_index = 0
         interval = self._collision_intervals[interval_index]
 
         def run_collision():
@@ -231,15 +260,10 @@ class CollisionSubstepScheduler:
 
     def step(self) -> None:
         """Execute or record one complete fixed-substep frame."""
-        self.interval_overflow.zero_()
-        self._travel_estimate.zero_()
-        self._previous_max_point_speed.zero_()
         model = self._model
         for substep_index in range(self._substeps):
             state_in = substep_index % 2
             state = self._states[state_in]
-            self._max_point_speed.zero_()
-            self._interval_conditions.zero_()
             wp.launch(
                 _find_max_point_speed,
                 dim=model.shape_count,
@@ -268,13 +292,17 @@ class CollisionSubstepScheduler:
                     self._interval_values,
                     self._interval_conditions,
                     self._collision_due,
+                    self._collision_deadline,
                     self._travel_estimate,
                     self.interval_overflow,
                 ],
                 device=model.device,
             )
-            wp.capture_if(
-                self._collision_due,
-                on_true=lambda substep_index=substep_index: self._dispatch_collision(substep_index),
-            )
+            if substep_index == 0:
+                self._dispatch_collision(substep_index)
+            else:
+                wp.capture_if(
+                    self._collision_due,
+                    on_true=lambda substep_index=substep_index: self._dispatch_collision(substep_index),
+                )
             self._substep_callback(self._states[state_in], self._states[1 - state_in], self._substep_dt)

@@ -1403,7 +1403,9 @@ collision detection runs within a frame. The total number of simulation
 substeps remains fixed. The scheduler always runs collision detection at the
 beginning of a frame, tracks a conservative bound derived from the currently
 observed rigid-shape velocities on the device, and runs additional collision
-passes when that bound exhausts the available speculative distance. The bound
+passes when that bound exhausts the available speculative distance or the
+previous collision prediction horizon expires, whichever occurs first. A drop
+in observed speed does not extend a previously selected horizon. The bound
 assumes that two bodies may move directly toward one another at the maximum
 observed shape speed:
 
