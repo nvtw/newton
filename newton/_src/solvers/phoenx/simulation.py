@@ -436,7 +436,7 @@ class PhoenXWorld:
             max_thread_blocks: Cap on the single-world PGS persistent
                 grid; ``None`` auto-sizes. No effect on multi-world.
             colored_contact_headers: Store rigid-contact column metadata in
-                color-slot order for the single-world mass-splitting solve.
+                color-slot order for single- or multi-world mass splitting.
             colored_contact_rows: Store rigid-contact solve state in color-slot
                 order across every substep. Requires colored_contact_headers.
             mass_splitting: Enable Tonge mass splitting -- coloring caps
@@ -483,7 +483,7 @@ class PhoenXWorld:
         if self._colored_contact_rows and rigid_contact_max <= 0:
             raise ValueError("colored_contact_rows requires rigid_contact_max > 0")
         if self._colored_contact_headers and (
-            step_layout != "single_world"
+            step_layout not in ("single_world", "multi_world")
             or not mass_splitting
             or self._contact_patch_enabled
             or enable_column_timers
@@ -494,7 +494,7 @@ class PhoenXWorld:
             or num_soft_hexahedra > 0
         ):
             raise NotImplementedError(
-                "colored_contact_headers currently requires single_world standard PGS with mass splitting "
+                "colored_contact_headers currently requires single_world or multi_world standard PGS with mass splitting "
                 "and rigid point-friction contacts, without column timers"
             )
         if self._contact_patch_enabled and (
@@ -3011,10 +3011,15 @@ class PhoenXWorld:
 
         self._dispatcher.begin_step()
         if self._colored_contact_headers:
+            colored_element_ids = (
+                self._world_element_ids_by_color
+                if self.step_layout == "multi_world"
+                else self._partitioner.element_ids_by_color
+            )
             contact_pack_colored_headers(
                 self._contact_cols,
                 self._contact_cols_packed,
-                self._partitioner.element_ids_by_color,
+                colored_element_ids,
                 self._num_active_constraints,
                 self._contact_offset,
                 self._constraint_capacity,
@@ -3023,7 +3028,7 @@ class PhoenXWorld:
             if self._colored_contact_rows:
                 contact_build_colored_row_offsets(
                     self._contact_cols_packed,
-                    self._partitioner.element_ids_by_color,
+                    colored_element_ids,
                     self._num_active_constraints,
                     self._contact_offset,
                     self._contact_row_counts,
@@ -4784,6 +4789,7 @@ class PhoenXWorld:
             phase=phase,
             **flags,
             has_contacts=self.max_contact_columns > 0 and self._reduced_articulation is None,
+            packed_contact_headers=self._colored_contact_headers,
             patch_friction=self._contact_patch_enabled,
             bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
         )
@@ -4794,7 +4800,7 @@ class PhoenXWorld:
             block_dim=block_dim,
             inputs=[
                 self.constraints,
-                self._contact_cols,
+                self._contact_cols_packed,
                 self.bodies,
                 self._particles_or_sentinel(),
                 idt,
@@ -4824,6 +4830,7 @@ class PhoenXWorld:
             phase=phase,
             **flags,
             has_contacts=self.max_contact_columns > 0 and self._reduced_articulation is None,
+            packed_contact_headers=self._colored_contact_headers,
             patch_friction=self._contact_patch_enabled,
             bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
         )
@@ -4832,7 +4839,7 @@ class PhoenXWorld:
             dim=self._constraint_capacity,
             inputs=[
                 self.constraints,
-                self._contact_cols,
+                self._contact_cols_packed,
                 self.bodies,
                 self._particles_or_sentinel(),
                 idt,
