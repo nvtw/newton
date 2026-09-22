@@ -157,7 +157,7 @@ class TestMultiWorldMassSplittingColoring(unittest.TestCase):
     def test_capped_greedy_coloring_retains_overflow_rows(self) -> None:
         device = wp.get_preferred_device()
         rows_per_world = 5
-        num_worlds = 2
+        num_worlds = 32
         element_count = rows_per_world * num_worlds
         element_dtype = np.dtype({"names": ["bodies"], "formats": ["8i4"], "offsets": [0], "itemsize": 32})
         host_elements = np.full(element_count, -1, dtype=element_dtype)
@@ -168,8 +168,8 @@ class TestMultiWorldMassSplittingColoring(unittest.TestCase):
                 host_elements["bodies"][base + row, :2] = (center, center + row + 1)
 
         elements = wp.array(host_elements, dtype=ElementInteractionData, device=device)
-        offsets = wp.array([0, rows_per_world, element_count], dtype=wp.int32, device=device)
-        counts = wp.array([rows_per_world, rows_per_world], dtype=wp.int32, device=device)
+        offsets = wp.array(np.arange(num_worlds + 1, dtype=np.int32) * rows_per_world, dtype=wp.int32, device=device)
+        counts = wp.full(num_worlds, rows_per_world, dtype=wp.int32, device=device)
         world_elements = wp.array(np.arange(element_count, dtype=np.int32), device=device)
         families = wp.zeros(element_count, dtype=wp.int32, device=device)
         node_masks = wp.zeros(num_worlds * (rows_per_world + 1), dtype=wp.uint64, device=device)
@@ -184,8 +184,9 @@ class TestMultiWorldMassSplittingColoring(unittest.TestCase):
         overflow = wp.zeros(1, dtype=wp.int32, device=device)
 
         wp.launch(
-            simulation_kernels.get_per_world_greedy_coloring_kernel(False, True),
-            dim=num_worlds,
+            simulation_kernels.get_per_world_greedy_coloring_kernel(False, True, True),
+            dim=num_worlds * 32,
+            block_dim=32,
             inputs=[offsets, counts, world_elements, elements, families, node_masks, wp.int32(2)],
             outputs=[
                 assigned,
@@ -200,8 +201,10 @@ class TestMultiWorldMassSplittingColoring(unittest.TestCase):
             device=device,
         )
 
-        np.testing.assert_array_equal(num_colors.numpy(), np.array([3, 3], dtype=np.int32))
-        np.testing.assert_array_equal(color_starts.numpy()[:, :4], np.array([[0, 1, 2, 5], [0, 1, 2, 5]]))
+        np.testing.assert_array_equal(num_colors.numpy(), np.full(num_worlds, 3, dtype=np.int32))
+        np.testing.assert_array_equal(
+            color_starts.numpy()[:, :4], np.tile(np.array([0, 1, 2, 5], dtype=np.int32), (num_worlds, 1))
+        )
         np.testing.assert_array_equal(np.sort(output.numpy()), np.arange(element_count, dtype=np.int32))
         self.assertTrue(np.all(assigned.numpy() > 0))
         self.assertEqual(int(overflow.numpy()[0]), 0)

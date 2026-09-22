@@ -631,8 +631,13 @@ _PER_WORLD_FREE_COLOR_FLIP = wp.constant(wp.int64(-1))
 
 
 @functools.cache
-def get_per_world_greedy_coloring_kernel(group_families: bool, spill_overflow: bool = False):
+def get_per_world_greedy_coloring_kernel(
+    group_families: bool, spill_overflow: bool = False, spread_worlds: bool = False
+):
     """Build the shared world-greedy colorer with optional family grouping.
+
+    When ``spread_worlds`` is true, each world occupies its own warp so many
+    independent serial passes can hide memory latency.
 
     When ``spill_overflow`` is true, rows that cannot use one of the
     ``max_colors`` independent-set colours are retained in colour
@@ -670,7 +675,12 @@ def get_per_world_greedy_coloring_kernel(group_families: bool, spill_overflow: b
         removes MIS rounds, block barriers, and atomics while preserving parallel
         PGS correctness between body-disjoint colors.
         """
-        w = wp.tid()
+        tid = wp.tid()
+        w = tid
+        if wp.static(spread_worlds):
+            if tid % wp.int32(32) != wp.int32(0):
+                return
+            w = tid / wp.int32(32)
         base = world_element_offsets[w]
         count = world_element_count[w]
 
