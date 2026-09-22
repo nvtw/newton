@@ -413,11 +413,12 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     def _log_shapes_graphed(self, state) -> None:
         """Replay stable CUDA shape updates with one host launch."""
         signature = self._shape_update_signature()
+        signature_changed = signature != self._shape_update_graph_signature
         appearance_changed = any(
             shapes.colors_changed or shapes.opacities_changed for shapes in self._shape_instances.values()
         )
         stable = self.device.is_cuda and not self._scene_dirty and not self.model_changed and not appearance_changed
-        if not stable or signature != self._shape_update_graph_signature:
+        if not stable or signature_changed:
             self._invalidate_shape_update_graphs()
             self._shape_update_graph_signature = signature
 
@@ -428,7 +429,12 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             self._transforms_dirty = True
             return
 
-        if stable:
+        # A visibility or layer change can make the renderer rebuild its scene
+        # buffers in end_frame(). Capturing this transition would retain the
+        # old device pointers and replay them after the rebuild. Update the
+        # transition frame normally, then capture against stable buffers on
+        # following frames.
+        if stable and not signature_changed:
             with wp.ScopedCapture() as capture:
                 ViewerBase._log_shapes(self, state)
             self._shape_update_graphs[graph_key] = capture.graph

@@ -193,10 +193,40 @@ class TestViewerOptix(unittest.TestCase):
         ):
             viewer._log_shapes_graphed(state)
             viewer._log_shapes_graphed(state)
+            viewer._log_shapes_graphed(state)
 
-        log_shapes.assert_called_once_with(viewer, state)
+        self.assertEqual(log_shapes.call_count, 2)
+        log_shapes.assert_called_with(viewer, state)
         launch.assert_called_once_with(graph)
         self.assertTrue(viewer._transforms_dirty)
+
+    def test_cuda_shape_update_visibility_transition_is_not_captured(self):
+        """Delay graph capture until renderer buffers stabilize after visibility changes."""
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        viewer.device = SimpleNamespace(is_cuda=True)
+        viewer._scene_dirty = False
+        viewer._transforms_dirty = False
+        viewer.model_changed = False
+        viewer._shape_instances = {}
+        viewer._shape_update_graphs = {17: object()}
+        viewer._shape_update_graph_signature = (False, True)
+        state = SimpleNamespace(body_q=SimpleNamespace(ptr=17))
+        signatures = iter(((True, False), (True, False)))
+        capture = SimpleNamespace(graph=object())
+
+        with (
+            mock.patch.object(viewer, "_shape_update_signature", side_effect=signatures),
+            mock.patch.object(ViewerBase, "_log_shapes", autospec=True) as log_shapes,
+            mock.patch.object(wp, "ScopedCapture", return_value=nullcontext(capture)) as scoped_capture,
+        ):
+            viewer._log_shapes_graphed(state)
+            self.assertEqual(viewer._shape_update_graphs, {})
+            scoped_capture.assert_not_called()
+            viewer._log_shapes_graphed(state)
+
+        self.assertEqual(log_shapes.call_count, 2)
+        scoped_capture.assert_called_once_with()
+        self.assertIs(viewer._shape_update_graphs[17], capture.graph)
 
     def test_snapshot_wait_does_not_drain_physics(self):
         """Rendering waits for the snapshot, while the next step remains asynchronous."""
