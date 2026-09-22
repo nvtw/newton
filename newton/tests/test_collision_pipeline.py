@@ -2764,7 +2764,7 @@ def test_mesh_convex_midphase_queries_margin_shell(test, device):
 
 
 def test_rigid_mesh_contacts_export_surface_velocity(test, device):
-    """Export interpolated mesh vertex velocity on rigid contacts."""
+    """Transform and export a varying mesh velocity field at contacts."""
     vertices = np.array(
         [
             [-1.0, -1.0, 0.0],
@@ -2775,18 +2775,24 @@ def test_rigid_mesh_contacts_export_surface_velocity(test, device):
         dtype=np.float32,
     )
     indices = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
-    surface_velocity = np.array([0.75, -0.25, 0.0], dtype=np.float32)
     mesh = newton.Mesh(vertices, indices, compute_inertia=False, enable_surface_velocity=True)
+    mesh_xform = wp.transform(
+        wp.vec3(0.4, -0.3, 0.0),
+        wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.5 * np.pi),
+    )
+    mesh_scale = wp.vec3(2.0, 0.5, 1.0)
+    contact_point_world = np.array([0.525, 0.2, 0.0], dtype=np.float32)
+    velocity_local = vertices.copy()
 
     builder = newton.ModelBuilder()
-    mesh_shape = builder.add_shape_mesh(body=-1, mesh=mesh)
-    sphere_body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.09), wp.quat_identity()))
+    mesh_shape = builder.add_shape_mesh(body=-1, xform=mesh_xform, mesh=mesh, scale=mesh_scale)
+    sphere_body = builder.add_body(xform=wp.transform(wp.vec3(*contact_point_world[:2], 0.09), wp.quat_identity()))
     sphere_shape = builder.add_shape_sphere(
         body=sphere_body,
         radius=0.1,
     )
     model = builder.finalize(device=device)
-    mesh.mesh.velocities.assign(np.tile(surface_velocity, (len(vertices), 1)))
+    mesh.mesh.velocities.assign(velocity_local)
 
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
     contacts = pipeline.contacts()
@@ -2796,9 +2802,13 @@ def test_rigid_mesh_contacts_export_surface_velocity(test, device):
     test.assertGreater(count, 0)
     shape0 = contacts.rigid_contact_shape0.numpy()[:count]
     shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+    point0 = contacts.rigid_contact_point0.numpy()[:count]
+    point1 = contacts.rigid_contact_point1.numpy()[:count]
     contact_velocity = contacts.rigid_contact_surface_velocity.numpy()[:count]
     for i in range(count):
-        expected = surface_velocity if shape1[i] == mesh_shape else -surface_velocity
+        mesh_point = point1[i] if shape1[i] == mesh_shape else point0[i]
+        expected_mesh_velocity = mesh_point - np.array([0.4, -0.3, 0.0], dtype=np.float32)
+        expected = expected_mesh_velocity if shape1[i] == mesh_shape else -expected_mesh_velocity
         test.assertIn(sphere_shape, (shape0[i], shape1[i]))
         np.testing.assert_allclose(contact_velocity[i], expected, atol=1.0e-6)
 

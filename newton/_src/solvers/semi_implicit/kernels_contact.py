@@ -505,7 +505,8 @@ def _eval_body_contact(
 
     # relative velocity
     v = bv_a - bv_b
-    v -= contact_surface_velocity
+    surface_velocity_t = contact_surface_velocity - n * wp.dot(n, contact_surface_velocity)
+    v -= surface_velocity_t
 
     # print(v)
 

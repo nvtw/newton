@@ -149,9 +149,11 @@ class Mesh:
         com [m]: Mesh center of mass in local coordinates.
         inertia [kg*m^2]: Mesh inertia tensor about :attr:`com` in local coordinates.
         enable_surface_velocity: Whether rigid contacts sample the finalized Warp
-            mesh's per-vertex velocities.
+            mesh's per-vertex velocities for contact friction.
         mesh: Most recently finalized Warp mesh. Its ``velocities`` array may be
             updated on the device to prescribe per-vertex surface motion [m/s].
+            Contact solvers use only the component tangent to the contact surface;
+            normal motion must be represented by updating the mesh geometry.
 
     Example:
         Load a mesh from an OBJ file using OpenMesh and create a Newton Mesh:
@@ -216,8 +218,11 @@ class Mesh:
             sdf: Optional prebuilt SDF object owned by this mesh.
             opacity: Optional per-mesh opacity in [0, 1].
             enable_surface_velocity: If ``True``, rigid contacts sample per-vertex
-                velocities from the finalized Warp mesh. Disabled by default so
-                ordinary mesh contacts incur no surface-velocity query cost.
+                velocities from the finalized Warp mesh for friction. Solvers use
+                only the component tangent to the contact surface; normal motion
+                must be represented by updating the mesh geometry. Disabled by
+                default so ordinary mesh contacts incur no surface-velocity query
+                cost.
         """
         from .inertia import compute_inertia_mesh  # noqa: PLC0415
 

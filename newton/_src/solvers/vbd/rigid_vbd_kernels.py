@@ -1870,7 +1870,7 @@ def evaluate_rigid_contact_from_collision(
     I3 = wp.identity(n=3, dtype=float)
 
     # Normal approach rate from the geometric points (not the rotating anchor).
-    v_rel_n = (x_s_b_now - x_s_b_prev - x_s_a_now + x_s_a_prev) / dt + contact_surface_velocity
+    v_rel_n = (x_s_b_now - x_s_b_prev - x_s_a_now + x_s_a_prev) / dt
     v_dot_n = wp.dot(contact_normal, v_rel_n)
 
     # Tangential slip from the surface anchor (required for finite-radius friction).
