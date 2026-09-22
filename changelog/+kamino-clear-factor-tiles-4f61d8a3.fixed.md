@@ -1,1 +1,3 @@
-Fix stale Kamino RCM Cholesky factor entries when matrix sparsity shrinks between factorizations, keeping dense DVI Schur-response consumers consistent with the current factor.
+Fix Kamino DVI factor reuse when sparsity shrinks, preserve small-bound sliding
+friction at stationarity, and avoid offset overflow for solver buffers larger
+than 2 GiB.

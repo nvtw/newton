@@ -24,7 +24,7 @@ class Example:
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 6
+        self.sim_substeps = 4 if args.solver == "kamino" else 6
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.world_count = args.world_count
@@ -76,7 +76,6 @@ class Example:
                 self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
             )
             solver_config.dvi.max_alternating_iterations = 8
-            solver_config.constraints.alpha = 0.2
             solver_config.dvi.bilateral_solve_interval = 8
             solver_config.dvi.bilateral_solver_type = "LLTBRCM"
             solver_config.dvi.omega = 1.2
@@ -162,13 +161,15 @@ class Example:
             "all bodies are above the ground",
             lambda q, qd: q[2] > 0.0,
         )
-        # Keep the predicate on one line so Warp extracts the comparison too.
+        # fmt: off
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "all body velocities are small",
-            lambda q, qd: max(abs(qd)) < 0.015,
+            lambda q, qd: max(abs(qd))
+            < 0.015,  # Relaxed from 0.005 - G1 has higher residual velocities with collision pipeline
         )
+        # fmt: on
 
     @staticmethod
     def create_parser():

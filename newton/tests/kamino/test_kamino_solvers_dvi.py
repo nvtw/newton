@@ -41,6 +41,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.projections import (
 from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_JOINTS,
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
+    _can_reuse_sparse_assembly,
     _can_use_cooperative_articulation,
     _sparse_delassus_matvec_rows,
 )
@@ -422,6 +423,16 @@ class TestDVISolver(unittest.TestCase):
         self.assertEqual(_can_use_cooperative_articulation(path), self.device.is_cuda)
         path.use_schur_complement = False
         self.assertFalse(_can_use_cooperative_articulation(path))
+
+    def test_00_sparse_assembly_reuse_requires_large_constrained_batch(self):
+        """Avoid cached sparse assembly where it regresses ordinary DVI solves."""
+        size = SimpleNamespace(num_worlds=2047, sum_of_num_friction_joint_cts=2047)
+        self.assertFalse(_can_reuse_sparse_assembly(size, has_unilateral_constraints=True))
+        size.num_worlds = 2048
+        self.assertTrue(_can_reuse_sparse_assembly(size, has_unilateral_constraints=False))
+        size.sum_of_num_friction_joint_cts = 0
+        self.assertFalse(_can_reuse_sparse_assembly(size, has_unilateral_constraints=False))
+        self.assertTrue(_can_reuse_sparse_assembly(size, has_unilateral_constraints=True))
 
     def test_00_config_selection(self):
         """Verify default, dense, PADMM, and explicit DVI configuration selection."""

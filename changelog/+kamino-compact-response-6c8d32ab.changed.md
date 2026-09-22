@@ -1,1 +1,0 @@
-Accelerate compact Schur response construction for large CUDA batches in Kamino DVI while retaining cooperative solves for noncompact contacts and smaller batches; no configuration changes are required.

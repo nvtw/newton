@@ -1,1 +1,0 @@
-Reuse the initial forward-solved right-hand side in single-world compact Kamino DVI solves, avoiding redundant forward substitution when recovering final joint impulses. No configuration changes are required.

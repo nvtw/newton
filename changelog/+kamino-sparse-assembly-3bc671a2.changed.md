@@ -1,3 +1,5 @@
-Accelerate captured Kamino DVI solves by reusing conservative bilateral sparsity
-and assembling directly in the existing numerical solver ordering. Preserve
-dynamic contacts, closed-loop support, and solver settings; no migration is required.
+Accelerate experimental sparse Kamino DVI solves across small joint-friction,
+large batched articulation, and contact-rich workloads by reusing sparse
+factorization structure and compact Schur responses. Solver tolerances,
+iteration budgets, joint-friction laws, and contact laws are unchanged; no
+configuration migration is required.
