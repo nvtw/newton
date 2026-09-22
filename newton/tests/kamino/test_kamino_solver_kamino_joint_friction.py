@@ -261,6 +261,7 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
         wraps=make_response_kernel,
     )
     def test_compact_schur_friction_spin_down(self, response_kernel):
+        """Preserve analytical friction through compact Schur spin-down and reversals."""
         self._check_compact_schur_friction(response_kernel, omega=1.0, max_iterations=8)
 
     @mock.patch(

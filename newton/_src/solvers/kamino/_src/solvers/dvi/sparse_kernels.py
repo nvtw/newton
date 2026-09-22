@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from functools import cache
-
 import warp as wp
 
 from ...core.math import FLOAT32_EPS
@@ -3038,110 +3036,92 @@ def _solve_dvi_compact_schur_pgs_cooperative(
         solver_status[wid] = status
 
 
-@cache
-def make_build_sparse_bilateral_block_kernel():
-    """Build bilateral assembly in dense element storage."""
-    offset_dtype = int32
+@wp.kernel
+def _build_sparse_bilateral_block(
+    # Inputs:
+    model_bodies_inv_m_i: wp.array[float32],
+    data_bodies_inv_I_i: wp.array[mat33f],
+    pair_wid: wp.array[int32],
+    pair_row: wp.array[int32],
+    pair_col: wp.array[int32],
+    pair_bid: wp.array[int32],
+    pair_i: wp.array[int32],
+    pair_j: wp.array[int32],
+    jacobian_cts_nzb_values: wp.array[vec6f],
+    problem_njc: wp.array[int32],
+    bilateral_mio: wp.array[int32],
+    bilateral_vio: wp.array[int32],
+    bilateral_P: wp.array[float32],
+    # Output:
+    bilateral_D: wp.array[float32],
+    inverse_permutation: wp.array[int32],
+    use_permutation: bool,
+):
+    pair_id = wp.tid()
+    wid = pair_wid[pair_id]
+    njc = problem_njc[wid]
+    row = pair_row[pair_id]
+    col = pair_col[pair_id]
+    block_i = jacobian_cts_nzb_values[pair_i[pair_id]]
+    block_j = jacobian_cts_nzb_values[pair_j[pair_id]]
+    Jv_i = vec3f(block_i[0], block_i[1], block_i[2])
+    Jv_j = vec3f(block_j[0], block_j[1], block_j[2])
+    Jw_i = vec3f(block_i[3], block_i[4], block_i[5])
+    Jw_j = vec3f(block_j[3], block_j[4], block_j[5])
 
-    @wp.kernel
-    def _build_sparse_bilateral_block(
-        # Inputs:
-        model_bodies_inv_m_i: wp.array[float32],
-        data_bodies_inv_I_i: wp.array[mat33f],
-        pair_wid: wp.array[int32],
-        pair_row: wp.array[int32],
-        pair_col: wp.array[int32],
-        pair_bid: wp.array[int32],
-        pair_i: wp.array[int32],
-        pair_j: wp.array[int32],
-        jacobian_cts_nzb_values: wp.array[vec6f],
-        problem_njc: wp.array[int32],
-        bilateral_mio: wp.array[offset_dtype],
-        bilateral_vio: wp.array[int32],
-        bilateral_P: wp.array[float32],
-        # Output:
-        bilateral_D: wp.array[float32],
-        inverse_permutation: wp.array[int32],
-        use_permutation: bool,
-    ):
-        pair_id = wp.tid()
-        wid = pair_wid[pair_id]
-        njc = problem_njc[wid]
-        row = pair_row[pair_id]
-        col = pair_col[pair_id]
-        block_i = jacobian_cts_nzb_values[pair_i[pair_id]]
-        block_j = jacobian_cts_nzb_values[pair_j[pair_id]]
-        Jv_i = vec3f(block_i[0], block_i[1], block_i[2])
-        Jv_j = vec3f(block_j[0], block_j[1], block_j[2])
-        Jw_i = vec3f(block_i[3], block_i[4], block_i[5])
-        Jw_j = vec3f(block_j[3], block_j[4], block_j[5])
+    bid_k = pair_bid[pair_id]
+    inv_m_k = model_bodies_inv_m_i[bid_k]
+    inv_I_k = data_bodies_inv_I_i[bid_k]
+    D_ij = inv_m_k * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, inv_I_k @ Jw_j)
 
-        bid_k = pair_bid[pair_id]
-        inv_m_k = model_bodies_inv_m_i[bid_k]
-        inv_I_k = data_bodies_inv_I_i[bid_k]
-        D_ij = inv_m_k * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, inv_I_k @ Jw_j)
+    bvio = bilateral_vio[wid]
+    p_row = bilateral_P[bvio + row]
+    p_col = bilateral_P[bvio + col]
+    val = p_row * D_ij * p_col
 
-        bvio = bilateral_vio[wid]
-        p_row = bilateral_P[bvio + row]
-        p_col = bilateral_P[bvio + col]
-        val = p_row * D_ij * p_col
-
-        bmio = offset_dtype(bilateral_mio[wid])
-        if use_permutation:
-            row = inverse_permutation[bvio + row]
-            col = inverse_permutation[bvio + col]
-        wp.atomic_add(bilateral_D, bmio + njc * row + col, val)
-        wp.atomic_add(bilateral_D, bmio + njc * col + row, val)
-
-    return _build_sparse_bilateral_block
+    bmio = bilateral_mio[wid]
+    if use_permutation:
+        row = inverse_permutation[bvio + row]
+        col = inverse_permutation[bvio + col]
+    wp.atomic_add(bilateral_D, bmio + njc * row + col, val)
+    wp.atomic_add(bilateral_D, bmio + njc * col + row, val)
 
 
-@cache
-def make_set_sparse_bilateral_diagonal_kernel():
-    """Build bilateral assembly in dense element storage."""
-    offset_dtype = int32
+@wp.kernel
+def _set_sparse_bilateral_diagonal(
+    # Inputs:
+    problem_njc: wp.array[int32],
+    problem_vio: wp.array[int32],
+    bilateral_mio: wp.array[int32],
+    bilateral_vio: wp.array[int32],
+    problem_diag: wp.array[float32],
+    # Outputs:
+    bilateral_D: wp.array[float32],
+    bilateral_P: wp.array[float32],
+    inverse_permutation: wp.array[int32],
+    use_permutation: bool,
+):
+    wid, row = wp.tid()
 
-    @wp.kernel
-    def _set_sparse_bilateral_diagonal(
-        # Inputs:
-        problem_njc: wp.array[int32],
-        problem_vio: wp.array[int32],
-        bilateral_mio: wp.array[offset_dtype],
-        bilateral_vio: wp.array[int32],
-        problem_diag: wp.array[float32],
-        # Outputs:
-        bilateral_D: wp.array[float32],
-        bilateral_P: wp.array[float32],
-        inverse_permutation: wp.array[int32],
-        use_permutation: bool,
-    ):
-        wid, row = wp.tid()
+    njc = problem_njc[wid]
+    if njc == 0:
+        if row == 0:
+            bilateral_D[bilateral_mio[wid]] = float32(1.0)
+            bilateral_P[bilateral_vio[wid]] = float32(1.0)
+        return
+    if row >= njc:
+        return
 
-        njc = problem_njc[wid]
-        if njc == 0:
-            if row == 0:
-                bilateral_D[bilateral_mio[wid]] = float32(1.0)
-                bilateral_P[bilateral_vio[wid]] = float32(1.0)
-            return
-        if row >= njc:
-            return
-
-        pvio = problem_vio[wid]
-        bvio = bilateral_vio[wid]
-        bmio = offset_dtype(bilateral_mio[wid])
-        diag = wp.abs(problem_diag[pvio + row])
-        p = wp.sqrt(1.0 / (diag + FLOAT32_EPS))
-        bilateral_P[bvio + row] = p
-        if use_permutation:
-            row = inverse_permutation[bvio + row]
-        diagonal_index = bmio + njc * row + row
-        bilateral_D[diagonal_index] = p * diag * p + float32(7.0e-7)
-
-    return _set_sparse_bilateral_diagonal
-
-
-_build_sparse_bilateral_block = make_build_sparse_bilateral_block_kernel()
-_set_sparse_bilateral_diagonal = make_set_sparse_bilateral_diagonal_kernel()
+    pvio = problem_vio[wid]
+    bvio = bilateral_vio[wid]
+    bmio = bilateral_mio[wid]
+    diag = wp.abs(problem_diag[pvio + row])
+    p = wp.sqrt(1.0 / (diag + FLOAT32_EPS))
+    bilateral_P[bvio + row] = p
+    if use_permutation:
+        row = inverse_permutation[bvio + row]
+    diagonal_index = bmio + njc * row + row
+    bilateral_D[diagonal_index] = p * diag * p + float32(7.0e-7)
 
 
 @wp.kernel
