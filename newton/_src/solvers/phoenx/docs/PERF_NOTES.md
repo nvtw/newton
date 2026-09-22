@@ -1070,3 +1070,32 @@ These later results supersede the early FP16/contact-row prioritization:
   but still fell to 37.1 FPS because completion atomics and spin waits cost
   more than the exposed overlap. Atomics and readiness tracking are therefore
   not useful replacements for these small colors.
+- Contact-reduction screens on the 64-world plate workload showed that solver
+  work can be cut materially, but the normal/support budget is an accuracy
+  control. Six axis-normal bins with six support directions reached 49.4 FPS
+  and preserved 0.0323 mm penetration, but angular RMS jitter rose to
+  0.001284 rad/s (above the 0.001243 limit). Eight support directions reached
+  48.3 FPS and fixed angular jitter, but linear RMS jitter rose to 0.01591 mm/s
+  (above 0.0154). Seven and ten directions also failed a jitter limit. Keeping
+  12 normal bins and reducing each patch from six to four support directions
+  passed at 0.0323 mm penetration, 0.0143 mm/s linear jitter, and
+  0.001171 rad/s angular jitter, but reached only 43.4 FPS versus 41.9 FPS. An
+  eight-bin octahedral screen reached 42.3 FPS. Leave the validated 12-bin,
+  six-direction global default unchanged; a leaner reducer needs a better
+  stability mechanism before it can carry the 60 FPS target.
+
+- A rigid-contact-only dispatcher specialization removed family-boundary
+  arithmetic and a duplicate articulation-owner check from the dominant
+  mass-splitting kernel, but sustained throughput was 42.1 FPS versus the
+  41.9 FPS baseline. The compiler already eliminates enough of that dispatch
+  that the extra specialization is not worthwhile, so it was removed. The
+  multi-world dispatcher already alternates forward and reverse color order
+  between PGS sweeps.
+
+- Folding each rigid world's overflow batches into its existing one-block color
+  sweep removed the separate global overflow launch and reproduced the
+  qualified penetration and jitter values exactly. It reached 42.8 FPS over
+  300 frames, but an identical sustained 600-frame A/B was only 41.4 versus
+  41.2 FPS. The extra kernel arguments and duplicated overflow dispatcher are
+  not justified by that 0.5% gain, so the prototype was removed.
+
