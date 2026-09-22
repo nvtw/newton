@@ -2445,6 +2445,107 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
     elif block_iteration == int32(_FUSED_BILATERAL_BLOCK):
         sweep_count *= cfg.max_alternating_iterations
 
+    if use_full_schur and nc == int32(0) and block_iteration == int32(_FUSED_BILATERAL_BLOCK):
+        # Scalar Schur sweeps are sequential, but their working set fits on
+        # chip. Avoid a dependent global-memory round trip for every row.
+        # Tile stores synchronize the block; inactive lanes use scratch slots.
+        q = wp.tile_zeros(shape=(544,), dtype=float32, storage="shared")
+        impulses = wp.tile_zeros(shape=(544,), dtype=float32, storage="shared")
+        diagonals = wp.tile_zeros(shape=(544,), dtype=float32, storage="shared")
+        lowers = wp.tile_zeros(shape=(544,), dtype=float32, storage="shared")
+        uppers = wp.tile_zeros(shape=(544,), dtype=float32, storage="shared")
+        scales = wp.tile_zeros(shape=(544,), dtype=float32, storage="shared")
+        order = wp.tile_zeros(shape=(544,), dtype=int32, storage="shared")
+        chunks = (scalar_count + int32(31)) / int32(32)
+        for chunk in range(chunks):
+            target = lane + int32(32) * chunk
+            safe_target = wp.min(target, scalar_count - int32(1))
+            index = vio + njc + safe_target
+            shared_index = wp.where(target < scalar_count, target, int32(512) + lane)
+            lower = float32(0.0)
+            upper = float32(0.0)
+            if safe_target < nbc:
+                lower = problem_bound_lower[bcio + safe_target]
+                upper = problem_bound_upper[bcio + safe_target]
+            q[shared_index] = compact_q[index]
+            impulses[shared_index] = solution_lambdas[index]
+            diagonals[shared_index] = projected_diag[index]
+            lowers[shared_index] = lower
+            uppers[shared_index] = upper
+            scales[shared_index] = problem_P[index]
+            order[shared_index] = inequality_ids_by_color[uio + safe_target]
+
+        completed = int32(0)
+        for sweep in range(sweep_count):
+            changed = wp.bool(False)
+            # Forward scalar sweeps visit the color/group storage order.
+            for slot in range(scalar_count):
+                uid = order[slot]
+                row = bcgo + uid - njc
+                valid = wp.bool(True)
+                if uid >= nbc:
+                    row = lcgo + uid - nbc - njc
+                    valid = limit_indices[lio + uid - nbc] >= int32(0)
+                old_value = impulses[row]
+                value = old_value
+                if valid:
+                    if uid < nbc:
+                        value = _project_box_update(
+                            old_value, q[row], diagonals[row], cfg.regularization, cfg.omega, lowers[row], uppers[row]
+                        )
+                    elif diagonals[row] > FLOAT32_EPS:
+                        value = wp.max(
+                            float32(0.0),
+                            old_value - cfg.omega * q[row] / (diagonals[row] + cfg.regularization + FLOAT32_EPS),
+                        )
+                delta = value - old_value
+                changed = changed or delta != float32(0.0)
+                write_index = wp.where(lane == int32(0), row, int32(512) + lane)
+                impulses[write_index] = value
+                if delta != float32(0.0):
+                    for chunk in range(chunks):
+                        target = lane + int32(32) * chunk
+                        shared_index = wp.where(target < scalar_count, target, int32(512) + lane)
+                        coefficient = float32(0.0)
+                        if target < scalar_count:
+                            coefficient = compact_schur[response_offset + row * scalar_count + target]
+                        q[shared_index] = q[shared_index] - coefficient * delta
+            completed = sweep + int32(1)
+            if not changed:
+                break
+            if nl == int32(0) and cfg.tolerance > float32(0.0):
+                violations = float32(0.0)
+                for bounded_row in range(lane, nbc, int32(32)):
+                    value = impulses[bounded_row]
+                    gradient = q[bounded_row]
+                    lower = lowers[bounded_row]
+                    upper = uppers[bounded_row]
+                    valid = wp.isfinite(value) and wp.isfinite(gradient) and value >= lower and value <= upper
+                    stationary = lower == upper
+                    stationary = stationary or (value == lower and gradient >= float32(0.0))
+                    stationary = stationary or (value == upper and gradient <= float32(0.0))
+                    stationary = stationary or (
+                        value > lower
+                        and value < upper
+                        and wp.abs(gradient) <= cfg.tolerance * wp.abs(scales[bounded_row])
+                    )
+                    projected = _project_box_update(
+                        value, gradient, diagonals[bounded_row], cfg.regularization, cfg.omega, lower, upper
+                    )
+                    valid = valid and wp.isfinite(projected) and wp.abs(projected - value) <= cfg.tolerance
+                    if not valid or not stationary:
+                        violations += float32(1.0)
+                if _subgroup_sum_32(violations) == float32(0.0):
+                    break
+        for target in range(lane, scalar_count, int32(32)):
+            compact_q[vio + njc + target] = q[target]
+            solution_lambdas[vio + njc + target] = impulses[target]
+        if lane == int32(0):
+            status = solver_status[wid]
+            status.iterations = completed
+            solver_status[wid] = status
+        return
+
     completed_sweeps = int32(0)
     for sweep in range(sweep_count):
         sweep_changed = wp.bool(False)
