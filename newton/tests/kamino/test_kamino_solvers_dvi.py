@@ -527,6 +527,20 @@ class TestDVISolver(unittest.TestCase):
         )
         self.assertEqual(kamino_config.DVISolverConfig.from_model(model_with_attrs).max_alternating_iterations, 37)
 
+    def test_00_schur_ignores_bilateral_solve_interval(self):
+        """Do not fall back to bilateral alternation after Schur elimination."""
+        configs = [
+            kamino_config.DVISolverConfig(max_alternating_iterations=4, bilateral_solve_interval=interval)
+            for interval in (1, 2)
+        ]
+        solver = SimpleNamespace(_use_schur_complement=True, _max_alternating_iterations=4)
+
+        schedule = DVISolver._make_bilateral_solve_schedule(solver, configs)
+
+        self.assertEqual(schedule, (False, False, False))
+        solver._use_schur_complement = False
+        self.assertEqual(DVISolver._make_bilateral_solve_schedule(solver, configs), (True, True, True))
+
     def test_00a_dvi_contact_capacity_uses_geometry_heuristic(self):
         """Limit DVI contact allocation while honoring explicit overrides."""
         builder = newton.ModelBuilder()
