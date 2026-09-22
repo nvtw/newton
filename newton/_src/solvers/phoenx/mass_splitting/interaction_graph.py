@@ -45,6 +45,7 @@ __all__ = [
     "emit_pair",
     "interaction_graph_scratch_zeros",
     "record_all_interactions_kernel",
+    "record_all_interactions_multiworld_kernel",
 ]
 
 
@@ -222,6 +223,64 @@ def record_all_interactions_kernel(
         if v < wp.int32(0):
             break
         emit_pair(scratch, v, partition_key)
+
+
+@wp.kernel(enable_backward=False)
+def record_all_interactions_multiworld_kernel(
+    elements: wp.array[ElementInteractionData],
+    contact_articulation_owner: wp.array[wp.int32],
+    contact_offset: wp.int32,
+    element_ids_by_color: wp.array[wp.int32],
+    world_csr_offsets: wp.array[wp.int32],
+    world_color_starts: wp.array2d[wp.int32],
+    world_num_colors: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+    batch_size: wp.int32,
+    row_partition: wp.array[wp.int32],
+    row_batch_start: wp.array[wp.int32],
+    scratch: InteractionGraphScratch,
+):
+    """Emit copy-state ownership for a capped per-world colouring.
+
+    One thread owns one world. Regular colours share partition zero. Rows in
+    each world's final overflow colour are split into local batches. Partition
+    identifiers may repeat between worlds because worlds have disjoint nodes.
+    The explicit per-row partition is also consumed by the slot-cache builder
+    and by the solve kernel, keeping all three users on the same mapping.
+    """
+    world = wp.tid()
+    world_base = world_csr_offsets[world]
+    num_colors = world_num_colors[world]
+    color = wp.int32(0)
+    while color < num_colors:
+        start = world_color_starts[world, color]
+        end = world_color_starts[world, color + wp.int32(1)]
+        position = start
+        while position < end:
+            cid = element_ids_by_color[world_base + position]
+            partition = wp.int32(0)
+            if color >= max_colored_partitions:
+                # Partition keys are local to a node, so keys may repeat in
+                # disjoint worlds. As in the single-world path, batch zero
+                # shares the regular partition-zero state.
+                overflow_offset = position - start
+                partition = overflow_offset / batch_size
+                if overflow_offset % batch_size == wp.int32(0):
+                    row_batch_start[cid] = wp.int32(1)
+                else:
+                    row_batch_start[cid] = wp.int32(0)
+            else:
+                row_batch_start[cid] = wp.int32(0)
+            row_partition[cid] = partition
+            if cid < contact_offset or contact_articulation_owner[cid - contact_offset] < wp.int32(0):
+                element = elements[cid]
+                for endpoint_index in range(MAX_BODIES):
+                    node = element_interaction_data_get(element, endpoint_index)
+                    if node < wp.int32(0):
+                        break
+                    emit_pair(scratch, node, partition)
+            position += wp.int32(1)
+        color += wp.int32(1)
 
 
 # -----------------------------------------------------------------------------

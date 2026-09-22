@@ -631,8 +631,15 @@ _PER_WORLD_FREE_COLOR_FLIP = wp.constant(wp.int64(-1))
 
 
 @functools.cache
-def get_per_world_greedy_coloring_kernel(group_families: bool):
-    """Build the shared world-greedy colorer with optional family grouping."""
+def get_per_world_greedy_coloring_kernel(group_families: bool, spill_overflow: bool = False):
+    """Build the shared world-greedy colorer with optional family grouping.
+
+    When ``spill_overflow`` is true, rows that cannot use one of the
+    ``max_colors`` independent-set colours are retained in colour
+    ``max_colors``. That final bucket is intentionally not an independent
+    set; mass splitting gives each batch private body state while it is
+    solved.
+    """
 
     @wp.kernel(enable_backward=False, module="unique")
     def kernel(
@@ -693,9 +700,12 @@ def get_per_world_greedy_coloring_kernel(group_families: bool):
 
             color = _lowest_set_bit(wp.int64(forbidden_mask) ^ _PER_WORLD_FREE_COLOR_FLIP)
             if color < wp.int32(0) or color >= max_colors:
-                overflow_flag[0] = wp.int32(1)
-                assigned[eid] = wp.int32(-1)
-            else:
+                if wp.static(spill_overflow):
+                    color = max_colors
+                else:
+                    overflow_flag[0] = wp.int32(1)
+                    assigned[eid] = wp.int32(-1)
+            if color >= wp.int32(0) and (color < max_colors or wp.static(spill_overflow)):
                 # Smallest-free greedy produces a contiguous color range. Initialize
                 # a bucket exactly once when its first element appears.
                 if color >= num_colors:
@@ -715,12 +725,13 @@ def get_per_world_greedy_coloring_kernel(group_families: bool):
                     num_colors = color + wp.int32(1)
 
                 assigned[eid] = color + wp.int32(1)
-                color_bit = wp.uint64(1) << wp.uint64(color)
-                for j in range(MAX_BODIES):
-                    node = elements[eid].bodies[j]
-                    if node < wp.int32(0):
-                        break
-                    node_color_mask[node] |= color_bit
+                if color < max_colors:
+                    color_bit = wp.uint64(1) << wp.uint64(color)
+                    for j in range(MAX_BODIES):
+                        node = elements[eid].bodies[j]
+                        if node < wp.int32(0):
+                            break
+                        node_color_mask[node] |= color_bit
                 family = wp.int32(0)
                 if wp.static(group_families):
                     family = _element_fast_family(element_family[eid])
@@ -4312,3 +4323,227 @@ def get_singleworld_kernel(
         patch_friction=patch_friction,
         bilateral_joint_blocks=bilateral_joint_blocks,
     )
+
+
+@functools.cache
+def get_multiworld_mass_splitting_kernel(
+    *,
+    phase: str,
+    cloth_support: bool,
+    enable_column_timers: bool = False,
+    soft_tet_neohookean: bool = False,
+    has_joints: bool = True,
+    has_contacts: bool = True,
+    skip_joint_pgs: bool = False,
+    has_sleeping: bool = True,
+    has_soft_contact_pd: bool = True,
+    patch_friction: bool = False,
+    bilateral_joint_blocks: bool = False,
+):
+    """Build one block-per-world, one-sweep mass-splitting kernel.
+
+    A launch performs exactly one prepare, biased iterate, or relaxation
+    sweep. This boundary is deliberate: split copies must be averaged across
+    the whole device between PGS sweeps to preserve momentum.
+    """
+    is_prepare = phase == "prepare"
+    is_cached_prepare = phase == "cached_prepare"
+    use_bias = phase == "iterate"
+    dispatch_one_cid, _ = _make_singleworld_dispatch_func(
+        cloth_support=cloth_support,
+        enable_column_timers=enable_column_timers,
+        soft_tet_neohookean=soft_tet_neohookean,
+        has_joints=has_joints,
+        skip_joint_pgs=skip_joint_pgs,
+        has_mass_splitting=True,
+        packed_contact_headers=False,
+        has_sleeping=has_sleeping,
+        has_soft_contact_pd=has_soft_contact_pd,
+        is_prepare=is_prepare,
+        is_cached_prepare=is_cached_prepare,
+        use_bias=use_bias,
+        patch_friction=patch_friction,
+        bilateral_joint_blocks=bilateral_joint_blocks,
+    )
+
+    @wp.kernel(enable_backward=False, module="unique", grid_stride=False)
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        element_ids_by_color: wp.array[wp.int32],
+        world_color_starts: wp.array2d[wp.int32],
+        world_csr_offsets: wp.array[wp.int32],
+        world_num_colors: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_worlds: wp.int32,
+        num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
+        num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
+        num_soft_tetrahedra: wp.int32,
+        num_soft_hexahedra: wp.int32,
+        num_bodies: wp.int32,
+        copy_state: CopyStateContainer,
+        max_colored_partitions: wp.int32,
+        reverse: wp.int32,
+        joint_only: wp.int32,
+    ):
+        tid = wp.tid()
+        block_dim = wp.block_dim()
+        world = tid / block_dim
+        lane = tid - world * block_dim
+        if world >= num_worlds:
+            return
+
+        num_colors = world_num_colors[world]
+        world_base = world_csr_offsets[world]
+        step = wp.int32(0)
+        while step < num_colors:
+            color = _color_for_step(step, num_colors, reverse, max_colored_partitions)
+            start = world_color_starts[world, color]
+            end = world_color_starts[world, color + wp.int32(1)]
+            count = end - start
+            if color != max_colored_partitions:
+                local = lane
+                while local < count:
+                    slot = world_base + start + local
+                    cid = element_ids_by_color[slot]
+                    if joint_only == wp.int32(0) or cid < num_joints:
+                        dispatch_one_cid(
+                            constraints,
+                            contact_cols,
+                            bodies,
+                            particles,
+                            cc,
+                            contacts,
+                            copy_state,
+                            num_joints,
+                            joint_pgs_enabled,
+                            num_cloth_triangles,
+                            num_cloth_bending,
+                            num_soft_tetrahedra,
+                            num_soft_hexahedra,
+                            num_bodies,
+                            idt,
+                            sor_boost,
+                            cid,
+                            slot,
+                            wp.int32(0),
+                        )
+                    local += block_dim
+            _sync_threads()
+            step += wp.int32(1)
+
+    return kernel
+
+
+@functools.cache
+def get_multiworld_mass_splitting_overflow_kernel(
+    *,
+    phase: str,
+    cloth_support: bool,
+    enable_column_timers: bool = False,
+    soft_tet_neohookean: bool = False,
+    has_joints: bool = True,
+    has_contacts: bool = True,
+    skip_joint_pgs: bool = False,
+    has_sleeping: bool = True,
+    has_soft_contact_pd: bool = True,
+    patch_friction: bool = False,
+    bilateral_joint_blocks: bool = False,
+):
+    """Build the global one-thread-per-overflow-row sweep kernel."""
+    is_prepare = phase == "prepare"
+    is_cached_prepare = phase == "cached_prepare"
+    dispatch_one_cid, _ = _make_singleworld_dispatch_func(
+        cloth_support=cloth_support,
+        enable_column_timers=enable_column_timers,
+        soft_tet_neohookean=soft_tet_neohookean,
+        has_joints=has_joints,
+        skip_joint_pgs=skip_joint_pgs,
+        has_mass_splitting=True,
+        packed_contact_headers=False,
+        has_sleeping=has_sleeping,
+        has_soft_contact_pd=has_soft_contact_pd,
+        is_prepare=is_prepare,
+        is_cached_prepare=is_cached_prepare,
+        use_bias=phase == "iterate",
+        patch_friction=patch_friction,
+        bilateral_joint_blocks=bilateral_joint_blocks,
+    )
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        element_ids_by_color: wp.array[wp.int32],
+        assigned: wp.array[wp.int32],
+        row_partition: wp.array[wp.int32],
+        row_batch_start: wp.array[wp.int32],
+        num_active_constraints: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
+        num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
+        num_soft_tetrahedra: wp.int32,
+        num_soft_hexahedra: wp.int32,
+        num_bodies: wp.int32,
+        copy_state: CopyStateContainer,
+        overflow_color: wp.int32,
+        batch_size: wp.int32,
+        joint_only: wp.int32,
+    ):
+        slot = wp.tid()
+        if slot >= num_active_constraints[0]:
+            return
+        cid = element_ids_by_color[slot]
+        if assigned[cid] != overflow_color + wp.int32(1):
+            return
+        partition = row_partition[cid]
+        if row_batch_start[cid] == wp.int32(0):
+            return
+
+        inner = wp.int32(0)
+        while inner < batch_size:
+            current_slot = slot + inner
+            if current_slot >= num_active_constraints[0]:
+                break
+            current_cid = element_ids_by_color[current_slot]
+            if assigned[current_cid] != overflow_color + wp.int32(1) or row_partition[current_cid] != partition:
+                break
+            if joint_only == wp.int32(0) or current_cid < num_joints:
+                dispatch_one_cid(
+                    constraints,
+                    contact_cols,
+                    bodies,
+                    particles,
+                    cc,
+                    contacts,
+                    copy_state,
+                    num_joints,
+                    joint_pgs_enabled,
+                    num_cloth_triangles,
+                    num_cloth_bending,
+                    num_soft_tetrahedra,
+                    num_soft_hexahedra,
+                    num_bodies,
+                    idt,
+                    sor_boost,
+                    current_cid,
+                    current_slot,
+                    partition,
+                )
+            inner += wp.int32(1)
+
+    return kernel

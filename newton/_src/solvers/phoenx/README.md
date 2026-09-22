@@ -239,9 +239,13 @@ flowchart TD
     single("<b>SingleWorldDispatcher</b><br/>Best for one large scene"):::path
     msd("<b>SingleWorldMassSplittingDispatcher</b><br/>Solves overflow through copy slots"):::ms
     msu("<b>SingleWorldMassSplittingUnrolledDispatcher</b><br/>Specialized fixed-cap variant"):::ms
+    multiq("<b>mass_splitting</b><br/>Adds per-world overflow copies"):::decision
     multi("<b>MultiWorldDispatcher</b><br/>Best for many independent worlds"):::multi
+    multims("<b>MultiWorldMassSplittingDispatcher</b><br/>Fused regular colors, global overflow batches"):::ms
     ctor --> layout
-    layout -->|multi_world| multi
+    layout -->|multi_world| multiq
+    multiq -->|false| multi
+    multiq -->|true| multims
     layout -->|single_world| msq
     msq -->|false| single
     msq -->|true| unroll
@@ -259,7 +263,7 @@ flowchart TD
 | --- | --- | --- |
 | `step_layout="single_world"` | A few large worlds, large stacks, mass splitting | Build one global color CSR. Dispatch persistent-grid head kernels plus a single-block fused tail for small trailing colors. |
 | `step_layout="multi_world"` | Many independent worlds, robot/RL batches | Build per-world color CSR. Fast-tail or block-per-world schedulers process worlds in a graph-stable layout. |
-| `mass_splitting=True` | Single-world scenes where color count or dense deformables would serialize too much | Cap regular colors, solve overflow with copy states, then average/broadcast and write back. |
+| `mass_splitting=True` | Dense single- or multi-world scenes where unrestricted coloring would serialize too much | Cap regular colors, solve overflow batches with copy states, then mass-average/broadcast and write back. |
 
 Important knobs:
 | Knob | Effect |
@@ -276,7 +280,7 @@ Important knobs:
 Keep these constraints explicit when changing solver dispatch or adding examples:
 - Public `SolverPhoenX` construction covers rigid bodies, contacts, Newton rigid joints, particles, cloth triangles/bending, and soft tetrahedra from `Model`. Soft hexahedra still use the internal `PhoenXWorld` array path.
 - D6 structural equalities use compact lock-pattern modes in the direct system. Free-axis limits, speed caps, and friction use one common six-axis D6 row representation; unsupported structural shapes fail early.
-- Mass splitting is single-world only. It can coexist with joints and cloth-triangle rows, but `mass_splitting=True` still rejects `step_layout="multi_world"`.
+- Mass splitting supports both step layouts and can coexist with joints and deformable rows. Multi-world mode colors each world independently, solves regular colors in per-world blocks, and dispatches overflow batches globally before the momentum-preserving merge-back.
 - `prepare_refresh_stride="auto"` is a graph-capture-safe optimization for rigid contact/joint worlds. Contact worlds refresh at least every third substep, and joint-only worlds may use larger fixed strides.
 - Auto-selection heuristics belong near construction-time policy helpers in `world.py` (`_choose_initial_threads_per_world`, `_choose_auto_prepare_refresh_stride`, `_choose_multi_world_scheduler`) plus the small GPU lane picker. Keep scheduler choices graph-stable after construction.
 

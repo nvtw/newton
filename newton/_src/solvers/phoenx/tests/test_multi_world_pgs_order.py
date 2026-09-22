@@ -19,7 +19,11 @@ from newton._src.solvers.phoenx import simulation, simulation_kernels
 from newton._src.solvers.phoenx.body import body_container_zeros
 from newton._src.solvers.phoenx.execution_policy import _choose_fast_tail_solve_schedule
 from newton._src.solvers.phoenx.experimental.mini.benchmark import _make_stack_model
-from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import ElementInteractionData
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
+    GREEDY_MAX_COLORS,
+    ElementInteractionData,
+)
+from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import MAX_COLORS
 from newton._src.solvers.phoenx.tests.test_robot_policy_parity import (
     _g1_29dof_yaml,
     _g1_robot_model,
@@ -143,6 +147,124 @@ class TestMultiWorldStableBucketing(unittest.TestCase):
         np.testing.assert_array_equal(offsets.numpy(), np.array([0, 4, 7, 11, 13], dtype=np.int32))
         np.testing.assert_array_equal(output.numpy()[: len(expected)], np.asarray(expected, dtype=np.int32))
         self.assertEqual(int(num_runs.numpy()[0]), 8)
+
+
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "PhoenX per-world overflow tests run on CUDA only.",
+)
+class TestMultiWorldMassSplittingColoring(unittest.TestCase):
+    def test_capped_greedy_coloring_retains_overflow_rows(self) -> None:
+        device = wp.get_preferred_device()
+        rows_per_world = 5
+        num_worlds = 2
+        element_count = rows_per_world * num_worlds
+        element_dtype = np.dtype({"names": ["bodies"], "formats": ["8i4"], "offsets": [0], "itemsize": 32})
+        host_elements = np.full(element_count, -1, dtype=element_dtype)
+        for world in range(num_worlds):
+            base = world * rows_per_world
+            center = world * (rows_per_world + 1)
+            for row in range(rows_per_world):
+                host_elements["bodies"][base + row, :2] = (center, center + row + 1)
+
+        elements = wp.array(host_elements, dtype=ElementInteractionData, device=device)
+        offsets = wp.array([0, rows_per_world, element_count], dtype=wp.int32, device=device)
+        counts = wp.array([rows_per_world, rows_per_world], dtype=wp.int32, device=device)
+        world_elements = wp.array(np.arange(element_count, dtype=np.int32), device=device)
+        families = wp.zeros(element_count, dtype=wp.int32, device=device)
+        node_masks = wp.zeros(num_worlds * (rows_per_world + 1), dtype=wp.uint64, device=device)
+        assigned = wp.zeros(element_count, dtype=wp.int32, device=device)
+        family_width = int(GREEDY_MAX_COLORS) * int(simulation_kernels._PER_WORLD_FAST_FAMILIES)
+        family_counts = wp.zeros((num_worlds, family_width), dtype=wp.int32, device=device)
+        family_offsets = wp.zeros((num_worlds, family_width), dtype=wp.int32, device=device)
+        output = wp.full(element_count, -1, dtype=wp.int32, device=device)
+        color_starts = wp.zeros((num_worlds, int(MAX_COLORS) + 1), dtype=wp.int32, device=device)
+        family_starts = wp.zeros((num_worlds, family_width), dtype=wp.int32, device=device)
+        num_colors = wp.zeros(num_worlds, dtype=wp.int32, device=device)
+        overflow = wp.zeros(1, dtype=wp.int32, device=device)
+
+        wp.launch(
+            simulation_kernels.get_per_world_greedy_coloring_kernel(False, True),
+            dim=num_worlds,
+            inputs=[offsets, counts, world_elements, elements, families, node_masks, wp.int32(2)],
+            outputs=[
+                assigned,
+                family_counts,
+                family_offsets,
+                output,
+                color_starts,
+                family_starts,
+                num_colors,
+                overflow,
+            ],
+            device=device,
+        )
+
+        np.testing.assert_array_equal(num_colors.numpy(), np.array([3, 3], dtype=np.int32))
+        np.testing.assert_array_equal(color_starts.numpy()[:, :4], np.array([[0, 1, 2, 5], [0, 1, 2, 5]]))
+        np.testing.assert_array_equal(np.sort(output.numpy()), np.arange(element_count, dtype=np.int32))
+        self.assertTrue(np.all(assigned.numpy() > 0))
+        self.assertEqual(int(overflow.numpy()[0]), 0)
+
+
+@unittest.skipUnless(
+    wp.get_preferred_device().is_cuda,
+    "PhoenX multi-world mass-splitting integration tests run on CUDA only.",
+)
+class TestMultiWorldMassSplittingIntegration(unittest.TestCase):
+    def test_dense_contacts_preserve_per_world_linear_momentum(self) -> None:
+        device = wp.get_preferred_device()
+        template = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        shape_cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.0, restitution=0.0)
+        for position in ((0.0, 0.0, 0.0), (0.8, 0.0, 0.0), (-0.8, 0.0, 0.0), (0.0, 0.8, 0.0), (0.0, -0.8, 0.0)):
+            body = template.add_body(xform=wp.transform(wp.vec3(*position), wp.quat_identity()))
+            template.add_shape_sphere(body, radius=0.5, cfg=shape_cfg)
+
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        builder.replicate(template, 2)
+        model = builder.finalize(device=device)
+        pipeline = newton.CollisionPipeline(model, rigid_contact_max=64, contact_matching="sticky", deterministic=True)
+        contacts = pipeline.contacts()
+        state_0 = model.state()
+        state_1 = model.state()
+        control = model.control()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+            step_layout="multi_world",
+            mass_splitting=True,
+            max_colored_partitions=1,
+            mass_splitting_batch_size=2,
+            joint_mode="maximal_direct",
+        )
+
+        pipeline.collide(state_0, contacts)
+        self.assertGreaterEqual(int(contacts.rigid_contact_count.numpy()[0]), 8)
+        state_0.clear_forces()
+        solver.step(state_0, state_1, control, contacts, 1.0 / 60.0)
+
+        velocities = state_1.body_qd.numpy()[:, :3].astype(np.float64)
+        masses = model.body_mass.numpy().astype(np.float64)
+        bodies_per_world = 5
+        for world in range(2):
+            world_slice = slice(world * bodies_per_world, (world + 1) * bodies_per_world)
+            momentum = np.sum(masses[world_slice, None] * velocities[world_slice], axis=0)
+            np.testing.assert_allclose(momentum, 0.0, atol=2.0e-4, rtol=0.0)
+        self.assertTrue(np.all(np.isfinite(state_1.body_q.numpy())))
+        self.assertGreaterEqual(int(np.max(solver.world._multiworld_row_partition.numpy())), 1)
+        batch_starts = solver.world._multiworld_row_batch_start.numpy()
+        color_starts = solver.world._world_color_starts.numpy()
+        num_colors = solver.world._world_num_colors.numpy()
+        expected_batches = 0
+        for world, colors in enumerate(num_colors):
+            if colors > 1:
+                overflow_count = int(color_starts[world, 2] - color_starts[world, 1])
+                expected_batches += (overflow_count + 1) // 2
+        # Every world starts its own first overflow batch, even when the
+        # preceding global CSR row belongs to another world's batch zero.
+        self.assertEqual(expected_batches, int(np.sum(batch_starts)))
 
 
 class TestMultiWorldColoringContract(unittest.TestCase):
