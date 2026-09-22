@@ -1057,3 +1057,16 @@ These later results supersede the early FP16/contact-row prioritization:
   (0.0138--0.0185 mm penetration), but added serial color work and reached only
   40.7--41.7 FPS. Six sweeps with 16 colors reached 48.1 FPS but failed settled
   linear and angular jitter limits.
+
+- Contact-layout and local-order experiments on the same 64-world plate workload
+  were rejected after sustained 300-frame runs. Transposing geometry and
+  derived rows to contact-major storage reached 39.5 FPS; warp-interleaving
+  manifold rows reached 37.0 FPS; reversing packed point order reached
+  32.2 FPS; and stable sorting independent columns by manifold width reached
+  36.8 FPS. The unchanged field-major, forward, stable color order remained at
+  41.9 FPS. A separate real 64-world G1 scheduling screen measured the current
+  world-local color loop at 0.700 ms versus 4.109 ms for dependency scanning.
+  A production-shaped exact-predecessor prototype removed full color barriers
+  but still fell to 37.1 FPS because completion atomics and spin waits cost
+  more than the exposed overlap. Atomics and readiness tracking are therefore
+  not useful replacements for these small colors.
