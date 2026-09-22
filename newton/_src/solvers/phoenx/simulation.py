@@ -3575,7 +3575,8 @@ class PhoenXWorld:
         """Build copy ownership from the capped per-world CSR schedule."""
         wp.launch(
             record_all_interactions_multiworld_kernel,
-            dim=self.num_worlds,
+            dim=(self.num_worlds, 128),
+            block_dim=128,
             inputs=[
                 self._elements,
                 self._contact_cols.articulation_owner,

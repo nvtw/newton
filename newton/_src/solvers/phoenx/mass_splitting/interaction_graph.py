@@ -242,20 +242,22 @@ def record_all_interactions_multiworld_kernel(
 ):
     """Emit copy-state ownership for a capped per-world colouring.
 
-    One thread owns one world. Regular colours share partition zero. Rows in
-    each world's final overflow colour are split into local batches. Partition
+    A 2-D launch assigns 128 lanes to each world. Lanes stride through every
+    colour's rows independently; pair emission and per-row metadata are
+    race-free because each CSR row has one owner. Regular colours share
+    partition zero. Rows in each world's final overflow colour are split into local batches. Partition
     identifiers may repeat between worlds because worlds have disjoint nodes.
     The explicit per-row partition is also consumed by the slot-cache builder
     and by the solve kernel, keeping all three users on the same mapping.
     """
-    world = wp.tid()
+    world, lane = wp.tid()
     world_base = world_csr_offsets[world]
     num_colors = world_num_colors[world]
     color = wp.int32(0)
     while color < num_colors:
         start = world_color_starts[world, color]
         end = world_color_starts[world, color + wp.int32(1)]
-        position = start
+        position = start + lane
         while position < end:
             cid = element_ids_by_color[world_base + position]
             partition = wp.int32(0)
@@ -279,7 +281,7 @@ def record_all_interactions_multiworld_kernel(
                     if node < wp.int32(0):
                         break
                     emit_pair(scratch, node, partition)
-            position += wp.int32(1)
+            position += wp.int32(128)
         color += wp.int32(1)
 
 
