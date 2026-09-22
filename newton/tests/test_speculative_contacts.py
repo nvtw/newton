@@ -1021,8 +1021,8 @@ def test_adaptive_collision_schedule_prevents_capsule_tunneling(test, device, ex
     test.assertLess(adaptive_x_a, adaptive_x_b)
 
 
-def test_adaptive_collision_schedule_tracks_acceleration(test, device):
-    """Refresh collision detection when accumulated travel grows during the frame."""
+def test_adaptive_collision_schedule_reacts_to_acceleration(test, device):
+    """Refresh collision detection after observed speed grows during the frame."""
     frame_dt = 1.0
     substeps = 10
     travel_budget = 2.0
@@ -1056,7 +1056,57 @@ def test_adaptive_collision_schedule_tracks_acceleration(test, device):
 
     test.assertGreater(int(collision_calls.numpy()[0]), 1)
     test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 0)
-    test.assertGreater(float(scheduler.travel_estimate.numpy()[0]), 0.0)
+
+
+def test_adaptive_collision_schedule_rejects_unsupported_inputs(test, device):
+    """Reject particles, aliased states, and undersized rigid-body buffers."""
+
+    def noop(*args):
+        del args
+
+    builder = newton.ModelBuilder()
+    body = builder.add_body()
+    builder.add_shape_sphere(body, radius=0.1)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, speculative_contact_gap_max=0.1)
+    state = model.state()
+
+    with test.assertRaisesRegex(ValueError, "distinct ping-pong buffers"):
+        newton.CollisionSubstepScheduler(
+            pipeline,
+            (state, state),
+            collision_callback=noop,
+            substep_callback=noop,
+            frame_dt=0.01,
+            substeps=2,
+        )
+
+    short_state = model.state()
+    short_state.body_q = wp.empty(0, dtype=wp.transform, device=device)
+    short_state.body_qd = wp.empty(0, dtype=wp.spatial_vector, device=device)
+    with test.assertRaisesRegex(ValueError, "must contain all bodies"):
+        newton.CollisionSubstepScheduler(
+            pipeline,
+            (short_state, model.state()),
+            collision_callback=noop,
+            substep_callback=noop,
+            frame_dt=0.01,
+            substeps=2,
+        )
+
+    particle_builder = newton.ModelBuilder()
+    particle_builder.add_particle(pos=wp.vec3(), vel=wp.vec3(), mass=1.0)
+    particle_model = particle_builder.finalize(device=device)
+    particle_pipeline = newton.CollisionPipeline(particle_model, speculative_contact_gap_max=0.1)
+    with test.assertRaisesRegex(ValueError, "rigid contacts only"):
+        newton.CollisionSubstepScheduler(
+            particle_pipeline,
+            (particle_model.state(), particle_model.state()),
+            collision_callback=noop,
+            substep_callback=noop,
+            frame_dt=0.01,
+            substeps=2,
+        )
 
 
 def test_speculative_narrow_phase_launch(test, device):
@@ -1601,7 +1651,14 @@ for _name, _test in (
         "test_adaptive_collision_schedule_prevents_capsule_tunneling",
         test_adaptive_collision_schedule_prevents_capsule_tunneling,
     ),
-    ("test_adaptive_collision_schedule_tracks_acceleration", test_adaptive_collision_schedule_tracks_acceleration),
+    (
+        "test_adaptive_collision_schedule_reacts_to_acceleration",
+        test_adaptive_collision_schedule_reacts_to_acceleration,
+    ),
+    (
+        "test_adaptive_collision_schedule_rejects_unsupported_inputs",
+        test_adaptive_collision_schedule_rejects_unsupported_inputs,
+    ),
     ("test_speculative_narrow_phase_launch", test_speculative_narrow_phase_launch),
     (
         "test_speculative_narrow_phase_rejects_hydroelastic",

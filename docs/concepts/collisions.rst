@@ -1398,11 +1398,12 @@ per-shape distance to add twice. If collision detection is skipped between
 solver substeps, sufficiently fast bodies can travel beyond that extension and
 tunnel through one another.
 
-:class:`newton.CollisionSubstepScheduler` addresses this by varying how often
+:class:`newton.CollisionSubstepScheduler` reduces this risk by varying how often
 collision detection runs within a frame. The total number of simulation
 substeps remains fixed. The scheduler always runs collision detection at the
-beginning of a frame, tracks a conservative global motion estimate on the
-device, and runs additional collision passes only when needed. The estimate
+beginning of a frame, tracks a conservative bound derived from the currently
+observed rigid-shape velocities on the device, and runs additional collision
+passes when that bound exhausts the available speculative distance. The bound
 assumes that two bodies may move directly toward one another at the maximum
 observed shape speed:
 
@@ -1437,6 +1438,14 @@ always executes every configured solver substep. Its two states are ping-pong
 buffers, so the substep count must be even. ``schedule.interval_overflow`` is
 set when collision detection on every substep is still insufficient; in that
 case, increase the substep count or the speculative extension limit.
+
+The scheduler is an experimental optimization for rigid contacts, not
+continuous collision detection. It does not support particles. It observes
+acceleration, impulses, and user-prescribed velocity changes only after a
+substep completes, so abrupt motion can still cross thin geometry within one
+substep. ``interval_overflow`` diagnoses limits implied by observed velocity;
+it cannot predict an acceleration that has not occurred yet. Choose the solver
+substep size for the expected acceleration and impulses.
 
 Enable the feature with the keyword-only ``speculative_contact_gap_max`` constructor argument:
 

@@ -29,7 +29,7 @@ def _find_max_point_speed(
     shape_collision_radius: wp.array[wp.float32],
     max_point_speed: wp.array[wp.float32],
 ):
-    """Find a conservative maximum speed over all moving shape points."""
+    """Find a conservative instantaneous speed over all moving shape points."""
     shape_id = wp.tid()
     body_id = shape_body[shape_id]
     if body_id < 0:
@@ -101,6 +101,14 @@ class CollisionSubstepScheduler:
     substep. Selection stays on the device and uses :func:`warp.capture_if`, so
     it is compatible with CUDA graph capture.
 
+    Scheduling is based on instantaneous rigid-shape velocities. It reacts to
+    acceleration and impulses after observing their effect on a completed
+    substep; it does not predict motion caused within the next substep. This is
+    an optimization for speculative rigid contacts, not continuous collision
+    detection, and sufficiently abrupt motion can still tunnel through thin
+    geometry. Use enough solver substeps for the expected acceleration and
+    impulses.
+
     :meth:`step` works both directly and during CUDA graph capture. When an
     outer capture is active, the complete fixed schedule is recorded inline.
     CUDA graph conditional nodes require CUDA 12.4 or newer.
@@ -127,6 +135,11 @@ class CollisionSubstepScheduler:
         substeps: Fixed positive even number of solver substeps per frame.
         pair_gap_lower_bound: Conservative lower bound on every possible
             colliding pair's authored gap sum [m]. Use ``0.0`` when unknown.
+
+    Raises:
+        ValueError: If the pipeline contains particles, the states are not two
+            distinct compatible rigid-body buffers, or a numeric configuration
+            value is invalid.
     """
 
     def __init__(
@@ -146,6 +159,8 @@ class CollisionSubstepScheduler:
         if speculative_contact_gap_max is None:
             raise ValueError("collision_pipeline must have speculative contacts enabled")
         model = collision_pipeline.model
+        if model.particle_count > 0:
+            raise ValueError("CollisionSubstepScheduler supports rigid contacts only; particles are not supported")
         if len(states) != 2:
             raise ValueError(f"states must contain exactly two entries, got {len(states)}")
         if not callable(collision_callback) or not callable(substep_callback):
@@ -167,44 +182,45 @@ class CollisionSubstepScheduler:
         if travel_budget <= 0.0:
             raise ValueError("adaptive collision scheduling requires a positive speculative extension or gap bound")
         state_tuple = tuple(states)
+        if state_tuple[0] is state_tuple[1]:
+            raise ValueError("states must contain two distinct ping-pong buffers")
         for index, state in enumerate(state_tuple):
             if state.body_q is None or state.body_qd is None:
                 raise ValueError(f"states[{index}] must contain body_q and body_qd")
             if state.body_q.device != model.device or state.body_qd.device != model.device:
                 raise ValueError(f"states[{index}] must be allocated on the model device")
+            if state.body_q.shape[0] < model.body_count or state.body_qd.shape[0] < model.body_count:
+                raise ValueError(f"states[{index}] must contain all bodies in the collision pipeline model")
 
-        self.collision_pipeline = collision_pipeline
-        self.model = model
-        self.states = state_tuple
-        self.collision_callback = collision_callback
-        self.substep_callback = substep_callback
-        self.frame_dt = float(frame_dt)
-        self.substeps = substeps
-        self.substep_dt = self.frame_dt / self.substeps
-        self.travel_budget = travel_budget
-        self.collision_intervals = tuple(value for value in range(1, substeps + 1) if substeps % value == 0)
+        self._model = model
+        self._states = state_tuple
+        self._collision_callback = collision_callback
+        self._substep_callback = substep_callback
+        self._substeps = substeps
+        self._substep_dt = float(frame_dt) / substeps
+        self._travel_budget = travel_budget
+        self._collision_intervals = tuple(value for value in range(1, substeps + 1) if substeps % value == 0)
 
         device = model.device
-        self._interval_values = wp.array(self.collision_intervals, dtype=wp.int32, device=device)
-        self._interval_conditions = wp.zeros(len(self.collision_intervals), dtype=wp.int32, device=device)
+        self._interval_values = wp.array(self._collision_intervals, dtype=wp.int32, device=device)
+        self._interval_conditions = wp.zeros(len(self._collision_intervals), dtype=wp.int32, device=device)
         self._interval_condition_views = [
-            self._interval_conditions[index : index + 1] for index in range(len(self.collision_intervals))
+            self._interval_conditions[index : index + 1] for index in range(len(self._collision_intervals))
         ]
         self._collision_due = wp.zeros(1, dtype=wp.int32, device=device)
         self._max_point_speed = wp.zeros(1, dtype=wp.float32, device=device)
         self._previous_max_point_speed = wp.zeros(1, dtype=wp.float32, device=device)
-        self.travel_estimate = wp.zeros(1, dtype=wp.float32, device=device)
-        """Device scalar holding estimated relative travel since the last collision refresh [m]."""
+        self._travel_estimate = wp.zeros(1, dtype=wp.float32, device=device)
         self.interval_overflow = wp.zeros(1, dtype=wp.int32, device=device)
         """Device scalar set to one when collision every substep is still insufficient."""
 
     def _dispatch_collision(self, substep_index: int, interval_index: int = 0) -> None:
-        interval = self.collision_intervals[interval_index]
+        interval = self._collision_intervals[interval_index]
 
         def run_collision():
-            self.collision_callback(self.states[substep_index % 2], interval * self.substep_dt)
+            self._collision_callback(self._states[substep_index % 2], interval * self._substep_dt)
 
-        if interval_index == len(self.collision_intervals) - 1:
+        if interval_index == len(self._collision_intervals) - 1:
             run_collision()
             return
         wp.capture_if(
@@ -216,12 +232,12 @@ class CollisionSubstepScheduler:
     def step(self) -> None:
         """Execute or record one complete fixed-substep frame."""
         self.interval_overflow.zero_()
-        self.travel_estimate.zero_()
+        self._travel_estimate.zero_()
         self._previous_max_point_speed.zero_()
-        model = self.model
-        for substep_index in range(self.substeps):
+        model = self._model
+        for substep_index in range(self._substeps):
             state_in = substep_index % 2
-            state = self.states[state_in]
+            state = self._states[state_in]
             self._max_point_speed.zero_()
             self._interval_conditions.zero_()
             wp.launch(
@@ -246,13 +262,13 @@ class CollisionSubstepScheduler:
                 inputs=[
                     self._max_point_speed,
                     self._previous_max_point_speed,
-                    self.substep_dt,
-                    self.travel_budget,
+                    self._substep_dt,
+                    self._travel_budget,
                     substep_index,
                     self._interval_values,
                     self._interval_conditions,
                     self._collision_due,
-                    self.travel_estimate,
+                    self._travel_estimate,
                     self.interval_overflow,
                 ],
                 device=model.device,
@@ -261,4 +277,4 @@ class CollisionSubstepScheduler:
                 self._collision_due,
                 on_true=lambda substep_index=substep_index: self._dispatch_collision(substep_index),
             )
-            self.substep_callback(self.states[state_in], self.states[1 - state_in], self.substep_dt)
+            self._substep_callback(self._states[state_in], self._states[1 - state_in], self._substep_dt)
