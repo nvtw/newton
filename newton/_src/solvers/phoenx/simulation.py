@@ -1070,6 +1070,24 @@ class PhoenXWorld:
             device=self.device,
         )
         self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
+        self._fused_multiworld_mass_splitting = False
+        self._world_body_ids = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self._world_body_offsets = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
+        if (
+            self.mass_splitting_enabled
+            and self.step_layout == "multi_world"
+            and self._mass_splitting_velocity_only_average
+        ):
+            body_world = bodies.world_id.numpy()
+            inverse_mass = bodies.inverse_mass.numpy()
+            if not np.any((body_world < 0) & (inverse_mass > 0.0)):
+                world_body_ids = [int(body) for world in range(nw) for body in np.flatnonzero(body_world == world)]
+                world_body_offsets = [0]
+                for world in range(nw):
+                    world_body_offsets.append(world_body_offsets[-1] + int(np.count_nonzero(body_world == world)))
+                self._world_body_ids = wp.array(world_body_ids or [0], dtype=wp.int32, device=self.device)
+                self._world_body_offsets = wp.array(world_body_offsets, dtype=wp.int32, device=self.device)
+                self._fused_multiworld_mass_splitting = True
         # Sized nw+1 so the inclusive scan output lands in world_csr_offsets.
         self._world_totals_shifted: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._per_world_num_runs: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -4780,6 +4798,56 @@ class PhoenXWorld:
             kw["cached_prepare"] = bool(cached_prepare)
         return kw
 
+    def _multiworld_mass_splitting_iterate_fused(self, idt: wp.float32) -> None:
+        """Run all rigid biased sweeps with block-local copy reconciliation."""
+        flags = self._dispatch_specialization_flags()
+        kernel = get_multiworld_mass_splitting_kernel(
+            phase="iterate",
+            **flags,
+            has_contacts=self.max_contact_columns > 0 and self._reduced_articulation is None,
+            packed_contact_headers=self._colored_contact_headers,
+            patch_friction=self._contact_patch_enabled,
+            bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
+            fused_iterations=True,
+        )
+        block_dim = 128
+        wp.launch(
+            kernel,
+            dim=self.num_worlds * block_dim,
+            block_dim=block_dim,
+            inputs=[
+                self.constraints,
+                self._contact_cols_packed,
+                self.bodies,
+                self._particles_or_sentinel(),
+                idt,
+                wp.float32(self.sor_boost),
+                self._world_element_ids_by_color,
+                self._world_color_starts,
+                self._world_csr_offsets,
+                self._world_num_colors,
+                self._contact_container_solve,
+                self._active_contact_views(),
+                wp.int32(self.num_worlds),
+                wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
+                wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_cloth_bending),
+                wp.int32(self.num_soft_tetrahedra),
+                wp.int32(self.num_soft_hexahedra),
+                wp.int32(self.num_bodies),
+                self._copy_state,
+                wp.int32(int(self.max_colored_partitions)),
+                wp.int32(0),
+                wp.int32(0),
+                self._world_body_ids,
+                self._world_body_offsets,
+                wp.int32(self.solver_iterations),
+                wp.int32(self.mass_splitting_batch_size),
+            ],
+            device=self.device,
+        )
+
     def _multiworld_mass_splitting_sweep(
         self, phase: str, idt: wp.float32, *, reverse_colors: bool = False, joint_only: bool = False
     ) -> None:
@@ -4823,6 +4891,10 @@ class PhoenXWorld:
                 wp.int32(int(self.max_colored_partitions)),
                 wp.int32(int(reverse_colors)),
                 wp.int32(int(joint_only)),
+                self._world_body_ids,
+                self._world_body_offsets,
+                wp.int32(1),
+                wp.int32(self.mass_splitting_batch_size),
             ],
             device=self.device,
         )
