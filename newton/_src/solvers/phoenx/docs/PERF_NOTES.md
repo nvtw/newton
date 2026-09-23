@@ -1130,3 +1130,19 @@ These later results supersede the early FP16/contact-row prioritization:
   angular RMS speed. The cache costs 12 bytes per contact; keep it only on the
   rigid point-contact path, where eight position sweeps plus one velocity sweep
   amortize the extra traffic.
+
+- Warm-start and partition-coupling screens did not close the remaining
+  convergence gap. Only about 39--40% of all contacts match across 120 Hz
+  updates, but 78% of currently penetrating contacts do; two deterministic
+  second-choice predecessor rounds recovered no additional real matches.
+  Relaxing the normal threshold from 0.995 to 0.99 changed match identities
+  without changing dynamics, while 0.98 plus a 1 mm position threshold raised
+  linear/angular jitter. Six sweeps still measured 0.112 mm/s and
+  0.00386 rad/s settled RMS speed. Reconciling overflow before regular colors
+  to make the partition coupling multiplicative only changed those results to
+  0.107 mm/s and 0.00388 rad/s. The sustained fast-tail scheduler reached
+  44.8 FPS versus 45.0 FPS for block-world auto. An algebraically equivalent
+  unnormalized static-friction fast path was also rejected because its
+  generated analytic module still compiled after three minutes. Keep the
+  current thresholds, additive partition schedule, auto scheduler, and compact
+  friction projection.
