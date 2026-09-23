@@ -1120,3 +1120,13 @@ These later results supersede the early FP16/contact-row prioritization:
   and rows reached 39.2 FPS; retaining headers but disabling packed rows reached
   40.3 FPS. The current packed layout and one persistent 128-thread block per
   world remain preferable.
+
+- Caching the three off-diagonal contact-frame mobility terms during prepare
+  removes repeated lever-arm cross products, inverse-inertia transforms, and
+  dot products from every point-contact sweep. On the qualified 64-world SDF
+  plate workload, sustained 600-frame throughput rose from 43.3 to 45.0 FPS
+  (45.6 FPS over 300 frames). Quality remained at 0.0323 mm maximum
+  penetration, 0.01485 mm/s settled linear RMS speed, and 0.001148 rad/s
+  angular RMS speed. The cache costs 12 bytes per contact; keep it only on the
+  rigid point-contact path, where eight position sweeps plus one velocity sweep
+  amortize the extra traffic.
