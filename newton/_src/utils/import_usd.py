@@ -5,20 +5,15 @@ from __future__ import annotations
 
 import collections
 import copy
-import datetime
-import hashlib
 import inspect
 import itertools
 import logging
 import math
 import os
-import posixpath
 import re
 import warnings
 from dataclasses import dataclass, replace
-from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urljoin, urlparse
 
 if TYPE_CHECKING:
     from pxr import Usd
@@ -34,7 +29,7 @@ import warp as wp
 
 from ..core import quat_between_axes
 from ..core.types import Axis, Transform
-from ..geometry import GeoType, Mesh, ShapeFlags, compute_inertia_shape, compute_inertia_sphere, transform_inertia
+from ..geometry import Mesh, ShapeFlags, compute_inertia_sphere
 from ..sim.builder import ModelBuilder
 from ..sim.enums import JointTargetMode, JointType
 from ..sim.model import Model
@@ -47,6 +42,7 @@ from ..solvers.mujoco.utils import (
 )
 from ..usd import require_newton_usd_schemas
 from ..usd import utils as usd
+from ..usd._asset_download import resolve_usd_from_url  # noqa: F401
 from ..usd._usd_resolution_policy import (
     _PhysicsMaterial,
     _resolve_newton_limit_kd,
@@ -94,51 +90,6 @@ _NEWTON_SRC_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pa
 # would render an unmaterialed scene in colours the asset never authored. Display-encoded to
 # match the colours that are resolved from a material.
 _UNMATERIALED_VISUAL_COLOR = color_linear_to_srgb((0.18, 0.18, 0.18))
-
-
-def _validate_https_usd_url(url: str) -> None:
-    """Reject non-HTTPS URLs before USD asset downloads."""
-    if urlparse(url).scheme != "https":
-        raise ValueError(f"USD URL downloads require HTTPS: {url}")
-
-
-def _cache_path_for_absolute_usd_reference(url: str) -> str:
-    """Return a safe cache-relative path for an absolute USD reference URL."""
-    parsed = urlparse(url)
-    basename = posixpath.basename(parsed.path) or "reference.usd"
-    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-    return posixpath.join("_external_usd", digest, basename)
-
-
-def _reject_windows_rooted_usd_path(path: str) -> None:
-    """Reject paths with Windows drive, root, or UNC semantics."""
-    windows_path = PureWindowsPath(path)
-    if windows_path.drive or windows_path.root:
-        raise ValueError(f"USD reference path must be relative: {path}")
-
-
-def _normalize_usd_cache_relative_path(path: str) -> str:
-    """Normalize a relative cache path while rejecting POSIX and Windows escapes."""
-    _reject_windows_rooted_usd_path(path)
-
-    normalized = posixpath.normpath(path.replace("\\", "/"))
-    if normalized in {"", ".", ".."} or posixpath.isabs(normalized) or normalized.startswith("../"):
-        raise ValueError(f"USD reference path escapes the target folder: {path}")
-    return normalized
-
-
-def _resolve_usd_cache_path(target_folder_name: str, relative_path: str) -> str:
-    """Return the canonical cache path when it remains beneath the target folder."""
-    normalized = _normalize_usd_cache_relative_path(relative_path)
-    target_root = os.path.realpath(target_folder_name)
-    candidate = os.path.realpath(os.path.join(target_root, *normalized.split("/")))
-    try:
-        common_path = os.path.commonpath((target_root, candidate))
-    except ValueError as exc:
-        raise ValueError(f"USD reference path escapes the target folder: {relative_path}") from exc
-    if os.path.normcase(common_path) != os.path.normcase(target_root):
-        raise ValueError(f"USD reference path escapes the target folder: {relative_path}")
-    return candidate
 
 
 def _is_uniform_scale(scale, rel_tol: float = 1.0e-6) -> bool:
@@ -511,6 +462,7 @@ def parse_usd(
         raise ImportError("Failed to import pxr. Please install USD (e.g. via `pip install usd-core`).") from e
     require_newton_usd_schemas(Usd)
 
+    from ..usd._mass_properties import _is_enabled_collider, _UsdMassProperties  # noqa: PLC0415
     from .topology import topological_sort_undirected  # noqa: PLC0415
 
     # Capture material defaults at the start of this import.
@@ -729,11 +681,6 @@ def parse_usd(
     xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
     traverse_instance_proxies = Usd.TraverseInstanceProxies()
 
-    def _is_enabled_collider(prim: Usd.Prim) -> bool:
-        if collider := UsdPhysics.CollisionAPI(prim):
-            return collider.GetCollisionEnabledAttr().Get()
-        return False
-
     def _xform_to_mat44(xform: wp.transform) -> wp.mat44:
         return wp.transform_compose(xform.p, xform.q, wp.vec3(1.0))
 
@@ -764,95 +711,7 @@ def parse_usd(
     def _has_api_schema(prim: Usd.Prim, schema_name: str) -> bool:
         return bool(prim and prim.IsValid() and usd.has_applied_api_schema(prim, schema_name))
 
-    # UsdPhysics.MassAPI value semantics: a schema fallback value (0 mass/density, zero
-    # diagonal inertia or principal axes, non-finite center of mass) means "unspecified"
-    # even when explicitly authored, so authoredness must not be used as the override signal.
-    # A blocked attribute resolves to no value (Get() returns None) and is also unspecified.
-    def _mass_api_effective_mass(mass_api: UsdPhysics.MassAPI) -> float | None:
-        mass = mass_api.GetMassAttr().Get()
-        return float(mass) if mass is not None and math.isfinite(mass) and mass > 0.0 else None
-
-    warned_invalid_density: set[str] = set()
-
-    def _mass_api_effective_density(mass_api: UsdPhysics.MassAPI, *, warn_invalid: bool = False) -> float | None:
-        raw_density = mass_api.GetDensityAttr().Get()
-        if raw_density is not None and math.isfinite(raw_density) and raw_density > 0.0:
-            return float(raw_density)
-        prim_path = str(mass_api.GetPrim().GetPath())
-        if warn_invalid and raw_density is not None and raw_density != 0.0 and prim_path not in warned_invalid_density:
-            warned_invalid_density.add(prim_path)
-            warnings.warn(
-                f"{prim_path}: authored MassAPI density must be positive and finite; treating it as unspecified.",
-                stacklevel=2,
-            )
-        return None
-
-    warned_invalid_diag_inertia: set[str] = set()
-
-    def _mass_api_effective_diag_inertia(mass_api: UsdPhysics.MassAPI):
-        diag = mass_api.GetDiagonalInertiaAttr().Get()
-        if diag is None or all(v == 0.0 for v in diag):
-            return None
-        if all(math.isfinite(v) and v >= 0.0 for v in diag):
-            return diag
-        prim_path = str(mass_api.GetPrim().GetPath())
-        if prim_path not in warned_invalid_diag_inertia:
-            warned_invalid_diag_inertia.add(prim_path)
-            warnings.warn(
-                f"{prim_path}: authored MassAPI diagonalInertia must have finite, nonnegative components; "
-                "treating it as unspecified.",
-                stacklevel=2,
-            )
-        return None
-
-    def _mass_api_effective_com(mass_api: UsdPhysics.MassAPI):
-        com = mass_api.GetCenterOfMassAttr().Get()
-        return com if com is not None and all(math.isfinite(v) for v in com) else None
-
-    def _mass_api_effective_principal_axes(mass_api: UsdPhysics.MassAPI):
-        axes = mass_api.GetPrincipalAxesAttr().Get()
-        return axes if axes is not None and axes != Gf.Quatf(0.0) else None
-
-    # WORKAROUND: UsdPhysicsRigidBodyAPI::ComputeMassProperties reads MassAPI attributes
-    # into uninitialized locals (_ParseMassApi/_GetCoM in pxr/usd/usdPhysics/rigidBodyAPI.cpp;
-    # usd-core <= 26.3, https://github.com/PixarAnimationStudios/OpenUSD/issues/4155).
-    # A blocked attribute makes Get() fail, leaving stack garbage that can pass the
-    # authored-value checks and yield nondeterministic mass properties. Supported versions
-    # also apply authored mass from disabled colliders after the callback
-    # (https://github.com/PixarAnimationStudios/OpenUSD/pull/4164).
-    # Bypass ComputeMassProperties for either condition and use recorded enabled colliders.
-    # Remove each workaround once the minimum supported usd-core ships its upstream fix.
-    # Density is excluded from the blocked-attribute check: it is read into an initialized
-    # struct member upstream and blocked density already resolves to "unspecified".
-    def _mass_api_has_blocked_attrs(prim: Usd.Prim) -> bool:
-        mass_api = UsdPhysics.MassAPI(prim)
-        if not mass_api:
-            return False
-        attrs = (
-            mass_api.GetMassAttr(),
-            mass_api.GetDiagonalInertiaAttr(),
-            mass_api.GetPrincipalAxesAttr(),
-            mass_api.GetCenterOfMassAttr(),
-        )
-        return any(attr.GetResolveInfo().ValueIsBlocked() for attr in attrs)
-
-    def _mass_computer_requires_recorded_fallback(body_prim: Usd.Prim) -> bool:
-        """Detect inputs that supported OpenUSD versions cannot aggregate safely."""
-        if _mass_api_has_blocked_attrs(body_prim):
-            return True
-        it = iter(Usd.PrimRange(body_prim, Usd.TraverseInstanceProxies()))
-        for prim in it:
-            if prim != body_prim and prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                it.PruneChildren()
-                continue
-            if prim.HasAPI(UsdPhysics.CollisionAPI):
-                if UsdPhysics.MassAPI(prim) and not _is_enabled_collider(prim):
-                    # OpenUSD reads authored mass after the callback, so a zero callback
-                    # cannot exclude a disabled collider with MassAPI.
-                    return True
-                if _mass_api_has_blocked_attrs(prim):
-                    return True
-        return False
+    mass_properties = _UsdMassProperties(stage, usd_axis_to_axis, _get_mesh_cached)
 
     def _should_write_solreflimit_mode() -> bool:
         return mjc_resolver is not None and solreflimit_mode_key in builder.custom_attributes
@@ -2533,7 +2392,7 @@ def parse_usd(
             prim = stage.GetPrimAtPath(prim_path)
 
     # Bodies that need ComputeMassProperties fallback (no MassAPI, or missing mass, inertia, or CoM).
-    bodies_requiring_mass_properties_fallback: set[str] = set()
+    bodies_requiring_mass_properties_fallback = mass_properties.bodies_requiring_mass_properties_fallback
     if UsdPhysics.ObjectType.RigidBody in ret_dict:
         prim_paths, rigid_body_descs = ret_dict[UsdPhysics.ObjectType.RigidBody]
         for prim_path, rigid_body_desc in zip(prim_paths, rigid_body_descs, strict=False):
@@ -2558,9 +2417,9 @@ def parse_usd(
                         break
                 continue
 
-            has_effective_mass = _mass_api_effective_mass(mass_api) is not None
-            has_effective_inertia = _mass_api_effective_diag_inertia(mass_api) is not None
-            has_effective_com = _mass_api_effective_com(mass_api) is not None
+            has_effective_mass = mass_properties.effective_mass(mass_api) is not None
+            has_effective_inertia = mass_properties.effective_diag_inertia(mass_api) is not None
+            has_effective_com = mass_properties.effective_com(mass_api) is not None
             if not (has_effective_mass and has_effective_inertia and has_effective_com):
                 bodies_requiring_mass_properties_fallback.add(body_path)
 
@@ -3271,138 +3130,6 @@ def parse_usd(
             if verbose:
                 print(f"Skipping joint group {joint_group}: {exc}")
 
-    def _build_mass_info_from_effective_properties(
-        prim: Usd.Prim,
-        local_pos,
-        local_rot,
-        shape_geo_type: int,
-        shape_scale: wp.vec3,
-        shape_src: Mesh | None,
-        shape_axis=None,
-    ):
-        """Build unit-density collider mass information from effective collider MassAPI properties.
-
-        This helper is used for rigid-body fallback mass aggregation via
-        ``UsdPhysics.RigidBodyAPI.ComputeMassProperties``. When a collider prim has effective
-        ``MassAPI`` mass and diagonal inertia, we convert those values into a
-        ``RigidBodyAPI.MassInformation`` payload that represents unit-density collider properties.
-        """
-        mass_api = UsdPhysics.MassAPI(prim)
-        if not mass_api:
-            return None
-
-        _mass_api_effective_density(mass_api, warn_invalid=True)
-        mass = _mass_api_effective_mass(mass_api)
-        diag_val = _mass_api_effective_diag_inertia(mass_api)
-        if mass is None or diag_val is None:
-            # Warn when an authored override is dropped: mass carries a non-fallback value
-            # that is unusable. The 0.0 schema fallback and blocked values stay silent.
-            raw_mass = mass_api.GetMassAttr().Get()
-            if mass is None and raw_mass is not None and raw_mass != 0.0:
-                warnings.warn(
-                    f"Skipping collider {prim.GetPath()}: authored MassAPI mass must be positive and finite "
-                    "to derive volume and density.",
-                    stacklevel=2,
-                )
-            return None
-
-        shape_volume, _, _ = compute_inertia_shape(shape_geo_type, shape_scale, shape_src, density=1.0)
-        if shape_volume <= 0.0:
-            warnings.warn(
-                f"Skipping collider {prim.GetPath()}: unable to derive positive collider volume from authored shape parameters.",
-                stacklevel=2,
-            )
-            return None
-        density = mass / shape_volume
-        if density <= 0.0:
-            warnings.warn(
-                f"Skipping collider {prim.GetPath()}: derived density from authored mass is non-positive.",
-                stacklevel=2,
-            )
-            return None
-
-        inertia_diag_unit = np.array(diag_val, dtype=np.float32) / density
-
-        principal_axes = _mass_api_effective_principal_axes(mass_api)
-        if principal_axes is None:
-            principal_axes = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
-        center_of_mass = _mass_api_effective_com(mass_api)
-        if center_of_mass is None:
-            center_of_mass = Gf.Vec3f(0.0, 0.0, 0.0)
-
-        i_rot = usd.value_to_warp(principal_axes)
-        rot = np.array(wp.quat_to_matrix(i_rot), dtype=np.float32).reshape(3, 3)
-        inertia_full_unit = rot @ np.diag(inertia_diag_unit) @ rot.T
-
-        mass_info = UsdPhysics.RigidBodyAPI.MassInformation()
-        mass_info.volume = float(shape_volume)
-        mass_info.centerOfMass = center_of_mass
-        mass_info.localPos = Gf.Vec3f(*local_pos)
-        mass_info.localRot = _resolve_mass_info_local_rotation(local_rot, shape_geo_type, shape_axis)
-        mass_info.inertia = Gf.Matrix3f(*inertia_full_unit.flatten().tolist())
-        return mass_info
-
-    def _resolve_mass_info_local_rotation(local_rot, shape_geo_type: int, shape_axis):
-        """Match collider mass frame rotation with shape axis correction used by shape insertion."""
-        if shape_geo_type not in {GeoType.CAPSULE, GeoType.CYLINDER, GeoType.CONE} or shape_axis is None:
-            return local_rot
-
-        axis = usd_axis_to_axis.get(shape_axis)
-        if axis is None:
-            axis_int_map = {
-                int(UsdPhysics.Axis.X): Axis.X,
-                int(UsdPhysics.Axis.Y): Axis.Y,
-                int(UsdPhysics.Axis.Z): Axis.Z,
-            }
-            axis = axis_int_map.get(int(shape_axis))
-        if axis is None or axis == Axis.Z:
-            return local_rot
-
-        local_rot_wp = usd.value_to_warp(local_rot)
-        corrected_rot = wp.mul(local_rot_wp, quat_between_axes(Axis.Z, axis))
-        return Gf.Quatf(
-            float(corrected_rot[3]),
-            float(corrected_rot[0]),
-            float(corrected_rot[1]),
-            float(corrected_rot[2]),
-        )
-
-    def _build_mass_info_from_shape_geometry(
-        prim: Usd.Prim,
-        local_pos,
-        local_rot,
-        shape_geo_type: int,
-        shape_scale: wp.vec3,
-        shape_src: Mesh | None,
-        shape_axis=None,
-        is_solid: bool = True,
-        thickness: float = 0.0,
-    ):
-        """Build unit-density collider mass information from geometric shape parameters.
-
-        This fallback path derives collider volume, center of mass, and inertia from shape
-        geometry (box/sphere/capsule/cylinder/cone/mesh) when collider-authored MassAPI mass
-        properties are not available.
-        """
-        shape_mass, shape_com, shape_inertia = compute_inertia_shape(
-            shape_geo_type, shape_scale, shape_src, density=1.0, is_solid=is_solid, thickness=thickness
-        )
-        if shape_mass <= 0.0:
-            warnings.warn(
-                f"Skipping collider {prim.GetPath()} in mass aggregation: unable to derive positive unit-density mass.",
-                stacklevel=2,
-            )
-            return None
-
-        shape_inertia_np = np.array(shape_inertia, dtype=np.float32).reshape(3, 3)
-        mass_info = UsdPhysics.RigidBodyAPI.MassInformation()
-        mass_info.volume = float(shape_mass)
-        mass_info.centerOfMass = Gf.Vec3f(*shape_com)
-        mass_info.localPos = Gf.Vec3f(*local_pos)
-        mass_info.localRot = _resolve_mass_info_local_rotation(local_rot, shape_geo_type, shape_axis)
-        mass_info.inertia = Gf.Matrix3f(*shape_inertia_np.flatten().tolist())
-        return mass_info
-
     # parse shapes attached to the rigid bodies
     # Canonicalized (sorted) USD path pairs from physics:filteredPairs. Collected from native
     # colliders and deformable participants, applied only after deformable lowering so every
@@ -3445,83 +3172,6 @@ def parse_usd(
     # all rigid shapes exist. Preserve the builder default on every imported shape so callers can
     # still disable collisions with zero or a shared negative group.
     imported_rigid_collider_groups: dict[str, tuple[str, ...]] = {}
-    rigid_body_mass_info_map = {}
-    rigid_body_mass_fallback_density = {}
-    rigid_body_fallback_collider_paths = collections.defaultdict(list)
-    expected_fallback_collider_paths: set[str] = set()
-
-    def _record_fallback_collider_mass_information(
-        path: str,
-        prim: Usd.Prim,
-        shape_spec,
-        shape_type,
-        *,
-        density: float,
-        is_solid: bool,
-        thickness: float,
-        mesh_source: Mesh | None = None,
-    ):
-        """Record collider mass information used by the rigid-body fallback callback."""
-        body_path = str(shape_spec.rigidBody)
-        if body_path not in bodies_requiring_mass_properties_fallback or not _is_enabled_collider(prim):
-            return
-
-        shape_geo_type = None
-        shape_scale = wp.vec3(1.0, 1.0, 1.0)
-        shape_src = None
-        if shape_type == UsdPhysics.ObjectType.CubeShape:
-            shape_geo_type = GeoType.BOX
-            hx, hy, hz = shape_spec.halfExtents
-            shape_scale = wp.vec3(hx, hy, hz)
-        elif shape_type == UsdPhysics.ObjectType.SphereShape:
-            shape_geo_type = GeoType.SPHERE
-            shape_scale = wp.vec3(shape_spec.radius, 0.0, 0.0)
-        elif shape_type == UsdPhysics.ObjectType.CapsuleShape:
-            shape_geo_type = GeoType.CAPSULE
-            shape_scale = wp.vec3(shape_spec.radius, shape_spec.halfHeight, 0.0)
-        elif shape_type == UsdPhysics.ObjectType.CylinderShape:
-            shape_geo_type = GeoType.CYLINDER
-            shape_scale = wp.vec3(shape_spec.radius, shape_spec.halfHeight, 0.0)
-        elif shape_type == UsdPhysics.ObjectType.ConeShape:
-            shape_geo_type = GeoType.CONE
-            shape_scale = wp.vec3(shape_spec.radius, shape_spec.halfHeight, 0.0)
-        elif shape_type == UsdPhysics.ObjectType.MeshShape:
-            shape_geo_type = GeoType.MESH
-            shape_scale = wp.vec3(*shape_spec.meshScale)
-            # Visual meshes retain source mass properties; reuse those without
-            # treating expanded visual topology as a geometry-only cache entry.
-            shape_src = mesh_source if mesh_source is not None else _get_mesh_cached(prim)
-        if shape_geo_type is None:
-            return
-
-        expected_fallback_collider_paths.add(path)
-        shape_axis = getattr(shape_spec, "axis", None)
-        mass_info = _build_mass_info_from_effective_properties(
-            prim,
-            shape_spec.localPos,
-            shape_spec.localRot,
-            shape_geo_type,
-            shape_scale,
-            shape_src,
-            shape_axis,
-        )
-        if mass_info is None:
-            mass_info = _build_mass_info_from_shape_geometry(
-                prim,
-                shape_spec.localPos,
-                shape_spec.localRot,
-                shape_geo_type,
-                shape_scale,
-                shape_src,
-                shape_axis,
-                is_solid=is_solid,
-                thickness=thickness,
-            )
-        if mass_info is not None:
-            if path not in rigid_body_mass_info_map:
-                rigid_body_fallback_collider_paths[body_path].append(path)
-            rigid_body_mass_info_map[path] = mass_info
-            rigid_body_mass_fallback_density[path] = density
 
     for key, value in ret_dict.items():
         if key in {
@@ -3641,7 +3291,7 @@ def parse_usd(
                 if shape_already_added:
                     builder.shape_collision_group[path_shape_map[path]] = collision_group
                     imported_rigid_collider_groups[path] = collision_groups
-                    _record_fallback_collider_mass_information(
+                    mass_properties.record_collider(
                         path,
                         prim,
                         shape_spec,
@@ -3842,7 +3492,7 @@ def parse_usd(
                 if shell_thickness_val is not None and math.isfinite(float(shell_thickness_val)) and shape_id >= 0:
                     builder.shape_margin[shape_id] = margin_val
 
-                _record_fallback_collider_mass_information(
+                mass_properties.record_collider(
                     path,
                     prim,
                     shape_spec,
@@ -3893,72 +3543,7 @@ def parse_usd(
             if other_shape_id != shape_id:
                 builder.add_shape_collision_filter_pair(shape_id, other_shape_id)
 
-    def _zero_mass_information():
-        """Create a reusable zero-contribution collider mass payload for callback fallback."""
-        mass_info = UsdPhysics.RigidBodyAPI.MassInformation()
-        mass_info.volume = 0.0
-        mass_info.centerOfMass = Gf.Vec3f(0.0)
-        mass_info.localPos = Gf.Vec3f(0.0)
-        mass_info.localRot = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
-        mass_info.inertia = Gf.Matrix3f(0.0)
-        return mass_info
-
-    zero_mass_information = _zero_mass_information()
-    warned_missing_collider_mass_info: set[str] = set()
-
-    def _get_collision_mass_information(collider_prim: Usd.Prim):
-        """MassInformation callback for ``ComputeMassProperties`` with one-time warning on misses."""
-        if not _is_enabled_collider(collider_prim):
-            return zero_mass_information
-        collider_path = str(collider_prim.GetPath())
-        is_expected_missing = (
-            collider_path in expected_fallback_collider_paths and collider_path not in rigid_body_mass_info_map
-        )
-        if is_expected_missing and collider_path not in warned_missing_collider_mass_info:
-            warnings.warn(
-                f"Skipping collider {collider_path} in mass aggregation: missing usable collider mass information.",
-                stacklevel=2,
-            )
-            warned_missing_collider_mass_info.add(collider_path)
-        return rigid_body_mass_info_map.get(collider_path, zero_mass_information)
-
-    def _aggregate_recorded_mass_properties(body_path: str, body_density: float | None):
-        """Aggregate callback mass data when OpenUSD cannot traverse the colliders."""
-        total_mass = 0.0
-        total_com = wp.vec3(0.0)
-        total_inertia = wp.mat33(0.0)
-        found = False
-        for collider_path in rigid_body_fallback_collider_paths.get(body_path, ()):
-            mass_info = rigid_body_mass_info_map[collider_path]
-            shape_density = rigid_body_mass_fallback_density[collider_path]
-            # The recording helpers reject nonpositive unit-density mass.
-            volume = float(mass_info.volume)
-            collider_prim = stage.GetPrimAtPath(collider_path)
-            collider_mass_api = UsdPhysics.MassAPI(collider_prim)
-            collider_mass = _mass_api_effective_mass(collider_mass_api) if collider_mass_api else None
-            collider_density = _mass_api_effective_density(collider_mass_api) if collider_mass_api else None
-            density = collider_mass / volume if collider_mass is not None else collider_density
-            if density is None:
-                density = body_density if body_density is not None else shape_density
-
-            mass = density * volume
-            local_rot = usd.value_to_warp(mass_info.localRot)
-            local_xform = wp.transform(wp.vec3(*mass_info.localPos), local_rot)
-            com = wp.transform_point(local_xform, wp.vec3(*mass_info.centerOfMass))
-            inertia = wp.mat33(np.array(mass_info.inertia, dtype=np.float32).reshape(3, 3) * density)
-
-            new_mass = total_mass + mass
-            new_com = (total_com * total_mass + com * mass) / new_mass
-            total_inertia = transform_inertia(
-                total_mass, total_inertia, new_com - total_com, wp.quat_identity()
-            ) + transform_inertia(mass, inertia, new_com - com, local_rot)
-            total_mass = new_mass
-            total_com = new_com
-            found = True
-
-        if not found:
-            return None
-        return total_mass, total_inertia, total_com
+    mass_properties.zero_mass_information = mass_properties._create_zero_mass_information()
 
     # Resolve body inertial properties from authored values and collider aggregation.
     if UsdPhysics.ObjectType.RigidBody in ret_dict:
@@ -3972,10 +3557,10 @@ def parse_usd(
             body_id = path_body_map.get(body_path, -1)
             if body_id == -1:
                 continue
-            effective_mass = _mass_api_effective_mass(mass_api) if mass_api else None
-            effective_density = _mass_api_effective_density(mass_api, warn_invalid=True) if mass_api else None
-            effective_diag_inertia = _mass_api_effective_diag_inertia(mass_api) if mass_api else None
-            effective_com = _mass_api_effective_com(mass_api) if mass_api else None
+            effective_mass = mass_properties.effective_mass(mass_api) if mass_api else None
+            effective_density = mass_properties.effective_density(mass_api, warn_invalid=True) if mass_api else None
+            effective_diag_inertia = mass_properties.effective_diag_inertia(mass_api) if mass_api else None
+            effective_com = mass_properties.effective_com(mass_api) if mass_api else None
             has_effective_mass = effective_mass is not None
             has_effective_inertia = effective_diag_inertia is not None
             has_effective_com = effective_com is not None
@@ -4020,12 +3605,12 @@ def parse_usd(
             # Compute baseline mass properties via mass computer when at least one property needs resolving.
             if not (has_effective_mass and has_effective_inertia and has_effective_com):
                 rigid_body_api = UsdPhysics.RigidBodyAPI(prim)
-                if _mass_computer_requires_recorded_fallback(prim):
+                if mass_properties.requires_recorded_fallback(prim):
                     # Use recorded enabled colliders when OpenUSD cannot aggregate safely.
                     cmp_mass = -1.0
                 else:
                     cmp_mass, cmp_i_diag, cmp_com, cmp_principal_axes = rigid_body_api.ComputeMassProperties(
-                        _get_collision_mass_information
+                        mass_properties.get_collision_mass_information
                     )
                 if cmp_mass < 0.0 or not math.isfinite(cmp_mass):
                     # ComputeMassProperties failed to discover colliders (e.g. shapes
@@ -4033,7 +3618,7 @@ def parse_usd(
                     # non-finite authored values. Prefer the recorded callback payloads,
                     # which also cover colliders below instance proxies. Schema-resolved
                     # shapes without real prims fall back to builder-accumulated values.
-                    recorded_properties = _aggregate_recorded_mass_properties(
+                    recorded_properties = mass_properties.aggregate_recorded(
                         body_path, effective_density if not has_effective_mass else None
                     )
                     if recorded_properties is not None:
@@ -4075,7 +3660,7 @@ def parse_usd(
                 i_diag_np = None  # skip diagonal path; full matrix set below
             elif has_effective_inertia:
                 i_diag_np = np.array(effective_diag_inertia, dtype=np.float32)
-                principal_axes = _mass_api_effective_principal_axes(mass_api)
+                principal_axes = mass_properties.effective_principal_axes(mass_api)
                 if principal_axes is None:
                     principal_axes = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
             elif not has_effective_mass:
@@ -5176,191 +4761,6 @@ def parse_usd(
         )
 
     return result
-
-
-def resolve_usd_from_url(url: str, target_folder_name: str | None = None, export_usda: bool = False) -> str:
-    """Download a USD file from a URL and resolves all references to other USD files to be downloaded to the given target folder.
-
-    Args:
-        url: URL to the USD file.
-        target_folder_name: Target folder name. If ``None``, a time-stamped
-          folder will be created in the current directory.
-        export_usda: If ``True``, converts each downloaded USD file to USDA and
-          saves the additional USDA file in the target folder with the same
-          base name as the original USD file.
-
-    Returns:
-        File path to the downloaded USD file.
-
-    Raises:
-        ValueError: If a URL is not HTTPS or a referenced asset cannot be
-            localized within the download cache.
-    """
-
-    import requests
-
-    try:
-        from pxr import Usd
-    except ImportError as e:
-        raise ImportError("Failed to import pxr. Please install USD (e.g. via `pip install usd-core`).") from e
-
-    def _download_https_url(source_url: str):
-        """Download a URL while validating every redirect target is HTTPS."""
-        current_url = source_url
-        request_timeout_s = 30
-        for _ in range(10):
-            _validate_https_usd_url(current_url)
-            response = requests.get(current_url, allow_redirects=False, timeout=request_timeout_s)
-            if int(response.status_code) in {301, 302, 303, 307, 308}:
-                redirect_url = response.headers.get("Location")
-                if not redirect_url:
-                    return response, current_url
-                current_url = urljoin(current_url, redirect_url)
-                continue
-            final_url = getattr(response, "url", current_url)
-            if not isinstance(final_url, str):
-                final_url = current_url
-            _validate_https_usd_url(final_url)
-            return response, final_url
-        raise RuntimeError(f"Too many redirects while downloading USD file: {source_url}")
-
-    response, resolved_url = _download_https_url(url)
-    if response.status_code != 200:
-        raise RuntimeError(f"Failed to download USD file. Status code: {response.status_code}")
-    file = response.content
-    dot = os.path.extsep
-    base = posixpath.basename(urlparse(resolved_url).path)
-    url_folder = posixpath.dirname(resolved_url)
-    base_name = dot.join(base.split(dot)[:-1])
-    if target_folder_name is None:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        target_folder_name = os.path.join(".usd_cache", f"{base_name}_{timestamp}")
-    os.makedirs(target_folder_name, exist_ok=True)
-    target_folder_name = os.path.realpath(target_folder_name)
-    target_filename = _resolve_usd_cache_path(target_folder_name, base)
-    with open(target_filename, "wb") as f:
-        f.write(file)
-
-    stage = Usd.Stage.Open(target_filename, Usd.Stage.LoadNone)
-    root_layer = stage.GetRootLayer()
-    stage_str = root_layer.ExportToString()
-    print(f"Downloaded USD file to {target_filename}.")
-
-    # Recursively resolve referenced USD files like `references = @./franka_collisions.usd@`
-    # Each entry in the queue is (resolved_url, cache_relative_path).
-    downloaded_urls: set[str] = {url, resolved_url}
-    pending: collections.deque[tuple[str, str]] = collections.deque()
-
-    def _write_layer_string(filename: str, layer, layer_str: str) -> None:
-        """Persist rewritten USDA text to both the layer and cache file."""
-        import_from_string = getattr(layer, "ImportFromString", None)
-        if callable(import_from_string):
-            import_from_string(layer_str)
-            save = getattr(layer, "Save", None)
-            if callable(save):
-                save()
-        with open(filename, "w") as f:
-            f.write(layer_str)
-
-    def _extract_references(layer_str, parent_url_folder, parent_local_folder):
-        """Extract references, queue downloads, and return rewritten layer text."""
-        reference_assignment_pattern = re.compile(
-            r"(?P<prefix>references\s*=\s*)"
-            r"(?P<value>@[^@]*@(?:<[^>]*>)?(?:\s*\([^)]*\))?|\[[^]]*\])",
-            re.DOTALL,
-        )
-        reference_item_pattern = re.compile(r"@(?P<path>[^@]*)@(?P<suffix>(?:<[^>]*>)?(?:\s*\([^)]*\))?)")
-
-        def _prepare_reference(raw_ref):
-            """Return the rewritten path, source URL, and cache-relative path."""
-            raw_ref_scheme = urlparse(raw_ref).scheme
-            if raw_ref_scheme in {"http", "https"}:
-                ref_url = urljoin(parent_url_folder + "/", raw_ref)
-                _validate_https_usd_url(ref_url)
-                local_path = _cache_path_for_absolute_usd_reference(ref_url)
-                rewritten_ref = local_path
-            else:
-                _reject_windows_rooted_usd_path(raw_ref)
-                local_path = _normalize_usd_cache_relative_path(posixpath.join(parent_local_folder, raw_ref))
-                ref_url = urljoin(parent_url_folder + "/", raw_ref.replace("\\", "/"))
-                rewritten_ref = raw_ref
-            return rewritten_ref, ref_url, local_path
-
-        def _rewrite_reference_item(match):
-            """Validate one asset reference and rewrite its cache path when needed."""
-            raw_ref = match.group("path")
-            rewritten_ref, ref_url, local_path = _prepare_reference(raw_ref)
-            _resolve_usd_cache_path(target_folder_name, local_path)
-            if ref_url not in downloaded_urls:
-                pending.append((ref_url, local_path))
-            return f"@{rewritten_ref}@{match.group('suffix')}"
-
-        def _rewrite_reference_assignment(match):
-            """Rewrite asset references without changing other reference-list entries."""
-            rewritten_value = reference_item_pattern.sub(_rewrite_reference_item, match.group("value"))
-            return match.group("prefix") + rewritten_value
-
-        return reference_assignment_pattern.sub(_rewrite_reference_assignment, layer_str)
-
-    rewritten_stage_str = _extract_references(stage_str, url_folder, "")
-    if rewritten_stage_str != stage_str:
-        _write_layer_string(target_filename, root_layer, rewritten_stage_str)
-        stage_str = rewritten_stage_str
-
-    if export_usda:
-        usda_filename = _resolve_usd_cache_path(target_folder_name, base_name + ".usda")
-        with open(usda_filename, "w") as f:
-            f.write(stage_str)
-            print(f"Exported USDA file to {usda_filename}.")
-
-    while pending:
-        ref_url, local_path = pending.popleft()
-        if ref_url in downloaded_urls:
-            continue
-        downloaded_urls.add(ref_url)
-        try:
-            response, resolved_ref_url = _download_https_url(ref_url)
-            if response.status_code != 200:
-                print(f"Failed to download reference {local_path}. Status code: {response.status_code}")
-                continue
-            downloaded_urls.add(resolved_ref_url)
-            file = response.content
-            local_dir = posixpath.dirname(local_path)
-            try:
-                ref_filename = _resolve_usd_cache_path(target_folder_name, local_path)
-            except ValueError:
-                print(f"Skipping reference that escapes target folder: {local_path}")
-                continue
-            os.makedirs(os.path.dirname(ref_filename), exist_ok=True)
-            if not os.path.exists(ref_filename):
-                with open(ref_filename, "wb") as f:
-                    f.write(file)
-            print(f"Downloaded USD reference {local_path} to {ref_filename}.")
-
-            ref_stage = Usd.Stage.Open(ref_filename, Usd.Stage.LoadNone)
-            ref_layer = ref_stage.GetRootLayer()
-            ref_stage_str = ref_layer.ExportToString()
-
-            rewritten_ref_stage_str = _extract_references(ref_stage_str, posixpath.dirname(resolved_ref_url), local_dir)
-            if rewritten_ref_stage_str != ref_stage_str:
-                _write_layer_string(ref_filename, ref_layer, rewritten_ref_stage_str)
-                ref_stage_str = rewritten_ref_stage_str
-
-            if export_usda:
-                ref_base = os.path.basename(ref_filename)
-                ref_base_name = dot.join(ref_base.split(dot)[:-1])
-                usda_relative_path = (
-                    posixpath.join(local_dir, ref_base_name + ".usda") if local_dir else ref_base_name + ".usda"
-                )
-                usda_filename = _resolve_usd_cache_path(target_folder_name, usda_relative_path)
-                with open(usda_filename, "w") as f:
-                    f.write(ref_stage_str)
-                    print(f"Exported USDA file to {usda_filename}.")
-        except ValueError:
-            raise
-        except Exception:
-            print(f"Failed to download {local_path}.")
-    return target_filename
 
 
 def _raise_on_stage_errors(usd_stage, stage_source: str):
