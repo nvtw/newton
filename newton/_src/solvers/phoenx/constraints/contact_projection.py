@@ -427,6 +427,14 @@ def _make_contact_project_coupled_velocity_update(has_soft_contact_pd: bool):
                 sor_boost,
             )
 
+        if lambda_n_friction == wp.float32(0.0) or (mu_s == wp.float32(0.0) and mu_k == wp.float32(0.0)):
+            # An unloaded contact has a zero Coulomb disk. Removing stale
+            # tangent impulses is still a physical equal-and-opposite impulse.
+            cc_set_normal_lambda(cc, k, normal_update.lambda_new)
+            cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+            cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+            return normal_update.delta * normal - lam_t1_old * tangent1 - lam_t2_old * tangent2
+
         # The normal impulse changes tangential velocity before friction acts.
         rhs_t1 = jv_t1 + bias_t1 + mobility_nt1 * normal_update.delta
         rhs_t2 = jv_t2 + bias_t2 + mobility_nt2 * normal_update.delta

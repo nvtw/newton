@@ -1146,3 +1146,5 @@ These later results supersede the early FP16/contact-row prioritization:
   generated analytic module still compiled after three minutes. Keep the
   current thresholds, additive partition schedule, auto scheduler, and compact
   friction projection.
+
+- Coupled rigid-contact projection now exits after the normal solve when the Coulomb disk has zero radius, while still clearing stale tangent impulses with an equal-and-opposite impulse. The exact 64-world, 120-plate SDF benchmark (32-voxel field, voxel-depth contacts disabled, 120 Hz collision, six temporal substeps, eight position sweeps and one velocity sweep) sustained 45.5 FPS over 600 frames versus the committed 45.0 FPS result. The analytic hard/soft/speculative/frictionless/stale-impulse comparison passes. Moving the three cached cross-mobility reads behind the branch through another compile-time specialization regressed a heavier 64-voxel workload from 28.9 to 28.2 FPS and was removed; its extra kernel footprint outweighed the skipped reads.
