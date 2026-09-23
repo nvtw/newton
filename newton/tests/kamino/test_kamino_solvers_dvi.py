@@ -4161,6 +4161,7 @@ class TestDVISolver(unittest.TestCase):
         padded_coupling[offset : offset + njc * stride] = np.pad(coupling, ((0, 0), (0, stride - nu))).ravel()
         for use_forward_schur in (False, True):
             with self.subTest(use_forward_schur=use_forward_schur):
+                coupling_input = np.full(capacity, np.nan, dtype=np.float32) if use_forward_schur else padded_coupling
                 response = np.zeros(capacity, dtype=np.float32)
                 if use_forward_schur:
                     response[offset : offset + njc * nu] = white.ravel()
@@ -4177,7 +4178,7 @@ class TestDVISolver(unittest.TestCase):
                         i32([0]),
                         i32([offset]),
                         i32([stride]),
-                        wp.array(padded_coupling, dtype=wp.float32, device=self.device),
+                        wp.array(coupling_input, dtype=wp.float32, device=self.device),
                         wp.array(response, dtype=wp.float32, device=self.device),
                         schur,
                         correction,

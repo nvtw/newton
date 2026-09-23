@@ -166,6 +166,59 @@ class TestKaminoBlockedResponse(unittest.TestCase):
                 np.testing.assert_allclose(x.numpy(), expected_x, rtol=2e-6, atol=2e-6)
 
 
+class TestCooperativeResponse(unittest.TestCase):
+    def test_unpermuted_compact_response(self):
+        """Match dense elimination without permutation and with an inactive column."""
+        if not wp.get_cuda_device_count():
+            self.skipTest("Cooperative response construction requires CUDA")
+        device = wp.get_cuda_devices()[0]
+        rng = np.random.default_rng(4282)
+        njc, nu = 33, 3
+        lower = np.tril(rng.normal(0.0, 0.02, (njc, njc))).astype(np.float32)
+        np.fill_diagonal(lower, 2.0)
+        scale = rng.uniform(0.5, 1.5, njc).astype(np.float32)
+        coupling = rng.normal(size=(njc, nu)).astype(np.float32)
+        coupling[:, -1] = 0.0
+        expected = np.linalg.solve(lower.astype(np.float64), scale[:, None] * coupling)
+
+        def i32(values):
+            return wp.array(values, dtype=wp.int32, device=device)
+
+        def f32(values):
+            return wp.array(np.asarray(values).ravel(), dtype=wp.float32, device=device)
+
+        response = wp.full(njc * nu, -123.0, dtype=wp.float32, device=device)
+        wp.launch(
+            _solve_bilateral_unilateral_response_cooperative,
+            dim=2 * 32,
+            block_dim=128,
+            inputs=[
+                i32([njc + nu]),
+                i32([njc]),
+                i32([0]),
+                i32([0]),
+                f32(scale),
+                f32(lower),
+                i32([-1] * njc),
+                False,
+                i32([0]),
+                i32([nu]),
+                f32(coupling),
+                wp.empty(njc * nu, dtype=wp.float32, device=device),
+                response,
+                0,
+                2,
+                True,
+                i32([0] * njc),
+                False,
+            ],
+            device=device,
+        )
+        actual = response.numpy().reshape(njc, nu)
+        np.testing.assert_allclose(actual, expected, rtol=2.0e-6, atol=2.0e-6)
+        np.testing.assert_array_equal(actual[:, -1], 0.0)
+
+
 def _assert_bits_equal(a, b):
     np.testing.assert_array_equal(a.copy().view(np.uint32), b.copy().view(np.uint32))
 
