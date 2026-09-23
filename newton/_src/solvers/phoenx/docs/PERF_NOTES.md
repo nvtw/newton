@@ -1197,3 +1197,44 @@ These later results supersede the early FP16/contact-row prioritization:
   kernel regressed the 100-frame screen from 49.0 to 48.5 FPS, and 192- and
   256-thread world blocks were neutral at 46.6 FPS sustained; both experiments
   were removed.
+
+- A settled 64-world plate contact census found 167,229 points in 21,918 body
+  pairs. The 2,320 pairs with more than 16 points contained 74,212 points, and
+  1,657 pairs with more than 32 points contained 60,934 points. Long SDF contact
+  columns are therefore a material part of the remaining cost, rather than a
+  rare tail. Future block contact work should target these columns and retain
+  the existing pairwise momentum balance.
+
+- Reducing every contact patch from six support directions to four reached
+  48.2 FPS versus 46.4 FPS, but a full 1,200-frame moving-state comparison
+  showed that reducing biased sweeps from eight to six increased linear and
+  angular residual motion by 16% and 14%; five sweeps increased them by 26%
+  and 27%. Four directions also failed the geometric-mesh activation regression
+  at 15.10 micrometres penetration versus its 10-micrometre limit. Three
+  directions reached 51.6 FPS but failed the short settled-jitter gates. Keep
+  six directions and eight biased sweeps until convergence improves by a
+  mechanism that passes the cross-scene checks.
+
+- Reversing point order inside alternating body-pair contact columns worsened
+  the short linear-jitter result to 0.0424 mm/s and weakened temporal contact
+  matching. It was removed. A direct-regular-color plus mass-split-overflow
+  prototype passed the focused per-world momentum and fused-schedule tests, but
+  failed the physical stack immediately: motion grew to 40.9 m/s RMS and
+  penetration to 119 m. Mixing direct body updates with the existing copy-state
+  mass scaling is therefore invalid in that form; the prototype was removed.
+
+
+- Grouping the same eight contact-column passes into four reconciliation
+  rounds, with two local passes per body pair, worsened the one-world quality
+  probe from 0.01757 to 0.1483 mm/s linear RMS and from 0.001310 to 0.01462
+  rad/s angular RMS. Repeating a pair cannot replace propagation through the
+  copy-state average; the prototype was removed.
+
+
+- Reconciling split body state after every regular color was also rejected.
+  Two outer sweeps reached 0.184 mm penetration, 0.683 mm/s linear RMS, and
+  0.0588 rad/s angular RMS. Four recovered penetration to 0.0323 mm, but still
+  measured 0.275 mm/s and 0.0266 rad/s. The current copy-count scaling spreads
+  each color's correction over all partition copies, so additional averages do
+  not produce direct colored Gauss-Seidel. A valid hybrid must build copy state
+  only for overflow rows and leave regular colors on physical body state.
