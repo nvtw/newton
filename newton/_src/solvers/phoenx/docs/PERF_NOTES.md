@@ -1099,3 +1099,24 @@ These later results supersede the early FP16/contact-row prioritization:
   41.2 FPS. The extra kernel arguments and duplicated overflow dispatcher are
   not justified by that 0.5% gain, so the prototype was removed.
 
+- The rigid point-contact solver now defaults to its existing coupled
+  normal/friction projection. The analytic normal-first equivalence regression
+  proves the two paths produce identical impulses and velocities across hard,
+  soft, speculative, frictionless, and stale-friction cases; the plate quality
+  measurements were also unchanged at 0.0323 mm maximum penetration,
+  0.01484 mm/s linear RMS jitter, and 0.001164 rad/s angular RMS jitter.
+  Avoiding the split projection's larger generated kernel raised the 64-world
+  120-plate workload from 41.2 to 43.3 FPS over 600 frames (44.0 FPS over the
+  300-frame screen). Twenty-two targeted contact, momentum, packed-row, energy,
+  speculative-contact, and Kapla tests passed; a 128-world G1 smoke remained
+  finite. Seven position sweeps failed the linear-jitter gate at 0.0305 mm/s,
+  so eight remain required.
+
+- Further occupancy and scheduling screens were rejected. Ordering colors by
+  support height reached 38.5 FPS and did not rescue four-sweep jitter. Splitting
+  each color into separate two-block-per-world graph nodes reached 30.1 FPS;
+  graph-node boundaries outweighed the extra blocks. A 256-thread world block
+  reached 42.0 FPS, effectively neutral. Disabling both packed contact headers
+  and rows reached 39.2 FPS; retaining headers but disabling packed rows reached
+  40.3 FPS. The current packed layout and one persistent 128-thread block per
+  world remain preferable.

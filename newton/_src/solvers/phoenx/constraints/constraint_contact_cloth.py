@@ -1231,7 +1231,7 @@ def _make_contact_iterate_at(
     staged_body_properties: bool = False,
     *,
     frictionless_fast_path: bool = False,
-    normal_first: bool = True,
+    normal_first: bool = False,
 ):
     @wp.func
     def impl(
