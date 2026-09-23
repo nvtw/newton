@@ -2595,6 +2595,7 @@ class CollisionPipeline:
                 ],
                 outputs=[contacts.rigid_contact_surface_velocity],
                 device=self.device,
+                record_tape=False,
             )
 
         # Build the contact report before saving state, because save

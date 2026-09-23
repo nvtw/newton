@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.sim.collide import eval_rigid_contact_surface_velocities
 from newton.solvers.experimental.coupled import SolverCoupled
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
@@ -35,6 +36,23 @@ def test_mesh_surface_velocity_is_opt_in(test, device):
     contacts = pipeline.contacts()
 
     test.assertEqual(len(contacts.rigid_contact_surface_velocity), 0)
+
+
+def test_mesh_surface_velocity_is_not_recorded_on_tape(test, device):
+    """Keep non-differentiable surface-velocity evaluation off Warp tapes."""
+    mesh = newton.Mesh.create_plane(1.0, 1.0, compute_inertia=False)
+    mesh.enable_surface_velocity = True
+    builder = newton.ModelBuilder()
+    builder.add_shape_mesh(body=-1, mesh=mesh)
+    model = builder.finalize(device=device)
+
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
+    contacts = pipeline.contacts()
+    with wp.Tape() as tape:
+        pipeline.collide(model.state(), contacts)
+
+    recorded_kernels = [launch[0] for launch in tape.launches if not callable(launch)]
+    test.assertNotIn(eval_rigid_contact_surface_velocities, recorded_kernels)
 
 
 def test_mesh_surface_velocity_moves_rigid_body(test, device, solver_name):
@@ -271,6 +289,12 @@ for test_device in devices:
         TestMeshSurfaceVelocity,
         "test_mesh_surface_velocity_is_opt_in",
         test_mesh_surface_velocity_is_opt_in,
+        devices=[test_device],
+    )
+    add_function_test(
+        TestMeshSurfaceVelocity,
+        "test_mesh_surface_velocity_is_not_recorded_on_tape",
+        test_mesh_surface_velocity_is_not_recorded_on_tape,
         devices=[test_device],
     )
     add_function_test(
