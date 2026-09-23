@@ -269,6 +269,65 @@ class TestMultiWorldMassSplittingIntegration(unittest.TestCase):
         # preceding global CSR row belongs to another world's batch zero.
         self.assertEqual(expected_batches, int(np.sum(batch_starts)))
 
+    def test_fused_world_sweeps_match_staged_reconciliation(self) -> None:
+        """World-owned iteration fusion must preserve the staged trajectory."""
+        device = wp.get_preferred_device()
+
+        def make_sim(fused: bool):
+            model = _make_stack_model(4, 5, str(device))
+            pipeline = newton.CollisionPipeline(
+                model,
+                rigid_contact_max=4 * 40,
+                contact_matching="sticky",
+                deterministic=True,
+            )
+            contacts = pipeline.contacts()
+            state_0 = model.state()
+            state_1 = model.state()
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                substeps=2,
+                solver_iterations=4,
+                velocity_iterations=0,
+                contact_friction_model="point",
+                step_layout="multi_world",
+                mass_splitting=True,
+                max_colored_partitions=1,
+                mass_splitting_batch_size=2,
+                colored_contact_headers=True,
+                colored_contact_rows=True,
+                joint_mode="maximal_direct",
+            )
+            self.assertTrue(solver.world._fused_multiworld_mass_splitting)
+            solver.world._fused_multiworld_mass_splitting = fused
+            return (
+                model,
+                pipeline,
+                contacts,
+                state_0,
+                state_1,
+                solver,
+                model.control(),
+            )
+
+        def step(sim) -> None:
+            _model, pipeline, contacts, state_0, state_1, solver, control = sim
+            pipeline.collide(state_0, contacts)
+            state_0.clear_forces()
+            solver.step(state_0, state_1, control, contacts, 1.0 / 60.0)
+            wp.copy(state_0.body_q, state_1.body_q)
+            wp.copy(state_0.body_qd, state_1.body_qd)
+
+        fused = make_sim(True)
+        staged = make_sim(False)
+        for _ in range(8):
+            step(fused)
+            step(staged)
+
+        np.testing.assert_array_equal(fused[3].body_q.numpy(), staged[3].body_q.numpy())
+        np.testing.assert_array_equal(fused[3].body_qd.numpy(), staged[3].body_qd.numpy())
+
 
 class TestMultiWorldColoringContract(unittest.TestCase):
     def test_per_world_greedy_overflow_flag_is_cleared_before_build(self) -> None:

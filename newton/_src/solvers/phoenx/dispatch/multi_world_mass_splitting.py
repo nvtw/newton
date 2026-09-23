@@ -107,20 +107,29 @@ class MultiWorldMassSplittingDispatcher:
             w._warm_start_owned_contacts()
             direct.solve(use_bias=False)
             w._mass_splitting_broadcast()
-        for iteration in range(w.solver_iterations):
-            w._multiworld_mass_splitting_sweep("iterate", idt, reverse_colors=bool(iteration % 2))
-            w._mass_splitting_average_and_broadcast(inv_dt)
-            # Divide contact sweeps into temporal blocks when requested. A
-            # complete PCR pass transfers intermediate contact impulses through
-            # the joint graph. Final position recovery and the velocity pass
-            # retain residual refinement.
-            direct_projection = iteration in w._direct_joint_projection_iterations
-            if direct is not None and direct.enabled and direct_projection:
-                w._mass_splitting_writeback(already_averaged=True)
-                final_projection = iteration == w.solver_iterations - 1
-                direct.solve(use_bias=final_projection, refine=final_projection)
-                if iteration + 1 < w.solver_iterations:
-                    w._mass_splitting_broadcast()
+        fuse_iterations = bool(
+            w._fused_multiworld_mass_splitting
+            and (direct is None or not direct.enabled)
+            and not w._reduced_constraints_active_this_step
+            and w.joint_refinement_iterations == 0
+        )
+        if fuse_iterations:
+            w._multiworld_mass_splitting_iterate_fused(idt)
+        else:
+            for iteration in range(w.solver_iterations):
+                w._multiworld_mass_splitting_sweep("iterate", idt, reverse_colors=bool(iteration % 2))
+                w._mass_splitting_average_and_broadcast(inv_dt)
+                # Divide contact sweeps into temporal blocks when requested. A
+                # complete PCR pass transfers intermediate contact impulses through
+                # the joint graph. Final position recovery and the velocity pass
+                # retain residual refinement.
+                direct_projection = iteration in w._direct_joint_projection_iterations
+                if direct is not None and direct.enabled and direct_projection:
+                    w._mass_splitting_writeback(already_averaged=True)
+                    final_projection = iteration == w.solver_iterations - 1
+                    direct.solve(use_bias=final_projection, refine=final_projection)
+                    if iteration + 1 < w.solver_iterations:
+                        w._mass_splitting_broadcast()
 
         # Keep each joint's original copy ownership and reconcile its paired
         # impulse before the next refinement or body writeback.

@@ -1180,3 +1180,20 @@ These later results supersede the early FP16/contact-row prioritization:
   two values exceed the current settled gates, so this short probe must not be
   cited as a passing settled-quality run. The established 0.01485 mm/s and
   0.001148 rad/s values above remain the qualified measurements.
+
+- Rigid multi-world mass splitting now keeps all biased iterations inside one
+  world-owning block. Each block processes its regular colors and overflow
+  batches, performs the same scalar-order copy-state average, and only then
+  advances to the next alternating PGS sweep. This replaces 24 graph nodes per
+  temporal substep (eight regular sweeps, eight overflow sweeps, and eight
+  averages) with one launch while retaining all eight iterations and
+  momentum-preserving reconciliation points. The qualified 64-world plate
+  workload sustained 46.7 FPS over 600 frames versus 45.5 FPS, while a short
+  Nsight trace reduced biased solve work from about 1.91 to 1.547 ms/substep
+  (-19%) at 144 registers/thread. Eight deterministic multi-world stack steps
+  are bitwise equal to the staged schedule; the plate quality probe is also
+  unchanged at 0.0323 mm penetration, 0.01757 mm/s linear RMS, and
+  0.001310 rad/s angular RMS. Fusing warm-start preparation into the same
+  kernel regressed the 100-frame screen from 49.0 to 48.5 FPS, and 192- and
+  256-thread world blocks were neutral at 46.6 FPS sustained; both experiments
+  were removed.

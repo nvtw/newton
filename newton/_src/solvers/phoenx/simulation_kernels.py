@@ -4350,13 +4350,18 @@ def get_multiworld_mass_splitting_kernel(
     packed_contact_headers: bool = False,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
+    fused_iterations: bool = False,
 ):
-    """Build one block-per-world, one-sweep mass-splitting kernel.
+    """Build a block-per-world mass-splitting sweep kernel.
 
-    A launch performs exactly one prepare, biased iterate, or relaxation
-    sweep. This boundary is deliberate: split copies must be averaged across
-    the whole device between PGS sweeps to preserve momentum.
+    The standard path performs one prepare, biased iterate, or relaxation
+    sweep. Rigid multi-world scenes may fuse all biased iterations: one block
+    owns a complete world, including its overflow batches and copy-state
+    reconciliation, so every momentum-preserving average remains ordered
+    without a device-wide launch boundary.
     """
+    if fused_iterations and phase != "iterate":
+        raise ValueError("fused mass-splitting iterations require phase='iterate'")
     is_prepare = phase == "prepare"
     is_cached_prepare = phase == "cached_prepare"
     use_bias = phase == "iterate"
@@ -4403,6 +4408,10 @@ def get_multiworld_mass_splitting_kernel(
         max_colored_partitions: wp.int32,
         reverse: wp.int32,
         joint_only: wp.int32,
+        world_body_ids: wp.array[wp.int32],
+        world_body_offsets: wp.array[wp.int32],
+        num_iterations: wp.int32,
+        batch_size: wp.int32,
     ):
         tid = wp.tid()
         block_dim = wp.block_dim()
@@ -4413,42 +4422,114 @@ def get_multiworld_mass_splitting_kernel(
 
         num_colors = world_num_colors[world]
         world_base = world_csr_offsets[world]
-        step = wp.int32(0)
-        while step < num_colors:
-            color = _color_for_step(step, num_colors, reverse, max_colored_partitions)
-            start = world_color_starts[world, color]
-            end = world_color_starts[world, color + wp.int32(1)]
-            count = end - start
-            if color != max_colored_partitions:
-                local = lane
-                while local < count:
-                    slot = world_base + start + local
-                    cid = element_ids_by_color[slot]
-                    if joint_only == wp.int32(0) or cid < num_joints:
-                        dispatch_one_cid(
-                            constraints,
-                            contact_cols,
-                            bodies,
-                            particles,
-                            cc,
-                            contacts,
-                            copy_state,
-                            num_joints,
-                            joint_pgs_enabled,
-                            num_cloth_triangles,
-                            num_cloth_bending,
-                            num_soft_tetrahedra,
-                            num_soft_hexahedra,
-                            num_bodies,
-                            idt,
-                            sor_boost,
-                            cid,
-                            slot,
-                            wp.int32(0),
-                        )
-                    local += block_dim
-            _sync_threads()
-            step += wp.int32(1)
+        iteration_count = wp.int32(1)
+        if wp.static(fused_iterations):
+            iteration_count = num_iterations
+        iteration = wp.int32(0)
+        while iteration < iteration_count:
+            direction = reverse
+            if wp.static(fused_iterations):
+                direction = iteration & wp.int32(1)
+            step = wp.int32(0)
+            while step < num_colors:
+                color = _color_for_step(step, num_colors, direction, max_colored_partitions)
+                start = world_color_starts[world, color]
+                end = world_color_starts[world, color + wp.int32(1)]
+                count = end - start
+                if color != max_colored_partitions:
+                    local = lane
+                    while local < count:
+                        slot = world_base + start + local
+                        cid = element_ids_by_color[slot]
+                        if joint_only == wp.int32(0) or cid < num_joints:
+                            dispatch_one_cid(
+                                constraints,
+                                contact_cols,
+                                bodies,
+                                particles,
+                                cc,
+                                contacts,
+                                copy_state,
+                                num_joints,
+                                joint_pgs_enabled,
+                                num_cloth_triangles,
+                                num_cloth_bending,
+                                num_soft_tetrahedra,
+                                num_soft_hexahedra,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                cid,
+                                slot,
+                                wp.int32(0),
+                            )
+                        local += block_dim
+                elif wp.static(fused_iterations):
+                    batch = lane
+                    num_batches = (count + batch_size - wp.int32(1)) / batch_size
+                    while batch < num_batches:
+                        inner = wp.int32(0)
+                        while inner < batch_size:
+                            local = batch * batch_size + inner
+                            if local >= count:
+                                break
+                            slot = world_base + start + local
+                            cid = element_ids_by_color[slot]
+                            dispatch_one_cid(
+                                constraints,
+                                contact_cols,
+                                bodies,
+                                particles,
+                                cc,
+                                contacts,
+                                copy_state,
+                                num_joints,
+                                joint_pgs_enabled,
+                                num_cloth_triangles,
+                                num_cloth_bending,
+                                num_soft_tetrahedra,
+                                num_soft_hexahedra,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                cid,
+                                slot,
+                                batch,
+                            )
+                            inner += wp.int32(1)
+                        batch += block_dim
+                _sync_threads()
+                step += wp.int32(1)
+
+            if wp.static(fused_iterations):
+                body_slot = world_body_offsets[world] + lane
+                body_end = world_body_offsets[world + wp.int32(1)]
+                while body_slot < body_end:
+                    node = world_body_ids[body_slot]
+                    copy_count = copy_state.count_per_node[node]
+                    if copy_count > wp.int32(1):
+                        copy_start = wp.int32(0)
+                        if node > wp.int32(0):
+                            copy_start = copy_state.section_end[node - wp.int32(1)]
+                        copy_end = copy_start + copy_count
+                        sum_v = wp.vec3f(0.0)
+                        sum_w = wp.vec3f(0.0)
+                        copy = copy_start
+                        while copy < copy_end:
+                            sum_v += copy_state.velocity[copy]
+                            sum_w += copy_state.angular_velocity[copy]
+                            copy += wp.int32(1)
+                        inv_count = wp.float32(1.0) / wp.float32(copy_count)
+                        avg_v = sum_v * inv_count
+                        avg_w = sum_w * inv_count
+                        copy = copy_start
+                        while copy < copy_end:
+                            copy_state.velocity[copy] = avg_v
+                            copy_state.angular_velocity[copy] = avg_w
+                            copy += wp.int32(1)
+                    body_slot += block_dim
+                _sync_threads()
+            iteration += wp.int32(1)
 
     return kernel
 
