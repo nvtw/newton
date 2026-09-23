@@ -1963,6 +1963,12 @@ contact_prepare_for_iteration_at_packed_rows = _make_contact_prepare_for_iterati
 contact_prepare_for_iteration_at_packed_rows_no_soft_pd = _make_contact_prepare_for_iteration_at(
     cloth_support=False, has_soft_contact_pd=False, packed_rows=True, stage_body_properties=True
 )
+contact_prepare_for_iteration_at_packed_rows_lean = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_mass_splitting=False, packed_rows=True
+)
+contact_prepare_for_iteration_at_packed_rows_lean_no_soft_pd = _make_contact_prepare_for_iteration_at(
+    cloth_support=False, has_mass_splitting=False, has_soft_contact_pd=False, packed_rows=True
+)
 contact_prepare_for_iteration_at_lean = _make_contact_prepare_for_iteration_at(
     cloth_support=False, has_mass_splitting=False
 )
@@ -2109,6 +2115,72 @@ def contact_prepare_for_iteration_packed_rows(
     body_pair = constraint_bodies_make(b1, b2)
     source_first = contact_get_original_contact_first(constraints, cid)
     contact_prepare_for_iteration_at_packed_rows(
+        constraints,
+        cid,
+        source_first,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_packed_rows_lean(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    source_first = contact_get_original_contact_first(constraints, cid)
+    contact_prepare_for_iteration_at_packed_rows_lean(
+        constraints,
+        cid,
+        source_first,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        parallel_id,
+    )
+
+
+@wp.func
+def contact_prepare_for_iteration_packed_rows_lean_no_soft_pd(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    source_first = contact_get_original_contact_first(constraints, cid)
+    contact_prepare_for_iteration_at_packed_rows_lean_no_soft_pd(
         constraints,
         cid,
         source_first,

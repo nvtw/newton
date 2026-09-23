@@ -240,6 +240,8 @@ class TestMultiWorldMassSplittingIntegration(unittest.TestCase):
             mass_splitting=True,
             max_colored_partitions=1,
             mass_splitting_batch_size=2,
+            colored_contact_headers=True,
+            colored_contact_rows=True,
             joint_mode="maximal_direct",
         )
 
@@ -247,6 +249,22 @@ class TestMultiWorldMassSplittingIntegration(unittest.TestCase):
         self.assertGreaterEqual(int(contacts.rigid_contact_count.numpy()[0]), 8)
         state_0.clear_forces()
         solver.step(state_0, state_1, control, contacts, 1.0 / 60.0)
+
+        world = solver.world
+        self.assertTrue(world._overflow_only_mass_splitting)
+        element_ids = world._world_element_ids_by_color.numpy()
+        row_partitions = world._multiworld_row_partition.numpy()
+        world_offsets = world._world_csr_offsets.numpy()
+        color_starts = world._world_color_starts.numpy()
+        world_num_colors = world._world_num_colors.numpy()
+        for world_index in range(2):
+            base = int(world_offsets[world_index])
+            regular_end = int(color_starts[world_index, 1])
+            active_end = int(color_starts[world_index, int(world_num_colors[world_index])])
+            regular_ids = element_ids[base : base + regular_end]
+            overflow_ids = element_ids[base + regular_end : base + active_end]
+            np.testing.assert_array_equal(row_partitions[regular_ids], -1)
+            self.assertTrue(np.all(row_partitions[overflow_ids] >= 0))
 
         velocities = state_1.body_qd.numpy()[:, :3].astype(np.float64)
         masses = model.body_mass.numpy().astype(np.float64)
@@ -256,6 +274,46 @@ class TestMultiWorldMassSplittingIntegration(unittest.TestCase):
             momentum = np.sum(masses[world_slice, None] * velocities[world_slice], axis=0)
             np.testing.assert_allclose(momentum, 0.0, atol=2.0e-4, rtol=0.0)
         self.assertTrue(np.all(np.isfinite(state_1.body_q.numpy())))
+
+        reference_pipeline = newton.CollisionPipeline(
+            model,
+            rigid_contact_max=64,
+            contact_matching="sticky",
+            deterministic=True,
+        )
+        reference_contacts = reference_pipeline.contacts()
+        reference_state_0 = model.state()
+        reference_state_1 = model.state()
+        reference_solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+            step_layout="multi_world",
+            mass_splitting=True,
+            max_colored_partitions=1,
+            mass_splitting_batch_size=2,
+            colored_contact_headers=False,
+            colored_contact_rows=False,
+            joint_mode="maximal_direct",
+        )
+        reference_pipeline.collide(reference_state_0, reference_contacts)
+        reference_state_0.clear_forces()
+        reference_solver.step(
+            reference_state_0,
+            reference_state_1,
+            model.control(),
+            reference_contacts,
+            1.0 / 60.0,
+        )
+        np.testing.assert_allclose(state_1.body_q.numpy(), reference_state_1.body_q.numpy(), rtol=1.0e-5, atol=1.0e-6)
+        np.testing.assert_allclose(
+            state_1.body_qd.numpy(),
+            reference_state_1.body_qd.numpy(),
+            rtol=1.0e-5,
+            atol=2.0e-5,
+        )
+
         self.assertGreaterEqual(int(np.max(solver.world._multiworld_row_partition.numpy())), 1)
         batch_starts = solver.world._multiworld_row_batch_start.numpy()
         color_starts = solver.world._world_color_starts.numpy()
@@ -300,6 +358,8 @@ class TestMultiWorldMassSplittingIntegration(unittest.TestCase):
                 joint_mode="maximal_direct",
             )
             self.assertTrue(solver.world._fused_multiworld_mass_splitting)
+            # Isolate launch fusion from the direct-regular schedule.
+            solver.world._overflow_only_mass_splitting = False
             solver.world._fused_multiworld_mass_splitting = fused
             return (
                 model,

@@ -79,6 +79,8 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_prepare_for_iteration_lean_no_soft_pd,
     contact_prepare_for_iteration_no_soft_pd,
     contact_prepare_for_iteration_packed_rows,
+    contact_prepare_for_iteration_packed_rows_lean,
+    contact_prepare_for_iteration_packed_rows_lean_no_soft_pd,
     contact_prepare_for_iteration_packed_rows_no_soft_pd,
     contact_prepare_for_iteration_patch_lean,
     contact_prepare_for_iteration_patch_lean_no_soft_pd,
@@ -3286,6 +3288,12 @@ def _make_singleworld_rigid_contact_dispatch_func(
                 prepare_func = (
                     contact_prepare_for_iteration if has_soft_contact_pd else contact_prepare_for_iteration_no_soft_pd
                 )
+        elif packed_contact_headers:
+            prepare_func = (
+                contact_prepare_for_iteration_packed_rows_lean
+                if has_soft_contact_pd
+                else contact_prepare_for_iteration_packed_rows_lean_no_soft_pd
+            )
         else:
             prepare_func = (
                 contact_prepare_for_iteration_lean
@@ -4351,6 +4359,7 @@ def get_multiworld_mass_splitting_kernel(
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
     fused_iterations: bool = False,
+    direct_regular_colors: bool = False,
 ):
     """Build a block-per-world mass-splitting sweep kernel.
 
@@ -4362,6 +4371,8 @@ def get_multiworld_mass_splitting_kernel(
     """
     if fused_iterations and phase != "iterate":
         raise ValueError("fused mass-splitting iterations require phase='iterate'")
+    if direct_regular_colors and cloth_support:
+        raise ValueError("direct regular colors require rigid-only worlds")
     is_prepare = phase == "prepare"
     is_cached_prepare = phase == "cached_prepare"
     use_bias = phase == "iterate"
@@ -4381,6 +4392,24 @@ def get_multiworld_mass_splitting_kernel(
         patch_friction=patch_friction,
         bilateral_joint_blocks=bilateral_joint_blocks,
     )
+    dispatch_regular = dispatch_one_cid
+    if direct_regular_colors:
+        dispatch_regular, _ = _make_singleworld_dispatch_func(
+            cloth_support=False,
+            enable_column_timers=enable_column_timers,
+            soft_tet_neohookean=False,
+            has_joints=has_joints,
+            skip_joint_pgs=skip_joint_pgs,
+            has_mass_splitting=False,
+            packed_contact_headers=packed_contact_headers,
+            has_sleeping=has_sleeping,
+            has_soft_contact_pd=has_soft_contact_pd,
+            is_prepare=is_prepare,
+            is_cached_prepare=is_cached_prepare,
+            use_bias=use_bias,
+            patch_friction=patch_friction,
+            bilateral_joint_blocks=bilateral_joint_blocks,
+        )
 
     @wp.kernel(enable_backward=False, module="unique", grid_stride=False)
     def kernel(
@@ -4442,7 +4471,7 @@ def get_multiworld_mass_splitting_kernel(
                         slot = world_base + start + local
                         cid = element_ids_by_color[slot]
                         if joint_only == wp.int32(0) or cid < num_joints:
-                            dispatch_one_cid(
+                            dispatch_regular(
                                 constraints,
                                 contact_cols,
                                 bodies,
@@ -4464,7 +4493,23 @@ def get_multiworld_mass_splitting_kernel(
                                 wp.int32(0),
                             )
                         local += block_dim
-                elif wp.static(fused_iterations):
+                elif wp.static(fused_iterations or direct_regular_colors):
+                    if wp.static(direct_regular_colors):
+                        body_slot = world_body_offsets[world] + lane
+                        body_end = world_body_offsets[world + wp.int32(1)]
+                        while body_slot < body_end:
+                            node = world_body_ids[body_slot]
+                            copy_count = copy_state.count_per_node[node]
+                            copy_start = wp.int32(0)
+                            if node > wp.int32(0):
+                                copy_start = copy_state.section_end[node - wp.int32(1)]
+                            copy = copy_start
+                            while copy < copy_start + copy_count:
+                                copy_state.velocity[copy] = bodies.velocity[node]
+                                copy_state.angular_velocity[copy] = bodies.angular_velocity[node]
+                                copy += wp.int32(1)
+                            body_slot += block_dim
+                        _sync_threads()
                     batch = lane
                     num_batches = (count + batch_size - wp.int32(1)) / batch_size
                     while batch < num_batches:
@@ -4501,13 +4546,16 @@ def get_multiworld_mass_splitting_kernel(
                 _sync_threads()
                 step += wp.int32(1)
 
-            if wp.static(fused_iterations):
+            if wp.static(fused_iterations or direct_regular_colors):
                 body_slot = world_body_offsets[world] + lane
                 body_end = world_body_offsets[world + wp.int32(1)]
                 while body_slot < body_end:
                     node = world_body_ids[body_slot]
                     copy_count = copy_state.count_per_node[node]
-                    if copy_count > wp.int32(1):
+                    reconcile = copy_count > wp.int32(1)
+                    if wp.static(direct_regular_colors):
+                        reconcile = copy_count > wp.int32(0)
+                    if reconcile:
                         copy_start = wp.int32(0)
                         if node > wp.int32(0):
                             copy_start = copy_state.section_end[node - wp.int32(1)]
@@ -4522,11 +4570,15 @@ def get_multiworld_mass_splitting_kernel(
                         inv_count = wp.float32(1.0) / wp.float32(copy_count)
                         avg_v = sum_v * inv_count
                         avg_w = sum_w * inv_count
-                        copy = copy_start
-                        while copy < copy_end:
-                            copy_state.velocity[copy] = avg_v
-                            copy_state.angular_velocity[copy] = avg_w
-                            copy += wp.int32(1)
+                        if wp.static(direct_regular_colors):
+                            bodies.velocity[node] = avg_v
+                            bodies.angular_velocity[node] = avg_w
+                        else:
+                            copy = copy_start
+                            while copy < copy_end:
+                                copy_state.velocity[copy] = avg_v
+                                copy_state.angular_velocity[copy] = avg_w
+                                copy += wp.int32(1)
                     body_slot += block_dim
                 _sync_threads()
             iteration += wp.int32(1)

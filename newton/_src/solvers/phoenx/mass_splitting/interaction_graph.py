@@ -236,6 +236,7 @@ def record_all_interactions_multiworld_kernel(
     world_num_colors: wp.array[wp.int32],
     max_colored_partitions: wp.int32,
     batch_size: wp.int32,
+    overflow_only: wp.int32,
     row_partition: wp.array[wp.int32],
     row_batch_start: wp.array[wp.int32],
     scratch: InteractionGraphScratch,
@@ -244,8 +245,11 @@ def record_all_interactions_multiworld_kernel(
 
     A 2-D launch assigns 128 lanes to each world. Lanes stride through every
     colour's rows independently; pair emission and per-row metadata are
-    race-free because each CSR row has one owner. Regular colours share
-    partition zero. Rows in each world's final overflow colour are split into local batches. Partition
+    race-free because each CSR row has one owner. With overflow-only disabled,
+    regular colours share partition zero. Otherwise regular rows receive
+    partition -1 and emit no copy ownership, allowing conflict-free colors to
+    update physical body state directly. Rows in each world's final overflow
+    colour are split into local batches. Partition
     identifiers may repeat between worlds because worlds have disjoint nodes.
     The explicit per-row partition is also consumed by the slot-cache builder
     and by the solve kernel, keeping all three users on the same mapping.
@@ -261,7 +265,9 @@ def record_all_interactions_multiworld_kernel(
         while position < end:
             cid = element_ids_by_color[world_base + position]
             partition = wp.int32(0)
+            emit_interaction = overflow_only == wp.int32(0)
             if color >= max_colored_partitions:
+                emit_interaction = bool(True)
                 # Partition keys are local to a node, so keys may repeat in
                 # disjoint worlds. As in the single-world path, batch zero
                 # shares the regular partition-zero state.
@@ -273,8 +279,12 @@ def record_all_interactions_multiworld_kernel(
                     row_batch_start[cid] = wp.int32(0)
             else:
                 row_batch_start[cid] = wp.int32(0)
+                if overflow_only != wp.int32(0):
+                    partition = wp.int32(-1)
             row_partition[cid] = partition
-            if cid < contact_offset or contact_articulation_owner[cid - contact_offset] < wp.int32(0):
+            if emit_interaction and (
+                cid < contact_offset or contact_articulation_owner[cid - contact_offset] < wp.int32(0)
+            ):
                 element = elements[cid]
                 for endpoint_index in range(MAX_BODIES):
                     node = element_interaction_data_get(element, endpoint_index)
