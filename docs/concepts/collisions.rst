@@ -1435,6 +1435,11 @@ observed shape speed:
     )
     schedule.step()
 
+An increase in any shape's speed triggers a refresh at the next substep,
+since a collision pass made while that shape was slower may have produced a
+shorter effective speculative gap. The scheduler checks the final substep's
+output when reporting ``interval_overflow``.
+
 The same ``step()`` call works directly or inside CUDA graph capture; callbacks
 must therefore be capture-safe and preallocate their storage. The scheduler
 always executes every configured solver substep. Its two states are ping-pong

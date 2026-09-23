@@ -28,6 +28,8 @@ def _find_max_point_speed(
     shape_collision_aabb_upper: wp.array[wp.vec3],
     shape_collision_radius: wp.array[wp.float32],
     max_point_speed: wp.array[wp.float32],
+    previous_shape_speed: wp.array[wp.float32],
+    speed_increased: wp.array[wp.int32],
 ):
     """Find a conservative instantaneous speed over all moving shape points."""
     shape_id = wp.tid()
@@ -47,11 +49,15 @@ def _find_max_point_speed(
     angular_radius = wp.max(wp.length(furthest), shape_collision_radius[shape_id])
     point_speed_bound = wp.length(shape_origin_velocity) + wp.length(angular_velocity) * angular_radius
     wp.atomic_max(max_point_speed, 0, point_speed_bound)
+    if point_speed_bound > previous_shape_speed[shape_id]:
+        wp.atomic_max(speed_increased, 0, 1)
+    previous_shape_speed[shape_id] = point_speed_bound
 
 
 @wp.kernel(enable_backward=False)
 def _update_collision_schedule(
     max_point_speed: wp.array[wp.float32],
+    speed_increased: wp.array[wp.int32],
     previous_max_point_speed: wp.array[wp.float32],
     substep_dt: float,
     travel_budget: float,
@@ -67,6 +73,8 @@ def _update_collision_schedule(
     speed = max_point_speed[0]
     # Clear the reduction output for the next substep in the consuming kernel.
     max_point_speed[0] = 0.0
+    increased = speed_increased[0]
+    speed_increased[0] = 0
     previous_speed = previous_max_point_speed[0]
     relative_travel_per_substep = 2.0 * speed * substep_dt
 
@@ -83,6 +91,7 @@ def _update_collision_schedule(
     due = (
         substep_index == 0
         or substep_index >= collision_deadline[0]
+        or increased > 0
         or accumulated_travel + relative_travel_per_substep > travel_budget
     )
     collision_due[0] = int(due)
@@ -106,16 +115,37 @@ def _update_collision_schedule(
         interval_overflow[0] = 1
 
 
+@wp.kernel(enable_backward=False)
+def _check_final_substep(
+    max_point_speed: wp.array[wp.float32],
+    previous_max_point_speed: wp.array[wp.float32],
+    travel_estimate: wp.array[wp.float32],
+    interval_overflow: wp.array[wp.int32],
+    substep_dt: float,
+    travel_budget: float,
+):
+    """Check motion observed after the final solver substep."""
+    speed = max_point_speed[0]
+    max_point_speed[0] = 0.0
+    previous_speed = previous_max_point_speed[0]
+    accumulated_travel = travel_estimate[0]
+    if speed > previous_speed:
+        accumulated_travel += 2.0 * (speed - previous_speed) * substep_dt
+    if accumulated_travel > travel_budget:
+        interval_overflow[0] = 1
+
+
 class CollisionSubstepScheduler:
     """Schedule collision refreshes over a fixed number of simulation substeps.
 
     The scheduler always invokes ``substep_callback`` exactly ``substeps``
     times per frame. It invokes ``collision_callback`` before substep zero and
     thereafter whenever the accumulated global relative-travel estimate would
-    exhaust the configured budget or the previous collision horizon expires.
-    The speed bound is reevaluated after every substep. Selection stays on the
-    device and uses :func:`warp.capture_if`, so it is compatible with CUDA graph
-    capture.
+    exhaust the configured budget, an individual shape's speed increases, or
+    the previous collision horizon expires. The speed bound is reevaluated
+    after every substep, including the final substep for overflow reporting.
+    Selection stays on the device and uses :func:`warp.capture_if`, so it is
+    compatible with CUDA graph capture.
 
     Scheduling is based on instantaneous rigid-shape velocities. It reacts to
     acceleration and impulses after observing their effect on a completed
@@ -219,7 +249,11 @@ class CollisionSubstepScheduler:
         else:
             if not np.isfinite(max_collision_dt) or max_collision_dt <= 0.0:
                 raise ValueError(f"max_collision_dt must be a positive finite number or None, got {max_collision_dt!r}")
-            max_collision_interval = int(float(max_collision_dt) / self._substep_dt)
+            interval_ratio = float(max_collision_dt) / self._substep_dt
+            nearest_interval = round(interval_ratio)
+            if np.isclose(interval_ratio, nearest_interval, rtol=1e-12, atol=0.0):
+                interval_ratio = nearest_interval
+            max_collision_interval = int(interval_ratio)
             if max_collision_interval < 1:
                 raise ValueError(
                     f"max_collision_dt must be at least the solver substep duration {self._substep_dt}, "
@@ -239,6 +273,8 @@ class CollisionSubstepScheduler:
         self._collision_due = wp.zeros(1, dtype=wp.int32, device=device)
         self._collision_deadline = wp.zeros(1, dtype=wp.int32, device=device)
         self._max_point_speed = wp.zeros(1, dtype=wp.float32, device=device)
+        self._previous_shape_speed = wp.zeros(model.shape_count, dtype=wp.float32, device=device)
+        self._speed_increased = wp.zeros(1, dtype=wp.int32, device=device)
         self._previous_max_point_speed = wp.zeros(1, dtype=wp.float32, device=device)
         self._travel_estimate = wp.zeros(1, dtype=wp.float32, device=device)
         self.interval_overflow = wp.zeros(1, dtype=wp.int32, device=device)
@@ -291,6 +327,8 @@ class CollisionSubstepScheduler:
                     model.shape_collision_aabb_upper,
                     model.shape_collision_radius,
                     self._max_point_speed,
+                    self._previous_shape_speed,
+                    self._speed_increased,
                 ],
                 device=model.device,
             )
@@ -299,6 +337,7 @@ class CollisionSubstepScheduler:
                 dim=1,
                 inputs=[
                     self._max_point_speed,
+                    self._speed_increased,
                     self._previous_max_point_speed,
                     self._substep_dt,
                     self._travel_budget,
@@ -320,3 +359,34 @@ class CollisionSubstepScheduler:
                     on_true=lambda substep_index=substep_index: self._dispatch_collision(substep_index),
                 )
             self._substep_callback(self._states[state_in], self._states[1 - state_in], self._substep_dt)
+        wp.launch(
+            _find_max_point_speed,
+            dim=model.shape_count,
+            inputs=[
+                self._states[0].body_q,
+                self._states[0].body_qd,
+                model.body_com,
+                model.shape_body,
+                model.shape_transform,
+                model.shape_collision_aabb_lower,
+                model.shape_collision_aabb_upper,
+                model.shape_collision_radius,
+                self._max_point_speed,
+                self._previous_shape_speed,
+                self._speed_increased,
+            ],
+            device=model.device,
+        )
+        wp.launch(
+            _check_final_substep,
+            dim=1,
+            inputs=[
+                self._max_point_speed,
+                self._previous_max_point_speed,
+                self._travel_estimate,
+                self.interval_overflow,
+                self._substep_dt,
+                self._travel_budget,
+            ],
+            device=model.device,
+        )

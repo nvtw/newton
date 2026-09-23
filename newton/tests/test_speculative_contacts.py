@@ -949,6 +949,8 @@ def test_speculative_contacts_prevent_dynamic_tunneling(test, device):
 
 def test_adaptive_collision_schedule_prevents_capsule_tunneling(test, device, external_capture=False):
     """Refresh collisions often enough to prevent opposing capsules from tunneling."""
+    if external_capture and not wp.is_conditional_graph_supported():
+        test.skipTest("CUDA graph capture requires conditional graph support")
     frame_dt = 0.01
     substeps = 10
     max_speculative_extension = 0.2
@@ -1055,8 +1057,8 @@ def test_adaptive_collision_schedule_reacts_to_acceleration(test, device):
     scheduler.step()
 
     test.assertGreater(int(collision_calls.numpy()[0]), 1)
-    # Acceleration makes corrected travel exceed the budget before a refresh.
-    test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 1)
+    # Refreshing after each observed speed increase keeps travel within budget.
+    test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 0)
 
 
 def test_adaptive_collision_schedule_limits_refresh_interval(test, device):
@@ -1064,7 +1066,7 @@ def test_adaptive_collision_schedule_limits_refresh_interval(test, device):
     frame_dt = 1.0 / 60.0
     substeps = 12
 
-    builder = newton.ModelBuilder(gravity=0.0)
+    builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
     body = builder.add_body()
     builder.add_shape_sphere(body, radius=0.1)
     model = builder.finalize(device=device)
