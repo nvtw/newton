@@ -1429,6 +1429,7 @@ observed shape speed:
         substep_callback=substep,
         frame_dt=1.0 / 60.0,
         substeps=10,
+        max_collision_dt=1.0 / 120.0,
     )
     schedule.step()
 
@@ -1438,6 +1439,11 @@ always executes every configured solver substep. Its two states are ping-pong
 buffers, so the substep count must be even. ``schedule.interval_overflow`` is
 set when collision detection on every substep is still insufficient; in that
 case, increase the substep count or the speculative extension limit.
+Set ``max_collision_dt`` to cap the time between collision passes independently
+of the travel estimate. For example, ``1.0 / 120.0`` requests collision
+detection at least 120 times per second. The scheduler rounds the interval down
+to a whole number of solver substeps and rejects a limit shorter than one
+substep.
 
 The scheduler is an experimental optimization for rigid contacts, not
 continuous collision detection. It does not support particles. It observes

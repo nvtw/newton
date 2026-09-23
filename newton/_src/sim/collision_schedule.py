@@ -60,6 +60,8 @@ def _update_collision_schedule(
     interval_conditions: wp.array[wp.int32],
     collision_due: wp.array[wp.int32],
     travel_estimate: wp.array[wp.float32],
+    substeps_since_collision: wp.array[wp.int32],
+    max_collision_interval: int,
     interval_overflow: wp.array[wp.int32],
 ):
     """Accumulate relative travel and select the next collision horizon."""
@@ -73,11 +75,18 @@ def _update_collision_schedule(
         # its starting speed. This bounds that step by its two endpoint speeds.
         accumulated_travel += 2.0 * (speed - previous_speed) * substep_dt
 
-    due = substep_index == 0 or accumulated_travel + relative_travel_per_substep > travel_budget
+    elapsed_substeps = substeps_since_collision[0]
+    due = (
+        substep_index == 0
+        or elapsed_substeps >= max_collision_interval
+        or accumulated_travel + relative_travel_per_substep > travel_budget
+    )
     collision_due[0] = int(due)
     if due:
         accumulated_travel = 0.0
+        elapsed_substeps = 0
     travel_estimate[0] = accumulated_travel + relative_travel_per_substep
+    substeps_since_collision[0] = elapsed_substeps + 1
     previous_max_point_speed[0] = speed
 
     interval_count = collision_intervals.shape[0]
@@ -133,8 +142,10 @@ class CollisionSubstepScheduler:
             ``substeps`` times per frame.
         frame_dt: Fixed frame duration [s].
         substeps: Fixed positive even number of solver substeps per frame.
-        pair_gap_lower_bound: Conservative lower bound on every possible
-            colliding pair's authored gap sum [m]. Use ``0.0`` when unknown.
+        max_collision_dt: Maximum time between collision refreshes [s]. The
+            actual interval is rounded down to a whole number of solver
+            substeps. If ``None``, refresh frequency is limited only by the
+            relative-travel estimate.
 
     Raises:
         ValueError: If the pipeline contains particles, the states are not two
@@ -151,7 +162,7 @@ class CollisionSubstepScheduler:
         substep_callback: Callable[[State, State, float], None],
         frame_dt: float,
         substeps: int,
-        pair_gap_lower_bound: float = 0.0,
+        max_collision_dt: float | None = None,
     ):
         if not isinstance(collision_pipeline, CollisionPipeline):
             raise TypeError("collision_pipeline must be a CollisionPipeline")
@@ -175,12 +186,9 @@ class CollisionSubstepScheduler:
             raise TypeError("substeps must be an integer") from error
         if substeps <= 0 or substeps % 2 != 0:
             raise ValueError(f"substeps must be a positive even integer, got {substeps}")
-        if not np.isfinite(pair_gap_lower_bound) or pair_gap_lower_bound < 0.0:
-            raise ValueError(f"pair_gap_lower_bound must be a non-negative finite number, got {pair_gap_lower_bound!r}")
-
-        travel_budget = max(float(pair_gap_lower_bound), float(speculative_contact_gap_max))
+        travel_budget = float(speculative_contact_gap_max)
         if travel_budget <= 0.0:
-            raise ValueError("adaptive collision scheduling requires a positive speculative extension or gap bound")
+            raise ValueError("adaptive collision scheduling requires a positive speculative extension")
         state_tuple = tuple(states)
         if state_tuple[0] is state_tuple[1]:
             raise ValueError("states must contain two distinct ping-pong buffers")
@@ -199,7 +207,22 @@ class CollisionSubstepScheduler:
         self._substeps = substeps
         self._substep_dt = float(frame_dt) / substeps
         self._travel_budget = travel_budget
-        self._collision_intervals = tuple(value for value in range(1, substeps + 1) if substeps % value == 0)
+        if max_collision_dt is None:
+            max_collision_interval = substeps
+        else:
+            if not np.isfinite(max_collision_dt) or max_collision_dt <= 0.0:
+                raise ValueError(f"max_collision_dt must be a positive finite number or None, got {max_collision_dt!r}")
+            max_collision_interval = int(float(max_collision_dt) / self._substep_dt)
+            if max_collision_interval < 1:
+                raise ValueError(
+                    f"max_collision_dt must be at least the solver substep duration {self._substep_dt}, "
+                    f"got {max_collision_dt!r}"
+                )
+            max_collision_interval = min(max_collision_interval, substeps)
+        self._collision_intervals = tuple(
+            value for value in range(1, max_collision_interval + 1) if substeps % value == 0
+        )
+        self._max_collision_interval = self._collision_intervals[-1]
 
         device = model.device
         self._interval_values = wp.array(self._collision_intervals, dtype=wp.int32, device=device)
@@ -211,6 +234,7 @@ class CollisionSubstepScheduler:
         self._max_point_speed = wp.zeros(1, dtype=wp.float32, device=device)
         self._previous_max_point_speed = wp.zeros(1, dtype=wp.float32, device=device)
         self._travel_estimate = wp.zeros(1, dtype=wp.float32, device=device)
+        self._substeps_since_collision = wp.zeros(1, dtype=wp.int32, device=device)
         self.interval_overflow = wp.zeros(1, dtype=wp.int32, device=device)
         """Device scalar set to one when collision every substep is still insufficient."""
 
@@ -233,6 +257,7 @@ class CollisionSubstepScheduler:
         """Execute or record one complete fixed-substep frame."""
         self.interval_overflow.zero_()
         self._travel_estimate.zero_()
+        self._substeps_since_collision.zero_()
         self._previous_max_point_speed.zero_()
         model = self._model
         for substep_index in range(self._substeps):
@@ -269,6 +294,8 @@ class CollisionSubstepScheduler:
                     self._interval_conditions,
                     self._collision_due,
                     self._travel_estimate,
+                    self._substeps_since_collision,
+                    self._max_collision_interval,
                     self.interval_overflow,
                 ],
                 device=model.device,

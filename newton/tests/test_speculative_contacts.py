@@ -1058,6 +1058,40 @@ def test_adaptive_collision_schedule_reacts_to_acceleration(test, device):
     test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 0)
 
 
+def test_adaptive_collision_schedule_limits_refresh_interval(test, device):
+    """Refresh collisions at least as often as the configured time limit."""
+    frame_dt = 1.0 / 60.0
+    substeps = 12
+
+    builder = newton.ModelBuilder(gravity=0.0)
+    body = builder.add_body()
+    builder.add_shape_sphere(body, radius=0.1)
+    model = builder.finalize(device=device)
+    states = (model.state(), model.state())
+    pipeline = newton.CollisionPipeline(model, speculative_contact_gap_max=0.1)
+    collision_calls = wp.zeros(1, dtype=wp.int32, device=device)
+
+    def collide(state, dt):
+        del state, dt
+        wp.launch(_increment_counter, dim=1, inputs=[collision_calls], device=device)
+
+    def substep(state_in, state_out, dt):
+        del state_in, state_out, dt
+
+    scheduler = newton.CollisionSubstepScheduler(
+        pipeline,
+        states,
+        collision_callback=collide,
+        substep_callback=substep,
+        frame_dt=frame_dt,
+        substeps=substeps,
+        max_collision_dt=1.0 / 120.0,
+    )
+    scheduler.step()
+
+    test.assertEqual(int(collision_calls.numpy()[0]), 2)
+
+
 def test_adaptive_collision_schedule_rejects_unsupported_inputs(test, device):
     """Reject particles, aliased states, and undersized rigid-body buffers."""
 
@@ -1070,6 +1104,17 @@ def test_adaptive_collision_schedule_rejects_unsupported_inputs(test, device):
     model = builder.finalize(device=device)
     pipeline = newton.CollisionPipeline(model, speculative_contact_gap_max=0.1)
     state = model.state()
+
+    with test.assertRaisesRegex(ValueError, "at least the solver substep duration"):
+        newton.CollisionSubstepScheduler(
+            pipeline,
+            (state, model.state()),
+            collision_callback=noop,
+            substep_callback=noop,
+            frame_dt=0.01,
+            substeps=2,
+            max_collision_dt=0.004,
+        )
 
     with test.assertRaisesRegex(ValueError, "distinct ping-pong buffers"):
         newton.CollisionSubstepScheduler(
@@ -1654,6 +1699,10 @@ for _name, _test in (
     (
         "test_adaptive_collision_schedule_reacts_to_acceleration",
         test_adaptive_collision_schedule_reacts_to_acceleration,
+    ),
+    (
+        "test_adaptive_collision_schedule_limits_refresh_interval",
+        test_adaptive_collision_schedule_limits_refresh_interval,
     ),
     (
         "test_adaptive_collision_schedule_rejects_unsupported_inputs",
