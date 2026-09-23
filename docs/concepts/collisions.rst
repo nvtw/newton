@@ -1403,7 +1403,9 @@ collision detection runs within a frame. The total number of simulation
 substeps remains fixed. The scheduler always runs collision detection at the
 beginning of a frame, tracks a conservative bound derived from the currently
 observed rigid-shape velocities on the device, and runs additional collision
-passes when that bound exhausts the available speculative distance. The bound
+passes when that bound exhausts the available speculative distance or the
+previous collision prediction horizon expires, whichever occurs first. A drop
+in observed speed does not extend a previously selected horizon. The bound
 assumes that two bodies may move directly toward one another at the maximum
 observed shape speed:
 
@@ -1437,8 +1439,11 @@ The same ``step()`` call works directly or inside CUDA graph capture; callbacks
 must therefore be capture-safe and preallocate their storage. The scheduler
 always executes every configured solver substep. Its two states are ping-pong
 buffers, so the substep count must be even. ``schedule.interval_overflow`` is
-set when collision detection on every substep is still insufficient; in that
-case, increase the substep count or the speculative extension limit.
+set when observed per-substep or accumulated travel exceeds the budget; in
+that case, increase the substep count or the speculative extension limit.
+Collision prediction horizons are capped at the next frame boundary, where
+contacts are always refreshed.
+
 Set ``max_collision_dt`` to cap the time between collision passes independently
 of the travel estimate. For example, ``1.0 / 120.0`` requests collision
 detection at least 120 times per second. The scheduler rounds the interval down
