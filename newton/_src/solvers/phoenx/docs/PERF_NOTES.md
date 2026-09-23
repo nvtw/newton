@@ -1147,4 +1147,36 @@ These later results supersede the early FP16/contact-row prioritization:
   current thresholds, additive partition schedule, auto scheduler, and compact
   friction projection.
 
-- Coupled rigid-contact projection now exits after the normal solve when the Coulomb disk has zero radius, while still clearing stale tangent impulses with an equal-and-opposite impulse. The exact 64-world, 120-plate SDF benchmark (32-voxel field, voxel-depth contacts disabled, 120 Hz collision, six temporal substeps, eight position sweeps and one velocity sweep) sustained 45.5 FPS over 600 frames versus the committed 45.0 FPS result. The analytic hard/soft/speculative/frictionless/stale-impulse comparison passes. Moving the three cached cross-mobility reads behind the branch through another compile-time specialization regressed a heavier 64-voxel workload from 28.9 to 28.2 FPS and was removed; its extra kernel footprint outweighed the skipped reads.
+- Coupled rigid-contact projection now exits after the normal solve when the
+  Coulomb disk has zero radius, while still clearing stale tangent impulses
+  with an equal-and-opposite impulse. The exact 64-world, 120-plate SDF
+  benchmark (32-voxel field, voxel-depth contacts disabled, 120 Hz collision,
+  six temporal substeps, eight position sweeps, and one velocity sweep)
+  sustained 45.5 FPS over 600 frames versus the committed 45.0 FPS result. A
+  short Nsight trace reduced the dominant multi-world sweep from 253.1 to
+  239.0 us (-5.6%). The analytic hard, soft, speculative, frictionless, and
+  stale-impulse comparisons pass, as do rigid and reduced-coordinate energy
+  and momentum checks. Moving the three cached cross-mobility reads behind the
+  branch through another compile-time specialization regressed a heavier
+  64-voxel workload from 28.9 to 28.2 FPS and was removed; its extra kernel
+  footprint outweighed the skipped reads.
+
+- The qualified plate workload's 956 tangent blocks were all well conditioned,
+  so replacing the general FP64 fallback with a compact eigenspace fallback was
+  screened. It retained the synthetic condition-number-10,000, rank-one,
+  anisotropic-dissipation, and kinetic-energy checks, but sustained only
+  46.1 FPS versus 45.5 FPS over 600 frames (+1.3%) while adding about 90 lines
+  to the contact projection. A pure-FP32 version reached about 49.9 FPS in a
+  short screen but failed the extreme-condition KKT residual. Both variants
+  were removed: the accurate version does not justify its complexity, and the
+  faster version does not meet the accuracy requirement.
+
+- Keep benchmark configurations explicit. The qualified throughput workload
+  uses a 32-voxel SDF with voxel-depth contacts disabled; the interactive
+  64-voxel default with voxel-depth contacts enabled measures about 28.9 FPS
+  and is not comparable. A one-world, 20-plate, 300-frame quality probe at the
+  qualified contact settings measured 0.0323 mm maximum penetration,
+  0.01757 mm/s linear RMS speed, and 0.001310 rad/s angular RMS speed. The last
+  two values exceed the current settled gates, so this short probe must not be
+  cited as a passing settled-quality run. The established 0.01485 mm/s and
+  0.001148 rad/s values above remain the qualified measurements.
