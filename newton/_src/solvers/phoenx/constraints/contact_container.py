@@ -30,6 +30,9 @@ __all__ = [
     "cc_get_eff_t2",
     "cc_get_friction_anchor0",
     "cc_get_friction_anchor1",
+    "cc_get_mobility_nt1",
+    "cc_get_mobility_nt2",
+    "cc_get_mobility_t1t2",
     "cc_get_normal",
     "cc_get_normal_lambda",
     "cc_get_normal_lambdas",
@@ -57,6 +60,9 @@ __all__ = [
     "cc_set_eff_t2",
     "cc_set_friction_anchor0",
     "cc_set_friction_anchor1",
+    "cc_set_mobility_nt1",
+    "cc_set_mobility_nt2",
+    "cc_set_mobility_t1t2",
     "cc_set_normal",
     "cc_set_normal_lambda",
     "cc_set_pd_bias",
@@ -89,13 +95,14 @@ CC_DWORDS_PER_CONTACT: int = 12
 #: remain canonical geometry and are never changed by a friction-anchor reset.
 CC_RIGID_DWORDS_PER_CONTACT: int = 12
 
-#: 16 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias +
-#: pd_eff_soft + r0(3) + r1(3). pd_* are non-zero only for soft contacts (user
-#: K/D); pd_eff_soft > 0 switches the normal row to absolute PD spring-damper.
-#: Rigid-contact prepare caches lever arms for the velocity sweeps. The final
-#: slot stores the generation-time gap for current contacts only; it is written
-#: by ingest and consumed by prepare before the velocity sweeps.
-CC_DERIVED_DWORDS_PER_CONTACT: int = 16
+#: 19 = eff_n + eff_t1 + eff_t2 + bias + bias_t1 + bias_t2 + pd_gamma + pd_bias +
+#: pd_eff_soft + r0(3) + r1(3) + mobility(3) + start_gap. pd_* are non-zero only
+#: for soft contacts (user K/D); pd_eff_soft > 0 switches the normal row to
+#: absolute PD spring-damper. Rigid-contact prepare caches lever arms for the
+#: velocity sweeps. Three slots cache the off-diagonal rigid contact-frame mobility terms reused
+#: by every velocity sweep. The final slot stores the generation-time gap for
+#: current contacts only; it is written by ingest and consumed by prepare.
+CC_DERIVED_DWORDS_PER_CONTACT: int = 19
 
 
 # Compile-time dword offsets.
@@ -131,7 +138,10 @@ _CC_OFF_R0_Z = wp.constant(11)
 _CC_OFF_R1_X = wp.constant(12)
 _CC_OFF_R1_Y = wp.constant(13)
 _CC_OFF_R1_Z = wp.constant(14)
-_CC_OFF_START_GAP = wp.constant(15)
+_CC_OFF_MOBILITY_NT1 = wp.constant(15)
+_CC_OFF_MOBILITY_NT2 = wp.constant(16)
+_CC_OFF_MOBILITY_T1T2 = wp.constant(17)
+_CC_OFF_START_GAP = wp.constant(18)
 
 
 @wp.struct
@@ -411,6 +421,36 @@ def cc_get_eff_t2(cc: ContactContainer, k: wp.int32) -> wp.float32:
 @wp.func
 def cc_set_eff_t2(cc: ContactContainer, k: wp.int32, v: wp.float32):
     write2d_f32(cc.derived, _CC_OFF_EFF_T2, k, v)
+
+
+@wp.func
+def cc_get_mobility_nt1(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return read2d_f32(cc.derived, _CC_OFF_MOBILITY_NT1, k)
+
+
+@wp.func
+def cc_set_mobility_nt1(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    write2d_f32(cc.derived, _CC_OFF_MOBILITY_NT1, k, v)
+
+
+@wp.func
+def cc_get_mobility_nt2(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return read2d_f32(cc.derived, _CC_OFF_MOBILITY_NT2, k)
+
+
+@wp.func
+def cc_set_mobility_nt2(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    write2d_f32(cc.derived, _CC_OFF_MOBILITY_NT2, k, v)
+
+
+@wp.func
+def cc_get_mobility_t1t2(cc: ContactContainer, k: wp.int32) -> wp.float32:
+    return read2d_f32(cc.derived, _CC_OFF_MOBILITY_T1T2, k)
+
+
+@wp.func
+def cc_set_mobility_t1t2(cc: ContactContainer, k: wp.int32, v: wp.float32):
+    write2d_f32(cc.derived, _CC_OFF_MOBILITY_T1T2, k, v)
 
 
 @wp.func

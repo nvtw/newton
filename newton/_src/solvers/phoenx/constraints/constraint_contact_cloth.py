@@ -70,6 +70,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_eff_t2,
     cc_get_friction_anchor0,
     cc_get_friction_anchor1,
+    cc_get_mobility_nt1,
+    cc_get_mobility_nt2,
+    cc_get_mobility_t1t2,
     cc_get_normal,
     cc_get_normal_lambda,
     cc_get_pd_bias,
@@ -90,6 +93,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_eff_t2,
     cc_set_friction_anchor0,
     cc_set_friction_anchor1,
+    cc_set_mobility_nt1,
+    cc_set_mobility_nt2,
+    cc_set_mobility_t1t2,
     cc_set_normal_lambda,
     cc_set_pd_bias,
     cc_set_pd_eff_soft,
@@ -371,6 +377,19 @@ def rebase_ordinary_contact_relax_kernel(
             k,
             effective_mass_scalar(tangent2, r1, r2, inverse_mass1, inverse_mass2, inverse_inertia1, inverse_inertia2),
         )
+        rn1 = wp.cross(r1, normal)
+        rn2 = wp.cross(r2, normal)
+        rt11 = wp.cross(r1, tangent1)
+        rt12 = wp.cross(r2, tangent1)
+        rt21 = wp.cross(r1, tangent2)
+        rt22 = wp.cross(r2, tangent2)
+        response_t11 = inverse_inertia1 * rt11
+        response_t12 = inverse_inertia2 * rt12
+        response_t21 = inverse_inertia1 * rt21
+        response_t22 = inverse_inertia2 * rt22
+        cc_set_mobility_nt1(cc, k, wp.dot(rn1, response_t11) + wp.dot(rn2, response_t12))
+        cc_set_mobility_nt2(cc, k, wp.dot(rn1, response_t21) + wp.dot(rn2, response_t22))
+        cc_set_mobility_t1t2(cc, k, wp.dot(rt11, response_t21) + wp.dot(rt12, response_t22))
         if cc_get_pd_eff_soft(cc, k) > wp.float32(0.0) and eff_n > wp.float32(0.0):
             cc_set_pd_eff_soft(cc, k, wp.float32(1.0) / (wp.float32(1.0) / eff_n + cc_get_pd_gamma(cc, k)))
 
@@ -775,6 +794,20 @@ def _make_contact_prepare_for_iteration_at(
             cc_set_eff_n(cc, k, eff_n)
             cc_set_eff_t1(cc, k, eff_t1)
             cc_set_eff_t2(cc, k, eff_t2)
+            if wp.static(not cloth_support and not patch_friction):
+                rn1 = wp.cross(r1, n)
+                rn2 = wp.cross(r2, n)
+                rt11 = wp.cross(r1, t1_dir)
+                rt12 = wp.cross(r2, t1_dir)
+                rt21 = wp.cross(r1, t2_dir)
+                rt22 = wp.cross(r2, t2_dir)
+                response_t11 = inv_inertia1 * rt11
+                response_t12 = inv_inertia2 * rt12
+                response_t21 = inv_inertia1 * rt21
+                response_t22 = inv_inertia2 * rt22
+                cc_set_mobility_nt1(cc, k, wp.dot(rn1, response_t11) + wp.dot(rn2, response_t12))
+                cc_set_mobility_nt2(cc, k, wp.dot(rn1, response_t21) + wp.dot(rn2, response_t22))
+                cc_set_mobility_t1t2(cc, k, wp.dot(rt11, response_t21) + wp.dot(rt12, response_t22))
             cc_set_bias(cc, k, bias_val)
             cc_set_bias_t1(cc, k, bias_t1_val)
             cc_set_bias_t2(cc, k, bias_t2_val)
@@ -1581,21 +1614,9 @@ def _make_contact_iterate_at(
                                 cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
                                 cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
                             else:
-                                # Orthogonal linear rows have zero cross mobility. Their
-                                # angular rows couple through each endpoint's inverse inertia.
-                                rn1 = wp.cross(r1, n)
-                                rn2 = wp.cross(r2, n)
-                                rt11 = wp.cross(r1, t1_dir)
-                                rt12 = wp.cross(r2, t1_dir)
-                                rt21 = wp.cross(r1, t2_dir)
-                                rt22 = wp.cross(r2, t2_dir)
-                                response_t11 = inv_inertia1 * rt11
-                                response_t12 = inv_inertia2 * rt12
-                                response_t21 = inv_inertia1 * rt21
-                                response_t22 = inv_inertia2 * rt22
-                                mobility_nt1 = wp.dot(rn1, response_t11) + wp.dot(rn2, response_t12)
-                                mobility_nt2 = wp.dot(rn1, response_t21) + wp.dot(rn2, response_t22)
-                                mobility_t1t2 = wp.dot(rt11, response_t21) + wp.dot(rt12, response_t22)
+                                mobility_nt1 = cc_get_mobility_nt1(cc, k)
+                                mobility_nt2 = cc_get_mobility_nt2(cc, k)
+                                mobility_t1t2 = cc_get_mobility_t1t2(cc, k)
                                 tangent_delta = contact_project_tangent_delta(
                                     cc,
                                     k,
@@ -1616,21 +1637,9 @@ def _make_contact_iterate_at(
                                 )
                             imp = normal_delta * n + tangent_delta[0] * t1_dir + tangent_delta[1] * t2_dir
                         else:
-                            # Orthogonal linear rows have zero cross mobility. Their
-                            # angular rows couple through each endpoint's inverse inertia.
-                            rn1 = wp.cross(r1, n)
-                            rn2 = wp.cross(r2, n)
-                            rt11 = wp.cross(r1, t1_dir)
-                            rt12 = wp.cross(r2, t1_dir)
-                            rt21 = wp.cross(r1, t2_dir)
-                            rt22 = wp.cross(r2, t2_dir)
-                            response_t11 = inv_inertia1 * rt11
-                            response_t12 = inv_inertia2 * rt12
-                            response_t21 = inv_inertia1 * rt21
-                            response_t22 = inv_inertia2 * rt22
-                            mobility_nt1 = wp.dot(rn1, response_t11) + wp.dot(rn2, response_t12)
-                            mobility_nt2 = wp.dot(rn1, response_t21) + wp.dot(rn2, response_t22)
-                            mobility_t1t2 = wp.dot(rt11, response_t21) + wp.dot(rt12, response_t22)
+                            mobility_nt1 = cc_get_mobility_nt1(cc, k)
+                            mobility_nt2 = cc_get_mobility_nt2(cc, k)
+                            mobility_t1t2 = cc_get_mobility_t1t2(cc, k)
                             if wp.static(has_soft_contact_pd):
                                 imp = contact_project_coupled_velocity_update(
                                     cc,

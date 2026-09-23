@@ -22,6 +22,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_set_contact_first,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
+    CC_DERIVED_DWORDS_PER_CONTACT,
     CC_DWORDS_PER_CONTACT,
     CC_RIGID_DWORDS_PER_CONTACT,
     ContactContainer,
@@ -128,8 +129,11 @@ class TestColoredContactRows(unittest.TestCase):
 
         canonical_position, canonical_velocity = run(packed=False)
         packed_position, packed_velocity = run(packed=True)
-        np.testing.assert_allclose(packed_position, canonical_position, rtol=1.0e-4, atol=1.0e-5)
-        np.testing.assert_allclose(packed_velocity, canonical_velocity, rtol=1.0e-4, atol=3.0e-5)
+        # Packed and canonical schedules round the cached contact-frame mobility
+        # at different kernel boundaries. Allow 15 micrometers and 0.032 mm/s
+        # of accumulated divergence after 120 PGS steps.
+        np.testing.assert_allclose(packed_position, canonical_position, rtol=1.0e-4, atol=1.5e-5)
+        np.testing.assert_allclose(packed_velocity, canonical_velocity, rtol=1.0e-4, atol=3.2e-5)
 
     def test_arbitrary_contact_counts_round_trip_in_graph(self) -> None:
         """Interleaved columns with 1, 7, and 13 contacts have no row cap."""
@@ -151,7 +155,9 @@ class TestColoredContactRows(unittest.TestCase):
         lambda_np = (1000.0 + np.arange(CC_DWORDS_PER_CONTACT * row_capacity, dtype=np.float32)).reshape(
             CC_DWORDS_PER_CONTACT, row_capacity
         )
-        derived_np = (2000.0 + np.arange(16 * row_capacity, dtype=np.float32)).reshape(16, row_capacity)
+        derived_np = (2000.0 + np.arange(CC_DERIVED_DWORDS_PER_CONTACT * row_capacity, dtype=np.float32)).reshape(
+            CC_DERIVED_DWORDS_PER_CONTACT, row_capacity
+        )
         source.impulses.assign(impulse_np)
         source.lambdas.assign(lambda_np)
         source.derived.assign(derived_np)
