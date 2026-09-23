@@ -1071,6 +1071,7 @@ class PhoenXWorld:
         )
         self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._fused_multiworld_mass_splitting = False
+        self._overflow_only_mass_splitting = False
         self._world_body_ids = wp.zeros(1, dtype=wp.int32, device=self.device)
         self._world_body_offsets = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         if (
@@ -1088,6 +1089,7 @@ class PhoenXWorld:
                 self._world_body_ids = wp.array(world_body_ids or [0], dtype=wp.int32, device=self.device)
                 self._world_body_offsets = wp.array(world_body_offsets, dtype=wp.int32, device=self.device)
                 self._fused_multiworld_mass_splitting = True
+                self._overflow_only_mass_splitting = self.num_joints == 0
         # Sized nw+1 so the inclusive scan output lands in world_csr_offsets.
         self._world_totals_shifted: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._per_world_num_runs: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -1107,8 +1109,9 @@ class PhoenXWorld:
         )
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
         # Explicit copy-state partition for every row in a multi-world
-        # mass-splitting schedule. Regular colors use zero; overflow rows use
-        # their world-local batch index.
+        # mass-splitting schedule. Rigid contact-only worlds mark regular
+        # colors -1 (direct body state); overflow rows use their world-local
+        # batch index. Other worlds retain partition zero for regular colors.
         self._multiworld_row_partition: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
         self._multiworld_row_batch_start: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
         self._per_world_node_color_mask: wp.array[wp.uint64] = wp.zeros(
@@ -3610,6 +3613,7 @@ class PhoenXWorld:
                 self._world_num_colors,
                 wp.int32(int(self.max_colored_partitions)),
                 wp.int32(self.mass_splitting_batch_size),
+                wp.int32(int(self._overflow_only_mass_splitting)),
                 self._multiworld_row_partition,
                 self._multiworld_row_batch_start,
                 self._interaction_graph_scratch,
@@ -4798,17 +4802,25 @@ class PhoenXWorld:
             kw["cached_prepare"] = bool(cached_prepare)
         return kw
 
-    def _multiworld_mass_splitting_iterate_fused(self, idt: wp.float32) -> None:
-        """Run all rigid biased sweeps with block-local copy reconciliation."""
+    def _multiworld_mass_splitting_persistent(
+        self,
+        phase: str,
+        idt: wp.float32,
+        *,
+        num_iterations: int,
+        direct_regular_colors: bool,
+    ) -> None:
+        """Run complete rigid sweeps inside one world-owning block."""
         flags = self._dispatch_specialization_flags()
         kernel = get_multiworld_mass_splitting_kernel(
-            phase="iterate",
+            phase=phase,
             **flags,
             has_contacts=self.max_contact_columns > 0 and self._reduced_articulation is None,
             packed_contact_headers=self._colored_contact_headers,
             patch_friction=self._contact_patch_enabled,
             bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
-            fused_iterations=True,
+            fused_iterations=phase == "iterate" and num_iterations > 1,
+            direct_regular_colors=direct_regular_colors,
         )
         block_dim = 128
         wp.launch(
@@ -4842,10 +4854,34 @@ class PhoenXWorld:
                 wp.int32(0),
                 self._world_body_ids,
                 self._world_body_offsets,
-                wp.int32(self.solver_iterations),
+                wp.int32(num_iterations),
                 wp.int32(self.mass_splitting_batch_size),
             ],
             device=self.device,
+        )
+
+    def _multiworld_mass_splitting_iterate_fused(self, idt: wp.float32) -> None:
+        """Run all rigid biased sweeps with block-local copy reconciliation."""
+        self._multiworld_mass_splitting_persistent(
+            "iterate",
+            idt,
+            num_iterations=self.solver_iterations,
+            direct_regular_colors=False,
+        )
+
+    def _multiworld_mass_splitting_direct_regular(
+        self,
+        phase: str,
+        idt: wp.float32,
+        *,
+        num_iterations: int = 1,
+    ) -> None:
+        """Solve regular colors directly and mass split only overflow rows."""
+        self._multiworld_mass_splitting_persistent(
+            phase,
+            idt,
+            num_iterations=num_iterations,
+            direct_regular_colors=True,
         )
 
     def _multiworld_mass_splitting_sweep(

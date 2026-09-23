@@ -1223,13 +1223,11 @@ These later results supersede the early FP16/contact-row prioritization:
   penetration to 119 m. Mixing direct body updates with the existing copy-state
   mass scaling is therefore invalid in that form; the prototype was removed.
 
-
 - Grouping the same eight contact-column passes into four reconciliation
   rounds, with two local passes per body pair, worsened the one-world quality
   probe from 0.01757 to 0.1483 mm/s linear RMS and from 0.001310 to 0.01462
   rad/s angular RMS. Repeating a pair cannot replace propagation through the
   copy-state average; the prototype was removed.
-
 
 - Reconciling split body state after every regular color was also rejected.
   Two outer sweeps reached 0.184 mm penetration, 0.683 mm/s linear RMS, and
@@ -1238,3 +1236,16 @@ These later results supersede the early FP16/contact-row prioritization:
   each color's correction over all partition copies, so additional averages do
   not produce direct colored Gauss-Seidel. A valid hybrid must build copy state
   only for overflow rows and leave regular colors on physical body state.
+
+- The valid hybrid schedule removes regular colors from the copy graph and
+  updates their conflict-free body pairs directly; only overflow batches use
+  Tonge copies and exact averaging. A dedicated direct prepare path preserves
+  packed-row source indices. At five position sweeps and one velocity sweep,
+  the exact 64-world, 120-plate workload sustained 60.46, 60.61, and 60.73 FPS
+  in independent 600-frame runs at 120 Hz collision detection, versus
+  46.4--46.7 FPS for eight fully split sweeps. A 1,200-frame, one-world,
+  20-plate settled probe measured 0.03230 mm maximum penetration, 0.01291 mm/s
+  linear RMS speed, and 0.000883 rad/s angular RMS speed. Six and eight hybrid
+  sweeps also passed, but reached only 58.56 and 49.26 FPS. The 64-world pile
+  was still rearranging after 1,200 frames, so its moving-state velocities are
+  retained as robustness data rather than mislabeled as settled jitter.

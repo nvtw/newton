@@ -3,10 +3,10 @@
 
 """Multi-world PGS dispatcher with Tonge mass splitting.
 
-Regular independent-set colours run in one synchronized block per world. The
-overflow colour runs as globally parallel batches with private body/particle
-copy states. A mass-weighted average and broadcast between sweeps preserves
-linear and angular momentum before the next PGS iteration.
+Rigid contact-only worlds update regular independent-set colors directly and
+reserve private copy state for the overflow color. Other worlds retain split
+state for every color. A mass-weighted overflow average preserves linear and
+angular momentum before the next PGS iteration.
 """
 
 from __future__ import annotations
@@ -32,13 +32,15 @@ class MultiWorldMassSplittingDispatcher:
 
     def solve(self, idt: wp.float32) -> None:
         w = self._world
-        # Fan body / particle state into every owned copy-state slot
-        # before the constraint kernels read them.
-        w._mass_splitting_broadcast()
+        # Fully split worlds read copy state during regular colors and need an
+        # initial broadcast. Overflow-only worlds read physical state first;
+        # their persistent kernel broadcasts immediately before overflow.
+        if not w._overflow_only_mass_splitting:
+            w._mass_splitting_broadcast()
         if w._constraint_capacity == 0:
-            # Still need to writeback to keep slot[0] -> body in sync
-            # for the next substep.
-            w._mass_splitting_writeback()
+            # Fully split worlds still need slot[0] -> body writeback.
+            if not w._overflow_only_mass_splitting:
+                w._mass_splitting_writeback()
             return
         direct = getattr(w, "_direct_equality_system", None)
         overlap_factor = bool(
@@ -87,6 +89,12 @@ class MultiWorldMassSplittingDispatcher:
             return
 
         inv_dt = 1.0 / w.substep_dt
+        direct_regular_colors = bool(
+            w._overflow_only_mass_splitting
+            and (direct is None or not direct.enabled)
+            and not w._reduced_constraints_active_this_step
+            and w.joint_refinement_iterations == 0
+        )
         if direct is not None and direct.enabled:
             # The post-warm-start solve below supersedes an exact projection
             # here. Refresh the copy slots because direct pre-solve operations
@@ -95,7 +103,10 @@ class MultiWorldMassSplittingDispatcher:
             w._mass_splitting_broadcast()
         # Prepare applies the warm-start impulse to each body's slots;
         # average so the iterate phase starts from converged slot values.
-        if w._refresh_prepare_this_substep():
+        if direct_regular_colors:
+            phase = "prepare" if w._refresh_prepare_this_substep() else "cached_prepare"
+            w._multiworld_mass_splitting_direct_regular(phase, idt)
+        elif w._refresh_prepare_this_substep():
             w._multiworld_mass_splitting_sweep("prepare", idt)
             w._mass_splitting_average_and_broadcast(inv_dt)
         else:
@@ -113,7 +124,13 @@ class MultiWorldMassSplittingDispatcher:
             and not w._reduced_constraints_active_this_step
             and w.joint_refinement_iterations == 0
         )
-        if fuse_iterations:
+        if direct_regular_colors:
+            w._multiworld_mass_splitting_direct_regular(
+                "iterate",
+                idt,
+                num_iterations=w.solver_iterations,
+            )
+        elif fuse_iterations:
             w._multiworld_mass_splitting_iterate_fused(idt)
         else:
             for iteration in range(w.solver_iterations):
@@ -140,7 +157,7 @@ class MultiWorldMassSplittingDispatcher:
         # Writeback slot[0].velocity -> body.velocity. step()'s
         # integrate_positions then advances bodies with the post-PGS
         # velocity.
-        if direct is None or not direct.enabled:
+        if (direct is None or not direct.enabled) and not direct_regular_colors:
             w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.resolve_bounded_drives(idt, use_bias=True)
@@ -169,15 +186,25 @@ class MultiWorldMassSplittingDispatcher:
                 w._reduced_articulation.solve_constraints(w, idt, relax=True)
             return
 
+        direct_regular_colors = bool(
+            w._overflow_only_mass_splitting
+            and (direct is None or not direct.enabled)
+            and not w._reduced_constraints_active_this_step
+        )
+
         # Pose integration updates anisotropic angular velocity and world
         # inertia on the body state. Refresh every copy before relaxation so
         # the split rows cannot overwrite that torque-free update with stale
         # pre-integrate velocities.
-        w._mass_splitting_broadcast()
+        if not direct_regular_colors:
+            w._mass_splitting_broadcast()
         inv_dt = 1.0 / w.substep_dt
         for iteration in range(w._active_velocity_iterations):
-            w._multiworld_mass_splitting_sweep("relax", idt)
-            w._mass_splitting_average_and_broadcast(inv_dt)
+            if direct_regular_colors:
+                w._multiworld_mass_splitting_direct_regular("relax", idt)
+            else:
+                w._multiworld_mass_splitting_sweep("relax", idt)
+                w._mass_splitting_average_and_broadcast(inv_dt)
             if direct is not None and direct.enabled:
                 w._mass_splitting_writeback(already_averaged=True)
                 w._wait_direct_factor()
@@ -187,7 +214,7 @@ class MultiWorldMassSplittingDispatcher:
 
         # Second writeback after relax: relax also routes through slots,
         # so the next substep would see stale body.velocity otherwise.
-        if direct is None or not direct.enabled:
+        if (direct is None or not direct.enabled) and not direct_regular_colors:
             w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             w._wait_direct_factor()
