@@ -75,6 +75,11 @@ class Settings:
     mass_splitting: bool = False
     max_colors: int = 12
     threads_per_world: int | str = "auto"
+    color_group_size: int = 0
+    splitting_batch_size: int = 8
+    prepare_refresh_stride: int | str = "auto"
+    parallel_contact_prepare: bool = False
+    contact_chunk_size: int = 0
 
 
 def _may_toggle_mass(options: dict) -> bool:
@@ -83,17 +88,42 @@ def _may_toggle_mass(options: dict) -> bool:
         options.get("solver_scheme") == "tgs"
         or options.get("contact_friction_model") == "patch"
         or options.get("joint_mode") in ("maximal_projected", "maximal_articulated", "hybrid", "reduced")
-        or options.get("mass_splitting_color_group_size", 0)
         or options.get("joint_refinement_iterations", 0)
         or options.get("direct_joint_projection_passes", 1) > 1
     )
 
 
-def candidate_settings(base: Settings, world_count: int, mode: str = "default", *, toggle_mass=True) -> list[Settings]:
-    """Return an ordered, bounded search with no cartesian-product sweep."""
+def _neighbor_sizes(value: int, *, minimum: int = 1, maximum: int = 32) -> tuple[int, ...]:
+    """Try half/current/double near an authored GPU group or batch size."""
+    return tuple(sorted({max(minimum, value // 2), value, min(maximum, value * 2)}))
+
+
+def candidate_settings(
+    base: Settings,
+    world_count: int,
+    mode: str = "default",
+    *,
+    toggle_mass=True,
+    allow_ungrouped=True,
+    allow_stride_two=True,
+    allow_multi_layout=True,
+) -> list[Settings]:
+    """Start at authored settings, then try nearby scheduling and work budgets.
+
+    Large vectorized workloads skip global single-world coloring; half/double
+    size changes probe GPU occupancy without a cartesian-product sweep.
+    """
     if mode not in ("fast", "default", "thorough"):
         raise ValueError(f"Unknown tuning mode: {mode}")
-    layouts = ["single_world", "multi_world"] if world_count > 1 else ["single_world"]
+    layouts = (
+        ["single_world"]
+        if world_count == 1
+        else ["single_world", "multi_world"]
+        if world_count <= 16
+        else ["multi_world"]
+    )
+    if not allow_multi_layout:
+        layouts = [base.layout]
     layouts = [base.layout, *(layout for layout in layouts if layout != base.layout)]
     candidates = [base]
     candidates.extend(
@@ -102,7 +132,11 @@ def candidate_settings(base: Settings, world_count: int, mode: str = "default", 
         if layout != base.layout and not (base.layout == "auto" and layout == "multi_world" and world_count > 1)
     )
     if toggle_mass:
-        candidates.append(replace(base, mass_splitting=not base.mass_splitting))
+        candidates.append(
+            replace(base, mass_splitting=False, color_group_size=0)
+            if base.mass_splitting
+            else replace(base, mass_splitting=True)
+        )
     color_candidates = []
     if base.mass_splitting or toggle_mass:
         colored = replace(base, mass_splitting=True)
@@ -115,11 +149,11 @@ def candidate_settings(base: Settings, world_count: int, mode: str = "default", 
             )
         if mode == "thorough":
             color_candidates.append(replace(colored, max_colors=max(1, base.max_colors // 4)))
-    if world_count > 1 and mode != "fast":
+    if world_count > 1 and mode != "fast" and allow_multi_layout:
         candidates.extend(
             replace(base, layout="multi_world", scheduler=scheduler) for scheduler in ("fast_tail", "block_world")
         )
-    if world_count > 1 and mode == "thorough":
+    if world_count > 1 and mode == "thorough" and allow_multi_layout:
         candidates.extend(replace(base, layout="multi_world", threads_per_world=threads) for threads in (8, 16, 32))
     cheaper = [
         (max(1, base.substeps // 2), base.iterations),
@@ -139,6 +173,21 @@ def candidate_settings(base: Settings, world_count: int, mode: str = "default", 
     for substeps, iterations in cheaper:
         candidates.append(replace(base, substeps=substeps, iterations=iterations))
     candidates.extend(color_candidates)
+    if mode == "thorough":
+        if base.mass_splitting:
+            candidates.extend(
+                replace(base, splitting_batch_size=size) for size in _neighbor_sizes(base.splitting_batch_size)
+            )
+            if base.color_group_size:
+                group_sizes = _neighbor_sizes(base.color_group_size)
+                if allow_ungrouped:
+                    group_sizes = (0, *group_sizes)
+                candidates.extend(replace(base, color_group_size=size) for size in group_sizes)
+        candidates.append(replace(base, prepare_refresh_stride=1))
+        if base.substeps >= 4 and allow_stride_two:
+            candidates.append(replace(base, prepare_refresh_stride=2))
+        candidates.append(replace(base, parallel_contact_prepare=not base.parallel_contact_prepare))
+        candidates.append(replace(base, contact_chunk_size=0 if base.contact_chunk_size else 64))
     return list(dict.fromkeys(candidates))
 
 
@@ -278,6 +327,11 @@ def run_trial(scene, settings, frames, sample_stride):
         mass_splitting=settings.mass_splitting,
         max_colored_partitions=settings.max_colors,
         threads_per_world=settings.threads_per_world,
+        mass_splitting_color_group_size=settings.color_group_size,
+        mass_splitting_batch_size=settings.splitting_batch_size,
+        prepare_refresh_stride=settings.prepare_refresh_stride,
+        parallel_contact_prepare=settings.parallel_contact_prepare,
+        contact_chunk_size=settings.contact_chunk_size,
     )
     pipeline = (
         scene.pipeline_factory()
@@ -354,11 +408,32 @@ def tune(scene, *, mode="default", frames=None, sample_stride=10, slack=0.1, lim
         options.get("mass_splitting", False),
         options.get("max_colored_partitions", 12),
         options.get("threads_per_world", "auto"),
+        options.get("mass_splitting_color_group_size", 0),
+        options.get("mass_splitting_batch_size", 8),
+        options.get("prepare_refresh_stride", "auto"),
+        options.get("parallel_contact_prepare", False),
+        options.get("contact_chunk_size", 0),
     )
-    if options.get("velocity_iterations", 1) != 1:
-        raise ValueError("This tuner requires one fixed velocity iteration")
     rows = []
-    candidates = candidate_settings(base, max(1, scene.model.world_count), mode, toggle_mass=_may_toggle_mass(options))
+    candidates = candidate_settings(
+        base,
+        max(1, scene.model.world_count),
+        mode,
+        toggle_mass=_may_toggle_mass(options),
+        allow_ungrouped=not (
+            options.get("solver_scheme") == "tgs"
+            or options.get("joint_refinement_iterations", 0)
+            or options.get("direct_joint_projection_passes", 1) > 1
+        ),
+        allow_stride_two=not base.mass_splitting and options.get("solver_scheme") != "tgs",
+        allow_multi_layout=not (
+            base.color_group_size
+            or options.get("solver_scheme") == "tgs"
+            or options.get("joint_mode") == "maximal_pgs"
+            or options.get("joint_refinement_iterations", 0)
+            or options.get("direct_joint_projection_passes", 1) > 1
+        ),
+    )
     tuning_start = time.perf_counter()
     for settings in candidates:
         if rows:
@@ -437,15 +512,16 @@ def main():
         time_budget_s=args.time_budget_s,
     )
     print(
-        "layout           scheduler   threads  split   colors  substeps  iterations    FPS  joint mm  joint deg  penetration mm  pass"
+        "layout           scheduler   lanes  split  cap/grp/batch  prep  parallel  chunk  sub  iter    FPS  joint mm  joint deg  pen mm  pass"
     )
     for row in rows:
         s, m = row["settings"], row["metrics"]
+        colors = f"{s.max_colors}/{s.color_group_size}/{s.splitting_batch_size}" if s.mass_splitting else "-"
         print(
-            f"{s.layout:16} {s.scheduler:11} {s.threads_per_world!s:8} {s.mass_splitting!s:7}"
-            f" {str(s.max_colors) if s.mass_splitting else '-':8}"
-            f"{s.substeps:8d}{s.iterations:12d}{row['fps']:7.1f}{m['joint_m'] * 1000:10.3f}"
-            f"{math.degrees(m['joint_rad']):11.3f}{m['penetration_m'] * 1000:16.3f}  {row['passes']}"
+            f"{s.layout:16} {s.scheduler:11} {s.threads_per_world!s:4} {s.mass_splitting!s:6} {colors:14}"
+            f" {s.prepare_refresh_stride!s:5} {s.parallel_contact_prepare!s:9} {s.contact_chunk_size:6d}"
+            f" {s.substeps:4d} {s.iterations:5d}{row['fps']:7.1f}{m['joint_m'] * 1000:10.3f}"
+            f"{math.degrees(m['joint_rad']):11.3f}{m['penetration_m'] * 1000:8.3f}  {row['passes']}"
         )
     print("Limits:", limits)
     print("Recommended:", winner["settings"] if winner else "none passed")
