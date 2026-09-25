@@ -15,7 +15,7 @@ import json
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import warp as wp
@@ -72,9 +72,24 @@ class Settings:
     substeps: int
     iterations: int
     scheduler: str = "auto"
+    mass_splitting: bool = False
+    max_colors: int = 12
+    threads_per_world: int | str = "auto"
 
 
-def candidate_settings(base: Settings, world_count: int, mode: str = "default") -> list[Settings]:
+def _may_toggle_mass(options: dict) -> bool:
+    """Avoid trials that violate a fixed solver feature's mass-splitting requirement."""
+    return not (
+        options.get("solver_scheme") == "tgs"
+        or options.get("contact_friction_model") == "patch"
+        or options.get("joint_mode") in ("maximal_projected", "maximal_articulated", "hybrid", "reduced")
+        or options.get("mass_splitting_color_group_size", 0)
+        or options.get("joint_refinement_iterations", 0)
+        or options.get("direct_joint_projection_passes", 1) > 1
+    )
+
+
+def candidate_settings(base: Settings, world_count: int, mode: str = "default", *, toggle_mass=True) -> list[Settings]:
     """Return an ordered, bounded search with no cartesian-product sweep."""
     if mode not in ("fast", "default", "thorough"):
         raise ValueError(f"Unknown tuning mode: {mode}")
@@ -82,15 +97,30 @@ def candidate_settings(base: Settings, world_count: int, mode: str = "default") 
     layouts = [base.layout, *(layout for layout in layouts if layout != base.layout)]
     candidates = [base]
     candidates.extend(
-        Settings(layout, base.substeps, base.iterations)
+        replace(base, layout=layout)
         for layout in layouts
         if layout != base.layout and not (base.layout == "auto" and layout == "multi_world" and world_count > 1)
     )
+    if toggle_mass:
+        candidates.append(replace(base, mass_splitting=not base.mass_splitting))
+    color_candidates = []
+    if base.mass_splitting or toggle_mass:
+        colored = replace(base, mass_splitting=True)
+        if mode != "fast":
+            color_candidates.extend(
+                (
+                    replace(colored, max_colors=max(1, base.max_colors // 2)),
+                    replace(colored, max_colors=min(32, base.max_colors + 4)),
+                )
+            )
+        if mode == "thorough":
+            color_candidates.append(replace(colored, max_colors=max(1, base.max_colors // 4)))
     if world_count > 1 and mode != "fast":
         candidates.extend(
-            Settings("multi_world", base.substeps, base.iterations, scheduler)
-            for scheduler in ("fast_tail", "block_world")
+            replace(base, layout="multi_world", scheduler=scheduler) for scheduler in ("fast_tail", "block_world")
         )
+    if world_count > 1 and mode == "thorough":
+        candidates.extend(replace(base, layout="multi_world", threads_per_world=threads) for threads in (8, 16, 32))
     cheaper = [
         (max(1, base.substeps // 2), base.iterations),
         (base.substeps, max(1, base.iterations // 2)),
@@ -107,7 +137,8 @@ def candidate_settings(base: Settings, world_count: int, mode: str = "default") 
             ]
         )
     for substeps, iterations in cheaper:
-        candidates.append(Settings(base.layout, substeps, iterations))
+        candidates.append(replace(base, substeps=substeps, iterations=iterations))
+    candidates.extend(color_candidates)
     return list(dict.fromkeys(candidates))
 
 
@@ -244,6 +275,9 @@ def run_trial(scene, settings, frames, sample_stride):
         solver_iterations=settings.iterations,
         step_layout=settings.layout,
         multi_world_scheduler=settings.scheduler,
+        mass_splitting=settings.mass_splitting,
+        max_colored_partitions=settings.max_colors,
+        threads_per_world=settings.threads_per_world,
     )
     pipeline = (
         scene.pipeline_factory()
@@ -317,11 +351,14 @@ def tune(scene, *, mode="default", frames=None, sample_stride=10, slack=0.1, lim
         options.get("substeps", 1),
         options.get("solver_iterations", 8),
         options.get("multi_world_scheduler", "auto"),
+        options.get("mass_splitting", False),
+        options.get("max_colored_partitions", 12),
+        options.get("threads_per_world", "auto"),
     )
     if options.get("velocity_iterations", 1) != 1:
         raise ValueError("This tuner requires one fixed velocity iteration")
     rows = []
-    candidates = candidate_settings(base, max(1, scene.model.world_count), mode)
+    candidates = candidate_settings(base, max(1, scene.model.world_count), mode, toggle_mass=_may_toggle_mass(options))
     tuning_start = time.perf_counter()
     for settings in candidates:
         if rows:
@@ -361,8 +398,8 @@ def tune(scene, *, mode="default", frames=None, sample_stride=10, slack=0.1, lim
         result["passes"] = _passes(result["metrics"], limits)
         if len(rows) == 1 and not result["passes"]:
             candidates[1:1] = [
-                Settings(base.layout, base.substeps * 2, base.iterations),
-                Settings(base.layout, base.substeps, base.iterations * 2),
+                replace(base, substeps=base.substeps * 2),
+                replace(base, iterations=base.iterations * 2),
             ]
     winner = max((row for row in rows if row["passes"]), key=lambda row: row["fps"], default=None)
     return rows, limits, winner
@@ -399,11 +436,16 @@ def main():
         limits=absolute,
         time_budget_s=args.time_budget_s,
     )
-    print("layout          scheduler  substeps  iterations    FPS  joint mm  joint deg  penetration mm  pass")
+    print(
+        "layout           scheduler   threads  split   colors  substeps  iterations    FPS  joint mm  joint deg  penetration mm  pass"
+    )
     for row in rows:
         s, m = row["settings"], row["metrics"]
         print(
-            f"{s.layout:16}{s.scheduler:11}{s.substeps:8d}{s.iterations:12d}{row['fps']:7.1f}{m['joint_m'] * 1000:10.3f}{math.degrees(m['joint_rad']):11.3f}{m['penetration_m'] * 1000:16.3f}  {row['passes']}"
+            f"{s.layout:16} {s.scheduler:11} {s.threads_per_world!s:8} {s.mass_splitting!s:7}"
+            f" {str(s.max_colors) if s.mass_splitting else '-':8}"
+            f"{s.substeps:8d}{s.iterations:12d}{row['fps']:7.1f}{m['joint_m'] * 1000:10.3f}"
+            f"{math.degrees(m['joint_rad']):11.3f}{m['penetration_m'] * 1000:16.3f}  {row['passes']}"
         )
     print("Limits:", limits)
     print("Recommended:", winner["settings"] if winner else "none passed")
