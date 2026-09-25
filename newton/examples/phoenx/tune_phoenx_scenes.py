@@ -5,12 +5,20 @@
 
 import math
 
+import numpy as np
 import warp as wp
 
 import newton
 import newton.utils
 from newton import JointTargetMode
 from newton.examples.kamino.example_kamino_colibri import build_scene as build_colibri
+from newton.examples.phoenx.analog_digital_clock_scene import SCENE as ANALOG_SCENE
+from newton.examples.phoenx.example_phoenx_analog_digital_clock import (
+    _apply_angular_drag as _analog_drag,
+)
+from newton.examples.phoenx.example_phoenx_analog_digital_clock import (
+    build_scene as build_analog_clock,
+)
 from newton.examples.phoenx.example_phoenx_bike_transmission import (
     DEFAULT_CADENCE_RPM,
     DEFAULT_STARTUP_RAMP_TIME,
@@ -23,6 +31,13 @@ from newton.examples.phoenx.example_phoenx_bike_transmission import (
 )
 from newton.examples.phoenx.example_phoenx_caterpillar import build_scene as build_caterpillar
 from newton.examples.phoenx.example_phoenx_colibri import CONTACT_OFFSETS
+from newton.examples.phoenx.example_phoenx_tourbillon_clock import (
+    _apply_angular_drag as _tourbillon_drag,
+)
+from newton.examples.phoenx.example_phoenx_tourbillon_clock import (
+    build_scene as build_tourbillon,
+)
+from newton.examples.phoenx.tourbillon_clock_scene import SCENE as TOURBILLON_SCENE
 from newton.examples.phoenx.tune_phoenx import TuningScene
 
 
@@ -221,3 +236,105 @@ def make_g1_scene(num_worlds=16):
         initialize_state=initialize_state,
         pipeline_factory=lambda: newton.CollisionPipeline(model, contact_matching="sticky"),
     )
+
+
+def make_g1_64_scene():
+    """Larger multi-world G1 scaling check with the same physical setup."""
+    return make_g1_scene(64)
+
+
+def _make_clock_scene(build, scene_data, drag_kernel, *, sdf_resolution, options):
+    model = build(sdf_resolution=sdf_resolution).finalize(skip_validation_joints=True)
+    angular_damping = wp.array(
+        np.asarray([body["angular_damping"] for body in scene_data["bodies"]], dtype=np.float32),
+        dtype=float,
+        device=model.device,
+    )
+
+    def before_update(state, _control, _index, _dt):
+        wp.launch(
+            drag_kernel,
+            dim=model.body_count,
+            inputs=[state.body_q, state.body_qd, model.body_inertia, angular_damping],
+            outputs=[state.body_f],
+            device=model.device,
+        )
+
+    def pipeline():
+        return newton.CollisionPipeline(
+            model,
+            contact_matching="latest",
+            rigid_contact_max=32768,
+            speculative_contact_gap_max=0.002,
+            speculative_contact_velocity_filter=False,
+        )
+
+    return TuningScene(
+        model,
+        frame_dt=1.0 / 60.0,
+        collision_updates=2,
+        solver_options=options,
+        pipeline_factory=pipeline,
+        before_update=before_update,
+        in_place=True,
+    )
+
+
+def make_analog_clock_scene():
+    """Driven AnalogDigitalClock, including authored angular drag."""
+    return _make_clock_scene(
+        build_analog_clock,
+        ANALOG_SCENE,
+        _analog_drag,
+        sdf_resolution=0,
+        options={
+            "joint_mode": "maximal_pgs",
+            "step_layout": "single_world",
+            "substeps": 16,
+            "solver_iterations": 6,
+            "joint_refinement_iterations": 2,
+            "velocity_iterations": 1,
+            "parallel_contact_prepare": True,
+            "contact_chunk_size": 64,
+            "mass_splitting": True,
+            "mass_splitting_color_group_size": 2,
+            "mass_splitting_batch_size": 2,
+            "max_colored_partitions": 8,
+        },
+    )
+
+
+def make_tourbillon_scene():
+    """Driven TourbillonClock, including bearing friction and angular drag."""
+    scene = _make_clock_scene(
+        build_tourbillon,
+        TOURBILLON_SCENE,
+        _tourbillon_drag,
+        sdf_resolution=128,
+        options={
+            "joint_mode": "maximal_direct",
+            "step_layout": "single_world",
+            "substeps": 4,
+            "solver_iterations": 4,
+            "velocity_iterations": 1,
+            "direct_joint_projection_passes": 4,
+            "parallel_contact_prepare": False,
+            "enable_body_pair_grouping": True,
+            "contact_chunk_size": 64,
+            "mass_splitting": True,
+            "mass_splitting_color_group_size": 2,
+            "mass_splitting_batch_size": 2,
+            "max_colored_partitions": 8,
+        },
+    )
+    joint = list(scene.model.joint_label).index("/World/Clock/TourbillonSpecialGear/RevoluteJoint")
+    parent = int(scene.model.joint_parent.numpy()[joint])
+    child = int(scene.model.joint_child.numpy()[joint])
+
+    def drive_activity(state):
+        qd = state.body_qd.numpy()
+        return {"drive_abs_speed_rad_s": abs(float(qd[child, 5] - qd[parent, 5]))}
+
+    scene.observables = drive_activity
+    scene.observable_tolerances = {"drive_abs_speed_rad_s": 0.5}
+    return scene

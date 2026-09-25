@@ -55,6 +55,8 @@ class TuningScene:
     collision_updates is the number of collision refreshes per displayed frame.
     before_update may apply time-dependent forces or controls.
     extra_metrics returns nonnegative error measures, with smaller being better.
+    observables returns motion quantities averaged over the second half of a
+    trial; observable_tolerances limits their difference from the reference.
     in_place and initialize_state reproduce examples that step one state buffer
     or derive body poses from joint coordinates before the first update.
     """
@@ -66,6 +68,8 @@ class TuningScene:
     pipeline_factory: Callable | None = None
     before_update: Callable | None = None
     extra_metrics: Callable | None = None
+    observables: Callable | None = None
+    observable_tolerances: dict = field(default_factory=dict)
     in_place: bool = False
     initialize_state: Callable | None = None
 
@@ -116,6 +120,7 @@ def candidate_settings(
     allow_ungrouped=True,
     allow_stride_two=True,
     allow_multi_layout=True,
+    min_iterations=1,
 ) -> list[Settings]:
     """Start at authored settings, then try nearby scheduling and work budgets.
 
@@ -197,7 +202,7 @@ def candidate_settings(
             candidates.append(replace(base, prepare_refresh_stride=2))
         candidates.append(replace(base, parallel_contact_prepare=not base.parallel_contact_prepare))
         candidates.append(replace(base, contact_chunk_size=0 if base.contact_chunk_size else 64))
-    return list(dict.fromkeys(candidates))
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate.iterations >= min_iterations))
 
 
 def _quat_rotate(q, v):
@@ -358,6 +363,7 @@ def run_trial(scene, settings, frames, sample_stride):
     setup_s = time.perf_counter() - start
     state_index = 0
     metrics = {}
+    observable_samples = {}
     unscored = set()
     elapsed = 0.0
     timed_frames = 0
@@ -384,10 +390,14 @@ def run_trial(scene, settings, frames, sample_stride):
             unscored.update(flags)
             for name, value in measured.items():
                 metrics[name] = max(metrics.get(name, 0.0), float(value))
+            if scene.observables and frame >= frames // 2:
+                for name, value in scene.observables(states[state_index]).items():
+                    observable_samples.setdefault(name, []).append(float(value))
     return {
         "settings": settings,
         "fps": timed_frames / elapsed,
         "metrics": metrics,
+        "observables": {name: float(np.mean(values)) for name, values in observable_samples.items()},
         "setup_s": setup_s,
         "trial_s": time.perf_counter() - start,
         "unscored": sorted(unscored),
@@ -423,6 +433,9 @@ def tune(
             "and min_gain >= 0 are required"
         )
     options = scene.solver_options
+    observable_tolerances = getattr(scene, "observable_tolerances", {})
+    if any(value < 0 or not math.isfinite(value) for value in observable_tolerances.values()):
+        raise ValueError("observable tolerances must be finite and nonnegative")
     base = Settings(
         options.get("step_layout", "auto"),
         options.get("substeps", 1),
@@ -456,6 +469,7 @@ def tune(
             or options.get("joint_refinement_iterations", 0)
             or options.get("direct_joint_projection_passes", 1) > 1
         ),
+        min_iterations=options.get("direct_joint_projection_passes", 1),
     )
     tuning_start = time.perf_counter()
     for settings in candidates:
@@ -484,14 +498,23 @@ def tune(
                 }
             )
             continue
+        reference_observables = rows[0].get("observables", {}) if rows else result.get("observables", {})
+        for name in observable_tolerances:
+            if name not in reference_observables:
+                raise ValueError(f"Reference trial did not report observable {name!r}")
+            current = result.get("observables", {}).get(name, math.inf)
+            result["metrics"][f"motion_delta:{name}"] = abs(current - reference_observables[name])
         rows.append(result)
         if len(rows) == 1:
             reference = result["metrics"]
             near_zero_floor = {"joint_m": 1.0e-4, "joint_rad": math.radians(0.1), "penetration_m": 1.0e-4}
             relative = {
-                name: max(value * (1.0 + slack), near_zero_floor.get(name, 0.0)) for name, value in reference.items()
+                name: max(value * (1.0 + slack), near_zero_floor.get(name, 0.0))
+                for name, value in reference.items()
+                if not name.startswith("motion_delta:")
             }
             limits = {name: min(cap, (limits or {}).get(name, math.inf)) for name, cap in relative.items()}
+            limits.update({f"motion_delta:{name}": tolerance for name, tolerance in observable_tolerances.items()})
             limits.update({name: cap for name, cap in (limits or {}).items() if name not in limits})
         result["passes"] = _passes(result["metrics"], limits)
         if len(rows) == 1 and not result["passes"]:
@@ -507,7 +530,11 @@ def tune(
 
 def format_comparison(reference, recommended):
     """Compare the authored setting with the selected passing trial."""
-    lines = ["Reference vs recommended (simulation only)", "Metric                 Reference  Recommended"]
+    width = max(
+        23,
+        *(len(name) + 2 for name in (*reference["metrics"], *reference.get("observables", {}))),
+    )
+    lines = ["Reference vs recommended (simulation only)", f"{'Metric':{width}}Reference  Recommended"]
     for label, key, scale in (
         ("FPS", "fps", 1.0),
         ("Max joint error (mm)", "joint_m", 1000.0),
@@ -516,10 +543,13 @@ def format_comparison(reference, recommended):
     ):
         old = reference["fps"] if key == "fps" else reference["metrics"][key] * scale
         new = recommended["fps"] if key == "fps" else recommended["metrics"][key] * scale
-        lines.append(f"{label:23}{old:9.3f}  {new:11.3f}")
+        lines.append(f"{label:{width}}{old:9.3f}  {new:11.3f}")
     for key in sorted(reference["metrics"].keys() - {"joint_m", "joint_rad", "penetration_m"}):
         old, new = reference["metrics"][key], recommended["metrics"].get(key, math.nan)
-        lines.append(f"{key:23}{old:9.3g}  {new:11.3g}")
+        lines.append(f"{key:{width}}{old:9.3g}  {new:11.3g}")
+    for key in sorted(reference.get("observables", {})):
+        old, new = reference["observables"][key], recommended.get("observables", {}).get(key, math.nan)
+        lines.append(f"{key:{width}}{old:9.3g}  {new:11.3g}")
     changes = [
         f"{name}: {old} -> {new}"
         for name, old, new in (
@@ -577,6 +607,12 @@ def main():
             f" {s.substeps:4d} {s.iterations:5d}{row['fps']:7.1f}{m['joint_m'] * 1000:10.3f}"
             f"{math.degrees(m['joint_rad']):11.3f}{m['penetration_m'] * 1000:8.3f}  {row['passes']}"
         )
+        for name, value in row.get("observables", {}).items():
+            delta_name = f"motion_delta:{name}"
+            if delta_name in m:
+                print(f"  {name}: mean={value:.3g}, delta={m[delta_name]:.3g}, limit={limits[delta_name]:.3g}")
+            else:
+                print(f"  {name}: mean={value:.3g}")
     print("Limits:", limits)
     print("Recommended:", winner["settings"] if winner else "none passed")
     if winner:
@@ -593,6 +629,9 @@ def main():
                 **row,
                 "settings": vars(row["settings"]),
                 "metrics": {name: value if math.isfinite(value) else None for name, value in row["metrics"].items()},
+                "observables": {
+                    name: value if math.isfinite(value) else None for name, value in row.get("observables", {}).items()
+                },
             }
             for row in rows
         ]
