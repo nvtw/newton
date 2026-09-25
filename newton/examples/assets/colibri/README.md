@@ -4,8 +4,8 @@ These local assets come from the supplied `Colibri Plans Rev FF` OBJ files and
 `Colibri.usd`. The original files remain unchanged.
 
 The copyrighted OBJ files are not distributed with Newton. Local development
-uses ignored symlinks to `Colibri Plans Rev FF/Newton Colibri obj` beside the
-original `Colibri obj` directory.
+uses ignored symlinks to `~/Documents/Meshes/Colibri`. The original
+`Colibri obj` CAD exports remain beside the source USD.
 
 ## Units and geometry
 

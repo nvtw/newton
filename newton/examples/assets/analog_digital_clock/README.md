@@ -1,7 +1,8 @@
 # Analog-digital clock
 
 Run `uv run -m newton.examples phoenx_analog_digital_clock` from the repository.
-The example loads the adjacent gzip-compressed OBJ files and
+The example loads ignored links to the gzip-compressed OBJ files in
+`~/Documents/Meshes/AnalogDigitalClock` and
 `newton/examples/phoenx/analog_digital_clock_scene.py`; USD and `pxr` are not
 needed at runtime. OptiX is the default viewer. Use `--viewer null` for headless
 physics, `--motor-off` to disable the motor gear drive while retaining the seven
@@ -70,7 +71,8 @@ Only regeneration requires USD Python bindings and trimesh:
 
 ```bash
 uv run python newton/examples/assets/analog_digital_clock/extract_usd.py \
-    /path/to/AnalogDigitalClock_SI_Units.usd
+    /path/to/AnalogDigitalClock_SI_Units.usd \
+    --output ~/Documents/Meshes/AnalogDigitalClock
 uv run ruff format newton/examples/phoenx/analog_digital_clock_scene.py
 ```
 

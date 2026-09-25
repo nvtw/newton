@@ -230,7 +230,7 @@ def extract(source: Path, destination: Path):
         "joints": joints,
         "notes": "SI units, Z up. Authored body poses retained; startup velocities intentionally zero.",
     }
-    data_path = destination.parent.parent / "phoenx" / "analog_digital_clock_scene.py"
+    data_path = Path(__file__).resolve().parents[2] / "phoenx" / "analog_digital_clock_scene.py"
     data_path.write_text(
         '# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers\n# SPDX-License-Identifier: Apache-2.0\n"""SI scene data extracted from AnalogDigitalClock_SI_Units.usd; see the asset README."""\n\nfrom math import inf\n\nSCENE = '
         + pprint.pformat(payload, width=120, sort_dicts=False)
@@ -242,6 +242,6 @@ def extract(source: Path, destination: Path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
-    parser.add_argument("--output", type=Path, default=Path(__file__).parent)
+    parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     extract(args.source, args.output)
