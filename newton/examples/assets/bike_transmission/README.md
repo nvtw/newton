@@ -7,8 +7,8 @@ joints, and drive settings are recorded in
 libraries are **not required to run the example**.
 
 The copyrighted OBJ files are not distributed with Newton. Keep generated
-meshes in this directory beside the Colibri asset directory; `.gitignore`
-excludes them from commits.
+meshes in `~/Documents/Meshes/BikeTransmission` and link them into this
+ignored asset directory for the example.
 
 Run from the repository root:
 
@@ -85,7 +85,8 @@ To regenerate from the original source (requires `pxr`):
 
 ```bash
 uv run python newton/examples/assets/bike_transmission/extract_usd.py \
-  /path/to/BikeTransmission.usd
+  /path/to/BikeTransmission.usd \
+  --output ~/Documents/Meshes/BikeTransmission
 uv run ruff format newton/examples/phoenx/bike_transmission_scene.py
 ```
 

@@ -39,7 +39,7 @@ OBJ files are copyrighted source assets and are deliberately ignored by Git.
 The local links point to:
 
 ```text
-/home/twidmer/Documents/colibri/Colibri Plans Rev FF/TourbillonClock obj
+~/Documents/Meshes/TourbillonClock
 ```
 
 ## Regenerate assets
@@ -49,7 +49,7 @@ Regeneration requires USD Python bindings and trimesh:
 ```bash
 uv run python newton/examples/assets/tourbillon_clock/extract_usd.py \
     /home/twidmer/Documents/colibri/TourbillonClock.usd \
-    --output "/home/twidmer/Documents/colibri/Colibri Plans Rev FF/TourbillonClock obj"
+    --output ~/Documents/Meshes/TourbillonClock
 uv run ruff format newton/examples/phoenx/tourbillon_clock_scene.py
 ```
 
