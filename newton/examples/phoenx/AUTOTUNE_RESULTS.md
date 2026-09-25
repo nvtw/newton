@@ -43,3 +43,32 @@ Replace the factory with `make_bike_scene`, `make_caterpillar_scene`, or
 `make_colibri_scene`. Use `--json path.json` for the complete candidate table.
 The copyrighted mechanism OBJ assets stay in the local asset directory and
 are not part of this report or the repository.
+
+## Additional scenes (2026-09-25)
+
+The same GPU and direct-stepping method were used for two clocks and a
+larger G1 batch. Angular drag and authored drives were active in both clocks.
+
+| Scene (duration) | Authored → alternative | FPS | Joint translation, mm | Joint rotation, deg | Penetration, mm | Result |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| AnalogDigitalClock (2 s) | 16×6 → 8×6 | 46.34 → 77.25 | 1.283 → 2.039 | 0.033 → 0.084 | 0.086 → 0.195 | Reject; joint and contact errors rise too far |
+| TourbillonClock (6 s) | 4×4 → 2×4 | 56.55 → 90.43 | 0.029 → 0.008 | 0.011 → 0.015 | 2.589 → 2.636 | Reject; driven gear motion changes substantially |
+| G1, 64 worlds (2 s) | 1×2 → 1×1 | 48.85 → 57.74 | 0.0043 → 0.0048 | 0.00043 → 0.00053 | 0.905 → 0.865 | Candidate: 1 iteration (+18.2%) |
+
+Here `substeps×iterations` is per contact refresh. Both clocks refresh
+contacts at 120 Hz; G1 makes five refreshes per 60 Hz frame. Analog clock
+half-substeps and half-iterations both failed the quality gate. The
+Tourbillon half-substep result initially passed the geometric gate, but its
+driven joint's mean absolute relative angular speed over the last half of
+the run changed from 0.058 to 2.861 rad/s. The new motion-observable gate
+rejects it with a 0.5 rad/s tolerance. The authored drive target is about
+14 rad/s in magnitude, so the clock's actual motion merits a separate
+physical-behavior investigation; matching its reference is not proof of
+correct clock operation. Iteration counts below Tourbillon's four required
+direct-projection passes are now skipped instead of run as invalid trials.
+
+The G1 result corroborates the 16-world result at a larger batch size, but
+neither flat-ground run includes walking control, policy observations, or the
+training environment's CUDA graph. Kapla Tower uses the lower-level
+`PhoenXWorld` stepping path; the current `SolverPhoenX` tuner cannot make a
+like-for-like comparison to that example.

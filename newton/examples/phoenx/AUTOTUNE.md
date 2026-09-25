@@ -22,7 +22,8 @@ uv run --extra examples -m newton.examples.phoenx.tune_phoenx \
 ```
 
 The repository also includes real-scene factories for BikeTransmission,
-Caterpillar, four-world Colibri, and 16-world G1. They use the examples'
+Caterpillar, four-world Colibri, AnalogDigitalClock, TourbillonClock, and
+16- or 64-world G1. They use the examples'
 authored materials, drives, contact refresh rates, and solver settings:
 
 ```console
@@ -32,8 +33,9 @@ uv run --extra examples -m newton.examples.phoenx.tune_phoenx \
 ```
 
 Replace `make_bike_scene` with `make_caterpillar_scene`,
-`make_colibri_scene`, or `make_g1_scene` to run those workloads. The OBJ
-assets for the first three must be installed locally, as for the examples.
+`make_colibri_scene`, `make_analog_clock_scene`, `make_tourbillon_scene`,
+`make_g1_scene`, or `make_g1_64_scene` to run those workloads. The OBJ
+assets for the mechanisms must be installed locally, as for the examples.
 
 For a real scene, write an importable `make_scene()` function returning
 `TuningScene(model=builder.finalize(), frame_dt=1/60,
@@ -108,6 +110,15 @@ cannot be inferred from anchor alignment alone; use an extra metric for them.
 The command supports `--json results.json` for scripts.
 The console report explicitly compares reference and recommended FPS and
 error metrics, and lists every setting changed from the reference.
+If an important behavior is not captured by joint and contact errors, provide
+`observables(state)` returning named scalar quantities and matching
+`observable_tolerances` in their units. The tuner averages each observable
+over sampled frames in the second half of every trial and rejects candidates
+whose mean differs from the authored reference by more than its tolerance.
+TourbillonClock monitors its driven gear's absolute angular speed; this
+catches a faster but behaviorally different setting that passes the geometric
+error gate. The authored behavior is a comparison point, not proof that its
+drive is physically correct.
 
 Single-world scheduling can solve several independent worlds; the tuner tries
 it alongside the multi-world schedulers when the model has more than one world.

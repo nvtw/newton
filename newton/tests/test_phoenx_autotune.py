@@ -270,3 +270,38 @@ def test_custom_metric_has_no_assumed_angular_floor(monkeypatch):
     rows, limits, winner = tune_phoenx.tune(scene, mode="fast", frames=10)
     assert np.isclose(limits["drive_error"], 1.1e-5)
     assert winner is rows[0]
+
+
+def test_search_respects_required_direct_projection_passes():
+    base = Settings("single_world", 4, 4, mass_splitting=True, color_group_size=2)
+    candidates = candidate_settings(base, 1, "default", min_iterations=4)
+    assert all(candidate.iterations >= 4 for candidate in candidates)
+    assert any(candidate.substeps == 2 for candidate in candidates)
+
+
+def test_motion_observable_rejects_changed_mechanism(monkeypatch):
+    def fake_trial(_scene, setting, _frames, _stride):
+        return {
+            "settings": setting,
+            "fps": 50.0 if setting.substeps == 4 else 90.0,
+            "metrics": {"joint_m": 0.00002, "joint_rad": 0.0002, "penetration_m": 0.002},
+            "observables": {"drive_speed_rad_s": 0.06 if setting.substeps == 4 else 2.89},
+            "setup_s": 0.0,
+            "trial_s": 0.0,
+            "unscored": [],
+        }
+
+    monkeypatch.setattr(tune_phoenx, "run_trial", fake_trial)
+    scene = SimpleNamespace(
+        frame_dt=1 / 60,
+        collision_updates=1,
+        solver_options={"substeps": 4, "solver_iterations": 4},
+        observable_tolerances={"drive_speed_rad_s": 0.5},
+        model=SimpleNamespace(world_count=1),
+    )
+    rows, limits, winner = tune_phoenx.tune(scene, mode="fast", frames=10)
+    assert np.isclose(limits["motion_delta:drive_speed_rad_s"], 0.5)
+    assert not next(row for row in rows if row["settings"].substeps == 2)["passes"]
+    assert winner is rows[0]
+    report = tune_phoenx.format_comparison(rows[0], next(row for row in rows if row["settings"].substeps == 2))
+    assert "drive_speed_rad_s" in report and "2.89" in report
