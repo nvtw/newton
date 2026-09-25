@@ -65,6 +65,7 @@ def test_single_world_does_not_try_multi_world_schedule():
     base = Settings("auto", 8, 4)
     assert all(row.layout != "multi_world" for row in candidate_settings(base, 1))
     assert any(row.layout == "single_world" for row in candidate_settings(base, 2))
+    assert all(row.layout != "single_world" for row in candidate_settings(base, 8192))
     assert any(row.scheduler == "block_world" for row in candidate_settings(base, 2))
     assert any(row.mass_splitting for row in candidate_settings(base, 1, "fast"))
     assert {row.max_colors for row in candidate_settings(base, 2) if row.mass_splitting} == {6, 12, 16}
@@ -72,7 +73,25 @@ def test_single_world_does_not_try_multi_world_schedule():
     assert {row.threads_per_world for row in candidate_settings(base, 2, "thorough")} == {"auto", 8, 16, 32}
     assert not tune_phoenx._may_toggle_mass({"solver_scheme": "tgs"})
     assert not tune_phoenx._may_toggle_mass({"contact_friction_model": "patch"})
-    assert not tune_phoenx._may_toggle_mass({"mass_splitting_color_group_size": 2})
+    assert tune_phoenx._may_toggle_mass({"mass_splitting_color_group_size": 2})
+    grouped = Settings("single_world", 8, 4, mass_splitting=True, color_group_size=2, splitting_batch_size=2)
+    assert any(
+        not row.mass_splitting and row.color_group_size == 0
+        for row in candidate_settings(grouped, 2, "fast", allow_multi_layout=False)
+    )
+    thorough = candidate_settings(
+        grouped,
+        2,
+        "thorough",
+        toggle_mass=False,
+        allow_ungrouped=False,
+        allow_stride_two=False,
+        allow_multi_layout=False,
+    )
+    assert {row.color_group_size for row in thorough} == {1, 2, 4}
+    assert {row.splitting_batch_size for row in thorough} == {1, 2, 4}
+    assert {row.prepare_refresh_stride for row in thorough} == {"auto", 1}
+    assert all(row.layout == "single_world" for row in thorough)
 
 
 def test_search_modes_and_quality_gate(monkeypatch):
@@ -116,3 +135,6 @@ def test_search_modes_and_quality_gate(monkeypatch):
     rows, _, winner = tune_phoenx.tune(scene, frames=10)
     assert any("unsupported combination" in row.get("error", "") for row in rows)
     assert winner is not None
+    scene.solver_options["velocity_iterations"] = 2
+    rows, _, _ = tune_phoenx.tune(scene, mode="fast", frames=10)
+    assert rows
