@@ -66,6 +66,13 @@ def test_single_world_does_not_try_multi_world_schedule():
     assert all(row.layout != "multi_world" for row in candidate_settings(base, 1))
     assert any(row.layout == "single_world" for row in candidate_settings(base, 2))
     assert any(row.scheduler == "block_world" for row in candidate_settings(base, 2))
+    assert any(row.mass_splitting for row in candidate_settings(base, 1, "fast"))
+    assert {row.max_colors for row in candidate_settings(base, 2) if row.mass_splitting} == {6, 12, 16}
+    assert all(not row.mass_splitting for row in candidate_settings(base, 2, toggle_mass=False))
+    assert {row.threads_per_world for row in candidate_settings(base, 2, "thorough")} == {"auto", 8, 16, 32}
+    assert not tune_phoenx._may_toggle_mass({"solver_scheme": "tgs"})
+    assert not tune_phoenx._may_toggle_mass({"contact_friction_model": "patch"})
+    assert not tune_phoenx._may_toggle_mass({"mass_splitting_color_group_size": 2})
 
 
 def test_search_modes_and_quality_gate(monkeypatch):
