@@ -55,6 +55,8 @@ class TuningScene:
     collision_updates is the number of collision refreshes per displayed frame.
     before_update may apply time-dependent forces or controls.
     extra_metrics returns nonnegative error measures, with smaller being better.
+    in_place and initialize_state reproduce examples that step one state buffer
+    or derive body poses from joint coordinates before the first update.
     """
 
     model: newton.Model
@@ -64,6 +66,8 @@ class TuningScene:
     pipeline_factory: Callable | None = None
     before_update: Callable | None = None
     extra_metrics: Callable | None = None
+    in_place: bool = False
+    initialize_state: Callable | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +94,11 @@ def _may_toggle_mass(options: dict) -> bool:
         or options.get("joint_mode") in ("maximal_projected", "maximal_articulated", "hybrid", "reduced")
         or options.get("joint_refinement_iterations", 0)
         or options.get("direct_joint_projection_passes", 1) > 1
+        or (
+            options.get("joint_mode") == "maximal_direct"
+            and options.get("contact_chunk_size", 0) > 0
+            and not options.get("enable_body_pair_grouping", False)
+        )
     )
 
 
@@ -284,7 +293,7 @@ class _Probe:
         if not np.isfinite(poses).all() or not np.isfinite(velocities).all():
             return {"joint_m": math.inf, "joint_rad": math.inf, "penetration_m": math.inf}, {"nonfinite"}
         linear, angular, unscored = _joint_errors(model, poses, self.joint_data)
-        self.pipeline.collide(state, self.contacts)
+        self.pipeline.collide(state, self.contacts, dt=self.scene.frame_dt / self.scene.collision_updates)
         count = int(self.contacts.rigid_contact_count.numpy()[0])
         if count > self.contacts.rigid_contact_max:
             penetration = math.inf
@@ -341,7 +350,9 @@ def run_trial(scene, settings, frames, sample_stride):
     solver = newton.solvers.SolverPhoenX(scene.model, collision_pipeline=pipeline, **options)
     contacts = pipeline.contacts()
     control = scene.model.control()
-    states = [scene.model.state(), scene.model.state()]
+    states = [scene.model.state()] if scene.in_place else [scene.model.state(), scene.model.state()]
+    if scene.initialize_state:
+        scene.initialize_state(states[0])
     probe = _Probe(scene)
     wp.synchronize()
     setup_s = time.perf_counter() - start
@@ -355,13 +366,15 @@ def run_trial(scene, settings, frames, sample_stride):
     for frame in range(frames):
         tick = time.perf_counter()
         for update in range(scene.collision_updates):
-            current, next_state = states[state_index], states[1 - state_index]
+            current = states[state_index]
+            next_state = current if scene.in_place else states[1 - state_index]
             current.clear_forces()
             if scene.before_update:
                 scene.before_update(current, control, frame * scene.collision_updates + update, update_dt)
-            pipeline.collide(current, contacts)
+            pipeline.collide(current, contacts, dt=update_dt)
             solver.step(current, next_state, control, contacts, update_dt)
-            state_index = 1 - state_index
+            if not scene.in_place:
+                state_index = 1 - state_index
         wp.synchronize()
         if frame >= warmup_frames:
             elapsed += time.perf_counter() - tick
@@ -385,7 +398,9 @@ def _passes(metrics, limits):
     return all(math.isfinite(metrics.get(name, math.inf)) and metrics[name] <= cap for name, cap in limits.items())
 
 
-def tune(scene, *, mode="default", frames=None, sample_stride=10, slack=0.1, limits=None, time_budget_s=None):
+def tune(
+    scene, *, mode="default", frames=None, sample_stride=10, slack=0.1, limits=None, time_budget_s=None, min_gain=0.05
+):
     """Tune against a reference run and optional user-supplied absolute caps."""
     if mode not in ("fast", "default", "thorough"):
         raise ValueError(f"Unknown tuning mode: {mode}")
@@ -395,9 +410,17 @@ def tune(scene, *, mode="default", frames=None, sample_stride=10, slack=0.1, lim
         time_budget_s = {"fast": 20.0, "default": 90.0, "thorough": 300.0}[mode]
     if time_budget_s <= 0:
         raise ValueError("time_budget_s must be positive")
-    if frames < 2 or sample_stride < 1 or scene.frame_dt <= 0 or scene.collision_updates < 1 or slack < 0:
+    if (
+        frames < 2
+        or sample_stride < 1
+        or scene.frame_dt <= 0
+        or scene.collision_updates < 1
+        or slack < 0
+        or min_gain < 0
+    ):
         raise ValueError(
-            "frames >= 2, sample_stride >= 1, frame_dt > 0, collision_updates >= 1, and slack >= 0 are required"
+            "frames >= 2, sample_stride >= 1, frame_dt > 0, collision_updates >= 1, slack >= 0, "
+            "and min_gain >= 0 are required"
         )
     options = scene.solver_options
     base = Settings(
@@ -464,9 +487,9 @@ def tune(scene, *, mode="default", frames=None, sample_stride=10, slack=0.1, lim
         rows.append(result)
         if len(rows) == 1:
             reference = result["metrics"]
+            near_zero_floor = {"joint_m": 1.0e-4, "joint_rad": math.radians(0.1), "penetration_m": 1.0e-4}
             relative = {
-                name: value * (1.0 + slack) + (1.0e-4 if name.endswith("_m") else math.radians(0.1))
-                for name, value in reference.items()
+                name: max(value * (1.0 + slack), near_zero_floor.get(name, 0.0)) for name, value in reference.items()
             }
             limits = {name: min(cap, (limits or {}).get(name, math.inf)) for name, cap in relative.items()}
             limits.update({name: cap for name, cap in (limits or {}).items() if name not in limits})
@@ -477,7 +500,36 @@ def tune(scene, *, mode="default", frames=None, sample_stride=10, slack=0.1, lim
                 replace(base, iterations=base.iterations * 2),
             ]
     winner = max((row for row in rows if row["passes"]), key=lambda row: row["fps"], default=None)
+    if winner and rows[0]["passes"] and winner["fps"] < rows[0]["fps"] * (1.0 + min_gain):
+        winner = rows[0]
     return rows, limits, winner
+
+
+def format_comparison(reference, recommended):
+    """Compare the authored setting with the selected passing trial."""
+    lines = ["Reference vs recommended (simulation only)", "Metric                 Reference  Recommended"]
+    for label, key, scale in (
+        ("FPS", "fps", 1.0),
+        ("Max joint error (mm)", "joint_m", 1000.0),
+        ("Max joint error (deg)", "joint_rad", 180.0 / math.pi),
+        ("Max penetration (mm)", "penetration_m", 1000.0),
+    ):
+        old = reference["fps"] if key == "fps" else reference["metrics"][key] * scale
+        new = recommended["fps"] if key == "fps" else recommended["metrics"][key] * scale
+        lines.append(f"{label:23}{old:9.3f}  {new:11.3f}")
+    for key in sorted(reference["metrics"].keys() - {"joint_m", "joint_rad", "penetration_m"}):
+        old, new = reference["metrics"][key], recommended["metrics"].get(key, math.nan)
+        lines.append(f"{key:23}{old:9.3g}  {new:11.3g}")
+    changes = [
+        f"{name}: {old} -> {new}"
+        for name, old, new in (
+            (name, getattr(reference["settings"], name), getattr(recommended["settings"], name))
+            for name in vars(reference["settings"])
+        )
+        if old != new
+    ]
+    lines.append("Suggested setting changes: " + (", ".join(changes) if changes else "none; keep authored settings"))
+    return "\n".join(lines)
 
 
 def main():
@@ -488,6 +540,7 @@ def main():
     parser.add_argument("--frames", type=int, help="Override the mode's simulated frames per candidate")
     parser.add_argument("--sample-stride", type=int, default=10)
     parser.add_argument("--relative-slack", type=float, default=0.1)
+    parser.add_argument("--min-gain", type=float, default=0.05, help="Minimum FPS gain before recommending a change")
     parser.add_argument("--max-joint-mm", type=float)
     parser.add_argument("--max-joint-deg", type=float)
     parser.add_argument("--max-penetration-mm", type=float)
@@ -510,6 +563,7 @@ def main():
         slack=args.relative_slack,
         limits=absolute,
         time_budget_s=args.time_budget_s,
+        min_gain=args.min_gain,
     )
     print(
         "layout           scheduler   lanes  split  cap/grp/batch  prep  parallel  chunk  sub  iter    FPS  joint mm  joint deg  pen mm  pass"
@@ -525,6 +579,8 @@ def main():
         )
     print("Limits:", limits)
     print("Recommended:", winner["settings"] if winner else "none passed")
+    if winner:
+        print(format_comparison(rows[0], winner))
     print(f"Evaluated {len(rows)} candidates in {sum(row['trial_s'] for row in rows):.1f} s")
     for row in rows:
         if "error" in row:

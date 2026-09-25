@@ -6,6 +6,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import warp as wp
 
 import newton
 from newton.examples.phoenx import tune_phoenx
@@ -73,6 +74,12 @@ def test_single_world_does_not_try_multi_world_schedule():
     assert {row.threads_per_world for row in candidate_settings(base, 2, "thorough")} == {"auto", 8, 16, 32}
     assert not tune_phoenx._may_toggle_mass({"solver_scheme": "tgs"})
     assert not tune_phoenx._may_toggle_mass({"contact_friction_model": "patch"})
+    assert not tune_phoenx._may_toggle_mass(
+        {"joint_mode": "maximal_direct", "contact_chunk_size": 64, "enable_body_pair_grouping": False}
+    )
+    assert tune_phoenx._may_toggle_mass(
+        {"joint_mode": "maximal_direct", "contact_chunk_size": 64, "enable_body_pair_grouping": True}
+    )
     assert tune_phoenx._may_toggle_mass({"mass_splitting_color_group_size": 2})
     grouped = Settings("single_world", 8, 4, mass_splitting=True, color_group_size=2, splitting_batch_size=2)
     assert any(
@@ -138,3 +145,128 @@ def test_search_modes_and_quality_gate(monkeypatch):
     scene.solver_options["velocity_iterations"] = 2
     rows, _, _ = tune_phoenx.tune(scene, mode="fast", frames=10)
     assert rows
+
+
+def test_report_compares_reference_and_recommendation():
+    base = Settings("single_world", 8, 4)
+    chosen = Settings("single_world", 8, 2)
+    rows = [
+        {
+            "settings": base,
+            "fps": 20.0,
+            "metrics": {"joint_m": 0.001, "joint_rad": 0.01, "penetration_m": 0.002},
+            "passes": True,
+        },
+        {
+            "settings": chosen,
+            "fps": 25.0,
+            "metrics": {"joint_m": 0.0011, "joint_rad": 0.012, "penetration_m": 0.0025},
+            "passes": True,
+        },
+    ]
+    report = tune_phoenx.format_comparison(rows[0], rows[1])
+    assert "Reference" in report and "Recommended" in report
+    assert "20.0" in report and "25.0" in report
+    assert "1.000" in report and "1.100" in report
+    assert "2.000" in report and "2.500" in report
+    assert "iterations: 4 -> 2" in report
+
+
+def test_probe_passes_contact_update_dt_for_speculative_contacts():
+    class Pipeline:
+        def contacts(self):
+            return SimpleNamespace(rigid_contact_max=0, rigid_contact_count=_Array([0]))
+
+        def collide(self, _state, _contacts, *, dt):
+            assert np.isclose(dt, 1 / 120)
+
+    scene = SimpleNamespace(
+        model=SimpleNamespace(joint_count=0, device=wp.get_device("cpu")),
+        frame_dt=1 / 60,
+        collision_updates=2,
+        pipeline_factory=Pipeline,
+        extra_metrics=None,
+    )
+    state = SimpleNamespace(body_q=_Array(np.zeros((0, 7))), body_qd=_Array(np.zeros((0, 6))))
+    metrics, flags = tune_phoenx._Probe(scene).measure(state)
+    assert metrics == {"joint_m": 0.0, "joint_rad": 0.0, "penetration_m": 0.0}
+    assert not flags
+
+
+def test_small_nonzero_reference_does_not_get_large_slack(monkeypatch):
+    def fake_trial(_scene, setting, _frames, _stride):
+        return {
+            "settings": setting,
+            "fps": 20.0 if setting.iterations == 4 else 30.0,
+            "metrics": {
+                "joint_m": 0.00012 if setting.iterations == 4 else 0.00020,
+                "joint_rad": 0.0,
+                "penetration_m": 0.0,
+            },
+            "setup_s": 0.0,
+            "trial_s": 0.0,
+            "unscored": [],
+        }
+
+    monkeypatch.setattr(tune_phoenx, "run_trial", fake_trial)
+    scene = SimpleNamespace(
+        frame_dt=1 / 60,
+        collision_updates=1,
+        solver_options={"substeps": 8, "solver_iterations": 4},
+        model=SimpleNamespace(world_count=1),
+    )
+    rows, limits, winner = tune_phoenx.tune(scene, mode="fast", frames=10)
+    assert np.isclose(limits["joint_m"], 0.000132)
+    assert winner is rows[0]
+
+
+def test_small_fps_gain_keeps_authored_setting(monkeypatch):
+    def fake_trial(_scene, setting, _frames, _stride):
+        return {
+            "settings": setting,
+            "fps": 100.0 if setting.iterations == 4 else 103.0,
+            "metrics": {"joint_m": 0.001, "joint_rad": 0.0, "penetration_m": 0.0},
+            "setup_s": 0.0,
+            "trial_s": 0.0,
+            "unscored": [],
+        }
+
+    monkeypatch.setattr(tune_phoenx, "run_trial", fake_trial)
+    scene = SimpleNamespace(
+        frame_dt=1 / 60,
+        collision_updates=1,
+        solver_options={"substeps": 8, "solver_iterations": 4},
+        model=SimpleNamespace(world_count=1),
+    )
+    rows, _, winner = tune_phoenx.tune(scene, mode="fast", frames=10)
+    assert winner is rows[0]
+    rows, _, winner = tune_phoenx.tune(scene, mode="fast", frames=10, min_gain=0.02)
+    assert winner["settings"].iterations == 2
+
+
+def test_custom_metric_has_no_assumed_angular_floor(monkeypatch):
+    def fake_trial(_scene, setting, _frames, _stride):
+        return {
+            "settings": setting,
+            "fps": 100.0 if setting.iterations == 4 else 150.0,
+            "metrics": {
+                "joint_m": 0.0,
+                "joint_rad": 0.0,
+                "penetration_m": 0.0,
+                "drive_error": 1.0e-5 if setting.iterations == 4 else 1.0e-3,
+            },
+            "setup_s": 0.0,
+            "trial_s": 0.0,
+            "unscored": [],
+        }
+
+    monkeypatch.setattr(tune_phoenx, "run_trial", fake_trial)
+    scene = SimpleNamespace(
+        frame_dt=1 / 60,
+        collision_updates=1,
+        solver_options={"substeps": 8, "solver_iterations": 4},
+        model=SimpleNamespace(world_count=1),
+    )
+    rows, limits, winner = tune_phoenx.tune(scene, mode="fast", frames=10)
+    assert np.isclose(limits["drive_error"], 1.1e-5)
+    assert winner is rows[0]

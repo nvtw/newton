@@ -21,6 +21,20 @@ uv run --extra examples -m newton.examples.phoenx.tune_phoenx \
   newton.examples.phoenx.tune_phoenx_demo:make_scene --mode default
 ```
 
+The repository also includes real-scene factories for BikeTransmission,
+Caterpillar, four-world Colibri, and 16-world G1. They use the examples'
+authored materials, drives, contact refresh rates, and solver settings:
+
+```console
+uv run --extra examples -m newton.examples.phoenx.tune_phoenx \
+  newton.examples.phoenx.tune_phoenx_scenes:make_bike_scene \
+  --mode default --frames 180 --json bike-tuning.json
+```
+
+Replace `make_bike_scene` with `make_caterpillar_scene`,
+`make_colibri_scene`, or `make_g1_scene` to run those workloads. The OBJ
+assets for the first three must be installed locally, as for the examples.
+
 For a real scene, write an importable `make_scene()` function returning
 `TuningScene(model=builder.finalize(), frame_dt=1/60,
 solver_options={"substeps": 8, "solver_iterations": 4,
@@ -33,6 +47,8 @@ a new pipeline with sticky contact matching. If controls or forces change over
 time, provide `before_update(state, control, update_index, update_dt)`.
 It runs before collision detection on every update. The callback must apply
 the same deterministic inputs in every trial.
+Set `in_place=True` when the example advances the same state buffer and
+`initialize_state` when it computes initial poses with forward kinematics.
 
 `--mode fast` runs 60 frames per candidate with a 20-second soft budget and
 checks the layout, mass splitting on/off, and one-axis work reductions.
@@ -73,10 +89,14 @@ included in error measurements. The default mode's 120-frame horizon is two
 seconds at 60 Hz. Increase `--frames` for slowly developing failures.
 
 The first trial is the supplied reference. By default, a candidate passes if
-each error stays within 10% of that reference plus a small numerical floor
-(0.1 mm for lengths, 0.1 degree for angles). Absolute caps are combined with
+each error stays within 10% of that reference, with a small minimum cap
+(0.1 mm for lengths, 0.1 degree for angles) for nearly zero references.
+The minimum cap is not added to an already nonzero reference. Absolute caps are combined with
 these reference limits by taking the stricter value. Use `--relative-slack`
 to allow a larger relative degradation when appropriate.
+The tuner keeps the authored setting unless a passing candidate gains at
+least 5% FPS (`--min-gain` changes this threshold), since smaller differences
+can be timing noise in short trials.
 **A bad reference does not become physically correct through autotuning.**
 For meaningful acceptance, supply scene-specific caps, for example
 `--max-joint-mm 1 --max-joint-deg 0.5 --max-penetration-mm 3`. No setting is
@@ -86,6 +106,8 @@ sag, motor tracking error, or interpenetration of a specific pair. Rod and
 distance joints are reported as unscored because their allowed deformation
 cannot be inferred from anchor alignment alone; use an extra metric for them.
 The command supports `--json results.json` for scripts.
+The console report explicitly compares reference and recommended FPS and
+error metrics, and lists every setting changed from the reference.
 
 Single-world scheduling can solve several independent worlds; the tuner tries
 it alongside the multi-world schedulers when the model has more than one world.
