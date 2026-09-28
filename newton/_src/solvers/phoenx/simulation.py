@@ -3953,7 +3953,9 @@ class PhoenXWorld:
             and not self.num_particles
             and not self._contact_patch_enabled
         ):
-            rows_per_column = 32 if self.device.is_cuda else 1
+            # Color-packed rigid manifolds are short. A lane per column avoids
+            # loading both bodies' state once for every mostly idle row lane.
+            rows_per_column = 1 if self._colored_contact_headers else (32 if self.device.is_cuda else 1)
             wp.launch(
                 rebase_ordinary_contact_relax_kernel,
                 dim=(
