@@ -30,6 +30,9 @@ def _parse_grid(value: str) -> tuple[int, int]:
 def main() -> None:
     parser = examples.create_parser()
     parser.add_argument("--tower-grid", type=_parse_grid, default=(1, 1))
+    parser.add_argument("--grid-broadphase", action="store_true", help="Use the uniform-grid rigid broad phase")
+    parser.add_argument("--ticks-per-frame", type=int, default=None, help="Physics ticks per rendered frame")
+    parser.add_argument("--sim-substeps", type=int, default=None, help="Solver substeps per physics tick")
     parser.add_argument(
         "--no-overlap", action="store_true", help="Run physics and rendering sequentially for comparison"
     )
@@ -37,6 +40,23 @@ def main() -> None:
     parsed = parser.parse_args()
     module = importlib.import_module("newton._src.solvers.phoenx.examples.example_kapla_tower")
     module.TOWER_GRID_DIMS = parsed.tower_grid
+    module.USE_GRID_BROAD_PHASE = parsed.grid_broadphase
+    if parsed.ticks_per_frame is not None and parsed.ticks_per_frame < 1:
+        parser.error("--ticks-per-frame must be positive")
+    if parsed.sim_substeps is not None and parsed.sim_substeps < 1:
+        parser.error("--sim-substeps must be positive")
+
+    original_example = module.Example
+
+    class BenchmarkExample(original_example):
+        def _build_scene(self):
+            if parsed.ticks_per_frame is not None:
+                self.steps_per_frame = parsed.ticks_per_frame
+                self.fps = self.render_fps * self.steps_per_frame
+                self.frame_dt = 1.0 / self.fps
+            if parsed.sim_substeps is not None:
+                self.sim_substeps = parsed.sim_substeps
+            super()._build_scene()
 
     # ViewerOptix's ordinary 16,384-instance default fits one tower. The
     # four-tower benchmark needs a larger allocation before scene logging.
@@ -48,7 +68,7 @@ def main() -> None:
         )
 
     viewer, args = examples.init(parser)
-    example = module.Example(viewer, args)
+    example = BenchmarkExample(viewer, args)
     if args.no_overlap:
         example.overlap_simulation_render = False
     frame_times: list[float] = []
