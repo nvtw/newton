@@ -38,6 +38,7 @@ def main() -> None:
     parser.add_argument("--sim-substeps", type=int, default=None, help="Solver substeps per physics tick")
     parser.add_argument("--solver-iterations", type=int, default=None, help="Biased contact sweeps per substep")
     parser.add_argument("--velocity-iterations", type=int, default=None, help="Velocity relaxation passes per substep")
+    parser.add_argument("--max-colored-partitions", type=int, default=None, help="Contact colors before split overflow")
     parser.add_argument("--trace-gpu-events", action="store_true", help="Sample OptiX and physics GPU durations")
     parser.add_argument(
         "--trace-on-slowdown", action="store_true", help="Start GPU event sampling after a frame exceeds 50 ms"
@@ -53,6 +54,8 @@ def main() -> None:
     module.TOWER_GRID_DIMS = parsed.tower_grid
     module.USE_GRID_BROAD_PHASE = parsed.grid_broadphase
     module.USE_IMPLICIT_TREE_BROAD_PHASE = parsed.implicit_tree_broadphase
+    if parsed.max_colored_partitions is not None:
+        module.MASS_SPLITTING_MAX_COLORED_PARTITIONS = parsed.max_colored_partitions
     if parsed.ticks_per_frame is not None and parsed.ticks_per_frame < 1:
         parser.error("--ticks-per-frame must be positive")
     if parsed.sim_substeps is not None and parsed.sim_substeps < 1:
@@ -61,6 +64,8 @@ def main() -> None:
         parser.error("--solver-iterations must be positive")
     if parsed.velocity_iterations is not None and parsed.velocity_iterations < 1:
         parser.error("--velocity-iterations must be positive")
+    if parsed.max_colored_partitions is not None and parsed.max_colored_partitions < 1:
+        parser.error("--max-colored-partitions must be positive")
 
     original_example = module.Example
 
