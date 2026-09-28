@@ -1390,6 +1390,42 @@ class TestContactsExamples(NewtonTestCase):
     pass
 
 
+def test_pyramid_kamino_impact(test, device):
+    from newton.examples.contacts.example_pyramid import CUBE_HALF, Example  # noqa: PLC0415
+
+    with contextlib.redirect_stdout(io.StringIO()), wp.ScopedDevice(device):
+        example = Example(
+            ViewerNull(),
+            SimpleNamespace(
+                test=False,
+                world_count=1,
+                solver="kamino",
+                num_pyramids=1,
+                pyramid_size=20,
+                broad_phase="sap",
+            ),
+        )
+        for frame in range(451):
+            if frame % 5 == 0:
+                poses = example.state_0.body_q.numpy()[: example.box_count]
+                bottom = min(
+                    pose[2]
+                    - CUBE_HALF * np.abs(np.asarray(wp.quat_to_matrix(wp.quat(*pose[3:7]))).reshape(3, 3)[2]).sum()
+                    for pose in poses
+                )
+                test.assertGreater(bottom, -0.08, f"Frame {frame}: a cube penetrated the ground by {-bottom:.3f} m")
+            if frame < 450:
+                example.step()
+
+
+add_function_test(
+    TestContactsExamples,
+    "test_pyramid_kamino_impact",
+    test_pyramid_kamino_impact,
+    devices=cuda_test_devices,
+)
+
+
 _CONTACT_EXAMPLE_ALLOW_OUTPUT_REGEXES = [
     (_PXR_WORK_THREAD_LIMIT_OUTPUT_RE, "stderr"),
 ]

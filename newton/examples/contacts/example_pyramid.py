@@ -26,7 +26,8 @@ PYRAMID_SPACING = 2.0 * CUBE_SPACING
 Y_STACK = 15.0
 
 WRECKING_BALL_RADIUS = 2.0
-WRECKING_BALL_DENSITY_MULT = 100.0
+# Its volume already makes it about 65 times heavier than one cube at equal density.
+WRECKING_BALL_DENSITY_MULT = 1.0
 RAMP_LENGTH = 20.0
 RAMP_WIDTH = 5.0
 RAMP_THICKNESS = 0.5
@@ -133,6 +134,7 @@ class Example:
             solver_config.integrator = "moreau"
             solver_config.collision_detector.broadphase = args.broad_phase
             solver_config.dvi.max_alternating_iterations = 8
+            solver_config.constraints.gamma = 0.2
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
             self.collision_pipeline = None
             self.contacts = newton.Contacts(
