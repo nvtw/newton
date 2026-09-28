@@ -1,1 +1,1 @@
-Add Kamino options to the conveyor, pyramid, nut-and-bolt, ANYmal D, and H1 rigid-body examples.
+Add Kamino solver options to fourteen rigid-body and controller examples.
