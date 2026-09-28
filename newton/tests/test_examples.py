@@ -1730,6 +1730,14 @@ add_example_test(
 )
 add_example_test(
     TestControllersExamples,
+    name="controllers.example_controller_joint_impedance_heterogeneous",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
+)
+add_example_test(
+    TestControllersExamples,
     name="controllers.example_controller_operational_space_hybrid_force_motion",
     devices=cuda_test_devices,
     test_options={"usd_required": True, "num-frames": 600},
