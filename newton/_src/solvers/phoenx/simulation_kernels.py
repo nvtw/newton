@@ -136,6 +136,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 from newton._src.solvers.phoenx.helpers.array_access import read1d_i32
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
+from newton._src.solvers.phoenx.mass_splitting.kernels import initialize_rigid_overflow_copy
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.timer import elapsed_us, read_global_timer_ns
 
@@ -4113,6 +4114,16 @@ def _make_singleworld_persistent_kernel(
                     # Batch index = partition_key stamped by emit.
                     parallel_id = t_slot / ms_batch_size
                 cid = read1d_i32(element_ids_by_color, start + t_slot)
+                if wp.static(direct_regular_colors):
+                    if is_overflow_color:
+                        contact_cid = cid - num_joints
+                        if wp.static(packed_contact_headers):
+                            contact_cid = start + t_slot
+                        body1 = contact_get_body1(contact_cols, contact_cid)
+                        body2 = contact_get_body2(contact_cols, contact_cid)
+                        dt = wp.float32(1.0) / idt
+                        initialize_rigid_overflow_copy(copy_state, bodies, body1, parallel_id, dt)
+                        initialize_rigid_overflow_copy(copy_state, bodies, body2, parallel_id, dt)
                 _dispatch_one_cid(
                     constraints,
                     contact_cols,

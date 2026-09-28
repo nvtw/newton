@@ -47,23 +47,24 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         for _ in range(regular_colors):
             w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container)
         if w._singleworld_overflow_only_mass_splitting:
-            w._mass_splitting_broadcast()
             w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container)
-            w._mass_splitting_average_and_broadcast()
-            w._mass_splitting_writeback(already_averaged=True)
+            w._mass_splitting_average_overflow_into_bodies()
 
     def solve(self, idt: wp.float32) -> None:
         w = self._world
-        w._mass_splitting_broadcast()
+        if not w._singleworld_overflow_only_mass_splitting:
+            w._mass_splitting_broadcast()
         if w._constraint_capacity == 0:
-            w._mass_splitting_writeback()
+            if not w._singleworld_overflow_only_mass_splitting:
+                w._mass_splitting_writeback()
             return
         direct = getattr(w, "_direct_equality_system", None)
         if direct is not None and direct.enabled:
             direct.prepare_and_factor(idt)
 
         if not w._regular_pgs_active_this_step:
-            w._mass_splitting_writeback()
+            if not w._singleworld_overflow_only_mass_splitting:
+                w._mass_splitting_writeback()
             if direct is not None and direct.enabled:
                 w._warm_start_owned_contacts()
                 direct.solve(use_bias=True)
@@ -109,7 +110,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 if iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
 
-        if direct is None or not direct.enabled:
+        if (direct is None or not direct.enabled) and not w._singleworld_overflow_only_mass_splitting:
             w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.resolve_bounded_drives(idt, use_bias=True)
@@ -138,7 +139,8 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 w._reduced_articulation.solve_constraints(w, idt, relax=True)
             return
 
-        w._mass_splitting_broadcast()
+        if not w._singleworld_overflow_only_mass_splitting:
+            w._mass_splitting_broadcast()
         inv_dt = 1.0 / w.substep_dt
         _, _, _, _, relax_head, _ = w._singleworld_kernels()
         for iteration in range(w._active_velocity_iterations):
@@ -152,7 +154,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 if iteration + 1 < w._active_velocity_iterations:
                     w._mass_splitting_broadcast()
 
-        if direct is None or not direct.enabled:
+        if (direct is None or not direct.enabled) and not w._singleworld_overflow_only_mass_splitting:
             w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.resolve_bounded_drives(idt, use_bias=False)

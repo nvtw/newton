@@ -177,6 +177,7 @@ from newton._src.solvers.phoenx.mass_splitting import (
     launch_average_and_broadcast,
     launch_average_and_broadcast_grouped,
     launch_average_and_broadcast_rigid_velocity,
+    launch_average_rigid_velocity_into_bodies,
     launch_broadcast_rigid_to_copy_states,
     launch_copy_state_into_rigids,
     record_all_interactions_kernel,
@@ -455,8 +456,8 @@ class PhoenXWorld:
                 sleeping, symmetric sweeps, deformables, or unrolled dispatch.
             mass_splitting_overflow_only: Experimental single-world rigid contact
                 path that updates regular colors directly and splits only overflow
-                contacts. Requires the unrolled dispatcher and no joints or
-                deformables.
+                contacts. Requires the unrolled dispatcher, one contact per
+                overflow batch, and no joints or deformables.
             joint_refinement_iterations: Additional joint-only sweeps with mass-copy
                 reconciliation after the mixed iterations. Set by SolverPhoenX.
             direct_joint_projection_passes: Exact direct-joint projections distributed
@@ -971,9 +972,11 @@ class PhoenXWorld:
         if mass_splitting_overflow_only and (
             not self.mass_splitting_enabled
             or self.step_layout != "single_world"
+            or not self.device.is_cuda
             or not self._mass_splitting_velocity_only_average
             or self.num_joints != 0
             or self.mass_splitting_color_group_size != 0
+            or self.mass_splitting_batch_size != 1
             or not self.mass_splitting_unrolled
         ):
             raise ValueError("overflow-only mass splitting requires a rigid contact-only single world")
@@ -3507,6 +3510,10 @@ class PhoenXWorld:
                 ],
                 device=self.device,
             )
+
+    def _mass_splitting_average_overflow_into_bodies(self) -> None:
+        """Finish a rigid overflow pass without writing unused copy slots."""
+        launch_average_rigid_velocity_into_bodies(self._copy_state, self.bodies)
 
     def _mass_splitting_writeback(self, *, already_averaged: bool = False) -> None:
         """Write each body / particle's slot-0 velocity back to storage.
