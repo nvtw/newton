@@ -18,11 +18,11 @@
   @media(max-width:760px){main{padding:20px 14px 50px}.hero{padding:28px}.metrics,.layout{grid-template-columns:1fr}.full{grid-column:auto}.rank{grid-template-columns:20px minmax(120px,1fr) 75px}.bar{display:none}}
 </style>
 <main>
-  <header class="hero"><div class="eyebrow">Newton / PhoenX / Performance investigation</div><h1>Kapla tower</h1><p>From the reported 40 FPS to over 80 FPS for one tower, with OptiX rendering and physics running on separate CUDA streams. Measurements use the RTX PRO 6000 Blackwell.</p><div class="goal"><span class="dot"></span> 1×1 TARGET MET · 2×2 SCALE STUDY</div></header>
+  <header class="hero"><div class="eyebrow">Newton / PhoenX / Performance investigation</div><h1>Kapla tower</h1><p>One tower now sustains over 80 FPS with OptiX. The next goal is 60 FPS for four towers in one PhoenX world, with the same stability and deterministic physics. Measurements use the RTX PRO 6000 Blackwell.</p><div class="goal"><span class="dot"></span> NEW GOAL · 2×2 AT 60+ FPS</div></header>
   <div class="metrics">
-    <section class="card"><div class="eyebrow">Reported starting point</div><div class="number">~40 <span class="unit">FPS</span></div><div class="muted">Interactive tower, before changes</div></section>
-    <section class="card"><div class="eyebrow">One tower · OptiX</div><div class="number green">~83 <span class="unit">FPS</span></div><div class="muted">1,000 frames; every 20-frame window above 80 FPS</div></section>
-    <section class="card"><div class="eyebrow">Four towers · one world</div><div class="number blue">37.6 <span class="unit">FPS</span></div><div class="muted">400 frames; final 50 frames: 37.0 FPS</div></section>
+    <section class="card"><div class="eyebrow">Four towers · current</div><div class="number blue">37.6 <span class="unit">FPS</span></div><div class="muted">OptiX included · 400 frames</div></section>
+    <section class="card"><div class="eyebrow">Four towers · goal</div><div class="number green">60+ <span class="unit">FPS</span></div><div class="muted">One world · stable · deterministic</div></section>
+    <section class="card"><div class="eyebrow">One tower · achieved</div><div class="number">~83 <span class="unit">FPS</span></div><div class="muted">1,000 frames; all windows above 80 FPS</div></section>
     <section class="card"><div class="eyebrow">SMs active · four towers</div><div class="number">83.3<span class="unit">%</span></div><div class="muted">Hardware counter, final 2 s of profiled run</div></section>
   </div>
   <div class="layout">
@@ -41,6 +41,7 @@
     </section>
     <section class="card"><div class="eyebrow">Investigation log</div><h2>What changed</h2>
       <div class="fact"><strong>Separate CUDA streams confirmed</strong><span>Nsight shows OptiX ray launches on stream 13 and physics on stream 15. In both the one-tower and four-tower traces, 79 of 80 ray launches overlap a physics kernel.</span></div>
+      <div class="fact"><strong>Overlap saves about 0.9 ms on 2×2</strong><span>Matched 200-frame OptiX runs measured about 37.6 FPS with overlap and 36.4 FPS with sequential physics/rendering in the steady windows: a gain of roughly 1.2 FPS. Rendering currently uses the default CUDA stream; dedicated nonblocking render-stream handoff is under investigation.</span></div>
       <div class="fact"><strong>Renderer stall fixed</strong><span>After repeated TLAS refits, ray launch could jump from about 1 ms to 60 ms. A full rebuild after 16 refits kept rendering steady for 400 frames; the renderer regression test passes.</span></div>
       <div class="fact"><strong>Large single world hybrid · 66 FPS</strong><span>Independent colored contacts now update rigid bodies directly; only overflow contacts use split copies. This passes the settled tower test with 4 substeps and 8 iterations and reaches about 66 FPS across 400 OptiX frames. Seven iterations fail the jitter threshold.</span></div>
       <div class="fact"><strong>Three substeps and local overflow copies · about 83 FPS</strong><span>The hybrid path passes the jitter test with 3 substeps and 8 iterations. Each overflow contact initializes its own copy, then copies reduce directly into body velocities. A 1,000-frame OptiX run stayed above 80.72 FPS in every 20-frame window; at frame 800 it measured 84.12 FPS.</span></div>
@@ -51,21 +52,22 @@
       <div class="fact"><strong>Remaining cost</strong><span>The repeated color solve costs 5.87 ms per frame. Copy broadcast no longer appears in the current top 10. The larger four-tower scene exposes a new broad-phase bottleneck.</span></div>
       <div class="fact"><strong>Hardware counters captured</strong><span>The 2×2 run recorded 87,492 CUDA kernels. In its final two seconds, the graphics engine averaged 99.7% active, SMs 83.3% active, and SM issue throughput 12.0%. Profiling enabled: 36.38 FPS.</span></div>
     </section>
-    <section class="card full"><div class="eyebrow">Four towers · one PhoenX world</div><h2>Where the time moves</h2><p class="muted">Same 3×8 solver and OptiX renderer · 45,360 bricks · Nsight Systems average GPU milliseconds per frame.</p>
-      <div class="rank"><span class="id">01</span><span class="name">Contact solve · iterate</span><span class="bar"><i style="--v:100%"></i></span><b>9.40</b></div>
-      <div class="rank"><span class="id">02</span><span class="name">SAP broad phase</span><span class="bar"><i style="--v:51.2%"></i></span><b>4.81</b></div>
-      <div class="rank"><span class="id">03</span><span class="name">OptiX ray launch</span><span class="bar"><i style="--v:24.1%"></i></span><b>2.27</b></div>
-      <div class="rank"><span class="id">04</span><span class="name">Contact velocity relaxation</span><span class="bar"><i style="--v:23.9%"></i></span><b>2.24</b></div>
-      <div class="rank"><span class="id">05</span><span class="name">Contact solve · prepare</span><span class="bar"><i style="--v:17.4%"></i></span><b>1.64</b></div>
-      <div class="rank"><span class="id">06</span><span class="name">CUB radix sort</span><span class="bar"><i style="--v:12.3%"></i></span><b>1.16</b></div>
-      <div class="rank"><span class="id">07</span><span class="name">Contact solve · relax</span><span class="bar"><i style="--v:11.4%"></i></span><b>1.07</b></div>
-      <div class="rank"><span class="id">08</span><span class="name">Segmented radix sort</span><span class="bar"><i style="--v:5.7%"></i></span><b>0.54</b></div>
-      <div class="rank"><span class="id">09</span><span class="name">Contact gather</span><span class="bar"><i style="--v:4.4%"></i></span><b>0.42</b></div>
-      <div class="rank"><span class="id">10</span><span class="name">Fused overflow reduction</span><span class="bar"><i style="--v:4.0%"></i></span><b>0.38</b></div>
+    <section class="card full"><div class="eyebrow">Four towers · latest captured baseline</div><h2>Top 10 GPU kernels · 2×2</h2><p class="muted">45,360 bricks in one world · 80 OptiX frames · Nsight Systems average GPU milliseconds per frame. Counter collection lowers measured FPS, so use the unprofiled 37.6 FPS above for the speed baseline.</p>
+      <div class="rank"><span class="id">01</span><span class="name">Contact solve · iterate</span><span class="bar"><i style="--v:100%"></i></span><b>9.70</b></div>
+      <div class="rank"><span class="id">02</span><span class="name">SAP broad phase</span><span class="bar"><i style="--v:48.7%"></i></span><b>4.72</b></div>
+      <div class="rank"><span class="id">03</span><span class="name">Contact velocity relaxation</span><span class="bar"><i style="--v:22.7%"></i></span><b>2.20</b></div>
+      <div class="rank"><span class="id">04</span><span class="name">OptiX ray launch</span><span class="bar"><i style="--v:21.4%"></i></span><b>2.08</b></div>
+      <div class="rank"><span class="id">05</span><span class="name">Contact solve · prepare</span><span class="bar"><i style="--v:16.7%"></i></span><b>1.62</b></div>
+      <div class="rank"><span class="id">06</span><span class="name">CUB radix sort</span><span class="bar"><i style="--v:11.8%"></i></span><b>1.15</b></div>
+      <div class="rank"><span class="id">07</span><span class="name">Contact solve · relax</span><span class="bar"><i style="--v:10.5%"></i></span><b>1.02</b></div>
+      <div class="rank"><span class="id">08</span><span class="name">Segmented radix sort</span><span class="bar"><i style="--v:5.3%"></i></span><b>0.51</b></div>
+      <div class="rank"><span class="id">09</span><span class="name">Contact gather</span><span class="bar"><i style="--v:4.6%"></i></span><b>0.45</b></div>
+      <div class="rank"><span class="id">10</span><span class="name">Fused overflow reduction</span><span class="bar"><i style="--v:4.2%"></i></span><b>0.41</b></div>
       <div class="callout"><strong>Busy GPU, limited issue throughput</strong><p>CUDA kernels cover 97.9% of the 2×2 frame interval. Hardware counters show 99.7% graphics-engine activity, 83.3% SM activity, and 12.0% SM issue throughput in the final two seconds; DRAM read and write throughput were 13.9% and 12.0%. The contact kernel launches 1,504 blocks of 32 threads on 188 SMs, but each regular color has only 16–22k useful contacts against 48k launched lanes. The serialized color schedule and partially useful launches limit compute throughput.</p></div>
     </section>
     <section class="card full"><div class="eyebrow">Launch</div><h2>Run or benchmark</h2><pre><code>uv run -m newton._src.solvers.phoenx.examples.example_kapla_tower
 uv run python scripts/benchmark_kapla_optix.py --tower-grid 2x2 --num-frames 400
+uv run python scripts/benchmark_kapla_optix.py --tower-grid 2x2 --num-frames 200 --no-overlap
 sudo ./scripts/profile_kapla_2x2_gpu.sh</code></pre><p class="muted">The final command captures hardware counters and exports <code>/tmp/kapla_2x2_gpu_metrics.sqlite</code>; it is only needed to repeat the counter measurement.</p></section>
   </div>
 </main>
