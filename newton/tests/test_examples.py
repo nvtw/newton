@@ -1391,6 +1391,7 @@ class TestContactsExamples(NewtonTestCase):
 
 
 def test_pyramid_kamino_impact(test, device):
+    """Check Kamino pyramid ground clearance through the wrecking-ball impact."""
     from newton.examples.contacts.example_pyramid import CUBE_HALF, Y_STACK, Example  # noqa: PLC0415
 
     with contextlib.redirect_stdout(io.StringIO()), wp.ScopedDevice(device):
@@ -1406,14 +1407,12 @@ def test_pyramid_kamino_impact(test, device):
             ),
         )
         for frame in range(451):
-            if frame % 5 == 0:
-                poses = example.state_0.body_q.numpy()[: example.box_count]
-                bottom = min(
-                    pose[2]
-                    - CUBE_HALF * np.abs(np.asarray(wp.quat_to_matrix(wp.quat(*pose[3:7]))).reshape(3, 3)[2]).sum()
-                    for pose in poses
-                )
-                test.assertGreater(bottom, -0.1, f"Frame {frame}: a cube penetrated the ground by {-bottom:.3f} m")
+            poses = example.state_0.body_q.numpy()[: example.box_count]
+            bottom = min(
+                pose[2] - CUBE_HALF * np.abs(np.asarray(wp.quat_to_matrix(wp.quat(*pose[3:7]))).reshape(3, 3)[2]).sum()
+                for pose in poses
+            )
+            test.assertGreater(bottom, -0.1, f"Frame {frame}: a cube penetrated the ground by {-bottom:.3f} m")
             if frame < 450:
                 example.step()
         ball_y = example.state_0.body_q.numpy()[example.box_count, 1]

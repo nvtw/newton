@@ -515,6 +515,38 @@ def concat6d(X1: wp.mat33f, X2: wp.mat33f) -> wp.spatial_matrixf:
 
 
 @wp.func
+def _solve_gyroscopic_midpoint(
+    dt: wp.float32,
+    I_i: wp.mat33f,
+    inv_I_i: wp.mat33f,
+    omega_i: wp.vec3f,
+    tau_i: wp.vec3f,
+) -> tuple[wp.vec3f, bool]:
+    # The fixed-point iteration is inexpensive when the time step is small
+    # enough, but its final iterate must satisfy the midpoint equation.
+    omega_next = omega_i + dt * (inv_I_i @ tau_i)
+    for _ in range(5):
+        midpoint = 0.5 * (omega_i + omega_next)
+        omega_next = omega_i + dt * (inv_I_i @ (tau_i - wp.cross(midpoint, I_i @ midpoint)))
+    midpoint = 0.5 * (omega_i + omega_next)
+    residual = midpoint - omega_i - 0.5 * dt * (inv_I_i @ (tau_i - wp.cross(midpoint, I_i @ midpoint)))
+    if wp.length(residual) <= 1.0e-6 * (1.0 + wp.length(omega_i)):
+        return omega_next, True
+
+    omega_mid = omega_i + 0.5 * dt * (inv_I_i @ tau_i)
+    identity = wp.identity(3, dtype=wp.float32)
+    for _ in range(12):
+        gyro = wp.cross(omega_mid, I_i @ omega_mid)
+        residual = omega_mid - omega_i - 0.5 * dt * (inv_I_i @ (tau_i - gyro))
+        if wp.length(residual) <= 1.0e-6 * (1.0 + wp.length(omega_i)):
+            return 2.0 * omega_mid - omega_i, True
+        # Jacobian of omega x (I omega) is skew(omega) I - skew(I omega).
+        jacobian = identity + 0.5 * dt * (inv_I_i @ (wp.skew(omega_mid) @ I_i - wp.skew(I_i @ omega_mid)))
+        omega_mid -= wp.inverse(jacobian) @ residual
+    return omega_i, False
+
+
+@wp.func
 def compute_body_twist_update_with_eom(
     dt: wp.float32,
     g: wp.vec3f,
@@ -533,13 +565,23 @@ def compute_body_twist_update_with_eom(
     # Compute velocity update equations
     # Disable gravity acceleration for massless bodies because inv_m * m i = 0.0 for such bodies, not 1.0.
     v_i_n = v_i + dt * (g * wp.nonzero(inv_m_i) + inv_m_i * f_i)
-    # Evaluate the gyroscopic torque at the midpoint. With no applied torque,
-    # its work against the midpoint velocity is zero, preserving rotational
-    # kinetic energy instead of adding energy at every explicit Euler step.
-    omega_i_n = omega_i + dt * (inv_I_i @ tau_i)
-    for _ in range(5):
-        omega_mid = 0.5 * (omega_i + omega_i_n)
-        omega_i_n = omega_i + dt * (inv_I_i @ (tau_i - wp.cross(omega_mid, I_i @ omega_mid)))
+    # Solve the midpoint equation before using its energy-preserving update.
+    # Retry with shorter steps if Newton's method does not converge.
+    omega_i_n = omega_i
+    remaining = dt
+    substep = dt
+    for _ in range(1024):
+        if remaining <= 0.0:
+            break
+        step = wp.min(substep, remaining)
+        next_omega, converged = _solve_gyroscopic_midpoint(step, I_i, inv_I_i, omega_i_n, tau_i)
+        if converged:
+            omega_i_n = next_omega
+            remaining -= step
+            substep = 2.0 * step
+        else:
+            substep = 0.5 * step
+    assert remaining <= 0.0, "Kamino gyroscopic midpoint solve did not converge"
 
     # Return the updated velocities
     return v_i_n, omega_i_n
