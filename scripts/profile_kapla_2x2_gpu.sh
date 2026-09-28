@@ -45,15 +45,32 @@ cd "${repo_dir}"
 
 "${nsys_bin}" export --type=sqlite --output="${report_base}.sqlite" \
     --force-overwrite=true "${report_base}.nsys-rep"
-if ! kernel_count="$(sqlite3 "${report_base}.sqlite" 'SELECT count(*) FROM CUPTI_ACTIVITY_KIND_KERNEL;')"; then
-    echo "The report contains no CUDA kernel table; the benchmark did not run." >&2
-    exit 1
-fi
-if [[ ${kernel_count} -eq 0 ]]; then
-    echo "The report contains no CUDA kernels; the benchmark did not run." >&2
+if ! capture_summary="$(/usr/bin/python3 -c '
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as db:
+    kernel_count, last_kernel_end = db.execute(
+        "SELECT count(*), max(end) FROM CUPTI_ACTIVITY_KIND_KERNEL"
+    ).fetchone()
+    if kernel_count < 1000:
+        sys.exit("The report has too few CUDA kernels for an 80-frame benchmark.")
+    metrics = dict(db.execute(
+        "SELECT metricId, avg(value) FROM GPU_METRICS "
+        "WHERE timestamp BETWEEN ? AND ? AND metricId IN (6, 7, 8) "
+        "GROUP BY metricId",
+        (last_kernel_end - 2_000_000_000, last_kernel_end),
+    ))
+    if len(metrics) != 3:
+        sys.exit("The report has no usable GPU counter samples.")
+    print(f"Captured {kernel_count} CUDA kernels. Final 2 s: "
+          f"graphics engine {metrics[6]:.1f}%, "
+          f"SMs active {metrics[7]:.1f}%, SM issue {metrics[8]:.1f}%.")
+' "${report_base}.sqlite")"; then
+    echo "The Nsight capture is incomplete." >&2
     exit 1
 fi
 chown "${SUDO_USER}:" "${report_base}.nsys-rep" "${report_base}.sqlite"
-echo "Captured ${kernel_count} CUDA kernel launches."
+echo "${capture_summary}"
 echo "GPU metric report: ${report_base}.nsys-rep"
 echo "SQLite data:      ${report_base}.sqlite"
