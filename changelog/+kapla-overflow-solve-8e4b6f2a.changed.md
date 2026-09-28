@@ -1,0 +1,1 @@
+Speed up the PhoenX Kapla tower with a single-world contact path that applies regular colored contacts directly and splits only overflow contacts; enable it with `mass_splitting_overflow_only=True` for rigid contact-only worlds using unrolled mass splitting.

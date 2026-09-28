@@ -3939,6 +3939,7 @@ def _make_singleworld_persistent_kernel(
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
+    direct_regular_colors: bool = False,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
 ):
@@ -3986,6 +3987,21 @@ def _make_singleworld_persistent_kernel(
         enable_column_timers=enable_column_timers,
         bilateral_joint_blocks=bilateral_joint_blocks,
     )
+    if direct_regular_colors:
+        _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
+            has_joints=has_joints,
+            has_contacts=has_contacts,
+            skip_joint_pgs=skip_joint_pgs,
+            has_mass_splitting=False,
+            packed_contact_headers=packed_contact_headers,
+            has_sleeping=has_sleeping,
+            has_soft_contact_pd=has_soft_contact_pd,
+            is_prepare=is_prepare,
+            is_cached_prepare=is_cached_prepare,
+            use_bias=use_bias,
+            enable_column_timers=enable_column_timers,
+            bilateral_joint_blocks=bilateral_joint_blocks,
+        )
 
     @wp.kernel(enable_backward=False, module="unique", grid_stride=False)
     def kernel(
@@ -4140,6 +4156,7 @@ def _make_singleworld_fused_kernel(
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
+    direct_regular_colors: bool = False,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
 ):
@@ -4319,6 +4336,7 @@ def get_singleworld_kernel(
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
     rigid_direct: bool = False,
+    direct_regular_colors: bool = False,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
 ):
@@ -4338,6 +4356,7 @@ def get_singleworld_kernel(
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
         rigid_direct=rigid_direct,
+        direct_regular_colors=direct_regular_colors,
         patch_friction=patch_friction,
         bilateral_joint_blocks=bilateral_joint_blocks,
     )

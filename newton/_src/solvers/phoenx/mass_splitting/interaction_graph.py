@@ -164,6 +164,7 @@ def record_all_interactions_kernel(
     interaction_id_to_partition: wp.array[wp.int32],
     max_colored_partitions: wp.int32,
     batch_size: wp.int32,
+    overflow_only: wp.int32,
     scratch: InteractionGraphScratch,
 ):
     """Per-step emit: walk the active CSR slots and stamp
@@ -176,6 +177,8 @@ def record_all_interactions_kernel(
       ``interaction_id_to_partition[element_ids_by_color[t]]``.
     * If colour ``< K`` (a regular MIS bucket): ``partition_key = 0``
       so every body in any regular bucket shares one copy slot.
+      In ``overflow_only`` mode these interactions are omitted because
+      regular colors operate on body state directly.
     * If colour ``== K`` (overflow): ``partition_key = (t -
       color_starts[K]) // batch_size`` — overflow constraints group
       into batches of ``batch_size`` consecutive CSR slots, all
@@ -211,6 +214,8 @@ def record_all_interactions_kernel(
     if eid >= contact_offset and contact_articulation_owner[eid - contact_offset] >= wp.int32(0):
         return
     color = interaction_id_to_partition[eid]
+    if overflow_only != wp.int32(0) and color < max_colored_partitions:
+        return
     partition_key = wp.int32(0)
     if color >= max_colored_partitions:
         # Overflow slice. Group every ``batch_size`` consecutive

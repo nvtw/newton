@@ -46,7 +46,9 @@ class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
             SimpleNamespace(solver="classic", max_colors=10),
         )
         self.assertEqual(example_kapla_tower.MASS_SPLITTING_MAX_COLORED_PARTITIONS, 9)
-        self.assertEqual(example.solver_iterations, 10)
+        self.assertEqual(example.sim_substeps, 4)
+        self.assertEqual(example.solver_iterations, 8)
+        self.assertTrue(example.world._singleworld_overflow_only_mass_splitting)
         for _ in range(example.WARMUP_FRAMES + 1):
             example.step()
 
