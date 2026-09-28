@@ -12,6 +12,7 @@ import warp as wp
 
 from ..core.reset import normalize_reset_world_mask
 from ..geometry.broad_phase_grid import BroadPhaseGrid
+from ..geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_core import compute_tight_aabb_from_support
@@ -1058,16 +1059,17 @@ def _normalize_broad_phase_mode(mode: str) -> str:
 
 
 def _infer_broad_phase_mode_from_instance(
-    broad_phase: BroadPhaseAllPairs | BroadPhaseSAP | BroadPhaseGrid | BroadPhaseExplicit,
+    broad_phase: BroadPhaseAllPairs | BroadPhaseSAP | BroadPhaseGrid | BroadPhaseImplicitTree | BroadPhaseExplicit,
 ) -> str:
     if isinstance(broad_phase, BroadPhaseAllPairs):
         return "nxn"
-    if isinstance(broad_phase, BroadPhaseSAP | BroadPhaseGrid):
+    if isinstance(broad_phase, BroadPhaseSAP | BroadPhaseGrid | BroadPhaseImplicitTree):
         return "sap"
     if isinstance(broad_phase, BroadPhaseExplicit):
         return "explicit"
     raise TypeError(
-        "broad_phase must be a BroadPhaseAllPairs, BroadPhaseSAP, BroadPhaseGrid, or BroadPhaseExplicit instance "
+        "broad_phase must be a BroadPhaseAllPairs, BroadPhaseSAP, BroadPhaseGrid, "
+        "BroadPhaseImplicitTree, or BroadPhaseExplicit instance "
         f"(got {type(broad_phase)!r})"
     )
 
@@ -1327,6 +1329,7 @@ class CollisionPipeline:
         | BroadPhaseAllPairs
         | BroadPhaseSAP
         | BroadPhaseGrid
+        | BroadPhaseImplicitTree
         | BroadPhaseExplicit
         | None = None,
         narrow_phase: NarrowPhase | None = None,
@@ -1562,7 +1565,9 @@ class CollisionPipeline:
         compact_sort_key_bits = 0
 
         mode_from_broad_phase: str | None = None
-        broad_phase_instance: BroadPhaseAllPairs | BroadPhaseSAP | BroadPhaseGrid | BroadPhaseExplicit | None = None
+        broad_phase_instance: (
+            BroadPhaseAllPairs | BroadPhaseSAP | BroadPhaseGrid | BroadPhaseImplicitTree | BroadPhaseExplicit | None
+        ) = None
         if broad_phase is not None:
             if isinstance(broad_phase, str):
                 mode_from_broad_phase = _normalize_broad_phase_mode(broad_phase)
@@ -2857,7 +2862,7 @@ class CollisionPipeline:
                 filter_data=self.broad_phase_filter_data,
                 **broad_phase_speculative_kwargs,
             )
-        elif isinstance(self.broad_phase, BroadPhaseSAP | BroadPhaseGrid):
+        elif isinstance(self.broad_phase, BroadPhaseSAP | BroadPhaseGrid | BroadPhaseImplicitTree):
             if sort_axis_displacement_limit is not None:
                 broad_phase_speculative_kwargs["sort_axis_displacement_limit"] = sort_axis_displacement_limit
             self.broad_phase.launch(

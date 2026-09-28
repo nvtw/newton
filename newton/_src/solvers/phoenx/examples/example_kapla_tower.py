@@ -36,6 +36,7 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.geometry.broad_phase_grid import BroadPhaseGrid
+from newton._src.geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
 from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, body_container_zeros
 from newton._src.solvers.phoenx.examples.example_common import (
     init_phoenx_bodies_kernel as _init_phoenx_bodies_kernel,
@@ -114,6 +115,7 @@ PARTITIONER_ALGORITHM: str = "endpoint_owner"
 # which the collision-pipeline budgets below absorb via ``Nx * Ny``.
 TOWER_GRID_DIMS: tuple[int, int] = (1, 1)
 USE_GRID_BROAD_PHASE: bool = False
+USE_IMPLICIT_TREE_BROAD_PHASE: bool = False
 # Centre-to-centre spacing [m]. Tower footprint ~7.1 x 5.0 m at
 # scale 0.1; 9 m leaves ~2 m clearance so neighbours don't leak into
 # each other's SAP lists during settling.
@@ -277,7 +279,13 @@ class Example:
             shape_pairs_max=shape_pairs_max,
             rigid_contact_max=rigid_contact_max_pipeline,
         )
-        if USE_GRID_BROAD_PHASE:
+        if USE_IMPLICIT_TREE_BROAD_PHASE:
+            self.collision_pipeline.broad_phase = BroadPhaseImplicitTree(
+                self.model.shape_world,
+                shape_flags=self.model.shape_flags,
+                device=self.device,
+            )
+        elif USE_GRID_BROAD_PHASE:
             self.collision_pipeline.broad_phase = BroadPhaseGrid(
                 self.model.shape_world,
                 shape_flags=self.model.shape_flags,
