@@ -647,6 +647,13 @@ add_basic_example_test(
     test_options={"num-frames": 230, "solver": "mujoco"},
     test_suffix="mujoco",
 )
+add_basic_example_test(
+    name="basic.example_basic_dzhanibekov",
+    devices=cuda_test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 230, "solver": "kamino"},
+    test_suffix="kamino",
+)
 
 add_basic_example_test(
     name="basic.example_basic_multi_solver_overlay",
@@ -956,10 +963,26 @@ add_example_test(
 )
 add_example_test(
     TestRobotExamples,
+    name="robot.example_robot_ur10",
+    devices=cuda_test_devices,
+    test_options={"usd_required": True, "num-frames": 100, "world-count": 2, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
+)
+add_example_test(
+    TestRobotExamples,
     name="robot.example_robot_allegro_hand",
     devices=cuda_test_devices,
     test_options={"usd_required": True, "num-frames": 500},
     use_viewer=True,
+)
+add_example_test(
+    TestRobotExamples,
+    name="robot.example_robot_allegro_hand",
+    devices=cuda_test_devices,
+    test_options={"usd_required": True, "num-frames": 500, "world-count": 1, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
 )
 add_example_test(
     TestRobotExamples,
@@ -1095,6 +1118,14 @@ add_example_test(
 )
 add_example_test(
     TestSelectionAPIExamples,
+    name="selection.example_selection_articulations",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 100, "world-count": 2, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
+)
+add_example_test(
+    TestSelectionAPIExamples,
     name="selection.example_selection_cartpole",
     devices=test_devices,
     test_options={"num-frames": 100},
@@ -1127,11 +1158,27 @@ add_example_test(
 )
 add_example_test(
     TestSelectionAPIExamples,
+    name="selection.example_selection_materials",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 100, "world-count": 2, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
+)
+add_example_test(
+    TestSelectionAPIExamples,
     name="selection.example_selection_multiple",
     devices=test_devices,
     test_options={"num-frames": 100},
     test_options_cpu={"num-frames": 10},
     use_viewer=True,
+)
+add_example_test(
+    TestSelectionAPIExamples,
+    name="selection.example_selection_multiple",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 100, "world-count": 2, "solver": "kamino"},
+    use_viewer=True,
+    test_suffix="kamino",
 )
 
 

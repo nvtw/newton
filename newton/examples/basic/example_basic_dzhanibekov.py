@@ -12,6 +12,7 @@
 # Command: python -m newton.examples basic_dzhanibekov
 # XPBD: python -m newton.examples basic_dzhanibekov --solver xpbd
 # MuJoCo: python -m newton.examples basic_dzhanibekov --solver mujoco
+# Kamino: python -m newton.examples basic_dzhanibekov --solver kamino
 #
 ###########################################################################
 
@@ -32,6 +33,7 @@ _BAR_DENSITY = 100.0
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
@@ -43,6 +45,8 @@ class Example:
         self.min_stem_axis_y = 1.0
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        if self.solver_type == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(builder)
 
         self.body = builder.add_body(
             xform=wp.transform(wp.vec3(0.0, 0.0, 2.0), wp.quat_identity()),
@@ -114,8 +118,17 @@ class Example:
             )
             self.collision_pipeline = None
             self.contacts = None
+        elif self.solver_type == "kamino":
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
+            )
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+            self.collision_pipeline = None
+            self.contacts = None
         else:
-            raise ValueError(f"Unknown solver type: {self.solver_type}. Choose from 'vbd', 'xpbd', or 'mujoco'.")
+            raise ValueError(
+                f"Unknown solver type: {self.solver_type}. Choose from 'vbd', 'xpbd', 'mujoco', or 'kamino'."
+            )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -188,8 +201,8 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         default="vbd",
-        choices=["vbd", "xpbd", "mujoco"],
-        help="Solver type: vbd (default), xpbd, or mujoco.",
+        choices=["vbd", "xpbd", "mujoco", "kamino"],
+        help="Solver type: vbd (default), xpbd, mujoco, or kamino.",
     )
     viewer, args = newton.examples.init(parser)
     newton.examples.run(Example(viewer, args), args)

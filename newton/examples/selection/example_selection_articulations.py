@@ -10,6 +10,7 @@
 # performs selective resets on subsets of worlds.
 #
 # Command: python -m newton.examples selection_articulations
+#          python -m newton.examples selection_articulations --solver kamino
 #
 ###########################################################################
 
@@ -76,6 +77,7 @@ def random_forces_kernel(
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
 
@@ -84,11 +86,14 @@ class Example:
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.world_count = args.world_count
+        self.solver_type = args.solver
 
         # increase contact stiffness
         contact_ke = 1.0e4
 
         world = newton.ModelBuilder()
+        if self.solver_type == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(world)
         world.default_shape_cfg.ke = contact_ke
         world.default_shape_cfg.gap = 0.0
         world.add_mjcf(
@@ -115,7 +120,13 @@ class Example:
         # finalize model
         self.model = scene.finalize()
 
-        self.solver = newton.solvers.SolverMuJoCo(self.model, njmax=200, nconmax=50)
+        if self.solver_type == "kamino":
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
+            )
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(self.model, njmax=200, nconmax=50)
 
         self.viewer = viewer
 
@@ -303,6 +314,7 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
+        parser.add_argument("--solver", choices=["mujoco", "kamino"], default="mujoco")
         parser.set_defaults(world_count=16)
         return parser
 
