@@ -527,14 +527,19 @@ def compute_body_twist_update_with_eom(
     # Extract linear and angular parts
     v_i = wp.spatial_top(u_i)
     omega_i = wp.spatial_bottom(u_i)
-    S_i = wp.skew(omega_i)
     f_i = wp.spatial_top(w_i)
     tau_i = wp.spatial_bottom(w_i)
 
     # Compute velocity update equations
     # Disable gravity acceleration for massless bodies because inv_m * m i = 0.0 for such bodies, not 1.0.
     v_i_n = v_i + dt * (g * wp.nonzero(inv_m_i) + inv_m_i * f_i)
-    omega_i_n = omega_i + dt * inv_I_i @ (-S_i @ (I_i @ omega_i) + tau_i)
+    # Evaluate the gyroscopic torque at the midpoint. With no applied torque,
+    # its work against the midpoint velocity is zero, preserving rotational
+    # kinetic energy instead of adding energy at every explicit Euler step.
+    omega_i_n = omega_i + dt * (inv_I_i @ tau_i)
+    for _ in range(5):
+        omega_mid = 0.5 * (omega_i + omega_i_n)
+        omega_i_n = omega_i + dt * (inv_I_i @ (tau_i - wp.cross(omega_mid, I_i @ omega_mid)))
 
     # Return the updated velocities
     return v_i_n, omega_i_n

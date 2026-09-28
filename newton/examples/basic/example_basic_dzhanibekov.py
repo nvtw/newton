@@ -133,6 +133,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
+        self.initial_rotational_energy = self._rotational_energy() if self.solver_type == "kamino" else None
 
         self.initial_body_q = self.state_0.body_q.numpy().copy()
         self.body_com = self.model.body_com.numpy()[self.body].copy()
@@ -174,7 +175,19 @@ class Example:
         ]
         self.min_stem_axis_y = min(self.min_stem_axis_y, float(local_y_world[1]))
 
+    def _rotational_energy(self):
+        body_q = self.state_0.body_q.numpy()[self.body]
+        omega = self.state_0.body_qd.numpy()[self.body, 3:6]
+        rotation = np.array(wp.quat_to_matrix(wp.quat(*body_q[3:7])), dtype=np.float32).reshape(3, 3)
+        inertia = self.model.body_inertia.numpy()[self.body]
+        return float(0.5 * omega @ (rotation @ inertia @ rotation.T) @ omega)
+
     def test_final(self):
+        """Verify the free body flips without gaining rotational energy."""
+        if self.initial_rotational_energy is not None:
+            energy_ratio = self._rotational_energy() / self.initial_rotational_energy
+            if not np.isfinite(energy_ratio) or abs(energy_ratio - 1.0) > 0.01:
+                raise ValueError(f"Torque-free body changed rotational energy by {energy_ratio - 1.0:.1%}")
         body_q = self.state_0.body_q.numpy()
         body_qd = self.state_0.body_qd.numpy()
         if not np.isfinite(body_q[self.body]).all() or not np.isfinite(body_qd[self.body]).all():
