@@ -72,7 +72,7 @@ class Example:
         self.solver_type = args.solver
         self.world_count = args.world_count
         if self.world_count is None:
-            self.world_count = 1 if self.solver_type == "kamino" else 100
+            self.world_count = 100
 
         self.viewer = viewer
 
