@@ -95,8 +95,10 @@ class Example:
             solver_config = newton.solvers.SolverKamino.Config.from_model(
                 self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
             )
-            solver_config.dvi.max_alternating_iterations = 8
-            solver_config.dvi.bilateral_solve_interval = 8
+            # Bounded joint drives and foot contacts need the bilateral rows
+            # resolved throughout the alternating solve to hold the stance.
+            solver_config.dvi.max_alternating_iterations = 32
+            solver_config.dvi.bilateral_solve_interval = 1
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
         else:
             self.solver = newton.solvers.SolverMuJoCo(
@@ -196,6 +198,15 @@ class Example:
                 < 0.25,  # Relaxed from 0.1 - collision pipeline has residual velocities up to ~0.2
             )
             # fmt: on
+
+        if self.solver_type == "kamino":
+            body_q = self.state_0.body_q.numpy()
+            base_heights = [body_q[i, 2] for i, label in enumerate(self.model.body_label) if label.endswith("/base")]
+            foot_heights = [body_q[i, 2] for i, label in enumerate(self.model.body_label) if label.endswith("_FOOT")]
+            if not base_heights or min(base_heights) < 0.6:
+                raise AssertionError(f"ANYmal D collapsed: base heights {base_heights}")
+            if not foot_heights or min(foot_heights) < -0.01:
+                raise AssertionError(f"ANYmal D feet sank into the ground: foot heights {foot_heights}")
 
     @staticmethod
     def create_parser():
