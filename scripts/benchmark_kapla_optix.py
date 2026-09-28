@@ -30,6 +30,9 @@ def _parse_grid(value: str) -> tuple[int, int]:
 def main() -> None:
     parser = examples.create_parser()
     parser.add_argument("--tower-grid", type=_parse_grid, default=(1, 1))
+    parser.add_argument(
+        "--no-overlap", action="store_true", help="Run physics and rendering sequentially for comparison"
+    )
     parser.set_defaults(viewer="optix", headless=True, quiet=True)
     parsed = parser.parse_args()
     module = importlib.import_module("newton._src.solvers.phoenx.examples.example_kapla_tower")
@@ -46,6 +49,8 @@ def main() -> None:
 
     viewer, args = examples.init(parser)
     example = module.Example(viewer, args)
+    if args.no_overlap:
+        example.overlap_simulation_render = False
     frame_times: list[float] = []
     original_throttle = examples._throttle_render_fps
 
