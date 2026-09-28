@@ -158,8 +158,8 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.frame_index: int = 0
-        self.sim_substeps = 6
-        self.solver_iterations = 10 if ENABLE_MASS_SPLITTING else 6
+        self.sim_substeps = 4
+        self.solver_iterations = 8 if ENABLE_MASS_SPLITTING else 6
         self.velocity_iterations = 1
 
         self._build_scene()
@@ -373,6 +373,7 @@ class Example:
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,
+            mass_splitting_overflow_only=ENABLE_MASS_SPLITTING,
             mass_splitting_batch_size=1,
             partitioner_algorithm=PARTITIONER_ALGORITHM,
             colored_contact_headers=USE_COLORED_CONTACT_HEADERS,

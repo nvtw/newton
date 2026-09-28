@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Kapla performance status</title>
+<style>
+  :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#17243b;background:#f6f8fc;font-synthesis:none}
+  *{box-sizing:border-box}body{margin:0}main{max-width:1120px;margin:auto;padding:40px 28px 80px}
+  .eyebrow{font-size:11px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:#72819b}
+  h1{font-size:clamp(38px,5vw,58px);letter-spacing:-.06em;line-height:1.03;margin:10px 0 16px}h2{font-size:20px;letter-spacing:-.03em;margin:0 0 13px}
+  p{line-height:1.55}.muted{color:#6b7890;font-size:13px}.hero{background:linear-gradient(115deg,#ffffff 30%,#edf3ff);border:1px solid #e3eaf5;border-radius:26px;padding:38px 42px;margin-bottom:18px;box-shadow:0 12px 38px #233e7310}
+  .hero p{color:#52647f;max-width:610px;margin:0}.goal{display:inline-flex;align-items:center;gap:9px;background:#e9f1ff;color:#1e54b7;border-radius:100px;padding:8px 13px;font-size:12px;font-weight:800;margin-top:23px}.dot{width:7px;height:7px;border-radius:100%;background:#3975e5}
+  .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:18px}.card{background:#fff;border:1px solid #e5eaf2;border-radius:20px;padding:25px;box-shadow:0 8px 30px #1e38590a}
+  .number{font-size:44px;font-weight:780;letter-spacing:-.06em;line-height:1.1;margin:10px 0 6px}.unit{font-size:18px;letter-spacing:-.02em}.blue{color:#2967d7}.green{color:#0b8a6b}
+  .layout{display:grid;grid-template-columns:1.45fr 1fr;gap:18px}.full{grid-column:1/-1}.callout{border-left:4px solid #3975e5;padding:4px 0 4px 17px;margin:18px 0 0}.callout strong{font-size:15px}.callout p{color:#5c6980;margin:5px 0 0;font-size:14px}
+  .rank{display:grid;grid-template-columns:25px minmax(170px,1.4fr) minmax(110px,1fr) 65px;gap:11px;align-items:center;padding:10px 2px;border-bottom:1px solid #edf0f5;font-size:13px}.rank:last-child{border:0}.rank b{font-variant-numeric:tabular-nums;text-align:right}.rank .id{color:#91a0b7;font-weight:750}.rank .name{font-weight:620}.bar{height:8px;background:#edf2fa;border-radius:20px;overflow:hidden}.bar i{display:block;height:100%;width:var(--v);background:#9bb9ed;border-radius:20px}.rank:first-child .bar i{background:#356fe0}.rank:first-child .name,.rank:first-child b{color:#215ac7}
+  .fact{padding:13px 0;border-bottom:1px solid #edf0f5}.fact:last-child{border:0}.fact strong{display:block;font-size:14px}.fact span{display:block;color:#66748b;font-size:13px;line-height:1.5;margin-top:4px}
+  code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}pre{background:#14223d;color:#dbeafe;border-radius:12px;padding:17px 20px;overflow:auto;font-size:13px;margin:14px 0 0}
+  @media(max-width:760px){main{padding:20px 14px 50px}.hero{padding:28px}.metrics,.layout{grid-template-columns:1fr}.full{grid-column:auto}.rank{grid-template-columns:20px minmax(120px,1fr) 75px}.bar{display:none}}
+</style>
+<main>
+  <header class="hero"><div class="eyebrow">Newton / PhoenX / Performance investigation</div><h1>Kapla tower</h1><p>Tracking the path from the reported 40 FPS to a stable 80+ FPS. Measurements use the RTX PRO 6000 Blackwell and the actual OptiX viewer.</p><div class="goal"><span class="dot"></span> ACTIVE GOAL · 80+ FPS WITH FULL STABILITY</div></header>
+  <div class="metrics">
+    <section class="card"><div class="eyebrow">Reported starting point</div><div class="number">~40 <span class="unit">FPS</span></div><div class="muted">Interactive tower, before changes</div></section>
+    <section class="card"><div class="eyebrow">Stable measured trial</div><div class="number blue">~66 <span class="unit">FPS</span></div><div class="muted">400 OptiX frames; tower jitter test passed</div></section>
+    <section class="card"><div class="eyebrow">Next milestone</div><div class="number green">80+ <span class="unit">FPS</span></div><div class="muted">Preserve the existing physics quality threshold</div></section>
+  </div>
+  <div class="layout">
+    <section class="card"><div class="eyebrow">GPU profile / stable 4×8 hybrid</div><h2>Top 10 kernels</h2><p class="muted">Nsight Systems · 80 headless OptiX frames · average GPU milliseconds per frame. Bars are scaled to the largest kernel.</p>
+      <div class="rank"><span class="id">01</span><span class="name">Contact solve · iterate</span><span class="bar"><i style="--v:100%"></i></span><b>7.41</b></div>
+      <div class="rank"><span class="id">02</span><span class="name">OptiX ray launch</span><span class="bar"><i style="--v:13.4%"></i></span><b>0.99</b></div>
+      <div class="rank"><span class="id">03</span><span class="name">Contact solve · prepare</span><span class="bar"><i style="--v:12.2%"></i></span><b>0.90</b></div>
+      <div class="rank"><span class="id">04</span><span class="name">Contact solve · relax</span><span class="bar"><i style="--v:11.0%"></i></span><b>0.82</b></div>
+      <div class="rank"><span class="id">05</span><span class="name">Broadcast overflow copies</span><span class="bar"><i style="--v:10.4%"></i></span><b>0.77</b></div>
+      <div class="rank"><span class="id">06</span><span class="name">SAP broad phase</span><span class="bar"><i style="--v:9.2%"></i></span><b>0.68</b></div>
+      <div class="rank"><span class="id">07</span><span class="name">Contact velocity relaxation</span><span class="bar"><i style="--v:8.6%"></i></span><b>0.64</b></div>
+      <div class="rank"><span class="id">08</span><span class="name">CUB radix sort</span><span class="bar"><i style="--v:6.5%"></i></span><b>0.48</b></div>
+      <div class="rank"><span class="id">09</span><span class="name">Rigid velocity average</span><span class="bar"><i style="--v:3.7%"></i></span><b>0.27</b></div>
+      <div class="rank"><span class="id">10</span><span class="name">Copy velocities to bodies</span><span class="bar"><i style="--v:2.6%"></i></span><b>0.20</b></div>
+      <div class="callout"><strong>What does #1 do?</strong><p>It processes one color of independent brick contacts, reads contact rows and velocities, computes collision and friction impulses, then writes updated body velocities directly. The next color depends on those writes. At 4 substeps and 8 iterations, this kernel launched 640 times per rendered frame: 51,200 launches across this trace.</p></div>
+    </section>
+    <section class="card"><div class="eyebrow">Investigation log</div><h2>What changed</h2>
+      <div class="fact"><strong>Separate CUDA streams confirmed</strong><span>Physics and OptiX already overlap. The old frame rate was dominated by physics and occasional ray-tracing stalls.</span></div>
+      <div class="fact"><strong>Renderer stall fixed</strong><span>After repeated TLAS refits, ray launch could jump from about 1 ms to 60 ms. A full rebuild after 16 refits kept rendering steady for 400 frames; the renderer regression test passes.</span></div>
+      <div class="fact"><strong>Large single world hybrid · 66 FPS</strong><span>Independent colored contacts now update rigid bodies directly; only overflow contacts use split copies. This passes the settled tower test with 4 substeps and 8 iterations and reaches about 66 FPS across 400 OptiX frames. Seven iterations fail the jitter threshold.</span></div>
+      <div class="fact"><strong>Color grouping screened</strong><span>The existing grouped-color path reached 2.87 FPS on Kapla with its required settings, versus roughly 60 FPS in the current physics-only path. Its 32-lane per-group schedule does not expose enough parallelism for this tower. The probe switches were removed.</span></div>
+      <div class="fact"><strong>Color cap tradeoff tested</strong><span>Reducing the regular color cap from nine to six failed the settled tower test; the faster schedule moved too many contacts into the split overflow pass. The cap remains nine.</span></div>
+      <div class="fact"><strong>Next structural target</strong><span>The repeated color solve still costs 7.41 ms per frame, while overflow copy broadcasts cost 0.77 ms. The remaining gap to 80 FPS needs another reduction in repeated solver work.</span></div>
+    </section>
+    <section class="card full"><div class="eyebrow">Launch</div><h2>Run the tower</h2><pre><code>uv run -m newton._src.solvers.phoenx.examples.example_kapla_tower</code></pre></section>
+  </div>
+</main>
+</html>

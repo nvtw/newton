@@ -41,8 +41,16 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         """Head-only fixed-count colour drain."""
         w = self._world
         fuse_threshold = wp.int32(-1)
-        for _ in range(self._launch_bound):
+        regular_colors = self._launch_bound
+        if w._singleworld_overflow_only_mass_splitting:
+            regular_colors -= 1
+        for _ in range(regular_colors):
             w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container)
+        if w._singleworld_overflow_only_mass_splitting:
+            w._mass_splitting_broadcast()
+            w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container)
+            w._mass_splitting_average_and_broadcast()
+            w._mass_splitting_writeback(already_averaged=True)
 
     def solve(self, idt: wp.float32) -> None:
         w = self._world
@@ -81,7 +89,8 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 idt,
                 w._contact_container_solve if w._colored_contact_rows else None,
             )
-            w._mass_splitting_average_and_broadcast(inv_dt)
+            if not w._singleworld_overflow_only_mass_splitting:
+                w._mass_splitting_average_and_broadcast(inv_dt)
         else:
             w._run_cached_prepare_bookkeeping(idt)
         if direct is not None and direct.enabled:
@@ -92,7 +101,8 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         for iteration in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             self._unrolled_sweep(iterate_head, idt, w._contact_container_solve)
-            w._mass_splitting_average_and_broadcast(inv_dt)
+            if not w._singleworld_overflow_only_mass_splitting:
+                w._mass_splitting_average_and_broadcast(inv_dt)
             if direct is not None and direct.enabled:
                 w._mass_splitting_writeback(already_averaged=True)
                 direct.solve(use_bias=iteration == w.solver_iterations - 1)
@@ -134,7 +144,8 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         for iteration in range(w._active_velocity_iterations):
             w._partitioner.begin_sweep()
             self._unrolled_sweep(relax_head, idt, w._contact_container_solve)
-            w._mass_splitting_average_and_broadcast(inv_dt)
+            if not w._singleworld_overflow_only_mass_splitting:
+                w._mass_splitting_average_and_broadcast(inv_dt)
             if direct is not None and direct.enabled:
                 w._mass_splitting_writeback(already_averaged=True)
                 direct.solve(use_bias=False)
