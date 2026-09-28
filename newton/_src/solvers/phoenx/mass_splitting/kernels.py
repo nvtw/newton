@@ -42,15 +42,18 @@ from newton._src.solvers.phoenx.access_mode import (
 )
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.mass_splitting.access import (
+    get_state_index,
     slot_synchronize_to_velocity_level,
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
 __all__ = [
+    "initialize_rigid_overflow_copy",
     "launch_average_and_broadcast",
     "launch_average_and_broadcast_grouped",
     "launch_average_and_broadcast_rigid_velocity",
+    "launch_average_rigid_velocity_into_bodies",
     "launch_broadcast_rigid_to_copy_states",
     "launch_copy_state_into_rigids",
 ]
@@ -73,6 +76,30 @@ def _section_range(copy_state: CopyStateContainer, node_id: wp.int32):
         start = copy_state.section_end[node_id - 1]
     end = copy_state.section_end[node_id]
     return start, end
+
+
+@wp.func
+def initialize_rigid_overflow_copy(
+    copy_state: CopyStateContainer,
+    bodies: BodyContainer,
+    body_id: wp.int32,
+    parallel_id: wp.int32,
+    dt: wp.float32,
+):
+    """Initialize one uniquely owned overflow copy from its rigid body."""
+    slot, _ = get_state_index(copy_state, body_id, parallel_id)
+    if slot < wp.int32(0):
+        return
+    velocity = bodies.velocity[body_id]
+    angular_velocity = bodies.angular_velocity[body_id]
+    copy_state.position[slot] = bodies.position[body_id] + dt * velocity
+    copy_state.orientation[slot] = integrate_orientation(bodies.orientation[body_id], angular_velocity, dt)
+    copy_state.velocity[slot] = velocity
+    copy_state.angular_velocity[slot] = angular_velocity
+    mode = _ACCESS_MODE_VELOCITY_LEVEL
+    if bodies.access_mode[body_id] == _ACCESS_MODE_STATIC:
+        mode = _ACCESS_MODE_STATIC
+    copy_state.access_mode[slot] = mode
 
 
 @wp.kernel(enable_backward=False)
@@ -326,6 +353,51 @@ def _average_and_broadcast_rigid_velocity_subgroup_kernel(copy_state: CopyStateC
 
 
 @wp.kernel(enable_backward=False)
+def _average_rigid_velocity_into_bodies_kernel(copy_state: CopyStateContainer, bodies: BodyContainer):
+    """Reduce overflow copies directly into their owning rigid body.
+
+    Regular colors use body velocities, and the next overflow pass
+    initializes its copies from those bodies. No intermediate copy-state
+    broadcast is needed after this reduction.
+    """
+    tid = wp.tid()
+    node_id = tid // wp.int32(8)
+    lane = tid & wp.int32(7)
+    if node_id >= bodies.velocity.shape[0]:
+        return
+
+    count = copy_state.count_per_node[node_id]
+    if count <= wp.int32(0):
+        return
+    start = wp.int32(0)
+    if node_id > wp.int32(0):
+        start = copy_state.section_end[node_id - wp.int32(1)]
+    if copy_state.access_mode[start] == _ACCESS_MODE_STATIC:
+        return
+
+    end = start + count
+    mask = wp.uint32(255) << wp.uint32(tid & wp.int32(24))
+    sum_v = wp.vec3f(0.0)
+    sum_w = wp.vec3f(0.0)
+    chunk = start
+    while chunk < end:
+        value_v = wp.vec3f(0.0)
+        value_w = wp.vec3f(0.0)
+        slot = chunk + lane
+        if slot < end:
+            value_v = copy_state.velocity[slot]
+            value_w = copy_state.angular_velocity[slot]
+        sum_v = _subgroup_accumulate8_vec3(sum_v, value_v, mask)
+        sum_w = _subgroup_accumulate8_vec3(sum_w, value_w, mask)
+        chunk += wp.int32(8)
+
+    if lane == wp.int32(0):
+        inv_count = wp.float32(1.0) / wp.float32(count)
+        bodies.velocity[node_id] = sum_v * inv_count
+        bodies.angular_velocity[node_id] = sum_w * inv_count
+
+
+@wp.kernel(enable_backward=False)
 def _average_and_broadcast_grouped_kernel(
     copy_state: CopyStateContainer,
     bodies: BodyContainer,
@@ -559,6 +631,17 @@ def launch_average_and_broadcast_rigid_velocity(
         inputs=[copy_state, bodies, particles, wp.int32(num_bodies), wp.float32(inv_dt)],
         block_dim=_MASS_SPLITTING_PER_NODE_BLOCK_DIM,
         device=device,
+    )
+
+
+def launch_average_rigid_velocity_into_bodies(copy_state: CopyStateContainer, bodies: BodyContainer) -> None:
+    """Reduce rigid overflow velocities directly into body storage."""
+    wp.launch(
+        _average_rigid_velocity_into_bodies_kernel,
+        dim=bodies.velocity.shape[0] * 8,
+        inputs=[copy_state, bodies],
+        block_dim=128,
+        device=copy_state.section_end.device,
     )
 
 

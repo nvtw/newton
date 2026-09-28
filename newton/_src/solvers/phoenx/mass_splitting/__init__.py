@@ -51,6 +51,7 @@ from newton._src.solvers.phoenx.mass_splitting.kernels import (
     launch_average_and_broadcast,
     launch_average_and_broadcast_grouped,
     launch_average_and_broadcast_rigid_velocity,
+    launch_average_rigid_velocity_into_bodies,
     launch_broadcast_rigid_to_copy_states,
     launch_copy_state_into_rigids,
 )
@@ -65,6 +66,7 @@ __all__ = [
     "launch_average_and_broadcast",
     "launch_average_and_broadcast_grouped",
     "launch_average_and_broadcast_rigid_velocity",
+    "launch_average_rigid_velocity_into_bodies",
     "launch_broadcast_rigid_to_copy_states",
     "launch_copy_state_into_rigids",
     "read_angular_velocity_unified",

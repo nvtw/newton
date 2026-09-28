@@ -158,7 +158,7 @@ class Example:
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.frame_index: int = 0
-        self.sim_substeps = 4
+        self.sim_substeps = 3
         self.solver_iterations = 8 if ENABLE_MASS_SPLITTING else 6
         self.velocity_iterations = 1
 
