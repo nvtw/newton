@@ -5939,7 +5939,6 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         body_world = model.body_world.numpy()
         shape_transform = model.shape_transform.numpy()
         shape_type = model.shape_type.numpy()
-        shape_is_solid = model.shape_is_solid.numpy()
         # MuJoCo requires every size component to be positive, so conversion below
         # fills unused zero components. Keep those edits isolated from the model's
         # CPU-backed Warp array, for which ``numpy()`` may return a writable view.
@@ -6496,6 +6495,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                         uservert=mesh_src.vertices.flatten(),
                         userface=mesh_src.indices.flatten(),
                         maxhullvert=mesh_src.maxhullvert,
+                        # Newton supplies body inertia, so MuJoCo need not compute volume inertia.
+                        inertia=mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL,
                     )
                     geom_params["meshname"] = name
                 elif stype == GeoType.MESH or stype == GeoType.CONVEX_MESH:
@@ -6543,13 +6544,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                         uservert=vertices.flatten(),
                         userface=indices.flatten(),
                         maxhullvert=maxhullvert,
-                        # Convex decomposition can produce parts too thin for MuJoCo's
-                        # volume inertia calculation. Newton supplies body inertia.
-                        inertia=(
-                            mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL
-                            if stype == GeoType.CONVEX_MESH or not shape_is_solid[shape]
-                            else mujoco.mjtMeshInertia.mjMESH_INERTIA_LEGACY
-                        ),
+                        # Newton supplies body inertia, so MuJoCo need not compute volume inertia.
+                        inertia=mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL,
                     )
                     geom_params["meshname"] = name
                 geom_params["pos"] = tf.p
