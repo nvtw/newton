@@ -31,6 +31,9 @@ def main() -> None:
     parser = examples.create_parser()
     parser.add_argument("--tower-grid", type=_parse_grid, default=(1, 1))
     parser.add_argument("--grid-broadphase", action="store_true", help="Use the uniform-grid rigid broad phase")
+    parser.add_argument(
+        "--implicit-tree-broadphase", action="store_true", help="Use the experimental implicit-BVH rigid broad phase"
+    )
     parser.add_argument("--ticks-per-frame", type=int, default=None, help="Physics ticks per rendered frame")
     parser.add_argument("--sim-substeps", type=int, default=None, help="Solver substeps per physics tick")
     parser.add_argument(
@@ -38,9 +41,12 @@ def main() -> None:
     )
     parser.set_defaults(viewer="optix", headless=True, quiet=True)
     parsed = parser.parse_args()
+    if parsed.grid_broadphase and parsed.implicit_tree_broadphase:
+        parser.error("select only one broad phase")
     module = importlib.import_module("newton._src.solvers.phoenx.examples.example_kapla_tower")
     module.TOWER_GRID_DIMS = parsed.tower_grid
     module.USE_GRID_BROAD_PHASE = parsed.grid_broadphase
+    module.USE_IMPLICIT_TREE_BROAD_PHASE = parsed.implicit_tree_broadphase
     if parsed.ticks_per_frame is not None and parsed.ticks_per_frame < 1:
         parser.error("--ticks-per-frame must be positive")
     if parsed.sim_substeps is not None and parsed.sim_substeps < 1:
