@@ -1782,6 +1782,7 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(
                 data_provider,
                 writer_data,
                 (tri_idx << 1) | 1,
+                1.0e-4 if type_a == GeoType.MESH else 0.0,
             )
 
     return narrow_phase_process_mesh_triangle_contacts_kernel
