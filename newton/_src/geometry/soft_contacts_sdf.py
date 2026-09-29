@@ -395,6 +395,11 @@ def optimize_face_sdf(
         elif dc <= da and dc <= db:
             s = wp.vec3(0.0, 0.0, 1.0)
         target = s[0] * a + s[1] * b + s[2] * c
+        # Box and capsule have exact convex SDFs and gradients. Their
+        # Frank-Wolfe gap bounds the remaining distance improvement, so skip
+        # repeated line searches once it falls below one micron.
+        if (geo == GeoType.BOX or geo == GeoType.CAPSULE) and wp.dot(grad, x - target) <= 1.0e-6:
+            break
         gamma, line_x, line_phi, line_grad = optimize_edge_sdf(
             geo, scale, x, target, shape_sdf_index, texture_sdf_table, ls_iter
         )

@@ -23,6 +23,21 @@ from newton.viewer import ViewerNull
 
 DEFORMABLE_COLLISION_CASES = ((256, 1), (16, 1024))
 
+COARSE_CLOTH_RIGID_CASES = (
+    ("box_coarse_cloth_16", "box", 4, 16, 1, False),
+    ("box_coarse_cloth_64", "box", 4, 64, 1, False),
+    ("capsule_coarse_cloth_16", "capsule", 4, 16, 1, False),
+    ("mesh_coarse_cloth_16", "mesh", 4, 16, 1, False),
+)
+
+COARSE_CLOTH_VBD_CASES = (
+    ("box_coarse_cloth_16", "box", 8, 16, 1, False),
+    ("box_coarse_cloth_64", "box", 8, 64, 1, False),
+    ("box_coarse_cloth_256", "box", 8, 256, 1, False),
+    ("capsule_coarse_cloth_16", "capsule", 8, 16, 1, False),
+    ("mesh_coarse_cloth_16", "mesh", 8, 16, 1, False),
+)
+
 DEFORMABLE_RIGID_CASES = (
     ("sphere_dense", "sphere", 64, 128, 1, False),
     ("sphere_sparse", "sphere", 64, 128, 1, True),
@@ -281,6 +296,59 @@ class DeformableRigidCollisionScale(DeformableRigidCollision):
     launch_count = 3
 
 
+class FastDeformableRigidCoarseCloth(DeformableRigidCollision):
+    """Guard collision latency for small replicated deformable scenes."""
+
+    params = (COARSE_CLOTH_RIGID_CASES,)
+    repeat = pr_gate_repeat(5)
+
+
+class FastDeformableRigidCoarseClothVBD(DeformableRigidCollision):
+    """Measure small-scene full-surface contact through the VBD solve."""
+
+    params = (COARSE_CLOTH_VBD_CASES,)
+    repeat = pr_gate_repeat(5)
+    launch_count = 5
+
+    def setup(self, case):
+        device = wp.get_device()
+        if not device.is_cuda:
+            raise SkipNotImplemented
+
+        _name, kind, resolution, world_count, shape_count, sparse = case
+        builder = newton.ModelBuilder()
+        builder.replicate(_make_deformable_rigid_world(kind, resolution, shape_count, sparse), world_count)
+        builder.color()
+        self.model = builder.finalize(device=device)
+        self.state_in = self.model.state()
+        self.state_out = self.model.state()
+        self.pipeline = newton.CollisionPipeline(
+            self.model,
+            broad_phase="nxn",
+            soft_contact_gap=0.05,
+            enable_rigid_soft_full_surface_contact=True,
+            verify_buffers=False,
+        )
+        self.contacts = self.pipeline.contacts()
+        self.solver = newton.solvers.SolverVBD(self.model, iterations=10)
+        self.control = self.model.control()
+
+        for _ in range(self.warmup_count):
+            self.pipeline.collide(self.state_in, self.contacts)
+            self.solver.step(self.state_in, self.state_out, self.control, self.contacts, 1.0 / 120.0)
+        self._verify_contact_capacity()
+        with wp.ScopedCapture(device=device) as capture:
+            self.pipeline.collide(self.state_in, self.contacts)
+            self.solver.step(self.state_in, self.state_out, self.control, self.contacts, 1.0 / 120.0)
+        self.graph = capture.graph
+
+    @skip_benchmark_if(wp.get_cuda_device_count() == 0)
+    def time_simulate(self, case):
+        for _ in range(self.launch_count):
+            wp.capture_launch(self.graph)
+        wp.synchronize_device()
+
+
 class FastExampleClothManipulation:
     timeout = 300
     repeat = 3
@@ -329,6 +397,8 @@ if __name__ == "__main__":
         "FastDeformableSelfCollision": FastDeformableSelfCollision,
         "DeformableRigidCollision": DeformableRigidCollision,
         "DeformableRigidCollisionScale": DeformableRigidCollisionScale,
+        "FastDeformableRigidCoarseCloth": FastDeformableRigidCoarseCloth,
+        "FastDeformableRigidCoarseClothVBD": FastDeformableRigidCoarseClothVBD,
         "FastExampleClothManipulation": FastExampleClothManipulation,
         "FastExampleClothTwist": FastExampleClothTwist,
     }

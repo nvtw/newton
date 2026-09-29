@@ -204,7 +204,7 @@ class TestSimulationBenchmarks(unittest.TestCase):
             self.assertFalse(any(pattern.search(benchmark_name) for pattern in patterns), benchmark_name)
 
     def test_deformable_rigid_collision_benchmarks_stay_out_of_pr_gate(self):
-        """Keep deformable-rigid collision benchmarks nightly-only."""
+        """Keep large cases nightly and guard coarse cloth in the PR gate."""
         benchmark_names = (
             "simulation.bench_cloth.DeformableRigidCollision.time_collide",
             "simulation.bench_cloth.DeformableRigidCollisionScale.time_collide",
@@ -217,6 +217,20 @@ class TestSimulationBenchmarks(unittest.TestCase):
                 self.assertFalse(any(pattern.search(benchmark_name) for pattern in patterns))
         self.assertEqual(bench_cloth.DeformableRigidCollision.repeat, 3)
         self.assertEqual(bench_cloth.DeformableRigidCollisionScale.repeat, 1)
+        coarse_name = "simulation.bench_cloth.FastDeformableRigidCoarseCloth.time_collide"
+        self.assertIn(coarse_name, inventory)
+        self.assertTrue(any(pattern.search(coarse_name) for pattern in patterns))
+        self.assertEqual(
+            {case[1] for case in bench_cloth.FastDeformableRigidCoarseCloth.params[0]},
+            {"box", "capsule", "mesh"},
+        )
+        vbd_name = "simulation.bench_cloth.FastDeformableRigidCoarseClothVBD.time_simulate"
+        self.assertIn(vbd_name, inventory)
+        self.assertTrue(any(pattern.search(vbd_name) for pattern in patterns))
+        self.assertIn(
+            ("box_coarse_cloth_256", "box", 8, 256, 1, False),
+            bench_cloth.FastDeformableRigidCoarseClothVBD.params[0],
+        )
 
     def test_deformable_rigid_benchmark_rejects_overflow(self):
         """Reject each truncated contact stream but allow exactly full buffers."""
