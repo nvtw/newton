@@ -183,11 +183,11 @@ class Example:
         state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state
         self.viewer.begin_frame(self._render_time if self._render_state_prepared else self.sim_time)
         self.viewer.log_state(state)
+        self.viewer.end_frame()
         if self._render_state_prepared:
             done = self._render_state_done[self._render_state_index]
             if done is not None:
                 wp.record_event(done)
-        self.viewer.end_frame()
         self._render_state_prepared = False
 
     def test_final(self) -> None:
