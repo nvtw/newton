@@ -173,6 +173,20 @@ _SOFT_HEX_OFF_BODY8 = wp.constant(wp.int32(8))
 # Opt-in comparison for mixed rigid colors. Eight lanes solve the rows of one
 # D6 block while the existing color launch still handles its contacts.
 _EXPERIMENTAL_COOPERATIVE_JOINTS = os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_JOINTS") == "1"
+_EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES = os.environ.get("PHOENX_EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES") == "1"
+
+
+@wp.func
+def _rigid_family_lane_allocation(count_joints: wp.int32, count_contacts: wp.int32, stride: wp.int32) -> wp.vec2i:
+    """Return joint lane count and contact lane offset for one rigid color."""
+    joint_lanes = stride
+    contact_lane_base = wp.int32(0)
+    if count_joints > wp.int32(0) and count_contacts > wp.int32(0):
+        needed_joint_lanes = ((count_joints * wp.int32(8) + wp.int32(31)) / wp.int32(32)) * wp.int32(32)
+        if needed_joint_lanes <= stride / wp.int32(2):
+            joint_lanes = needed_joint_lanes
+            contact_lane_base = joint_lanes
+    return wp.vec2i(joint_lanes, contact_lane_base)
 
 
 __all__ = [
@@ -3898,6 +3912,24 @@ def _make_singleworld_rigid_direct_color_func(
         elif wp.static(has_joints):
             contact_start = color_end
 
+        joint_lanes = stride
+        contact_lane_base = wp.int32(0)
+        if wp.static(
+            _EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES
+            and _EXPERIMENTAL_COOPERATIVE_JOINTS
+            and bilateral_joint_blocks
+            and not is_prepare
+            and not is_cached_prepare
+            and has_joints
+            and has_contacts
+            and not skip_joint_pgs
+        ):
+            count_joints = contact_start - joint_start
+            count_contacts = color_end - contact_start
+            allocation = _rigid_family_lane_allocation(count_joints, count_contacts, stride)
+            joint_lanes = allocation[0]
+            contact_lane_base = allocation[1]
+
         if wp.static(has_joints and not skip_joint_pgs):
             count_joints = contact_start - joint_start
             if wp.static(
@@ -3938,7 +3970,7 @@ def _make_singleworld_rigid_direct_color_func(
                                 sor_boost,
                                 use_bias,
                             )
-                    base = base + stride / wp.int32(8)
+                    base = base + joint_lanes / wp.int32(8)
             else:
                 base = lane
                 while base < count_joints:
@@ -3964,8 +3996,8 @@ def _make_singleworld_rigid_direct_color_func(
 
         if wp.static(has_contacts):
             count_contacts = color_end - contact_start
-            base = lane
-            while base < count_contacts:
+            base = lane - contact_lane_base
+            while base >= wp.int32(0) and base < count_contacts:
                 cid = read1d_i32(element_ids_by_color, contact_start + base)
                 _dispatch_rigid_contact(
                     contact_cols,
@@ -3981,7 +4013,7 @@ def _make_singleworld_rigid_direct_color_func(
                     contact_start + base,
                     wp.int32(0),
                 )
-                base = base + stride
+                base = base + stride - contact_lane_base
 
     return _dispatch_rigid_direct_color
 
