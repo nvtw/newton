@@ -5147,8 +5147,8 @@ def compute_rod_dahl_parameters(
 # Iteration kernels (per color per iteration)
 # -----------------------------
 @functools.cache
-def create_accumulate_body_body_contacts_per_body(has_surface_velocity: bool):
-    """Create a kernel specialized for optional surface velocity."""
+def create_accumulate_body_body_contacts_per_body():
+    """Create the rigid contact accumulation kernel."""
 
     @wp.kernel(module="unique")
     def accumulate_body_body_contacts_per_body(
@@ -5286,7 +5286,7 @@ def create_accumulate_body_body_contacts_per_body(has_surface_velocity: bool):
             contact_mu = contact_material_mu[contact_idx]
 
             surface_velocity = wp.vec3(0.0)
-            if wp.static(has_surface_velocity):
+            if rigid_contact_surface_velocity:
                 surface_velocity = rigid_contact_surface_velocity[contact_idx]
 
             (
@@ -5353,8 +5353,8 @@ def create_accumulate_body_body_contacts_per_body(has_surface_velocity: bool):
 
 
 @functools.cache
-def create_compute_rigid_contact_forces(has_surface_velocity: bool):
-    """Create a kernel specialized for optional surface velocity."""
+def create_compute_rigid_contact_forces():
+    """Create the rigid contact force kernel."""
 
     @wp.kernel(module="unique")
     def compute_rigid_contact_forces(
@@ -5476,7 +5476,7 @@ def create_compute_rigid_contact_forces(has_surface_velocity: bool):
         contact_mu = contact_material_mu[contact_idx]
 
         surface_velocity = wp.vec3(0.0)
-        if wp.static(has_surface_velocity):
+        if rigid_contact_surface_velocity:
             surface_velocity = rigid_contact_surface_velocity[contact_idx]
 
         (
@@ -5523,12 +5523,10 @@ def create_compute_rigid_contact_forces(has_surface_velocity: bool):
     return compute_rigid_contact_forces
 
 
-compute_rigid_contact_forces = create_compute_rigid_contact_forces(False)
-compute_rigid_contact_forces_surface_velocity = create_compute_rigid_contact_forces(True)
+compute_rigid_contact_forces = create_compute_rigid_contact_forces()
 
 
-accumulate_body_body_contacts_per_body = create_accumulate_body_body_contacts_per_body(False)
-accumulate_body_body_contacts_per_body_surface_velocity = create_accumulate_body_body_contacts_per_body(True)
+accumulate_body_body_contacts_per_body = create_accumulate_body_body_contacts_per_body()
 
 
 @wp.kernel
@@ -6587,8 +6585,8 @@ def update_duals_joint(
 
 
 @functools.cache
-def create_update_duals_body_body_contacts(has_surface_velocity: bool):
-    """Create a kernel specialized for optional surface velocity."""
+def create_update_duals_body_body_contacts():
+    """Create the rigid contact dual update kernel."""
 
     @wp.kernel(module="unique")
     def update_duals_body_body_contacts(
@@ -6682,7 +6680,7 @@ def create_update_duals_body_body_contacts(has_surface_velocity: bool):
                 C_stab_n = C_n_raw
 
             rel_disp = (a0_world - a0_prev) - (a1_world - a1_prev)
-            if wp.static(has_surface_velocity):
+            if rigid_contact_surface_velocity:
                 rel_disp -= rigid_contact_surface_velocity[idx] * dt
             tangential_disp = rel_disp - n * wp.dot(n, rel_disp)
             tangent_residual = tangential_disp + (1.0 - stab_alpha) * C0_t_vec
@@ -6715,8 +6713,7 @@ def create_update_duals_body_body_contacts(has_surface_velocity: bool):
     return update_duals_body_body_contacts
 
 
-update_duals_body_body_contacts = create_update_duals_body_body_contacts(False)
-update_duals_body_body_contacts_surface_velocity = create_update_duals_body_body_contacts(True)
+update_duals_body_body_contacts = create_update_duals_body_body_contacts()
 
 
 @wp.kernel

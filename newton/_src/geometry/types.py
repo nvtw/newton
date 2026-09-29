@@ -148,7 +148,7 @@ class Mesh:
             ``compute_inertia`` is ``True``.
         com [m]: Mesh center of mass in local coordinates.
         inertia [kg*m^2]: Mesh inertia tensor about :attr:`com` in local coordinates.
-        enable_surface_velocity: Whether rigid contacts sample the finalized Warp
+        enable_surface_velocity: If True, rigid contacts sample the finalized Warp
             mesh's per-vertex velocities for contact friction.
         mesh: Most recently finalized Warp mesh. Its ``velocities`` array may be
             updated on the device to prescribe per-vertex surface motion [m/s].

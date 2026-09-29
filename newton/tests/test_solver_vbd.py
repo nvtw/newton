@@ -40,11 +40,9 @@ from newton._src.solvers.vbd.rigid_vbd_kernels import (
     _evaluate_rigid_soft_contact_force_norm,
     _joint_angular_rho_seed,
     accumulate_body_body_contacts_per_body,
-    accumulate_body_body_contacts_per_body_surface_velocity,
     build_body_body_contact_lists,
     build_body_particle_contact_lists,
     compute_rigid_contact_forces,
-    compute_rigid_contact_forces_surface_velocity,
     evaluate_angular_constraint_force_hessian,
     evaluate_body_particle_contact,
     evaluate_linear_constraint_force_hessian,
@@ -58,7 +56,6 @@ from newton._src.solvers.vbd.rigid_vbd_kernels import (
     snapshot_body_body_contact_history,
     step_body_body_contact_C0_lambda,
     update_duals_body_body_contacts,
-    update_duals_body_body_contacts_surface_velocity,
     update_duals_body_particle_contacts,
     update_duals_joint,
 )
@@ -4876,7 +4873,7 @@ def _tet_only_tile_solve_matches_legacy_bits(test, device):
 
 class TestSolverVBD(unittest.TestCase):
     def test_contact_kernel_modules_follow_deterministic_mode(self):
-        """Apply VBD deterministic options to specialized contact modules."""
+        """Apply VBD deterministic options to rigid contact kernels."""
         builder = newton.ModelBuilder()
         builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
         builder.color()
@@ -4890,11 +4887,8 @@ class TestSolverVBD(unittest.TestCase):
 
         kernels = (
             accumulate_body_body_contacts_per_body,
-            accumulate_body_body_contacts_per_body_surface_velocity,
             compute_rigid_contact_forces,
-            compute_rigid_contact_forces_surface_velocity,
             update_duals_body_body_contacts,
-            update_duals_body_body_contacts_surface_velocity,
         )
         for kernel in kernels:
             options = wp.get_module_options(module=kernel.module)

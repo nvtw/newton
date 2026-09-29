@@ -271,10 +271,10 @@ class Contacts:
             """Body-frame contact point on shape 0 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
             self.rigid_contact_point1 = wp.zeros(rigid_contact_max, dtype=wp.vec3)
             """Body-frame contact point on shape 1 [m], shape (rigid_contact_max,), dtype :class:`vec3`."""
-            self.rigid_contact_surface_velocity = wp.zeros(
-                rigid_contact_max if rigid_contact_surface_velocity else 0, dtype=wp.vec3
+            self.rigid_contact_surface_velocity = (
+                wp.zeros(rigid_contact_max, dtype=wp.vec3) if rigid_contact_surface_velocity else None
             )
-            """World-space surface velocity of shape 1 relative to shape 0 [m/s]. Empty when disabled."""
+            """World-space surface velocity of shape 1 relative to shape 0 [m/s], or None when disabled."""
             self.rigid_contact_offset0 = wp.zeros(rigid_contact_max, dtype=wp.vec3)
             """Body-frame friction anchor offset for shape 0 [m], shape (rigid_contact_max,), dtype :class:`vec3`.
 

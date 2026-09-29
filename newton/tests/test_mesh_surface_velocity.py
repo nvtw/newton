@@ -35,7 +35,29 @@ def test_mesh_surface_velocity_is_opt_in(test, device):
     pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
     contacts = pipeline.contacts()
 
-    test.assertEqual(len(contacts.rigid_contact_surface_velocity), 0)
+    test.assertIsNone(contacts.rigid_contact_surface_velocity)
+
+
+def test_disabled_surface_velocity_runs_rigid_solver(test, device, solver_name):
+    """Accept an absent surface-velocity buffer in every rigid solver."""
+    mesh = newton.Mesh.create_plane(1.0, 1.0, compute_inertia=False)
+    builder = newton.ModelBuilder()
+    builder.add_shape_mesh(body=-1, mesh=mesh)
+    body = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 0.19), wp.quat_identity()))
+    builder.add_shape_box(body=body, hx=0.2, hy=0.2, hz=0.2)
+    builder.add_articulation([builder.add_joint_free(body)])
+    builder.color()
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
+    contacts = pipeline.contacts()
+    test.assertIsNone(contacts.rigid_contact_surface_velocity)
+
+    state_in = model.state()
+    state_out = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+    pipeline.collide(state_in, contacts)
+    test.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+    _make_solver(solver_name, model).step(state_in, state_out, model.control(), contacts, 1.0 / 240.0)
 
 
 def test_mesh_surface_velocity_is_not_recorded_on_tape(test, device):
@@ -316,6 +338,13 @@ for test_device in devices:
             TestMeshSurfaceVelocity,
             f"test_mesh_surface_velocity_moves_rigid_body_{name}",
             test_mesh_surface_velocity_moves_rigid_body,
+            devices=[test_device],
+            solver_name=name,
+        )
+        add_function_test(
+            TestMeshSurfaceVelocity,
+            f"test_disabled_surface_velocity_runs_rigid_solver_{name}",
+            test_disabled_surface_velocity_runs_rigid_solver,
             devices=[test_device],
             solver_name=name,
         )

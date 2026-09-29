@@ -11,7 +11,6 @@ from ..coupled.interface import CouplingInterface
 from ..semi_implicit import kernels_contact, kernels_muscle, kernels_particle
 from ..semi_implicit.kernels_contact import (
     eval_body_contact,
-    eval_body_contact_surface_velocity,
     eval_particle_body_contact_forces,
     eval_particle_contact_forces,
 )
@@ -676,9 +675,8 @@ class SolverFeatherstone(SolverBase, CouplingInterface):
                 )
 
                 if contacts is not None and contacts.rigid_contact_max:
-                    has_surface_velocity = len(contacts.rigid_contact_surface_velocity) > 0
                     wp.launch(
-                        kernel=(eval_body_contact_surface_velocity if has_surface_velocity else eval_body_contact),
+                        kernel=eval_body_contact,
                         dim=contacts.rigid_contact_max,
                         inputs=[
                             state_in.body_q,
@@ -693,7 +691,7 @@ class SolverFeatherstone(SolverBase, CouplingInterface):
                             contacts.rigid_contact_count,
                             contacts.rigid_contact_point0,
                             contacts.rigid_contact_point1,
-                            *([contacts.rigid_contact_surface_velocity] if has_surface_velocity else []),
+                            contacts.rigid_contact_surface_velocity,
                             contacts.rigid_contact_normal,
                             contacts.rigid_contact_shape0,
                             contacts.rigid_contact_shape1,

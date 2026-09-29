@@ -23,7 +23,6 @@ from .kernels import (
     convert_joint_impulse_to_parent_f,
     copy_kinematic_body_state_kernel,
     solve_body_contact_positions,
-    solve_body_contact_positions_surface_velocity,
     solve_body_joints,
     solve_joint_mimics,
     solve_particle_particle_contacts,
@@ -742,13 +741,8 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                 device=model.device,
                             )
 
-                        has_surface_velocity = len(contacts.rigid_contact_surface_velocity) > 0
                         wp.launch(
-                            kernel=(
-                                solve_body_contact_positions_surface_velocity
-                                if has_surface_velocity
-                                else solve_body_contact_positions
-                            ),
+                            kernel=solve_body_contact_positions,
                             dim=contacts.rigid_contact_max,
                             inputs=[
                                 body_q,
@@ -761,7 +755,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
                                 contacts.rigid_contact_count,
                                 contacts.rigid_contact_point0,
                                 contacts.rigid_contact_point1,
-                                *([contacts.rigid_contact_surface_velocity] if has_surface_velocity else []),
+                                contacts.rigid_contact_surface_velocity,
                                 contacts.rigid_contact_offset0,
                                 contacts.rigid_contact_offset1,
                                 contacts.rigid_contact_normal,

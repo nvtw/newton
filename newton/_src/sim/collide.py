@@ -2572,7 +2572,10 @@ class CollisionPipeline:
             )
 
         if self._rigid_contact_surface_velocity and contacts.rigid_contact_max > 0:
-            if len(contacts.rigid_contact_surface_velocity) < contacts.rigid_contact_max:
+            if (
+                contacts.rigid_contact_surface_velocity is None
+                or len(contacts.rigid_contact_surface_velocity) < contacts.rigid_contact_max
+            ):
                 raise ValueError(
                     "contacts must allocate rigid surface velocities for this model; use CollisionPipeline.contacts()"
                 )

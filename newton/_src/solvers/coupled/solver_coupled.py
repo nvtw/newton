@@ -2779,7 +2779,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 ],
                 device=self.model.device,
             )
-            if len(contacts.rigid_contact_surface_velocity) > 0:
+            if contacts.rigid_contact_surface_velocity is not None:
                 wp.launch(
                     _copy_filtered_rigid_contact_surface_velocity_kernel,
                     dim=contacts.rigid_contact_max,
@@ -2887,7 +2887,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 per_contact_shape_properties=contacts.per_contact_shape_properties,
                 requested_attributes=requested,
                 contact_matching=contacts.rigid_contact_match_index is not None,
-                rigid_contact_surface_velocity=len(contacts.rigid_contact_surface_velocity) > 0,
+                rigid_contact_surface_velocity=contacts.rigid_contact_surface_velocity is not None,
             )
             self._entry_contact_buffers[entry.name] = filtered
             self._entry_contact_sources[entry.name] = contacts
@@ -2941,7 +2941,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
             and filtered.per_contact_shape_properties == contacts.per_contact_shape_properties
             and (filtered.force is not None) == (contacts.force is not None)
             and (filtered.rigid_contact_match_index is not None) == (contacts.rigid_contact_match_index is not None)
-            and (len(filtered.rigid_contact_surface_velocity) > 0) == (len(contacts.rigid_contact_surface_velocity) > 0)
+            and (filtered.rigid_contact_surface_velocity is None) == (contacts.rigid_contact_surface_velocity is None)
         )
 
     def _refresh_model_view_overrides(self, flags: int) -> None:

@@ -2705,66 +2705,6 @@ def solve_body_contact_positions(
     contact_count: wp.array[int],
     contact_point0: wp.array[wp.vec3],
     contact_point1: wp.array[wp.vec3],
-    contact_offset0: wp.array[wp.vec3],
-    contact_offset1: wp.array[wp.vec3],
-    contact_normal: wp.array[wp.vec3],
-    contact_thickness0: wp.array[float],
-    contact_thickness1: wp.array[float],
-    contact_shape0: wp.array[int],
-    contact_shape1: wp.array[int],
-    shape_material_mu: wp.array[float],
-    shape_material_mu_torsional: wp.array[float],
-    shape_material_mu_rolling: wp.array[float],
-    relaxation: float,
-    dt: float,
-    deltas: wp.array[wp.spatial_vector],
-    contact_inv_weight: wp.array[float],
-    contact_impulse: wp.array[wp.spatial_vector],
-):
-    tid = wp.tid()
-    _solve_body_contact_positions(
-        body_q,
-        body_qd,
-        body_flags,
-        body_com,
-        body_m_inv,
-        body_I_inv,
-        shape_body,
-        contact_count,
-        contact_point0,
-        contact_point1,
-        wp.vec3(0.0),
-        contact_offset0,
-        contact_offset1,
-        contact_normal,
-        contact_thickness0,
-        contact_thickness1,
-        contact_shape0,
-        contact_shape1,
-        shape_material_mu,
-        shape_material_mu_torsional,
-        shape_material_mu_rolling,
-        relaxation,
-        dt,
-        deltas,
-        contact_inv_weight,
-        contact_impulse,
-        tid,
-    )
-
-
-@wp.kernel
-def solve_body_contact_positions_surface_velocity(
-    body_q: wp.array[wp.transform],
-    body_qd: wp.array[wp.spatial_vector],
-    body_flags: wp.array[wp.int32],
-    body_com: wp.array[wp.vec3],
-    body_m_inv: wp.array[float],
-    body_I_inv: wp.array[wp.mat33],
-    shape_body: wp.array[int],
-    contact_count: wp.array[int],
-    contact_point0: wp.array[wp.vec3],
-    contact_point1: wp.array[wp.vec3],
     contact_surface_velocity: wp.array[wp.vec3],
     contact_offset0: wp.array[wp.vec3],
     contact_offset1: wp.array[wp.vec3],
@@ -2783,6 +2723,9 @@ def solve_body_contact_positions_surface_velocity(
     contact_impulse: wp.array[wp.spatial_vector],
 ):
     tid = wp.tid()
+    surface_velocity = wp.vec3(0.0)
+    if contact_surface_velocity:
+        surface_velocity = contact_surface_velocity[tid]
     _solve_body_contact_positions(
         body_q,
         body_qd,
@@ -2794,7 +2737,7 @@ def solve_body_contact_positions_surface_velocity(
         contact_count,
         contact_point0,
         contact_point1,
-        contact_surface_velocity[tid],
+        surface_velocity,
         contact_offset0,
         contact_offset1,
         contact_normal,
