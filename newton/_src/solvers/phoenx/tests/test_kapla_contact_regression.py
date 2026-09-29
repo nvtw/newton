@@ -29,6 +29,33 @@ from newton.viewer import ViewerNull
 class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
     """Primitive Kapla contacts must settle after graph-captured stepping."""
 
+    def test_four_towers_retain_structure_with_one_velocity_iteration(self) -> None:
+        """A settled but collapsed tower must not pass the stability check."""
+        old_dims = example_kapla_tower.TOWER_GRID_DIMS
+        old_grid = example_kapla_tower.USE_GRID_BROAD_PHASE
+        try:
+            example_kapla_tower.TOWER_GRID_DIMS = (2, 2)
+            example_kapla_tower.USE_GRID_BROAD_PHASE = True
+            example = example_kapla_tower.Example(
+                ViewerNull(),
+                SimpleNamespace(solver="classic", max_colors=10),
+            )
+            initial = example.bodies.position.numpy()
+            for _ in range(600):
+                example.step()
+            final = example.bodies.position.numpy()
+            self.assertEqual(example.velocity_iterations, 1)
+            for tower, newton_ids in enumerate(example._brick_newton_ids):
+                ids = np.asarray(newton_ids, dtype=np.int32) + 1
+                displacement = np.linalg.norm(final[ids] - initial[ids], axis=1)
+                fallen = (initial[ids, 2] > 1.0) & (final[ids, 2] < initial[ids, 2] - 0.5)
+                with self.subTest(tower=tower):
+                    self.assertLess(float(np.mean(displacement > 0.1)), 0.05)
+                    self.assertFalse(bool(np.any(fallen)))
+        finally:
+            example_kapla_tower.TOWER_GRID_DIMS = old_dims
+            example_kapla_tower.USE_GRID_BROAD_PHASE = old_grid
+
     def test_benchmark_camera_tracks_configured_collider_position(self) -> None:
         viewer = _HeadlessViewer()
         viewer.set_camera(pos=wp.vec3(1.2, 0.75, 0.4))
@@ -46,8 +73,8 @@ class TestPhoenXKaplaPrimitiveContacts(unittest.TestCase):
             SimpleNamespace(solver="classic", max_colors=10),
         )
         self.assertEqual(example_kapla_tower.MASS_SPLITTING_MAX_COLORED_PARTITIONS, 9)
-        self.assertEqual(example.sim_substeps, 3)
-        self.assertEqual(example.solver_iterations, 8)
+        self.assertEqual(example.sim_substeps, 4)
+        self.assertEqual(example.solver_iterations, 10)
         self.assertTrue(example.world._singleworld_overflow_only_mass_splitting)
         for _ in range(example.WARMUP_FRAMES + 1):
             example.step()
