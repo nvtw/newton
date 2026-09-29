@@ -29,8 +29,16 @@ def _transform(values):
     return wp.transform(wp.vec3(*values[:3]), wp.quat(*values[3:]))
 
 
-def make_hoberman_builder(*, collidable: bool = False, gravity=(0.0, 0.0, 0.0)) -> newton.ModelBuilder:
-    """Build one jointed sphere from neutral body, joint, and tile data."""
+def make_hoberman_builder(
+    *,
+    collidable: bool = False,
+    gravity=(0.0, 0.0, 0.0),
+    mid_spring_stiffness: float = 0.0,
+    mid_spring_damping: float = 0.0,
+) -> newton.ModelBuilder:
+    """Build a sphere, optionally springing each middle cross hinge to its authored angle."""
+    if mid_spring_stiffness < 0.0 or mid_spring_damping < 0.0:
+        raise ValueError("Hoberman spring stiffness and damping must be nonnegative")
     builder = newton.ModelBuilder(gravity=gravity)
     for label, pose, com, inertia, mass in hoberman_sphere_data.BODIES:
         builder.add_link(
@@ -57,12 +65,23 @@ def make_hoberman_builder(*, collidable: bool = False, gravity=(0.0, 0.0, 0.0)) 
             linear_axes, angular_axes = axes[:3], axes[3:]
         else:
             linear_axes, angular_axes = (), axes
+        spring_cross_hinge = joint_type == newton.JointType.REVOLUTE and "_mid" in label
+        spring_kwargs = (
+            {
+                "target_pos": coordinates[0],
+                "target_ke": mid_spring_stiffness,
+                "target_kd": mid_spring_damping,
+                "actuator_mode": newton.JointTargetMode.POSITION,
+            }
+            if spring_cross_hinge and mid_spring_stiffness > 0.0
+            else {}
+        )
         joint_index = builder.add_joint(
             joint_type,
             parent,
             child,
             linear_axes=[newton.ModelBuilder.JointDofConfig(axis=axis) for axis in linear_axes],
-            angular_axes=[newton.ModelBuilder.JointDofConfig(axis=axis) for axis in angular_axes],
+            angular_axes=[newton.ModelBuilder.JointDofConfig(axis=axis, **spring_kwargs) for axis in angular_axes],
             label=label,
             parent_xform=_transform(parent_frame),
             child_xform=_transform(child_frame),
