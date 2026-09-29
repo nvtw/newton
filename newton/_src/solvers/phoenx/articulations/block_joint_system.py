@@ -7,9 +7,11 @@ import warp as wp
 
 from ..body import BodyContainer, mat33_from_sym6
 from ..constraints.bilateral_joint import (
+    EXPERIMENTAL_COOPERATIVE_JOINT_INVERSE,
     EXPERIMENTAL_JOINT_INVERSE,
     _prepare_bilateral_joint_blocks_cooperative,
     invert_prepared_bilateral_joint_blocks,
+    invert_prepared_bilateral_joint_blocks_cooperative,
     prepare_bilateral_joint_blocks,
 )
 from ..constraints.bilateral_joint_data import BilateralJointData, Mat66d, Vec6d
@@ -241,12 +243,21 @@ class BlockJointSystem(DirectEqualitySystem):
                     device=self.model.device,
                 )
             if EXPERIMENTAL_JOINT_INVERSE:
-                wp.launch(
-                    invert_prepared_bilateral_joint_blocks,
-                    dim=world.num_joints,
-                    inputs=[world.constraints],
-                    device=self.model.device,
-                )
+                if self.model.device.is_cuda and EXPERIMENTAL_COOPERATIVE_JOINT_INVERSE:
+                    wp.launch(
+                        invert_prepared_bilateral_joint_blocks_cooperative,
+                        dim=8 * world.num_joints,
+                        inputs=[world.constraints],
+                        device=self.model.device,
+                        block_dim=32,
+                    )
+                else:
+                    wp.launch(
+                        invert_prepared_bilateral_joint_blocks,
+                        dim=world.num_joints,
+                        inputs=[world.constraints],
+                        device=self.model.device,
+                    )
 
     def solve(self, *, use_bias, refine=True):
         # Match the direct equality solve interface. Block systems always

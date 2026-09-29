@@ -21,6 +21,7 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 
 # Temporary experiment; select before importing PhoenX in the benchmark process.
 EXPERIMENTAL_JOINT_INVERSE = os.environ.get("PHOENX_EXPERIMENTAL_JOINT_INVERSE") == "1"
+EXPERIMENTAL_COOPERATIVE_JOINT_INVERSE = os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_JOINT_INVERSE") == "1"
 
 
 @wp.func
@@ -177,6 +178,33 @@ def _solve_bilateral_impulses(
     return _backward_bilateral_impulses(data, cid, count, structural, solution)
 
 
+@wp.func
+def _invert_bilateral_column(lower: Mat66d, diagonal: Vec6d, count: wp.int32, column: wp.int32) -> Vec6d:
+    """Solve one inverse column in the scalar kernel's FP64 operation order."""
+    solution = Vec6d()
+    for i in range(6):
+        if i < count:
+            value = wp.float64(0.0)
+            if i == column:
+                value = wp.float64(1.0)
+            for j in range(6):
+                if j < i:
+                    value -= lower[i, j] * solution[j]
+            solution[i] = value
+    for i in range(6):
+        if i < count:
+            solution[i] /= diagonal[i]
+    for reverse in range(6):
+        i = 5 - reverse
+        if i < count:
+            value = solution[i]
+            for j in range(6):
+                if j > i and j < count:
+                    value -= lower[j, i] * solution[j]
+            solution[i] = value
+    return solution
+
+
 @wp.kernel(enable_backward=False)
 def invert_prepared_bilateral_joint_blocks(constraints: ConstraintContainer):
     """Precompute the inverse mass-metric block for repeated PGS sweeps."""
@@ -190,27 +218,7 @@ def invert_prepared_bilateral_joint_blocks(constraints: ConstraintContainer):
     inverse = Mat66d()
     for column in range(6):
         if column < count:
-            solution = Vec6d()
-            for i in range(6):
-                if i < count:
-                    value = wp.float64(0.0)
-                    if i == column:
-                        value = wp.float64(1.0)
-                    for j in range(6):
-                        if j < i:
-                            value -= lower[i, j] * solution[j]
-                    solution[i] = value
-            for i in range(6):
-                if i < count:
-                    solution[i] /= diagonal[i]
-            for reverse in range(6):
-                i = 5 - reverse
-                if i < count:
-                    value = solution[i]
-                    for j in range(6):
-                        if j > i and j < count:
-                            value -= lower[j, i] * solution[j]
-                    solution[i] = value
+            solution = _invert_bilateral_column(lower, diagonal, count, column)
             for i in range(6):
                 if i < count:
                     inverse[i, column] = solution[i]
@@ -229,6 +237,31 @@ def invert_prepared_bilateral_joint_blocks(constraints: ConstraintContainer):
 """
 )
 def _shuffle_bilateral_rhs(value: wp.float64, source_lane: wp.int32) -> wp.float64: ...
+
+
+@wp.kernel(enable_backward=False)
+def invert_prepared_bilateral_joint_blocks_cooperative(constraints: ConstraintContainer):
+    """Invert independent D6 columns with eight CUDA lanes per joint."""
+    tid = wp.tid()
+    cid = tid // wp.int32(8)
+    column = tid % wp.int32(8)
+    data = constraints.bilateral
+    count = data.row_count[cid]
+    if count == wp.int32(0) or data.valid[cid] == wp.int32(0):
+        return
+    lower = data.lower[cid]
+    diagonal = data.diagonal[cid]
+    solution = Vec6d()
+    if column < count:
+        solution = _invert_bilateral_column(lower, diagonal, count, column)
+    inverse = Mat66d()
+    for i in range(6):
+        for j in range(6):
+            entry = _shuffle_bilateral_rhs(solution[i], j)
+            if column == wp.int32(0):
+                inverse[i, j] = entry
+    if column == wp.int32(0):
+        data.inverse[cid] = inverse
 
 
 @wp.func_native("""
