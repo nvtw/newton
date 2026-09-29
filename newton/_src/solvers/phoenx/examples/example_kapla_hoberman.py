@@ -95,6 +95,7 @@ class Example:
             self.model.shape_world,
             shape_flags=self.model.shape_flags,
             cell_width=0.6,
+            pair_mode="warp_deterministic",
             device=self.device,
         )
         self.collision_pipeline = pipeline

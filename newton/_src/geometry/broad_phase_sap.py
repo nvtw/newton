@@ -516,7 +516,71 @@ def _sap_select_sweep_kernel(
         sweep_mode[0] = wp.int32(1)
 
 
+def _make_sap_accept_pair_func(filter_func: Any):
+    @wp.func
+    def accept_pair(
+        shape1_tmp: wp.int32,
+        shape2_tmp: wp.int32,
+        world_id: wp.int32,
+        num_regular_worlds: wp.int32,
+        shape_bounding_box_lower: wp.array[wp.vec3],
+        shape_bounding_box_upper: wp.array[wp.vec3],
+        shape_gap: wp.array[float],
+        shape_displacement: wp.array[wp.vec3],
+        collision_group: wp.array[int],
+        shape_world: wp.array[int],
+        filter_pairs: wp.array[wp.vec2i],
+        num_filter_pairs: wp.int32,
+        shape_body: wp.array[int],
+        body_flags: wp.array[int],
+        include_static_kinematic_pairs: wp.bool,
+        filter_data: Any,
+    ) -> wp.bool:
+        if shape1_tmp == shape2_tmp:
+            return False
+        shape1 = wp.min(shape1_tmp, shape2_tmp)
+        shape2 = wp.max(shape1_tmp, shape2_tmp)
+        col_group1 = collision_group[shape1]
+        col_group2 = collision_group[shape2]
+        world1 = shape_world[shape1]
+        world2 = shape_world[shape2]
+        is_dedicated_minus_one_segment = world_id >= num_regular_worlds
+        if world1 == wp.int32(-1) and world2 == wp.int32(-1) and not is_dedicated_minus_one_segment:
+            return False
+        if not test_world_and_group_pair(world1, world2, col_group1, col_group2):
+            return False
+
+        pair = wp.vec2i(shape1, shape2)
+        if is_shape_pair_same_body_filtered(shape1, shape2, shape_body):
+            return False
+        if is_shape_pair_immovable_filtered(shape1, shape2, shape_body, body_flags, include_static_kinematic_pairs):
+            return False
+        if num_filter_pairs > wp.int32(0) and is_pair_excluded(pair, filter_pairs, num_filter_pairs):
+            return False
+
+        gap1 = wp.float32(0.0)
+        gap2 = wp.float32(0.0)
+        if shape_gap.shape[0] > 0:
+            gap1 = shape_gap[shape1]
+            gap2 = shape_gap[shape2]
+        if not check_aabb_overlap_moving(
+            shape1,
+            shape2,
+            shape_bounding_box_lower,
+            shape_bounding_box_upper,
+            gap1,
+            gap2,
+            shape_displacement,
+        ):
+            return False
+        return filter_func(pair, filter_data) != wp.int32(0)
+
+    return accept_pair
+
+
 def _make_sap_process_pair_func(filter_func: Any):
+    accept_pair = _make_sap_accept_pair_func(filter_func)
+
     @wp.func
     def process_pair(
         shape1_tmp: wp.int32,
@@ -539,45 +603,32 @@ def _make_sap_process_pair_func(filter_func: Any):
         candidate_pair_count: wp.array[int],
         max_candidate_pair: wp.int32,
     ):
-        if shape1_tmp == shape2_tmp:
-            return
-        shape1 = wp.min(shape1_tmp, shape2_tmp)
-        shape2 = wp.max(shape1_tmp, shape2_tmp)
-        col_group1 = collision_group[shape1]
-        col_group2 = collision_group[shape2]
-        world1 = shape_world[shape1]
-        world2 = shape_world[shape2]
-        is_dedicated_minus_one_segment = world_id >= num_regular_worlds
-        if world1 == wp.int32(-1) and world2 == wp.int32(-1) and not is_dedicated_minus_one_segment:
-            return
-        if not test_world_and_group_pair(world1, world2, col_group1, col_group2):
-            return
-
-        pair = wp.vec2i(shape1, shape2)
-        if is_shape_pair_same_body_filtered(shape1, shape2, shape_body):
-            return
-        if is_shape_pair_immovable_filtered(shape1, shape2, shape_body, body_flags, include_static_kinematic_pairs):
-            return
-        if num_filter_pairs > wp.int32(0) and is_pair_excluded(pair, filter_pairs, num_filter_pairs):
-            return
-
-        gap1 = wp.float32(0.0)
-        gap2 = wp.float32(0.0)
-        if shape_gap.shape[0] > 0:
-            gap1 = shape_gap[shape1]
-            gap2 = shape_gap[shape2]
-        if not check_aabb_overlap_moving(
-            shape1,
-            shape2,
+        if accept_pair(
+            shape1_tmp,
+            shape2_tmp,
+            world_id,
+            num_regular_worlds,
             shape_bounding_box_lower,
             shape_bounding_box_upper,
-            gap1,
-            gap2,
+            shape_gap,
             shape_displacement,
+            collision_group,
+            shape_world,
+            filter_pairs,
+            num_filter_pairs,
+            shape_body,
+            body_flags,
+            include_static_kinematic_pairs,
+            filter_data,
         ):
-            return
-        if filter_func(pair, filter_data) != wp.int32(0):
-            write_pair(pair, candidate_pair, candidate_pair_count, max_candidate_pair)
+            candidate_pair_shape0 = wp.min(shape1_tmp, shape2_tmp)
+            candidate_pair_shape1 = wp.max(shape1_tmp, shape2_tmp)
+            write_pair(
+                wp.vec2i(candidate_pair_shape0, candidate_pair_shape1),
+                candidate_pair,
+                candidate_pair_count,
+                max_candidate_pair,
+            )
 
     return process_pair
 

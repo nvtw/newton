@@ -41,7 +41,10 @@ class TestBroadPhaseGrid(unittest.TestCase):
         sap = BroadPhaseSAP(world, shape_flags=flags, direction_search=False, device=device)
         # One slot per shape forces the overflow path. Shape zero also spans
         # many cells and must use the large-shape side pass.
-        grid = BroadPhaseGrid(world, shape_flags=flags, capacity_factor=1, device=device)
+        grids = [
+            BroadPhaseGrid(world, shape_flags=flags, capacity_factor=1, pair_mode=mode, device=device)
+            for mode in ("scalar", "warp_deterministic")
+        ]
         pairs_sap = wp.empty(shape_count * shape_count, dtype=wp.vec2i, device=device)
         pairs_grid = wp.empty(shape_count * shape_count, dtype=wp.vec2i, device=device)
         count_sap = wp.zeros(1, dtype=wp.int32, device=device)
@@ -83,14 +86,21 @@ class TestBroadPhaseGrid(unittest.TestCase):
             lower.assign(low)
             upper.assign(high)
             launch(sap, pairs_sap, count_sap)
-            launch(grid, pairs_grid, count_grid)
-            self.assertEqual(pair_set(pairs_sap, count_sap), pair_set(pairs_grid, count_grid))
+            expected = pair_set(pairs_sap, count_sap)
+            for grid in grids:
+                launch(grid, pairs_grid, count_grid)
+                self.assertEqual(expected, pair_set(pairs_grid, count_grid))
+                if grid.pair_mode == "warp_deterministic":
+                    emitted = pairs_grid.numpy()[: int(count_grid.numpy()[0])].copy()
+                    launch(grid, pairs_grid, count_grid)
+                    np.testing.assert_array_equal(emitted, pairs_grid.numpy()[: len(emitted)])
 
-        count_grid.zero_()
-        with wp.ScopedCapture(device=device) as capture:
-            launch(grid, pairs_grid, count_grid)
-        wp.capture_launch(capture.graph)
-        self.assertEqual(pair_set(pairs_sap, count_sap), pair_set(pairs_grid, count_grid))
+        for grid in grids:
+            count_grid.zero_()
+            with wp.ScopedCapture(device=device) as capture:
+                launch(grid, pairs_grid, count_grid)
+            wp.capture_launch(capture.graph)
+            self.assertEqual(pair_set(pairs_sap, count_sap), pair_set(pairs_grid, count_grid))
 
 
 if __name__ == "__main__":

@@ -5,19 +5,51 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import warp as wp
 
 from .broad_phase_common import EmptyFilterData, keep_all_filter, precompute_world_map
-from .broad_phase_sap import _make_sap_process_pair_func
+from .broad_phase_sap import _make_sap_accept_pair_func, _make_sap_process_pair_func
 
 wp.set_module_options({"enable_backward": False})
 
 _CELL_BIAS = wp.constant(wp.int32(1 << 20))
 _MAX_CELLS_PER_SHAPE = wp.constant(wp.int32(8))
 _EMPTY_CELL_KEY = wp.constant(wp.uint64((1 << 64) - 1))
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __any_sync(mask, pred);
+#else
+return pred;
+#endif
+""")
+def _warp_any(mask: wp.uint32, pred: bool) -> bool: ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __ballot_sync(mask, pred);
+#else
+return pred ? 1u : 0u;
+#endif
+""")
+def _warp_ballot(mask: wp.uint32, pred: bool) -> wp.uint32: ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __popc(value);
+#else
+int count = 0;
+while (value != 0u) { count += (int)(value & 1u); value >>= 1u; }
+return count;
+#endif
+""")
+def _warp_popc(value: wp.uint32) -> wp.int32: ...
 
 
 @wp.func
@@ -145,9 +177,63 @@ def _grid_scatter_large(
         large_index[large_prefix[leaf] - wp.int32(1)] = leaf
 
 
+@wp.kernel(enable_backward=False)
+def _grid_finish_deterministic_pairs(
+    grid_prefix: wp.array[int],
+    large_prefix: wp.array[int],
+    candidate_pair_count: wp.array[int],
+    capacity: wp.int32,
+    shape_count: wp.int32,
+):
+    candidate_pair_count[0] += grid_prefix[capacity - wp.int32(1)] + large_prefix[shape_count - wp.int32(1)]
+
+
 def _make_grid_pair_kernels(filter_func: Any, filter_data_type: Any):
     _module = f"grid_broadphase_{filter_func.__name__}_{filter_data_type.__name__}"
     process_pair = _make_sap_process_pair_func(filter_func)
+    accept_pair = _make_sap_accept_pair_func(filter_func)
+
+    @wp.func
+    def accept_leaf_pair(
+        leaf1: wp.int32,
+        leaf2: wp.int32,
+        shape_index: wp.array[int],
+        shape_lower: wp.array[wp.vec3],
+        shape_upper: wp.array[wp.vec3],
+        shape_gap: wp.array[float],
+        shape_displacement: wp.array[wp.vec3],
+        collision_group: wp.array[int],
+        shape_world: wp.array[int],
+        filter_pairs: wp.array[wp.vec2i],
+        num_filter_pairs: wp.int32,
+        shape_body: wp.array[int],
+        body_flags: wp.array[int],
+        include_static_kinematic_pairs: wp.bool,
+        filter_data: Any,
+    ) -> wp.bool:
+        shape1 = shape_index[leaf1]
+        shape2 = shape_index[leaf2]
+        pair_world_id = wp.int32(0)
+        if shape_world[shape1] == wp.int32(-1) and shape_world[shape2] == wp.int32(-1):
+            pair_world_id = wp.int32(1)
+        return accept_pair(
+            shape1,
+            shape2,
+            pair_world_id,
+            wp.int32(1),
+            shape_lower,
+            shape_upper,
+            shape_gap,
+            shape_displacement,
+            collision_group,
+            shape_world,
+            filter_pairs,
+            num_filter_pairs,
+            shape_body,
+            body_flags,
+            include_static_kinematic_pairs,
+            filter_data,
+        )
 
     @wp.func
     def process_leaf_pair(
@@ -258,6 +344,185 @@ def _make_grid_pair_kernels(filter_func: Any, filter_data_type: Any):
                 )
             j += wp.int32(1)
 
+    def make_deterministic_grid_kernel(count_only: bool):
+        @wp.kernel(
+            name="grid_pairs_warp_count" if count_only else "grid_pairs_warp_emit",
+            enable_backward=False,
+            module=_module,
+            grid_stride=False,
+        )
+        def kernel(
+            keys: wp.array[wp.uint64],
+            values: wp.array[int],
+            cell_lower: wp.array[wp.vec3i],
+            shape_index: wp.array[int],
+            shape_lower: wp.array[wp.vec3],
+            shape_upper: wp.array[wp.vec3],
+            shape_gap: wp.array[float],
+            shape_displacement: wp.array[wp.vec3],
+            collision_group: wp.array[int],
+            shape_world: wp.array[int],
+            filter_pairs: wp.array[wp.vec2i],
+            num_filter_pairs: int,
+            shape_body: wp.array[int],
+            body_flags: wp.array[int],
+            include_static_kinematic_pairs: bool,
+            filter_data: Any,
+            pair_counts: wp.array[int],
+            pair_prefix: wp.array[int],
+            candidate_pair: wp.array[wp.vec2i],
+            candidate_pair_count: wp.array[int],
+            max_candidate_pair: int,
+            capacity: int,
+        ):
+            tid = wp.tid()
+            i = tid / wp.int32(32)
+            lane = tid % wp.int32(32)
+            key = keys[i]
+            if key == _EMPTY_CELL_KEY:
+                if wp.static(count_only):
+                    if lane == wp.int32(0):
+                        pair_counts[i] = wp.int32(0)
+                return
+            leaf1 = values[i]
+            lo1 = cell_lower[leaf1]
+            j = i + wp.int32(1) + lane
+            total = wp.int32(0)
+            base = wp.int32(0)
+            if wp.static(not count_only):
+                base = candidate_pair_count[0] + pair_prefix[i] - pair_counts[i]
+            while True:
+                active = j < capacity
+                if active:
+                    active = keys[j] == key
+                if not _warp_any(wp.uint32(0xFFFFFFFF), active):
+                    break
+                accepted = False
+                if active:
+                    leaf2 = values[j]
+                    lo2 = cell_lower[leaf2]
+                    owner_key = _cell_key(
+                        wp.max(lo1[0], lo2[0]),
+                        wp.max(lo1[1], lo2[1]),
+                        wp.max(lo1[2], lo2[2]),
+                    )
+                    if owner_key == key:
+                        accepted = accept_leaf_pair(
+                            leaf1,
+                            leaf2,
+                            shape_index,
+                            shape_lower,
+                            shape_upper,
+                            shape_gap,
+                            shape_displacement,
+                            collision_group,
+                            shape_world,
+                            filter_pairs,
+                            num_filter_pairs,
+                            shape_body,
+                            body_flags,
+                            include_static_kinematic_pairs,
+                            filter_data,
+                        )
+                accepted_mask = _warp_ballot(wp.uint32(0xFFFFFFFF), accepted)
+                if wp.static(not count_only):
+                    if accepted:
+                        prior_lanes = (wp.uint32(1) << wp.uint32(lane)) - wp.uint32(1)
+                        rank = _warp_popc(accepted_mask & prior_lanes)
+                        output = base + total + rank
+                        if output < max_candidate_pair:
+                            shape1 = shape_index[leaf1]
+                            shape2 = shape_index[values[j]]
+                            candidate_pair[output] = wp.vec2i(wp.min(shape1, shape2), wp.max(shape1, shape2))
+                total += _warp_popc(accepted_mask)
+                j += wp.int32(32)
+            if wp.static(count_only):
+                if lane == wp.int32(0):
+                    pair_counts[i] = total
+
+        return kernel
+
+    deterministic_grid_count = make_deterministic_grid_kernel(True)
+    deterministic_grid_emit = make_deterministic_grid_kernel(False)
+
+    def make_deterministic_large_kernel(count_only: bool):
+        @wp.kernel(
+            name="grid_large_count" if count_only else "grid_large_emit",
+            enable_backward=False,
+            module=_module,
+            grid_stride=False,
+        )
+        def kernel(
+            large_flag: wp.array[int],
+            large_prefix: wp.array[int],
+            large_index: wp.array[int],
+            shape_index: wp.array[int],
+            shape_lower: wp.array[wp.vec3],
+            shape_upper: wp.array[wp.vec3],
+            shape_gap: wp.array[float],
+            shape_displacement: wp.array[wp.vec3],
+            collision_group: wp.array[int],
+            shape_world: wp.array[int],
+            filter_pairs: wp.array[wp.vec2i],
+            num_filter_pairs: int,
+            shape_body: wp.array[int],
+            body_flags: wp.array[int],
+            include_static_kinematic_pairs: bool,
+            filter_data: Any,
+            pair_counts: wp.array[int],
+            pair_prefix: wp.array[int],
+            grid_prefix: wp.array[int],
+            candidate_pair: wp.array[wp.vec2i],
+            candidate_pair_count: wp.array[int],
+            max_candidate_pair: int,
+            shape_count: int,
+            capacity: int,
+        ):
+            leaf1 = wp.tid()
+            large_count = large_prefix[shape_count - wp.int32(1)]
+            total = wp.int32(0)
+            base = wp.int32(0)
+            if wp.static(not count_only):
+                base = candidate_pair_count[0] + grid_prefix[capacity - wp.int32(1)]
+                base += pair_prefix[leaf1] - pair_counts[leaf1]
+            for large_slot in range(large_count):
+                leaf2 = large_index[large_slot]
+                if leaf1 == leaf2:
+                    continue
+                if large_flag[leaf1] != wp.int32(0) and leaf1 > leaf2:
+                    continue
+                if accept_leaf_pair(
+                    leaf1,
+                    leaf2,
+                    shape_index,
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_displacement,
+                    collision_group,
+                    shape_world,
+                    filter_pairs,
+                    num_filter_pairs,
+                    shape_body,
+                    body_flags,
+                    include_static_kinematic_pairs,
+                    filter_data,
+                ):
+                    if wp.static(not count_only):
+                        output = base + total
+                        if output < max_candidate_pair:
+                            shape1 = shape_index[leaf1]
+                            shape2 = shape_index[leaf2]
+                            candidate_pair[output] = wp.vec2i(wp.min(shape1, shape2), wp.max(shape1, shape2))
+                    total += wp.int32(1)
+            if wp.static(count_only):
+                pair_counts[leaf1] = total
+
+        return kernel
+
+    deterministic_large_count = make_deterministic_large_kernel(True)
+    deterministic_large_emit = make_deterministic_large_kernel(False)
+
     @wp.kernel(enable_backward=False, module=_module, grid_stride=False)
     def large_pairs(
         large_flag: wp.array[int],
@@ -312,10 +577,24 @@ def _make_grid_pair_kernels(filter_func: Any, filter_data_type: Any):
                 max_candidate_pair,
             )
 
-    return grid_pairs, large_pairs
+    return (
+        grid_pairs,
+        large_pairs,
+        deterministic_grid_count,
+        deterministic_grid_emit,
+        deterministic_large_count,
+        deterministic_large_emit,
+    )
 
 
-_grid_pair_kernel, _large_pair_kernel = _make_grid_pair_kernels(keep_all_filter, EmptyFilterData)
+(
+    _grid_pair_kernel,
+    _large_pair_kernel,
+    _grid_deterministic_count_kernel,
+    _grid_deterministic_emit_kernel,
+    _large_deterministic_count_kernel,
+    _large_deterministic_emit_kernel,
+) = _make_grid_pair_kernels(keep_all_filter, EmptyFilterData)
 
 
 class BroadPhaseGrid:
@@ -323,7 +602,9 @@ class BroadPhaseGrid:
 
     Each pair belongs to the first cell shared by its swept bounds. Large
     shapes that span more than eight cells, and shapes exceeding the compact
-    member buffer, are compared directly with every shape.
+    member buffer, are compared directly with every shape. The deterministic
+    warp pair mode spreads dense-cell pair checks across GPU lanes and emits
+    them in stable cell-entry order.
     """
 
     def __init__(
@@ -333,6 +614,7 @@ class BroadPhaseGrid:
         *,
         cell_width: float = 0.3,
         capacity_factor: int = 4,
+        pair_mode: Literal["scalar", "warp_deterministic"] = "scalar",
         device: wp.Device | str | None = None,
         filter_func: Any | None = None,
         filter_data_type: Any | None = None,
@@ -341,6 +623,8 @@ class BroadPhaseGrid:
             raise ValueError("cell_width must be positive")
         if capacity_factor < 1:
             raise ValueError("capacity_factor must be positive")
+        if pair_mode not in ("scalar", "warp_deterministic"):
+            raise ValueError(f"unsupported grid pair mode: {pair_mode}")
         if (filter_func is None) != (filter_data_type is None):
             raise ValueError("filter_func and filter_data_type must be provided together")
         if isinstance(shape_world, wp.array):
@@ -354,6 +638,7 @@ class BroadPhaseGrid:
         valid_indices = np.unique(index_map).astype(np.int32)
         self.shape_index = wp.array(valid_indices, dtype=wp.int32, device=device)
         self.shape_count = len(valid_indices)
+        self.pair_mode = pair_mode if wp.get_device(device).is_cuda else "scalar"
         self.cell_width = float(cell_width)
         self.capacity = max(1, capacity_factor * self.shape_count)
         self.cell_lower = wp.empty(self.shape_count, dtype=wp.vec3i, device=device)
@@ -363,14 +648,51 @@ class BroadPhaseGrid:
         self.large_flag = wp.empty(self.shape_count, dtype=wp.int32, device=device)
         self.large_prefix = wp.empty(self.shape_count, dtype=wp.int32, device=device)
         self.large_index = wp.empty(self.shape_count, dtype=wp.int32, device=device)
+        self.pair_counts = (
+            wp.empty(self.capacity, dtype=wp.int32, device=device) if self.pair_mode == "warp_deterministic" else None
+        )
+        self.pair_prefix = (
+            wp.empty(self.capacity, dtype=wp.int32, device=device) if self.pair_mode == "warp_deterministic" else None
+        )
+        self.large_pair_counts = (
+            wp.empty(self.shape_count, dtype=wp.int32, device=device)
+            if self.pair_mode == "warp_deterministic"
+            else None
+        )
+        self.large_pair_prefix = (
+            wp.empty(self.shape_count, dtype=wp.int32, device=device)
+            if self.pair_mode == "warp_deterministic"
+            else None
+        )
         self.keys = wp.empty(2 * self.capacity, dtype=wp.uint64, device=device)
         self.values = wp.empty(2 * self.capacity, dtype=wp.int32, device=device)
         self._has_custom_filter = filter_func is not None
         self._empty_filter_data = EmptyFilterData()
         if self._has_custom_filter:
-            self._grid_kernel, self._large_kernel = _make_grid_pair_kernels(filter_func, filter_data_type)
+            (
+                self._grid_kernel,
+                self._large_kernel,
+                self._deterministic_grid_count,
+                self._deterministic_grid_emit,
+                self._deterministic_large_count,
+                self._deterministic_large_emit,
+            ) = _make_grid_pair_kernels(filter_func, filter_data_type)
         else:
-            self._grid_kernel, self._large_kernel = _grid_pair_kernel, _large_pair_kernel
+            (
+                self._grid_kernel,
+                self._large_kernel,
+                self._deterministic_grid_count,
+                self._deterministic_grid_emit,
+                self._deterministic_large_count,
+                self._deterministic_large_emit,
+            ) = (
+                _grid_pair_kernel,
+                _large_pair_kernel,
+                _grid_deterministic_count_kernel,
+                _grid_deterministic_emit_kernel,
+                _large_deterministic_count_kernel,
+                _large_deterministic_emit_kernel,
+            )
 
     def launch(
         self,
@@ -490,6 +812,78 @@ class BroadPhaseGrid:
             candidate_pair_count,
             candidate_pair.shape[0],
         ]
+        if self.pair_mode == "warp_deterministic":
+            filter_inputs = common_inputs[:-3]
+            grid_inputs = [
+                self.keys,
+                self.values,
+                self.cell_lower,
+                *filter_inputs,
+                self.pair_counts,
+                self.pair_prefix,
+                candidate_pair,
+                candidate_pair_count,
+                candidate_pair.shape[0],
+                self.capacity,
+            ]
+            wp.launch(
+                self._deterministic_grid_count,
+                dim=self.capacity * 32,
+                inputs=grid_inputs,
+                device=device,
+                record_tape=False,
+            )
+            wp.utils.array_scan(self.pair_counts, self.pair_prefix, True)
+            large_inputs = [
+                self.large_flag,
+                self.large_prefix,
+                self.large_index,
+                *filter_inputs,
+                self.large_pair_counts,
+                self.large_pair_prefix,
+                self.pair_prefix,
+                candidate_pair,
+                candidate_pair_count,
+                candidate_pair.shape[0],
+                self.shape_count,
+                self.capacity,
+            ]
+            wp.launch(
+                self._deterministic_large_count,
+                dim=self.shape_count,
+                inputs=large_inputs,
+                device=device,
+                record_tape=False,
+            )
+            wp.utils.array_scan(self.large_pair_counts, self.large_pair_prefix, True)
+            wp.launch(
+                self._deterministic_grid_emit,
+                dim=self.capacity * 32,
+                inputs=grid_inputs,
+                device=device,
+                record_tape=False,
+            )
+            wp.launch(
+                self._deterministic_large_emit,
+                dim=self.shape_count,
+                inputs=large_inputs,
+                device=device,
+                record_tape=False,
+            )
+            wp.launch(
+                _grid_finish_deterministic_pairs,
+                dim=1,
+                inputs=[
+                    self.pair_prefix,
+                    self.large_pair_prefix,
+                    candidate_pair_count,
+                    self.capacity,
+                    self.shape_count,
+                ],
+                device=device,
+                record_tape=False,
+            )
+            return
         wp.launch(
             self._grid_kernel,
             dim=self.capacity,
