@@ -102,6 +102,87 @@ def _collide_capsule_cylinder_barrel(
 
 
 @wp.func
+def _collide_capsule_cylinder_line_contacts(
+    capsule_pos: wp.vec3,
+    capsule_axis: wp.vec3,
+    capsule_radius: float,
+    capsule_half_length: float,
+    cylinder_pos: wp.vec3,
+    cylinder_axis: wp.vec3,
+    cylinder_radius: float,
+    cylinder_half_height: float,
+) -> tuple[bool, float, wp.vec3, float, wp.vec3, wp.vec3]:
+    """Return endpoint witnesses for barrel and finite cap contact lines.
+
+    Other configurations retain the general convex query. Axes are normalized.
+    """
+    empty = wp.vec3(0.0)
+    relative = capsule_pos - cylinder_pos
+    axial_center = wp.dot(relative, cylinder_axis)
+    radial_center = relative - axial_center * cylinder_axis
+    axial_axis = wp.dot(capsule_axis, cylinder_axis)
+    radial_axis = capsule_axis - axial_axis * cylinder_axis
+
+    if wp.dot(radial_axis, radial_axis) <= 1.0e-12:
+        radial_distance = wp.length(radial_center)
+        if radial_distance >= cylinder_radius and radial_distance > 0.0:
+            low = wp.max(axial_center - capsule_half_length, -cylinder_half_height)
+            high = wp.min(axial_center + capsule_half_length, cylinder_half_height)
+            if high > low:
+                normal = -radial_center / radial_distance
+                distance = radial_distance - cylinder_radius - capsule_radius
+                offset = radial_center + normal * (capsule_radius + 0.5 * distance)
+                return (
+                    True,
+                    distance,
+                    cylinder_pos + low * cylinder_axis + offset,
+                    distance,
+                    cylinder_pos + high * cylinder_axis + offset,
+                    normal,
+                )
+
+    radial_axis_sq = wp.dot(radial_axis, radial_axis)
+    if radial_axis_sq > 1.0e-12 and capsule_half_length > 0.0:
+        direction = float(0.0)
+        if axial_center > 0.0:
+            direction = 1.0
+        elif axial_center < 0.0:
+            direction = -1.0
+        if direction != 0.0:
+            radial_offset = wp.dot(radial_center, radial_axis)
+            discriminant = radial_offset * radial_offset - radial_axis_sq * (
+                wp.dot(radial_center, radial_center) - cylinder_radius * cylinder_radius
+            )
+            if discriminant > 0.0:
+                root = wp.sqrt(discriminant)
+                low = wp.max((-radial_offset - root) / radial_axis_sq, -capsule_half_length)
+                high = wp.min((-radial_offset + root) / radial_axis_sq, capsule_half_length)
+            else:
+                low = float(0.0)
+                high = float(0.0)
+            if high > low:
+                core0 = relative + low * capsule_axis
+                core1 = relative + high * capsule_axis
+                axial0 = wp.dot(core0, cylinder_axis)
+                axial1 = wp.dot(core1, cylinder_axis)
+                radial0 = core0 - axial0 * cylinder_axis
+                radial1 = core1 - axial1 * cylinder_axis
+                if cylinder_half_height - direction * axial0 <= cylinder_radius - wp.length(
+                    radial0
+                ) and cylinder_half_height - direction * axial1 <= cylinder_radius - wp.length(radial1):
+                    normal = -direction * cylinder_axis
+                    distance0 = direction * axial0 - cylinder_half_height - capsule_radius
+                    distance1 = direction * axial1 - cylinder_half_height - capsule_radius
+                    cap0 = cylinder_pos + radial0 + direction * cylinder_half_height * cylinder_axis
+                    cap1 = cylinder_pos + radial1 + direction * cylinder_half_height * cylinder_axis
+                    point0 = 0.5 * (capsule_pos + low * capsule_axis + capsule_radius * normal + cap0)
+                    point1 = 0.5 * (capsule_pos + high * capsule_axis + capsule_radius * normal + cap1)
+                    return True, distance0, point0, distance1, point1, normal
+
+    return False, float(MAXVAL), empty, float(MAXVAL), empty, empty
+
+
+@wp.func
 def closest_segment_point_and_dist(a: wp.vec3, b: wp.vec3, pt: wp.vec3) -> tuple[wp.vec3, float]:
     """Returns closest point on the line segment and the distance squared."""
     closest = closest_segment_point(a, b, pt)

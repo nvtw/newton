@@ -25,6 +25,7 @@ from ..geometry.collision_core import (
 )
 from ..geometry.collision_primitive import (
     _collide_capsule_cylinder_barrel,
+    _collide_capsule_cylinder_line_contacts,
     _collide_plane_capsule_contacts,
     collide_capsule_capsule,
     collide_plane_box,
@@ -869,20 +870,41 @@ def create_narrow_phase_primitive_kernel(
                 )
 
             elif is_capsule_a and is_cylinder_b and scale_b[2] == 0.0:
-                barrel_handled, barrel_dist, barrel_pos, barrel_normal = _collide_capsule_cylinder_barrel(
-                    pos_a,
-                    wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0)),
-                    scale_a[0],
-                    scale_a[1],
-                    pos_b,
-                    wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0)),
-                    scale_b[0],
-                    scale_b[1],
+                capsule_axis = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+                cylinder_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
+                line_handled, line_dist_0, line_pos_0, line_dist_1, line_pos_1, line_normal = (
+                    _collide_capsule_cylinder_line_contacts(
+                        pos_a,
+                        capsule_axis,
+                        scale_a[0],
+                        scale_a[1],
+                        pos_b,
+                        cylinder_axis,
+                        scale_b[0],
+                        scale_b[1],
+                    )
                 )
-                if barrel_handled:
-                    contact_dist_0 = barrel_dist
-                    contact_pos_0 = barrel_pos
-                    contact_normal = barrel_normal
+                if line_handled:
+                    contact_dist_0 = line_dist_0
+                    contact_pos_0 = line_pos_0
+                    contact_dist_1 = line_dist_1
+                    contact_pos_1 = line_pos_1
+                    contact_normal = line_normal
+                else:
+                    barrel_handled, barrel_dist, barrel_pos, barrel_normal = _collide_capsule_cylinder_barrel(
+                        pos_a,
+                        capsule_axis,
+                        scale_a[0],
+                        scale_a[1],
+                        pos_b,
+                        cylinder_axis,
+                        scale_b[0],
+                        scale_b[1],
+                    )
+                    if barrel_handled:
+                        contact_dist_0 = barrel_dist
+                        contact_pos_0 = barrel_pos
+                        contact_normal = barrel_normal
 
             # -----------------------------------------------------------------
             # Sphere-Box collision (type_a=SPHERE=2, type_b=BOX=6)
