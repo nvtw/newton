@@ -90,6 +90,7 @@ def test_pipeline_dispatch(test, device):
                 "cap_deep",
                 "cap_bottom",
                 "cap_axial",
+                "cap_axial_bottom",
                 "rim",
                 "core",
                 "rounded",
@@ -119,7 +120,7 @@ def test_pipeline_dispatch(test, device):
                     poses = model.body_q.numpy()
                     poses[capsule_body, :3] = (0.00395, 0.0, 0.0003)
                     axis = wp.vec3(0.0, 1.0, 0.0)
-                    if kind in ("parallel", "parallel_clipped", "cap_axial"):
+                    if kind in ("parallel", "parallel_clipped", "cap_axial", "cap_axial_bottom"):
                         axis = wp.vec3(0.0, 0.0, 1.0)
                     elif kind == "near_parallel":
                         axis = wp.normalize(wp.vec3(0.05, 0.0, 1.0))
@@ -147,6 +148,7 @@ def test_pipeline_dispatch(test, device):
                         "cap_penetrating",
                         "cap_deep",
                         "cap_axial",
+                        "cap_axial_bottom",
                     ):
                         poses[capsule_body, :3] = (0.0, 0.0, 0.0017)
                     if kind == "cap_clipped":
@@ -160,6 +162,8 @@ def test_pipeline_dispatch(test, device):
                     elif kind == "cap_deep":
                         poses[capsule_body, 2] = 0.001
                     elif kind == "cap_bottom":
+                        poses[capsule_body, :3] = (0.0, 0.0, -0.0017)
+                    elif kind == "cap_axial_bottom":
                         poses[capsule_body, :3] = (0.0, 0.0, -0.0017)
                     elif kind == "parallel_clipped":
                         poses[capsule_body, 2] = 0.0013
@@ -185,12 +189,14 @@ def test_pipeline_dispatch(test, device):
                         "cap_penetrating",
                         "cap_deep",
                         "cap_bottom",
+                        "cap_axial",
+                        "cap_axial_bottom",
                     )
                     test.assertEqual(count, 0 if kind in analytic_kinds else 1)
-                    if kind in ("cap_axial", "cap_outside", "rim", "core"):
+                    if kind in ("cap_outside", "rim", "core"):
                         test.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
                     if kind in analytic_kinds and kind != "near_parallel":
-                        expected_count = 1 if kind == "barrel" else 2
+                        expected_count = 1 if kind in ("barrel", "cap_axial", "cap_axial_bottom") else 2
                         test.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), expected_count)
                         bodies = model.shape_body.numpy()
                         core_points = []
@@ -221,8 +227,10 @@ def test_pipeline_dispatch(test, device):
                                 expected_gap = -0.0003
                             elif kind == "cap_deep":
                                 expected_gap = -0.00075
+                            elif kind in ("cap_axial", "cap_axial_bottom"):
+                                expected_gap = -0.00055
                             test.assertAlmostEqual(gap, expected_gap, delta=1e-8)
-                            if kind == "cap_bottom":
+                            if kind in ("cap_bottom", "cap_axial_bottom"):
                                 expected = np.array([0.0, 0.0, -1.0])
                             elif kind in (
                                 "cap_face",
@@ -232,6 +240,7 @@ def test_pipeline_dispatch(test, device):
                                 "cap_tilted",
                                 "cap_penetrating",
                                 "cap_deep",
+                                "cap_axial",
                             ):
                                 expected = np.array([0.0, 0.0, 1.0])
                             else:

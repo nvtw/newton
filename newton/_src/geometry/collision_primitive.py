@@ -140,6 +140,21 @@ def _collide_capsule_cylinder_line_contacts(
                     cylinder_pos + high * cylinder_axis + offset,
                     normal,
                 )
+        elif radial_distance < cylinder_radius:
+            direction = float(0.0)
+            if axial_center > 0.0:
+                direction = 1.0
+            elif axial_center < 0.0:
+                direction = -1.0
+            if direction != 0.0:
+                axial = wp.max(direction * axial_center - wp.abs(axial_axis) * capsule_half_length, 0.0)
+                if cylinder_half_height - axial <= cylinder_radius - radial_distance:
+                    normal = -direction * cylinder_axis
+                    distance = axial - cylinder_half_height - capsule_radius
+                    core = cylinder_pos + radial_center + direction * axial * cylinder_axis
+                    cap = cylinder_pos + radial_center + direction * cylinder_half_height * cylinder_axis
+                    point = 0.5 * (core + capsule_radius * normal + cap)
+                    return True, distance, point, float(MAXVAL), empty, normal
 
     radial_axis_sq = wp.dot(radial_axis, radial_axis)
     if radial_axis_sq > 1.0e-12 and capsule_half_length > 0.0:

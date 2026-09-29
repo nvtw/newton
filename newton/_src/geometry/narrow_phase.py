@@ -276,15 +276,14 @@ def create_prepare_convex_pair(external_aabb: bool, speculative: bool = False):
 
         radius_eff_a = float(0.0)
         radius_eff_b = float(0.0)
-        small_radius = 0.0001
+        # A tiny support radius perturbs near-touching witnesses. Query the
+        # core point/segment and apply its physical radius afterward.
         if type_a == GeoType.SPHERE or type_a == GeoType.CAPSULE:
-            radius = wp.min(geom_a.scale[0], small_radius)
-            radius_eff_a = geom_a.scale[0] - radius
-            geom_a.scale[0] = radius
+            radius_eff_a = geom_a.scale[0]
+            geom_a.scale[0] = 0.0
         if type_b == GeoType.SPHERE or type_b == GeoType.CAPSULE:
-            radius = wp.min(geom_b.scale[0], small_radius)
-            radius_eff_b = geom_b.scale[0] - radius
-            geom_b.scale[0] = radius
+            radius_eff_b = geom_b.scale[0]
+            geom_b.scale[0] = 0.0
 
         margin_sum = margin_a + margin_b
         eps = 1.0e-4
