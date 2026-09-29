@@ -63,6 +63,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_iterate_lean,
     contact_iterate_lean_no_sleep,
     contact_iterate_lean_no_sleep_no_soft_pd,
+    contact_iterate_lean_no_sleep_no_soft_pd_cooperative,
     contact_iterate_lean_no_soft_pd,
     contact_iterate_no_sleep,
     contact_iterate_no_sleep_no_soft_pd,
@@ -174,6 +175,7 @@ _SOFT_HEX_OFF_BODY8 = wp.constant(wp.int32(8))
 # D6 block while the existing color launch still handles its contacts.
 _EXPERIMENTAL_COOPERATIVE_JOINTS = os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_JOINTS") == "1"
 _EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES = os.environ.get("PHOENX_EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES") == "1"
+_EXPERIMENTAL_COOPERATIVE_CONTACTS = os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_CONTACTS") == "1"
 
 
 @wp.func
@@ -3191,9 +3193,11 @@ def _phoenx_apply_global_damping_kernel(
 #   (b) ``count <= fuse_threshold`` -- hand off to the fused tail
 #       kernel, which resumes at the same cursor.
 #
-# Neither case touches ``color_cursor``; the dedicated ``head_active``
-# flag is what lets the tail kernel pick up where (b) stopped. During
-# normal work thread 0 decrements ``color_cursor`` at end-of-kernel.
+# Neither case advances ``color_cursor``; the dedicated ``head_active``
+# flag is what lets the tail kernel pick up where (b) stopped. A separate
+# one-thread kernel advances dynamic heads after every CTA completes. Fixed
+# unrolled heads receive their immutable step index and update the cursor
+# only for bookkeeping.
 # ``fuse_threshold = 0`` disables (b) and preserves the original
 # one-kernel-per-colour behaviour.
 # Tail launches after head_active clears stay cheap (early-exit no-ops) until
@@ -3840,6 +3844,7 @@ def _make_singleworld_rigid_direct_color_func(
     enable_column_timers: bool,
     bilateral_joint_blocks: bool = False,
     direct_regular_colors: bool = False,
+    patch_friction: bool = False,
 ):
     """Generated rigid-only color dispatch for single-world kernels."""
 
@@ -3997,23 +4002,58 @@ def _make_singleworld_rigid_direct_color_func(
         if wp.static(has_contacts):
             count_contacts = color_end - contact_start
             base = lane - contact_lane_base
-            while base >= wp.int32(0) and base < count_contacts:
-                cid = read1d_i32(element_ids_by_color, contact_start + base)
-                _dispatch_rigid_contact(
-                    contact_cols,
-                    bodies,
-                    particles,
-                    cc,
-                    contacts,
-                    copy_state,
-                    num_bodies,
-                    idt,
-                    sor_boost,
-                    cid - num_joints,
-                    contact_start + base,
-                    wp.int32(0),
-                )
-                base = base + stride - contact_lane_base
+            if wp.static(
+                _EXPERIMENTAL_COOPERATIVE_CONTACTS
+                and direct_regular_colors
+                and not is_prepare
+                and not is_cached_prepare
+                and use_bias
+                and not has_sleeping
+                and not has_soft_contact_pd
+                and not patch_friction
+                and packed_contact_headers
+            ):
+                # Keep joint-family lanes out before integer division, which
+                # would otherwise round -1..-3 to zero on CUDA.
+                if base >= wp.int32(0):
+                    point_lane = base % wp.int32(4)
+                    base = base / wp.int32(4)
+                    while base < count_contacts:
+                        cid = read1d_i32(element_ids_by_color, contact_start + base)
+                        if contact_cols.articulation_owner[cid - num_joints] < wp.int32(0):
+                            contact_iterate_lean_no_sleep_no_soft_pd_cooperative(
+                                contact_cols,
+                                contact_start + base,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                copy_state,
+                                wp.int32(0),
+                                sor_boost,
+                                point_lane,
+                            )
+                        base = base + (stride - contact_lane_base) / wp.int32(4)
+            else:
+                while base >= wp.int32(0) and base < count_contacts:
+                    cid = read1d_i32(element_ids_by_color, contact_start + base)
+                    _dispatch_rigid_contact(
+                        contact_cols,
+                        bodies,
+                        particles,
+                        cc,
+                        contacts,
+                        copy_state,
+                        num_bodies,
+                        idt,
+                        sor_boost,
+                        cid - num_joints,
+                        contact_start + base,
+                        wp.int32(0),
+                    )
+                    base = base + stride - contact_lane_base
 
     return _dispatch_rigid_direct_color
 
@@ -4080,6 +4120,7 @@ def _make_singleworld_persistent_kernel(
         use_bias=use_bias,
         enable_column_timers=enable_column_timers,
         bilateral_joint_blocks=bilateral_joint_blocks,
+        patch_friction=patch_friction,
     )
     if direct_regular_colors:
         _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
@@ -4096,6 +4137,7 @@ def _make_singleworld_persistent_kernel(
             enable_column_timers=enable_column_timers,
             bilateral_joint_blocks=bilateral_joint_blocks,
             direct_regular_colors=True,
+            patch_friction=patch_friction,
         )
 
     @wp.kernel(name=f"phoenx_singleworld_{phase}", enable_backward=False, module="unique", grid_stride=False)
@@ -4127,15 +4169,31 @@ def _make_singleworld_persistent_kernel(
         max_colored_partitions: wp.int32,
         ms_batch_size: wp.int32,
         sweep_direction: wp.array[wp.int32],
+        fixed_step_idx: wp.int32,
     ):
         tid = wp.tid()
-        if color_cursor[0] <= 0:
-            if tid == 0:
-                head_active[0] = 0
-            return
-        start, count, cursor, c = _singleworld_color_range(
-            color_starts, num_colors, color_cursor, sweep_direction, max_colored_partitions
-        )
+        if fixed_step_idx >= wp.int32(0):
+            # The unrolled dispatcher knows this launch's color index. Every
+            # CTA must use the same immutable value: thread 0 may update the
+            # cursor before a later CTA starts.
+            n_colors = num_colors[0]
+            if fixed_step_idx >= n_colors:
+                if tid == 0:
+                    head_active[0] = 0
+                    color_cursor[0] = 0
+                return
+            cursor = n_colors - fixed_step_idx
+            c = _color_for_step(fixed_step_idx, n_colors, sweep_direction[0], max_colored_partitions)
+            start = color_starts[c]
+            count = color_starts[c + wp.int32(1)] - start
+        else:
+            if color_cursor[0] <= 0:
+                if tid == 0:
+                    head_active[0] = 0
+                return
+            start, count, cursor, c = _singleworld_color_range(
+                color_starts, num_colors, color_cursor, sweep_direction, max_colored_partitions
+            )
 
         num_units = count
         if max_colored_partitions >= wp.int32(0) and c == max_colored_partitions:
@@ -4191,7 +4249,7 @@ def _make_singleworld_persistent_kernel(
                     tid,
                     total_num_threads,
                 )
-                if tid == 0:
+                if tid == 0 and fixed_step_idx >= wp.int32(0):
                     color_cursor[0] = cursor - 1
                 return
 
@@ -4246,10 +4304,20 @@ def _make_singleworld_persistent_kernel(
                     parallel_id,
                 )
 
-        if tid == 0:
+        if tid == 0 and fixed_step_idx >= wp.int32(0):
             color_cursor[0] = cursor - 1
 
     return kernel
+
+
+@wp.kernel
+def advance_singleworld_color_cursor_kernel(
+    color_cursor: wp.array[wp.int32],
+    head_active: wp.array[wp.int32],
+):
+    """Advance only after every CTA of a dynamic head launch has finished."""
+    if head_active[0] != wp.int32(0) and color_cursor[0] > wp.int32(0):
+        color_cursor[0] = color_cursor[0] - wp.int32(1)
 
 
 @functools.cache

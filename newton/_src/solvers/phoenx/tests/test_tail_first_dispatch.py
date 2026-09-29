@@ -167,7 +167,14 @@ def _run_schedule(sizes, reverse, overflow, batch, candidate):
                         wp.int32(overflow),
                         wp.int32(batch),
                         direction,
+                        wp.int32(-1),
                     ],
+                    device="cuda:0",
+                )
+                wp.launch(
+                    kernels.advance_singleworld_color_cursor_kernel,
+                    dim=1,
+                    inputs=[cursor, head_active],
                     device="cuda:0",
                 )
 

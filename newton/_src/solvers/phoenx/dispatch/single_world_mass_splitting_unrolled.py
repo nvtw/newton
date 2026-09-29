@@ -46,10 +46,10 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         regular_colors = self._launch_bound
         if w._singleworld_overflow_only_mass_splitting:
             regular_colors -= 1
-        for _ in range(regular_colors):
-            w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container)
+        for step_idx in range(regular_colors):
+            w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container, step_idx)
         if w._singleworld_overflow_only_mass_splitting:
-            w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container)
+            w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container, regular_colors)
             w._mass_splitting_average_overflow_into_bodies()
 
     def solve(self, idt: wp.float32) -> None:

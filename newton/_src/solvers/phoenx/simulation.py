@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 
 import numpy as np
@@ -222,6 +223,7 @@ from newton._src.solvers.phoenx.simulation_kernels import (
     _scan_blocks_int_kernel,
     _scatter_monotone_world_run_starts_kernel,
     _set_kinematic_pose_batch_kernel,
+    advance_singleworld_color_cursor_kernel,
     get_block_world_kernel,
     get_fast_tail_kernel,
     get_multiworld_mass_splitting_kernel,
@@ -473,6 +475,8 @@ class PhoenXWorld:
             self.device = bodies.position.device
         else:
             self.device = wp.get_device(device)
+        if os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_CONTACTS") == "1" and not self.device.is_cuda:
+            raise ValueError("PHOENX_EXPERIMENTAL_COOPERATIVE_CONTACTS requires a CUDA device")
 
         valid_contact_friction_models = ("point", "patch")
         if contact_friction_model not in valid_contact_friction_models:
@@ -4462,6 +4466,7 @@ class PhoenXWorld:
         idt: wp.float32,
         fuse_threshold: wp.int32,
         contact_container: ContactContainer | None = None,
+        fixed_step_idx: int = -1,
     ) -> None:
         """Launch the persistent-grid single-world head kernel."""
         contact_views = self._active_contact_views()
@@ -4500,10 +4505,18 @@ class PhoenXWorld:
                 ms_cap,
                 ms_batch,
                 self._partitioner.sweep_direction,
+                wp.int32(fixed_step_idx),
             ],
             block_dim=_SINGLEWORLD_BLOCK_DIM,
             device=self.device,
         )
+        if fixed_step_idx < 0:
+            wp.launch(
+                advance_singleworld_color_cursor_kernel,
+                dim=1,
+                inputs=[self._partitioner.color_cursor, self._head_active],
+                device=self.device,
+            )
 
     def _capture_singleworld_sweep(self, kernel, **kw) -> None:
         """capture_while body: head-path sweep on the persistent grid, unrolled
