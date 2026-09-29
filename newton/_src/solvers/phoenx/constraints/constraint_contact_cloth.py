@@ -132,6 +132,7 @@ from newton._src.solvers.phoenx.constraints.contact_projection import (
     contact_project_velocity_update,
     contact_project_velocity_update_no_soft_pd,
 )
+from newton._src.solvers.phoenx.constraints.contact_tgs_cooperative import shuffle_vec
 from newton._src.solvers.phoenx.contact_endpoints import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
@@ -1262,6 +1263,7 @@ def _make_contact_iterate_at(
     has_soft_contact_pd: bool = True,
     patch_friction: bool = False,
     staged_body_properties: bool = False,
+    cooperative_lanes: int = 1,
     *,
     frictionless_fast_path: bool = False,
     normal_first: bool = False,
@@ -1386,350 +1388,407 @@ def _make_contact_iterate_at(
                     inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * inv_factor2_f
 
         for i in range(contact_count):
-            k = contact_first + i
+            active_point = True
+            if wp.static(cooperative_lanes > 1):
+                active_point = parallel_id == i % wp.static(cooperative_lanes)
+            if active_point:
+                k = contact_first + i
 
-            n = cc_get_normal(cc, k)
-            normal_only = False
-            if wp.static(frictionless_fast_path and not cloth_support):
-                if not use_patch and mu_s == wp.float32(0.0) and mu_k == wp.float32(0.0):
-                    # A stale tangent impulse must still be released by the
-                    # general solve, even after friction becomes zero.
-                    normal_only = cc_get_tangent1_lambda(cc, k) == wp.float32(0.0) and cc_get_tangent2_lambda(
-                        cc, k
-                    ) == wp.float32(0.0)
-            t1_dir = wp.vec3f(0.0)
-            t2_dir = wp.vec3f(0.0)
-            if not normal_only:
-                t1_dir = cc_get_tangent1(cc, k)
-                t2_dir = wp.cross(n, t1_dir)
+                n = cc_get_normal(cc, k)
+                normal_only = False
+                if wp.static(frictionless_fast_path and not cloth_support):
+                    if not use_patch and mu_s == wp.float32(0.0) and mu_k == wp.float32(0.0):
+                        # A stale tangent impulse must still be released by the
+                        # general solve, even after friction becomes zero.
+                        normal_only = cc_get_tangent1_lambda(cc, k) == wp.float32(0.0) and cc_get_tangent2_lambda(
+                            cc, k
+                        ) == wp.float32(0.0)
+                t1_dir = wp.vec3f(0.0)
+                t2_dir = wp.vec3f(0.0)
+                if not normal_only:
+                    t1_dir = cc_get_tangent1(cc, k)
+                    t2_dir = wp.cross(n, t1_dir)
 
-            if wp.static(cloth_support):
-                margin0 = contacts.rigid_contact_margin0[k]
-                margin1 = contacts.rigid_contact_margin1[k]
-                bary0 = cc_get_side0_bary(cc, k)
-                bary1 = cc_get_side1_bary(cc, k)
-                p0_world = _side_world_contact_point(
-                    side0_kind,
-                    side0_nodes,
-                    bary0,
-                    bodies,
-                    particles,
-                    num_bodies,
-                    contacts,
-                    k,
-                    False,
-                    margin0,
-                    n,
-                )
-                p1_world = _side_world_contact_point(
-                    side1_kind,
-                    side1_nodes,
-                    bary1,
-                    bodies,
-                    particles,
-                    num_bodies,
-                    contacts,
-                    k,
-                    True,
-                    margin1,
-                    n,
-                )
-                v0_at_p = contact_endpoint_velocity_at_point(
-                    side0_kind,
-                    side0_nodes,
-                    bary0,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    parallel_id,
-                    side0_slots,
-                    side0_counts,
-                    p0_world,
-                )
-                v1_at_p = contact_endpoint_velocity_at_point(
-                    side1_kind,
-                    side1_nodes,
-                    bary1,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    parallel_id,
-                    side1_slots,
-                    side1_counts,
-                    p1_world,
-                )
-                vel_rel = v1_at_p - v0_at_p
-            else:
-                r1 = cc_get_r0(cc, k)
-                r2 = cc_get_r1(cc, k)
-                vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
+                if wp.static(cloth_support):
+                    margin0 = contacts.rigid_contact_margin0[k]
+                    margin1 = contacts.rigid_contact_margin1[k]
+                    bary0 = cc_get_side0_bary(cc, k)
+                    bary1 = cc_get_side1_bary(cc, k)
+                    p0_world = _side_world_contact_point(
+                        side0_kind,
+                        side0_nodes,
+                        bary0,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        contacts,
+                        k,
+                        False,
+                        margin0,
+                        n,
+                    )
+                    p1_world = _side_world_contact_point(
+                        side1_kind,
+                        side1_nodes,
+                        bary1,
+                        bodies,
+                        particles,
+                        num_bodies,
+                        contacts,
+                        k,
+                        True,
+                        margin1,
+                        n,
+                    )
+                    v0_at_p = contact_endpoint_velocity_at_point(
+                        side0_kind,
+                        side0_nodes,
+                        bary0,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        side0_slots,
+                        side0_counts,
+                        p0_world,
+                    )
+                    v1_at_p = contact_endpoint_velocity_at_point(
+                        side1_kind,
+                        side1_nodes,
+                        bary1,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        side1_slots,
+                        side1_counts,
+                        p1_world,
+                    )
+                    vel_rel = v1_at_p - v0_at_p
+                else:
+                    r1 = cc_get_r0(cc, k)
+                    r2 = cc_get_r1(cc, k)
+                    vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
 
-            jv_n = wp.dot(vel_rel, n)
-            jv_t1 = wp.float32(0.0)
-            jv_t2 = wp.float32(0.0)
-            eff_t1 = wp.float32(0.0)
-            eff_t2 = wp.float32(0.0)
-            if not normal_only:
-                if wp.static(not patch_friction):
-                    jv_t1 = wp.dot(vel_rel, t1_dir)
-                    jv_t2 = wp.dot(vel_rel, t2_dir)
-                    eff_t1 = cc_get_eff_t1(cc, k)
-                    eff_t2 = cc_get_eff_t2(cc, k)
-                elif not use_patch:
-                    jv_t1 = wp.dot(vel_rel, t1_dir)
-                    jv_t2 = wp.dot(vel_rel, t2_dir)
-                    eff_t1 = cc_get_eff_t1(cc, k)
-                    eff_t2 = cc_get_eff_t2(cc, k)
+                jv_n = wp.dot(vel_rel, n)
+                jv_t1 = wp.float32(0.0)
+                jv_t2 = wp.float32(0.0)
+                eff_t1 = wp.float32(0.0)
+                eff_t2 = wp.float32(0.0)
+                if not normal_only:
+                    if wp.static(not patch_friction):
+                        jv_t1 = wp.dot(vel_rel, t1_dir)
+                        jv_t2 = wp.dot(vel_rel, t2_dir)
+                        eff_t1 = cc_get_eff_t1(cc, k)
+                        eff_t2 = cc_get_eff_t2(cc, k)
+                    elif not use_patch:
+                        jv_t1 = wp.dot(vel_rel, t1_dir)
+                        jv_t2 = wp.dot(vel_rel, t2_dir)
+                        eff_t1 = cc_get_eff_t1(cc, k)
+                        eff_t2 = cc_get_eff_t2(cc, k)
 
-            eff_n = cc_get_eff_n(cc, k)
-            bias_val = cc_get_bias(cc, k)
-            speculative_bias = bias_val
-            bias_t1_val = wp.float32(0.0)
-            bias_t2_val = wp.float32(0.0)
-            if not normal_only:
-                if wp.static(use_bias and not patch_friction):
-                    bias_t1_val = cc_get_bias_t1(cc, k)
-                    bias_t2_val = cc_get_bias_t2(cc, k)
-                elif wp.static(use_bias):
-                    if not use_patch:
+                eff_n = cc_get_eff_n(cc, k)
+                bias_val = cc_get_bias(cc, k)
+                speculative_bias = bias_val
+                bias_t1_val = wp.float32(0.0)
+                bias_t2_val = wp.float32(0.0)
+                if not normal_only:
+                    if wp.static(use_bias and not patch_friction):
                         bias_t1_val = cc_get_bias_t1(cc, k)
                         bias_t2_val = cc_get_bias_t2(cc, k)
-            is_speculative = speculative_bias > wp.float32(0.0)
-            if is_speculative and wp.static(not use_bias):
-                continue
-            if wp.static(not use_bias):
-                bias_val = wp.float32(0.0)
+                    elif wp.static(use_bias):
+                        if not use_patch:
+                            bias_t1_val = cc_get_bias_t1(cc, k)
+                            bias_t2_val = cc_get_bias_t2(cc, k)
+                is_speculative = speculative_bias > wp.float32(0.0)
+                if is_speculative and wp.static(not use_bias):
+                    continue
+                if wp.static(not use_bias):
+                    bias_val = wp.float32(0.0)
 
-            # Normal/friction rows: optional soft-contact PD, penetrating
-            # main solve, or rigid relax.
-            pd_eff_soft_n = wp.float32(0.0)
-            pd_gamma_n = wp.float32(0.0)
-            pd_bias_n = wp.float32(0.0)
-            if wp.static(has_soft_contact_pd):
-                pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
-                if pd_eff_soft_n > wp.float32(0.0):
-                    pd_gamma_n = cc_get_pd_gamma(cc, k)
-                    pd_bias_n = cc_get_pd_bias(cc, k)
+                # Normal/friction rows: optional soft-contact PD, penetrating
+                # main solve, or rigid relax.
+                pd_eff_soft_n = wp.float32(0.0)
+                pd_gamma_n = wp.float32(0.0)
+                pd_bias_n = wp.float32(0.0)
+                if wp.static(has_soft_contact_pd):
+                    pd_eff_soft_n = cc_get_pd_eff_soft(cc, k)
+                    if pd_eff_soft_n > wp.float32(0.0):
+                        pd_gamma_n = cc_get_pd_gamma(cc, k)
+                        pd_bias_n = cc_get_pd_bias(cc, k)
 
-            if is_speculative:
-                mass_coeff_n = wp.float32(1.0)
-                impulse_coeff_n = wp.float32(0.0)
-                if speculative_bias <= idt * wp.float32(0.002):
+                if is_speculative:
+                    mass_coeff_n = wp.float32(1.0)
+                    impulse_coeff_n = wp.float32(0.0)
+                    if speculative_bias <= idt * wp.float32(0.002):
+                        mu_s_eff = mu_s
+                        mu_k_eff = mu_k
+                    else:
+                        mu_s_eff = wp.float32(0.0)
+                        mu_k_eff = wp.float32(0.0)
+                elif wp.static(use_bias):
+                    mass_coeff_n = mass_coeff
+                    impulse_coeff_n = impulse_coeff
                     mu_s_eff = mu_s
                     mu_k_eff = mu_k
                 else:
-                    mu_s_eff = wp.float32(0.0)
-                    mu_k_eff = wp.float32(0.0)
-            elif wp.static(use_bias):
-                mass_coeff_n = mass_coeff
-                impulse_coeff_n = impulse_coeff
-                mu_s_eff = mu_s
-                mu_k_eff = mu_k
-            else:
-                mass_coeff_n = wp.float32(1.0)
-                impulse_coeff_n = wp.float32(0.0)
-                mu_s_eff = mu_s
-                mu_k_eff = mu_k
+                    mass_coeff_n = wp.float32(1.0)
+                    impulse_coeff_n = wp.float32(0.0)
+                    mu_s_eff = mu_s
+                    mu_k_eff = mu_k
 
-            if normal_only:
-                if wp.static(has_soft_contact_pd):
-                    imp = contact_project_normal_velocity_update(
-                        cc,
-                        k,
-                        n,
-                        jv_n,
-                        eff_n,
-                        bias_val,
-                        mass_coeff_n,
-                        impulse_coeff_n,
-                        sor_boost,
-                        pd_eff_soft_n,
-                        pd_gamma_n,
-                        pd_bias_n,
-                    )
+                if normal_only:
+                    if wp.static(has_soft_contact_pd):
+                        imp = contact_project_normal_velocity_update(
+                            cc,
+                            k,
+                            n,
+                            jv_n,
+                            eff_n,
+                            bias_val,
+                            mass_coeff_n,
+                            impulse_coeff_n,
+                            sor_boost,
+                            pd_eff_soft_n,
+                            pd_gamma_n,
+                            pd_bias_n,
+                        )
+                    else:
+                        imp = contact_project_normal_velocity_update_no_soft_pd(
+                            cc,
+                            k,
+                            n,
+                            jv_n,
+                            eff_n,
+                            bias_val,
+                            mass_coeff_n,
+                            impulse_coeff_n,
+                            sor_boost,
+                            pd_eff_soft_n,
+                            pd_gamma_n,
+                            pd_bias_n,
+                        )
                 else:
-                    imp = contact_project_normal_velocity_update_no_soft_pd(
-                        cc,
-                        k,
-                        n,
-                        jv_n,
-                        eff_n,
-                        bias_val,
-                        mass_coeff_n,
-                        impulse_coeff_n,
-                        sor_boost,
-                        pd_eff_soft_n,
-                        pd_gamma_n,
-                        pd_bias_n,
-                    )
-            else:
-                # Keep rigid lever/inertia expressions behind a standalone
-                # static branch: Warp does not prune a static term inside a
-                # mixed static/runtime boolean expression for cloth kernels.
-                handled_rigid_point = False
-                imp = wp.vec3(0.0)
-                if wp.static(not cloth_support):
-                    if not use_patch:
-                        handled_rigid_point = True
-                        if wp.static(normal_first):
-                            if wp.static(has_soft_contact_pd):
-                                normal_result = contact_project_normal_delta_load(
-                                    cc,
-                                    k,
-                                    jv_n,
-                                    eff_n,
-                                    bias_val,
-                                    mass_coeff_n,
-                                    impulse_coeff_n,
-                                    sor_boost,
-                                    pd_eff_soft_n,
-                                    pd_gamma_n,
-                                    pd_bias_n,
-                                )
-                            else:
-                                normal_result = contact_project_normal_delta_load_no_soft_pd(
-                                    cc,
-                                    k,
-                                    jv_n,
-                                    eff_n,
-                                    bias_val,
-                                    mass_coeff_n,
-                                    impulse_coeff_n,
-                                    sor_boost,
-                                    pd_eff_soft_n,
-                                    pd_gamma_n,
-                                    pd_bias_n,
-                                )
-                            normal_delta = normal_result[0]
-                            load = normal_result[1]
-                            tangent_delta = wp.vec2f(0.0)
-                            if load == wp.float32(0.0) or (mu_s_eff == wp.float32(0.0) and mu_k_eff == wp.float32(0.0)):
-                                # Removing old tangent impulses is still a physical impulse.
-                                tangent_delta = wp.vec2f(
-                                    -cc_get_tangent1_lambda(cc, k),
-                                    -cc_get_tangent2_lambda(cc, k),
-                                )
-                                cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
-                                cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+                    # Keep rigid lever/inertia expressions behind a standalone
+                    # static branch: Warp does not prune a static term inside a
+                    # mixed static/runtime boolean expression for cloth kernels.
+                    handled_rigid_point = False
+                    imp = wp.vec3(0.0)
+                    if wp.static(not cloth_support):
+                        if not use_patch:
+                            handled_rigid_point = True
+                            if wp.static(normal_first):
+                                if wp.static(has_soft_contact_pd):
+                                    normal_result = contact_project_normal_delta_load(
+                                        cc,
+                                        k,
+                                        jv_n,
+                                        eff_n,
+                                        bias_val,
+                                        mass_coeff_n,
+                                        impulse_coeff_n,
+                                        sor_boost,
+                                        pd_eff_soft_n,
+                                        pd_gamma_n,
+                                        pd_bias_n,
+                                    )
+                                else:
+                                    normal_result = contact_project_normal_delta_load_no_soft_pd(
+                                        cc,
+                                        k,
+                                        jv_n,
+                                        eff_n,
+                                        bias_val,
+                                        mass_coeff_n,
+                                        impulse_coeff_n,
+                                        sor_boost,
+                                        pd_eff_soft_n,
+                                        pd_gamma_n,
+                                        pd_bias_n,
+                                    )
+                                normal_delta = normal_result[0]
+                                load = normal_result[1]
+                                tangent_delta = wp.vec2f(0.0)
+                                if load == wp.float32(0.0) or (
+                                    mu_s_eff == wp.float32(0.0) and mu_k_eff == wp.float32(0.0)
+                                ):
+                                    # Removing old tangent impulses is still a physical impulse.
+                                    tangent_delta = wp.vec2f(
+                                        -cc_get_tangent1_lambda(cc, k),
+                                        -cc_get_tangent2_lambda(cc, k),
+                                    )
+                                    cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
+                                    cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
+                                else:
+                                    mobility_nt1 = cc_get_mobility_nt1(cc, k)
+                                    mobility_nt2 = cc_get_mobility_nt2(cc, k)
+                                    mobility_t1t2 = cc_get_mobility_t1t2(cc, k)
+                                    tangent_delta = contact_project_tangent_delta(
+                                        cc,
+                                        k,
+                                        normal_delta,
+                                        load,
+                                        jv_t1,
+                                        jv_t2,
+                                        eff_t1,
+                                        eff_t2,
+                                        bias_t1_val,
+                                        bias_t2_val,
+                                        mu_s_eff,
+                                        mu_k_eff,
+                                        sor_boost,
+                                        mobility_nt1,
+                                        mobility_nt2,
+                                        mobility_t1t2,
+                                    )
+                                imp = normal_delta * n + tangent_delta[0] * t1_dir + tangent_delta[1] * t2_dir
                             else:
                                 mobility_nt1 = cc_get_mobility_nt1(cc, k)
                                 mobility_nt2 = cc_get_mobility_nt2(cc, k)
                                 mobility_t1t2 = cc_get_mobility_t1t2(cc, k)
-                                tangent_delta = contact_project_tangent_delta(
-                                    cc,
-                                    k,
-                                    normal_delta,
-                                    load,
-                                    jv_t1,
-                                    jv_t2,
-                                    eff_t1,
-                                    eff_t2,
-                                    bias_t1_val,
-                                    bias_t2_val,
-                                    mu_s_eff,
-                                    mu_k_eff,
-                                    sor_boost,
-                                    mobility_nt1,
-                                    mobility_nt2,
-                                    mobility_t1t2,
-                                )
-                            imp = normal_delta * n + tangent_delta[0] * t1_dir + tangent_delta[1] * t2_dir
-                        else:
-                            mobility_nt1 = cc_get_mobility_nt1(cc, k)
-                            mobility_nt2 = cc_get_mobility_nt2(cc, k)
-                            mobility_t1t2 = cc_get_mobility_t1t2(cc, k)
-                            if wp.static(has_soft_contact_pd):
-                                imp = contact_project_coupled_velocity_update(
-                                    cc,
-                                    k,
-                                    n,
-                                    t1_dir,
-                                    t2_dir,
-                                    jv_n,
-                                    jv_t1,
-                                    jv_t2,
-                                    eff_n,
-                                    eff_t1,
-                                    eff_t2,
-                                    bias_val,
-                                    bias_t1_val,
-                                    bias_t2_val,
-                                    mu_s_eff,
-                                    mu_k_eff,
-                                    mass_coeff_n,
-                                    impulse_coeff_n,
-                                    sor_boost,
-                                    pd_eff_soft_n,
-                                    pd_gamma_n,
-                                    pd_bias_n,
-                                    mobility_nt1,
-                                    mobility_nt2,
-                                    mobility_t1t2,
-                                )
-                            else:
-                                imp = contact_project_coupled_velocity_update_no_soft_pd(
-                                    cc,
-                                    k,
-                                    n,
-                                    t1_dir,
-                                    t2_dir,
-                                    jv_n,
-                                    jv_t1,
-                                    jv_t2,
-                                    eff_n,
-                                    eff_t1,
-                                    eff_t2,
-                                    bias_val,
-                                    bias_t1_val,
-                                    bias_t2_val,
-                                    mu_s_eff,
-                                    mu_k_eff,
-                                    mass_coeff_n,
-                                    impulse_coeff_n,
-                                    sor_boost,
-                                    pd_eff_soft_n,
-                                    pd_gamma_n,
-                                    pd_bias_n,
-                                    mobility_nt1,
-                                    mobility_nt2,
-                                    mobility_t1t2,
-                                )
-                if not handled_rigid_point:
-                    if wp.static(patch_friction):
-                        if use_patch:
-                            if wp.static(has_soft_contact_pd):
-                                imp = contact_project_normal_velocity_update(
-                                    cc,
-                                    k,
-                                    n,
-                                    jv_n,
-                                    eff_n,
-                                    bias_val,
-                                    mass_coeff_n,
-                                    impulse_coeff_n,
-                                    sor_boost,
-                                    pd_eff_soft_n,
-                                    pd_gamma_n,
-                                    pd_bias_n,
-                                )
-                            else:
-                                imp = contact_project_normal_velocity_update_no_soft_pd(
-                                    cc,
-                                    k,
-                                    n,
-                                    jv_n,
-                                    eff_n,
-                                    bias_val,
-                                    mass_coeff_n,
-                                    impulse_coeff_n,
-                                    sor_boost,
-                                    wp.float32(0.0),
-                                    wp.float32(0.0),
-                                    wp.float32(0.0),
-                                )
+                                if wp.static(has_soft_contact_pd):
+                                    imp = contact_project_coupled_velocity_update(
+                                        cc,
+                                        k,
+                                        n,
+                                        t1_dir,
+                                        t2_dir,
+                                        jv_n,
+                                        jv_t1,
+                                        jv_t2,
+                                        eff_n,
+                                        eff_t1,
+                                        eff_t2,
+                                        bias_val,
+                                        bias_t1_val,
+                                        bias_t2_val,
+                                        mu_s_eff,
+                                        mu_k_eff,
+                                        mass_coeff_n,
+                                        impulse_coeff_n,
+                                        sor_boost,
+                                        pd_eff_soft_n,
+                                        pd_gamma_n,
+                                        pd_bias_n,
+                                        mobility_nt1,
+                                        mobility_nt2,
+                                        mobility_t1t2,
+                                    )
+                                else:
+                                    imp = contact_project_coupled_velocity_update_no_soft_pd(
+                                        cc,
+                                        k,
+                                        n,
+                                        t1_dir,
+                                        t2_dir,
+                                        jv_n,
+                                        jv_t1,
+                                        jv_t2,
+                                        eff_n,
+                                        eff_t1,
+                                        eff_t2,
+                                        bias_val,
+                                        bias_t1_val,
+                                        bias_t2_val,
+                                        mu_s_eff,
+                                        mu_k_eff,
+                                        mass_coeff_n,
+                                        impulse_coeff_n,
+                                        sor_boost,
+                                        pd_eff_soft_n,
+                                        pd_gamma_n,
+                                        pd_bias_n,
+                                        mobility_nt1,
+                                        mobility_nt2,
+                                        mobility_t1t2,
+                                    )
+                    if not handled_rigid_point:
+                        if wp.static(patch_friction):
+                            if use_patch:
+                                if wp.static(has_soft_contact_pd):
+                                    imp = contact_project_normal_velocity_update(
+                                        cc,
+                                        k,
+                                        n,
+                                        jv_n,
+                                        eff_n,
+                                        bias_val,
+                                        mass_coeff_n,
+                                        impulse_coeff_n,
+                                        sor_boost,
+                                        pd_eff_soft_n,
+                                        pd_gamma_n,
+                                        pd_bias_n,
+                                    )
+                                else:
+                                    imp = contact_project_normal_velocity_update_no_soft_pd(
+                                        cc,
+                                        k,
+                                        n,
+                                        jv_n,
+                                        eff_n,
+                                        bias_val,
+                                        mass_coeff_n,
+                                        impulse_coeff_n,
+                                        sor_boost,
+                                        wp.float32(0.0),
+                                        wp.float32(0.0),
+                                        wp.float32(0.0),
+                                    )
 
+                            else:
+                                if wp.static(has_soft_contact_pd):
+                                    imp = contact_project_velocity_update(
+                                        cc,
+                                        k,
+                                        n,
+                                        t1_dir,
+                                        t2_dir,
+                                        jv_n,
+                                        jv_t1,
+                                        jv_t2,
+                                        eff_n,
+                                        eff_t1,
+                                        eff_t2,
+                                        bias_val,
+                                        bias_t1_val,
+                                        bias_t2_val,
+                                        mu_s_eff,
+                                        mu_k_eff,
+                                        mass_coeff_n,
+                                        impulse_coeff_n,
+                                        sor_boost,
+                                        pd_eff_soft_n,
+                                        pd_gamma_n,
+                                        pd_bias_n,
+                                    )
+                                else:
+                                    imp = contact_project_velocity_update_no_soft_pd(
+                                        cc,
+                                        k,
+                                        n,
+                                        t1_dir,
+                                        t2_dir,
+                                        jv_n,
+                                        jv_t1,
+                                        jv_t2,
+                                        eff_n,
+                                        eff_t1,
+                                        eff_t2,
+                                        bias_val,
+                                        bias_t1_val,
+                                        bias_t2_val,
+                                        mu_s_eff,
+                                        mu_k_eff,
+                                        mass_coeff_n,
+                                        impulse_coeff_n,
+                                        sor_boost,
+                                        wp.float32(0.0),
+                                        wp.float32(0.0),
+                                        wp.float32(0.0),
+                                    )
                         else:
                             if wp.static(has_soft_contact_pd):
                                 imp = contact_project_velocity_update(
@@ -1781,113 +1840,67 @@ def _make_contact_iterate_at(
                                     wp.float32(0.0),
                                     wp.float32(0.0),
                                 )
-                    else:
-                        if wp.static(has_soft_contact_pd):
-                            imp = contact_project_velocity_update(
-                                cc,
-                                k,
-                                n,
-                                t1_dir,
-                                t2_dir,
-                                jv_n,
-                                jv_t1,
-                                jv_t2,
-                                eff_n,
-                                eff_t1,
-                                eff_t2,
-                                bias_val,
-                                bias_t1_val,
-                                bias_t2_val,
-                                mu_s_eff,
-                                mu_k_eff,
-                                mass_coeff_n,
-                                impulse_coeff_n,
-                                sor_boost,
-                                pd_eff_soft_n,
-                                pd_gamma_n,
-                                pd_bias_n,
+                if wp.static(patch_friction):
+                    if use_patch:
+                        lambda_n_load = cc_get_normal_lambda(cc, k)
+                        if pd_eff_soft_n <= wp.float32(0.0):
+                            lambda_n_load = wp.clamp(
+                                lambda_n_load + mass_coeff_n * eff_n * bias_val * sor_boost,
+                                wp.float32(0.0),
+                                lambda_n_load,
                             )
-                        else:
-                            imp = contact_project_velocity_update_no_soft_pd(
-                                cc,
-                                k,
-                                n,
-                                t1_dir,
-                                t2_dir,
-                                jv_n,
-                                jv_t1,
-                                jv_t2,
-                                eff_n,
-                                eff_t1,
-                                eff_t2,
-                                bias_val,
-                                bias_t1_val,
-                                bias_t2_val,
-                                mu_s_eff,
-                                mu_k_eff,
-                                mass_coeff_n,
-                                impulse_coeff_n,
-                                sor_boost,
-                                wp.float32(0.0),
-                                wp.float32(0.0),
-                                wp.float32(0.0),
-                            )
-            if wp.static(patch_friction):
-                if use_patch:
-                    lambda_n_load = cc_get_normal_lambda(cc, k)
-                    if pd_eff_soft_n <= wp.float32(0.0):
-                        lambda_n_load = wp.clamp(
-                            lambda_n_load + mass_coeff_n * eff_n * bias_val * sor_boost,
-                            wp.float32(0.0),
-                            lambda_n_load,
-                        )
-                    if is_speculative and speculative_bias > idt * wp.float32(0.002):
-                        lambda_n_load = wp.float32(0.0)
-                    patch_normal_load += lambda_n_load
+                        if is_speculative and speculative_bias > idt * wp.float32(0.002):
+                            lambda_n_load = wp.float32(0.0)
+                        patch_normal_load += lambda_n_load
 
-            if wp.static(cloth_support):
-                contact_endpoint_apply_impulse(
-                    side0_kind,
-                    side0_nodes,
-                    bary0,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    parallel_id,
-                    side0_slots,
-                    side0_counts,
-                    p0_world,
-                    -imp,
-                )
-                contact_endpoint_apply_impulse(
-                    side1_kind,
-                    side1_nodes,
-                    bary1,
-                    bodies,
-                    particles,
-                    copy_state,
-                    num_bodies,
-                    parallel_id,
-                    side1_slots,
-                    side1_counts,
-                    p1_world,
-                    imp,
-                )
-            else:
-                v1, v2, w1, w2 = apply_pair_velocity_impulse(
-                    v1,
-                    v2,
-                    w1,
-                    w2,
-                    inv_mass1,
-                    inv_mass2,
-                    inv_inertia1,
-                    inv_inertia2,
-                    r1,
-                    r2,
-                    imp,
-                )
+                if wp.static(cloth_support):
+                    contact_endpoint_apply_impulse(
+                        side0_kind,
+                        side0_nodes,
+                        bary0,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        side0_slots,
+                        side0_counts,
+                        p0_world,
+                        -imp,
+                    )
+                    contact_endpoint_apply_impulse(
+                        side1_kind,
+                        side1_nodes,
+                        bary1,
+                        bodies,
+                        particles,
+                        copy_state,
+                        num_bodies,
+                        parallel_id,
+                        side1_slots,
+                        side1_counts,
+                        p1_world,
+                        imp,
+                    )
+                else:
+                    v1, v2, w1, w2 = apply_pair_velocity_impulse(
+                        v1,
+                        v2,
+                        w1,
+                        w2,
+                        inv_mass1,
+                        inv_mass2,
+                        inv_inertia1,
+                        inv_inertia2,
+                        r1,
+                        r2,
+                        imp,
+                    )
+            if wp.static(cooperative_lanes > 1):
+                v1 = shuffle_vec(v1, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
+                v2 = shuffle_vec(v2, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
+                w1 = shuffle_vec(w1, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
+                w2 = shuffle_vec(w2, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
 
         if wp.static(patch_friction):
             if use_patch:
@@ -1936,16 +1949,20 @@ def _make_contact_iterate_at(
                     patch_update.lambda_new[0] * patch_tangent1 + patch_update.lambda_new[1] * patch_tangent2
                 )
 
-        if wp.static(not cloth_support):
-            # Mass-splitting fast-path writeback (matches the load gate above).
-            if wp.static(not has_mass_splitting) or (slot1 < wp.int32(0) and slot2 < wp.int32(0)):
-                body_store_vw(bodies, b1, v1, w1)
-                body_store_vw(bodies, b2, v2, w2)
-            else:
-                write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
-                write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
-                write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
-                write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
+        write_owner = True
+        if wp.static(cooperative_lanes > 1):
+            write_owner = parallel_id == 0
+        if write_owner:
+            if wp.static(not cloth_support):
+                # Mass-splitting fast-path writeback (matches the load gate above).
+                if wp.static(not has_mass_splitting) or (slot1 < wp.int32(0) and slot2 < wp.int32(0)):
+                    body_store_vw(bodies, b1, v1, w1)
+                    body_store_vw(bodies, b2, v2, w2)
+                else:
+                    write_velocity_unified(bodies, particles, copy_state, b1, slot1, num_bodies, v1)
+                    write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2)
+                    write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1)
+                    write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2)
 
     return impl
 
@@ -3078,3 +3095,43 @@ def contact_iterate_cloth_aware(
             parallel_id,
             sor_boost,
         )
+
+
+contact_iterate_at_lean_no_soft_pd_cooperative = _make_contact_iterate_at(
+    cloth_support=False, has_mass_splitting=False, use_bias=True, has_soft_contact_pd=False, cooperative_lanes=4
+)
+
+
+@wp.func
+def contact_iterate_lean_no_sleep_no_soft_pd_cooperative(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copy_state: CopyStateContainer,
+    parallel_id: wp.int32,
+    sor_boost: wp.float32,
+    lane: wp.int32,
+):
+    b1 = contact_get_body1(constraints, cid)
+    b2 = contact_get_body2(constraints, cid)
+    body_pair = constraint_bodies_make(b1, b2)
+    contact_iterate_at_lean_no_soft_pd_cooperative(
+        constraints,
+        cid,
+        0,
+        bodies,
+        particles,
+        num_bodies,
+        body_pair,
+        idt,
+        cc,
+        contacts,
+        copy_state,
+        lane,
+        sor_boost,
+    )
