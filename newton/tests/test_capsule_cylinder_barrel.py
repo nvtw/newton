@@ -263,11 +263,100 @@ def test_pipeline_dispatch(test, device):
                                 )
 
 
+def test_cap_line_does_not_cross_opposite_face(test, device):
+    """Avoid pairing a capsule endpoint below the bottom cap with the top cap."""
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        cfg = newton.ModelBuilder.ShapeConfig(density=0.0, gap=0.01)
+        cylinder_body = builder.add_body(mass=1.0, inertia=wp.mat33(*np.eye(3).ravel()))
+        capsule_body = builder.add_body(mass=1.0, inertia=wp.mat33(*np.eye(3).ravel()))
+        builder.add_shape_cylinder(body=cylinder_body, radius=10.0, half_height=1.0, cfg=cfg)
+        builder.add_shape_capsule(body=capsule_body, radius=0.25, half_height=3.0, cfg=cfg)
+        model = builder.finalize()
+        state = model.state()
+        poses = model.body_q.numpy()
+        poses[capsule_body, :3] = (0.0, 0.0, 0.1)
+        axis = wp.normalize(wp.vec3(1.0, 0.0, 1.0))
+        poses[capsule_body, 3:] = np.asarray(wp.quat_between_vectors(wp.vec3(0.0, 0.0, 1.0), axis))
+        state.body_q.assign(poses)
+        pipeline = newton.CollisionPipeline(model)
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        test.assertGreater(count, 0)
+        test.assertEqual(int(pipeline.narrow_phase.gjk_candidate_pairs_count.numpy()[0]), 0)
+        bodies = model.shape_body.numpy()
+        shape0 = contacts.rigid_contact_shape0.numpy()
+        point0 = contacts.rigid_contact_point0.numpy()
+        point1 = contacts.rigid_contact_point1.numpy()
+        for i in range(count):
+            if bodies[shape0[i]] == capsule_body:
+                capsule_local, cylinder_local = point0[i], point1[i]
+            else:
+                capsule_local, cylinder_local = point1[i], point0[i]
+            capsule_world = np.asarray(wp.transform_point(wp.transform(*poses[capsule_body]), wp.vec3(*capsule_local)))
+            cylinder_world = np.asarray(
+                wp.transform_point(wp.transform(*poses[cylinder_body]), wp.vec3(*cylinder_local))
+            )
+            test.assertFalse(
+                capsule_world[2] < -1.25 and cylinder_world[2] > 0.0,
+                f"capsule={capsule_world}, cylinder={cylinder_world}, normal={contacts.rigid_contact_normal.numpy()[i]}, "
+                f"gjk={pipeline.narrow_phase.gjk_candidate_pairs_count.numpy()[0]}",
+            )
+
+
+def test_gap_admission(test, device):
+    """Generate separated barrel and cap contacts inside the combined shape gap."""
+    with wp.ScopedDevice(device):
+        for kind, positions in (
+            ("barrel", (0.0043, 0.0046)),
+            ("cap", (0.00205, 0.00235)),
+        ):
+            for position, expected_count in zip(positions, (1 if kind == "barrel" else 2, 0), strict=True):
+                with test.subTest(kind=kind, position=position):
+                    builder = newton.ModelBuilder()
+                    cfg = newton.ModelBuilder.ShapeConfig(density=0.0, gap=0.00025)
+                    cylinder_body = builder.add_body(mass=1.0, inertia=wp.mat33(*np.eye(3).ravel()))
+                    capsule_body = builder.add_body(mass=1.0, inertia=wp.mat33(*np.eye(3).ravel()))
+                    builder.add_shape_cylinder(body=cylinder_body, radius=0.00375, half_height=0.0015, cfg=cfg)
+                    builder.add_shape_capsule(body=capsule_body, radius=0.00025, half_height=0.0005, cfg=cfg)
+                    model = builder.finalize()
+                    state = model.state()
+                    poses = model.body_q.numpy()
+                    if kind == "barrel":
+                        poses[capsule_body, :3] = (position, 0.0, 0.0)
+                        axis = wp.vec3(0.0, 1.0, 0.0)
+                    else:
+                        poses[capsule_body, :3] = (0.0, 0.0, position)
+                        axis = wp.vec3(1.0, 0.0, 0.0)
+                    poses[capsule_body, 3:] = np.asarray(wp.quat_between_vectors(wp.vec3(0.0, 0.0, 1.0), axis))
+                    state.body_q.assign(poses)
+                    for speculative in (False, True):
+                        with test.subTest(speculative=speculative):
+                            pipeline = newton.CollisionPipeline(
+                                model,
+                                speculative_contact_gap_max=0.001 if speculative else None,
+                            )
+                            contacts = pipeline.contacts()
+                            if speculative:
+                                pipeline.collide(state, contacts, dt=0.01)
+                            else:
+                                pipeline.collide(state, contacts)
+                            test.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), expected_count)
+
+
 class TestCapsuleCylinderBarrel(unittest.TestCase):
     """Check point and line contacts and preserve general convex fallbacks."""
 
 
 add_function_test(TestCapsuleCylinderBarrel, "test_barrel_guards", test_barrel_guards, devices=get_test_devices())
+add_function_test(
+    TestCapsuleCylinderBarrel,
+    "test_cap_line_does_not_cross_opposite_face",
+    test_cap_line_does_not_cross_opposite_face,
+    devices=get_test_devices(),
+)
+add_function_test(TestCapsuleCylinderBarrel, "test_gap_admission", test_gap_admission, devices=get_test_devices())
 add_function_test(
     TestCapsuleCylinderBarrel, "test_pipeline_dispatch", test_pipeline_dispatch, devices=get_test_devices()
 )

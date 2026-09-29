@@ -160,6 +160,12 @@ def _collide_capsule_cylinder_line_contacts(
             else:
                 low = float(0.0)
                 high = float(0.0)
+            if axial_axis != 0.0:
+                midplane = -axial_center / axial_axis
+                if direction * axial_axis > 0.0:
+                    low = wp.max(low, midplane)
+                else:
+                    high = wp.min(high, midplane)
             if high > low:
                 core0 = relative + low * capsule_axis
                 core1 = relative + high * capsule_axis
@@ -167,9 +173,14 @@ def _collide_capsule_cylinder_line_contacts(
                 axial1 = wp.dot(core1, cylinder_axis)
                 radial0 = core0 - axial0 * cylinder_axis
                 radial1 = core1 - axial1 * cylinder_axis
-                if cylinder_half_height - direction * axial0 <= cylinder_radius - wp.length(
-                    radial0
-                ) and cylinder_half_height - direction * axial1 <= cylinder_radius - wp.length(radial1):
+                # Both witnesses must lie on the chosen cap's side of the
+                # cylinder midplane; otherwise they need different normals.
+                if (
+                    direction * axial0 >= 0.0
+                    and direction * axial1 >= 0.0
+                    and cylinder_half_height - direction * axial0 <= cylinder_radius - wp.length(radial0)
+                    and cylinder_half_height - direction * axial1 <= cylinder_radius - wp.length(radial1)
+                ):
                     normal = -direction * cylinder_axis
                     distance0 = direction * axial0 - cylinder_half_height - capsule_radius
                     distance1 = direction * axial1 - cylinder_half_height - capsule_radius
