@@ -28,6 +28,8 @@ SPHERE_START_HEIGHT = 4.8
 PICK_STIFFNESS = 300.0
 PICK_DAMPING = 30.0
 PICK_MAX_ACCELERATION = 20.0
+HOBERMAN_MID_SPRING_STIFFNESS = 50.0
+HOBERMAN_MID_SPRING_DAMPING = 5.0
 
 
 class Example:
@@ -52,7 +54,12 @@ class Example:
         # Import and tile the articulated asset once, then clone it into
         # the same world. Negative groups filter contacts within each
         # sphere while allowing sphere-ground and sphere-tower contacts.
-        sphere = make_hoberman_builder(collidable=True, gravity=(0.0, 0.0, -9.81))
+        sphere = make_hoberman_builder(
+            collidable=True,
+            gravity=(0.0, 0.0, -9.81),
+            mid_spring_stiffness=HOBERMAN_MID_SPRING_STIFFNESS,
+            mid_spring_damping=HOBERMAN_MID_SPRING_DAMPING,
+        )
         sphere_body_count = sphere.body_count
         sphere_joint_count = len(sphere.joint_parent)
         self.sphere_first_shape = len(builder.shape_body)
