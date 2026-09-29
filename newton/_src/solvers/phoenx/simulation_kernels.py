@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import functools
+import os
 
 import warp as wp
 
@@ -23,6 +24,7 @@ from newton._src.solvers.phoenx.body import (
     sym6_from_mat33,
 )
 from newton._src.solvers.phoenx.constraints.bilateral_joint import (
+    EXPERIMENTAL_JOINT_INVERSE,
     get_iterate_bilateral_joint_block,
     iterate_bilateral_joint_block,
 )
@@ -166,6 +168,11 @@ _SOFT_HEX_OFF_BODY5 = wp.constant(wp.int32(5))
 _SOFT_HEX_OFF_BODY6 = wp.constant(wp.int32(6))
 _SOFT_HEX_OFF_BODY7 = wp.constant(wp.int32(7))
 _SOFT_HEX_OFF_BODY8 = wp.constant(wp.int32(8))
+
+
+# Opt-in comparison for mixed rigid colors. Eight lanes solve the rows of one
+# D6 block while the existing color launch still handles its contacts.
+_EXPERIMENTAL_COOPERATIVE_JOINTS = os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_JOINTS") == "1"
 
 
 __all__ = [
@@ -810,6 +817,7 @@ def _make_multiworld_rigid_prepare_dispatch_func(
     cached_prepare: bool,
     enable_column_timers: bool,
     patch_friction: bool = False,
+    direct_regular_colors: bool = False,
 ):
     """Generated rigid multi-world prepare dispatch."""
 
@@ -826,8 +834,11 @@ def _make_multiworld_rigid_prepare_dispatch_func(
         t0 = wp.uint64(0)
         if wp.static(enable_column_timers):
             t0 = read_global_timer_ns()
+        parallel_id = wp.int32(0)
+        if wp.static(direct_regular_colors):
+            parallel_id = wp.int32(-1)
         joint_constraint_prepare_inequality(
-            constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), idt
+            constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, idt
         )
         if wp.static(enable_column_timers):
             constraint_accumulate_time_us(
@@ -974,6 +985,7 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
     use_bias: bool,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
+    direct_regular_colors: bool = False,
 ):
     """Generated rigid multi-world multi-sweep iterate dispatch."""
 
@@ -992,11 +1004,14 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
         t0 = wp.uint64(0)
         if wp.static(enable_column_timers):
             t0 = read_global_timer_ns()
+        parallel_id = wp.int32(0)
+        if wp.static(direct_regular_colors):
+            parallel_id = wp.int32(-1)
         sweep = wp.int32(0)
         while sweep < num_sweeps:
             if wp.static(bilateral_joint_blocks):
                 iterate_bilateral_joint_block(
-                    constraints, cid, bodies, particles, copy_state, num_bodies, wp.int32(0), use_bias
+                    constraints, cid, bodies, particles, copy_state, num_bodies, parallel_id, use_bias
                 )
             joint_constraint_iterate_inequality(
                 constraints,
@@ -1005,7 +1020,7 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
                 particles,
                 copy_state,
                 num_bodies,
-                wp.int32(0),
+                parallel_id,
                 idt,
                 sor_boost,
                 use_bias,
@@ -3810,6 +3825,7 @@ def _make_singleworld_rigid_direct_color_func(
     use_bias: bool,
     enable_column_timers: bool,
     bilateral_joint_blocks: bool = False,
+    direct_regular_colors: bool = False,
 ):
     """Generated rigid-only color dispatch for single-world kernels."""
 
@@ -3829,6 +3845,7 @@ def _make_singleworld_rigid_direct_color_func(
         has_soft_contact_pd=has_soft_contact_pd,
         cached_prepare=is_cached_prepare,
         enable_column_timers=enable_column_timers,
+        direct_regular_colors=direct_regular_colors,
     )
     _, _dispatch_iterate_rigid_joint, _ = _make_multiworld_rigid_iterate_dispatch_funcs(
         has_joints=has_joints,
@@ -3839,7 +3856,9 @@ def _make_singleworld_rigid_direct_color_func(
         enable_column_timers=enable_column_timers,
         use_bias=use_bias,
         bilateral_joint_blocks=bilateral_joint_blocks,
+        direct_regular_colors=direct_regular_colors,
     )
+    cooperative_iterate = get_iterate_bilateral_joint_block(True, dense_inverse=EXPERIMENTAL_JOINT_INVERSE)
 
     @wp.func
     def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
@@ -3881,25 +3900,67 @@ def _make_singleworld_rigid_direct_color_func(
 
         if wp.static(has_joints and not skip_joint_pgs):
             count_joints = contact_start - joint_start
-            base = lane
-            while base < count_joints:
-                cid = read1d_i32(element_ids_by_color, joint_start + base)
-                if _joint_pgs_enabled(cid, joint_pgs_enabled):
-                    if wp.static(is_prepare or is_cached_prepare):
-                        _dispatch_prepare_rigid_joint(constraints, bodies, particles, copy_state, num_bodies, idt, cid)
-                    else:
-                        _dispatch_iterate_rigid_joint(
+            if wp.static(
+                _EXPERIMENTAL_COOPERATIVE_JOINTS and bilateral_joint_blocks and not is_prepare and not is_cached_prepare
+            ):
+                # A warp contains four independent eight-lane D6 solves.
+                # The color is an independent set, so the leader can scatter
+                # its paired impulse while other tiles progress independently.
+                tile_lane = lane % wp.int32(8)
+                base = lane / wp.int32(8)
+                while base < count_joints:
+                    cid = read1d_i32(element_ids_by_color, joint_start + base)
+                    if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                        parallel_id = wp.int32(0)
+                        if wp.static(direct_regular_colors):
+                            parallel_id = wp.int32(-1)
+                        cooperative_iterate(
                             constraints,
+                            cid,
                             bodies,
                             particles,
                             copy_state,
                             num_bodies,
-                            idt,
-                            sor_boost,
-                            cid,
-                            wp.int32(1),
+                            parallel_id,
+                            use_bias,
+                            tile_lane,
                         )
-                base = base + stride
+                        if tile_lane == wp.int32(0):
+                            joint_constraint_iterate_inequality(
+                                constraints,
+                                cid,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                parallel_id,
+                                idt,
+                                sor_boost,
+                                use_bias,
+                            )
+                    base = base + stride / wp.int32(8)
+            else:
+                base = lane
+                while base < count_joints:
+                    cid = read1d_i32(element_ids_by_color, joint_start + base)
+                    if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                        if wp.static(is_prepare or is_cached_prepare):
+                            _dispatch_prepare_rigid_joint(
+                                constraints, bodies, particles, copy_state, num_bodies, idt, cid
+                            )
+                        else:
+                            _dispatch_iterate_rigid_joint(
+                                constraints,
+                                bodies,
+                                particles,
+                                copy_state,
+                                num_bodies,
+                                idt,
+                                sor_boost,
+                                cid,
+                                wp.int32(1),
+                            )
+                    base = base + stride
 
         if wp.static(has_contacts):
             count_contacts = color_end - contact_start
@@ -4002,9 +4063,10 @@ def _make_singleworld_persistent_kernel(
             use_bias=use_bias,
             enable_column_timers=enable_column_timers,
             bilateral_joint_blocks=bilateral_joint_blocks,
+            direct_regular_colors=True,
         )
 
-    @wp.kernel(enable_backward=False, module="unique", grid_stride=False)
+    @wp.kernel(name=f"phoenx_singleworld_{phase}", enable_backward=False, module="unique", grid_stride=False)
     def kernel(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
@@ -4116,11 +4178,17 @@ def _make_singleworld_persistent_kernel(
                 cid = read1d_i32(element_ids_by_color, start + t_slot)
                 if wp.static(direct_regular_colors):
                     if is_overflow_color:
-                        contact_cid = cid - num_joints
-                        if wp.static(packed_contact_headers):
-                            contact_cid = start + t_slot
-                        body1 = contact_get_body1(contact_cols, contact_cid)
-                        body2 = contact_get_body2(contact_cols, contact_cid)
+                        body1 = wp.int32(-1)
+                        body2 = wp.int32(-1)
+                        if cid < num_joints:
+                            body1 = constraint_get_body1(constraints, cid)
+                            body2 = constraint_get_body2(constraints, cid)
+                        else:
+                            contact_cid = cid - num_joints
+                            if wp.static(packed_contact_headers):
+                                contact_cid = start + t_slot
+                            body1 = contact_get_body1(contact_cols, contact_cid)
+                            body2 = contact_get_body2(contact_cols, contact_cid)
                         dt = wp.float32(1.0) / idt
                         initialize_rigid_overflow_copy(copy_state, bodies, body1, parallel_id, dt)
                         initialize_rigid_overflow_copy(copy_state, bodies, body2, parallel_id, dt)

@@ -454,10 +454,10 @@ class PhoenXWorld:
                 the existing regular/overflow schedule. Requires one world,
                 ordinary point contacts, block joints, and no packed contacts,
                 sleeping, symmetric sweeps, deformables, or unrolled dispatch.
-            mass_splitting_overflow_only: Experimental single-world rigid contact
-                path that updates regular colors directly and splits only overflow
-                contacts. Requires the unrolled dispatcher, one contact per
-                overflow batch, and no joints or deformables.
+            mass_splitting_overflow_only: Experimental single-world rigid path
+                that updates regular colors directly and splits only overflow
+                contacts and PGS joints. Requires the unrolled dispatcher, one
+                constraint per overflow batch, and no deformables.
             joint_refinement_iterations: Additional joint-only sweeps with mass-copy
                 reconciliation after the mixed iterations. Set by SolverPhoenX.
             direct_joint_projection_passes: Exact direct-joint projections distributed
@@ -974,12 +974,11 @@ class PhoenXWorld:
             or self.step_layout != "single_world"
             or not self.device.is_cuda
             or not self._mass_splitting_velocity_only_average
-            or self.num_joints != 0
             or self.mass_splitting_color_group_size != 0
             or self.mass_splitting_batch_size != 1
             or not self.mass_splitting_unrolled
         ):
-            raise ValueError("overflow-only mass splitting requires a rigid contact-only single world")
+            raise ValueError("overflow-only mass splitting requires a rigid single world with unrolled dispatch")
         self._singleworld_overflow_only_mass_splitting = bool(mass_splitting_overflow_only)
         if warm_start_invalidate_period is None:
             warm_start_invalidate_period = 4 if _has_dynamic_rigid_rows else 0

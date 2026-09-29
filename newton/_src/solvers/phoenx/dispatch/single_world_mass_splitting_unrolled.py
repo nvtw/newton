@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING
 
 import warp as wp
 
+from newton._src.solvers.phoenx.dispatch.mass_splitting_common import solve_auxiliary_constraints
+
 if TYPE_CHECKING:
     from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
@@ -59,6 +61,12 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 w._mass_splitting_writeback()
             return
         direct = getattr(w, "_direct_equality_system", None)
+        # Block PGS joints prepare local factors through the direct-system
+        # interface, but solve inside the colored kernel. In overflow-only
+        # mode the regular colors already update bodies directly; copying
+        # slot zero back here would overwrite their velocity with one
+        # unaveraged overflow partition.
+        sync_direct_copies = not (w._singleworld_overflow_only_mass_splitting and w.constraints.bilateral.enabled)
         if direct is not None and direct.enabled:
             direct.prepare_and_factor(idt)
 
@@ -69,19 +77,15 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 w._warm_start_owned_contacts()
                 direct.solve(use_bias=True)
                 direct.resolve_bounded_drives(idt, use_bias=True)
-            w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
-            if w._maximal_tree_projector is not None:
-                w._maximal_tree_projector.project(use_bias=True)
-                w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
-            if w._reduced_constraints_active_this_step:
-                w._reduced_articulation.solve_constraints(w, idt, relax=False)
+            solve_auxiliary_constraints(w, idt, relax=False)
             return
 
         inv_dt = 1.0 / w.substep_dt
         if direct is not None and direct.enabled:
             direct.solve(use_bias=False)
             direct.resolve_bounded_drives(idt, use_bias=False)
-            w._mass_splitting_broadcast()
+            if sync_direct_copies:
+                w._mass_splitting_broadcast()
         prepare_head, _, iterate_head, _, _, _ = w._singleworld_kernels()
         if w._refresh_prepare_this_substep():
             w._partitioner.begin_sweep()
@@ -95,31 +99,29 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         else:
             w._run_cached_prepare_bookkeeping(idt)
         if direct is not None and direct.enabled:
-            w._mass_splitting_writeback(already_averaged=True)
+            if sync_direct_copies:
+                w._mass_splitting_writeback(already_averaged=True)
             w._warm_start_owned_contacts()
             direct.solve(use_bias=False)
-            w._mass_splitting_broadcast()
+            if sync_direct_copies:
+                w._mass_splitting_broadcast()
         for iteration in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             self._unrolled_sweep(iterate_head, idt, w._contact_container_solve)
             if not w._singleworld_overflow_only_mass_splitting:
                 w._mass_splitting_average_and_broadcast(inv_dt)
             if direct is not None and direct.enabled:
-                w._mass_splitting_writeback(already_averaged=True)
+                if sync_direct_copies:
+                    w._mass_splitting_writeback(already_averaged=True)
                 direct.solve(use_bias=iteration == w.solver_iterations - 1)
-                if iteration + 1 < w.solver_iterations:
+                if sync_direct_copies and iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
 
         if (direct is None or not direct.enabled) and not w._singleworld_overflow_only_mass_splitting:
             w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.resolve_bounded_drives(idt, use_bias=True)
-        w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
-        if w._maximal_tree_projector is not None:
-            w._maximal_tree_projector.project(use_bias=True)
-            w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
-        if w._reduced_constraints_active_this_step:
-            w._reduced_articulation.solve_constraints(w, idt, relax=False)
+        solve_auxiliary_constraints(w, idt, relax=False)
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
@@ -127,16 +129,12 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             return
 
         direct = getattr(w, "_direct_equality_system", None)
+        sync_direct_copies = not (w._singleworld_overflow_only_mass_splitting and w.constraints.bilateral.enabled)
         if not w._regular_pgs_active_this_step:
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=False)
                 direct.resolve_bounded_drives(idt, use_bias=False)
-            w._solve_direct_contacts(use_bias=False, refresh_mobility=False)
-            if w._maximal_tree_projector is not None:
-                w._maximal_tree_projector.project(use_bias=False)
-                w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
-            if w._reduced_constraints_active_this_step:
-                w._reduced_articulation.solve_constraints(w, idt, relax=True)
+            solve_auxiliary_constraints(w, idt, relax=True)
             return
 
         if not w._singleworld_overflow_only_mass_splitting:
@@ -149,21 +147,17 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             if not w._singleworld_overflow_only_mass_splitting:
                 w._mass_splitting_average_and_broadcast(inv_dt)
             if direct is not None and direct.enabled:
-                w._mass_splitting_writeback(already_averaged=True)
+                if sync_direct_copies:
+                    w._mass_splitting_writeback(already_averaged=True)
                 direct.solve(use_bias=False)
-                if iteration + 1 < w._active_velocity_iterations:
+                if sync_direct_copies and iteration + 1 < w._active_velocity_iterations:
                     w._mass_splitting_broadcast()
 
         if (direct is None or not direct.enabled) and not w._singleworld_overflow_only_mass_splitting:
             w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.resolve_bounded_drives(idt, use_bias=False)
-        w._solve_direct_contacts(use_bias=False, refresh_mobility=False)
-        if w._maximal_tree_projector is not None:
-            w._maximal_tree_projector.project(use_bias=False)
-            w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
-        if w._reduced_constraints_active_this_step:
-            w._reduced_articulation.solve_constraints(w, idt, relax=True)
+        solve_auxiliary_constraints(w, idt, relax=True)
 
 
 __all__ = ["SingleWorldMassSplittingUnrolledDispatcher"]
