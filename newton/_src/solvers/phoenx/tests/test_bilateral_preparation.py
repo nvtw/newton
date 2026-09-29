@@ -11,8 +11,10 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem
 from newton._src.solvers.phoenx.body import inertia_sym6_unpack_np
 from newton._src.solvers.phoenx.constraints.bilateral_joint import (
+    EXPERIMENTAL_JOINT_INVERSE,
     BodyContainer,
     ConstraintContainer,
     CopyStateContainer,
@@ -23,6 +25,7 @@ from newton._src.solvers.phoenx.constraints.bilateral_joint import (
     _response,
     constraint_get_body1,
     constraint_get_body2,
+    invert_prepared_bilateral_joint_blocks,
     iterate_bilateral_joint_block,
     prepare_bilateral_joint_blocks,
 )
@@ -175,9 +178,23 @@ class TestBilateralPreparation(unittest.TestCase):
                 wp.launch(
                     prepare_bilateral_joint_blocks,
                     world.num_joints,
-                    [world.constraints, world.bodies, copies],
+                    [
+                        world.constraints,
+                        world.bodies,
+                        copies,
+                        world._partitioner.interaction_id_to_partition,
+                        wp.int32(world.max_colored_partitions or 0),
+                        wp.int32(int(world._singleworld_overflow_only_mass_splitting)),
+                    ],
                     device=model.device,
                 )
+                if EXPERIMENTAL_JOINT_INVERSE:
+                    wp.launch(
+                        invert_prepared_bilateral_joint_blocks,
+                        world.num_joints,
+                        [world.constraints],
+                        device=model.device,
+                    )
             finally:
                 copies.highest_index_in_use.assign(highest)
             np.testing.assert_array_equal(copies.highest_index_in_use.numpy(), highest)
@@ -254,10 +271,19 @@ class TestBilateralPreparation(unittest.TestCase):
                 ):
                     for field in fields:
                         getattr(data, field).zero_()
+                    inputs = [world.constraints, world.bodies, world._copy_state]
+                    if active is not _prepare_dynamic_reference:
+                        inputs.extend(
+                            [
+                                world._partitioner.interaction_id_to_partition,
+                                wp.int32(world.max_colored_partitions or 0),
+                                wp.int32(int(world._singleworld_overflow_only_mass_splitting)),
+                            ]
+                        )
                     wp.launch(
                         active,
                         world.num_joints * (8 if block else 1),
-                        [world.constraints, world.bodies, world._copy_state],
+                        inputs,
                         device=model.device,
                         block_dim=block or 256,
                     )
@@ -299,7 +325,14 @@ class TestBilateralPreparation(unittest.TestCase):
         ):
             setattr(data, name, wp.array(np.full(shape, 17, dtype=scalar), dtype=dtype, device=model.device))
         constraints.bilateral = data
-        inputs = [constraints, world.bodies, world._copy_state]
+        inputs = [
+            constraints,
+            world.bodies,
+            world._copy_state,
+            wp.zeros(count, dtype=wp.int32, device=model.device),
+            wp.int32(0),
+            wp.int32(0),
+        ]
         initial = {name: getattr(data, name).numpy() for name in fields}
         for invalid in (False, True):
             if invalid:
@@ -338,19 +371,28 @@ class TestBilateralPreparation(unittest.TestCase):
 class TestBilateralPreparationDispatch(unittest.TestCase):
     def test_cpu_scalar_and_cuda_complete_subgroups(self):
         """Select the scalar CPU kernel or complete CUDA eight-lane groups."""
-        from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem
-
-        world = SimpleNamespace(num_joints=7, constraints=object(), bodies=object(), _copy_state=object())
+        world = SimpleNamespace(
+            num_joints=7,
+            constraints=object(),
+            bodies=object(),
+            _copy_state=object(),
+            _partitioner=SimpleNamespace(interaction_id_to_partition=object()),
+            max_colored_partitions=0,
+            _singleworld_overflow_only_mass_splitting=False,
+        )
         for cuda in (False, True):
             device = SimpleNamespace(is_cuda=cuda)
             system = SimpleNamespace(enabled=True, _block_world=world, model=SimpleNamespace(device=device))
             with patch.object(wp, "launch") as launched:
                 BlockJointSystem.prepare_and_factor(system, 100.0)
             kernel = _prepare_bilateral_joint_blocks_cooperative if cuda else prepare_bilateral_joint_blocks
-            self.assertIs(launched.call_args.args[0], kernel)
-            self.assertEqual(launched.call_args.kwargs["dim"], 56 if cuda else 7)
+            prepare_call = launched.call_args_list[0]
+            self.assertIs(prepare_call.args[0], kernel)
+            self.assertEqual(prepare_call.kwargs["dim"], 56 if cuda else 7)
             if cuda:
-                self.assertEqual(launched.call_args.kwargs["block_dim"], 32)
+                self.assertEqual(prepare_call.kwargs["block_dim"], 32)
+            if EXPERIMENTAL_JOINT_INVERSE:
+                self.assertIs(launched.call_args_list[1].args[0], invert_prepared_bilateral_joint_blocks)
 
 
 if __name__ == "__main__":

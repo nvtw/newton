@@ -249,6 +249,7 @@ class SolverPhoenX(SolverBase):
         joint_refinement_iterations: int = 0,
         direct_joint_projection_passes: int = 1,
         mass_splitting_unrolled: bool = False,
+        mass_splitting_overflow_only: bool = False,
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
@@ -367,6 +368,10 @@ class SolverPhoenX(SolverBase):
             mass_splitting_unrolled: Use the fixed-launch mass-splitting
                 dispatcher. This can reduce graph-control overhead on
                 workloads whose overflow structure is stable.
+            mass_splitting_overflow_only: Update rigid regular colors directly
+                and split only overflow constraints. Requires a single CUDA
+                world, unrolled dispatch, batch size one, and maximal PGS
+                joints when joints are present.
             partitioner_algorithm: ``"greedy"`` (default),
                 ``"endpoint_owner"`` (single-world mass splitting only), or
                 ``"luby_fixed"`` (single-world only).
@@ -514,6 +519,8 @@ class SolverPhoenX(SolverBase):
             raise ValueError(
                 "joint_mode='maximal_pgs' requires single-world maximal rigid point contacts without rod joints"
             )
+        if mass_splitting_overflow_only and has_constraint_joints and joint_solver != "block_pgs":
+            raise ValueError("mass_splitting_overflow_only requires joint_mode='maximal_pgs' when joints are present")
         if solver_scheme == "tgs":
             if (
                 not model.device.is_cuda
@@ -875,6 +882,7 @@ class SolverPhoenX(SolverBase):
             joint_refinement_iterations=joint_refinement_iterations,
             direct_joint_projection_passes=direct_joint_projection_passes,
             mass_splitting_unrolled=mass_splitting_unrolled,
+            mass_splitting_overflow_only=mass_splitting_overflow_only,
             partitioner_algorithm=partitioner_algorithm,
             max_greedy_outer_iters=max_greedy_outer_iters,
             enable_warm_start_coloring=enable_warm_start_coloring,

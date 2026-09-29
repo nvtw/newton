@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 
 import warp as wp
 
+from newton._src.solvers.phoenx.dispatch.mass_splitting_common import solve_auxiliary_constraints
+
 if TYPE_CHECKING:
     from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
@@ -85,12 +87,7 @@ class SingleWorldMassSplittingDispatcher:
                 w._warm_start_owned_contacts()
                 direct.solve(use_bias=True)
                 direct.resolve_bounded_drives(idt, use_bias=True)
-            w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
-            if w._maximal_tree_projector is not None:
-                w._maximal_tree_projector.project(use_bias=True)
-                w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
-            if w._reduced_constraints_active_this_step:
-                w._reduced_articulation.solve_constraints(w, idt, relax=False)
+            solve_auxiliary_constraints(w, idt, relax=False)
             return
 
         inv_dt = 1.0 / w.substep_dt
@@ -158,12 +155,7 @@ class SingleWorldMassSplittingDispatcher:
             w._mass_splitting_writeback(already_averaged=True)
         if direct is not None and direct.enabled:
             direct.resolve_bounded_drives(idt, use_bias=True)
-        w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
-        if w._maximal_tree_projector is not None:
-            w._maximal_tree_projector.project(use_bias=True)
-            w._solve_maximal_articulated_contacts(use_bias=True, refresh_mobility=True)
-        if w._reduced_constraints_active_this_step:
-            w._reduced_articulation.solve_constraints(w, idt, relax=False)
+        solve_auxiliary_constraints(w, idt, relax=False)
 
     def relax(self, idt: wp.float32) -> None:
         w = self._world
@@ -175,12 +167,7 @@ class SingleWorldMassSplittingDispatcher:
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=False)
                 direct.resolve_bounded_drives(idt, use_bias=False)
-            w._solve_direct_contacts(use_bias=False, refresh_mobility=False)
-            if w._maximal_tree_projector is not None:
-                w._maximal_tree_projector.project(use_bias=False)
-                w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
-            if w._reduced_constraints_active_this_step:
-                w._reduced_articulation.solve_constraints(w, idt, relax=True)
+            solve_auxiliary_constraints(w, idt, relax=True)
             return
 
         # Pose integration updates anisotropic angular velocity and world
@@ -215,12 +202,7 @@ class SingleWorldMassSplittingDispatcher:
             w._wait_direct_factor()
             direct.resolve_bounded_drives(idt, use_bias=False)
 
-        w._solve_direct_contacts(use_bias=False, refresh_mobility=False)
-        if w._maximal_tree_projector is not None:
-            w._maximal_tree_projector.project(use_bias=False)
-            w._solve_maximal_articulated_contacts(use_bias=False, refresh_mobility=False)
-        if w._reduced_constraints_active_this_step:
-            w._reduced_articulation.solve_constraints(w, idt, relax=True)
+        solve_auxiliary_constraints(w, idt, relax=True)
 
 
 __all__ = ["SingleWorldMassSplittingDispatcher"]

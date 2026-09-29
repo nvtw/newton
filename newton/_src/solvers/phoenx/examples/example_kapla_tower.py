@@ -130,6 +130,34 @@ CAMERA_COLLIDER_RADIUS: float = 0.4
 CAMERA_COLLIDER_DENSITY: float = 1000.0
 
 
+def add_kapla_bricks(
+    builder: newton.ModelBuilder,
+    centres_xy: list[tuple[float, float]],
+) -> tuple[list[list[int]], tuple[float, float, float]]:
+    """Add one or more copies of the authored tower to one model builder."""
+    half_extents = tuple(0.5 * GLOBAL_SCALING * float(extent) for extent in BRICK_FULL_EXTENTS)
+    positions = (POSITIONS * GLOBAL_SCALING).astype(np.float32)
+    quats = ORIENTATIONS.astype(np.float32)
+    quats /= np.maximum(np.linalg.norm(quats, axis=1, keepdims=True), 1e-12)
+    cfg = newton.ModelBuilder.ShapeConfig(density=BRICK_DENSITY, gap=0.01)
+    brick_ids: list[list[int]] = []
+    for cx, cy in centres_xy:
+        cell_ids: list[int] = []
+        for i in range(NUM_BRICKS):
+            qx, qy, qz, qw = quats[i]
+            px, py, pz = positions[i]
+            body = builder.add_body(
+                xform=wp.transform(
+                    p=wp.vec3(float(px) + cx, float(py) + cy, float(pz)),
+                    q=wp.quat(float(qx), float(qy), float(qz), float(qw)),
+                ),
+            )
+            builder.add_shape_box(body, hx=half_extents[0], hy=half_extents[1], hz=half_extents[2], cfg=cfg)
+            cell_ids.append(body)
+        brick_ids.append(cell_ids)
+    return brick_ids, half_extents
+
+
 class Example:
     """PhoenX Kapla Tower -- port of ``Demo15`` from PhoenXDemo.
 
@@ -178,21 +206,6 @@ class Example:
         builder = newton.ModelBuilder()
         builder.add_ground_plane(height=GROUND_HEIGHT)
 
-        hx = 0.5 * GLOBAL_SCALING * BRICK_FULL_EXTENTS[0]
-        hy = 0.5 * GLOBAL_SCALING * BRICK_FULL_EXTENTS[1]
-        hz = 0.5 * GLOBAL_SCALING * BRICK_FULL_EXTENTS[2]
-
-        # USDA stores quats as half-precision; renormalise so Newton
-        # gets unit quaternions in ``body_q``.
-        positions = (POSITIONS * GLOBAL_SCALING).astype(np.float32)
-        quats = ORIENTATIONS.astype(np.float32)
-        norms = np.linalg.norm(quats, axis=1, keepdims=True)
-        quats = quats / np.maximum(norms, 1e-12)
-
-        # 1 cm AABB margin. Newton default (5 cm) is ~4x bigger than
-        # the bricks and would explode the SAP candidate count.
-        cfg = newton.ModelBuilder.ShapeConfig(density=BRICK_DENSITY, gap=0.01)
-
         nx, ny = (int(d) for d in TOWER_GRID_DIMS)
         if nx < 1 or ny < 1:
             raise ValueError(f"TOWER_GRID_DIMS components must be >= 1 (got {TOWER_GRID_DIMS})")
@@ -209,19 +222,7 @@ class Example:
         self._cell_centres_xy = cell_centres_xy
 
         # Per-cell newton-id list (cell_index = j * nx + i, row-major).
-        self._brick_newton_ids: list[list[int]] = [[] for _ in range(nx * ny)]
-        for cell_index, (cx, cy) in enumerate(cell_centres_xy):
-            for i in range(NUM_BRICKS):
-                qx, qy, qz, qw = quats[i]
-                px, py, pz = positions[i]
-                body = builder.add_body(
-                    xform=wp.transform(
-                        p=wp.vec3(float(px) + cx, float(py) + cy, float(pz)),
-                        q=wp.quat(float(qx), float(qy), float(qz), float(qw)),
-                    ),
-                )
-                builder.add_shape_box(body, hx=hx, hy=hy, hz=hz, cfg=cfg)
-                self._brick_newton_ids[cell_index].append(body)
+        self._brick_newton_ids, (hx, hy, hz) = add_kapla_bricks(builder, cell_centres_xy)
 
         # Camera collider added as dynamic so finalize() accepts it,
         # then flipped to :data:`MOTION_KINEMATIC` and inverse-mass-

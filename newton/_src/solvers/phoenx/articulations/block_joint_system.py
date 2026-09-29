@@ -6,7 +6,12 @@ import numpy as np
 import warp as wp
 
 from ..body import BodyContainer, mat33_from_sym6
-from ..constraints.bilateral_joint import _prepare_bilateral_joint_blocks_cooperative, prepare_bilateral_joint_blocks
+from ..constraints.bilateral_joint import (
+    EXPERIMENTAL_JOINT_INVERSE,
+    _prepare_bilateral_joint_blocks_cooperative,
+    invert_prepared_bilateral_joint_blocks,
+    prepare_bilateral_joint_blocks,
+)
 from ..constraints.bilateral_joint_data import BilateralJointData, Mat66d, Vec6d
 from .direct_equality import DirectEqualitySystem, _body_com_twist, _direct_wrench_response
 
@@ -196,6 +201,7 @@ class BlockJointSystem(DirectEqualitySystem):
         data.response1 = wp.zeros((count, 6), dtype=wp.spatial_vector, device=device)
         data.lower = wp.zeros(count, dtype=Mat66d, device=device)
         data.diagonal = wp.zeros(count, dtype=Vec6d, device=device)
+        data.inverse = wp.zeros(count, dtype=Mat66d, device=device)
         data.valid = wp.zeros(count, dtype=wp.int32, device=device)
         world.constraints.bilateral = data
         ownership = world._joint_pgs_enabled.numpy().copy()
@@ -211,11 +217,19 @@ class BlockJointSystem(DirectEqualitySystem):
     def prepare_and_factor(self, idt):
         if self.enabled:
             world = self._block_world
+            prepare_inputs = [
+                world.constraints,
+                world.bodies,
+                world._copy_state,
+                world._partitioner.interaction_id_to_partition,
+                wp.int32(world.max_colored_partitions or 0),
+                wp.int32(int(world._singleworld_overflow_only_mass_splitting)),
+            ]
             if self.model.device.is_cuda:
                 wp.launch(
                     _prepare_bilateral_joint_blocks_cooperative,
                     dim=8 * world.num_joints,
-                    inputs=[world.constraints, world.bodies, world._copy_state],
+                    inputs=prepare_inputs,
                     device=self.model.device,
                     block_dim=32,
                 )
@@ -223,7 +237,14 @@ class BlockJointSystem(DirectEqualitySystem):
                 wp.launch(
                     prepare_bilateral_joint_blocks,
                     dim=world.num_joints,
-                    inputs=[world.constraints, world.bodies, world._copy_state],
+                    inputs=prepare_inputs,
+                    device=self.model.device,
+                )
+            if EXPERIMENTAL_JOINT_INVERSE:
+                wp.launch(
+                    invert_prepared_bilateral_joint_blocks,
+                    dim=world.num_joints,
+                    inputs=[world.constraints],
                     device=self.model.device,
                 )
 

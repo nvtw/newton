@@ -4,6 +4,7 @@
 """Mass-metric joint blocks evaluated in the same colors as rigid contacts."""
 
 import functools
+import os
 
 import warp as wp
 
@@ -17,6 +18,9 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 from newton._src.solvers.phoenx.constraints.constraint_joint import _ms_load_body_pair, _ms_store_body_pair
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
+
+# Temporary experiment; select before importing PhoenX in the benchmark process.
+EXPERIMENTAL_JOINT_INVERSE = os.environ.get("PHOENX_EXPERIMENTAL_JOINT_INVERSE") == "1"
 
 
 @wp.func
@@ -36,7 +40,12 @@ def _response(bodies: BodyContainer, body: wp.int32, wrench: wp.spatial_vector) 
 
 @wp.kernel(enable_backward=False)
 def prepare_bilateral_joint_blocks(
-    constraints: ConstraintContainer, bodies: BodyContainer, copy_state: CopyStateContainer
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    copy_state: CopyStateContainer,
+    joint_partitions: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+    overflow_only: wp.int32,
 ):
     # A joint has at most six rows. Constant loop bounds let Warp unroll
     # matrix indexing while the guards preserve the original active-row order.
@@ -51,7 +60,10 @@ def prepare_bilateral_joint_blocks(
     body1 = constraint_get_body2(constraints, cid)
     factor0 = wp.float32(1.0)
     factor1 = wp.float32(1.0)
-    if copy_state.highest_index_in_use[0] > 0:
+    # A regular-color joint acts on bodies directly in overflow-only
+    # mode, even if a shared body also owns overflow copies.
+    use_copies = overflow_only == wp.int32(0) or joint_partitions[cid] >= max_colored_partitions
+    if use_copies and copy_state.highest_index_in_use[0] > 0:
         factor0 = wp.float32(wp.max(copy_state.count_per_node[body0], wp.int32(1)))
         factor1 = wp.float32(wp.max(copy_state.count_per_node[body1], wp.int32(1)))
     for i in range(6):
@@ -121,6 +133,17 @@ def _backward_bilateral_impulses(
                     value -= lower[j, i] * solution[j]
             solution[i] = value
 
+    return _scatter_bilateral_impulses(data, cid, count, structural, solution)
+
+
+@wp.func
+def _scatter_bilateral_impulses(
+    data: BilateralJointData,
+    cid: wp.int32,
+    count: wp.int32,
+    structural: wp.int32,
+    solution: Vec6d,
+):
     impulse0 = wp.spatial_vector()
     impulse1 = wp.spatial_vector()
     for i in range(count):
@@ -152,6 +175,46 @@ def _solve_bilateral_impulses(
     for i in range(count):
         solution[i] /= diagonal[i]
     return _backward_bilateral_impulses(data, cid, count, structural, solution)
+
+
+@wp.kernel(enable_backward=False)
+def invert_prepared_bilateral_joint_blocks(constraints: ConstraintContainer):
+    """Precompute the inverse mass-metric block for repeated PGS sweeps."""
+    cid = wp.tid()
+    data = constraints.bilateral
+    count = data.row_count[cid]
+    if count == 0 or data.valid[cid] == 0:
+        return
+    lower = data.lower[cid]
+    diagonal = data.diagonal[cid]
+    inverse = Mat66d()
+    for column in range(6):
+        if column < count:
+            solution = Vec6d()
+            for i in range(6):
+                if i < count:
+                    value = wp.float64(0.0)
+                    if i == column:
+                        value = wp.float64(1.0)
+                    for j in range(6):
+                        if j < i:
+                            value -= lower[i, j] * solution[j]
+                    solution[i] = value
+            for i in range(6):
+                if i < count:
+                    solution[i] /= diagonal[i]
+            for reverse in range(6):
+                i = 5 - reverse
+                if i < count:
+                    value = solution[i]
+                    for j in range(6):
+                        if j > i and j < count:
+                            value -= lower[j, i] * solution[j]
+                    solution[i] = value
+            for i in range(6):
+                if i < count:
+                    inverse[i, column] = solution[i]
+    data.inverse[cid] = inverse
 
 
 @wp.func_native(
@@ -195,7 +258,12 @@ def _subtract_bilateral_pivot(pivot: wp.float64, lower: wp.float64, diagonal: wp
 
 @wp.kernel(enable_backward=False)
 def _prepare_bilateral_joint_blocks_cooperative(
-    constraints: ConstraintContainer, bodies: BodyContainer, copy_state: CopyStateContainer
+    constraints: ConstraintContainer,
+    bodies: BodyContainer,
+    copy_state: CopyStateContainer,
+    joint_partitions: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+    overflow_only: wp.int32,
 ):
     # Eight consecutive CUDA lanes own a joint; every lane must participate
     # in the subgroup shuffles, including the two unused row lanes.
@@ -213,7 +281,8 @@ def _prepare_bilateral_joint_blocks_cooperative(
     body1 = constraint_get_body2(constraints, cid)
     factor0 = wp.float32(1.0)
     factor1 = wp.float32(1.0)
-    if copy_state.highest_index_in_use[0] > 0:
+    use_copies = overflow_only == wp.int32(0) or joint_partitions[cid] >= max_colored_partitions
+    if use_copies and copy_state.highest_index_in_use[0] > 0:
         factor0 = wp.float32(wp.max(copy_state.count_per_node[body0], wp.int32(1)))
         factor1 = wp.float32(wp.max(copy_state.count_per_node[body1], wp.int32(1)))
     response0 = wp.spatial_vector()
@@ -282,13 +351,17 @@ def _prepare_bilateral_joint_blocks_cooperative(
 
 
 @functools.cache
-def get_iterate_bilateral_joint_block(cooperative: bool = False, *, temporal_springs: bool = False):
-    """Build scalar or eight-lane RHS and forward solve with shared back solve.
+def get_iterate_bilateral_joint_block(
+    cooperative: bool = False, *, temporal_springs: bool = False, dense_inverse: bool = False
+):
+    """Build scalar or eight-lane D6 block solve with paired impulse scatter.
 
     The cooperative variant requires eight participating CUDA lanes per joint.
     All lanes take the same enabled/count/valid returns, and gather before
     nonleaders exit. Each row retains its original FP64 component and
     subtraction order; backward substitution and impulse scatter stay scalar.
+    With a prepared dense inverse, each lane computes one output row from the
+    original residuals and the leader scatters the gathered solution.
 
     Temporal springs solve a fresh force increment each substep. Their existing
     velocity already includes earlier increments, so their residual omits the
@@ -350,21 +423,23 @@ def get_iterate_bilateral_joint_block(cooperative: bool = False, *, temporal_spr
                     residual += wp.float64(data.bias[structural, local])
                 rhs_value = -residual
 
-            # Each row subtracts solved earlier rows in the same ascending
-            # order as the scalar forward solve. Scaling must follow all rows.
-            lower = data.lower[cid]
-            for forward_row in range(count):
-                solved = _shuffle_bilateral_rhs(rhs_value, forward_row)
-                if tile_lane > forward_row and tile_lane < count:
-                    rhs_value -= lower[tile_lane, forward_row] * solved
-            if tile_lane < count:
-                diagonal = data.diagonal[cid]
-                rhs_value /= diagonal[tile_lane]
+            if wp.static(not dense_inverse):
+                # Each row subtracts solved earlier rows in the same ascending
+                # order as the scalar forward solve. Scaling follows all rows.
+                lower = data.lower[cid]
+                for forward_row in range(count):
+                    solved = _shuffle_bilateral_rhs(rhs_value, forward_row)
+                    if tile_lane > forward_row and tile_lane < count:
+                        rhs_value -= lower[tile_lane, forward_row] * solved
+                if tile_lane < count:
+                    diagonal = data.diagonal[cid]
+                    rhs_value /= diagonal[tile_lane]
             rhs = Vec6d()
             for row_lane in range(count):
                 rhs[row_lane] = _shuffle_bilateral_rhs(rhs_value, row_lane)
-            if tile_lane != 0:
-                return
+            if wp.static(not dense_inverse):
+                if tile_lane != 0:
+                    return
         else:
             rhs = Vec6d()
             for i in range(count):
@@ -380,7 +455,29 @@ def get_iterate_bilateral_joint_block(cooperative: bool = False, *, temporal_spr
                     residual += wp.float64(data.bias[structural, local])
                 rhs[i] = -residual
 
-        if wp.static(cooperative):
+        if wp.static(dense_inverse):
+            inverse = data.inverse[cid]
+            solution = Vec6d()
+            if wp.static(cooperative):
+                value = wp.float64(0.0)
+                if tile_lane < count:
+                    for j in range(6):
+                        if j < count:
+                            value += inverse[tile_lane, j] * rhs[j]
+                for row_lane in range(count):
+                    solution[row_lane] = _shuffle_bilateral_rhs(value, row_lane)
+                if tile_lane != 0:
+                    return
+            else:
+                for i in range(6):
+                    if i < count:
+                        value = wp.float64(0.0)
+                        for j in range(6):
+                            if j < count:
+                                value += inverse[i, j] * rhs[j]
+                        solution[i] = value
+            impulse0, impulse1 = _scatter_bilateral_impulses(data, cid, count, structural, solution)
+        elif wp.static(cooperative):
             impulse0, impulse1 = _backward_bilateral_impulses(data, cid, count, structural, rhs)
         else:
             impulse0, impulse1 = _solve_bilateral_impulses(data, cid, count, structural, rhs)
@@ -393,7 +490,7 @@ def get_iterate_bilateral_joint_block(cooperative: bool = False, *, temporal_spr
     return iterate
 
 
-_iterate_bilateral_scalar = get_iterate_bilateral_joint_block(False)
+_iterate_bilateral_scalar = get_iterate_bilateral_joint_block(False, dense_inverse=EXPERIMENTAL_JOINT_INVERSE)
 
 
 @wp.func
