@@ -502,7 +502,6 @@ def _launch_sparse_inequality_pgs(
     if bsm is None:
         raise RuntimeError("Sparse inequality PGS requires an initialized Delassus operator.")
 
-    path.body_space.zero_()
     bilateral_vio = (
         path.data.bilateral_operator.info.vio if path.data.bilateral_operator is not None else problem.data.vio
     )
