@@ -76,14 +76,7 @@ _SPARSE_DELASSUS_ROWS_UNILATERAL = 1
 _CONTACT_PAIR_SORT_MIN_CAPACITY = 4096
 _PARALLEL_CONTACT_MAX_COLORS = 8
 _PARALLEL_CONTACT_MIN_CAPACITY = 32768
-_SPARSE_ASSEMBLY_REUSE_MIN_WORLDS = 2048
 _SPARSE_INEQUALITY_TOPOLOGY_ERROR = "Sparse DVI inequalities require limit/contact topology and sparse Jacobians."
-
-
-def _can_reuse_sparse_assembly(size, has_unilateral_constraints: bool) -> bool:
-    """Return whether a large constrained batch amortizes cached assembly."""
-    has_joint_friction = size.sum_of_num_friction_joint_cts > 0
-    return size.num_worlds >= _SPARSE_ASSEMBLY_REUSE_MIN_WORLDS and (has_joint_friction or has_unilateral_constraints)
 
 
 def _use_parallel_contact_colors(num_worlds: int, max_limits: int, max_contacts: int, is_cuda: bool) -> bool:
@@ -194,9 +187,7 @@ class SparseDVIPath:
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
             _build_sparse_bilateral_pairs(self, problem)
             _build_sparse_bilateral_row_nzb_topology(self, problem)
-            if isinstance(self.bilateral_solver, LLTBlockedRCMSolver) and _can_reuse_sparse_assembly(
-                self.size, self.has_unilateral_constraints
-            ):
+            if isinstance(self.bilateral_solver, LLTBlockedRCMSolver):
                 self.bilateral_solver.configure_sparse_assembly(
                     *self.bilateral_nzb_pairs[:3],
                 )
@@ -1313,7 +1304,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         response_kernel = _solve_bilateral_unilateral_response_cooperative
         # Pack independent warp workers to avoid limiting occupancy to one warp per block.
         response_block_dim = 256 if path.size.num_worlds >= 128 else 128
-        response_tasks_per_world = (max_unilateral_rows + 1) // 2
+        response_tasks_per_world = min(32, (max_unilateral_rows + 1) // 2)
         response_dim = path.size.num_worlds * response_tasks_per_world * 32
         wp.launch(
             kernel=_find_bilateral_factor_row_start_rcm if use_permutation else _find_bilateral_factor_row_start,

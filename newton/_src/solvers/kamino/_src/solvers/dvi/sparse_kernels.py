@@ -2901,6 +2901,26 @@ def _load_compact_schur_row(compact_schur: wp.array[float32], base: int32, lane:
     return values
 
 
+@wp.func
+def _get_component_4(values: wp.vec4f, index: int32) -> float32:
+    """Select a register component without dynamically indexing an array."""
+    return wp.where(
+        index == int32(0),
+        values.x,
+        wp.where(index == int32(1), values.y, wp.where(index == int32(2), values.z, values.w)),
+    )
+
+
+@wp.func
+def _set_component_4(values: wp.vec4f, index: int32, value: float32) -> wp.vec4f:
+    return wp.vec4f(
+        wp.where(index == int32(0), value, values.x),
+        wp.where(index == int32(1), value, values.y),
+        wp.where(index == int32(2), value, values.z),
+        wp.where(index == int32(3), value, values.w),
+    )
+
+
 @wp.kernel
 def _solve_dvi_compact_schur_pgs_cooperative(
     limit_indices: wp.array[int32],
@@ -3039,11 +3059,11 @@ def _solve_dvi_compact_schur_pgs_cooperative(
                 current = row + component
                 chunk = current / int32(32)
                 owner = current % int32(32)
-                correction = _shuffle_lane_32(q[chunk], owner)
-                old_lambda = _shuffle_lane_32(impulses[chunk], owner)
-                diag = _shuffle_lane_32(diagonal[chunk], owner)
-                bound_lower = _shuffle_lane_32(lower[chunk], owner)
-                bound_upper = _shuffle_lane_32(upper[chunk], owner)
+                correction = _shuffle_lane_32(_get_component_4(q, chunk), owner)
+                old_lambda = _shuffle_lane_32(_get_component_4(impulses, chunk), owner)
+                diag = _shuffle_lane_32(_get_component_4(diagonal, chunk), owner)
+                bound_lower = _shuffle_lane_32(_get_component_4(lower, chunk), owner)
+                bound_upper = _shuffle_lane_32(_get_component_4(upper, chunk), owner)
                 s_row = _load_compact_schur_row(compact_schur, s_offset + current * nu, lane, nu)
                 t_row = wp.vec4f()
                 correction_1 = float32(0.0)
@@ -3054,17 +3074,17 @@ def _solve_dvi_compact_schur_pgs_cooperative(
                 if tangent:
                     second_chunk = (row + int32(1)) / int32(32)
                     second_owner = (row + int32(1)) % int32(32)
-                    correction_1 = _shuffle_lane_32(q[second_chunk], second_owner)
-                    old_lambda_1 = _shuffle_lane_32(impulses[second_chunk], second_owner)
-                    diagonal_1 = _shuffle_lane_32(diagonal[second_chunk], second_owner)
+                    correction_1 = _shuffle_lane_32(_get_component_4(q, second_chunk), second_owner)
+                    old_lambda_1 = _shuffle_lane_32(_get_component_4(impulses, second_chunk), second_owner)
+                    diagonal_1 = _shuffle_lane_32(_get_component_4(diagonal, second_chunk), second_owner)
                     t_row = _load_compact_schur_row(compact_schur, s_offset + (row + int32(1)) * nu, lane, nu)
                     normal_chunk = (row + int32(2)) / int32(32)
                     normal_owner = (row + int32(2)) % int32(32)
-                    lambda_n = _shuffle_lane_32(impulses[normal_chunk], normal_owner)
-                    bias_n = _shuffle_lane_32(velocity_bias[normal_chunk], normal_owner)
-                    scale_n = _shuffle_lane_32(scale[normal_chunk], normal_owner)
-                    diagonal_n = _shuffle_lane_32(normal_diagonal[normal_chunk], normal_owner)
-                    mu_c = _shuffle_lane_32(mu[normal_chunk], normal_owner)
+                    lambda_n = _shuffle_lane_32(_get_component_4(impulses, normal_chunk), normal_owner)
+                    bias_n = _shuffle_lane_32(_get_component_4(velocity_bias, normal_chunk), normal_owner)
+                    scale_n = _shuffle_lane_32(_get_component_4(scale, normal_chunk), normal_owner)
+                    diagonal_n = _shuffle_lane_32(_get_component_4(normal_diagonal, normal_chunk), normal_owner)
+                    mu_c = _shuffle_lane_32(_get_component_4(mu, normal_chunk), normal_owner)
                     friction_load = mu_c * _contact_friction_normal_load(
                         lambda_n, bias_n, scale_n, diagonal_n, cfg.regularization, cfg.omega
                     )
@@ -3099,9 +3119,9 @@ def _solve_dvi_compact_schur_pgs_cooperative(
                 delta_0 = new_lambda - old_lambda
                 delta_1 = new_lambda_1 - old_lambda_1
                 if lane == owner:
-                    impulses[chunk] = new_lambda
+                    impulses = _set_component_4(impulses, chunk, new_lambda)
                 if tangent and lane == (row + int32(1)) % int32(32):
-                    impulses[(row + int32(1)) / int32(32)] = new_lambda_1
+                    impulses = _set_component_4(impulses, (row + int32(1)) / int32(32), new_lambda_1)
                 if delta_0 != float32(0.0) or delta_1 != float32(0.0):
                     for update_chunk in range(4):
                         update = s_row[update_chunk] * delta_0
@@ -3109,8 +3129,8 @@ def _solve_dvi_compact_schur_pgs_cooperative(
                         q[update_chunk] = q[update_chunk] - update
 
     for row in range(lane, nu, int32(32)):
-        compact_q[q_offset + row] = q[row / int32(32)]
-        solution_lambdas[q_offset + row] = impulses[row / int32(32)]
+        compact_q[q_offset + row] = _get_component_4(q, row / int32(32))
+        solution_lambdas[q_offset + row] = _get_component_4(impulses, row / int32(32))
     if lane == int32(0):
         status = solver_status[wid]
         status.iterations = sweep_count
