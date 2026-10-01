@@ -3070,35 +3070,32 @@ def _solve_dvi_compact_schur_pgs_cooperative(
                     )
                 new_lambda = old_lambda
                 new_lambda_1 = old_lambda_1
-                if lane == int32(0):
-                    if uid < nbc:
-                        new_lambda = _project_box_update(
-                            old_lambda, correction, diag, cfg.regularization, cfg.omega, bound_lower, bound_upper
+                if uid < nbc:
+                    new_lambda = _project_box_update(
+                        old_lambda, correction, diag, cfg.regularization, cfg.omega, bound_lower, bound_upper
+                    )
+                elif uid < scalar_count:
+                    if diag > FLOAT32_EPS:
+                        new_lambda = wp.max(
+                            float32(0.0),
+                            old_lambda - cfg.omega * correction / (diag + cfg.regularization + FLOAT32_EPS),
                         )
-                    elif uid < scalar_count:
-                        if diag > FLOAT32_EPS:
-                            new_lambda = wp.max(
-                                float32(0.0),
-                                old_lambda - cfg.omega * correction / (diag + cfg.regularization + FLOAT32_EPS),
-                            )
-                    elif phase == int32(0):
-                        new_lambda = _project_contact_normal_update(
-                            old_lambda, correction, diag, cfg.regularization, cfg.omega
-                        )
-                    else:
-                        projected = _project_contact_tangent_update(
-                            wp.vec2f(old_lambda, old_lambda_1),
-                            wp.vec2f(correction, correction_1),
-                            wp.vec2f(diag, diagonal_1),
-                            -compact_schur[s_offset + (row + int32(1)) * nu + row],
-                            cfg.regularization,
-                            cfg.omega,
-                            friction_load,
-                        )
-                        new_lambda = projected.x
-                        new_lambda_1 = projected.y
-                new_lambda = _broadcast_lane_0_32(new_lambda)
-                new_lambda_1 = _broadcast_lane_0_32(new_lambda_1)
+                elif phase == int32(0):
+                    new_lambda = _project_contact_normal_update(
+                        old_lambda, correction, diag, cfg.regularization, cfg.omega
+                    )
+                else:
+                    projected = _project_contact_tangent_update(
+                        wp.vec2f(old_lambda, old_lambda_1),
+                        wp.vec2f(correction, correction_1),
+                        wp.vec2f(diag, diagonal_1),
+                        -compact_schur[s_offset + (row + int32(1)) * nu + row],
+                        cfg.regularization,
+                        cfg.omega,
+                        friction_load,
+                    )
+                    new_lambda = projected.x
+                    new_lambda_1 = projected.y
                 delta_0 = new_lambda - old_lambda
                 delta_1 = new_lambda_1 - old_lambda_1
                 if lane == owner:
