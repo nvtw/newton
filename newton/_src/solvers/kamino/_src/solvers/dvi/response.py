@@ -13,10 +13,12 @@ from .sparse_kernels import _subgroup_sum
 
 wp.set_module_options({"enable_backward": False})
 
+_RESPONSE_WIDTH = 16
+
 
 @cache
-def make_response_kernel():
-    """Compute four columns of ``L^-1 P D C`` per 128-thread CUDA block.
+def make_response_kernel(width: int = _RESPONSE_WIDTH):
+    """Compute ``width`` columns of ``L^-1 P D C`` per 128-thread CUDA block.
 
     The unpacked RCM factor uses 32-row tiles. Its symbolic pattern lets
     independent column groups skip zero tiles while sharing factor loads.
@@ -24,7 +26,6 @@ def make_response_kernel():
     contiguously with row stride ``nu``.
     """
     block_size = 32
-    width = 4
 
     @wp.kernel
     def response(
@@ -58,14 +59,18 @@ def make_response_kernel():
         tiles = (n + block_size - 1) // block_size
         for i in range(0, n, block_size):
             rhs = wp.tile_zeros(shape=(block_size, width), dtype=wp.float32, storage="shared")
-            local_row = lane // width
-            local_col = lane % width
-            active = local_row < block_size and i + local_row < n and column + local_col < nu
-            value = wp.float32(0.0)
-            if active:
-                row = permutation[vio[world] + i + local_row]
-                value = preconditioner[vio[world] + row] * coupling[response_mio[world] + row * nu + column + local_col]
-            wp.tile_scatter_masked(rhs, local_row, local_col, value, active)
+            for chunk in range(block_size * width // 128):
+                index = lane + chunk * 128
+                local_row = index // width
+                local_col = index % width
+                active = i + local_row < n and column + local_col < nu
+                value = wp.float32(0.0)
+                if active:
+                    row = permutation[vio[world] + i + local_row]
+                    value = (
+                        preconditioner[vio[world] + row] * coupling[response_mio[world] + row * nu + column + local_col]
+                    )
+                wp.tile_scatter_masked(rhs, local_row, local_col, value, active)
             diagonal = wp.tile_load(matrix, shape=(block_size, block_size), offset=(i, i))
             for j in range(0, i, block_size):
                 if pattern[tpo[world] + (i // block_size) * tiles + j // block_size] != 0:

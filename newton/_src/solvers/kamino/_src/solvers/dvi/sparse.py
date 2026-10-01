@@ -30,7 +30,12 @@ from .kernels import (
     _solve_bilateral_unilateral_response_compact,
     _solve_bilateral_unilateral_response_cooperative,
 )
-from .response import _add_forward_bilateral_gradient, _update_forward_bilateral_rhs, make_response_kernel
+from .response import (
+    _RESPONSE_WIDTH,
+    _add_forward_bilateral_gradient,
+    _update_forward_bilateral_rhs,
+    make_response_kernel,
+)
 from .sparse_kernels import (
     _assemble_compact_unilateral_schur_blocked,
     _assemble_compact_unilateral_schur_tiled,
@@ -1343,17 +1348,19 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             device=path.device,
             block_dim=128,
         )
-    # Share factor tiles across four right-hand sides when there are few worlds.
+    # Small batches need more independent column groups; wider tiles amortize
+    # factor loads in larger batches. Very large batches use scalar columns.
     use_tiled_response = (
         enable_compact_schur
         and use_permutation
         and path.bilateral_solver.block_size == 32
-        and path.size.num_worlds <= 16
+        and path.size.num_worlds < 2048
     )
     if use_tiled_response:
+        response_width = 4 if path.size.num_worlds <= 16 else _RESPONSE_WIDTH
         wp.launch(
-            kernel=make_response_kernel(),
-            dim=(path.size.num_worlds * ((max_unilateral_rows + 3) // 4), 128),
+            kernel=make_response_kernel(response_width),
+            dim=(path.size.num_worlds * ((max_unilateral_rows + response_width - 1) // response_width), 128),
             inputs=[
                 problem.data.dim,
                 problem.data.njc,
