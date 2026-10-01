@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Check analytic capsule-cylinder point, line, and rim contacts."""
+"""Check specialized capsule-cylinder point, line, and rim contacts."""
 
 import unittest
 
@@ -216,7 +216,7 @@ def test_rim_conditioning(test, device):
 
 
 def test_pipeline_dispatch(test, device):
-    """Handle sharp cylinders analytically and preserve rounded-cylinder dispatch."""
+    """Handle sharp cylinders without GJK/MPR and preserve rounded-cylinder dispatch."""
     with wp.ScopedDevice(device):
         for reversed_order in (False, True):
             for kind in (
@@ -320,7 +320,7 @@ def test_pipeline_dispatch(test, device):
                     contacts = pipeline.contacts()
                     pipeline.collide(state, contacts)
                     count = int(pipeline.narrow_phase.gjk_candidate_pairs_count.numpy()[0])
-                    analytic_kinds = (
+                    manifold_kinds = (
                         "barrel",
                         "parallel",
                         "parallel_clipped",
@@ -339,7 +339,7 @@ def test_pipeline_dispatch(test, device):
                     test.assertEqual(count, 1 if kind == "rounded" else 0)
                     if kind in ("cap_outside", "rim", "core"):
                         test.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
-                    if kind in analytic_kinds and kind != "near_parallel":
+                    if kind in manifold_kinds and kind != "near_parallel":
                         expected_count = 1 if kind in ("barrel", "cap_axial", "cap_axial_bottom") else 2
                         test.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), expected_count)
                         bodies = model.shape_body.numpy()
@@ -639,7 +639,7 @@ def test_generic_dispatch_bounds(test, device):
 
 
 class TestCapsuleCylinderBarrel(unittest.TestCase):
-    """Check analytic point, line, rim, and penetrating contacts."""
+    """Check point, line, rim, and penetrating contacts."""
 
 
 add_function_test(TestCapsuleCylinderBarrel, "test_barrel_guards", test_barrel_guards, devices=get_test_devices())

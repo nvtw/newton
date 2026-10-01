@@ -902,14 +902,9 @@ def _capsule_cylinder_features(
             if along * wp.dot(capsule_axis, candidate) > 0.0 or wp.abs(endpoint[2]) > cylinder_half_height:
                 continue
         elif i == 8:
-            if radial_axis_sq > 1.0e-12:
-                continue
             candidate = relative - wp.dot(relative, cylinder_axis) * cylinder_axis
             if wp.length_sq(candidate) <= 1.0e-24:
-                ref = wp.vec3(1.0, 0.0, 0.0)
-                if wp.abs(cylinder_axis[0]) > 0.9:
-                    ref = wp.vec3(0.0, 1.0, 0.0)
-                candidate = ref - wp.dot(ref, cylinder_axis) * cylinder_axis
+                candidate = wp.vec3(1.0, 0.0, 0.0)
             candidate = wp.normalize(candidate)
         elif i >= 6:
             if radial_axis_sq <= 1.0e-12:

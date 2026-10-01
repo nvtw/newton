@@ -423,12 +423,14 @@ def create_narrow_phase_primitive_kernel(
     capsule_cylinder_enabled: bool = True,
 ):
     """
-    Create a kernel for fast analytical collision detection of primitive shapes.
+    Create a kernel for specialized collision detection of primitive shapes.
 
     This kernel handles lightweight primitive pairs (sphere-sphere, sphere-capsule,
     capsule-capsule, plane-sphere, plane-capsule) using direct analytical formulas
     instead of iterative GJK/MPR. Remaining pairs are routed to specialized buffers
     for mesh handling or to the GJK/MPR kernel for complex convex pairs.
+    Sharp capsule-cylinder pairs use a finite-cylinder feature solver with
+    closed-form fast paths and a bounded root search for general skew rims.
 
     Args:
         writer_func: Contact writer function (e.g., write_contact_simple).
@@ -2293,8 +2295,9 @@ class NarrowPhase:
                 generic GJK/MPR processing. Set to False only from a complete
                 scene-topology proof; this omits the GJK/MPR launch entirely.
             has_capsule_cylinder_pairs: Whether capsule-cylinder pairs can occur.
-                False omits their analytic solver from the primitive kernel to
-                avoid its register cost in unrelated scenes. Defaults to True.
+                False omits their specialized solver from the primitive kernel
+                to reduce kernel memory use in unrelated scenes; any such pairs
+                still route to GJK/MPR. Defaults to True.
             sparse_gjk_pairs: Whether GJK routing preserves broad-phase pair
                 indices instead of compacting its work buffer. Defaults to
                 automatic enablement for large CUDA candidate buffers.
