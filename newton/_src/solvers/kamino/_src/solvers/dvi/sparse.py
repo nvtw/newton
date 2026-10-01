@@ -1030,12 +1030,12 @@ def _build_sparse_bilateral_pairs(path: SparseDVIPath, problem: DualProblem) -> 
 
 
 def _build_sparse_bilateral_row_nzb_topology(path: SparseDVIPath, problem: DualProblem) -> None:
-    """Cache joint Jacobian blocks by bilateral row in their original storage order."""
+    """Cache bilateral and bounded joint blocks by constraint row in storage order."""
     jacobian = problem.delassus.constraint_jacobian
     counts = path.jacobians.joint_constraint_nzb_count.numpy().tolist()
     matrix_starts = jacobian.nzb_start.numpy().tolist()
     coords = jacobian.nzb_coords.numpy()
-    joint_counts = problem.data.njc.numpy().tolist()
+    joint_counts = (problem.data.njc.numpy() + problem.data.nbc.numpy()).tolist()
 
     world_row_offsets = []
     row_starts = [0]
@@ -1057,36 +1057,43 @@ def _build_sparse_bilateral_row_nzb_topology(path: SparseDVIPath, problem: DualP
 
 
 def _solve_sparse_bilateral_block(
-    path: SparseDVIPath, problem: DualProblem, active_dim: wp.array[int32] | None = None, forward_only: bool = False
+    path: SparseDVIPath,
+    problem: DualProblem,
+    active_dim: wp.array[int32] | None = None,
+    forward_only: bool = False,
+    compact_coupling: bool = False,
 ) -> None:
     operator = path.data.bilateral_operator
     state = path.data.state
-    wp.launch(
-        kernel=_zero_bilateral_lambdas,
-        dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
-        inputs=[
-            problem.data.njc,
-            problem.data.vio,
-            path.data.solution.lambdas,
-        ],
-        device=path.device,
-    )
-    _sparse_delassus_matvec_rows_path(path, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
+    workers = 8 if path.device.is_cuda else 1
     wp.launch(
         kernel=_build_sparse_bilateral_rhs,
-        dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
+        dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts, workers),
         inputs=[
             problem.data.vio,
             problem.data.njc,
             problem.data.v_f,
-            state.v_aug,
+            problem.data.dim,
+            state.bilateral_response_mio,
+            state.bilateral_response_stride,
+            state.bilateral_coupling,
+            path.data.solution.lambdas,
+            compact_coupling,
+            workers,
             operator.info.vio,
             state.bilateral_preconditioner,
             state.bilateral_rhs,
         ],
         device=path.device,
+        block_dim=128 if path.device.is_cuda else 1,
     )
     if forward_only:
+        wp.launch(
+            _zero_bilateral_lambdas,
+            dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
+            inputs=[problem.data.njc, problem.data.vio, path.data.solution.lambdas],
+            device=path.device,
+        )
         solver = path.bilateral_solver
         info = operator.info
         wp.launch(
@@ -1144,8 +1151,8 @@ def _solve_sparse_with_bilateral_alternation(path: SparseDVIPath, problem: DualP
     """Alternate direct bilateral solves with projected sparse unilateral sweeps."""
     state = path.data.state
     _factor_sparse_bilateral_block(path, problem)
-    _solve_sparse_bilateral_block(path, problem)
     if not path.has_unilateral_constraints:
+        _solve_sparse_bilateral_block(path, problem)
         _compute_sparse_solution_vectors(path, problem)
         return
     if not _can_use_sparse_colored_inequalities(path):
@@ -1158,6 +1165,8 @@ def _solve_sparse_with_bilateral_alternation(path: SparseDVIPath, problem: DualP
         device=path.device,
     )
     _prepare_sparse_inequality_pgs(path, problem)
+    _assemble_sparse_bilateral_coupling(path, problem, False)
+    _solve_sparse_bilateral_block(path, problem)
     max_unilateral_rows = (
         path.size.max_of_num_bounded_joint_cts + path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
     )
@@ -1231,8 +1240,8 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     # the final impulses are known. Larger compact systems use body gathers.
     forward_bilateral = path.has_unilateral_constraints and reuse_forward_bilateral and max_unilateral_rows <= 512
     _factor_sparse_bilateral_block(path, problem)
-    _solve_sparse_bilateral_block(path, problem, forward_only=forward_bilateral)
     if not path.has_unilateral_constraints:
+        _solve_sparse_bilateral_block(path, problem)
         _compute_sparse_solution_vectors(path, problem)
         return
 
@@ -1249,51 +1258,9 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         raise RuntimeError(_SPARSE_INEQUALITY_TOPOLOGY_ERROR)
     _prepare_sparse_inequality_pgs(path, problem)
 
-    delassus = _get_sparse_delassus(problem)
-    bsm = delassus.bsm
-    if path.bilateral_row_nzb_topology is None:
-        raise RuntimeError("Sparse DVI topology is not prepared. Call `SparseDVIPath.prepare()` before solving.")
-    world_row_offsets, row_starts, row_nzb_indices = path.bilateral_row_nzb_topology
-    # Coupling and response kernels overwrite every active entry; only the
-    # accumulated bilateral correction must start from zero.
+    _assemble_sparse_bilateral_coupling(path, problem, enable_compact_schur)
     state.bilateral_delta.zero_()
-    # One thread per column; split rows only when the batch is too small to fill the GPU.
-    coupling_row_groups = max(1, min(32, (1 << 20) // (path.size.num_worlds * max_unilateral_rows)))
-    wp.launch(
-        kernel=_assemble_sparse_bilateral_unilateral_coupling,
-        dim=(path.size.num_worlds, max_unilateral_rows, coupling_row_groups),
-        inputs=[
-            bsm.num_nzb,
-            bsm.nzb_start,
-            bsm.nzb_coords,
-            bsm.nzb_values,
-            delassus.constraint_jacobian.nzb_values,
-            problem.data.dim,
-            problem.data.njc,
-            problem.data.nbc,
-            problem.data.nl,
-            problem.data.nc,
-            problem.data.bcio,
-            problem.data.lio,
-            problem.data.cio,
-            problem.data.vio,
-            problem.data.P,
-            state.limit_indices,
-            state.contact_indices,
-            path.jacobians.bounded_constraint_nzb_offsets,
-            path.jacobians.limit_constraint_nzb_offsets,
-            path.jacobians.contact_constraint_nzb_offsets,
-            world_row_offsets,
-            row_starts,
-            row_nzb_indices,
-            state.bilateral_response_mio,
-            state.bilateral_response_stride,
-            state.bilateral_coupling,
-            coupling_row_groups,
-            wp.bool(enable_compact_schur),
-        ],
-        device=path.device,
-    )
+    _solve_sparse_bilateral_block(path, problem, forward_only=forward_bilateral, compact_coupling=enable_compact_schur)
     factor_offsets = path.data.bilateral_operator.info.mio
     factor = path.bilateral_solver.L
     response_kernel = _solve_bilateral_unilateral_response
@@ -1487,7 +1454,9 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             if not path.should_solve_bilateral_after_block(block_iteration):
                 continue
             path.set_bilateral_active_dim(problem, block_iteration)
-            _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
+            _solve_sparse_bilateral_block(
+                path, problem, active_dim=state.bilateral_active_dim, compact_coupling=enable_compact_schur
+            )
             wp.launch(
                 kernel=_reset_active_bilateral_delta,
                 dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
@@ -1557,7 +1526,9 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         # Compact Schur stores whitened columns instead of full responses;
         # one fresh bilateral solve recovers the final joint impulses.
         path.set_bilateral_active_dim(problem, -1)
-        _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
+        _solve_sparse_bilateral_block(
+            path, problem, active_dim=state.bilateral_active_dim, compact_coupling=enable_compact_schur
+        )
     else:
         wp.launch(
             kernel=_reconstruct_fused_bilateral_solution,
@@ -1592,3 +1563,54 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             device=path.device,
         )
     _compute_sparse_solution_vectors(path, problem)
+
+
+def _assemble_sparse_bilateral_coupling(path: SparseDVIPath, problem: DualProblem, compact_layout: bool) -> None:
+    state = path.data.state
+    max_unilateral_rows = (
+        path.size.max_of_num_bounded_joint_cts + path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
+    )
+    delassus = _get_sparse_delassus(problem)
+    if delassus._needs_update:
+        delassus.update()
+    bsm = delassus.bsm
+    if path.bilateral_row_nzb_topology is None:
+        raise RuntimeError("Sparse DVI topology is not prepared. Call `SparseDVIPath.prepare()` before solving.")
+    world_row_offsets, row_starts, row_nzb_indices = path.bilateral_row_nzb_topology
+    # One thread per column; split rows only when the batch is too small to fill the GPU.
+    coupling_row_groups = max(1, min(32, (1 << 20) // (path.size.num_worlds * max_unilateral_rows)))
+    wp.launch(
+        kernel=_assemble_sparse_bilateral_unilateral_coupling,
+        dim=(path.size.num_worlds, max_unilateral_rows, coupling_row_groups),
+        inputs=[
+            bsm.num_nzb,
+            bsm.nzb_start,
+            bsm.nzb_coords,
+            bsm.nzb_values,
+            delassus.constraint_jacobian.nzb_values,
+            problem.data.dim,
+            problem.data.njc,
+            problem.data.nbc,
+            problem.data.nl,
+            problem.data.nc,
+            problem.data.bcio,
+            problem.data.lio,
+            problem.data.cio,
+            problem.data.vio,
+            problem.data.P,
+            state.limit_indices,
+            state.contact_indices,
+            path.jacobians.bounded_constraint_nzb_offsets,
+            path.jacobians.limit_constraint_nzb_offsets,
+            path.jacobians.contact_constraint_nzb_offsets,
+            world_row_offsets,
+            row_starts,
+            row_nzb_indices,
+            state.bilateral_response_mio,
+            state.bilateral_response_stride,
+            state.bilateral_coupling,
+            coupling_row_groups,
+            wp.bool(compact_layout),
+        ],
+        device=path.device,
+    )

@@ -443,6 +443,7 @@ class DVISolver:
                     self._unilateral_strides_host,
                     bilateral_vector_size,
                     self._use_schur_complement,
+                    cache_bilateral_coupling=self._data.bilateral_operator is not None,
                 )
             elif self._use_schur_complement:
                 self._data.state.allocate_dense_projection(self._size)

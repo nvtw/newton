@@ -103,13 +103,19 @@ def _build_sparse_bilateral_rhs(
     problem_vio: wp.array[int32],
     problem_njc: wp.array[int32],
     problem_v_f: wp.array[float32],
-    state_v_aug: wp.array[float32],
+    problem_dim: wp.array[int32],
+    response_mio: wp.array[int32],
+    response_stride: wp.array[int32],
+    coupling: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+    compact_layout: bool,
+    workers: int32,
     bilateral_vio: wp.array[int32],
     bilateral_P: wp.array[float32],
     # Outputs:
     bilateral_rhs: wp.array[float32],
 ):
-    wid, row = wp.tid()
+    wid, row, lane = wp.tid()
 
     njc = problem_njc[wid]
     if row >= njc:
@@ -117,8 +123,16 @@ def _build_sparse_bilateral_rhs(
 
     pvio = problem_vio[wid]
     bvio = bilateral_vio[wid]
-    rhs = -(state_v_aug[pvio + row] + problem_v_f[pvio + row])
-    bilateral_rhs[bvio + row] = bilateral_P[bvio + row] * rhs
+    nu = problem_dim[wid] - njc
+    stride = response_stride[wid]
+    if compact_layout and _compact_schur_fits(njc, nu, stride):
+        stride = nu
+    value = float32(0.0)
+    for col in range(lane, nu, workers):
+        value += coupling[response_mio[wid] + row * stride + col] * solution_lambdas[pvio + njc + col]
+    value = _subgroup_sum(value, workers)
+    if lane == int32(0):
+        bilateral_rhs[bvio + row] = -bilateral_P[bvio + row] * (value + problem_v_f[pvio + row])
 
 
 @wp.kernel
@@ -793,9 +807,13 @@ def _assemble_sparse_bilateral_unilateral_coupling(
     nbc = problem_nbc[wid]
     nl = problem_nl[wid]
     if unilateral < nbc:
-        offsets = friction_nzb_offsets[problem_bcio[wid] + unilateral]
-        col_block_0 = offsets[0]
-        col_block_1 = offsets[1]
+        column_row = bilateral_world_row_offsets[wid] + col
+        start = bilateral_row_starts[column_row]
+        end = bilateral_row_starts[column_row + int32(1)]
+        if start < end:
+            col_block_0 = bilateral_row_nzb_indices[start]
+        if start + int32(1) < end:
+            col_block_1 = bilateral_row_nzb_indices[start + int32(1)]
     elif unilateral < nbc + nl:
         mapped_limit = limit_indices[problem_lio[wid] + unilateral - nbc]
         if mapped_limit >= int32(0):
@@ -1676,15 +1694,15 @@ def _solve_dvi_sparse_inequalities_pgs(
 #if defined(__CUDA_ARCH__)
     float r = value;
     #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        r += __shfl_xor_sync(0xffffffffu, r, offset, 32);
+    for (int offset = width / 2; offset > 0; offset >>= 1)
+        r += __shfl_xor_sync(0xffffffffu, r, offset, width);
     return r;
 #else
     return value;
 #endif
     """
 )
-def _subgroup_sum_32(value: float32) -> float32: ...
+def _subgroup_sum(value: float32, width: int32 = 32) -> float32: ...
 
 
 @wp.func_native(
@@ -2545,7 +2563,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                     valid = valid and wp.isfinite(projected) and wp.abs(projected - value) <= cfg.tolerance
                     if not valid or not stationary:
                         violations += float32(1.0)
-                if _subgroup_sum_32(violations) == float32(0.0):
+                if _subgroup_sum(violations) == float32(0.0):
                     break
         for target in range(lane, scalar_count, int32(32)):
             compact_q[vio + njc + target] = q[target]
@@ -2635,9 +2653,9 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                                         partial_cross += (
                                             bilateral_coupling[index] * bilateral_response[index + int32(1)]
                                         )
-                                correction_0 = _subgroup_sum_32(partial_0)
-                                correction_1 = _subgroup_sum_32(partial_1)
-                                projected_cross = _subgroup_sum_32(partial_cross)
+                                correction_0 = _subgroup_sum(partial_0)
+                                correction_1 = _subgroup_sum(partial_1)
+                                projected_cross = _subgroup_sum(partial_cross)
 
                         delta_0 = float32(0.0)
                         delta_1 = float32(0.0)
@@ -2868,7 +2886,7 @@ def _solve_dvi_sparse_inequalities_pgs_cooperative(
                 valid = valid and wp.isfinite(projected) and wp.abs(projected - value) <= cfg.tolerance
                 if not valid or not stationary:
                     violations += float32(1.0)
-            if _subgroup_sum_32(violations) == float32(0.0):
+            if _subgroup_sum(violations) == float32(0.0):
                 break
 
     if lane == int32(0) and block_iteration == int32(_FUSED_BILATERAL_BLOCK):

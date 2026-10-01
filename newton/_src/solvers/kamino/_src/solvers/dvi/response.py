@@ -9,7 +9,7 @@ import warp as wp
 
 from ...linalg.factorize.llt_blocked_rcm import get_float32_array_offset_ptr
 from .kernels import _compact_schur_fits
-from .sparse_kernels import _subgroup_sum_32
+from .sparse_kernels import _subgroup_sum
 
 wp.set_module_options({"enable_backward": False})
 
@@ -101,7 +101,7 @@ def _update_forward_bilateral_rhs(
     for column in range(lane, nu, 32):
         delta = lambdas[offset + column] - initial[offset + column]
         value += response[rio[world] + row * nu + column] * delta
-    value = _subgroup_sum_32(value)
+    value = _subgroup_sum(value)
     if lane == 0:
         y[bvio[world] + row] -= value
 
@@ -126,6 +126,6 @@ def _add_forward_bilateral_gradient(
     value = wp.float32(0.0)
     for row in range(lane, n, 32):
         value += response[rio[world] + row * nu + column] * y[bvio[world] + row]
-    value = _subgroup_sum_32(value)
+    value = _subgroup_sum(value)
     if lane == 0:
         gradient[vio[world] + n + column] += value
