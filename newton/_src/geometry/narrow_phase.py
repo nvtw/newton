@@ -24,10 +24,9 @@ from ..geometry.collision_core import (
     post_process_minkowski_only,
 )
 from ..geometry.collision_primitive import (
-    _collide_capsule_cylinder_barrel,
-    _collide_capsule_cylinder_line_contacts,
     _collide_plane_capsule_contacts,
     collide_capsule_capsule,
+    collide_capsule_cylinder,
     collide_plane_box,
     collide_plane_cylinder,
     collide_plane_ellipsoid,
@@ -421,6 +420,7 @@ def create_narrow_phase_primitive_kernel(
     speculative: bool = False,
     sparse_gjk_pairs: bool = False,
     hydroelastic_enabled: bool = False,
+    capsule_cylinder_enabled: bool = True,
 ):
     """
     Create a kernel for fast analytical collision detection of primitive shapes.
@@ -435,11 +435,12 @@ def create_narrow_phase_primitive_kernel(
         speculative: Enable predictive contact admission.
         sparse_gjk_pairs: Preserve broad-phase pair indices in the GJK buffer.
         hydroelastic_enabled: Route hydroelastic pairs to the SDF-SDF pipeline.
+        capsule_cylinder_enabled: Compile capsule-cylinder contacts when these pairs can occur.
 
     Returns:
         A warp kernel for primitive collision detection
     """
-    _module = f"narrow_phase_primitive_{writer_func.__name__}_{speculative}_{sparse_gjk_pairs}_{hydroelastic_enabled}"
+    _module = f"narrow_phase_primitive_{writer_func.__name__}_{speculative}_{sparse_gjk_pairs}_{hydroelastic_enabled}_{capsule_cylinder_enabled}"
 
     @wp.func(module=_module)
     def _admit(
@@ -868,42 +869,19 @@ def create_narrow_phase_primitive_kernel(
                     pos_a, sphere_radius, pos_b, cylinder_axis, cylinder_radius, cylinder_half_height
                 )
 
-            elif is_capsule_a and is_cylinder_b and scale_b[2] == 0.0:
+            elif wp.static(capsule_cylinder_enabled) and is_capsule_a and is_cylinder_b and scale_b[2] == 0.0:
                 capsule_axis = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
                 cylinder_axis = wp.quat_rotate(quat_b, wp.vec3(0.0, 0.0, 1.0))
-                line_handled, line_dist_0, line_pos_0, line_dist_1, line_pos_1, line_normal = (
-                    _collide_capsule_cylinder_line_contacts(
-                        pos_a,
-                        capsule_axis,
-                        scale_a[0],
-                        scale_a[1],
-                        pos_b,
-                        cylinder_axis,
-                        scale_b[0],
-                        scale_b[1],
-                    )
+                contact_dist_0, contact_pos_0, contact_dist_1, contact_pos_1, contact_normal = collide_capsule_cylinder(
+                    pos_a,
+                    capsule_axis,
+                    scale_a[0],
+                    scale_a[1],
+                    pos_b,
+                    cylinder_axis,
+                    scale_b[0],
+                    scale_b[1],
                 )
-                if line_handled:
-                    contact_dist_0 = line_dist_0
-                    contact_pos_0 = line_pos_0
-                    contact_dist_1 = line_dist_1
-                    contact_pos_1 = line_pos_1
-                    contact_normal = line_normal
-                else:
-                    barrel_handled, barrel_dist, barrel_pos, barrel_normal = _collide_capsule_cylinder_barrel(
-                        pos_a,
-                        capsule_axis,
-                        scale_a[0],
-                        scale_a[1],
-                        pos_b,
-                        cylinder_axis,
-                        scale_b[0],
-                        scale_b[1],
-                    )
-                    if barrel_handled:
-                        contact_dist_0 = barrel_dist
-                        contact_pos_0 = barrel_pos
-                        contact_normal = barrel_normal
 
             # -----------------------------------------------------------------
             # Sphere-Box collision (type_a=SPHERE=2, type_b=BOX=6)
@@ -1051,6 +1029,7 @@ def create_narrow_phase_primitive_kernel(
                 (is_plane_a and (is_sphere_b or is_capsule_b or is_ellipsoid_b or use_plane_cylinder or is_box_b))
                 or (is_sphere_a and (is_sphere_b or is_capsule_b or (is_cylinder_b and scale_b[2] == 0.0) or is_box_b))
                 or (is_capsule_a and is_capsule_b)
+                or (is_capsule_a and is_cylinder_b and scale_b[2] == 0.0)
             ):
                 continue
 
@@ -2268,6 +2247,7 @@ class NarrowPhase:
         use_lean_gjk_mpr: bool = False,
         convex_support_acceleration: bool = True,
         has_generic_convex_pairs: bool = True,
+        has_capsule_cylinder_pairs: bool = True,
         sparse_gjk_pairs: bool | None = None,
         split_gjk_mpr: bool = False,
         candidate_pair_work_estimate: int | None = None,
@@ -2312,6 +2292,9 @@ class NarrowPhase:
             has_generic_convex_pairs: Whether any candidate pair can require
                 generic GJK/MPR processing. Set to False only from a complete
                 scene-topology proof; this omits the GJK/MPR launch entirely.
+            has_capsule_cylinder_pairs: Whether capsule-cylinder pairs can occur.
+                False omits their analytic solver from the primitive kernel to
+                avoid its register cost in unrelated scenes. Defaults to True.
             sparse_gjk_pairs: Whether GJK routing preserves broad-phase pair
                 indices instead of compacting its work buffer. Defaults to
                 automatic enablement for large CUDA candidate buffers.
@@ -2471,6 +2454,7 @@ class NarrowPhase:
             speculative=speculative,
             sparse_gjk_pairs=self.sparse_gjk_pairs,
             hydroelastic_enabled=hydroelastic_sdf is not None,
+            capsule_cylinder_enabled=has_capsule_cylinder_pairs,
         )
         # GJK/MPR kernel handles remaining convex-convex pairs. Only models with cooked
         # support data select the accelerated support function; other models
