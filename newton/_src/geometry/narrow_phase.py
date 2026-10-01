@@ -1029,7 +1029,7 @@ def create_narrow_phase_primitive_kernel(
                 (is_plane_a and (is_sphere_b or is_capsule_b or is_ellipsoid_b or use_plane_cylinder or is_box_b))
                 or (is_sphere_a and (is_sphere_b or is_capsule_b or (is_cylinder_b and scale_b[2] == 0.0) or is_box_b))
                 or (is_capsule_a and is_capsule_b)
-                or (is_capsule_a and is_cylinder_b and scale_b[2] == 0.0)
+                or (wp.static(capsule_cylinder_enabled) and is_capsule_a and is_cylinder_b and scale_b[2] == 0.0)
             ):
                 continue
 
