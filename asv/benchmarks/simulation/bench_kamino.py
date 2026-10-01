@@ -53,7 +53,7 @@ def _collect_metrics_dr_legs(robot, world_count, num_frames, samples, use_policy
 class FastG1DVI:
     """Measure the G1 example's complete DVI frame at its default settings."""
 
-    params = [1, 4, 64]
+    params = [1, 4, 64, 512]
     param_names = ["world_count"]
     number = 1
     rounds = 2

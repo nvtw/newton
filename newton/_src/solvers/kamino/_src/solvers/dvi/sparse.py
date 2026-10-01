@@ -1423,23 +1423,24 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     )
     if enable_compact_schur:
         # Expose more independent Gram tiles when there are few worlds.
-        wp.launch(
-            kernel=_assemble_compact_unilateral_schur_blocked,
-            dim=(path.size.num_worlds, 256),
-            inputs=[
-                problem.data.dim,
-                problem.data.njc,
-                problem.data.vio,
-                state.bilateral_response_mio,
-                state.bilateral_response_stride,
-                state.bilateral_response,
-                state.bilateral_response_factor,
-                state.s,
-            ],
-            device=path.device,
-            block_dim=256,
-        )
-        if max_unilateral_rows > 128:
+        if path.size.num_worlds > 16:
+            wp.launch(
+                kernel=_assemble_compact_unilateral_schur_blocked,
+                dim=(path.size.num_worlds, 256),
+                inputs=[
+                    problem.data.dim,
+                    problem.data.njc,
+                    problem.data.vio,
+                    state.bilateral_response_mio,
+                    state.bilateral_response_stride,
+                    state.bilateral_response,
+                    state.bilateral_response_factor,
+                    state.s,
+                ],
+                device=path.device,
+                block_dim=256,
+            )
+        if max_unilateral_rows > 128 or path.size.num_worlds <= 16:
             wp.launch(
                 kernel=_assemble_compact_unilateral_schur_tiled,
                 dim=(path.size.num_worlds, 16, 128),
@@ -1453,7 +1454,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
                     state.bilateral_response_factor,
                     state.s,
                     16,
-                    129,
+                    1 if path.size.num_worlds <= 16 else 129,
                 ],
                 device=path.device,
                 block_dim=128,
