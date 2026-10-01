@@ -12,12 +12,44 @@ from newton._src.solvers.kamino._src.linalg.core import DenseLinearOperatorData,
 from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked_rcm import (
     get_float32_array_offset_ptr,
     get_int32_array_offset_ptr,
+    make_llt_blocked_rcm_symbolic_fill_in_kernel,
 )
 from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked_rcm_solver import LLTBlockedRCMSolver
 from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     _find_bilateral_factor_row_start,
     _find_bilateral_factor_row_start_rcm,
 )
+
+
+class TestKaminoSymbolicFill(unittest.TestCase):
+    def test_bitset_boundaries(self):
+        """Match classical fill across bitset boundaries and preserve upper entries and guards."""
+        rng = np.random.default_rng(731)
+        for tiles in (0, 1, 15, 31, 32, 33, 63, 64, 65):
+            initial = rng.choice([0, 0, 0, 1, 2], size=(tiles, tiles)).astype(np.int32)
+            expected = initial.copy()
+            np.fill_diagonal(expected, 1)
+            for j in range(tiles):
+                for i in range(j + 1, tiles):
+                    if expected[i, j] == 0 and np.any((expected[i, :j] != 0) & (expected[j, :j] != 0)):
+                        expected[i, j] = 1
+            padded = np.pad(initial.ravel(), (7, 9), constant_values=-77)
+            oracle = np.pad(expected.ravel(), (7, 9), constant_values=-77)
+            for device in wp.get_devices():
+                with self.subTest(tiles=tiles, device=device):
+                    pattern = wp.array(padded, dtype=wp.int32, device=device)
+                    wp.launch(
+                        make_llt_blocked_rcm_symbolic_fill_in_kernel(max(tiles, 1)),
+                        dim=1,
+                        inputs=[
+                            wp.array([max(0, tiles * 32 - 7)], dtype=wp.int32, device=device),
+                            wp.array([7], dtype=wp.int32, device=device),
+                            32,
+                            pattern,
+                        ],
+                        device=device,
+                    )
+                    np.testing.assert_array_equal(pattern.numpy(), oracle)
 
 
 class TestKaminoFactorRowStart(unittest.TestCase):

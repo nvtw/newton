@@ -218,11 +218,12 @@ def make_llt_blocked_rcm_symbolic_fill_in_kernel(max_n_tiles: int):
 
     The inflated pattern is the final tile sparsity pattern of ``L`` (lower
     triangle including diagonal); the upper triangle is left unchanged.
-    ``max_n_tiles`` is a compile-time upper bound on ``n_tiles_i`` for any
-    block in the batch - baked in so Warp can statically unroll-bound the
-    inner loops.
+    ``max_n_tiles`` bounds the local bitset storage. Patterns with up to 64
+    tiles use row intersections; larger patterns retain column scans.
     """
-    del max_n_tiles  # kept for cache key; kernel itself uses dynamic n_tiles from dim
+    mask_capacity = max(1, min(max_n_tiles, 64))
+    mask_type = wp.uint32 if mask_capacity <= 32 else wp.uint64
+    mask_vector = wp.types.vector(length=mask_capacity, dtype=mask_type)
 
     @wp.kernel
     def symbolic_fill_in_kernel(
@@ -240,6 +241,28 @@ def make_llt_blocked_rcm_symbolic_fill_in_kernel(max_n_tiles: int):
         # guarantees the forward/backward solve has a diagonal pivot tile).
         for d in range(n_tiles):
             tile_pattern[tp_off + d * n_tiles + d] = int(1)
+
+        # Small patterns fit one bitset per row. Intersecting two rows replaces
+        # the inner scan over their already-filled columns.
+        if n_tiles <= wp.static(mask_capacity):
+            masks = mask_vector()
+            for i in range(n_tiles):
+                row_mask = mask_type(0)
+                for k in range(i + 1):
+                    if tile_pattern[tp_off + i * n_tiles + k] != int(0):
+                        row_mask |= mask_type(1) << mask_type(k)
+                masks[i] = row_mask
+            for j in range(n_tiles):
+                pivot = masks[j]
+                for i in range(j + 1, n_tiles):
+                    if (masks[i] & pivot) != mask_type(0):
+                        masks[i] |= mask_type(1) << mask_type(j)
+            for i in range(n_tiles):
+                for j in range(i):
+                    if (masks[i] & (mask_type(1) << mask_type(j))) != mask_type(0):
+                        if tile_pattern[tp_off + i * n_tiles + j] == int(0):
+                            tile_pattern[tp_off + i * n_tiles + j] = int(1)
+            return
 
         # Classical block symbolic Cholesky, lower-triangle only.
         # For each j, then each i > j: L[i,j] |= OR_k<j ( L[i,k] & L[j,k] ).
