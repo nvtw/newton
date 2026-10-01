@@ -1405,12 +1405,19 @@ class TestDVISolver(unittest.TestCase):
 
         solver._sparse_path.set_bilateral_active_dim = record_bilateral_active_dim
         solver.coldstart()
-        with mock.patch.object(
-            problem.delassus, "apply_jacobian_transpose", wraps=problem.delassus.apply_jacobian_transpose
-        ) as body_products:
+        with (
+            mock.patch.object(
+                problem.delassus, "apply_jacobian_transpose", wraps=problem.delassus.apply_jacobian_transpose
+            ) as body_products,
+            mock.patch.object(
+                solver._bilateral_solver, "solve", wraps=solver._bilateral_solver.solve
+            ) as separate_bilateral_solves,
+        ):
             solver.solve(problem)
         # Sweep reconstruction stays fused regardless of solve intervals.
         self.assertEqual(body_products.call_count, 0)
+        # CUDA prepares the RHS and scatters the result in the same solve CTA.
+        self.assertEqual(separate_bilateral_solves.call_count, 0 if self.device.is_cuda else 4)
 
         joint_dims = problem.data.njc.numpy()
         self.assertEqual([block_iteration for block_iteration, _ in active_dim_updates], [0, 1, -1])

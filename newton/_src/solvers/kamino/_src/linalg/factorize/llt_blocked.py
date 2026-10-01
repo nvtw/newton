@@ -216,9 +216,13 @@ def make_llt_blocked_factorize_kernel(block_size: int):
 
 
 @cache
-def make_llt_blocked_solve_kernel(block_size: int):
-    @wp.kernel
-    def llt_blocked_solve_kernel(
+def make_llt_blocked_solve_func(block_size: int):
+    """Share the blocked substitutions with callers that fuse RHS preparation."""
+
+    @wp.func
+    def llt_blocked_solve_func(
+        tid: wp.int32,
+        tid_block: wp.int32,
         # Inputs:
         dim: wp.array[wp.int32],
         mio: wp.array[wp.int32],
@@ -229,8 +233,7 @@ def make_llt_blocked_solve_kernel(block_size: int):
         y: wp.array[wp.float32],
         x: wp.array[wp.float32],
     ):
-        # Retrieve the thread index and thread-block configuration
-        tid, tid_block = wp.tid()
+        # Retrieve the thread-block configuration
         num_threads_per_block = wp.block_dim()
 
         # Retrieve the matrix block dimensions and size
@@ -306,7 +309,28 @@ def make_llt_blocked_solve_kernel(block_size: int):
             wp.tile_upper_solve_inplace(wp.tile_transpose(L_diag), rhs_tile)
             wp.tile_store(x_i, rhs_tile, offset=(i, 0))
 
-    # Return the kernel function
+    return llt_blocked_solve_func
+
+
+@cache
+def make_llt_blocked_solve_kernel(block_size: int):
+    solve = make_llt_blocked_solve_func(block_size)
+
+    @wp.kernel
+    def llt_blocked_solve_kernel(
+        # Inputs:
+        dim: wp.array[wp.int32],
+        mio: wp.array[wp.int32],
+        vio: wp.array[wp.int32],
+        L: wp.array[wp.float32],
+        b: wp.array[wp.float32],
+        # Outputs:
+        y: wp.array[wp.float32],
+        x: wp.array[wp.float32],
+    ):
+        tid, tid_block = wp.tid()
+        solve(tid, tid_block, dim, mio, vio, L, b, y, x)
+
     return llt_blocked_solve_kernel
 
 

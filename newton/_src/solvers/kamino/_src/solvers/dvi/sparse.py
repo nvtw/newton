@@ -16,7 +16,7 @@ from ...geometry.contacts import ContactsKamino
 from ...geometry.keying import KeySorter
 from ...kinematics.jacobians import SparseSystemJacobians
 from ...kinematics.limits import LimitsKamino
-from ...linalg import LLTBlockedRCMSolver
+from ...linalg import LLTBlockedRCMSolver, LLTBlockedSolver
 from ...linalg.factorize.llt_blocked_rcm import make_llt_blocked_rcm_solve_kernel
 from .kernels import (
     _FUSED_BILATERAL_BLOCK,
@@ -70,6 +70,7 @@ from .sparse_kernels import (
     _solve_dvi_sparse_inequalities_pgs_cooperative,
     _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
+    make_sparse_bilateral_solve_kernel,
 )
 
 wp.set_module_options({"enable_backward": False})
@@ -1096,6 +1097,39 @@ def _solve_sparse_bilateral_block(
 ) -> None:
     operator = path.data.bilateral_operator
     state = path.data.state
+    solver = path.bilateral_solver
+    if (
+        path.device.is_cuda
+        and isinstance(solver, LLTBlockedSolver)
+        and solver._solve_block_dim % 32 == 0
+        and not forward_only
+    ):
+        wp.launch(
+            make_sparse_bilateral_solve_kernel(solver._solve_block_size),
+            dim=(path.size.num_worlds, solver._solve_block_dim),
+            inputs=[
+                problem.data.vio,
+                problem.data.njc,
+                problem.data.v_f,
+                problem.data.dim,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_coupling,
+                path.data.solution.lambdas,
+                compact_coupling,
+                operator.info.dim if active_dim is None else active_dim,
+                operator.info.mio,
+                operator.info.vio,
+                state.bilateral_preconditioner,
+                solver.L,
+                solver._y,
+                state.bilateral_rhs,
+                state.bilateral_solution,
+            ],
+            device=path.device,
+            block_dim=solver._solve_block_dim,
+        )
+        return
     workers = 8 if path.device.is_cuda else 1
     wp.launch(
         kernel=_build_sparse_bilateral_rhs,

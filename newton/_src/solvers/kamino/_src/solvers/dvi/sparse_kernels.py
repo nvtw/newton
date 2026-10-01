@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+from functools import cache
+
 import warp as wp
 
 from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from ...geometry.keying import build_pair_key2, uint64_sentinel_value
+from ...linalg.factorize.llt_blocked import make_llt_blocked_solve_func
 from ...linalg.factorize.llt_blocked_rcm import get_float32_array_offset_ptr
 from .kernels import _FUSED_BILATERAL_BLOCK, _FUSED_INEQUALITY_BLOCK, _compact_schur_fits, _sync_threads
 from .projections import (
@@ -32,6 +35,60 @@ float32 = wp.float32
 int32 = wp.int32
 mat33f = wp.mat33f
 vec3f = wp.vec3f
+
+
+@cache
+def make_sparse_bilateral_solve_kernel(block_size: int):
+    """Prepare, solve and scatter one world's bilateral block in a single CTA."""
+    solve = make_llt_blocked_solve_func(block_size)
+
+    @wp.kernel(module="unique", enable_backward=False)
+    def sparse_bilateral_solve(
+        problem_vio: wp.array[int32],
+        problem_njc: wp.array[int32],
+        problem_v_f: wp.array[float32],
+        problem_dim: wp.array[int32],
+        response_mio: wp.array[int32],
+        response_stride: wp.array[int32],
+        coupling: wp.array[float32],
+        solution_lambdas: wp.array[float32],
+        compact_layout: bool,
+        bilateral_dim: wp.array[int32],
+        bilateral_mio: wp.array[int32],
+        bilateral_vio: wp.array[int32],
+        bilateral_P: wp.array[float32],
+        L: wp.array[float32],
+        y: wp.array[float32],
+        bilateral_rhs: wp.array[float32],
+        bilateral_solution: wp.array[float32],
+    ):
+        wid, tid = wp.tid()
+        njc = problem_njc[wid]
+        pvio = problem_vio[wid]
+        bvio = bilateral_vio[wid]
+        nu = problem_dim[wid] - njc
+        stride = response_stride[wid]
+        if compact_layout and _compact_schur_fits(njc, nu, stride):
+            stride = nu
+        workers = 8
+        groups = wp.block_dim() // workers
+        lane = tid % workers
+        for chunk in range((njc + groups - 1) // groups):
+            row = chunk * groups + tid // workers
+            value = float32(0.0)
+            if row < njc:
+                for col in range(lane, nu, workers):
+                    value += coupling[response_mio[wid] + row * stride + col] * solution_lambdas[pvio + njc + col]
+            value = _subgroup_sum(value, workers)
+            if row < njc and lane == 0:
+                bilateral_rhs[bvio + row] = -bilateral_P[bvio + row] * (value + problem_v_f[pvio + row])
+        _sync_threads()
+        solve(wid, tid, bilateral_dim, bilateral_mio, bilateral_vio, L, bilateral_rhs, y, bilateral_solution)
+        _sync_threads()
+        for row in range(tid, njc, wp.block_dim()):
+            solution_lambdas[pvio + row] = bilateral_P[bvio + row] * bilateral_solution[bvio + row]
+
+    return sparse_bilateral_solve
 
 
 @wp.kernel
