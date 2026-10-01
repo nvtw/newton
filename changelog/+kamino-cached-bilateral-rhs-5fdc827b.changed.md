@@ -1,1 +1,0 @@
-Kamino DVI reuses the bilateral–unilateral coupling when assembling right-hand sides for direct solves, reducing repeated sparse matrix-vector work during alternating iterations. Coupling assembly resolves bounded constraint blocks by their constraint-row order when joint friction and bounded drives coexist.

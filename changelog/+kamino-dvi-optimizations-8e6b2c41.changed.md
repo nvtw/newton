@@ -1,0 +1,1 @@
+Improve Kamino DVI performance through optimized CUDA sweeps, fused bilateral solves, reused sparse assembly and coupling, faster RCM symbolic factorization, and improved batching of response solves and constraint grouping. Resolve bounded coupling blocks correctly when joint friction and bounded drives coexist. Existing APIs and simulation settings require no changes.
