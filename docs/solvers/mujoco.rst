@@ -679,7 +679,7 @@ automatically. Call :meth:`~newton.solvers.SolverMuJoCo.update_contacts`
 when you need contact points, forces, or material indices in Newton form.
 
 Separated speculative contacts
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 With ``use_mujoco_contacts=False``, Newton's collision pipeline can generate
 separated candidates using velocity expansion. By default, MuJoCo activates
