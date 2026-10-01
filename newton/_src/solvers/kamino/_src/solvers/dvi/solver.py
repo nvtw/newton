@@ -57,6 +57,9 @@ wp.set_module_options({"enable_backward": False})
 
 float32 = wp.float32
 
+# Bound optional non-Schur storage independently of contact capacity and batch size.
+_MAX_CACHED_BILATERAL_COUPLING_ENTRIES = 16 * 1024 * 1024  # 64 MiB of float32.
+
 
 class DVISolver:
     """Solve Kamino dual problems with projected DVI iterations.
@@ -443,7 +446,15 @@ class DVISolver:
                     self._unilateral_strides_host,
                     bilateral_vector_size,
                     self._use_schur_complement,
-                    cache_bilateral_coupling=self._data.bilateral_operator is not None,
+                    cache_bilateral_coupling=(
+                        self._data.bilateral_operator is not None
+                        and not self._use_schur_complement
+                        and sum(
+                            rows * stride
+                            for rows, stride in zip(self._joint_rows_host, self._unilateral_strides_host, strict=True)
+                        )
+                        <= _MAX_CACHED_BILATERAL_COUPLING_ENTRIES
+                    ),
                 )
             elif self._use_schur_complement:
                 self._data.state.allocate_dense_projection(self._size)

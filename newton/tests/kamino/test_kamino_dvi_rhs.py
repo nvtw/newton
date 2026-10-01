@@ -5,11 +5,13 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import warp as wp
 
 from newton._src.solvers.kamino._src.core.types import vec6f
+from newton._src.solvers.kamino._src.solvers.dvi.solver import DVISolver
 from newton._src.solvers.kamino._src.solvers.dvi.sparse import _build_sparse_bilateral_row_nzb_topology
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _assemble_sparse_bilateral_unilateral_coupling,
@@ -19,6 +21,29 @@ from newton._src.solvers.kamino._src.solvers.dvi.types import DVIState
 
 
 class TestKaminoBilateralRHS(unittest.TestCase):
+    def test_large_non_schur_workspace_stays_matrix_free(self):
+        """Avoid oversized coupling allocations and int32 errors in non-Schur solves."""
+        solver = DVISolver()
+        solver._device = wp.get_device("cpu")
+        solver._size = SimpleNamespace(sum_of_max_inequalities=1, num_worlds=1, sum_of_max_total_cts=1)
+        solver._joint_rows_host = [46341]
+        solver._data = SimpleNamespace(
+            state=DVIState(),
+            bilateral_operator=SimpleNamespace(info=SimpleNamespace(total_vec_size=1)),
+        )
+        zeros = wp.zeros
+
+        def bounded_zeros(shape, *args, **kwargs):
+            self.assertLessEqual(shape, 2, "Non-Schur setup attempted a large coupling allocation")
+            return zeros(shape, *args, **kwargs)
+
+        for stride in (1000, 46341):
+            with self.subTest(stride=stride), mock.patch.object(wp, "zeros", side_effect=bounded_zeros):
+                solver._unilateral_strides_host = [stride]
+                solver._allocate_projection_workspace(SimpleNamespace(sparse=True))
+                self.assertEqual(solver.data.state.bilateral_coupling.size, 1)
+                self.assertFalse(solver.data.state._sparse_coupling_allocated)
+
     def test_coupling_workspace_without_responses(self):
         """Cache only the coupling when alternating solves do not use Schur responses."""
         state = DVIState()

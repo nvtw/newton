@@ -155,6 +155,24 @@ def _reconstruct_fused_bilateral_solution(
 
 
 @wp.kernel
+def _build_sparse_bilateral_rhs_from_matvec(
+    problem_vio: wp.array[int32],
+    problem_njc: wp.array[int32],
+    problem_v_f: wp.array[float32],
+    state_v_aug: wp.array[float32],
+    bilateral_vio: wp.array[int32],
+    bilateral_P: wp.array[float32],
+    bilateral_rhs: wp.array[float32],
+):
+    """Build the bilateral RHS from matrix-free unilateral row products."""
+    wid, row = wp.tid()
+    if row < problem_njc[wid]:
+        pvio = problem_vio[wid]
+        bvio = bilateral_vio[wid]
+        bilateral_rhs[bvio + row] = -bilateral_P[bvio + row] * (state_v_aug[pvio + row] + problem_v_f[pvio + row])
+
+
+@wp.kernel
 def _build_sparse_bilateral_rhs(
     # Inputs:
     problem_vio: wp.array[int32],
@@ -3086,6 +3104,7 @@ def _solve_dvi_compact_schur_pgs_cooperative(
         return
     uio = problem_uio[wid]
     bcio = problem_bcio[wid]
+    lio = problem_lio[wid]
     cio = problem_cio[wid]
     bcgo = problem_bcgo[wid]
     lcgo = problem_lcgo[wid]
@@ -3160,6 +3179,12 @@ def _solve_dvi_compact_schur_pgs_cooperative(
                     uid = reverse[step]
                 if uid < scalar_count and phase != int32(0):
                     continue
+                if uid >= nbc and uid < scalar_count:
+                    if limit_indices[lio + uid - nbc] < int32(0):
+                        continue
+                elif uid >= scalar_count:
+                    if contact_indices[cio + uid - scalar_count] < int32(0):
+                        continue
                 row = _compact_unilateral_row(uid, nbc, scalar_count, bcgo, lcgo, ccgo, njc)
                 component = _cooperative_unilateral_component(uid, scalar_count, phase)
                 current = row + component

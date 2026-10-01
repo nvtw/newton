@@ -1428,6 +1428,30 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(active_dim_updates[1][1], active_dim_updates[0][1])
         np.testing.assert_array_equal(active_dim_updates[2][1], joint_dims)
 
+        # Force the budget fallback on the same problem and heterogeneous
+        # intervals, without allocating a contact-capacity-sized buffer.
+        expected = solver.data.solution.lambdas.numpy().copy()
+        with mock.patch("newton._src.solvers.kamino._src.solvers.dvi.solver._MAX_CACHED_BILATERAL_COUPLING_ENTRIES", 0):
+            fallback = DVISolver(
+                model=model,
+                data=data,
+                limits=limits,
+                contacts=detector.contacts,
+                jacobians=jacobians,
+                problem=problem,
+                config=configs,
+                warmstart=WarmStartMode.NONE,
+            )
+            fallback.coldstart()
+            with mock.patch.object(
+                problem.delassus, "apply_jacobian_transpose", wraps=problem.delassus.apply_jacobian_transpose
+            ) as body_products:
+                fallback.solve(problem)
+        self.assertEqual(fallback.data.state.bilateral_coupling.size, 1)
+        self.assertEqual(body_products.call_count, 4)
+        np.testing.assert_array_equal(fallback.data.state.bilateral_active_dim.numpy(), joint_dims)
+        np.testing.assert_allclose(fallback.data.solution.lambdas.numpy(), expected, atol=2e-5, rtol=2e-5)
+
     def test_03d2_dvi_direct_block_finishes_with_bilateral_solve(self):
         """Recover a consistent bilateral solution after fused inequality iterations."""
         builder = basics.build_boxes_hinged()

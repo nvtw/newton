@@ -72,8 +72,18 @@ class TestKaminoCompactSchur(unittest.TestCase):
     def test_pipelined_sweeps_match_general_kernel(self):
         """Preserve mixed-constraint updates and reversed schedules through 128 compact rows."""
         rng = np.random.default_rng(28932)
-        for nb, nl, nc in ((0, 0, 1), (2, 2, 3), (31, 1, 32), (0, 0, 42), (7, 0, 2), (125, 0, 1)):
-            with self.subTest(bounded=nb, limits=nl, contacts=nc):
+        cases = (
+            (0, 0, 1, False),
+            (2, 2, 3, False),
+            (31, 1, 32, False),
+            (0, 0, 42, False),
+            (7, 0, 2, False),
+            (125, 0, 1, False),
+            (2, 2, 3, True),
+            (0, 1, 1, True),
+        )
+        for nb, nl, nc, unmapped in cases:
+            with self.subTest(bounded=nb, limits=nl, contacts=nc, unmapped=unmapped):
                 nu = nb + nl + 3 * nc
                 n = max(32, nu)
                 slots = nb + nl + nc
@@ -95,14 +105,19 @@ class TestKaminoCompactSchur(unittest.TestCase):
                 config.regularization = 0.001
                 config.omega = 0.8
                 config.tolerance = 1e-5
+                limits = np.arange(nl, dtype=np.int32)
+                contacts = np.arange(nc, dtype=np.int32)
+                if unmapped:
+                    limits[0] = -1
+                    contacts[0] = -1
                 data = {
                     "problem_nbc": self.ints([nb]),
                     "problem_nl": self.ints([nl]),
                     "problem_nc": self.ints([nc]),
                     "problem_njc": self.ints([n]),
                     "problem_bcio": self.ints([0]),
-                    "problem_lio": self.ints([0]),
-                    "problem_cio": self.ints([0]),
+                    "problem_lio": self.ints([2]),
+                    "problem_cio": self.ints([3]),
                     "problem_uio": self.ints([0]),
                     "problem_bcgo": self.ints([n]),
                     "problem_lcgo": self.ints([n + nb]),
@@ -111,9 +126,9 @@ class TestKaminoCompactSchur(unittest.TestCase):
                     "bilateral_vio": self.ints([0]),
                     "response_mio": self.ints([0]),
                     "response_stride": self.ints([nu]),
-                    "limit_indices": self.ints(list(range(nl))),
-                    "contact_indices": self.ints(list(range(nc))),
-                    "problem_mu": self.floats(np.full(nc, 0.6)),
+                    "limit_indices": self.ints(np.pad(limits, (2, 0), constant_values=999)),
+                    "contact_indices": self.ints(np.pad(contacts, (3, 0), constant_values=999)),
+                    "problem_mu": self.floats(np.pad(np.full(nc, 0.6), (3, 0), constant_values=999)),
                     "problem_bound_lower": self.floats(np.full(nb, -0.3)),
                     "problem_bound_upper": self.floats(np.full(nb, 0.7)),
                     "problem_P": self.floats(rng.uniform(0.5, 1.5, n + nu)),
@@ -150,6 +165,9 @@ class TestKaminoCompactSchur(unittest.TestCase):
                 np.testing.assert_array_equal(results[1][0][:n], initial[:n])
                 np.testing.assert_allclose(results[0][0], results[1][0], atol=3e-6, rtol=3e-6)
                 np.testing.assert_allclose(results[0][1], results[1][1], atol=3e-6, rtol=3e-6)
+                if unmapped:
+                    inactive = [n + nb, *range(n + nb + nl, n + nb + nl + 3)]
+                    np.testing.assert_array_equal(results[1][0][inactive], initial[inactive])
 
 
 class TestKaminoFullSchurAssembly(unittest.TestCase):

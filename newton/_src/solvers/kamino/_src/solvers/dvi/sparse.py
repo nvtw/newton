@@ -42,6 +42,7 @@ from .sparse_kernels import (
     _assemble_sparse_bilateral_unilateral_coupling,
     _build_sparse_bilateral_block,
     _build_sparse_bilateral_rhs,
+    _build_sparse_bilateral_rhs_from_matvec,
     _cache_sparse_contact_diagonal,
     _cache_sparse_projected_diagonal,
     _color_compact_contact_groups,
@@ -1100,8 +1101,31 @@ def _solve_sparse_bilateral_block(
     operator = path.data.bilateral_operator
     state = path.data.state
     solver = path.bilateral_solver
+    if not state._sparse_coupling_allocated:
+        wp.launch(
+            _zero_bilateral_lambdas,
+            dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
+            inputs=[problem.data.njc, problem.data.vio, path.data.solution.lambdas],
+            device=path.device,
+        )
+        _sparse_delassus_matvec_rows_path(path, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
+        wp.launch(
+            _build_sparse_bilateral_rhs_from_matvec,
+            dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
+            inputs=[
+                problem.data.vio,
+                problem.data.njc,
+                problem.data.v_f,
+                state.v_aug,
+                operator.info.vio,
+                state.bilateral_preconditioner,
+                state.bilateral_rhs,
+            ],
+            device=path.device,
+        )
     if (
-        path.device.is_cuda
+        state._sparse_coupling_allocated
+        and path.device.is_cuda
         and isinstance(solver, LLTBlockedSolver)
         and solver._solve_block_dim % 32 == 0
         and not forward_only
@@ -1132,28 +1156,29 @@ def _solve_sparse_bilateral_block(
             block_dim=solver._solve_block_dim,
         )
         return
-    workers = 8 if path.device.is_cuda else 1
-    wp.launch(
-        kernel=_build_sparse_bilateral_rhs,
-        dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts, workers),
-        inputs=[
-            problem.data.vio,
-            problem.data.njc,
-            problem.data.v_f,
-            problem.data.dim,
-            state.bilateral_response_mio,
-            state.bilateral_response_stride,
-            state.bilateral_coupling,
-            path.data.solution.lambdas,
-            compact_coupling,
-            workers,
-            operator.info.vio,
-            state.bilateral_preconditioner,
-            state.bilateral_rhs,
-        ],
-        device=path.device,
-        block_dim=128 if path.device.is_cuda else 1,
-    )
+    if state._sparse_coupling_allocated:
+        workers = 8 if path.device.is_cuda else 1
+        wp.launch(
+            kernel=_build_sparse_bilateral_rhs,
+            dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts, workers),
+            inputs=[
+                problem.data.vio,
+                problem.data.njc,
+                problem.data.v_f,
+                problem.data.dim,
+                state.bilateral_response_mio,
+                state.bilateral_response_stride,
+                state.bilateral_coupling,
+                path.data.solution.lambdas,
+                compact_coupling,
+                workers,
+                operator.info.vio,
+                state.bilateral_preconditioner,
+                state.bilateral_rhs,
+            ],
+            device=path.device,
+            block_dim=128 if path.device.is_cuda else 1,
+        )
     if forward_only:
         wp.launch(
             _zero_bilateral_lambdas,
@@ -1232,7 +1257,8 @@ def _solve_sparse_with_bilateral_alternation(path: SparseDVIPath, problem: DualP
         device=path.device,
     )
     _prepare_sparse_inequality_pgs(path, problem)
-    _assemble_sparse_bilateral_coupling(path, problem, False)
+    if state._sparse_coupling_allocated:
+        _assemble_sparse_bilateral_coupling(path, problem, False)
     _solve_sparse_bilateral_block(path, problem)
     max_unilateral_rows = (
         path.size.max_of_num_bounded_joint_cts + path.size.max_of_max_limits + 3 * path.size.max_of_max_contacts
