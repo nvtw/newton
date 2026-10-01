@@ -860,11 +860,13 @@ class TestDVISolver(unittest.TestCase):
         negative index.
         """
 
-        def solve_single_inequality(limit_index: int, bounded: bool = False) -> tuple[float, np.ndarray]:
+        def solve_single_inequality(
+            limit_index: int, bounded: bool = False, initial_lambda: float = 0.0, column_major: bool = False
+        ) -> tuple[float, np.ndarray]:
             int32_array = lambda values: wp.array(values, dtype=wp.int32, device=self.device)  # noqa: E731
             float_array = lambda values: wp.array(values, dtype=wp.float32, device=self.device)  # noqa: E731
             jacobian_block = wp.array([vec6f(1.0, 0.0, 0.0, 0.0, 0.0, 0.0)], dtype=vec6f, device=self.device)
-            lambdas = float_array([0.0])
+            lambdas = float_array([initial_lambda, *([0.0] * 5 if column_major else [])])
             config = wp.array(
                 [
                     convert_config_to_struct(
@@ -881,7 +883,7 @@ class TestDVISolver(unittest.TestCase):
                 device=self.device,
             )
             threads_per_world = 64 if self.device.is_cuda else 1
-            body_space = wp.zeros(6, dtype=wp.float32, device=self.device)
+            body_space = wp.full(6, float("nan"), dtype=wp.float32, device=self.device)
             wp.launch(
                 kernel=_solve_dvi_sparse_inequalities_pgs,
                 dim=threads_per_world,
@@ -939,6 +941,14 @@ class TestDVISolver(unittest.TestCase):
                     config,
                     body_space,
                     lambdas,
+                    int32_array([1]),  # transpose_num_nzb
+                    int32_array([0]),  # transpose_nzb_start
+                    wp.array([[0, 0]], dtype=wp.int32, device=self.device),
+                    jacobian_block,
+                    int32_array([0]),  # transpose_row_start
+                    int32_array([0]),  # transpose_col_start
+                    int32_array([6]),  # transpose_max_cols
+                    column_major,  # transpose_column_major
                 ],
                 device=self.device,
                 block_dim=threads_per_world,
@@ -953,6 +963,12 @@ class TestDVISolver(unittest.TestCase):
         lambda_bounded, body_space = solve_single_inequality(-1, bounded=True)
         self.assertAlmostEqual(lambda_bounded, 0.25, places=4)
         self.assertAlmostEqual(body_space[0], 0.25, places=4)
+        # Both layouts reconstruct the initial product, then propagate the
+        # projected impulse delta. Stale NaNs must not enter either product.
+        for column_major in (False, True):
+            impulse, body = solve_single_inequality(0, initial_lambda=0.2, column_major=column_major)
+            self.assertAlmostEqual(impulse, 1.0, places=4)
+            np.testing.assert_allclose(body, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0], atol=1.0e-5)
 
     def _make_box_on_plane_setup(self, max_world_contacts: int = 4, sparse: bool = False):
         """Build an inequality-only box-on-plane problem and its containers."""
@@ -1389,7 +1405,12 @@ class TestDVISolver(unittest.TestCase):
 
         solver._sparse_path.set_bilateral_active_dim = record_bilateral_active_dim
         solver.coldstart()
-        solver.solve(problem)
+        with mock.patch.object(
+            problem.delassus, "apply_jacobian_transpose", wraps=problem.delassus.apply_jacobian_transpose
+        ) as body_products:
+            solver.solve(problem)
+        # Sweep reconstruction stays fused regardless of solve intervals.
+        self.assertEqual(body_products.call_count, 0)
 
         joint_dims = problem.data.njc.numpy()
         self.assertEqual([block_iteration for block_iteration, _ in active_dim_updates], [0, 1, -1])

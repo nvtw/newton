@@ -1264,6 +1264,14 @@ def _solve_dvi_sparse_inequalities_pgs(
     solver_config: wp.array[DVIConfigStruct],
     body_space: wp.array[float32],
     solution_lambdas: wp.array[float32],
+    transpose_num_nzb: wp.array[int32],
+    transpose_nzb_start: wp.array[int32],
+    transpose_nzb_coords: wp.array2d[int32],
+    transpose_nzb_values: wp.array[vec6f],
+    transpose_row_start: wp.array[int32],
+    transpose_col_start: wp.array[int32],
+    transpose_max_cols: wp.array[int32],
+    transpose_column_major: bool,
 ):
     """Apply one conflict-free sparse PGS schedule to every inequality."""
     tid = wp.tid()
@@ -1279,6 +1287,29 @@ def _solve_dvi_sparse_inequalities_pgs(
     nu = nbc + nl + nc
     if nu == 0:
         return
+    # Reconstruct the current body vector before the sweeps. The same block
+    # owns this world's vector throughout, so local barriers replace the
+    # separate masked reset and transpose-product launches.
+    body_offset = transpose_col_start[wid]
+    for column in range(lane, transpose_max_cols[wid], threads_per_world):
+        body_space[body_offset + column] = float32(0.0)
+    _sync_threads()
+    for block_index in range(lane, transpose_num_nzb[wid], threads_per_world):
+        index = transpose_nzb_start[wid] + block_index
+        coordinates = transpose_nzb_coords[index]
+        block = transpose_nzb_values[index]
+        row = transpose_row_start[wid] + coordinates[0]
+        column = body_offset + coordinates[1]
+        if transpose_column_major:
+            value = float32(0.0)
+            for component in range(6):
+                value += block[component] * solution_lambdas[row + component]
+            wp.atomic_add(body_space, column, value)
+        else:
+            value = solution_lambdas[row]
+            for component in range(6):
+                wp.atomic_add(body_space, column + component, block[component] * value)
+    _sync_threads()
     bcio = problem_bcio[wid]
     lio = problem_lio[wid]
     cio = problem_cio[wid]

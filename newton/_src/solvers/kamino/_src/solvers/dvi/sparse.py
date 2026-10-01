@@ -9,6 +9,7 @@ import warp as wp
 
 from ...core.data import DataKamino
 from ...core.model import ModelKamino
+from ...core.types import vec6f
 from ...dynamics.delassus import BlockSparseMatrixFreeDelassusOperator
 from ...dynamics.dual import DualProblem
 from ...geometry.contacts import ContactsKamino
@@ -505,7 +506,6 @@ def _launch_sparse_inequality_pgs(
     bilateral_vio = (
         path.data.bilateral_operator.info.vio if path.data.bilateral_operator is not None else problem.data.vio
     )
-    delassus.apply_jacobian_transpose(path.data.solution.lambdas, path.body_space, path.all_worlds_mask)
     threads_per_world = 1
     if path.device.is_cuda:
         threads_per_world = 64
@@ -542,6 +542,31 @@ def _launch_sparse_inequality_pgs(
     if cooperative_articulation:
         kernel = _solve_dvi_sparse_inequalities_pgs_cooperative
         threads_per_world = 32
+    if kernel == _solve_dvi_sparse_inequalities_pgs:
+        if path.device.is_cuda:
+            threads_per_world = max(128, threads_per_world)
+        if delassus._needs_update:
+            delassus.update()
+        transpose = delassus._transpose_op_matrix
+        column_major = delassus._col_major_jacobian is not None
+        transpose_values = transpose.nzb_values
+        if column_major:
+            # The 6x1 column blocks and vec6 share the same scalar layout.
+            transpose_values = wp.array(
+                ptr=transpose_values.ptr, shape=(transpose_values.size,), dtype=vec6f, device=path.device
+            )
+        body_inputs = [
+            transpose.num_nzb,
+            transpose.nzb_start,
+            transpose.nzb_coords,
+            transpose_values,
+            transpose.row_start,
+            transpose.col_start,
+            transpose.max_cols,
+            column_major,
+        ]
+    else:
+        delassus.apply_jacobian_transpose(path.data.solution.lambdas, path.body_space, path.all_worlds_mask)
     common_inputs = [
         bsm.num_nzb,
         bsm.nzb_start,
@@ -817,6 +842,8 @@ def _launch_sparse_inequality_pgs(
             device=path.device,
             block_dim=32,
         )
+    if kernel == _solve_dvi_sparse_inequalities_pgs:
+        kernel_inputs.extend(body_inputs)
     wp.launch(
         kernel=kernel,
         dim=path.size.num_worlds * threads_per_world,
