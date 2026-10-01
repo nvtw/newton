@@ -384,6 +384,8 @@ def _prepare_sparse_inequality_pgs(path: SparseDVIPath, problem: DualProblem) ->
                 wp.bool(use_contact_order),
             ],
             device=path.device,
+            # Spread serial per-world coloring across more CUDA blocks.
+            block_dim=4 if path.device.is_cuda else 256,
         )
         return
 
