@@ -50,6 +50,39 @@ def _collect_metrics_dr_legs(robot, world_count, num_frames, samples, use_policy
     )
 
 
+class FastG1DVI:
+    """Measure the G1 example's complete DVI frame at its default settings."""
+
+    params = [1, 4, 64]
+    param_names = ["world_count"]
+    number = 1
+    rounds = 2
+    repeat = 5
+    timeout = 600
+
+    def setup(self, world_count):
+        if wp.get_cuda_device_count() == 0:
+            raise SkipNotImplemented
+
+        from newton.examples.robot.example_robot_g1 import Example  # noqa: PLC0415
+        from newton.viewer import ViewerNull  # noqa: PLC0415
+
+        args = Example.create_parser().parse_args(["--solver", "kamino", "--world-count", str(world_count)])
+        with wp.ScopedDevice("cuda:0"):
+            self.example = Example(ViewerNull(), args)
+            for _ in range(100):
+                self.example.step()
+        wp.synchronize_device(self.example.model.device)
+
+    def time_simulate(self, world_count):
+        for _ in range(200):
+            self.example.step()
+        wp.synchronize_device(self.example.model.device)
+
+    def teardown(self, world_count):
+        self.example.test_final()
+
+
 class _FastBenchmark:
     """Utility base class for fast Kamino benchmarks."""
 

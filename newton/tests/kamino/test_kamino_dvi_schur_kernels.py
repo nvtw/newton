@@ -72,7 +72,7 @@ class TestKaminoCompactSchur(unittest.TestCase):
     def test_pipelined_sweeps_match_general_kernel(self):
         """Preserve mixed-constraint updates and reversed schedules through 128 compact rows."""
         rng = np.random.default_rng(28932)
-        for nb, nl, nc in ((0, 0, 1), (2, 2, 3), (31, 1, 32), (0, 0, 42), (7, 0, 2)):
+        for nb, nl, nc in ((0, 0, 1), (2, 2, 3), (31, 1, 32), (0, 0, 42), (7, 0, 2), (125, 0, 1)):
             with self.subTest(bounded=nb, limits=nl, contacts=nc):
                 nu = nb + nl + 3 * nc
                 n = max(32, nu)
@@ -116,8 +116,8 @@ class TestKaminoCompactSchur(unittest.TestCase):
                     "problem_mu": self.floats(np.full(nc, 0.6)),
                     "problem_bound_lower": self.floats(np.full(nb, -0.3)),
                     "problem_bound_upper": self.floats(np.full(nb, 0.7)),
-                    "problem_P": self.floats(np.ones(n + nu)),
-                    "problem_v_b": self.floats(np.zeros(n + nu)),
+                    "problem_P": self.floats(rng.uniform(0.5, 1.5, n + nu)),
+                    "problem_v_b": self.floats(rng.normal(0.0, 0.05, n + nu)),
                     "problem_diag": self.floats(np.concatenate([np.ones(n), operator.diagonal()])),
                     "projected_diag": self.floats(np.concatenate([np.ones(n), operator.diagonal()])),
                     "compact_schur": self.floats(-operator.T),

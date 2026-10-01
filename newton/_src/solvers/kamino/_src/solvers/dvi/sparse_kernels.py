@@ -1699,6 +1699,16 @@ def _subgroup_sum_32(value: float32) -> float32: ...
 def _broadcast_lane_0_32(value: float32) -> float32: ...
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+    return __shfl_sync(0xffffffffu, value, lane, 32);
+#else
+    return value;
+#endif
+""")
+def _shuffle_lane_32(value: float32, lane: int32) -> float32: ...
+
+
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
@@ -2930,10 +2940,9 @@ def _solve_dvi_compact_schur_pgs_cooperative(
 
     Handles the fused-bilateral schedule for worlds with contacts whose compact
     operator fits in 128 rows; ``_solve_dvi_sparse_inequalities_pgs_cooperative``
-    covers the remaining worlds. The reversed sweep order and the compact
-    velocity live in shared memory, and each row's Schur entries and projection
-    inputs are gathered one row ahead, so the serial per-row chain is mostly
-    on-chip.
+    covers the remaining worlds. Each lane keeps up to four velocity rows,
+    impulses, and projection inputs in registers. Warp shuffles gather them
+    for the ordered projections; only the reversed schedule is shared.
     """
     tid = wp.tid()
     lane = tid % int32(32)
@@ -2951,7 +2960,6 @@ def _solve_dvi_compact_schur_pgs_cooperative(
         return
     uio = problem_uio[wid]
     bcio = problem_bcio[wid]
-    lio = problem_lio[wid]
     cio = problem_cio[wid]
     bcgo = problem_bcgo[wid]
     lcgo = problem_lcgo[wid]
@@ -2988,149 +2996,124 @@ def _solve_dvi_compact_schur_pgs_cooperative(
             position += count
     _sync_warp_32()
 
-    # Keep the compact velocity in shared memory. Tile element writes
-    # synchronize the block, so every lane always writes: lanes beyond nu
-    # target a scratch slot whose value is never read.
-    q = wp.tile_zeros(shape=(160,), dtype=float32, storage="shared")
+    # Each lane owns up to four rows throughout the solve. Only Schur rows
+    # and the sweep schedule are streamed during the serial update chain.
+    q = wp.vec4f()
+    impulses = wp.vec4f()
+    diagonal = wp.vec4f()
+    lower = wp.vec4f()
+    upper = wp.vec4f()
+    mu = wp.vec4f()
+    velocity_bias = wp.vec4f()
+    scale = wp.vec4f()
+    normal_diagonal = wp.vec4f()
     for chunk in range(4):
-        target = lane + int32(32) * chunk
-        index = wp.where(target < nu, target, int32(128) + lane)
-        q_value = compact_q[q_offset + wp.min(target, nu - int32(1))]
-        q[index] = wp.where(target < nu, q_value, float32(0.0))
+        row = lane + int32(32) * chunk
+        if row < nu:
+            index = q_offset + row
+            q[chunk] = compact_q[index]
+            impulses[chunk] = solution_lambdas[index]
+            diagonal[chunk] = projected_diag[index]
+            velocity_bias[chunk] = problem_v_b[index]
+            scale[chunk] = problem_P[index]
+            normal_diagonal[chunk] = wp.abs(problem_diag[index]) * scale[chunk] * scale[chunk]
+            if row >= bcgo - njc and row < bcgo - njc + nbc:
+                bounded = bcio + row - (bcgo - njc)
+                lower[chunk] = problem_bound_lower[bounded]
+                upper[chunk] = problem_bound_upper[bounded]
+            if row >= ccgo - njc:
+                mu[chunk] = problem_mu[cio + (row - (ccgo - njc)) / int32(3)]
 
     sweep_count = cfg.inequality_sweeps_per_iteration * cfg.max_alternating_iterations
-    uid = int32(0)
-    unilateral_row = int32(0)
-    component = int32(0)
-    index = int32(0)
-    mapped_id = int32(0)
-    s_row = wp.vec4f()
-    t_row = wp.vec4f()
-    old_lambda = float32(0.0)
-    diagonal = float32(0.0)
-    lower = float32(0.0)
-    upper = float32(0.0)
-    old_lambda_1 = float32(0.0)
-    diagonal_1 = float32(0.0)
     for sweep in range(sweep_count):
         for phase in range(2):
             use_reverse = phase == int32(1) and (sweep % cfg.inequality_sweeps_per_iteration) % int32(2) != int32(0)
-            # One-slot software pipeline: gather everything the next row
-            # needs while the current row is projected serially on lane 0.
-            for step in range(slots + int32(1)):
-                uid_next = int32(0)
-                row_next = int32(0)
-                component_next = int32(0)
-                index_next = int32(0)
-                mapped_next = int32(-1)
-                s_next = wp.vec4f()
-                t_next = wp.vec4f()
-                lambda_next = float32(0.0)
-                diagonal_next = float32(0.0)
-                lower_next = float32(0.0)
-                upper_next = float32(0.0)
-                lambda_next_1 = float32(0.0)
-                diagonal_next_1 = float32(0.0)
-                if step < slots:
-                    uid_next = inequality_ids_by_color[uio + step]
-                    if use_reverse:
-                        uid_next = reverse[step]
-                    tangent_next = uid_next >= scalar_count and phase != int32(0)
-                    if uid_next >= scalar_count or phase == int32(0):
-                        row_next = _compact_unilateral_row(uid_next, nbc, scalar_count, bcgo, lcgo, ccgo, njc)
-                        component_next = _cooperative_unilateral_component(uid_next, scalar_count, phase)
-                        index_next = q_offset + row_next + component_next
-                        s_next = _load_compact_schur_row(
-                            compact_schur, s_offset + (row_next + component_next) * nu, lane, nu
-                        )
-                        mapped_next = bcio + uid_next
-                        if uid_next >= scalar_count:
-                            mapped_next = contact_indices[cio + uid_next - scalar_count]
-                        elif uid_next >= nbc:
-                            mapped_next = limit_indices[lio + uid_next - nbc]
-                        lambda_next = solution_lambdas[index_next]
-                        diagonal_next = projected_diag[index_next]
-                        if uid_next < nbc:
-                            lower_next = problem_bound_lower[mapped_next]
-                            upper_next = problem_bound_upper[mapped_next]
-                        if tangent_next:
-                            t_next = _load_compact_schur_row(
-                                compact_schur, s_offset + (row_next + int32(1)) * nu, lane, nu
-                            )
-                            lambda_next_1 = solution_lambdas[index_next + int32(1)]
-                            diagonal_next_1 = projected_diag[index_next + int32(1)]
-                process = step > int32(0) and mapped_id >= int32(0) and (uid >= scalar_count or phase == int32(0))
-                delta_0 = float32(0.0)
-                delta_1 = float32(0.0)
-                if process and lane == int32(0):
-                    correction_0 = q[unilateral_row + component]
-                    new_lambda = old_lambda
+            for step in range(slots):
+                uid = inequality_ids_by_color[uio + step]
+                if use_reverse:
+                    uid = reverse[step]
+                if uid < scalar_count and phase != int32(0):
+                    continue
+                row = _compact_unilateral_row(uid, nbc, scalar_count, bcgo, lcgo, ccgo, njc)
+                component = _cooperative_unilateral_component(uid, scalar_count, phase)
+                current = row + component
+                chunk = current / int32(32)
+                owner = current % int32(32)
+                correction = _shuffle_lane_32(q[chunk], owner)
+                old_lambda = _shuffle_lane_32(impulses[chunk], owner)
+                diag = _shuffle_lane_32(diagonal[chunk], owner)
+                bound_lower = _shuffle_lane_32(lower[chunk], owner)
+                bound_upper = _shuffle_lane_32(upper[chunk], owner)
+                s_row = _load_compact_schur_row(compact_schur, s_offset + current * nu, lane, nu)
+                t_row = wp.vec4f()
+                correction_1 = float32(0.0)
+                old_lambda_1 = float32(0.0)
+                diagonal_1 = float32(0.0)
+                friction_load = float32(0.0)
+                tangent = uid >= scalar_count and phase != int32(0)
+                if tangent:
+                    second_chunk = (row + int32(1)) / int32(32)
+                    second_owner = (row + int32(1)) % int32(32)
+                    correction_1 = _shuffle_lane_32(q[second_chunk], second_owner)
+                    old_lambda_1 = _shuffle_lane_32(impulses[second_chunk], second_owner)
+                    diagonal_1 = _shuffle_lane_32(diagonal[second_chunk], second_owner)
+                    t_row = _load_compact_schur_row(compact_schur, s_offset + (row + int32(1)) * nu, lane, nu)
+                    normal_chunk = (row + int32(2)) / int32(32)
+                    normal_owner = (row + int32(2)) % int32(32)
+                    lambda_n = _shuffle_lane_32(impulses[normal_chunk], normal_owner)
+                    bias_n = _shuffle_lane_32(velocity_bias[normal_chunk], normal_owner)
+                    scale_n = _shuffle_lane_32(scale[normal_chunk], normal_owner)
+                    diagonal_n = _shuffle_lane_32(normal_diagonal[normal_chunk], normal_owner)
+                    mu_c = _shuffle_lane_32(mu[normal_chunk], normal_owner)
+                    friction_load = mu_c * _contact_friction_normal_load(
+                        lambda_n, bias_n, scale_n, diagonal_n, cfg.regularization, cfg.omega
+                    )
+                new_lambda = old_lambda
+                new_lambda_1 = old_lambda_1
+                if lane == int32(0):
                     if uid < nbc:
                         new_lambda = _project_box_update(
-                            old_lambda, correction_0, diagonal, cfg.regularization, cfg.omega, lower, upper
+                            old_lambda, correction, diag, cfg.regularization, cfg.omega, bound_lower, bound_upper
                         )
                     elif uid < scalar_count:
-                        if diagonal > FLOAT32_EPS:
+                        if diag > FLOAT32_EPS:
                             new_lambda = wp.max(
                                 float32(0.0),
-                                old_lambda - cfg.omega * correction_0 / (diagonal + cfg.regularization + FLOAT32_EPS),
+                                old_lambda - cfg.omega * correction / (diag + cfg.regularization + FLOAT32_EPS),
                             )
                     elif phase == int32(0):
                         new_lambda = _project_contact_normal_update(
-                            old_lambda, correction_0, diagonal, cfg.regularization, cfg.omega
+                            old_lambda, correction, diag, cfg.regularization, cfg.omega
                         )
                     else:
-                        old_tangent = wp.vec2f(old_lambda, old_lambda_1)
-                        new_tangent = _project_contact_tangent_update(
-                            old_tangent,
-                            wp.vec2f(correction_0, q[unilateral_row + int32(1)]),
-                            wp.vec2f(diagonal, diagonal_1),
-                            -compact_schur[s_offset + (unilateral_row + int32(1)) * nu + unilateral_row],
+                        projected = _project_contact_tangent_update(
+                            wp.vec2f(old_lambda, old_lambda_1),
+                            wp.vec2f(correction, correction_1),
+                            wp.vec2f(diag, diagonal_1),
+                            -compact_schur[s_offset + (row + int32(1)) * nu + row],
                             cfg.regularization,
                             cfg.omega,
-                            problem_mu[cio + uid - scalar_count]
-                            * _contact_friction_normal_load(
-                                solution_lambdas[index + int32(2)],
-                                problem_v_b[index + int32(2)],
-                                problem_P[index + int32(2)],
-                                wp.abs(problem_diag[index + int32(2)])
-                                * problem_P[index + int32(2)]
-                                * problem_P[index + int32(2)],
-                                cfg.regularization,
-                                cfg.omega,
-                            ),
+                            friction_load,
                         )
-                        new_lambda = new_tangent.x
-                        delta_1 = new_tangent.y - old_tangent.y
-                        solution_lambdas[index + int32(1)] = new_tangent.y
-                    delta_0 = new_lambda - old_lambda
-                    solution_lambdas[index] = new_lambda
-                delta_0 = _broadcast_lane_0_32(delta_0)
-                delta_1 = _broadcast_lane_0_32(delta_1)
+                        new_lambda = projected.x
+                        new_lambda_1 = projected.y
+                new_lambda = _broadcast_lane_0_32(new_lambda)
+                new_lambda_1 = _broadcast_lane_0_32(new_lambda_1)
+                delta_0 = new_lambda - old_lambda
+                delta_1 = new_lambda_1 - old_lambda_1
+                if lane == owner:
+                    impulses[chunk] = new_lambda
+                if tangent and lane == (row + int32(1)) % int32(32):
+                    impulses[(row + int32(1)) / int32(32)] = new_lambda_1
                 if delta_0 != float32(0.0) or delta_1 != float32(0.0):
-                    for chunk in range(4):
-                        target = lane + int32(32) * chunk
-                        q_index = wp.where(target < nu, target, int32(128) + lane)
-                        update = s_row[chunk] * delta_0
-                        update += t_row[chunk] * delta_1
-                        q[q_index] = q[q_index] - update
-                # Rotate the pipeline; the next row's registers become current.
-                uid = uid_next
-                unilateral_row = row_next
-                component = component_next
-                index = index_next
-                mapped_id = mapped_next
-                s_row = s_next
-                t_row = t_next
-                old_lambda = lambda_next
-                diagonal = diagonal_next
-                lower = lower_next
-                upper = upper_next
-                old_lambda_1 = lambda_next_1
-                diagonal_1 = diagonal_next_1
+                    for update_chunk in range(4):
+                        update = s_row[update_chunk] * delta_0
+                        update += t_row[update_chunk] * delta_1
+                        q[update_chunk] = q[update_chunk] - update
 
-    for target in range(lane, nu, int32(32)):
-        compact_q[q_offset + target] = q[target]
+    for row in range(lane, nu, int32(32)):
+        compact_q[q_offset + row] = q[row / int32(32)]
+        solution_lambdas[q_offset + row] = impulses[row / int32(32)]
     if lane == int32(0):
         status = solver_status[wid]
         status.iterations = sweep_count
