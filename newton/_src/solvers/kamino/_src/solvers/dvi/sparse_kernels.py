@@ -3051,6 +3051,26 @@ def _set_component_4(values: wp.vec4f, index: int32, value: float32) -> wp.vec4f
     )
 
 
+@wp.func
+def _scheduled_compact_id(
+    uid: int32,
+    nbc: int32,
+    scalar_count: int32,
+    lio: int32,
+    cio: int32,
+    limit_indices: wp.array[int32],
+    contact_indices: wp.array[int32],
+) -> float32:
+    """Encode a scheduled inequality id exactly as float, or -1 for unmapped rows."""
+    if uid >= nbc and uid < scalar_count:
+        if limit_indices[lio + uid - nbc] < int32(0):
+            return float32(-1.0)
+    elif uid >= scalar_count:
+        if contact_indices[cio + uid - scalar_count] < int32(0):
+            return float32(-1.0)
+    return float32(uid)
+
+
 @wp.kernel
 def _solve_dvi_compact_schur_pgs_cooperative(
     limit_indices: wp.array[int32],
@@ -3147,8 +3167,22 @@ def _solve_dvi_compact_schur_pgs_cooperative(
             position += count
     _sync_warp_32()
 
+    # Keep both schedules in registers, with skipped slots marked as -1, so
+    # the serial chain shuffles them instead of issuing dependent loads.
+    forward_ids = wp.vec4f()
+    reverse_ids = wp.vec4f()
+    for chunk in range(4):
+        step = lane + int32(32) * chunk
+        if step < slots:
+            forward_ids[chunk] = _scheduled_compact_id(
+                inequality_ids_by_color[uio + step], nbc, scalar_count, lio, cio, limit_indices, contact_indices
+            )
+            reverse_ids[chunk] = _scheduled_compact_id(
+                reverse[step], nbc, scalar_count, lio, cio, limit_indices, contact_indices
+            )
+
     # Each lane owns up to four rows throughout the solve. Only Schur rows
-    # and the sweep schedule are streamed during the serial update chain.
+    # are streamed during the serial update chain.
     q = wp.vec4f()
     impulses = wp.vec4f()
     diagonal = wp.vec4f()
@@ -3180,17 +3214,10 @@ def _solve_dvi_compact_schur_pgs_cooperative(
         for phase in range(2):
             use_reverse = phase == int32(1) and (sweep % cfg.inequality_sweeps_per_iteration) % int32(2) != int32(0)
             for step in range(slots):
-                uid = inequality_ids_by_color[uio + step]
-                if use_reverse:
-                    uid = reverse[step]
-                if uid < scalar_count and phase != int32(0):
+                ids = wp.where(use_reverse, reverse_ids, forward_ids)
+                uid = int32(_shuffle_lane_32(_get_component_4(ids, step / int32(32)), step % int32(32)))
+                if uid < int32(0) or (uid < scalar_count and phase != int32(0)):
                     continue
-                if uid >= nbc and uid < scalar_count:
-                    if limit_indices[lio + uid - nbc] < int32(0):
-                        continue
-                elif uid >= scalar_count:
-                    if contact_indices[cio + uid - scalar_count] < int32(0):
-                        continue
                 row = _compact_unilateral_row(uid, nbc, scalar_count, bcgo, lcgo, ccgo, njc)
                 component = _cooperative_unilateral_component(uid, scalar_count, phase)
                 current = row + component
