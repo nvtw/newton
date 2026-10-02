@@ -12,6 +12,7 @@ import tempfile
 import types
 import unittest
 import warnings
+import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -716,6 +717,29 @@ class TestDriveNeuralMLP(unittest.TestCase):
                         {ctrl._net_input_name: wp.ones((n, 2), dtype=wp.float32, device=self.device)}
                     )
                     np.testing.assert_allclose(outputs[ctrl._net_output_name].numpy(), np.full((n, 1), 3.0))
+
+    def test_finalize_releases_initial_fixed_batch_runtime(self):
+        """Release the inspection runtime before allocating its replacement."""
+        from warp_nn.runtime import OnnxRuntime  # noqa: PLC0415
+
+        path = self._save_mlp(np.array([[2.0, 0.0]], dtype=np.float32), np.array([1.0], dtype=np.float32), batch_dim=1)
+        runtime_refs = []
+
+        def create_runtime(*args, **kwargs):
+            if runtime_refs:
+                self.assertIsNone(runtime_refs[0](), "The initial runtime still owns model allocations")
+            runtime = OnnxRuntime(*args, **kwargs)
+            runtime_refs.append(weakref.ref(runtime))
+            return runtime
+
+        ctrl = DriveNeuralMLP(model_path=path)
+        with (
+            patch("newton._src.actuators.utils._require_warp_nn_runtime", return_value=create_runtime),
+            self.assertWarnsRegex(DeprecationWarning, "fixed.*deprecated"),
+        ):
+            ctrl.finalize(self.device, 3)
+        self.assertEqual(len(runtime_refs), 2)
+        self.assertIs(runtime_refs[-1](), ctrl._network)
 
     def test_finalize_dynamic_batch_onnx_with_multiple_actuators(self):
         """Run a dynamic-batch ONNX export with one scalar per actuator."""

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import math
 import os
@@ -123,7 +124,10 @@ def load_checkpoint(
             DeprecationWarning,
             stacklevel=2,
         )
-        # Warp-NN 0.4.0 preserves fixed-batch overrides through its deprecated constructor.
+        # Avoid overlapping model allocations when using Warp-NN 0.4.0's legacy overrides.
+        del runtime
+        # Warp compilation can retain constructor frames until cyclic garbage collection.
+        gc.collect()
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
