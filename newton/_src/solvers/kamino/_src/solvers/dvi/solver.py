@@ -26,6 +26,7 @@ from ..common import (
 from .kernels import (
     _FUSED_BILATERAL_BLOCK,
     _FUSED_INEQUALITY_BLOCK,
+    BILATERAL_FAILED_PIVOT_SHIFT,
     _assemble_bilateral_contact_response,
     _build_bilateral_rhs,
     _compute_dvi_desaxce_corrections,
@@ -339,6 +340,7 @@ class DVISolver:
             kwargs.setdefault("solve_block_dim", 256)
             solver_class = LLTBlockedSolver
         else:
+            kwargs.setdefault("failed_pivot_shift", BILATERAL_FAILED_PIVOT_SHIFT)
             solver_class = LLTBlockedRCMSolver
         self._bilateral_solver = solver_class(operator=operator, device=self._device, **kwargs)
 

@@ -85,6 +85,33 @@ def _mark_structural_tiles(
     wp.atomic_max(pattern, tpo[world] + wp.max(row, col) * tiles + wp.min(row, col), 1)
 
 
+@wp.kernel
+def _flag_failed_factors(
+    dim: wp.array[wp.int32],
+    mio: wp.array[wp.int32],
+    L: wp.array[wp.float32],
+    retry_dim: wp.array[wp.int32],
+):
+    """Select blocks with a non-finite pivot for refactoring."""
+    world, row = wp.tid()
+    n = dim[world]
+    if row < n and not wp.isfinite(L[mio[world] + row * n + row]):
+        retry_dim[world] = n
+
+
+@wp.kernel
+def _shift_failed_factors(
+    mio: wp.array[wp.int32],
+    retry_dim: wp.array[wp.int32],
+    shift: wp.float32,
+    A: wp.array[wp.float32],
+):
+    world, row = wp.tid()
+    n = retry_dim[world]
+    if row < n:
+        A[mio[world] + row * n + row] += shift
+
+
 PARALLEL_FACTORIZATION_MAX_BLOCKS_PER_SM = 2
 """Batches with at least this many blocks per SM use the per-block factorization."""
 
@@ -136,6 +163,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         rcm_max_bfs_iters: int | None = None,
         reuse_permutation: bool = True,
         parallel_factorization: bool = False,
+        failed_pivot_shift: float = 0.0,
         dtype: FloatType = wp.float32,
         device: wp.DeviceLike | None = None,
         **kwargs: dict[str, Any],
@@ -154,6 +182,9 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             reuse_permutation: whether to compute RCM once and reuse that
                 permutation for later numeric factorizations. The numeric tile
                 pattern is still rebuilt each time. Defaults to ``True``.
+            failed_pivot_shift: diagonal shift added to blocks whose
+                factorization produced a non-finite pivot before they are
+                refactored. Zero disables the retry. Defaults to ``0.0``.
             parallel_factorization: whether to solve off-diagonal tiles of
                 each Cholesky panel in parallel while the batch is too small
                 to fill the device. Defaults to ``False``.
@@ -202,6 +233,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._rcm_max_bfs_iters = rcm_max_bfs_iters
         self._reuse_permutation = reuse_permutation
         self._parallel_factorization = parallel_factorization
+        self._failed_pivot_shift = failed_pivot_shift
 
         # Build kernels (cached by block_size / max_dim at allocate time).
         self._factorize_kernel = make_llt_blocked_rcm_factorize_kernel(block_size)
@@ -411,6 +443,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             # Tile-pattern flat storage + offsets.
             self._tile_pattern = wp.zeros(shape=(total_tp_size,), dtype=wp.int32)
             self._tpo = to_warp_int32_array(tp_offsets[:-1])
+            self._retry_dim = wp.zeros(info.num_blocks, dtype=wp.int32)
 
             # Batched-RCM scratch. Owning these here matches how the other
             # linalg solvers hold their buffers and keeps the recorded-launch
@@ -594,6 +627,35 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
                 block_dim=self._factorize_block_dim,
                 device=self._device,
                 clear_skipped=clear_skipped,
+            )
+        if self._failed_pivot_shift > 0.0:
+            # Round-off can break near-singular blocks; refactor only those,
+            # since the per-block kernel exits immediately for zero dimensions.
+            self._retry_dim.zero_()
+            retry_shape = (num_blocks, self._max_dim)
+            wp.launch(
+                _flag_failed_factors,
+                dim=retry_shape,
+                inputs=[info.dim, info.mio, self._L, self._retry_dim],
+                device=self._device,
+            )
+            wp.launch(
+                _shift_failed_factors,
+                dim=retry_shape,
+                inputs=[info.mio, self._retry_dim, self._failed_pivot_shift, self._A_hat],
+                device=self._device,
+            )
+            llt_blocked_rcm_factorize(
+                kernel=self._factorize_kernel,
+                dim=self._retry_dim,
+                mio=info.mio,
+                tpo=self._tpo,
+                A=self._A_hat,
+                tile_pattern=self._tile_pattern,
+                L=self._L,
+                num_blocks=num_blocks,
+                block_dim=self._factorize_block_dim,
+                device=self._device,
             )
 
     @override

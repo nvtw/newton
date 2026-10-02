@@ -38,6 +38,10 @@ _FUSED_INEQUALITY_BLOCK = -2
 # the equality residual, but closed-loop robots lose contact below this.
 BILATERAL_DIAGONAL_FLOOR = 7.0e-7
 
+# Extra diagonal shift for bilateral blocks whose factorization fails. Float32
+# round-off can make near-singular closed-loop blocks indefinite.
+BILATERAL_FAILED_PIVOT_SHIFT = 1.0e-5
+
 _FUSED_BILATERAL_BLOCK = -3
 
 
