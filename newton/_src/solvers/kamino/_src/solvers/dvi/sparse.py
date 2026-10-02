@@ -553,7 +553,8 @@ def _launch_sparse_inequality_pgs(
         threads_per_world = 32
     if kernel == _solve_dvi_sparse_inequalities_pgs:
         if path.device.is_cuda:
-            threads_per_world = max(128, threads_per_world)
+            # Wider blocks help small batches but limit residency beyond ~512 worlds.
+            threads_per_world = max(128 if path.size.num_worlds <= 512 else 64, threads_per_world)
         if delassus._needs_update:
             delassus.update()
         transpose = delassus._transpose_op_matrix
