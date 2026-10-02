@@ -40,6 +40,18 @@ FLOAT32_EPS = wp.constant(wp.float32(np.finfo(np.float32).eps))
 I_3 = wp.constant(wp.mat33f(1, 0, 0, 0, 1, 0, 0, 0, 1))
 """ The 3x3 identity matrix."""
 
+GYROSCOPIC_MIDPOINT_NEWTON_ITERATIONS = wp.constant(12)
+"""Safety limit on Newton iterations; acceptance is determined by the residual."""
+
+GYROSCOPIC_MIDPOINT_SUFFICIENT_DECREASE = wp.constant(1.0e-4)
+"""Armijo coefficient for backtracking on the squared midpoint residual."""
+
+GYROSCOPIC_MIDPOINT_MAX_SUBSTEP_ATTEMPTS = wp.constant(1024)
+"""Safety limit on accepted substeps and retries to bound per-body work."""
+
+GYROSCOPIC_MIDPOINT_RELATIVE_TOLERANCE = wp.constant(1.0e-6)
+"""Midpoint residual tolerance scaled by one plus the initial angular speed."""
+
 
 ###
 # Rotation matrices
@@ -522,27 +534,41 @@ def _solve_gyroscopic_midpoint(
     omega_i: wp.vec3f,
     tau_i: wp.vec3f,
 ) -> tuple[wp.vec3f, bool]:
-    # The fixed-point iteration is inexpensive when the time step is small
-    # enough, but its final iterate must satisfy the midpoint equation.
-    omega_next = omega_i + dt * (inv_I_i @ tau_i)
-    for _ in range(5):
-        midpoint = 0.5 * (omega_i + omega_next)
-        omega_next = omega_i + dt * (inv_I_i @ (tau_i - wp.cross(midpoint, I_i @ midpoint)))
-    midpoint = 0.5 * (omega_i + omega_next)
-    residual = midpoint - omega_i - 0.5 * dt * (inv_I_i @ (tau_i - wp.cross(midpoint, I_i @ midpoint)))
-    if wp.length(residual) <= 1.0e-6 * (1.0 + wp.length(omega_i)):
-        return omega_next, True
-
+    """Solve the angular midpoint equation using Newton's method with backtracking."""
     omega_mid = omega_i + 0.5 * dt * (inv_I_i @ tau_i)
     identity = wp.identity(3, dtype=wp.float32)
-    for _ in range(12):
-        gyro = wp.cross(omega_mid, I_i @ omega_mid)
-        residual = omega_mid - omega_i - 0.5 * dt * (inv_I_i @ (tau_i - gyro))
-        if wp.length(residual) <= 1.0e-6 * (1.0 + wp.length(omega_i)):
+    tolerance = GYROSCOPIC_MIDPOINT_RELATIVE_TOLERANCE * (1.0 + wp.length(omega_i))
+    residual = omega_mid - omega_i - 0.5 * dt * (inv_I_i @ (tau_i - wp.cross(omega_mid, I_i @ omega_mid)))
+    for _ in range(GYROSCOPIC_MIDPOINT_NEWTON_ITERATIONS):
+        if wp.length(residual) <= tolerance:
             return 2.0 * omega_mid - omega_i, True
         # Jacobian of omega x (I omega) is skew(omega) I - skew(I omega).
         jacobian = identity + 0.5 * dt * (inv_I_i @ (wp.skew(omega_mid) @ I_i - wp.skew(I_i @ omega_mid)))
-        omega_mid -= wp.inverse(jacobian) @ residual
+        direction = wp.inverse(jacobian) @ residual
+        residual_squared = wp.length_sq(residual)
+        scale = wp.float32(1.0)
+        accepted = wp.bool(False)
+        # Bound backtracking by float32 resolution.
+        while scale >= FLOAT32_EPS:
+            candidate = omega_mid - scale * direction
+            candidate_gyro = wp.cross(candidate, I_i @ candidate)
+            candidate_residual = candidate - omega_i - 0.5 * dt * (inv_I_i @ (tau_i - candidate_gyro))
+            candidate_residual_squared = wp.length_sq(candidate_residual)
+            if (
+                candidate_residual_squared < residual_squared
+                and candidate_residual_squared
+                <= (1.0 - 2.0 * GYROSCOPIC_MIDPOINT_SUFFICIENT_DECREASE * scale) * residual_squared
+            ):
+                omega_mid = candidate
+                residual = candidate_residual
+                accepted = True
+                break
+            scale *= 0.5
+        if not accepted:
+            return omega_i, False
+    # The final accepted Newton step may have reached tolerance at the iteration limit.
+    if wp.length(residual) <= tolerance:
+        return 2.0 * omega_mid - omega_i, True
     return omega_i, False
 
 
@@ -570,7 +596,7 @@ def compute_body_twist_update_with_eom(
     omega_i_n = omega_i
     remaining = dt
     substep = dt
-    for _ in range(1024):
+    for _ in range(GYROSCOPIC_MIDPOINT_MAX_SUBSTEP_ATTEMPTS):
         if remaining <= 0.0:
             break
         step = wp.min(substep, remaining)
