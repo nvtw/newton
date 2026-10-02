@@ -61,7 +61,7 @@ import warp as wp
 from .....core.types import override
 from ...config import ConfigBase, ConstrainedDynamicsConfig, ConstraintStabilizationConfig
 from ..core.data import DataKamino
-from ..core.math import FLOAT32_EPS
+from ..core.math import FLOAT32_EPS, compute_gyroscopic_torque
 from ..core.model import ModelKamino
 from ..core.size import SizeKamino
 from ..core.types import vec6f
@@ -372,13 +372,11 @@ def gravity_plus_coriolis_wrench(
     I_i: wp.mat33f,
     omega_i: wp.vec3f,
     dt: wp.float32,
-    inv_I_i: wp.mat33f,
-    tau_i: wp.vec3f,
 ) -> wp.spatial_vectorf:
     """
-    Compute gravity and gyroscopic torque at a predicted angular midpoint.
+    Compute the gravitational + Coriolis wrench acting on a body.
     """
-    f_gi_i, tau_gi_i = gravity_plus_coriolis_wrench_split(g, m_i, I_i, omega_i, dt, inv_I_i, tau_i)
+    f_gi_i, tau_gi_i = gravity_plus_coriolis_wrench_split(g, m_i, I_i, omega_i, dt)
     return wp.spatial_vectorf(*f_gi_i, *tau_gi_i)
 
 
@@ -389,17 +387,12 @@ def gravity_plus_coriolis_wrench_split(
     I_i: wp.mat33f,
     omega_i: wp.vec3f,
     dt: wp.float32,
-    inv_I_i: wp.mat33f,
-    tau_i: wp.vec3f,
 ) -> tuple[wp.vec3f, wp.vec3f]:
-    """Compute gravity and gyroscopic torque using the applied-torque midpoint predictor.
-
-    The predictor includes external and actuation torque, but omits gyroscopic
-    torque and constraint reactions to keep dual assembly non-iterative.
     """
-    omega_mid = omega_i + 0.5 * dt * (inv_I_i @ tau_i)
+    Compute the gravitational+inertial wrench on a body.
+    """
     f_gi_i = m_i * g
-    tau_gi_i = -wp.cross(omega_mid, I_i @ omega_mid)
+    tau_gi_i = compute_gyroscopic_torque(dt, I_i, omega_i)
     return f_gi_i, tau_gi_i
 
 
@@ -469,7 +462,6 @@ def _build_nonlinear_generalized_force(
     model_bodies_m_i: wp.array[wp.float32],
     state_bodies_u_i: wp.array[wp.spatial_vectorf],
     state_bodies_I_i: wp.array[wp.mat33f],
-    state_bodies_inv_I_i: wp.array[wp.mat33f],
     state_bodies_w_e_i: wp.array[wp.spatial_vectorf],
     state_bodies_w_a_i: wp.array[wp.spatial_vectorf],
     # Outputs:
@@ -482,7 +474,6 @@ def _build_nonlinear_generalized_force(
     wid = model_bodies_wid[bid]
     m_i = model_bodies_m_i[bid]
     I_i = state_bodies_I_i[bid]
-    inv_I_i = state_bodies_inv_I_i[bid]
     u_i = state_bodies_u_i[bid]
     w_e_i = state_bodies_w_e_i[bid]
     w_a_i = state_bodies_w_a_i[bid]
@@ -495,8 +486,7 @@ def _build_nonlinear_generalized_force(
     omega_i = wp.spatial_bottom(u_i)
 
     # Compute the net external wrench on the body
-    w_i = w_e_i + w_a_i
-    h_i = w_i + gravity_plus_coriolis_wrench(g, m_i, I_i, omega_i, dt, inv_I_i, wp.spatial_bottom(w_i))
+    h_i = w_e_i + w_a_i + gravity_plus_coriolis_wrench(g, m_i, I_i, omega_i, dt)
 
     # Store the generalized free-velocity vector
     problem_h[bid] = dt * h_i
@@ -540,8 +530,7 @@ def _build_generalized_free_velocity(
     omega_i = wp.spatial_bottom(u_i)
 
     # Compute the net external wrench on the body
-    w_i = w_e_i + w_a_i
-    h_i = w_i + gravity_plus_coriolis_wrench(g, m_i, I_i, omega_i, dt, inv_I_i, wp.spatial_bottom(w_i))
+    h_i = w_e_i + w_a_i + gravity_plus_coriolis_wrench(g, m_i, I_i, omega_i, dt)
     f_h_i = wp.spatial_top(h_i)
     tau_h_i = wp.spatial_bottom(h_i)
 
@@ -1686,7 +1675,6 @@ class DualProblem:
                 model.bodies.m_i,
                 data.bodies.u_i,
                 data.bodies.I_i,
-                data.bodies.inv_I_i,
                 data.bodies.w_e_i,
                 data.bodies.w_a_i,
                 # Outputs:

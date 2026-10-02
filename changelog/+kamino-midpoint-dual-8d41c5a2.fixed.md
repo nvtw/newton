@@ -1,1 +1,0 @@
-Use Newton's method with backtracking for Kamino's gyroscopic midpoint solve, and evaluate gyroscopic torque at a predicted angular midpoint when assembling free velocities and nonlinear generalized forces for constrained dynamics.

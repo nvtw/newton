@@ -40,18 +40,6 @@ FLOAT32_EPS = wp.constant(wp.float32(np.finfo(np.float32).eps))
 I_3 = wp.constant(wp.mat33f(1, 0, 0, 0, 1, 0, 0, 0, 1))
 """ The 3x3 identity matrix."""
 
-GYROSCOPIC_MIDPOINT_NEWTON_ITERATIONS = wp.constant(12)
-"""Safety limit on Newton iterations; acceptance is determined by the residual."""
-
-GYROSCOPIC_MIDPOINT_SUFFICIENT_DECREASE = wp.constant(1.0e-4)
-"""Armijo coefficient for backtracking on the squared midpoint residual."""
-
-GYROSCOPIC_MIDPOINT_MAX_SUBSTEP_ATTEMPTS = wp.constant(1024)
-"""Safety limit on accepted substeps and retries to bound per-body work."""
-
-GYROSCOPIC_MIDPOINT_RELATIVE_TOLERANCE = wp.constant(1.0e-6)
-"""Midpoint residual tolerance scaled by one plus the initial angular speed."""
-
 
 ###
 # Rotation matrices
@@ -527,49 +515,24 @@ def concat6d(X1: wp.mat33f, X2: wp.mat33f) -> wp.spatial_matrixf:
 
 
 @wp.func
-def _solve_gyroscopic_midpoint(
+def compute_gyroscopic_torque(
     dt: wp.float32,
     I_i: wp.mat33f,
-    inv_I_i: wp.mat33f,
     omega_i: wp.vec3f,
-    tau_i: wp.vec3f,
-) -> tuple[wp.vec3f, bool]:
-    """Solve the angular midpoint equation using Newton's method with backtracking."""
-    omega_mid = omega_i + 0.5 * dt * (inv_I_i @ tau_i)
-    identity = wp.identity(3, dtype=wp.float32)
-    tolerance = GYROSCOPIC_MIDPOINT_RELATIVE_TOLERANCE * (1.0 + wp.length(omega_i))
-    residual = omega_mid - omega_i - 0.5 * dt * (inv_I_i @ (tau_i - wp.cross(omega_mid, I_i @ omega_mid)))
-    for _ in range(GYROSCOPIC_MIDPOINT_NEWTON_ITERATIONS):
-        if wp.length(residual) <= tolerance:
-            return 2.0 * omega_mid - omega_i, True
-        # Jacobian of omega x (I omega) is skew(omega) I - skew(I omega).
-        jacobian = identity + 0.5 * dt * (inv_I_i @ (wp.skew(omega_mid) @ I_i - wp.skew(I_i @ omega_mid)))
-        direction = wp.inverse(jacobian) @ residual
-        residual_squared = wp.length_sq(residual)
-        scale = wp.float32(1.0)
-        accepted = wp.bool(False)
-        # Bound backtracking by float32 resolution.
-        while scale >= FLOAT32_EPS:
-            candidate = omega_mid - scale * direction
-            candidate_gyro = wp.cross(candidate, I_i @ candidate)
-            candidate_residual = candidate - omega_i - 0.5 * dt * (inv_I_i @ (tau_i - candidate_gyro))
-            candidate_residual_squared = wp.length_sq(candidate_residual)
-            if (
-                candidate_residual_squared < residual_squared
-                and candidate_residual_squared
-                <= (1.0 - 2.0 * GYROSCOPIC_MIDPOINT_SUFFICIENT_DECREASE * scale) * residual_squared
-            ):
-                omega_mid = candidate
-                residual = candidate_residual
-                accepted = True
-                break
-            scale *= 0.5
-        if not accepted:
-            return omega_i, False
-    # The final accepted Newton step may have reached tolerance at the iteration limit.
-    if wp.length(residual) <= tolerance:
-        return 2.0 * omega_mid - omega_i, True
-    return omega_i, False
+) -> wp.vec3f:
+    """Compute the effective gyroscopic torque over a time step.
+
+    Takes an explicit Euler step of the angular momentum ``L = I ω`` and
+    rescales the result back to ``|L|``. Explicit Euler only ever lengthens
+    ``L`` and steadily gains energy; restoring the conserved momentum
+    magnitude keeps torque-free rotation bounded, as in PhysX.
+    """
+    L_i = I_i @ omega_i
+    L_i_n = L_i - dt * wp.cross(omega_i, L_i)
+    L_i_n_len = wp.length(L_i_n)
+    if L_i_n_len > 0.0:
+        L_i_n *= wp.length(L_i) / L_i_n_len
+    return (L_i_n - L_i) / dt
 
 
 @wp.func
@@ -591,23 +554,7 @@ def compute_body_twist_update_with_eom(
     # Compute velocity update equations
     # Disable gravity acceleration for massless bodies because inv_m * m i = 0.0 for such bodies, not 1.0.
     v_i_n = v_i + dt * (g * wp.nonzero(inv_m_i) + inv_m_i * f_i)
-    # Solve the midpoint equation before using its energy-preserving update.
-    # Retry with shorter steps if Newton's method does not converge.
-    omega_i_n = omega_i
-    remaining = dt
-    substep = dt
-    for _ in range(GYROSCOPIC_MIDPOINT_MAX_SUBSTEP_ATTEMPTS):
-        if remaining <= 0.0:
-            break
-        step = wp.min(substep, remaining)
-        next_omega, converged = _solve_gyroscopic_midpoint(step, I_i, inv_I_i, omega_i_n, tau_i)
-        if converged:
-            omega_i_n = next_omega
-            remaining -= step
-            substep = 2.0 * step
-        else:
-            substep = 0.5 * step
-    assert remaining <= 0.0, "Kamino gyroscopic midpoint solve did not converge"
+    omega_i_n = omega_i + dt * inv_I_i @ (compute_gyroscopic_torque(dt, I_i, omega_i) + tau_i)
 
     # Return the updated velocities
     return v_i_n, omega_i_n
