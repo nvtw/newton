@@ -96,7 +96,7 @@ class TestKaminoFactorRowStart(unittest.TestCase):
                 pattern = wp.array(patterns, dtype=wp.int32, device=device)
                 reference = wp.full(len(expected), -77, dtype=wp.int32, device=device)
                 candidate = wp.full(len(expected), -77, dtype=wp.int32, device=device)
-                inputs = [dims, matrix_offsets, vector_offsets, matrices_wp]
+                inputs = [dims, matrix_offsets, dims, vector_offsets, matrices_wp]
                 wp.launch(
                     _find_bilateral_factor_row_start,
                     dim=(len(dimensions), max(dimensions)),

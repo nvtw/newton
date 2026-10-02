@@ -88,6 +88,7 @@ def _mark_structural_tiles(
 @wp.kernel
 def _flag_failed_factors(
     dim: wp.array[wp.int32],
+    ld: wp.array[wp.int32],
     mio: wp.array[wp.int32],
     L: wp.array[wp.float32],
     retry_dim: wp.array[wp.int32],
@@ -95,21 +96,21 @@ def _flag_failed_factors(
     """Select blocks with a non-finite pivot for refactoring."""
     world, row = wp.tid()
     n = dim[world]
-    if row < n and not wp.isfinite(L[mio[world] + row * n + row]):
+    if row < n and not wp.isfinite(L[mio[world] + row * ld[world] + row]):
         retry_dim[world] = n
 
 
 @wp.kernel
 def _shift_failed_factors(
+    ld: wp.array[wp.int32],
     mio: wp.array[wp.int32],
     retry_dim: wp.array[wp.int32],
     shift: wp.float32,
     A: wp.array[wp.float32],
 ):
     world, row = wp.tid()
-    n = retry_dim[world]
-    if row < n:
-        A[mio[world] + row * n + row] += shift
+    if row < retry_dim[world]:
+        A[mio[world] + row * ld[world] + row] += shift
 
 
 PARALLEL_FACTORIZATION_MAX_BLOCKS_PER_SM = 2
@@ -164,6 +165,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         reuse_permutation: bool = True,
         parallel_factorization: bool = False,
         failed_pivot_shift: float = 0.0,
+        capacity_stride: bool = False,
         dtype: FloatType = wp.float32,
         device: wp.DeviceLike | None = None,
         **kwargs: dict[str, Any],
@@ -185,6 +187,10 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             failed_pivot_shift: diagonal shift added to blocks whose
                 factorization produced a non-finite pivot before they are
                 refactored. Zero disables the retry. Defaults to ``0.0``.
+            capacity_stride: whether each block is stored with its capacity
+                (maximum dimension) as row stride instead of its active
+                dimension. Capacities rounded up to ``block_size`` keep all
+                tile accesses aligned and in bounds. Defaults to ``False``.
             parallel_factorization: whether to solve off-diagonal tiles of
                 each Cholesky panel in parallel while the batch is too small
                 to fill the device. Defaults to ``False``.
@@ -234,6 +240,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         self._reuse_permutation = reuse_permutation
         self._parallel_factorization = parallel_factorization
         self._failed_pivot_shift = failed_pivot_shift
+        self._capacity_stride = capacity_stride
 
         # Build kernels (cached by block_size / max_dim at allocate time).
         self._factorize_kernel = make_llt_blocked_rcm_factorize_kernel(block_size)
@@ -304,6 +311,10 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         if self._tpo is None:
             raise ValueError("Tile pattern offsets have not been allocated!")
         return self._tpo
+
+    def _stride(self) -> wp.array[wp.int32]:
+        """Per-block matrix row strides."""
+        return self._operator.info.maxdim if self._capacity_stride else self._operator.info.dim
 
     ###
     # Implementation
@@ -492,6 +503,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         info = self._operator.info
         with wp.ScopedDevice(self._device):
             self._reorder_callback = _rcm_batch.create_rcm_batch_launch(
+                ld=self._stride(),
                 A_flat=A,
                 perm_flat=self._P,
                 dims=info.dim,
@@ -537,7 +549,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
                 valid_dims = self._rcm_scratch["permutation_dim"].numpy()
                 self._permutation_initialized = all(
                     int(is_valid) != 0 and int(valid_dim) == expected_dim
-                    for is_valid, valid_dim, expected_dim in zip(valid, valid_dims, info.dimensions, strict=True)
+                    for is_valid, valid_dim, expected_dim in zip(valid, valid_dims, info.dim.numpy(), strict=True)
                 )
                 self._permutation_initialized_during_capture = False
                 self._permutation_capture_id = None
@@ -562,6 +574,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         #    bits are OR'd via atomic_max.
         self._tile_pattern.zero_()
         llt_blocked_rcm_fused_permute_and_tp(
+            ld=self._stride(),
             kernel=self._fused_permute_and_tp_kernel,
             dim=info.dim,
             mio=info.mio,
@@ -601,6 +614,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             and num_blocks < PARALLEL_FACTORIZATION_MAX_BLOCKS_PER_SM * self._device.sm_count
         ):
             llt_blocked_rcm_factorize_parallel(
+                ld=self._stride(),
                 kernels=self._parallel_factorize_kernels,
                 dim=info.dim,
                 mio=info.mio,
@@ -616,6 +630,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             )
         else:
             llt_blocked_rcm_factorize(
+                ld=self._stride(),
                 kernel=self._factorize_kernel,
                 dim=info.dim,
                 mio=info.mio,
@@ -636,16 +651,17 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
             wp.launch(
                 _flag_failed_factors,
                 dim=retry_shape,
-                inputs=[info.dim, info.mio, self._L, self._retry_dim],
+                inputs=[info.dim, self._stride(), info.mio, self._L, self._retry_dim],
                 device=self._device,
             )
             wp.launch(
                 _shift_failed_factors,
                 dim=retry_shape,
-                inputs=[info.mio, self._retry_dim, self._failed_pivot_shift, self._A_hat],
+                inputs=[self._stride(), info.mio, self._retry_dim, self._failed_pivot_shift, self._A_hat],
                 device=self._device,
             )
             llt_blocked_rcm_factorize(
+                ld=self._stride(),
                 kernel=self._factorize_kernel,
                 dim=self._retry_dim,
                 mio=info.mio,
@@ -669,6 +685,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
 
         # Solve L L^T x_hat = P b and scatter x_hat -> x.
         llt_blocked_rcm_solve(
+            ld=self._stride(),
             kernel=self._solve_kernel,
             dim=info.dim,
             mio=info.mio,
@@ -706,6 +723,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
 
         # In-place solve on x_hat (x_hat starts as the permuted RHS; y is scratch).
         llt_blocked_rcm_solve_inplace(
+            ld=self._stride(),
             kernel=self._solve_inplace_kernel,
             dim=info.dim,
             mio=info.mio,

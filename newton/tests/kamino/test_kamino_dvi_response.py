@@ -61,6 +61,7 @@ class TestKaminoBlockedResponse(unittest.TestCase):
                         ints([n + nu]),
                         ints([n]),
                         ints([0]),
+                        ints([n]),
                         ints([0]),
                         floats(scale),
                         floats(lower),
@@ -91,6 +92,7 @@ class TestKaminoBlockedResponse(unittest.TestCase):
                     make_llt_blocked_rcm_solve_kernel(32, True, False),
                     dim=(1, 128),
                     inputs=[
+                        ints([n]),
                         ints([n]),
                         ints([0]),
                         ints([0]),
@@ -145,6 +147,7 @@ class TestKaminoBlockedResponse(unittest.TestCase):
                     dim=(1, 128),
                     inputs=[
                         ints([n]),
+                        ints([n]),
                         ints([0]),
                         ints([0]),
                         ints([0]),
@@ -196,6 +199,7 @@ class TestCooperativeResponse(unittest.TestCase):
                 i32([njc + nu]),
                 i32([njc]),
                 i32([0]),
+                i32([njc]),
                 i32([0]),
                 f32(scale),
                 f32(lower),
@@ -284,7 +288,7 @@ class TestSplitResponse(unittest.TestCase):
                     _solve_bilateral_unilateral_response_compact,
                     dim=(len(ns), 128),
                     block_dim=128,
-                    inputs=[dim, njc, bmio, bvio, scale, L, order, rio, stride, coupling, outputs[index], prefix],
+                    inputs=[dim, njc, bmio, njc, bvio, scale, L, order, rio, stride, coupling, outputs[index], prefix],
                     device=device,
                 )
             wp.launch(
@@ -295,6 +299,7 @@ class TestSplitResponse(unittest.TestCase):
                     dim,
                     njc,
                     bmio,
+                    njc,
                     bvio,
                     scale,
                     L,

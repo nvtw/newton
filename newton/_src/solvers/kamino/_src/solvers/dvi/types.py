@@ -264,6 +264,7 @@ class DVIData:
         self.solution: DualSolution | None = None
         self.info: DVIInfo | None = None
         self.bilateral_operator: DenseLinearOperatorData | None = None
+        self.bilateral_dim: wp.array[int32] | None = None
         if size is not None:
             self.finalize(size=size, collect_info=collect_info, device=device)
 

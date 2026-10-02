@@ -3396,8 +3396,8 @@ def _build_sparse_bilateral_block(
     pair_i: wp.array[int32],
     pair_j: wp.array[int32],
     jacobian_cts_nzb_values: wp.array[vec6f],
-    problem_njc: wp.array[int32],
     bilateral_mio: wp.array[int32],
+    bilateral_ld: wp.array[int32],
     bilateral_vio: wp.array[int32],
     bilateral_P: wp.array[float32],
     # Output:
@@ -3420,7 +3420,6 @@ def _build_sparse_bilateral_block(
         D_ij += model_bodies_inv_m_i[bid_k] * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, data_bodies_inv_I_i[bid_k] @ Jw_j)
 
     wid = pair_wid[first]
-    njc = problem_njc[wid]
     row = pair_row[first]
     col = pair_col[first]
     bvio = bilateral_vio[wid]
@@ -3430,8 +3429,9 @@ def _build_sparse_bilateral_block(
     if use_permutation:
         row = inverse_permutation[bvio + row]
         col = inverse_permutation[bvio + col]
-    bilateral_D[bmio + njc * row + col] = val
-    bilateral_D[bmio + njc * col + row] = val
+    ld = bilateral_ld[wid]
+    bilateral_D[bmio + ld * row + col] = val
+    bilateral_D[bmio + ld * col + row] = val
 
 
 @wp.kernel
@@ -3440,6 +3440,7 @@ def _set_sparse_bilateral_diagonal(
     problem_njc: wp.array[int32],
     problem_vio: wp.array[int32],
     bilateral_mio: wp.array[int32],
+    bilateral_ld: wp.array[int32],
     bilateral_vio: wp.array[int32],
     problem_diag: wp.array[float32],
     # Outputs:
@@ -3467,7 +3468,7 @@ def _set_sparse_bilateral_diagonal(
     bilateral_P[bvio + row] = p
     if use_permutation:
         row = inverse_permutation[bvio + row]
-    diagonal_index = bmio + njc * row + row
+    diagonal_index = bmio + bilateral_ld[wid] * row + row
     bilateral_D[diagonal_index] = p * diag * p + float32(BILATERAL_DIAGONAL_FLOOR)
 
 

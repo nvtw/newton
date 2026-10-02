@@ -20,7 +20,9 @@ hides all of this behind the same public API as :class:`LLTBlockedSolver`.
 
 Layout conventions (same as llt_blocked):
 - ``dim`` (wp.int32[num_blocks]):          active size ``n_i`` of each block
-- ``mio`` (wp.int32[num_blocks]):          matrix-index offset into flat A/L (n_i*n_i per block)
+- ``ld`` (wp.int32[num_blocks]):           row stride of each block in flat A/L; launchers
+                                        default it to ``dim`` (dense ``n_i * n_i`` blocks)
+- ``mio`` (wp.int32[num_blocks]):          matrix-index offset into flat A/L
 - ``vio`` (wp.int32[num_blocks]):          vector-index offset into flat vectors (n_i per block)
 - ``tpo`` (wp.int32[num_blocks]):          tile-pattern-index offset into flat tile_pattern
                                         (``n_tiles_i * n_tiles_i`` entries per block,
@@ -152,6 +154,7 @@ def make_llt_blocked_rcm_fused_permute_and_tp_kernel(block_size: int, max_dim: i
     @wp.kernel
     def fused_permute_and_tp_kernel(
         dim: wp.array[wp.int32],
+        ld: wp.array[wp.int32],
         mio: wp.array[wp.int32],
         vio: wp.array[wp.int32],
         tpo: wp.array[wp.int32],
@@ -192,8 +195,9 @@ def make_llt_blocked_rcm_fused_permute_and_tp_kernel(block_size: int, max_dim: i
             inv_P[vec_off + p_r] = r
 
         # 2. Permuted value.
-        v = A[mat_off + p_r * n_i + p_c]
-        A_hat[mat_off + r * n_i + c] = v
+        stride = ld[b]
+        v = A[mat_off + p_r * stride + p_c]
+        A_hat[mat_off + r * stride + c] = v
 
         # 3. Tile-pattern OR (via atomic_max on 0/1).
         av = v
@@ -302,6 +306,7 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
     def llt_blocked_rcm_factorize_kernel(
         # Inputs:
         dim: wp.array[wp.int32],
+        ld: wp.array[wp.int32],
         mio: wp.array[wp.int32],
         tpo: wp.array[wp.int32],
         A: wp.array[wp.float32],
@@ -324,8 +329,9 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
         n_i_padded = ((n_i + block_size - 1) // block_size) * block_size
         n_tiles = n_i_padded // block_size
 
-        A_i = wp.array(ptr=A_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
-        L_i = wp.array(ptr=L_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
+        # Rows are stored with stride ld >= n_i; padding keeps tiles aligned and in bounds.
+        A_i = wp.array(ptr=A_i_ptr, shape=(ld[tid], ld[tid]), dtype=wp.float32)
+        L_i = wp.array(ptr=L_i_ptr, shape=(ld[tid], ld[tid]), dtype=wp.float32)
         TP_i = wp.array(ptr=tp_i_ptr, shape=(n_tiles, n_tiles), dtype=wp.int32)
 
         # Process the matrix in blocks along its leading dimension.
@@ -428,6 +434,7 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
     def factorize_diagonal_kernel(
         tile_k: int,
         dim: wp.array[wp.int32],
+        ld: wp.array[wp.int32],
         mio: wp.array[wp.int32],
         tpo: wp.array[wp.int32],
         A: wp.array[wp.float32],
@@ -443,8 +450,9 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
 
         mat_offset = mio[bid]
         pattern_offset = tpo[bid]
-        A_i = wp.array(ptr=get_float32_array_offset_ptr(A, mat_offset), shape=(n, n), dtype=wp.float32)
-        L_i = wp.array(ptr=get_float32_array_offset_ptr(L, mat_offset), shape=(n, n), dtype=wp.float32)
+        stride = ld[bid]
+        A_i = wp.array(ptr=get_float32_array_offset_ptr(A, mat_offset), shape=(stride, stride), dtype=wp.float32)
+        L_i = wp.array(ptr=get_float32_array_offset_ptr(L, mat_offset), shape=(stride, stride), dtype=wp.float32)
         n_tiles = (n + block_size - 1) // block_size
         TP_i = wp.array(
             ptr=get_int32_array_offset_ptr(tile_pattern, pattern_offset),
@@ -478,6 +486,7 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
     def factorize_panel_kernel(
         tile_k: int,
         dim: wp.array[wp.int32],
+        ld: wp.array[wp.int32],
         mio: wp.array[wp.int32],
         tpo: wp.array[wp.int32],
         A: wp.array[wp.float32],
@@ -495,8 +504,9 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
 
         mat_offset = mio[bid]
         pattern_offset = tpo[bid]
-        A_i = wp.array(ptr=get_float32_array_offset_ptr(A, mat_offset), shape=(n, n), dtype=wp.float32)
-        L_i = wp.array(ptr=get_float32_array_offset_ptr(L, mat_offset), shape=(n, n), dtype=wp.float32)
+        stride = ld[bid]
+        A_i = wp.array(ptr=get_float32_array_offset_ptr(A, mat_offset), shape=(stride, stride), dtype=wp.float32)
+        L_i = wp.array(ptr=get_float32_array_offset_ptr(L, mat_offset), shape=(stride, stride), dtype=wp.float32)
         TP_i = wp.array(
             ptr=get_int32_array_offset_ptr(tile_pattern, pattern_offset),
             shape=(n_tiles, n_tiles),
@@ -560,6 +570,7 @@ def make_llt_blocked_rcm_solve_kernel(
     def llt_blocked_rcm_solve_kernel(
         # Inputs:
         dim: wp.array[wp.int32],
+        ld: wp.array[wp.int32],
         mio: wp.array[wp.int32],
         vio: wp.array[wp.int32],
         tpo: wp.array[wp.int32],
@@ -591,7 +602,7 @@ def make_llt_blocked_rcm_solve_kernel(
         n_i_padded = ((n_i + block_size - 1) // block_size) * block_size
         n_tiles = n_i_padded // block_size
 
-        L_i = wp.array(ptr=L_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
+        L_i = wp.array(ptr=L_i_ptr, shape=(ld[tid], ld[tid]), dtype=wp.float32)
         b_i = wp.array(ptr=b_i_ptr, shape=(n_i, 1), dtype=wp.float32)
         y_i = wp.array(ptr=y_i_ptr, shape=(n_i, 1), dtype=wp.float32)
         x_hat_i = wp.array(ptr=x_hat_i_ptr, shape=(n_i, 1), dtype=wp.float32)
@@ -687,6 +698,7 @@ def make_llt_blocked_rcm_solve_inplace_kernel(block_size: int):
     def llt_blocked_rcm_solve_inplace_kernel(
         # Inputs:
         dim: wp.array[wp.int32],
+        ld: wp.array[wp.int32],
         mio: wp.array[wp.int32],
         vio: wp.array[wp.int32],
         tpo: wp.array[wp.int32],
@@ -712,7 +724,7 @@ def make_llt_blocked_rcm_solve_inplace_kernel(block_size: int):
         n_i_padded = ((n_i + block_size - 1) // block_size) * block_size
         n_tiles = n_i_padded // block_size
 
-        L_i = wp.array(ptr=L_i_ptr, shape=(n_i, n_i), dtype=wp.float32)
+        L_i = wp.array(ptr=L_i_ptr, shape=(ld[tid], ld[tid]), dtype=wp.float32)
         y_i = wp.array(ptr=y_i_ptr, shape=(n_i, 1), dtype=wp.float32)
         x_i = wp.array(ptr=x_i_ptr, shape=(n_i, 1), dtype=wp.float32)
         TP_i = wp.array(ptr=tp_i_ptr, shape=(n_tiles, n_tiles), dtype=wp.int32)
@@ -816,6 +828,7 @@ def llt_blocked_rcm_fused_permute_and_tp(
     num_blocks: int,
     max_dim: int,
     device: wp.DeviceLike = None,
+    ld: wp.array[wp.int32] | None = None,
 ):
     """Launches the fused (inv_P + permute_matrix + build_tile_pattern) kernel.
 
@@ -825,7 +838,7 @@ def llt_blocked_rcm_fused_permute_and_tp(
     wp.launch(
         kernel=kernel,
         dim=(num_blocks, max_dim * (max_dim + 1) // 2),
-        inputs=[dim, mio, vio, tpo, float(tol), P, A, A_hat, inv_P, tile_pattern],
+        inputs=[dim, dim if ld is None else ld, mio, vio, tpo, float(tol), P, A, A_hat, inv_P, tile_pattern],
         device=device,
     )
 
@@ -860,6 +873,7 @@ def llt_blocked_rcm_factorize(
     block_dim: int = 128,
     device: wp.DeviceLike = None,
     clear_skipped: bool = True,
+    ld: wp.array[wp.int32] | None = None,
 ):
     """Launches the RCM-reordered semi-sparse blocked Cholesky factorization.
 
@@ -869,7 +883,7 @@ def llt_blocked_rcm_factorize(
     wp.launch_tiled(
         kernel=kernel,
         dim=num_blocks,
-        inputs=[dim, mio, tpo, A, tile_pattern, clear_skipped, L],
+        inputs=[dim, dim if ld is None else ld, mio, tpo, A, tile_pattern, clear_skipped, L],
         block_dim=block_dim,
         device=device,
     )
@@ -888,6 +902,7 @@ def llt_blocked_rcm_factorize_parallel(
     block_dim: int = 128,
     device: wp.DeviceLike = None,
     clear_skipped: bool = True,
+    ld: wp.array[wp.int32] | None = None,
 ):
     """Launch the panel-parallel semi-sparse blocked Cholesky factorization."""
     diagonal_kernel, panel_kernel = kernels
@@ -895,7 +910,7 @@ def llt_blocked_rcm_factorize_parallel(
         wp.launch_tiled(
             kernel=diagonal_kernel,
             dim=num_blocks,
-            inputs=[tile_k, dim, mio, tpo, A, tile_pattern, L],
+            inputs=[tile_k, dim, dim if ld is None else ld, mio, tpo, A, tile_pattern, L],
             block_dim=block_dim,
             device=device,
         )
@@ -904,7 +919,7 @@ def llt_blocked_rcm_factorize_parallel(
             wp.launch_tiled(
                 kernel=panel_kernel,
                 dim=(num_blocks, panel_tiles),
-                inputs=[tile_k, dim, mio, tpo, A, tile_pattern, clear_skipped, L],
+                inputs=[tile_k, dim, dim if ld is None else ld, mio, tpo, A, tile_pattern, clear_skipped, L],
                 block_dim=block_dim,
                 device=device,
             )
@@ -926,12 +941,13 @@ def llt_blocked_rcm_solve(
     num_blocks: int = 1,
     block_dim: int = 128,
     device: wp.DeviceLike = None,
+    ld: wp.array[wp.int32] | None = None,
 ):
     """Launches the RCM-reordered semi-sparse blocked Cholesky solve kernel."""
     wp.launch_tiled(
         kernel=kernel,
         dim=num_blocks,
-        inputs=[dim, mio, vio, tpo, P, L, tile_pattern, b, y, x_hat, x],
+        inputs=[dim, dim if ld is None else ld, mio, vio, tpo, P, L, tile_pattern, b, y, x_hat, x],
         block_dim=block_dim,
         device=device,
     )
@@ -950,12 +966,13 @@ def llt_blocked_rcm_solve_inplace(
     num_blocks: int = 1,
     block_dim: int = 128,
     device: wp.DeviceLike = None,
+    ld: wp.array[wp.int32] | None = None,
 ):
     """Launches the RCM-reordered semi-sparse in-place solve kernel."""
     wp.launch_tiled(
         kernel=kernel,
         dim=num_blocks,
-        inputs=[dim, mio, vio, tpo, L, tile_pattern, y, x],
+        inputs=[dim, dim if ld is None else ld, mio, vio, tpo, L, tile_pattern, y, x],
         block_dim=block_dim,
         device=device,
     )
