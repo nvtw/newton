@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import warnings
 import zipfile
 from typing import Any
 
@@ -82,7 +83,8 @@ def load_checkpoint(
         batch_size: Fixed batch dimension used to pre-allocate intermediate
             buffers.
         input_batch_axes: Optional ONNX graph-input batch axes to validate.
-            Each selected axis must be dynamic in the exported model.
+            Fixed axes use the deprecated Warp-NN constructor overrides and
+            emit a deprecation warning. Prefer dynamic axes in exported models.
         requires_grad: Whether the runtime allocates gradient storage for its
             own tensors. Required to differentiate the network, since the
             runtime owns intermediate buffers that cannot be given gradients
@@ -100,6 +102,7 @@ def load_checkpoint(
     metadata = load_metadata(path)
     OnnxRuntime = _require_warp_nn_runtime()
     runtime = OnnxRuntime(path, device=device, requires_grad=requires_grad)
+    fixed = []
     if input_batch_axes is not None:
         if isinstance(input_batch_axes, dict):
             unknown = set(input_batch_axes) - {spec.name for spec in runtime.inputs}
@@ -111,11 +114,30 @@ def load_checkpoint(
                 if not -len(spec.shape) <= axis < len(spec.shape):
                     raise ValueError(f"ONNX input '{spec.name}' batch axis {axis} is out of range")
                 if spec.shape[axis] is not None:
-                    raise ValueError(
-                        f"ONNX checkpoint '{path}': input '{spec.name}' batch axis {axis} "
-                        f"is fixed at {spec.shape[axis]}. Re-export the model with a dynamic batch axis; "
-                        "changing the input shape alone may leave fixed batch sizes embedded in the graph."
-                    )
+                    fixed.append(f"'{spec.name}' (axis {axis}, size {spec.shape[axis]})")
+    if fixed:
+        warnings.warn(
+            f"ONNX checkpoint '{path}' has fixed batch dimensions on {', '.join(fixed)}; "
+            "support for fixed-batch neural-drive exports is deprecated and will be removed in a future release. "
+            "Re-export the model with dynamic batch axes.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # Warp-NN 0.4.0 preserves fixed-batch overrides through its deprecated constructor.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"The OnnxRuntime's '(batch_size|input_batch_axes)' argument is deprecated",
+                category=DeprecationWarning,
+            )
+            runtime = OnnxRuntime(
+                path,
+                device=device,
+                requires_grad=requires_grad,
+                batch_size=batch_size,
+                input_batch_axes=input_batch_axes,
+            )
+        return runtime, metadata
     inputs = {
         spec.name: wp.ones(
             tuple(batch_size if dimension is None else dimension for dimension in spec.shape),

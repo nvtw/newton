@@ -121,8 +121,9 @@ class DriveNeuralLSTM(DriveBase):
     ``.onnx`` checkpoints use Warp-NN. The exported ONNX model must have three
     inputs (input, initial hidden, and initial cell) and three graph outputs
     (effort, hidden output, and cell output). Metadata properties map those
-    names to drive roles. All three inputs must declare a dynamic batch axis
-    (axis 1).
+    names to drive roles. All three inputs should declare a dynamic batch axis
+    (axis 1). Fixed-batch ONNX exports are deprecated and emit a warning during
+    finalization.
 
     ONNX checkpoints support the implicit effort mode through a per-step
     linearization of the network; Torch checkpoints do not and must use the

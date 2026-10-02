@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import types
 import unittest
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -695,8 +696,8 @@ class TestDriveNeuralMLP(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "effort_scale.*zero_scale.onnx"):
             DriveNeuralMLP(model_path=path)
 
-    def test_finalize_rejects_fixed_batch_onnx(self):
-        """Reject fixed batch axes even when they match the actuator count."""
+    def test_finalize_fixed_batch_onnx_with_multiple_actuators(self):
+        """Warn once and preserve inference for fixed-batch ONNX exports."""
         weights = np.array([[2.0, 0.0]], dtype=np.float32)
         bias = np.array([1.0], dtype=np.float32)
         for batch_dim in (1, 3):
@@ -704,8 +705,17 @@ class TestDriveNeuralMLP(unittest.TestCase):
             for n in (1, 3):
                 with self.subTest(batch_dim=batch_dim, num_actuators=n):
                     ctrl = DriveNeuralMLP(model_path=path)
-                    with self.assertRaisesRegex(ValueError, "input.*axis 0.*fixed.*Re-export.*dynamic batch"):
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter("always", DeprecationWarning)
                         ctrl.finalize(self.device, n)
+                    self.assertEqual(len(caught), 1)
+                    self.assertIs(caught[0].category, DeprecationWarning)
+                    self.assertIn(path, str(caught[0].message))
+                    self.assertRegex(str(caught[0].message), "input.*axis 0.*deprecated.*Re-export.*dynamic batch")
+                    outputs = ctrl._network(
+                        {ctrl._net_input_name: wp.ones((n, 2), dtype=wp.float32, device=self.device)}
+                    )
+                    np.testing.assert_allclose(outputs[ctrl._net_output_name].numpy(), np.full((n, 1), 3.0))
 
     def test_finalize_dynamic_batch_onnx_with_multiple_actuators(self):
         """Run a dynamic-batch ONNX export with one scalar per actuator."""
@@ -715,7 +725,9 @@ class TestDriveNeuralMLP(unittest.TestCase):
 
         n = 3
         ctrl = DriveNeuralMLP(model_path=path)
-        ctrl.finalize(self.device, n)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            ctrl.finalize(self.device, n)
         self.assertEqual(ctrl._net_input.shape, (n, 2))
         outputs = ctrl._network({ctrl._net_input_name: ctrl._net_input})
         self.assertEqual(outputs[ctrl._net_output_name].shape, (n, 1))
@@ -942,25 +954,44 @@ class TestDriveNeuralLSTM(unittest.TestCase):
         _build_lstm_onnx(path, hidden_size=hidden, num_layers=1, metadata=metadata)
         return path
 
-    def test_finalize_rejects_fixed_batch_onnx(self):
-        """Reject a fixed batch axis on each LSTM input before inference."""
+    def test_finalize_fixed_batch_onnx(self):
+        """Warn once and preserve LSTM inference with fixed input batch axes."""
         onnx_mod, _, _, _ = _onnx_modules()
-        for input_name in ("input", "h_in", "c_in"):
+        for input_names in (("input",), ("h_in",), ("c_in",), ("input", "h_in", "c_in")):
             path = self._save_lstm()
             model = onnx_mod.load(path)
             for value in model.graph.input:
-                if value.name == input_name:
+                if value.name in input_names:
                     value.type.tensor_type.shape.dim[1].dim_value = 1
             onnx_mod.save(model, path)
             for n in (1, 3):
-                with self.subTest(input_name=input_name, num_actuators=n):
+                with self.subTest(input_names=input_names, num_actuators=n):
                     ctrl = DriveNeuralLSTM(model_path=path)
-                    with self.assertRaisesRegex(ValueError, f"{input_name}.*axis 1.*fixed.*Re-export.*dynamic batch"):
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter("always", DeprecationWarning)
                         ctrl.finalize(self.device, n)
+                    self.assertEqual(len(caught), 1)
+                    self.assertIs(caught[0].category, DeprecationWarning)
+                    self.assertIn(path, str(caught[0].message))
+                    for input_name in input_names:
+                        self.assertIn(input_name, str(caught[0].message))
+                    self.assertRegex(str(caught[0].message), "axis 1.*deprecated.*Re-export.*dynamic batch")
+                    outputs = ctrl._network(
+                        {
+                            "input": wp.ones((1, n, 2), dtype=wp.float32, device=self.device),
+                            "h_in": wp.zeros((1, n, 8), dtype=wp.float32, device=self.device),
+                            "c_in": wp.zeros((1, n, 8), dtype=wp.float32, device=self.device),
+                        }
+                    )
+                    self.assertEqual(outputs["output"].shape, (n, 1))
+                    self.assertEqual(outputs["h_out"].shape, (1, n, 8))
+                    self.assertEqual(outputs["c_out"].shape, (1, n, 8))
 
     def _run_lstm_compute(self, ctrl: DriveNeuralLSTM) -> None:
         n = 1
-        ctrl.finalize(self.device, n)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            ctrl.finalize(self.device, n)
 
         state_a = ctrl.state(n, self.device)
         state_b = ctrl.state(n, self.device)

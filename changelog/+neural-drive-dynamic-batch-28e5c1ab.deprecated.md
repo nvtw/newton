@@ -1,0 +1,1 @@
+Deprecate fixed-batch ONNX exports for `DriveNeuralMLP` and `DriveNeuralLSTM` while preserving legacy batch overrides during the deprecation window; re-export checkpoints with dynamic batch axes (axis 0 for MLP, axis 1 for all LSTM inputs) before support is removed in a future release.

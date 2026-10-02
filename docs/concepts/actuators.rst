@@ -263,12 +263,15 @@ Neural-network drives (:class:`DriveNeuralMLP`,
 Warp-NN runs with its own Warp kernels. Torch checkpoints use the Torch backend
 and require PyTorch.
 
-ONNX exports must declare a dynamic batch axis on each drive input: axis 0
+ONNX exports should declare a dynamic batch axis on each drive input: axis 0
 for the MLP input and axis 1 for the LSTM input, initial hidden state, and
 initial cell state. Newton sets this dimension to the actuator count during
-finalization. Fixed-batch exports are rejected, even when their batch size
-matches that count. Re-export those models with dynamic batch axes; editing
-only the input shapes can leave fixed batch sizes embedded in graph operations.
+finalization. Fixed-batch exports remain supported through Warp-NN's legacy
+batch overrides, but emit a ``DeprecationWarning`` during finalization, even
+when their batch size matches the actuator count. This compatibility bridge
+will be removed in a future release. Re-export those models with dynamic batch
+axes; editing only the input shapes can leave fixed batch sizes embedded in
+graph operations.
 
 Torch checkpoints are pt2 archives (``.pt2``) saved with ``torch.export.save``.
 Checkpoint metadata (scales and network configuration) is stored as a JSON
