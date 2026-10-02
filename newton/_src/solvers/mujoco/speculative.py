@@ -53,7 +53,7 @@ def prepare_contacts(
             # clearance and install the predictive target after step1.
             distance[i] = margin[i] - wp.max(1.0e-8, wp.abs(margin[i]) * 1.0e-6)
             dim[i] = 1  # No friction before the surfaces meet.
-            solref[i] = wp.vec2(2.0 * timestep[world[i]], 1.0)
+            solref[i] = wp.vec2(2.0 * timestep[world[i] % timestep.shape[0]], 1.0)
             solimp[i] = vec5(0.95, 0.95, 0.001, 0.5, 2.0)
 
 
@@ -77,7 +77,7 @@ def set_contact_targets(
         row = address[i, 0]
         if row >= 0:
             w = world[i]
-            h = timestep[w]
+            h = timestep[w % timestep.shape[0]]
             position[w, row] = gap
             # Target v_next >= -gap / h under semi-implicit integration.
             # The unilateral response leaves separating motion unimpeded.

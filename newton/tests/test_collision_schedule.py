@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.solvers import SolverXPBD
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
 
@@ -27,6 +28,12 @@ def _advance_velocity(tick: wp.array[int], velocities: wp.array[float], body_qd:
     tick[0] += 1
     speed = velocities[tick[0] % velocities.shape[0]]
     body_qd[0] = wp.spatial_vector(speed, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+@wp.kernel
+def _measure_sphere_separation(body_q: wp.array[wp.transform], minimum: wp.array[float]):
+    separation = wp.transform_get_translation(body_q[0])[0] - wp.transform_get_translation(body_q[1])[0]
+    minimum[0] = wp.min(minimum[0], separation)
 
 
 def test_collision_schedule_horizon_deadline(test, device, external_capture=False):
@@ -122,8 +129,8 @@ def test_collision_schedule_horizon_deadline(test, device, external_capture=Fals
                         if i > 0 and speed > previous_speed:
                             travel += 2.0 * (speed - previous_speed) * dt
                         accumulated_overflow = travel > 0.03
-                        speed_increased = i > 0 and speed > previous_speed
-                        if i == 0 or i >= deadline or speed_increased or travel + relative_travel > 0.03:
+                        motion_changed = i > 0 and speeds[index % len(speeds)] != speeds[(index - 1) % len(speeds)]
+                        if i == 0 or i >= deadline or motion_changed or travel + relative_travel > 0.03:
                             interval = max((j for j in intervals if j * relative_travel <= 0.03), default=1)
                             interval = min(interval, substeps - i)
                             expected[index] = interval * dt
@@ -189,6 +196,131 @@ def test_collision_schedule_refreshes_for_shape_acceleration(test, device):
     )
     scheduler.step()
     np.testing.assert_array_equal(np.flatnonzero(horizons.numpy()), [0, 1])
+
+
+def test_collision_schedule_refreshes_for_velocity_changes(test, device, external_capture=False):
+    """Refresh after slowing, reversing, or turning without increasing speed."""
+    if external_capture and not wp.is_conditional_graph_supported():
+        test.skipTest("CUDA graph capture requires conditional graph support")
+    for velocity in ((0.0, 0.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 1.0, 0.0)):
+        with test.subTest(velocity=velocity):
+            builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+            body = builder.add_body()
+            builder.add_shape_sphere(body, radius=0.02)
+            builder.body_qd[body] = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            model = builder.finalize(device=device)
+            states = (model.state(), model.state())
+            changed_velocity = wp.array([(*velocity, 0.0, 0.0, 0.0)], dtype=wp.spatial_vector, device=device)
+            pipeline = newton.CollisionPipeline(model, speculative_contact_gap_max=1.0)
+            tick = wp.zeros(1, dtype=int, device=device)
+            horizons = wp.zeros(4, dtype=float, device=device)
+
+            def collide(state, horizon, *, tick=tick, horizons=horizons):
+                wp.launch(_record_horizon, 1, inputs=[tick, horizons, horizon], device=device)
+
+            def step(state_in, state_out, dt, *, changed_velocity=changed_velocity, tick=tick):
+                wp.copy(state_out.body_q, state_in.body_q)
+                wp.copy(state_out.body_qd, changed_velocity)
+                wp.launch(_increment_tick, 1, inputs=[tick], device=device)
+
+            scheduler = newton.CollisionSubstepScheduler(
+                pipeline, states, collision_callback=collide, substep_callback=step, frame_dt=0.04, substeps=4
+            )
+            if external_capture:
+                with wp.ScopedCapture(device=device) as capture:
+                    scheduler.step()
+                wp.capture_launch(capture.graph)
+            else:
+                scheduler.step()
+            np.testing.assert_array_equal(np.flatnonzero(horizons.numpy()), [0, 1])
+            test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 0)
+
+
+def test_collision_schedule_ignores_visual_shapes(test, device, external_capture=False):
+    """Ignore visual-only motion when selecting refreshes and reporting overflow."""
+    if external_capture and not wp.is_conditional_graph_supported():
+        test.skipTest("CUDA graph capture requires conditional graph support")
+    builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+    stationary = builder.add_body()
+    builder.add_shape_sphere(stationary, radius=0.02)
+    moving = builder.add_body()
+    builder.add_shape_sphere(moving, radius=1.0, cfg=builder.ShapeConfig(has_shape_collision=False))
+    builder.body_qd[moving] = (10.0, 0.0, 0.0, 0.0, 0.0, 10.0)
+    model = builder.finalize(device=device)
+    states = (model.state(), model.state())
+    pipeline = newton.CollisionPipeline(model, speculative_contact_gap_max=0.01)
+    calls = wp.zeros(1, dtype=int, device=device)
+
+    def collide(state, horizon):
+        wp.launch(_increment_tick, 1, inputs=[calls], device=device)
+
+    def step(state_in, state_out, dt):
+        wp.copy(state_out.body_q, state_in.body_q)
+        wp.copy(state_out.body_qd, state_in.body_qd)
+
+    scheduler = newton.CollisionSubstepScheduler(
+        pipeline, states, collision_callback=collide, substep_callback=step, frame_dt=0.04, substeps=10
+    )
+    if external_capture:
+        with wp.ScopedCapture(device=device) as capture:
+            scheduler.step()
+        wp.capture_launch(capture.graph)
+    else:
+        scheduler.step()
+    test.assertEqual(int(calls.numpy()[0]), 1)
+    test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 0)
+
+
+def test_collision_schedule_stopping_leader(test, device, external_capture=False):
+    """Keep following spheres separated when the leading sphere stops at a wall."""
+    if external_capture and not wp.is_conditional_graph_supported():
+        test.skipTest("CUDA graph capture requires conditional graph support")
+    for substeps in (20, 100):
+        with test.subTest(substeps=substeps):
+            builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+            cfg = builder.ShapeConfig(gap=0.001, margin=0.0, mu=0.0, restitution=0.0)
+            builder.add_shape_box(-1, hx=0.01, hy=0.1, hz=0.1, cfg=cfg)
+            for x in (-0.035, -0.085):
+                body = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.0)))
+                builder.add_shape_sphere(body, radius=0.02, cfg=cfg)
+                builder.body_qd[body] = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            model = builder.finalize(device=device)
+            states = (model.state(), model.state())
+            solver = SolverXPBD(model, iterations=10)
+            pipeline = newton.CollisionPipeline(model, speculative_contact_gap_max=0.1)
+            contacts = pipeline.contacts()
+            minimum = wp.full(1, 1.0, dtype=float, device=device)
+
+            def collide(state, horizon, *, pipeline=pipeline, contacts=contacts):
+                pipeline.collide(state, contacts, dt=horizon)
+
+            def step(state_in, state_out, dt, *, solver=solver, contacts=contacts, minimum=minimum):
+                state_in.clear_forces()
+                solver.step(state_in, state_out, None, contacts, dt)
+                wp.launch(_measure_sphere_separation, 1, inputs=[state_out.body_q, minimum], device=device)
+
+            scheduler = newton.CollisionSubstepScheduler(
+                pipeline,
+                states,
+                collision_callback=collide,
+                substep_callback=step,
+                frame_dt=1.0 / 60.0,
+                substeps=substeps,
+            )
+            # Allocate collision storage and compile kernels before capture.
+            collide(states[0], 1.0 / 60.0)
+            if external_capture:
+                with wp.ScopedCapture(device=device) as capture:
+                    scheduler.step()
+                for _ in range(4):
+                    wp.capture_launch(capture.graph)
+            else:
+                for _ in range(4):
+                    scheduler.step()
+            positions = states[0].body_q.numpy()[:, 0]
+            test.assertGreater(float(positions[0] - positions[1]), 0.039)
+            test.assertGreater(float(minimum.numpy()[0]), 0.039)
+            test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 0)
 
 
 def test_collision_schedule_checks_final_substep_overflow(test, device):
@@ -314,6 +446,21 @@ def test_collision_schedule_rotating_fingertip(test, device):
 
 class TestCollisionSchedule(unittest.TestCase):
     """Test collision deadlines and their effect on thin-wall contact."""
+
+
+for name, function in (
+    ("velocity_changes", test_collision_schedule_refreshes_for_velocity_changes),
+    ("visual_shapes", test_collision_schedule_ignores_visual_shapes),
+    ("stopping_leader", test_collision_schedule_stopping_leader),
+):
+    add_function_test(TestCollisionSchedule, f"test_collision_schedule_{name}", function, devices=get_test_devices())
+    add_function_test(
+        TestCollisionSchedule,
+        f"test_collision_schedule_{name}_capture",
+        function,
+        devices=get_cuda_test_devices(),
+        external_capture=True,
+    )
 
 
 add_function_test(

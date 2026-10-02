@@ -170,6 +170,57 @@ class TestMuJoCoSpeculativeContacts(unittest.TestCase):
             with self.subTest(dt=dt), self.assertRaisesRegex(ValueError, "finite positive timestep"):
                 solver.step(model.state(), model.state(), model.control(), None, dt)
 
+    def test_shared_timestep_across_worlds(self):
+        """Match speculative braking with shared and per-world timesteps, including replay."""
+        template = newton.ModelBuilder(gravity=wp.vec3(0.0))
+        cfg = template.ShapeConfig(gap=0.0, margin=0.0)
+        template.add_shape_box(-1, hx=0.2, hy=0.2, hz=0.005, cfg=cfg)
+        body = template.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.05)))
+        template.add_shape_box(body, hx=0.01, hy=0.01, hz=0.001, cfg=cfg)
+        builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+        builder.add_world(template)
+        builder.add_world(template, xform=wp.transform(wp.vec3(1.0, 0.0, 0.0)))
+        model = builder.finalize(device="cuda:0")
+        dt = 1.0 / 60.0
+        for capture_enabled in (False, True):
+            results = []
+            for timestep_count in (1, 2):
+                with self.subTest(capture=capture_enabled, timestep_count=timestep_count):
+                    states = (model.state(), model.state())
+                    states[0].joint_qd.assign([0.0, 0.0, -3.0, 0.0, 0.0, 0.0] * 2)
+                    newton.eval_fk(model, states[0].joint_q, states[0].joint_qd, states[0])
+                    solver = SolverMuJoCo(model, use_mujoco_contacts=False, use_speculative_contacts=True)
+                    solver.mjw_model.opt.timestep = wp.full(timestep_count, dt, dtype=float, device=model.device)
+                    pipeline = newton.CollisionPipeline(model, speculative_contact_gap_max=0.1)
+                    contacts = pipeline.contacts()
+                    control = model.control()
+
+                    def step_pair(
+                        *, states=states, pipeline=pipeline, solver=solver, control=control, contacts=contacts
+                    ):
+                        for source, destination in (states, states[::-1]):
+                            source.clear_forces()
+                            pipeline.collide(source, contacts, dt=dt)
+                            solver.step(source, destination, control, contacts, dt)
+
+                    # Warm up lazy collision storage and solver kernels.
+                    step_pair()
+                    if capture_enabled:
+                        with wp.ScopedCapture(device=model.device) as capture:
+                            step_pair()
+                        wp.capture_launch(capture.graph)
+                    else:
+                        step_pair()
+                    position = states[0].body_q.numpy()[:, 2]
+                    velocity = states[0].body_qd.numpy()[:, 2]
+                    results.append((position, velocity))
+                    self.assertTrue(np.isfinite(position).all())
+                    self.assertTrue(np.isfinite(velocity).all())
+                    np.testing.assert_allclose(position[0], position[1], atol=1.0e-6)
+                    np.testing.assert_allclose(velocity[0], velocity[1], atol=1.0e-6)
+                    self.assertGreater(float(position.min()), 0.003)
+            np.testing.assert_allclose(results[0], results[1], atol=1.0e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

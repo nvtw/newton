@@ -1435,10 +1435,12 @@ observed shape speed:
     )
     schedule.step()
 
-An increase in any shape's speed triggers a refresh at the next substep,
-since a collision pass made while that shape was slower may have produced a
-shorter effective speculative gap. The scheduler checks the final substep's
-output when reporting ``interval_overflow``.
+Any change in a collidable shape's linear or angular velocity triggers a
+refresh at the next substep. Slowing, stopping, or turning can increase the
+closing speed between shapes and require contacts that the earlier pass did
+not create. Shapes with rigid collision disabled do not affect the schedule
+or overflow reporting. The scheduler checks the final substep's output when
+reporting ``interval_overflow``.
 
 The same ``step()`` call works directly or inside CUDA graph capture; callbacks
 must therefore be capture-safe and preallocate their storage. The scheduler
