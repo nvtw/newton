@@ -3320,6 +3320,33 @@ def _build_sparse_bilateral_block(
 
 
 @wp.kernel
+def _clear_sparse_bilateral_block(
+    pair_wid: wp.array[int32],
+    pair_row: wp.array[int32],
+    pair_col: wp.array[int32],
+    problem_njc: wp.array[int32],
+    bilateral_mio: wp.array[int32],
+    bilateral_vio: wp.array[int32],
+    inverse_permutation: wp.array[int32],
+    use_permutation: bool,
+    bilateral_D: wp.array[float32],
+):
+    """Zero the structural entries accumulated by ``_build_sparse_bilateral_block``."""
+    pair_id = wp.tid()
+    wid = pair_wid[pair_id]
+    njc = problem_njc[wid]
+    row = pair_row[pair_id]
+    col = pair_col[pair_id]
+    if use_permutation:
+        bvio = bilateral_vio[wid]
+        row = inverse_permutation[bvio + row]
+        col = inverse_permutation[bvio + col]
+    bmio = bilateral_mio[wid]
+    bilateral_D[bmio + njc * row + col] = float32(0.0)
+    bilateral_D[bmio + njc * col + row] = float32(0.0)
+
+
+@wp.kernel
 def _set_sparse_bilateral_diagonal(
     # Inputs:
     problem_njc: wp.array[int32],

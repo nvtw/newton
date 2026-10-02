@@ -45,6 +45,7 @@ from .sparse_kernels import (
     _build_sparse_bilateral_rhs_from_matvec,
     _cache_sparse_contact_diagonal,
     _cache_sparse_projected_diagonal,
+    _clear_sparse_bilateral_block,
     _color_compact_contact_groups,
     _compact_contact_group_starts,
     _compare_compact_contact_topology,
@@ -974,13 +975,32 @@ def _assemble_sparse_bilateral_block(
     operator = path.data.bilateral_operator
     state = path.data.state
     matrix_offsets = operator.info.mio
-    matrix.zero_()
+    if path.bilateral_nzb_pairs is None:
+        raise RuntimeError("Sparse DVI topology is not prepared. Call `SparseDVIPath.prepare()` before solving.")
+    pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j = path.bilateral_nzb_pairs
+    # Assembly writes only structural entries, so clearing those keeps the
+    # dense matrix zero elsewhere without a full-size memset.
+    if pair_wid.size > 0:
+        wp.launch(
+            kernel=_clear_sparse_bilateral_block,
+            dim=pair_wid.size,
+            inputs=[
+                pair_wid,
+                pair_row,
+                pair_col,
+                problem.data.njc,
+                matrix_offsets,
+                operator.info.vio,
+                inverse if inverse is not None else operator.info.vio,
+                inverse is not None,
+                matrix,
+            ],
+            device=path.device,
+        )
     state.bilateral_preconditioner.zero_()
     problem.delassus.diagonal(state.scratch)
 
     jacobian = problem.delassus.constraint_jacobian
-    if path.bilateral_nzb_pairs is None:
-        raise RuntimeError("Sparse DVI topology is not prepared. Call `SparseDVIPath.prepare()` before solving.")
     wp.launch(
         kernel=_set_sparse_bilateral_diagonal,
         dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
@@ -997,7 +1017,6 @@ def _assemble_sparse_bilateral_block(
         ],
         device=path.device,
     )
-    pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j = path.bilateral_nzb_pairs
     if pair_wid.size > 0:
         wp.launch(
             kernel=_build_sparse_bilateral_block,
