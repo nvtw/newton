@@ -306,6 +306,7 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
         tpo: wp.array[wp.int32],
         A: wp.array[wp.float32],
         tile_pattern: wp.array[wp.int32],
+        clear_skipped: bool,
         # Outputs:
         L: wp.array[wp.float32],
     ):
@@ -370,8 +371,9 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
                 if TP_i[tile_i, tile_k] == int(0):
                     # Sparsity can shrink between factorizations. DVI reads L
                     # without the tile mask, so old factor entries cannot remain.
-                    zeros = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32)
-                    wp.tile_store(L_i, zeros, offset=(i, k))
+                    if clear_skipped:
+                        zeros = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32)
+                        wp.tile_store(L_i, zeros, offset=(i, k))
                     continue
 
                 A_ik_tile = wp.tile_load(A_i, shape=(block_size, block_size), offset=(i, k), storage="shared")
@@ -480,6 +482,7 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
         tpo: wp.array[wp.int32],
         A: wp.array[wp.float32],
         tile_pattern: wp.array[wp.int32],
+        clear_skipped: bool,
         L: wp.array[wp.float32],
     ):
         bid, panel_tile_i, tid_block = wp.tid()
@@ -500,8 +503,9 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
             dtype=wp.int32,
         )
         if TP_i[tile_i, tile_k] == int(0):
-            zeros = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32)
-            wp.tile_store(L_i, zeros, offset=(tile_i * block_size, tile_k * block_size))
+            if clear_skipped:
+                zeros = wp.tile_zeros(shape=(block_size, block_size), dtype=wp.float32)
+                wp.tile_store(L_i, zeros, offset=(tile_i * block_size, tile_k * block_size))
             return
 
         i = tile_i * block_size
@@ -855,12 +859,17 @@ def llt_blocked_rcm_factorize(
     num_blocks: int = 1,
     block_dim: int = 128,
     device: wp.DeviceLike = None,
+    clear_skipped: bool = True,
 ):
-    """Launches the RCM-reordered semi-sparse blocked Cholesky factorization."""
+    """Launches the RCM-reordered semi-sparse blocked Cholesky factorization.
+
+    ``clear_skipped=False`` keeps factor tiles outside ``tile_pattern``; use
+    it only when the pattern cannot shrink between factorizations.
+    """
     wp.launch_tiled(
         kernel=kernel,
         dim=num_blocks,
-        inputs=[dim, mio, tpo, A, tile_pattern, L],
+        inputs=[dim, mio, tpo, A, tile_pattern, clear_skipped, L],
         block_dim=block_dim,
         device=device,
     )
@@ -878,6 +887,7 @@ def llt_blocked_rcm_factorize_parallel(
     max_tiles: int,
     block_dim: int = 128,
     device: wp.DeviceLike = None,
+    clear_skipped: bool = True,
 ):
     """Launch the panel-parallel semi-sparse blocked Cholesky factorization."""
     diagonal_kernel, panel_kernel = kernels
@@ -894,7 +904,7 @@ def llt_blocked_rcm_factorize_parallel(
             wp.launch_tiled(
                 kernel=panel_kernel,
                 dim=(num_blocks, panel_tiles),
-                inputs=[tile_k, dim, mio, tpo, A, tile_pattern, L],
+                inputs=[tile_k, dim, mio, tpo, A, tile_pattern, clear_skipped, L],
                 block_dim=block_dim,
                 device=device,
             )

@@ -350,7 +350,8 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
     def _compute_sparse_reuse(self, assemble: Callable) -> None:
         assemble(self._A_hat, self._inv_P)
         wp.copy(self._tile_pattern, self._structural_pattern)
-        self._factorize_numeric()
+        # The structural pattern is fixed, so skipped tiles are already zero.
+        self._factorize_numeric(clear_skipped=False)
         self._has_factors = True
 
     @override
@@ -553,7 +554,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
         # 4. Numeric factorization with tile-pattern skips.
         self._factorize_numeric()
 
-    def _factorize_numeric(self) -> None:
+    def _factorize_numeric(self, clear_skipped: bool = True) -> None:
         info = self._operator.info
         num_blocks = info.num_blocks
         if self._parallel_factorization:
@@ -569,6 +570,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
                 max_tiles=(self._max_dim + self._block_size - 1) // self._block_size,
                 block_dim=self._factorize_block_dim,
                 device=self._device,
+                clear_skipped=clear_skipped,
             )
         else:
             llt_blocked_rcm_factorize(
@@ -582,6 +584,7 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
                 num_blocks=num_blocks,
                 block_dim=self._factorize_block_dim,
                 device=self._device,
+                clear_skipped=clear_skipped,
             )
 
     @override
