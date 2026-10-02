@@ -1964,6 +1964,15 @@ def _assemble_compact_unilateral_schur_tiled(
             wp.tile_store(out, wp.tile_transpose(accum), offset=(col, row))
 
 
+@wp.func_native("""
+const float4 values = *reinterpret_cast<const float4*>(&rows.data.ptr[row * 128 + column]);
+return wp::vec4f(values.x, values.y, values.z, values.w);
+""")
+def _shared_row_quad(rows: wp.tile[float32, 16, 128], row: int32, column: int32) -> wp.vec4f:
+    """Read four consecutive, 16-byte aligned entries of a staged response row."""
+    ...
+
+
 @wp.kernel
 def _assemble_compact_unilateral_schur_blocked(
     problem_dim: wp.array[int32],
@@ -2003,13 +2012,13 @@ def _assemble_compact_unilateral_schur_blocked(
         row0 = int32(4) * block_row
         col0 = int32(4) * block_col
         accum = wp.mat44f()
-        for k in range(int32(0), njc, int32(8)):
+        for k in range(int32(0), njc, int32(16)):
             # Out-of-range rows and columns load as zero.
-            rows = wp.tile_load(y, shape=(8, 128), offset=(k, 0), storage="shared")
+            rows = wp.tile_load(y, shape=(16, 128), offset=(k, 0), storage="shared")
             if active:
-                for kk in range(8):
-                    a = wp.vec4f(rows[kk, row0], rows[kk, row0 + 1], rows[kk, row0 + 2], rows[kk, row0 + 3])
-                    b = wp.vec4f(rows[kk, col0], rows[kk, col0 + 1], rows[kk, col0 + 2], rows[kk, col0 + 3])
+                for kk in range(16):
+                    a = _shared_row_quad(rows, kk, row0)
+                    b = _shared_row_quad(rows, kk, col0)
                     for i in range(4):
                         for j in range(4):
                             accum[i, j] += a[i] * b[j]
