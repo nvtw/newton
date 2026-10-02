@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import tempfile
 import zipfile
 from typing import Any
 
@@ -82,8 +81,8 @@ def load_checkpoint(
             current default device.
         batch_size: Fixed batch dimension used to pre-allocate intermediate
             buffers.
-        input_batch_axes: Optional ONNX graph-input batch-axis override. These
-            axes are made dynamic before preparing the Warp-NN runtime.
+        input_batch_axes: Optional ONNX graph-input batch axes to validate.
+            Each selected axis must be dynamic in the exported model.
         requires_grad: Whether the runtime allocates gradient storage for its
             own tensors. Required to differentiate the network, since the
             runtime owns intermediate buffers that cannot be given gradients
@@ -100,29 +99,23 @@ def load_checkpoint(
         raise ValueError(f"ONNX batch_size must be positive, got {batch_size}")
     metadata = load_metadata(path)
     OnnxRuntime = _require_warp_nn_runtime()
-    if input_batch_axes is None:
-        runtime = OnnxRuntime(path, device=device, requires_grad=requires_grad)
-    else:
-        # Relax explicitly overridden batch axes before the runtime validates inputs.
-        onnx = _require_onnx()
-        model = onnx.load(path)
-        initializers = {value.name for value in model.graph.initializer}
-        graph_inputs = [value for value in model.graph.input if value.name not in initializers]
+    runtime = OnnxRuntime(path, device=device, requires_grad=requires_grad)
+    if input_batch_axes is not None:
         if isinstance(input_batch_axes, dict):
-            unknown = set(input_batch_axes) - {value.name for value in graph_inputs}
+            unknown = set(input_batch_axes) - {spec.name for spec in runtime.inputs}
             if unknown:
                 raise KeyError(f"Unknown ONNX graph inputs in input_batch_axes: {sorted(unknown)}")
-        for value in graph_inputs:
-            axis = input_batch_axes.get(value.name) if isinstance(input_batch_axes, dict) else input_batch_axes
+        for spec in runtime.inputs:
+            axis = input_batch_axes.get(spec.name) if isinstance(input_batch_axes, dict) else input_batch_axes
             if axis is not None:
-                dimensions = value.type.tensor_type.shape.dim
-                if not -len(dimensions) <= axis < len(dimensions):
-                    raise ValueError(f"ONNX input '{value.name}' batch axis {axis} is out of range")
-                dimensions[axis].dim_param = "newton_batch"
-        with tempfile.TemporaryDirectory() as directory:
-            prepared_path = os.path.join(directory, "model.onnx")
-            onnx.save(model, prepared_path)
-            runtime = OnnxRuntime(prepared_path, device=device, requires_grad=requires_grad)
+                if not -len(spec.shape) <= axis < len(spec.shape):
+                    raise ValueError(f"ONNX input '{spec.name}' batch axis {axis} is out of range")
+                if spec.shape[axis] is not None:
+                    raise ValueError(
+                        f"ONNX checkpoint '{path}': input '{spec.name}' batch axis {axis} "
+                        f"is fixed at {spec.shape[axis]}. Re-export the model with a dynamic batch axis; "
+                        "changing the input shape alone may leave fixed batch sizes embedded in the graph."
+                    )
     inputs = {
         spec.name: wp.ones(
             tuple(batch_size if dimension is None else dimension for dimension in spec.shape),

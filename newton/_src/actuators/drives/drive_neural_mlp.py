@@ -178,7 +178,8 @@ class DriveNeuralMLP(DriveBase):
     Configuration parameters (``input_order``, ``input_idx``,
     ``pos_scale``, ``vel_scale``, ``effort_scale``) are read from checkpoint
     metadata, falling back to defaults when absent. ``.onnx`` checkpoints run
-    through Warp-NN. Torch checkpoints keep the Torch backend and must be pt2
+    through Warp-NN and must declare a dynamic batch axis (axis 0) on the
+    network input. Torch checkpoints keep the Torch backend and must be pt2
     archives saved with ``torch.export.save``.
 
     Implicit actuation linearizes the network about the current state each

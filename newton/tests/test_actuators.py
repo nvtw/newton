@@ -695,11 +695,23 @@ class TestDriveNeuralMLP(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "effort_scale.*zero_scale.onnx"):
             DriveNeuralMLP(model_path=path)
 
-    def test_finalize_fixed_batch_onnx_with_multiple_actuators(self):
-        """Fixed-batch ONNX exports can still run one scalar per actuator."""
+    def test_finalize_rejects_fixed_batch_onnx(self):
+        """Reject fixed batch axes even when they match the actuator count."""
         weights = np.array([[2.0, 0.0]], dtype=np.float32)
         bias = np.array([1.0], dtype=np.float32)
-        path = self._save_mlp(weights, bias, filename="fixed_batch_mlp.onnx", batch_dim=1)
+        for batch_dim in (1, 3):
+            path = self._save_mlp(weights, bias, batch_dim=batch_dim)
+            for n in (1, 3):
+                with self.subTest(batch_dim=batch_dim, num_actuators=n):
+                    ctrl = DriveNeuralMLP(model_path=path)
+                    with self.assertRaisesRegex(ValueError, "input.*axis 0.*fixed.*Re-export.*dynamic batch"):
+                        ctrl.finalize(self.device, n)
+
+    def test_finalize_dynamic_batch_onnx_with_multiple_actuators(self):
+        """Run a dynamic-batch ONNX export with one scalar per actuator."""
+        weights = np.array([[2.0, 0.0]], dtype=np.float32)
+        bias = np.array([1.0], dtype=np.float32)
+        path = self._save_mlp(weights, bias)
 
         n = 3
         ctrl = DriveNeuralMLP(model_path=path)
@@ -929,6 +941,22 @@ class TestDriveNeuralLSTM(unittest.TestCase):
         path = os.path.join(self._tmp_dir, filename)
         _build_lstm_onnx(path, hidden_size=hidden, num_layers=1, metadata=metadata)
         return path
+
+    def test_finalize_rejects_fixed_batch_onnx(self):
+        """Reject a fixed batch axis on each LSTM input before inference."""
+        onnx_mod, _, _, _ = _onnx_modules()
+        for input_name in ("input", "h_in", "c_in"):
+            path = self._save_lstm()
+            model = onnx_mod.load(path)
+            for value in model.graph.input:
+                if value.name == input_name:
+                    value.type.tensor_type.shape.dim[1].dim_value = 1
+            onnx_mod.save(model, path)
+            for n in (1, 3):
+                with self.subTest(input_name=input_name, num_actuators=n):
+                    ctrl = DriveNeuralLSTM(model_path=path)
+                    with self.assertRaisesRegex(ValueError, f"{input_name}.*axis 1.*fixed.*Re-export.*dynamic batch"):
+                        ctrl.finalize(self.device, n)
 
     def _run_lstm_compute(self, ctrl: DriveNeuralLSTM) -> None:
         n = 1

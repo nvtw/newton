@@ -1,0 +1,1 @@
+Require dynamic ONNX input batch axes for `DriveNeuralMLP` and `DriveNeuralLSTM` instead of overriding fixed batch sizes; re-export fixed-batch checkpoints with dynamic batch axes (axis 0 for MLP, axis 1 for all LSTM inputs).
