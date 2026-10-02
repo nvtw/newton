@@ -3355,6 +3355,7 @@ def _build_sparse_bilateral_block(
     # Inputs:
     model_bodies_inv_m_i: wp.array[float32],
     data_bodies_inv_I_i: wp.array[mat33f],
+    entry_starts: wp.array[int32],
     pair_wid: wp.array[int32],
     pair_row: wp.array[int32],
     pair_col: wp.array[int32],
@@ -3371,61 +3372,33 @@ def _build_sparse_bilateral_block(
     inverse_permutation: wp.array[int32],
     use_permutation: bool,
 ):
-    pair_id = wp.tid()
-    wid = pair_wid[pair_id]
+    """Write one off-diagonal entry pair from its body contributions."""
+    entry = wp.tid()
+    first = entry_starts[entry]
+    D_ij = float32(0.0)
+    for pair_id in range(first, entry_starts[entry + 1]):
+        block_i = jacobian_cts_nzb_values[pair_i[pair_id]]
+        block_j = jacobian_cts_nzb_values[pair_j[pair_id]]
+        Jv_i = vec3f(block_i[0], block_i[1], block_i[2])
+        Jv_j = vec3f(block_j[0], block_j[1], block_j[2])
+        Jw_i = vec3f(block_i[3], block_i[4], block_i[5])
+        Jw_j = vec3f(block_j[3], block_j[4], block_j[5])
+        bid_k = pair_bid[pair_id]
+        D_ij += model_bodies_inv_m_i[bid_k] * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, data_bodies_inv_I_i[bid_k] @ Jw_j)
+
+    wid = pair_wid[first]
     njc = problem_njc[wid]
-    row = pair_row[pair_id]
-    col = pair_col[pair_id]
-    block_i = jacobian_cts_nzb_values[pair_i[pair_id]]
-    block_j = jacobian_cts_nzb_values[pair_j[pair_id]]
-    Jv_i = vec3f(block_i[0], block_i[1], block_i[2])
-    Jv_j = vec3f(block_j[0], block_j[1], block_j[2])
-    Jw_i = vec3f(block_i[3], block_i[4], block_i[5])
-    Jw_j = vec3f(block_j[3], block_j[4], block_j[5])
-
-    bid_k = pair_bid[pair_id]
-    inv_m_k = model_bodies_inv_m_i[bid_k]
-    inv_I_k = data_bodies_inv_I_i[bid_k]
-    D_ij = inv_m_k * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, inv_I_k @ Jw_j)
-
+    row = pair_row[first]
+    col = pair_col[first]
     bvio = bilateral_vio[wid]
-    p_row = bilateral_P[bvio + row]
-    p_col = bilateral_P[bvio + col]
-    val = p_row * D_ij * p_col
+    val = bilateral_P[bvio + row] * D_ij * bilateral_P[bvio + col]
 
     bmio = bilateral_mio[wid]
     if use_permutation:
         row = inverse_permutation[bvio + row]
         col = inverse_permutation[bvio + col]
-    wp.atomic_add(bilateral_D, bmio + njc * row + col, val)
-    wp.atomic_add(bilateral_D, bmio + njc * col + row, val)
-
-
-@wp.kernel
-def _clear_sparse_bilateral_block(
-    pair_wid: wp.array[int32],
-    pair_row: wp.array[int32],
-    pair_col: wp.array[int32],
-    problem_njc: wp.array[int32],
-    bilateral_mio: wp.array[int32],
-    bilateral_vio: wp.array[int32],
-    inverse_permutation: wp.array[int32],
-    use_permutation: bool,
-    bilateral_D: wp.array[float32],
-):
-    """Zero the structural entries accumulated by ``_build_sparse_bilateral_block``."""
-    pair_id = wp.tid()
-    wid = pair_wid[pair_id]
-    njc = problem_njc[wid]
-    row = pair_row[pair_id]
-    col = pair_col[pair_id]
-    if use_permutation:
-        bvio = bilateral_vio[wid]
-        row = inverse_permutation[bvio + row]
-        col = inverse_permutation[bvio + col]
-    bmio = bilateral_mio[wid]
-    bilateral_D[bmio + njc * row + col] = float32(0.0)
-    bilateral_D[bmio + njc * col + row] = float32(0.0)
+    bilateral_D[bmio + njc * row + col] = val
+    bilateral_D[bmio + njc * col + row] = val
 
 
 @wp.kernel

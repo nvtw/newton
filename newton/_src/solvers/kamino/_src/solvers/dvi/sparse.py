@@ -47,7 +47,6 @@ from .sparse_kernels import (
     _build_sparse_bilateral_rhs_from_matvec,
     _cache_sparse_contact_diagonal,
     _cache_sparse_projected_diagonal,
-    _clear_sparse_bilateral_block,
     _color_compact_contact_groups,
     _compact_contact_group_starts,
     _compare_compact_contact_topology,
@@ -161,6 +160,7 @@ class SparseDVIPath:
             ]
             | None
         ) = None
+        self.bilateral_entry_starts: wp.array[wp.int32] | None = None
         self.bilateral_row_nzb_topology: tuple[wp.array[wp.int32], wp.array[wp.int32], wp.array[wp.int32]] | None = None
         self.bilateral_lower_inverse: wp.array[wp.float32] | None = None
         self.bilateral_inverse: wp.array[wp.float32] | None = None
@@ -1010,25 +1010,6 @@ def _assemble_sparse_bilateral_block(
     if path.bilateral_nzb_pairs is None:
         raise RuntimeError("Sparse DVI topology is not prepared. Call `SparseDVIPath.prepare()` before solving.")
     pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j = path.bilateral_nzb_pairs
-    # Assembly writes only structural entries, so clearing those keeps the
-    # dense matrix zero elsewhere without a full-size memset.
-    if pair_wid.size > 0:
-        wp.launch(
-            kernel=_clear_sparse_bilateral_block,
-            dim=pair_wid.size,
-            inputs=[
-                pair_wid,
-                pair_row,
-                pair_col,
-                problem.data.njc,
-                matrix_offsets,
-                operator.info.vio,
-                inverse if inverse is not None else operator.info.vio,
-                inverse is not None,
-                matrix,
-            ],
-            device=path.device,
-        )
     state.bilateral_preconditioner.zero_()
     problem.delassus.diagonal(state.scratch)
 
@@ -1050,12 +1031,15 @@ def _assemble_sparse_bilateral_block(
         device=path.device,
     )
     if pair_wid.size > 0:
+        # Each entry has one writer, and entries outside the structural pairs
+        # are never written, so the dense matrix needs no clearing.
         wp.launch(
             kernel=_build_sparse_bilateral_block,
-            dim=pair_wid.size,
+            dim=path.bilateral_entry_starts.size - 1,
             inputs=[
                 path.model.bodies.inv_m_i,
                 path.model_data.bodies.inv_I_i,
+                path.bilateral_entry_starts,
                 pair_wid,
                 pair_row,
                 pair_col,
@@ -1110,10 +1094,19 @@ def _build_sparse_bilateral_pairs(path: SparseDVIPath, problem: DualProblem) -> 
                     pair_i.append(nzb_i)
                     pair_j.append(nzb_j)
 
-    path.bilateral_nzb_pairs = tuple(
-        wp.array(values, dtype=int32, device=path.device)
-        for values in (pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j)
-    )
+    # Group pairs by matrix entry so assembly can write each entry once.
+    order = sorted(range(len(pair_wid)), key=lambda pair: (pair_wid[pair], pair_row[pair], pair_col[pair]))
+    pairs = [[values[pair] for pair in order] for values in (pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j)]
+    entry_starts = [
+        pair
+        for pair in range(len(order))
+        if pair == 0
+        or (pairs[0][pair], pairs[1][pair], pairs[2][pair])
+        != (pairs[0][pair - 1], pairs[1][pair - 1], pairs[2][pair - 1])
+    ]
+    entry_starts.append(len(order))
+    path.bilateral_nzb_pairs = tuple(wp.array(values, dtype=int32, device=path.device) for values in pairs)
+    path.bilateral_entry_starts = wp.array(entry_starts, dtype=int32, device=path.device)
 
 
 def _build_sparse_bilateral_row_nzb_topology(path: SparseDVIPath, problem: DualProblem) -> None:
