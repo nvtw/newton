@@ -3426,12 +3426,15 @@ def _build_sparse_bilateral_block(
     val = bilateral_P[bvio + row] * D_ij * bilateral_P[bvio + col]
 
     bmio = bilateral_mio[wid]
-    if use_permutation:
-        row = inverse_permutation[bvio + row]
-        col = inverse_permutation[bvio + col]
     ld = bilateral_ld[wid]
-    bilateral_D[bmio + ld * row + col] = val
-    bilateral_D[bmio + ld * col + row] = val
+    if use_permutation:
+        # The permuted matrix feeds the factorization directly, which reads only its lower triangle.
+        permuted_row = inverse_permutation[bvio + row]
+        permuted_col = inverse_permutation[bvio + col]
+        bilateral_D[bmio + ld * wp.max(permuted_row, permuted_col) + wp.min(permuted_row, permuted_col)] = val
+    else:
+        bilateral_D[bmio + ld * row + col] = val
+        bilateral_D[bmio + ld * col + row] = val
 
 
 @wp.kernel

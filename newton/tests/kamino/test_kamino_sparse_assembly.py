@@ -282,7 +282,10 @@ class TestKaminoSparseAssemblyQuality(unittest.TestCase):
                 wp.capture_launch(capture.graph)
                 matrix_np = control_matrix.numpy().reshape(n, n)
                 np.testing.assert_allclose(
-                    observed.numpy().reshape(n, n), matrix_np[np.ix_(order, order)], rtol=3.0e-6, atol=3.0e-7
+                    np.tril(observed.numpy().reshape(n, n)),
+                    np.tril(matrix_np[np.ix_(order, order)]),
+                    rtol=3.0e-6,
+                    atol=3.0e-7,
                 )
                 scaling = np.sqrt(1.0 / (diag_np.astype(np.float64) + np.finfo(np.float32).eps))
                 oracle = scaling[:, None] * unscaled * scaling[None, :] + np.eye(n) * 7.0e-7
