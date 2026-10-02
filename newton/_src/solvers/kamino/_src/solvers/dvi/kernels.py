@@ -35,9 +35,8 @@ vec3f = wp.vec3f
 
 _FUSED_INEQUALITY_BLOCK = -2
 # Diagonal floor added to the unit-scaled bilateral block. Smaller floors reduce
-# the equality residual, but float32 assembly round-off on rank-deficient
-# closed-loop blocks can then produce non-positive Cholesky pivots.
-BILATERAL_DIAGONAL_FLOOR = 2.0e-6
+# the equality residual, but closed-loop robots lose contact below this.
+BILATERAL_DIAGONAL_FLOOR = 7.0e-7
 
 _FUSED_BILATERAL_BLOCK = -3
 

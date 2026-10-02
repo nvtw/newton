@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import warp as wp
 
 from ...core.data import DataKamino
@@ -1059,6 +1061,26 @@ def _assemble_sparse_bilateral_block(
         )
 
 
+def group_bilateral_pairs(pairs: Sequence[Sequence[int]]) -> tuple[list[list[int]], list[int]]:
+    """Sort bilateral body pairs by matrix entry and return each entry's first pair.
+
+    Args:
+        pairs: Parallel ``(world, row, col, body, block_i, block_j)`` sequences.
+
+    Returns:
+        The reordered sequences and ``entry_starts``, whose consecutive values
+        delimit the pairs of one ``(world, row, col)`` entry; the last value is
+        the pair count. ``_build_sparse_bilateral_block`` writes each entry once.
+    """
+    count = len(pairs[0])
+    order = sorted(range(count), key=lambda pair: (pairs[0][pair], pairs[1][pair], pairs[2][pair]))
+    pairs = [[int(values[pair]) for pair in order] for values in pairs]
+    keys = list(zip(pairs[0], pairs[1], pairs[2], strict=True))
+    entry_starts = [pair for pair in range(count) if pair == 0 or keys[pair] != keys[pair - 1]]
+    entry_starts.append(count)
+    return pairs, entry_starts
+
+
 def _build_sparse_bilateral_pairs(path: SparseDVIPath, problem: DualProblem) -> None:
     """Cache joint Jacobian block pairs that contribute to the bilateral matrix."""
     jacobian = problem.delassus.constraint_jacobian
@@ -1094,17 +1116,7 @@ def _build_sparse_bilateral_pairs(path: SparseDVIPath, problem: DualProblem) -> 
                     pair_i.append(nzb_i)
                     pair_j.append(nzb_j)
 
-    # Group pairs by matrix entry so assembly can write each entry once.
-    order = sorted(range(len(pair_wid)), key=lambda pair: (pair_wid[pair], pair_row[pair], pair_col[pair]))
-    pairs = [[values[pair] for pair in order] for values in (pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j)]
-    entry_starts = [
-        pair
-        for pair in range(len(order))
-        if pair == 0
-        or (pairs[0][pair], pairs[1][pair], pairs[2][pair])
-        != (pairs[0][pair - 1], pairs[1][pair - 1], pairs[2][pair - 1])
-    ]
-    entry_starts.append(len(order))
+    pairs, entry_starts = group_bilateral_pairs((pair_wid, pair_row, pair_col, pair_bid, pair_i, pair_j))
     path.bilateral_nzb_pairs = tuple(wp.array(values, dtype=int32, device=path.device) for values in pairs)
     path.bilateral_entry_starts = wp.array(entry_starts, dtype=int32, device=path.device)
 
