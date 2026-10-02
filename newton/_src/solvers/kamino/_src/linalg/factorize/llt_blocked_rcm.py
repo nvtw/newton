@@ -341,18 +341,19 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
 
             A_kk_tile = wp.tile_load(A_i, shape=(block_size, block_size), offset=(k, k), storage="shared")
 
-            if k + block_size > n_i:
-                num_tile_elements = block_size * block_size
-                num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
-                for i in range(num_iterations):
-                    linear_index = tid_block + i * num_threads_per_block
-                    linear_index = linear_index % num_tile_elements
-                    row = linear_index // block_size
-                    col = linear_index % block_size
-                    value = A_kk_tile[row, col]
-                    if k + row >= n_i or k + col >= n_i:
-                        value = wp.where(row == col, wp.float32(1), wp.float32(0))
-                    A_kk_tile[row, col] = value
+            # Mirror the lower triangle and pad out-of-range rows with identity,
+            # since the upper-mode tile Cholesky below reads the upper triangle.
+            num_tile_elements = block_size * block_size
+            num_iterations = (num_tile_elements + num_threads_per_block - 1) // num_threads_per_block
+            for i in range(num_iterations):
+                linear_index = tid_block + i * num_threads_per_block
+                linear_index = linear_index % num_tile_elements
+                row = linear_index // block_size
+                col = linear_index % block_size
+                value = A_kk_tile[wp.max(row, col), wp.min(row, col)]
+                if k + row >= n_i or k + col >= n_i:
+                    value = wp.where(row == col, wp.float32(1), wp.float32(0))
+                A_kk_tile[row, col] = value
 
             if k > 0:
                 for j in range(0, k, block_size):
@@ -367,8 +368,11 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
                         L_block_T = wp.tile_transpose(L_block)
                         wp.tile_matmul(L_block, L_block_T, A_kk_tile, alpha=-1.0)
 
-            wp.tile_cholesky_inplace(A_kk_tile)
-            wp.tile_store(L_i, A_kk_tile, offset=(k, k))
+            # Upper mode on the row-major tile is the native layout of the tile
+            # solver; A_kk = U^T U, so the transposed view is the lower factor.
+            wp.tile_cholesky_inplace(A_kk_tile, fill_mode="upper")
+            L_kk_tile = wp.tile_transpose(A_kk_tile)
+            wp.tile_store(L_i, L_kk_tile, offset=(k, k))
 
             for i in range(end, n_i_padded, block_size):
                 tile_i = i // block_size
@@ -414,7 +418,7 @@ def make_llt_blocked_rcm_factorize_kernel(block_size: int):
                             wp.tile_matmul(L_tile, L_T_tile, A_ik_tile, alpha=-1.0)
 
                 t = wp.tile_transpose(A_ik_tile)
-                wp.tile_lower_solve_inplace(A_kk_tile, t)
+                wp.tile_lower_solve_inplace(L_kk_tile, t)
                 sol_tile = wp.tile_transpose(t)
                 wp.tile_store(L_i, sol_tile, offset=(i, k))
 
@@ -461,16 +465,16 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
         )
 
         diagonal = wp.tile_load(A_i, shape=(block_size, block_size), offset=(k, k), storage="shared")
-        if k + block_size > n:
-            for q in range((block_size * block_size + block_dim - 1) // block_dim):
-                index = (tid_block + q * block_dim) % (block_size * block_size)
-                row = index // block_size
-                col = index % block_size
-                # Preserve a collective full-tile write before the next Tile operation.
-                value = diagonal[row, col]
-                if k + row >= n or k + col >= n:
-                    value = wp.where(row == col, wp.float32(1), wp.float32(0))
-                diagonal[row, col] = value
+        # Mirror the lower triangle and pad out-of-range rows for the upper-mode Cholesky.
+        for q in range((block_size * block_size + block_dim - 1) // block_dim):
+            index = (tid_block + q * block_dim) % (block_size * block_size)
+            row = index // block_size
+            col = index % block_size
+            # Preserve a collective full-tile write before the next Tile operation.
+            value = diagonal[wp.max(row, col), wp.min(row, col)]
+            if k + row >= n or k + col >= n:
+                value = wp.where(row == col, wp.float32(1), wp.float32(0))
+            diagonal[row, col] = value
 
         for tile_j in range(tile_k):
             if TP_i[tile_k, tile_j] == int(0):
@@ -479,8 +483,8 @@ def make_llt_blocked_rcm_parallel_factorize_kernels(block_size: int):
             previous = wp.tile_load(L_i, shape=(block_size, block_size), offset=(k, j))
             wp.tile_matmul(previous, wp.tile_transpose(previous), diagonal, alpha=-1.0)
 
-        wp.tile_cholesky_inplace(diagonal)
-        wp.tile_store(L_i, diagonal, offset=(k, k))
+        wp.tile_cholesky_inplace(diagonal, fill_mode="upper")
+        wp.tile_store(L_i, wp.tile_transpose(diagonal), offset=(k, k))
 
     @wp.kernel(enable_backward=False)
     def factorize_panel_kernel(
