@@ -3268,6 +3268,88 @@ def _solve_dvi_compact_schur_pgs_cooperative(
         solver_status[wid] = status
 
 
+SMALL_BILATERAL_INVERSE_SIZE = 128
+_INVERSE_TILE = 32
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _invert_small_bilateral_block(
+    dim: wp.array[int32],
+    mio: wp.array[int32],
+    L: wp.array[float32],
+    lower_inverse: wp.array[float32],
+    inverse: wp.array[float32],
+):
+    """Form ``(L L^T)^-1 = X^T X`` with ``X = L^-1`` using 32x32 tiles, one block per world."""
+    wid, lane = wp.tid()
+    threads = wp.block_dim()
+    size = wp.static(_INVERSE_TILE)
+    n = dim[wid]
+    offset = mio[wid]
+    tiles = (n + size - 1) // size
+    L_i = wp.array(ptr=get_float32_array_offset_ptr(L, offset), shape=(n, n), dtype=float32)
+    X_i = wp.array(ptr=get_float32_array_offset_ptr(lower_inverse, offset), shape=(n, n), dtype=float32)
+    D_i = wp.array(ptr=get_float32_array_offset_ptr(inverse, offset), shape=(n, n), dtype=float32)
+    for tile_j in range(tiles):
+        for tile_i in range(tile_j, tiles):
+            i = tile_i * size
+            block = wp.tile_zeros(shape=(size, size), dtype=float32, storage="shared")
+            diagonal = wp.tile_load(L_i, shape=(size, size), offset=(i, i), storage="shared")
+            for q in range((size * size + threads - 1) // threads):
+                index = (lane + q * threads) % (size * size)
+                row = index // size
+                col = index % size
+                value = diagonal[row, col]
+                if i + row >= n or i + col >= n:
+                    value = wp.where(row == col, float32(1.0), float32(0.0))
+                diagonal[row, col] = value
+                block[row, col] = wp.where(tile_i == tile_j and row == col, float32(1.0), float32(0.0))
+            for tile_k in range(tile_j, tile_i):
+                left = wp.tile_load(L_i, shape=(size, size), offset=(i, tile_k * size))
+                right = wp.tile_load(X_i, shape=(size, size), offset=(tile_k * size, tile_j * size))
+                wp.tile_matmul(left, right, block, alpha=-1.0)
+            wp.tile_lower_solve_inplace(diagonal, block)
+            wp.tile_store(X_i, block, offset=(i, tile_j * size))
+    for tile_i in range(tiles):
+        for tile_j in range(tiles):
+            block = wp.tile_zeros(shape=(size, size), dtype=float32)
+            for tile_k in range(wp.max(tile_i, tile_j), tiles):
+                left = wp.tile_load(X_i, shape=(size, size), offset=(tile_k * size, tile_i * size))
+                right = wp.tile_load(X_i, shape=(size, size), offset=(tile_k * size, tile_j * size))
+                wp.tile_matmul(wp.tile_transpose(left), right, block)
+            wp.tile_store(D_i, block, offset=(tile_i * size, tile_j * size))
+
+
+@wp.kernel
+def _apply_small_bilateral_inverse(
+    dim: wp.array[int32],
+    mio: wp.array[int32],
+    vio: wp.array[int32],
+    inverse: wp.array[float32],
+    bilateral_rhs: wp.array[float32],
+    problem_vio: wp.array[int32],
+    problem_njc: wp.array[int32],
+    bilateral_P: wp.array[float32],
+    bilateral_solution: wp.array[float32],
+    solution_lambdas: wp.array[float32],
+):
+    """Apply the cached symmetric inverse and scatter the scaled joint impulses.
+
+    A zero active dimension keeps the previous solution.
+    """
+    wid, row = wp.tid()
+    n = dim[wid]
+    v = vio[wid]
+    if row < n:
+        m = mio[wid]
+        value = float32(0.0)
+        for col in range(n):
+            value += inverse[m + col * n + row] * bilateral_rhs[v + col]
+        bilateral_solution[v + row] = value
+    if row < problem_njc[wid]:
+        solution_lambdas[problem_vio[wid] + row] = bilateral_P[v + row] * bilateral_solution[v + row]
+
+
 @wp.kernel
 def _build_sparse_bilateral_block(
     # Inputs:

@@ -37,6 +37,8 @@ from .response import (
     make_response_kernel,
 )
 from .sparse_kernels import (
+    SMALL_BILATERAL_INVERSE_SIZE,
+    _apply_small_bilateral_inverse,
     _assemble_compact_unilateral_schur_blocked,
     _assemble_compact_unilateral_schur_tiled,
     _assemble_sparse_bilateral_unilateral_coupling,
@@ -52,6 +54,7 @@ from .sparse_kernels import (
     _compute_dvi_sparse_solution_vectors,
     _expand_colored_contact_groups,
     _group_mapped_dvi_inequalities,
+    _invert_small_bilateral_block,
     _map_active_contacts,
     _map_active_limits,
     _map_bounded_constraints,
@@ -159,6 +162,8 @@ class SparseDVIPath:
             | None
         ) = None
         self.bilateral_row_nzb_topology: tuple[wp.array[wp.int32], wp.array[wp.int32], wp.array[wp.int32]] | None = None
+        self.bilateral_lower_inverse: wp.array[wp.float32] | None = None
+        self.bilateral_inverse: wp.array[wp.float32] | None = None
         self.contact_sorter: KeySorter | None = None
         self.contact_world_starts: wp.array[wp.int32] | None = None
         if device.is_cuda and size.max_of_max_contacts >= _CONTACT_PAIR_SORT_MIN_CAPACITY:
@@ -200,6 +205,19 @@ class SparseDVIPath:
                 self.bilateral_solver.configure_sparse_assembly(
                     *self.bilateral_nzb_pairs[:3],
                 )
+            # Alternating solves of small blocks reuse one inverse per factorization.
+            elif (
+                self.device.is_cuda
+                and isinstance(self.bilateral_solver, LLTBlockedSolver)
+                and not self.use_schur_complement
+                and not self.data.state._sparse_coupling_allocated
+                and self.size.max_of_num_bilateral_joint_cts <= SMALL_BILATERAL_INVERSE_SIZE
+            ):
+                operator = self.data.bilateral_operator
+                self.bilateral_lower_inverse = wp.zeros(
+                    operator.info.total_mat_size, dtype=wp.float32, device=self.device
+                )
+                self.bilateral_inverse = wp.zeros_like(self.bilateral_lower_inverse)
 
     def solve(self, problem: DualProblem) -> None:
         """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
@@ -963,6 +981,20 @@ def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) ->
     else:
         _assemble_sparse_bilateral_block(path, problem, operator.mat)
         path.bilateral_solver.compute(A=operator.mat)
+        if path.bilateral_inverse is not None:
+            wp.launch_tiled(
+                _invert_small_bilateral_block,
+                dim=path.size.num_worlds,
+                inputs=[
+                    operator.info.dim,
+                    operator.info.mio,
+                    path.bilateral_solver.L,
+                    path.bilateral_lower_inverse,
+                    path.bilateral_inverse,
+                ],
+                block_dim=128,
+                device=path.device,
+            )
 
 
 def _assemble_sparse_bilateral_block(
@@ -1226,6 +1258,26 @@ def _solve_sparse_bilateral_block(
             ],
             device=path.device,
             block_dim=solver._solve_block_dim,
+        )
+        return
+    if path.bilateral_inverse is not None:
+        info = operator.info
+        wp.launch(
+            _apply_small_bilateral_inverse,
+            dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
+            inputs=[
+                info.dim if active_dim is None else active_dim,
+                info.mio,
+                info.vio,
+                path.bilateral_inverse,
+                state.bilateral_rhs,
+                problem.data.vio,
+                problem.data.njc,
+                state.bilateral_preconditioner,
+                state.bilateral_solution,
+                path.data.solution.lambdas,
+            ],
+            device=path.device,
         )
         return
     full_dim = operator.info.dim

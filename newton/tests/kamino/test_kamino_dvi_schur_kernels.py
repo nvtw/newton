@@ -10,7 +10,9 @@ import warp as wp
 
 from newton._src.solvers.kamino._src.solvers.dvi.kernels import _compute_dvi_status_residuals
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
+    _apply_small_bilateral_inverse,
     _assemble_compact_unilateral_schur_blocked,
+    _invert_small_bilateral_block,
     _solve_dvi_compact_schur_pgs_cooperative,
     _solve_dvi_sparse_inequalities_pgs_cooperative,
 )
@@ -168,6 +170,67 @@ class TestKaminoCompactSchur(unittest.TestCase):
                 if unmapped:
                     inactive = [n + nb, *range(n + nb + nl, n + nb + nl + 3)]
                     np.testing.assert_array_equal(results[1][0][inactive], initial[inactive])
+
+
+class TestKaminoSmallBilateralInverse(unittest.TestCase):
+    def test_matches_dense_solve(self):
+        """Invert partial-tile blocks and apply them, keeping the old solution for inactive worlds."""
+        if not wp.get_cuda_device_count():
+            self.skipTest("Tile inversion requires CUDA")
+        device = wp.get_cuda_devices()[0]
+        rng = np.random.default_rng(4127)
+        dims = [1, 33, 70, 128]
+        mio = np.concatenate(([0], np.cumsum(np.square(dims))[:-1]))
+        vio = np.concatenate(([0], np.cumsum(dims)[:-1]))
+        factors, matrices = [], []
+        for n in dims:
+            basis = rng.normal(size=(n, n))
+            matrix = basis @ basis.T / n + np.eye(n)
+            matrices.append(matrix)
+            # Garbage above the diagonal must not leak into the inverse.
+            factors.append(np.linalg.cholesky(matrix) + np.triu(rng.normal(size=(n, n)), 1))
+        L = wp.array(np.concatenate([f.ravel() for f in factors]), dtype=wp.float32, device=device)
+        dim = wp.array(dims, dtype=wp.int32, device=device)
+        mio_wp = wp.array(mio, dtype=wp.int32, device=device)
+        vio_wp = wp.array(vio, dtype=wp.int32, device=device)
+        lower_inverse = wp.zeros(L.size, dtype=wp.float32, device=device)
+        inverse = wp.zeros(L.size, dtype=wp.float32, device=device)
+        wp.launch_tiled(
+            _invert_small_bilateral_block,
+            dim=len(dims),
+            inputs=[dim, mio_wp, L, lower_inverse, inverse],
+            block_dim=128,
+            device=device,
+        )
+        rhs = rng.normal(size=sum(dims))
+        previous = rng.normal(size=sum(dims))
+        scale = rng.uniform(0.5, 2.0, size=sum(dims))
+        solution = wp.array(previous, dtype=wp.float32, device=device)
+        lambdas = wp.zeros(sum(dims), dtype=wp.float32, device=device)
+        active = [1, 33, 0, 128]
+        wp.launch(
+            _apply_small_bilateral_inverse,
+            dim=(len(dims), max(dims)),
+            inputs=[
+                wp.array(active, dtype=wp.int32, device=device),
+                mio_wp,
+                vio_wp,
+                inverse,
+                wp.array(rhs, dtype=wp.float32, device=device),
+                vio_wp,
+                dim,
+                wp.array(scale, dtype=wp.float32, device=device),
+                solution,
+                lambdas,
+            ],
+            device=device,
+        )
+        expected = previous.copy()
+        for n, matrix, start, used in zip(dims, matrices, vio, active, strict=True):
+            if used:
+                expected[start : start + n] = np.linalg.solve(matrix, rhs[start : start + n])
+        np.testing.assert_allclose(solution.numpy(), expected, rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(lambdas.numpy(), scale * expected, rtol=1e-4, atol=1e-4)
 
 
 class TestKaminoFullSchurAssembly(unittest.TestCase):
