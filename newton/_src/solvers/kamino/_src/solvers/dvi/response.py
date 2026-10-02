@@ -57,6 +57,9 @@ def make_response_kernel(width: int = _RESPONSE_WIDTH):
             ptr=get_float32_array_offset_ptr(output, response_mio[world]), shape=(n, nu), dtype=wp.float32
         )
         tiles = (n + block_size - 1) // block_size
+        # Leading zero coupling tiles have zero response; start substitution
+        # at the group's first nonzero tile.
+        first = n
         for i in range(0, n, block_size):
             rhs = wp.tile_zeros(shape=(block_size, width), dtype=wp.float32, storage="shared")
             for chunk in range(block_size * width // 128):
@@ -71,8 +74,13 @@ def make_response_kernel(width: int = _RESPONSE_WIDTH):
                         preconditioner[vio[world] + row] * coupling[response_mio[world] + row * nu + column + local_col]
                     )
                 wp.tile_scatter_masked(rhs, local_row, local_col, value, active)
+            if first == n:
+                if wp.tile_max(wp.tile_map(wp.abs, rhs))[0] == wp.float32(0.0):
+                    wp.tile_store(result, rhs, offset=(i, column))
+                    continue
+                first = i
             diagonal = wp.tile_load(matrix, shape=(block_size, block_size), offset=(i, i))
-            for j in range(0, i, block_size):
+            for j in range(first, i, block_size):
                 if pattern[tpo[world] + (i // block_size) * tiles + j // block_size] != 0:
                     block = wp.tile_load(matrix, shape=(block_size, block_size), offset=(i, j))
                     previous = wp.tile_load(result, shape=(block_size, width), offset=(j, column))
