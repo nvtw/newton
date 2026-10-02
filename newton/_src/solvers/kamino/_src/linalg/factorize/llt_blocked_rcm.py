@@ -71,6 +71,14 @@ __all__ = [
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncthreads();
+#endif
+""")
+def _sync_threads(): ...
+
+
 ###
 # Raw-pointer helpers (mirrors llt_blocked.py)
 ###
@@ -615,18 +623,13 @@ def make_llt_blocked_rcm_solve_kernel(
         TP_i = wp.array(ptr=tp_i_ptr, shape=(n_tiles, n_tiles), dtype=wp.int32)
 
         if wp.static(forward_substitution):
-            # Forward substitution: solve L y = b.
+            # Gather the permuted right-hand side once, then solve L y = P b in place.
+            for row in range(tid_block, n_i, num_threads_per_block):
+                y_i[row, 0] = b_i[P_i[row], 0]
+            _sync_threads()
             for i in range(0, n_i_padded, block_size):
                 tile_i = i // block_size
-                rhs_tile = wp.tile_zeros(shape=(block_size, 1), dtype=wp.float32, storage="shared")
-                num_row_iterations = (block_size + num_threads_per_block - 1) // num_threads_per_block
-                for ii in range(num_row_iterations):
-                    row = tid_block + ii * num_threads_per_block
-                    active = row < block_size and i + row < n_i
-                    value = wp.float32(0.0)
-                    if active:
-                        value = b_i[P_i[i + row], 0]
-                    wp.tile_scatter_masked(rhs_tile, row, 0, value, active)
+                rhs_tile = wp.tile_load(y_i, shape=(block_size, 1), offset=(i, 0), storage="shared")
                 L_diag = wp.tile_load(L_i, shape=(block_size, block_size), offset=(i, i))
                 if i > 0:
                     for j in range(0, i, block_size):
