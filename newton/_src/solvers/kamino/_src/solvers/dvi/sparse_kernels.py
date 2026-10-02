@@ -14,7 +14,13 @@ from ...core.types import vec6f
 from ...geometry.keying import build_pair_key2, uint64_sentinel_value
 from ...linalg.factorize.llt_blocked import make_llt_blocked_solve_func
 from ...linalg.factorize.llt_blocked_rcm import get_float32_array_offset_ptr
-from .kernels import _FUSED_BILATERAL_BLOCK, _FUSED_INEQUALITY_BLOCK, _compact_schur_fits, _sync_threads
+from .kernels import (
+    _FUSED_BILATERAL_BLOCK,
+    _FUSED_INEQUALITY_BLOCK,
+    BILATERAL_DIAGONAL_FLOOR,
+    _compact_schur_fits,
+    _sync_threads,
+)
 from .projections import (
     contact_friction_normal_load as _contact_friction_normal_load,
 )
@@ -3435,7 +3441,7 @@ def _set_sparse_bilateral_diagonal(
     if use_permutation:
         row = inverse_permutation[bvio + row]
     diagonal_index = bmio + njc * row + row
-    bilateral_D[diagonal_index] = p * diag * p + float32(7.0e-7)
+    bilateral_D[diagonal_index] = p * diag * p + float32(BILATERAL_DIAGONAL_FLOOR)
 
 
 @wp.kernel

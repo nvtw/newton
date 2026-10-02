@@ -34,6 +34,11 @@ int32 = wp.int32
 vec3f = wp.vec3f
 
 _FUSED_INEQUALITY_BLOCK = -2
+# Diagonal floor added to the unit-scaled bilateral block. Smaller floors reduce
+# the equality residual, but float32 assembly round-off on rank-deficient
+# closed-loop blocks can then produce non-positive Cholesky pivots.
+BILATERAL_DIAGONAL_FLOOR = 2.0e-6
+
 _FUSED_BILATERAL_BLOCK = -3
 
 
@@ -168,8 +173,7 @@ def _copy_bilateral_block(
 
     val = p_row * problem_D[pmio + ncts * row + col] * p_col
     if row == col:
-        # Smaller floors reduce equality residual, but closed-loop robots lose contact below this.
-        val += float32(7.0e-7)
+        val += float32(BILATERAL_DIAGONAL_FLOOR)
         bilateral_P[bvio + row] = p_row
     bilateral_D[bmio + njc * row + col] = val
 
