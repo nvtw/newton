@@ -85,6 +85,10 @@ def _mark_structural_tiles(
     wp.atomic_max(pattern, tpo[world] + wp.max(row, col) * tiles + wp.min(row, col), 1)
 
 
+PARALLEL_FACTORIZATION_MAX_BLOCKS_PER_SM = 2
+"""Batches with at least this many blocks per SM use the per-block factorization."""
+
+
 class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
     """RCM-reordered, semi-sparse Blocked LLT (Cholesky) solver.
 
@@ -151,7 +155,8 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
                 permutation for later numeric factorizations. The numeric tile
                 pattern is still rebuilt each time. Defaults to ``True``.
             parallel_factorization: whether to solve off-diagonal tiles of
-                each Cholesky panel in parallel. Defaults to ``False``.
+                each Cholesky panel in parallel while the batch is too small
+                to fill the device. Defaults to ``False``.
         """
         # The underlying kernels (factorize / solve / permute / tile-pattern)
         # are hard-coded to wp.float32, so reject any other dtype up front
@@ -557,7 +562,11 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
     def _factorize_numeric(self, clear_skipped: bool = True) -> None:
         info = self._operator.info
         num_blocks = info.num_blocks
-        if self._parallel_factorization:
+        # Panel parallelism only pays off while the batch cannot fill the device.
+        if (
+            self._parallel_factorization
+            and num_blocks < PARALLEL_FACTORIZATION_MAX_BLOCKS_PER_SM * self._device.sm_count
+        ):
             llt_blocked_rcm_factorize_parallel(
                 kernels=self._parallel_factorize_kernels,
                 dim=info.dim,
