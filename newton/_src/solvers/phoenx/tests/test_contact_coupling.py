@@ -11,6 +11,7 @@ import newton
 from newton._src.solvers.phoenx.articulations.reduced_forest import ReducedForestContactSystem
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.constraints.contact_projection import (
+    _fast_div,
     contact_project_coupled_velocity_update_no_soft_pd,
     contact_project_friction_metric,
     contact_project_velocity_update_no_soft_pd,
@@ -154,7 +155,36 @@ def _solve_metric_batch(
     result[i] = contact_project_friction_metric(k[0], k[1], k[2], v[0], v[1], old[0], old[1], 1.0, 1.0)
 
 
+@wp.kernel(enable_backward=False)
+def _fast_div_batch(numerator: wp.array[wp.float32], denominator: wp.array[wp.float32], out: wp.array[wp.float32]):
+    i = wp.tid()
+    out[i] = _fast_div(numerator[i], denominator[i])
+
+
 class TestContactCoupling(unittest.TestCase):
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA fast division")
+    def test_fast_division_matches_ieee_range(self):
+        """Approximate division stays within a few ulp, including huge and zero divisors."""
+        rng = np.random.default_rng(3)
+        numerator = (rng.uniform(-1.0, 1.0, 4096) * 10.0 ** rng.integers(-30, 30, 4096)).astype(np.float32)
+        denominator = (rng.uniform(0.5, 2.0, 4096) * 10.0 ** rng.integers(-30, 30, 4096)).astype(np.float32)
+        numerator[:3] = (3.0e38, -1.0, 2.0)
+        denominator[:3] = (2.0e38, 1.0e38, 0.0)
+        out = wp.zeros(len(numerator), dtype=wp.float32, device="cuda:0")
+        wp.launch(
+            _fast_div_batch,
+            len(numerator),
+            [wp.array(numerator, device="cuda:0"), wp.array(denominator, device="cuda:0")],
+            [out],
+            device="cuda:0",
+        )
+        expected = numerator.astype(np.float64) / denominator.astype(np.float64)
+        actual = out.numpy().astype(np.float64)
+        self.assertTrue(np.isinf(actual[2]))
+        finite = np.isfinite(expected) & (np.abs(expected) > 1.0e-30) & (np.abs(expected) < 1.0e30)
+        relative = np.abs(actual[finite] - expected[finite]) / np.abs(expected[finite])
+        self.assertLess(float(relative.max()), 4.0 * float(np.finfo(np.float32).eps))
+
     def test_cross_articulation_friction_does_not_add_energy(self):
         if not wp.is_cuda_available():
             self.skipTest("CUDA required")
@@ -228,37 +258,42 @@ class TestContactCoupling(unittest.TestCase):
         velocities = np.asarray([item[1] for item in cases], dtype=np.float32)
         old = np.asarray([item[2] for item in cases], dtype=np.float32)
         packed = np.stack([matrices[:, 0, 0], matrices[:, 0, 1], matrices[:, 1, 1]], axis=1)
-        result = wp.zeros(len(cases), dtype=wp.vec2, device="cpu")
-        wp.launch(
-            _solve_metric_batch,
-            dim=len(cases),
-            inputs=[
-                wp.array(packed, dtype=wp.vec3, device="cpu"),
-                wp.array(velocities, dtype=wp.vec2, device="cpu"),
-                wp.array(old, dtype=wp.vec2, device="cpu"),
-            ],
-            outputs=[result],
-            device="cpu",
-        )
-        for raw_matrix, raw_velocity, previous, friction in zip(matrices, velocities, old, result.numpy(), strict=True):
-            matrix = raw_matrix.astype(np.float64)
-            velocity = raw_velocity.astype(np.float64)
-            after_velocity = velocity + matrix @ (friction.astype(np.float64) - previous)
-            self.assertAlmostEqual(float(np.linalg.norm(friction)), 1.0, places=5)
-            slip_length = np.linalg.norm(after_velocity)
-            self.assertLessEqual(float(friction @ after_velocity), 1.0e-6 * slip_length)
-            cross = friction[0] * after_velocity[1] - friction[1] * after_velocity[0]
-            roundoff = (
-                8.0
-                * np.finfo(np.float32).eps
-                * (np.linalg.norm(velocity) + np.linalg.norm(matrix) * np.linalg.norm(friction - previous))
+        # CUDA uses fast division in the float32 projection; check it too.
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            result = wp.zeros(len(cases), dtype=wp.vec2, device=device)
+            wp.launch(
+                _solve_metric_batch,
+                dim=len(cases),
+                inputs=[
+                    wp.array(packed, dtype=wp.vec3, device=device),
+                    wp.array(velocities, dtype=wp.vec2, device=device),
+                    wp.array(old, dtype=wp.vec2, device=device),
+                ],
+                outputs=[result],
+                device=device,
             )
-            self.assertLess(
-                abs(cross), 2.0e-5 * slip_length + roundoff, msg=str((matrix, velocity, previous, friction))
-            )
-            before = 0.5 * velocity @ np.linalg.solve(matrix, velocity)
-            after = 0.5 * after_velocity @ np.linalg.solve(matrix, after_velocity)
-            self.assertLessEqual(after, before + 1.0e-6 * max(before, 1.0e-12))
+            for raw_matrix, raw_velocity, previous, friction in zip(
+                matrices, velocities, old, result.numpy(), strict=True
+            ):
+                matrix = raw_matrix.astype(np.float64)
+                velocity = raw_velocity.astype(np.float64)
+                after_velocity = velocity + matrix @ (friction.astype(np.float64) - previous)
+                self.assertAlmostEqual(float(np.linalg.norm(friction)), 1.0, places=5)
+                slip_length = np.linalg.norm(after_velocity)
+                self.assertLessEqual(float(friction @ after_velocity), 1.0e-6 * slip_length)
+                cross = friction[0] * after_velocity[1] - friction[1] * after_velocity[0]
+                roundoff = (
+                    8.0
+                    * np.finfo(np.float32).eps
+                    * (np.linalg.norm(velocity) + np.linalg.norm(matrix) * np.linalg.norm(friction - previous))
+                )
+                self.assertLess(
+                    abs(cross), 2.0e-5 * slip_length + roundoff, msg=str((matrix, velocity, previous, friction))
+                )
+                before = 0.5 * velocity @ np.linalg.solve(matrix, velocity)
+                after = 0.5 * after_velocity @ np.linalg.solve(matrix, after_velocity)
+                self.assertLessEqual(after, before + 1.0e-6 * max(before, 1.0e-12))
 
     def test_anisotropic_sliding_friction_dissipates_energy(self):
         mobility = np.diag([100.0, 1.0])
