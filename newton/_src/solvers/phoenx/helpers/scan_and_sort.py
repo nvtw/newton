@@ -46,10 +46,14 @@ def sort_variable_length_int(
     wp.utils.radix_sort_pairs(keys, values, count, end_bit=end_bit)
 
 
-def sort_variable_length_int64(keys: wp.array[wp.int64], values: wp.array[int], active_length: wp.array[int]) -> None:
+def sort_variable_length_int64(
+    keys: wp.array[wp.int64], values: wp.array[int], active_length: wp.array[int], end_bit: int | None = None
+) -> None:
     count = keys.shape[0] // 2
     wp.launch(_mask_tail_int64, dim=count, inputs=[keys, active_length])
-    wp.utils.radix_sort_pairs(keys, values, count)
+    # As for ``sort_variable_length_int``: callers whose nonnegative keys stay
+    # below ``2**end_bit - 1`` get the full-width order with fewer passes.
+    wp.utils.radix_sort_pairs(keys, values, count, end_bit=end_bit)
 
 
 # Variable-length RLE: stamp the tail with a sentinel so the full-size RLE

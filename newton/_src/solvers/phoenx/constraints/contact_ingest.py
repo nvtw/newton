@@ -1377,10 +1377,12 @@ def ingest_contacts(
         )
         # Sort body-pair keys (in place); ``sort_perm`` becomes the
         # permutation: ``sort_perm[sorted_k] = newton_k``.
+        # PhoenX body indices are nonnegative, so keys lie in [0, num_bodies**2).
         sort_variable_length_int64(
             scratch.body_pair_keys,
             scratch.sort_perm,
             contacts.rigid_contact_count,
+            end_bit=(int(max(1, num_bodies)) ** 2).bit_length(),
         )
         # Build the inverse permutation for the warm-start gather to
         # translate prev-frame Newton-order match indices into
