@@ -190,8 +190,32 @@ def _make_contact_project_velocity_update(has_soft_contact_pd: bool):
     return impl
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+// __fdividef avoids the branchy IEEE division subroutine and is accurate to
+// about 2 ulp. It returns zero for divisors above 2^126, so pre-scale those.
+float numerator = a;
+float denominator = b;
+if (fabsf(denominator) > 8.50705917e37f) {
+    numerator *= 0.25f;
+    denominator *= 0.25f;
+}
+return __fdividef(numerator, denominator);
+#else
+return a / b;
+#endif
+""")
+def _fast_div(a: wp.float32, b: wp.float32) -> wp.float32: ...
+
+
 def _make_contact_project_friction_metric(scalar_type):
     relative_tolerance = 2.0e-7 if scalar_type == wp.float32 else 1.0e-7
+
+    @wp.func
+    def div(x: scalar_type, y: scalar_type) -> scalar_type:
+        if wp.static(scalar_type == wp.float32):
+            return _fast_div(x, y)
+        return x / y
 
     @wp.func
     def impl(
@@ -215,11 +239,11 @@ def _make_contact_project_friction_metric(scalar_type):
         scale = wp.max(mobility_t1, mobility_t2)
         result = wp.vec2f(0.0)
         if scale > wp.float32(0.0) and static_radius > wp.float32(0.0):
-            a = scalar_type(mobility_t1) / scalar_type(scale)
-            c = scalar_type(mobility_t2) / scalar_type(scale)
-            b = scalar_type(mobility_t1t2) / scalar_type(scale)
-            v1 = scalar_type(rhs_t1) / scalar_type(scale)
-            v2 = scalar_type(rhs_t2) / scalar_type(scale)
+            a = div(scalar_type(mobility_t1), scalar_type(scale))
+            c = div(scalar_type(mobility_t2), scalar_type(scale))
+            b = div(scalar_type(mobility_t1t2), scalar_type(scale))
+            v1 = div(scalar_type(rhs_t1), scalar_type(scale))
+            v2 = div(scalar_type(rhs_t2), scalar_type(scale))
             target1 = a * scalar_type(lambda_t1_old) + b * scalar_type(lambda_t2_old) - v1
             target2 = b * scalar_type(lambda_t1_old) + c * scalar_type(lambda_t2_old) - v2
             determinant = scalar_type(a) * scalar_type(c) - scalar_type(b) * scalar_type(b)
@@ -270,8 +294,8 @@ def _make_contact_project_friction_metric(scalar_type):
                         cc = scalar_type(c) + alpha
                         bb = scalar_type(b)
                         det = aa * cc - bb * bb
-                        x = (cc * target_x - bb * target_y) / det
-                        y = (aa * target_y - bb * target_x) / det
+                        x = div(cc * target_x - bb * target_y, det)
+                        y = div(aa * target_y - bb * target_x, det)
                         length = wp.sqrt(x * x + y * y)
                         error = length - radius
                         # Newton approaches this convex decreasing norm from
@@ -287,8 +311,8 @@ def _make_contact_project_friction_metric(scalar_type):
                         else:
                             upper = alpha
                             result = wp.vec2f(wp.float32(x), wp.float32(y))
-                        derivative = -(cc * x * x - scalar_type(2.0) * bb * x * y + aa * y * y) / (det * length)
-                        proposal = alpha - error / derivative
+                        derivative = -div(cc * x * x - scalar_type(2.0) * bb * x * y + aa * y * y, det * length)
+                        proposal = alpha - div(error, derivative)
                         if proposal <= lower or proposal >= upper:
                             proposal = scalar_type(0.5) * (lower + upper)
                         alpha = proposal
