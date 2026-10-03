@@ -212,6 +212,7 @@ class _FullContactArrays:
     sticky_prev_offset1: wp.array[wp.vec2]
     sticky_prev_normal: wp.array[wp.vec3]
     sticky_match_index: wp.array[wp.int32]
+    sticky_witness_threshold_sq: float
     has_shape_props: int
     has_match_index: int
     has_sticky_history: int
@@ -250,6 +251,20 @@ def _backup_full_kernel(
         data.match_index_buf[i] = data.match_index[i]
 
 
+@wp.func
+def _sticky_witnesses_valid(data: _FullContactArrays, p: int, previous: int) -> bool:
+    """Whether both saved witnesses stay near their fresh contact points.
+
+    Saved and fresh witnesses share a body frame, so their body-frame distance
+    equals the world-space drift under the current pose. Body-local witnesses
+    can leave the fresh contact when a body rotates.
+    """
+    threshold_sq = data.sticky_witness_threshold_sq
+    drift0 = data.sticky_prev_point0[previous] - data.point0_buf[p]
+    drift1 = data.sticky_prev_point1[previous] - data.point1_buf[p]
+    return wp.length_sq(drift0) <= threshold_sq and wp.length_sq(drift1) <= threshold_sq
+
+
 @wp.kernel(enable_backward=False)
 def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], count: wp.array[int]):
     """Permuted write-back from scratch into live arrays."""
@@ -261,8 +276,13 @@ def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], coun
         data.sorted_keys[i] = data.sort_keys[p]
     data.shape0[i] = data.shape0_buf[p]
     data.shape1[i] = data.shape1_buf[p]
-    if data.has_sticky_history != 0 and data.sticky_match_index[i] >= wp.int32(0):
+    replay = False
+    previous = int(-1)
+    if data.has_sticky_history != 0:
         previous = data.sticky_match_index[i]
+        if previous >= 0:
+            replay = _sticky_witnesses_valid(data, p, previous)
+    if replay:
         data.point0[i] = data.sticky_prev_point0[previous]
         data.point1[i] = data.sticky_prev_point1[previous]
         data.offset0[i] = decode_oct(data.sticky_prev_offset0[previous]) * data.margin0_buf[p]
@@ -513,6 +533,7 @@ class ContactSorter:
         sticky_prev_offset1: wp.array | None = None,
         sticky_prev_normal: wp.array | None = None,
         sticky_match_index: wp.array | None = None,
+        sticky_witness_threshold_sq: float = 0.0,
         device: Devicelike = None,
     ) -> None:
         """Sort contacts written through the full collide.py writer.
@@ -547,6 +568,8 @@ class ContactSorter:
             sticky_prev_offset1: Optional oct-encoded previous offset direction on shape 1.
             sticky_prev_normal: Optional previous canonical contact normals.
             sticky_match_index: Optional canonical indices into sticky history.
+            sticky_witness_threshold_sq: Maximum squared world-space drift [m^2] between
+                a saved witness and its fresh contact point; larger drift keeps fresh geometry.
             device: Device to launch on.
         """
         n = self._capacity
@@ -613,6 +636,7 @@ class ContactSorter:
         )
         data.sticky_prev_normal = sticky_prev_normal if sticky_prev_normal is not None else self._full_normal_buf
         data.sticky_match_index = sticky_match_index if sticky_match_index is not None else self._full_match_index_buf
+        data.sticky_witness_threshold_sq = float(sticky_witness_threshold_sq)
         data.has_shape_props = 1 if has_props else 0
         data.has_match_index = 1 if has_match else 0
         data.has_sticky_history = 1 if has_sticky_history else 0

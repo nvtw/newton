@@ -8,6 +8,7 @@
 # to stress-test narrow-phase contact generation.
 #
 # Command: python -m newton.examples pyramid
+# Kamino DVI: python -m newton.examples pyramid --solver kamino
 #
 ###########################################################################
 
@@ -36,20 +37,29 @@ XPBD_CONTACT_RELAXATION = 0.8
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
+        self.viewer = viewer
+        self.test_mode = args.test
+        self.world_count = args.world_count
+        self.solver_type = args.solver
+
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.viewer = viewer
-        self.test_mode = args.test
-        self.world_count = args.world_count
-
         num_pyramids = args.num_pyramids
+        if num_pyramids is None:
+            num_pyramids = 1 if self.solver_type == "kamino" else DEFAULT_NUM_PYRAMIDS
         pyramid_size = args.pyramid_size
+        if pyramid_size is None:
+            pyramid_size = DEFAULT_PYRAMID_SIZE
+        self.pyramid_size = pyramid_size
 
         builder = newton.ModelBuilder()
+        if self.solver_type == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(builder)
         builder.add_shape_plane(xform=wp.transform_identity(), width=0.0, length=0.0)
 
         box_count = 0
@@ -112,20 +122,42 @@ class Example:
         else:
             self.model = builder.finalize()
 
-        solver_name = getattr(args, "solver", "xpbd")
-        # PhoenX needs sticky contact matching for its persistent warm-start.
-        cp_kwargs = {"broad_phase": args.broad_phase}
-        if solver_name == "phoenx":
-            cp_kwargs["contact_matching"] = "sticky"
-        self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)
+        if self.solver_type == "kamino":
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model,
+                dynamics_solver="dvi",
+                sparse_dynamics=True,
+                sparse_jacobian=True,
+            )
+            solver_config.use_collision_detector = True
+            solver_config.integrator = "moreau"
+            solver_config.collision_detector.broadphase = args.broad_phase
+            # The heavy ball needs short steps; keep each DVI solve inexpensive.
+            solver_config.dvi.max_alternating_iterations = 2
+            solver_config.constraints.gamma = 0.5
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+            self.collision_pipeline = None
+            self.contacts = newton.Contacts(
+                self.model.rigid_contact_max,
+                0,
+                device=self.model.device,
+                requested_attributes=self.model.get_requested_contact_attributes(),
+            )
+        else:
+            # PhoenX needs sticky contact matching for its persistent warm-start.
+            cp_kwargs = {"broad_phase": args.broad_phase}
+            if self.solver_type == "phoenx":
+                cp_kwargs["contact_matching"] = "sticky"
+            self.collision_pipeline = newton.CollisionPipeline(self.model, **cp_kwargs)
+            self.contacts = self.collision_pipeline.contacts()
 
-        if solver_name == "phoenx":
+        if self.solver_type == "phoenx":
             self.solver = newton.solvers.SolverPhoenX(
                 self.model, substeps=4, solver_iterations=8, velocity_iterations=1
             )
-        elif solver_name == "mujoco":
+        elif self.solver_type == "mujoco":
             self.solver = newton.solvers.SolverMuJoCo(self.model)
-        else:
+        elif self.solver_type == "xpbd":
             self.solver = newton.solvers.SolverXPBD(
                 self.model,
                 iterations=XPBD_ITERATIONS,
@@ -140,8 +172,6 @@ class Example:
 
         self.top_initial_positions = self.state_0.body_q.numpy()[:, :3].copy()
 
-        self.contacts = self.collision_pipeline.contacts()
-
         self.viewer.set_model(self.model)
 
         cam_dist = max(pyramid_height, num_pyramids * PYRAMID_SPACING * 0.3)
@@ -154,17 +184,25 @@ class Example:
         self.capture()
 
     def capture(self):
-        with wp.ScopedCapture() as capture:
-            self.simulate()
-        self.graph = capture.graph
+        if wp.get_device().is_cuda and not wp.config.verify_cuda:
+            with wp.ScopedCapture() as capture:
+                self.simulate()
+            self.graph = capture.graph
+        else:
+            self.graph = None
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
+        contacts = None if self.solver_type == "kamino" else self.contacts
+        for substep in range(self.sim_substeps):
             self.state_0.clear_forces()
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+            if self.collision_pipeline is not None:
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             self.viewer.apply_forces(self.state_0)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
+            self.solver.step(self.state_0, self.state_1, self.control, contacts, self.sim_dt)
+            if self.sim_substeps % 2 == 1 and substep == self.sim_substeps - 1:
+                self.state_0.assign(self.state_1)
+            else:
+                self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
         if self.graph:
@@ -177,24 +215,35 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        if self.contacts is not None:
+            if self.solver_type == "kamino" and self.viewer.show_contacts:
+                self.solver.update_contacts(self.contacts, self.state_0)
+            self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
     def test_final(self):
-        """Verify pyramid top cubes remain near their initial positions.
+        """Verify pyramid top cubes settle without moving laterally.
 
         In test mode the wrecking ball is omitted so the pyramids should
-        settle under gravity without toppling.  Each top cube must stay
-        within ``max_displacement`` of its initial position.
+        settle under gravity without toppling. Vertical gaps between rows
+        are expected to close.
         """
         body_q = self.state_0.body_q.numpy()
-        max_displacement = 0.5  # [m]
+        max_lateral_displacement = 0.5  # [m]
+        initial_row_gap = CUBE_SPACING - 2.0 * CUBE_HALF
+        max_vertical_settlement = (self.pyramid_size - 1) * initial_row_gap + 0.1
         for idx in self.top_body_indices:
             current_pos = body_q[idx, :3]
             initial_pos = self.top_initial_positions[idx]
-            displacement = np.linalg.norm(current_pos - initial_pos)
-            assert displacement < max_displacement, (
-                f"Top cube body {idx}: displaced {displacement:.4f} m (max allowed {max_displacement:.4f} m)"
+            lateral_displacement = np.linalg.norm(current_pos[:2] - initial_pos[:2])
+            vertical_settlement = initial_pos[2] - current_pos[2]
+            assert lateral_displacement < max_lateral_displacement, (
+                f"Top cube body {idx}: moved laterally {lateral_displacement:.4f} m "
+                f"(max allowed {max_lateral_displacement:.4f} m)"
+            )
+            assert vertical_settlement < max_vertical_settlement, (
+                f"Top cube body {idx}: settled {vertical_settlement:.4f} m vertically "
+                f"(max allowed {max_vertical_settlement:.4f} m)"
             )
 
     @staticmethod
@@ -205,22 +254,22 @@ class Example:
         newton.examples.add_broad_phase_arg(parser)
         parser.set_defaults(broad_phase="sap")
         parser.add_argument(
+            "--solver",
+            choices=["xpbd", "mujoco", "phoenx", "kamino"],
+            default="xpbd",
+            help="Rigid-body solver backend.",
+        )
+        parser.add_argument(
             "--num-pyramids",
             type=int,
-            default=DEFAULT_NUM_PYRAMIDS,
-            help="Number of pyramids to build.",
+            default=None,
+            help=f"Number of pyramids to build (default: 1 for Kamino, {DEFAULT_NUM_PYRAMIDS} otherwise).",
         )
         parser.add_argument(
             "--pyramid-size",
             type=int,
-            default=DEFAULT_PYRAMID_SIZE,
-            help="Number of rows in each pyramid base.",
-        )
-        parser.add_argument(
-            "--solver",
-            choices=["xpbd", "mujoco", "phoenx"],
-            default="xpbd",
-            help="Rigid-body solver backend.",
+            default=None,
+            help=f"Number of rows in each pyramid base (default: {DEFAULT_PYRAMID_SIZE}).",
         )
         return parser
 
