@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx import simulation as phoenx_simulation
 from newton._src.solvers.phoenx.dispatch.color_groups import (
     get_sweep_block_dim,
     get_sweep_kernel,
@@ -131,6 +132,92 @@ class TestCooperativeJointRHS(unittest.TestCase):
                     else:
                         for a, b in zip(expected, actual, strict=True):
                             self.assertEqual(a.tobytes(), b.tobytes())
+
+
+def _simulate_single_world_chains(*, cooperative: bool, steps: int = 30) -> np.ndarray:
+    """Drop hinged box chains onto the ground with overflow-only mass splitting."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    for chain in range(24):
+        previous = -1
+        joints = []
+        for link in range(4):
+            body = builder.add_link(
+                xform=wp.transform(
+                    wp.vec3(0.5 * link, 0.6 * chain, 0.3 + 0.05 * chain),
+                    wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.2 * chain),
+                ),
+            )
+            builder.add_shape_box(body, hx=0.2, hy=0.1, hz=0.05)
+            if previous < 0:
+                joints.append(builder.add_joint_free(body))
+            else:
+                joints.append(
+                    builder.add_joint_revolute(
+                        previous,
+                        body,
+                        axis=wp.vec3(0.0, 1.0, 0.0),
+                        parent_xform=wp.transform(wp.vec3(0.25, 0.0, 0.0), wp.quat_identity()),
+                        child_xform=wp.transform(wp.vec3(-0.25, 0.0, 0.0), wp.quat_identity()),
+                    )
+                )
+            previous = body
+        builder.add_articulation(joints)
+    model = builder.finalize(device="cuda:0")
+    pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+    contacts = pipeline.contacts()
+
+    original = phoenx_simulation.get_singleworld_kernel
+
+    def get_kernel(*args, **kwargs):
+        if "cooperative_joints" in kwargs:
+            kwargs["cooperative_joints"] = kwargs["cooperative_joints"] and cooperative
+            requested.append(kwargs["cooperative_joints"])
+        return original(*args, **kwargs)
+
+    requested = []
+    with patch.object(phoenx_simulation, "get_singleworld_kernel", get_kernel):
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            collision_pipeline=pipeline,
+            joint_mode="maximal_pgs",
+            step_layout="single_world",
+            substeps=2,
+            solver_iterations=4,
+            velocity_iterations=1,
+            mass_splitting=True,
+            mass_splitting_overflow_only=True,
+            mass_splitting_batch_size=1,
+            mass_splitting_unrolled=True,
+            max_colored_partitions=2,
+            partitioner_algorithm="endpoint_owner",
+            colored_contact_headers=True,
+            colored_contact_rows=True,
+        )
+        state = model.state()
+        control = model.control()
+
+        def simulate():
+            pipeline.collide(state, contacts)
+            solver.step(state, state, control, contacts, 1.0 / 120.0)
+
+        simulate()
+        with wp.ScopedCapture() as capture:
+            simulate()
+    assert any(requested) == cooperative
+    for _ in range(steps):
+        wp.capture_launch(capture.graph)
+    return state.body_q.numpy()
+
+
+@unittest.skipUnless(_cuda_with_graph_capture(), "Cooperative joint RHS requires CUDA")
+class TestSingleWorldCooperativeJoints(unittest.TestCase):
+    def test_single_world_cooperative_joints_match_scalar(self):
+        """Mixed joint/contact colors keep the scalar trajectory bit for bit."""
+        scalar = _simulate_single_world_chains(cooperative=False)
+        cooperative = _simulate_single_world_chains(cooperative=True)
+        self.assertTrue(np.isfinite(scalar).all())
+        self.assertEqual(scalar.tobytes(), cooperative.tobytes())
 
 
 class TestCooperativeJointPolicy(unittest.TestCase):

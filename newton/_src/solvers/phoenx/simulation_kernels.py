@@ -173,7 +173,6 @@ _SOFT_HEX_OFF_BODY8 = wp.constant(wp.int32(8))
 
 # Opt-in comparison for mixed rigid colors. Eight lanes solve the rows of one
 # D6 block while the existing color launch still handles its contacts.
-_EXPERIMENTAL_COOPERATIVE_JOINTS = os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_JOINTS") == "1"
 _EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES = os.environ.get("PHOENX_EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES") == "1"
 _EXPERIMENTAL_COOPERATIVE_CONTACTS = os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_CONTACTS") == "1"
 
@@ -3845,8 +3844,13 @@ def _make_singleworld_rigid_direct_color_func(
     bilateral_joint_blocks: bool = False,
     direct_regular_colors: bool = False,
     patch_friction: bool = False,
+    cooperative_joints: bool = False,
 ):
-    """Generated rigid-only color dispatch for single-world kernels."""
+    """Generated rigid-only color dispatch for single-world kernels.
+
+    ``cooperative_joints`` solves each bilateral joint block with eight lanes
+    in iterate/relax; it requires CUDA warp shuffles.
+    """
 
     _dispatch_rigid_contact = _make_singleworld_rigid_contact_dispatch_func(
         has_mass_splitting=has_mass_splitting,
@@ -3921,7 +3925,7 @@ def _make_singleworld_rigid_direct_color_func(
         contact_lane_base = wp.int32(0)
         if wp.static(
             _EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES
-            and _EXPERIMENTAL_COOPERATIVE_JOINTS
+            and cooperative_joints
             and bilateral_joint_blocks
             and not is_prepare
             and not is_cached_prepare
@@ -3937,9 +3941,7 @@ def _make_singleworld_rigid_direct_color_func(
 
         if wp.static(has_joints and not skip_joint_pgs):
             count_joints = contact_start - joint_start
-            if wp.static(
-                _EXPERIMENTAL_COOPERATIVE_JOINTS and bilateral_joint_blocks and not is_prepare and not is_cached_prepare
-            ):
+            if wp.static(cooperative_joints and bilateral_joint_blocks and not is_prepare and not is_cached_prepare):
                 # A warp contains four independent eight-lane D6 solves.
                 # The color is an independent set, so the leader can scatter
                 # its paired impulse while other tiles progress independently.
@@ -4076,6 +4078,7 @@ def _make_singleworld_persistent_kernel(
     direct_regular_colors: bool = False,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
+    cooperative_joints: bool = False,
 ):
     """Persistent-grid PGS kernel for the requested phase.
 
@@ -4121,6 +4124,7 @@ def _make_singleworld_persistent_kernel(
         enable_column_timers=enable_column_timers,
         bilateral_joint_blocks=bilateral_joint_blocks,
         patch_friction=patch_friction,
+        cooperative_joints=cooperative_joints,
     )
     if direct_regular_colors:
         _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
@@ -4138,6 +4142,7 @@ def _make_singleworld_persistent_kernel(
             bilateral_joint_blocks=bilateral_joint_blocks,
             direct_regular_colors=True,
             patch_friction=patch_friction,
+            cooperative_joints=cooperative_joints,
         )
 
     @wp.kernel(name=f"phoenx_singleworld_{phase}", enable_backward=False, module="unique", grid_stride=False)
@@ -4518,11 +4523,15 @@ def get_singleworld_kernel(
     direct_regular_colors: bool = False,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
+    cooperative_joints: bool = False,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
     factory = _make_singleworld_fused_kernel if fused else _make_singleworld_persistent_kernel
+    # The single-block fused tail keeps scalar joints; both paths are bitwise equal.
+    extra = {} if fused else {"cooperative_joints": cooperative_joints}
     return factory(
+        **extra,
         phase=phase,
         cloth_support=cloth_support,
         enable_column_timers=enable_column_timers,
