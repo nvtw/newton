@@ -2,20 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Check ordered four-lane contact solving against the scalar color path."""
 
-import os
 import unittest
 from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx import simulation_kernels as kernels
-from newton._src.solvers.phoenx.body import body_container_zeros
+import newton
+from newton._src.solvers.phoenx import simulation as phoenx_simulation
 from newton._src.solvers.phoenx.constraints import constraint_contact_cloth as contact
 from newton._src.solvers.phoenx.constraints.constraint_contact import _OFF_CONTACT_COUNT
-from newton._src.solvers.phoenx.constraints.constraint_container import constraint_container_zeros
 from newton._src.solvers.phoenx.examples.example_kapla_hoberman import Example
-from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 class _NullViewer:
@@ -32,12 +29,24 @@ class _NullViewer:
 
 
 class TestCooperativeContactDevice(unittest.TestCase):
-    def test_opt_in_rejects_cpu(self):
-        bodies = body_container_zeros(1, device="cpu")
-        constraints = constraint_container_zeros(0, 1, device="cpu")
-        with patch.dict(os.environ, {"PHOENX_EXPERIMENTAL_COOPERATIVE_CONTACTS": "1"}):
-            with self.assertRaisesRegex(ValueError, "requires a CUDA device"):
-                PhoenXWorld(bodies, constraints, device="cpu")
+    def test_cpu_keeps_scalar_contacts(self):
+        """Select subgroup shuffles only for CUDA single-world kernels."""
+        builder = newton.ModelBuilder()
+        body = builder.add_body()
+        builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+        model = builder.finalize(device="cpu")
+        world = newton.solvers.SolverPhoenX(model, step_layout="single_world").world
+        requested = []
+        original = phoenx_simulation.get_singleworld_kernel
+
+        def get_kernel(*args, **kwargs):
+            requested.append(kwargs.get("cooperative_contacts", False))
+            return original(*args, **kwargs)
+
+        with patch.object(phoenx_simulation, "get_singleworld_kernel", get_kernel):
+            world._singleworld_kernels()
+        self.assertTrue(requested)
+        self.assertFalse(any(requested))
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "CUDA required for subgroup shuffles")
@@ -70,46 +79,44 @@ class TestCooperativeContactParity(unittest.TestCase):
             world.constraints.multipliers,
         )
         snapshots = tuple(wp.clone(array) for array in arrays)
-        previous_flag = kernels._EXPERIMENTAL_COOPERATIVE_CONTACTS
+        original = phoenx_simulation.get_singleworld_kernel
 
         def build_kernel(enabled):
-            kernels._EXPERIMENTAL_COOPERATIVE_CONTACTS = enabled
-            kernels._make_singleworld_rigid_direct_color_func.cache_clear()
-            kernels._make_singleworld_persistent_kernel.cache_clear()
-            return world._singleworld_kernels()[2]
+            def get_kernel(*args, **kwargs):
+                if "cooperative_contacts" in kwargs:
+                    kwargs["cooperative_contacts"] = enabled
+                return original(*args, **kwargs)
 
-        try:
-            scalar = build_kernel(False)
-            cooperative = build_kernel(True)
-            self.assertIsNot(scalar, cooperative)
+            with patch.object(phoenx_simulation, "get_singleworld_kernel", get_kernel):
+                return world._singleworld_kernels()[2]
 
-            def capture(kernel):
-                wp.capture_begin(device=example.device)
-                world._launch_singleworld_head(kernel, wp.float32(1.0 / world.substep_dt), wp.int32(-1), cc, 0)
-                return wp.capture_end(device=example.device)
+        scalar = build_kernel(False)
+        cooperative = build_kernel(True)
+        self.assertIsNot(scalar, cooperative)
 
-            scalar_graph = capture(scalar)
-            cooperative_graph = capture(cooperative)
+        def capture(kernel):
+            wp.capture_begin(device=example.device)
+            world._launch_singleworld_head(kernel, wp.float32(1.0 / world.substep_dt), wp.int32(-1), cc, 0)
+            return wp.capture_end(device=example.device)
 
-            def solve(graph):
-                for target, snapshot in zip(arrays, snapshots, strict=True):
-                    wp.copy(target, snapshot)
-                world._partitioner.sweep_direction.assign([0])
-                wp.synchronize_device(example.device)
-                wp.capture_launch(graph)
-                return tuple(array.numpy().copy() for array in arrays)
+        scalar_graph = capture(scalar)
+        cooperative_graph = capture(cooperative)
 
-            expected = solve(scalar_graph)
-            repeated = solve(scalar_graph)
-            for reference, repeat in zip(expected, repeated, strict=True):
-                np.testing.assert_array_equal(repeat, reference)
-            actual = solve(cooperative_graph)
-            for reference, candidate in zip(expected, actual, strict=True):
-                np.testing.assert_array_equal(candidate, reference)
-        finally:
-            kernels._EXPERIMENTAL_COOPERATIVE_CONTACTS = previous_flag
-            kernels._make_singleworld_rigid_direct_color_func.cache_clear()
-            kernels._make_singleworld_persistent_kernel.cache_clear()
+        def solve(graph):
+            for target, snapshot in zip(arrays, snapshots, strict=True):
+                wp.copy(target, snapshot)
+            world._partitioner.sweep_direction.assign([0])
+            wp.synchronize_device(example.device)
+            wp.capture_launch(graph)
+            return tuple(array.numpy().copy() for array in arrays)
+
+        expected = solve(scalar_graph)
+        repeated = solve(scalar_graph)
+        for reference, repeat in zip(expected, repeated, strict=True):
+            np.testing.assert_array_equal(repeat, reference)
+        actual = solve(cooperative_graph)
+        for reference, candidate in zip(expected, actual, strict=True):
+            np.testing.assert_array_equal(candidate, reference)
 
 
 if __name__ == "__main__":
