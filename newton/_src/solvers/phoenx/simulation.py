@@ -5026,12 +5026,13 @@ class PhoenXWorld:
             "direct_regular_colors": self._singleworld_overflow_only_mass_splitting,
             "patch_friction": self._contact_patch_enabled,
         }
+        cooperative = {"cooperative_joints": self.device.is_cuda and kw["bilateral_joint_blocks"]}
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),
             get_singleworld_kernel(phase="prepare", fused=True, **kw),
-            get_singleworld_kernel(phase="iterate", fused=False, **kw),
+            get_singleworld_kernel(phase="iterate", fused=False, **kw, **cooperative),
             get_singleworld_kernel(phase="iterate", fused=True, **kw),
-            get_singleworld_kernel(phase="relax", fused=False, **kw),
+            get_singleworld_kernel(phase="relax", fused=False, **kw, **cooperative),
             get_singleworld_kernel(phase="relax", fused=True, **kw),
         )
 
