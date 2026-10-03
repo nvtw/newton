@@ -958,9 +958,10 @@ def _check_sticky_rotated_witness(test, device, *, plane_first, threshold, use_c
             pipeline.collide(state, contacts)
         test.assertEqual(count, int(contacts.rigid_contact_count.numpy()[0]))
         match_index = contacts.rigid_contact_match_index.numpy()[:count]
-        test.assertTrue(np.all(match_index >= 0), "The geometric contacts must still match")
-        test.assertEqual(int(contacts.rigid_contact_new_count.numpy()[0]), 0)
-        test.assertEqual(int(contacts.rigid_contact_broken_count.numpy()[0]), 0)
+        # Sticky matching retains penetrating anchors; separated rows are new contacts.
+        test.assertTrue(np.all(match_index[penetrating] >= 0), "Penetrating contacts must still match")
+        np.testing.assert_array_equal(match_index[separated], MATCH_BROKEN)
+        test.assertEqual(int(contacts.rigid_contact_new_count.numpy()[0]), int(np.count_nonzero(separated)))
         for field in fields:
             current = getattr(contacts, f"rigid_contact_{field}").numpy()[:count]
             if expect_replay:
@@ -977,10 +978,11 @@ def _check_sticky_rotated_witness(test, device, *, plane_first, threshold, use_c
             pipeline.collide(state, contacts)
         test.assertEqual(count, int(contacts.rigid_contact_count.numpy()[0]))
         match_index = contacts.rigid_contact_match_index.numpy()[:count]
-        test.assertTrue(np.all(match_index >= 0))
+        test.assertTrue(np.all(match_index[penetrating] >= 0))
         for field in fields:
             np.testing.assert_array_equal(
-                getattr(contacts, f"rigid_contact_{field}").numpy()[:count], retained[field][match_index]
+                getattr(contacts, f"rigid_contact_{field}").numpy()[:count][penetrating],
+                retained[field][match_index[penetrating]],
             )
 
 
