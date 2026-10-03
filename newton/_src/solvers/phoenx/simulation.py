@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable
 
 import numpy as np
@@ -475,8 +474,6 @@ class PhoenXWorld:
             self.device = bodies.position.device
         else:
             self.device = wp.get_device(device)
-        if os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_CONTACTS") == "1" and not self.device.is_cuda:
-            raise ValueError("PHOENX_EXPERIMENTAL_COOPERATIVE_CONTACTS requires a CUDA device")
 
         valid_contact_friction_models = ("point", "patch")
         if contact_friction_model not in valid_contact_friction_models:
@@ -5026,11 +5023,12 @@ class PhoenXWorld:
             "direct_regular_colors": self._singleworld_overflow_only_mass_splitting,
             "patch_friction": self._contact_patch_enabled,
         }
-        cooperative = {"cooperative_joints": self.device.is_cuda and kw["bilateral_joint_blocks"]}
+        cuda = self.device.is_cuda
+        cooperative = {"cooperative_joints": cuda and kw["bilateral_joint_blocks"]}
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),
             get_singleworld_kernel(phase="prepare", fused=True, **kw),
-            get_singleworld_kernel(phase="iterate", fused=False, **kw, **cooperative),
+            get_singleworld_kernel(phase="iterate", fused=False, **kw, **cooperative, cooperative_contacts=cuda),
             get_singleworld_kernel(phase="iterate", fused=True, **kw),
             get_singleworld_kernel(phase="relax", fused=False, **kw, **cooperative),
             get_singleworld_kernel(phase="relax", fused=True, **kw),
