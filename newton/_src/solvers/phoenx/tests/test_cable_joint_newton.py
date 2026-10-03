@@ -146,6 +146,43 @@ class TestNewtonCableAdapter(unittest.TestCase):
         modes = solver._joint_constraints.joint_mode.numpy()
         self.assertIn(int(JOINT_MODE_GENERIC_D6), modes.tolist())
 
+    def test_direct_rows_overwrite_stale_unused_rows(self) -> None:
+        """Skipped material, dynamic and tail rows are rewritten from stale storage."""
+        from newton._src.solvers.phoenx.tests.test_block_joint_policy import (  # noqa: PLC0415
+            make_model,
+            make_solver,
+        )
+
+        rod_model, rod_solver = _two_body_cable_world(
+            bend_stiffness=10.0,
+            bend_damping=0.5,
+            shear_stiffness=0.0,
+            shear_damping=0.0,
+            twist_stiffness=0.0,
+            twist_damping=0.0,
+        )
+        hinge_model = make_model(100.0)
+        hinge_solver = make_solver(hinge_model)
+        for model, solver in ((rod_model, rod_solver), (hinge_model, hinge_solver)):
+            direct = solver._direct_equality_system
+            arrays = (
+                direct.row_wrench0,
+                direct.row_wrench1,
+                direct.row_bias,
+                direct.row_error,
+                direct.row_stiffness,
+                direct.row_damping,
+            )
+            direct.refresh_geometry(wp.float32(1000.0))
+            expected = [array.numpy().copy() for array in arrays]
+            self.assertTrue(any(np.any(value == 0.0) for value in expected))
+            for array in arrays:
+                array.fill_(float("nan"))
+            direct.refresh_geometry(wp.float32(1000.0))
+            wp.synchronize_device(model.device)
+            for array, reference in zip(arrays, expected, strict=True):
+                self.assertEqual(array.numpy().tobytes(), reference.tobytes())
+
     def test_rod_d6_rows_preserve_material_slots_and_momentum(self) -> None:
         """Map all four material slots without introducing an impulse couple."""
         model, solver = _two_body_cable_world(
