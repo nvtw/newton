@@ -107,6 +107,7 @@ retained step reproduces the original trajectory bit for bit:
 | Direct-equality rows written once (kernel 35.4 -> 20.4 us) | 66.0 |
 | Body-pair/interaction-graph sorts limited to used key bits | 66.7 |
 | No copy-state lookup for direct colors (`parallel_id < 0`) | 67.3 |
+| `__fdividef` in the float32 friction-disk projection (deterministic, not bitwise; worst-case joint/drop/slide errors over 300 frames unchanged) | 70.6 |
 
 Each launch is a single wave, so its time is the slowest per-column chain.
 A fixed-state probe of contact-only colors (~12.7 us) attributes ~3 us to
@@ -120,6 +121,15 @@ Rejected: preloading each lane's first point before the ordered chain
 concurrently (neutral); a More-Sorensen reciprocal Newton step (+1.3%, but
 higher worst-body residual speed in both Kapla scenes); forcing the float32
 friction branch (neutral). The joint FP64 chain is hidden behind contacts.
+
+Nsight Compute on two settled iterate launches: 152 registers, no spills,
+7-10% achieved occupancy, 89% of cycles without an eligible warp. Stalls are
+long scoreboard 30-45%, fixed-latency wait 20-24%, short scoreboard 10-14%,
+instruction-cache misses 9-11%. IEEE float32 division was about 14% of
+samples, mostly in the friction projection. Module-wide `fast_math` reached
+75 FPS but produced NaNs. Fast division at the remaining projection sites
+(+0.6%) and hoisting launch-metadata loads (+0.4%, bitwise) were within
+noise and not retained.
 
 ## Batched humanoid comparison
 
