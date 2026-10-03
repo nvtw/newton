@@ -492,7 +492,11 @@ def build_interaction_graph(
 
     # Stage 2: variable-length sort. Helper masks the tail past
     # ``num_pairs[0]`` with ``INT64_MAX`` then runs radix_sort_pairs.
-    sort_variable_length_int64(scratch.packed_keys, scratch.packed_values, scratch.num_pairs)
+    # Node ids lie in [0, num_nodes), so the packed keys need only the
+    # partition word plus the node bit width.
+    sort_variable_length_int64(
+        scratch.packed_keys, scratch.packed_values, scratch.num_pairs, end_bit=32 + max(1, num_nodes).bit_length()
+    )
 
     # Stage 3: boundary detect + per-node count.
     wp.launch(
