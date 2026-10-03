@@ -91,6 +91,36 @@ the fixed 24-substep workload, crank tracking, support, and the penetration and
 joint-error gates. A two-color setting is faster but is rejected because it
 fails crank tracking. The PhoenX default remains unchanged.
 
+## Kapla tower with Hoberman spheres
+
+Measured 2026-10-03 on an RTX PRO 6000 Blackwell (`example_kapla_hoberman`,
+240 captured frames after 60, 4 substeps x 10 iterations, 9 colors plus
+overflow, 13,741 bodies, 4,200 block joints, ~259k contact points). Every
+retained step reproduces the original trajectory bit for bit:
+
+| Change | FPS |
+| --- | --- |
+| Baseline | 34.7 |
+| Eight-lane cooperative joint blocks in single-world iterate/relax | 49.5 |
+| Joint and contact families of a color on disjoint lanes | 63.5 |
+| Four-lane ordered contacts in regular colors | 65.2 |
+| Direct-equality rows written once (kernel 35.4 -> 20.4 us) | 66.0 |
+| Body-pair/interaction-graph sorts limited to used key bits | 66.7 |
+| No copy-state lookup for direct colors (`parallel_id < 0`) | 67.3 |
+
+Each launch is a single wave, so its time is the slowest per-column chain.
+A fixed-state probe of contact-only colors (~12.7 us) attributes ~3 us to
+headers and body traffic, ~2 us to point loads and ~7.5 us to point
+arithmetic, of which the sliding-friction root solve
+(`contact_project_friction_metric`) is ~4.8 us. Capping that solve at two
+iterations bounds its end-to-end value at +5.5%.
+
+Rejected: preloading each lane's first point before the ordered chain
+(slower, 64.0 vs 65.2 FPS); precomputed joint inverses once families run
+concurrently (neutral); a More-Sorensen reciprocal Newton step (+1.3%, but
+higher worst-body residual speed in both Kapla scenes); forcing the float32
+friction branch (neutral). The joint FP64 chain is hidden behind contacts.
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,
