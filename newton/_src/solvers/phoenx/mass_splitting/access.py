@@ -117,6 +117,10 @@ def get_state_index(
         if slot < wp.int32(0):
             return wp.int32(-1), wp.int32(1)
         return slot, copy_state.count_per_node[node_id]
+    # Direct colours (parallel_id < 0) never own a slot: partition keys are
+    # nonnegative, so skip the dependent section/list lookup chain.
+    if parallel_id < wp.int32(0):
+        return wp.int32(-1), wp.int32(1)
     # Slow path: overflow colour (parallel_id > 0). Binary-search the
     # node's partition list.
     if copy_state.highest_index_in_use[0] == wp.int32(0):
