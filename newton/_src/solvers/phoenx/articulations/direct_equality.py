@@ -552,6 +552,25 @@ def _set_direct_point_row(
 
 
 @wp.func
+def _zero_direct_row(
+    structural_index: wp.int32,
+    row: wp.int32,
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    row_bias: wp.array2d[wp.float32],
+    row_error: wp.array2d[wp.float32],
+    row_stiffness: wp.array2d[wp.float32],
+    row_damping: wp.array2d[wp.float32],
+):
+    row_wrench0[structural_index, row] = wp.spatial_vector()
+    row_wrench1[structural_index, row] = wp.spatial_vector()
+    row_bias[structural_index, row] = wp.float32(0.0)
+    row_error[structural_index, row] = wp.float32(0.0)
+    row_stiffness[structural_index, row] = wp.float32(0.0)
+    row_damping[structural_index, row] = wp.float32(0.0)
+
+
+@wp.func
 def _prepare_direct_rows(
     structural_index: wp.int32,
     joint: wp.int32,
@@ -620,14 +639,8 @@ def _prepare_direct_rows(
         point0_com += wp.float32(0.5) * point_error
         point1_com -= wp.float32(0.5) * point_error
 
-    for row in range(_MAX_ROWS):
-        row_wrench0[structural_index, row] = wp.spatial_vector()
-        row_wrench1[structural_index, row] = wp.spatial_vector()
-        row_bias[structural_index, row] = wp.float32(0.0)
-        row_error[structural_index, row] = wp.float32(0.0)
-        row_stiffness[structural_index, row] = wp.float32(0.0)
-        row_damping[structural_index, row] = wp.float32(0.0)
-
+    # Each row is written exactly once: strided per-joint rows make a
+    # zero-then-overwrite pass the dominant cost of this one-wave kernel.
     row = wp.int32(0)
     linear_count = generic_linear_count[joint]
     for axis_index in range(3):
@@ -656,6 +669,10 @@ def _prepare_direct_rows(
                 row_error[structural_index, row] = error
                 row_stiffness[structural_index, row] = stiffness
                 row_damping[structural_index, row] = damping
+            else:
+                _zero_direct_row(
+                    structural_index, row, row_wrench0, row_wrench1, row_bias, row_error, row_stiffness, row_damping
+                )
             row += wp.int32(1)
     rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
     if material_rows:
@@ -703,12 +720,27 @@ def _prepare_direct_rows(
                 row_error[structural_index, row] = error
                 row_stiffness[structural_index, row] = stiffness
                 row_damping[structural_index, row] = damping
+            else:
+                _zero_direct_row(
+                    structural_index, row, row_wrench0, row_wrench1, row_bias, row_error, row_stiffness, row_damping
+                )
             row += wp.int32(1)
 
     # Native one-axis joints keep their dynamic row adjacent to the compact
     # structural block. Preparing that row here avoids a separate kernel in
     # scenes dominated by hinges while using the same paired row primitives.
     axis = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
+    unused_start = row
+    if joint_type[joint] == JointType.REVOLUTE or joint_type[joint] == JointType.PRISMATIC:
+        row_error[structural_index, row] = wp.float32(0.0)
+        row_stiffness[structural_index, row] = wp.float32(0.0)
+        row_damping[structural_index, row] = wp.float32(0.0)
+        unused_start = row + wp.int32(1)
+    for unused in range(_MAX_ROWS):
+        if wp.int32(unused) >= unused_start:
+            _zero_direct_row(
+                structural_index, unused, row_wrench0, row_wrench1, row_bias, row_error, row_stiffness, row_damping
+            )
     if joint_type[joint] == JointType.REVOLUTE:
         _set_angular_row(
             structural_index,
