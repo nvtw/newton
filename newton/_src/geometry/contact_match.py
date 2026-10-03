@@ -381,8 +381,8 @@ def _contact_claim_priority(data: _MatchData, k: int, old: int):
     diff = wp.float32(0.5) * (p0 + p1) - data.prev_pos_world[old]
     dist = wp.dot(diff, diff)
     if data.sticky != 0:
-        nd = wp.dot(diff, data.new_normal[source])
-        dist = wp.max(dist - nd * nd, wp.float32(0))
+        normal_dist = wp.dot(diff, data.new_normal[source])
+        dist = wp.max(dist - normal_dist * normal_dist, wp.float32(0))
     return _pack_claim(dist, data.new_keys[source])
 
 
@@ -701,6 +701,11 @@ class ContactMatcher:
     def is_sticky(self) -> bool:
         """Whether sticky-mode history buffers are allocated."""
         return self._sticky
+
+    @property
+    def pos_threshold_sq(self) -> float:
+        """Squared match distance threshold [m^2], also the sticky witness drift bound."""
+        return self._pos_threshold_sq
 
     @property
     def prev_contact_count(self) -> wp.array[wp.int32]:

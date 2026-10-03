@@ -9,6 +9,7 @@
 # applies a sinusoidal trajectory to the joint targets.
 #
 # Command: python -m newton.examples robot_ur10 --world-count 16
+#          python -m newton.examples robot_ur10 --solver kamino
 #
 ###########################################################################
 
@@ -52,6 +53,7 @@ def update_joint_target_trajectory_kernel(
 
 class Example:
     def __init__(self, viewer, args):
+        newton.use_coord_layout_targets = True
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
 
@@ -59,17 +61,21 @@ class Example:
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
+        self.solver_type = args.solver
         self.world_count = args.world_count
+        if self.world_count is None:
+            self.world_count = 4 if self.solver_type == "kamino" else 100
 
         self.viewer = viewer
 
         self.device = wp.get_device()
 
         # Pick the solver backend; default stays MuJoCo for reproducibility.
-        solver_name = getattr(args, "solver", "mujoco")
 
         ur10 = newton.ModelBuilder()
-        if solver_name == "mujoco":
+        if self.solver_type == "kamino":
+            newton.solvers.SolverKamino.register_custom_attributes(ur10)
+        elif self.solver_type == "mujoco":
             newton.solvers.SolverMuJoCo.register_custom_attributes(ur10)
 
         asset_path = newton.utils.download_asset("universal_robots_ur10")
@@ -114,6 +120,8 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
+        self.contacts = None
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
         self.articulation_view = ArticulationView(
             self.model, "*ur10*", exclude_joint_types=[newton.JointType.FREE, newton.JointType.DISTANCE]
@@ -157,8 +165,7 @@ class Example:
 
         self.ctrl = self.articulation_view.get_attribute("joint_target_q", self.control)
 
-        self.solver_name = solver_name
-        if solver_name == "phoenx":
+        if self.solver_type == "phoenx":
             # The arm is welded to the world via a FIXED root joint
             # (re-typed above), so PhoenX's contact pipeline only sees
             # arm-arm pairs. Self-collisions are disabled in the USD
@@ -172,12 +179,15 @@ class Example:
             )
             self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="sticky")
             self.contacts = self.collision_pipeline.contacts()
-        else:
-            self.solver = newton.solvers.SolverMuJoCo(
-                self.model,
-                disable_contacts=True,
+        elif self.solver_type == "kamino":
+            solver_config = newton.solvers.SolverKamino.Config.from_model(
+                self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
             )
-            self.contacts = None
+            solver_config.dvi.max_alternating_iterations = 8
+            solver_config.dvi.bilateral_solve_interval = 8
+            self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+        else:
+            self.solver = newton.solvers.SolverMuJoCo(self.model, disable_contacts=True)
 
         self.viewer.set_model(self.model)
 
@@ -224,7 +234,10 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        pass
+        """Verify the robot joint state remains finite while tracking targets."""
+        joint_q = self.state_0.joint_q.numpy()
+        if not np.isfinite(joint_q).all():
+            raise ValueError("UR10 joint positions contain non-finite values")
 
     @staticmethod
     def create_parser():
@@ -232,11 +245,11 @@ class Example:
         newton.examples.add_world_count_arg(parser)
         parser.add_argument(
             "--solver",
-            choices=["mujoco", "phoenx"],
+            choices=["mujoco", "phoenx", "kamino"],
             default="phoenx",
-            help="Rigid-body solver backend. 'mujoco' (default) uses the MuJoCo/Warp solver; 'phoenx' uses SolverPhoenX.",
+            help="Rigid-body solver backend: 'mujoco', 'phoenx', or 'kamino'.",
         )
-        parser.set_defaults(world_count=100)
+        parser.set_defaults(world_count=None)
         return parser
 
 
