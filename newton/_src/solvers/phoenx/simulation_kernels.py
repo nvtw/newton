@@ -173,7 +173,6 @@ _SOFT_HEX_OFF_BODY8 = wp.constant(wp.int32(8))
 
 # Opt-in comparison for mixed rigid colors. Eight lanes solve the rows of one
 # D6 block while the existing color launch still handles its contacts.
-_EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES = os.environ.get("PHOENX_EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES") == "1"
 _EXPERIMENTAL_COOPERATIVE_CONTACTS = os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_CONTACTS") == "1"
 
 
@@ -3849,7 +3848,8 @@ def _make_singleworld_rigid_direct_color_func(
     """Generated rigid-only color dispatch for single-world kernels.
 
     ``cooperative_joints`` solves each bilateral joint block with eight lanes
-    in iterate/relax; it requires CUDA warp shuffles.
+    in iterate/relax and runs joint and contact families of a color on
+    disjoint lanes; it requires CUDA warp shuffles.
     """
 
     _dispatch_rigid_contact = _make_singleworld_rigid_contact_dispatch_func(
@@ -3923,9 +3923,10 @@ def _make_singleworld_rigid_direct_color_func(
 
         joint_lanes = stride
         contact_lane_base = wp.int32(0)
+        # Mixed colors are independent sets: give joint tiles and contacts
+        # disjoint warp-aligned lanes so the families run concurrently.
         if wp.static(
-            _EXPERIMENTAL_CONCURRENT_RIGID_FAMILIES
-            and cooperative_joints
+            cooperative_joints
             and bilateral_joint_blocks
             and not is_prepare
             and not is_cached_prepare
