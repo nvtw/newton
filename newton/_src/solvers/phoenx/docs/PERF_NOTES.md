@@ -131,6 +131,31 @@ samples, mostly in the friction projection. Module-wide `fast_math` reached
 (+0.6%) and hoisting launch-metadata loads (+0.4%, bitwise) were within
 noise and not retained.
 
+## Mixed playground: exact mechanisms inside block PGS
+
+`example_mixed_playground` adds 50 standing G1 robots and five bicycle
+drivetrains to the Kapla+Hoberman world (one world, all robots colliding).
+Local joint blocks cannot hold a G1 (0.05 kg waist link between 3.8 kg and
+9.6 kg bodies: it topples, then diverges) or a 120-link chain loop (mm gaps, no
+drive). `direct_joint_mask` solves those joints as exact mechanisms between
+the `maximal_pgs` color sweeps; the Hoberman joints stay blocks. The bicycle
+needs 8 substeps; the scene runs 8 x 5 (same sweeps per frame as 4 x 10).
+
+| Change (RTX PRO 6000 Blackwell) | FPS |
+| --- | --- |
+| Exact G1/bike mechanisms, solve after every iteration | 13 |
+| Block grid instead of task queues for many mechanisms | 15.8 |
+| Two exact projections per substep (`direct_joint_projection_passes=2`) | 17.7 |
+| Contact chunks of 8 points for drivetrain manifolds | 24.0 |
+| No redundant panel factor for PCR-solved mechanisms | 27.0 |
+
+Every step keeps all quality checks; the last is trajectory-identical, and
+Kapla+Hoberman remains bitwise unchanged at 71 FPS. Rejected: nested-dissection
+ordering for cyclic mechanisms (12.8 FPS: the per-mechanism block grid cannot
+use the independent subtrees and pays 28% more panels; RCM stays), cutting one
+chain joint to make PCR paths (6 cm closure gaps), fusing PCR levels (each
+level reads neighbor tiles of other blocks).
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,
