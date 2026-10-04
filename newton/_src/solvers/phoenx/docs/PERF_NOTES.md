@@ -161,7 +161,13 @@ was slower (27 -> 21.9 FPS, standalone bike 81 -> 53): the 64 barrier steps of
 the 16x16 tile substitutions expose L2 latency with only one block per
 mechanism. Checking convergence after one correction instead of two was also
 slower (27 -> 25.3): most solves need the second pass, and one unconverged
-mechanism triggers the conditional passes for all.
+mechanism triggers the conditional passes for all. Solving the chain rings with the
+panel Cholesky instead of PCR was slower and less accurate (28.2 -> 23.7 FPS,
+standalone bike 81 -> 59, rear sprocket 8.3 vs 13.3 rad/s): the serial
+38-tile substitution exceeds PCR's launch cost. An FP64 PCR needs no
+refinement (chain tests pass with one pass) and halves the solve cost
+(4.4 -> 2.6 ms/frame), but its factorization rises from 1.9 to 6.4 ms/frame
+on this 1/64-rate FP64 GPU (26.1 FPS); revisit on full-rate FP64 GPUs.
 
 ## Batched humanoid comparison
 
