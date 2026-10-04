@@ -155,6 +155,16 @@ def _solve_metric_batch(
     result[i] = contact_project_friction_metric(k[0], k[1], k[2], v[0], v[1], old[0], old[1], 1.0, 1.0)
 
 
+def _make_tiny_radius_kernel(fast_math: bool):
+    @wp.kernel(enable_backward=False, module="unique", module_options={"fast_math": fast_math})
+    def solve(radius: wp.array[wp.float32], result: wp.array[wp.vec2]):
+        i = wp.tid()
+        r = radius[i]
+        result[i] = contact_project_friction_metric(1.0, 0.2, 0.5, -1.0, 0.3, 0.5 * r, 0.0, r, r)
+
+    return solve
+
+
 @wp.kernel(enable_backward=False)
 def _fast_div_batch(numerator: wp.array[wp.float32], denominator: wp.array[wp.float32], out: wp.array[wp.float32]):
     i = wp.tid()
@@ -239,6 +249,21 @@ class TestContactCoupling(unittest.TestCase):
         self.assertLessEqual(energy(), before + 1.0e-7)
         np.testing.assert_allclose(_total_momentum(model, state), momentum_before, rtol=0.0, atol=2.0e-6)
         self._last_velocity = state.body_qd.numpy()
+
+    def test_metric_friction_with_vanishing_radius_stays_finite(self):
+        """Sliding radii whose squares underflow (or flush to zero) must not produce NaN impulses."""
+        radius_np = np.array([1.0e-30, 1.0e-25, 1.0e-20, 1.0e-12, 1.0], dtype=np.float32)
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            for fast_math in (False, True):
+                radius = wp.array(radius_np, dtype=wp.float32, device=device)
+                result = wp.zeros(len(radius_np), dtype=wp.vec2, device=device)
+                wp.launch(_make_tiny_radius_kernel(fast_math), len(radius_np), [radius], [result], device=device)
+                friction = result.numpy()
+                self.assertTrue(np.isfinite(friction).all(), msg=f"{device} fast_math={fast_math}: {friction}")
+                lengths = np.linalg.norm(friction.astype(np.float64), axis=1)
+                np.testing.assert_array_less(lengths, 1.0001 * radius_np.astype(np.float64) + 1.0e-30)
+                self.assertAlmostEqual(float(lengths[-1]), 1.0, places=5)
 
     def test_metric_friction_handles_rotation_scale_and_small_mobility(self):
         cases = []

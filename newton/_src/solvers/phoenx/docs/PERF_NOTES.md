@@ -177,6 +177,22 @@ substep factor for relax (possible without G1 effort limits) gains only 1.2%.
 The overflow partition costs about 1.8x a regular color in iterate and 2.4x in
 prepare for 4.5x the columns.
 
+The captured graph (`wp.capture_debug_dot_print`) was a strict chain of 3,205
+top-level nodes. Forking the PCR chain reduction onto a side stream beside the
+panel-LLT G1 factor and solve raised the playground from 29.5 to 32.4 FPS with
+a bitwise-identical trajectory. Warp resolves `capture_if` graphs by stream,
+so conditional refinement stays on the main stream after the join.
+
+Module-wide `fast_math` NaNs came from the Coulomb-disk Newton search: at
+friction radii below about 1e-19 its squared lengths flush to zero and the
+derivative becomes 0/0 (IEEE fails the same way below about 1e-23). Dropping
+sliding friction below a 1e-18 radius is bitwise on the default path. With it,
+`fast_math` on the single-world iterate kernel gives Kapla+Hoberman 71.0 ->
+73.5 FPS and the playground 32.4 -> 33.5 FPS with all quality checks passing.
+Also enabling it for prepare and relax cut the minimum bicycle rear-wheel speed
+from 16.5 to 3.5 rad/s; on the LLT/PCR modules it was neutral and widened the
+chain pin gap (0.06 -> 0.23 mm). Both were rejected.
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,

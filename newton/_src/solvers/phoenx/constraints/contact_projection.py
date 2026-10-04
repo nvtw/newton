@@ -265,7 +265,10 @@ def _make_contact_project_friction_metric(scalar_type):
                 )
             if wp.length_sq(result) > static_radius * static_radius:
                 result = wp.vec2f(0.0)
-                if dynamic_radius > wp.float32(0.0):
+                # Below this radius the squared lengths of the Newton search
+                # underflow (or flush to zero), and the derivative divides by
+                # zero. Such impulses are negligible: drop sliding friction.
+                if dynamic_radius > wp.float32(1.0e-18):
                     lower = scalar_type(0.0)
                     radius = scalar_type(dynamic_radius)
                     target_x = scalar_type(target1)
