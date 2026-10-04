@@ -4149,7 +4149,16 @@ def _make_singleworld_persistent_kernel(
             cooperative_contacts=cooperative_contacts,
         )
 
-    @wp.kernel(name=f"phoenx_singleworld_{phase}", enable_backward=False, module="unique", grid_stride=False)
+    # Approximate float32 division and square roots shorten the latency-bound
+    # contact chain of the iterate sweep (+4% Kapla). Prepare stays IEEE: its
+    # mesh-manifold effective masses degrade the bicycle drivetrain.
+    @wp.kernel(
+        name=f"phoenx_singleworld_{phase}",
+        enable_backward=False,
+        module="unique",
+        grid_stride=False,
+        module_options={"fast_math": phase == "iterate"},
+    )
     def kernel(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
