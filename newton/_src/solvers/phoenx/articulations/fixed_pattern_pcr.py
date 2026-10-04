@@ -577,6 +577,14 @@ class BlockTridiagonalPCR:
         reduction. It is intended for conservative intermediate projections
         that are followed by a fully refined solve.
         """
+        self.reduce(rhs, refine=refine)
+        self.finish(solution, refine=refine)
+
+    def reduce(self, rhs: wp.array[wp.float32], *, refine: bool = True) -> None:
+        """Run the unconditional reduction and corrections of :meth:`solve`.
+
+        Contains no conditional graph nodes, so it may run on a forked stream.
+        """
         wp.launch(
             _initialize_rhs_kernel,
             dim=(self.task_count, BS),
@@ -595,20 +603,6 @@ class BlockTridiagonalPCR:
         self._solve_workspace()
         wp.copy(self.accumulated, self.delta)
         if not refine:
-            wp.launch(
-                _unpermute_solution_kernel,
-                dim=(self.task_count, BS),
-                inputs=[
-                    self.task_mechanism,
-                    self.task_tile,
-                    self.dimensions,
-                    self.vector_offsets,
-                    self.permutation,
-                    self.accumulated,
-                    solution,
-                ],
-                device=self.device,
-            )
             return
         wp.launch(
             _residual_kernel,
@@ -664,10 +658,14 @@ class BlockTridiagonalPCR:
             inputs=[len(self.mechanisms), self.refinement_norms, self.needs_refinement],
             device=self.device,
         )
-        if self.device.is_capturing and wp.is_conditional_graph_supported():
-            wp.capture_if(self.needs_refinement, on_true=self._refine_twice)
-        else:
-            self._refine_twice()
+
+    def finish(self, solution: wp.array[wp.float32], *, refine: bool = True) -> None:
+        """Apply conditional refinement and write the solution of :meth:`reduce`."""
+        if refine:
+            if self.device.is_capturing and wp.is_conditional_graph_supported():
+                wp.capture_if(self.needs_refinement, on_true=self._refine_twice)
+            else:
+                self._refine_twice()
         wp.launch(
             _unpermute_solution_kernel,
             dim=(self.task_count, BS),
