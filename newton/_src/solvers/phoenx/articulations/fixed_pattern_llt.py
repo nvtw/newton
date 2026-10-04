@@ -816,6 +816,14 @@ def _find_block_tridiagonal_mechanisms(panel_tables: list[np.ndarray], block_siz
     return np.asarray(mechanisms, dtype=np.int32)
 
 
+# Atomic task queues pay off only when the symbolic graph exposes clearly more
+# ready work than one block per mechanism. A forest of 50 G1 trees (ready width
+# 3x/2x the mechanism count) runs 24% faster on the per-mechanism block grid,
+# while clock, colibri and G1 example mechanisms keep their queues.
+_PRODUCT_QUEUE_READY_FACTOR = 4
+_PUSH_QUEUE_READY_FACTOR = 2
+
+
 class FixedPatternPanelLLT:
     """Factor and solve fixed-topology mechanism matrices in compact panels."""
 
@@ -978,8 +986,9 @@ class FixedPatternPanelLLT:
                 block_size,
                 self.device,
             )
-            self._use_product_factor = product_schedule.product_count > 0 and product_schedule.max_ready_count > len(
-                dimensions
+            self._use_product_factor = (
+                product_schedule.product_count > 0
+                and product_schedule.max_ready_count > _PRODUCT_QUEUE_READY_FACTOR * len(dimensions)
             )
             if self._use_product_factor:
                 self._product_factor_schedule = product_schedule
@@ -1020,7 +1029,7 @@ class FixedPatternPanelLLT:
                 push_forward_schedule.max_ready_count,
                 push_backward_schedule.max_ready_count,
             )
-            self._use_push_solve = push_ready_width > mechanism_count
+            self._use_push_solve = push_ready_width > _PUSH_QUEUE_READY_FACTOR * mechanism_count
             if self._use_push_solve:
                 self._push_forward_schedule = push_forward_schedule
                 self._push_backward_schedule = push_backward_schedule
