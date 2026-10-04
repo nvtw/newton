@@ -148,13 +148,20 @@ needs 8 substeps; the scene runs 8 x 5 (same sweeps per frame as 4 x 10).
 | Two exact projections per substep (`direct_joint_projection_passes=2`) | 17.7 |
 | Contact chunks of 8 points for drivetrain manifolds | 24.0 |
 | No redundant panel factor for PCR-solved mechanisms | 27.0 |
+| Unrefined projections before/after contact preparation | 28.2 |
 
 Every step keeps all quality checks; the last is trajectory-identical, and
 Kapla+Hoberman remains bitwise unchanged at 71 FPS. Rejected: nested-dissection
 ordering for cyclic mechanisms (12.8 FPS: the per-mechanism block grid cannot
 use the independent subtrees and pays 28% more panels; RCM stays), cutting one
-chain joint to make PCR paths (6 cm closure gaps), fusing PCR levels (each
-level reads neighbor tiles of other blocks).
+chain joint to make PCR paths (6 cm closure gaps). A refined PCR solve is
+about 25-40 launches (three or five 6-level reductions plus residual, update
+and norm kernels). Fusing a whole refined solve into one block per mechanism
+was slower (27 -> 21.9 FPS, standalone bike 81 -> 53): the 64 barrier steps of
+the 16x16 tile substitutions expose L2 latency with only one block per
+mechanism. Checking convergence after one correction instead of two was also
+slower (27 -> 25.3): most solves need the second pass, and one unconverged
+mechanism triggers the conditional passes for all.
 
 ## Batched humanoid comparison
 
