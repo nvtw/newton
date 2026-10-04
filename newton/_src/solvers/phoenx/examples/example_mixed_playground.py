@@ -100,6 +100,9 @@ class Example(KaplaHobermanExample):
     solver_iterations = 5
     # Exact mechanisms are projected mid-solve and after the final iteration.
     direct_joint_projection_passes = 2
+    # Long drivetrain mesh manifolds become short columns; the 3-5 point
+    # brick, sphere and robot manifolds are unaffected.
+    contact_chunk_size = 8
 
     def add_extra_content(self, builder: newton.ModelBuilder) -> None:
         self._exact_joints = []

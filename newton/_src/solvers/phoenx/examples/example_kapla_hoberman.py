@@ -100,6 +100,7 @@ def make_solver(
     solver_iterations: int = 10,
     direct_joint_mask: np.ndarray | None = None,
     direct_joint_projection_passes: int | None = None,
+    contact_chunk_size: int = 0,
 ) -> newton.solvers.SolverPhoenX:
     """Single-world PhoenX configuration shared by the mixed scenes."""
     return newton.solvers.SolverPhoenX(
@@ -121,6 +122,7 @@ def make_solver(
         max_thread_blocks=8 * device.sm_count,
         direct_joint_mask=direct_joint_mask,
         direct_joint_projection_passes=direct_joint_projection_passes,
+        contact_chunk_size=contact_chunk_size,
     )
 
 
@@ -131,6 +133,7 @@ class Example:
     substeps = 4
     solver_iterations = 10
     direct_joint_projection_passes = None
+    contact_chunk_size = 0
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -164,6 +167,7 @@ class Example:
             solver_iterations=self.solver_iterations,
             direct_joint_mask=self.direct_joint_mask(),
             direct_joint_projection_passes=self.direct_joint_projection_passes,
+            contact_chunk_size=self.contact_chunk_size,
         )
         self.solver.world.set_global_linear_damping(1.0)
         self.solver.world.set_global_angular_damping(1.0)
