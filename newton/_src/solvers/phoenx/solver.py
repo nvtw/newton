@@ -33,7 +33,7 @@ from newton._src.solvers.phoenx.adapter_kernels import (
     _snapshot_pre_step_pose_kernel,
     _snapshot_pre_step_velocity_kernel,
 )
-from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem
+from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem, MixedJointSystem
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import DirectContactRunSchedule
 from newton._src.solvers.phoenx.articulations.direct_contact_response import DirectContactResponse
 from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem, _drive_dof_masks
@@ -247,7 +247,7 @@ class SolverPhoenX(SolverBase):
         mass_splitting_batch_size: int = 8,
         mass_splitting_color_group_size: int = 0,
         joint_refinement_iterations: int = 0,
-        direct_joint_projection_passes: int = 1,
+        direct_joint_projection_passes: int | None = None,
         mass_splitting_unrolled: bool = False,
         mass_splitting_overflow_only: bool = False,
         partitioner_algorithm: str = "greedy",
@@ -267,6 +267,7 @@ class SolverPhoenX(SolverBase):
         jacobi_max_colors: int | None = None,
         joint_mode: str = "maximal_direct",
         reduced_articulation_path: str = "reference",
+        direct_joint_mask: np.ndarray | None = None,
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -321,10 +322,13 @@ class SolverPhoenX(SolverBase):
                 each sweep. Defaults to zero. Requires the soft scheme, grouped
                 single-world mass splitting, and block PGS joints.
             direct_joint_projection_passes: Number of exact direct-joint projections
-                distributed across each group of PGS contact iterations. Two passes
-                feed contact impulses through the joint graph at mid-solve and again
-                after the final iteration. Defaults to one final projection. Requires
-                soft grouped single-world mass splitting with direct joints.
+                distributed across the PGS contact iterations of a substep; only the
+                final one refines its residual. Two passes feed contact impulses
+                through the joint graph at mid-solve and again after the final
+                iteration. ``None`` keeps the dispatcher default: one final
+                projection with grouped mass splitting and one per iteration with
+                the unrolled dispatcher. Values above one require soft single-world
+                mass splitting with direct joints or a ``direct_joint_mask``.
             parallel_contact_prepare: Experimental parallel geometry preparation
                 for CUDA single-world maximal rigid point contacts. Preserves
                 ordered contact warm starts, including mass-split copy states.
@@ -426,6 +430,12 @@ class SolverPhoenX(SolverBase):
                 ``"standard"``. The experimental ``"simple"`` Jacobi solver
                 moved out of production PhoenX; use PhoenX Mini under ``phoenx.experimental.mini`` for solver experiments.
             jacobi_max_colors: Deprecated compatibility argument with no effect.
+            direct_joint_mask: Optional per-joint boolean mask for
+                ``joint_mode="maximal_pgs"``. Masked joints are solved as exact
+                mechanisms, as in ``"maximal_direct"``, between the color sweeps;
+                the remaining joints stay local blocks inside the sweeps. Use it
+                for long chains, closed linkages and trees with large link mass
+                ratios, which converge poorly as independent blocks.
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
                 topology-proven cross-phase articulation fusion on CUDA.
@@ -474,12 +484,14 @@ class SolverPhoenX(SolverBase):
             or joint_refinement_iterations < 0
         ):
             raise ValueError("joint_refinement_iterations must be a nonnegative integer")
-        if (
+        if direct_joint_projection_passes is not None and (
             isinstance(direct_joint_projection_passes, bool)
             or not isinstance(direct_joint_projection_passes, int)
             or not 1 <= direct_joint_projection_passes <= solver_iterations
         ):
-            raise ValueError("direct_joint_projection_passes must be an integer between 1 and solver_iterations")
+            raise ValueError(
+                "direct_joint_projection_passes must be None or an integer between 1 and solver_iterations"
+            )
         gravity_np = self._read_model_gravity_np(model)
 
         num_worlds = max(1, int(gravity_np.shape[0]))
@@ -519,6 +531,14 @@ class SolverPhoenX(SolverBase):
             raise ValueError(
                 "joint_mode='maximal_pgs' requires single-world maximal rigid point contacts without rod joints"
             )
+        if direct_joint_mask is not None:
+            direct_joint_mask = np.asarray(direct_joint_mask, dtype=bool)
+            if joint_solver != "block_pgs":
+                raise ValueError("direct_joint_mask requires joint_mode='maximal_pgs'")
+            if direct_joint_mask.shape != (int(model.joint_count),):
+                raise ValueError("direct_joint_mask must contain one entry per model joint")
+            if not np.any(direct_joint_mask):
+                direct_joint_mask = None
         if mass_splitting_overflow_only and has_constraint_joints and joint_solver != "block_pgs":
             raise ValueError("mass_splitting_overflow_only requires joint_mode='maximal_pgs' when joints are present")
         if solver_scheme == "tgs":
@@ -565,16 +585,16 @@ class SolverPhoenX(SolverBase):
                 "joint_refinement_iterations requires soft grouped single-world mass splitting "
                 "with block PGS joints and positive solver_iterations"
             )
-        if direct_joint_projection_passes > 1 and (
+        if (direct_joint_projection_passes or 1) > 1 and (
             solver_scheme != "soft"
-            or joint_solver != "direct"
+            or (joint_solver != "direct" and direct_joint_mask is None)
             or step_layout != "single_world"
             or not mass_splitting
-            or mass_splitting_color_group_size <= 0
+            or (mass_splitting_color_group_size <= 0 and not mass_splitting_unrolled)
         ):
             raise ValueError(
-                "multiple direct_joint_projection_passes require soft grouped "
-                "single-world mass splitting with direct joints"
+                "multiple direct_joint_projection_passes require soft grouped or unrolled "
+                "single-world mass splitting with direct joints or a direct_joint_mask"
             )
         if (
             contact_chunk_size
@@ -1029,11 +1049,16 @@ class SolverPhoenX(SolverBase):
                     material_joint
                 ]
             equality_system_type = DirectEqualitySystem
+            system_options = {}
             if joint_solver == "block_pgs":
                 equality_system_type = BlockJointSystem
+                if direct_joint_mask is not None:
+                    equality_system_type = MixedJointSystem
+                    system_options["exact_joint_mask"] = direct_joint_mask
             self._direct_equality_system = equality_system_type(
                 model,
                 self.bodies,
+                **system_options,
                 excluded_joint_mask=excluded_joint_mask,
                 effective_joint_dof_start=effective_joint_dof_start,
                 effective_joint_target_start=joint_target_start,
@@ -1223,11 +1248,16 @@ class SolverPhoenX(SolverBase):
         if direct is None or not direct.enabled:
             return
         joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
-        if self._joint_solver == "block_pgs":
-            self.world.set_joint_pgs_ownership(self._direct_base_joint_pgs_enabled.copy())
-            return
         joint_pgs_enabled = self._direct_base_joint_pgs_enabled.copy()
-        for joint in np.flatnonzero(direct.joint_mask):
+        direct_joints = direct.joint_mask
+        if self._joint_solver == "block_pgs":
+            # Exact mechanisms of a mixed system leave the sweeps like
+            # maximal_direct joints; local blocks always stay.
+            direct_joints = direct.exact.joint_mask if isinstance(direct, MixedJointSystem) else None
+            if direct_joints is None:
+                self.world.set_joint_pgs_ownership(joint_pgs_enabled)
+                return
+        for joint in np.flatnonzero(direct_joints):
             cid = int(joint_idx_to_cid[joint])
             if cid >= 0 and int(direct.d6_inequality_count[cid]) == 0:
                 joint_pgs_enabled[cid] = 0

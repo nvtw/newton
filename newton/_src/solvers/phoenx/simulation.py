@@ -370,7 +370,7 @@ class PhoenXWorld:
         mass_splitting_color_group_size: int = 0,
         mass_splitting_overflow_only: bool = False,
         joint_refinement_iterations: int = 0,
-        direct_joint_projection_passes: int = 1,
+        direct_joint_projection_passes: int | None = None,
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
         max_greedy_outer_iters: int | None = None,
@@ -462,7 +462,8 @@ class PhoenXWorld:
             joint_refinement_iterations: Additional joint-only sweeps with mass-copy
                 reconciliation after the mixed iterations. Set by SolverPhoenX.
             direct_joint_projection_passes: Exact direct-joint projections distributed
-                across the grouped PGS contact iterations. Set by SolverPhoenX.
+                across the PGS contact iterations, or ``None`` for the dispatcher
+                default. Set by SolverPhoenX.
             partitioner_algorithm: ``"greedy"`` (default) constructs the
                 interaction graph, ``"endpoint_owner"`` uses adjacency-free
                 endpoint elections for single-world mass splitting, and
@@ -744,16 +745,18 @@ class PhoenXWorld:
         ):
             raise ValueError("mass_splitting_color_group_size must be a nonnegative integer")
         self.joint_refinement_iterations = joint_refinement_iterations
-        if (
+        if direct_joint_projection_passes is not None and (
             isinstance(direct_joint_projection_passes, bool)
             or not isinstance(direct_joint_projection_passes, int)
             or not 1 <= direct_joint_projection_passes <= self.solver_iterations
         ):
-            raise ValueError("direct_joint_projection_passes must be an integer between 1 and solver_iterations")
+            raise ValueError(
+                "direct_joint_projection_passes must be None or an integer between 1 and solver_iterations"
+            )
         self.direct_joint_projection_passes = direct_joint_projection_passes
+        passes = direct_joint_projection_passes or 1
         self._direct_joint_projection_iterations = frozenset(
-            block * self.solver_iterations // direct_joint_projection_passes - 1
-            for block in range(1, direct_joint_projection_passes + 1)
+            block * self.solver_iterations // passes - 1 for block in range(1, passes + 1)
         )
         self.mass_splitting_color_group_size = mass_splitting_color_group_size
         if self.mass_splitting_color_group_size and (
