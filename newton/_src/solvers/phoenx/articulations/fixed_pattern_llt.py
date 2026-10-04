@@ -1062,6 +1062,13 @@ class FixedPatternPanelLLT:
         self._solve_cooperative = _make_cooperative_solve_kernel(block_size)
         self._solve_grouped_rhs_batch = _make_grouped_rhs_batch_solve_kernel(block_size)
         self._cooperative_solve_block_dim = 128 if block_size == 32 else 64
+        # Chains reduced by PCR are independent of the panel LLT mechanisms;
+        # a side stream forks them into a parallel graph branch.
+        self._pcr_stream = (
+            wp.Stream(self.device)
+            if self._pcr is not None and self.device.is_cuda and pcr_mechanisms.size < len(dimensions)
+            else None
+        )
         self._grouped_rhs_block_dim = block_size * GROUPED_RHS_ITEMS_PER_TASK
 
     def create_grouped_rhs_batch(
@@ -1075,6 +1082,9 @@ class FixedPatternPanelLLT:
 
     def compute(self) -> None:
         """Factor narrow mechanisms cooperatively or use the ready queue."""
+        if self._pcr_stream is not None:
+            with wp.ScopedStream(self._pcr_stream):
+                self._pcr.compute(self.matrix)
         factor_mechanisms = [self.cooperative_factor_mechanism]
         if self._grouped_rhs_factor_required:
             factor_mechanisms.append(self.grouped_rhs_factor_mechanism)
@@ -1124,7 +1134,9 @@ class FixedPatternPanelLLT:
                 schedule.compute(self.matrix, self.factor)
         # Grouped contact response still consumes the LLT factor; PCR replaces
         # only the latency-bound scalar right-hand-side solve.
-        if self._pcr is not None:
+        if self._pcr_stream is not None:
+            wp.wait_stream(self._pcr_stream)
+        elif self._pcr is not None:
             self._pcr.compute(self.matrix)
 
     def solve(
@@ -1139,6 +1151,9 @@ class FixedPatternPanelLLT:
         The refine option affects only long block-tridiagonal mechanisms using
         PCR; all other factor paths retain their existing solve.
         """
+        if self._pcr_stream is not None:
+            with wp.ScopedStream(self._pcr_stream):
+                self._pcr.reduce(rhs, refine=refine)
         if self.cooperative_mechanism.size > 0:
             wp.launch_tiled(
                 self._solve_cooperative,
@@ -1199,7 +1214,10 @@ class FixedPatternPanelLLT:
                 self.solution_permuted,
                 solution,
             )
-        if self._pcr is not None:
+        if self._pcr_stream is not None:
+            wp.wait_stream(self._pcr_stream)
+            self._pcr.finish(solution, refine=refine)
+        elif self._pcr is not None:
             self._pcr.solve(rhs, solution, refine=refine)
 
 

@@ -946,6 +946,57 @@ class TestDirectJointTypes(unittest.TestCase):
             intermediate_relative = np.linalg.norm(intermediate_residual) / rhs_norm
             self.assertLess(intermediate_relative, 5.0e-3, msg=f"intermediate {mechanism}: {intermediate_relative}")
 
+    def test_parallel_cyclic_reduction_forks_beside_panel_mechanisms(self) -> None:
+        """Run PCR chains on a forked graph branch with results identical to serial order."""
+        dimensions = (157, 40)
+        starts = np.cumsum(np.asarray((0, *dimensions), dtype=np.int32))
+        permutation = np.concatenate([np.arange(dimension, dtype=np.int32) for dimension in dimensions])
+        # Mechanism 0 is a tile chain; mechanism 1 is dense and uses the panel LLT.
+        row_bodies = tuple(frozenset((row // 16, row // 16 + 1)) for row in range(dimensions[0])) + tuple(
+            frozenset((1000,)) for _ in range(dimensions[1])
+        )
+        device = wp.get_preferred_device()
+        panel = FixedPatternPanelLLT(dimensions, starts, permutation, row_bodies, device=device)
+        np.testing.assert_array_equal(panel._pcr.mechanisms, [0])
+        self.assertIsNotNone(panel._pcr_stream)
+
+        rng = np.random.default_rng(4411)
+        matrices = []
+        for mechanism, dimension in enumerate(dimensions):
+            factor = np.zeros((dimension, dimension), dtype=np.float64)
+            for row in range(dimension):
+                first = 0 if mechanism else max(0, (row // 16 - 1) * 16)
+                factor[row, first:row] = rng.normal(scale=0.01, size=row - first)
+                factor[row, row] = 1.0
+            matrices.append(factor @ factor.T)
+        storage = np.zeros(panel.matrix.size, dtype=np.float32)
+        for row, column, address in zip(
+            panel.symbolic.matrix_row,
+            panel.symbolic.matrix_column,
+            panel.symbolic.matrix_storage,
+            strict=True,
+        ):
+            mechanism = int(np.searchsorted(starts[1:], row, side="right"))
+            storage[address] = matrices[mechanism][row - starts[mechanism], column - starts[mechanism]]
+        panel.matrix.assign(storage)
+        rhs_np = rng.normal(size=int(starts[-1])).astype(np.float32)
+        rhs = wp.array(rhs_np, dtype=wp.float32, device=device)
+
+        solutions = []
+        for pcr_stream in (panel._pcr_stream, None):
+            panel._pcr_stream = pcr_stream
+            solution = wp.zeros_like(rhs)
+            with wp.ScopedCapture(device) as capture:
+                panel.compute()
+                panel.solve(rhs, solution)
+            wp.capture_launch(capture.graph)
+            solutions.append(solution.numpy())
+        np.testing.assert_array_equal(solutions[0], solutions[1])
+        for mechanism, matrix in enumerate(matrices):
+            begin, end = int(starts[mechanism]), int(starts[mechanism + 1])
+            residual = matrix @ solutions[0][begin:end] - rhs_np[begin:end]
+            self.assertLess(np.linalg.norm(residual) / np.linalg.norm(rhs_np[begin:end]), 2.0e-5)
+
     def test_grouped_rhs_limits_tile_width_for_occupancy(self) -> None:
         """Limit grouped contact solves to the measured occupancy width."""
         self.assertEqual(GROUPED_RHS_ITEMS_PER_TASK * GROUPED_RHS_ITEM_WIDTH, 12)
