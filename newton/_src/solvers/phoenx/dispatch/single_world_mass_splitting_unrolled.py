@@ -105,15 +105,22 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             direct.solve(use_bias=False)
             if sync_direct_copies:
                 w._mass_splitting_broadcast()
+        # Without explicit projection passes, project after every iteration.
+        every_iteration = w.direct_joint_projection_passes is None
         for iteration in range(w.solver_iterations):
             w._partitioner.begin_sweep()
             self._unrolled_sweep(iterate_head, idt, w._contact_container_solve)
             if not w._singleworld_overflow_only_mass_splitting:
                 w._mass_splitting_average_and_broadcast(inv_dt)
-            if direct is not None and direct.enabled:
+            final = iteration == w.solver_iterations - 1
+            if (
+                direct is not None
+                and direct.enabled
+                and (every_iteration or iteration in w._direct_joint_projection_iterations)
+            ):
                 if sync_direct_copies:
                     w._mass_splitting_writeback(already_averaged=True)
-                direct.solve(use_bias=iteration == w.solver_iterations - 1)
+                direct.solve(use_bias=final, refine=every_iteration or final)
                 if sync_direct_copies and iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
 

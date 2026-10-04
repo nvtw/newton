@@ -295,3 +295,92 @@ class BlockJointSystem(DirectEqualitySystem):
             super().resolve_bounded_drives(idt, use_bias=use_bias)
         finally:
             self._resolving_bounds = False
+
+
+class MixedJointSystem:
+    """Exact mechanism solves for selected joints, local color blocks for the rest.
+
+    Long chains, trees with large link mass ratios and closed linkages converge
+    poorly as independent joint blocks. Their joints are owned by a
+    :class:`DirectEqualitySystem`, whose solve runs between the color sweeps at
+    the same points as in ``maximal_direct``; the remaining joints stay in
+    :class:`BlockJointSystem`. Both share the world's bodies, so the mechanisms
+    couple to contacts and block joints through the sweep order.
+    """
+
+    def __init__(self, model, bodies, *, excluded_joint_mask=None, exact_joint_mask, **kwargs):
+        joint_count = int(model.joint_count)
+        excluded = np.zeros(joint_count, dtype=bool) if excluded_joint_mask is None else np.asarray(excluded_joint_mask)
+        exact = np.asarray(exact_joint_mask, dtype=bool) & ~excluded
+        self.blocks = BlockJointSystem(model, bodies, excluded_joint_mask=excluded | exact, **kwargs)
+        self.exact = DirectEqualitySystem(model, bodies, excluded_joint_mask=~exact, **kwargs)
+        self._parts = tuple(part for part in (self.blocks, self.exact) if part.enabled)
+        self.d6_inequality_count = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self._parts)
+
+    @property
+    def joint_mask(self) -> np.ndarray:
+        return self.blocks.joint_mask | self.exact.joint_mask
+
+    @property
+    def direct_friction_dof_mask(self) -> np.ndarray:
+        return self.blocks.direct_friction_dof_mask | self.exact.direct_friction_dof_mask
+
+    @property
+    def has_bounded_drives(self) -> bool:
+        return any(part.has_bounded_drives for part in self._parts)
+
+    @property
+    def requires_global_projection(self) -> bool:
+        return self.has_bounded_drives
+
+    @property
+    def supports_async_factor(self) -> bool:
+        return False
+
+    def bind_world(self, world, joint_idx_to_cid):
+        if self.blocks.enabled:
+            self.blocks.bind_world(world, joint_idx_to_cid)
+
+    def _forward(self, name, *args, **kwargs):
+        for part in self._parts:
+            getattr(part, name)(*args, **kwargs)
+
+    def bind_constraint_indices(self, joint_idx_to_cid):
+        self.blocks.bind_constraint_indices(joint_idx_to_cid)
+        self.exact.bind_constraint_indices(joint_idx_to_cid)
+
+    def set_temporal_substeps(self, substeps):
+        self.blocks.set_temporal_substeps(substeps)
+        self.exact.set_temporal_substeps(substeps)
+
+    def set_control_targets(self, target_q, target_qd):
+        self.blocks.set_control_targets(target_q, target_qd)
+        self.exact.set_control_targets(target_q, target_qd)
+
+    def refresh_joint_properties(self):
+        self._forward("refresh_joint_properties")
+
+    def refresh_cable_rest_state(self):
+        self._forward("refresh_cable_rest_state")
+
+    def gather_constraint_wrenches(self, out, idt):
+        self._forward("gather_constraint_wrenches", out, idt)
+
+    def refresh_geometry(self, idt):
+        self._forward("refresh_geometry", idt)
+
+    def begin_substep(self, idt):
+        self._forward("begin_substep", idt)
+
+    def prepare_and_factor(self, idt):
+        self._forward("prepare_and_factor", idt)
+
+    def solve(self, *, use_bias, refine=True):
+        self._forward("solve", use_bias=use_bias, refine=refine)
+
+    def resolve_bounded_drives(self, idt, *, use_bias):
+        self._forward("resolve_bounded_drives", idt, use_bias=use_bias)
