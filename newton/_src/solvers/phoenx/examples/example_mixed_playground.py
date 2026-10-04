@@ -98,8 +98,9 @@ class Example(KaplaHobermanExample):
     # count per frame matches the Kapla+Hoberman scene.
     substeps = 8
     solver_iterations = 5
-    # Exact mechanisms are projected mid-solve and after the final iteration.
-    direct_joint_projection_passes = 2
+    # One exact projection after the final iteration keeps the chain pins
+    # within 0.07 mm and the robots' stance unchanged.
+    direct_joint_projection_passes = 1
     # Long drivetrain mesh manifolds become short columns; the 3-5 point
     # brick, sphere and robot manifolds are unaffected.
     contact_chunk_size = 8
