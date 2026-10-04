@@ -32,10 +32,105 @@ HOBERMAN_MID_SPRING_STIFFNESS = 50.0
 HOBERMAN_MID_SPRING_DAMPING = 5.0
 
 
+def add_tower_and_spheres(builder: newton.ModelBuilder) -> tuple[np.ndarray, int, int, int]:
+    """Add the ground, one Kapla tower and the Hoberman ring to ``builder``.
+
+    Returns the tower body ids, the first sphere shape index, and the body and
+    joint counts of one sphere.
+    """
+    builder.add_ground_plane(height=GROUND_HEIGHT)
+    tower_ids, _ = add_kapla_bricks(builder, [(0.0, 0.0)])
+
+    # Import and tile the articulated asset once, then clone it into
+    # the same world. Negative groups filter contacts within each
+    # sphere while allowing sphere-ground and sphere-tower contacts.
+    sphere = make_hoberman_builder(
+        collidable=True,
+        gravity=(0.0, 0.0, -9.81),
+        mid_spring_stiffness=HOBERMAN_MID_SPRING_STIFFNESS,
+        mid_spring_damping=HOBERMAN_MID_SPRING_DAMPING,
+    )
+    sphere_first_shape = len(builder.shape_body)
+    for index in range(HOBERMAN_COUNT):
+        angle = 2.0 * math.pi * index / HOBERMAN_COUNT
+        offset = wp.transform(
+            p=wp.vec3(
+                SPHERE_RING_RADIUS * math.cos(angle),
+                TOWER_CENTRE_Y + SPHERE_RING_RADIUS * math.sin(angle),
+                SPHERE_START_HEIGHT,
+            ),
+            q=wp.quat_identity(),
+        )
+        first_shape = len(builder.shape_body)
+        builder.add_builder(sphere, xform=offset, label_prefix=f"hoberman_{index:02d}")
+        builder.shape_collision_group[first_shape:] = [-(index + 2)] * (len(builder.shape_body) - first_shape)
+    return (
+        np.asarray(tower_ids[0], dtype=np.int32),
+        sphere_first_shape,
+        sphere.body_count,
+        len(sphere.joint_parent),
+    )
+
+
+def make_collision_pipeline(model: newton.Model, device) -> newton.CollisionPipeline:
+    """Sticky-contact pipeline with a uniform grid broad phase for the mixed scene."""
+    pipeline = newton.CollisionPipeline(
+        model,
+        contact_matching=PHOENX_CONTACT_MATCHING,
+        broad_phase="sap",
+        shape_pairs_max=2_000_000,
+        rigid_contact_max=750_000,
+    )
+    pipeline.broad_phase = BroadPhaseGrid(
+        model.shape_world,
+        shape_flags=model.shape_flags,
+        cell_width=0.6,
+        pair_mode="warp_deterministic",
+        device=device,
+    )
+    return pipeline
+
+
+def make_solver(
+    model: newton.Model,
+    pipeline: newton.CollisionPipeline,
+    device,
+    *,
+    substeps: int = 4,
+    solver_iterations: int = 10,
+    direct_joint_mask: np.ndarray | None = None,
+    direct_joint_projection_passes: int | None = None,
+) -> newton.solvers.SolverPhoenX:
+    """Single-world PhoenX configuration shared by the mixed scenes."""
+    return newton.solvers.SolverPhoenX(
+        model,
+        collision_pipeline=pipeline,
+        substeps=substeps,
+        solver_iterations=solver_iterations,
+        velocity_iterations=1,
+        step_layout="single_world",
+        mass_splitting=True,
+        mass_splitting_overflow_only=True,
+        max_colored_partitions=9,
+        mass_splitting_batch_size=1,
+        mass_splitting_unrolled=True,
+        partitioner_algorithm="endpoint_owner",
+        colored_contact_headers=True,
+        colored_contact_rows=True,
+        joint_mode="maximal_pgs",
+        max_thread_blocks=8 * device.sm_count,
+        direct_joint_mask=direct_joint_mask,
+        direct_joint_projection_passes=direct_joint_projection_passes,
+    )
+
+
 class Example:
     """Exercise looped joints and dense rigid contacts in one world."""
 
     overlap_simulation_render = True
+    substeps = 4
+    solver_iterations = 10
+    direct_joint_projection_passes = None
 
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -46,36 +141,11 @@ class Example:
         self.frame_index = 0
 
         builder = newton.ModelBuilder()
-        builder.add_ground_plane(height=GROUND_HEIGHT)
-        tower_ids, _ = add_kapla_bricks(builder, [(0.0, 0.0)])
-        self.tower_body_count = len(tower_ids[0])
-        self.tower_body_ids = np.asarray(tower_ids[0], dtype=np.int32)
-
-        # Import and tile the articulated asset once, then clone it into
-        # the same world. Negative groups filter contacts within each
-        # sphere while allowing sphere-ground and sphere-tower contacts.
-        sphere = make_hoberman_builder(
-            collidable=True,
-            gravity=(0.0, 0.0, -9.81),
-            mid_spring_stiffness=HOBERMAN_MID_SPRING_STIFFNESS,
-            mid_spring_damping=HOBERMAN_MID_SPRING_DAMPING,
+        self.tower_body_ids, self.sphere_first_shape, sphere_body_count, sphere_joint_count = add_tower_and_spheres(
+            builder
         )
-        sphere_body_count = sphere.body_count
-        sphere_joint_count = len(sphere.joint_parent)
-        self.sphere_first_shape = len(builder.shape_body)
-        for index in range(HOBERMAN_COUNT):
-            angle = 2.0 * math.pi * index / HOBERMAN_COUNT
-            offset = wp.transform(
-                p=wp.vec3(
-                    SPHERE_RING_RADIUS * math.cos(angle),
-                    TOWER_CENTRE_Y + SPHERE_RING_RADIUS * math.sin(angle),
-                    SPHERE_START_HEIGHT,
-                ),
-                q=wp.quat_identity(),
-            )
-            first_shape = len(builder.shape_body)
-            builder.add_builder(sphere, xform=offset, label_prefix=f"hoberman_{index:02d}")
-            builder.shape_collision_group[first_shape:] = [-(index + 2)] * (len(builder.shape_body) - first_shape)
+        self.tower_body_count = len(self.tower_body_ids)
+        self.add_extra_content(builder)
 
         builder.color()
         self.model = builder.finalize(skip_validation_joints=True, skip_shape_contact_pairs=True)
@@ -84,39 +154,16 @@ class Example:
         self.state.body_q.assign(self.model.body_q)
         self.control = self.model.control()
 
-        pipeline = newton.CollisionPipeline(
+        self.collision_pipeline = make_collision_pipeline(self.model, self.device)
+        self.contacts = self.collision_pipeline.contacts()
+        self.solver = make_solver(
             self.model,
-            contact_matching=PHOENX_CONTACT_MATCHING,
-            broad_phase="sap",
-            shape_pairs_max=2_000_000,
-            rigid_contact_max=750_000,
-        )
-        pipeline.broad_phase = BroadPhaseGrid(
-            self.model.shape_world,
-            shape_flags=self.model.shape_flags,
-            cell_width=0.6,
-            pair_mode="warp_deterministic",
-            device=self.device,
-        )
-        self.collision_pipeline = pipeline
-        self.contacts = pipeline.contacts()
-        self.solver = newton.solvers.SolverPhoenX(
-            self.model,
-            collision_pipeline=pipeline,
-            substeps=4,
-            solver_iterations=10,
-            velocity_iterations=1,
-            step_layout="single_world",
-            mass_splitting=True,
-            mass_splitting_overflow_only=True,
-            max_colored_partitions=9,
-            mass_splitting_batch_size=1,
-            mass_splitting_unrolled=True,
-            partitioner_algorithm="endpoint_owner",
-            colored_contact_headers=True,
-            colored_contact_rows=True,
-            joint_mode="maximal_pgs",
-            max_thread_blocks=8 * self.device.sm_count,
+            self.collision_pipeline,
+            self.device,
+            substeps=self.substeps,
+            solver_iterations=self.solver_iterations,
+            direct_joint_mask=self.direct_joint_mask(),
+            direct_joint_projection_passes=self.direct_joint_projection_passes,
         )
         self.solver.world.set_global_linear_damping(1.0)
         self.solver.world.set_global_angular_damping(1.0)
@@ -149,6 +196,16 @@ class Example:
         self._render_state_prepared = False
         self._render_time = self.sim_time
 
+    def add_extra_content(self, builder: newton.ModelBuilder) -> None:
+        """Hook for derived scenes to add content to the shared world."""
+
+    def direct_joint_mask(self) -> np.ndarray | None:
+        """Joints solved as exact mechanisms; ``None`` keeps all joints as local blocks."""
+        return None
+
+    def simulate_controls(self) -> None:
+        """Hook for derived scenes to update controls once per captured frame."""
+
     def prepare_render_state(self) -> None:
         """Snapshot poses before physics advances on the other CUDA stream."""
         assert self._render_states is not None
@@ -162,6 +219,7 @@ class Example:
 
     def simulate(self) -> None:
         """Advance two 120 Hz physics ticks for one rendered frame."""
+        self.simulate_controls()
         for _ in range(2):
             self.state.clear_forces()
             self.viewer.apply_forces(self.state)
