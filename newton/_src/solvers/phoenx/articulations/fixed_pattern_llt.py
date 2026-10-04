@@ -816,12 +816,15 @@ def _find_block_tridiagonal_mechanisms(panel_tables: list[np.ndarray], block_siz
     return np.asarray(mechanisms, dtype=np.int32)
 
 
-# Atomic task queues pay off only when the symbolic graph exposes clearly more
-# ready work than one block per mechanism. A forest of 50 G1 trees (ready width
-# 3x/2x the mechanism count) runs 24% faster on the per-mechanism block grid,
-# while clock, colibri and G1 example mechanisms keep their queues.
-_PRODUCT_QUEUE_READY_FACTOR = 4
-_PUSH_QUEUE_READY_FACTOR = 2
+# Atomic task queues pay off when a few mechanisms leave most of the
+# per-mechanism block grid idle. With many mechanisms the grid is already busy:
+# a forest of 50 G1 trees runs 24% faster without queues.
+_QUEUE_MAX_MECHANISMS_PER_SM = 1.0 / 8.0
+
+
+def _use_task_queue(ready_width: int, mechanism_count: int, device: wp.Device) -> bool:
+    """Whether dependency-ready panel queues beat one block per mechanism."""
+    return ready_width > mechanism_count and mechanism_count < _QUEUE_MAX_MECHANISMS_PER_SM * device.sm_count
 
 
 class FixedPatternPanelLLT:
@@ -986,14 +989,14 @@ class FixedPatternPanelLLT:
                 block_size,
                 self.device,
             )
-            self._use_product_factor = (
-                product_schedule.product_count > 0
-                and product_schedule.max_ready_count > _PRODUCT_QUEUE_READY_FACTOR * len(dimensions)
+            self._use_product_factor = product_schedule.product_count > 0 and _use_task_queue(
+                product_schedule.max_ready_count, len(dimensions), self.device
             )
             if self._use_product_factor:
                 self._product_factor_schedule = product_schedule
 
         self._persistent_schedule = None
+        self._persistent_schedule_without_pcr = None
         if not self._use_product_factor and not use_cooperative_factor:
             self._persistent_schedule = PersistentFactorSchedule(
                 panel_tables,
@@ -1002,6 +1005,18 @@ class FixedPatternPanelLLT:
                 block_size,
                 self.device,
             )
+            # PCR solves its block-tridiagonal mechanisms from its own factor;
+            # their panel LLT is needed only by the grouped contact response.
+            other_mechanisms = np.setdiff1d(all_mechanisms, pcr_mechanisms, assume_unique=True)
+            if pcr_mechanisms.size and other_mechanisms.size:
+                other_tables = [panel_tables[mechanism] for mechanism in other_mechanisms]
+                self._persistent_schedule_without_pcr = PersistentFactorSchedule(
+                    other_tables,
+                    tuple(dimensions[mechanism] for mechanism in other_mechanisms),
+                    sum(int(np.count_nonzero(table >= 0)) for table in other_tables),
+                    block_size,
+                    self.device,
+                )
 
         remaining_large_mechanisms = np.setdiff1d(large_mechanisms, pcr_mechanisms, assume_unique=True)
         mechanism_count = len(remaining_large_mechanisms)
@@ -1029,7 +1044,7 @@ class FixedPatternPanelLLT:
                 push_forward_schedule.max_ready_count,
                 push_backward_schedule.max_ready_count,
             )
-            self._use_push_solve = push_ready_width > _PUSH_QUEUE_READY_FACTOR * mechanism_count
+            self._use_push_solve = _use_task_queue(push_ready_width, mechanism_count, self.device)
             if self._use_push_solve:
                 self._push_forward_schedule = push_forward_schedule
                 self._push_backward_schedule = push_backward_schedule
@@ -1102,10 +1117,11 @@ class FixedPatternPanelLLT:
             )
         elif self.cooperative_factor_mechanism.size == 0 and self.grouped_rhs_factor_mechanism.size == 0:
             assert self._persistent_schedule is not None
-            self._persistent_schedule.compute(
-                self.matrix,
-                self.factor,
-            )
+            schedule = self._persistent_schedule
+            if self._pcr is not None and not self._grouped_rhs_factor_required:
+                schedule = self._persistent_schedule_without_pcr
+            if schedule is not None:
+                schedule.compute(self.matrix, self.factor)
         # Grouped contact response still consumes the LLT factor; PCR replaces
         # only the latency-bound scalar right-hand-side solve.
         if self._pcr is not None:
