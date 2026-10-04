@@ -149,6 +149,7 @@ needs 8 substeps; the scene runs 8 x 5 (same sweeps per frame as 4 x 10).
 | Contact chunks of 8 points for drivetrain manifolds | 24.0 |
 | No redundant panel factor for PCR-solved mechanisms | 27.0 |
 | Unrefined projections before/after contact preparation | 28.2 |
+| One exact projection per substep (scene setting) | 29.5 |
 
 Every step keeps all quality checks; the last is trajectory-identical, and
 Kapla+Hoberman remains bitwise unchanged at 71 FPS. Rejected: nested-dissection
@@ -167,7 +168,14 @@ standalone bike 81 -> 59, rear sprocket 8.3 vs 13.3 rad/s): the serial
 38-tile substitution exceeds PCR's launch cost. An FP64 PCR needs no
 refinement (chain tests pass with one pass) and halves the solve cost
 (4.4 -> 2.6 ms/frame), but its factorization rises from 1.9 to 6.4 ms/frame
-on this 1/64-rate FP64 GPU (26.1 FPS); revisit on full-rate FP64 GPUs.
+on this 1/64-rate FP64 GPU (26.1 FPS); revisit on full-rate FP64 GPUs. The
+cooperative LLT solve (about 40 us per G1-forest solve) is bound by its serial
+tile chain, not by the permuted gather (hoisting it: neutral) nor the 16x16
+triangular solves (a chained microbenchmark is only 20% slower than matvecs);
+32- and 128-thread solve blocks were neutral to slower than 64. Reusing the
+substep factor for relax (possible without G1 effort limits) gains only 1.2%.
+The overflow partition costs about 1.8x a regular color in iterate and 2.4x in
+prepare for 4.5x the columns.
 
 ## Batched humanoid comparison
 
