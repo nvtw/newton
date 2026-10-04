@@ -82,7 +82,9 @@ class SingleWorldMassSplittingUnrolledDispatcher:
 
         inv_dt = 1.0 / w.substep_dt
         if direct is not None and direct.enabled:
-            direct.solve(use_bias=False)
+            # Projections before and after contact preparation are followed by
+            # a refined final projection, so they skip residual refinement.
+            direct.solve(use_bias=False, refine=False)
             direct.resolve_bounded_drives(idt, use_bias=False)
             if sync_direct_copies:
                 w._mass_splitting_broadcast()
@@ -102,7 +104,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             if sync_direct_copies:
                 w._mass_splitting_writeback(already_averaged=True)
             w._warm_start_owned_contacts()
-            direct.solve(use_bias=False)
+            direct.solve(use_bias=False, refine=False)
             if sync_direct_copies:
                 w._mass_splitting_broadcast()
         # Without explicit projection passes, project after every iteration.
