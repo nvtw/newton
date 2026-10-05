@@ -2296,6 +2296,10 @@ contact midpoints and normals in buffers owned by the pipeline: 40 bytes per
 ``rigid_contact_max`` slot.  ``"sticky"`` adds 48 bytes per slot and
 ``contact_report=True`` adds 4.  ``"disabled"`` allocates no matching history.
 
+The deterministic pipeline's sorter omits the unused simple-layout scratch,
+saving 48 bytes per ``rigid_contact_max`` slot. This more than offsets the
+additional matcher-owned midpoint and normal history.
+
 .. _Contact Reports:
 
 Contact Reports

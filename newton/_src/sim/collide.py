@@ -1888,6 +1888,7 @@ class CollisionPipeline:
                 rigid_contact_max,
                 key_bit_count=self._contact_sort_sub_key_bits + 2 * self._contact_sort_shape_index_bits,
                 per_contact_shape_properties=per_contact_props,
+                allocate_simple_scratch=False,
                 device=device,
             )
         else:
