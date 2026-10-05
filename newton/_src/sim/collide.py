@@ -2554,8 +2554,8 @@ class CollisionPipeline:
                 device=self.device,
             )
 
-        # Match the sorted stream against the previous frame, so every match
-        # index names a final row of this frame's buffer.
+        # Match the sorted stream against the previous frame: entry i belongs to
+        # final row i, and its value is a row of the previous sorted stream.
         if self._contact_matcher is not None:
             self._contact_matcher.match(
                 sort_keys=self._contact_sorter.sorted_keys_view,
