@@ -768,6 +768,8 @@ def test_prev_count_clamped_on_overflow(test, device):
         match_idx = contacts.rigid_contact_match_index.numpy()
         test.assertTrue(np.all(match_idx < capacity), f"Match indices must address stored rows: {match_idx}")
         test.assertTrue(np.all(match_idx >= MATCH_BROKEN))
+        # Drain the expected device printf here, not into the next test's output check.
+        wp.synchronize_device(device)
 
 
 def test_pipeline_sorter_omits_unused_simple_scratch(test, device):
