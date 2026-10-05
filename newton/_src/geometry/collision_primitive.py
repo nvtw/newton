@@ -788,7 +788,7 @@ def _capsule_cylinder_rim_normal(
         best_sn = 1.0
         best_gap = b - cylinder_radius
 
-    if c <= 1.0e-7:
+    if c == 0.0:
         # The projected rim degenerates to a line for a horizontal core.
         if a > 0.0 and b > cylinder_radius:
             length = wp.sqrt(a * a + (b - cylinder_radius) * (b - cylinder_radius))
@@ -807,10 +807,8 @@ def _capsule_cylinder_rim_normal(
             length = wp.sqrt(x * x + y * y)
             cs = x / length
             sn = y / length
-            gap = b * sn - cylinder_radius * wp.sqrt(c * c * cs * cs + sn * sn)
-            if gap >= best_gap:
-                best_cs = cs
-                best_sn = sn
+            best_cs = cs
+            best_sn = sn
     elif b > 0.0:
         # With t=tan(theta), the derivative has the sign of
         # B-A*t-R*(1-c*c)*t/sqrt(c*c+t*t). For A>0 it decreases
@@ -818,6 +816,11 @@ def _capsule_cylinder_rim_normal(
         # first root (a maximum); the second root is a minimum.
         high = float(0.5 * wp.pi)
         solve = a > 0.0
+        if a > 0.0 and b < cylinder_radius * sine_sq:
+            # The a=0 root bounds this root from above. A tight bracket
+            # resolves the rim's radial direction even for tiny core tilts.
+            k = cylinder_radius * sine_sq
+            high = wp.atan(b * c / wp.sqrt(k * k - b * b))
         if a < 0.0 and cylinder_radius * sine_sq > -a * c:
             turn_sq = wp.pow(cylinder_radius * sine_sq * c * c / (-a), 2.0 / 3.0) - c * c
             turn = wp.sqrt(wp.max(turn_sq, 0.0))
@@ -842,8 +845,14 @@ def _capsule_cylinder_rim_normal(
             angle = 0.5 * (low + high)
             sn = wp.sin(angle)
             cs = wp.cos(angle)
-            gap = a * cs + b * sn - cylinder_radius * wp.sqrt(c * c * cs * cs + sn * sn)
-            if gap >= best_gap:
+            radial = wp.sqrt(c * c * cs * cs + sn * sn)
+            # For a>=0 the stationary maximum beats both boundaries. For
+            # a<0 only the barrel boundary can win. Compare their difference
+            # directly so tiny rim improvements do not round away in FP32.
+            barrel_improvement = (
+                a * cs - b * cs * cs / (1.0 + sn) + cylinder_radius * sine_sq * cs * cs / (1.0 + radial)
+            )
+            if a > 0.0 or barrel_improvement >= 0.0:
                 best_cs = cs
                 best_sn = sn
     return wp.normalize(direction * best_cs * e0 + best_sn * e1)

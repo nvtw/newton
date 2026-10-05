@@ -113,7 +113,7 @@ def test_support_witnesses(test, device):
     # Almost horizontal overhangs and almost circular projected rims also need
     # valid surface witnesses, not just an accurate scalar gap.
     index = 32
-    for c in (1e-5, 0.001, 0.01, 1.0 - 1e-5):
+    for c in (1e-9, 1e-8, 1e-7, 1e-5, 0.001, 0.01, 1.0 - 1e-5):
         sine = np.sqrt(1.0 - c * c)
         for a in (-0.1, -1e-4, 1e-4, 0.1):
             for b in (0.3, 1.0):
@@ -123,6 +123,8 @@ def test_support_witnesses(test, device):
                 index += 1
     scales = np.tile([0.001, 1.0, 1000.0], count // 3)
     rotations, _ = np.linalg.qr(rng.normal(size=(count, 3, 3)))
+    # Preserve sub-epsilon tilts instead of losing them in frame roundoff.
+    rotations[32:56] = np.eye(3)
     with wp.ScopedDevice(device):
         distances = wp.zeros(count, dtype=wp.vec2)
         points = wp.zeros(count, dtype=wp.vec3)
@@ -191,7 +193,7 @@ def query_rim_normals(parameters: wp.array[wp.vec3], represented: wp.array[wp.ve
 def test_rim_conditioning(test, device):
     """Check thin ellipses, nearly circular rims, and repeated-root limits."""
     parameters = []
-    for c in (1e-5, 1e-3, 0.01, 0.1, 0.5, 0.9, 0.99, 1.0 - 1e-5):
+    for c in (0.0, 1e-9, 1e-8, 1e-7, 1e-5, 1e-3, 0.01, 0.1, 0.5, 0.9, 0.99, 1.0 - 1e-5):
         for a in (-2.0, -0.1, -1e-4, 0.0, 1e-4, 0.1, 2.0):
             for b in (0.0, 1e-4, 0.01, 0.3, 0.9, 1.0, 1.1, 2.0, c * abs(a)):
                 parameters.append((c, a, b))
@@ -556,6 +558,64 @@ def test_rim_overhang_and_near_parallel(test, device):
                                     )
 
 
+def test_near_horizontal_cap_witnesses(test, device):
+    """Keep cap/rim witnesses on both surfaces for nearly horizontal cores."""
+    with wp.ScopedDevice(device):
+        for reversed_order in (False, True):
+            for direction in (-1.0, 1.0):
+                for z, radius in ((0.54, 0.75), (0.719, 0.01), (0.72, 0.01), (0.725, 0.01), (0.73, 0.01)):
+                    for tilt in (0.0, -1e-7, 1e-7, -1e-6, 1e-6):
+                        with test.subTest(order=reversed_order, cap=direction, z=z, radius=radius, tilt=tilt):
+                            builder = newton.ModelBuilder()
+                            cfg = newton.ModelBuilder.ShapeConfig(gap=0.01, density=0.0)
+                            body = builder.add_body(mass=1.0, inertia=wp.mat33(*np.eye(3).ravel()))
+                            cylinder = {"body": -1, "radius": 1.38, "half_height": 0.72, "cfg": cfg}
+                            capsule = {"body": body, "radius": radius, "half_height": 0.94, "cfg": cfg}
+                            if reversed_order:
+                                capsule_id = builder.add_shape_capsule(**capsule)
+                                builder.add_shape_cylinder(**cylinder)
+                            else:
+                                builder.add_shape_cylinder(**cylinder)
+                                capsule_id = builder.add_shape_capsule(**capsule)
+                            model = builder.finalize()
+                            state = model.state()
+                            rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), -0.5 * wp.pi + tilt)
+                            pose = wp.transform(wp.vec3(0.8, 0.85, direction * z), rotation)
+                            state.body_q.assign([pose])
+                            axis = np.asarray(wp.quat_rotate(rotation, wp.vec3(0.0, 0.0, 1.0)), dtype=float)
+                            axis /= np.linalg.norm(axis)
+                            pipeline = newton.CollisionPipeline(model)
+                            contacts = pipeline.contacts()
+                            pipeline.collide(state, contacts)
+                            count = int(contacts.rigid_contact_count.numpy()[0])
+                            test.assertGreater(count, 0)
+                            shape0 = contacts.rigid_contact_shape0.numpy()
+                            shape1 = contacts.rigid_contact_shape1.numpy()
+                            point0 = contacts.rigid_contact_point0.numpy()
+                            point1 = contacts.rigid_contact_point1.numpy()
+                            margin0 = contacts.rigid_contact_margin0.numpy()
+                            margin1 = contacts.rigid_contact_margin1.numpy()
+                            normals = contacts.rigid_contact_normal.numpy()
+                            for i in range(count):
+                                x0 = point0[i].astype(float)
+                                x1 = point1[i].astype(float)
+                                if shape0[i] == capsule_id:
+                                    x0 = np.asarray(wp.transform_point(pose, wp.vec3(*x0)), dtype=float)
+                                if shape1[i] == capsule_id:
+                                    x1 = np.asarray(wp.transform_point(pose, wp.vec3(*x1)), dtype=float)
+                                normal = normals[i].astype(float)
+                                gap = (x1 - x0) @ normal - margin0[i] - margin1[i]
+                                test.assertAlmostEqual(gap, z - 0.72 - radius, delta=3e-6)
+                                s0 = x0 + margin0[i] * normal
+                                s1 = x1 - margin1[i] * normal
+                                ca, cy = (s0, s1) if shape0[i] == capsule_id else (s1, s0)
+                                relative = ca - np.array([0.8, 0.85, direction * z])
+                                along = np.clip(relative @ axis, -0.94, 0.94)
+                                test.assertAlmostEqual(np.linalg.norm(relative - along * axis), radius, delta=3e-6)
+                                test.assertLessEqual(np.linalg.norm(cy[:2]), 1.38 + 3e-6)
+                                test.assertAlmostEqual(cy[2], direction * 0.72, delta=3e-6)
+
+
 def test_gap_admission(test, device):
     """Generate separated barrel and cap contacts inside the combined shape gap."""
     with wp.ScopedDevice(device):
@@ -657,6 +717,12 @@ add_function_test(
     devices=get_test_devices(),
 )
 add_function_test(TestCapsuleCylinderBarrel, "test_gap_admission", test_gap_admission, devices=get_test_devices())
+add_function_test(
+    TestCapsuleCylinderBarrel,
+    "test_near_horizontal_cap_witnesses",
+    test_near_horizontal_cap_witnesses,
+    devices=get_test_devices(),
+)
 add_function_test(
     TestCapsuleCylinderBarrel,
     "test_rim_overhang_and_near_parallel",
