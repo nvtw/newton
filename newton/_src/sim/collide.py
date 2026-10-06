@@ -1955,9 +1955,16 @@ class CollisionPipeline:
         """Number of precomputed (particle, shape) pairs launched for soft contacts.
 
         This is the base of the default ``soft_contact_max``, which additionally reserves
-        edge/face headroom when ``enable_rigid_soft_full_surface_contact`` is set.
+        edge/face headroom when ``enable_rigid_soft_full_surface_contact`` is set. With that
+        flag, mesh and convex-mesh shapes are excluded here: their particle contacts come from
+        the full-surface mesh pass.
         """
         return self._soft_contact_pair_count
+
+    @property
+    def _has_rigid_soft_queries(self) -> bool:
+        """Whether any rigid-soft contact pass has candidates, including full-surface passes."""
+        return self._soft_contact_tids_size > 0 or self._soft_mesh_contact_data is not None
 
     @property
     def soft_rigid_contact_pair_count(self) -> int:

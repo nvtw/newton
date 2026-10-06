@@ -2746,11 +2746,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 "(pass collision_pipeline=CollisionPipeline(...) to SolverVBD): the DAT reference poses "
                 "must be snapshotted at the exact detection instants the solver drives."
             )
-        has_rigid_soft_queries = (
-            self.collision_pipeline.soft_contact_pair_count > 0
-            or len(self.collision_pipeline.soft_edge_rigid_pairs) > 0
-            or len(self.collision_pipeline.soft_face_rigid_pairs) > 0
-        )
+        has_rigid_soft_queries = self.collision_pipeline._has_rigid_soft_queries
         if self.integrate_with_external_rigid_solver:
             raise ValueError("rigid_soft_enable_dat is not supported with an external rigid solver.")
 

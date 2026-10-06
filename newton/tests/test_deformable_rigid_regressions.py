@@ -674,6 +674,35 @@ def test_mesh_pad_pinch_pushes_toward_nearest_exit(test, device):
             test.assertTrue(np.all(np.abs(normals[:, 2]) < 1.0e-3), normals)
 
 
+def test_dat_budget_counts_full_surface_mesh_queries(test, device):
+    """DAT bounds rigid motion by the soft query radius even when meshes are the only soft colliders."""
+    builder = newton.ModelBuilder()
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.5, -0.5, 0.0),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=4,
+        dim_y=4,
+        cell_x=0.25,
+        cell_y=0.25,
+        mass=0.05,
+        particle_radius=5.0e-3,
+    )
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.4), wp.quat_identity()))
+    builder.add_shape_mesh(body, mesh=newton.Mesh.create_sphere(0.25, num_latitudes=8, num_longitudes=8))
+    builder.color()
+    model = builder.finalize(device=device)
+    for full_surface in (False, True):
+        with test.subTest(full_surface=full_surface):
+            pipeline = newton.CollisionPipeline(
+                model, soft_contact_gap=0.1, enable_rigid_soft_full_surface_contact=full_surface
+            )
+            solver = newton.solvers.SolverVBD(
+                model, iterations=1, rigid_soft_enable_dat=True, collision_pipeline=pipeline
+            )
+            test.assertAlmostEqual(solver._rigid_soft_query_radius_min, 0.105, places=6)
+
+
 def test_mixed_mesh_edge_dispatch(test, device):
     """Keep mesh edge contacts when compact scheduling is enabled in a mixed scene."""
     builder = newton.ModelBuilder()
@@ -730,6 +759,7 @@ for device in get_test_devices():
         test_convex_hull_edges_use_collision_numbering,
         test_identical_meshes_share_contact_precomputation,
         test_mesh_pad_pinch_pushes_toward_nearest_exit,
+        test_dat_budget_counts_full_surface_mesh_queries,
         test_finite_plane_feature_geometry,
         test_large_heightfield_task_contacts,
     ):
