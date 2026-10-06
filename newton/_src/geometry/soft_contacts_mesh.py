@@ -168,6 +168,98 @@ def _cone_query_bounds(
     return np.append(direction, widths[best] + 1.0e-5), error
 
 
+def _cone_query_bounds_batch(
+    points: np.ndarray, positions: np.ndarray, *, edges: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate ``_cone_query_bounds`` for equally sized neighbor lists.
+
+    Inputs have shapes (N, 3), (N, K, 3), and optionally (N, 3).
+    Masked candidates retain the scalar implementation's order, including its
+    first-minimum tie break. The caller batches by valence and limits N to keep
+    temporary storage bounded. All computation remains float64.
+    """
+    count, neighbor_count = positions.shape[:2]
+    bounds = np.tile([0.0, 0.0, 1.0, 1.0], (count, 1))
+    result_errors = np.zeros((count, 3))
+    if count == 0 or neighbor_count < 2:
+        return bounds, result_errors
+
+    directions = positions - points[:, None, :]
+    length = np.linalg.norm(directions, axis=2)
+    # Scalar np.linalg.norm(vec3) uses a dot product, whereas norm(..., axis=1)
+    # sums three squares. Keep the dot-product evaluation order when batching
+    # those particular norms so that rounding agrees with the scalar version.
+    point_bound = np.sqrt((points[:, None, :] @ points[:, :, None])[:, 0, 0])
+    if edges is not None:
+        half_length = np.sqrt((edges[:, None, :] @ edges[:, :, None])[:, 0, 0]) * 0.5
+        axis = edges / np.where(half_length > 0, 2 * half_length, 1.0)[:, None]
+        directions -= (directions @ axis[:, :, None]) * axis[:, None, :]
+        length += half_length[:, None]
+        point_bound += half_length
+    projected = np.linalg.norm(directions, axis=2)
+    valid = projected > 0
+    if edges is not None:
+        valid &= half_length[:, None] > 0
+    denominator = np.where(valid, projected, 1.0)
+    directions /= denominator[:, :, None]
+    p = point_bound[:, None] + np.linalg.norm(positions, axis=2)
+    errors = 2.0e-6 * np.stack((p * length, p + length, np.ones_like(p)), axis=2) / denominator[:, :, None]
+
+    if neighbor_count > 6:
+        # Select the same six coordinate extrema as the scalar implementation,
+        # keeping unique indices in their original order. Rows with at most six
+        # nonzero directions retain all of them.
+        extrema = np.concatenate(
+            (
+                np.argmin(np.where(valid[:, :, None], directions, np.inf), axis=1),
+                np.argmax(np.where(valid[:, :, None], directions, -np.inf), axis=1),
+            ),
+            axis=1,
+        )
+        selected = np.zeros_like(valid)
+        np.put_along_axis(selected, extrema, True, axis=1)
+        selected = valid & np.where((np.sum(valid, axis=1) > 6)[:, None], selected, True)
+        indices = np.sort(np.where(selected, np.arange(neighbor_count), neighbor_count), axis=1)[:, :6]
+        valid = indices < neighbor_count
+        indices = np.minimum(indices, neighbor_count - 1)
+        directions = np.take_along_axis(directions, indices[:, :, None], axis=1)
+        errors = np.take_along_axis(errors, indices[:, :, None], axis=1)
+
+    i, j = _cone_pair_indices(directions.shape[1])
+    delta = directions[:, i] - directions[:, j]
+    a = np.linalg.norm(delta, axis=2)
+    b = np.linalg.norm(directions[:, i] + directions[:, j], axis=2)
+    active = valid[:, i] & valid[:, j] & (a > b)
+    denominator = np.where(active, a, 1.0)
+    axes = delta / denominator[:, :, None]
+    width = b / denominator
+    relaxation = 2 * np.maximum(errors[:, i], errors[:, j]) / denominator[:, :, None]
+    if edges is not None:
+        axes = np.concatenate((axes, axis[:, None, :]), axis=1)
+        width = np.column_stack((width, np.zeros(count)))
+        relaxation = np.concatenate((relaxation, np.zeros((count, 1, 3))), axis=1)
+        active = np.column_stack((active, half_length > 0))
+
+    i, j = _cone_pair_indices(axes.shape[1])
+    if len(i) == 0:
+        return bounds, result_errors
+    eigenvalue = 1 - np.abs(np.sum(axes[:, i] * axes[:, j], axis=2))
+    valid = active[:, i] & active[:, j] & (eigenvalue > 1.0e-12)
+    widths = np.sqrt((width[:, i] ** 2 + width[:, j] ** 2) / np.where(valid, eigenvalue, 1.0))
+    widths = np.where(valid, widths, np.inf)
+    best = np.argmin(widths, axis=1)
+    rows = np.flatnonzero(widths[np.arange(count), best] < 1.0)
+    best = best[rows]
+    direction = np.cross(axes[rows, i[best]], axes[rows, j[best]])
+    direction /= np.sqrt((direction[:, None, :] @ direction[:, :, None])[:, 0, 0])[:, None]
+    bounds[rows, :3] = direction
+    bounds[rows, 3] = widths[rows, best] + 1.0e-5
+    result_errors[rows] = (relaxation[rows, i[best]] + relaxation[rows, j[best]]) / np.sqrt(
+        eigenvalue[rows, best, None]
+    )
+    return bounds, result_errors
+
+
 @wp.func
 def _cone_valid(
     mesh: wp.uint64, scale: wp.vec3, point: wp.vec3, diff: wp.vec3, span: wp.vec3i, neighbors: wp.array[int]
@@ -266,23 +358,35 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
         vs = {v: span(n, representative[v] // 3) for v, n in incident.items()}
         es = {key: span(n, edge_owner[key]) for key, n in opposite.items()}
         points = np.asarray(mesh.vertices, dtype=np.float64)[idx]
-        vb = {
-            v: (
-                _cone_query_bounds(points[representative[v]], points[[representative[n] for n in ns]])
-                if len(vertex_table)
-                else (np.array([0.0, 0.0, 1.0, 1.0]), np.zeros(3))
-            )
-            for v, ns in incident.items()
-        }
-        eb = {}
+
+        def feature_bounds(features, *, is_edge, enabled):
+            if not enabled:
+                return dict.fromkeys(features, (np.array([0.0, 0.0, 1.0, 1.0]), np.zeros(3)))
+            groups = {}
+            for key, ns in features.items():
+                groups.setdefault(len(ns), []).append(key)
+            result = {}
+            for valence, keys in groups.items():
+                # At most six directions enter the axis-pair search. Also cap
+                # neighbor storage for unusually high-valence/nonmanifold meshes.
+                batch_size = max(1, min(2048, 65536 // max(valence, 1)))
+                for start in range(0, len(keys), batch_size):
+                    batch = keys[start : start + batch_size]
+                    ns = np.asarray([[representative[n] for n in features[key]] for key in batch], dtype=np.int32)
+                    if is_edge:
+                        endpoints = points[[[representative[v] for v in key] for key in batch]]
+                        centers = (endpoints[:, 0] + endpoints[:, 1]) * 0.5
+                        edges = endpoints[:, 1] - endpoints[:, 0]
+                    else:
+                        centers = points[[representative[key] for key in batch]]
+                        edges = None
+                    bounds, errors = _cone_query_bounds_batch(centers, points[ns], edges=edges)
+                    result.update((key, (bounds[row], errors[row])) for row, key in enumerate(batch))
+            return result
+
+        vb = feature_bounds(incident, is_edge=False, enabled=len(vertex_table) > 0)
+        eb = feature_bounds(opposite, is_edge=True, enabled=len(et) > 0)
         edge_slots = {}
-        for key, ns in opposite.items():
-            p, q = points[[representative[v] for v in key]]
-            eb[key] = (
-                _cone_query_bounds((p + q) * 0.5, points[[representative[n] for n in ns]], edge=q - p)
-                if len(et)
-                else (np.array([0.0, 0.0, 1.0, 1.0]), np.zeros(3))
-            )
         offset = len(vertex_spans)
         for slot, v in enumerate(canon):
             vertex_spans.append(vs[int(v)])
