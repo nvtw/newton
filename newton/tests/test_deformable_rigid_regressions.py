@@ -11,6 +11,7 @@ import warp as wp
 
 import newton
 import newton.solvers
+from newton._src.geometry import soft_contacts_mesh
 from newton._src.geometry.sdf_texture import SLOT_LINEAR, TextureSDFData
 from newton._src.geometry.soft_contacts_sdf import (
     _closest_edge_plane,
@@ -513,6 +514,92 @@ def test_cloth_settles_on_heightfield_stairs(test, device):
     test.assertGreater(float(q[:, 2].min()), 0.09)
 
 
+def test_convex_hull_edges_use_collision_numbering(test, device):
+    """Convex hulls of unwelded meshes must build and match MESH ridge contacts for any vertex order."""
+    box = newton.Mesh.create_box(0.2, 0.2, 0.2, compute_inertia=False)
+    vertices, indices = np.asarray(box.vertices), np.asarray(box.indices).reshape(-1)
+    ridge_up = wp.transform(wp.vec3(), wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.25 * np.pi))
+    for seed in range(20):
+        order = np.random.default_rng(seed).permutation(len(vertices))
+        inverse = np.empty_like(order)
+        inverse[order] = np.arange(len(order))
+        edge_contacts = []
+        for add_shape in ("add_shape_mesh", "add_shape_convex_hull"):
+            builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+            mesh = newton.Mesh(vertices[order], inverse[indices], compute_inertia=False)
+            getattr(builder, add_shape)(body=-1, mesh=mesh, xform=ridge_up)
+            # The ridge passes under a single 0.2 m cloth cell, between soft vertices.
+            builder.add_cloth_grid(
+                pos=wp.vec3(-0.3, -0.3, 0.2835),
+                rot=wp.quat_identity(),
+                vel=wp.vec3(),
+                dim_x=3,
+                dim_y=3,
+                cell_x=0.2,
+                cell_y=0.2,
+                mass=0.1,
+                particle_radius=0.0,
+            )
+            model = builder.finalize(device=device)
+            pipeline = newton.CollisionPipeline(
+                model, soft_contact_gap=0.02, enable_rigid_soft_full_surface_contact=True
+            )
+            contacts = pipeline.contacts()
+            pipeline.collide(model.state(), contacts)
+            count = int(contacts.soft_contact_count.numpy()[0])
+            contact_indices = contacts.soft_contact_indices.numpy()[:count]
+            edge_contacts.append(int(np.sum((contact_indices[:, 1] >= 0) & (contact_indices[:, 2] < 0))))
+        with test.subTest(seed=seed):
+            test.assertGreater(edge_contacts[0], 0)
+            test.assertEqual(edge_contacts[1], edge_contacts[0])
+
+
+def test_identical_meshes_share_contact_precomputation(test, device):
+    """Distinct Mesh objects with identical geometry, e.g. replicated by importers, are processed once."""
+    sphere = newton.Mesh.create_sphere(0.2, num_latitudes=8, num_longitudes=8, compute_inertia=False)
+    builder = newton.ModelBuilder()
+    for world in range(4):
+        copy = newton.Mesh(np.array(sphere.vertices), np.array(sphere.indices), compute_inertia=False)
+        builder.add_shape_mesh(body=-1, mesh=copy, xform=wp.transform(wp.vec3(float(world), 0.0, 0.0)))
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.5, -0.5, 0.3),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=4,
+        dim_y=4,
+        cell_x=1.0,
+        cell_y=0.25,
+        mass=0.1,
+    )
+    model = builder.finalize(device=device)
+    feature_data = mock.Mock(wraps=soft_contacts_mesh._mesh_feature_data)
+    feature_bounds = mock.Mock(wraps=soft_contacts_mesh._cone_query_bounds_batch)
+    with (
+        mock.patch.object(soft_contacts_mesh, "_mesh_feature_data", feature_data),
+        mock.patch.object(soft_contacts_mesh, "_cone_query_bounds_batch", feature_bounds),
+    ):
+        newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
+    test.assertEqual(feature_data.call_count, 1)
+    reference_calls = feature_bounds.call_count
+
+    builder = newton.ModelBuilder()
+    builder.add_shape_mesh(body=-1, mesh=sphere)
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.5, -0.5, 0.3),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=1,
+        dim_y=1,
+        cell_x=1.0,
+        cell_y=1.0,
+        mass=0.1,
+    )
+    feature_bounds.reset_mock()
+    with mock.patch.object(soft_contacts_mesh, "_cone_query_bounds_batch", feature_bounds):
+        newton.CollisionPipeline(builder.finalize(device=device), enable_rigid_soft_full_surface_contact=True)
+    test.assertEqual(reference_calls, feature_bounds.call_count)
+
+
 def test_mixed_mesh_edge_dispatch(test, device):
     """Keep mesh edge contacts when compact scheduling is enabled in a mixed scene."""
     builder = newton.ModelBuilder()
@@ -566,6 +653,8 @@ for device in get_test_devices():
         test_finite_plane_penetrating_face,
         test_cloth_under_finite_plane_shelf,
         test_cloth_settles_on_heightfield_stairs,
+        test_convex_hull_edges_use_collision_numbering,
+        test_identical_meshes_share_contact_precomputation,
         test_finite_plane_feature_geometry,
         test_large_heightfield_task_contacts,
     ):

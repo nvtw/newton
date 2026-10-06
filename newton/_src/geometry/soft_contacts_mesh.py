@@ -311,7 +311,43 @@ def _face_valid(
     return True
 
 
-def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: wp.array):
+def _collision_meshes(model: Model, shape_mask: np.ndarray) -> dict[int, Mesh]:
+    """Return the mesh backing each masked shape's ``shape_source_ptr`` and edge table.
+
+    Convex hulls collide against a vertex-deduplicated copy of their source, so its packed
+    collision edges use that copy's vertex numbering, not ``model.shape_source``'s.
+    """
+    from ..sim.builder import _deduplicate_convex_collision_mesh  # noqa: PLC0415
+
+    shape_types = model.shape_type.numpy()
+    convex_copies: dict[int, Mesh] = {}
+    meshes = {}
+    for shape in np.flatnonzero(shape_mask):
+        mesh = model.shape_source[shape]
+        if mesh is None or not hasattr(mesh, "indices"):
+            raise ValueError(f"mesh/convex shape {int(shape)} has no shape_source Mesh")
+        if shape_types[shape] == int(GeoType.CONVEX_MESH):
+            if id(mesh) not in convex_copies:
+                convex_copies[id(mesh)] = _deduplicate_convex_collision_mesh(mesh)
+            mesh = convex_copies[id(mesh)]
+        meshes[int(shape)] = mesh
+    return meshes
+
+
+def _geometry_key(mesh: Mesh) -> tuple[int, int, int]:
+    """Share per-mesh precomputation across distinct but identical Mesh objects."""
+    return (len(mesh.vertices), len(mesh.indices), hash(mesh))
+
+
+def _edge_rows(keys: np.ndarray, query: np.ndarray, what: str) -> np.ndarray:
+    """Locate sorted edge keys, rejecting edges that are not part of the triangle topology."""
+    rows = np.searchsorted(keys, query)
+    if np.any(rows >= len(keys)) or np.any(keys[np.minimum(rows, len(keys) - 1)] != query):
+        raise ValueError(f"{what} contains an edge that is not an edge of the mesh triangles.")
+    return rows
+
+
+def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], vertex_table: wp.array, edge_table: wp.array):
     """Build fixed incident-feature spans, ownership, and per-shape component counts."""
     et = edge_table.numpy()
     offsets = np.zeros(model.shape_count, dtype=np.int32)
@@ -405,10 +441,8 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
 
     # Shape instances share immutable local topology. Only the feature rows
     # carry a shape id; constructing full adjacency per world is unnecessary.
-    for shape, mesh in enumerate(model.shape_source):
-        if mesh is None or not hasattr(mesh, "indices"):
-            continue
-        key = id(mesh)
+    for shape, mesh in meshes.items():
+        key = _geometry_key(mesh)
         if key not in cache:
             cache[key] = build(mesh)
         offset, canon, edge_keys, edge_data, component_count = cache[key]
@@ -417,7 +451,7 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
         start, end = np.searchsorted(et[:, 0], (shape, shape + 1))
         edge_canon = np.sort(canon[et[start:end, 1:]].astype(np.int64), axis=1)
         keys = (edge_canon[:, 0] << 32) | edge_canon[:, 1]
-        ee[start:end] = edge_data[np.searchsorted(edge_keys, keys)]
+        ee[start:end] = edge_data[_edge_rows(edge_keys, keys, "Rigid edge table")]
     if max(len(vertex_spans), len(edge_spans), len(neighbors)) > np.iinfo(np.int32).max:
         raise ValueError("Mesh contact topology exceeds 32-bit indexing capacity.")
     arrays = [wp.array(offsets, dtype=int, device=model.device)]
@@ -503,14 +537,14 @@ def _mesh_feature_data(
         edge_canon = canonical[collision_edges]
         sorted_canon = np.sort(edge_canon.astype(np.int64), axis=1)
         selected_keys = (sorted_canon[:, 0] << 32) | sorted_canon[:, 1]
-        edge_outward = edge_outward[np.searchsorted(edge_keys, selected_keys)]
+        edge_outward = edge_outward[_edge_rows(edge_keys, selected_keys, "Mesh collision edge set")]
     edge_table = np.column_stack((index_of_canon[edge_canon[:, 0]], index_of_canon[edge_canon[:, 1]])).astype(np.int32)
 
     return vertex_table, vertex_normals, edge_table, edge_outward
 
 
 def _build_rigid_features(
-    model: Model, bvh_shape_mask: np.ndarray
+    model: Model, meshes: dict[int, Mesh]
 ) -> tuple[wp.array[wp.vec2i], wp.array[wp.vec3], wp.array[wp.vec3i], wp.array[wp.vec3]]:
 
     device = model.device
@@ -518,19 +552,16 @@ def _build_rigid_features(
     vertex_normals: list[np.ndarray] = []
     edge_rows: list[np.ndarray] = []
     edge_outwards: list[np.ndarray] = []
-    cache: dict[tuple[int, bytes | None], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+    cache: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
     edge_ranges = model.shape_edge_range.numpy()
     packed_edges = model.mesh_edge_indices.numpy()
 
-    for shape in np.flatnonzero(bvh_shape_mask):
-        mesh = model.shape_source[shape]
-        if mesh is None:
-            raise ValueError(f"mesh/convex shape {int(shape)} has no shape_source Mesh")
+    for shape, mesh in meshes.items():
         start, count = (int(value) for value in edge_ranges[shape])
         # Finalized tables include SDF edges cooked by the builder, which need
         # not be attached to the source Mesh. Slices may differ for one source.
         collision_edges = packed_edges[start : start + count] if start >= 0 else mesh._collision_edges
-        key = (id(mesh), None if collision_edges is None else np.asarray(collision_edges).tobytes())
+        key = (_geometry_key(mesh), None if collision_edges is None else np.asarray(collision_edges).tobytes())
         data = cache.get(key)
         if data is None:
             data = _mesh_feature_data(mesh, collision_edges=collision_edges)
@@ -1340,8 +1371,9 @@ class MeshContactData:
 
     def __init__(self, model: Model, shape_mask: np.ndarray, vertex_pairs: wp.array[wp.vec2i]):
         self.vertex_pairs = vertex_pairs
+        meshes = _collision_meshes(model, shape_mask)
         if model.tri_count:
-            self.rigid_features = _build_rigid_features(model, shape_mask)
+            self.rigid_features = _build_rigid_features(model, meshes)
             if model.edge_count == 0:
                 self.rigid_features = (
                     *self.rigid_features[:2],
@@ -1360,11 +1392,11 @@ class MeshContactData:
         vertices, vertex_normals, edges, edge_normals = self.rigid_features
         if max(_MESH_QUERY_PARTITIONS * len(vertex_pairs), len(vertices), len(edges)) > np.iinfo(np.int32).max:
             raise ValueError("Mesh contact queries exceed 32-bit indexing capacity.")
-        adjacency, component_counts = _build_feature_adjacency(model, vertices, edges)
+        adjacency, component_counts = _build_feature_adjacency(model, meshes, vertices, edges)
         self.adjacency = [*adjacency, vertex_normals, edge_normals]
         # A query emits at most one contact per feature pair. Bound the wide
         # append counter before allocating; final writes remain capacity checked.
-        max_faces = max(len(model.shape_source[s].indices) // 3 for s in np.flatnonzero(shape_mask))
+        max_faces = max(len(mesh.indices) // 3 for mesh in meshes.values())
         bound = len(vertex_pairs) * max_faces + len(vertices) * model.tri_count + len(edges) * model.edge_count
         if bound > np.iinfo(np.int64).max - np.iinfo(np.int32).max:
             raise ValueError("Mesh contact pairs exceed 64-bit counting capacity.")
