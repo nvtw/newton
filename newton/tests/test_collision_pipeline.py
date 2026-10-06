@@ -5395,6 +5395,53 @@ add_function_test(
 )
 
 
+def _full_surface_mesh_contacts(vertices, faces, points, gap, device):
+    """Collide radius-zero particles against one static mesh with full-surface contacts enabled."""
+    builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+    builder.add_shape_mesh(body=-1, mesh=newton.Mesh(vertices, faces.reshape(-1), compute_inertia=False))
+    for point in points:
+        builder.add_particle(wp.vec3(*point), wp.vec3(0.0), 1.0, radius=0.0)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, soft_contact_gap=gap, enable_rigid_soft_full_surface_contact=True)
+    contacts = pipeline.contacts()
+    state = model.state()
+    pipeline.collide(state, contacts)
+    count = int(contacts.soft_contact_count.numpy()[0])
+    particles = contacts.soft_contact_particle.numpy()[:count]
+    normals = contacts.soft_contact_normal.numpy()[:count]
+    # Signed separation along each contact normal, as consumed by the VBD contact model.
+    separation = np.einsum(
+        "ij,ij->i", normals, state.particle_q.numpy()[particles] - contacts.soft_contact_body_pos.numpy()[:count]
+    )
+    return particles, normals, separation
+
+
+def test_full_surface_mixed_winding_contact_normal(test, device):
+    """Full-surface mesh contacts use parity for watertight meshes with inconsistent winding."""
+    vertices, faces = _make_mixed_winding_convex_pile_proxy()
+    points = np.array([[0.13, 0.018, 0.012]], dtype=np.float32)
+    _particles, normals, separation = _full_surface_mesh_contacts(vertices, faces, points, 0.05, device)
+    test.assertGreater(len(normals), 0)
+    test.assertTrue(np.all(normals[:, 0] > 0.99), normals)
+    test.assertTrue(np.all(separation > 0.0), separation)
+
+
+def test_full_surface_thin_gap_points_stay_outside(test, device):
+    """Points in a thin gap between watertight boxes are outside, not penetrating, under parity."""
+    vertices, faces = _make_thin_gap_box_pair()
+    points = _sample_thin_gap_points(256)
+    particles, _normals, separation = _full_surface_mesh_contacts(vertices, faces, points, 1.0e-3, device)
+    test.assertGreater(len(particles), 0)
+    test.assertTrue(np.all(separation >= 0.0), separation[separation < 0.0])
+
+
+for _name, _fn in (
+    ("test_full_surface_mixed_winding_contact_normal", test_full_surface_mixed_winding_contact_normal),
+    ("test_full_surface_thin_gap_points_stay_outside", test_full_surface_thin_gap_points_stay_outside),
+):
+    add_function_test(TestFullSurfaceSoftContact, _name, _fn, devices=soft_devices)
+
+
 def test_small_heightfield_between_deformable_vertices(test, device):
     """A sloped heightfield inside a large deformable triangle must not rely on soft vertices."""
     builder = newton.ModelBuilder()

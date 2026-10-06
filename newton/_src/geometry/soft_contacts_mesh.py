@@ -20,8 +20,8 @@ import numpy as np
 import warp as wp
 
 from .collision_core import transform_normal_with_scale
-from .flags import ParticleFlags, ShapeFlags
-from .kernels import triangle_closest_point
+from .flags import MeshSignMethod, ParticleFlags, ShapeFlags
+from .kernels import mesh_query_point_sign, resolve_mesh_sign_method, triangle_closest_point
 from .soft_contacts_sdf import _shape_frames
 from .tri_mesh_collision import TriMeshCollisionDetector
 from .types import GeoType
@@ -62,7 +62,8 @@ const unsigned mask = __activemask();
 const int leader = (threadIdx.x & 31) & ~(lanes - 1);
 if ((threadIdx.x & (lanes - 1)) == 0) {
 #endif
-    const auto query = wp::mesh_query_point_sign_normal(mesh_id, point, radius);
+    const auto query = parity ? wp::mesh_query_point_sign_parity(mesh_id, point, radius)
+                              : wp::mesh_query_point_sign_normal(mesh_id, point, radius);
     sign = query.result ? (query.sign < 0.0f ? -1 : 1) : 0;
 #if defined(__CUDA_ARCH__)
 }
@@ -71,8 +72,10 @@ return __shfl_sync(mask, sign, leader);
 return sign;
 #endif
 """)
-def _mesh_partition_sign(mesh_id: wp.uint64, point: wp.vec3, radius: float, lanes: int) -> int:
+def _mesh_partition_sign(mesh_id: wp.uint64, point: wp.vec3, radius: float, lanes: int, parity: bool) -> int:
     """Share an exact nearest query within a power-of-two group of CUDA lanes.
+
+    ``parity`` selects ray-crossing parity (watertight meshes) instead of the pseudo-normal sign.
 
     All lanes in each group must participate with identical query arguments.
     Group size must divide the CUDA warp size and the launch block dimension.
@@ -642,9 +645,9 @@ def _face_vertex_velocity(mesh: wp.uint64, index: wp.int32):
 
 
 @wp.func
-def _feature_mesh_sign(mesh: wp.uint64, X_sw: wp.transform, scale: wp.vec3, soft: wp.vec3):
+def _feature_mesh_sign(mesh: wp.uint64, X_sw: wp.transform, scale: wp.vec3, soft: wp.vec3, sign_method: int):
     query_point = wp.cw_div(wp.transform_point(X_sw, soft), scale)
-    query = wp.mesh_query_point_sign_normal(mesh, query_point, 1.0e6)
+    query = mesh_query_point_sign(mesh, query_point, 1.0e6, sign_method)
     if not query.result:
         return int(0)
     surface = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
@@ -667,6 +670,7 @@ def _detect_mesh_vertex_contacts(
     shape_flags: wp.array[wp.int32],
     shape_scale: wp.array[wp.vec3],
     shape_source_ptr: wp.array[wp.uint64],
+    shape_mesh_properties: wp.array[wp.int32],
     shape_lower: wp.array[wp.vec3],
     shape_upper: wp.array[wp.vec3],
     shape_margin: wp.array[float],
@@ -722,14 +726,15 @@ def _detect_mesh_vertex_contacts(
     min_scale = wp.min(wp.min(wp.abs(scale[0]), wp.abs(scale[1])), wp.abs(scale[2]))
     x_mesh = wp.cw_div(x_local, scale)
     r_mesh = threshold / min_scale
-    vertex_sign = _mesh_partition_sign(mesh, x_mesh, r_mesh, partitions)
+    sign_method = resolve_mesh_sign_method(shape_mesh_properties[shape_index])
+    vertex_sign = _mesh_partition_sign(mesh, x_mesh, r_mesh, partitions, sign_method == MeshSignMethod.PARITY)
     if vertex_sign == 0:
         if lane != 0:
             return
         # A finite proximity band must not discard already penetrating points.
         # The expanded shape bounds have already rejected distant particles.
         recovery_radius = wp.length(upper_bound - lower_bound) / min_scale
-        recovery = wp.mesh_query_point_sign_normal(mesh, x_mesh, recovery_radius)
+        recovery = mesh_query_point_sign(mesh, x_mesh, recovery_radius, sign_method)
         if recovery.result and recovery.sign < 0.0:
             _append_mesh_contact(
                 _MESH_FEATURE_VT + 8,
@@ -795,6 +800,7 @@ def _detect_mesh_face_contacts(
     shape_flags: wp.array[wp.int32],
     shape_scale: wp.array[wp.vec3],
     shape_source_ptr: wp.array[wp.uint64],
+    shape_mesh_properties: wp.array[wp.int32],
     shape_world: wp.array[wp.int32],
     shape_margin: wp.array[float],
     bvh_tris_id: wp.uint64,
@@ -886,7 +892,9 @@ def _detect_mesh_face_contacts(
                     inward = _cone_valid(mesh, scale, x_local, -diff, vertex_spans[slot], neighbors)
                     if not outward and not inward:
                         continue
-                    sign = _feature_mesh_sign(mesh, _X_sw, scale, cp)
+                    sign = _feature_mesh_sign(
+                        mesh, _X_sw, scale, cp, resolve_mesh_sign_method(shape_mesh_properties[shape_index])
+                    )
                     if sign == 2:
                         reference = transform_normal_with_scale(X_ws, scale, vertex_outward[tid])
                         sign = wp.where(wp.dot(cp - x_w, reference) < 0.0, -1, 1)
@@ -916,6 +924,7 @@ def _detect_mesh_edge_contacts(
     shape_flags: wp.array[wp.int32],
     shape_scale: wp.array[wp.vec3],
     shape_source_ptr: wp.array[wp.uint64],
+    shape_mesh_properties: wp.array[wp.int32],
     shape_world: wp.array[wp.int32],
     shape_margin: wp.array[float],
     bvh_edges_id: wp.uint64,
@@ -1018,7 +1027,9 @@ def _detect_mesh_edge_contacts(
                     inward = _cone_valid(mesh, scale, rigid_local, -diff_local, edge_spans[slot], neighbors)
                     if not outward and not inward:
                         continue
-                    sign = _feature_mesh_sign(mesh, _X_sw, scale, soft_point)
+                    sign = _feature_mesh_sign(
+                        mesh, _X_sw, scale, soft_point, resolve_mesh_sign_method(shape_mesh_properties[shape_index])
+                    )
                     if sign == 2:
                         reference = transform_normal_with_scale(X_ws, scale, edge_outward[tid])
                         sign = wp.where(wp.dot(soft_point - rigid_point, reference) < 0.0, -1, 1)
@@ -1232,6 +1243,7 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
         model.shape_flags,
         model.shape_scale,
         model.shape_source_ptr,
+        model._shape_mesh_properties,
     ]
     parallel_epsilon = detector.edge_edge_parallel_epsilon if detector is not None else 1.0e-5
 
@@ -1254,6 +1266,7 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
                 model.shape_flags,
                 model.shape_scale,
                 model.shape_source_ptr,
+                model._shape_mesh_properties,
                 model.shape_collision_aabb_lower,
                 model.shape_collision_aabb_upper,
                 model.shape_margin,
