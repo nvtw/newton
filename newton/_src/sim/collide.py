@@ -1635,10 +1635,19 @@ class CollisionPipeline:
             mesh_sdf_identity_scale_only = False
             max_mesh_mesh_pairs = self.shape_pairs_max
             max_mesh_plane_pairs = self.shape_pairs_max
+            has_box_pairs = True
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
                 colliding_mask = _shape_collide_mask(model, len(shape_types))
                 colliding_shape_types = shape_types[colliding_mask]
+                box_count = int(
+                    np.count_nonzero(
+                        (colliding_shape_types == int(GeoType.BOX)) | (colliding_shape_types == int(GeoType.PLANE))
+                    )
+                )
+                has_box_pairs = box_count > 1 or (
+                    box_count > 0 and bool(np.any(colliding_shape_types == int(GeoType.CONVEX_MESH)))
+                )
                 mesh_mask = colliding_mask & (shape_types == int(GeoType.MESH))
                 heightfield_mask = colliding_mask & (shape_types == int(GeoType.HFIELD))
                 plane_mask = colliding_mask & (shape_types == int(GeoType.PLANE))
@@ -1792,6 +1801,8 @@ class CollisionPipeline:
                 contact_writer_supports_speculative=self._speculative_enabled,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
+            # Finite planes also become boxes in the convex query preparation.
+            self.narrow_phase._has_box_pairs = has_box_pairs
 
         # Analytic and convex manifolds use compact unique sub-keys even when
         # matching; complex contact families retain the full fingerprint width.
