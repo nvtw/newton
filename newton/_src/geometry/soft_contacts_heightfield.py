@@ -5,7 +5,12 @@
 
 import warp as wp
 
-from ..utils.heightfield import HeightfieldData, get_triangle_shape_from_heightfield
+from ..utils.heightfield import (
+    HeightfieldData,
+    get_triangle_shape_from_heightfield,
+    heightfield_cell_range,
+    signed_heightfield_feature_distance,
+)
 from .contact_reduction import float_flip
 from .flags import ShapeFlags
 from .kernels import triangle_closest_point
@@ -15,58 +20,12 @@ _HEIGHTFIELD_CELLS_PER_TASK = 256
 
 
 @wp.func
-def _signed_feature_distance(x: wp.vec3, y: wp.vec3, normal: wp.vec3, threshold: float) -> float:
-    """Sign nearby feature distances without treating distant back-facing edges as penetration."""
-    delta = x - y
-    distance = wp.length(delta)
-    normal_distance = wp.dot(delta, normal)
-    if normal_distance < 0.0:
-        # A negative plane distance means penetration only when the two features also overlap
-        # tangentially. Without this guard, distant skew edges can appear penetrating merely because
-        # their closest-point delta happens to point behind the heightfield triangle's plane.
-        tangent = delta - normal_distance * normal
-        if wp.length_sq(tangent) >= threshold * threshold:
-            return float(1.0e10)
-        return -distance
-    return distance
-
-
-@wp.func
-def _heightfield_cell_range(a: wp.vec3, b: wp.vec3, c: wp.vec3, hfd: HeightfieldData, threshold: float):
-    """Return the conservative inclusive cell rectangle, or an empty rectangle."""
-    tri_lower = wp.min(a, wp.min(b, c)) - wp.vec3(threshold)
-    tri_upper = wp.max(a, wp.max(b, c)) + wp.vec3(threshold)
-    # Terrain is solid below its surface, so only the upper elevation provides a safe Z rejection;
-    # deeply penetrating triangles must still reach the exact feature tests.
-    if (
-        hfd.nrow <= 1
-        or hfd.ncol <= 1
-        or tri_upper[0] < -hfd.hx
-        or tri_lower[0] > hfd.hx
-        or tri_upper[1] < -hfd.hy
-        or tri_lower[1] > hfd.hy
-        or tri_lower[2] > hfd.max_z
-    ):
-        return wp.vec4i(0, -1, 0, -1)
-
-    dx = 2.0 * hfd.hx / wp.float32(hfd.ncol - 1)
-    dy = 2.0 * hfd.hy / wp.float32(hfd.nrow - 1)
-    col_begin = wp.max(wp.int32(wp.floor((tri_lower[0] + hfd.hx) / dx)), 0)
-    col_end = wp.min(wp.int32(wp.floor((tri_upper[0] + hfd.hx) / dx)), hfd.ncol - 2)
-    row_begin = wp.max(wp.int32(wp.floor((tri_lower[1] + hfd.hy) / dy)), 0)
-    row_end = wp.min(wp.int32(wp.floor((tri_upper[1] + hfd.hy) / dy)), hfd.nrow - 2)
-
-    return wp.vec4i(col_begin, col_end, row_begin, row_end)
-
-
-@wp.func
 def _closest_heightfield_feature(
     a: wp.vec3,
     b: wp.vec3,
     c: wp.vec3,
     hfd: HeightfieldData,
     elevations: wp.array[wp.float32],
-    threshold: float,
     cells: wp.vec4i,
     begin: int,
     end: int,
@@ -111,13 +70,13 @@ def _closest_heightfield_feature(
                     elif rigid_vertex == 2:
                         y = w
                     x, bary, _feature = triangle_closest_point(a, b, c, y)
-                    distance = _signed_feature_distance(x, y, normal, threshold)
+                    distance, contact_normal = signed_heightfield_feature_distance(x, y, normal, hfd, elevations, best)
                     if distance < best:
                         best = distance
                         best_cell = cell
                         best_bary = bary
                         best_y = y
-                        best_normal = normal
+                        best_normal = contact_normal
 
                 for soft_edge in range(3):
                     p = a
@@ -140,7 +99,9 @@ def _closest_heightfield_feature(
                         st = wp.closest_point_edge_edge(p, q, r, s, 1.0e-6)
                         x = p + st[0] * (q - p)
                         y = r + st[1] * (s - r)
-                        distance = _signed_feature_distance(x, y, normal, threshold)
+                        distance, contact_normal = signed_heightfield_feature_distance(
+                            x, y, normal, hfd, elevations, best
+                        )
                         if distance < best:
                             best = distance
                             best_cell = cell
@@ -151,7 +112,7 @@ def _closest_heightfield_feature(
                             else:
                                 best_bary = wp.vec3(st[0], 0.0, 1.0 - st[0])
                             best_y = y
-                            best_normal = normal
+                            best_normal = contact_normal
 
     return best, best_bary, best_y, best_normal, best_cell
 
@@ -213,7 +174,7 @@ def create_soft_heightfield_face_contacts(
     b = wp.transform_point(X_sw, particle_q[b_idx])
     c = wp.transform_point(X_sw, particle_q[c_idx])
     hfd = heightfield_data[shape_heightfield_index[shape]]
-    cells = _heightfield_cell_range(a, b, c, hfd, threshold)
+    cells = heightfield_cell_range(a, b, c, hfd, threshold)
     begin = int(0)
     end = (cells[1] - cells[0] + 1) * (cells[3] - cells[2] + 1)
     if emit_large:
@@ -225,7 +186,7 @@ def create_soft_heightfield_face_contacts(
         task_counts[tid] = wp.int64((end + cells_per_task - 1) // cells_per_task)
         return
     distance, bary, y, normal, _cell = _closest_heightfield_feature(
-        a, b, c, hfd, heightfield_elevations, threshold, cells, begin, end
+        a, b, c, hfd, heightfield_elevations, cells, begin, end
     )
     if distance < threshold:
         _emit_soft_ef_contact(
@@ -303,12 +264,12 @@ def find_heightfield_task_contacts(
         b = wp.transform_point(X_sw, particle_q[b_idx])
         c = wp.transform_point(X_sw, particle_q[c_idx])
         hfd = heightfield_data[shape_heightfield_index[shape]]
-        cells = _heightfield_cell_range(a, b, c, hfd, threshold)
+        cells = heightfield_cell_range(a, b, c, hfd, threshold)
         cell_count = (cells[1] - cells[0] + 1) * (cells[3] - cells[2] + 1)
         begin = int(task - offsets[tid]) * cells_per_task
         end = wp.min(begin + cells_per_task, cell_count)
         distance, _bary, _y, _normal, cell = _closest_heightfield_feature(
-            a, b, c, hfd, heightfield_elevations, threshold, cells, begin, end
+            a, b, c, hfd, heightfield_elevations, cells, begin, end
         )
         if distance < threshold:
             # Distance first, then the original row-major cell order for deterministic ties.

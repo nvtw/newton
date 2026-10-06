@@ -471,6 +471,48 @@ def test_cloth_under_finite_plane_shelf(test, device):
     test.assertLess(float(state_0.particle_q.numpy()[:, 2].max()), 0.1)
 
 
+def test_cloth_settles_on_heightfield_stairs(test, device):
+    """Full-surface heightfield contacts must not push cloth sideways off steep step risers."""
+    half_extent, samples = 1.5, 61
+    x = np.linspace(-half_extent, half_extent, samples)
+    heights = np.floor((x + half_extent) / 0.3) * 0.1
+    builder = newton.ModelBuilder()
+    builder.add_shape_heightfield(
+        heightfield=newton.Heightfield(
+            data=np.tile(heights[None, :], (samples, 1)).astype(np.float32),
+            nrow=samples,
+            ncol=samples,
+            hx=half_extent,
+            hy=half_extent,
+        )
+    )
+    builder.add_cloth_grid(
+        pos=wp.vec3(-1.0, -1.0, 1.2),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.0),
+        dim_x=16,
+        dim_y=16,
+        cell_x=2.0 / 16,
+        cell_y=2.0 / 16,
+        mass=0.05,
+        particle_radius=0.01,
+    )
+    builder.color()
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, soft_contact_gap=0.01, enable_rigid_soft_full_surface_contact=True)
+    solver = newton.solvers.SolverVBD(model, iterations=10, rigid_compliant_alm=True)
+    state_0, state_1, control, contacts = model.state(), model.state(), model.control(), pipeline.contacts()
+    for _ in range(900):
+        pipeline.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, 1.0 / 600.0)
+        state_0, state_1 = state_1, state_0
+    q = state_0.particle_q.numpy()
+    # The per-particle path settles near mean x = -0.1; sliding off the stairs drives it past -0.5.
+    test.assertGreater(float(q[:, 0].mean()), -0.4)
+    test.assertTrue(np.all(np.abs(q[:, :2]) < half_extent))
+    test.assertGreater(float(q[:, 2].min()), 0.09)
+
+
 def test_mixed_mesh_edge_dispatch(test, device):
     """Keep mesh edge contacts when compact scheduling is enabled in a mixed scene."""
     builder = newton.ModelBuilder()
@@ -523,6 +565,7 @@ for device in get_test_devices():
         test_particle_gradient_after_pipeline_reuse,
         test_finite_plane_penetrating_face,
         test_cloth_under_finite_plane_shelf,
+        test_cloth_settles_on_heightfield_stairs,
         test_finite_plane_feature_geometry,
         test_large_heightfield_task_contacts,
     ):

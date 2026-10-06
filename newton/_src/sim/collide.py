@@ -2729,6 +2729,7 @@ class CollisionPipeline:
                     model.shape_heightfield_index,
                     model.heightfield_data,
                     model.heightfield_elevations,
+                    self.enable_rigid_soft_full_surface_contact,
                 ],
                 outputs=[
                     contacts.soft_contact_count,

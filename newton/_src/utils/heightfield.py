@@ -252,6 +252,65 @@ def sample_sdf_heightfield(
 
 
 @wp.func
+def heightfield_cell_range(a: wp.vec3, b: wp.vec3, c: wp.vec3, hfd: HeightfieldData, threshold: float):
+    """Return the conservative inclusive cell rectangle, or an empty rectangle."""
+    tri_lower = wp.min(a, wp.min(b, c)) - wp.vec3(threshold)
+    tri_upper = wp.max(a, wp.max(b, c)) + wp.vec3(threshold)
+    # Terrain is solid below its surface, so only the upper elevation provides a safe Z rejection;
+    # deeply penetrating triangles must still reach the exact feature tests.
+    if (
+        hfd.nrow <= 1
+        or hfd.ncol <= 1
+        or tri_upper[0] < -hfd.hx
+        or tri_lower[0] > hfd.hx
+        or tri_upper[1] < -hfd.hy
+        or tri_lower[1] > hfd.hy
+        or tri_lower[2] > hfd.max_z
+    ):
+        return wp.vec4i(0, -1, 0, -1)
+
+    dx = 2.0 * hfd.hx / wp.float32(hfd.ncol - 1)
+    dy = 2.0 * hfd.hy / wp.float32(hfd.nrow - 1)
+    col_begin = wp.max(wp.int32(wp.floor((tri_lower[0] + hfd.hx) / dx)), 0)
+    col_end = wp.min(wp.int32(wp.floor((tri_upper[0] + hfd.hx) / dx)), hfd.ncol - 2)
+    row_begin = wp.max(wp.int32(wp.floor((tri_lower[1] + hfd.hy) / dy)), 0)
+    row_end = wp.min(wp.int32(wp.floor((tri_upper[1] + hfd.hy) / dy)), hfd.nrow - 2)
+
+    return wp.vec4i(col_begin, col_end, row_begin, row_end)
+
+
+@wp.func
+def signed_heightfield_feature_distance(
+    x: wp.vec3,
+    y: wp.vec3,
+    face_normal: wp.vec3,
+    hfd: HeightfieldData,
+    elevations: wp.array[wp.float32],
+    best: float,
+):
+    """Sign a soft/terrain feature pair by terrain height and orient its normal along the pair.
+
+    Only a soft point below the terrain at its own (x, y) penetrates, as in the per-particle path.
+    The normal follows the closest-feature delta, so a cloth edge crossing a riser edge is pushed
+    across that edge instead of along the riser's nearly horizontal face normal.
+    """
+    delta = x - y
+    distance = wp.length(delta)
+    if -distance >= best:
+        return float(1.0e10), face_normal
+    penetrating = bool(False)
+    if x[2] < hfd.max_z:
+        plane_distance, _normal, lateral_sq = _heightfield_surface_query(hfd, elevations, x)
+        penetrating = lateral_sq == 0.0 and plane_distance < 0.0
+    normal = face_normal
+    if distance > 0.0:
+        normal = delta / distance
+    if penetrating:
+        return -distance, -normal
+    return distance, normal
+
+
+@wp.func
 def sample_sdf_grad_heightfield(
     hfd: HeightfieldData,
     elevation_data: wp.array[wp.float32],

@@ -1085,6 +1085,7 @@ def test_mixed_winding_convex_pile_contact_normal(test, device):
             wp.array([0], dtype=wp.int32, device=device),
             wp.empty(0, dtype=HeightfieldData, device=device),
             wp.empty(0, dtype=wp.float32, device=device),
+            False,
         ],
         outputs=[
             soft_contact_count,
@@ -1284,6 +1285,7 @@ def _launch_open_box_soft_contact(test, device, mesh_id, points, mesh_properties
             wp.array([0], dtype=wp.int32, device=device),
             wp.empty(0, dtype=HeightfieldData, device=device),
             wp.empty(0, dtype=wp.float32, device=device),
+            False,
         ],
         outputs=[
             count,
