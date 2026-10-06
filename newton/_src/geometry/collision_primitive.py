@@ -69,7 +69,8 @@ def _collide_capsule_cylinder_line_contacts(
 ) -> tuple[bool, float, wp.vec3, float, wp.vec3, wp.vec3]:
     """Return endpoint witnesses for barrel and finite cap contact lines.
 
-    Near-parallel barrel witnesses share the center's tangent-plane normal.
+    Near-parallel barrel witnesses share the tangent-plane normal at the
+    middle of their clipped contact interval.
     Bound both the angle and radial drift to limit this manifold approximation.
     Other configurations use the finite-cylinder feature solver. Axes are normalized.
     """
@@ -92,7 +93,11 @@ def _collide_capsule_cylinder_line_contacts(
         end1 = (cylinder_half_height - axial_center) / axial_axis
         low = wp.max(wp.min(end0, end1), -capsule_half_length)
         high = wp.min(wp.max(end0, end1), capsule_half_length)
-        radial_distance = wp.length(radial_center)
+        # A short cylinder can clip the line far from the capsule center.
+        # The interval midpoint keeps the shared normal local to the contact.
+        middle = relative + 0.5 * (low + high) * capsule_axis
+        radial_middle = wp.cross(cylinder_axis, wp.cross(middle, cylinder_axis))
+        radial_distance = wp.length(radial_middle)
         if high > low and radial_distance > 0.0:
             core0 = relative + low * capsule_axis
             core1 = relative + high * capsule_axis
@@ -101,7 +106,7 @@ def _collide_capsule_cylinder_line_contacts(
             radial0 = core0 - axial0 * cylinder_axis
             radial1 = core1 - axial1 * cylinder_axis
             if wp.length(radial0) >= cylinder_radius and wp.length(radial1) >= cylinder_radius:
-                normal = -radial_center / radial_distance
+                normal = -radial_middle / radial_distance
                 distance0 = -wp.dot(radial0, normal) - cylinder_radius - capsule_radius
                 distance1 = -wp.dot(radial1, normal) - cylinder_radius - capsule_radius
                 barrel0 = cylinder_pos + axial0 * cylinder_axis - cylinder_radius * normal
@@ -158,13 +163,6 @@ def _collide_capsule_cylinder_line_contacts(
                 root = wp.sqrt(discriminant)
                 low = wp.max((-radial_offset - root) / radial_axis_sq, -capsule_half_length)
                 high = wp.min((-radial_offset + root) / radial_axis_sq, capsule_half_length)
-                # A descending overhang can be closer to the rim or barrel
-                # than either radius-clipped cap witness.
-                # Ignore roundoff in nominally horizontal capsule rotations.
-                if (low > -capsule_half_length and direction * axial_axis > 1.0e-6) or (
-                    high < capsule_half_length and direction * axial_axis < -1.0e-6
-                ):
-                    return False, float(MAXVAL), empty, float(MAXVAL), empty, empty
             else:
                 low = float(0.0)
                 high = float(0.0)
@@ -1016,7 +1014,7 @@ def collide_capsule_cylinder(
     axial_axis = wp.dot(capsule_axis, cylinder_axis)
     radial_axis = wp.cross(cylinder_axis, wp.cross(capsule_axis, cylinder_axis))
     radial_axis_sq = wp.length_sq(radial_axis)
-    line, d0, p0, d1, p1, normal = _collide_capsule_cylinder_line_contacts(
+    line, d0, p0, d1, p1, line_normal = _collide_capsule_cylinder_line_contacts(
         capsule_pos,
         capsule_axis,
         capsule_radius,
@@ -1026,9 +1024,11 @@ def collide_capsule_cylinder(
         cylinder_radius,
         cylinder_half_height,
     )
+    scale = wp.max(cylinder_radius + cylinder_half_height + capsule_half_length + capsule_radius, 1.0e-12)
+    flat_line = line and d1 < MAXVAL and wp.abs(wp.dot(capsule_axis, line_normal)) <= 0.01
     if line:
-        if wp.abs(wp.dot(normal, cylinder_axis)) <= 1.0e-6:
-            return d0, p0, d1, p1, normal
+        if wp.abs(wp.dot(line_normal, cylinder_axis)) <= 1.0e-6:
+            return d0, p0, d1, p1, line_normal
         support_gap = _capsule_cylinder_support_gap(
             relative,
             capsule_axis,
@@ -1037,14 +1037,11 @@ def collide_capsule_cylinder(
             cylinder_axis,
             cylinder_radius,
             cylinder_half_height,
-            -normal,
+            -line_normal,
         )
         # A clipped cap line cannot represent penetration of the entire core.
-        scale = wp.max(cylinder_radius + cylinder_half_height + capsule_half_length + capsule_radius, 1.0e-12)
-        if wp.abs(wp.min(d0, d1) - support_gap) <= 1.0e-6 * scale and (
-            d1 >= MAXVAL or wp.abs(wp.dot(capsule_axis, normal)) <= 0.01
-        ):
-            return d0, p0, d1, p1, normal
+        if wp.abs(wp.min(d0, d1) - support_gap) <= 1.0e-6 * scale and (d1 >= MAXVAL or flat_line):
+            return d0, p0, d1, p1, line_normal
 
     # Use a frame with cylinder axis +z and the capsule axis in the xz plane.
     # This removes world-space cross products and lets the compiler simplify
@@ -1065,6 +1062,17 @@ def collide_capsule_cylinder(
     )
     point = cylinder_pos + point[0] * x_axis + point[1] * y_axis + point[2] * cylinder_axis
     normal = normal[0] * x_axis + normal[1] * y_axis + normal[2] * cylinder_axis
+    # An overhanging end can dip past the rim and make the rim the deepest
+    # feature. If its normal still matches the cap, keep the far cap-line
+    # endpoint as a second contact so the flat support does not collapse.
+    if flat_line and wp.dot(normal, line_normal) >= 1.0 - 5.0e-5:
+        far_distance = d0
+        far_point = p0
+        if wp.length_sq(p1 - point) > wp.length_sq(p0 - point):
+            far_distance = d1
+            far_point = p1
+        if far_distance >= distance and wp.length(far_point - point) > 1.0e-6 * scale:
+            return distance, point, far_distance, far_point, normal
     return distance, point, float(MAXVAL), wp.vec3(0.0), normal
 
 

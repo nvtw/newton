@@ -1008,6 +1008,66 @@ def test_signed_distance_reference(test, device):
     np.testing.assert_array_less(np.abs(_cylinder_sdf(cylinder, cylinder_radius, height)), tolerance)
 
 
+def _query_contacts(device, positions, axes, dims):
+    """Return both contact distances and the normal in a +z cylinder frame."""
+    count = len(positions)
+    with wp.ScopedDevice(device):
+        distances = wp.zeros(count, dtype=wp.vec2)
+        points = wp.zeros(count, dtype=wp.vec3)
+        normals = wp.zeros(count, dtype=wp.vec3)
+        wp.launch(
+            query_capsule_cylinder,
+            count,
+            [
+                wp.array(positions, dtype=wp.vec3),
+                wp.array(axes, dtype=wp.vec3),
+                wp.array(np.tile([0.0, 0.0, 1.0], (count, 1)), dtype=wp.vec3),
+                wp.array(dims, dtype=wp.vec4),
+                distances,
+                points,
+                normals,
+            ],
+        )
+    return distances.numpy().astype(float), normals.numpy().astype(float)
+
+
+def test_cap_overhang_keeps_line(test, device):
+    """Keep two cap contacts when a slightly tilted core overhangs the rim."""
+    pitches = np.array([1e-5, 1e-4, 1e-3, 5e-3])
+    pitches = np.concatenate([pitches, -pitches])
+    # Both ends overhang a cap chord, or one end overhangs with the center inside.
+    centers = np.array([[0.0, 0.15, 0.2499], [0.25, 0.0, 0.2499]])
+    positions = np.repeat(centers, len(pitches), axis=0)
+    angle = np.tile(pitches, len(centers))
+    axes = np.stack([np.cos(angle), np.zeros_like(angle), np.sin(angle)], axis=1)
+    dims = np.tile([0.05, 0.4, 0.3, 0.2], (len(axes), 1))
+    distances, normals = _query_contacts(device, positions, axes, dims)
+    test.assertTrue(np.all(distances[:, 1] < 0.5 * MAXVAL))
+    reference = _signed_distance(positions, axes, dims, -normals)
+    # The first contact is the exact deepest one; the line endpoint is not deeper.
+    np.testing.assert_allclose(distances[:, 0], reference, atol=2e-6)
+    np.testing.assert_array_less(reference - 2e-6, distances[:, 1])
+    np.testing.assert_array_less(1.0 - 5e-5, -normals[:, 2])
+
+
+def test_near_parallel_short_barrel(test, device):
+    """Take near-parallel barrel normals near a short barrel, not the capsule center."""
+    # A long capsule, tilted along the barrel tangent, touches a thin, wide
+    # disk far from its center, where the radial direction has rotated.
+    tilt = np.array([-0.009, -0.005, -0.001, 0.001, 0.005, 0.009])
+    axes = np.stack([np.zeros_like(tilt), np.sin(tilt), np.cos(tilt)], axis=1)
+    dims = np.tile([0.0116, 4.85, 6.35, 0.00275], (len(axes), 1))
+    # Place the core point at the disk mid-plane just outside the barrel.
+    contact = np.array([6.35 + 0.0116 - 1e-5, 0.0, 0.0])
+    positions = contact - 4.0 * axes
+    distances, normals = _query_contacts(device, positions, axes, dims)
+    reference = _signed_distance(positions, axes, dims, -normals)
+    test.assertTrue(np.all(distances[:, 1] < 0.5 * MAXVAL))
+    np.testing.assert_array_less(reference - 2e-6, distances[:, 0])
+    np.testing.assert_array_less(reference - 2e-6, distances[:, 1])
+    np.testing.assert_allclose(np.minimum(distances[:, 0], distances[:, 1]), reference, atol=2e-6)
+
+
 class TestCapsuleCylinderBarrel(unittest.TestCase):
     """Check point, line, rim, and penetrating contacts."""
 
@@ -1026,6 +1086,15 @@ add_function_test(
     devices=get_test_devices(),
 )
 add_function_test(TestCapsuleCylinderBarrel, "test_gap_admission", test_gap_admission, devices=get_test_devices())
+add_function_test(
+    TestCapsuleCylinderBarrel, "test_cap_overhang_keeps_line", test_cap_overhang_keeps_line, devices=get_test_devices()
+)
+add_function_test(
+    TestCapsuleCylinderBarrel,
+    "test_near_parallel_short_barrel",
+    test_near_parallel_short_barrel,
+    devices=get_test_devices(),
+)
 add_function_test(
     TestCapsuleCylinderBarrel,
     "test_signed_distance_reference",
