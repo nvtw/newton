@@ -897,6 +897,11 @@ def _capsule_cylinder_features(
     best_gap = -float(MAXVAL)
     outward = cylinder_axis
     interior_core = bool(False)
+    endpoint_witness = bool(False)
+    endpoint_along = float(0.0)
+    # Feature bounds use a small slack: every candidate gap is a lower bound,
+    # so admitting a boundary feature cannot overestimate the separation.
+    tol = 1.0e-5 * (cylinder_radius + cylinder_half_height + capsule_half_length + wp.length(relative))
     # The extra radial feature is only needed for parallel cores. A runtime
     # feature count also keeps Warp from unrolling two copies of the rim solver.
     feature_count = wp.where(radial_axis_sq > 1.0e-12, 8, 9)
@@ -930,7 +935,8 @@ def _capsule_cylinder_features(
             # the bound is attained and no other feature search is necessary.
             if along * wp.dot(capsule_axis, candidate) <= 0.0:
                 return endpoint_distance, endpoint_point, endpoint_normal
-            continue
+            # Otherwise keep its support gap as a lower bound. Rounding can
+            # reject every stationary feature when an endpoint touches a rim.
         elif i == 4 or i == 5:
             # Inside the cylinder, the nearest endpoint face may not be the
             # nearest face for the entire segment. Include its barrel normal.
@@ -966,8 +972,8 @@ def _capsule_cylinder_features(
             if candidate[2] == 0.0:
                 along = -relative[0] / capsule_axis[0]
                 if (
-                    wp.abs(along) > capsule_half_length
-                    or wp.abs(relative[2] + along * axial_axis) > cylinder_half_height
+                    wp.abs(along) > capsule_half_length + tol
+                    or wp.abs(relative[2] + along * axial_axis) > cylinder_half_height + tol
                 ):
                     continue
             else:
@@ -975,7 +981,7 @@ def _capsule_cylinder_features(
                 if radial_length > 0.0:
                     rim = cylinder_radius / radial_length * wp.vec3(candidate[0], candidate[1], 0.0)
                     rim[2] = wp.sign(candidate[2]) * cylinder_half_height
-                    if wp.abs(wp.dot(rim - relative, capsule_axis)) > capsule_half_length:
+                    if wp.abs(wp.dot(rim - relative, capsule_axis)) > capsule_half_length + tol:
                         continue
         gap = _capsule_cylinder_support_gap(
             relative,
@@ -991,6 +997,9 @@ def _capsule_cylinder_features(
             best_gap = gap
             outward = candidate
             interior_core = i >= 6 or ((i == 0 or i == 1) and axial_axis == 0.0)
+            endpoint_witness = i == 2 or i == 3
+            if endpoint_witness:
+                endpoint_along = wp.where(i == 2, -capsule_half_length, capsule_half_length)
 
     # Construct supporting witnesses on the selected feature. For a core
     # interior witness, project the cylinder rim onto the finite segment.
@@ -1002,6 +1011,9 @@ def _capsule_cylinder_features(
         cylinder_core += cylinder_radius * radial / radial_length
     core_dot = wp.dot(capsule_axis, outward)
     along = -wp.sign(core_dot) * capsule_half_length
+    # A core perpendicular to an endpoint normal ties both endpoints.
+    if endpoint_witness and wp.abs(core_dot) * capsule_half_length <= tol:
+        along = endpoint_along
     if interior_core:
         along = wp.clamp(wp.dot(cylinder_core - relative, capsule_axis), -capsule_half_length, capsule_half_length)
         if axial == 0.0 and radial_axis_sq > 1.0e-12:

@@ -854,6 +854,69 @@ def test_generic_dispatch_bounds(test, device):
                             model.shape_scale.assign(scale)
 
 
+def test_endpoint_tangent_to_rim(test, device):
+    """Return the endpoint gap when rounding rejects every stationary rim feature."""
+    angles = np.linspace(0.05, 1.52, 400)
+    offsets = np.array([-0.05, -0.01, 0.0, 1e-4, 0.01])
+    angle, offset = (grid.ravel() for grid in np.meshgrid(angles, offsets))
+    count = len(angle)
+    # The core leaves the rim tangentially from an endpoint on its bisector.
+    outward = np.stack([np.sin(angle), np.zeros(count), np.cos(angle)], axis=1)
+    axes = np.stack([np.cos(angle), np.zeros(count), -np.sin(angle)], axis=1)
+    positions = np.array([1.0, 0.0, 0.75]) + (0.2 + offset)[:, None] * outward + 0.6 * axes
+    with wp.ScopedDevice(device):
+        distances = wp.zeros(count, dtype=wp.vec2)
+        points = wp.zeros(count, dtype=wp.vec3)
+        normals = wp.zeros(count, dtype=wp.vec3)
+        wp.launch(
+            query_capsule_cylinder,
+            count,
+            [
+                wp.array(positions, dtype=wp.vec3),
+                wp.array(axes, dtype=wp.vec3),
+                wp.array(np.tile([0.0, 0.0, 1.0], (count, 1)), dtype=wp.vec3),
+                wp.array(np.tile([0.2, 0.6, 1.0, 0.75], (count, 1)), dtype=wp.vec4),
+                distances,
+                points,
+                normals,
+            ],
+        )
+    np.testing.assert_allclose(distances.numpy()[:, 0], offset, atol=2e-6)
+    np.testing.assert_allclose(normals.numpy(), -outward, atol=2e-3)
+
+
+def test_barrel_witness_at_cap_plane(test, device):
+    """Keep barrel normals whose core witness lies on a cap plane within rounding."""
+    angles = np.linspace(-1.4, 1.4, 200)
+    sides = np.array([-1.0, 1.0])
+    alongs = np.array([-0.4, -0.1, 0.0, 0.25])
+    offsets = np.array([-0.01, 0.0, 0.001])
+    angle, side, along, offset = (grid.ravel() for grid in np.meshgrid(angles, sides, alongs, offsets))
+    count = len(angle)
+    # The core is perpendicular to the barrel normal +y, and its closest
+    # point to the cylinder axis lies exactly at a cap height.
+    axes = np.stack([np.cos(angle), np.zeros(count), np.sin(angle)], axis=1)
+    positions = np.stack([-along * axes[:, 0], 0.5 + offset, side * 0.75 - along * axes[:, 2]], axis=1)
+    with wp.ScopedDevice(device):
+        distances = wp.zeros(count, dtype=wp.vec2)
+        points = wp.zeros(count, dtype=wp.vec3)
+        normals = wp.zeros(count, dtype=wp.vec3)
+        wp.launch(
+            query_capsule_cylinder,
+            count,
+            [
+                wp.array(positions, dtype=wp.vec3),
+                wp.array(axes, dtype=wp.vec3),
+                wp.array(np.tile([0.0, 0.0, 1.0], (count, 1)), dtype=wp.vec3),
+                wp.array(np.tile([0.05, 0.5, 0.45, 0.75], (count, 1)), dtype=wp.vec4),
+                distances,
+                points,
+                normals,
+            ],
+        )
+    np.testing.assert_allclose(distances.numpy()[:, 0], offset, atol=2e-6)
+
+
 class TestCapsuleCylinderBarrel(unittest.TestCase):
     """Check point, line, rim, and penetrating contacts."""
 
@@ -873,6 +936,18 @@ add_function_test(
     devices=get_test_devices(),
 )
 add_function_test(TestCapsuleCylinderBarrel, "test_gap_admission", test_gap_admission, devices=get_test_devices())
+add_function_test(
+    TestCapsuleCylinderBarrel,
+    "test_barrel_witness_at_cap_plane",
+    test_barrel_witness_at_cap_plane,
+    devices=get_test_devices(),
+)
+add_function_test(
+    TestCapsuleCylinderBarrel,
+    "test_endpoint_tangent_to_rim",
+    test_endpoint_tangent_to_rim,
+    devices=get_test_devices(),
+)
 add_function_test(
     TestCapsuleCylinderBarrel,
     "test_conditioned_feature_witnesses",
