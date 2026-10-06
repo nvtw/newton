@@ -676,6 +676,102 @@ def test_cap_rim_support_witnesses(test, device):
                         test.assertAlmostEqual(gap, -0.021 * scale, delta=tolerance)
 
 
+def test_conditioned_feature_witnesses(test, device):
+    """Preserve valid cap and barrel witnesses at ill-conditioned boundaries."""
+    positions = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [-33.37416458129883, -7.06756591796875, -22.036640167236328],
+            [-0.018604129552841187, 1.0235445499420166, -167.64295959472656],
+            [-5.021750450134277, 55.52897262573242, 24.3689022064209],
+            [72.64119720458984, -3.374417781829834, 29.78777313232422],
+            [35.210872650146484, -32.48945999145508, -2.9023711681365967],
+            [9.716127, 4.9476957, 8.939304],
+        ]
+    )
+    axes = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [-0.4947160482406616, 0.2887207865715027, -0.819692850112915],
+            [-0.9986806511878967, 0.031890347599983215, -0.04024896398186684],
+            [0.7282047271728516, -0.6798352003097534, -0.08684459328651428],
+            [0.73636454, 0.29118964, 0.6107175],
+        ]
+    )
+    cylinder_axes = np.array(
+        [
+            [0.8, 0.17, 0.54],
+            [0.8217647671699524, 0.17402389645576477, 0.5426033139228821],
+            [0.0, 0.0, 1.0],
+            [-0.06646548211574554, 0.9085239768028259, 0.41251251101493835],
+            [0.0, 0.0, 1.0],
+            [0.7286396026611328, -0.6793518662452698, -0.08697929233312607],
+            [0.736281, 0.29129338, 0.61076874],
+        ]
+    )
+    dimensions = np.array(
+        [
+            [0.1, 0.0, 1.0, 10.0],
+            [0.06330857425928116, 0.0, 1.0, 42.1290168762207],
+            [0.777827262878418, 0.9754909873008728, 1.0, 91.13072204589844],
+            [0.5759442448616028, 0.03788183629512787, 1.0, 61.29697799682617],
+            [0.5687828660011292, 73.5628662109375, 1.0, 27.199745178222656],
+            [0.08787105977535248, 83.95655822753906, 1.0, 78.32493591308594],
+            [0.01377502, 12.711492, 1.0, 11.89699],
+        ]
+    )
+    axes /= np.linalg.norm(axes, axis=1)[:, None]
+    cylinder_axes /= np.linalg.norm(cylinder_axes, axis=1)[:, None]
+    for scale in (0.001, 1.0, 1000.0):
+        with wp.ScopedDevice(device):
+            distances = wp.empty(len(positions), dtype=wp.vec2)
+            points = wp.empty(len(positions), dtype=wp.vec3)
+            normals = wp.empty(len(positions), dtype=wp.vec3)
+            wp.launch(
+                query_capsule_cylinder,
+                len(positions),
+                [
+                    wp.array(positions * scale, dtype=wp.vec3),
+                    wp.array(axes, dtype=wp.vec3),
+                    wp.array(cylinder_axes, dtype=wp.vec3),
+                    wp.array(dimensions * scale, dtype=wp.vec4),
+                    distances,
+                    points,
+                    normals,
+                ],
+            )
+        gaps = distances.numpy().astype(float) / scale
+        centers = points.numpy().astype(float) / scale
+        outward = -normals.numpy().astype(float)
+        test.assertLess(gaps[-1, 1], MAXVAL)
+        for i, (radius, length, cylinder_radius, height) in enumerate(dimensions[:-1]):
+            with test.subTest(scale=scale, case=i):
+                tolerance = 4e-6 * max(np.max(dimensions[i]), np.linalg.norm(positions[i]))
+                normal = outward[i]
+                capsule_surface = centers[i] + 0.5 * gaps[i, 0] * normal
+                cylinder_surface = centers[i] - 0.5 * gaps[i, 0] * normal
+                along = np.clip((capsule_surface - positions[i]) @ axes[i], -length, length)
+                test.assertAlmostEqual(
+                    np.linalg.norm(capsule_surface - positions[i] - along * axes[i]), radius, delta=tolerance
+                )
+                axial = cylinder_surface @ cylinder_axes[i]
+                radial = np.linalg.norm(cylinder_surface - axial * cylinder_axes[i])
+                test.assertLessEqual(radial, cylinder_radius + tolerance)
+                test.assertLessEqual(abs(axial), height + tolerance)
+                test.assertLessEqual(min(abs(radial - cylinder_radius), abs(abs(axial) - height)), tolerance)
+                axial_normal = normal @ cylinder_axes[i]
+                support_gap = (
+                    positions[i] @ normal
+                    - length * abs(axes[i] @ normal)
+                    - height * abs(axial_normal)
+                    - cylinder_radius * np.linalg.norm(normal - axial_normal * cylinder_axes[i])
+                    - radius
+                )
+                test.assertAlmostEqual(gaps[i, 0], support_gap, delta=tolerance)
+
+
 def test_gap_admission(test, device):
     """Generate separated barrel and cap contacts inside the combined shape gap."""
     with wp.ScopedDevice(device):
@@ -777,6 +873,12 @@ add_function_test(
     devices=get_test_devices(),
 )
 add_function_test(TestCapsuleCylinderBarrel, "test_gap_admission", test_gap_admission, devices=get_test_devices())
+add_function_test(
+    TestCapsuleCylinderBarrel,
+    "test_conditioned_feature_witnesses",
+    test_conditioned_feature_witnesses,
+    devices=get_test_devices(),
+)
 add_function_test(
     TestCapsuleCylinderBarrel,
     "test_cap_rim_support_witnesses",

@@ -75,8 +75,8 @@ def _collide_capsule_cylinder_barrel(
     distance bound inside the finite barrel, so it is also a global closest pair.
     """
     relative = capsule_pos - cylinder_pos
-    radial_center = relative - cylinder_axis * wp.dot(relative, cylinder_axis)
-    radial_axis = capsule_axis - cylinder_axis * wp.dot(capsule_axis, cylinder_axis)
+    radial_center = wp.cross(cylinder_axis, wp.cross(relative, cylinder_axis))
+    radial_axis = wp.cross(cylinder_axis, wp.cross(capsule_axis, cylinder_axis))
     radial_axis_sq = wp.dot(radial_axis, radial_axis)
     # This dimensionless guard preserves the parallel side-contact manifold.
     if radial_axis_sq <= 1.0e-12:
@@ -88,13 +88,23 @@ def _collide_capsule_cylinder_barrel(
     )
     closest = relative + along * capsule_axis
     axial = wp.dot(closest, cylinder_axis)
-    radial = closest - axial * cylinder_axis
+    radial = wp.cross(cylinder_axis, wp.cross(closest, cylinder_axis))
     radial_distance = wp.length(radial)
     if radial_distance < cylinder_radius or wp.abs(axial) >= cylinder_half_height:
         return False, float(MAXVAL), wp.vec3(0.0), wp.vec3(0.0)
     if radial_distance <= 0.0:
         return False, float(MAXVAL), wp.vec3(0.0), wp.vec3(0.0)
     normal = -radial / radial_distance
+    if wp.abs(along) < capsule_half_length:
+        # Interior barrel contacts have a normal perpendicular to both axes.
+        # Construct it directly instead of normalizing a residual obtained by
+        # subtracting large segment coordinates.
+        perpendicular = wp.cross(cylinder_axis, capsule_axis)
+        outward = wp.normalize(wp.cross(cylinder_axis, wp.cross(perpendicular, cylinder_axis)))
+        if wp.dot(relative, outward) < 0.0:
+            outward = -outward
+        normal = -outward
+        radial_distance = wp.dot(relative, outward)
     separation = radial_distance - cylinder_radius - capsule_radius
     capsule_surface = capsule_pos + along * capsule_axis + capsule_radius * normal
     cylinder_surface = cylinder_pos + axial * cylinder_axis - cylinder_radius * normal
@@ -121,9 +131,9 @@ def _collide_capsule_cylinder_line_contacts(
     empty = wp.vec3(0.0)
     relative = capsule_pos - cylinder_pos
     axial_center = wp.dot(relative, cylinder_axis)
-    radial_center = relative - axial_center * cylinder_axis
+    radial_center = wp.cross(cylinder_axis, wp.cross(relative, cylinder_axis))
     axial_axis = wp.dot(capsule_axis, cylinder_axis)
-    radial_axis = capsule_axis - axial_axis * cylinder_axis
+    radial_axis = wp.cross(cylinder_axis, wp.cross(capsule_axis, cylinder_axis))
     radial_axis_sq = wp.dot(radial_axis, radial_axis)
 
     # Keep a line manifold for small tilts, with radial drift bounded by the
@@ -680,8 +690,9 @@ def collide_sphere_cylinder(
     vec = sphere_pos - cylinder_pos
     x = wp.dot(vec, cylinder_axis)
 
-    a_proj = cylinder_axis * x
-    p_proj = vec - a_proj
+    # The double cross keeps the radial direction perpendicular to the axis
+    # even when subtracting nearly equal axial coordinates would lose it.
+    p_proj = wp.cross(cylinder_axis, wp.cross(vec, cylinder_axis))
     p_proj_sqr = wp.dot(p_proj, p_proj)
 
     collide_side = wp.abs(x) < cylinder_half_height
@@ -698,8 +709,18 @@ def collide_sphere_cylinder(
 
     # side collision
     if collide_side:
-        pos_target = cylinder_pos + a_proj
-        return collide_sphere_sphere(sphere_pos, sphere_radius, pos_target, cylinder_radius)
+        radial_distance = wp.sqrt(p_proj_sqr)
+        outward = wp.vec3(0.0)
+        if radial_distance > 0.0:
+            outward = p_proj / radial_distance
+        else:
+            reference = wp.vec3(1.0, 0.0, 0.0)
+            if wp.abs(cylinder_axis[0]) > 0.9:
+                reference = wp.vec3(0.0, 1.0, 0.0)
+            outward = wp.normalize(wp.cross(cylinder_axis, reference))
+        distance = radial_distance - cylinder_radius - sphere_radius
+        point = sphere_pos - outward * (sphere_radius + 0.5 * distance)
+        return distance, point, -outward
     # cap collision
     elif collide_cap:
         if x > 0.0:
@@ -887,10 +908,12 @@ def _capsule_cylinder_features(
             # A cap normal supports a tilted core at an endpoint. It is a
             # stationary feature only when that endpoint projects into the
             # cap disk; an overhang instead needs an interior rim witness.
-            if axial_axis != 0.0:
-                endpoint = relative - wp.sign(wp.dot(capsule_axis, candidate)) * capsule_half_length * capsule_axis
-                if wp.length_sq(wp.vec2(endpoint[0], endpoint[1])) > cylinder_radius * cylinder_radius:
-                    continue
+            along = -wp.sign(wp.dot(capsule_axis, candidate)) * capsule_half_length
+            if axial_axis == 0.0:
+                along = wp.clamp(-relative[0] / capsule_axis[0], -capsule_half_length, capsule_half_length)
+            cap_core = relative + along * capsule_axis
+            if wp.length_sq(wp.vec2(cap_core[0], cap_core[1])) > cylinder_radius * cylinder_radius:
+                continue
         elif i == 2 or i == 3:
             along = wp.where(i == 2, -capsule_half_length, capsule_half_length)
             endpoint_distance, endpoint_point, endpoint_normal = collide_sphere_cylinder(
@@ -1027,7 +1050,8 @@ def collide_capsule_cylinder(
         )
         return distance, point, float(MAXVAL), wp.vec3(0.0), normal
     axial_axis = wp.dot(capsule_axis, cylinder_axis)
-    radial_axis_sq = wp.length_sq(capsule_axis - axial_axis * cylinder_axis)
+    radial_axis = wp.cross(cylinder_axis, wp.cross(capsule_axis, cylinder_axis))
+    radial_axis_sq = wp.length_sq(radial_axis)
     near_parallel = (
         radial_axis_sq <= 1.0e-4
         and radial_axis_sq * capsule_half_length * capsule_half_length <= 1.0e-4 * cylinder_radius * cylinder_radius
@@ -1091,7 +1115,7 @@ def collide_capsule_cylinder(
     # Use a frame with cylinder axis +z and the capsule axis in the xz plane.
     # This removes world-space cross products and lets the compiler simplify
     # all cap/barrel support expressions in the general feature calculation.
-    x_axis = capsule_axis - axial_axis * cylinder_axis
+    x_axis = radial_axis
     if radial_axis_sq <= 1.0e-12:
         ref = wp.vec3(1.0, 0.0, 0.0)
         if wp.abs(cylinder_axis[0]) > 0.9:
