@@ -110,6 +110,13 @@ def test_support_witnesses(test, device):
     axes[:6] /= np.linalg.norm(axes[:6], axis=1)[:, None]
     dimensions[:6] = [0.25, 3.0, 1.0, 1.0]
     dimensions[24:32, 1] = 0.0
+    # Cap normals require an endpoint inside the disk even for tiny tilts.
+    # Otherwise the selected rim feature must retain its interior witness.
+    for index, tilt in enumerate((0.0, -1e-7, 1e-7, -1e-6, 1e-6, -1e-5, 1e-5, -1e-3, 1e-3), start=count - 9):
+        positions[index] = [-0.203244, 0.504936, -0.719]
+        axes[index] = [0.340771, -0.940146, tilt]
+        axes[index] /= np.linalg.norm(axes[index])
+        dimensions[index] = [0.01, 0.8536813536163314, 0.3, 0.73]
     # Almost horizontal overhangs and almost circular projected rims also need
     # valid surface witnesses, not just an accurate scalar gap.
     index = 32
@@ -616,6 +623,59 @@ def test_near_horizontal_cap_witnesses(test, device):
                                 test.assertAlmostEqual(cy[2], direction * 0.72, delta=3e-6)
 
 
+def test_cap_rim_support_witnesses(test, device):
+    """Keep cap/rim witnesses on both surfaces for almost horizontal overhangs."""
+    rotation = wp.quat(-0.6648025512695312, -0.2409108579158783, 0.0, 0.7071064114570618)
+    axis = np.asarray(wp.quat_rotate(rotation, wp.vec3(0.0, 0.0, 1.0)), dtype=float)
+    axis /= np.linalg.norm(axis)
+    with wp.ScopedDevice(device):
+        for scale in (0.001, 1.0, 1000.0):
+            for reversed_order in (False, True):
+                with test.subTest(scale=scale, order=reversed_order):
+                    radius, length, cylinder_radius, height = np.array([0.01, 0.8536813536163314, 0.3, 0.73]) * scale
+                    position = np.array([-0.203244, 0.504936, -0.719]) * scale
+                    pose = wp.transform(wp.vec3(*position), rotation)
+                    builder = newton.ModelBuilder()
+                    body = builder.add_body(xform=pose, mass=1.0, inertia=wp.mat33(*np.eye(3).ravel()))
+                    cfg = newton.ModelBuilder.ShapeConfig(density=0.0, gap=0.01 * scale)
+                    capsule = {"body": body, "radius": radius, "half_height": length, "cfg": cfg}
+                    cylinder = {"body": -1, "radius": cylinder_radius, "half_height": height, "cfg": cfg}
+                    if reversed_order:
+                        capsule_id = builder.add_shape_capsule(**capsule)
+                        builder.add_shape_cylinder(**cylinder)
+                    else:
+                        builder.add_shape_cylinder(**cylinder)
+                        capsule_id = builder.add_shape_capsule(**capsule)
+                    model = builder.finalize()
+                    pipeline = newton.CollisionPipeline(model)
+                    contacts = pipeline.contacts()
+                    pipeline.collide(model.state(), contacts)
+                    count = int(contacts.rigid_contact_count.numpy()[0])
+                    test.assertGreater(count, 0)
+                    shapes = contacts.rigid_contact_shape0.numpy()
+                    points0 = contacts.rigid_contact_point0.numpy()
+                    points1 = contacts.rigid_contact_point1.numpy()
+                    normals = contacts.rigid_contact_normal.numpy()
+                    margins0 = contacts.rigid_contact_margin0.numpy()
+                    margins1 = contacts.rigid_contact_margin1.numpy()
+                    tolerance = 3e-6 * scale
+                    for i in range(count):
+                        x0, x1 = points0[i].astype(float), points1[i].astype(float)
+                        if shapes[i] == capsule_id:
+                            x0 = np.asarray(wp.transform_point(pose, wp.vec3(*x0)), dtype=float)
+                        else:
+                            x1 = np.asarray(wp.transform_point(pose, wp.vec3(*x1)), dtype=float)
+                        normal = normals[i].astype(float)
+                        s0, s1 = x0 + margins0[i] * normal, x1 - margins1[i] * normal
+                        cap, cyl = (s0, s1) if shapes[i] == capsule_id else (s1, s0)
+                        along = np.clip((cap - position) @ axis, -length, length)
+                        test.assertAlmostEqual(np.linalg.norm(cap - position - along * axis), radius, delta=tolerance)
+                        test.assertLessEqual(np.linalg.norm(cyl[:2]), cylinder_radius + tolerance)
+                        test.assertAlmostEqual(cyl[2], -height, delta=tolerance)
+                        gap = (x1 - x0) @ normal - margins0[i] - margins1[i]
+                        test.assertAlmostEqual(gap, -0.021 * scale, delta=tolerance)
+
+
 def test_gap_admission(test, device):
     """Generate separated barrel and cap contacts inside the combined shape gap."""
     with wp.ScopedDevice(device):
@@ -717,6 +777,12 @@ add_function_test(
     devices=get_test_devices(),
 )
 add_function_test(TestCapsuleCylinderBarrel, "test_gap_admission", test_gap_admission, devices=get_test_devices())
+add_function_test(
+    TestCapsuleCylinderBarrel,
+    "test_cap_rim_support_witnesses",
+    test_cap_rim_support_witnesses,
+    devices=get_test_devices(),
+)
 add_function_test(
     TestCapsuleCylinderBarrel,
     "test_near_horizontal_cap_witnesses",

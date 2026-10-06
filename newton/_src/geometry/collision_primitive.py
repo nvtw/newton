@@ -875,6 +875,7 @@ def _capsule_cylinder_features(
     radial_axis_sq = capsule_axis[0] * capsule_axis[0]
     best_gap = -float(MAXVAL)
     outward = cylinder_axis
+    interior_core = bool(False)
     # The extra radial feature is only needed for parallel cores. A runtime
     # feature count also keeps Warp from unrolling two copies of the rim solver.
     feature_count = wp.where(radial_axis_sq > 1.0e-12, 8, 9)
@@ -882,6 +883,14 @@ def _capsule_cylinder_features(
         candidate = cylinder_axis
         if i == 1:
             candidate = -cylinder_axis
+        if i == 0 or i == 1:
+            # A cap normal supports a tilted core at an endpoint. It is a
+            # stationary feature only when that endpoint projects into the
+            # cap disk; an overhang instead needs an interior rim witness.
+            if axial_axis != 0.0:
+                endpoint = relative - wp.sign(wp.dot(capsule_axis, candidate)) * capsule_half_length * capsule_axis
+                if wp.length_sq(wp.vec2(endpoint[0], endpoint[1])) > cylinder_radius * cylinder_radius:
+                    continue
         elif i == 2 or i == 3:
             along = wp.where(i == 2, -capsule_half_length, capsule_half_length)
             endpoint_distance, endpoint_point, endpoint_normal = collide_sphere_cylinder(
@@ -958,6 +967,7 @@ def _capsule_cylinder_features(
         if gap >= best_gap:
             best_gap = gap
             outward = candidate
+            interior_core = i >= 6 or ((i == 0 or i == 1) and axial_axis == 0.0)
 
     # Construct supporting witnesses on the selected feature. For a core
     # interior witness, project the cylinder rim onto the finite segment.
@@ -969,7 +979,7 @@ def _capsule_cylinder_features(
         cylinder_core += cylinder_radius * radial / radial_length
     core_dot = wp.dot(capsule_axis, outward)
     along = -wp.sign(core_dot) * capsule_half_length
-    if wp.abs(core_dot) <= 1.0e-6:
+    if interior_core:
         along = wp.clamp(wp.dot(cylinder_core - relative, capsule_axis), -capsule_half_length, capsule_half_length)
         if axial == 0.0 and radial_axis_sq > 1.0e-12:
             radial_center = relative - wp.dot(relative, cylinder_axis) * cylinder_axis
