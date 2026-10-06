@@ -9,6 +9,7 @@ from ..utils.heightfield import (
     HeightfieldData,
     get_triangle_shape_from_heightfield,
     heightfield_cell_range,
+    heightfield_point_below,
     signed_heightfield_feature_distance,
 )
 from .contact_reduction import float_flip
@@ -17,6 +18,24 @@ from .kernels import triangle_closest_point
 from .soft_contacts_sdf import _emit_soft_ef_contact, _shape_frames
 
 _HEIGHTFIELD_CELLS_PER_TASK = 256
+# The feature search sits near 128 registers per thread; smaller blocks keep occupancy from
+# halving when it crosses that limit.
+_HEIGHTFIELD_BLOCK_DIM = 128
+
+
+@wp.func
+def _signed_candidate(
+    x: wp.vec3,
+    y: wp.vec3,
+    face_normal: wp.vec3,
+    best: float,
+    hfd: HeightfieldData,
+    elevations: wp.array[wp.float32],
+):
+    """Signed distance and normal of one candidate pair, or 1e10 when neither sign can beat ``best``."""
+    if -wp.length(x - y) >= best:
+        return float(1.0e10), face_normal
+    return signed_heightfield_feature_distance(x, y, face_normal, heightfield_point_below(hfd, elevations, x))
 
 
 @wp.func
@@ -30,7 +49,11 @@ def _closest_heightfield_feature(
     begin: int,
     end: int,
 ):
-    """Find the missing rigid-vertex/face and rigid-edge/edge contact for one soft triangle."""
+    """Find the missing rigid-vertex/face and rigid-edge/edge contact for one soft triangle.
+
+    Candidates are ranked by signed distance: penetrating pairs (soft point below the terrain)
+    first, deepest first, then separated pairs, closest first.
+    """
     best = float(1.0e10)
     best_bary = wp.vec3(0.0)
     best_y = wp.vec3(0.0)
@@ -70,7 +93,7 @@ def _closest_heightfield_feature(
                     elif rigid_vertex == 2:
                         y = w
                     x, bary, _feature = triangle_closest_point(a, b, c, y)
-                    distance, contact_normal = signed_heightfield_feature_distance(x, y, normal, hfd, elevations, best)
+                    distance, contact_normal = _signed_candidate(x, y, normal, best, hfd, elevations)
                     if distance < best:
                         best = distance
                         best_cell = cell
@@ -99,9 +122,7 @@ def _closest_heightfield_feature(
                         st = wp.closest_point_edge_edge(p, q, r, s, 1.0e-6)
                         x = p + st[0] * (q - p)
                         y = r + st[1] * (s - r)
-                        distance, contact_normal = signed_heightfield_feature_distance(
-                            x, y, normal, hfd, elevations, best
-                        )
+                        distance, contact_normal = _signed_candidate(x, y, normal, best, hfd, elevations)
                         if distance < best:
                             best = distance
                             best_cell = cell
@@ -317,6 +338,7 @@ def launch_soft_heightfield_contacts(*, model, state, contacts, margin: float, d
         inputs=[*inputs, tid_base, task_counts, winners, False, cells_per_task, contacts.soft_contact_max],
         outputs=outputs,
         device=device,
+        block_dim=_HEIGHTFIELD_BLOCK_DIM,
     )
     if workspace is None:
         return
@@ -328,6 +350,7 @@ def launch_soft_heightfield_contacts(*, model, state, contacts, margin: float, d
         dim=grid_size,
         inputs=[*inputs, offsets, winners, cells_per_task, grid_size],
         device=device,
+        block_dim=_HEIGHTFIELD_BLOCK_DIM,
     )
     wp.launch(
         create_soft_heightfield_face_contacts,
@@ -335,4 +358,5 @@ def launch_soft_heightfield_contacts(*, model, state, contacts, margin: float, d
         inputs=[*inputs, tid_base, task_counts, winners, True, cells_per_task, contacts.soft_contact_max],
         outputs=outputs,
         device=device,
+        block_dim=_HEIGHTFIELD_BLOCK_DIM,
     )

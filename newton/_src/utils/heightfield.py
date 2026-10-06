@@ -280,32 +280,44 @@ def heightfield_cell_range(a: wp.vec3, b: wp.vec3, c: wp.vec3, hfd: HeightfieldD
 
 
 @wp.func
-def signed_heightfield_feature_distance(
-    x: wp.vec3,
-    y: wp.vec3,
-    face_normal: wp.vec3,
-    hfd: HeightfieldData,
-    elevations: wp.array[wp.float32],
-    best: float,
-):
+def heightfield_point_below(hfd: HeightfieldData, elevation_data: wp.array[wp.float32], pos: wp.vec3) -> bool:
+    """Whether ``pos`` lies below the terrain surface at its own (x, y) inside the footprint.
+
+    Interpolates the surface height on the same triangle split as :func:`_heightfield_surface_query`.
+    """
+    if hfd.nrow <= 1 or hfd.ncol <= 1 or pos[2] >= hfd.max_z or wp.abs(pos[0]) > hfd.hx or wp.abs(pos[1]) > hfd.hy:
+        return False
+    col_f = (pos[0] + hfd.hx) * wp.float32(hfd.ncol - 1) / (2.0 * hfd.hx)
+    row_f = (pos[1] + hfd.hy) * wp.float32(hfd.nrow - 1) / (2.0 * hfd.hy)
+    col = wp.min(wp.int32(col_f), hfd.ncol - 2)
+    row = wp.min(wp.int32(row_f), hfd.nrow - 2)
+    fx = col_f - wp.float32(col)
+    fy = row_f - wp.float32(row)
+    base = hfd.data_offset + row * hfd.ncol + col
+    h00 = elevation_data[base]
+    h11 = elevation_data[base + hfd.ncol + 1]
+    height = float(0.0)
+    if fx >= fy:
+        height = h00 + fx * (elevation_data[base + 1] - h00) + fy * (h11 - elevation_data[base + 1])
+    else:
+        height = h00 + fy * (elevation_data[base + hfd.ncol] - h00) + fx * (h11 - elevation_data[base + hfd.ncol])
+    return pos[2] < hfd.min_z + height * (hfd.max_z - hfd.min_z)
+
+
+@wp.func
+def signed_heightfield_feature_distance(x: wp.vec3, y: wp.vec3, face_normal: wp.vec3, below: bool):
     """Sign a soft/terrain feature pair by terrain height and orient its normal along the pair.
 
-    Only a soft point below the terrain at its own (x, y) penetrates, as in the per-particle path.
-    The normal follows the closest-feature delta, so a cloth edge crossing a riser edge is pushed
-    across that edge instead of along the riser's nearly horizontal face normal.
+    Only a soft point ``x`` below the terrain at its own (x, y) penetrates, as in the per-particle
+    path. The normal follows the closest-feature delta, so a cloth edge crossing a riser edge is
+    pushed across that edge instead of along the riser's nearly horizontal face normal.
     """
     delta = x - y
     distance = wp.length(delta)
-    if -distance >= best:
-        return float(1.0e10), face_normal
-    penetrating = bool(False)
-    if x[2] < hfd.max_z:
-        plane_distance, _normal, lateral_sq = _heightfield_surface_query(hfd, elevations, x)
-        penetrating = lateral_sq == 0.0 and plane_distance < 0.0
     normal = face_normal
     if distance > 0.0:
         normal = delta / distance
-    if penetrating:
+    if below:
         return -distance, -normal
     return distance, normal
 

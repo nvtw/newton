@@ -7,6 +7,7 @@ from ..utils.heightfield import (
     HeightfieldData,
     get_triangle_shape_from_heightfield,
     heightfield_cell_range,
+    heightfield_point_below,
     sample_sdf_grad_heightfield,
     signed_heightfield_feature_distance,
 )
@@ -1153,8 +1154,9 @@ def closest_point_heightfield(
     Only triangles within ``threshold`` of ``pos`` in XY are searched; farther points return 1e10.
     """
     cells = heightfield_cell_range(pos, pos, pos, hfd, threshold)
-    best = float(1.0e10)
-    best_normal = wp.vec3(0.0, 0.0, 1.0)
+    best_sq = float(1.0e20)
+    closest = wp.vec3(0.0)
+    closest_normal = wp.vec3(0.0, 0.0, 1.0)
     for row in range(cells[2], cells[3] + 1):
         for col in range(cells[0], cells[1] + 1):
             for sub in range(2):
@@ -1164,12 +1166,17 @@ def closest_point_heightfield(
                 )
                 v = u + rigid_shape.scale
                 w = u + rigid_shape.auxiliary
-                face_normal = wp.normalize(wp.cross(v - u, w - u))
                 y, _bary, _feature = triangle_closest_point(u, v, w, pos)
-                distance, normal = signed_heightfield_feature_distance(pos, y, face_normal, hfd, elevation_data, best)
-                if distance < best:
-                    best = distance
-                    best_normal = normal
+                distance_sq = wp.length_sq(pos - y)
+                if distance_sq < best_sq:
+                    best_sq = distance_sq
+                    closest = y
+                    closest_normal = wp.cross(v - u, w - u)
+    if best_sq >= 1.0e20:
+        return float(1.0e10), wp.vec3(0.0, 0.0, 1.0)
+    best, best_normal = signed_heightfield_feature_distance(
+        pos, closest, wp.normalize(closest_normal), heightfield_point_below(hfd, elevation_data, pos)
+    )
     return best, best_normal
 
 
