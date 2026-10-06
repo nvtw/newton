@@ -703,6 +703,37 @@ def test_dat_budget_counts_full_surface_mesh_queries(test, device):
             test.assertAlmostEqual(solver._rigid_soft_query_radius_min, 0.105, places=6)
 
 
+def test_separated_mesh_shells_keep_default_capacity(test, device):
+    """Shells that no particle can touch together must not multiply the default contact capacity."""
+    box = newton.Mesh.create_box(0.05, 0.05, 0.05, compute_inertia=False)
+    vertices, indices = np.asarray(box.vertices), np.asarray(box.indices).reshape(-1)
+
+    def default_capacity(shell_count):
+        offsets = [np.array([0.3 * (k % 4), 0.3 * (k // 4), 0.0]) for k in range(shell_count)]
+        mesh = newton.Mesh(
+            np.concatenate([vertices + offset for offset in offsets]),
+            np.concatenate([indices + k * len(vertices) for k in range(shell_count)]),
+            compute_inertia=False,
+        )
+        builder = newton.ModelBuilder()
+        builder.add_shape_mesh(body=-1, mesh=mesh)
+        builder.add_cloth_grid(
+            pos=wp.vec3(-0.1, -0.1, 0.03),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(),
+            dim_x=16,
+            dim_y=16,
+            cell_x=0.075,
+            cell_y=0.075,
+            mass=0.01,
+            particle_radius=0.005,
+        )
+        model = builder.finalize(device=device)
+        return newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True).soft_contact_max
+
+    test.assertEqual(default_capacity(16), default_capacity(1))
+
+
 def test_mixed_mesh_edge_dispatch(test, device):
     """Keep mesh edge contacts when compact scheduling is enabled in a mixed scene."""
     builder = newton.ModelBuilder()
@@ -760,6 +791,7 @@ for device in get_test_devices():
         test_identical_meshes_share_contact_precomputation,
         test_mesh_pad_pinch_pushes_toward_nearest_exit,
         test_dat_budget_counts_full_surface_mesh_queries,
+        test_separated_mesh_shells_keep_default_capacity,
         test_finite_plane_feature_geometry,
         test_large_heightfield_task_contacts,
     ):

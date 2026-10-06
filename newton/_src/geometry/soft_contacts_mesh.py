@@ -406,11 +406,37 @@ def _edge_rows(keys: np.ndarray, query: np.ndarray, what: str) -> np.ndarray:
     return rows
 
 
-def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], vertex_table: wp.array, edge_table: wp.array):
-    """Build fixed incident-feature spans, ownership, and per-shape component counts."""
+def _max_concurrent_components(lower: np.ndarray, upper: np.ndarray, band: float) -> int:
+    """Bound how many disjoint surface components a single point can touch within ``band``.
+
+    A point within ``band`` of several components lies in all of their band-expanded bounds,
+    so those bounds overlap pairwise. The most bounds overlapping any one bound, counting
+    itself, therefore bounds the components that one particle can contact at once.
+    """
+    lower = lower - band
+    upper = upper + band
+    most = 0
+    for start in range(0, len(lower), 1024):
+        rows = slice(start, start + 1024)
+        overlap = np.all((lower[rows, None] <= upper[None]) & (lower[None] <= upper[rows, None]), axis=2)
+        most = max(most, int(overlap.sum(axis=1).max()))
+    return most
+
+
+def _build_feature_adjacency(
+    model: Model, meshes: dict[int, Mesh], vertex_table: wp.array, edge_table: wp.array, contact_band: float
+):
+    """Build fixed incident-feature spans and ownership.
+
+    Also returns, per shape, how many disjoint surface components one particle can touch within
+    ``contact_band`` plus the shape's margin.
+    """
     et = edge_table.numpy()
     offsets = np.zeros(model.shape_count, dtype=np.int32)
-    component_counts = np.zeros(model.shape_count, dtype=np.int32)
+    concurrent_components = np.zeros(model.shape_count, dtype=np.int32)
+    shape_scale = model.shape_scale.numpy()
+    shape_margin = model.shape_margin.numpy() if model.shape_margin is not None else np.zeros(model.shape_count)
+    concurrency_cache = {}
     vertex_spans, edge_spans, neighbors = [], [], []
     vertex_bounds, vertex_errors, edge_bounds, edge_errors = [], [], [], []
     ee = np.zeros(len(et), dtype=np.int32)
@@ -436,14 +462,23 @@ def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], vertex_table
                 edge_owner.setdefault(key, face)
 
         unvisited = set(incident)
+        component_of = {}
         component_count = 0
         while unvisited:
-            component_count += 1
             pending = [unvisited.pop()]
+            component_of[pending[0]] = component_count
             while pending:
                 connected = incident[pending.pop()] & unvisited
                 unvisited.difference_update(connected)
+                component_of.update(dict.fromkeys(connected, component_count))
                 pending.extend(connected)
+            component_count += 1
+        vertex_positions = np.asarray(mesh.vertices, dtype=np.float64)[idx]
+        component_ids = np.fromiter((component_of[int(v)] for v in canon), dtype=np.int64, count=len(canon))
+        component_lower = np.full((component_count, 3), np.inf)
+        component_upper = np.full((component_count, 3), -np.inf)
+        np.minimum.at(component_lower, component_ids, vertex_positions)
+        np.maximum.at(component_upper, component_ids, vertex_positions)
 
         def span(vertices, owner, representatives=representative):
             start = len(neighbors)
@@ -496,7 +531,7 @@ def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], vertex_table
         keys = sorted(es)
         edge_keys = np.asarray([(a << 32) | b for a, b in keys], dtype=np.int64)
         edge_data = np.asarray([edge_slots[key] for key in keys], dtype=np.int32)
-        return offset, canon, edge_keys, edge_data, component_count
+        return offset, canon, edge_keys, edge_data, (component_lower, component_upper)
 
     # Shape instances share immutable local topology. Only the feature rows
     # carry a shape id; constructing full adjacency per world is unnecessary.
@@ -504,9 +539,16 @@ def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], vertex_table
         key = _geometry_key(mesh)
         if key not in cache:
             cache[key] = build(mesh)
-        offset, canon, edge_keys, edge_data, component_count = cache[key]
+        offset, canon, edge_keys, edge_data, (component_lower, component_upper) = cache[key]
         offsets[shape] = offset
-        component_counts[shape] = component_count
+        scale = shape_scale[shape].astype(np.float64)
+        band = contact_band + float(shape_margin[shape])
+        concurrency_key = (key, tuple(scale), band)
+        if concurrency_key not in concurrency_cache:
+            scaled_lower = np.minimum(component_lower * scale, component_upper * scale)
+            scaled_upper = np.maximum(component_lower * scale, component_upper * scale)
+            concurrency_cache[concurrency_key] = _max_concurrent_components(scaled_lower, scaled_upper, band)
+        concurrent_components[shape] = concurrency_cache[concurrency_key]
         start, end = np.searchsorted(et[:, 0], (shape, shape + 1))
         edge_canon = np.sort(canon[et[start:end, 1:]].astype(np.int64), axis=1)
         keys = (edge_canon[:, 0] << 32) | edge_canon[:, 1]
@@ -529,7 +571,7 @@ def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], vertex_table
             (edge_errors, 3, wp.vec3),
         )
     )
-    return arrays, component_counts
+    return arrays, concurrent_components
 
 
 CONTACT_NORMAL_DEGENERATE_EPS = wp.constant(1.0e-6)
@@ -1603,7 +1645,7 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
 class MeshContactData:
     """Fixed mesh topology and acceleration structures; no candidate-contact buffer."""
 
-    def __init__(self, model: Model, shape_mask: np.ndarray, vertex_pairs: wp.array[wp.vec2i]):
+    def __init__(self, model: Model, shape_mask: np.ndarray, vertex_pairs: wp.array[wp.vec2i], gap: float):
         self.vertex_pairs = vertex_pairs
         meshes = _collision_meshes(model, shape_mask)
         if model.tri_count:
@@ -1626,7 +1668,9 @@ class MeshContactData:
         vertices, vertex_normals, edges, edge_normals = self.rigid_features
         if max(_MESH_QUERY_PARTITIONS * len(vertex_pairs), len(vertices), len(edges)) > np.iinfo(np.int32).max:
             raise ValueError("Mesh contact queries exceed 32-bit indexing capacity.")
-        adjacency, component_counts = _build_feature_adjacency(model, meshes, vertices, edges)
+        adjacency, concurrent_components = _build_feature_adjacency(
+            model, meshes, vertices, edges, gap + model.particle_max_radius
+        )
         self.adjacency = [*adjacency, vertex_normals, edge_normals]
         # A query emits at most one contact per feature pair, or two depth probes per
         # edge pair. Bound the wide append counter before allocating; final writes
@@ -1656,6 +1700,7 @@ class MeshContactData:
             )
 
         surface_pairs = len(vertex_pairs) + count_pairs(model.tri_indices, 0) + count_pairs(model.edge_indices, 2)
+        # Allow four local patches per surface component that a particle can touch at once.
         vertex_pair_shapes = vertex_pairs.numpy()[:, 1]
-        vertex_patch_hint = int((4 * component_counts[vertex_pair_shapes]).sum(dtype=np.int64))
+        vertex_patch_hint = int((4 * concurrent_components[vertex_pair_shapes]).sum(dtype=np.int64))
         self.contact_capacity_hint = max(vertex_patch_hint, surface_pairs, len(vertices) + len(edges))
