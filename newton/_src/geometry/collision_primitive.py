@@ -57,61 +57,6 @@ def closest_segment_point(a: wp.vec3, b: wp.vec3, pt: wp.vec3) -> wp.vec3:
 
 
 @wp.func
-def _collide_capsule_cylinder_barrel(
-    capsule_pos: wp.vec3,
-    capsule_axis: wp.vec3,
-    capsule_radius: float,
-    capsule_half_length: float,
-    cylinder_pos: wp.vec3,
-    cylinder_axis: wp.vec3,
-    cylinder_radius: float,
-    cylinder_half_height: float,
-) -> tuple[bool, float, wp.vec3, wp.vec3]:
-    """Solve a capsule core's exterior closest point on a finite cylinder barrel.
-
-    Return an unhandled result for parallel cores, cap/rim witnesses, or core
-    intersection. The line and finite-cylinder feature solvers handle those.
-    Axes are normalized. The handled witness attains the infinite-cylinder
-    distance bound inside the finite barrel, so it is also a global closest pair.
-    """
-    relative = capsule_pos - cylinder_pos
-    radial_center = wp.cross(cylinder_axis, wp.cross(relative, cylinder_axis))
-    radial_axis = wp.cross(cylinder_axis, wp.cross(capsule_axis, cylinder_axis))
-    radial_axis_sq = wp.dot(radial_axis, radial_axis)
-    # This dimensionless guard preserves the parallel side-contact manifold.
-    if radial_axis_sq <= 1.0e-12:
-        return False, float(MAXVAL), wp.vec3(0.0), wp.vec3(0.0)
-    along = wp.clamp(
-        -wp.dot(radial_center, radial_axis) / radial_axis_sq,
-        -capsule_half_length,
-        capsule_half_length,
-    )
-    closest = relative + along * capsule_axis
-    axial = wp.dot(closest, cylinder_axis)
-    radial = wp.cross(cylinder_axis, wp.cross(closest, cylinder_axis))
-    radial_distance = wp.length(radial)
-    if radial_distance < cylinder_radius or wp.abs(axial) >= cylinder_half_height:
-        return False, float(MAXVAL), wp.vec3(0.0), wp.vec3(0.0)
-    if radial_distance <= 0.0:
-        return False, float(MAXVAL), wp.vec3(0.0), wp.vec3(0.0)
-    normal = -radial / radial_distance
-    if wp.abs(along) < capsule_half_length:
-        # Interior barrel contacts have a normal perpendicular to both axes.
-        # Construct it directly instead of normalizing a residual obtained by
-        # subtracting large segment coordinates.
-        perpendicular = wp.cross(cylinder_axis, capsule_axis)
-        outward = wp.normalize(wp.cross(cylinder_axis, wp.cross(perpendicular, cylinder_axis)))
-        if wp.dot(relative, outward) < 0.0:
-            outward = -outward
-        normal = -outward
-        radial_distance = wp.dot(relative, outward)
-    separation = radial_distance - cylinder_radius - capsule_radius
-    capsule_surface = capsule_pos + along * capsule_axis + capsule_radius * normal
-    cylinder_surface = cylinder_pos + axial * cylinder_axis - cylinder_radius * normal
-    return True, separation, 0.5 * (capsule_surface + cylinder_surface), normal
-
-
-@wp.func
 def _collide_capsule_cylinder_line_contacts(
     capsule_pos: wp.vec3,
     capsule_axis: wp.vec3,
@@ -1071,23 +1016,6 @@ def collide_capsule_cylinder(
     axial_axis = wp.dot(capsule_axis, cylinder_axis)
     radial_axis = wp.cross(cylinder_axis, wp.cross(capsule_axis, cylinder_axis))
     radial_axis_sq = wp.length_sq(radial_axis)
-    near_parallel = (
-        radial_axis_sq <= 1.0e-4
-        and radial_axis_sq * capsule_half_length * capsule_half_length <= 1.0e-4 * cylinder_radius * cylinder_radius
-    )
-    if not near_parallel:
-        barrel, distance, point, normal = _collide_capsule_cylinder_barrel(
-            capsule_pos,
-            capsule_axis,
-            capsule_radius,
-            capsule_half_length,
-            cylinder_pos,
-            cylinder_axis,
-            cylinder_radius,
-            cylinder_half_height,
-        )
-        if barrel:
-            return distance, point, float(MAXVAL), wp.vec3(0.0), normal
     line, d0, p0, d1, p1, normal = _collide_capsule_cylinder_line_contacts(
         capsule_pos,
         capsule_axis,
@@ -1117,19 +1045,6 @@ def collide_capsule_cylinder(
             d1 >= MAXVAL or wp.abs(wp.dot(capsule_axis, normal)) <= 0.01
         ):
             return d0, p0, d1, p1, normal
-    if near_parallel:
-        barrel, distance, point, normal = _collide_capsule_cylinder_barrel(
-            capsule_pos,
-            capsule_axis,
-            capsule_radius,
-            capsule_half_length,
-            cylinder_pos,
-            cylinder_axis,
-            cylinder_radius,
-            cylinder_half_height,
-        )
-        if barrel:
-            return distance, point, float(MAXVAL), wp.vec3(0.0), normal
 
     # Use a frame with cylinder axis +z and the capsule axis in the xz plane.
     # This removes world-space cross products and lets the compiler simplify

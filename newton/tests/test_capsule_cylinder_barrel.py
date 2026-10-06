@@ -12,67 +12,9 @@ import newton
 from newton._src.core.types import MAXVAL
 from newton._src.geometry.collision_primitive import (
     _capsule_cylinder_rim_normal,
-    _collide_capsule_cylinder_barrel,
     collide_capsule_cylinder,
 )
 from newton.tests.unittest_utils import add_function_test, get_test_devices
-
-
-@wp.kernel
-def query_barrel(
-    positions: wp.array[wp.vec3],
-    axes: wp.array[wp.vec3],
-    handled: wp.array[int],
-    distances: wp.array[float],
-    centers: wp.array[wp.vec3],
-    normals: wp.array[wp.vec3],
-):
-    i = wp.tid()
-    ok, distance, center, normal = _collide_capsule_cylinder_barrel(
-        positions[i], axes[i], 0.25, 0.5, wp.vec3(0.0), wp.vec3(0.0, 0.0, 1.0), 3.75, 1.5
-    )
-    handled[i] = int(ok)
-    distances[i] = distance
-    centers[i] = center
-    normals[i] = normal
-
-
-def test_barrel_guards(test, device):
-    """Limit the barrel fast path to exterior witnesses on the finite barrel."""
-    positions = [
-        (3.95, 0.0, 0.3),  # interior barrel witness
-        (4.45, 0.0, 0.3),  # core endpoint is the closest witness
-        (4.1, 0.0, 0.3),  # separated but analytically handled
-        (3.95, 0.0, 0.3),  # parallel: use the line manifold
-        (3.95, 0.0, 1.5),  # exact rim: use the finite-cylinder solver
-        (3.95, 0.0, 1.6),  # outside barrel: use the finite-cylinder solver
-        (3.7, 0.0, 0.3),  # core intersection: use the finite-cylinder solver
-    ]
-    axes = [
-        (0.0, 1.0, 0.0),
-        (1.0, 0.0, 0.0),
-        (0.0, 1.0, 0.0),
-        (0.0, 0.0, 1.0),
-        (0.0, 1.0, 0.0),
-        (0.0, 1.0, 0.0),
-        (0.0, 1.0, 0.0),
-    ]
-    n = len(positions)
-    with wp.ScopedDevice(device):
-        handled = wp.zeros(n, dtype=int)
-        distances = wp.zeros(n, dtype=float)
-        centers = wp.zeros(n, dtype=wp.vec3)
-        normals = wp.zeros(n, dtype=wp.vec3)
-        wp.launch(
-            query_barrel,
-            n,
-            [wp.array(positions, dtype=wp.vec3), wp.array(axes, dtype=wp.vec3), handled, distances, centers, normals],
-        )
-    np.testing.assert_array_equal(handled.numpy(), [1, 1, 1, 0, 0, 0, 0])
-    np.testing.assert_allclose(distances.numpy()[:3], [-0.05, -0.05, 0.1], atol=1e-6)
-    np.testing.assert_allclose(normals.numpy()[:3], [[-1.0, 0.0, 0.0]] * 3, atol=1e-6)
-    np.testing.assert_allclose(centers.numpy()[:3], [[3.725, 0.0, 0.3], [3.725, 0.0, 0.3], [3.8, 0.0, 0.3]], atol=1e-6)
-    test.assertTrue(np.all(distances.numpy()[3:] >= MAXVAL * 0.99))
 
 
 @wp.kernel
@@ -1070,7 +1012,6 @@ class TestCapsuleCylinderBarrel(unittest.TestCase):
     """Check point, line, rim, and penetrating contacts."""
 
 
-add_function_test(TestCapsuleCylinderBarrel, "test_barrel_guards", test_barrel_guards, devices=get_test_devices())
 add_function_test(
     TestCapsuleCylinderBarrel, "test_support_witnesses", test_support_witnesses, devices=get_test_devices()
 )
