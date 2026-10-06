@@ -314,7 +314,6 @@ def create_compute_gjk_mpr_contacts(
         data_provider: Any,
         writer_data: Any,
         sort_sub_key: int = 0,
-        core_support_radius: float = 0.0,
     ):
         """
         Compute contacts between two shapes using GJK/MPR algorithm and write them.
@@ -336,7 +335,6 @@ def create_compute_gjk_mpr_contacts(
                 directional seeds and vertex adjacency.
             writer_data: Data structure for contact writer
             sort_sub_key: Sub-key for deterministic contact sorting (e.g. triangle/edge index)
-            core_support_radius: Small support radius used for mesh-triangle contacts
         """
         radius_eff_a = float(0.0)
         radius_eff_b = float(0.0)
@@ -346,17 +344,13 @@ def create_compute_gjk_mpr_contacts(
         type_b = shape_b_data.shape_type
 
         # Point/segment cores give exact witnesses at touching contacts.
-        # Mesh triangles can retain a small core radius for robust MPR
-        # penetration handling when many contacts are generated.
         if type_a == GeoType.SPHERE or type_a == GeoType.CAPSULE:
-            core_radius_a = wp.min(shape_a_data.scale[0], core_support_radius)
-            radius_eff_a = shape_a_data.scale[0] - core_radius_a
-            shape_a_data.scale[0] = core_radius_a
+            radius_eff_a = shape_a_data.scale[0]
+            shape_a_data.scale[0] = 0.0
 
         if type_b == GeoType.SPHERE or type_b == GeoType.CAPSULE:
-            core_radius_b = wp.min(shape_b_data.scale[0], core_support_radius)
-            radius_eff_b = shape_b_data.scale[0] - core_radius_b
-            shape_b_data.scale[0] = core_radius_b
+            radius_eff_b = shape_b_data.scale[0]
+            shape_b_data.scale[0] = 0.0
 
         # Pre-pack ContactData template with static information
         contact_template = ContactData()
