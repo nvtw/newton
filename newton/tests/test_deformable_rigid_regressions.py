@@ -230,12 +230,13 @@ def _plane_features(
     b: wp.vec3,
     c: wp.vec3,
     scale: wp.vec3,
+    depth: float,
     points: wp.array[wp.vec3],
     distances: wp.array[float],
     normals: wp.array[wp.vec3],
 ):
-    _u, edge_point, edge_phi, edge_normal = _closest_edge_plane(scale, a, b)
-    _bary, face_point, face_phi, face_normal = _closest_face_plane(scale, a, b, c)
+    _u, edge_point, edge_phi, edge_normal = _closest_edge_plane(scale, a, b, depth)
+    _bary, face_point, face_phi, face_normal = _closest_face_plane(scale, a, b, c, depth)
     points[0] = edge_point
     distances[0] = edge_phi
     normals[0] = edge_normal
@@ -266,6 +267,7 @@ def test_finite_plane_feature_geometry(test, device):
                     inputs=[
                         *(wp.vec3(*(factor * np.array(v))) for v in vertices),
                         wp.vec3(0.2 * factor, 0.2 * factor, 0.0),
+                        1.0e10,
                     ],
                     outputs=[points, distances, normals],
                     device=device,
@@ -282,12 +284,33 @@ def test_finite_plane_feature_geometry(test, device):
             wp.vec3(1.0, 0.0, -1.0),
             wp.vec3(0.0, 1.0, -1.0),
             wp.vec3(0.2, 0.2, 0.0),
+            1.0e10,
         ],
         outputs=[points, distances, normals],
         device=device,
     )
     test.assertAlmostEqual(float(distances.numpy()[0]), -1.55, delta=1.0e-6)
     np.testing.assert_allclose(points.numpy()[0], (-0.1, 0.0, -1.55), atol=1.0e-6)
+
+    # A finite sheet only penetrates within its slab depth, like the per-particle sdf_plane.
+    bounded_cases = (
+        # Entirely below the slab: the unsigned sheet distance from below, never a penetration.
+        ((-1.0, -1.0, -0.3), (3.0, -1.0, -0.3), (-1.0, 1.0, -0.3), np.hypot(0.9, 0.3), 0.3, (0.0, 0.0, -1.0)),
+        # Sloping through the slab bottom: clip the signed minimum at the slab depth.
+        ((0.0, -0.05, 0.5), (0.0, 0.05, -1.0), (0.05, 0.0, 0.5), -0.1, -0.1, (0.0, 0.0, 1.0)),
+    )
+    for a, b, c, edge_phi, face_phi, face_normal in bounded_cases:
+        with test.subTest(vertices=(a, b, c)):
+            wp.launch(
+                _plane_features,
+                dim=1,
+                inputs=[wp.vec3(*a), wp.vec3(*b), wp.vec3(*c), wp.vec3(0.2, 0.2, 0.0), 0.1],
+                outputs=[points, distances, normals],
+                device=device,
+            )
+            test.assertAlmostEqual(float(distances.numpy()[0]), edge_phi, delta=1.0e-6)
+            test.assertAlmostEqual(float(distances.numpy()[1]), face_phi, delta=1.0e-6)
+            np.testing.assert_allclose(normals.numpy()[1], face_normal, atol=1.0e-6)
 
 
 def test_large_heightfield_task_contacts(test, device):
@@ -388,25 +411,64 @@ def test_particle_gradient_after_pipeline_reuse(test, device):
 
 
 def test_finite_plane_penetrating_face(test, device):
-    """Detect the finite footprint inside a penetrating face whose vertices are all outside."""
+    """Detect the finite footprint inside a face whose vertices are all outside, within the slab only."""
+    for depth, expected_count in ((0.02, 1), (10.0, 0)):
+        builder = newton.ModelBuilder()
+        builder.add_shape_plane(width=0.2, length=0.2)
+        for point in ((-1.0, -1.0, -depth), (3.0, -1.0, -depth), (-1.0, 1.0, -depth)):
+            builder.add_particle(wp.vec3(*point), wp.vec3(), 0.1, radius=0.0)
+        builder.add_triangle(0, 1, 2)
+        model = builder.finalize(device=device)
+        pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True, soft_contact_gap=0.05)
+        state = model.state()
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+        count = int(contacts.soft_contact_count.numpy()[0])
+        with test.subTest(depth=depth):
+            test.assertEqual(count, expected_count)
+            if expected_count == 0:
+                continue
+            bary = contacts.soft_contact_barycentric.numpy()[0]
+            point = bary @ state.particle_q.numpy()
+            test.assertLessEqual(abs(float(point[0])), 0.10001)
+            test.assertLessEqual(abs(float(point[1])), 0.10001)
+            np.testing.assert_allclose(
+                contacts.soft_contact_body_pos.numpy()[0], (point[0], point[1], 0.0), atol=1.0e-5
+            )
+            np.testing.assert_allclose(contacts.soft_contact_normal.numpy()[0], (0.0, 0.0, 1.0), atol=1.0e-6)
+
+
+def test_cloth_under_finite_plane_shelf(test, device):
+    """A finite plane is a sheet: cloth lying well below a shelf must not be pulled up through it."""
     builder = newton.ModelBuilder()
-    builder.add_shape_plane(width=0.2, length=0.2)
-    for point in ((-1.0, -1.0, -10.0), (3.0, -1.0, -10.0), (-1.0, 1.0, -10.0)):
-        builder.add_particle(wp.vec3(*point), wp.vec3(), 0.1, radius=0.0)
-    builder.add_triangle(0, 1, 2)
+    builder.add_ground_plane()
+    shelf = builder.add_shape_plane(
+        body=-1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.3), wp.quat_identity()), width=0.5, length=0.5
+    )
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.4, -0.4, 0.01),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=8,
+        dim_y=8,
+        cell_x=0.1,
+        cell_y=0.1,
+        mass=0.1,
+        particle_radius=0.005,
+    )
+    builder.color()
     model = builder.finalize(device=device)
-    pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True, soft_contact_gap=0.05)
-    state = model.state()
-    contacts = pipeline.contacts()
-    pipeline.collide(state, contacts)
+    pipeline = newton.CollisionPipeline(model, soft_contact_gap=0.01, enable_rigid_soft_full_surface_contact=True)
+    solver = newton.solvers.SolverVBD(model, iterations=10, rigid_compliant_alm=True)
+    state_0, state_1, control, contacts = model.state(), model.state(), model.control(), pipeline.contacts()
+    pipeline.collide(state_0, contacts)
     count = int(contacts.soft_contact_count.numpy()[0])
-    test.assertEqual(count, 1)
-    bary = contacts.soft_contact_barycentric.numpy()[0]
-    point = bary @ state.particle_q.numpy()
-    test.assertLessEqual(abs(float(point[0])), 0.10001)
-    test.assertLessEqual(abs(float(point[1])), 0.10001)
-    np.testing.assert_allclose(contacts.soft_contact_body_pos.numpy()[0], (point[0], point[1], 0.0), atol=1.0e-5)
-    np.testing.assert_allclose(contacts.soft_contact_normal.numpy()[0], (0.0, 0.0, 1.0), atol=1.0e-6)
+    test.assertEqual(int((contacts.soft_contact_shape.numpy()[:count] == shelf).sum()), 0)
+    for _ in range(30):
+        pipeline.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, 1.0 / 240.0)
+        state_0, state_1 = state_1, state_0
+    test.assertLess(float(state_0.particle_q.numpy()[:, 2].max()), 0.1)
 
 
 def test_mixed_mesh_edge_dispatch(test, device):
@@ -460,6 +522,7 @@ for device in get_test_devices():
         test_soft_contact_workspace_storage,
         test_particle_gradient_after_pipeline_reuse,
         test_finite_plane_penetrating_face,
+        test_cloth_under_finite_plane_shelf,
         test_finite_plane_feature_geometry,
         test_large_heightfield_task_contacts,
     ):

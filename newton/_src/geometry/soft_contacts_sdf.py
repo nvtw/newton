@@ -69,20 +69,25 @@ def _is_analytic(geo: wp.int32):
 
 
 @wp.func
-def _eval_plane_sdf(scale: wp.vec3, point: wp.vec3):
-    """Return sheet distance and normal, with negative Z retained inside finite footprints."""
+def _eval_plane_sdf(scale: wp.vec3, point: wp.vec3, depth: float):
+    """Return sheet distance and normal; finite footprints are signed only down to ``depth``.
+
+    Like the per-particle ``sdf_plane``, a finite plane is a sheet rather than a half-space: points
+    within ``depth`` below its footprint penetrate along +Z, while deeper points (e.g. cloth under a
+    shelf) only see their unsigned distance to the sheet. ``depth = 0`` gives a two-sided sheet.
+    """
     half_width = 0.5 * scale[0]
     half_length = 0.5 * scale[1]
     if half_width <= 0.0 or half_length <= 0.0:
         distance = point[2]
         return distance, distance, wp.vec3(0.0, 0.0, 1.0)
 
-    # Within the finite footprint, preserve the plane's signed distance. Outside it, use the
-    # Euclidean distance to the open sheet, including the correct edge/corner gradient.
-    if wp.abs(point[0]) <= half_width and wp.abs(point[1]) <= half_length:
+    if wp.abs(point[0]) <= half_width and wp.abs(point[1]) <= half_length and point[2] >= -depth:
         distance = point[2]
         return distance, distance, wp.vec3(0.0, 0.0, 1.0)
 
+    # Outside the penetration slab, use the Euclidean distance to the open sheet, including the
+    # correct edge/corner gradient.
     closest = wp.vec3(
         wp.clamp(point[0], -half_width, half_width),
         wp.clamp(point[1], -half_length, half_length),
@@ -97,6 +102,14 @@ def _eval_plane_sdf(scale: wp.vec3, point: wp.vec3):
 
 
 @wp.func
+def _plane_slab_slack(geo: wp.int32, scale: wp.vec3, depth: float) -> float:
+    """Extra cull slack for finite planes, whose signed slab undercuts the sheet distance."""
+    if geo == GeoType.PLANE and scale[0] > 0.0 and scale[1] > 0.0:
+        return 2.0 * depth
+    return 0.0
+
+
+@wp.func
 def _plane_corner(scale: wp.vec3, corner: int) -> wp.vec3:
     x = 0.5 * scale[0]
     y = 0.5 * scale[1]
@@ -108,18 +121,19 @@ def _plane_corner(scale: wp.vec3, corner: int) -> wp.vec3:
 
 
 @wp.func
-def _closest_edge_plane(scale: wp.vec3, p: wp.vec3, q: wp.vec3):
-    """Minimize the signed sheet distance using footprint clipping and exact boundary features."""
+def _closest_edge_plane(scale: wp.vec3, p: wp.vec3, q: wp.vec3, depth: float):
+    """Minimize the signed sheet distance using slab clipping and exact boundary features."""
     u = float(0.0)
-    phi, _phi, grad = _eval_plane_sdf(scale, p)
-    phi_q, _phi_q, grad_q = _eval_plane_sdf(scale, q)
+    phi, _phi, grad = _eval_plane_sdf(scale, p, depth)
+    phi_q, _phi_q, grad_q = _eval_plane_sdf(scale, q, depth)
     if phi_q < phi:
         u, phi, grad = 1.0, phi_q, grad_q
     if scale[0] > 0.0 and scale[1] > 0.0:
         edge = q - p
         lo = float(0.0)
         hi = float(1.0)
-        # Below the footprint the signed distance is linear in Z; its minimum is at a clipped end.
+        # Inside the penetration slab the signed distance is linear in Z; its minimum is at a
+        # clipped end. The slab bottom keeps features far below the sheet from penetrating.
         for axis in range(2):
             half = 0.5 * scale[axis]
             if edge[axis] != 0.0:
@@ -129,6 +143,12 @@ def _closest_edge_plane(scale: wp.vec3, p: wp.vec3, q: wp.vec3):
                 hi = wp.min(hi, wp.max(t0, t1))
             elif wp.abs(p[axis]) > half:
                 hi = -1.0
+        if edge[2] > 0.0:
+            lo = wp.max(lo, (-depth - p[2]) / edge[2])
+        elif edge[2] < 0.0:
+            hi = wp.min(hi, (-depth - p[2]) / edge[2])
+        elif p[2] < -depth:
+            hi = -1.0
         if lo <= hi:
             t = lo
             if edge[2] < 0.0:
@@ -151,15 +171,15 @@ def _closest_edge_plane(scale: wp.vec3, p: wp.vec3, q: wp.vec3):
 
 
 @wp.func
-def _closest_face_plane(scale: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3):
+def _closest_face_plane(scale: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3, depth: float):
     """Minimize over triangle edges, quad vertices, and vertices of the clipped footprint."""
-    u, x, phi, grad = _closest_edge_plane(scale, a, b)
+    u, x, phi, grad = _closest_edge_plane(scale, a, b, depth)
     bary = wp.vec3(1.0 - u, u, 0.0)
     for edge in range(2):
         p, q = b, c
         if edge == 1:
             p, q = c, a
-        t, point, distance, normal = _closest_edge_plane(scale, p, q)
+        t, point, distance, normal = _closest_edge_plane(scale, p, q, depth)
         if distance < phi:
             x, phi, grad = point, distance, normal
             bary = wp.vec3(0.0, 1.0 - t, t)
@@ -187,7 +207,7 @@ def _closest_face_plane(scale: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3):
                 if v >= 0.0 and w >= 0.0 and v + w <= 1.0:
                     weights = wp.vec3(1.0 - v - w, v, w)
                     point = weights[0] * a + weights[1] * b + weights[2] * c
-                    if point[2] < phi:
+                    if point[2] < phi and point[2] >= -depth:
                         x, bary, phi, grad = point, weights, point[2], wp.vec3(0.0, 0.0, 1.0)
     return bary, x, phi, grad
 
@@ -214,7 +234,7 @@ def _eval_shape_sdf_lower(
     if geo == GeoType.ELLIPSOID:
         return sdf_ellipsoid(x_local, scale)
     if geo == GeoType.PLANE:
-        phi_lower, _phi, _grad = _eval_plane_sdf(scale, x_local)
+        phi_lower, _phi, _grad = _eval_plane_sdf(scale, x_local, 0.0)
         return phi_lower
 
     tex = texture_sdf_table[shape_sdf_index]
@@ -264,7 +284,7 @@ def eval_shape_sdf(
         p = sdf_ellipsoid(x_local, scale)
         return p, p, sdf_ellipsoid_grad(x_local, scale)
     if geo == GeoType.PLANE:
-        return _eval_plane_sdf(scale, x_local)
+        return _eval_plane_sdf(scale, x_local, 0.0)
 
     # Volume SDF (mesh / convex / other). Honor the descriptor's scale_baked flag: if the shape
     # scale was baked into the grid (e.g. hydroelastic primitives), query directly in shape-local
@@ -615,8 +635,9 @@ def _create_soft_face_contact_kernel(compact_sdf: bool):
         # farthest centroid-to-point distance, which is always a vertex. circumradius can be smaller than
         # that for non-equilateral triangles (e.g. 3-4-5: R=2.5 vs 2.85) and would drop valid contacts.
         reach = wp.max(wp.length(a_s - centroid_s), wp.max(wp.length(b_s - centroid_s), wp.length(c_s - centroid_s)))
-        # Finite sheets change sign at the footprint boundary and are not Lipschitz below it.
-        if geo != GeoType.PLANE and phi_c > threshold + reach:
+        # A finite sheet signs only its ``threshold``-deep penetration slab, so its feature distance
+        # can undercut the 1-Lipschitz two-sided sheet distance by at most twice that depth.
+        if phi_c > threshold + reach + _plane_slab_slack(geo, scale, threshold):
             return
 
         bary = wp.vec3(0.0)
@@ -640,7 +661,7 @@ def _create_soft_face_contact_kernel(compact_sdf: bool):
             phi = x[2]
             grad = wp.vec3(0.0, 0.0, 1.0)
         elif geo == GeoType.PLANE:
-            bary, x, phi, grad = _closest_face_plane(scale, a_s, b_s, c_s)
+            bary, x, phi, grad = _closest_face_plane(scale, a_s, b_s, c_s, threshold)
         else:
             if wp.static(compact_sdf):
                 fallback_slot = wp.atomic_add(fallback_count, 0, 1)
@@ -887,7 +908,7 @@ def _create_soft_edge_contact_kernel(compact_sdf: bool):
 
         mid_s = 0.5 * (p_s + q_s)
         phi_m = _eval_shape_sdf_lower(geo, scale, mid_s, sdf_idx, texture_sdf_table)
-        if geo != GeoType.PLANE and phi_m > threshold + 0.5 * wp.length(q_s - p_s):
+        if phi_m > threshold + 0.5 * wp.length(q_s - p_s) + _plane_slab_slack(geo, scale, threshold):
             return
 
         if wp.static(compact_sdf) and geo != GeoType.SPHERE and geo != GeoType.PLANE:
@@ -905,7 +926,7 @@ def _create_soft_edge_contact_kernel(compact_sdf: bool):
             phi = sdf_sphere(x, scale[0])
             grad = sdf_sphere_grad(x, scale[0])
         elif geo == GeoType.PLANE:
-            u, x, phi, grad = _closest_edge_plane(scale, p_s, q_s)
+            u, x, phi, grad = _closest_edge_plane(scale, p_s, q_s, threshold)
         else:
             u, x, phi, grad = optimize_edge_sdf(geo, scale, p_s, q_s, sdf_idx, texture_sdf_table, sdf_edge_iters)
         if phi < threshold:
