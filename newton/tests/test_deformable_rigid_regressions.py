@@ -600,6 +600,80 @@ def test_identical_meshes_share_contact_precomputation(test, device):
     test.assertEqual(reference_calls, feature_bounds.call_count)
 
 
+def _pinched_pad_contact_normals(device, depth, offset=(0.0, 0.0, 0.0), yaw=0.0):
+    """Collide a cube-mesh pad with a cloth edge running ``depth`` behind its inner (+Y) face.
+
+    The soft edge's endpoints lie outside the pad, so only full-surface edge contacts can act.
+    Returns the contact normals in the pad frame.
+    """
+    rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), yaw)
+    origin = wp.vec3(*offset)
+    half = 0.03
+    vertices = np.array(
+        [[x, y, z] for z in (-half, half) for y in (-half, half) for x in (-half, half)], dtype=np.float32
+    )
+    faces = np.array(
+        [
+            [0, 2, 1],
+            [1, 2, 3],
+            [4, 5, 6],
+            [5, 7, 6],
+            [0, 1, 4],
+            [1, 5, 4],
+            [2, 6, 3],
+            [3, 6, 7],
+            [0, 4, 2],
+            [2, 4, 6],
+            [1, 3, 5],
+            [3, 7, 5],
+        ],
+        dtype=np.int32,
+    )
+    builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+    pad = builder.add_body(xform=wp.transform(origin, rotation))
+    builder.add_shape_mesh(pad, mesh=newton.Mesh(vertices, faces.reshape(-1), compute_inertia=False))
+    builder.add_cloth_grid(
+        pos=origin + wp.quat_rotate(rotation, wp.vec3(-0.12, half - depth, 0.0)),
+        rot=rotation,
+        vel=wp.vec3(),
+        dim_x=1,
+        dim_y=1,
+        cell_x=0.24,
+        cell_y=0.06,
+        mass=0.1,
+        particle_radius=0.01,
+    )
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(
+        model, broad_phase="nxn", soft_contact_gap=0.01, enable_rigid_soft_full_surface_contact=True
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+    count = int(contacts.soft_contact_count.numpy()[0])
+    normals = contacts.soft_contact_normal.numpy()[:count]
+    inverse = wp.quat_inverse(rotation)
+    return np.array([wp.quat_rotate(inverse, wp.vec3(*n)) for n in normals]).reshape(-1, 3)
+
+
+def test_mesh_pad_pinch_pushes_toward_nearest_exit(test, device):
+    """A soft edge pinched inside a mesh pad keeps contacts that push it out through the nearest face.
+
+    Covers pairs inside the contact band (0.02 m here), penetrations beyond it that a closing
+    gripper produces, and poses away from the origin where the crossing point's inside/outside
+    sign is only roundoff.
+    """
+    cases = [(depth, (0.0, 0.0, 0.0), 0.0) for depth in (0.005, 0.015, 0.025)]
+    rng = np.random.default_rng(3)
+    cases += [(0.005, tuple(rng.uniform(-50.0, 50.0, 3)), float(rng.uniform(0.0, 2.0 * np.pi))) for _ in range(6)]
+    for depth, offset, yaw in cases:
+        with test.subTest(depth=depth, offset=offset, yaw=yaw):
+            normals = _pinched_pad_contact_normals(device, depth, offset, yaw)
+            test.assertGreater(len(normals), 0)
+            # The inner face is the nearest exit; the top and bottom faces are farther than any depth.
+            test.assertTrue(np.any(normals[:, 1] > 0.99), normals)
+            test.assertTrue(np.all(np.abs(normals[:, 2]) < 1.0e-3), normals)
+
+
 def test_mixed_mesh_edge_dispatch(test, device):
     """Keep mesh edge contacts when compact scheduling is enabled in a mixed scene."""
     builder = newton.ModelBuilder()
@@ -655,6 +729,7 @@ for device in get_test_devices():
         test_cloth_settles_on_heightfield_stairs,
         test_convex_hull_edges_use_collision_numbering,
         test_identical_meshes_share_contact_precomputation,
+        test_mesh_pad_pinch_pushes_toward_nearest_exit,
         test_finite_plane_feature_geometry,
         test_large_heightfield_task_contacts,
     ):
