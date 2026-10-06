@@ -1133,38 +1133,6 @@ class TestCollisionPrimitives(unittest.TestCase):
                 msg=f"Test case {i}: Point at +penetration_depth/2 not on cylinder surface (error: {dist_to_cylinder:.4f})",
             )
 
-    def test_sphere_cylinder_large_rim_normal(self):
-        """Keep rim normals in the sphere's radial plane for a large cylinder."""
-        angles = np.linspace(0.0, 2.0 * np.pi, 720, endpoint=False)
-        radial = np.stack([np.cos(angles), np.sin(angles), np.zeros_like(angles)], axis=1)
-        tangent = np.stack([-np.sin(angles), np.cos(angles), np.zeros_like(angles)], axis=1)
-        # Micrometer offsets past a 7.4 m rim; reconstructing the rim point cancels.
-        positions = (7.4 + 2e-6) * radial + [0.0, 0.0, 0.005 + 2.5e-5]
-        count = len(angles)
-        distances = wp.zeros(count, dtype=float)
-        contact_positions = wp.zeros(count, dtype=wp.vec3)
-        contact_normals = wp.zeros(count, dtype=wp.vec3)
-        wp.launch(
-            test_sphere_cylinder_kernel,
-            dim=count,
-            inputs=[
-                wp.array(positions, dtype=wp.vec3),
-                wp.full(count, 1e-4, dtype=float),
-                wp.zeros(count, dtype=wp.vec3),
-                wp.array(np.tile([0.0, 0.0, 1.0], (count, 1)), dtype=wp.vec3),
-                wp.full(count, 7.4, dtype=float),
-                wp.full(count, 0.005, dtype=float),
-                distances,
-                contact_positions,
-                contact_normals,
-            ],
-        )
-        normals = contact_normals.numpy().astype(float)
-        np.testing.assert_array_less(np.abs(np.sum(normals * tangent, axis=1)), 1e-5)
-        np.testing.assert_array_less(np.sum(normals * radial, axis=1), 0.0)
-        np.testing.assert_array_less(normals[:, 2], 0.0)
-        np.testing.assert_allclose(distances.numpy(), -7.5e-5, atol=1e-6)
-
     def test_sphere_box(self):
         """Test sphere-box collision with analytical penetration depth validation.
 

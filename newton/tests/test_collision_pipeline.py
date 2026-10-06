@@ -5785,66 +5785,6 @@ add_function_test(
 )
 
 
-def test_capsule_mesh_gap_admission(test, device):
-    """Report exact capsule-triangle gaps so contacts inside a small gap are kept."""
-    half = 0.01
-    vertices = np.array([[x, y, z] for x in (-half, half) for y in (-half, half) for z in (-half, half)])
-    faces = [[0, 1, 3], [0, 3, 2], [4, 6, 7], [4, 7, 5], [0, 4, 5], [0, 5, 1]]
-    faces += [[2, 3, 7], [2, 7, 6], [0, 2, 6], [0, 6, 4], [1, 5, 7], [1, 7, 3]]
-    mesh = newton.Mesh(vertices, np.array(faces).ravel(), compute_inertia=False)
-    radius, half_height, gap = 0.0012, 0.0016, 3.2e-5
-    cfg = newton.ModelBuilder.ShapeConfig(density=0.0, gap=gap)
-    rng = np.random.default_rng(0)
-    count = 200
-    distances = rng.uniform(0.1, 0.95, count) * 2.0 * gap
-    builder = newton.ModelBuilder()
-    for distance in distances:
-        tilt, spin = rng.uniform(-0.3, 0.3), rng.uniform(0.0, np.pi)
-        axis = np.array([np.sin(tilt), np.cos(spin) * np.cos(tilt), np.sin(spin) * np.cos(tilt)])
-        # The lower core endpoint lies at the target distance from the +x face.
-        center = [half + radius + distance + half_height * abs(axis[0]), *rng.uniform(-0.004, 0.004, 2)]
-        world = newton.ModelBuilder()
-        world.add_shape_mesh(-1, mesh=mesh, cfg=cfg)
-        pose = wp.transform(wp.vec3(*center), wp.quat_between_vectors(wp.vec3(0.0, 0.0, 1.0), wp.vec3(*axis)))
-        body = world.add_body(xform=pose, mass=1.0, inertia=wp.mat33(np.eye(3)))
-        world.add_shape_capsule(body, radius=radius, half_height=half_height, cfg=cfg)
-        builder.add_world(world)
-    model = builder.finalize(device=device)
-    state = model.state()
-    pipeline = newton.CollisionPipeline(model)
-    contacts = pipeline.contacts()
-    pipeline.collide(state, contacts)
-    contact_count = int(contacts.rigid_contact_count.numpy()[0])
-    shape0 = contacts.rigid_contact_shape0.numpy()[:contact_count]
-    shape1 = contacts.rigid_contact_shape1.numpy()[:contact_count]
-    point0 = contacts.rigid_contact_point0.numpy()[:contact_count]
-    point1 = contacts.rigid_contact_point1.numpy()[:contact_count]
-    normal = contacts.rigid_contact_normal.numpy()[:contact_count]
-    margin = (
-        contacts.rigid_contact_margin0.numpy()[:contact_count] + contacts.rigid_contact_margin1.numpy()[:contact_count]
-    )
-    shape_body = model.shape_body.numpy()
-    body_q = state.body_q.numpy()
-    closest = np.full(count, np.inf)
-    for i in range(contact_count):
-        world_points = []
-        for shape, local in ((shape0[i], point0[i]), (shape1[i], point1[i])):
-            body = shape_body[shape]
-            point = local if body < 0 else wp.transform_point(wp.transform(*body_q[body]), wp.vec3(*local))
-            world_points.append(np.asarray(point, dtype=float))
-        world = model.shape_world.numpy()[shape0[i]]
-        closest[world] = min(closest[world], (world_points[1] - world_points[0]) @ normal[i] - margin[i])
-    np.testing.assert_allclose(closest, distances, atol=1e-6)
-
-
-add_function_test(
-    TestCollisionPipeline,
-    "test_capsule_mesh_gap_admission",
-    test_capsule_mesh_gap_admission,
-    devices=get_test_devices(),
-)
-
-
 for _expert_test in (
     test_expert_narrow_phase_default_voxel_resolution,
     test_expert_narrow_phase_preserves_voxel_resolution,

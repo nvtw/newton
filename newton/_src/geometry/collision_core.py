@@ -339,18 +339,20 @@ def create_compute_gjk_mpr_contacts(
         radius_eff_a = float(0.0)
         radius_eff_b = float(0.0)
 
+        small_radius = 0.0001
+
         # Get shape types from shape data
         type_a = shape_a_data.shape_type
         type_b = shape_b_data.shape_type
 
-        # Point/segment cores give exact witnesses at touching contacts.
+        # Special treatment for minkowski objects
         if type_a == GeoType.SPHERE or type_a == GeoType.CAPSULE:
             radius_eff_a = shape_a_data.scale[0]
-            shape_a_data.scale[0] = 0.0
+            shape_a_data.scale[0] = small_radius
 
         if type_b == GeoType.SPHERE or type_b == GeoType.CAPSULE:
             radius_eff_b = shape_b_data.scale[0]
-            shape_b_data.scale[0] = 0.0
+            shape_b_data.scale[0] = small_radius
 
         # Pre-pack ContactData template with static information
         contact_template = ContactData()
