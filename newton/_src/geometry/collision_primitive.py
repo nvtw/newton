@@ -736,13 +736,20 @@ def collide_sphere_cylinder(
         return dist, pos, -plane_normal  # flip normal after position calculation
     # corner collision
     else:
-        inv_len = safe_div(1.0, wp.sqrt(p_proj_sqr))
-        p_proj = p_proj * (cylinder_radius * inv_len)
-
-        cap_offset = cylinder_axis * (wp.sign(x) * cylinder_half_height)
-        pos_corner = cylinder_pos + cap_offset + p_proj
-
-        return collide_sphere_sphere(sphere_pos, sphere_radius, pos_corner, 0.0)
+        # Build the corner offset from radial and axial excesses. Subtracting
+        # a reconstructed rim point would cancel for large cylinders.
+        radial_distance = wp.sqrt(p_proj_sqr)
+        outward = p_proj * safe_div(1.0, radial_distance)
+        axial = wp.sign(x) * cylinder_axis
+        offset = (radial_distance - cylinder_radius) * outward + (wp.abs(x) - cylinder_half_height) * axial
+        corner_distance = wp.length(offset)
+        if corner_distance > 0.0:
+            outward = offset / corner_distance
+        else:
+            outward = wp.normalize(outward + axial)
+        distance = corner_distance - sphere_radius
+        point = sphere_pos - outward * (sphere_radius + 0.5 * distance)
+        return distance, point, -outward
 
 
 @wp.func
