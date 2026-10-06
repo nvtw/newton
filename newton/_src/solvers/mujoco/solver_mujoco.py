@@ -844,6 +844,102 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         ]
 
     @staticmethod
+    def _mjc_tendon_type(prim) -> int:
+        """Resolve the USD tendon type, including the schema's spatial default."""
+        attr = prim.GetAttribute("mjc:type")
+        value = attr.Get() if attr else None
+        return {"fixed": 0, "spatial": 1}.get(str(value).lower() if value is not None else "spatial", -1)
+
+    @staticmethod
+    def _parse_mjc_spatial_tendon_wrap_rows(prim, context: dict[str, Any]) -> list[dict[str, Any]]:
+        """Decode a spatial path into wrap rows, rejecting invalid paths as a whole.
+
+        Path indices may repeat relationship targets. Segments and side-site indices
+        address this expanded path, while divisors are indexed by segment number.
+        """
+        if SolverMuJoCo._mjc_tendon_type(prim) != 1:
+            return []
+
+        def read_array(name: str) -> list:
+            attr = prim.GetAttribute(name)
+            value = attr.Get() if attr else None
+            return list(value) if value is not None else []
+
+        path_rel = prim.GetRelationship("mjc:path")
+        targets = list(path_rel.GetTargets()) if path_rel else []
+        indices = read_array("mjc:path:indices") or list(range(len(targets)))
+        segments = read_array("mjc:path:segments")
+        divisors = read_array("mjc:path:divisors")
+        side_rel = prim.GetRelationship("mjc:sideSites")
+        side_targets = list(side_rel.GetTargets()) if side_rel else []
+        side_indices = read_array("mjc:sideSites:indices")
+
+        if not indices:
+            raise ValueError("mjc:path has no wrap targets")
+        if segments and len(segments) != len(indices):
+            raise ValueError("mjc:path:segments must have one entry per path index")
+        if side_indices and len(side_indices) != len(indices):
+            raise ValueError("mjc:sideSites:indices must have one entry per path index")
+
+        builder = context["builder"]
+        shape_map = context["result"]["path_shape_map"]
+        rows = []
+        last_segment = 0
+        for i, path_index in enumerate(indices):
+            if path_index < 0 or path_index >= len(targets):
+                raise ValueError(f"mjc:path:indices entry {path_index} is out of range")
+
+            if segments:
+                segment = segments[i]
+                if segment < last_segment:
+                    raise ValueError("mjc:path:segments must be non-negative and non-decreasing")
+                if segment >= len(divisors):
+                    raise ValueError(f"mjc:path:divisors has no entry for segment {segment}")
+                divisor = float(divisors[segment])
+                if not math.isfinite(divisor) or divisor <= 0.0:
+                    raise ValueError(f"mjc:path:divisors entry for segment {segment} must be finite and positive")
+                if segment > last_segment:
+                    rows.append({"mujoco:tendon_wrap_type": 2, "mujoco:tendon_wrap_prm": divisor})
+                last_segment = segment
+
+            shape_path = str(targets[path_index])
+            shape_index = shape_map.get(shape_path)
+            if shape_index is None:
+                raise ValueError(f"wrap target {shape_path} is not an imported shape")
+            is_site = bool(builder.shape_flags[shape_index] & ShapeFlags.SITE)
+            if not is_site and builder.shape_type[shape_index] not in (GeoType.SPHERE, GeoType.CYLINDER):
+                raise ValueError(f"wrap geometry {shape_path} must be a sphere or cylinder")
+
+            side_shape = -1
+            if side_indices:
+                side_index = side_indices[i]
+                if side_index < -1 or side_index >= len(side_targets):
+                    raise ValueError(f"mjc:sideSites:indices entry {side_index} is out of range")
+                if not is_site and side_index >= 0:
+                    side_path = str(side_targets[side_index])
+                    side_shape = shape_map.get(side_path, -1)
+                    if side_shape < 0 or not builder.shape_flags[side_shape] & ShapeFlags.SITE:
+                        raise ValueError(f"side site {side_path} is not an imported site")
+
+            rows.append(
+                {
+                    "mujoco:tendon_wrap_type": 0 if is_site else 1,
+                    "mujoco:tendon_wrap_shape": shape_index,
+                    "mujoco:tendon_wrap_sidesite": side_shape,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _expand_mjc_tendon_wrap_rows(prim, context: dict[str, Any]) -> Iterable[dict[str, Any]]:
+        """Expand one spatial MjcTendon into wrap rows, warning if its path is invalid."""
+        try:
+            return SolverMuJoCo._parse_mjc_spatial_tendon_wrap_rows(prim, context)
+        except ValueError as error:
+            warnings.warn(f"Skipping spatial MjcTendon {prim.GetPath()}: {error}.", stacklevel=2)
+            return []
+
+    @staticmethod
     def _dense_custom_attribute_values(builder: ModelBuilder, key: str) -> list[Any]:
         """Return a default-filled list for one custom-frequency attribute."""
         attribute = builder.custom_attributes[key]
@@ -1131,6 +1227,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             ModelBuilder.CustomFrequency(
                 name="tendon_wrap",
                 namespace="mujoco",
+                usd_prim_filter=cls._is_mjc_tendon_prim,
+                usd_entry_expander=cls._expand_mjc_tendon_wrap_rows,
                 articulation_owner_attribute="mujoco:tendon_wrap_articulation",
                 articulation_owner_resolver=cls._resolve_mujoco_tendon_wrap_owners,
             )
@@ -2654,6 +2752,16 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             joint_entries = cls._parse_mjc_fixed_tendon_joint_entries(context["prim"], context_builder)
             return len(joint_entries)
 
+        def resolve_tendon_wrap_adr(_: Any, context: dict[str, Any]) -> int:
+            return resolve_context_builder(context)._custom_frequency_counts.get("mujoco:tendon_wrap", 0)
+
+        def resolve_tendon_wrap_num(_: Any, context: dict[str, Any]) -> int:
+            try:
+                return len(cls._parse_mjc_spatial_tendon_wrap_rows(context["prim"], context))
+            except ValueError:
+                # The wrap-row expander emits the warning once per invalid tendon.
+                return 0
+
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
                 name="tendon_articulation",
@@ -2888,6 +2996,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 dtype=wp.int32,
                 default=0,
                 namespace="mujoco",
+                usd_attribute_name="*",
+                usd_value_transformer=lambda _, context: cls._mjc_tendon_type(context["prim"]),
             )
         )
         # Addressing into wrap path arrays (one per tendon, used by spatial tendons)
@@ -2899,6 +3009,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 default=0,
                 namespace="mujoco",
                 references="mujoco:tendon_wrap",
+                usd_attribute_name="*",
+                usd_value_transformer=resolve_tendon_wrap_adr,
             )
         )
         builder.add_custom_attribute(
@@ -2908,6 +3020,8 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 dtype=wp.int32,
                 default=0,
                 namespace="mujoco",
+                usd_attribute_name="*",
+                usd_value_transformer=resolve_tendon_wrap_num,
             )
         )
 
@@ -3288,8 +3402,10 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 joint_start = int(tendon_joint_adr[i])
                 joint_num = int(tendon_joint_num[i])
                 if joint_num <= 0:
-                    if wp.config.log_level <= wp.LOG_DEBUG:
-                        print(f"Warning: Skipping tendon {i} during MuJoCo export because it has no joint wraps.")
+                    warnings.warn(
+                        f"Skipping fixed tendon '{tendon_label}' during MuJoCo export because it has no joint wraps.",
+                        stacklevel=2,
+                    )
                     continue
 
                 if joint_start < 0 or joint_start + joint_num > joint_entry_count:
@@ -3330,11 +3446,11 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                     fixed_wraps.append((joint_name, coef))
 
                 if len(fixed_wraps) == 0:
-                    if wp.config.log_level <= wp.LOG_DEBUG:
-                        print(
-                            f"Warning: Skipping tendon {i} during MuJoCo export "
-                            "because no valid joint wraps were resolved."
-                        )
+                    warnings.warn(
+                        f"Skipping fixed tendon '{tendon_label}' during MuJoCo export "
+                        "because no valid joint wraps were resolved.",
+                        stacklevel=2,
+                    )
                     continue
 
             elif ttype == 1:
@@ -4097,7 +4213,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         self.body_free_qd_start: wp.array[wp.int32] | None = None
         """Per-body mapping to the free-joint qd_start index (or -1 if not free)."""
 
-        # --- Conditional/lazy mappings ---
+        # --- Conditional mappings ---
         self.newton_shape_to_mjc_geom: wp.array[wp.int32] | None = None
         """Inverse mapping from Newton shape index to MuJoCo geom index. Only created when use_mujoco_contacts=False. Shape [nshape], dtype int32."""
 
@@ -4291,6 +4407,9 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 skip_visual_only_geoms=skip_visual_only_geoms,
             )
         if not use_mujoco_cpu and not use_mujoco_contacts:
+            # Persistent mappings must be initialized outside step(), which may
+            # first run inside a CUDA graph that is discarded without replay.
+            self._create_inverse_shape_mapping()
             self._contact_tid_to_cid = wp.full(self.mjw_data.naconmax, -1, dtype=wp.int32, device=self.device)
         self._initial_model_sync = False
         self.update_data_interval = update_data_interval
@@ -4755,10 +4874,6 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         )
 
     def _convert_contacts_to_mjwarp(self, model: Model, state_in: State, contacts: Contacts):
-        # Ensure the inverse shape mapping exists (lazy creation)
-        if self.newton_shape_to_mjc_geom is None:
-            self._create_inverse_shape_mapping()
-
         # The kernel only produces valid output for tid < naconmax (the full
         # path clamps count and rejects cid >= naconmax).  Launching more
         # threads than naconmax wastes GPU resources, so cap the grid size.
@@ -5129,10 +5244,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
         )
 
     def _create_inverse_shape_mapping(self):
-        """
-        Create the inverse shape mapping (Newton shape -> MuJoCo [world, geom]).
-        This is lazily created only when use_mujoco_contacts=False.
-        """
+        """Create the Newton shape to MuJoCo geom mapping for external contacts."""
         nworld = self.mjc_geom_to_newton_shape.shape[0]
         ngeom = self.mjc_geom_to_newton_shape.shape[1]
 
@@ -6569,10 +6681,12 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                     # MuJoCo size: (size_x, size_y, size_z, size_base) — all must be positive
                     # Our data is normalized [0,1], height range = max_z - min_z
                     # We set size_base to eps (MuJoCo requires positive) and shift the
-                    # geom origin by min_z so the lowest point is at the right world Z.
+                    # geom origin by min_z so the lowest point is at the right Z. The
+                    # shape's scale applies to hx, hy, min_z, and max_z alike.
                     eps = 1e-4
-                    mj_size_z = max(hfield_src.max_z - hfield_src.min_z, eps)
-                    mj_size = (hfield_src.hx, hfield_src.hy, mj_size_z, eps)
+                    hfield_scale = shape_size[shape]
+                    mj_size_z = max((hfield_src.max_z - hfield_src.min_z) * hfield_scale[2], eps)
+                    mj_size = (hfield_src.hx * hfield_scale[0], hfield_src.hy * hfield_scale[1], mj_size_z, eps)
                     elevation_data = hfield_src.data.flatten()
 
                     hfield_name = f"{model.shape_label[shape].replace('/', '_')}_{shape}"
@@ -6586,11 +6700,10 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
 
                     geom_params["hfieldname"] = hfield_name
 
-                    # Shift geom origin so data=0 maps to min_z in world space
-                    tf = wp.transform(
-                        wp.vec3(tf.p[0], tf.p[1], tf.p[2] + hfield_src.min_z),
-                        tf.q,
-                    )
+                    # Shift geom origin so data=0 maps to min_z, along the
+                    # heightfield's own z axis. update_geom_properties_kernel
+                    # re-applies the same shift whenever geom poses are synced.
+                    tf = tf * wp.transform(wp.vec3(0.0, 0.0, hfield_src.min_z * hfield_scale[2]), wp.quat_identity())
                 elif stype == GeoType.CONE:
                     size = shape_size[shape]
                     mesh_src = Mesh.create_cone(
@@ -7841,6 +7954,19 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             # Create mjc_geom_to_newton_shape: MuJoCo[world, geom] -> Newton shape
             self.mjc_geom_to_newton_shape = wp.full((nworld, self.mj_model.ngeom), -1, dtype=wp.int32)
 
+            # Scaled min_z per Newton shape (zero for non-heightfields): MuJoCo
+            # heightfield elevations start at the geom origin, so syncing geom
+            # poses from shape transforms must shift each heightfield by it.
+            # Baked with the construction-time scale, like hfield_size, so the
+            # two always agree and syncing needs no host read of shape_scale.
+            shape_scale_np = model.shape_scale.numpy()
+            shape_hfield_offset_np = np.zeros(model.shape_count, dtype=np.float32)
+            for shape_idx in np.flatnonzero(shape_type == GeoType.HFIELD):
+                hfield_src = model.shape_source[shape_idx]
+                if hfield_src is not None:
+                    shape_hfield_offset_np[shape_idx] = hfield_src.min_z * shape_scale_np[shape_idx][2]
+            self._shape_hfield_offset = wp.array(shape_hfield_offset_np, dtype=wp.float32, device=model.device)
+
             if self.mjw_model.geom_pos.size:
                 wp.launch(
                     update_shape_mappings_kernel,
@@ -8122,34 +8248,6 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                         f"njmax_nnz={njmax_nnz} is too small: sparse Jacobian storage requires capacity "
                         f"of at least {minimum_njmax_nnz}; the initial Jacobian contains "
                         f"{initial_required_nnz} nonzeros."
-                    )
-            elif njmax_nnz is None:
-                from mujoco_warp._src.io import _default_nconmax as estimate_mujoco_warp_nconmax
-                from mujoco_warp._src.io import _default_njmax as estimate_mujoco_warp_njmax
-                from mujoco_warp._src.io import _default_njmax_nnz as estimate_mujoco_warp_njmax_nnz
-
-                if is_mujoco_warp_sparse(self.mj_model):
-                    resolved_nconmax = (
-                        nconmax if nconmax is not None else estimate_mujoco_warp_nconmax(self.mj_model, self.mj_data)
-                    )
-                    resolved_njmax = (
-                        njmax if njmax is not None else estimate_mujoco_warp_njmax(self.mj_model, self.mj_data)
-                    )
-                    joint_limit_nnz = 0
-                    for limited, joint_type in zip(self.mj_model.jnt_limited, self.mj_model.jnt_type, strict=True):
-                        if not limited:
-                            continue
-                        joint_type_value = int(joint_type)
-                        if joint_type_value == mujoco.mjtJoint.mjJNT_BALL:
-                            joint_limit_nnz += 3
-                        elif joint_type_value in (mujoco.mjtJoint.mjJNT_SLIDE, mujoco.mjtJoint.mjJNT_HINGE):
-                            joint_limit_nnz += 1
-
-                    # work around buffer under-sizing until the fix is released (mjwarp #1630)
-                    njmax_nnz = min(
-                        estimate_mujoco_warp_njmax_nnz(self.mj_model, resolved_nconmax, resolved_njmax)
-                        + joint_limit_nnz,
-                        resolved_njmax * self.mj_model.nv,
                     )
 
             if nvmax is not None:
@@ -9148,9 +9246,11 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 self.mjc_geom_to_newton_shape,
                 self.mjw_model.geom_type,
                 self._mujoco.mjtGeom.mjGEOM_MESH,
+                self._mujoco.mjtGeom.mjGEOM_HFIELD,
                 self.mjw_model.geom_dataid,
                 self.mjw_model.mesh_pos,
                 self.mjw_model.mesh_quat,
+                self._shape_hfield_offset,
                 self.model.shape_material_mu_torsional,
                 self.model.shape_material_mu_rolling,
                 shape_geom_solimp,
