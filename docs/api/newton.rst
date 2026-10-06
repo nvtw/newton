@@ -33,7 +33,6 @@ newton
    CollisionSubstepScheduler
    Contacts
    Control
-   EqType
    Gaussian
    GeoType
    Heightfield
