@@ -917,6 +917,155 @@ def test_barrel_witness_at_cap_plane(test, device):
     np.testing.assert_allclose(distances.numpy()[:, 0], offset, atol=2e-6)
 
 
+def _support_gaps(normals, positions, axes, dims):
+    """Return float64 support gaps for outward normals in the cylinder frame."""
+    radius, length, cylinder_radius, height = (dims[:, i, None] for i in range(4))
+    return (
+        np.einsum("nkj,nj->nk", normals, positions)
+        - length * np.abs(np.einsum("nkj,nj->nk", normals, axes))
+        - height * np.abs(normals[..., 2])
+        - cylinder_radius * np.hypot(normals[..., 0], normals[..., 1])
+        - radius
+    )
+
+
+def _maximize_support_gap(starts, positions, axes, dims, iterations=300):
+    """Refine each start by a tangent-plane pattern search on the unit sphere."""
+    normal = starts / np.linalg.norm(starts, axis=-1, keepdims=True)
+    gap = _support_gaps(normal[:, None], positions, axes, dims)[:, 0]
+    step = np.full(len(normal), 0.1)
+    for _ in range(iterations):
+        reference = np.where(np.abs(normal[:, :1]) > 0.9, [0.0, 1.0, 0.0], [1.0, 0.0, 0.0])
+        u = np.cross(normal, reference)
+        u /= np.linalg.norm(u, axis=-1, keepdims=True)
+        v = np.cross(normal, u)
+        improved = np.zeros(len(normal), dtype=bool)
+        for a, b in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+            candidate = normal + step[:, None] * (a * u + b * v)
+            candidate /= np.linalg.norm(candidate, axis=-1, keepdims=True)
+            candidate_gap = _support_gaps(candidate[:, None], positions, axes, dims)[:, 0]
+            better = candidate_gap > gap
+            normal = np.where(better[:, None], candidate, normal)
+            gap = np.where(better, candidate_gap, gap)
+            improved |= better
+        step = np.minimum(np.where(improved, 1.5 * step, 0.5 * step), 0.3)
+    return gap
+
+
+def _cylinder_sdf(points, cylinder_radius, height):
+    radial = np.hypot(points[..., 0], points[..., 1]) - cylinder_radius
+    axial = np.abs(points[..., 2]) - height
+    outside = np.hypot(np.maximum(radial, 0.0), np.maximum(axial, 0.0))
+    return outside + np.minimum(np.maximum(radial, axial), 0.0)
+
+
+def _signed_distance(positions, axes, dims, solver_normals):
+    """Return a float64 reference for the capsule-cylinder signed distance.
+
+    The signed distance is the maximum support gap over unit normals. Every
+    normal gives a lower bound, so refine sampled, feature, and solver
+    normals. For an exterior core, also minimize the convex cylinder SDF.
+    """
+    radius, length, cylinder_radius, height = dims.T
+    i = np.arange(1500) + 0.5
+    polar = np.arccos(1.0 - 2.0 * i / len(i))
+    azimuth = np.pi * (1.0 + 5.0**0.5) * i
+    sphere = np.stack([np.cos(azimuth) * np.sin(polar), np.sin(azimuth) * np.sin(polar), np.cos(polar)], axis=-1)
+    sampled = _support_gaps(np.broadcast_to(sphere, (len(positions), *sphere.shape)), positions, axes, dims)
+    starts = [sphere[np.argsort(-sampled, axis=1)[:, j]] for j in range(4)]
+    starts += [solver_normals + 1e-30, np.tile([0.0, 0.0, 1.0], (len(positions), 1))]
+    starts += [-np.tile([0.0, 0.0, 1.0], (len(positions), 1))]
+    best = np.max([_maximize_support_gap(start, positions, axes, dims) for start in starts], axis=0)
+    low, high = -length, length.copy()
+    for _ in range(100):
+        a, b = low + (high - low) / 3.0, high - (high - low) / 3.0
+        left = _cylinder_sdf(positions + a[:, None] * axes, cylinder_radius, height) < _cylinder_sdf(
+            positions + b[:, None] * axes, cylinder_radius, height
+        )
+        high = np.where(left, b, high)
+        low = np.where(left, low, a)
+    core = _cylinder_sdf(positions + (0.5 * (low + high))[:, None] * axes, cylinder_radius, height)
+    return np.where(core > 0.0, core - radius, best)
+
+
+def test_signed_distance_reference(test, device):
+    """Match random and feature-boundary contacts to a float64 reference."""
+    rng = np.random.default_rng(7)
+    count = 1500
+    dims = np.column_stack(
+        [
+            rng.uniform(0.01, 0.4, 2 * count),
+            rng.uniform(0.0, 1.5, 2 * count),
+            rng.uniform(0.1, 1.5, 2 * count),
+            rng.uniform(0.1, 1.5, 2 * count),
+        ]
+    )
+    axes = rng.normal(size=(2 * count, 3))
+    positions = rng.uniform(-2.0, 2.0, size=(2 * count, 3))
+    # Touch a rim, cap edge, or barrel end with an endpoint or interior core point.
+    angle = rng.uniform(0.0, 2.0 * np.pi, count)
+    radial = np.stack([np.cos(angle), np.sin(angle), np.zeros(count)], axis=1)
+    side = rng.choice([-1.0, 1.0], count)
+    cone = rng.choice([0.0, 1e-7, 0.3, 0.8, 1.2, 0.5 * np.pi - 1e-7, 0.5 * np.pi], count)
+    outward = np.sin(cone)[:, None] * radial + (side * np.cos(cone))[:, None] * [0.0, 0.0, 1.0]
+    tangent = np.cross(outward, [0.0, 0.0, 1.0])
+    tangent[np.linalg.norm(tangent, axis=1) < 1e-9] = np.cross(radial, [0.0, 0.0, 1.0])[
+        np.linalg.norm(tangent, axis=1) < 1e-9
+    ]
+    tangent /= np.linalg.norm(tangent, axis=1)[:, None]
+    tangent = np.where(rng.random(count)[:, None] < 0.5, tangent, np.cross(outward, tangent))
+    radius, length, cylinder_radius, height = dims[count:].T
+    offset = rng.choice([-0.05, -1e-4, 0.0, 1e-4, 0.05], count) * radius
+    rim = cylinder_radius[:, None] * radial + (side * height)[:, None] * [0.0, 0.0, 1.0]
+    along = np.where(rng.random(count) < 0.5, length, rng.uniform(-0.9, 0.9, count) * length)
+    axes[count:] = tangent
+    positions[count:] = rim + (radius + offset)[:, None] * outward + along[:, None] * tangent
+    axes /= np.linalg.norm(axes, axis=1)[:, None]
+    # Pass a rotated pose, then compare in the cylinder frame.
+    rotation, _ = np.linalg.qr(rng.normal(size=(len(axes), 3, 3)))
+    with wp.ScopedDevice(device):
+        distances = wp.zeros(len(axes), dtype=wp.vec2)
+        points = wp.zeros(len(axes), dtype=wp.vec3)
+        normals = wp.zeros(len(axes), dtype=wp.vec3)
+        wp.launch(
+            query_capsule_cylinder,
+            len(axes),
+            [
+                wp.array(np.einsum("nij,nj->ni", rotation, positions), dtype=wp.vec3),
+                wp.array(np.einsum("nij,nj->ni", rotation, axes), dtype=wp.vec3),
+                wp.array(rotation[:, :, 2], dtype=wp.vec3),
+                wp.array(dims, dtype=wp.vec4),
+                distances,
+                points,
+                normals,
+            ],
+        )
+    distance = distances.numpy().astype(float)
+    point = np.einsum("nji,nj->ni", rotation, points.numpy().astype(float))
+    normal = np.einsum("nji,nj->ni", rotation, normals.numpy().astype(float))
+    normal /= np.linalg.norm(normal, axis=1)[:, None]
+    test.assertTrue(np.all(np.isfinite(distance[:, 0])) and np.all(np.isfinite(normal)))
+    reference = _signed_distance(positions, axes, dims, -normal)
+    scale = np.linalg.norm(positions, axis=1) + dims.sum(axis=1)
+    tolerance = 2e-6 * scale
+    line = distance[:, 1] < 0.5 * MAXVAL
+    # No contact may be deeper than the reference signed distance.
+    np.testing.assert_array_less(reference - tolerance, distance[:, 0])
+    np.testing.assert_array_less(reference[line] - tolerance[line], distance[line, 1])
+    # A single contact's normal must certify its distance as a support gap.
+    certified = _support_gaps(-normal[:, None], positions, axes, dims)[:, 0]
+    np.testing.assert_array_less(distance[~line, 0] - tolerance[~line], certified[~line])
+    np.testing.assert_allclose(np.minimum(distance[line, 0], distance[line, 1]), reference[line], atol=tolerance.max())
+    # Both witnesses lie on their surfaces.
+    radius, length, cylinder_radius, height = dims.T
+    capsule = point - 0.5 * distance[:, :1] * normal
+    cylinder = point + 0.5 * distance[:, :1] * normal
+    along = np.clip(np.einsum("ni,ni->n", capsule - positions, axes), -length, length)
+    capsule_gap = np.linalg.norm(capsule - positions - along[:, None] * axes, axis=1) - radius
+    np.testing.assert_array_less(np.abs(capsule_gap), tolerance)
+    np.testing.assert_array_less(np.abs(_cylinder_sdf(cylinder, cylinder_radius, height)), tolerance)
+
+
 class TestCapsuleCylinderBarrel(unittest.TestCase):
     """Check point, line, rim, and penetrating contacts."""
 
@@ -936,6 +1085,12 @@ add_function_test(
     devices=get_test_devices(),
 )
 add_function_test(TestCapsuleCylinderBarrel, "test_gap_admission", test_gap_admission, devices=get_test_devices())
+add_function_test(
+    TestCapsuleCylinderBarrel,
+    "test_signed_distance_reference",
+    test_signed_distance_reference,
+    devices=get_test_devices(),
+)
 add_function_test(
     TestCapsuleCylinderBarrel,
     "test_barrel_witness_at_cap_plane",
