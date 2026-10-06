@@ -698,7 +698,11 @@ def test_dat_budget_counts_full_surface_mesh_queries(test, device):
                 model, soft_contact_gap=0.1, enable_rigid_soft_full_surface_contact=full_surface
             )
             solver = newton.solvers.SolverVBD(
-                model, iterations=1, rigid_soft_enable_dat=True, collision_pipeline=pipeline
+                model,
+                iterations=1,
+                rigid_compliant_alm=True,
+                rigid_soft_enable_dat=True,
+                collision_pipeline=pipeline,
             )
             test.assertAlmostEqual(solver._rigid_soft_query_radius_min, 0.105, places=6)
 
