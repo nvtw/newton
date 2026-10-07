@@ -579,7 +579,9 @@ def _mesh_feature_data(
     canonical = mesh._canonical_vertex_ids()
     n_canon = int(canonical.max()) + 1
 
-    orig_edges, slot_keys, _sort_order, _keys_sorted, face_normals, face_norms = mesh._build_edge_slot_topology()
+    orig_edges, slot_keys, _sort_order, _keys_sorted, face_normals, face_norms = mesh._build_edge_slot_topology(
+        canonical
+    )
     valid_faces = face_norms > 0.0
     fn_unit = np.zeros_like(face_normals)
     fn_unit[valid_faces] = face_normals[valid_faces] / face_norms[valid_faces, None]
@@ -620,8 +622,9 @@ def _mesh_feature_data(
     edge_normal_accumulation = np.zeros((len(first_idx), 3), dtype=np.float64)
     np.add.at(edge_normal_accumulation, inverse, np.repeat(fn_unit, 3, axis=0))
     edge_outward = _unit(edge_normal_accumulation).astype(np.float32)
-    edge_canon = canonical[orig_edges[first_idx]]
-    if collision_edges is not None:
+    if collision_edges is None:
+        edge_canon = canonical[orig_edges[first_idx]]
+    else:
         # Keep exactly the SDF edge set, including an intentionally empty set.
         # Full triangle adjacency still supplies the normals and validity cones.
         edge_canon = canonical[collision_edges]
@@ -883,18 +886,16 @@ def _detect_mesh_vertex_contacts(
                 neighbors,
             ):
                 continue
-            sign = vertex_sign
-            if sign != 0:
-                _append_mesh_contact(
-                    _MESH_FEATURE_VT + wp.where(sign < 0, 8, 0),
-                    particle_index,
-                    shape_index,
-                    face,
-                    contact_max,
-                    contact_count,
-                    features,
-                    contact_shapes,
-                )
+            _append_mesh_contact(
+                _MESH_FEATURE_VT + wp.where(vertex_sign < 0, 8, 0),
+                particle_index,
+                shape_index,
+                face,
+                contact_max,
+                contact_count,
+                features,
+                contact_shapes,
+            )
 
 
 @wp.kernel(enable_backward=False)
