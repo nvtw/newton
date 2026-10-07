@@ -1290,7 +1290,9 @@ class CollisionPipeline:
                 the per-vertex (particle) contacts. Catches rigid features that pass between soft
                 vertices (e.g. a thin box edge or heightfield cell inside a coarse cloth triangle),
                 which the per-particle path misses. Meshes use exact, locally valid feature contacts
-                without requiring a volume SDF. These full-surface contacts are consumed only by
+                without requiring a volume SDF; only meshes with
+                :attr:`~newton.ShapeFlags.COLLIDE_PARTICLES` set at construction get them, others
+                keep per-particle contact. These full-surface contacts are consumed only by
                 :class:`~newton.solvers.SolverVBD`; other solvers raise on such contacts. Records are
                 emitted into :attr:`Contacts.soft_contact_indices`. Defaults to False. Fixed at
                 construction because it sizes the soft-contact buffer headroom.
@@ -1811,9 +1813,14 @@ class CollisionPipeline:
 
         # Built here (not in finalize) so models/tasks that never collide don't pay for it.
         # Host-side, so not graph-capture-safe -- construct the pipeline before any capture.
-        mesh_mask = np.zeros(model.shape_count, dtype=bool)
+        is_mesh = np.zeros(model.shape_count, dtype=bool)
+        mesh_mask = is_mesh
         if enable_rigid_soft_full_surface_contact and model.shape_count:
-            mesh_mask = np.isin(model.shape_type.numpy(), (int(GeoType.MESH), int(GeoType.CONVEX_MESH)))
+            is_mesh = np.isin(model.shape_type.numpy(), (int(GeoType.MESH), int(GeoType.CONVEX_MESH)))
+            # Mesh feature precompute is costly, so only meshes that collide with particles at
+            # construction use it. The rest keep the per-particle path, which still honors
+            # COLLIDE_PARTICLES being enabled later.
+            mesh_mask = is_mesh & ((model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_PARTICLES)) != 0)
         self.soft_rigid_contact_pairs = _build_soft_particle_rigid_contact_pairs(model, shape_ok=~mesh_mask)
         self._soft_contact_pair_count = len(self.soft_rigid_contact_pairs)
         self.enable_rigid_soft_full_surface_contact = enable_rigid_soft_full_surface_contact
@@ -1822,7 +1829,7 @@ class CollisionPipeline:
 
         if enable_rigid_soft_full_surface_contact and model.shape_count:
             shape_types = model.shape_type.numpy()
-            common_capable = _full_surface_capable_shape_mask(model) & ~mesh_mask
+            common_capable = _full_surface_capable_shape_mask(model) & ~is_mesh
             heightfield_capable = shape_types == int(GeoType.HFIELD)
             _warn_full_surface_fallbacks(model, common_capable | mesh_mask | heightfield_capable)
             self._soft_face_sdf_geo_types = tuple(

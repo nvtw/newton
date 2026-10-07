@@ -655,6 +655,38 @@ def _pinched_pad_contact_normals(device, depth, offset=(0.0, 0.0, 0.0), yaw=0.0)
     return np.array([wp.quat_rotate(inverse, wp.vec3(*n)) for n in normals]).reshape(-1, 3)
 
 
+def test_full_surface_skips_meshes_without_particle_collision(test, device):
+    """Precompute mesh features only for meshes that collide with particles."""
+    builder = newton.ModelBuilder()
+    colliding = builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.5, 0.5, 0.1, compute_inertia=False))
+    visual = builder.add_shape_mesh(
+        body=-1,
+        mesh=newton.Mesh.create_sphere(0.2, compute_inertia=False),
+        cfg=newton.ModelBuilder.ShapeConfig(has_particle_collision=False),
+    )
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.3, -0.3, 0.12),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=2,
+        dim_y=2,
+        cell_x=0.3,
+        cell_y=0.3,
+        mass=0.1,
+    )
+    model = builder.finalize(device=device)
+    feature_data = mock.Mock(wraps=soft_contacts_mesh._mesh_feature_data)
+    with mock.patch.object(soft_contacts_mesh, "_mesh_feature_data", feature_data):
+        pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
+    test.assertEqual(feature_data.call_count, 1)
+    # The visual mesh keeps per-particle pairs so enabling COLLIDE_PARTICLES later still works.
+    particle_shapes = set(pipeline.soft_rigid_contact_pairs.numpy()[:, 1].tolist())
+    test.assertIn(visual, particle_shapes)
+    test.assertNotIn(colliding, particle_shapes)
+    for pairs in (pipeline.soft_edge_rigid_pairs, pipeline.soft_face_rigid_pairs):
+        test.assertEqual(len(pairs), 0)
+
+
 def test_mesh_pad_pinch_pushes_toward_nearest_exit(test, device):
     """A soft edge pinched inside a mesh pad keeps contacts that push it out through the nearest face.
 
@@ -793,6 +825,7 @@ for device in get_test_devices():
         test_cloth_settles_on_heightfield_stairs,
         test_convex_hull_edges_use_collision_numbering,
         test_identical_meshes_share_contact_precomputation,
+        test_full_surface_skips_meshes_without_particle_collision,
         test_mesh_pad_pinch_pushes_toward_nearest_exit,
         test_dat_budget_counts_full_surface_mesh_queries,
         test_separated_mesh_shells_keep_default_capacity,
