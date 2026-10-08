@@ -1,0 +1,1 @@
+Add opt-in continuous collision detection for fast rigid bodies with `CollisionPipeline(ccd=True)` and `CollisionPipeline.resolve_ccd()`, which moves bodies that would pass through static shapes back to their time of impact.

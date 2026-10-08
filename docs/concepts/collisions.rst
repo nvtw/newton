@@ -1426,6 +1426,46 @@ reduction preserves representative close-clearance and early-impact candidates.
    Speculative contacts are opt-in and currently apply to rigid, non-hydroelastic
    contacts. They do not compute a time of impact or advance bodies to impact.
 
+.. _continuous-collision-detection:
+
+Continuous collision detection
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Bodies that move farther than about half their thickness in one step can pass through thin
+static geometry without ever overlapping it at a collision update. Continuous collision
+detection (CCD) prevents this with a post-step pass: every fast body is swept from its pose
+at the last :meth:`CollisionPipeline.collide` call to its solved pose, and a body that would
+hit a static shape is moved back along its sweep to the earliest time of impact. The linear
+velocity towards the hit surface is removed there; tangential motion and spin are kept. The
+time of impact is found by conservative advancement on GJK distances.
+
+Enable CCD on the pipeline and call :meth:`CollisionPipeline.resolve_ccd` after each solver step:
+
+.. code-block:: python
+
+    pipeline = newton.CollisionPipeline(model, ccd=True)
+
+    pipeline.collide(state_0, contacts, dt=sim_dt)
+    solver.step(state_0, state_1, control, contacts, sim_dt)
+    pipeline.resolve_ccd(state_1)
+
+``dt`` is required with CCD: :meth:`~CollisionPipeline.collide` sweeps the broad phase over
+the motion predicted from the current velocities, and :meth:`~CollisionPipeline.resolve_ccd`
+only checks the static shapes paired there. A shape counts as fast when its motion in the step
+exceeds half its smallest half-extent; all other shapes skip the time-of-impact query.
+A shape that already touches an obstacle at the start of the step is swept with a small core
+sphere at its center instead, so resting and sliding contacts do not stop the body. The
+following steps rely on regular contacts, so keep a positive contact ``gap`` (the builder
+default) on CCD bodies.
+
+.. note::
+
+   CCD is opt-in and applies to free-floating dynamic bodies (one free joint to the world,
+   no child links) with convex primitive or convex mesh shapes. They are swept against static
+   convex shapes and planes; meshes, heightfields, kinematic bodies, and other dynamic bodies
+   are not swept. Joint coordinates of moved bodies are updated, so reduced-coordinate solvers
+   such as :class:`~newton.solvers.SolverFeatherstone` are supported.
+
 .. _Common Patterns:
 
 Common Patterns
