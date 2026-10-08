@@ -12,6 +12,7 @@ import warp as wp
 
 from ...core.types import override
 from ...geometry import ParticleFlags
+from ...geometry.soft_contacts_mesh import filter_soft_mesh_contacts
 from ...geometry.tri_mesh_collision import (
     TriMeshCollisionDetector,
     TriMeshCollisionInfo,
@@ -2487,6 +2488,11 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         if self._pre_initialization_detection(state_in, dt):
             update_rigid = True
+        if contacts is not None:
+            # Collision detection reports every full-surface mesh feature pair. Until force
+            # evaluation and penetration prevention consume them separately, keep only the
+            # canonical pairs. No-op once these contacts have been filtered.
+            filter_soft_mesh_contacts(self.model, state_in, contacts)
 
         if control is None:
             control = self.model.control(clone_variables=False)
@@ -2884,6 +2890,7 @@ class SolverVBD(SolverBase, CouplingInterface):
         """Run selected collision detectors, then reset their DAT references."""
         if run_rigid_collision:
             self._run_rigid_collision(state, dt)
+            filter_soft_mesh_contacts(self.model, state, self._pipeline_contacts)
         if run_soft_self_collision:
             self._collision_detection_penetration_free(state, reset_reference=False)
 

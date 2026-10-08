@@ -30,7 +30,11 @@ from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.soft_contacts_heightfield import _HEIGHTFIELD_CELLS_PER_TASK, launch_soft_heightfield_contacts
-from ..geometry.soft_contacts_mesh import MeshContactData, launch_soft_mesh_contacts
+from ..geometry.soft_contacts_mesh import (
+    MeshContactData,
+    allocate_soft_mesh_contact_buffers,
+    launch_soft_mesh_contacts,
+)
 from ..geometry.soft_contacts_sdf import _SDF_COMPACTION_MIN_PAIRS, _SDF_SPECIALIZED_GEO_TYPES, launch_soft_ef_contacts
 from ..geometry.support_function import (
     GenericShapeData,
@@ -1297,10 +1301,12 @@ class CollisionPipeline:
                 surface -- the edges and triangle interiors -- against rigid surfaces, in addition to
                 the per-vertex (particle) contacts. Catches rigid features that pass between soft
                 vertices (e.g. a thin box edge or heightfield cell inside a coarse cloth triangle),
-                which the per-particle path misses. Meshes use exact, locally valid feature contacts
-                without requiring a volume SDF; only meshes with
-                :attr:`~newton.ShapeFlags.COLLIDE_PARTICLES` set at construction get them, others
-                keep per-particle contact. These full-surface contacts are consumed only by
+                which the per-particle path misses. Meshes use exact feature contacts without
+                requiring a volume SDF and report every vertex-face, face-vertex, and edge-edge
+                pair within the contact band, including redundant representations of one surface
+                patch; the consuming solver selects the pairs it applies forces to. Only meshes
+                with :attr:`~newton.ShapeFlags.COLLIDE_PARTICLES` set at construction get them,
+                others keep per-particle contact. These full-surface contacts are consumed only by
                 :class:`~newton.solvers.SolverVBD`; other solvers raise on such contacts. Records are
                 emitted into :attr:`Contacts.soft_contact_indices`. Defaults to False. Fixed at
                 construction because it sizes the soft-contact buffer headroom.
@@ -2056,12 +2062,7 @@ class CollisionPipeline:
         )
         contacts._contact_matching_mode = self.contact_matching
         if self._soft_mesh_contact_data is not None:
-            contacts._soft_contact_mesh_features = wp.empty(
-                contacts.soft_contact_max, dtype=wp.vec3i, device=self.model.device
-            )
-            contacts._soft_contact_mesh_params = wp.empty(
-                contacts.soft_contact_max, dtype=float, device=self.model.device
-            )
+            allocate_soft_mesh_contact_buffers(contacts)
         # Keep scan scratch with the output buffers. The extra count is a zero scan sentinel.
         # Differentiable contacts retain the serial feature loop's existing replay behavior.
         contacts._soft_heightfield_work = None

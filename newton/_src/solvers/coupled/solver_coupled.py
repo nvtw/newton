@@ -15,6 +15,7 @@ import warp as wp
 
 from ...core.reset import reset_world_selected as _reset_world_selected
 from ...geometry import ParticleFlags, ShapeFlags
+from ...geometry.soft_contacts_mesh import filter_soft_mesh_contacts
 from ...sim import JointType, Model, ModelFlags, StateFlags
 from ..solver import SolverBase
 from .interface import (
@@ -2211,6 +2212,10 @@ class SolverCoupled(SolverBase, CouplingInterface):
         contacts) own their own buffers internally.
         """
         self._distribute_state(state_in, dt=dt)
+        if contacts is not None:
+            # Entry buffers do not carry full-surface mesh feature records, so keep only the
+            # canonical mesh pairs before they are copied (see filter_soft_mesh_contacts).
+            filter_soft_mesh_contacts(self.model, state_in, contacts)
         self._step_coupled(state_in, state_out, control, contacts, dt)
         _copy_state(state_in, state_out)
         self._reconcile_state(state_out)

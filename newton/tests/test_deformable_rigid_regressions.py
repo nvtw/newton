@@ -155,7 +155,7 @@ def test_soft_contact_workspace_storage(test, device):
 
 
 def test_disconnected_mesh_contact_capacity(test, device):
-    """Reserve default contact storage for each nearby disconnected mesh patch."""
+    """Reserve default contact storage for every face near a particle, across disconnected patches."""
     base = newton.Mesh.create_box(0.02, 0.02, 0.02, compute_inertia=False)
     centers = np.array(
         (
@@ -181,11 +181,16 @@ def test_disconnected_mesh_contact_capacity(test, device):
         model, broad_phase="nxn", soft_contact_gap=0.05, enable_rigid_soft_full_surface_contact=True
     )
     contacts = pipeline.contacts()
-    pipeline.collide(model.state(), contacts)
+    state = model.state()
+    pipeline.collide(state, contacts)
 
-    contact_count = int(contacts.soft_contact_count.numpy()[0])
-    test.assertEqual(contact_count, len(centers))
-    test.assertLessEqual(contact_count, contacts.soft_contact_max)
+    # Detection reports every face within the band, which must fit the default capacity.
+    raw_count = int(contacts.soft_contact_count.numpy()[0])
+    test.assertGreater(raw_count, len(centers))
+    test.assertLessEqual(raw_count, contacts.soft_contact_max)
+    # The feature filter keeps one contact per patch.
+    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
+    test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), len(centers))
 
 
 def test_soft_contact_accumulation_thread_counts(test, device):
@@ -573,14 +578,14 @@ def test_identical_meshes_share_contact_precomputation(test, device):
     )
     model = builder.finalize(device=device)
     feature_data = mock.Mock(wraps=soft_contacts_mesh._mesh_feature_data)
-    feature_bounds = mock.Mock(wraps=soft_contacts_mesh._cone_query_bounds_batch)
+    components = mock.Mock(wraps=soft_contacts_mesh._max_faces_near_point)
     with (
         mock.patch.object(soft_contacts_mesh, "_mesh_feature_data", feature_data),
-        mock.patch.object(soft_contacts_mesh, "_cone_query_bounds_batch", feature_bounds),
+        mock.patch.object(soft_contacts_mesh, "_max_faces_near_point", components),
     ):
         newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
     test.assertEqual(feature_data.call_count, 1)
-    reference_calls = feature_bounds.call_count
+    reference_calls = components.call_count
 
     builder = newton.ModelBuilder()
     builder.add_shape_mesh(body=-1, mesh=sphere)
@@ -594,17 +599,17 @@ def test_identical_meshes_share_contact_precomputation(test, device):
         cell_y=1.0,
         mass=0.1,
     )
-    feature_bounds.reset_mock()
-    with mock.patch.object(soft_contacts_mesh, "_cone_query_bounds_batch", feature_bounds):
+    components.reset_mock()
+    with mock.patch.object(soft_contacts_mesh, "_max_faces_near_point", components):
         newton.CollisionPipeline(builder.finalize(device=device), enable_rigid_soft_full_surface_contact=True)
-    test.assertEqual(reference_calls, feature_bounds.call_count)
+    test.assertEqual(reference_calls, components.call_count)
 
 
 def _pinched_pad_contact_normals(device, depth, offset=(0.0, 0.0, 0.0), yaw=0.0):
     """Collide a cube-mesh pad with a cloth edge running ``depth`` behind its inner (+Y) face.
 
     The soft edge's endpoints lie outside the pad, so only full-surface edge contacts can act.
-    Returns the contact normals in the pad frame.
+    Returns the normals of the filtered contacts in the pad frame.
     """
     rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), yaw)
     origin = wp.vec3(*offset)
@@ -648,7 +653,10 @@ def _pinched_pad_contact_normals(device, depth, offset=(0.0, 0.0, 0.0), yaw=0.0)
         model, broad_phase="nxn", soft_contact_gap=0.01, enable_rigid_soft_full_surface_contact=True
     )
     contacts = pipeline.contacts()
-    pipeline.collide(model.state(), contacts)
+    state = model.state()
+    pipeline.collide(state, contacts)
+    # Keep the pairs the solver applies forces to.
+    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
     count = int(contacts.soft_contact_count.numpy()[0])
     normals = contacts.soft_contact_normal.numpy()[:count]
     inverse = wp.quat_inverse(rotation)
@@ -767,7 +775,112 @@ def test_separated_mesh_shells_keep_default_capacity(test, device):
         model = builder.finalize(device=device)
         return newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True).soft_contact_max
 
-    test.assertEqual(default_capacity(16), default_capacity(1))
+    # No particle can be near faces of two shells, so each particle reserves at most one
+    # shell's faces, however many shells the mesh has.
+    particles = 17 * 17
+    shell_faces = len(indices) // 3
+    for shell_count in (1, 16):
+        test.assertLessEqual(default_capacity(shell_count), particles * shell_faces)
+
+
+def _cloth_over_mesh_contacts(device, gap=0.02):
+    """Collide a perturbed cloth draped over a box mesh's top face and edges."""
+    rng = np.random.default_rng(7)
+    builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+    builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.2, 0.2, 0.05, compute_inertia=False))
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.24, -0.24, 0.055),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=16,
+        dim_y=16,
+        cell_x=0.03,
+        cell_y=0.03,
+        mass=0.1,
+        particle_radius=0.005,
+    )
+    model = builder.finalize(device=device)
+    state = model.state()
+    q = state.particle_q.numpy()
+    state.particle_q.assign(q + rng.normal(scale=0.3 * gap, size=q.shape).astype(np.float32))
+    pipeline = newton.CollisionPipeline(
+        model, broad_phase="nxn", soft_contact_gap=gap, enable_rigid_soft_full_surface_contact=True
+    )
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+    return model, state, pipeline, contacts
+
+
+def _soft_contact_records(contacts):
+    count = int(contacts.soft_contact_count.numpy()[0])
+    rows = np.concatenate(
+        (
+            contacts._soft_contact_mesh_features.numpy()[:count],
+            contacts.soft_contact_shape.numpy()[:count, None],
+        ),
+        axis=1,
+    )
+    return {tuple(row) for row in rows.tolist()}, count
+
+
+def test_mesh_detection_reports_every_feature_pair(test, device):
+    """Detection keeps redundant feature pairs; the solver-side filter selects a subset of them."""
+    model, state, _pipeline, contacts = _cloth_over_mesh_contacts(device)
+    raw, raw_count = _soft_contact_records(contacts)
+    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
+    kept, kept_count = _soft_contact_records(contacts)
+    test.assertEqual(len(raw), raw_count)
+    test.assertGreater(kept_count, 0)
+    test.assertLess(kept_count, raw_count)
+    test.assertTrue(kept <= raw)
+    # Filtered records carry geometry evaluated for their own features.
+    indices = contacts.soft_contact_indices.numpy()[:kept_count]
+    test.assertTrue(np.all(indices[:, 0] >= 0))
+    normals = contacts.soft_contact_normal.numpy()[:kept_count]
+    np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1.0, atol=1.0e-5)
+
+
+def test_mesh_contact_filter_runs_once_per_detection(test, device):
+    """Contacts reused across substeps are not filtered again at other positions."""
+    model, state, pipeline, contacts = _cloth_over_mesh_contacts(device)
+    raw_count = int(contacts.soft_contact_count.numpy()[0])
+    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
+    kept, kept_count = _soft_contact_records(contacts)
+    moved = model.state()
+    moved.particle_q.assign(state.particle_q.numpy() + np.float32(0.01))
+    soft_contacts_mesh.filter_soft_mesh_contacts(model, moved, contacts)
+    test.assertEqual(_soft_contact_records(contacts), (kept, kept_count))
+    # A new detection reports every pair again.
+    pipeline.collide(state, contacts)
+    test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), raw_count)
+
+
+def test_mesh_evaluation_skips_particle_contacts(test, device):
+    """Mesh evaluation must not overwrite per-particle contacts against meshes it does not handle."""
+    builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+    builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_box(0.1, 0.1, 0.1, compute_inertia=False))
+    late = builder.add_shape_mesh(
+        body=-1,
+        mesh=newton.Mesh.create_box(0.1, 0.1, 0.1, compute_inertia=False),
+        xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()),
+        cfg=newton.ModelBuilder.ShapeConfig(has_particle_collision=False),
+    )
+    builder.add_particle(wp.vec3(1.0, 0.0, 0.105), wp.vec3(0.0), mass=1.0, radius=0.0)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(
+        model, broad_phase="nxn", soft_contact_gap=0.02, enable_rigid_soft_full_surface_contact=True
+    )
+    flags = model.shape_flags.numpy()
+    flags[late] |= int(newton.ShapeFlags.COLLIDE_PARTICLES)
+    model.shape_flags.assign(flags)
+    contacts = pipeline.contacts()
+    # Stale mesh records from an earlier detection may share slots with per-particle contacts.
+    contacts._soft_contact_mesh_features.fill_(wp.vec3i(0, 0, 0))
+    pipeline.collide(model.state(), contacts)
+    test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), 1)
+    test.assertEqual(int(contacts.soft_contact_shape.numpy()[0]), late)
+    test.assertEqual(int(contacts.soft_contact_particle.numpy()[0]), 0)
+    np.testing.assert_allclose(contacts.soft_contact_normal.numpy()[0], (0.0, 0.0, 1.0), atol=1.0e-5)
 
 
 def test_mixed_mesh_edge_dispatch(test, device):
@@ -831,6 +944,9 @@ for device in get_test_devices():
         test_separated_mesh_shells_keep_default_capacity,
         test_finite_plane_feature_geometry,
         test_large_heightfield_task_contacts,
+        test_mesh_detection_reports_every_feature_pair,
+        test_mesh_contact_filter_runs_once_per_detection,
+        test_mesh_evaluation_skips_particle_contacts,
     ):
         add_function_test(TestDeformableRigidRegressions, fn.__name__, fn, devices=[device])
     if device.is_cuda:
