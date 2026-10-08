@@ -21,6 +21,7 @@ from newton._src.geometry.kernels import (
     resolve_mesh_sign_method,
 )
 from newton._src.geometry.sdf_texture import TextureSDFData
+from newton._src.geometry.soft_contacts_mesh import filter_soft_mesh_contacts
 from newton._src.geometry.soft_contacts_sdf import (
     SDF_EDGE_ITERS,
     SDF_FACE_ITERS,
@@ -5502,7 +5503,7 @@ add_function_test(
 
 
 def _full_surface_mesh_contacts(vertices, faces, points, gap, device):
-    """Collide radius-zero particles against one static mesh with full-surface contacts enabled."""
+    """Collide radius-zero particles against one static mesh and keep the filtered full-surface contacts."""
     builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
     builder.add_shape_mesh(body=-1, mesh=newton.Mesh(vertices, faces.reshape(-1), compute_inertia=False))
     for point in points:
@@ -5512,6 +5513,8 @@ def _full_surface_mesh_contacts(vertices, faces, points, gap, device):
     contacts = pipeline.contacts()
     state = model.state()
     pipeline.collide(state, contacts)
+    # Keep the pairs the solver applies forces to.
+    filter_soft_mesh_contacts(model, state, contacts)
     count = int(contacts.soft_contact_count.numpy()[0])
     particles = contacts.soft_contact_particle.numpy()[:count]
     normals = contacts.soft_contact_normal.numpy()[:count]

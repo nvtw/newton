@@ -1614,9 +1614,13 @@ class TestSolverCoupledBasic(unittest.TestCase):
         )
         coupled.step(state, model.state(), None, contacts, dt=1.0 / 60.0)
 
+        # The coupled step keeps only canonical mesh pairs in the source before copying them.
+        kept = int(contacts.soft_contact_count.numpy()[0])
+        self.assertGreater(kept, contacts.soft_contact_tids.shape[0], "kept contacts must exceed the replay range")
+        self.assertLessEqual(kept, count)
         filtered = coupled._entry_contact_buffers["A"]
-        self.assertEqual(int(filtered.soft_contact_count.numpy()[0]), count)
-        np.testing.assert_array_equal(filtered.soft_contact_tids.numpy()[:count], -1)
+        self.assertEqual(int(filtered.soft_contact_count.numpy()[0]), kept)
+        np.testing.assert_array_equal(filtered.soft_contact_tids.numpy()[:kept], -1)
 
     def test_entry_control_arrays_are_mapped_to_local_dofs(self):
         """Entry solvers should receive control arrays in their local DOF namespace."""
