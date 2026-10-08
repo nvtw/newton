@@ -1435,9 +1435,9 @@ Bodies that move farther than about half their thickness in one step can pass th
 static geometry without ever overlapping it at a collision update. Continuous collision
 detection (CCD) prevents this with a post-step pass: every fast body is swept from its pose
 at the last :meth:`CollisionPipeline.collide` call to its solved pose, and a body that would
-hit a static shape or mesh is moved back along its sweep to the earliest time of impact. The
-linear velocity towards the hit surface is removed there; tangential motion and spin are
-kept. The time of impact is found by conservative advancement on GJK distances.
+hit a static shape, mesh, or heightfield is moved back along its sweep to the earliest time
+of impact. The linear velocity towards the hit surface is removed there; tangential motion
+and spin are kept. The time of impact is found by conservative advancement on GJK distances.
 
 Enable CCD on the pipeline and call :meth:`CollisionPipeline.resolve_ccd` after each solver step:
 
@@ -1454,8 +1454,8 @@ the motion predicted from the current velocities, and :meth:`~CollisionPipeline.
 only checks the static shapes paired there. A shape counts as fast when its motion in the step
 exceeds half its smallest half-extent; all other shapes skip the time-of-impact query.
 A shape that already touches an obstacle at the start of the step is swept with a small core
-sphere at its center instead, so resting and sliding contacts do not stop the body. Mesh
-triangles are one-sided: they are skipped when the shape starts behind them or approaches them
+sphere at its center instead, so resting and sliding contacts do not stop the body. Mesh and
+heightfield triangles are one-sided: they are skipped when the shape starts behind them or approaches them
 by less than its core radius. The
 following steps rely on regular contacts, so keep a positive contact ``gap`` (the builder
 default) on CCD bodies.
@@ -1464,7 +1464,7 @@ default) on CCD bodies.
 
    CCD is opt-in and applies to free-floating dynamic bodies (one free joint to the world,
    no child links) with convex primitive or convex mesh shapes. They are swept against static
-   convex shapes, planes, and triangle meshes; heightfields, kinematic bodies, and other dynamic
+   convex shapes, planes, triangle meshes, and heightfields; kinematic bodies and other dynamic
    bodies are not swept. Joint coordinates of moved bodies are updated, so reduced-coordinate solvers
    such as :class:`~newton.solvers.SolverFeatherstone` are supported.
 

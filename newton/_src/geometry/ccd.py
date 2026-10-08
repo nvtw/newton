@@ -4,9 +4,9 @@
 """Continuous collision detection (CCD) for fast rigid bodies.
 
 After the solver step, every fast dynamic body is swept from its start pose to its solved pose
-against static shapes and meshes, and moved back to its earliest time of impact. Velocities are
-kept except for the normal velocity towards the hit surface, so solvers without speculative
-contacts do not drive the body back into it.
+against static shapes, meshes, and heightfields, and moved back to its earliest time of impact.
+Velocities are kept except for the normal velocity towards the hit surface, so solvers without
+speculative contacts do not drive the body back into it.
 
 The time of impact uses conservative advancement (Mirtich 1996) on GJK distances. A shape that
 touches an obstacle at the start of the step is swept with a small core sphere instead, so
@@ -19,6 +19,7 @@ import numpy as np
 import warp as wp
 
 from ..sim.enums import BodyFlags, JointType
+from ..utils.heightfield import HeightfieldData, get_triangle_shape_from_heightfield
 from .collision_core import aabb_to_unscaled, get_triangle_shape_from_mesh
 from .simplex_solver import create_solve_closest_distance
 from .support_function import GenericShapeData, SupportMapDataProvider, extract_shape_data, support_map
@@ -206,6 +207,51 @@ def _sweep(
     return t, normal
 
 
+@wp.func
+def _sweep_triangle(
+    geom_a: GenericShapeData,
+    shape_xform_a: wp.transform,
+    body_q0: wp.transform,
+    body_q1: wp.transform,
+    com: wp.vec3,
+    radius: float,
+    offset_a: float,
+    center_body: wp.vec3,
+    core_radius: float,
+    geom_tri: GenericShapeData,
+    xform_tri: wp.transform,
+    offset_b: float,
+    tolerance: float,
+) -> tuple[float, wp.vec3]:
+    """Sweep shape A against a one-sided static triangle.
+
+    The triangle is skipped if the shape center starts behind it, or approaches it by less than
+    the core radius and ends in front of it, so faces the shape slides along never stop it.
+    """
+    n = wp.normalize(wp.quat_rotate(wp.transform_get_rotation(xform_tri), wp.cross(geom_tri.scale, geom_tri.auxiliary)))
+    v0 = wp.transform_get_translation(xform_tri)
+    offset0 = wp.dot(n, wp.transform_point(body_q0, center_body) - v0)
+    offset1 = wp.dot(n, wp.transform_point(body_q1, center_body) - v0)
+    if offset0 < 0.0 or (offset0 - offset1 < core_radius and offset1 > core_radius):
+        return 1.0, n
+    return _sweep(
+        geom_a,
+        shape_xform_a,
+        body_q0,
+        body_q1,
+        com,
+        radius,
+        offset_a,
+        center_body,
+        core_radius,
+        geom_tri,
+        xform_tri,
+        False,
+        offset_b,
+        tolerance,
+    )
+
+
 @wp.kernel(enable_backward=False)
 def ccd_pair_impact_kernel(
     pairs: wp.array[wp.vec2i],
@@ -217,6 +263,9 @@ def ccd_pair_impact_kernel(
     shape_source: wp.array[wp.uint64],
     shape_aabb_lower: wp.array[wp.vec3],
     shape_aabb_upper: wp.array[wp.vec3],
+    shape_heightfield_index: wp.array[int],
+    heightfield_data: wp.array[HeightfieldData],
+    heightfield_elevations: wp.array[float],
     body_com: wp.array[wp.vec3],
     body_ccd_articulation: wp.array[int],
     body_q_start: wp.array[wp.transform],
@@ -242,7 +291,7 @@ def ccd_pair_impact_kernel(
         return
     type_b = shape_type[shape_b]
     if not _is_convex(shape_type[shape_a]) or not (
-        _is_convex(type_b) or type_b == GeoType.PLANE or type_b == GeoType.MESH
+        _is_convex(type_b) or type_b == GeoType.PLANE or type_b == GeoType.MESH or type_b == GeoType.HFIELD
     ):
         return
 
@@ -269,7 +318,74 @@ def ccd_pair_impact_kernel(
     center_b = 0.5 * (shape_aabb_lower[shape_b] + shape_aabb_upper[shape_b])
     geom_b, xform_b, offset_b = _shape_geometry(shape_b, shape_type, shape_transform, geom_data, shape_source, center_b)
 
-    if type_b != GeoType.MESH:
+    # Bounds of the whole sweep in the static shape's frame, for the mesh and heightfield queries.
+    inv_b = wp.transform_inverse(xform_b)
+    com0 = wp.transform_point(inv_b, wp.transform_point(q0, com))
+    com1 = wp.transform_point(inv_b, wp.transform_point(q1, com))
+    reach = wp.vec3(radius + offset_b + tolerance)
+    lower = wp.min(com0, com1) - reach
+    upper = wp.max(com0, com1) + reach
+
+    t = float(1.0)
+    normal = wp.vec3(0.0)
+    if type_b == GeoType.MESH:
+        mesh_scale = geom_b.scale
+        lower, upper, _inv_scale = aabb_to_unscaled(lower, upper, mesh_scale)
+        query = wp.mesh_query_aabb(shape_source[shape_b], lower, upper)
+        tri = int(0)
+        while wp.mesh_query_aabb_next(query, tri):
+            geom_tri, v0 = get_triangle_shape_from_mesh(shape_source[shape_b], mesh_scale, xform_b, tri)
+            t_tri, n_tri = _sweep_triangle(
+                geom_a,
+                shape_xform_a,
+                q0,
+                q1,
+                com,
+                radius,
+                offset_a,
+                center_body,
+                core_radius,
+                geom_tri,
+                wp.transform(v0, wp.quat_identity()),
+                offset_b,
+                tolerance,
+            )
+            if t_tri < t:
+                t = t_tri
+                normal = n_tri
+    elif type_b == GeoType.HFIELD:
+        hfd = heightfield_data[shape_heightfield_index[shape_b]]
+        rot_b = wp.transform_get_rotation(xform_b)
+        dx = 2.0 * hfd.hx / float(hfd.ncol - 1)
+        dy = 2.0 * hfd.hy / float(hfd.nrow - 1)
+        col_min = wp.max(int(wp.floor((lower[0] + hfd.hx) / dx)), 0)
+        col_max = wp.min(int(wp.floor((upper[0] + hfd.hx) / dx)), hfd.ncol - 2)
+        row_min = wp.max(int(wp.floor((lower[1] + hfd.hy) / dy)), 0)
+        row_max = wp.min(int(wp.floor((upper[1] + hfd.hy) / dy)), hfd.nrow - 2)
+        for row in range(row_min, row_max + 1):
+            for col in range(col_min, col_max + 1):
+                for sub in range(2):
+                    tri = (row * (hfd.ncol - 1) + col) * 2 + sub
+                    geom_tri, v0 = get_triangle_shape_from_heightfield(hfd, heightfield_elevations, xform_b, tri)
+                    t_tri, n_tri = _sweep_triangle(
+                        geom_a,
+                        shape_xform_a,
+                        q0,
+                        q1,
+                        com,
+                        radius,
+                        offset_a,
+                        center_body,
+                        core_radius,
+                        geom_tri,
+                        wp.transform(v0, rot_b),
+                        offset_b,
+                        tolerance,
+                    )
+                    if t_tri < t:
+                        t = t_tri
+                        normal = n_tri
+    else:
         infinite_plane_b = type_b == GeoType.PLANE and geom_b.scale[0] == 0.0 and geom_b.scale[1] == 0.0
         t, normal = _sweep(
             geom_a,
@@ -287,48 +403,6 @@ def ccd_pair_impact_kernel(
             offset_b,
             tolerance,
         )
-    else:
-        # Query the mesh BVH with the bounds of the whole sweep in unscaled mesh space.
-        mesh_scale = wp.vec3(geom_b.scale[0], geom_b.scale[1], geom_b.scale[2])
-        inv_mesh = wp.transform_inverse(xform_b)
-        com0 = wp.transform_point(inv_mesh, wp.transform_point(q0, com))
-        com1 = wp.transform_point(inv_mesh, wp.transform_point(q1, com))
-        reach = wp.vec3(radius + offset_b + tolerance)
-        lower, upper, _inv_scale = aabb_to_unscaled(wp.min(com0, com1) - reach, wp.max(com0, com1) + reach, mesh_scale)
-        center0 = wp.transform_point(q0, center_body)
-        center1 = wp.transform_point(q1, center_body)
-        t = float(1.0)
-        normal = wp.vec3(0.0)
-        query = wp.mesh_query_aabb(wp.uint64(shape_source[shape_b]), lower, upper)
-        tri = int(0)
-        while wp.mesh_query_aabb_next(query, tri):
-            geom_tri, v0 = get_triangle_shape_from_mesh(shape_source[shape_b], mesh_scale, xform_b, tri)
-            # One-sided triangles: skip if the shape started behind the face or does not
-            # approach it by more than its core.
-            n = wp.normalize(wp.cross(geom_tri.scale, geom_tri.auxiliary))
-            offset0 = wp.dot(n, center0 - v0)
-            offset1 = wp.dot(n, center1 - v0)
-            if offset0 < 0.0 or (offset0 - offset1 < core_radius and offset1 > core_radius):
-                continue
-            t_tri, n_tri = _sweep(
-                geom_a,
-                shape_xform_a,
-                q0,
-                q1,
-                com,
-                radius,
-                offset_a,
-                center_body,
-                core_radius,
-                geom_tri,
-                wp.transform(v0, wp.quat_identity()),
-                False,
-                offset_b,
-                tolerance,
-            )
-            if t_tri < t:
-                t = t_tri
-                normal = n_tri
     if t < 1.0:
         pair_impact_time[tid] = t
         pair_normal[tid] = normal

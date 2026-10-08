@@ -55,9 +55,16 @@ def _bullet_and_wall_model(device, velocity):
     return builder.finalize(device=device)
 
 
-def _mesh_floor():
-    vertices = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]], dtype=np.float32)
-    return newton.Mesh(vertices, np.array([0, 1, 2, 0, 2, 3], dtype=np.int32))
+def _add_floor(builder, floor):
+    """Add a static 2 m x 2 m floor at z = 0 as an infinite plane, a triangle mesh, or a heightfield."""
+    if floor == "plane":
+        builder.add_ground_plane()
+    elif floor == "mesh":
+        vertices = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]], dtype=np.float32)
+        builder.add_shape_mesh(-1, mesh=newton.Mesh(vertices, np.array([0, 1, 2, 0, 2, 3], dtype=np.int32)))
+    else:
+        heights = np.zeros((9, 9), dtype=np.float32)
+        builder.add_shape_heightfield(heightfield=newton.Heightfield(data=heights, nrow=9, ncol=9, hx=1.0, hy=1.0))
 
 
 def _make_solver(name, model):
@@ -99,10 +106,10 @@ def test_ccd_prevents_floor_tunneling(test, device):
     test.assertGreater(with_ccd[:, 0, 2].min(), 0.03)
 
 
-def test_ccd_prevents_mesh_tunneling(test, device):
-    """A sphere falling at 200 m/s must land on a zero-thickness triangle mesh floor."""
+def test_ccd_prevents_terrain_tunneling(test, device, floor):
+    """A sphere falling at 200 m/s must land on a triangle mesh or heightfield floor."""
     builder = newton.ModelBuilder()
-    builder.add_shape_mesh(-1, mesh=_mesh_floor())
+    _add_floor(builder, floor)
     body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0)))
     builder.add_shape_sphere(body, radius=0.05)
     builder.body_qd[body] = (0.0, 0.0, -200.0, 0.0, 0.0, 0.0)
@@ -143,21 +150,21 @@ def test_ccd_prevents_rotational_tunneling(test, device):
 
 def test_ccd_keeps_fast_sliding_contact(test, device):
     """A box sliding fast on the ground is a fast body but must not be stopped by its resting contact."""
-    for floor in ("plane", "mesh"):
+    for floor in ("plane", "mesh", "heightfield"):
         builder = newton.ModelBuilder()
         builder.default_shape_cfg.mu = 0.0
-        if floor == "plane":
-            builder.add_ground_plane()
-        else:
-            builder.add_shape_mesh(-1, mesh=_mesh_floor())
+        _add_floor(builder, floor)
         body = builder.add_body(xform=wp.transform(wp.vec3(-0.9, 0.0, 0.1)))
         builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
         builder.body_qd[body] = (30.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         model = builder.finalize(device=device)
         solver = newton.solvers.SolverXPBD(model, iterations=4)
 
-        poses = _simulate(model, solver, ccd=True, steps=3)
-        np.testing.assert_allclose(poses[:, 0, 0] + 0.9, 30.0 * DT * np.arange(1, 4), rtol=0.05, err_msg=floor)
+        # The box moves 10x the CCD threshold per step but must slide exactly as without CCD.
+        with_ccd = _simulate(model, solver, ccd=True, steps=3)
+        without_ccd = _simulate(model, solver, ccd=False, steps=3)
+        test.assertGreater(with_ccd[-1, 0, 0], 0.0, floor)
+        np.testing.assert_allclose(with_ccd, without_ccd, atol=1.0e-6, err_msg=floor)
 
 
 def test_ccd_graph_capture(test, device):
@@ -183,9 +190,14 @@ for _solver_name in ("xpbd", "semi_implicit", "featherstone"):
 add_function_test(
     TestCCD, "test_ccd_prevents_floor_tunneling", test_ccd_prevents_floor_tunneling, devices=get_test_devices()
 )
-add_function_test(
-    TestCCD, "test_ccd_prevents_mesh_tunneling", test_ccd_prevents_mesh_tunneling, devices=get_test_devices()
-)
+for _floor in ("mesh", "heightfield"):
+    add_function_test(
+        TestCCD,
+        f"test_ccd_prevents_terrain_tunneling_{_floor}",
+        test_ccd_prevents_terrain_tunneling,
+        devices=get_test_devices(),
+        floor=_floor,
+    )
 add_function_test(
     TestCCD,
     "test_ccd_prevents_rotational_tunneling",
