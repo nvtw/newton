@@ -4,9 +4,9 @@
 """Continuous collision detection (CCD) for fast rigid bodies.
 
 After the solver step, every fast dynamic body is swept from its start pose to its solved pose
-against static shapes and moved back to its earliest time of impact. Velocities are kept except
-for the normal velocity towards the hit surface, so solvers without speculative contacts do not
-drive the body back into it.
+against static shapes and meshes, and moved back to its earliest time of impact. Velocities are
+kept except for the normal velocity towards the hit surface, so solvers without speculative
+contacts do not drive the body back into it.
 
 The time of impact uses conservative advancement (Mirtich 1996) on GJK distances. A shape that
 touches an obstacle at the start of the step is swept with a small core sphere instead, so
@@ -19,6 +19,7 @@ import numpy as np
 import warp as wp
 
 from ..sim.enums import BodyFlags, JointType
+from .collision_core import aabb_to_unscaled, get_triangle_shape_from_mesh
 from .simplex_solver import create_solve_closest_distance
 from .support_function import GenericShapeData, SupportMapDataProvider, extract_shape_data, support_map
 from .types import GeoType
@@ -71,14 +72,6 @@ def _shape_geometry(
         offset += geom.scale[0]
         geom.scale[0] = _CORE_RADIUS
     return geom, wp.transform(pos, rot), offset
-
-
-@wp.func
-def _core_geometry(shape_center: wp.vec3, shape_transform: wp.transform) -> tuple[GenericShapeData, wp.transform]:
-    geom = GenericShapeData()
-    geom.shape_type = int(GeoType.SPHERE)
-    geom.scale = wp.vec3(_CORE_RADIUS)
-    return geom, wp.transform(wp.transform_point(shape_transform, shape_center), wp.quat_identity())
 
 
 @wp.func
@@ -158,6 +151,61 @@ def _time_of_impact(
     return t, normal
 
 
+@wp.func
+def _sweep(
+    geom_a: GenericShapeData,
+    shape_xform_a: wp.transform,
+    body_q0: wp.transform,
+    body_q1: wp.transform,
+    com: wp.vec3,
+    radius: float,
+    offset_a: float,
+    center_body: wp.vec3,
+    core_radius: float,
+    geom_b: GenericShapeData,
+    xform_b: wp.transform,
+    infinite_plane_b: bool,
+    offset_b: float,
+    tolerance: float,
+) -> tuple[float, wp.vec3]:
+    """Sweep shape A against static shape B; return impact time (1 = none) and A-to-B normal."""
+    t, normal = _time_of_impact(
+        geom_a,
+        shape_xform_a,
+        body_q0,
+        body_q1,
+        com,
+        radius,
+        geom_b,
+        xform_b,
+        infinite_plane_b,
+        offset_a + offset_b,
+        tolerance,
+    )
+    if t > 0.0:
+        return t, normal
+    # Already touching: only keep the core of the shape from tunneling.
+    core = GenericShapeData()
+    core.shape_type = int(GeoType.SPHERE)
+    core.scale = wp.vec3(_CORE_RADIUS)
+    t, normal = _time_of_impact(
+        core,
+        wp.transform(center_body, wp.quat_identity()),
+        body_q0,
+        body_q1,
+        com,
+        wp.length(center_body - com) + core_radius,
+        geom_b,
+        xform_b,
+        infinite_plane_b,
+        core_radius + offset_b,
+        tolerance,
+    )
+    if t == 0.0:
+        return 1.0, normal
+    return t, normal
+
+
 @wp.kernel(enable_backward=False)
 def ccd_pair_impact_kernel(
     pairs: wp.array[wp.vec2i],
@@ -193,7 +241,9 @@ def ccd_pair_impact_kernel(
     if body < 0 or shape_body[shape_b] >= 0 or body_ccd_articulation[body] < 0:
         return
     type_b = shape_type[shape_b]
-    if not _is_convex(shape_type[shape_a]) or not (_is_convex(type_b) or type_b == GeoType.PLANE):
+    if not _is_convex(shape_type[shape_a]) or not (
+        _is_convex(type_b) or type_b == GeoType.PLANE or type_b == GeoType.MESH
+    ):
         return
 
     q0 = body_q_start[body]
@@ -214,33 +264,71 @@ def ccd_pair_impact_kernel(
     if motion + _rotation_angle(q0, q1) * radius <= CCD_SAFETY_FACTOR * min_extent:
         return
 
+    core_radius = CCD_CORE_FRACTION * min_extent
+    tolerance = CCD_TOLERANCE_FRACTION * min_extent
     center_b = 0.5 * (shape_aabb_lower[shape_b] + shape_aabb_upper[shape_b])
     geom_b, xform_b, offset_b = _shape_geometry(shape_b, shape_type, shape_transform, geom_data, shape_source, center_b)
-    infinite_plane_b = type_b == GeoType.PLANE and geom_b.scale[0] == 0.0 and geom_b.scale[1] == 0.0
-    tolerance = CCD_TOLERANCE_FRACTION * min_extent
 
-    t, normal = _time_of_impact(
-        geom_a, shape_xform_a, q0, q1, com, radius, geom_b, xform_b, infinite_plane_b, offset_a + offset_b, tolerance
-    )
-    if t == 0.0:
-        # Already touching: only keep the core of the shape from tunneling.
-        core_radius = CCD_CORE_FRACTION * min_extent
-        geom_core, core_xform = _core_geometry(center_a, shape_xform_a)
-        t, normal = _time_of_impact(
-            geom_core,
-            core_xform,
+    if type_b != GeoType.MESH:
+        infinite_plane_b = type_b == GeoType.PLANE and geom_b.scale[0] == 0.0 and geom_b.scale[1] == 0.0
+        t, normal = _sweep(
+            geom_a,
+            shape_xform_a,
             q0,
             q1,
             com,
-            wp.length(center_body - com) + core_radius,
+            radius,
+            offset_a,
+            center_body,
+            core_radius,
             geom_b,
             xform_b,
             infinite_plane_b,
-            core_radius + offset_b,
+            offset_b,
             tolerance,
         )
-        if t == 0.0:
-            return
+    else:
+        # Query the mesh BVH with the bounds of the whole sweep in unscaled mesh space.
+        mesh_scale = wp.vec3(geom_b.scale[0], geom_b.scale[1], geom_b.scale[2])
+        inv_mesh = wp.transform_inverse(xform_b)
+        com0 = wp.transform_point(inv_mesh, wp.transform_point(q0, com))
+        com1 = wp.transform_point(inv_mesh, wp.transform_point(q1, com))
+        reach = wp.vec3(radius + offset_b + tolerance)
+        lower, upper, _inv_scale = aabb_to_unscaled(wp.min(com0, com1) - reach, wp.max(com0, com1) + reach, mesh_scale)
+        center0 = wp.transform_point(q0, center_body)
+        center1 = wp.transform_point(q1, center_body)
+        t = float(1.0)
+        normal = wp.vec3(0.0)
+        query = wp.mesh_query_aabb(wp.uint64(shape_source[shape_b]), lower, upper)
+        tri = int(0)
+        while wp.mesh_query_aabb_next(query, tri):
+            geom_tri, v0 = get_triangle_shape_from_mesh(shape_source[shape_b], mesh_scale, xform_b, tri)
+            # One-sided triangles: skip if the shape started behind the face or does not
+            # approach it by more than its core.
+            n = wp.normalize(wp.cross(geom_tri.scale, geom_tri.auxiliary))
+            offset0 = wp.dot(n, center0 - v0)
+            offset1 = wp.dot(n, center1 - v0)
+            if offset0 < 0.0 or (offset0 - offset1 < core_radius and offset1 > core_radius):
+                continue
+            t_tri, n_tri = _sweep(
+                geom_a,
+                shape_xform_a,
+                q0,
+                q1,
+                com,
+                radius,
+                offset_a,
+                center_body,
+                core_radius,
+                geom_tri,
+                wp.transform(v0, wp.quat_identity()),
+                False,
+                offset_b,
+                tolerance,
+            )
+            if t_tri < t:
+                t = t_tri
+                normal = n_tri
     if t < 1.0:
         pair_impact_time[tid] = t
         pair_normal[tid] = normal
