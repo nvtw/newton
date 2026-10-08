@@ -14,7 +14,14 @@ from ..core.reset import normalize_reset_world_mask
 from ..core.types import MAXVAL
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
-from ..geometry.ccd import ccd_apply_kernel, ccd_body_articulations, ccd_pair_impact_kernel, ccd_pick_hit_kernel
+from ..geometry.ccd import (
+    CCD_NO_HIT,
+    CCD_PAIR_THREADS,
+    ccd_apply_kernel,
+    ccd_body_articulations,
+    ccd_pair_impact_kernel,
+    ccd_pick_hit_kernel,
+)
 from ..geometry.collision_core import compute_tight_aabb_from_support
 from ..geometry.contact_data import (
     CONTACT_SORT_SUB_KEY_BITS,
@@ -1853,11 +1860,12 @@ class CollisionPipeline:
             if ccd:
                 self._ccd_body_articulation = wp.array(ccd_body_articulations(model), dtype=wp.int32, device=device)
                 self._ccd_body_q_start = wp.empty(model.body_count, dtype=wp.transform, device=device)
-                self._ccd_body_impact_time = wp.empty(model.body_count, dtype=wp.float32, device=device)
-                self._ccd_body_hit_pair = wp.empty(model.body_count, dtype=wp.int32, device=device)
+                # Reset by ccd_apply_kernel after every use.
+                self._ccd_body_impact_time = wp.full(model.body_count, 1.0, dtype=wp.float32, device=device)
+                self._ccd_body_hit_pair = wp.full(model.body_count, CCD_NO_HIT, dtype=wp.int32, device=device)
                 self._ccd_pair_impact_time = wp.empty(self.shape_pairs_max, dtype=wp.float32, device=device)
                 self._ccd_pair_normal = wp.empty(self.shape_pairs_max, dtype=wp.vec3, device=device)
-                self._ccd_articulation_mask = wp.empty(model.articulation_count, dtype=wp.bool, device=device)
+                self._ccd_articulation_mask = wp.zeros(model.articulation_count, dtype=wp.bool, device=device)
 
         if (
             getattr(self.narrow_phase, "shape_aabb_lower", None) is None
@@ -2302,12 +2310,10 @@ class CollisionPipeline:
         if not self.ccd:
             return
         model = self.model
-        self._ccd_body_impact_time.fill_(1.0)
-        self._ccd_body_hit_pair.fill_(2**31 - 1)
-        self._ccd_articulation_mask.zero_()
+        pair_threads = min(self.shape_pairs_max, CCD_PAIR_THREADS)
         wp.launch(
             ccd_pair_impact_kernel,
-            dim=self.shape_pairs_max,
+            dim=pair_threads,
             inputs=[
                 self.broad_phase_shape_pairs,
                 self.broad_phase_pair_count,
@@ -2332,9 +2338,10 @@ class CollisionPipeline:
         )
         wp.launch(
             ccd_pick_hit_kernel,
-            dim=self.shape_pairs_max,
+            dim=pair_threads,
             inputs=[
                 self.broad_phase_shape_pairs,
+                self.broad_phase_pair_count,
                 model.shape_body,
                 self._ccd_pair_impact_time,
                 self._ccd_body_impact_time,

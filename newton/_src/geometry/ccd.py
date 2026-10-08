@@ -36,6 +36,12 @@ CCD_TOLERANCE_FRACTION = wp.constant(0.05)
 
 CCD_MAX_ITERATIONS = wp.constant(20)
 
+CCD_NO_HIT = wp.constant(2**31 - 1)
+
+CCD_PAIR_THREADS = wp.constant(1 << 16)
+"""Thread count of the pair kernels; they stride over the pairs found because the pair buffer
+capacity can exceed the number of pairs by orders of magnitude."""
+
 _solve_gjk = create_solve_closest_distance(support_map)
 
 # Sphere and capsule cores are swept as points and segments; their radius is added to the gap.
@@ -252,10 +258,10 @@ def _sweep_triangle(
     )
 
 
-@wp.kernel(enable_backward=False)
-def ccd_pair_impact_kernel(
+@wp.func
+def _pair_impact(
+    tid: int,
     pairs: wp.array[wp.vec2i],
-    pair_count: wp.array[int],
     shape_body: wp.array[int],
     shape_type: wp.array[int],
     shape_transform: wp.array[wp.transform],
@@ -275,10 +281,7 @@ def ccd_pair_impact_kernel(
     pair_normal: wp.array[wp.vec3],
     body_impact_time: wp.array[float],
 ):
-    tid = wp.tid()
     pair_impact_time[tid] = 1.0
-    if tid >= pair_count[0]:
-        return
 
     # Sweep eligible dynamic shapes against static shapes only.
     shape_a = pairs[tid][0]
@@ -410,22 +413,69 @@ def ccd_pair_impact_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def ccd_pair_impact_kernel(
+    pairs: wp.array[wp.vec2i],
+    pair_count: wp.array[int],
+    shape_body: wp.array[int],
+    shape_type: wp.array[int],
+    shape_transform: wp.array[wp.transform],
+    geom_data: wp.array[wp.vec4],
+    shape_source: wp.array[wp.uint64],
+    shape_aabb_lower: wp.array[wp.vec3],
+    shape_aabb_upper: wp.array[wp.vec3],
+    shape_heightfield_index: wp.array[int],
+    heightfield_data: wp.array[HeightfieldData],
+    heightfield_elevations: wp.array[float],
+    body_com: wp.array[wp.vec3],
+    body_ccd_articulation: wp.array[int],
+    body_q_start: wp.array[wp.transform],
+    body_q: wp.array[wp.transform],
+    # outputs
+    pair_impact_time: wp.array[float],
+    pair_normal: wp.array[wp.vec3],
+    body_impact_time: wp.array[float],
+):
+    for i in range(wp.tid(), wp.min(pair_count[0], pairs.shape[0]), CCD_PAIR_THREADS):
+        _pair_impact(
+            i,
+            pairs,
+            shape_body,
+            shape_type,
+            shape_transform,
+            geom_data,
+            shape_source,
+            shape_aabb_lower,
+            shape_aabb_upper,
+            shape_heightfield_index,
+            heightfield_data,
+            heightfield_elevations,
+            body_com,
+            body_ccd_articulation,
+            body_q_start,
+            body_q,
+            pair_impact_time,
+            pair_normal,
+            body_impact_time,
+        )
+
+
+@wp.kernel(enable_backward=False)
 def ccd_pick_hit_kernel(
     pairs: wp.array[wp.vec2i],
+    pair_count: wp.array[int],
     shape_body: wp.array[int],
     pair_impact_time: wp.array[float],
     body_impact_time: wp.array[float],
     # outputs
     body_hit_pair: wp.array[int],
 ):
-    tid = wp.tid()
-    t = pair_impact_time[tid]
-    if t >= 1.0:
-        return
-    body = wp.max(shape_body[pairs[tid][0]], shape_body[pairs[tid][1]])
-    # Lowest pair index among equal impact times keeps the result deterministic.
-    if t == body_impact_time[body]:
-        wp.atomic_min(body_hit_pair, body, tid)
+    for i in range(wp.tid(), wp.min(pair_count[0], pairs.shape[0]), CCD_PAIR_THREADS):
+        t = pair_impact_time[i]
+        if t < 1.0:
+            body = wp.max(shape_body[pairs[i][0]], shape_body[pairs[i][1]])
+            # Lowest pair index among equal impact times keeps the result deterministic.
+            if t == body_impact_time[body]:
+                wp.atomic_min(body_hit_pair, body, i)
 
 
 @wp.kernel(enable_backward=False)
@@ -442,17 +492,24 @@ def ccd_apply_kernel(
     articulation_mask: wp.array[bool],
 ):
     body = wp.tid()
+    articulation = body_ccd_articulation[body]
+    if articulation < 0:
+        return
     t = body_impact_time[body]
+    hit = body_hit_pair[body]
+    # Reset the scratch for the next call; eligible bodies own their single-body articulation.
+    body_impact_time[body] = 1.0
+    body_hit_pair[body] = CCD_NO_HIT
+    articulation_mask[articulation] = t < 1.0
     if t >= 1.0:
         return
     body_q[body] = _pose_at(body_q_start[body], body_q[body], body_com[body], t)
 
     # Remove the velocity towards the hit surface; tangential motion and spin are kept.
-    normal = pair_normal[body_hit_pair[body]]
+    normal = pair_normal[hit]
     v = wp.spatial_top(body_qd[body])
     v -= wp.max(wp.dot(v, normal), 0.0) * normal
     body_qd[body] = wp.spatial_vector(v, wp.spatial_bottom(body_qd[body]))
-    articulation_mask[body_ccd_articulation[body]] = True
 
 
 def ccd_body_articulations(model) -> np.ndarray:
