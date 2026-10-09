@@ -13,8 +13,8 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _apply_small_bilateral_inverse,
     _assemble_compact_unilateral_schur_blocked,
     _invert_small_bilateral_block,
-    _solve_dvi_compact_schur_pgs_cooperative,
     _solve_dvi_sparse_inequalities_pgs_cooperative,
+    make_compact_schur_pgs_kernel,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _prepare_full_sparse_unilateral_schur as kernel,
@@ -157,22 +157,29 @@ class TestKaminoCompactSchur(unittest.TestCase):
                     "block_iteration": 0,
                 }
                 results = []
-                for kernel in (
-                    _solve_dvi_sparse_inequalities_pgs_cooperative,
-                    _solve_dvi_compact_schur_pgs_cooperative,
+                for kernels in (
+                    (_solve_dvi_sparse_inequalities_pgs_cooperative,),
+                    (make_compact_schur_pgs_kernel(64), make_compact_schur_pgs_kernel(128)),
                 ):
                     data["compact_q"] = self.floats(np.concatenate([np.zeros(n), q0]))
                     data["solution_lambdas"] = self.floats(initial)
                     data["solver_status"] = wp.zeros(1, dtype=DVIStatus, device=self.device)
-                    inputs = []
-                    for arg in kernel.adj.args:
-                        if arg.label in data:
-                            inputs.append(data[arg.label])
-                        else:
-                            # Full compact sweeps never read sparse body-space inputs.
-                            shape = (1, 2) if arg.type.ndim == 2 else 1
-                            inputs.append(wp.zeros(shape, dtype=arg.type.dtype, device=self.device))
-                    wp.launch(kernel, dim=32, inputs=inputs, device=self.device, block_dim=32)
+                    for index, kernel in enumerate(kernels):
+                        before = data["solution_lambdas"].numpy(), data["compact_q"].numpy()
+                        inputs = []
+                        for arg in kernel.adj.args:
+                            if arg.label in data:
+                                inputs.append(data[arg.label])
+                            else:
+                                # Full compact sweeps never read sparse body-space inputs.
+                                shape = (1, 2) if arg.type.ndim == 2 else 1
+                                inputs.append(wp.zeros(shape, dtype=arg.type.dtype, device=self.device))
+                        wp.launch(kernel, dim=32, inputs=inputs, device=self.device, block_dim=32)
+                        # Each world must be updated by exactly one specialization,
+                        # including the partially filled vectors at 63/64/65 rows.
+                        if len(kernels) == 2 and (nu > 64 if index == 0 else nu <= 64):
+                            np.testing.assert_array_equal(data["solution_lambdas"].numpy(), before[0])
+                            np.testing.assert_array_equal(data["compact_q"].numpy(), before[1])
                     results.append((data["solution_lambdas"].numpy(), data["compact_q"].numpy()))
                 np.testing.assert_array_equal(results[1][0][:n], initial[:n])
                 np.testing.assert_allclose(results[0][0], results[1][0], atol=3e-6, rtol=3e-6)
