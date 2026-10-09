@@ -1583,13 +1583,14 @@ def _fly(model, solver, frames, substeps, frame_dt=1.0 / 60.0):
     return np.array(positions), np.array(velocities)
 
 
-def test_mujoco_speculative_contacts_stop_at_surface(test, device):
-    """SolverMuJoCo must stop a box at 30 m/s at the face of a 2 cm wall, not after crossing it."""
+def test_mujoco_speculative_contacts_stop_at_surface(test, device, substeps):
+    """SolverMuJoCo must stop a box at 30 m/s in a 2 cm wall instead of crossing it."""
     model = _wall_and_box(device, 30.0, 0.0, mujoco=True)
     solver = newton.solvers.SolverMuJoCo(model, use_mujoco_contacts=False, njmax=100, nconmax=50)
-    positions, _ = _fly(model, solver, frames=6, substeps=1)
-    # The box front (x + 5 cm) must not pass the wall face at x = -1 cm by more than 1 mm.
-    test.assertLess(positions[:, 0].max() + 0.05, -0.01 + 1.0e-3)
+    positions, _ = _fly(model, solver, frames=6, substeps=substeps)
+    # The box front (x + 5 cm) may enter the wall (face at x = -1 cm) by at most a quarter of the
+    # wall's thickness, however compliant the contact.
+    test.assertLess(positions[:, 0].max() + 0.05, -0.01 + 0.005 + 1.0e-3)
 
 
 def test_mujoco_speculative_near_miss_applies_no_force(test, device):
@@ -1605,12 +1606,14 @@ class TestSpeculativeSolverResponse(unittest.TestCase):
     pass
 
 
-add_function_test(
-    TestSpeculativeSolverResponse,
-    "test_mujoco_speculative_contacts_stop_at_surface",
-    test_mujoco_speculative_contacts_stop_at_surface,
-    devices=get_cuda_test_devices(),
-)
+for _substeps in (1, 6):
+    add_function_test(
+        TestSpeculativeSolverResponse,
+        f"test_mujoco_speculative_contacts_stop_at_surface_{_substeps}_substeps",
+        test_mujoco_speculative_contacts_stop_at_surface,
+        devices=get_cuda_test_devices(),
+        substeps=_substeps,
+    )
 add_function_test(
     TestSpeculativeSolverResponse,
     "test_mujoco_speculative_near_miss_applies_no_force",

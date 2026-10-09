@@ -4495,7 +4495,7 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             # first run inside a CUDA graph that is discarded without replay.
             self._create_inverse_shape_mapping()
             self._contact_tid_to_cid = wp.full(self.mjw_data.naconmax, -1, dtype=wp.int32, device=self.device)
-            # Per-contact solref/solimp before the speculative override, for the substep fast path.
+            # Per-contact solref/solimp before a speculative bound replaces them, for the substep fast path.
             self._contact_solref_base = wp.zeros(self.mjw_data.naconmax, dtype=wp.vec2, device=self.device)
             self._contact_solimp_base = wp.zeros(self.mjw_data.naconmax, dtype=vec5, device=self.device)
         self._initial_model_sync = False

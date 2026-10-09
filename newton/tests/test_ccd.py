@@ -90,8 +90,9 @@ def test_ccd_prevents_thin_wall_tunneling(test, device, solver_name):
     test.assertGreater(without_ccd[-1, 0, 0], 0.0, "test setup must tunnel without CCD")
 
     with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=4)
-    # The box front (x + 5 cm) must stop at the wall face at x = -1 cm.
-    test.assertLess(with_ccd[:, 0, 0].max() + 0.05, -0.01 + 1.0e-3)
+    # The box front (x + 5 cm) may enter the wall (face at x = -1 cm) by at most a quarter of the
+    # wall's 2 cm thickness.
+    test.assertLess(with_ccd[:, 0, 0].max() + 0.05, -0.01 + 0.005 + 1.0e-3)
 
 
 def test_ccd_prevents_floor_tunneling(test, device, floor, speed, solver_name):
@@ -184,8 +185,9 @@ def test_ccd_stops_moving_pair(test, device, solver_name):
     test.assertGreater(without_ccd[-1, 0, 0], without_ccd[-1, 1, 0], "test setup must tunnel without CCD")
 
     with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=6)
+    # The boxes (10 cm wide) may overlap by at most a quarter of their width.
     gaps = with_ccd[:, 1, 0] - with_ccd[:, 0, 0]
-    test.assertGreater(gaps.min(), 0.1 - 1.0e-3)
+    test.assertGreater(gaps.min(), 0.1 - 0.025 - 1.0e-3)
 
 
 def test_ccd_ignores_near_miss(test, device, solver_name):
@@ -203,6 +205,28 @@ def test_ccd_ignores_near_miss(test, device, solver_name):
     expected_x = -0.5 + 5.0 * FRAME_DT * np.arange(1, 13)
     np.testing.assert_allclose(poses[:, 0, 0], expected_x, atol=1.0e-4)
     np.testing.assert_allclose(poses[:, 0, 1:3], np.tile([0.56, 0.0], (12, 1)), atol=1.0e-4)
+
+
+def test_ccd_keeps_contact_compliance(test, device, solver_name):
+    """A slow landing must respond with the contact's authored compliance, as without CCD when the
+    contact gap already detects the impact in time: CCD only adds contacts in time, it must not
+    stiffen ordinary impacts such as footfalls."""
+    builder = _builder()
+    builder.default_shape_cfg.ke = 2.0e4
+    builder.default_shape_cfg.kd = 2.0e2
+    # Wider than one frame of motion, so the run without CCD detects the landing in time too.
+    builder.default_shape_cfg.gap = 0.05
+    _add_floor(builder, "plane")
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1)))
+    builder.add_shape_sphere(body, radius=0.05)
+    builder.body_qd[body] = (0.0, 0.0, -2.0, 0.0, 0.0, 0.0)
+    model = builder.finalize(device=device)
+
+    with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=20)
+    without_ccd = _simulate(model, solver=solver_name, ccd=False, frames=20)
+    # The soft landing sinks the sphere a few millimetres; both runs must agree on it.
+    test.assertLess(without_ccd[:, 0, 2].min(), 0.05 - 1.0e-3, "test setup must penetrate softly")
+    np.testing.assert_allclose(with_ccd[:, 0, 2], without_ccd[:, 0, 2], atol=1.0e-3)
 
 
 def test_ccd_keeps_fast_sliding_contact(test, device, solver_name):
@@ -261,6 +285,14 @@ for _solver in ("mujoco", "kamino"):
         ("test_ccd_graph_capture", test_ccd_graph_capture),
     ):
         add_function_test(TestCCD, f"{_name}_{_solver}", _func, devices=devices, solver_name=_solver)
+# Kamino enforces speculative contacts in its velocity-level solve; compliance is a MuJoCo property.
+add_function_test(
+    TestCCD,
+    "test_ccd_keeps_contact_compliance_mujoco",
+    test_ccd_keeps_contact_compliance,
+    devices=devices,
+    solver_name="mujoco",
+)
 
 
 if __name__ == "__main__":

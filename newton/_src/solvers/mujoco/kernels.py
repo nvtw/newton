@@ -11,6 +11,7 @@ import warp as wp
 
 from ...core.types import vec5
 from ...geometry.ccd import shapes_meet_within
+from ...geometry.types import GeoType
 from ...sim import BodyFlags, JointTargetMode, JointType
 from ...sim.contacts import contact_surface_point, contact_surface_separation
 from .constants import (
@@ -380,10 +381,6 @@ def eval_mujoco_coupling_effective_mass_block_kernel(
     out_inertia[tid] = inertia
 
 
-SPECULATIVE_CONTACT_IMPEDANCE = wp.constant(0.99)
-"""Constant impedance of speculative contact rows; close to 1 so the velocity bound is nearly hard."""
-
-
 @wp.func
 def _contact_point_velocity(
     body: int,
@@ -399,15 +396,56 @@ def _contact_point_velocity(
     return wp.spatial_top(qd) + wp.cross(wp.spatial_bottom(qd), point - com)
 
 
-SPECULATIVE_CONTACT_SOLIMP = wp.constant(
-    vec5(SPECULATIVE_CONTACT_IMPEDANCE, SPECULATIVE_CONTACT_IMPEDANCE, 0.001, 0.5, 2.0)
-)
+SPECULATIVE_CORE_FRACTION = wp.constant(0.5)
+"""Deepest penetration a speculative contact allows within one substep, as a fraction of the
+smallest half-extent of the thinner solid in the pair. Half of it keeps contact normals from
+flipping with a factor-two margin and lies above ordinary per-substep motion such as footfalls."""
+
+SPECULATIVE_BOUND_IMPEDANCE = wp.constant(0.99)
+"""Constant impedance of a bounding speculative row; close to 1 so the bound is nearly hard."""
+
+
+@wp.func
+def _has_thickness(shape_type: int) -> bool:
+    """Whether a shape is a solid whose smallest half-extent bounds how deep it can be penetrated
+    before contact normals flip; planes, meshes and heightfields are surfaces."""
+    return not (shape_type == GeoType.PLANE or shape_type == GeoType.MESH or shape_type == GeoType.HFIELD)
+
+
+@wp.func
+def _min_half_extent(shape: int, shape_aabb_lower: wp.array[wp.vec3], shape_aabb_upper: wp.array[wp.vec3]) -> float:
+    h = 0.5 * (shape_aabb_upper[shape] - shape_aabb_lower[shape])
+    return wp.min(h[0], wp.min(h[1], h[2]))
+
+
+@wp.func
+def _soft_reference_acceleration(solref: wp.vec2, solimp: vec5, timestep: float, pos: float, vel: float) -> float:
+    """Reference normal acceleration ``-k * imp * pos - b * vel`` of a MuJoCo contact row.
+
+    Mirrors MuJoCo's stiffness and damping from solref (with refsafe) and uses the impedance at the
+    far end of its transition (``solimp[1]``), which is where contacts deeper than the transition
+    width sit.
+    """
+    dmax = wp.clamp(solimp[1], 0.0001, 0.9999)
+    if solref[0] <= 0.0:
+        k = -solref[0] / (dmax * dmax)
+    else:
+        timeconst = wp.max(solref[0], 2.0 * timestep)
+        dampratio = solref[1]
+        k = 1.0 / wp.max(MJ_MINVAL, dmax * dmax * timeconst * timeconst * dampratio * dampratio)
+    if solref[1] <= 0.0:
+        b = -solref[1] / dmax
+    else:
+        b = 2.0 / wp.max(MJ_MINVAL, dmax * wp.max(solref[0], 2.0 * timestep))
+    return -k * dmax * pos - b * vel
 
 
 @wp.func
 def speculative_contact_dist(
     dist: float,
     margin: float,
+    solref: wp.vec2,
+    solimp: vec5,
     point_a: wp.vec3,
     point_b: wp.vec3,
     normal: wp.vec3,
@@ -426,28 +464,33 @@ def speculative_contact_dist(
     body_qd: wp.array[wp.spatial_vector],
     body_com: wp.array[wp.vec3],
 ) -> tuple[float, bool]:
-    """Return the MuJoCo distance of a speculative contact and whether it is still separated.
+    """Return the MuJoCo distance of a contact from a pipeline with speculative contacts, and
+    whether its row must bound the approach instead of using the contact's own solref.
 
-    A separated contact (``dist > margin``) gets its separation predicted at the end of the step
-    from the current velocities, so its row activates only when the bodies would close the gap
-    within the step. With :func:`speculative_contact_solref` the row then bounds the normal
-    velocity after the step to ``-dist / timestep``: the bodies reach the surface but do not cross
-    it, and no force acts at a distance.
+    The speculative pipeline makes sure the contact exists before the bodies reach each other.
+    MuJoCo then activates it in the substep after they touch, which follows its compliant contact
+    model closely, so ordinary impacts such as footfalls keep that behavior. Only a body that would
+    pass a core depth within one substep, a fraction of the thinner solid in the pair (planes,
+    meshes and heightfields are surfaces and do not count), would tunnel through thin geometry or
+    flip the contact normal. For it the row bounds the normal velocity so the bodies reach the core
+    depth and no farther: ``v_n >= -max(dist - margin + core, 0) / timestep``. The bound only limits
+    the approach and is used only while it demands more than the contact's own response, so a body
+    resting near the core depth is held by its own compliance.
 
-    The separation follows the contact normal fixed at collision time, so a body passing beside an
-    edge would cross that plane without touching. Before a row activates, a sweep of the two
-    shapes over the step confirms they meet; otherwise the row stays inactive.
+    The distance follows the contact normal fixed at collision time, so a body passing beside an
+    edge would cross that plane without touching. Before a row activates, a sweep of the two shapes
+    over the step confirms they meet; otherwise the row stays inactive.
     """
     body_a = shape_body[shape_a]
     body_b = shape_body[shape_b]
-    separated = dist > margin
-    predicted = dist
-    if separated:
-        v_rel = _contact_point_velocity(body_b, point_b, body_q, body_qd, body_com) - _contact_point_velocity(
-            body_a, point_a, body_q, body_qd, body_com
-        )
-        predicted = dist + timestep * wp.dot(normal, v_rel)
-    if predicted < margin and not shapes_meet_within(
+    v_rel = _contact_point_velocity(body_b, point_b, body_q, body_qd, body_com) - _contact_point_velocity(
+        body_a, point_a, body_q, body_qd, body_com
+    )
+    step = timestep * wp.dot(normal, v_rel)
+    gap = dist - margin
+    if gap >= 0.0 and gap + step >= 0.0:
+        return dist, False
+    if not shapes_meet_within(
         shape_a,
         shape_b,
         timestep,
@@ -463,15 +506,33 @@ def speculative_contact_dist(
         body_qd,
         body_com,
     ):
-        predicted = wp.max(dist, margin + MJ_MINVAL)
-    return predicted, separated
+        return wp.max(dist, margin + MJ_MINVAL), False
+
+    extent = float(1.0e10)
+    if _has_thickness(shape_type[shape_a]):
+        extent = _min_half_extent(shape_a, shape_aabb_lower, shape_aabb_upper)
+    if _has_thickness(shape_type[shape_b]):
+        extent = wp.min(extent, _min_half_extent(shape_b, shape_aabb_lower, shape_aabb_upper))
+    bound = step + wp.max(gap + SPECULATIVE_CORE_FRACTION * extent, 0.0)
+    if bound < 0.0:
+        # A separated row would stay inactive this substep, so only the bound can act.
+        if gap >= 0.0:
+            return margin + bound, True
+        if -bound / (timestep * timestep) > _soft_reference_acceleration(
+            solref, solimp, timestep, gap, step / timestep
+        ):
+            return margin + bound, True
+    return dist, False
 
 
 @wp.func
-def speculative_contact_solref(timestep: float) -> wp.vec2:
-    """Direct-format solref whose reference acceleration ``-pos / timestep^2`` (with ``pos`` the
-    predicted end-of-step separation) bounds the post-step normal velocity to ``-dist / timestep``."""
+def speculative_bound_solref(timestep: float) -> wp.vec2:
+    """Direct-format solref whose reference acceleration ``-pos / timestep^2`` turns the position
+    reported by :func:`speculative_contact_dist` into its velocity bound."""
     return wp.vec2(-1.0 / (timestep * timestep), 0.0)
+
+
+SPECULATIVE_BOUND_SOLIMP = wp.constant(vec5(SPECULATIVE_BOUND_IMPEDANCE, SPECULATIVE_BOUND_IMPEDANCE, 0.001, 0.5, 2.0))
 
 
 # Kernel functions
@@ -517,7 +578,7 @@ def convert_newton_contacts_to_mjwarp_kernel(
     use_kf_mapping: bool,
     bodies_per_world: int,
     newton_shape_to_mjc_geom: wp.array[wp.int32],
-    # Speculative contacts (see speculative_contact_row)
+    # Speculative contacts (see speculative_contact_dist)
     speculative: bool,
     body_qd: wp.array[wp.spatial_vector],
     body_com: wp.array[wp.vec3],
@@ -762,14 +823,16 @@ def convert_newton_contacts_to_mjwarp_kernel(
 
         tid_to_cid[tid] = cid
 
-        # The fast path switches between these and the speculative row as the gap closes.
-        contact_solref_base[cid] = solref
-        contact_solimp_base[cid] = solimp
         if speculative:
+            # The fast path switches between these and the bounding row as the gap closes.
+            contact_solref_base[cid] = solref
+            contact_solimp_base[cid] = solimp
             timestep = opt_timestep[worldid % opt_timestep.shape[0]]
-            dist, separated = speculative_contact_dist(
+            dist, bound = speculative_contact_dist(
                 dist,
                 margin,
+                solref,
+                solimp,
                 point_a,
                 point_b,
                 n,
@@ -788,9 +851,9 @@ def convert_newton_contacts_to_mjwarp_kernel(
                 body_qd,
                 body_com,
             )
-            if separated:
-                solref = speculative_contact_solref(timestep)
-                solimp = SPECULATIVE_CONTACT_SOLIMP
+            if bound:
+                solref = speculative_bound_solref(timestep)
+                solimp = SPECULATIVE_BOUND_SOLIMP
 
         write_contact(
             dist_in=dist,
@@ -878,9 +941,11 @@ def convert_newton_contacts_to_mjwarp_kernel(
             if body_a < 0:
                 worldid = body_b // bodies_per_world
             timestep = opt_timestep[worldid % opt_timestep.shape[0]]
-            dist, separated = speculative_contact_dist(
+            dist, bound = speculative_contact_dist(
                 dist,
                 contact_includemargin_out[cid],
+                contact_solref_base[cid],
+                contact_solimp_base[cid],
                 point_a,
                 point_b,
                 n,
@@ -899,9 +964,9 @@ def convert_newton_contacts_to_mjwarp_kernel(
                 body_qd,
                 body_com,
             )
-            if separated:
-                contact_solref_out[cid] = speculative_contact_solref(timestep)
-                contact_solimp_out[cid] = SPECULATIVE_CONTACT_SOLIMP
+            if bound:
+                contact_solref_out[cid] = speculative_bound_solref(timestep)
+                contact_solimp_out[cid] = SPECULATIVE_BOUND_SOLIMP
             else:
                 contact_solref_out[cid] = contact_solref_base[cid]
                 contact_solimp_out[cid] = contact_solimp_base[cid]

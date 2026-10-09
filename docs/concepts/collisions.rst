@@ -1460,12 +1460,22 @@ joints and into the other body.
 
 How well a solver uses these contacts depends on the solver:
 
-- :class:`~newton.solvers.SolverMuJoCo` and :class:`~newton.solvers.SolverKamino` enforce them
-  exactly: a separated contact stops the bodies at the surface in the step in which they would
-  close its gap, and exerts no force when a sweep of the two shapes over the step shows that they
+- :class:`~newton.solvers.SolverMuJoCo` keeps its own compliant contact response, so footfalls and
+  other ordinary impacts behave exactly as with a contact gap that detects them in time. A body
+  that would pass a quarter of the thinner solid's smallest thickness within one substep (planes,
+  meshes and heightfields are surfaces and do not count) is bounded there however compliant the
+  contact is, so it cannot tunnel through thin geometry.
+- :class:`~newton.solvers.SolverKamino` resolves them in its velocity-level solve: the bodies stop
+  at the surface in the step in which they would close the gap.
+- In both, a contact exerts no force when a sweep of its two shapes over the step shows that they
   do not actually touch, for example when a body passes beside an edge.
 - Other solvers treat them like regular contacts. They detect the impact in time but may let the
   bodies penetrate or push on separated contacts along the contact normal.
+
+Contacts are predicted from the velocities at the :meth:`~CollisionPipeline.collide` call. A link
+that is thrown toward an obstacle only later in the interval, for example an arm whipped by an
+impact of the torso, is caught at the next collision update; call
+:meth:`~CollisionPipeline.collide` more often where that matters.
 
 .. _Common Patterns:
 
