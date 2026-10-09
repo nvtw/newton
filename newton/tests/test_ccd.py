@@ -190,11 +190,14 @@ def test_ccd_stops_moving_pair(test, device, solver_name):
     test.assertGreater(gaps.min(), 0.1 - 0.025 - 1.0e-3)
 
 
-def test_ccd_ignores_near_miss(test, device, solver_name):
+def test_ccd_ignores_near_miss(test, device, solver_name, wall):
     """A box passing 1 cm beside a wall edge at 5 m/s must keep its velocity: contacts whose
     shapes never touch must not act as ghost walls."""
     builder = _builder(gravity=False)
-    builder.add_shape_box(-1, hx=0.01, hy=0.5, hz=0.5)
+    if wall == "mesh":
+        builder.add_shape_mesh(-1, mesh=newton.Mesh.create_box(0.01, 0.5, 0.5, compute_inertia=False))
+    else:
+        builder.add_shape_box(-1, hx=0.01, hy=0.5, hz=0.5)
     body = builder.add_body(xform=wp.transform(wp.vec3(-0.5, 0.56, 0.0)))
     builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05)
     builder.body_qd[body] = (5.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -280,11 +283,19 @@ for _solver in ("mujoco", "kamino"):
         ("test_ccd_prevents_rotational_tunneling", test_ccd_prevents_rotational_tunneling),
         ("test_ccd_stops_articulated_link", test_ccd_stops_articulated_link),
         ("test_ccd_stops_moving_pair", test_ccd_stops_moving_pair),
-        ("test_ccd_ignores_near_miss", test_ccd_ignores_near_miss),
         ("test_ccd_keeps_fast_sliding_contact", test_ccd_keeps_fast_sliding_contact),
         ("test_ccd_graph_capture", test_ccd_graph_capture),
     ):
         add_function_test(TestCCD, f"{_name}_{_solver}", _func, devices=devices, solver_name=_solver)
+    for _wall in ("box", "mesh"):
+        add_function_test(
+            TestCCD,
+            f"test_ccd_ignores_near_miss_{_wall}_{_solver}",
+            test_ccd_ignores_near_miss,
+            devices=devices,
+            solver_name=_solver,
+            wall=_wall,
+        )
 # Kamino enforces speculative contacts in its velocity-level solve; compliance is a MuJoCo property.
 add_function_test(
     TestCCD,

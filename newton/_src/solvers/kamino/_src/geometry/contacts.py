@@ -37,6 +37,7 @@ from .....math import safe_div
 from .....sim.contacts import Contacts, contact_surface_point, contact_surface_separation
 from .....sim.model import Model
 from .....sim.state import State
+from .....utils.heightfield import HeightfieldData
 from ..core.bodies import is_immovable_for_kamino
 from ..core.materials import MaterialMixMode, make_get_mixed_material_pair_property
 from ..core.model import ModelKamino
@@ -1000,6 +1001,9 @@ def make_convert_contacts_newton_to_kamino(
         shape_source: wp.array[wp.uint64],
         shape_aabb_lower: wp.array[wp.vec3f],
         shape_aabb_upper: wp.array[wp.vec3f],
+        shape_heightfield_index: wp.array[wp.int32],
+        heightfield_data: wp.array[HeightfieldData],
+        heightfield_elevations: wp.array[wp.float32],
         # Outputs:
         kamino_model_active: wp.array[wp.int32],
         kamino_world_active: wp.array[wp.int32],
@@ -1115,6 +1119,9 @@ def make_convert_contacts_newton_to_kamino(
                 shape_source,
                 shape_aabb_lower,
                 shape_aabb_upper,
+                shape_heightfield_index,
+                heightfield_data,
+                heightfield_elevations,
                 body_q,
                 body_qd,
                 body_com,
@@ -1575,6 +1582,9 @@ def convert_contacts_newton_to_kamino(
             model.shape_source_ptr,
             model.shape_collision_aabb_lower,
             model.shape_collision_aabb_upper,
+            model.shape_heightfield_index,
+            model.heightfield_data,
+            model.heightfield_elevations,
         ],
         outputs=[
             contacts_out.model_active_contacts,

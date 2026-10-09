@@ -14,6 +14,7 @@ from ...geometry.ccd import shapes_meet_within
 from ...geometry.types import GeoType
 from ...sim import BodyFlags, JointTargetMode, JointType
 from ...sim.contacts import contact_surface_point, contact_surface_separation
+from ...utils.heightfield import HeightfieldData
 from .constants import (
     DEFAULT_LIMIT_SOLREF_DAMPRATIO,
     DEFAULT_LIMIT_SOLREF_TIMECONST,
@@ -460,6 +461,9 @@ def speculative_contact_dist(
     shape_source: wp.array[wp.uint64],
     shape_aabb_lower: wp.array[wp.vec3],
     shape_aabb_upper: wp.array[wp.vec3],
+    shape_heightfield_index: wp.array[int],
+    heightfield_data: wp.array[HeightfieldData],
+    heightfield_elevations: wp.array[float],
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
     body_com: wp.array[wp.vec3],
@@ -502,6 +506,9 @@ def speculative_contact_dist(
         shape_source,
         shape_aabb_lower,
         shape_aabb_upper,
+        shape_heightfield_index,
+        heightfield_data,
+        heightfield_elevations,
         body_q,
         body_qd,
         body_com,
@@ -588,6 +595,9 @@ def convert_newton_contacts_to_mjwarp_kernel(
     shape_source: wp.array[wp.uint64],
     shape_aabb_lower: wp.array[wp.vec3],
     shape_aabb_upper: wp.array[wp.vec3],
+    shape_heightfield_index: wp.array[int],
+    heightfield_data: wp.array[HeightfieldData],
+    heightfield_elevations: wp.array[float],
     opt_timestep: wp.array[float],
     contact_solref_base: wp.array[wp.vec2],
     contact_solimp_base: wp.array[vec5],
@@ -847,6 +857,9 @@ def convert_newton_contacts_to_mjwarp_kernel(
                 shape_source,
                 shape_aabb_lower,
                 shape_aabb_upper,
+                shape_heightfield_index,
+                heightfield_data,
+                heightfield_elevations,
                 body_q,
                 body_qd,
                 body_com,
@@ -960,6 +973,9 @@ def convert_newton_contacts_to_mjwarp_kernel(
                 shape_source,
                 shape_aabb_lower,
                 shape_aabb_upper,
+                shape_heightfield_index,
+                heightfield_data,
+                heightfield_elevations,
                 body_q,
                 body_qd,
                 body_com,
