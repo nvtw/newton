@@ -2351,9 +2351,6 @@ def _prepare_full_sparse_unilateral_schur(
     response_stride: wp.array[int32],
     compact_schur: wp.array[float32],
     compact_q: wp.array[float32],
-    enable_compact_schur: wp.bool,
-    block_iteration: int32,
-    solver_config: wp.array[DVIConfigStruct],
     body_space: wp.array[float32],
     solution_lambdas: wp.array[float32],
     workers_per_world: int32,
@@ -2362,16 +2359,13 @@ def _prepare_full_sparse_unilateral_schur(
     tid = wp.tid()
     lane = tid % workers_per_world
     wid = tid / workers_per_world
-    cfg = solver_config[wid]
-    if block_iteration >= int32(0) and block_iteration >= cfg.max_alternating_iterations:
-        return
     nbc = problem_nbc[wid]
     nl = problem_nl[wid]
     nc = problem_nc[wid]
     njc = problem_njc[wid]
     scalar_count = nbc + nl
     num_unilateral_rows = scalar_count + int32(3) * nc
-    if not enable_compact_schur or num_unilateral_rows == int32(0) or num_unilateral_rows > int32(512):
+    if num_unilateral_rows == int32(0) or num_unilateral_rows > int32(512):
         return
     if not _compact_schur_fits(njc, num_unilateral_rows, response_stride[wid]):
         return

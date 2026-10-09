@@ -782,9 +782,6 @@ def _launch_sparse_inequality_pgs(
                 state.bilateral_response_stride,
                 state.bilateral_response_factor,
                 state.s,
-                wp.bool(enable_compact_schur),
-                block_iteration,
-                path.data.config,
                 path.body_space,
                 path.data.solution.lambdas,
                 schur_workers,
@@ -1567,7 +1564,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     if use_scalar_response:
         wp.launch(
             kernel=_solve_bilateral_unilateral_response_compact,
-            dim=(path.size.num_worlds, max_unilateral_rows),
+            dim=(path.size.num_worlds, 128),
             inputs=[
                 problem.data.dim,
                 problem.data.njc,

@@ -617,22 +617,25 @@ def _solve_bilateral_unilateral_response_compact(
     factor_row_start: wp.array[int32],
 ):
     """Whiten permuted response columns independently for large compact batches."""
-    wid, unilateral = wp.tid()
+    wid, lane = wp.tid()
     njc = problem_njc[wid]
     nu = problem_dim[wid] - njc
-    if unilateral >= nu or not _compact_schur_fits(njc, nu, response_stride[wid]):
+    if not _compact_schur_fits(njc, nu, response_stride[wid]):
         return
     offset = response_mio[wid]
-    for row in range(njc):
-        original_row = bilateral_permutation[bilateral_vio[wid] + row]
-        value = bilateral_P[bilateral_vio[wid] + original_row] * coupling[offset + original_row * nu + unilateral]
-        for k in range(factor_row_start[bilateral_vio[wid] + row], row):
-            value -= (
-                bilateral_L[bilateral_mio[wid] + bilateral_ld[wid] * row + k] * response[offset + k * nu + unilateral]
+    # One block per world avoids scheduling workers for unused contact capacity.
+    for unilateral in range(lane, nu, 128):
+        for row in range(njc):
+            original_row = bilateral_permutation[bilateral_vio[wid] + row]
+            value = bilateral_P[bilateral_vio[wid] + original_row] * coupling[offset + original_row * nu + unilateral]
+            for k in range(factor_row_start[bilateral_vio[wid] + row], row):
+                value -= (
+                    bilateral_L[bilateral_mio[wid] + bilateral_ld[wid] * row + k]
+                    * response[offset + k * nu + unilateral]
+                )
+            response[offset + row * nu + unilateral] = (
+                value / bilateral_L[bilateral_mio[wid] + bilateral_ld[wid] * row + row]
             )
-        response[offset + row * nu + unilateral] = (
-            value / bilateral_L[bilateral_mio[wid] + bilateral_ld[wid] * row + row]
-        )
 
 
 @wp.kernel

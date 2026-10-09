@@ -262,7 +262,6 @@ class TestKaminoFullSchurAssembly(unittest.TestCase):
             (600, 513, 0, 0, 600),
             (2, 1, 1, 2, 2),
             (33, 0, 0, 0, 8),
-            (33, 3, 2, 2, 16),
         ]
         data = {
             name: []
@@ -294,14 +293,13 @@ class TestKaminoFullSchurAssembly(unittest.TestCase):
                 "response_stride",
                 "compact_schur",
                 "compact_q",
-                "solver_config",
                 "body_space",
                 "solution_lambdas",
             )
         }
         expected_s, expected_q = [], []
 
-        for wid, (n, nb, nl, nc, stride) in enumerate(cases):
+        for n, nb, nl, nc, stride in cases:
             nu = nb + nl + 3 * nc
             weighted = np.zeros((nu, 12))
             jacobian = np.zeros((nu, 12))
@@ -354,7 +352,7 @@ class TestKaminoFullSchurAssembly(unittest.TestCase):
             body = rng.normal(size=12).astype(np.float32)
             schur = rng.normal(size=n * stride).astype(np.float32)
             expected_matrix, expected_velocity = schur.copy(), q.copy()
-            if wid != len(cases) - 1 and 0 < nu <= 512 and nu * nu <= n * stride:
+            if 0 < nu <= 512 and nu * nu <= n * stride:
                 operator = (weighted @ jacobian.T) * p[None, n:] + np.diag(eta[n:])
                 expected_matrix[: nu * nu] -= operator.T.ravel()
                 expected_velocity[n:] = weighted @ body + eta[n:] * lambdas[n:] + vf[n:]
@@ -370,20 +368,13 @@ class TestKaminoFullSchurAssembly(unittest.TestCase):
                 ("compact_schur", schur),
             ):
                 data[name].extend(values)
-            config = DVIConfigStruct()
-            config.max_alternating_iterations = 0 if wid == len(cases) - 1 else 8
-            data["solver_config"].append(config)
 
         for device in wp.get_devices():
             arrays = {}
             for arg in kernel.adj.args:
                 name = arg.label
-                if name == "enable_compact_schur":
-                    arrays[name] = True
-                elif name == "workers_per_world":
+                if name == "workers_per_world":
                     arrays[name] = 128
-                elif name == "block_iteration":
-                    arrays[name] = 0
                 else:
                     arrays[name] = wp.array(data[name], dtype=arg.type.dtype, device=device)
             reference_s = None
