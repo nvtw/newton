@@ -46,7 +46,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _sparse_delassus_matvec_rows_path,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
-    _assemble_compact_unilateral_schur,
+    _assemble_compact_unilateral_schur_blocked,
     _assemble_compact_unilateral_schur_tiled,
     _color_compact_contact_groups,
     _color_mapped_dvi_inequalities,
@@ -3615,41 +3615,8 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(inequality_color_starts.numpy()[:2], [0, 4])
         np.testing.assert_array_equal(inequality_group_starts.numpy()[:5], [0, 1, 3, 4, 6])
 
-    def test_03g3a_dvi_compact_schur_matches_bilateral_correction(self):
-        """Preserve row/column orientation in the compact bilateral correction."""
-        coupling_np = np.array([[2.0, 3.0], [17.0, 19.0]], dtype=np.float32)
-        response_np = np.array([[5.0, 7.0], [11.0, 13.0]], dtype=np.float32)
-        compact_schur = wp.full(4, -1.0, dtype=wp.float32, device=self.device)
-        compact_q = wp.full(4, 9.0, dtype=wp.float32, device=self.device)
-        wp.launch(
-            kernel=_assemble_compact_unilateral_schur,
-            dim=1,
-            inputs=[
-                wp.array([4], dtype=wp.int32, device=self.device),
-                wp.array([2], dtype=wp.int32, device=self.device),
-                wp.array([0], dtype=wp.int32, device=self.device),
-                wp.array([0], dtype=wp.int32, device=self.device),
-                wp.array([2], dtype=wp.int32, device=self.device),
-                wp.array(coupling_np.ravel(), dtype=wp.float32, device=self.device),
-                wp.array(response_np.ravel(), dtype=wp.float32, device=self.device),
-                compact_schur,
-                compact_q,
-                False,
-                1,
-            ],
-            device=self.device,
-            block_dim=1,
-        )
-
-        expected = coupling_np.T @ response_np
-        np.testing.assert_allclose(compact_schur.numpy().reshape(2, 2), expected.T, rtol=1.0e-6)
-        np.testing.assert_array_equal(compact_q.numpy(), [9.0, 9.0, 0.0, 0.0])
-
-        deltas = np.array([0.25, -0.5], dtype=np.float32)
-        recurrence_q = -(expected[:, 0] * deltas[0] + expected[:, 1] * deltas[1])
-        bilateral_delta = -(response_np[:, 0] * deltas[0] + response_np[:, 1] * deltas[1])
-        np.testing.assert_allclose(recurrence_q, coupling_np.T @ bilateral_delta, rtol=1.0e-6)
-
+    def test_03g3a_dvi_compact_correction_selects_component(self):
+        """Select bounded, normal, and paired tangent corrections from compact rows."""
         component_q = wp.array([11.0, 22.0, 33.0], dtype=wp.float32, device=self.device)
         component_corrections = wp.empty(3, dtype=wp.vec2f, device=self.device)
         wp.launch(
@@ -3732,33 +3699,6 @@ class TestDVISolver(unittest.TestCase):
 
         np.testing.assert_allclose(reconstruct(True), expected_b, rtol=3.0e-6, atol=3.0e-6)
         np.testing.assert_allclose(reconstruct(False), expected_b, rtol=3.0e-6, atol=3.0e-6)
-
-    def test_03g3aa_dvi_compact_schur_skips_unprofitable_world(self):
-        """Leave scratch untouched when unilateral rows outnumber bilateral rows."""
-        compact_schur = wp.full(3, -1.0, dtype=wp.float32, device=self.device)
-        compact_q = wp.full(3, 9.0, dtype=wp.float32, device=self.device)
-        wp.launch(
-            kernel=_assemble_compact_unilateral_schur,
-            dim=1,
-            inputs=[
-                wp.array([3], dtype=wp.int32, device=self.device),
-                wp.array([1], dtype=wp.int32, device=self.device),
-                wp.array([0], dtype=wp.int32, device=self.device),
-                wp.array([0], dtype=wp.int32, device=self.device),
-                wp.array([2], dtype=wp.int32, device=self.device),
-                wp.ones(2, dtype=wp.float32, device=self.device),
-                wp.ones(2, dtype=wp.float32, device=self.device),
-                compact_schur,
-                compact_q,
-                False,
-                1,
-            ],
-            device=self.device,
-            block_dim=1,
-        )
-
-        np.testing.assert_array_equal(compact_schur.numpy(), [-1.0, -1.0, -1.0])
-        np.testing.assert_array_equal(compact_q.numpy(), [9.0, 9.0, 9.0])
 
     def test_03g3b_dvi_groups_contacts_in_private_pair_order(self):
         """Group geometry-pair contacts without changing their constraint indices."""
@@ -4308,8 +4248,10 @@ class TestDVISolver(unittest.TestCase):
 
         self.assertAlmostEqual(slips[0], slips[1], delta=1.0e-6)
 
-    def test_compact_schur_reference_uses_padded_stride(self):
-        """Store reference Schur output with the padded response stride."""
+    def test_compact_schur_preserves_padded_capacity(self):
+        """Pack both Gram implementations densely without overwriting padded capacity."""
+        if not self.device.is_cuda:
+            self.skipTest("Tiled Schur construction requires CUDA")
         njc, nu, stride, offset = 3, 2, 4, 3
         coupling = np.arange(1, njc * nu + 1, dtype=np.float32).reshape(njc, nu)
         lower = np.diag(np.array([1.0, 2.0, 3.0], dtype=np.float32))
@@ -4320,40 +4262,31 @@ class TestDVISolver(unittest.TestCase):
         def i32(values):
             return wp.array(values, dtype=wp.int32, device=self.device)
 
-        padded_coupling = np.zeros(capacity, dtype=np.float32)
-        padded_coupling[offset : offset + njc * stride] = np.pad(coupling, ((0, 0), (0, stride - nu))).ravel()
-        for use_forward_schur in (False, True):
-            with self.subTest(use_forward_schur=use_forward_schur):
-                coupling_input = np.full(capacity, np.nan, dtype=np.float32) if use_forward_schur else padded_coupling
-                response = np.zeros(capacity, dtype=np.float32)
-                if use_forward_schur:
-                    response[offset : offset + njc * nu] = white.ravel()
-                else:
-                    response[offset : offset + njc * stride] = np.pad(full, ((0, 0), (0, stride - nu))).ravel()
+        response = np.full(capacity, np.nan, dtype=np.float32)
+        response[offset : offset + njc * nu] = white.ravel()
+        for blocked in (False, True):
+            with self.subTest(blocked=blocked):
                 schur = wp.full(capacity, -123.0, dtype=wp.float32, device=self.device)
                 correction = wp.full(njc + nu, 99.0, dtype=wp.float32, device=self.device)
+                inputs = [
+                    i32([njc + nu]),
+                    i32([njc]),
+                    i32([0]),
+                    i32([offset]),
+                    i32([stride]),
+                    wp.array(response, dtype=wp.float32, device=self.device),
+                    schur,
+                    correction,
+                ]
                 wp.launch(
-                    _assemble_compact_unilateral_schur,
-                    dim=256,
-                    inputs=[
-                        i32([njc + nu]),
-                        i32([njc]),
-                        i32([0]),
-                        i32([offset]),
-                        i32([stride]),
-                        wp.array(coupling_input, dtype=wp.float32, device=self.device),
-                        wp.array(response, dtype=wp.float32, device=self.device),
-                        schur,
-                        correction,
-                        use_forward_schur,
-                        256,
-                    ],
-                    block_dim=256,
+                    _assemble_compact_unilateral_schur_blocked if blocked else _assemble_compact_unilateral_schur_tiled,
+                    dim=(1, 256) if blocked else (1, 16, 128),
+                    inputs=inputs if blocked else [*inputs, 16, 0],
+                    block_dim=256 if blocked else 128,
                     device=self.device,
                 )
                 expected = np.full(capacity, -123.0, dtype=np.float32)
-                expected_schur = expected[offset : offset + nu * stride].reshape(nu, stride)
-                expected_schur[:, :nu] = (coupling.T @ full).T
+                expected[offset : offset + nu * nu] = (coupling.T @ full).T.ravel()
                 np.testing.assert_allclose(schur.numpy(), expected, atol=1.0e-6, rtol=1.0e-6)
                 np.testing.assert_array_equal(correction.numpy(), [99.0] * njc + [0.0] * nu)
 
@@ -4494,20 +4427,17 @@ class TestDVISolver(unittest.TestCase):
         solve_response.launch()
         np.testing.assert_array_equal(response.numpy(), actual_response)
         wp.launch(
-            _assemble_compact_unilateral_schur,
-            dim=5 * 256,
+            _assemble_compact_unilateral_schur_blocked,
+            dim=(5, 256),
             inputs=[
                 dims,
                 joints,
                 i32(problem_offsets),
                 offsets,
                 strides,
-                coupling,
                 response,
                 workspace,
                 wp.zeros(int(totals.sum()), dtype=wp.float32, device=self.device),
-                True,
-                256,
             ],
             block_dim=256,
             device=self.device,
@@ -4541,10 +4471,9 @@ class TestDVISolver(unittest.TestCase):
                 np.testing.assert_allclose(
                     actual_response[offset : offset + n * nu].reshape(n, nu), white, atol=2.0e-6, rtol=2.0e-6
                 )
-                if nu <= n:
-                    np.testing.assert_allclose(
-                        actual_schur[offset : offset + nu * nu].reshape(nu, nu), schur.T, atol=5.0e-6, rtol=5.0e-6
-                    )
+                np.testing.assert_allclose(
+                    actual_schur[offset : offset + nu * nu].reshape(nu, nu), schur.T, atol=5.0e-6, rtol=5.0e-6
+                )
                 np.testing.assert_allclose(
                     tiled_schur[offset : offset + nu * nu].reshape(nu, nu), schur.T, atol=5.0e-6, rtol=5.0e-6
                 )

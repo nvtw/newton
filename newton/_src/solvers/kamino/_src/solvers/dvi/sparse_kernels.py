@@ -2019,47 +2019,6 @@ def _assemble_compact_unilateral_schur_blocked(
                             compact_schur[offset + col * nu + row] = accum[i, j]
 
 
-@wp.kernel
-def _assemble_compact_unilateral_schur(
-    problem_dim: wp.array[int32],
-    problem_njc: wp.array[int32],
-    problem_vio: wp.array[int32],
-    response_mio: wp.array[int32],
-    response_stride: wp.array[int32],
-    coupling: wp.array[float32],
-    response: wp.array[float32],
-    compact_schur: wp.array[float32],
-    compact_q: wp.array[float32],
-    use_forward_schur: bool,
-    workers_per_world: int32,
-):
-    """Assemble the compact correction from full responses or whitened columns."""
-    tid = wp.tid()
-    # CPU launches report a block width of one, so keep logical grouping explicit.
-    lane = tid % workers_per_world
-    wid = tid / workers_per_world
-    njc = problem_njc[wid]
-    nu = problem_dim[wid] - njc
-    if nu > njc:
-        return
-    offset = response_mio[wid]
-    stride = response_stride[wid]
-    for unilateral in range(lane, nu, workers_per_world):
-        compact_q[problem_vio[wid] + njc + unilateral] = float32(0.0)
-    # Store the Schur matrix transposed so a warp updating consecutive target
-    # rows reads consecutive values for a fixed source constraint.
-    for entry in range(lane, nu * nu, workers_per_world):
-        column = entry / nu
-        row = entry - column * nu
-        value = float32(0.0)
-        for bilateral in range(njc):
-            if use_forward_schur:
-                value += response[offset + bilateral * nu + row] * response[offset + bilateral * nu + column]
-            else:
-                value += coupling[offset + bilateral * stride + row] * response[offset + bilateral * stride + column]
-        compact_schur[offset + column * stride + row] = value
-
-
 @wp.func
 def _cooperative_sparse_bounded_update(
     bounded_id: int32,
