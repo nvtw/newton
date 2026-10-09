@@ -131,10 +131,7 @@ class DVISolver:
         self._unilateral_strides_host: list[int] = []
         self._max_unilateral_rows: int = 0
         self._num_joints: int = 0
-        self._joint_wid: wp.array[wp.int32] | None = None
-        self._joint_bid_B: wp.array[wp.int32] | None = None
-        self._joint_bid_F: wp.array[wp.int32] | None = None
-        self._joint_bounded_cts_offset: wp.array[wp.int32] | None = None
+        self._bounded_topology_inputs: list[wp.array[wp.int32]] = []
         self._body_inv_mass: wp.array[wp.float32] | None = None
 
         if model is not None:
@@ -208,10 +205,16 @@ class DVISolver:
         self._size = model.size
         self._device = model.device
         self._num_joints = model.size.sum_of_num_joints
-        self._joint_wid = model.joints.wid
-        self._joint_bid_B = model.joints.bid_B
-        self._joint_bid_F = model.joints.bid_F
-        self._joint_bounded_cts_offset = model.joints.bounded_cts_offset
+        self._bounded_topology_inputs = [
+            model.joints.wid,
+            model.joints.bid_B,
+            model.joints.bid_F,
+            model.joints.num_friction_cts,
+            model.joints.num_effort_cts,
+            model.joints.friction_cts_offset_total_cts,
+            model.joints.effort_cts_offset_total_cts,
+            model.info.total_cts_offset,
+        ]
         self._body_inv_mass = model.bodies.inv_m_i
         self._config = self._check_config(model, config)
         if len({c.unilateral_solver for c in self._config}) != 1:
@@ -706,11 +709,8 @@ class DVISolver:
                 kernel=_map_bounded_constraints,
                 dim=self._num_joints,
                 inputs=[
-                    self._joint_wid,
-                    self._joint_bid_B,
-                    self._joint_bid_F,
-                    self._joint_bounded_cts_offset,
-                    problem.data.bcio,
+                    *self._bounded_topology_inputs,
+                    problem.data.njc,
                     problem.data.iio,
                     state.inequality_bodies,
                 ],

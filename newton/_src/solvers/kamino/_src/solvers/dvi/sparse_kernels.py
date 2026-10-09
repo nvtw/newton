@@ -286,8 +286,12 @@ def _map_bounded_constraints(
     joint_wid: wp.array[int32],
     joint_bid_B: wp.array[int32],
     joint_bid_F: wp.array[int32],
-    joint_bounded_cts_offset: wp.array[int32],
-    problem_bcio: wp.array[int32],
+    joint_num_friction_cts: wp.array[int32],
+    joint_num_effort_cts: wp.array[int32],
+    joint_friction_cts_offset: wp.array[int32],
+    joint_effort_cts_offset: wp.array[int32],
+    world_cts_offset: wp.array[int32],
+    problem_njc: wp.array[int32],
     problem_uio: wp.array[int32],
     # Outputs:
     inequality_bodies: wp.array[wp.vec2i],
@@ -299,16 +303,13 @@ def _map_bounded_constraints(
     every step too rather than only once at solver finalization.
     """
     jid = wp.tid()
-    start = joint_bounded_cts_offset[jid]
-    end = joint_bounded_cts_offset[jid + 1]
-    if end <= start:
-        return
     wid = joint_wid[jid]
-    bcio = problem_bcio[wid]
-    uio = problem_uio[wid]
+    base = problem_uio[wid] - world_cts_offset[wid] - problem_njc[wid]
     pair = wp.vec2i(joint_bid_B[jid], joint_bid_F[jid])
-    for row in range(start, end):
-        inequality_bodies[uio + (row - bcio)] = pair
+    for row in range(joint_num_friction_cts[jid]):
+        inequality_bodies[base + joint_friction_cts_offset[jid] + row] = pair
+    for row in range(joint_num_effort_cts[jid]):
+        inequality_bodies[base + joint_effort_cts_offset[jid] + row] = pair
 
 
 @wp.kernel

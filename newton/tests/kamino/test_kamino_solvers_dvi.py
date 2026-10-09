@@ -1905,31 +1905,36 @@ class TestDVISolver(unittest.TestCase):
         np.testing.assert_array_equal(np.sort(inequality_ids_by_color.numpy()), np.arange(3))
 
     def test_03g5_dvi_map_bounded_constraints_writes_joint_body_pairs(self):
-        """Map each joint's bounded rows to its body pair and entity slot."""
-        joint_wid = wp.array([0, 0], dtype=wp.int32, device=self.device)
-        joint_bid_f = wp.array([0, 1], dtype=wp.int32, device=self.device)
-        joint_bid_b = wp.array([-1, 2], dtype=wp.int32, device=self.device)
-        joint_bounded_cts_offset = wp.array([0, 1, 2], dtype=wp.int32, device=self.device)
-        problem_bcio = wp.array([0], dtype=wp.int32, device=self.device)
-        problem_uio = wp.array([0], dtype=wp.int32, device=self.device)
-        inequality_bodies = wp.full(shape=2, value=wp.vec2i(-5, -5), dtype=wp.vec2i, device=self.device)
+        """Map mixed friction and effort rows in constraint order across worlds."""
+
+        def ints(values):
+            return wp.array(values, dtype=wp.int32, device=self.device)
+
+        inequality_bodies = wp.full(shape=14, value=wp.vec2i(-5, -5), dtype=wp.vec2i, device=self.device)
 
         wp.launch(
             kernel=_map_bounded_constraints,
-            dim=2,
+            dim=4,
             inputs=[
-                joint_wid,
-                joint_bid_b,
-                joint_bid_f,
-                joint_bounded_cts_offset,
-                problem_bcio,
-                problem_uio,
+                ints([0, 0, 1, 1]),
+                ints([-1, 0, -1, 2]),
+                ints([0, 1, 2, 3]),
+                ints([1, 1, 2, 0]),
+                ints([1, 1, 0, 1]),
+                ints([15, 16, 107, 109]),
+                ints([17, 18, 109, 109]),
+                ints([10, 100]),
+                ints([5, 7]),
+                ints([2, 9]),
                 inequality_bodies,
             ],
             device=self.device,
         )
 
-        np.testing.assert_array_equal(inequality_bodies.numpy(), [[-1, 0], [2, 1]])
+        expected = np.full((14, 2), -5, dtype=np.int32)
+        expected[2:6] = [[-1, 0], [0, 1], [-1, 0], [0, 1]]
+        expected[9:12] = [[-1, 2], [-1, 2], [2, 3]]
+        np.testing.assert_array_equal(inequality_bodies.numpy(), expected)
 
     def test_03i_dvi_coldstart_is_repeatable(self):
         """Repeat cold starts without clearing overwritten Schur workspace."""
