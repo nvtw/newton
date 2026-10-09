@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from itertools import product
 from types import SimpleNamespace
 from unittest import mock
 
@@ -327,7 +328,13 @@ def _solve_dvi(
 
 
 def _status_iteration_budget(solver: DVISolver, wid: int) -> int:
+    """Bound the backend's reported projected steps across unilateral phases."""
     config = solver.config[wid]
+    if config.unilateral_solver == "apgd":
+        phases = (
+            1 if config.use_schur_complement or solver._bilateral_solver is None else config.max_alternating_iterations
+        )
+        return phases * config.apgd.max_nonlinear_corrections * config.apgd.max_iterations
     return config.max_alternating_iterations * config.inequality_sweeps_per_iteration
 
 
@@ -1038,10 +1045,11 @@ class TestDVISolver(unittest.TestCase):
         body_force = np.zeros((model.body_count, 6), dtype=np.float32)
         body_force[body, 0] = applied_force
 
-        for sparse in (False, True):
-            with self.subTest(sparse=sparse):
+        for sparse, unilateral_solver in product((False, True), ("pgs", "apgd")):
+            with self.subTest(sparse=sparse, unilateral_solver=unilateral_solver):
                 config = SolverKamino.Config(
                     dynamics_solver="dvi",
+                    dvi=kamino_config.DVISolverConfig(unilateral_solver=unilateral_solver),
                     use_collision_detector=True,
                     sparse_dynamics=sparse,
                     sparse_jacobian=sparse,
@@ -1054,6 +1062,8 @@ class TestDVISolver(unittest.TestCase):
                 config.dvi.max_alternating_iterations = 200
                 config.dvi.tolerance = 1.0e-4
                 config.dvi.warmstart_mode = "none"
+                # Resolve sticking below the 1e-6 m/s rest-speed assertion.
+                config.dvi.apgd.tolerance = 1.0e-7
                 solver = SolverKamino(model, config=config)
                 state_0 = model.state()
                 state_1 = model.state()
@@ -2800,10 +2810,11 @@ class TestDVISolver(unittest.TestCase):
         model = builder.finalize(device=self.device)
 
         initial_speed = 3.0
-        for sparse in (False, True):
-            with self.subTest(sparse=sparse):
+        for sparse, unilateral_solver in product((False, True), ("pgs", "apgd")):
+            with self.subTest(sparse=sparse, unilateral_solver=unilateral_solver):
                 config = SolverKamino.Config(
                     dynamics_solver="dvi",
+                    dvi=kamino_config.DVISolverConfig(unilateral_solver=unilateral_solver),
                     use_collision_detector=True,
                     sparse_dynamics=sparse,
                     sparse_jacobian=sparse,
@@ -2845,7 +2856,8 @@ class TestDVISolver(unittest.TestCase):
                         )
 
                 self.assertTrue(contact_seen)
-                self.assertGreater(int(solver_dvi.data.state.inequality_num_colors.numpy()[0]), 0)
+                if unilateral_solver == "pgs":
+                    self.assertGreater(int(solver_dvi.data.state.inequality_num_colors.numpy()[0]), 0)
                 np.testing.assert_allclose(velocities, initial_speed, rtol=0.0, atol=1.0e-6)
                 self.assertLessEqual(max_tangent_impulse, 1.0e-8)
 
@@ -2870,10 +2882,11 @@ class TestDVISolver(unittest.TestCase):
         model = builder.finalize(device=self.device)
 
         expected_speeds = initial_speed - friction * 9.81 * dt * np.arange(1, steps + 1)
-        for sparse in (False, True):
-            with self.subTest(sparse=sparse):
+        for sparse, unilateral_solver in product((False, True), ("pgs", "apgd")):
+            with self.subTest(sparse=sparse, unilateral_solver=unilateral_solver):
                 config = SolverKamino.Config(
                     dynamics_solver="dvi",
+                    dvi=kamino_config.DVISolverConfig(unilateral_solver=unilateral_solver),
                     use_collision_detector=True,
                     sparse_dynamics=sparse,
                     sparse_jacobian=sparse,
@@ -2883,6 +2896,8 @@ class TestDVISolver(unittest.TestCase):
                         max_contacts_per_pair=8,
                     ),
                 )
+                # Resolve the correction for the analytical velocity/distance checks.
+                config.dvi.apgd.max_nonlinear_corrections = 8
                 solver = SolverKamino(model, config=config)
                 state_0 = model.state()
                 state_1 = model.state()
@@ -2922,10 +2937,11 @@ class TestDVISolver(unittest.TestCase):
 
             expected_speed = initial_speed - friction * 9.81 * dt * steps
             expected_distance = initial_speed * dt * steps - friction * 9.81 * dt * dt * steps * (steps + 1) / 2.0
-            for sparse in (False, True):
-                with self.subTest(friction=friction, sparse=sparse):
+            for sparse, unilateral_solver in product((False, True), ("pgs", "apgd")):
+                with self.subTest(friction=friction, sparse=sparse, unilateral_solver=unilateral_solver):
                     config = SolverKamino.Config(
                         dynamics_solver="dvi",
+                        dvi=kamino_config.DVISolverConfig(unilateral_solver=unilateral_solver),
                         use_collision_detector=True,
                         sparse_dynamics=sparse,
                         sparse_jacobian=sparse,
@@ -2935,6 +2951,8 @@ class TestDVISolver(unittest.TestCase):
                             max_contacts_per_pair=8,
                         ),
                     )
+                    # Resolve the correction for the analytical velocity/distance checks.
+                    config.dvi.apgd.max_nonlinear_corrections = 8
                     solver = SolverKamino(model, config=config)
                     state_0 = model.state()
                     state_1 = model.state()
@@ -2992,10 +3010,11 @@ class TestDVISolver(unittest.TestCase):
 
         expected_speed = initial_speed - friction * 9.81 * dt * steps
         expected_distance = initial_speed * dt * steps - friction * 9.81 * dt * dt * steps * (steps + 1) / 2.0
-        for sparse in (False, True):
-            with self.subTest(sparse=sparse):
+        for sparse, unilateral_solver in product((False, True), ("pgs", "apgd")):
+            with self.subTest(sparse=sparse, unilateral_solver=unilateral_solver):
                 config = SolverKamino.Config(
                     dynamics_solver="dvi",
+                    dvi=kamino_config.DVISolverConfig(unilateral_solver=unilateral_solver),
                     use_collision_detector=True,
                     sparse_dynamics=sparse,
                     sparse_jacobian=sparse,
@@ -3074,10 +3093,13 @@ class TestDVISolver(unittest.TestCase):
             builder.add_ground_plane(cfg=shape_cfg)
             model = builder.finalize(device=self.device)
 
-            for sparse in (False, True):
-                with self.subTest(angle=angle_degrees, friction=friction, sparse=sparse):
+            for sparse, unilateral_solver in product((False, True), ("pgs", "apgd")):
+                with self.subTest(
+                    angle=angle_degrees, friction=friction, sparse=sparse, unilateral_solver=unilateral_solver
+                ):
                     config = SolverKamino.Config(
                         dynamics_solver="dvi",
+                        dvi=kamino_config.DVISolverConfig(unilateral_solver=unilateral_solver),
                         use_collision_detector=True,
                         sparse_dynamics=sparse,
                         sparse_jacobian=sparse,
@@ -3139,10 +3161,11 @@ class TestDVISolver(unittest.TestCase):
         inertia_yy = float(model.body_inertia.numpy()[body][1, 1])
         expected_rolling_speed = initial_speed / (1.0 + inertia_yy / (mass * radius * radius))
 
-        for sparse in (False, True):
-            with self.subTest(sparse=sparse):
+        for sparse, unilateral_solver in product((False, True), ("pgs", "apgd")):
+            with self.subTest(sparse=sparse, unilateral_solver=unilateral_solver):
                 config = SolverKamino.Config(
                     dynamics_solver="dvi",
+                    dvi=kamino_config.DVISolverConfig(unilateral_solver=unilateral_solver),
                     use_collision_detector=True,
                     sparse_dynamics=sparse,
                     sparse_jacobian=sparse,
@@ -3410,6 +3433,92 @@ class TestDVISolver(unittest.TestCase):
         self.assertAlmostEqual(evaluate(-2.0), 2.5)
         self.assertAlmostEqual(evaluate(2.0), 3.0)
         self.assertAlmostEqual(evaluate(-20.0), 0.0)
+
+    def test_sparse_contacts_with_mixed_static_and_kinematic_supports(self):
+        """Keep grouped contact impulses independent of unused Jacobian storage."""
+
+        def i32(values):
+            return wp.array(values, dtype=wp.int32, device=self.device)
+
+        def f32(values):
+            return wp.array(values, dtype=wp.float32, device=self.device)
+
+        # Both supports map to the same immovable body for coloring. The
+        # kinematic support still has three extra (zero inverse-mass) blocks.
+        rows = np.eye(3, 6, dtype=np.float32)
+        for kinematic_first in (True, False):
+            with self.subTest(kinematic_first=kinematic_first):
+                supports = [0, -1] if kinematic_first else [-1, 0]
+                offsets = []
+                coords = []
+                jacobian = []
+                weighted = []
+                for contact, support in enumerate(supports):
+                    offsets.append(len(jacobian))
+                    coords.extend((3 * contact + axis, 6) for axis in range(3))
+                    jacobian.extend(rows)
+                    weighted.extend(rows)
+                    if support >= 0:
+                        coords.extend((3 * contact + axis, 0) for axis in range(3))
+                        jacobian.extend(-rows)
+                        weighted.extend(np.zeros_like(rows))
+                num_blocks = len(jacobian)
+                # Unused capacity must never affect a contact's three rows.
+                jacobian.extend(np.full((3, 6), np.nan, dtype=np.float32))
+                weighted.extend(np.full((3, 6), np.nan, dtype=np.float32))
+                coords.extend([(-1, -1)] * 3)
+                body_space = wp.zeros(12, dtype=wp.float32, device=self.device)
+                impulses = wp.zeros(6, dtype=wp.float32, device=self.device)
+                config = convert_config_to_struct(kamino_config.DVISolverConfig(max_alternating_iterations=1))
+                wp.launch(
+                    _solve_dvi_sparse_contacts_pgs,
+                    dim=1,
+                    inputs=[
+                        i32([num_blocks]),
+                        i32([0]),
+                        i32(coords),
+                        wp.array(weighted, dtype=vec6f, device=self.device),
+                        wp.array(jacobian, dtype=vec6f, device=self.device),
+                        i32([0]),
+                        i32([0]),
+                        i32(offsets),
+                        i32([0, 1]),
+                        wp.array([(support, 1) for support in supports], dtype=wp.vec2i, device=self.device),
+                        i32([0]),
+                        i32([2]),
+                        i32([0]),
+                        i32([0]),
+                        i32([0]),
+                        i32([0]),
+                        f32([0, 0]),
+                        f32([1] * 6),
+                        f32([0, 0, -1] * 2),
+                        f32([0] * 6),
+                        f32([1] * 6),
+                        f32([0] * 6),
+                        i32([1]),
+                        i32([0, 1]),
+                        i32([0, 1]),
+                        i32([0, 2]),
+                        f32([0, 0]),
+                        i32([0]),
+                        False,
+                        -1,
+                        -1,
+                        1,
+                        1,
+                        -1,
+                        wp.array([config], dtype=DVIConfigStruct, device=self.device),
+                        body_space,
+                        impulses,
+                    ],
+                    device=self.device,
+                    block_dim=1,
+                )
+                result = impulses.numpy().reshape(2, 3)
+                self.assertTrue(np.all(np.isfinite(result)), result)
+                self.assertAlmostEqual(float(result[:, 2].sum()), 1.0, places=5)
+                np.testing.assert_allclose(body_space.numpy()[6:], [0, 0, 1, 0, 0, 0], atol=1.0e-5)
 
     def test_03j2_sparse_dvi_refreshes_tangent_cross_cache(self):
         """Refresh tangent coupling before the fused friction phase."""
