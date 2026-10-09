@@ -1093,16 +1093,19 @@ def _build_sparse_bilateral_pairs(path: SparseDVIPath, problem: DualProblem) -> 
     for wid, count in enumerate(counts):
         start = starts[wid]
         njc = joint_counts[wid]
-        for local_i in range(count):
+        world_coords = coords[start : start + count].tolist()
+        blocks_by_body: dict[int, list[tuple[int, int]]] = {}
+        for local_block, (row, body_col) in enumerate(world_coords):
+            if row < njc:
+                blocks_by_body.setdefault(body_col, []).append((start + local_block, row))
+        for local_i, (row, body_col) in enumerate(world_coords):
             nzb_i = start + local_i
-            row = int(coords[nzb_i, 0])
-            body_col = int(coords[nzb_i, 1])
             if row >= njc:
                 continue
-            for local_j in range(count):
-                nzb_j = start + local_j
-                col = int(coords[nzb_j, 0])
-                if row < col < njc and body_col == int(coords[nzb_j, 1]):
+            # Only blocks on the same body can contribute; retain storage
+            # order within each group to preserve accumulation order.
+            for nzb_j, col in blocks_by_body[body_col]:
+                if row < col:
                     pair_wid.append(wid)
                     pair_row.append(row)
                     pair_col.append(col)
@@ -1129,11 +1132,12 @@ def _build_sparse_bilateral_row_nzb_topology(path: SparseDVIPath, problem: DualP
     row_offset = 0
     for count, matrix_start, njc in zip(counts, matrix_starts, joint_counts, strict=True):
         world_row_offsets.append(row_offset)
-        for row in range(njc):
-            for local_block in range(count):
-                block = matrix_start + local_block
-                if int(coords[block, 0]) == row:
-                    row_nzb_indices.append(block)
+        blocks_by_row = [[] for _ in range(njc)]
+        for local_block, (row, _) in enumerate(coords[matrix_start : matrix_start + count].tolist()):
+            if 0 <= row < njc:
+                blocks_by_row[row].append(matrix_start + local_block)
+        for row_blocks in blocks_by_row:
+            row_nzb_indices.extend(row_blocks)
             row_starts.append(len(row_nzb_indices))
         row_offset += njc
 

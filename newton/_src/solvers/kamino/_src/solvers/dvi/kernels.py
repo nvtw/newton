@@ -65,29 +65,6 @@ def _compute_row_velocity(
     return v
 
 
-@wp.func
-def _contact_velocity_aug(
-    ncts: int32,
-    mio: int32,
-    vio: int32,
-    ccgo: int32,
-    cio: int32,
-    cid: int32,
-    D: wp.array[float32],
-    v_f: wp.array[float32],
-    lambdas: wp.array[float32],
-    mu: wp.array[float32],
-) -> vec3f:
-    # Contact rows are [t0, t1, n]. De Saxce augments the normal velocity by
-    # mu * ||v_t|| before enforcing Coulomb-cone complementarity.
-    ccio = ccgo + 3 * cid
-    v_t0 = _compute_row_velocity(ncts, mio, vio, ccio + 0, D, v_f, lambdas)
-    v_t1 = _compute_row_velocity(ncts, mio, vio, ccio + 1, D, v_f, lambdas)
-    v_n = _compute_row_velocity(ncts, mio, vio, ccio + 2, D, v_f, lambdas)
-    vt_norm = wp.sqrt(v_t0 * v_t0 + v_t1 * v_t1)
-    return vec3f(v_t0, v_t1, v_n + mu[cio + cid] * vt_norm)
-
-
 @wp.kernel
 def _reset_dvi_solver_data(
     # Inputs:
