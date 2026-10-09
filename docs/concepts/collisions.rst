@@ -1438,42 +1438,37 @@ reduction preserves representative close-clearance and early-impact candidates.
 Continuous collision detection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Bodies that move farther than about half their thickness in one step can pass through thin
-static geometry without ever overlapping it at a collision update. Continuous collision
-detection (CCD) prevents this with a post-step pass: every fast body is swept from its pose
-at the last :meth:`CollisionPipeline.collide` call to its solved pose, and a body that would
-hit a static shape, mesh, or heightfield is moved back along its sweep to the earliest time
-of impact. The linear velocity towards the hit surface is removed there; tangential motion
-and spin are kept. The time of impact is found by conservative advancement on GJK distances.
-
-Enable CCD on the pipeline and call :meth:`CollisionPipeline.resolve_ccd` after each solver step:
+Between two :meth:`CollisionPipeline.collide` calls, a fast body or robot link can move farther
+than the contact gap and pass through thin geometry or another body without ever being in
+contact. Continuous collision detection (CCD) prevents this by keeping every contact that the
+current velocities can close before the next collision update:
 
 .. code-block:: python
 
     pipeline = newton.CollisionPipeline(model, ccd=True)
 
-    pipeline.collide(state_0, contacts, dt=sim_dt)
-    solver.step(state_0, state_1, control, contacts, sim_dt)
-    pipeline.resolve_ccd(state_1)
+    pipeline.collide(state_0, contacts, dt=frame_dt)  # time until the next collide() call
+    for _ in range(substeps):
+        solver.step(state_0, state_1, control, contacts, frame_dt / substeps)
+        state_0, state_1 = state_1, state_0
 
-``dt`` is required with CCD: :meth:`~CollisionPipeline.collide` sweeps the broad phase over
-the motion predicted from the current velocities, and :meth:`~CollisionPipeline.resolve_ccd`
-only checks the static shapes paired there. A shape counts as fast when its motion in the step
-exceeds half its smallest half-extent; all other shapes skip the time-of-impact query.
-A shape that already touches an obstacle at the start of the step is swept with a small core
-sphere at its center instead, so resting and sliding contacts do not stop the body. Mesh and
-heightfield triangles are one-sided: they are skipped when the shape starts behind them or approaches them
-by less than its core radius. The
-following steps rely on regular contacts, so keep a positive contact ``gap`` (the builder
-default) on CCD bodies.
+``ccd=True`` is shorthand for :ref:`speculative contacts <speculative-contacts>` without a cap on
+the closing distance. It applies to every pair of moving or static rigid shapes, including links
+of articulations, and the impact is resolved by the solver itself, so momentum flows through
+joints and into the other body.
+
+How well a solver uses these contacts depends on the solver:
+
+- :class:`~newton.solvers.SolverMuJoCo` enforces them exactly: a separated contact activates only
+  in the substep in which the bodies would close its gap, stops them at the surface, and exerts
+  no force when the two shapes do not actually touch, for example when a body passes beside an edge.
+- Other solvers treat them like regular contacts. They detect the impact in time but may let the
+  bodies penetrate or push on separated contacts along the contact normal.
 
 .. note::
 
-   CCD is opt-in and applies to free-floating dynamic bodies (one free joint to the world,
-   no child links) with convex primitive or convex mesh shapes. They are swept against static
-   convex shapes, planes, triangle meshes, and heightfields; kinematic bodies and other dynamic
-   bodies are not swept. Joint coordinates of moved bodies are updated, so reduced-coordinate solvers
-   such as :class:`~newton.solvers.SolverFeatherstone` are supported.
+   Triangle meshes have no thickness: a thin shape whose center crosses a triangle can still
+   lose that contact. Prefer heightfields or meshes with volume for terrain.
 
 .. _Common Patterns:
 

@@ -11,17 +11,8 @@ import numpy as np
 import warp as wp
 
 from ..core.reset import normalize_reset_world_mask
-from ..core.types import MAXVAL
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
 from ..geometry.broad_phase_sap import BroadPhaseSAP
-from ..geometry.ccd import (
-    CCD_NO_HIT,
-    CCD_PAIR_THREADS,
-    ccd_apply_kernel,
-    ccd_body_articulations,
-    ccd_pair_impact_kernel,
-    ccd_pick_hit_kernel,
-)
 from ..geometry.collision_core import compute_tight_aabb_from_support
 from ..geometry.contact_data import (
     CONTACT_SORT_SUB_KEY_BITS,
@@ -46,7 +37,6 @@ from ..geometry.support_function import (
 )
 from ..geometry.tri_mesh_collision import TriMeshCollisionDetector
 from ..geometry.types import GeoType
-from ..sim.articulation import eval_ik
 from ..sim.contacts import Contacts
 from ..sim.model import Model
 from ..sim.state import State
@@ -542,7 +532,6 @@ def compute_shape_velocities(
     shape_gap: wp.array[float],
     collision_update_dt: float,
     max_speculative_extension: float,
-    max_sweep_extension: float,
     # outputs
     shape_linear_velocity: wp.array[wp.vec3],
     shape_angular_velocity: wp.array[wp.vec3],
@@ -592,7 +581,7 @@ def compute_shape_velocities(
 
     displacement = shape_origin_velocity * collision_update_dt
     angular_extension = angular_speed_bound * collision_update_dt
-    cap = wp.vec3(max_sweep_extension)
+    cap = wp.vec3(max_speculative_extension)
     # Preserve absolute motion so pairwise subtraction retains relative velocity.
     shape_displacement[shape_id] = displacement
     angular_extension_vec = wp.min(wp.vec3(angular_extension), cap)
@@ -1258,6 +1247,10 @@ def _warn_full_surface_fallbacks(model: Model, capable: np.ndarray) -> None:
     )
 
 
+_CCD_SPECULATIVE_GAP_MAX = 1.0e6
+"""Speculative gap cap [m] used by ``ccd=True``; large enough to never limit a physical motion."""
+
+
 class CollisionPipeline:
     """
     Full-featured collision pipeline with GJK/MPR narrow phase and pluggable broad phase.
@@ -1435,10 +1428,11 @@ class CollisionPipeline:
                 ``0.0`` enables them without enlarging authored gaps. Defaults to
                 ``None``. See
                 :ref:`Speculative contacts <speculative-contacts>`.
-            ccd: Enable continuous collision detection for fast free-floating
-                rigid bodies. :meth:`collide` then requires ``dt`` and sweeps the
-                broad phase over the predicted motion, and :meth:`resolve_ccd`
-                must be called after each solver step. Defaults to ``False``. See
+            ccd: Enable continuous collision detection: keep every rigid contact that the
+                current velocities can close before the next :meth:`collide` call, without a
+                cap on the closing distance. Shorthand for an unbounded
+                ``speculative_contact_gap_max`` when that is not given; :meth:`collide` then
+                requires ``dt``. Defaults to ``False``. See
                 :ref:`Continuous collision detection <continuous-collision-detection>`.
 
         .. experimental::
@@ -1535,9 +1529,10 @@ class CollisionPipeline:
         self.reduce_contacts = reduce_contacts
         self.requires_grad = requires_grad
         self.include_static_kinematic_pairs = include_static_kinematic_pairs
+        if ccd and speculative_contact_gap_max is None:
+            speculative_contact_gap_max = _CCD_SPECULATIVE_GAP_MAX
         self.speculative_contact_gap_max = speculative_contact_gap_max
         self._speculative_enabled = speculative_contact_gap_max is not None
-        self.ccd = ccd
         contact_writer = write_contact_speculative if self._speculative_enabled else write_contact
 
         if using_expert_components:
@@ -1847,7 +1842,7 @@ class CollisionPipeline:
             self.broad_phase_shape_pairs = wp.zeros(self.shape_pairs_max, dtype=wp.vec2i, device=device)
             self.geom_data = wp.zeros(shape_count, dtype=wp.vec4, device=device)
             self.geom_transform = wp.zeros(shape_count, dtype=wp.transform, device=device)
-            if self._speculative_enabled or ccd:
+            if self._speculative_enabled:
                 self._shape_linear_velocity = wp.zeros(shape_count, dtype=wp.vec3, device=device)
                 self._shape_angular_velocity = wp.zeros(shape_count, dtype=wp.vec3, device=device)
                 self._shape_search_gap = wp.zeros(shape_count, dtype=wp.float32, device=device)
@@ -1857,15 +1852,6 @@ class CollisionPipeline:
                 self._shape_angular_velocity = wp.empty(0, dtype=wp.vec3, device=device)
                 self._shape_search_gap = wp.empty(0, dtype=wp.float32, device=device)
                 self._shape_displacement = wp.empty(0, dtype=wp.vec3, device=device)
-            if ccd:
-                self._ccd_body_articulation = wp.array(ccd_body_articulations(model), dtype=wp.int32, device=device)
-                self._ccd_body_q_start = wp.empty(model.body_count, dtype=wp.transform, device=device)
-                # Reset by ccd_apply_kernel after every use.
-                self._ccd_body_impact_time = wp.full(model.body_count, 1.0, dtype=wp.float32, device=device)
-                self._ccd_body_hit_pair = wp.full(model.body_count, CCD_NO_HIT, dtype=wp.int32, device=device)
-                self._ccd_pair_impact_time = wp.empty(self.shape_pairs_max, dtype=wp.float32, device=device)
-                self._ccd_pair_normal = wp.empty(self.shape_pairs_max, dtype=wp.vec3, device=device)
-                self._ccd_articulation_mask = wp.zeros(model.articulation_count, dtype=wp.bool, device=device)
 
         if (
             getattr(self.narrow_phase, "shape_aabb_lower", None) is None
@@ -2294,81 +2280,6 @@ class CollisionPipeline:
             device=model.device,
         )
 
-    def resolve_ccd(self, state: State):
-        """Move fast bodies that would pass through static shapes back to their time of impact.
-
-        Call after each solver step that consumed contacts from :meth:`collide`. Every fast,
-        free-floating dynamic body is swept from its pose at the last :meth:`collide` call to its
-        pose in ``state`` against the static shapes paired with it there. A body that hits one is
-        moved back along its sweep to the earliest time of impact, and its linear velocity towards
-        the hit surface is removed. Joint coordinates of moved bodies are updated as
-        well. Does nothing unless the pipeline was created with ``ccd=True``. See
-        :ref:`Continuous collision detection <continuous-collision-detection>`.
-
-        Args:
-            state: State produced by the solver step; updated in place.
-        """
-        if not self.ccd:
-            return
-        model = self.model
-        pair_threads = min(self.shape_pairs_max, CCD_PAIR_THREADS)
-        wp.launch(
-            ccd_pair_impact_kernel,
-            dim=pair_threads,
-            inputs=[
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
-                model.shape_body,
-                model.shape_type,
-                model.shape_transform,
-                self.geom_data,
-                model.shape_source_ptr,
-                model.shape_collision_aabb_lower,
-                model.shape_collision_aabb_upper,
-                model.shape_heightfield_index,
-                model.heightfield_data,
-                model.heightfield_elevations,
-                model.body_com,
-                self._ccd_body_articulation,
-                self._ccd_body_q_start,
-                state.body_q,
-            ],
-            outputs=[self._ccd_pair_impact_time, self._ccd_pair_normal, self._ccd_body_impact_time],
-            device=self.device,
-            record_tape=False,
-        )
-        wp.launch(
-            ccd_pick_hit_kernel,
-            dim=pair_threads,
-            inputs=[
-                self.broad_phase_shape_pairs,
-                self.broad_phase_pair_count,
-                model.shape_body,
-                self._ccd_pair_impact_time,
-                self._ccd_body_impact_time,
-            ],
-            outputs=[self._ccd_body_hit_pair],
-            device=self.device,
-            record_tape=False,
-        )
-        wp.launch(
-            ccd_apply_kernel,
-            dim=model.body_count,
-            inputs=[
-                model.body_com,
-                self._ccd_body_articulation,
-                self._ccd_body_impact_time,
-                self._ccd_body_hit_pair,
-                self._ccd_pair_normal,
-                self._ccd_body_q_start,
-            ],
-            outputs=[state.body_q, state.body_qd, self._ccd_articulation_mask],
-            device=self.device,
-            record_tape=False,
-        )
-        if state.joint_q is not None and model.articulation_count > 0:
-            eval_ik(model, state, state.joint_q, state.joint_qd, mask=self._ccd_articulation_mask)
-
     def collide(
         self,
         state: State,
@@ -2413,8 +2324,8 @@ class CollisionPipeline:
                 detection. Use :meth:`refit_soft_self_contact_bvh` directly
                 when an explicit full rebuild is needed.
             dt: Collision-update horizon [s]. Required when speculative
-                contacts or CCD are enabled. ``0.0`` disables velocity adaptation for
-                this call. Ignored when both are disabled. See
+                contacts are enabled. ``0.0`` disables velocity adaptation for
+                this call. Ignored when speculative contacts are disabled. See
                 :ref:`Speculative contacts <speculative-contacts>`.
         """
         # Keep the buffer's full-surface capability marker in sync with this pipeline on every call.
@@ -2444,25 +2355,20 @@ class CollisionPipeline:
             soft_contact_gap = soft_contact_margin
         else:
             soft_contact_gap = self.soft_contact_gap
-        if self._speculative_enabled or self.ccd:
+        if self._speculative_enabled:
             if dt is None:
-                raise ValueError("dt must be provided when speculative contacts or CCD are enabled")
+                raise ValueError("dt must be provided when speculative contacts are enabled")
             collision_update_dt = dt
             if not np.isfinite(collision_update_dt) or collision_update_dt < 0.0:
                 raise ValueError(f"dt must be a non-negative finite number, got {collision_update_dt!r}")
-        else:
-            collision_update_dt = 0.0
-        if self._speculative_enabled:
             max_speculative_extension = float(self.speculative_contact_gap_max)
             speculative_active = collision_update_dt > 0.0 and max_speculative_extension > 0.0
             search_gap = self._shape_search_gap if speculative_active else model.shape_gap
         else:
+            collision_update_dt = 0.0
             max_speculative_extension = 0.0
             speculative_active = False
             search_gap = model.shape_gap
-        # CCD needs every pair the uncapped predicted motion can reach as a sweep candidate.
-        sweep_active = speculative_active or (self.ccd and collision_update_dt > 0.0)
-        max_sweep_extension = MAXVAL if self.ccd else max_speculative_extension
 
         # Rigid contact detection -- broad phase + narrow phase.
         # These kernels hardcode record_tape=False internally so they are
@@ -2502,9 +2408,7 @@ class CollisionPipeline:
             record_tape=False,
         )
 
-        if self.ccd:
-            wp.copy(self._ccd_body_q_start, state.body_q)
-        if sweep_active:
+        if speculative_active:
             wp.launch(
                 kernel=compute_shape_velocities,
                 dim=model.shape_count,
@@ -2520,7 +2424,6 @@ class CollisionPipeline:
                     model.shape_gap,
                     collision_update_dt,
                     max_speculative_extension,
-                    max_sweep_extension,
                 ],
                 outputs=[
                     self._shape_linear_velocity,
@@ -2535,7 +2438,7 @@ class CollisionPipeline:
             )
 
         # Run broad phase (AABBs are already expanded by effective gaps, so pass None)
-        broad_phase_speculative_kwargs = {"shape_displacement": self._shape_displacement} if sweep_active else {}
+        broad_phase_speculative_kwargs = {"shape_displacement": self._shape_displacement} if speculative_active else {}
         if isinstance(self.broad_phase, BroadPhaseAllPairs):
             self.broad_phase.launch(
                 self.narrow_phase.shape_aabb_lower,
@@ -2556,8 +2459,8 @@ class CollisionPipeline:
                 **broad_phase_speculative_kwargs,
             )
         elif isinstance(self.broad_phase, BroadPhaseSAP):
-            if sweep_active:
-                broad_phase_speculative_kwargs["sort_axis_displacement_limit"] = max_sweep_extension
+            if speculative_active:
+                broad_phase_speculative_kwargs["sort_axis_displacement_limit"] = max_speculative_extension
             self.broad_phase.launch(
                 self.narrow_phase.shape_aabb_lower,
                 self.narrow_phase.shape_aabb_upper,

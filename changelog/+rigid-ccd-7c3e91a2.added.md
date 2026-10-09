@@ -1,1 +1,1 @@
-Add opt-in continuous collision detection for fast rigid bodies with `CollisionPipeline(ccd=True)` and `CollisionPipeline.resolve_ccd()`, which moves bodies that would pass through static shapes back to their time of impact.
+Add `CollisionPipeline(ccd=True)` for continuous collision detection: rigid contacts that the current velocities can close before the next `collide()` call are kept for all bodies, including articulation links, so fast bodies no longer tunnel through thin geometry or each other with solvers that enforce speculative contacts such as `SolverMuJoCo`.
