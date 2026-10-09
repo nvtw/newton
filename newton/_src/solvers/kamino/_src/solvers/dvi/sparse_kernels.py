@@ -3032,10 +3032,10 @@ def _scheduled_compact_id(
 @cache
 def make_compact_schur_pgs_kernel(max_rows: int):
     """Build a compact sweep with register storage matched to its row range."""
-    if max_rows not in (64, 128):
-        raise ValueError("Compact Schur kernels support 64 or 128 rows.")
+    if max_rows not in (32, 64, 128):
+        raise ValueError("Compact Schur kernels support 32, 64, or 128 rows.")
     chunks = max_rows // 32
-    min_rows = 0 if max_rows == 64 else 64
+    min_rows = 0 if max_rows <= 64 else 64
     vector = wp.types.vector(length=chunks, dtype=float32)
 
     @wp.func

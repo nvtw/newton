@@ -33,6 +33,7 @@ from .kernels import (
     _solve_bilateral_unilateral_response_compact,
     _solve_bilateral_unilateral_response_cooperative,
 )
+from .motor_condensation import MotorCondensation
 from .response import (
     _RESPONSE_WIDTH,
     _add_forward_bilateral_gradient,
@@ -147,6 +148,7 @@ class SparseDVIPath:
         self.body_space = wp.empty(shape=size.sum_of_num_body_dofs, dtype=wp.float32, device=device)
         self.parallel_contact_colors = wp.zeros(shape=1, dtype=wp.int32, device=device)
         self.joint_block_solver: JointBlockSolver | None = None
+        self.motor_condensation: MotorCondensation | None = None
         self.bilateral_solver = bilateral_solver
         self.use_schur_complement = use_schur_complement
         self.max_alternating_iterations = max_alternating_iterations
@@ -245,6 +247,8 @@ class SparseDVIPath:
                     operator.info.total_mat_size, dtype=wp.float32, device=self.device
                 )
                 self.bilateral_inverse = wp.zeros_like(self.bilateral_lower_inverse)
+
+        self.motor_condensation = MotorCondensation.create(self)
 
     def solve(self, problem: DualProblem) -> None:
         """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
@@ -870,47 +874,54 @@ def _launch_sparse_inequality_pgs(
                     block_dim=64,
                 )
     if cooperative_articulation and enable_compact_schur:
+        compact_inputs = [
+            state.limit_indices,
+            state.contact_indices,
+            problem.data.nbc,
+            problem.data.nl,
+            problem.data.nc,
+            problem.data.bcio,
+            problem.data.lio,
+            problem.data.cio,
+            problem.data.iio,
+            problem.data.bcgo,
+            problem.data.lcgo,
+            problem.data.ccgo,
+            problem.data.vio,
+            problem.data.mu,
+            problem.data.bound_lower,
+            problem.data.bound_upper,
+            problem.data.P,
+            problem.data.v_b,
+            state.scratch,
+            state.inequality_projected_diagonal,
+            problem.data.njc,
+            state.bilateral_response_mio,
+            state.bilateral_response_stride,
+            state.bilateral_response_factor,
+            state.s,
+            state.inequality_num_colors,
+            state.inequality_ids_by_color,
+            state.inequality_color_starts,
+            state.inequality_group_starts,
+            path.data.config,
+            path.data.status,
+            path.data.solution.lambdas,
+        ]
+        fallback_inputs = compact_inputs
+        if path.motor_condensation is not None:
+            fallback_inputs = list(compact_inputs)
+            fallback_inputs[4] = path.motor_condensation.prepare_candidates(compact_inputs)
         for max_rows in (64, 128):
             wp.launch(
                 kernel=make_compact_schur_pgs_kernel(max_rows),
                 dim=path.size.num_worlds * 32,
-                inputs=[
-                    state.limit_indices,
-                    state.contact_indices,
-                    problem.data.nbc,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.bcio,
-                    problem.data.lio,
-                    problem.data.cio,
-                    problem.data.iio,
-                    problem.data.bcgo,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.vio,
-                    problem.data.mu,
-                    problem.data.bound_lower,
-                    problem.data.bound_upper,
-                    problem.data.P,
-                    problem.data.v_b,
-                    state.scratch,
-                    state.inequality_projected_diagonal,
-                    problem.data.njc,
-                    state.bilateral_response_mio,
-                    state.bilateral_response_stride,
-                    state.bilateral_response_factor,
-                    state.s,
-                    state.inequality_num_colors,
-                    state.inequality_ids_by_color,
-                    state.inequality_color_starts,
-                    state.inequality_group_starts,
-                    path.data.config,
-                    path.data.status,
-                    path.data.solution.lambdas,
-                ],
+                inputs=fallback_inputs,
                 device=path.device,
                 block_dim=32,
             )
+        if path.motor_condensation is not None:
+            path.motor_condensation.publish(compact_inputs)
     if kernel == _solve_dvi_sparse_inequalities_pgs:
         kernel_inputs.extend(body_inputs)
     wp.launch(
