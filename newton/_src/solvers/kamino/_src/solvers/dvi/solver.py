@@ -1102,51 +1102,42 @@ class DVISolver:
             ],
             device=self.device,
         )
-        has_intermediate_bilateral_solve = any(self._bilateral_solve_after_block)
-        block_iterations = (
-            range(self._max_alternating_iterations) if has_intermediate_bilateral_solve else (_FUSED_BILATERAL_BLOCK,)
+        wp.launch(
+            kernel=_solve_dvi_inequalities_colored_pgs,
+            dim=self._size.num_worlds * threads_per_world,
+            inputs=[
+                problem.data.dim,
+                self._data.state.projected_mio,
+                problem.data.vio,
+                problem.data.nbc,
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.bcgo,
+                problem.data.lcgo,
+                problem.data.ccgo,
+                problem.data.bcio,
+                problem.data.cio,
+                problem.data.iio,
+                problem.data.mu,
+                problem.data.bound_lower,
+                problem.data.bound_upper,
+                self._data.state.projected_D,
+                problem.data.P,
+                problem.data.v_b,
+                _FUSED_BILATERAL_BLOCK,
+                self._data.state.inequality_num_colors,
+                self._data.state.inequality_ids_by_color,
+                self._data.state.inequality_color_starts,
+                self._data.config,
+                wp.bool(self.device.is_cuda),
+                self._data.status,
+                self._data.state.scratch,
+                self._data.state.v_aug,
+                self._data.solution.lambdas,
+            ],
+            device=self.device,
+            block_dim=threads_per_world,
         )
-        for block_iteration in block_iterations:
-            wp.launch(
-                kernel=_solve_dvi_inequalities_colored_pgs,
-                dim=self._size.num_worlds * threads_per_world,
-                inputs=[
-                    problem.data.dim,
-                    self._data.state.projected_mio,
-                    problem.data.vio,
-                    problem.data.nbc,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.bcgo,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.bcio,
-                    problem.data.cio,
-                    problem.data.iio,
-                    problem.data.mu,
-                    problem.data.bound_lower,
-                    problem.data.bound_upper,
-                    self._data.state.projected_D,
-                    problem.data.P,
-                    problem.data.v_b,
-                    block_iteration,
-                    self._data.state.inequality_num_colors,
-                    self._data.state.inequality_ids_by_color,
-                    self._data.state.inequality_color_starts,
-                    self._data.config,
-                    wp.bool(self.device.is_cuda and not has_intermediate_bilateral_solve),
-                    self._data.status,
-                    self._data.state.scratch,
-                    self._data.state.v_aug,
-                    self._data.solution.lambdas,
-                ],
-                device=self.device,
-                block_dim=threads_per_world,
-            )
-
-            if has_intermediate_bilateral_solve and self._should_solve_bilateral_after_block(block_iteration):
-                self._set_bilateral_active_dim(problem, block_iteration)
-                self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
 
         self._set_bilateral_active_dim(problem, -1)
         self._solve_bilateral_block(problem, active_dim=self._data.state.bilateral_active_dim)
@@ -1159,7 +1150,7 @@ class DVISolver:
                 problem.data.nl,
                 problem.data.nc,
                 self._data.config,
-                wp.bool(self.device.is_cuda and not has_intermediate_bilateral_solve),
+                wp.bool(self.device.is_cuda),
                 self._data.status,
             ],
             device=self.device,

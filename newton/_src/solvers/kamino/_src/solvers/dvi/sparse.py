@@ -67,7 +67,6 @@ from .sparse_kernels import (
     _prepare_contact_world_sort,
     _prepare_full_sparse_unilateral_schur,
     _reconstruct_fused_bilateral_solution,
-    _reset_active_bilateral_delta,
     _select_parallel_contact_colors,
     _set_sparse_bilateral_diagonal,
     _solve_dvi_compact_schur_pgs_cooperative,
@@ -1492,15 +1491,8 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
     )
     use_permutation = isinstance(path.bilateral_solver, LLTBlockedRCMSolver)
     permutation = path.bilateral_solver.P if use_permutation else state.projected_mio
-    has_intermediate_bilateral_solve = any(
-        path.should_solve_bilateral_after_block(block_iteration)
-        for block_iteration in range(path.max_alternating_iterations)
-    )
     enable_compact_schur = (
-        path.device.is_cuda
-        and path.size.max_of_num_bilateral_joint_cts >= 32
-        and path.max_alternating_iterations >= 4
-        and not has_intermediate_bilateral_solve
+        path.device.is_cuda and path.size.max_of_num_bilateral_joint_cts >= 32 and path.max_alternating_iterations >= 4
     )
     cooperative_fused_pgs = _can_use_cooperative_articulation(path)
     reuse_forward_bilateral = (
@@ -1719,34 +1711,14 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
         ],
         device=path.device,
     )
-    if not has_intermediate_bilateral_solve:
-        # A fixed bilateral response lets block-local barriers preserve colored GS across all sweeps.
-        _launch_sparse_inequality_pgs(
-            path,
-            problem,
-            _FUSED_BILATERAL_BLOCK,
-            enable_compact_schur=enable_compact_schur,
-            forward_bilateral=forward_bilateral,
-        )
-    else:
-        for block_iteration in range(path.max_alternating_iterations):
-            _launch_sparse_inequality_pgs(path, problem, block_iteration)
-            if not path.should_solve_bilateral_after_block(block_iteration):
-                continue
-            path.set_bilateral_active_dim(problem, block_iteration)
-            _solve_sparse_bilateral_block(
-                path, problem, active_dim=state.bilateral_active_dim, compact_coupling=enable_compact_schur
-            )
-            wp.launch(
-                kernel=_reset_active_bilateral_delta,
-                dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
-                inputs=[
-                    state.bilateral_active_dim,
-                    path.data.bilateral_operator.info.vio,
-                    state.bilateral_delta,
-                ],
-                device=path.device,
-            )
+    # A fixed bilateral response lets block-local barriers preserve colored GS across all sweeps.
+    _launch_sparse_inequality_pgs(
+        path,
+        problem,
+        _FUSED_BILATERAL_BLOCK,
+        enable_compact_schur=enable_compact_schur,
+        forward_bilateral=forward_bilateral,
+    )
 
     # Update the cached forward solve by Y * delta_lambda, then back-substitute.
     # The single-world capacity bound guarantees a whitened response layout.
@@ -1803,7 +1775,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             ],
             device=path.device,
         )
-    elif has_intermediate_bilateral_solve or not cooperative_fused_pgs or enable_compact_schur:
+    elif not cooperative_fused_pgs or enable_compact_schur:
         # Compact Schur stores whitened columns instead of full responses;
         # one fresh bilateral solve recovers the final joint impulses.
         path.set_bilateral_active_dim(problem, -1)
@@ -1829,7 +1801,7 @@ def _solve_sparse_with_bilateral_schur_complement(path: SparseDVIPath, problem: 
             ],
             device=path.device,
         )
-    if has_intermediate_bilateral_solve or not cooperative_fused_pgs:
+    if not cooperative_fused_pgs:
         wp.launch(
             kernel=_set_dvi_direct_status_iterations,
             dim=path.size.num_worlds,
