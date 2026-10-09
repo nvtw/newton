@@ -390,6 +390,10 @@ class ConstrainedDynamicsConfig(ConfigBase):
     Whether to cull speculative (= separated) contacts in the dynamics solve.
     These contacts have occasionally led to numerical instabilities, and
     can yield inaccurate restitutive impacts.
+
+    Contacts from a collision pipeline with speculative contacts (for example
+    ``CollisionPipeline(ccd=True)``) ignore this flag: a separated contact is
+    kept exactly when a sweep of its two shapes confirms they touch within the step.
     """
 
     @override

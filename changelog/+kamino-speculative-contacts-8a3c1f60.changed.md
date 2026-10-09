@@ -1,0 +1,1 @@
+`SolverKamino` keeps separated contacts from a `CollisionPipeline` with speculative contacts (for example `ccd=True`) exactly when a sweep of their shapes confirms they touch within the step, regardless of `cull_speculative_contacts`, so fast bodies stop at the surface without ghost forces from contacts they never reach.

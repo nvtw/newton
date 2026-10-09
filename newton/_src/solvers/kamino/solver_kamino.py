@@ -1115,6 +1115,9 @@ class SolverKamino(SolverBase, CouplingInterface):
                     friction_mix_mode=self._config.materials.friction_mix_mode,
                     restitution_mix_mode=self._config.materials.restitution_mix_mode,
                     cull_speculative_contacts=self._config.dynamics.cull_speculative_contacts,
+                    # Contacts from a speculative pipeline (e.g. ``ccd=True``) are kept exactly
+                    # when their shapes touch within the step.
+                    speculative_dt=dt if getattr(contacts, "_speculative", False) else 0.0,
                 )
         else:
             self._detector = None

@@ -1460,9 +1460,10 @@ joints and into the other body.
 
 How well a solver uses these contacts depends on the solver:
 
-- :class:`~newton.solvers.SolverMuJoCo` enforces them exactly: a separated contact activates only
-  in the substep in which the bodies would close its gap, stops them at the surface, and exerts
-  no force when the two shapes do not actually touch, for example when a body passes beside an edge.
+- :class:`~newton.solvers.SolverMuJoCo` and :class:`~newton.solvers.SolverKamino` enforce them
+  exactly: a separated contact stops the bodies at the surface in the step in which they would
+  close its gap, and exerts no force when a sweep of the two shapes over the step shows that they
+  do not actually touch, for example when a body passes beside an edge.
 - Other solvers treat them like regular contacts. They detect the impact in time but may let the
   bodies penetrate or push on separated contacts along the contact normal.
 

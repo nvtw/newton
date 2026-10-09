@@ -32,6 +32,7 @@ from typing import Literal
 
 import warp as wp
 
+from .....geometry.ccd import shapes_meet_within
 from .....math import safe_div
 from .....sim.contacts import Contacts, contact_surface_point, contact_surface_separation
 from .....sim.model import Model
@@ -944,6 +945,7 @@ def make_convert_contacts_newton_to_kamino(
     friction_mix_mode: MaterialMixMode = MaterialMixMode.AVERAGE,
     restitution_mix_mode: MaterialMixMode = MaterialMixMode.MIN,
     cull_speculative: bool = DEFAULT_CULL_SPECULATIVE_CONTACTS,
+    sweep_speculative: bool = False,
 ):
     """
     Generates a kernel to convert Newton contacts to the Kamino format.
@@ -953,6 +955,9 @@ def make_convert_contacts_newton_to_kamino(
         restitution_mix_mode: The mixing mode to use for restitution.
         cull_speculative: If ``True``, skip speculative contacts, i.e., contacts
             with positive margin-shifted distance.
+        sweep_speculative: If ``True``, keep a contact only when a sweep of its two
+            shapes over the step confirms that they touch, so contacts that would act
+            along a stale normal without touching are dropped.
 
     Returns:
         A kernel function that converts Newton contacts to the Kamino format.
@@ -985,6 +990,16 @@ def make_convert_contacts_newton_to_kamino(
         body_inv_mass: wp.array[wp.float32],
         body_inv_inertia: wp.array[wp.mat33f],
         body_flags: wp.array[wp.int32],
+        # Speculative-contact sweep (see sweep_speculative):
+        dt: wp.float32,
+        body_qd: wp.array[wp.spatial_vectorf],
+        body_com: wp.array[wp.vec3f],
+        shape_type: wp.array[wp.int32],
+        shape_transform: wp.array[wp.transformf],
+        shape_scale: wp.array[wp.vec3f],
+        shape_source: wp.array[wp.uint64],
+        shape_aabb_lower: wp.array[wp.vec3f],
+        shape_aabb_upper: wp.array[wp.vec3f],
         # Outputs:
         kamino_model_active: wp.array[wp.int32],
         kamino_world_active: wp.array[wp.int32],
@@ -1084,6 +1099,26 @@ def make_convert_contacts_newton_to_kamino(
         # made contact (positive gap distance).
         if wp.static(cull_speculative):
             if distance > 0.0:
+                return
+        if wp.static(sweep_speculative):
+            # Also sweep apparently penetrating contacts: their distance follows the normal fixed
+            # at collision time, which a body passing beside an edge crosses without touching.
+            if not shapes_meet_within(
+                sid_0,
+                sid_1,
+                dt,
+                shape_body,
+                shape_type,
+                shape_transform,
+                shape_scale,
+                newton_shape_margin,
+                shape_source,
+                shape_aabb_lower,
+                shape_aabb_upper,
+                body_q,
+                body_qd,
+                body_com,
+            ):
                 return
 
         # Ensure static body is always Kamino A, dynamic body is Kamino B
@@ -1403,6 +1438,7 @@ def convert_contacts_newton_to_kamino(
     friction_mix_mode: Literal["average", "multiply", "max", "min"] = "average",
     restitution_mix_mode: Literal["average", "multiply", "max", "min"] = "min",
     cull_speculative_contacts: bool = DEFAULT_CULL_SPECULATIVE_CONTACTS,
+    speculative_dt: float = 0.0,
 ):
     """
     Converts Newton's :class:`Contacts` to Kamino's :class:`ContactsKamino` format.
@@ -1447,6 +1483,11 @@ def convert_contacts_newton_to_kamino(
         cull_speculative_contacts:
             If ``True`` (the default), drop speculative contacts (contacts with
             positive margin-shifted distance).
+        speculative_dt:
+            Step [s] over which contacts are swept, for contacts from a pipeline with
+            speculative contacts. When positive, a contact is kept exactly when its
+            shapes touch within the step, overriding ``cull_speculative_contacts``.
+            Defaults to ``0.0`` (no sweep).
     """
     # Skip conversion if there are no contacts to convert or no capacity to store them.
     if contacts_out.model_max_contacts_host == 0 or contacts_in.rigid_contact_max == 0:
@@ -1492,7 +1533,8 @@ def convert_contacts_newton_to_kamino(
     _convert_contacts_newton_to_kamino = make_convert_contacts_newton_to_kamino(
         friction_mix_mode=MaterialMixMode.from_string(friction_mix_mode),
         restitution_mix_mode=MaterialMixMode.from_string(restitution_mix_mode),
-        cull_speculative=cull_speculative_contacts,
+        cull_speculative=cull_speculative_contacts and speculative_dt <= 0.0,
+        sweep_speculative=speculative_dt > 0.0,
     )
 
     # Launch the conversion kernel to convert Newton contacts to Kamino's format.
@@ -1524,6 +1566,15 @@ def convert_contacts_newton_to_kamino(
             model.body_inv_mass,
             model.body_inv_inertia,
             model.body_flags,
+            wp.float32(speculative_dt),
+            state.body_qd,
+            model.body_com,
+            model.shape_type,
+            model.shape_transform,
+            model.shape_scale,
+            model.shape_source_ptr,
+            model.shape_collision_aabb_lower,
+            model.shape_collision_aabb_upper,
         ],
         outputs=[
             contacts_out.model_active_contacts,

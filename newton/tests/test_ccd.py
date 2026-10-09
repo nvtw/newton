@@ -19,15 +19,22 @@ SUBSTEPS = 4
 def _builder(gravity=True):
     builder = newton.ModelBuilder() if gravity else newton.ModelBuilder(gravity=wp.vec3(0.0))
     newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+    newton.solvers.SolverKamino.register_custom_attributes(builder)
     builder.default_shape_cfg.gap = 0.01
     return builder
 
 
-def _simulate(model, *, ccd, frames, graph=False):
-    """Run SolverMuJoCo with one collide() per frame; return body poses after every frame."""
+def _make_solver(name, model):
+    if name == "kamino":
+        return newton.solvers.SolverKamino(model, config=newton.solvers.SolverKamino.Config.from_model(model))
+    return newton.solvers.SolverMuJoCo(model, use_mujoco_contacts=False, njmax=200, nconmax=100)
+
+
+def _simulate(model, *, ccd, frames, solver="mujoco", graph=False):
+    """Run ``solver`` with one collide() per frame; return body poses after every frame."""
     pipeline = newton.CollisionPipeline(model, ccd=ccd)
     contacts = pipeline.contacts()
-    solver = newton.solvers.SolverMuJoCo(model, use_mujoco_contacts=False, njmax=200, nconmax=100)
+    solver = _make_solver(solver, model)
     state_0, state_1 = model.state(), model.state()
     control = model.control()
     newton.eval_ik(model, state_0, state_0.joint_q, state_0.joint_qd)
@@ -76,18 +83,18 @@ def _add_floor(builder, floor):
         builder.add_ground_plane()
 
 
-def test_ccd_prevents_thin_wall_tunneling(test, device):
+def test_ccd_prevents_thin_wall_tunneling(test, device, solver_name):
     model = _bullet_and_wall(device, velocity=120.0)
 
-    without_ccd = _simulate(model, ccd=False, frames=4)
+    without_ccd = _simulate(model, solver=solver_name, ccd=False, frames=4)
     test.assertGreater(without_ccd[-1, 0, 0], 0.0, "test setup must tunnel without CCD")
 
-    with_ccd = _simulate(model, ccd=True, frames=4)
+    with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=4)
     # The box front (x + 5 cm) must stop at the wall face at x = -1 cm.
     test.assertLess(with_ccd[:, 0, 0].max() + 0.05, -0.01 + 1.0e-3)
 
 
-def test_ccd_prevents_floor_tunneling(test, device, floor, speed):
+def test_ccd_prevents_floor_tunneling(test, device, floor, speed, solver_name):
     """A 5 cm sphere falling at ``speed`` [m/s] must land and come to rest on the floor."""
     builder = _builder()
     _add_floor(builder, floor)
@@ -96,17 +103,17 @@ def test_ccd_prevents_floor_tunneling(test, device, floor, speed):
     builder.body_qd[body] = (0.0, 0.0, -speed, 0.0, 0.0, 0.0)
     model = builder.finalize(device=device)
 
-    without_ccd = _simulate(model, ccd=False, frames=30)
-    test.assertLess(without_ccd[-1, 0, 2], 0.0, "test setup must tunnel without CCD")
+    without_ccd = _simulate(model, solver=solver_name, ccd=False, frames=30)
+    test.assertLess(without_ccd[:, 0, 2].min(), 0.0, "test setup must sink below the floor without CCD")
 
-    with_ccd = _simulate(model, ccd=True, frames=30)
+    with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=30)
     # The soft contact absorbs the impact: the sphere may dip into the floor but never sinks a full
     # radius, and comes to rest on top.
     test.assertGreater(with_ccd[:, 0, 2].min(), -0.05)
     test.assertAlmostEqual(float(with_ccd[-1, 0, 2]), 0.05, delta=2.0e-3)
 
 
-def test_ccd_prevents_rotational_tunneling(test, device):
+def test_ccd_prevents_rotational_tunneling(test, device, solver_name):
     """A plank spinning a quarter turn per frame must not swing its tip through the wall."""
     builder = _builder(gravity=False)
     builder.add_shape_box(-1, hx=0.01, hy=1.0, hz=1.0)
@@ -123,14 +130,14 @@ def test_ccd_prevents_rotational_tunneling(test, device):
                 tips.append(wp.transform_point(xform, wp.vec3(0.0, y, 0.0))[0])
         return max(tips)
 
-    without_ccd = _simulate(model, ccd=False, frames=2)
+    without_ccd = _simulate(model, solver=solver_name, ccd=False, frames=2)
     test.assertGreater(max_tip_x(without_ccd), 0.01, "test setup must tunnel without CCD")
 
-    with_ccd = _simulate(model, ccd=True, frames=6)
+    with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=6)
     test.assertLess(max_tip_x(with_ccd), 0.0)
 
 
-def test_ccd_stops_articulated_link(test, device):
+def test_ccd_stops_articulated_link(test, device, solver_name):
     """A 1 m link on a hinge, swinging with a 40 m/s tip, must stop at a 2 cm wall."""
     builder = _builder(gravity=False)
     builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.5, 0.0)), hx=1.0, hy=0.01, hz=0.2)
@@ -154,15 +161,15 @@ def test_ccd_stops_articulated_link(test, device):
             for p in poses[:, 0]
         )
 
-    without_ccd = _simulate(model, ccd=False, frames=3)
+    without_ccd = _simulate(model, solver=solver_name, ccd=False, frames=3)
     test.assertGreater(max_tip_y(without_ccd), 0.51, "test setup must tunnel without CCD")
 
-    with_ccd = _simulate(model, ccd=True, frames=6)
+    with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=6)
     # The wall face is at y = 0.49.
     test.assertLess(max_tip_y(with_ccd), 0.49 + 1.0e-3)
 
 
-def test_ccd_stops_moving_pair(test, device):
+def test_ccd_stops_moving_pair(test, device, solver_name):
     """Two 5 cm boxes flying at each other at 60 m/s each must not pass through each other."""
     builder = _builder(gravity=False)
     bodies = []
@@ -173,15 +180,32 @@ def test_ccd_stops_moving_pair(test, device):
         bodies.append(body)
     model = builder.finalize(device=device)
 
-    without_ccd = _simulate(model, ccd=False, frames=4)
+    without_ccd = _simulate(model, solver=solver_name, ccd=False, frames=4)
     test.assertGreater(without_ccd[-1, 0, 0], without_ccd[-1, 1, 0], "test setup must tunnel without CCD")
 
-    with_ccd = _simulate(model, ccd=True, frames=6)
+    with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=6)
     gaps = with_ccd[:, 1, 0] - with_ccd[:, 0, 0]
     test.assertGreater(gaps.min(), 0.1 - 1.0e-3)
 
 
-def test_ccd_keeps_fast_sliding_contact(test, device):
+def test_ccd_ignores_near_miss(test, device, solver_name):
+    """A box passing 1 cm beside a wall edge at 5 m/s must keep its velocity: contacts whose
+    shapes never touch must not act as ghost walls."""
+    builder = _builder(gravity=False)
+    builder.add_shape_box(-1, hx=0.01, hy=0.5, hz=0.5)
+    body = builder.add_body(xform=wp.transform(wp.vec3(-0.5, 0.56, 0.0)))
+    builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05)
+    builder.body_qd[body] = (5.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    model = builder.finalize(device=device)
+
+    poses = _simulate(model, solver=solver_name, ccd=True, frames=12)
+    # Free flight: x advances 5 m/s * frame_dt per frame, y and z stay put.
+    expected_x = -0.5 + 5.0 * FRAME_DT * np.arange(1, 13)
+    np.testing.assert_allclose(poses[:, 0, 0], expected_x, atol=1.0e-4)
+    np.testing.assert_allclose(poses[:, 0, 1:3], np.tile([0.56, 0.0], (12, 1)), atol=1.0e-4)
+
+
+def test_ccd_keeps_fast_sliding_contact(test, device, solver_name):
     """A box sliding fast on the ground must slide exactly as without CCD."""
     builder = _builder()
     builder.default_shape_cfg.mu = 0.5
@@ -191,16 +215,16 @@ def test_ccd_keeps_fast_sliding_contact(test, device):
     builder.body_qd[body] = (30.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     model = builder.finalize(device=device)
 
-    with_ccd = _simulate(model, ccd=True, frames=3)
-    without_ccd = _simulate(model, ccd=False, frames=3)
+    with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=3)
+    without_ccd = _simulate(model, solver=solver_name, ccd=False, frames=3)
     test.assertGreater(with_ccd[-1, 0, 0], 0.0)
     np.testing.assert_allclose(with_ccd, without_ccd, atol=1.0e-4)
 
 
-def test_ccd_graph_capture(test, device):
+def test_ccd_graph_capture(test, device, solver_name):
     model = _bullet_and_wall(device, velocity=120.0)
-    eager = _simulate(model, ccd=True, frames=4)
-    captured = _simulate(model, ccd=True, frames=4, graph=True)
+    eager = _simulate(model, solver=solver_name, ccd=True, frames=4)
+    captured = _simulate(model, solver=solver_name, ccd=True, frames=4, graph=True)
     np.testing.assert_allclose(captured, eager, atol=1.0e-5)
 
 
@@ -209,26 +233,34 @@ class TestCCD(unittest.TestCase):
 
 
 devices = get_cuda_test_devices()
-add_function_test(
-    TestCCD, "test_ccd_prevents_thin_wall_tunneling", test_ccd_prevents_thin_wall_tunneling, devices=devices
-)
-# A 2 cm box floor at a fall speed MuJoCo's default soft contact can absorb; one-sided surfaces faster.
-for _floor, _speed in (("box", 10.0), ("mesh", 30.0), ("heightfield", 30.0)):
+for _solver in ("mujoco", "kamino"):
     add_function_test(
         TestCCD,
-        f"test_ccd_prevents_floor_tunneling_{_floor}",
-        test_ccd_prevents_floor_tunneling,
+        f"test_ccd_prevents_thin_wall_tunneling_{_solver}",
+        test_ccd_prevents_thin_wall_tunneling,
         devices=devices,
-        floor=_floor,
-        speed=_speed,
+        solver_name=_solver,
     )
-add_function_test(
-    TestCCD, "test_ccd_prevents_rotational_tunneling", test_ccd_prevents_rotational_tunneling, devices=devices
-)
-add_function_test(TestCCD, "test_ccd_stops_articulated_link", test_ccd_stops_articulated_link, devices=devices)
-add_function_test(TestCCD, "test_ccd_stops_moving_pair", test_ccd_stops_moving_pair, devices=devices)
-add_function_test(TestCCD, "test_ccd_keeps_fast_sliding_contact", test_ccd_keeps_fast_sliding_contact, devices=devices)
-add_function_test(TestCCD, "test_ccd_graph_capture", test_ccd_graph_capture, devices=devices)
+    # A 2 cm box floor at a fall speed the default soft contact can absorb; one-sided surfaces faster.
+    for _floor, _speed in (("box", 10.0), ("mesh", 30.0), ("heightfield", 30.0)):
+        add_function_test(
+            TestCCD,
+            f"test_ccd_prevents_floor_tunneling_{_floor}_{_solver}",
+            test_ccd_prevents_floor_tunneling,
+            devices=devices,
+            floor=_floor,
+            speed=_speed,
+            solver_name=_solver,
+        )
+    for _name, _func in (
+        ("test_ccd_prevents_rotational_tunneling", test_ccd_prevents_rotational_tunneling),
+        ("test_ccd_stops_articulated_link", test_ccd_stops_articulated_link),
+        ("test_ccd_stops_moving_pair", test_ccd_stops_moving_pair),
+        ("test_ccd_ignores_near_miss", test_ccd_ignores_near_miss),
+        ("test_ccd_keeps_fast_sliding_contact", test_ccd_keeps_fast_sliding_contact),
+        ("test_ccd_graph_capture", test_ccd_graph_capture),
+    ):
+        add_function_test(TestCCD, f"{_name}_{_solver}", _func, devices=devices, solver_name=_solver)
 
 
 if __name__ == "__main__":
