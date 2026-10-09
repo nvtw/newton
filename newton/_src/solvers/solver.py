@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from enum import Enum, IntEnum
@@ -710,6 +711,23 @@ class SolverBase:
                 state attributes are reset.
         """
         self._normalize_reset_world_mask(world_mask)
+
+    def _warn_if_ccd_contacts_not_enforced(self, contacts: Contacts | None) -> None:
+        """Warn once that this solver does not enforce contacts from ``CollisionPipeline(ccd=True)``.
+
+        Such contacts include separated pairs that may close within the step; solvers that treat them
+        like regular contacts detect impacts in time but may still let fast bodies pass through thin
+        geometry or push on bodies passing close by.
+        """
+        if contacts is None or not getattr(contacts, "_ccd", False) or getattr(self, "_warned_ccd", False):
+            return
+        self._warned_ccd = True
+        warnings.warn(
+            f"{type(self).__name__} treats contacts from CollisionPipeline(ccd=True) like regular contacts, "
+            "so fast bodies can still pass through thin geometry. SolverMuJoCo and SolverKamino enforce them.",
+            UserWarning,
+            stacklevel=3,
+        )
 
     def step(
         self,

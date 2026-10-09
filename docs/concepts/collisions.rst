@@ -1469,8 +1469,9 @@ How well a solver uses these contacts depends on the solver:
   at the surface in the step in which they would close the gap.
 - In both, a contact exerts no force when a sweep of its two shapes over the step shows that they
   do not actually touch, for example when a body passes beside an edge.
-- Other solvers treat them like regular contacts. They detect the impact in time but may let the
-  bodies penetrate or push on separated contacts along the contact normal.
+- Other solvers treat them like regular contacts and warn once when they receive contacts from a
+  ``ccd=True`` pipeline. They detect the impact in time but may let fast bodies pass through thin
+  geometry or push on bodies passing close by.
 
 Contacts are predicted from the velocities at the :meth:`~CollisionPipeline.collide` call. A link
 that is thrown toward an obstacle only later in the interval, for example an arm whipped by an

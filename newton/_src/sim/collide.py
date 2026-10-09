@@ -1529,6 +1529,7 @@ class CollisionPipeline:
         self.reduce_contacts = reduce_contacts
         self.requires_grad = requires_grad
         self.include_static_kinematic_pairs = include_static_kinematic_pairs
+        self._ccd = ccd
         if ccd and speculative_contact_gap_max is None:
             speculative_contact_gap_max = _CCD_SPECULATIVE_GAP_MAX
         self.speculative_contact_gap_max = speculative_contact_gap_max
@@ -2074,6 +2075,7 @@ class CollisionPipeline:
         # Contacts._enable_rigid_soft_full_surface_contact); edge/face records appear only when this is set.
         contacts._enable_rigid_soft_full_surface_contact = self.enable_rigid_soft_full_surface_contact
         contacts._speculative = self._speculative_enabled
+        contacts._ccd = self._ccd
 
         # attach custom attributes with assignment==CONTACT
         self.model._add_custom_attributes(contacts, Model.AttributeAssignment.CONTACT, requires_grad=self.requires_grad)
@@ -2335,6 +2337,7 @@ class CollisionPipeline:
         # ignore them. Mirrors the assignment in CollisionPipeline.contacts().
         contacts._enable_rigid_soft_full_surface_contact = self.enable_rigid_soft_full_surface_contact
         contacts._speculative = self._speculative_enabled
+        contacts._ccd = self._ccd
 
         # Counter zeroing and generation bump are fused into compute_shape_aabbs.
         # Only call contacts.clear() if clear_buffers mode is enabled (debug path).

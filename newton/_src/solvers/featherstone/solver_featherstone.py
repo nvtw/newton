@@ -488,6 +488,7 @@ class SolverFeatherstone(SolverBase, CouplingInterface):
         *,
         observables: SolverObservables | None = None,
     ) -> None:
+        self._warn_if_ccd_contacts_not_enforced(contacts)
         self._apply_module_options()
         self.validate_observables(observables)
         requires_grad = state_in.requires_grad

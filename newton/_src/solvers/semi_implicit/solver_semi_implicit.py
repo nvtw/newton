@@ -171,6 +171,7 @@ class SolverSemiImplicit(SolverBase, CouplingInterface):
             for simulations involving particle collisions.
             To disable it, set :attr:`newton.Model.particle_grid` to `None` prior to calling :meth:`step`.
         """
+        self._warn_if_ccd_contacts_not_enforced(contacts)
         self.validate_observables(observables, contacts)
         self._apply_module_options()
         with wp.ScopedTimer("simulate", False):

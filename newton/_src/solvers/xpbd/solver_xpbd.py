@@ -422,6 +422,7 @@ class SolverXPBD(SolverBase, CouplingInterface):
             dt: Time step size [s].
             observables: Optional solver observable arrays allocated by :meth:`observables`.
         """
+        self._warn_if_ccd_contacts_not_enforced(contacts)
         self._ensure_restitution_module_options()
         self._apply_module_options()
         self.validate_observables(observables, contacts)

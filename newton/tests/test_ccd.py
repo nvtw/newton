@@ -5,6 +5,7 @@
 
 import math
 import unittest
+import warnings
 
 import numpy as np
 import warp as wp
@@ -255,6 +256,26 @@ def test_ccd_graph_capture(test, device, solver_name):
     np.testing.assert_allclose(captured, eager, atol=1.0e-5)
 
 
+def test_ccd_warns_when_solver_does_not_enforce(test, device):
+    """Solvers that treat ccd=True contacts like regular contacts warn once; enforcing solvers do not."""
+    model = _bullet_and_wall(device, velocity=5.0)
+    for solver, ccd, expected in (
+        (newton.solvers.SolverXPBD(model), True, 1),
+        (newton.solvers.SolverXPBD(model), False, 0),
+        (_make_solver("mujoco", model), True, 0),
+    ):
+        pipeline = newton.CollisionPipeline(model, ccd=ccd, speculative_contact_gap_max=None if ccd else 0.5)
+        contacts = pipeline.contacts()
+        state_0, state_1 = model.state(), model.state()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for _ in range(2):
+                pipeline.collide(state_0, contacts, dt=FRAME_DT)
+                solver.step(state_0, state_1, model.control(), contacts, FRAME_DT)
+        messages = [w for w in caught if "CollisionPipeline(ccd=True)" in str(w.message)]
+        test.assertEqual(len(messages), expected, type(solver).__name__)
+
+
 class TestCCD(unittest.TestCase):
     pass
 
@@ -296,6 +317,12 @@ for _solver in ("mujoco", "kamino"):
             solver_name=_solver,
             wall=_wall,
         )
+add_function_test(
+    TestCCD,
+    "test_ccd_warns_when_solver_does_not_enforce",
+    test_ccd_warns_when_solver_does_not_enforce,
+    devices=devices,
+)
 # Kamino enforces speculative contacts in its velocity-level solve; compliance is a MuJoCo property.
 add_function_test(
     TestCCD,
