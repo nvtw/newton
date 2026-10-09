@@ -1441,7 +1441,7 @@ def _solve_sparse_with_bilateral_direct_block(path: SparseDVIPath, problem: Dual
     if delassus._needs_update:
         delassus.update()
     path.data.bilateral_operator.info.dim = path.data.bilateral_dim
-    _assemble_sparse_bilateral_block(path, problem, path.data.bilateral_operator.mat)
+    blocks.assemble(path, problem)
     blocks.prepare(path, problem)
     wp.capture_if(
         blocks.failure,

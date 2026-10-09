@@ -10,6 +10,7 @@ from unittest.mock import patch
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.kamino._src.core.types import vec6f
 from newton._src.solvers.kamino._src.solvers.dvi import sparse
 from newton._src.solvers.kamino._src.solvers.dvi.joint_blocks import JointBlockSolver, _build_topology
 
@@ -74,10 +75,31 @@ def _fixture(device):
         size=SimpleNamespace(num_worlds=worlds),
         model=SimpleNamespace(joints=joints, info=SimpleNamespace(total_cts_offset=ints([0, 64]))),
         data=SimpleNamespace(bilateral_dim=info.dim, bilateral_operator=operator, state=state),
-        bilateral_nzb_pairs=(ints(pair_world), ints(pair_row), ints(pair_col)),
+        bilateral_nzb_pairs=(ints(pair_world), ints(pair_row), ints(pair_col), *[ints(np.zeros(len(pair_world)))] * 3),
+        bilateral_entry_starts=ints(np.arange(len(pair_world) + 1)),
     )
     problem = SimpleNamespace(data=SimpleNamespace(dim=ints(n + nus), njc=info.dim))
     return path, problem, dense, matrix, mio, vio, rio, nus, scale, coupling
+
+
+def _packed_matrix(solver, matrix, mio, ld):
+    """Pack a CPU matrix reference, including identity padding for short groups."""
+    order = solver._schedule["order"].numpy()
+    rows = solver._schedule["rows"].numpy()
+    cols = solver._schedule["cols"].numpy()
+    packed = np.zeros((len(mio), solver._blocks, 6, 6), dtype=np.float32)
+    for world, offset in enumerate(mio):
+        for block, (row, col) in enumerate(zip(rows, cols, strict=True)):
+            for i in range(6):
+                for j in range(6):
+                    original_i, original_j = order[row * 6 + i], order[col * 6 + j]
+                    if original_i >= 0 and original_j >= 0:
+                        packed[world, block, i, j] = matrix[
+                            offset + max(original_i, original_j) * ld + min(original_i, original_j)
+                        ]
+                    elif row == col and i == j:
+                        packed[world, block, i, j] = 1.0
+    return packed.ravel()
 
 
 class TestKaminoJointBlocks(unittest.TestCase):
@@ -93,9 +115,10 @@ class TestKaminoJointBlocks(unittest.TestCase):
     def test_mixed_group_dense_reference(self):
         """Match dense solves and response Grams with padding and inactive worlds."""
         device = self._device()
-        path, problem, matrices, _, _, vio, rio, nus, scale, coupling = _fixture(device)
+        path, problem, matrices, matrix, mio, vio, rio, nus, scale, coupling = _fixture(device)
         solver = JointBlockSolver.create(path)
         self.assertIsNotNone(solver)
+        solver._matrix.assign(_packed_matrix(solver, matrix, mio, 20))
         solver.prepare(path, problem)
         self.assertEqual(int(solver.failure.numpy()[0]), 0)
         rng = np.random.default_rng(419)
@@ -131,6 +154,96 @@ class TestKaminoJointBlocks(unittest.TestCase):
             untouched[start : start + 16 * nu] = False
         np.testing.assert_array_equal(response[untouched], -123.0)
 
+    def test_direct_assembly_matches_original(self):
+        """Match original assembly after Jacobian, inertia, and compliance changes."""
+        device = self._device()
+        path, problem, _, _, mio, vio, *_ = _fixture(device)
+        rng = np.random.default_rng(80149)
+        groups = [[0, 3, 4, 5, 6], [1, 7, 8, 9, 10, 11], [2, 12, 13, 14, 15]]
+        owners = {row: group for group, rows in enumerate(groups) for row in rows}
+        body_sets = ((0,), (0, 1), (1,))
+        block_ids, entries = {}, []
+        for world in range(2):
+            for row in range(16):
+                for body in body_sets[owners[row]]:
+                    block_ids[world, row, body] = len(entries)
+                    entries.append((world, row, body))
+        pairs = [[] for _ in range(6)]
+        for world in range(2):
+            for row in range(16):
+                for col in range(row + 1, 16):
+                    for body in body_sets[owners[row]]:
+                        if body in body_sets[owners[col]]:
+                            values = (
+                                world,
+                                row,
+                                col,
+                                world * 2 + body,
+                                block_ids[world, row, body],
+                                block_ids[world, col, body],
+                            )
+                            for field, value in zip(pairs, values, strict=True):
+                                field.append(value)
+        pairs, starts = sparse.group_bilateral_pairs(pairs)
+
+        def ints(values):
+            return wp.array(values, dtype=wp.int32, device=device)
+
+        path.bilateral_nzb_pairs = tuple(ints(values) for values in pairs)
+        path.bilateral_entry_starts = ints(starts)
+        path.size.max_of_num_bilateral_joint_cts = 16
+        problem.data.vio = ints([0, 64])
+        diagonal = wp.zeros(128, dtype=wp.float32, device=device)
+        path.data.state.scratch = wp.empty_like(diagonal)
+        jacobian = wp.empty(len(entries), dtype=vec6f, device=device)
+        problem.delassus = SimpleNamespace(
+            constraint_jacobian=SimpleNamespace(nzb_values=jacobian),
+            diagonal=lambda destination: wp.copy(destination, diagonal),
+        )
+        inv_mass = wp.empty(4, dtype=wp.float32, device=device)
+        inv_inertia = wp.empty(4, dtype=wp.mat33f, device=device)
+        path.model.bodies = SimpleNamespace(inv_m_i=inv_mass)
+        path.model_data = SimpleNamespace(bodies=SimpleNamespace(inv_I_i=inv_inertia))
+        solver = JointBlockSolver.create(path)
+        self.assertIsNotNone(solver)
+        raw_values = rng.normal(0, 0.2, (len(entries), 6)).astype(np.float32)
+        reference = path.data.bilateral_operator.mat
+        for iteration in range(2):
+            values = raw_values.copy()
+            if iteration:
+                for index, (_, row, _) in enumerate(entries):
+                    if row in (0, 7):
+                        values[index] = 0.0
+            masses = np.array([0.5, 0.7, 0.9, 1.1], dtype=np.float32) * (iteration + 1)
+            inertias = np.array([np.diag([0.2 + i * 0.1, 0.7, 1.2]) for i in range(4)], dtype=np.float32)
+            inertias[:, 0, 1] = inertias[:, 1, 0] = 0.03 * (iteration + 1)
+            raw_diagonal = np.zeros(128, dtype=np.float32)
+            for index, (world, row, body) in enumerate(entries):
+                v, angular = values[index, :3], values[index, 3:]
+                bid = world * 2 + body
+                raw_diagonal[world * 64 + row] += masses[bid] * (v @ v) + angular @ inertias[bid] @ angular
+            # Positive passive joint compliance is part of the original diagonal.
+            for world in range(2):
+                raw_diagonal[world * 64 : world * 64 + 3] += np.array([0.2, 0.3, 0.4]) * (iteration + 1)
+            jacobian.assign(values)
+            inv_mass.assign(masses)
+            inv_inertia.assign(inertias)
+            diagonal.assign(raw_diagonal)
+            reference.zero_()
+            sparse._assemble_sparse_bilateral_block(path, problem, reference)
+            expected = _packed_matrix(solver, reference.numpy(), mio, 20)
+            expected_scale = path.data.state.bilateral_preconditioner.numpy()
+            path.data.state.bilateral_preconditioner.fill_(-99.0)
+            solver.assemble(path, problem)
+            np.testing.assert_allclose(solver._matrix.numpy(), expected, atol=2e-6, rtol=2e-6)
+            for world in range(2):
+                np.testing.assert_allclose(
+                    path.data.state.bilateral_preconditioner.numpy()[vio[world] : vio[world] + 16],
+                    expected_scale[vio[world] : vio[world] + 16],
+                    atol=1e-7,
+                    rtol=1e-7,
+                )
+
     def test_reject_nonchordal_topology(self):
         """Reject a four-cycle instead of silently dropping symbolic fill."""
         device = self._device()
@@ -156,6 +269,7 @@ class TestKaminoJointBlocks(unittest.TestCase):
         device = self._device(conditional=True)
         path, problem, matrices, matrix, mio, vio, *_ = _fixture(device)
         solver = JointBlockSolver.create(path)
+        solver._matrix.assign(_packed_matrix(solver, matrix, mio, 20))
         rhs = wp.ones(40, dtype=wp.float32, device=device)
         out = wp.zeros_like(rhs)
         solver.prepare(path, problem)
@@ -171,7 +285,7 @@ class TestKaminoJointBlocks(unittest.TestCase):
                 dims[1] = 33
             elif case == "factor":
                 current[mio[1]] = -1.0
-            path.data.bilateral_operator.mat.assign(current)
+            solver._matrix.assign(_packed_matrix(solver, current, mio, 20))
             problem.data.dim.assign(dims)
             wp.capture_launch(capture.graph)
             expected_failure = case != "valid"
@@ -202,7 +316,7 @@ class TestKaminoJointBlocks(unittest.TestCase):
             operator._needs_update = False
 
         operator.update = update
-        blocks = SimpleNamespace(failure=flag, prepare=lambda path, problem: None)
+        blocks = SimpleNamespace(failure=flag, prepare=lambda path, problem: None, assemble=lambda path, problem: None)
         path = SimpleNamespace(
             use_schur_complement=True,
             joint_block_solver=blocks,

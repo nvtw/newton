@@ -15,8 +15,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
+from ...core.math import FLOAT32_EPS
+from ...core.types import vec6f
 from ...linalg.factorize.llt_blocked_rcm import _sync_threads, get_float32_array_offset_ptr
-from .kernels import _compact_schur_fits
+from .kernels import BILATERAL_DIAGONAL_FLOOR, _compact_schur_fits
 
 if TYPE_CHECKING:
     from ...dynamics.dual import DualProblem
@@ -174,26 +176,78 @@ def _factor(
 
 
 @wp.kernel
-def _pack_matrix(
-    A: wp.array[wp.float32],
-    mio: wp.array[wp.int32],
-    ld: wp.array[wp.int32],
-    order: wp.array[wp.int32],
-    rows: wp.array[wp.int32],
-    cols: wp.array[wp.int32],
-    blocks: wp.array[wp.float32],
-    nb: int,
+def _initialize_dummy_rows(
+    order: wp.array[wp.int32], diagonal: wp.array[wp.int32], matrix: wp.array[wp.float32], num_blocks: int
 ):
-    w, e = wp.tid()
-    b = e // 36
-    i = order[rows[b] * 6 + (e % 36) // 6]
-    j = order[cols[b] * 6 + e % 6]
-    value = wp.float32(0)
-    if i >= 0 and j >= 0:
-        value = A[mio[w] + wp.max(i, j) * ld[w] + wp.min(i, j)]
-    elif rows[b] == cols[b] and (e % 36) // 6 == e % 6:
-        value = wp.float32(1)
-    blocks[w * nb * 36 + e] = value
+    world, row = wp.tid()
+    if order[row] < 0:
+        local = row % 6
+        matrix[world * num_blocks * 36 + diagonal[row // 6] * 36 + local * 7] = 1.0
+
+
+@wp.kernel
+def _assemble_diagonal(
+    njc: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    bilateral_vio: wp.array[wp.int32],
+    problem_diag: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    row_diagonal: wp.array[wp.int32],
+    matrix: wp.array[wp.float32],
+    num_blocks: int,
+):
+    world, row = wp.tid()
+    if row >= njc[world]:
+        return
+    diag = wp.abs(problem_diag[problem_vio[world] + row])
+    p = wp.sqrt(1.0 / (diag + FLOAT32_EPS))
+    scale[bilateral_vio[world] + row] = p
+    matrix[world * num_blocks * 36 + row_diagonal[row]] = p * diag * p + wp.float32(BILATERAL_DIAGONAL_FLOOR)
+
+
+@wp.kernel
+def _assemble_entries(
+    inv_mass: wp.array[wp.float32],
+    inv_inertia: wp.array[wp.mat33f],
+    entry_starts: wp.array[wp.int32],
+    pair_world: wp.array[wp.int32],
+    pair_row: wp.array[wp.int32],
+    pair_col: wp.array[wp.int32],
+    pair_body: wp.array[wp.int32],
+    pair_i: wp.array[wp.int32],
+    pair_j: wp.array[wp.int32],
+    jacobian: wp.array[vec6f],
+    bilateral_vio: wp.array[wp.int32],
+    scale: wp.array[wp.float32],
+    entry_target: wp.array[wp.int32],
+    block_rows: wp.array[wp.int32],
+    block_cols: wp.array[wp.int32],
+    num_blocks: int,
+    matrix: wp.array[wp.float32],
+):
+    entry = wp.tid()
+    first = entry_starts[entry]
+    value = wp.float32(0.0)
+    # Keep body accumulation and normalization in the dense assembly's order.
+    for pair in range(first, entry_starts[entry + 1]):
+        block_i = jacobian[pair_i[pair]]
+        block_j = jacobian[pair_j[pair]]
+        Jv_i = wp.vec3f(block_i[0], block_i[1], block_i[2])
+        Jv_j = wp.vec3f(block_j[0], block_j[1], block_j[2])
+        Jw_i = wp.vec3f(block_i[3], block_i[4], block_i[5])
+        Jw_j = wp.vec3f(block_j[3], block_j[4], block_j[5])
+        body = pair_body[pair]
+        value += inv_mass[body] * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, inv_inertia[body] @ Jw_j)
+    bvio = bilateral_vio[pair_world[first]]
+    value = scale[bvio + pair_row[first]] * value * scale[bvio + pair_col[first]]
+    target = entry_target[entry]
+    matrix[target] = value
+    local = target % (num_blocks * 36)
+    block = local // 36
+    if block_rows[block] == block_cols[block]:
+        # Diagonal tiles need both triangles; off-diagonal tiles have one owner.
+        cell = local % 36
+        matrix[target - cell + (cell % 6) * 6 + cell // 6] = value
 
 
 @wp.kernel
@@ -384,19 +438,87 @@ class JointBlockSolver:
             for name, value in metadata.items()
             if name not in ("n", "ng", "padded_n", "nb")
         }
-        self._matrix = wp.empty(self._worlds * self._blocks * 36, dtype=wp.float32, device=self._device)
+        self._matrix = wp.zeros(self._worlds * self._blocks * 36, dtype=wp.float32, device=self._device)
         self._factor = wp.empty_like(self._matrix)
         self._vector = wp.empty(self._worlds * self._padded, dtype=wp.float32, device=self._device)
         self.failure = wp.zeros(1, dtype=wp.int32, device=self._device)
 
+        order = np.asarray(metadata["order"], dtype=np.int32)
+        inverse = np.empty(self._n, dtype=np.int32)
+        inverse[order[order >= 0]] = np.flatnonzero(order >= 0)
+        diagonal = np.asarray(metadata["diagonal"], dtype=np.int32)
+        self._row_diagonal = wp.array(
+            diagonal[inverse // 6] * 36 + (inverse % 6) * 7, dtype=wp.int32, device=self._device
+        )
+        lookup = np.full((self._groups, self._groups), -1, dtype=np.int32)
+        lookup[np.asarray(metadata["rows"]), np.asarray(metadata["cols"])] = np.arange(self._blocks, dtype=np.int32)
+        first = path.bilateral_entry_starts.numpy()[:-1]
+        worlds = path.bilateral_nzb_pairs[0].numpy()[first]
+        i = inverse[path.bilateral_nzb_pairs[1].numpy()[first]]
+        j = inverse[path.bilateral_nzb_pairs[2].numpy()[first]]
+        swap = i // 6 < j // 6
+        rows, cols = np.where(swap, j, i), np.where(swap, i, j)
+        blocks = lookup[rows // 6, cols // 6]
+        offsets = worlds * (self._blocks * 36) + blocks * 36 + (rows % 6) * 6 + cols % 6
+        self._entry_target = wp.array(offsets, dtype=wp.int32, device=self._device)
+        # Numeric factorization has separate storage, so structural zeros and
+        # dummy identities need initialization only when the topology is built.
+        wp.launch(
+            _initialize_dummy_rows,
+            dim=(self._worlds, self._padded),
+            inputs=[self._schedule["order"], self._schedule["diagonal"], self._matrix, self._blocks],
+            device=self._device,
+        )
+
+    def assemble(self, path: SparseDVIPath, problem: DualProblem) -> None:
+        """Assemble normalized joint blocks directly from their body contributions."""
+        state = path.data.state
+        state.bilateral_preconditioner.zero_()
+        problem.delassus.diagonal(state.scratch)
+        wp.launch(
+            _assemble_diagonal,
+            dim=(self._worlds, self._n),
+            inputs=[
+                problem.data.njc,
+                problem.data.vio,
+                self._info.vio,
+                state.scratch,
+                state.bilateral_preconditioner,
+                self._row_diagonal,
+                self._matrix,
+                self._blocks,
+            ],
+            device=self._device,
+        )
+        if self._entry_target.size:
+            wp.launch(
+                _assemble_entries,
+                dim=self._entry_target.size,
+                inputs=[
+                    path.model.bodies.inv_m_i,
+                    path.model_data.bodies.inv_I_i,
+                    path.bilateral_entry_starts,
+                    *path.bilateral_nzb_pairs,
+                    problem.delassus.constraint_jacobian.nzb_values,
+                    self._info.vio,
+                    state.bilateral_preconditioner,
+                    self._entry_target,
+                    self._schedule["rows"],
+                    self._schedule["cols"],
+                    self._blocks,
+                    self._matrix,
+                ],
+                device=self._device,
+            )
+
     def prepare(self, path: SparseDVIPath, problem: DualProblem) -> None:
-        """Factor the already assembled, normalized matrix in original row order.
+        """Factor the already assembled, normalized joint blocks.
 
         Preserve its diagonal and regularization exactly. Unsupported dynamic
         dimensions or failed factors request the caller's original solve.
         """
         self.failure.zero_()
-        info, schedule = self._info, self._schedule
+        schedule = self._schedule
         wp.launch(
             _check_dimensions,
             dim=self._worlds,
@@ -406,21 +528,6 @@ class JointBlockSolver:
                 path.data.state.bilateral_response_stride,
                 self._n,
                 self.failure,
-            ],
-            device=self._device,
-        )
-        wp.launch(
-            _pack_matrix,
-            dim=(self._worlds, self._blocks * 36),
-            inputs=[
-                path.data.bilateral_operator.mat,
-                info.mio,
-                info.maxdim,
-                schedule["order"],
-                schedule["rows"],
-                schedule["cols"],
-                self._matrix,
-                self._blocks,
             ],
             device=self._device,
         )
