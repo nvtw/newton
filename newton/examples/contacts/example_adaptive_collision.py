@@ -23,7 +23,7 @@ import newton
 import newton.examples
 
 FPS = 60
-SUBSTEPS = 10
+SUBSTEPS = 20
 SPECULATIVE_GAP_MAX = 0.2
 
 BRICK_DEPTH = 0.18
@@ -196,6 +196,13 @@ class Example:
         self.viewer.log_state(self.state_0)
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
+
+    def test_post_step(self):
+        """Keep each scheduled frame within the speculative travel budget."""
+        if self.use_scheduler:
+            assert self.scheduler.interval_overflow.numpy()[0] == 0, (
+                "Scheduled motion exceeded the speculative travel budget; increase SUBSTEPS or SPECULATIVE_GAP_MAX"
+            )
 
     def test_final(self):
         body_q = self.state_0.body_q.numpy()
