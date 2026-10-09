@@ -260,32 +260,37 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
         np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-4, atol=1.0e-5)
 
     def test_parallel_factorization_with_partial_tile(self):
-        """Factorize and solve a system whose final tile is partial."""
-        n = 33
-        matrix = np.eye(n, dtype=np.float32) * 2.0
-        indices = np.arange(n - 1)
-        matrix[indices, indices + 1] = -0.25
-        matrix[indices + 1, indices] = -0.25
-        rhs = np.ones(n, dtype=np.float32)
+        """Handle partial tiles and clear panels removed between factorizations."""
+        for n in (33, 65):
+            with self.subTest(n=n):
+                matrix = np.eye(n, dtype=np.float32) * 2.0
+                indices = np.arange(n - 1)
+                matrix[indices, indices + 1] = -0.25
+                matrix[indices + 1, indices] = -0.25
+                rhs = np.ones(n, dtype=np.float32)
 
-        info = DenseSquareMultiLinearInfo()
-        info.finalize(dimensions=[n], dtype=wp.float32, device=self.default_device)
-        matrix_wp = wp.array(matrix.reshape(-1), dtype=wp.float32, device=self.default_device)
-        rhs_wp = wp.array(rhs, dtype=wp.float32, device=self.default_device)
-        result_wp = wp.zeros(n, dtype=wp.float32, device=self.default_device)
-        solver = LLTBlockedRCMSolver(
-            operator=DenseLinearOperatorData(info=info, mat=matrix_wp),
-            block_size=32,
-            reuse_permutation=True,
-            parallel_factorization=True,
-            device=self.default_device,
-        )
+                info = DenseSquareMultiLinearInfo()
+                info.finalize(dimensions=[n], dtype=wp.float32, device=self.default_device)
+                matrix_wp = wp.array(matrix.reshape(-1), dtype=wp.float32, device=self.default_device)
+                rhs_wp = wp.array(rhs, dtype=wp.float32, device=self.default_device)
+                result_wp = wp.zeros(n, dtype=wp.float32, device=self.default_device)
+                solver = LLTBlockedRCMSolver(
+                    operator=DenseLinearOperatorData(info=info, mat=matrix_wp),
+                    block_size=32,
+                    reuse_permutation=True,
+                    parallel_factorization=True,
+                    device=self.default_device,
+                )
 
-        solver.compute(matrix_wp)
-        solver.solve(rhs_wp, result_wp)
-
-        expected = np.linalg.solve(matrix, rhs)
-        np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-4, atol=1.0e-5)
+                for candidate in (matrix, np.eye(n, dtype=np.float32) * 2.0):
+                    matrix_wp.assign(candidate.reshape(-1))
+                    solver.compute(matrix_wp)
+                    solver.solve(rhs_wp, result_wp)
+                    expected = np.linalg.solve(candidate, rhs)
+                    np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-4, atol=1.0e-5)
+                # Disappearing panels must not retain values from the previous factor.
+                factor = solver.L.numpy().reshape(n, n)
+                np.testing.assert_allclose(np.tril(factor), np.eye(n) * np.sqrt(2.0), rtol=1.0e-6, atol=0.0)
 
     def test_cached_permutation_on_cpu_fallback(self):
         """Verify the CPU fallback reuses a cached permutation."""
