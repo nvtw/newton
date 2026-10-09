@@ -22,6 +22,62 @@ from newton._src.solvers.kamino._src.solvers.dvi.types import DVIState
 
 
 class TestKaminoBilateralRHS(unittest.TestCase):
+    def test_rhs_row_group_boundaries(self):
+        """Match dense products across row-group tails, empty inputs, and padded layouts."""
+        if not wp.is_cuda_available():
+            self.skipTest("Cooperative RHS row groups require CUDA")
+        device = wp.get_device("cuda:0")
+        rng = np.random.default_rng(917)
+        n, pvio, bvio, mio = 84, 3, 2, 5
+
+        def ints(values):
+            return wp.array(values, dtype=wp.int32, device=device)
+
+        def floats(values):
+            return wp.array(values, dtype=wp.float32, device=device)
+
+        for nu in (0, 15, 16, 17, 43, 65):
+            stride = nu + 7
+            coupling = rng.normal(0.0, 0.1, (n, nu)).astype(np.float32)
+            impulses = rng.normal(size=pvio + n + nu + 3).astype(np.float32)
+            free = rng.normal(size=impulses.size).astype(np.float32)
+            scale = rng.uniform(0.5, 1.5, bvio + n + 3).astype(np.float32)
+            expected = -scale[bvio : bvio + n] * (
+                coupling.astype(np.float64) @ impulses[pvio + n : pvio + n + nu] + free[pvio : pvio + n]
+            )
+            for compact in (False, True):
+                storage = np.full(mio + n * stride + 3, -999.0, dtype=np.float32)
+                active_stride = nu if compact else stride
+                storage[mio : mio + n * active_stride].reshape(n, active_stride)[:, :nu] = coupling
+                for workers in (8, 16, 32):
+                    with self.subTest(nu=nu, compact=compact, workers=workers):
+                        result = wp.full(bvio + n + 3, -123.0, dtype=wp.float32, device=device)
+                        wp.launch(
+                            _build_sparse_bilateral_rhs,
+                            dim=(1, n + 3, workers),
+                            inputs=[
+                                ints([pvio]),
+                                ints([n]),
+                                floats(free),
+                                ints([n + nu]),
+                                ints([mio]),
+                                ints([stride]),
+                                floats(storage),
+                                floats(impulses),
+                                compact,
+                                workers,
+                                ints([bvio]),
+                                floats(scale),
+                                result,
+                            ],
+                            device=device,
+                            block_dim=128,
+                        )
+                        actual = result.numpy()
+                        np.testing.assert_allclose(actual[bvio : bvio + n], expected, atol=2e-6, rtol=2e-6)
+                        np.testing.assert_array_equal(actual[:bvio], -123.0)
+                        np.testing.assert_array_equal(actual[bvio + n :], -123.0)
+
     def test_fused_matrix_free_inverse(self):
         """Match dense RHS and inverse products for both transpose layouts and inactive worlds."""
         if not wp.is_cuda_available():
@@ -220,7 +276,7 @@ class TestKaminoBilateralRHS(unittest.TestCase):
                         bilateral_scale = np.array([0.75, 1.25], dtype=np.float32)
                         result = wp.full(n + 7, -123.0, dtype=wp.float32, device=device)
                         reference = -bilateral_scale * (free[:n] + expected @ lambdas[n:])
-                        for workers in (8, 32) if device.is_cuda else (1,):
+                        for workers in (8, 16, 32) if device.is_cuda else (1,):
                             with self.subTest(workers=workers):
                                 wp.launch(
                                     _build_sparse_bilateral_rhs,

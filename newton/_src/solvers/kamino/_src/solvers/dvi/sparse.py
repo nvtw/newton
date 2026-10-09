@@ -1258,7 +1258,8 @@ def _solve_sparse_bilateral_block(
         )
         return
     if state._sparse_coupling_allocated:
-        workers = 8 if path.device.is_cuda else 1
+        # Wider row groups improve coupling loads in GPU-saturating batches.
+        workers = (16 if path.size.num_worlds >= 2048 else 8) if path.device.is_cuda else 1
         wp.launch(
             kernel=_build_sparse_bilateral_rhs,
             dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts, workers),
