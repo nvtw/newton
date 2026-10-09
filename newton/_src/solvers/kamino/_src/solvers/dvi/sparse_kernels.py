@@ -219,7 +219,6 @@ def _build_sparse_bilateral_rhs(
 @wp.kernel
 def _sparse_delassus_gemv_rows(
     # Matrix data:
-    dims: wp.array2d[int32],
     num_nzb: wp.array[int32],
     nzb_start: wp.array[int32],
     nzb_coords: wp.array2d[int32],
@@ -848,14 +847,12 @@ def _assemble_sparse_bilateral_unilateral_coupling(
     problem_nbc: wp.array[int32],
     problem_nl: wp.array[int32],
     problem_nc: wp.array[int32],
-    problem_bcio: wp.array[int32],
     problem_lio: wp.array[int32],
     problem_cio: wp.array[int32],
     problem_vio: wp.array[int32],
     problem_P: wp.array[float32],
     limit_indices: wp.array[int32],
     contact_indices: wp.array[int32],
-    friction_nzb_offsets: wp.array[wp.vec2i],
     limit_nzb_offsets: wp.array[int32],
     contact_nzb_offsets: wp.array[int32],
     bilateral_world_row_offsets: wp.array[int32],

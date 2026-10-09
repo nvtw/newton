@@ -171,8 +171,6 @@ class TestKaminoBilateralRHS(unittest.TestCase):
                 )
                 path = SimpleNamespace(jacobians=SimpleNamespace(joint_constraint_nzb_count=ints([6])), device=device)
                 _build_sparse_bilateral_row_nzb_topology(path, problem)
-                # The old per-joint bounded offsets interleave row groups.
-                per_joint_offsets = wp.array([[1, -1], [2, -1], [4, -1], [5, -1]], dtype=wp.vec2i, device=device)
                 dense_j = np.zeros((n + nu, 12))
                 for block, (row, col) in enumerate(coords):
                     dense_j[row, col : col + 6] = raw[block] * scale[row]
@@ -197,11 +195,9 @@ class TestKaminoBilateralRHS(unittest.TestCase):
                                 ints([0]),
                                 ints([0]),
                                 ints([0]),
-                                ints([0]),
                                 floats(scale),
                                 ints([-1]),
                                 ints([-1]),
-                                per_joint_offsets,
                                 ints([-1]),
                                 ints([-1]),
                                 *path.bilateral_row_nzb_topology,
