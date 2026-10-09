@@ -90,6 +90,8 @@ _SPARSE_DELASSUS_ROWS_UNILATERAL = 1
 _CONTACT_PAIR_SORT_MIN_CAPACITY = 4096
 _PARALLEL_CONTACT_MAX_COLORS = 8
 _PARALLEL_CONTACT_MIN_CAPACITY = 32768
+_MAX_ALTERNATING_BATCH_WORLDS = 2048
+_ALTERNATING_BATCH_INVERSE_ENTRIES = 16 * 1024 * 1024
 _SPARSE_INEQUALITY_TOPOLOGY_ERROR = "Sparse DVI inequalities require limit/contact topology and sparse Jacobians."
 
 
@@ -523,8 +525,13 @@ def _launch_sparse_inequality_pgs(
     block_iteration: int,
     enable_compact_schur: bool = False,
     forward_bilateral: bool = False,
+    *,
+    world_start: int = 0,
+    world_count: int | None = None,
 ) -> None:
-    """Apply colored sparse PGS, optionally recovering the initial gradient from a forward solve."""
+    """Apply colored sparse PGS, optionally to a batch of independent worlds."""
+    if world_count is None:
+        world_count = path.size.num_worlds
     state = path.data.state
     jacobians = path.jacobians
     if jacobians is None:
@@ -573,6 +580,8 @@ def _launch_sparse_inequality_pgs(
     if cooperative_articulation:
         kernel = _solve_dvi_sparse_inequalities_pgs_cooperative
         threads_per_world = 32
+    if (world_start != 0 or world_count != path.size.num_worlds) and kernel != _solve_dvi_sparse_inequalities_pgs:
+        raise ValueError("World batches require the general sparse PGS kernel.")
     if kernel == _solve_dvi_sparse_inequalities_pgs:
         if path.device.is_cuda:
             # Small batches need wider blocks; saturated batches benefit from more resident worlds.
@@ -599,6 +608,7 @@ def _launch_sparse_inequality_pgs(
             transpose.col_start,
             transpose.max_cols,
             column_major,
+            world_start,
         ]
     else:
         delassus.apply_jacobian_transpose(path.data.solution.lambdas, path.body_space, path.all_worlds_mask)
@@ -881,7 +891,7 @@ def _launch_sparse_inequality_pgs(
         kernel_inputs.extend(body_inputs)
     wp.launch(
         kernel=kernel,
-        dim=path.size.num_worlds * threads_per_world,
+        dim=world_count * threads_per_world,
         inputs=kernel_inputs,
         device=path.device,
         block_dim=threads_per_world,
@@ -1149,23 +1159,48 @@ def _build_sparse_bilateral_row_nzb_topology(path: SparseDVIPath, problem: DualP
     )
 
 
+def _can_use_fused_bilateral_inverse(path: SparseDVIPath) -> bool:
+    """Return whether the matrix-free inverse solve owns each world's complete RHS."""
+    return (
+        path.bilateral_inverse is not None
+        and not path.data.state._sparse_coupling_allocated
+        and path.device.is_cuda
+        and path.size.max_of_num_body_dofs <= 1024
+    )
+
+
+def _sparse_alternating_world_batch_size(path: SparseDVIPath) -> int:
+    """Bound inverse working sets so repeated solves can reuse the GPU cache."""
+    worlds = path.size.num_worlds
+    if (
+        worlds <= _MAX_ALTERNATING_BATCH_WORLDS
+        or path.size.max_of_max_contacts >= 2048
+        or not _can_use_fused_bilateral_inverse(path)
+    ):
+        return max(1, worlds)
+    rows = max(1, path.size.max_of_num_bilateral_joint_cts)
+    # Reserve at most 64 MiB for inverse data, leaving cache room for Jacobians
+    # and iterates. Power-of-two batches keep common replicated layouts aligned.
+    capacity = min(_MAX_ALTERNATING_BATCH_WORLDS, _ALTERNATING_BATCH_INVERSE_ENTRIES // (rows * rows))
+    return 1 << (max(1, capacity).bit_length() - 1)
+
+
 def _solve_sparse_bilateral_block(
     path: SparseDVIPath,
     problem: DualProblem,
     active_dim: wp.array[int32] | None = None,
     forward_only: bool = False,
     compact_coupling: bool = False,
+    *,
+    world_start: int = 0,
+    world_count: int | None = None,
 ) -> None:
+    if world_count is None:
+        world_count = path.size.num_worlds
     operator = path.data.bilateral_operator
     state = path.data.state
     solver = path.bilateral_solver
-    if (
-        path.bilateral_inverse is not None
-        and not state._sparse_coupling_allocated
-        and not forward_only
-        and path.device.is_cuda
-        and path.size.max_of_num_body_dofs <= 1024
-    ):
+    if not forward_only and _can_use_fused_bilateral_inverse(path):
         delassus = _get_sparse_delassus(problem)
         if delassus._needs_update:
             delassus.update()
@@ -1177,7 +1212,7 @@ def _solve_sparse_bilateral_block(
         body_capacity = 1 << (max(1, path.size.max_of_num_body_dofs) - 1).bit_length()
         wp.launch(
             make_sparse_bilateral_inverse_kernel(body_capacity),
-            dim=(path.size.num_worlds, 128),
+            dim=(world_count, 128),
             inputs=[
                 problem.data.vio,
                 problem.data.njc,
@@ -1200,11 +1235,14 @@ def _solve_sparse_bilateral_block(
                 *path.bilateral_row_nzb_topology,
                 delassus.bsm.nzb_coords,
                 delassus.bsm.nzb_values,
+                world_start,
             ],
             device=path.device,
             block_dim=128,
         )
         return
+    if world_start != 0 or world_count != path.size.num_worlds:
+        raise ValueError("World batches require the fused matrix-free bilateral inverse solve.")
     if not state._sparse_coupling_allocated:
         wp.launch(
             _zero_bilateral_lambdas,
@@ -1411,11 +1449,24 @@ def _solve_sparse_with_bilateral_alternation(path: SparseDVIPath, problem: DualP
         ],
         device=path.device,
     )
-    for block_iteration in range(path.max_alternating_iterations):
-        _launch_sparse_inequality_pgs(path, problem, block_iteration)
-        if path.should_solve_bilateral_after_block(block_iteration):
-            path.set_bilateral_active_dim(problem, block_iteration)
-            _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)
+    batch_size = _sparse_alternating_world_batch_size(path)
+    for world_start in range(0, path.size.num_worlds, batch_size):
+        world_count = min(batch_size, path.size.num_worlds - world_start)
+        for block_iteration in range(path.max_alternating_iterations):
+            _launch_sparse_inequality_pgs(
+                path, problem, block_iteration, world_start=world_start, world_count=world_count
+            )
+            if path.should_solve_bilateral_after_block(block_iteration):
+                # Active dimensions depend only on configuration and iteration,
+                # so the global mask can be reused by each independent batch.
+                path.set_bilateral_active_dim(problem, block_iteration)
+                _solve_sparse_bilateral_block(
+                    path,
+                    problem,
+                    active_dim=state.bilateral_active_dim,
+                    world_start=world_start,
+                    world_count=world_count,
+                )
 
     path.set_bilateral_active_dim(problem, -1)
     _solve_sparse_bilateral_block(path, problem, active_dim=state.bilateral_active_dim)

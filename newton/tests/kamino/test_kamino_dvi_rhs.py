@@ -148,6 +148,7 @@ class TestKaminoBilateralRHS(unittest.TestCase):
                                 ints(np.arange(n * 3)),
                                 ints(coords),
                                 wp.array(blocks, dtype=vec6f, device=device),
+                                0,  # world_start
                             ],
                             device=device,
                             block_dim=128,

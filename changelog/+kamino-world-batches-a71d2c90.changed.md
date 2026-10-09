@@ -1,0 +1,1 @@
+Improve large-batch Kamino DVI throughput by processing eligible matrix-free alternating solves in cache-sized groups of independent worlds, preserving per-world iteration budgets and solver settings without API changes.

@@ -956,6 +956,7 @@ class TestDVISolver(unittest.TestCase):
                     int32_array([0]),  # transpose_col_start
                     int32_array([6]),  # transpose_max_cols
                     column_major,  # transpose_column_major
+                    0,  # world_start
                 ],
                 device=self.device,
                 block_dim=threads_per_world,

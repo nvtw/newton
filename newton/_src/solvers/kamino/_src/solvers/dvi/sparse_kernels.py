@@ -1352,12 +1352,13 @@ def _solve_dvi_sparse_inequalities_pgs(
     transpose_col_start: wp.array[int32],
     transpose_max_cols: wp.array[int32],
     transpose_column_major: bool,
+    world_start: int32,
 ):
     """Apply one conflict-free sparse PGS schedule to every inequality."""
     tid = wp.tid()
     threads_per_world = int32(wp.block_dim())
     lane = tid % threads_per_world
-    wid = tid / threads_per_world
+    wid = tid / threads_per_world + world_start
     cfg = solver_config[wid]
     if block_iteration >= int32(0) and block_iteration >= cfg.max_alternating_iterations:
         return
@@ -3425,8 +3426,10 @@ def make_sparse_bilateral_inverse_kernel(body_capacity: int):
         bilateral_row_nzb_indices: wp.array[int32],
         bsm_nzb_coords: wp.array2d[int32],
         bsm_nzb_values: wp.array[vec6f],
+        world_start: int32,
     ):
         wid, lane = wp.tid()
+        wid += world_start
         n = active_dim[wid]
         njc = problem_njc[wid]
         pvio = problem_vio[wid]
