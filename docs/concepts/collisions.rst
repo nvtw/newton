@@ -1468,7 +1468,9 @@ How well a solver uses these contacts depends on the solver:
 - :class:`~newton.solvers.SolverKamino` resolves them in its velocity-level solve: the bodies stop
   at the surface in the step in which they would close the gap.
 - In both, a contact exerts no force when a sweep of its two shapes over the step shows that they
-  do not actually touch, for example when a body passes beside an edge.
+  do not actually touch, for example when a body passes beside an edge. The sweep covers convex
+  shapes against convex shapes, planes, and static meshes and heightfields; contacts between other
+  pairs, such as two moving meshes, are always kept. Hydroelastic contacts are not speculative.
 - Other solvers treat them like regular contacts and warn once when they receive contacts from a
   ``ccd=True`` pipeline. They detect the impact in time but may let fast bodies pass through thin
   geometry or push on bodies passing close by.
