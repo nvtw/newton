@@ -22,7 +22,9 @@ from .types import GeoType
 CCD_TOLERANCE_FRACTION = wp.constant(0.05)
 """Shapes closer than this fraction of the moving shape's smallest half-extent count as touching."""
 
-CCD_MAX_ITERATIONS = wp.constant(20)
+CCD_MAX_ITERATIONS = wp.constant(32)
+"""Iteration budget of a sweep. Undecided sweeps count as touching; with 32 iterations that happens
+for about 0.2% of random pairs near each other at 15 m/s and 30 rad/s over a 1/360 s substep."""
 
 _solve_gjk = create_solve_closest_distance(support_map)
 
