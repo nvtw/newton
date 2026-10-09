@@ -1453,9 +1453,22 @@ class TestDVISolver(unittest.TestCase):
                 warmstart=WarmStartMode.NONE,
             )
             fallback.coldstart()
-            with mock.patch.object(
-                problem.delassus, "apply_jacobian_transpose", wraps=problem.delassus.apply_jacobian_transpose
-            ) as body_products:
+            launch = wp.launch
+
+            def launch_one_warp(kernel, *args, **kwargs):
+                # Exercise the large-batch schedule on this heterogeneous reference problem.
+                if self.device.is_cuda and kernel is _solve_dvi_sparse_inequalities_pgs:
+                    worlds = kwargs["dim"] // kwargs["block_dim"]
+                    kwargs["dim"] = worlds * 32
+                    kwargs["block_dim"] = 32
+                return launch(kernel, *args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    problem.delassus, "apply_jacobian_transpose", wraps=problem.delassus.apply_jacobian_transpose
+                ) as body_products,
+                mock.patch.object(wp, "launch", side_effect=launch_one_warp),
+            ):
                 fallback.solve(problem)
         self.assertEqual(fallback.data.state.bilateral_coupling.size, 1)
         # The small CUDA inverse path also fuses matrix-free RHS construction.
