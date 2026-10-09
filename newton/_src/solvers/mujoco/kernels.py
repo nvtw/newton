@@ -407,10 +407,13 @@ SPECULATIVE_BOUND_IMPEDANCE = wp.constant(0.99)
 
 
 @wp.func
-def _has_thickness(shape_type: int) -> bool:
+def _has_thickness(shape_type: int, body: int) -> bool:
     """Whether a shape is a solid whose smallest half-extent bounds how deep it can be penetrated
-    before contact normals flip; planes, meshes and heightfields are surfaces."""
-    return not (shape_type == GeoType.PLANE or shape_type == GeoType.MESH or shape_type == GeoType.HFIELD)
+    before contact normals flip. Planes and heightfields are surfaces, and so are static meshes such
+    as terrain; a mesh on a body is a solid link."""
+    if shape_type == GeoType.PLANE or shape_type == GeoType.HFIELD:
+        return False
+    return shape_type != GeoType.MESH or body >= 0
 
 
 @wp.func
@@ -475,7 +478,7 @@ def speculative_contact_dist(
     MuJoCo then activates it in the substep after they touch, which follows its compliant contact
     model closely, so ordinary impacts such as footfalls keep that behavior. Only a body that would
     pass a core depth within one substep, a fraction of the thinner solid in the pair (planes,
-    meshes and heightfields are surfaces and do not count), would tunnel through thin geometry or
+    heightfields and static meshes are surfaces and do not count), would tunnel through thin geometry or
     flip the contact normal. For it the row bounds the normal velocity so the bodies reach the core
     depth and no farther: ``v_n >= -max(dist - margin + core, 0) / timestep``. The bound only limits
     the approach and is used only while it demands more than the contact's own response, so a body
@@ -516,9 +519,9 @@ def speculative_contact_dist(
         return wp.max(dist, margin + MJ_MINVAL), False
 
     extent = float(1.0e10)
-    if _has_thickness(shape_type[shape_a]):
+    if _has_thickness(shape_type[shape_a], body_a):
         extent = _min_half_extent(shape_a, shape_aabb_lower, shape_aabb_upper)
-    if _has_thickness(shape_type[shape_b]):
+    if _has_thickness(shape_type[shape_b], body_b):
         extent = wp.min(extent, _min_half_extent(shape_b, shape_aabb_lower, shape_aabb_upper))
     bound = step + wp.max(gap + SPECULATIVE_CORE_FRACTION * extent, 0.0)
     if bound < 0.0:
@@ -834,6 +837,10 @@ def convert_newton_contacts_to_mjwarp_kernel(
         tid_to_cid[tid] = cid
 
         if speculative:
+            # Friction rows fall back to solref when solreffriction is zero; pin them to the contact's
+            # own solref so a bounding normal row does not stiffen friction.
+            if solreffriction[0] == 0.0 and solreffriction[1] == 0.0:
+                solreffriction = solref
             # The fast path switches between these and the bounding row as the gap closes.
             contact_solref_base[cid] = solref
             contact_solimp_base[cid] = solimp
@@ -950,10 +957,7 @@ def convert_newton_contacts_to_mjwarp_kernel(
             rigid_contact_margin1[tid] - shape_margin[shape_b],
         )
         if speculative:
-            worldid = body_a // bodies_per_world
-            if body_a < 0:
-                worldid = body_b // bodies_per_world
-            timestep = opt_timestep[worldid % opt_timestep.shape[0]]
+            timestep = opt_timestep[contact_worldid_out[cid] % opt_timestep.shape[0]]
             dist, bound = speculative_contact_dist(
                 dist,
                 contact_includemargin_out[cid],

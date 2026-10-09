@@ -58,12 +58,6 @@ def _pose_at(q0: wp.transform, q1: wp.transform, com: wp.vec3, t: float) -> wp.t
 
 
 @wp.func
-def _rotation_angle(q0: wp.transform, q1: wp.transform) -> float:
-    d = wp.abs(wp.dot(wp.transform_get_rotation(q0), wp.transform_get_rotation(q1)))
-    return 2.0 * wp.acos(wp.min(d, 1.0))
-
-
-@wp.func
 def _gap(
     geom_a: GenericShapeData,
     xform_a: wp.transform,
@@ -133,13 +127,13 @@ def _sweep_meets(
     qa0: wp.transform,
     qa1: wp.transform,
     com_a: wp.vec3,
-    radius_a: float,
+    rotation_a: float,
     geom_b: GenericShapeData,
     xform_b: wp.transform,
     qb0: wp.transform,
     qb1: wp.transform,
     com_b: wp.vec3,
-    radius_b: float,
+    rotation_b: float,
     infinite_plane_b: bool,
     offset: float,
     target: float,
@@ -147,13 +141,13 @@ def _sweep_meets(
     """Whether two shapes on moving bodies come within ``target`` [m] of each other.
 
     Conservative advancement on the relative motion: the gap closes at most at the relative
-    translation along the normal plus each body's rotation angle times its bounding radius.
-    Undecided searches count as meeting.
+    translation along the normal plus each body's rotation ``rotation_*`` [m], its angle of
+    rotation over the sweep times its bounding radius. Undecided searches count as meeting.
     """
     translation = (wp.transform_point(qa1, com_a) - wp.transform_point(qa0, com_a)) - (
         wp.transform_point(qb1, com_b) - wp.transform_point(qb0, com_b)
     )
-    rotation = _rotation_angle(qa0, qa1) * radius_a + _rotation_angle(qb0, qb1) * radius_b
+    rotation = rotation_a + rotation_b
     t = float(0.0)
     for _ in range(CCD_MAX_ITERATIONS):
         gap, normal = _gap(
@@ -224,9 +218,14 @@ def shapes_meet_within(
         qa0 = body_q[body_a]
         com_a = body_com[body_a]
     qa1 = qa0
+    # Rotation angles come from the angular speed directly: recovering them from the two
+    # orientations loses small angles to float32 rounding.
+    angle_a = float(0.0)
     if body_a >= 0:
         qa1 = _predicted_pose(qa0, body_qd[body_a], com_a, dt)
+        angle_a = wp.length(wp.spatial_bottom(body_qd[body_a])) * dt
     radius_a = wp.length(wp.transform_point(xform_a, center_a) - com_a) + wp.length(half_a) + shape_margin[shape_a]
+    rotation_a = angle_a * radius_a
     target = CCD_TOLERANCE_FRACTION * wp.min(half_a[0], wp.min(half_a[1], half_a[2]))
     identity = wp.transform_identity()
 
@@ -253,7 +252,7 @@ def shapes_meet_within(
                     qa0,
                     qa1,
                     com_a,
-                    radius_a,
+                    rotation_a,
                     geom_tri,
                     wp.transform(v0, wp.quat_identity()),
                     identity,
@@ -285,7 +284,7 @@ def shapes_meet_within(
                         qa0,
                         qa1,
                         com_a,
-                        radius_a,
+                        rotation_a,
                         geom_tri,
                         wp.transform(v0, rot_b),
                         identity,
@@ -312,8 +311,10 @@ def shapes_meet_within(
         qb0 = body_q[body_b]
         com_b = body_com[body_b]
     qb1 = qb0
+    angle_b = float(0.0)
     if body_b >= 0:
         qb1 = _predicted_pose(qb0, body_qd[body_b], com_b, dt)
+        angle_b = wp.length(wp.spatial_bottom(body_qd[body_b])) * dt
     radius_b = wp.length(wp.transform_point(xform_b, center_b) - com_b) + wp.length(half_b) + shape_margin[shape_b]
     return _sweep_meets(
         geom_a,
@@ -321,13 +322,13 @@ def shapes_meet_within(
         qa0,
         qa1,
         com_a,
-        radius_a,
+        rotation_a,
         geom_b,
         xform_b,
         qb0,
         qb1,
         com_b,
-        radius_b,
+        angle_b * radius_b,
         infinite_plane_b,
         offset_a + offset_b,
         target,

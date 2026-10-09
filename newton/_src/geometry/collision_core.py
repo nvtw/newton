@@ -1076,7 +1076,11 @@ def orient_mesh_triangle(
     if reach < 0.0:
         return False, triangle, wp.quat_identity()
 
-    frame = wp.quat_between_vectors(wp.vec3(0.0, 0.0, 1.0), n)
+    # quat_between_vectors degenerates to the identity for exactly opposite vectors, which would
+    # extrude a downward-facing triangle in front of its face; turn about x instead.
+    frame = wp.quat(1.0, 0.0, 0.0, 0.0)
+    if n[2] > -0.9999:
+        frame = wp.quat_between_vectors(wp.vec3(0.0, 0.0, 1.0), n)
     prism = triangle
     prism.shape_type = int(GeoTypeEx.TRIANGLE_PRISM)
     prism.scale = wp.quat_rotate_inv(frame, triangle.scale)

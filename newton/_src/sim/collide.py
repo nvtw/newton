@@ -1250,8 +1250,10 @@ def _warn_full_surface_fallbacks(model: Model, capable: np.ndarray) -> None:
     )
 
 
-_CCD_SPECULATIVE_GAP_MAX = 1.0e6
-"""Speculative gap cap [m] used by ``ccd=True``; large enough to never limit a physical motion."""
+_CCD_SPECULATIVE_GAP_MAX = 2.0
+"""Default cap [m] on the closing distance ``ccd=True`` looks ahead per collision update. It covers
+120 m/s at 60 Hz, far beyond robot motion, while keeping a single exploding body from inflating its
+broad-phase bounds over the whole scene and overflowing shared pair and contact buffers."""
 
 
 class CollisionPipeline:
@@ -1432,11 +1434,15 @@ class CollisionPipeline:
                 ``None``. See
                 :ref:`Speculative contacts <speculative-contacts>`.
             ccd: Enable continuous collision detection: keep every rigid contact that the
-                current velocities can close before the next :meth:`collide` call, without a
-                cap on the closing distance. Shorthand for an unbounded
-                ``speculative_contact_gap_max`` when that is not given; :meth:`collide` then
-                requires ``dt``. Defaults to ``False``. See
+                current velocities can close before the next :meth:`collide` call. Shorthand for
+                speculative contacts with ``speculative_contact_gap_max`` defaulting to 2 m per
+                collision update; an explicit ``speculative_contact_gap_max`` takes precedence.
+                :meth:`collide` then requires ``dt``. Defaults to ``False``. See
                 :ref:`Continuous collision detection <continuous-collision-detection>`.
+
+                .. experimental::
+
+                    ``ccd`` and how solvers enforce its contacts may change without prior notice.
 
         .. experimental::
 

@@ -328,6 +328,29 @@ class TestMeshBackfaceCulling(unittest.TestCase):
     def test_back_face_convex_mesh(self):
         self._assert_back_face_culled(GeoType.CONVEX_MESH)
 
+    def test_crossed_downward_face_pushes_box_out_front(self):
+        """Push a box back out of a downward-facing face (a ceiling) it has partly crossed."""
+        mesh = _make_flat_ground_mesh(z=0.0)
+        ceiling = newton.Mesh(mesh.vertices, mesh.indices.reshape(-1, 3)[:, ::-1].reshape(-1), compute_inertia=False)
+        for reduce_contacts in (False, True):
+            with self.subTest(reduce_contacts=reduce_contacts):
+                model, cp, state = _build_collision_only(
+                    ceiling,
+                    GeoType.BOX,
+                    shape_pos=(0.0, 0.0, 0.05),
+                    shape_scale=(0.1, 0.1, 0.1),
+                    reduce_contacts=reduce_contacts,
+                )
+                contacts = _collide(model, cp, state)
+                count = int(contacts.rigid_contact_count.numpy()[0])
+                self.assertGreater(count, 0)
+                normals = contacts.rigid_contact_normal.numpy()[:count]
+                shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+                # Orient each normal from the mesh to the box: out of the ceiling's front, downward.
+                mesh_first = model.shape_type.numpy()[shape0] == int(GeoType.MESH)
+                down = np.where(mesh_first, -normals[:, 2], normals[:, 2])
+                self.assertTrue(np.all(down > 0.99), down)
+
     def test_near_back_face_box_matches_reduction_modes(self):
         """A box whose center has crossed the face but that still reaches in front of it is pushed
         back out the front, with and without reduction, instead of falling through."""

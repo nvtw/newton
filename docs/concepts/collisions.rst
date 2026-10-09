@@ -1450,27 +1450,33 @@ current velocities can close before the next collision update:
         solver.step(state_0, state_1, control, contacts, frame_dt / substeps)
         state_0, state_1 = state_1, state_0
 
-``ccd=True`` is shorthand for :ref:`speculative contacts <speculative-contacts>` without a cap on
-the closing distance. It applies to every pair of moving or static rigid shapes, including links
-of articulations, and the impact is resolved by the solver itself, so momentum flows through
-joints and into the other body.
+``ccd=True`` is shorthand for :ref:`speculative contacts <speculative-contacts>` with
+``speculative_contact_gap_max`` defaulting to 2 m per collision update, which covers 120 m/s at
+60 Hz; pass ``speculative_contact_gap_max`` to change it. It applies to every pair of moving or
+static rigid shapes, including links of articulations, and the impact is resolved by the solver
+itself, so momentum flows through joints and into the other body. Like all speculative contacts,
+it does not support hydroelastic contacts yet: the pipeline raises :class:`NotImplementedError`
+when a hydroelastic pair is present.
 
 How well a solver uses these contacts depends on the solver:
 
-- :class:`~newton.solvers.SolverMuJoCo` keeps its own compliant contact response, so footfalls and
-  other ordinary impacts behave exactly as with a contact gap that detects them in time. A body
-  that would pass a quarter of the thinner solid's smallest thickness within one substep (planes,
-  meshes and heightfields are surfaces and do not count) is bounded there however compliant the
-  contact is, so it cannot tunnel through thin geometry.
+- :class:`~newton.solvers.SolverMuJoCo` with Newton contacts (``use_mujoco_contacts=False``) keeps
+  its own compliant contact response, so footfalls and other ordinary impacts behave exactly as
+  with a contact gap that detects them in time. A body that would pass a quarter of the thinner
+  solid's smallest thickness within one substep is bounded there however compliant the contact
+  is, so it cannot tunnel through thin geometry. Planes, heightfields and static meshes are
+  surfaces and do not count; a mesh on a body, such as an imported robot link, does.
 - :class:`~newton.solvers.SolverKamino` resolves them in its velocity-level solve: the bodies stop
   at the surface in the step in which they would close the gap.
 - In both, a contact exerts no force when a sweep of its two shapes over the step shows that they
   do not actually touch, for example when a body passes beside an edge. The sweep covers convex
-  shapes against convex shapes, planes, and static meshes and heightfields; contacts between other
-  pairs, such as two moving meshes, are always kept. Hydroelastic contacts are not speculative.
-- Other solvers treat them like regular contacts and warn once when they receive contacts from a
-  ``ccd=True`` pipeline. They detect the impact in time but may let fast bodies pass through thin
-  geometry or push on bodies passing close by.
+  shapes (primitives and convex hulls) against convex shapes, planes, and static meshes and
+  heightfields; contacts of other pairs, such as a mesh link against the ground, are always kept.
+- :class:`~newton.solvers.SolverXPBD`, :class:`~newton.solvers.SolverSemiImplicit` and
+  :class:`~newton.solvers.SolverFeatherstone` treat them like regular contacts and warn once. They
+  detect the impact in time but may let fast bodies pass through thin geometry or push on bodies
+  passing close by. Other solvers that consume rigid contacts treat them the same way without
+  warning.
 
 Contacts are predicted from the velocities at the :meth:`~CollisionPipeline.collide` call. A link
 that is thrown toward an obstacle only later in the interval, for example an arm whipped by an
