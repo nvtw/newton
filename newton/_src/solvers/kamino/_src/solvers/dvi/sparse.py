@@ -199,7 +199,18 @@ class SparseDVIPath:
 
     def prepare(self, problem: DualProblem) -> None:
         """Precompute host-derived sparse topology before the first solve."""
-        _get_sparse_delassus(problem)
+        delassus = _get_sparse_delassus(problem)
+        # General PGS and fused inverse solves read transpose values directly.
+        delassus._set_raw_transpose_enabled(
+            self.device.is_cuda
+            and self.size.num_worlds >= 2048
+            and self.has_unilateral_constraints
+            and self.max_alternating_iterations >= 4
+            and self.data.bilateral_operator is not None
+            and _can_use_cooperative_articulation(self)
+            and not _can_use_fused_bilateral_inverse(self)
+            and delassus._col_major_jacobian is not None
+        )
         if self.model_data is None or self.jacobians is None:
             raise RuntimeError("Sparse DVI requires model data and sparse Jacobians.")
         if self.bilateral_solver is not None and self.data.bilateral_operator is not None:
