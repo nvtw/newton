@@ -1295,7 +1295,8 @@ def _solve_dvi_sparse_contacts_pgs(
                 _sync_threads()
 
 
-@wp.kernel
+# Limit register pressure so more independent worlds can remain resident.
+@wp.kernel(cuda_max_registers=80)
 def _solve_dvi_sparse_inequalities_pgs(
     bsm_num_nzb: wp.array[int32],
     bsm_nzb_start: wp.array[int32],
@@ -3392,6 +3393,94 @@ def _apply_small_bilateral_inverse(
         bilateral_solution[v + row] = value
     if row < problem_njc[wid]:
         solution_lambdas[problem_vio[wid] + row] = bilateral_P[v + row] * bilateral_solution[v + row]
+
+
+@cache
+def make_sparse_bilateral_inverse_kernel(body_capacity: int):
+    """Fuse a matrix-free bilateral RHS with the existing small inverse solve on CUDA."""
+    workspace_size = body_capacity + SMALL_BILATERAL_INVERSE_SIZE
+
+    @wp.func_native(f"__shared__ float values[{workspace_size}]; return reinterpret_cast<uint64_t>(values);")
+    def workspace_pointer() -> wp.uint64: ...
+
+    @wp.kernel(module="unique", enable_backward=False)
+    def sparse_bilateral_inverse(
+        problem_vio: wp.array[int32],
+        problem_njc: wp.array[int32],
+        problem_v_f: wp.array[float32],
+        active_dim: wp.array[int32],
+        bilateral_mio: wp.array[int32],
+        bilateral_vio: wp.array[int32],
+        bilateral_P: wp.array[float32],
+        inverse: wp.array[float32],
+        bilateral_rhs: wp.array[float32],
+        bilateral_solution: wp.array[float32],
+        solution_lambdas: wp.array[float32],
+        transpose_num_nzb: wp.array[int32],
+        transpose_nzb_start: wp.array[int32],
+        transpose_nzb_coords: wp.array2d[int32],
+        transpose_nzb_values: wp.array[vec6f],
+        transpose_row_start: wp.array[int32],
+        transpose_max_cols: wp.array[int32],
+        transpose_column_major: bool,
+        bilateral_world_row_offsets: wp.array[int32],
+        bilateral_row_starts: wp.array[int32],
+        bilateral_row_nzb_indices: wp.array[int32],
+        bsm_nzb_coords: wp.array2d[int32],
+        bsm_nzb_values: wp.array[vec6f],
+    ):
+        wid, lane = wp.tid()
+        n = active_dim[wid]
+        njc = problem_njc[wid]
+        pvio = problem_vio[wid]
+        bvio = bilateral_vio[wid]
+        if n > 0:
+            workspace = wp.array(ptr=workspace_pointer(), shape=(workspace_size,), dtype=float32)
+            for col in range(lane, transpose_max_cols[wid], wp.block_dim()):
+                workspace[col] = float32(0.0)
+            _sync_threads()
+            # Form J_u^T lambda_u without clearing the bilateral impulses or
+            # materializing a global body vector between separate launches.
+            for local in range(lane, transpose_num_nzb[wid], wp.block_dim()):
+                index = transpose_nzb_start[wid] + local
+                row = transpose_nzb_coords[index, 0]
+                col = transpose_nzb_coords[index, 1]
+                block = transpose_nzb_values[index]
+                if transpose_column_major:
+                    value = float32(0.0)
+                    for component in range(6):
+                        if row + component >= njc:
+                            value += block[component] * solution_lambdas[transpose_row_start[wid] + row + component]
+                    wp.atomic_add(workspace, col, value)
+                elif row >= njc:
+                    value = solution_lambdas[transpose_row_start[wid] + row]
+                    for component in range(6):
+                        wp.atomic_add(workspace, col + component, block[component] * value)
+            _sync_threads()
+            for row in range(lane, njc, wp.block_dim()):
+                cached_row = bilateral_world_row_offsets[wid] + row
+                value = float32(0.0)
+                for entry in range(bilateral_row_starts[cached_row], bilateral_row_starts[cached_row + 1]):
+                    index = bilateral_row_nzb_indices[entry]
+                    col = bsm_nzb_coords[index, 1]
+                    block = bsm_nzb_values[index]
+                    contribution = float32(0.0)
+                    for component in range(6):
+                        contribution += block[component] * workspace[col + component]
+                    value += contribution
+                value = -bilateral_P[bvio + row] * (value + problem_v_f[pvio + row])
+                bilateral_rhs[bvio + row] = value
+                workspace[body_capacity + row] = value
+            _sync_threads()
+            for row in range(lane, n, wp.block_dim()):
+                value = float32(0.0)
+                for col in range(n):
+                    value += inverse[bilateral_mio[wid] + col * n + row] * workspace[body_capacity + col]
+                bilateral_solution[bvio + row] = value
+        for row in range(lane, njc, wp.block_dim()):
+            solution_lambdas[pvio + row] = bilateral_P[bvio + row] * bilateral_solution[bvio + row]
+
+    return sparse_bilateral_inverse
 
 
 @wp.kernel

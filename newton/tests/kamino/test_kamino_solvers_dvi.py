@@ -1458,7 +1458,8 @@ class TestDVISolver(unittest.TestCase):
             ) as body_products:
                 fallback.solve(problem)
         self.assertEqual(fallback.data.state.bilateral_coupling.size, 1)
-        self.assertEqual(body_products.call_count, 4)
+        # The small CUDA inverse path also fuses matrix-free RHS construction.
+        self.assertEqual(body_products.call_count, 0 if self.device.is_cuda else 4)
         np.testing.assert_array_equal(fallback.data.state.bilateral_active_dim.numpy(), joint_dims)
         np.testing.assert_allclose(fallback.data.solution.lambdas.numpy(), expected, atol=2e-5, rtol=2e-5)
 

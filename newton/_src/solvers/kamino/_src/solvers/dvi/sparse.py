@@ -76,6 +76,7 @@ from .sparse_kernels import (
     _solve_dvi_sparse_inequalities_pgs_cooperative,
     _sparse_delassus_gemv_rows,
     _zero_bilateral_lambdas,
+    make_sparse_bilateral_inverse_kernel,
     make_sparse_bilateral_solve_kernel,
 )
 
@@ -1156,6 +1157,52 @@ def _solve_sparse_bilateral_block(
     operator = path.data.bilateral_operator
     state = path.data.state
     solver = path.bilateral_solver
+    if (
+        path.bilateral_inverse is not None
+        and not state._sparse_coupling_allocated
+        and not forward_only
+        and path.device.is_cuda
+        and path.size.max_of_num_body_dofs <= 1024
+    ):
+        delassus = _get_sparse_delassus(problem)
+        if delassus._needs_update:
+            delassus.update()
+        transpose = delassus._transpose_op_matrix
+        column_major = delassus._col_major_jacobian is not None
+        values = transpose.nzb_values
+        if column_major:
+            values = wp.array(ptr=values.ptr, shape=(values.size,), dtype=vec6f, device=path.device)
+        body_capacity = 1 << (max(1, path.size.max_of_num_body_dofs) - 1).bit_length()
+        wp.launch(
+            make_sparse_bilateral_inverse_kernel(body_capacity),
+            dim=(path.size.num_worlds, 128),
+            inputs=[
+                problem.data.vio,
+                problem.data.njc,
+                problem.data.v_f,
+                operator.info.dim if active_dim is None else active_dim,
+                operator.info.mio,
+                operator.info.vio,
+                state.bilateral_preconditioner,
+                path.bilateral_inverse,
+                state.bilateral_rhs,
+                state.bilateral_solution,
+                path.data.solution.lambdas,
+                transpose.num_nzb,
+                transpose.nzb_start,
+                transpose.nzb_coords,
+                values,
+                transpose.row_start,
+                transpose.max_cols,
+                column_major,
+                *path.bilateral_row_nzb_topology,
+                delassus.bsm.nzb_coords,
+                delassus.bsm.nzb_values,
+            ],
+            device=path.device,
+            block_dim=128,
+        )
+        return
     if not state._sparse_coupling_allocated:
         wp.launch(
             _zero_bilateral_lambdas,
