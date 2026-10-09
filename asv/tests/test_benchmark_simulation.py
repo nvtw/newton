@@ -165,7 +165,7 @@ class TestSimulationBenchmarks(unittest.TestCase):
         """Cover selector crossovers, duplicate-heavy hulls, and every convex type."""
         self.assertEqual(
             tuple(bench_contacts.FastConvexCollision.params[0]),
-            (("hulls", 56), ("hulls_duplicate", 192), ("mixed", 191)),
+            (("hulls", 56), ("hulls_duplicate", 192), ("mixed", 64), ("mixed", 153), ("mixed", 191)),
         )
         self.assertEqual(
             {shape for pair in bench_contacts.MIXED_CONVEX_PAIR_TYPES for shape in pair},
@@ -384,6 +384,7 @@ class TestSimulationBenchmarks(unittest.TestCase):
         inventory = {benchmark["name"]: benchmark for benchmark in self._discover_benchmarks(pr_gate=False)}
 
         blocking_benchmarks = (
+            "simulation.bench_reset.FastPartialResetStepHumanoidMuJoCo.time_reset_and_first_step",
             "simulation.bench_mujoco.FastG1.track_simulate",
             "simulation.bench_mujoco.FastG1.track_p95_step_time",
             "simulation.bench_anymal.FastMetricsExampleAnymalPretrained.track_mean_world_step_time",
@@ -399,6 +400,7 @@ class TestSimulationBenchmarks(unittest.TestCase):
             "simulation.bench_inverse_dynamics.FastInverseDynamics.time_eval_inverse_dynamics_force",
         )
         dashboard_benchmarks = (
+            "simulation.bench_reset.FullResetHumanoidMuJoCo.time_reset",
             "simulation.bench_mujoco.FastG1.track_solver_niter_mean",
             "simulation.bench_mujoco.FastG1.track_solver_niter_max",
             "simulation.bench_mujoco.FastG1.track_simulation_steps_per_second",
