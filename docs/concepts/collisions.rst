@@ -1438,7 +1438,7 @@ observed shape speed:
         substep_callback=substep,
         frame_dt=1.0 / 60.0,
         substeps=10,
-        max_collision_dt=1.0 / 120.0,
+        collision_dt_max=1.0 / 120.0,
     )
     schedule.step()
 
@@ -1458,11 +1458,19 @@ that case, increase the substep count or the speculative extension limit.
 Collision prediction horizons are capped at the next frame boundary, where
 contacts are always refreshed.
 
-Set ``max_collision_dt`` to cap the time between collision passes independently
+Set ``collision_dt_max`` to cap the time between collision passes independently
 of the travel estimate. For example, ``1.0 / 120.0`` requests collision
 detection at least 120 times per second. The scheduler rounds the interval down
 to a whole number of solver substeps and rejects a limit shorter than one
-substep.
+substep. Intervals need not divide the frame's substep count: with 14 substeps
+and a limit of six substeps, a stationary scene refreshes at substeps 0, 6, and
+12, with the final horizon shortened to two substeps. Limits larger than
+``frame_dt`` are capped at one frame.
+
+CUDA graph capture records a conditional branch for each possible whole-substep
+horizon, up to the configured limit or the remaining frame duration. Supporting
+more horizons increases graph size and capture cost; a smaller
+``collision_dt_max`` reduces the number of branches.
 
 The scheduler is an experimental optimization for rigid contacts, not
 continuous collision detection. It does not support particles. It observes

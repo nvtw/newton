@@ -184,15 +184,18 @@ class CollisionSubstepScheduler:
             ``substeps`` times per frame.
         frame_dt: Fixed frame duration [s].
         substeps: Fixed positive even number of solver substeps per frame.
-        max_collision_dt: Maximum time between collision refreshes [s]. The
+        collision_dt_max: Maximum time between collision refreshes [s]. The
             actual interval is rounded down to a whole number of solver
-            substeps. If ``None``, refresh frequency is limited only by the
-            relative-travel estimate.
+            substeps and capped at one frame, even if the limit exceeds
+            ``frame_dt``. Intervals need not divide ``substeps``. If ``None``,
+            refresh frequency is limited only by the relative-travel estimate.
 
     Raises:
-        ValueError: If the pipeline contains particles, the states are not two
-            distinct compatible rigid-body buffers, or a numeric configuration
-            value is invalid.
+        TypeError: If collision_pipeline is not a CollisionPipeline, either
+            callback is not callable, or substeps is not an integer or is a bool.
+        ValueError: If speculative contacts are disabled, the pipeline contains
+            particles, the states are not two distinct compatible rigid-body
+            buffers, or a numeric configuration value is invalid.
     """
 
     def __init__(
@@ -204,7 +207,7 @@ class CollisionSubstepScheduler:
         substep_callback: Callable[[State, State, float], None],
         frame_dt: float,
         substeps: int,
-        max_collision_dt: float | None = None,
+        collision_dt_max: float | None = None,
     ):
         if not isinstance(collision_pipeline, CollisionPipeline):
             raise TypeError("collision_pipeline must be a CollisionPipeline")
@@ -251,25 +254,23 @@ class CollisionSubstepScheduler:
         self._substeps = substeps
         self._substep_dt = float(frame_dt) / substeps
         self._travel_budget = travel_budget
-        if max_collision_dt is None:
+        if collision_dt_max is None:
             max_collision_interval = substeps
         else:
-            if not np.isfinite(max_collision_dt) or max_collision_dt <= 0.0:
-                raise ValueError(f"max_collision_dt must be a positive finite number or None, got {max_collision_dt!r}")
-            interval_ratio = float(max_collision_dt) / self._substep_dt
+            if not np.isfinite(collision_dt_max) or collision_dt_max <= 0.0:
+                raise ValueError(f"collision_dt_max must be a positive finite number or None, got {collision_dt_max!r}")
+            interval_ratio = float(collision_dt_max) / self._substep_dt
             nearest_interval = round(interval_ratio)
             if np.isclose(interval_ratio, nearest_interval, rtol=1e-12, atol=0.0):
                 interval_ratio = nearest_interval
             max_collision_interval = int(interval_ratio)
             if max_collision_interval < 1:
                 raise ValueError(
-                    f"max_collision_dt must be at least the solver substep duration {self._substep_dt}, "
-                    f"got {max_collision_dt!r}"
+                    f"collision_dt_max must be at least the solver substep duration {self._substep_dt}, "
+                    f"got {collision_dt_max!r}"
                 )
             max_collision_interval = min(max_collision_interval, substeps)
-        self._collision_intervals = tuple(
-            value for value in range(1, max_collision_interval + 1) if substeps % value == 0
-        )
+        self._collision_intervals = tuple(range(1, max_collision_interval + 1))
 
         device = model.device
         self._interval_values = wp.array(self._collision_intervals, dtype=wp.int32, device=device)
@@ -306,7 +307,9 @@ class CollisionSubstepScheduler:
         def run_collision():
             self._collision_callback(self._states[substep_index % 2], interval * self._substep_dt)
 
-        if interval_index == len(self._collision_intervals) - 1:
+        # Larger intervals produce the same horizon at the frame boundary;
+        # omit their conditional branches when recording the CUDA graph.
+        if interval_index == len(self._collision_intervals) - 1 or interval == self._substeps - substep_index:
             run_collision()
             return
         wp.capture_if(

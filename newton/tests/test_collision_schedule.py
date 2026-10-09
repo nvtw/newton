@@ -83,7 +83,8 @@ def test_collision_schedule_horizon_deadline(test, device, external_capture=Fals
                 tick = wp.zeros(1, dtype=int, device=device)
                 horizons = wp.zeros(2 * substeps, dtype=float, device=device)
                 velocities = wp.array(speeds, dtype=float, device=device)
-                dt = 1.0 / 60.0 / substeps
+                # Match device precision when travel lies on an interval boundary.
+                dt = np.float32(1.0 / 60.0 / substeps)
 
                 def collide(state, horizon, *, tick=tick, horizons=horizons):
                     del state
@@ -117,7 +118,7 @@ def test_collision_schedule_horizon_deadline(test, device, external_capture=Fals
                 # A scalar reference locks down refresh timing and horizon selection,
                 # including frame resets and switching between short/long intervals.
                 expected = np.zeros_like(recorded)
-                intervals = [i for i in range(1, substeps + 1) if substeps % i == 0]
+                intervals = range(1, substeps + 1)
                 expected_overflow = False
                 for frame in range(2):
                     travel, previous_speed, deadline = 0.0, 0.0, 0
@@ -159,7 +160,7 @@ def test_collision_schedule_horizon_deadline(test, device, external_capture=Fals
                 if profile == "accelerating":
                     test.assertLess(int(events[1]), substeps, "Retain travel-triggered early refreshes")
                 if profile == "constant" and substeps == 10:
-                    np.testing.assert_array_equal(events, np.arange(0, 2 * substeps, 2))
+                    np.testing.assert_array_equal(events, [0, 4, 8, 10, 14, 18])
                 elif profile == "fast":
                     np.testing.assert_array_equal(events, np.arange(2 * substeps))
                     np.testing.assert_allclose(recorded, dt, rtol=1e-6)
@@ -378,10 +379,65 @@ def test_collision_schedule_preserves_integer_time_limits(test, device):
                 substep_callback=step,
                 frame_dt=frame_dt,
                 substeps=substeps,
-                max_collision_dt=limit,
+                collision_dt_max=limit,
             )
             scheduler.step()
             test.assertEqual(int(tick.numpy()[0]), expected_calls)
+
+
+def test_collision_schedule_nondivisor_intervals(test, device, external_capture=False):
+    """Use nondivisor caps and travel horizons, truncating at frame boundaries."""
+    if external_capture and not wp.is_conditional_graph_supported():
+        test.skipTest("CUDA graph capture requires conditional graph support")
+    substeps = 14
+    for speed, limit in ((0.0, 6.5), (0.1, None), (0.0, 28.0)):
+        with test.subTest(speed=speed, limit=limit):
+            builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+            body = builder.add_body()
+            builder.add_shape_sphere(body, radius=0.1)
+            builder.body_qd[body] = (speed, 0.0, 0.0, 0.0, 0.0, 0.0)
+            model = builder.finalize(device=device)
+            states = (model.state(), model.state())
+            pipeline = newton.CollisionPipeline(model, speculative_contact_gap_max=1.3)
+            tick = wp.zeros(1, dtype=int, device=device)
+            horizons = wp.zeros(2 * substeps, dtype=float, device=device)
+
+            def collide(state, horizon, *, tick=tick, horizons=horizons):
+                del state
+                wp.launch(_record_horizon, 1, inputs=[tick, horizons, horizon], device=device)
+
+            def step(state_in, state_out, dt, *, tick=tick):
+                del dt
+                wp.copy(state_out.body_q, state_in.body_q)
+                wp.copy(state_out.body_qd, state_in.body_qd)
+                wp.launch(_increment_tick, 1, inputs=[tick], device=device)
+
+            scheduler = newton.CollisionSubstepScheduler(
+                pipeline,
+                states,
+                collision_callback=collide,
+                substep_callback=step,
+                frame_dt=float(substeps),
+                substeps=substeps,
+                collision_dt_max=limit,
+            )
+            if external_capture:
+                with wp.ScopedCapture(device=device) as capture:
+                    scheduler.step()
+                for _ in range(2):
+                    wp.capture_launch(capture.graph)
+            else:
+                for _ in range(2):
+                    scheduler.step()
+
+            expected = np.zeros(2 * substeps, dtype=np.float32)
+            if limit == 28.0:
+                expected[::substeps] = substeps
+            else:
+                expected[[0, 6, 12, 14, 20, 26]] = [6.0, 6.0, 2.0, 6.0, 6.0, 2.0]
+            np.testing.assert_array_equal(horizons.numpy(), expected)
+            test.assertEqual(int(tick.numpy()[0]), 2 * substeps)
+            test.assertEqual(int(scheduler.interval_overflow.numpy()[0]), 0)
 
 
 @wp.kernel
@@ -501,6 +557,20 @@ add_function_test(
     "test_collision_schedule_preserves_integer_time_limits",
     test_collision_schedule_preserves_integer_time_limits,
     devices=get_test_devices(),
+)
+
+add_function_test(
+    TestCollisionSchedule,
+    "test_collision_schedule_nondivisor_intervals",
+    test_collision_schedule_nondivisor_intervals,
+    devices=get_test_devices(),
+)
+add_function_test(
+    TestCollisionSchedule,
+    "test_collision_schedule_nondivisor_intervals_capture",
+    test_collision_schedule_nondivisor_intervals,
+    devices=get_cuda_test_devices(),
+    external_capture=True,
 )
 
 

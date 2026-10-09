@@ -1088,7 +1088,7 @@ def test_adaptive_collision_schedule_limits_refresh_interval(test, device):
         substep_callback=substep,
         frame_dt=frame_dt,
         substeps=substeps,
-        max_collision_dt=1.0 / 120.0,
+        collision_dt_max=1.0 / 120.0,
     )
     scheduler.step()
 
@@ -1116,7 +1116,7 @@ def test_adaptive_collision_schedule_rejects_unsupported_inputs(test, device):
             substep_callback=noop,
             frame_dt=0.01,
             substeps=2,
-            max_collision_dt=0.004,
+            collision_dt_max=0.004,
         )
 
     with test.assertRaisesRegex(ValueError, "distinct ping-pong buffers"):
