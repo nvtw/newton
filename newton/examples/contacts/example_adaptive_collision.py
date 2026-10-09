@@ -180,8 +180,9 @@ class Example:
             self.scheduler.step()
         else:
             self._collide(self.state_0, self.frame_dt)
-            for substep in range(SUBSTEPS):
-                self._substep(self.states[substep % 2], self.states[1 - substep % 2], self.sim_dt)
+            for _ in range(SUBSTEPS):
+                self._substep(self.state_0, self.state_1, self.sim_dt)
+                self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
         if self.graph is None:
