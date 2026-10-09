@@ -341,6 +341,8 @@ class DVISolver:
         else:
             kwargs.setdefault("failed_pivot_shift", BILATERAL_FAILED_PIVOT_SHIFT)
             kwargs.setdefault("capacity_stride", True)
+            if self._device.is_cuda and model.size.num_worlds >= 2048:
+                kwargs.setdefault("solve_block_dim", 128)
             solver_class = LLTBlockedRCMSolver
 
         bilateral_joint_cts_per_world = model.info.num_joint_bilateral_cts.numpy().astype(int).tolist()
