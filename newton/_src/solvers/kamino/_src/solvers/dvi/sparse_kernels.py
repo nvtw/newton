@@ -3032,12 +3032,13 @@ def _compact_unilateral_row(
 
 @wp.func
 def _load_compact_schur_row(compact_schur: wp.array[float32], base: int32, lane: int32, nu: int32) -> wp.vec4f:
-    """Load this lane's four strided entries of one compact Schur row."""
+    """Load four strided entries, clamping inactive lanes to the last active column."""
     values = wp.vec4f()
     for chunk in range(4):
-        target = lane + int32(32) * chunk
-        if target < nu:
-            values[chunk] = compact_schur[base + target]
+        # The sweep only gathers and stores active rows. Clamping unused
+        # components avoids bounds branches in every serial projection.
+        target = wp.min(lane + int32(32) * chunk, nu - int32(1))
+        values[chunk] = compact_schur[base + target]
     return values
 
 

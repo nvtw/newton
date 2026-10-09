@@ -43,7 +43,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
     _SPARSE_DELASSUS_ROWS_JOINTS,
     _SPARSE_DELASSUS_ROWS_UNILATERAL,
     _can_use_cooperative_articulation,
-    _sparse_delassus_matvec_rows,
+    _sparse_delassus_matvec_rows_path,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _assemble_compact_unilateral_schur,
@@ -2186,9 +2186,9 @@ class TestDVISolver(unittest.TestCase):
         problem.delassus.matvec(solver.data.solution.lambdas, full, solver.all_worlds_mask)
         full_np = full.numpy()
 
-        _sparse_delassus_matvec_rows(solver, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
+        _sparse_delassus_matvec_rows_path(solver._sparse_path, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
         joint_np = solver.data.state.v_aug.numpy()
-        _sparse_delassus_matvec_rows(solver, problem, _SPARSE_DELASSUS_ROWS_UNILATERAL)
+        _sparse_delassus_matvec_rows_path(solver._sparse_path, problem, _SPARSE_DELASSUS_ROWS_UNILATERAL)
         unilateral_np = solver.data.state.v_aug.numpy()
 
         dim = int(problem.data.dim.numpy()[0])

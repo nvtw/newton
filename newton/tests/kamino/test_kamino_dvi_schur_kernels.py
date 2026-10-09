@@ -77,6 +77,16 @@ class TestKaminoCompactSchur(unittest.TestCase):
         cases = (
             (0, 0, 1, False),
             (2, 2, 3, False),
+            # Exercise partially active vectors around each 32-row boundary.
+            (28, 0, 1, False),
+            (29, 0, 1, False),
+            (30, 0, 1, False),
+            (60, 0, 1, False),
+            (61, 0, 1, False),
+            (62, 0, 1, False),
+            (92, 0, 1, False),
+            (93, 0, 1, False),
+            (94, 0, 1, False),
             (31, 1, 32, False),
             (0, 0, 42, False),
             (7, 0, 2, False),

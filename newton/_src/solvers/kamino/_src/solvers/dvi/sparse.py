@@ -966,13 +966,6 @@ def _sparse_delassus_matvec_rows_path(path: SparseDVIPath, problem: DualProblem,
     )
 
 
-def _sparse_delassus_matvec_rows(solver, problem: DualProblem, row_kind: int) -> None:
-    """Compatibility wrapper for sparse Delassus row products."""
-    if solver._sparse_path is None:
-        raise RuntimeError("Sparse DVI path has not been allocated. Call `finalize()` first.")
-    _sparse_delassus_matvec_rows_path(solver._sparse_path, problem, row_kind)
-
-
 def _factor_sparse_bilateral_block(path: SparseDVIPath, problem: DualProblem) -> None:
     operator = path.data.bilateral_operator
     operator.info.dim = path.data.bilateral_dim
