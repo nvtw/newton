@@ -12,7 +12,11 @@ import warp as wp
 
 from newton._src.solvers.kamino._src.core.types import vec6f
 from newton._src.solvers.kamino._src.solvers.dvi import sparse
-from newton._src.solvers.kamino._src.solvers.dvi.joint_blocks import JointBlockSolver, _build_topology
+from newton._src.solvers.kamino._src.solvers.dvi.joint_blocks import (
+    JointBlockSolver,
+    _build_body_reach,
+    _build_topology,
+)
 
 
 def _fixture(device):
@@ -70,9 +74,22 @@ def _fixture(device):
         dynamic_cts_offset_total_cts=ints([0, 1, 2, 64, 65, 66]),
         kinematic_cts_offset_total_cts=ints([3, 7, 12, 67, 71, 76]),
     )
+    body_sets = ((0,), (0, 1), (1,))
+    owners = {row: group for group, rows in enumerate(groups) for row in rows}
+    joint_coords = [(row, 6 * body) for row in range(n) for body in body_sets[owners[row]]]
+    block_stride = len(joint_coords) + stride
+    coords = [*joint_coords, *((n + col, 0) for col in range(stride))] * worlds
+    bsm = SimpleNamespace(
+        nzb_coords=wp.array(coords, dtype=wp.int32, device=device),
+        nzb_start=ints(np.arange(worlds) * block_stride),
+        num_nzb=ints([block_stride] * worlds),
+    )
     path = SimpleNamespace(
         device=device,
-        size=SimpleNamespace(num_worlds=worlds),
+        size=SimpleNamespace(num_worlds=worlds, max_of_num_bodies=2),
+        jacobians=SimpleNamespace(
+            _J_cts=SimpleNamespace(bsm=bsm), joint_constraint_nzb_count=ints([len(joint_coords)] * worlds)
+        ),
         model=SimpleNamespace(joints=joints, info=SimpleNamespace(total_cts_offset=ints([0, 64]))),
         data=SimpleNamespace(bilateral_dim=info.dim, bilateral_operator=operator, state=state),
         bilateral_nzb_pairs=(ints(pair_world), ints(pair_row), ints(pair_col), *[ints(np.zeros(len(pair_world)))] * 3),
@@ -142,6 +159,8 @@ class TestKaminoJointBlocks(unittest.TestCase):
                 atol=2e-6,
                 rtol=2e-6,
             )
+        # This algebraic oracle deliberately uses dense, nonphysical coupling.
+        solver._body_reach = None
         solver.response(path, problem)
         response = path.data.state.bilateral_response.numpy()
         untouched = np.ones(len(response), dtype=bool)
@@ -153,6 +172,92 @@ class TestKaminoJointBlocks(unittest.TestCase):
             np.testing.assert_allclose(y.T @ y, expected, atol=2e-5, rtol=3e-6)
             untouched[start : start + 16 * nu] = False
         np.testing.assert_array_equal(response[untouched], -123.0)
+
+    def test_response_reach_tracks_contact_body_changes(self):
+        """Match unpruned ragged responses and erase stale groups as contacts move."""
+        device = self._device()
+        path, problem, matrices, matrix, mio, vio, rio, _, scale, coupling = _fixture(device)
+        solver = JointBlockSolver.create(path)
+        self.assertIsNotNone(solver._body_reach)
+        solver._matrix.assign(_packed_matrix(solver, matrix, mio, 20))
+
+        def ints(values):
+            return wp.array(values, dtype=wp.int32, device=device)
+
+        bsm = path.jacobians._J_cts.bsm
+        coords = bsm.nzb_coords.numpy()
+        starts = bsm.nzb_start.numpy()
+        counts = path.jacobians.joint_constraint_nzb_count.numpy()
+        contact_offsets = starts + counts
+        # One three-component body-ground contact per world; remaining slots
+        # deliberately retain unrelated capacity entries.
+        problem.data.dim.assign([19, 19])
+        for name in ("nbc", "nl", "bcio", "lio"):
+            setattr(problem.data, name, ints([0, 0]))
+        problem.data.cio = ints([0, 1])
+        problem.delassus = SimpleNamespace(bsm=bsm)
+        path.data.state.limit_indices = ints([-1])
+        path.data.state.contact_indices = ints([0, 1])
+        path.jacobians.bounded_constraint_nzb_offsets = wp.array([[-1, -1]], dtype=wp.vec2i, device=device)
+        path.jacobians.limit_constraint_nzb_offsets = ints([-1])
+        path.jacobians.contact_constraint_nzb_offsets = ints(contact_offsets)
+        solver.prepare(path, problem)
+        self.assertEqual(int(solver.failure.numpy()[0]), 0)
+        rng = np.random.default_rng(2751)
+        values = rng.normal(size=(2, 16, 3)).astype(np.float32)
+        groups = [[0, 3, 4, 5, 6], [1, 7, 8, 9, 10, 11], [2, 12, 13, 14, 15]]
+        state = path.data.state
+        output = state.bilateral_response
+        reference = wp.empty_like(output)
+        reach = solver._body_reach
+        output.fill_(float("nan"))
+        active = np.zeros(output.size, dtype=bool)
+        for start in rio:
+            active[start : start + 16 * 3] = True
+        for iteration, body in enumerate((0, 1, 1, 0)):
+            if iteration == 2:
+                output.fill_(float("nan"))
+            rows = groups[body] + groups[body + 1]
+            for world in range(2):
+                coords[contact_offsets[world] : contact_offsets[world] + 3, 1] = 6 * body
+                rhs = np.zeros((16, 3), dtype=np.float32)
+                rhs[rows] = values[world, rows]
+                coupling[rio[world] : rio[world] + 16 * 3] = rhs.ravel()
+            bsm.nzb_coords.assign(coords)
+            state.bilateral_coupling.assign(coupling)
+            solver.response(path, problem)
+            actual = output.numpy()
+            state.bilateral_response = reference
+            solver._body_reach = None
+            solver.response(path, problem)
+            expected = reference.numpy()
+            state.bilateral_response = output
+            solver._body_reach = reach
+            np.testing.assert_allclose(actual[active], expected[active], atol=2e-6, rtol=2e-6)
+            self.assertTrue(np.isnan(actual[~active]).all())
+            for world, start in enumerate(rio):
+                y = actual[start : start + 16 * 3].reshape(16, 3).astype(np.float64)
+                b = coupling[start : start + 16 * 3].reshape(16, 3) * scale[vio[world] : vio[world] + 16, None]
+                np.testing.assert_allclose(y.T @ y, b.T @ np.linalg.solve(matrices[world], b), atol=2e-5, rtol=3e-6)
+
+    def test_response_reach_rejects_unsupported_topology(self):
+        """Keep unpruned response support for oversized or heterogeneous body maps."""
+        device = self._device()
+        path, *_ = _fixture(device)
+        metadata, _ = _build_topology(path, *path.bilateral_nzb_pairs[:3])
+        self.assertIsNotNone(_build_body_reach(path, metadata))
+        self.assertIsNone(_build_body_reach(path, {**metadata, "ng": 65}))
+        bsm = path.jacobians._J_cts.bsm
+        coords = bsm.nzb_coords.numpy()
+        start = int(bsm.nzb_start.numpy()[1])
+        count = int(path.jacobians.joint_constraint_nzb_count.numpy()[1])
+        # Both worlds retain the same joint graph, but body labels no longer
+        # describe the same group incidence and cannot share reach masks.
+        coords[start : start + count, 1] = 6 - coords[start : start + count, 1]
+        bsm.nzb_coords.assign(coords)
+        solver = JointBlockSolver.create(path)
+        self.assertIsNotNone(solver)
+        self.assertIsNone(solver._body_reach)
 
     def test_direct_assembly_matches_original(self):
         """Match original assembly after Jacobian, inertia, and compliance changes."""

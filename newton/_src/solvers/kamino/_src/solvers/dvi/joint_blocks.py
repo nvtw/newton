@@ -19,6 +19,7 @@ from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from ...linalg.factorize.llt_blocked_rcm import _sync_threads, get_float32_array_offset_ptr
 from .kernels import BILATERAL_DIAGONAL_FLOOR, _compact_schur_fits
+from .sparse_kernels import _unilateral_nzb_offsets
 
 if TYPE_CHECKING:
     from ...dynamics.dual import DualProblem
@@ -142,6 +143,62 @@ def _build_topology(path: SparseDVIPath, pair_world: wp.array, pair_row: wp.arra
         "lengths": lengths,
         "row_offsets": row_offsets,
     }, "eligible homogeneous chordal joint-block graph"
+
+
+def _build_body_reach(path: SparseDVIPath, metadata: dict) -> wp.array | None:
+    """Find conservative forward-solve support shared by all local body labels."""
+    groups = metadata["ng"]
+    if groups > 64:
+        return None
+    worlds, bodies = path.size.num_worlds, path.size.max_of_num_bodies
+    order = np.asarray(metadata["order"], dtype=np.int32)
+    group_of = np.empty(metadata["n"], dtype=np.int32)
+    group_of[order[order >= 0]] = np.flatnonzero(order >= 0) // 6
+    jacobian = path.jacobians._J_cts.bsm
+    counts = path.jacobians.joint_constraint_nzb_count.numpy().astype(np.int64)
+    starts = jacobian.nzb_start.numpy().astype(np.int64)
+    world = np.repeat(np.arange(worlds, dtype=np.int64), counts)
+    origins = np.cumsum(counts) - counts
+    indices = np.repeat(starts - origins, counts) + np.arange(counts.sum(), dtype=np.int64)
+    coords = jacobian.nzb_coords.numpy()[indices]
+    active = (coords[:, 0] >= 0) & (coords[:, 0] < metadata["n"])
+    world, coords = world[active], coords[active]
+    if np.any(coords[:, 1] % 6) or np.any(coords[:, 1] < 0) or np.any(coords[:, 1] // 6 >= bodies):
+        return None
+    encoded = np.unique(
+        world * (bodies * groups) + (coords[:, 1] // 6).astype(np.int64) * groups + group_of[coords[:, 0]]
+    )
+    per_world = np.bincount(encoded // (bodies * groups), minlength=worlds)
+    if not np.all(per_world == per_world[0]):
+        return None
+    incidence = encoded.reshape(worlds, int(per_world[0])) % (bodies * groups)
+    if not np.all(incidence == incidence[0]):
+        return None
+    masks = [0] * bodies
+    for code in incidence[0]:
+        body, group = divmod(int(code), groups)
+        masks[body] |= 1 << group
+    # Columns are already in elimination order: propagate each body's seed
+    # groups through every potentially nonzero lower-factor block.
+    for body in range(bodies):
+        for row, col in zip(metadata["rows"], metadata["cols"], strict=True):
+            if masks[body] & (1 << int(col)):
+                masks[body] |= 1 << int(row)
+    return wp.array(np.asarray(masks, dtype=np.uint64), dtype=wp.uint64, device=path.device)
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+unsigned long long bits = (unsigned long long)value;
+for (int delta = 16; delta > 0; delta >>= 1) {
+    bits |= __shfl_xor_sync(0xffffffff, bits, delta);
+}
+return bits;
+#else
+return value;
+#endif
+""")
+def _warp_or_mask(value: wp.uint64) -> wp.uint64: ...
 
 
 @wp.kernel
@@ -370,14 +427,62 @@ def _response(
     response: wp.array[wp.float32],
     lengths: wp.array[wp.int32],
     offsets: wp.array[wp.int32],
+    body_reach: wp.array[wp.uint64],
+    bsm_num_nzb: wp.array[wp.int32],
+    bsm_nzb_start: wp.array[wp.int32],
+    bsm_nzb_coords: wp.array2d[wp.int32],
+    nbc: wp.array[wp.int32],
+    nl: wp.array[wp.int32],
+    bcio: wp.array[wp.int32],
+    lio: wp.array[wp.int32],
+    cio: wp.array[wp.int32],
+    limit_indices: wp.array[wp.int32],
+    contact_indices: wp.array[wp.int32],
+    bounded_offsets: wp.array[wp.vec2i],
+    limit_offsets: wp.array[wp.int32],
+    contact_offsets: wp.array[wp.int32],
 ):
     w, group, lane = wp.tid()
     nu = dim[w] - njc[w]
     if group * 16 >= nu:
         return
     ll = wp.array(ptr=get_float32_array_offset_ptr(factors, w * nb * 36), shape=(nb * 6, 6), dtype=wp.float32)
+    reach = wp.uint64(0)
+    if body_reach:
+        unilateral = group * 16 + lane % 16
+        if unilateral < nu:
+            blocks = _unilateral_nzb_offsets(
+                unilateral,
+                njc[w],
+                nbc[w],
+                nbc[w] + nl[w],
+                bcio[w],
+                lio[w],
+                cio[w],
+                bsm_nzb_start[w] + bsm_num_nzb[w],
+                bsm_nzb_coords,
+                limit_indices,
+                contact_indices,
+                bounded_offsets,
+                limit_offsets,
+                contact_offsets,
+            )
+            for side in range(2):
+                if blocks[side] >= 0:
+                    reach = reach | body_reach[bsm_nzb_coords[blocks[side], 1] // 6]
+        reach = _warp_or_mask(reach)
     for row in range(ng):
         value = wp.tile_zeros(shape=(6, 16), dtype=wp.float32, storage="shared")
+        if body_reach and (reach & (wp.uint64(1) << wp.uint64(row))) == wp.uint64(0):
+            # Contacts can move to another branch: overwrite formerly active
+            # response rows instead of retaining values from the previous solve.
+            target = wp.array(
+                ptr=get_float32_array_offset_ptr(response, rio[w] + offsets[row] * nu),
+                shape=(lengths[row], nu),
+                dtype=wp.float32,
+            )
+            wp.tile_store(target, value, offset=(0, group * 16))
+            continue
         for entry in range(lane, 96, 32):
             local = entry // 16
             col = group * 16 + entry % 16
@@ -442,6 +547,7 @@ class JointBlockSolver:
         self._factor = wp.empty_like(self._matrix)
         self._vector = wp.empty(self._worlds * self._padded, dtype=wp.float32, device=self._device)
         self.failure = wp.zeros(1, dtype=wp.int32, device=self._device)
+        self._body_reach = _build_body_reach(path, metadata)
 
         order = np.asarray(metadata["order"], dtype=np.int32)
         inverse = np.empty(self._n, dtype=np.int32)
@@ -601,6 +707,25 @@ class JointBlockSolver:
     def response(self, path: SparseDVIPath, problem: DualProblem) -> None:
         """Whiten into compact response storage, omitting identity dummy rows."""
         state, schedule = path.data.state, self._schedule
+        reach_inputs = [None] * 14
+        if self._body_reach is not None:
+            bsm = problem.delassus.bsm
+            reach_inputs = [
+                self._body_reach,
+                bsm.num_nzb,
+                bsm.nzb_start,
+                bsm.nzb_coords,
+                problem.data.nbc,
+                problem.data.nl,
+                problem.data.bcio,
+                problem.data.lio,
+                problem.data.cio,
+                state.limit_indices,
+                state.contact_indices,
+                path.jacobians.bounded_constraint_nzb_offsets,
+                path.jacobians.limit_constraint_nzb_offsets,
+                path.jacobians.contact_constraint_nzb_offsets,
+            ]
         wp.launch_tiled(
             _response,
             dim=(self._worlds, (self._n + 15) // 16),
@@ -622,6 +747,7 @@ class JointBlockSolver:
                 state.bilateral_response,
                 schedule["lengths"],
                 schedule["row_offsets"],
+                *reach_inputs,
             ],
             block_dim=32,
             device=self._device,
