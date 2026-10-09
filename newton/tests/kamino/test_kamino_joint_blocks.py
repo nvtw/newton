@@ -4,6 +4,7 @@
 """Regressions for joint-block solves and conditional Schur dispatch."""
 
 import unittest
+from itertools import pairwise
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -19,11 +20,20 @@ from newton._src.solvers.kamino._src.solvers.dvi.joint_blocks import (
 )
 
 
-def _fixture(device):
+def _fixture(device, *, topology="chain"):
     """Construct two padded worlds with interleaved five/six/five-row groups."""
     rng = np.random.default_rng(94017)
     worlds, n, ld, stride = 2, 16, 20, 9
     groups = [[0, 3, 4, 5, 6], [1, 7, 8, 9, 10, 11], [2, 12, 13, 14, 15]]
+    edges = {(0, 1), (1, 2)}
+    if topology != "chain":
+        lengths = [5, 6] * (2 if topology == "cycle" else 7)
+        starts = np.cumsum([0, *lengths])
+        groups = [list(range(start, end)) for start, end in pairwise(starts)]
+        n, ld = int(starts[-1]), int(starts[-1]) + 4
+        edges = {(0, 1), (1, 2), (2, 3), (0, 3)}
+        edges.update((i, j) for i in range(4, len(groups)) for j in range(i + 1, len(groups)))
+    origin = max(64, 1 << (n - 1).bit_length())
 
     def ints(values):
         return wp.array(np.asarray(values, dtype=np.int32), dtype=wp.int32, device=device)
@@ -42,7 +52,7 @@ def _fixture(device):
         a = np.zeros((n, n))
         for i, rows in enumerate(groups):
             for j, cols in enumerate(groups):
-                if abs(i - j) <= 1:
+                if i == j or (min(i, j), max(i, j)) in edges:
                     a[np.ix_(rows, cols)] = rng.normal(0, 0.03, (len(rows), len(cols)))
         a = (a + a.T) * 0.5 + np.eye(n) * (2 + world)
         dense.append(a)
@@ -68,13 +78,13 @@ def _fixture(device):
         bilateral_response=wp.full(len(coupling), -123.0, dtype=wp.float32, device=device),
     )
     joints = SimpleNamespace(
-        wid=ints([0, 0, 0, 1, 1, 1]),
-        num_dynamic_cts=ints([1] * 6),
-        num_kinematic_cts=ints([4, 5, 4] * 2),
-        dynamic_cts_offset_total_cts=ints([0, 1, 2, 64, 65, 66]),
-        kinematic_cts_offset_total_cts=ints([3, 7, 12, 67, 71, 76]),
+        wid=ints([world for world in range(worlds) for _ in groups]),
+        num_dynamic_cts=ints([1] * (worlds * len(groups))),
+        num_kinematic_cts=ints([len(group) - 1 for _ in range(worlds) for group in groups]),
+        dynamic_cts_offset_total_cts=ints([world * origin + group[0] for world in range(worlds) for group in groups]),
+        kinematic_cts_offset_total_cts=ints([world * origin + group[1] for world in range(worlds) for group in groups]),
     )
-    body_sets = ((0,), (0, 1), (1,))
+    body_sets = ((0,), (0, 1), (1,)) if topology == "chain" else [(0,)] * len(groups)
     owners = {row: group for group, rows in enumerate(groups) for row in rows}
     joint_coords = [(row, 6 * body) for row in range(n) for body in body_sets[owners[row]]]
     block_stride = len(joint_coords) + stride
@@ -90,7 +100,7 @@ def _fixture(device):
         jacobians=SimpleNamespace(
             _J_cts=SimpleNamespace(bsm=bsm), joint_constraint_nzb_count=ints([len(joint_coords)] * worlds)
         ),
-        model=SimpleNamespace(joints=joints, info=SimpleNamespace(total_cts_offset=ints([0, 64]))),
+        model=SimpleNamespace(joints=joints, info=SimpleNamespace(total_cts_offset=ints([0, origin]))),
         data=SimpleNamespace(bilateral_dim=info.dim, bilateral_operator=operator, state=state),
         bilateral_nzb_pairs=(ints(pair_world), ints(pair_row), ints(pair_col), *[ints(np.zeros(len(pair_world)))] * 3),
         bilateral_entry_starts=ints(np.arange(len(pair_world) + 1)),
@@ -172,6 +182,106 @@ class TestKaminoJointBlocks(unittest.TestCase):
             np.testing.assert_allclose(y.T @ y, expected, atol=2e-5, rtol=3e-6)
             untouched[start : start + 16 * nu] = False
         np.testing.assert_array_equal(response[untouched], -123.0)
+
+    def test_persistent_filled_cycle_dense_reference(self):
+        """Factor filled ragged cycles exactly, including panels wider than eight warps."""
+        device = self._device()
+        for topology in ("cycle", "wide"):
+            with self.subTest(topology=topology):
+                path, problem, matrices, matrix, mio, vio, *_ = _fixture(device, topology=topology)
+                metadata, reason = _build_topology(path, *path.bilateral_nzb_pairs[:3])
+                self.assertIsNone(metadata)
+                self.assertIn("nonchordal", reason)
+                metadata, reason = _build_topology(path, *path.bilateral_nzb_pairs[:3], allow_fill=True)
+                self.assertIsNotNone(metadata, reason)
+                groups = 4 if topology == "cycle" else 14
+                original_edges = 4 if topology == "cycle" else 49
+                self.assertEqual(metadata["nb"], groups + original_edges + 1)
+                with patch(
+                    "newton._src.solvers.kamino._src.solvers.dvi.joint_blocks._PERSISTENT_MAX_BLOCKS",
+                    metadata["nb"] - 1,
+                ):
+                    rejected, reason = _build_topology(path, *path.bilateral_nzb_pairs[:3], allow_fill=True)
+                    self.assertIsNone(rejected)
+                    self.assertIn("budget", reason)
+                solver = JointBlockSolver(path, metadata, persistent=True)
+                n, ld = matrices[0].shape[0], int(path.data.bilateral_operator.info.maxdim.numpy()[0])
+                packed = _packed_matrix(solver, matrix, mio, ld)
+                solver._matrix.assign(packed)
+                solver.prepare(path, problem)
+                self.assertEqual(int(solver.failure.numpy()[0]), 0)
+                np.testing.assert_array_equal(solver._matrix.numpy(), packed)
+                order = solver._schedule["order"].numpy()
+                rows, cols = solver._schedule["rows"].numpy(), solver._schedule["cols"].numpy()
+                factors = solver._factor.numpy().reshape(2, solver._blocks, 6, 6)
+                active = np.flatnonzero(order >= 0)
+                for world in range(2):
+                    lower = np.zeros((groups * 6, groups * 6))
+                    for block, (row, col) in enumerate(zip(rows, cols, strict=True)):
+                        value = factors[world, block]
+                        lower[row * 6 : row * 6 + 6, col * 6 : col * 6 + 6] = np.tril(value) if row == col else value
+                    expected = np.eye(groups * 6)
+                    expected[np.ix_(active, active)] = matrices[world][np.ix_(order[active], order[active])]
+                    np.testing.assert_allclose(lower @ lower.T, expected, atol=2e-6, rtol=2e-6)
+                rng = np.random.default_rng(83051)
+                rhs = rng.normal(size=int(vio[-1] + n + 5)).astype(np.float32)
+                out = wp.full(len(rhs), -123.0, dtype=wp.float32, device=device)
+                solver.solve(wp.array(rhs, device=device), out)
+                result, untouched = out.numpy(), np.ones(len(rhs), dtype=bool)
+                for world, offset in enumerate(vio):
+                    np.testing.assert_allclose(
+                        result[offset : offset + n],
+                        np.linalg.solve(matrices[world], rhs[offset : offset + n]),
+                        atol=2e-6,
+                        rtol=2e-6,
+                    )
+                    untouched[offset : offset + n] = False
+                np.testing.assert_array_equal(result[untouched], -123.0)
+
+    def test_persistent_capture_changes_and_recovers(self):
+        """Refresh filled factors on replay and preserve inactive worlds through fallback recovery."""
+        device = self._device(conditional=True)
+        path, problem, matrices, matrix, mio, vio, *_ = _fixture(device, topology="cycle")
+        metadata, _ = _build_topology(path, *path.bilateral_nzb_pairs[:3], allow_fill=True)
+        solver = JointBlockSolver(path, metadata, persistent=True)
+        n, ld = matrices[0].shape[0], int(path.data.bilateral_operator.info.maxdim.numpy()[0])
+        rhs = wp.ones(int(vio[-1] + n + 5), dtype=wp.float32, device=device)
+        out = wp.full(rhs.size, -123.0, dtype=wp.float32, device=device)
+        active = wp.array([n, 0], dtype=wp.int32, device=device)
+        solver._matrix.assign(_packed_matrix(solver, matrix, mio, ld))
+        solver.prepare(path, problem)
+        solver.solve(rhs, out, active)
+        with wp.ScopedCapture(device=device) as capture:
+            solver.prepare(path, problem)
+            wp.capture_if(
+                solver.failure, on_true=lambda: out.fill_(-777.0), on_false=lambda: solver.solve(rhs, out, active)
+            )
+        for case in ("changed", "factor", "valid", "zeros", "valid"):
+            dense = [value.copy() for value in matrices]
+            if case == "changed":
+                dense = [value * 1.7 for value in dense]
+            elif case == "factor":
+                dense[1][0, 0] = -1.0
+            elif case == "zeros":
+                dense = [np.diag(np.diag(value)) for value in dense]
+            current = matrix.copy()
+            for world, offset in enumerate(mio):
+                for row in range(n):
+                    current[offset + row * ld : offset + row * ld + row + 1] = dense[world][row, : row + 1]
+            solver._matrix.assign(_packed_matrix(solver, current, mio, ld))
+            out.fill_(-123.0)
+            wp.capture_launch(capture.graph)
+            self.assertEqual(bool(solver.failure.numpy()[0]), case == "factor")
+            result = out.numpy()
+            if case == "factor":
+                np.testing.assert_array_equal(result, -777.0)
+            else:
+                np.testing.assert_allclose(
+                    result[vio[0] : vio[0] + n], np.linalg.solve(dense[0], np.ones(n)), atol=2e-6, rtol=2e-6
+                )
+                untouched = np.ones(len(result), dtype=bool)
+                untouched[vio[0] : vio[0] + n] = False
+                np.testing.assert_array_equal(result[untouched], -123.0)
 
     def test_response_reach_tracks_contact_body_changes(self):
         """Match unpruned ragged responses and erase stale groups as contacts move."""
@@ -406,6 +516,36 @@ class TestKaminoJointBlocks(unittest.TestCase):
                         atol=2e-6,
                         rtol=2e-6,
                     )
+
+    def test_bilateral_only_dispatch_keeps_selected_factor(self):
+        """Use the selected block factor when no unilateral constraints need elimination."""
+        path = SimpleNamespace(
+            data=SimpleNamespace(state=SimpleNamespace(projected_mio=None)),
+            size=SimpleNamespace(
+                max_of_num_bilateral_joint_cts=384,
+                max_of_num_bounded_joint_cts=0,
+                max_of_max_limits=0,
+                max_of_max_contacts=0,
+                num_worlds=1,
+            ),
+            bilateral_solver=object(),
+            device=SimpleNamespace(is_cuda=True),
+            max_alternating_iterations=4,
+            has_unilateral_constraints=False,
+        )
+        problem = object()
+        for blocks in (None, object()):
+            with (
+                self.subTest(blocks=blocks is not None),
+                patch.object(sparse, "_can_use_cooperative_articulation", return_value=False),
+                patch.object(sparse, "_factor_sparse_bilateral_block") as factor,
+                patch.object(sparse, "_solve_sparse_bilateral_block") as solve,
+                patch.object(sparse, "_compute_sparse_solution_vectors") as finish,
+            ):
+                sparse._solve_sparse_with_bilateral_schur_complement(path, problem, joint_blocks=blocks)
+                self.assertEqual(factor.call_count, int(blocks is None))
+                solve.assert_called_once_with(path, problem, joint_blocks=blocks)
+                finish.assert_called_once_with(path, problem)
 
     def test_dispatch_refreshes_cached_values_before_conditional(self):
         """Refresh changing Jacobian values on both branches of every graph replay."""

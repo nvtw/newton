@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Exact joint-block Cholesky for homogeneous, chordal bilateral systems.
+"""Exact joint-block Cholesky for homogeneous bilateral systems.
 
-Each joint contributes at most six bilateral rows. A simplicial elimination
-order preserves block sparsity; identity dummy rows complete short blocks.
+Each joint contributes at most six bilateral rows. Batched solves preserve
+zero-fill ordering; persistent small-batch solves also allow bounded symbolic
+fill. Identity dummy rows complete short blocks.
 Response tiles omit those dummy rows, preserving the compact Schur layout.
 """
 
@@ -19,7 +20,7 @@ from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from ...linalg.factorize.llt_blocked_rcm import _sync_threads, get_float32_array_offset_ptr
 from .kernels import BILATERAL_DIAGONAL_FLOOR, _compact_schur_fits
-from .sparse_kernels import _unilateral_nzb_offsets
+from .sparse_kernels import _shuffle_lane_32, _unilateral_nzb_offsets
 
 if TYPE_CHECKING:
     from ...dynamics.dual import DualProblem
@@ -28,8 +29,14 @@ if TYPE_CHECKING:
 wp.set_module_options({"enable_backward": False, "enable_mathdx_solver": False, "enable_mathdx_gemm": False})
 
 
-def _build_topology(path: SparseDVIPath, pair_world: wp.array, pair_row: wp.array, pair_col: wp.array):
-    """Build a zero-fill schedule, rejecting unsupported or heterogeneous rows."""
+# Bound fill storage on the small-batch path; larger graphs retain RCM.
+_PERSISTENT_MAX_BLOCKS = 4096
+
+
+def _build_topology(
+    path: SparseDVIPath, pair_world: wp.array, pair_row: wp.array, pair_col: wp.array, *, allow_fill: bool = False
+):
+    """Build a static elimination schedule, optionally allowing bounded fill."""
     joints = path.model.joints
     world = joints.wid.numpy()
     dynamic_counts = joints.num_dynamic_cts.numpy()
@@ -86,6 +93,9 @@ def _build_topology(path: SparseDVIPath, pair_world: wp.array, pair_row: wp.arra
         if a != b:
             graph[a].add(b)
             graph[b].add(a)
+    stored_blocks = ng + sum(len(adjacent) for adjacent in graph) // 2
+    if allow_fill and stored_blocks > _PERSISTENT_MAX_BLOCKS:
+        return None, "persistent block storage budget exceeded"
     remaining = set(range(ng))
     order = []
     while remaining:
@@ -95,7 +105,19 @@ def _build_topology(path: SparseDVIPath, pair_world: wp.array, pair_row: wp.arra
             if all(b in graph[a] for a in adjacent for b in adjacent if a != b):
                 choices.append((len(adjacent), node))
         if not choices:
-            return None, "nonchordal graph: zero-fill block elimination unavailable"
+            if not allow_fill:
+                return None, "nonchordal graph: zero-fill block elimination unavailable"
+            node = min(remaining, key=lambda node: (len(graph[node] & remaining), node))
+            adjacent = graph[node] & remaining
+            added = sum(len(adjacent - graph[a] - {a}) for a in adjacent) // 2
+            if stored_blocks + added > _PERSISTENT_MAX_BLOCKS:
+                return None, "persistent block storage budget exceeded"
+            stored_blocks += added
+            # Completing the surviving neighborhood gives exact symbolic
+            # Cholesky fill; the corresponding original matrix blocks stay zero.
+            for a in adjacent:
+                graph[a].update(adjacent - {a})
+            choices.append((len(adjacent), node))
         node = min(choices)[1]
         order.append(node)
         remaining.remove(node)
@@ -142,7 +164,7 @@ def _build_topology(path: SparseDVIPath, pair_world: wp.array, pair_row: wp.arra
         "following": following,
         "lengths": lengths,
         "row_offsets": row_offsets,
-    }, "eligible homogeneous chordal joint-block graph"
+    }, "eligible homogeneous joint-block graph"
 
 
 def _build_body_reach(path: SparseDVIPath, metadata: dict) -> wp.array | None:
@@ -230,6 +252,153 @@ def _factor(
             transposed = wp.tile_transpose(value)
             wp.tile_lower_solve_inplace(d, transposed)
             wp.tile_store(ll, wp.tile_transpose(transposed), offset=(b * 6, 0))
+
+
+@wp.kernel
+def _factor_persistent(
+    matrix: wp.array[wp.float32],
+    factors: wp.array[wp.float32],
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    diagonal: wp.array[wp.int32],
+    updates: wp.array[wp.int32],
+    lefts: wp.array[wp.int32],
+    rights: wp.array[wp.int32],
+    nb: int,
+    tasks: wp.array[wp.int32],
+    levels: wp.array[wp.int32],
+    level_count: int,
+):
+    """Factor independent blocks with eight warps and a barrier per level."""
+    world, thread = wp.tid()
+    lane = thread % 32
+    warp = thread // 32
+    origin = world * nb * 36
+    for level in range(level_count):
+        for task in range(levels[level] + warp, levels[level + 1], 8):
+            block = tasks[task]
+            value = vec6f(0.0)
+            result = vec6f(0.0)
+            if lane < 6:
+                for col in range(6):
+                    value[col] = matrix[origin + block * 36 + lane * 6 + col]
+                for update in range(updates[block], updates[block + 1]):
+                    left = lefts[update]
+                    right = rights[update]
+                    for col in range(6):
+                        accum = wp.float32(0.0)
+                        for k in range(6):
+                            accum += (
+                                factors[origin + left * 36 + lane * 6 + k] * factors[origin + right * 36 + col * 6 + k]
+                            )
+                        value[col] -= accum
+            if rows[block] == cols[block]:
+                for pivot in range(6):
+                    accum = wp.float32(0.0)
+                    for k in range(pivot):
+                        component = _shuffle_lane_32(result[k], pivot)
+                        accum += result[k] * component
+                    numerator = value[pivot] - accum
+                    root = wp.float32(0.0)
+                    if lane == pivot:
+                        root = wp.sqrt(numerator)
+                    pivot_diagonal = _shuffle_lane_32(root, pivot)
+                    if lane == pivot:
+                        result[pivot] = pivot_diagonal
+                    elif lane > pivot and lane < 6:
+                        result[pivot] = numerator / pivot_diagonal
+            elif lane < 6:
+                d = diagonal[cols[block]]
+                for pivot in range(6):
+                    numerator = value[pivot]
+                    for k in range(pivot):
+                        numerator -= factors[origin + d * 36 + pivot * 6 + k] * result[k]
+                    result[pivot] = numerator / factors[origin + d * 36 + pivot * 6 + pivot]
+            if lane < 6:
+                for col in range(6):
+                    factors[origin + block * 36 + lane * 6 + col] = result[col]
+        _sync_threads()
+
+
+@wp.kernel
+def _solve_persistent(
+    factors: wp.array[wp.float32],
+    scratch: wp.array[wp.float32],
+    active: wp.array[wp.int32],
+    diagonal: wp.array[wp.int32],
+    pstart: wp.array[wp.int32],
+    previous: wp.array[wp.int32],
+    fstart: wp.array[wp.int32],
+    following: wp.array[wp.int32],
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    nb: int,
+    padded: int,
+    forward_tasks: wp.array[wp.int32],
+    forward_levels: wp.array[wp.int32],
+    forward_count: int,
+    backward_tasks: wp.array[wp.int32],
+    backward_levels: wp.array[wp.int32],
+    backward_count: int,
+):
+    """Solve independent group rows with one persistent block per world."""
+    world, thread = wp.tid()
+    if active[world] == 0:
+        return
+    lane = thread % 32
+    warp = thread // 32
+    origin = world * nb * 36
+    vector = world * padded
+    for level in range(forward_count):
+        for task in range(forward_levels[level] + warp, forward_levels[level + 1], 8):
+            row = forward_tasks[task]
+            value = wp.float32(0.0)
+            if lane < 6:
+                value = scratch[vector + row * 6 + lane]
+                for entry in range(pstart[row], pstart[row + 1]):
+                    block = previous[entry]
+                    accum = wp.float32(0.0)
+                    for k in range(6):
+                        accum += factors[origin + block * 36 + lane * 6 + k] * scratch[vector + cols[block] * 6 + k]
+                    value -= accum
+            d = diagonal[row]
+            for pivot in range(6):
+                solved = wp.float32(0.0)
+                if lane == pivot:
+                    solved = value / factors[origin + d * 36 + pivot * 6 + pivot]
+                solved = _shuffle_lane_32(solved, pivot)
+                if lane == pivot:
+                    value = solved
+                elif lane > pivot and lane < 6:
+                    value -= factors[origin + d * 36 + lane * 6 + pivot] * solved
+            if lane < 6:
+                scratch[vector + row * 6 + lane] = value
+        _sync_threads()
+    for level in range(backward_count):
+        for task in range(backward_levels[level] + warp, backward_levels[level + 1], 8):
+            row = backward_tasks[task]
+            value = wp.float32(0.0)
+            if lane < 6:
+                value = scratch[vector + row * 6 + lane]
+                for entry in range(fstart[row], fstart[row + 1]):
+                    block = following[entry]
+                    accum = wp.float32(0.0)
+                    for k in range(6):
+                        accum += factors[origin + block * 36 + k * 6 + lane] * scratch[vector + rows[block] * 6 + k]
+                    value -= accum
+            d = diagonal[row]
+            for pivot in range(5, -1, -1):
+                solved = wp.float32(0.0)
+                if lane == pivot:
+                    solved = value / factors[origin + d * 36 + pivot * 6 + pivot]
+                solved = _shuffle_lane_32(solved, pivot)
+                if lane == pivot:
+                    value = solved
+                elif lane < pivot:
+                    value -= factors[origin + d * 36 + pivot * 6 + lane] * solved
+            if lane < 6:
+                scratch[vector + row * 6 + lane] = value
+        _sync_threads()
 
 
 @wp.kernel
@@ -321,6 +490,27 @@ def _check_factor(
             if factors[w * nb * 36 + diagonal[row] * 36 + i * 6 + i] <= 0.0:
                 failed = 1
     wp.atomic_max(failure, 0, failed)
+
+
+@wp.kernel
+def _check_factor_parallel(
+    factors: wp.array[wp.float32],
+    diagonal: wp.array[wp.int32],
+    failure: wp.array[wp.int32],
+    nb: int,
+    ng: int,
+):
+    w, lane = wp.tid()
+    failed = int(0)
+    for entry in range(lane, nb * 36, 256):
+        if not wp.isfinite(factors[w * nb * 36 + entry]):
+            failed = 1
+    for entry in range(lane, ng * 6, 256):
+        row, col = entry // 6, entry % 6
+        if factors[w * nb * 36 + diagonal[row] * 36 + col * 7] <= 0.0:
+            failed = 1
+    if failed:
+        wp.atomic_max(failure, 0, failed)
 
 
 @wp.kernel
@@ -513,6 +703,31 @@ def _response(
         wp.tile_store(target, value, offset=(0, group * 16))
 
 
+def _build_levels(metadata: dict) -> dict:
+    """Group independent factor blocks and triangular rows into barrier levels."""
+    factor = np.zeros(metadata["nb"], dtype=np.int32)
+    for block, (row, col) in enumerate(zip(metadata["rows"], metadata["cols"], strict=True)):
+        start, end = metadata["starts"][block : block + 2]
+        dependencies = metadata["left"][start:end] + metadata["right"][start:end]
+        if row != col:
+            dependencies = [*dependencies, metadata["diagonal"][col]]
+        factor[block] = 1 + max((int(factor[index]) for index in dependencies), default=0)
+    forward = np.zeros(metadata["ng"], dtype=np.int32)
+    backward = np.zeros_like(forward)
+    for row in range(metadata["ng"]):
+        entries = metadata["previous"][metadata["pstart"][row] : metadata["pstart"][row + 1]]
+        forward[row] = 1 + max((int(forward[metadata["cols"][entry]]) for entry in entries), default=0)
+    for row in range(metadata["ng"] - 1, -1, -1):
+        entries = metadata["following"][metadata["fstart"][row] : metadata["fstart"][row + 1]]
+        backward[row] = 1 + max((int(backward[metadata["rows"][entry]]) for entry in entries), default=0)
+    levels = {}
+    for name, values in (("factor", factor), ("forward", forward), ("backward", backward)):
+        tasks = np.argsort(values, kind="stable").astype(np.int32)
+        offsets = np.cumsum(np.r_[0, np.bincount(values)[1:]], dtype=np.int32)
+        levels[name] = (tasks, offsets)
+    return levels
+
+
 class JointBlockSolver:
     """Own a fixed block schedule and scratch without modifying the RCM solver.
 
@@ -521,16 +736,17 @@ class JointBlockSolver:
     """
 
     @classmethod
-    def create(cls, path: SparseDVIPath) -> JointBlockSolver | None:
-        """Allocate a schedule only for supported homogeneous joint topologies."""
+    def create(cls, path: SparseDVIPath, *, persistent: bool = False) -> JointBlockSolver | None:
+        """Allocate a fixed schedule, allowing bounded fill for persistent solves."""
         if path.bilateral_nzb_pairs is None or not path.device.is_cuda:
             return None
-        metadata, _ = _build_topology(path, *path.bilateral_nzb_pairs[:3])
+        metadata, _ = _build_topology(path, *path.bilateral_nzb_pairs[:3], allow_fill=persistent)
         if metadata is None:
             return None
-        return cls(path, metadata)
+        return cls(path, metadata, persistent=persistent)
 
-    def __init__(self, path: SparseDVIPath, metadata: dict):
+    def __init__(self, path: SparseDVIPath, metadata: dict, *, persistent: bool = False):
+        self._persistent = persistent
         self._device = path.device
         self._info = path.data.bilateral_operator.info
         self._worlds = path.size.num_worlds
@@ -543,6 +759,14 @@ class JointBlockSolver:
             for name, value in metadata.items()
             if name not in ("n", "ng", "padded_n", "nb")
         }
+        self._levels = {}
+        if persistent:
+            for name, (tasks, offsets) in _build_levels(metadata).items():
+                self._levels[name] = (
+                    wp.array(tasks, dtype=wp.int32, device=self._device),
+                    wp.array(offsets, dtype=wp.int32, device=self._device),
+                    len(offsets) - 1,
+                )
         self._matrix = wp.zeros(self._worlds * self._blocks * 36, dtype=wp.float32, device=self._device)
         self._factor = wp.empty_like(self._matrix)
         self._vector = wp.empty(self._worlds * self._padded, dtype=wp.float32, device=self._device)
@@ -637,27 +861,48 @@ class JointBlockSolver:
             ],
             device=self._device,
         )
-        wp.launch_tiled(
-            _factor,
-            dim=self._worlds,
-            inputs=[
-                self._matrix,
-                self._factor,
-                schedule["rows"],
-                schedule["cols"],
-                schedule["diagonal"],
-                schedule["starts"],
-                schedule["left"],
-                schedule["right"],
-                self._blocks,
-            ],
-            block_dim=32,
-            device=self._device,
-        )
+        if self._persistent:
+            wp.launch(
+                _factor_persistent,
+                dim=(self._worlds, 256),
+                inputs=[
+                    self._matrix,
+                    self._factor,
+                    schedule["rows"],
+                    schedule["cols"],
+                    schedule["diagonal"],
+                    schedule["starts"],
+                    schedule["left"],
+                    schedule["right"],
+                    self._blocks,
+                    *self._levels["factor"],
+                ],
+                block_dim=256,
+                device=self._device,
+            )
+        else:
+            wp.launch_tiled(
+                _factor,
+                dim=self._worlds,
+                inputs=[
+                    self._matrix,
+                    self._factor,
+                    schedule["rows"],
+                    schedule["cols"],
+                    schedule["diagonal"],
+                    schedule["starts"],
+                    schedule["left"],
+                    schedule["right"],
+                    self._blocks,
+                ],
+                block_dim=32,
+                device=self._device,
+            )
         wp.launch(
-            _check_factor,
-            dim=self._worlds,
+            _check_factor_parallel if self._persistent else _check_factor,
+            dim=(self._worlds, 256) if self._persistent else self._worlds,
             inputs=[self._factor, schedule["diagonal"], self.failure, self._blocks, self._groups],
+            block_dim=256,
             device=self._device,
         )
 
@@ -676,27 +921,51 @@ class JointBlockSolver:
             inputs=[dimensions, info.vio, schedule["order"], rhs, self._vector, self._padded],
             device=self._device,
         )
-        wp.launch_tiled(
-            _solve,
-            dim=self._worlds,
-            inputs=[
-                self._factor,
-                self._vector,
-                dimensions,
-                schedule["diagonal"],
-                schedule["pstart"],
-                schedule["previous"],
-                schedule["fstart"],
-                schedule["following"],
-                schedule["rows"],
-                schedule["cols"],
-                self._blocks,
-                self._groups,
-                self._padded,
-            ],
-            block_dim=32,
-            device=self._device,
-        )
+        if self._persistent:
+            wp.launch(
+                _solve_persistent,
+                dim=(self._worlds, 256),
+                inputs=[
+                    self._factor,
+                    self._vector,
+                    dimensions,
+                    schedule["diagonal"],
+                    schedule["pstart"],
+                    schedule["previous"],
+                    schedule["fstart"],
+                    schedule["following"],
+                    schedule["rows"],
+                    schedule["cols"],
+                    self._blocks,
+                    self._padded,
+                    *self._levels["forward"],
+                    *self._levels["backward"],
+                ],
+                block_dim=256,
+                device=self._device,
+            )
+        else:
+            wp.launch_tiled(
+                _solve,
+                dim=self._worlds,
+                inputs=[
+                    self._factor,
+                    self._vector,
+                    dimensions,
+                    schedule["diagonal"],
+                    schedule["pstart"],
+                    schedule["previous"],
+                    schedule["fstart"],
+                    schedule["following"],
+                    schedule["rows"],
+                    schedule["cols"],
+                    self._blocks,
+                    self._groups,
+                    self._padded,
+                ],
+                block_dim=32,
+                device=self._device,
+            )
         wp.launch(
             _scatter,
             dim=(self._worlds, self._padded),

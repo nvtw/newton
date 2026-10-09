@@ -227,13 +227,15 @@ class SparseDVIPath:
                 if (
                     self.device.is_cuda
                     and wp.is_conditional_graph_supported()
-                    and self.size.num_worlds >= 2048
                     and self.use_schur_complement
-                    and self.has_unilateral_constraints
                     and self.size.max_of_num_bilateral_joint_cts >= 32
                     and self.max_alternating_iterations >= 4
+                    and (
+                        (self.size.num_worlds >= 2048 and self.has_unilateral_constraints)
+                        or (self.size.num_worlds <= 16 and self.size.max_of_num_bilateral_joint_cts >= 384)
+                    )
                 ):
-                    self.joint_block_solver = JointBlockSolver.create(self)
+                    self.joint_block_solver = JointBlockSolver.create(self, persistent=self.size.num_worlds <= 16)
             # Alternating solves of small blocks reuse one inverse per factorization.
             elif (
                 self.device.is_cuda
@@ -1566,7 +1568,7 @@ def _solve_sparse_with_bilateral_schur_complement(
     if joint_blocks is None:
         _factor_sparse_bilateral_block(path, problem)
     if not path.has_unilateral_constraints:
-        _solve_sparse_bilateral_block(path, problem)
+        _solve_sparse_bilateral_block(path, problem, joint_blocks=joint_blocks)
         _compute_sparse_solution_vectors(path, problem)
         return
 

@@ -1,0 +1,1 @@
+Accelerate Kamino DVI for large joint systems in small batches with an exact sparse factorization that supports loop-induced fill and retains the original solver as fallback; no migration is required.
