@@ -16,6 +16,7 @@ from .support_function import (
     GenericShapeData,
     GeoTypeEx,
     SupportMapDataProvider,
+    closest_point_on_triangle,
     pack_mesh_ptr,
     support_map,
     unpack_mesh_ptr,
@@ -1013,10 +1014,14 @@ def _compute_mesh_vs_convex_query_aabb(
 @wp.func
 def _mesh_triangle_is_front_facing_local(
     mesh_id: wp.uint64,
-    center_in_bvh: wp.vec3,
+    aabb_lower: wp.vec3,
+    aabb_upper: wp.vec3,
     tri_idx: int,
 ) -> bool:
-    """Check triangle winding against a point in unscaled mesh-local space."""
+    """Whether any part of a box in unscaled mesh-local space lies in front of a triangle's face.
+
+    Plane sides survive the affine map to the unscaled frame, so the test holds for any mesh scale.
+    """
     mesh = wp.mesh_get(mesh_id)
     idx0 = mesh.indices[tri_idx * 3 + 0]
     idx1 = mesh.indices[tri_idx * 3 + 1]
@@ -1026,8 +1031,58 @@ def _mesh_triangle_is_front_facing_local(
     v1 = mesh.points[idx1]
     v2 = mesh.points[idx2]
     face_normal = wp.cross(v1 - v0, v2 - v0)
-    center_dist = wp.dot(face_normal, center_in_bvh - v0)
-    return not (center_dist < 0.0)
+    center = 0.5 * (aabb_lower + aabb_upper)
+    half = 0.5 * (aabb_upper - aabb_lower)
+    front_reach = wp.dot(face_normal, center - v0) + wp.dot(wp.abs(face_normal), half)
+    return not (front_reach < 0.0)
+
+
+@wp.func
+def orient_mesh_triangle(
+    triangle: GenericShapeData,
+    pos_tri: wp.vec3,
+    shape: GenericShapeData,
+    quat_shape: wp.quat,
+    pos_shape: wp.vec3,
+    margin_shape: float,
+) -> tuple[bool, GenericShapeData, wp.quat]:
+    """Return whether a convex shape can touch a one-sided mesh triangle, and the triangle to use.
+
+    Mesh triangles have no thickness and only their front face collides. A shape whose center is in
+    front collides with the plain triangle. A shape whose center has crossed the face, lies over the
+    triangle, and still reaches in front of it would otherwise lose the contact and fall through; it
+    collides with the triangle extruded behind its face instead, like a heightfield cell, which pushes
+    it back out the front. The extruded triangle is a ``TRIANGLE_PRISM`` in a frame whose z axis is
+    the face normal, returned as the rotation to use for it. Any other shape behind the face cannot
+    touch it; requiring the center to lie over the triangle keeps a shape next to a closed mesh, for
+    example flush with its top face while hitting its side, from being pushed out through that face.
+    """
+    face_normal = wp.cross(triangle.scale, triangle.auxiliary)
+    normal_length = wp.length(face_normal)
+    if normal_length <= 0.0:
+        return True, triangle, wp.quat_identity()
+    n = face_normal / normal_length
+    offset = pos_shape - pos_tri
+    center_dist = wp.dot(n, offset)
+    if center_dist >= 0.0:
+        return True, triangle, wp.quat_identity()
+
+    projection = offset - center_dist * n
+    closest = closest_point_on_triangle(projection, wp.vec3(0.0), triangle.scale, triangle.auxiliary)
+    if wp.length_sq(projection - closest) > 1.0e-12 * wp.length_sq(triangle.scale):
+        return False, triangle, wp.quat_identity()
+
+    front = support_map(shape, wp.quat_rotate_inv(quat_shape, n), SupportMapDataProvider())
+    reach = wp.dot(n, wp.quat_rotate(quat_shape, front) + pos_shape - pos_tri) + margin_shape
+    if reach < 0.0:
+        return False, triangle, wp.quat_identity()
+
+    frame = wp.quat_between_vectors(wp.vec3(0.0, 0.0, 1.0), n)
+    prism = triangle
+    prism.shape_type = int(GeoTypeEx.TRIANGLE_PRISM)
+    prism.scale = wp.quat_rotate_inv(frame, triangle.scale)
+    prism.auxiliary = wp.quat_rotate_inv(frame, triangle.auxiliary)
+    return True, prism, frame
 
 
 @wp.func
@@ -1118,7 +1173,7 @@ def mesh_vs_convex_midphase(
         while wp.tile_query_valid(query):
             result_tile = wp.tile_mesh_query_aabb_next(query)
             tri_index = wp.untile(result_tile)
-            if tri_index >= 0 and not _mesh_triangle_is_front_facing_local(mesh_id, center_in_bvh, tri_index):
+            if tri_index >= 0 and not _mesh_triangle_is_front_facing_local(mesh_id, aabb_lower, aabb_upper, tri_index):
                 tri_index = -1
 
             # Add this triangle pair to the output buffer if valid
@@ -1144,7 +1199,7 @@ def mesh_vs_convex_midphase(
         while wp.mesh_query_aabb_next(query, tri_index):
             # Add this triangle pair to the output buffer if valid
             # Store (mesh_shape, non_mesh_shape, tri_index) to guarantee mesh is always first
-            if tri_index >= 0 and _mesh_triangle_is_front_facing_local(mesh_id, center_in_bvh, tri_index):
+            if tri_index >= 0 and _mesh_triangle_is_front_facing_local(mesh_id, aabb_lower, aabb_upper, tri_index):
                 out_idx = wp.atomic_add(triangle_pairs_count, 0, 1)
                 if out_idx < triangle_pairs.shape[0]:
                     triangle_pairs[out_idx] = wp.vec3i(mesh_shape, non_mesh_shape, tri_index)

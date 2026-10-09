@@ -329,7 +329,8 @@ class TestMeshBackfaceCulling(unittest.TestCase):
         self._assert_back_face_culled(GeoType.CONVEX_MESH)
 
     def test_near_back_face_box_matches_reduction_modes(self):
-        """Cull near-back-face box contacts with and without reduction."""
+        """A box whose center has crossed the face but that still reaches in front of it is pushed
+        back out the front, with and without reduction, instead of falling through."""
         mesh = _make_flat_ground_mesh(z=0.0)
         for reduce_contacts in (False, True):
             for z_pos in (-0.08, -0.05, -0.02):
@@ -343,7 +344,13 @@ class TestMeshBackfaceCulling(unittest.TestCase):
                     )
                     contacts = _collide(model, cp, state)
                     count = int(contacts.rigid_contact_count.numpy()[0])
-                    self.assertEqual(count, 0)
+                    self.assertGreater(count, 0)
+                    normals = contacts.rigid_contact_normal.numpy()[:count]
+                    shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+                    # Orient each normal from the mesh to the box.
+                    mesh_first = model.shape_type.numpy()[shape0] == int(GeoType.MESH)
+                    up = np.where(mesh_first, normals[:, 2], -normals[:, 2])
+                    self.assertTrue(np.all(up > 0.99), up)
 
     # ------------------------------------------------------------------
     # Rotated convex shapes on back side

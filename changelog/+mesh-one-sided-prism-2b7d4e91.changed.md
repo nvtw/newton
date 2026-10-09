@@ -1,0 +1,1 @@
+Convex shapes that sink partway through a triangle mesh are now pushed back out of its front face instead of losing the contact and falling through. A shape whose center has crossed a triangle, lies over it, and still reaches in front of it collides with the triangle extruded behind its face, like a heightfield cell; shapes entirely behind a triangle still get no contact with it.

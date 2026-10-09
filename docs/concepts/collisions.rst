@@ -1042,11 +1042,12 @@ Uses BVH (Bounding Volume Hierarchy) queries to find nearby triangles, then gene
 
 .. important::
    **Triangle winding order matters.** Newton uses counter-clockwise (CCW) winding
-   to determine the outward face normal of each triangle. The collision pipeline
-   performs back-face culling: when a convex shape is on the back side of a
-   triangle (behind the face normal), the contact is discarded. This prevents
-   shapes that tunnel through a mesh surface from being trapped by inverted
-   contact normals.
+   to determine the outward face normal of each triangle, and only the front side
+   collides. A convex shape entirely behind a triangle gets no contact with it. A
+   shape whose center has crossed the face but that still reaches in front of it
+   collides with the triangle extruded behind its face, like a heightfield cell, so
+   the contact pushes it back out the front instead of trapping it with an
+   inverted normal or letting it fall through.
 
    Supply mesh indices in CCW order when viewed from the outside of the surface.
    If your mesh has inconsistent or clockwise winding, convex shapes may pass
@@ -1464,11 +1465,6 @@ How well a solver uses these contacts depends on the solver:
   no force when the two shapes do not actually touch, for example when a body passes beside an edge.
 - Other solvers treat them like regular contacts. They detect the impact in time but may let the
   bodies penetrate or push on separated contacts along the contact normal.
-
-.. note::
-
-   Triangle meshes have no thickness: a thin shape whose center crosses a triangle can still
-   lose that contact. Prefer heightfields or meshes with volume for terrain.
 
 .. _Common Patterns:
 

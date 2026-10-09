@@ -20,6 +20,7 @@ from ..geometry.collision_core import (
     create_find_contacts,
     get_triangle_shape_from_mesh,
     mesh_vs_convex_midphase,
+    orient_mesh_triangle,
     post_process_axial_on_discrete_contact,
     post_process_minkowski_only,
 )
@@ -1762,6 +1763,14 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(
 
             # Extract margin offset for shape A (signed distance padding)
             margin_offset_a = shape_data[shape_a][3]
+
+            # Mesh triangles are one-sided; heightfield prisms handle this through their extrusion.
+            if type_a != GeoType.HFIELD:
+                touches, shape_data_a, quat_a = orient_mesh_triangle(
+                    shape_data_a, pos_a, shape_data_b, quat_b, pos_b, margin_offset_a + margin_offset_b
+                )
+                if not touches:
+                    continue
 
             # Sum per-shape contact gaps for consistent pairwise thresholding
             gap_a = shape_gap[shape_a]

@@ -67,6 +67,7 @@ from ..utils.heightfield import HeightfieldData, get_triangle_shape_from_heightf
 from .collision_core import (
     create_compute_gjk_mpr_contacts,
     get_triangle_shape_from_mesh,
+    orient_mesh_triangle,
 )
 from .collision_primitive import collide_sphere_sphere
 from .contact_data import ContactData, compute_contact_approach_speed
@@ -2472,17 +2473,16 @@ def mesh_triangle_contacts_to_reducer_kernel(
         else:
             quat_a = wp.quat_identity()
 
-        # Back-face culling: skip when the convex center is behind the
-        # triangle face. TRIANGLE_PRISM (heightfields) handles this
-        # through its extruded support function.
-        if shape_data_a.shape_type == int(GeoTypeEx.TRIANGLE):
-            face_normal = wp.cross(shape_data_a.scale, shape_data_a.auxiliary)
-            center_dist = wp.dot(face_normal, pos_b - pos_a)
-            if center_dist < 0.0:
-                continue
-
         # Extract margin offset for shape A (signed distance padding)
         margin_offset_a = shape_data[shape_a][3]
+
+        # Mesh triangles are one-sided; heightfield prisms handle this through their extrusion.
+        if shape_data_a.shape_type == int(GeoTypeEx.TRIANGLE):
+            touches, shape_data_a, quat_a = orient_mesh_triangle(
+                shape_data_a, pos_a, shape_data_b, quat_b, pos_b, margin_offset_a + margin_offset_b
+            )
+            if not touches:
+                continue
 
         # Use additive per-shape contact gap for detection threshold
         gap_a = shape_gap[shape_a]
@@ -2491,7 +2491,7 @@ def mesh_triangle_contacts_to_reducer_kernel(
 
         # Heightfields use extruded triangle prisms to keep contacts one-sided near
         # cell boundaries, so their sphere contacts must retain the generic path.
-        if shape_data_b.shape_type == GeoType.SPHERE and type_a != GeoType.HFIELD:
+        if shape_data_b.shape_type == GeoType.SPHERE and shape_data_a.shape_type == int(GeoTypeEx.TRIANGLE):
             tri_a = pos_a
             tri_b = pos_a + shape_data_a.scale
             tri_c = pos_a + shape_data_a.auxiliary
