@@ -1,0 +1,1 @@
+Accelerate captured Kamino DVI Schur solves for large batches of supported joint trees using sparse joint-block factorization, retaining the existing solver as a fallback without changing solver settings.

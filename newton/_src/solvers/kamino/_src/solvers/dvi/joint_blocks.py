@@ -1,0 +1,521 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Exact joint-block Cholesky for homogeneous, chordal bilateral systems.
+
+Each joint contributes at most six bilateral rows. A simplicial elimination
+order preserves block sparsity; identity dummy rows complete short blocks.
+Response tiles omit those dummy rows, preserving the compact Schur layout.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import numpy as np
+import warp as wp
+
+from ...linalg.factorize.llt_blocked_rcm import _sync_threads, get_float32_array_offset_ptr
+from .kernels import _compact_schur_fits
+
+if TYPE_CHECKING:
+    from ...dynamics.dual import DualProblem
+    from .sparse import SparseDVIPath
+
+wp.set_module_options({"enable_backward": False, "enable_mathdx_solver": False, "enable_mathdx_gemm": False})
+
+
+def _build_topology(path: SparseDVIPath, pair_world: wp.array, pair_row: wp.array, pair_col: wp.array):
+    """Build a zero-fill schedule, rejecting unsupported or heterogeneous rows."""
+    joints = path.model.joints
+    world = joints.wid.numpy()
+    dynamic_counts = joints.num_dynamic_cts.numpy()
+    kinematic_counts = joints.num_kinematic_cts.numpy()
+    dynamic_offsets = joints.dynamic_cts_offset_total_cts.numpy()
+    kinematic_offsets = joints.kinematic_cts_offset_total_cts.numpy()
+    origin = path.model.info.total_cts_offset.numpy()
+    dimensions = path.data.bilateral_dim.numpy()
+    worlds = path.size.num_worlds
+    groups_by_world = [[] for _ in range(worlds)]
+    for joint, wid in enumerate(world):
+        rows = list(
+            range(
+                int(dynamic_offsets[joint] - origin[wid]),
+                int(dynamic_offsets[joint] - origin[wid] + dynamic_counts[joint]),
+            )
+        )
+        rows += list(
+            range(
+                int(kinematic_offsets[joint] - origin[wid]),
+                int(kinematic_offsets[joint] - origin[wid] + kinematic_counts[joint]),
+            )
+        )
+        if rows:
+            if len(rows) > 6:
+                return None, "joint group exceeds six bilateral rows"
+            groups_by_world[wid].append(tuple(rows))
+    groups = groups_by_world[0]
+    n = int(dimensions[0])
+    if n == 0 or any(g != groups for g in groups_by_world) or not np.all(dimensions == n):
+        return None, "empty or heterogeneous joint-row topology"
+    if sorted(row for group in groups for row in group) != list(range(n)):
+        return None, "joint groups do not partition the bilateral rows exactly"
+    group_of = np.empty(n, dtype=np.int32)
+    for i, group in enumerate(groups):
+        group_of[list(group)] = i
+    pw, pr, pc = pair_world.numpy(), pair_row.numpy(), pair_col.numpy()
+    if np.any(pr < 0) or np.any(pc < 0) or np.any(pr >= n) or np.any(pc >= n):
+        return None, "pair row outside static bilateral dimensions"
+    ng = len(groups)
+    lo = np.minimum(group_of[pr], group_of[pc])
+    hi = np.maximum(group_of[pr], group_of[pc])
+    # Unique block edges per world verify all replicated worlds share the graph.
+    edges = np.unique(pw.astype(np.int64) * ng * ng + lo.astype(np.int64) * ng + hi)
+    counts = np.bincount(edges // (ng * ng), minlength=worlds)
+    if not np.all(counts == counts[0]):
+        return None, "heterogeneous block graphs"
+    edge_sets = edges.reshape(worlds, int(counts[0])) % (ng * ng)
+    if not np.all(edge_sets == edge_sets[0]):
+        return None, "heterogeneous block graphs"
+    graph = [set() for _ in groups]
+    for encoded in edge_sets[0]:
+        a, b = divmod(int(encoded), ng)
+        if a != b:
+            graph[a].add(b)
+            graph[b].add(a)
+    remaining = set(range(ng))
+    order = []
+    while remaining:
+        choices = []
+        for node in remaining:
+            adjacent = graph[node] & remaining
+            if all(b in graph[a] for a in adjacent for b in adjacent if a != b):
+                choices.append((len(adjacent), node))
+        if not choices:
+            return None, "nonchordal graph: zero-fill block elimination unavailable"
+        node = min(choices)[1]
+        order.append(node)
+        remaining.remove(node)
+    positions = {node: i for i, node in enumerate(order)}
+    pairs = [(i, i) for i in range(ng)]
+    for node in order:
+        for other in graph[node]:
+            if positions[other] > positions[node]:
+                pairs.append((positions[other], positions[node]))
+    pairs.sort(key=lambda pair: (pair[1], pair[0]))
+    index = {pair: i for i, pair in enumerate(pairs)}
+    starts, left, right = [0], [], []
+    for i, j in pairs:
+        for k in range(j):
+            if (i, k) in index and (j, k) in index:
+                left.append(index[i, k])
+                right.append(index[j, k])
+        starts.append(len(left))
+    previous_start, previous, following_start, following = [0], [], [0], []
+    for i in range(ng):
+        previous.extend(index[i, k] for k in range(i) if (i, k) in index)
+        following.extend(index[k, i] for k in range(i + 1, ng) if (k, i) in index)
+        previous_start.append(len(previous))
+        following_start.append(len(following))
+    lengths = [len(groups[node]) for node in order]
+    scalar_order = [row for node in order for row in (*groups[node], *([-1] * (6 - len(groups[node]))))]
+    row_offsets = np.cumsum([0, *lengths]).tolist()
+    rows, cols = zip(*pairs, strict=False)
+    return {
+        "n": n,
+        "ng": ng,
+        "padded_n": ng * 6,
+        "nb": len(pairs),
+        "order": scalar_order,
+        "rows": rows,
+        "cols": cols,
+        "diagonal": [index[i, i] for i in range(ng)],
+        "starts": starts,
+        "left": left,
+        "right": right,
+        "pstart": previous_start,
+        "previous": previous,
+        "fstart": following_start,
+        "following": following,
+        "lengths": lengths,
+        "row_offsets": row_offsets,
+    }, "eligible homogeneous chordal joint-block graph"
+
+
+@wp.kernel
+def _factor(
+    blocks: wp.array[wp.float32],
+    factors: wp.array[wp.float32],
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    diagonal: wp.array[wp.int32],
+    starts: wp.array[wp.int32],
+    lefts: wp.array[wp.int32],
+    rights: wp.array[wp.int32],
+    nb: int,
+):
+    w, _lane = wp.tid()
+    aa = wp.array(ptr=get_float32_array_offset_ptr(blocks, w * nb * 36), shape=(nb * 6, 6), dtype=wp.float32)
+    ll = wp.array(ptr=get_float32_array_offset_ptr(factors, w * nb * 36), shape=(nb * 6, 6), dtype=wp.float32)
+    for b in range(nb):
+        value = wp.tile_load(aa, shape=(6, 6), offset=(b * 6, 0), storage="shared")
+        for update in range(starts[b], starts[b + 1]):
+            left = wp.tile_load(ll, shape=(6, 6), offset=(lefts[update] * 6, 0))
+            right = wp.tile_load(ll, shape=(6, 6), offset=(rights[update] * 6, 0))
+            wp.tile_matmul(left, wp.tile_transpose(right), value, alpha=-1.0)
+        if rows[b] == cols[b]:
+            wp.tile_cholesky_inplace(value, fill_mode="upper")
+            wp.tile_store(ll, wp.tile_transpose(value), offset=(b * 6, 0))
+        else:
+            d = wp.tile_load(ll, shape=(6, 6), offset=(diagonal[cols[b]] * 6, 0))
+            transposed = wp.tile_transpose(value)
+            wp.tile_lower_solve_inplace(d, transposed)
+            wp.tile_store(ll, wp.tile_transpose(transposed), offset=(b * 6, 0))
+
+
+@wp.kernel
+def _pack_matrix(
+    A: wp.array[wp.float32],
+    mio: wp.array[wp.int32],
+    ld: wp.array[wp.int32],
+    order: wp.array[wp.int32],
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    blocks: wp.array[wp.float32],
+    nb: int,
+):
+    w, e = wp.tid()
+    b = e // 36
+    i = order[rows[b] * 6 + (e % 36) // 6]
+    j = order[cols[b] * 6 + e % 6]
+    value = wp.float32(0)
+    if i >= 0 and j >= 0:
+        value = A[mio[w] + wp.max(i, j) * ld[w] + wp.min(i, j)]
+    elif rows[b] == cols[b] and (e % 36) // 6 == e % 6:
+        value = wp.float32(1)
+    blocks[w * nb * 36 + e] = value
+
+
+@wp.kernel
+def _check_factor(
+    factors: wp.array[wp.float32], diagonal: wp.array[wp.int32], failure: wp.array[wp.int32], nb: int, ng: int
+):
+    w = wp.tid()
+    failed = int(0)
+    for e in range(nb * 36):
+        if not wp.isfinite(factors[w * nb * 36 + e]):
+            failed = 1
+    for row in range(ng):
+        for i in range(6):
+            if factors[w * nb * 36 + diagonal[row] * 36 + i * 6 + i] <= 0.0:
+                failed = 1
+    wp.atomic_max(failure, 0, failed)
+
+
+@wp.kernel
+def _check_dimensions(
+    dim: wp.array[wp.int32], njc: wp.array[wp.int32], stride: wp.array[wp.int32], n: int, failure: wp.array[wp.int32]
+):
+    w = wp.tid()
+    nu = dim[w] - njc[w]
+    if njc[w] != n or nu < 0 or nu > n or not _compact_schur_fits(njc[w], nu, stride[w]):
+        wp.atomic_max(failure, 0, 1)
+
+
+@wp.kernel
+def _pack_rhs(
+    dim: wp.array[wp.int32],
+    vio: wp.array[wp.int32],
+    order: wp.array[wp.int32],
+    rhs: wp.array[wp.float32],
+    scratch: wp.array[wp.float32],
+    padded: int,
+):
+    w, row = wp.tid()
+    if dim[w] == 0:
+        return
+    value = wp.float32(0)
+    if order[row] >= 0:
+        value = rhs[vio[w] + order[row]]
+    scratch[w * padded + row] = value
+
+
+@wp.kernel
+def _solve(
+    factors: wp.array[wp.float32],
+    scratch: wp.array[wp.float32],
+    active: wp.array[wp.int32],
+    diagonal: wp.array[wp.int32],
+    previous_start: wp.array[wp.int32],
+    previous: wp.array[wp.int32],
+    following_start: wp.array[wp.int32],
+    following: wp.array[wp.int32],
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    nb: int,
+    ng: int,
+    padded: int,
+):
+    w, _lane = wp.tid()
+    if active[w] == 0:
+        return
+    ll = wp.array(ptr=get_float32_array_offset_ptr(factors, w * nb * 36), shape=(nb * 6, 6), dtype=wp.float32)
+    yy = wp.array(ptr=get_float32_array_offset_ptr(scratch, w * padded), shape=(padded, 1), dtype=wp.float32)
+    for row in range(ng):
+        value = wp.tile_load(yy, shape=(6, 1), offset=(row * 6, 0), storage="shared")
+        for entry in range(previous_start[row], previous_start[row + 1]):
+            block = previous[entry]
+            left = wp.tile_load(ll, shape=(6, 6), offset=(block * 6, 0))
+            right = wp.tile_load(yy, shape=(6, 1), offset=(cols[block] * 6, 0))
+            wp.tile_matmul(left, right, value, alpha=-1.0)
+        d = wp.tile_load(ll, shape=(6, 6), offset=(diagonal[row] * 6, 0))
+        wp.tile_lower_solve_inplace(d, value)
+        wp.tile_store(yy, value, offset=(row * 6, 0))
+    for row in range(ng - 1, -1, -1):
+        value = wp.tile_load(yy, shape=(6, 1), offset=(row * 6, 0), storage="shared")
+        for entry in range(following_start[row], following_start[row + 1]):
+            block = following[entry]
+            left = wp.tile_load(ll, shape=(6, 6), offset=(block * 6, 0))
+            right = wp.tile_load(yy, shape=(6, 1), offset=(rows[block] * 6, 0))
+            wp.tile_matmul(wp.tile_transpose(left), right, value, alpha=-1.0)
+        d = wp.tile_load(ll, shape=(6, 6), offset=(diagonal[row] * 6, 0))
+        wp.tile_upper_solve_inplace(wp.tile_transpose(d), value)
+        wp.tile_store(yy, value, offset=(row * 6, 0))
+
+
+@wp.kernel
+def _scatter(
+    dim: wp.array[wp.int32],
+    vio: wp.array[wp.int32],
+    order: wp.array[wp.int32],
+    scratch: wp.array[wp.float32],
+    out: wp.array[wp.float32],
+    padded: int,
+):
+    w, row = wp.tid()
+    if dim[w] != 0 and order[row] >= 0:
+        out[vio[w] + order[row]] = scratch[w * padded + row]
+
+
+@wp.kernel
+def _response(
+    factors: wp.array[wp.float32],
+    diagonal: wp.array[wp.int32],
+    starts: wp.array[wp.int32],
+    previous: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    nb: int,
+    ng: int,
+    dim: wp.array[wp.int32],
+    njc: wp.array[wp.int32],
+    vio: wp.array[wp.int32],
+    rio: wp.array[wp.int32],
+    order: wp.array[wp.int32],
+    scale: wp.array[wp.float32],
+    coupling: wp.array[wp.float32],
+    response: wp.array[wp.float32],
+    lengths: wp.array[wp.int32],
+    offsets: wp.array[wp.int32],
+):
+    w, group, lane = wp.tid()
+    nu = dim[w] - njc[w]
+    if group * 16 >= nu:
+        return
+    ll = wp.array(ptr=get_float32_array_offset_ptr(factors, w * nb * 36), shape=(nb * 6, 6), dtype=wp.float32)
+    for row in range(ng):
+        value = wp.tile_zeros(shape=(6, 16), dtype=wp.float32, storage="shared")
+        for entry in range(lane, 96, 32):
+            local = entry // 16
+            col = group * 16 + entry % 16
+            original = order[row * 6 + local]
+            v = wp.float32(0)
+            if original >= 0 and col < nu:
+                v = scale[vio[w] + original] * coupling[rio[w] + original * nu + col]
+            value[local, entry % 16] = v
+        _sync_threads()
+        for entry in range(starts[row], starts[row + 1]):
+            block = previous[entry]
+            left = wp.tile_load(ll, shape=(6, 6), offset=(block * 6, 0))
+            previous_row = cols[block]
+            source = wp.array(
+                ptr=get_float32_array_offset_ptr(response, rio[w] + offsets[previous_row] * nu),
+                shape=(lengths[previous_row], nu),
+                dtype=wp.float32,
+            )
+            right = wp.tile_load(source, shape=(6, 16), offset=(0, group * 16))
+            wp.tile_matmul(left, right, value, alpha=-1.0)
+        d = wp.tile_load(ll, shape=(6, 6), offset=(diagonal[row] * 6, 0))
+        wp.tile_lower_solve_inplace(d, value)
+        target = wp.array(
+            ptr=get_float32_array_offset_ptr(response, rio[w] + offsets[row] * nu),
+            shape=(lengths[row], nu),
+            dtype=wp.float32,
+        )
+        wp.tile_store(target, value, offset=(0, group * 16))
+
+
+class JointBlockSolver:
+    """Own a fixed block schedule and scratch without modifying the RCM solver.
+
+    ``failure`` is a device scalar. After ``prepare``, the caller must select
+    the original complete solve whenever it is nonzero, before changing impulses.
+    """
+
+    @classmethod
+    def create(cls, path: SparseDVIPath) -> JointBlockSolver | None:
+        """Allocate a schedule only for supported homogeneous joint topologies."""
+        if path.bilateral_nzb_pairs is None or not path.device.is_cuda:
+            return None
+        metadata, _ = _build_topology(path, *path.bilateral_nzb_pairs[:3])
+        if metadata is None:
+            return None
+        return cls(path, metadata)
+
+    def __init__(self, path: SparseDVIPath, metadata: dict):
+        self._device = path.device
+        self._info = path.data.bilateral_operator.info
+        self._worlds = path.size.num_worlds
+        self._n = metadata["n"]
+        self._groups = metadata["ng"]
+        self._padded = metadata["padded_n"]
+        self._blocks = metadata["nb"]
+        self._schedule = {
+            name: wp.array(np.asarray(value, dtype=np.int32), dtype=wp.int32, device=self._device)
+            for name, value in metadata.items()
+            if name not in ("n", "ng", "padded_n", "nb")
+        }
+        self._matrix = wp.empty(self._worlds * self._blocks * 36, dtype=wp.float32, device=self._device)
+        self._factor = wp.empty_like(self._matrix)
+        self._vector = wp.empty(self._worlds * self._padded, dtype=wp.float32, device=self._device)
+        self.failure = wp.zeros(1, dtype=wp.int32, device=self._device)
+
+    def prepare(self, path: SparseDVIPath, problem: DualProblem) -> None:
+        """Factor the already assembled, normalized matrix in original row order.
+
+        Preserve its diagonal and regularization exactly. Unsupported dynamic
+        dimensions or failed factors request the caller's original solve.
+        """
+        self.failure.zero_()
+        info, schedule = self._info, self._schedule
+        wp.launch(
+            _check_dimensions,
+            dim=self._worlds,
+            inputs=[
+                problem.data.dim,
+                problem.data.njc,
+                path.data.state.bilateral_response_stride,
+                self._n,
+                self.failure,
+            ],
+            device=self._device,
+        )
+        wp.launch(
+            _pack_matrix,
+            dim=(self._worlds, self._blocks * 36),
+            inputs=[
+                path.data.bilateral_operator.mat,
+                info.mio,
+                info.maxdim,
+                schedule["order"],
+                schedule["rows"],
+                schedule["cols"],
+                self._matrix,
+                self._blocks,
+            ],
+            device=self._device,
+        )
+        wp.launch_tiled(
+            _factor,
+            dim=self._worlds,
+            inputs=[
+                self._matrix,
+                self._factor,
+                schedule["rows"],
+                schedule["cols"],
+                schedule["diagonal"],
+                schedule["starts"],
+                schedule["left"],
+                schedule["right"],
+                self._blocks,
+            ],
+            block_dim=32,
+            device=self._device,
+        )
+        wp.launch(
+            _check_factor,
+            dim=self._worlds,
+            inputs=[self._factor, schedule["diagonal"], self.failure, self._blocks, self._groups],
+            device=self._device,
+        )
+
+    def solve(
+        self,
+        rhs: wp.array[wp.float32],
+        x: wp.array[wp.float32],
+        active_dim: wp.array[wp.int32] | None = None,
+    ) -> None:
+        """Solve in original row order; inactive worlds retain their outputs."""
+        info, schedule = self._info, self._schedule
+        dimensions = info.dim if active_dim is None else active_dim
+        wp.launch(
+            _pack_rhs,
+            dim=(self._worlds, self._padded),
+            inputs=[dimensions, info.vio, schedule["order"], rhs, self._vector, self._padded],
+            device=self._device,
+        )
+        wp.launch_tiled(
+            _solve,
+            dim=self._worlds,
+            inputs=[
+                self._factor,
+                self._vector,
+                dimensions,
+                schedule["diagonal"],
+                schedule["pstart"],
+                schedule["previous"],
+                schedule["fstart"],
+                schedule["following"],
+                schedule["rows"],
+                schedule["cols"],
+                self._blocks,
+                self._groups,
+                self._padded,
+            ],
+            block_dim=32,
+            device=self._device,
+        )
+        wp.launch(
+            _scatter,
+            dim=(self._worlds, self._padded),
+            inputs=[dimensions, info.vio, schedule["order"], self._vector, x, self._padded],
+            device=self._device,
+        )
+
+    def response(self, path: SparseDVIPath, problem: DualProblem) -> None:
+        """Whiten into compact response storage, omitting identity dummy rows."""
+        state, schedule = path.data.state, self._schedule
+        wp.launch_tiled(
+            _response,
+            dim=(self._worlds, (self._n + 15) // 16),
+            inputs=[
+                self._factor,
+                schedule["diagonal"],
+                schedule["pstart"],
+                schedule["previous"],
+                schedule["cols"],
+                self._blocks,
+                self._groups,
+                problem.data.dim,
+                problem.data.njc,
+                self._info.vio,
+                state.bilateral_response_mio,
+                schedule["order"],
+                state.bilateral_preconditioner,
+                state.bilateral_coupling,
+                state.bilateral_response,
+                schedule["lengths"],
+                schedule["row_offsets"],
+            ],
+            block_dim=32,
+            device=self._device,
+        )
