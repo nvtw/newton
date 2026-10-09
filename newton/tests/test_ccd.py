@@ -31,7 +31,7 @@ def _make_solver(name, model):
     return newton.solvers.SolverMuJoCo(model, use_mujoco_contacts=False, njmax=200, nconmax=100)
 
 
-def _simulate(model, *, ccd, frames, solver="mujoco", graph=False):
+def _simulate(model, *, ccd, frames, solver="mujoco", graph=False, substeps=SUBSTEPS):
     """Run ``solver`` with one collide() per frame; return body poses after every frame."""
     pipeline = newton.CollisionPipeline(model, ccd=ccd)
     contacts = pipeline.contacts()
@@ -42,9 +42,9 @@ def _simulate(model, *, ccd, frames, solver="mujoco", graph=False):
 
     def frame():
         pipeline.collide(state_0, contacts, dt=FRAME_DT if ccd else None)
-        for _ in range(SUBSTEPS):
+        for _ in range(substeps):
             state_0.clear_forces()
-            solver.step(state_0, state_1, control, contacts, FRAME_DT / SUBSTEPS)
+            solver.step(state_0, state_1, control, contacts, FRAME_DT / substeps)
             state_0.assign(state_1)
 
     if graph:
@@ -84,13 +84,14 @@ def _add_floor(builder, floor):
         builder.add_ground_plane()
 
 
-def test_ccd_prevents_thin_wall_tunneling(test, device, solver_name):
+def test_ccd_prevents_thin_wall_tunneling(test, device, solver_name, substeps):
+    """A box at 120 m/s must stop in a 2 cm wall instead of passing through it."""
     model = _bullet_and_wall(device, velocity=120.0)
 
-    without_ccd = _simulate(model, solver=solver_name, ccd=False, frames=4)
+    without_ccd = _simulate(model, solver=solver_name, ccd=False, frames=4, substeps=substeps)
     test.assertGreater(without_ccd[-1, 0, 0], 0.0, "test setup must tunnel without CCD")
 
-    with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=4)
+    with_ccd = _simulate(model, solver=solver_name, ccd=True, frames=4, substeps=substeps)
     # The box front (x + 5 cm) may enter the wall (face at x = -1 cm) by at most a quarter of the
     # wall's 2 cm thickness.
     test.assertLess(with_ccd[:, 0, 0].max() + 0.05, -0.01 + 0.005 + 1.0e-3)
@@ -174,12 +175,10 @@ def test_ccd_stops_articulated_link(test, device, solver_name):
 def test_ccd_stops_moving_pair(test, device, solver_name):
     """Two 5 cm boxes flying at each other at 60 m/s each must not pass through each other."""
     builder = _builder(gravity=False)
-    bodies = []
     for x, v in ((-0.5, 60.0), (0.5, -60.0)):
         body = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.0)))
         builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05)
         builder.body_qd[body] = (v, 0.0, 0.0, 0.0, 0.0, 0.0)
-        bodies.append(body)
     model = builder.finalize(device=device)
 
     without_ccd = _simulate(model, solver=solver_name, ccd=False, frames=4)
@@ -282,13 +281,16 @@ class TestCCD(unittest.TestCase):
 
 devices = get_cuda_test_devices()
 for _solver in ("mujoco", "kamino"):
-    add_function_test(
-        TestCCD,
-        f"test_ccd_prevents_thin_wall_tunneling_{_solver}",
-        test_ccd_prevents_thin_wall_tunneling,
-        devices=devices,
-        solver_name=_solver,
-    )
+    # One substep per frame catches impacts resolved before the bodies touch; four is typical.
+    for _substeps in (1, 4):
+        add_function_test(
+            TestCCD,
+            f"test_ccd_prevents_thin_wall_tunneling_{_substeps}_substeps_{_solver}",
+            test_ccd_prevents_thin_wall_tunneling,
+            devices=devices,
+            solver_name=_solver,
+            substeps=_substeps,
+        )
     # A 2 cm box floor at a fall speed the default soft contact can absorb; one-sided surfaces faster.
     for _floor, _speed in (("box", 10.0), ("mesh", 30.0), ("heightfield", 30.0)):
         add_function_test(

@@ -1427,12 +1427,9 @@ reduction preserves representative close-clearance and early-impact candidates.
    Speculative contacts are opt-in and currently apply to rigid, non-hydroelastic
    contacts. They do not compute a time of impact or advance bodies to impact.
 
-   :class:`~newton.solvers.SolverMuJoCo` enforces them speculatively: a separated contact
-   activates only in the substep in which the current velocities would close its gap, and then
-   bounds the normal velocity so the bodies reach the surface without crossing it. Before a
-   contact activates, a sweep of the two convex shapes over the substep confirms that they
-   actually touch, so bodies passing beside an edge feel no force. Other solvers treat
-   speculative contacts like regular contacts.
+   :class:`~newton.solvers.SolverMuJoCo` and :class:`~newton.solvers.SolverKamino` honor them as
+   described in :ref:`Continuous collision detection <continuous-collision-detection>`; other
+   solvers treat them like regular contacts.
 
 .. _continuous-collision-detection:
 

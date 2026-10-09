@@ -245,8 +245,8 @@ class Contacts:
         self.clear_buffers = clear_buffers
         self._contact_matching_mode: Literal["disabled", "latest", "sticky"] = "disabled"
         # Private flag: set by the collision pipeline when it keeps separated rigid contacts that the
-        # current velocities can close within the step (speculative contacts). Solvers that support it
-        # then bound the approach to the gap instead of ignoring the contact until it penetrates.
+        # current velocities can close within the step (speculative contacts), so solvers that enforce
+        # them (SolverMuJoCo, SolverKamino) can tell them apart from contacts that already touch.
         self._speculative = False
         # Private flag: set by a collision pipeline created with ``ccd=True``, so solvers that do not
         # enforce speculative contacts can warn that they do not prevent tunneling.
