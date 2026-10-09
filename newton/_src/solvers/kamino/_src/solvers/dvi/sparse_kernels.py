@@ -1024,9 +1024,6 @@ def _select_parallel_contact_colors(
 
 @wp.kernel
 def _solve_dvi_sparse_contacts_pgs(
-    bsm_num_nzb: wp.array[int32],
-    bsm_nzb_start: wp.array[int32],
-    bsm_nzb_coords: wp.array2d[int32],
     bsm_nzb_values: wp.array[vec6f],
     jacobian_nzb_values: wp.array[vec6f],
     bsm_row_start: wp.array[int32],

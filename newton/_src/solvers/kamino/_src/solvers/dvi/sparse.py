@@ -623,7 +623,7 @@ def _launch_sparse_inequality_pgs(
     ]
     if contact_only:
         kernel_inputs = [
-            *common_inputs,
+            *common_inputs[3:],
             jacobians.contact_constraint_nzb_offsets,
             state.contact_indices,
             path.contacts.bid_AB,

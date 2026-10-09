@@ -3465,23 +3465,18 @@ class TestDVISolver(unittest.TestCase):
             with self.subTest(kinematic_first=kinematic_first):
                 supports = [0, -1] if kinematic_first else [-1, 0]
                 offsets = []
-                coords = []
                 jacobian = []
                 weighted = []
-                for contact, support in enumerate(supports):
+                for support in supports:
                     offsets.append(len(jacobian))
-                    coords.extend((3 * contact + axis, 6) for axis in range(3))
                     jacobian.extend(rows)
                     weighted.extend(rows)
                     if support >= 0:
-                        coords.extend((3 * contact + axis, 0) for axis in range(3))
                         jacobian.extend(-rows)
                         weighted.extend(np.zeros_like(rows))
-                num_blocks = len(jacobian)
                 # Unused capacity must never affect a contact's three rows.
                 jacobian.extend(np.full((3, 6), np.nan, dtype=np.float32))
                 weighted.extend(np.full((3, 6), np.nan, dtype=np.float32))
-                coords.extend([(-1, -1)] * 3)
                 body_space = wp.zeros(12, dtype=wp.float32, device=self.device)
                 impulses = wp.zeros(6, dtype=wp.float32, device=self.device)
                 config = convert_config_to_struct(kamino_config.DVISolverConfig(max_alternating_iterations=1))
@@ -3489,9 +3484,6 @@ class TestDVISolver(unittest.TestCase):
                     _solve_dvi_sparse_contacts_pgs,
                     dim=1,
                     inputs=[
-                        i32([num_blocks]),
-                        i32([0]),
-                        i32(coords),
                         wp.array(weighted, dtype=vec6f, device=self.device),
                         wp.array(jacobian, dtype=vec6f, device=self.device),
                         i32([0]),
