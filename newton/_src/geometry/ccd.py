@@ -22,7 +22,13 @@ from ..sim.enums import BodyFlags, JointType
 from ..utils.heightfield import HeightfieldData, get_triangle_shape_from_heightfield
 from .collision_core import aabb_to_unscaled, get_triangle_shape_from_mesh
 from .simplex_solver import create_solve_closest_distance
-from .support_function import GenericShapeData, SupportMapDataProvider, extract_shape_data, support_map
+from .support_function import (
+    GenericShapeData,
+    SupportMapDataProvider,
+    extract_shape_data,
+    pack_mesh_ptr,
+    support_map,
+)
 from .types import GeoType
 
 CCD_SAFETY_FACTOR = wp.constant(0.5)
@@ -510,6 +516,137 @@ def ccd_apply_kernel(
     v = wp.spatial_top(body_qd[body])
     v -= wp.max(wp.dot(v, normal), 0.0) * normal
     body_qd[body] = wp.spatial_vector(v, wp.spatial_bottom(body_qd[body]))
+
+
+@wp.func
+def _predicted_pose(q: wp.transform, qd: wp.spatial_vector, com: wp.vec3, dt: float) -> wp.transform:
+    """Pose after moving for ``dt`` with constant linear velocity at the COM and angular velocity."""
+    rot = wp.transform_get_rotation(q)
+    w = wp.spatial_bottom(qd)
+    angle = wp.length(w) * dt
+    if angle > 0.0:
+        rot = wp.quat_from_axis_angle(wp.normalize(w), angle) * rot
+    c = wp.transform_point(q, com) + wp.spatial_top(qd) * dt
+    return wp.transform(c - wp.quat_rotate(rot, com), rot)
+
+
+@wp.func
+def _model_shape_geometry(
+    shape: int,
+    shape_type: wp.array[int],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    shape_source: wp.array[wp.uint64],
+    center: wp.vec3,
+) -> tuple[GenericShapeData, wp.transform, float]:
+    """Return support data, body-relative transform and surface offset [m] of a shape from model arrays."""
+    geom = GenericShapeData()
+    geom.shape_type = shape_type[shape]
+    geom.scale = shape_scale[shape]
+    geom.auxiliary = wp.vec3(0.0)
+    geom.center = wp.vec3(0.0)
+    geom.shape_index = shape
+    if geom.shape_type == GeoType.PLANE:
+        geom.scale = wp.vec3(0.5 * geom.scale[0], 0.5 * geom.scale[1], 0.0)
+    elif geom.shape_type == GeoType.CONVEX_MESH:
+        geom.auxiliary = pack_mesh_ptr(shape_source[shape])
+        geom.center = center
+    offset = shape_margin[shape]
+    if geom.shape_type == GeoType.SPHERE or geom.shape_type == GeoType.CAPSULE:
+        offset += geom.scale[0]
+        geom.scale[0] = _CORE_RADIUS
+    return geom, shape_transform[shape], offset
+
+
+@wp.func
+def shapes_meet_within(
+    shape_a: int,
+    shape_b: int,
+    dt: float,
+    shape_body: wp.array[int],
+    shape_type: wp.array[int],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    shape_source: wp.array[wp.uint64],
+    shape_aabb_lower: wp.array[wp.vec3],
+    shape_aabb_upper: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+) -> bool:
+    """Whether two shapes touch within ``dt`` [s] when their bodies keep their current velocities.
+
+    Conservative advancement on the relative motion: the gap closes at most at the relative
+    translation along the normal plus each body's rotation angle times its bounding radius.
+    Pairs this cannot sweep (non-convex shapes) and undecided searches count as touching, so a
+    contact is never dropped wrongly.
+    """
+    if shape_type[shape_a] == GeoType.PLANE:
+        tmp = shape_a
+        shape_a = shape_b
+        shape_b = tmp
+    type_b = shape_type[shape_b]
+    if not _is_convex(shape_type[shape_a]) or not (_is_convex(type_b) or type_b == GeoType.PLANE):
+        return True
+
+    center_a = 0.5 * (shape_aabb_lower[shape_a] + shape_aabb_upper[shape_a])
+    center_b = 0.5 * (shape_aabb_lower[shape_b] + shape_aabb_upper[shape_b])
+    half_a = 0.5 * (shape_aabb_upper[shape_a] - shape_aabb_lower[shape_a])
+    half_b = 0.5 * (shape_aabb_upper[shape_b] - shape_aabb_lower[shape_b])
+    geom_a, xform_a, offset_a = _model_shape_geometry(
+        shape_a, shape_type, shape_transform, shape_scale, shape_margin, shape_source, center_a
+    )
+    geom_b, xform_b, offset_b = _model_shape_geometry(
+        shape_b, shape_type, shape_transform, shape_scale, shape_margin, shape_source, center_b
+    )
+    infinite_plane_b = type_b == GeoType.PLANE and geom_b.scale[0] == 0.0 and geom_b.scale[1] == 0.0
+
+    body_a = shape_body[shape_a]
+    body_b = shape_body[shape_b]
+    qa0 = wp.transform_identity()
+    qb0 = wp.transform_identity()
+    com_a = wp.vec3(0.0)
+    com_b = wp.vec3(0.0)
+    if body_a >= 0:
+        qa0 = body_q[body_a]
+        com_a = body_com[body_a]
+    if body_b >= 0:
+        qb0 = body_q[body_b]
+        com_b = body_com[body_b]
+    qa1 = qa0
+    qb1 = qb0
+    if body_a >= 0:
+        qa1 = _predicted_pose(qa0, body_qd[body_a], com_a, dt)
+    if body_b >= 0:
+        qb1 = _predicted_pose(qb0, body_qd[body_b], com_b, dt)
+
+    radius_a = wp.length(wp.transform_point(xform_a, center_a) - com_a) + wp.length(half_a) + shape_margin[shape_a]
+    radius_b = wp.length(wp.transform_point(xform_b, center_b) - com_b) + wp.length(half_b) + shape_margin[shape_b]
+    translation = (wp.transform_point(qa1, com_a) - wp.transform_point(qa0, com_a)) - (
+        wp.transform_point(qb1, com_b) - wp.transform_point(qb0, com_b)
+    )
+    rotation = _rotation_angle(qa0, qa1) * radius_a + _rotation_angle(qb0, qb1) * radius_b
+    target = CCD_TOLERANCE_FRACTION * wp.min(half_a[0], wp.min(half_a[1], half_a[2]))
+
+    t = float(0.0)
+    for _ in range(CCD_MAX_ITERATIONS):
+        gap, normal = _gap(
+            geom_a,
+            _pose_at(qa0, qa1, com_a, t) * xform_a,
+            geom_b,
+            _pose_at(qb0, qb1, com_b, t) * xform_b,
+            infinite_plane_b,
+            offset_a + offset_b,
+        )
+        if gap <= target:
+            return True
+        approach = wp.max(wp.dot(normal, translation), 0.0) + rotation
+        if gap - target >= (1.0 - t) * approach:
+            return False
+        t += (gap - target) / approach
+    return True
 
 
 def ccd_body_articulations(model) -> np.ndarray:

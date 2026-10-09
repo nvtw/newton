@@ -244,6 +244,10 @@ class Contacts:
         self.per_contact_shape_properties = per_contact_shape_properties
         self.clear_buffers = clear_buffers
         self._contact_matching_mode: Literal["disabled", "latest", "sticky"] = "disabled"
+        # Private flag: set by the collision pipeline when it keeps separated rigid contacts that the
+        # current velocities can close within the step (speculative contacts). Solvers that support it
+        # then bound the approach to the gap instead of ignoring the contact until it penetrates.
+        self._speculative = False
         with wp.ScopedDevice(device):
             # One int32[3] array holding two independent contact counts, [0] rigid and [1] soft,
             # plus [2] an internal flag set when global contact reduction lost candidates.

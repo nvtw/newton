@@ -10,6 +10,7 @@ from typing import Any
 import warp as wp
 
 from ...core.types import vec5
+from ...geometry.ccd import shapes_meet_within
 from ...sim import BodyFlags, JointTargetMode, JointType
 from ...sim.contacts import contact_surface_point, contact_surface_separation
 from .constants import (
@@ -379,6 +380,100 @@ def eval_mujoco_coupling_effective_mass_block_kernel(
     out_inertia[tid] = inertia
 
 
+SPECULATIVE_CONTACT_IMPEDANCE = wp.constant(0.99)
+"""Constant impedance of speculative contact rows; close to 1 so the velocity bound is nearly hard."""
+
+
+@wp.func
+def _contact_point_velocity(
+    body: int,
+    point: wp.vec3,
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+) -> wp.vec3:
+    if body < 0:
+        return wp.vec3(0.0)
+    qd = body_qd[body]
+    com = wp.transform_point(body_q[body], body_com[body])
+    return wp.spatial_top(qd) + wp.cross(wp.spatial_bottom(qd), point - com)
+
+
+SPECULATIVE_CONTACT_SOLIMP = wp.constant(
+    vec5(SPECULATIVE_CONTACT_IMPEDANCE, SPECULATIVE_CONTACT_IMPEDANCE, 0.001, 0.5, 2.0)
+)
+
+
+@wp.func
+def speculative_contact_dist(
+    dist: float,
+    margin: float,
+    point_a: wp.vec3,
+    point_b: wp.vec3,
+    normal: wp.vec3,
+    shape_a: int,
+    shape_b: int,
+    timestep: float,
+    shape_body: wp.array[int],
+    shape_type: wp.array[int],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3],
+    shape_margin: wp.array[float],
+    shape_source: wp.array[wp.uint64],
+    shape_aabb_lower: wp.array[wp.vec3],
+    shape_aabb_upper: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+) -> tuple[float, bool]:
+    """Return the MuJoCo distance of a speculative contact and whether it is still separated.
+
+    A separated contact (``dist > margin``) gets its separation predicted at the end of the step
+    from the current velocities, so its row activates only when the bodies would close the gap
+    within the step. With :func:`speculative_contact_solref` the row then bounds the normal
+    velocity after the step to ``-dist / timestep``: the bodies reach the surface but do not cross
+    it, and no force acts at a distance.
+
+    The separation follows the contact normal fixed at collision time, so a body passing beside an
+    edge would cross that plane without touching. Before a row activates, a sweep of the two
+    shapes over the step confirms they meet; otherwise the row stays inactive.
+    """
+    body_a = shape_body[shape_a]
+    body_b = shape_body[shape_b]
+    separated = dist > margin
+    predicted = dist
+    if separated:
+        v_rel = _contact_point_velocity(body_b, point_b, body_q, body_qd, body_com) - _contact_point_velocity(
+            body_a, point_a, body_q, body_qd, body_com
+        )
+        predicted = dist + timestep * wp.dot(normal, v_rel)
+    if predicted < margin and not shapes_meet_within(
+        shape_a,
+        shape_b,
+        timestep,
+        shape_body,
+        shape_type,
+        shape_transform,
+        shape_scale,
+        shape_margin,
+        shape_source,
+        shape_aabb_lower,
+        shape_aabb_upper,
+        body_q,
+        body_qd,
+        body_com,
+    ):
+        predicted = wp.max(dist, margin + MJ_MINVAL)
+    return predicted, separated
+
+
+@wp.func
+def speculative_contact_solref(timestep: float) -> wp.vec2:
+    """Direct-format solref whose reference acceleration ``-pos / timestep^2`` (with ``pos`` the
+    predicted end-of-step separation) bounds the post-step normal velocity to ``-dist / timestep``."""
+    return wp.vec2(-1.0 / (timestep * timestep), 0.0)
+
+
 # Kernel functions
 @wp.kernel
 def convert_newton_contacts_to_mjwarp_kernel(
@@ -422,6 +517,19 @@ def convert_newton_contacts_to_mjwarp_kernel(
     use_kf_mapping: bool,
     bodies_per_world: int,
     newton_shape_to_mjc_geom: wp.array[wp.int32],
+    # Speculative contacts (see speculative_contact_row)
+    speculative: bool,
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    shape_type: wp.array[int],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3],
+    shape_source: wp.array[wp.uint64],
+    shape_aabb_lower: wp.array[wp.vec3],
+    shape_aabb_upper: wp.array[wp.vec3],
+    opt_timestep: wp.array[float],
+    contact_solref_base: wp.array[wp.vec2],
+    contact_solimp_base: wp.array[vec5],
     # Mujoco warp contacts
     naconmax: int,
     nacon_out: wp.array[int],
@@ -451,8 +559,8 @@ def convert_newton_contacts_to_mjwarp_kernel(
     #
     # When the contact set hasn't changed since the last full pass
     # (contact_generation == last_contact_generation), the kernel takes a
-    # fast path that only recomputes the body-q-dependent fields (dist, pos)
-    # and resets efc_address.  All other MJWarp contact fields (frame,
+    # fast path that only recomputes the body-q-dependent fields (dist, pos,
+    # and solref/solimp of speculative contacts) and resets efc_address.  All other MJWarp contact fields (frame,
     # friction, solref, solimp, condim, geom, worldid, includemargin) are
     # still valid from the previous full pass.
 
@@ -654,6 +762,36 @@ def convert_newton_contacts_to_mjwarp_kernel(
 
         tid_to_cid[tid] = cid
 
+        # The fast path switches between these and the speculative row as the gap closes.
+        contact_solref_base[cid] = solref
+        contact_solimp_base[cid] = solimp
+        if speculative:
+            timestep = opt_timestep[worldid % opt_timestep.shape[0]]
+            dist, separated = speculative_contact_dist(
+                dist,
+                margin,
+                point_a,
+                point_b,
+                n,
+                shape_a,
+                shape_b,
+                timestep,
+                shape_body,
+                shape_type,
+                shape_transform,
+                shape_scale,
+                shape_margin,
+                shape_source,
+                shape_aabb_lower,
+                shape_aabb_upper,
+                body_q,
+                body_qd,
+                body_com,
+            )
+            if separated:
+                solref = speculative_contact_solref(timestep)
+                solimp = SPECULATIVE_CONTACT_SOLIMP
+
         write_contact(
             dist_in=dist,
             pos_in=pos,
@@ -728,13 +866,46 @@ def convert_newton_contacts_to_mjwarp_kernel(
 
         n = rigid_contact_normal[tid]
         # rigid_contact_margin includes shape_margin; MuJoCo handles it explicitly, subtract to recover radius_eff.
-        contact_dist_out[cid] = contact_surface_separation(
+        dist = contact_surface_separation(
             bx_a,
             bx_b,
             n,
             rigid_contact_margin0[tid] - shape_margin[shape_a],
             rigid_contact_margin1[tid] - shape_margin[shape_b],
         )
+        if speculative:
+            worldid = body_a // bodies_per_world
+            if body_a < 0:
+                worldid = body_b // bodies_per_world
+            timestep = opt_timestep[worldid % opt_timestep.shape[0]]
+            dist, separated = speculative_contact_dist(
+                dist,
+                contact_includemargin_out[cid],
+                point_a,
+                point_b,
+                n,
+                shape_a,
+                shape_b,
+                timestep,
+                shape_body,
+                shape_type,
+                shape_transform,
+                shape_scale,
+                shape_margin,
+                shape_source,
+                shape_aabb_lower,
+                shape_aabb_upper,
+                body_q,
+                body_qd,
+                body_com,
+            )
+            if separated:
+                contact_solref_out[cid] = speculative_contact_solref(timestep)
+                contact_solimp_out[cid] = SPECULATIVE_CONTACT_SOLIMP
+            else:
+                contact_solref_out[cid] = contact_solref_base[cid]
+                contact_solimp_out[cid] = contact_solimp_base[cid]
+        contact_dist_out[cid] = dist
         contact_pos_out[cid] = 0.5 * (point_a + point_b)
 
         for i in range(contact_efc_address_out.shape[1]):

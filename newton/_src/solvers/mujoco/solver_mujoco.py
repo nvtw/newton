@@ -4495,6 +4495,9 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
             # first run inside a CUDA graph that is discarded without replay.
             self._create_inverse_shape_mapping()
             self._contact_tid_to_cid = wp.full(self.mjw_data.naconmax, -1, dtype=wp.int32, device=self.device)
+            # Per-contact solref/solimp before the speculative override, for the substep fast path.
+            self._contact_solref_base = wp.zeros(self.mjw_data.naconmax, dtype=wp.vec2, device=self.device)
+            self._contact_solimp_base = wp.zeros(self.mjw_data.naconmax, dtype=vec5, device=self.device)
         self._initial_model_sync = False
         self.update_data_interval = update_data_interval
         self._step = 0
@@ -5061,6 +5064,19 @@ class SolverMuJoCo(SolverBase, CouplingInterface):
                 self.mjw_model.opt.cone == self._mujoco.mjtCone.mjCONE_ELLIPTIC,
                 bodies_per_world,
                 self.newton_shape_to_mjc_geom,
+                # Speculative contacts
+                getattr(contacts, "_speculative", False),
+                state_in.body_qd,
+                model.body_com,
+                model.shape_type,
+                model.shape_transform,
+                model.shape_scale,
+                model.shape_source_ptr,
+                model.shape_collision_aabb_lower,
+                model.shape_collision_aabb_upper,
+                self.mjw_model.opt.timestep,
+                self._contact_solref_base,
+                self._contact_solimp_base,
                 # Mujoco warp contacts
                 self.mjw_data.naconmax,
                 self.mjw_data.nacon,
