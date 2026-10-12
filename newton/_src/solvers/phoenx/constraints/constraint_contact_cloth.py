@@ -123,6 +123,8 @@ from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
 )
 from newton._src.solvers.phoenx.constraints.contact_projection import (
     contact_project_coupled_velocity_update,
+    contact_project_coupled_velocity_update_mobility,
+    contact_project_coupled_velocity_update_mobility_no_soft_pd,
     contact_project_coupled_velocity_update_no_soft_pd,
     contact_project_normal_delta_load,
     contact_project_normal_delta_load_no_soft_pd,
@@ -140,6 +142,7 @@ from newton._src.solvers.phoenx.contact_endpoints import (
 from newton._src.solvers.phoenx.helpers.math_helpers import (
     apply_pair_spatial_impulse,
     apply_pair_velocity_impulse,
+    contact_mobility_scalar,
     effective_mass_scalar,
 )
 from newton._src.solvers.phoenx.mass_splitting.access import (
@@ -159,9 +162,13 @@ __all__ = [
     "contact_iterate_at_lean",
     "contact_iterate_cloth_aware",
     "contact_iterate_lean",
+    "contact_iterate_lean_mobility",
     "contact_iterate_lean_no_sleep",
+    "contact_iterate_lean_no_sleep_mobility",
     "contact_iterate_lean_no_sleep_no_soft_pd",
+    "contact_iterate_lean_no_sleep_no_soft_pd_mobility",
     "contact_iterate_lean_no_soft_pd",
+    "contact_iterate_lean_no_soft_pd_mobility",
     "contact_iterate_no_sleep",
     "contact_iterate_no_sleep_no_soft_pd",
     "contact_iterate_no_soft_pd",
@@ -368,16 +375,19 @@ def rebase_ordinary_contact_relax_kernel(
         tangent2 = wp.cross(normal, tangent1)
         eff_n = effective_mass_scalar(normal, r1, r2, inverse_mass1, inverse_mass2, inverse_inertia1, inverse_inertia2)
         cc_set_eff_n(cc, k, eff_n)
-        cc_set_eff_t1(
-            cc,
-            k,
-            effective_mass_scalar(tangent1, r1, r2, inverse_mass1, inverse_mass2, inverse_inertia1, inverse_inertia2),
+        tangent_response1 = contact_mobility_scalar(
+            tangent1, r1, r2, inverse_mass1, inverse_mass2, inverse_inertia1, inverse_inertia2
         )
-        cc_set_eff_t2(
-            cc,
-            k,
-            effective_mass_scalar(tangent2, r1, r2, inverse_mass1, inverse_mass2, inverse_inertia1, inverse_inertia2),
+        tangent_response2 = contact_mobility_scalar(
+            tangent2, r1, r2, inverse_mass1, inverse_mass2, inverse_inertia1, inverse_inertia2
         )
+        if not packed_headers:
+            # Ordinary columns and reduced-coordinate consumers retain
+            # reciprocal effective masses; packed rigid PGS uses mobility.
+            tangent_response1 = wp.float32(1.0) / tangent_response1 if tangent_response1 > 0.0 else 0.0
+            tangent_response2 = wp.float32(1.0) / tangent_response2 if tangent_response2 > 0.0 else 0.0
+        cc_set_eff_t1(cc, k, tangent_response1)
+        cc_set_eff_t2(cc, k, tangent_response2)
         rn1 = wp.cross(r1, normal)
         rn2 = wp.cross(r2, normal)
         rt11 = wp.cross(r1, tangent1)
@@ -403,6 +413,7 @@ def _make_contact_prepare_for_iteration_at(
     packed_rows: bool = False,
     stage_body_properties: bool = False,
     pointwise_geometry: bool = False,
+    tangent_mobility_layout: bool = False,
 ):
     if pointwise_geometry and (cloth_support or patch_friction or packed_rows or stage_body_properties):
         raise ValueError(
@@ -786,8 +797,18 @@ def _make_contact_prepare_for_iteration_at(
                 eff_t1 = wp.float32(0.0)
                 eff_t2 = wp.float32(0.0)
                 if wp.static(not patch_friction):
-                    eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-                    eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+                    if wp.static(tangent_mobility_layout):
+                        # Packed rigid point rows feed a coupled tangent
+                        # metric, which uses mobility directly each sweep.
+                        eff_t1 = contact_mobility_scalar(
+                            t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
+                        )
+                        eff_t2 = contact_mobility_scalar(
+                            t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2
+                        )
+                    else:
+                        eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+                        eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
                 elif not use_patch:
                     eff_t1 = effective_mass_scalar(t1_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
                     eff_t2 = effective_mass_scalar(t2_dir, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
@@ -1267,7 +1288,23 @@ def _make_contact_iterate_at(
     *,
     frictionless_fast_path: bool = False,
     normal_first: bool = False,
+    tangent_mobility_layout: bool = False,
 ):
+    if tangent_mobility_layout and normal_first:
+        raise ValueError("The normal-first projector requires inverse tangent effective masses")
+    if tangent_mobility_layout:
+        coupled_project = (
+            contact_project_coupled_velocity_update_mobility
+            if has_soft_contact_pd
+            else contact_project_coupled_velocity_update_mobility_no_soft_pd
+        )
+    else:
+        coupled_project = (
+            contact_project_coupled_velocity_update
+            if has_soft_contact_pd
+            else contact_project_coupled_velocity_update_no_soft_pd
+        )
+
     @wp.func
     def impl(
         constraints: ContactColumnContainer,
@@ -1648,62 +1685,33 @@ def _make_contact_iterate_at(
                                 mobility_nt1 = cc_get_mobility_nt1(cc, k)
                                 mobility_nt2 = cc_get_mobility_nt2(cc, k)
                                 mobility_t1t2 = cc_get_mobility_t1t2(cc, k)
-                                if wp.static(has_soft_contact_pd):
-                                    imp = contact_project_coupled_velocity_update(
-                                        cc,
-                                        k,
-                                        n,
-                                        t1_dir,
-                                        t2_dir,
-                                        jv_n,
-                                        jv_t1,
-                                        jv_t2,
-                                        eff_n,
-                                        eff_t1,
-                                        eff_t2,
-                                        bias_val,
-                                        bias_t1_val,
-                                        bias_t2_val,
-                                        mu_s_eff,
-                                        mu_k_eff,
-                                        mass_coeff_n,
-                                        impulse_coeff_n,
-                                        sor_boost,
-                                        pd_eff_soft_n,
-                                        pd_gamma_n,
-                                        pd_bias_n,
-                                        mobility_nt1,
-                                        mobility_nt2,
-                                        mobility_t1t2,
-                                    )
-                                else:
-                                    imp = contact_project_coupled_velocity_update_no_soft_pd(
-                                        cc,
-                                        k,
-                                        n,
-                                        t1_dir,
-                                        t2_dir,
-                                        jv_n,
-                                        jv_t1,
-                                        jv_t2,
-                                        eff_n,
-                                        eff_t1,
-                                        eff_t2,
-                                        bias_val,
-                                        bias_t1_val,
-                                        bias_t2_val,
-                                        mu_s_eff,
-                                        mu_k_eff,
-                                        mass_coeff_n,
-                                        impulse_coeff_n,
-                                        sor_boost,
-                                        pd_eff_soft_n,
-                                        pd_gamma_n,
-                                        pd_bias_n,
-                                        mobility_nt1,
-                                        mobility_nt2,
-                                        mobility_t1t2,
-                                    )
+                                imp = coupled_project(
+                                    cc,
+                                    k,
+                                    n,
+                                    t1_dir,
+                                    t2_dir,
+                                    jv_n,
+                                    jv_t1,
+                                    jv_t2,
+                                    eff_n,
+                                    eff_t1,
+                                    eff_t2,
+                                    bias_val,
+                                    bias_t1_val,
+                                    bias_t2_val,
+                                    mu_s_eff,
+                                    mu_k_eff,
+                                    mass_coeff_n,
+                                    impulse_coeff_n,
+                                    sor_boost,
+                                    pd_eff_soft_n,
+                                    pd_gamma_n,
+                                    pd_bias_n,
+                                    mobility_nt1,
+                                    mobility_nt2,
+                                    mobility_t1t2,
+                                )
                     if not handled_rigid_point:
                         if wp.static(patch_friction):
                             if use_patch:
@@ -1975,16 +1983,24 @@ contact_prepare_for_iteration_at_no_soft_pd = _make_contact_prepare_for_iteratio
     cloth_support=False, has_soft_contact_pd=False
 )
 contact_prepare_for_iteration_at_packed_rows = _make_contact_prepare_for_iteration_at(
-    cloth_support=False, packed_rows=True, stage_body_properties=True
+    cloth_support=False, packed_rows=True, stage_body_properties=True, tangent_mobility_layout=True
 )
 contact_prepare_for_iteration_at_packed_rows_no_soft_pd = _make_contact_prepare_for_iteration_at(
-    cloth_support=False, has_soft_contact_pd=False, packed_rows=True, stage_body_properties=True
+    cloth_support=False,
+    has_soft_contact_pd=False,
+    packed_rows=True,
+    stage_body_properties=True,
+    tangent_mobility_layout=True,
 )
 contact_prepare_for_iteration_at_packed_rows_lean = _make_contact_prepare_for_iteration_at(
-    cloth_support=False, has_mass_splitting=False, packed_rows=True
+    cloth_support=False, has_mass_splitting=False, packed_rows=True, tangent_mobility_layout=True
 )
 contact_prepare_for_iteration_at_packed_rows_lean_no_soft_pd = _make_contact_prepare_for_iteration_at(
-    cloth_support=False, has_mass_splitting=False, has_soft_contact_pd=False, packed_rows=True
+    cloth_support=False,
+    has_mass_splitting=False,
+    has_soft_contact_pd=False,
+    packed_rows=True,
+    tangent_mobility_layout=True,
 )
 contact_prepare_for_iteration_at_lean = _make_contact_prepare_for_iteration_at(
     cloth_support=False, has_mass_splitting=False
@@ -2003,13 +2019,25 @@ contact_iterate_at = _make_contact_iterate_at(cloth_support=False, use_bias=True
 contact_relax_at = _make_contact_iterate_at(cloth_support=False, use_bias=False)
 contact_iterate_at_no_soft_pd = _make_contact_iterate_at(cloth_support=False, use_bias=True, has_soft_contact_pd=False)
 contact_relax_at_no_soft_pd = _make_contact_iterate_at(cloth_support=False, use_bias=False, has_soft_contact_pd=False)
-contact_iterate_at_packed = _make_contact_iterate_at(cloth_support=False, use_bias=True, staged_body_properties=True)
-contact_relax_at_packed = _make_contact_iterate_at(cloth_support=False, use_bias=False, staged_body_properties=True)
+contact_iterate_at_packed = _make_contact_iterate_at(
+    cloth_support=False, use_bias=True, staged_body_properties=True, tangent_mobility_layout=True
+)
+contact_relax_at_packed = _make_contact_iterate_at(
+    cloth_support=False, use_bias=False, staged_body_properties=True, tangent_mobility_layout=True
+)
 contact_iterate_at_packed_no_soft_pd = _make_contact_iterate_at(
-    cloth_support=False, use_bias=True, has_soft_contact_pd=False, staged_body_properties=True
+    cloth_support=False,
+    use_bias=True,
+    has_soft_contact_pd=False,
+    staged_body_properties=True,
+    tangent_mobility_layout=True,
 )
 contact_relax_at_packed_no_soft_pd = _make_contact_iterate_at(
-    cloth_support=False, use_bias=False, has_soft_contact_pd=False, staged_body_properties=True
+    cloth_support=False,
+    use_bias=False,
+    has_soft_contact_pd=False,
+    staged_body_properties=True,
+    tangent_mobility_layout=True,
 )
 contact_iterate_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False, use_bias=True)
 contact_relax_at_lean = _make_contact_iterate_at(cloth_support=False, has_mass_splitting=False, use_bias=False)
@@ -2018,6 +2046,26 @@ contact_iterate_at_lean_no_soft_pd = _make_contact_iterate_at(
 )
 contact_relax_at_lean_no_soft_pd = _make_contact_iterate_at(
     cloth_support=False, has_mass_splitting=False, use_bias=False, has_soft_contact_pd=False
+)
+contact_iterate_at_lean_no_soft_pd_mobility = _make_contact_iterate_at(
+    cloth_support=False,
+    has_mass_splitting=False,
+    use_bias=True,
+    has_soft_contact_pd=False,
+    tangent_mobility_layout=True,
+)
+contact_relax_at_lean_no_soft_pd_mobility = _make_contact_iterate_at(
+    cloth_support=False,
+    has_mass_splitting=False,
+    use_bias=False,
+    has_soft_contact_pd=False,
+    tangent_mobility_layout=True,
+)
+contact_iterate_at_lean_mobility = _make_contact_iterate_at(
+    cloth_support=False, has_mass_splitting=False, use_bias=True, tangent_mobility_layout=True
+)
+contact_relax_at_lean_mobility = _make_contact_iterate_at(
+    cloth_support=False, has_mass_splitting=False, use_bias=False, tangent_mobility_layout=True
 )
 contact_iterate_at_patch_lean = _make_contact_iterate_at(
     cloth_support=False, has_mass_splitting=False, use_bias=True, patch_friction=True
@@ -2909,56 +2957,92 @@ def contact_iterate_lean_no_sleep(
         )
 
 
-@wp.func
-def contact_iterate_lean_no_sleep_no_soft_pd(
-    constraints: ContactColumnContainer,
-    cid: wp.int32,
-    bodies: BodyContainer,
-    particles: ParticleContainer,
-    num_bodies: wp.int32,
-    idt: wp.float32,
-    cc: ContactContainer,
-    contacts: ContactViews,
-    use_bias: wp.bool,
-    copy_state: CopyStateContainer,
-    parallel_id: wp.int32,
-    sor_boost: wp.float32,
-):
-    b1 = contact_get_body1(constraints, cid)
-    b2 = contact_get_body2(constraints, cid)
-    body_pair = constraint_bodies_make(b1, b2)
-    if use_bias:
-        contact_iterate_at_lean_no_soft_pd(
-            constraints,
-            cid,
-            0,
-            bodies,
-            particles,
-            num_bodies,
-            body_pair,
-            idt,
-            cc,
-            contacts,
-            copy_state,
-            parallel_id,
-            sor_boost,
-        )
+def _make_contact_iterate_lean(*, has_sleeping: bool, has_soft_contact_pd: bool, tangent_mobility_layout: bool):
+    if has_soft_contact_pd:
+        iterate_at = contact_iterate_at_lean_mobility if tangent_mobility_layout else contact_iterate_at_lean
+        relax_at = contact_relax_at_lean_mobility if tangent_mobility_layout else contact_relax_at_lean
     else:
-        contact_relax_at_lean_no_soft_pd(
-            constraints,
-            cid,
-            0,
-            bodies,
-            particles,
-            num_bodies,
-            body_pair,
-            idt,
-            cc,
-            contacts,
-            copy_state,
-            parallel_id,
-            sor_boost,
+        iterate_at = (
+            contact_iterate_at_lean_no_soft_pd_mobility
+            if tangent_mobility_layout
+            else contact_iterate_at_lean_no_soft_pd
         )
+        relax_at = (
+            contact_relax_at_lean_no_soft_pd_mobility if tangent_mobility_layout else contact_relax_at_lean_no_soft_pd
+        )
+
+    @wp.func
+    def impl(
+        constraints: ContactColumnContainer,
+        cid: wp.int32,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        num_bodies: wp.int32,
+        idt: wp.float32,
+        cc: ContactContainer,
+        contacts: ContactViews,
+        use_bias: wp.bool,
+        copy_state: CopyStateContainer,
+        parallel_id: wp.int32,
+        sor_boost: wp.float32,
+    ):
+        b1 = contact_get_body1(constraints, cid)
+        b2 = contact_get_body2(constraints, cid)
+        if wp.static(has_sleeping):
+            if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
+                return
+        body_pair = constraint_bodies_make(b1, b2)
+        if use_bias:
+            iterate_at(
+                constraints,
+                cid,
+                0,
+                bodies,
+                particles,
+                num_bodies,
+                body_pair,
+                idt,
+                cc,
+                contacts,
+                copy_state,
+                parallel_id,
+                sor_boost,
+            )
+        else:
+            relax_at(
+                constraints,
+                cid,
+                0,
+                bodies,
+                particles,
+                num_bodies,
+                body_pair,
+                idt,
+                cc,
+                contacts,
+                copy_state,
+                parallel_id,
+                sor_boost,
+            )
+
+    return impl
+
+
+contact_iterate_lean_no_sleep_no_soft_pd = _make_contact_iterate_lean(
+    has_sleeping=False, has_soft_contact_pd=False, tangent_mobility_layout=False
+)
+contact_iterate_lean_no_sleep_no_soft_pd_mobility = _make_contact_iterate_lean(
+    has_sleeping=False, has_soft_contact_pd=False, tangent_mobility_layout=True
+)
+contact_iterate_lean_no_sleep_mobility = _make_contact_iterate_lean(
+    has_sleeping=False, has_soft_contact_pd=True, tangent_mobility_layout=True
+)
+contact_iterate_lean_no_soft_pd_mobility = _make_contact_iterate_lean(
+    has_sleeping=True, has_soft_contact_pd=False, tangent_mobility_layout=True
+)
+contact_iterate_lean_mobility = _make_contact_iterate_lean(
+    has_sleeping=True, has_soft_contact_pd=True, tangent_mobility_layout=True
+)
 
 
 @wp.func
@@ -3098,7 +3182,12 @@ def contact_iterate_cloth_aware(
 
 
 contact_iterate_at_lean_no_soft_pd_cooperative = _make_contact_iterate_at(
-    cloth_support=False, has_mass_splitting=False, use_bias=True, has_soft_contact_pd=False, cooperative_lanes=4
+    cloth_support=False,
+    has_mass_splitting=False,
+    use_bias=True,
+    has_soft_contact_pd=False,
+    cooperative_lanes=4,
+    tangent_mobility_layout=True,
 )
 
 

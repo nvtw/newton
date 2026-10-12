@@ -182,17 +182,30 @@ def contact_partitions_is_removed(
 
 #: Bit layout of the packed-priority int32:
 #:
-#: * bits 24..31 : cost  (contact-count bias; 0 for non-contact rows)
+#: * bits 24..31 : cost (255 for joints; 1..254 for contacts; 0 otherwise)
 #: * bits  0..23 : random tiebreaker (unique JP/Luby permutation jitter)
 #:
-#: Cost in the high byte makes plain int32 lexicographic comparison
-#: equivalent to (cost, random) lexicographic ordering -- contacts win
-#: over non-contacts; ties broken by the random permutation. Capping
-#: cost at 255 is fine for our scenes (contact column count rarely
-#: exceeds a few dozen).
+#: Compare the packed bits as uint32 so costs above 127 retain their order.
+#: Joints win before contacts to keep structural rows out of mass-splitting
+#: overflow whenever regular colors can accommodate the joint graph.
 PACKED_PRIO_COST_SHIFT = wp.constant(wp.int32(24))
 PACKED_PRIO_RANDOM_MASK = wp.constant(wp.int32(0x00FFFFFF))
 PACKED_PRIO_COST_MAX = 0xFF  # host-side cap when filling
+
+
+@wp.func
+def _pack_priority(cost: wp.int32, random_value: wp.int32) -> wp.int32:
+    return (wp.clamp(cost, wp.int32(0), wp.int32(255)) << PACKED_PRIO_COST_SHIFT) | (
+        random_value & PACKED_PRIO_RANDOM_MASK
+    )
+
+
+@wp.func
+def _pack_constraint_priority(cost: wp.int32, random_value: wp.int32, joint_enabled: wp.bool) -> wp.int32:
+    cost = wp.clamp(cost, wp.int32(0), wp.int32(254))
+    if joint_enabled:
+        cost = wp.int32(255)
+    return _pack_priority(cost, random_value)
 
 
 @wp.func
@@ -216,7 +229,7 @@ def _priority_is_greater(
 ) -> bool:
     # Shape-based priorities and random hashes can collide. A total order is
     # required so adjacent constraints cannot both join the independent set.
-    return priority > other_priority or (priority == other_priority and element > other_element)
+    return wp.uint32(priority) > wp.uint32(other_priority) or (priority == other_priority and element > other_element)
 
 
 @wp.func
@@ -243,9 +256,7 @@ def pack_priorities_kernel(
     tid = wp.tid()
     if tid >= packed_priorities.shape[0]:
         return
-    cost = cost_values[tid]
-    rand = random_values[tid] & PACKED_PRIO_RANDOM_MASK
-    packed_priorities[tid] = (cost << PACKED_PRIO_COST_SHIFT) | rand
+    packed_priorities[tid] = _pack_priority(cost_values[tid], random_values[tid])
 
 
 @wp.kernel(enable_backward=False)

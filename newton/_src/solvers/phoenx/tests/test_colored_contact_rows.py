@@ -10,12 +10,17 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.body import BodyContainer, body_load_inv_inertia_sym6, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     RIGID_CONTACT_SOLVE_DWORDS,
     ContactColumnContainer,
     contact_build_colored_row_offsets,
     contact_column_container_zeros,
     contact_gather_colored_rows,
+    contact_get_body1,
+    contact_get_body2,
+    contact_get_count1,
+    contact_get_count2,
     contact_pack_colored_headers,
     contact_scatter_colored_rows,
     contact_set_contact_count,
@@ -26,9 +31,14 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_DWORDS_PER_CONTACT,
     CC_RIGID_DWORDS_PER_CONTACT,
     ContactContainer,
+    cc_get_normal,
+    cc_get_r0,
+    cc_get_r1,
+    cc_get_tangent1,
     contact_container_zeros,
     contact_solve_container_zeros,
 )
+from newton._src.solvers.phoenx.helpers.math_helpers import contact_mobility_scalar
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 
 
@@ -52,8 +62,81 @@ def _offset_packed_impulses(contacts: ContactContainer, total: wp.array[wp.int32
         contacts.impulses[row, k] += wp.float32(10000.0)
 
 
+@wp.kernel(enable_backward=False)
+def _reconstruct_packed_tangent_mobility(
+    headers: ContactColumnContainer,
+    contacts: ContactContainer,
+    bodies: BodyContainer,
+    row_slots: wp.array[wp.int32],
+    row_total: wp.array[wp.int32],
+    expected: wp.array2d[wp.float32],
+):
+    k = wp.tid()
+    if k >= row_total[0]:
+        return
+    cid = row_slots[k]
+    body1 = contact_get_body1(headers, cid)
+    body2 = contact_get_body2(headers, cid)
+    factor1 = wp.float32(contact_get_count1(headers, cid))
+    factor2 = wp.float32(contact_get_count2(headers, cid))
+    inv_mass1 = bodies.inverse_mass[body1] * factor1
+    inv_mass2 = bodies.inverse_mass[body2] * factor2
+    inv_inertia1 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, body1)) * factor1
+    inv_inertia2 = mat33_from_sym6(body_load_inv_inertia_sym6(bodies, body2)) * factor2
+    normal = cc_get_normal(contacts, k)
+    tangent1 = cc_get_tangent1(contacts, k)
+    tangent2 = wp.cross(normal, tangent1)
+    r0 = cc_get_r0(contacts, k)
+    r1 = cc_get_r1(contacts, k)
+    expected[0, k] = contact_mobility_scalar(tangent1, r0, r1, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+    expected[1, k] = contact_mobility_scalar(tangent2, r0, r1, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
+
+
 @unittest.skipUnless(wp.is_cuda_available(), "colored contact-row tests require CUDA graph capture")
 class TestColoredContactRows(unittest.TestCase):
+    def test_packed_tangent_rows_store_mobility(self) -> None:
+        """The coupled packed projector must receive K, not its reciprocal."""
+        scene = _PhoenXScene(
+            fps=120,
+            substeps=2,
+            solver_iterations=2,
+            velocity_iterations=1,
+            step_layout="single_world",
+            mass_splitting=True,
+            colored_contact_headers=True,
+            colored_contact_rows=True,
+            max_colored_partitions=8,
+            mass_splitting_batch_size=1,
+        )
+        scene.add_ground_plane()
+        scene.add_box((0.0, 0.0, 0.48), (0.5, 0.5, 0.5), mass=10.0)
+        scene.finalize()
+        scene.step()
+
+        world = scene.world
+        total = int(world._contact_row_total.numpy()[0])
+        self.assertGreater(total, 0)
+        expected = wp.zeros((2, world.rigid_contact_max), dtype=wp.float32, device=scene.device)
+        wp.launch(
+            _reconstruct_packed_tangent_mobility,
+            dim=world.rigid_contact_max,
+            inputs=[
+                world._contact_cols_packed,
+                world._contact_container_solve,
+                world.bodies,
+                world._contact_row_slots,
+                world._contact_row_total,
+                expected,
+            ],
+            device=scene.device,
+        )
+        stored = world._contact_container_solve.derived.numpy()[1:3, :total]
+        predicted = expected.numpy()[:, :total]
+        self.assertTrue(np.isfinite(stored).all())
+        self.assertGreater(float(np.max(predicted)), 0.1)
+        # A final pose integration may rotate inertia after the last prepare.
+        np.testing.assert_allclose(stored, predicted, rtol=1.0e-3, atol=1.0e-5)
+
     def test_mass_split_rigid_scene_uses_direct_regular_colors(self) -> None:
         """Mass splitting keeps typed dispatch outside the overflow color."""
         scene = _PhoenXScene(

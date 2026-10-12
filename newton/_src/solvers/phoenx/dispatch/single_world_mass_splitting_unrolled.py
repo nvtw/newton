@@ -61,12 +61,11 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 w._mass_splitting_writeback()
             return
         direct = getattr(w, "_direct_equality_system", None)
-        # Block PGS joints prepare local factors through the direct-system
-        # interface, but solve inside the colored kernel. In overflow-only
-        # mode the regular colors already update bodies directly; copying
-        # slot zero back here would overwrite their velocity with one
-        # unaveraged overflow partition.
-        sync_direct_copies = not (w._singleworld_overflow_only_mass_splitting and w.constraints.bilateral.enabled)
+        # Overflow-only sweeps finish in physical body storage. Copy slots
+        # retain individual overflow velocities and are initialized from
+        # bodies by the next sweep. This ownership also applies to exact
+        # joints: copying slot zero back would discard the averaged impulse.
+        sync_direct_copies = not w._singleworld_overflow_only_mass_splitting
         if direct is not None and direct.enabled:
             direct.prepare_and_factor(idt)
 
@@ -138,7 +137,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             return
 
         direct = getattr(w, "_direct_equality_system", None)
-        sync_direct_copies = not (w._singleworld_overflow_only_mass_splitting and w.constraints.bilateral.enabled)
+        sync_direct_copies = not w._singleworld_overflow_only_mass_splitting
         if not w._regular_pgs_active_this_step:
             if direct is not None and direct.enabled:
                 direct.solve(use_bias=False)

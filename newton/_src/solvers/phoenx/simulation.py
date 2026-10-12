@@ -3936,18 +3936,6 @@ class PhoenXWorld:
                 device=self.device,
             )
 
-    def _can_reuse_direct_relax_tangent(self, direct) -> bool:
-        """Return whether one relaxation sweep may reuse the biased D6 tangent."""
-        return bool(
-            self._active_velocity_iterations == 1
-            and self.mass_splitting_enabled
-            and self._regular_pgs_active_this_step
-            and self._combine_direct_prepare_projection
-            and not direct.has_bounded_drives
-            and self._direct_contact_response is None
-            and self._maximal_contact_response is None
-        )
-
     def _refresh_owned_relax_geometry(self, idt: wp.float32) -> None:
         """Refresh maximal constraint responses at the integrated configuration."""
         if (
@@ -3984,8 +3972,9 @@ class PhoenXWorld:
         direct = getattr(self, "_direct_equality_system", None)
         if direct is None or not direct.enabled or self._active_velocity_iterations <= 0:
             return
-        if self._can_reuse_direct_relax_tangent(direct):
-            return
+        # Integration moves centers of mass and rotates inertia. Reusing the
+        # biased solve's levers would apply paired impulses at different world
+        # points and create angular momentum during velocity relaxation.
         direct.refresh_geometry(idt)
         overlap_factor = bool(
             self.mass_splitting_enabled
@@ -4642,7 +4631,13 @@ class PhoenXWorld:
             is_cuda=self.device.is_cuda,
             has_bilateral_blocks=bool(self.constraints.bilateral.enabled),
         )
-        block_dim = get_color_group_block_dim(cooperative_joints)
+        joint_row_capacity = int(self.constraints.bilateral.row_capacity) or 6
+        block_dim = get_color_group_block_dim(cooperative_joints, joint_row_capacity)
+        block_count = COLOR_GROUP_SWEEP_BLOCK_COUNT
+        if self._temporal_contact_state is None and self.mass_splitting_color_group_size == 1:
+            # Single-color copy partitions have no inter-color dependencies.
+            # Give their independent rows enough blocks to occupy the device.
+            block_count = max(block_count, 4 * self.device.sm_count)
         data = self._color_group_data
         inputs = [
             self.constraints,
@@ -4665,7 +4660,9 @@ class PhoenXWorld:
             kernel = get_color_group_sweep_kernel(
                 phase,
                 soft_pd,
+                block_count,
                 cooperative_joints=cooperative_joints,
+                joint_row_capacity=joint_row_capacity,
                 temporal_springs=self._temporal_joint_springs,
                 joint_only=joint_only,
                 reverse_colors=reverse_colors,
@@ -4676,6 +4673,7 @@ class PhoenXWorld:
             kernel = get_sweep_kernel(
                 phase,
                 cooperative_joints=cooperative_joints,
+                joint_row_capacity=joint_row_capacity,
                 temporal_springs=self._temporal_joint_springs,
                 record_wrenches=bool(self._temporal_contact_state.record_wrenches),
                 world_count=self._temporal_sweep_worlds,
@@ -4683,7 +4681,7 @@ class PhoenXWorld:
             inputs.append(self._temporal_contact_state)
         wp.launch(
             kernel,
-            (COLOR_GROUP_SWEEP_BLOCK_COUNT * self._temporal_sweep_worlds, block_dim),
+            (block_count * self._temporal_sweep_worlds, block_dim),
             inputs,
             block_dim=block_dim,
             device=self.device,
@@ -5027,7 +5025,10 @@ class PhoenXWorld:
             "patch_friction": self._contact_patch_enabled,
         }
         cuda = self.device.is_cuda
-        cooperative = {"cooperative_joints": cuda and kw["bilateral_joint_blocks"]}
+        cooperative = {
+            "cooperative_joints": cuda and kw["bilateral_joint_blocks"],
+            "joint_row_capacity": int(self.constraints.bilateral.row_capacity) or 6,
+        }
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),
             get_singleworld_kernel(phase="prepare", fused=True, **kw),

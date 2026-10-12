@@ -17,6 +17,64 @@ from newton._src.solvers.phoenx.simulation_kernels import advance_singleworld_co
 
 
 class TestUnrolledColorDispatch(unittest.TestCase):
+    def test_exact_projection_keeps_averaged_overflow_velocity(self):
+        """Exact joints must receive the physical mean, not an overflow copy."""
+        world = SimpleNamespace(
+            max_colored_partitions=1,
+            _singleworld_overflow_only_mass_splitting=True,
+            constraints=SimpleNamespace(bilateral=SimpleNamespace(enabled=0)),
+            _constraint_capacity=1,
+            _regular_pgs_active_this_step=True,
+            substep_dt=0.01,
+            solver_iterations=1,
+            _active_velocity_iterations=1,
+            _colored_contact_rows=False,
+            _contact_container_solve=None,
+            direct_joint_projection_passes=None,
+            _partitioner=SimpleNamespace(begin_sweep=Mock()),
+            _singleworld_kernels=Mock(return_value=(None,) * 6),
+            _refresh_prepare_this_substep=Mock(return_value=True),
+            _warm_start_owned_contacts=Mock(),
+            velocity=0.0,
+            copies=[0.0, 0.0],
+        )
+        projected = []
+        world._direct_equality_system = SimpleNamespace(
+            enabled=True,
+            prepare_and_factor=Mock(),
+            resolve_bounded_drives=Mock(),
+            solve=lambda **kwargs: projected.append(world.velocity),
+        )
+
+        def broadcast():
+            world.copies = [world.velocity, world.velocity]
+
+        def writeback(**kwargs):
+            world.velocity = world.copies[0]
+
+        def overflow_sweep(*args):
+            # Equal-mass copies have different constraint impulses. The
+            # overflow reduction writes their mean only into physical bodies.
+            world.copies = [2.0, 4.0]
+            world.velocity = sum(world.copies) / len(world.copies)
+
+        world._mass_splitting_broadcast = Mock(side_effect=broadcast)
+        world._mass_splitting_writeback = Mock(side_effect=writeback)
+        dispatcher = SingleWorldMassSplittingUnrolledDispatcher(world)
+        with (
+            patch.object(type(dispatcher), "_unrolled_sweep", side_effect=overflow_sweep),
+            patch(
+                "newton._src.solvers.phoenx.dispatch.single_world_mass_splitting_unrolled.solve_auxiliary_constraints"
+            ),
+        ):
+            dispatcher.solve(wp.float32(100.0))
+            dispatcher.relax(wp.float32(100.0))
+
+        self.assertEqual(projected, [0.0, 3.0, 3.0, 3.0])
+        self.assertEqual(world.velocity, 3.0)
+        world._mass_splitting_broadcast.assert_not_called()
+        world._mass_splitting_writeback.assert_not_called()
+
     def test_each_head_launch_receives_its_fixed_step(self):
         launch = Mock()
         average = Mock()

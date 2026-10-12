@@ -14,6 +14,7 @@ __all__ = [
     "apply_pair_angular_impulse",
     "apply_pair_spatial_impulse",
     "apply_pair_velocity_impulse",
+    "contact_mobility_scalar",
     "create_orthonormal",
     "effective_mass_scalar",
     "extract_rotation_angle",
@@ -308,6 +309,30 @@ def apply_pair_velocity_impulse(
 
 
 @wp.func
+def contact_mobility_scalar(
+    axis: wp.vec3f,
+    r1: wp.vec3f,
+    r2: wp.vec3f,
+    inv_mass1: wp.float32,
+    inv_mass2: wp.float32,
+    inv_inertia1_world: wp.mat33f,
+    inv_inertia2_world: wp.mat33f,
+) -> wp.float32:
+    """Return ``J M^-1 J^T`` for a rigid contact tangent row.
+
+    The packed rigid point solver uses the mobility directly in its coupled
+    friction metric. Keep the same zero threshold as effective_mass_scalar so
+    a pinned pair retains its existing degenerate-row behavior.
+    """
+    rc1 = wp.cross(r1, axis)
+    rc2 = wp.cross(r2, axis)
+    w = inv_mass1 + inv_mass2 + wp.dot(rc1, inv_inertia1_world @ rc1) + wp.dot(rc2, inv_inertia2_world @ rc2)
+    if w > 1.0e-12:
+        return w
+    return 0.0
+
+
+@wp.func
 def effective_mass_scalar(
     axis: wp.vec3f,
     r1: wp.vec3f,
@@ -319,10 +344,8 @@ def effective_mass_scalar(
 ) -> wp.float32:
     """Scalar ``1 / (J M^-1 J^T)`` for a point-axis row. Returns 0 when the
     denominator collapses (both bodies static/pinned)."""
-    rc1 = wp.cross(r1, axis)
-    rc2 = wp.cross(r2, axis)
-    w = inv_mass1 + inv_mass2 + wp.dot(rc1, inv_inertia1_world @ rc1) + wp.dot(rc2, inv_inertia2_world @ rc2)
-    if w > 1.0e-12:
+    w = contact_mobility_scalar(axis, r1, r2, inv_mass1, inv_mass2, inv_inertia1_world, inv_inertia2_world)
+    if w > 0.0:
         return 1.0 / w
     return 0.0
 

@@ -14,6 +14,7 @@ Usage::
         partitioner.launch()
 """
 
+import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
@@ -26,6 +27,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_GREEDY_OUTER_ITERS,
     TILE_SCAN_BLOCK_DIM,
     ElementInteractionData,
+    _pack_constraint_priority,
     element_interaction_data_get,
     endpoint_owner_clear_winners_kernel,
     endpoint_owner_commit_kernel,
@@ -54,6 +56,16 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     speculative_pick_kernel,
     speculative_validate_commit_kernel,
     warm_start_periodic_invalidate_kernel,
+)
+from newton._src.solvers.phoenx.graph_coloring.warm_start import (
+    seed_warm_start_kernel,
+    warm_start_cache_zeros,
+    warm_start_dedup_pairs_kernel,
+    warm_start_emit_pairs_kernel,
+    warm_start_invalidate_apply_kernel,
+    warm_start_invalidate_mark_kernel,
+    warm_start_mark_boundaries_kernel,
+    warm_start_reset_count_kernel,
 )
 from newton._src.solvers.phoenx.helpers.scan_and_sort import scan_variable_length
 from newton._src.solvers.phoenx.solver_config import NUM_INNER_WHILE_ITERATIONS
@@ -223,8 +235,8 @@ def _fill_packed_priorities_from_contacts_kernel(
 
     Layout: ``packed[i] = (cost << 24) | (random[i] & 0xFFFFFF)``.
 
-    ``cost`` is the contact-count bias (joints get 0, contacts get the
-    column's contact count clamped to 0..255); the random tiebreaker
+    ``cost`` reserves 255 for joints; contacts use their column count
+    clamped to 0..254. The random tiebreaker
     is read straight from the per-build permutation. This replaces the
     older two-array layout that needed a re-shift/OR per kernel access.
     """
@@ -234,12 +246,7 @@ def _fill_packed_priorities_from_contacts_kernel(
         cost = contact_get_contact_count(contact_cols, local_cid)
     else:
         cost = wp.int32(0)
-    # Clamp cost to fit in the 8-bit high byte (255+ contacts on a single
-    # column is unrealistic but cap defensively).
-    if cost > wp.int32(255):
-        cost = wp.int32(255)
-    rand = random_values[tid] & wp.int32(0x00FFFFFF)
-    packed_priorities[tid] = (cost << wp.int32(24)) | rand
+    packed_priorities[tid] = _pack_constraint_priority(cost, random_values[tid], tid < num_joints)
 
 
 class IncrementalContactPartitioner:
@@ -328,10 +335,6 @@ class IncrementalContactPartitioner:
         # entirely. See :mod:`warm_start` for the design.
         self.enable_warm_start: bool = bool(enable_warm_start)
         if self.enable_warm_start:
-            from newton._src.solvers.phoenx.graph_coloring.warm_start import (
-                warm_start_cache_zeros,
-            )
-
             self._warm_start_cache = warm_start_cache_zeros(max_num_interactions, device=device)
             # Per-frame scratch for the validation pass. ``mark`` is
             # written by mark_kernel, consumed + cleared by
@@ -351,8 +354,6 @@ class IncrementalContactPartitioner:
             self._ws_pair_values = None
             self._ws_is_boundary = None
             self._ws_dest_idx = None
-
-        import numpy as np
 
         rng = np.random.default_rng(seed)
         priorities = rng.permutation(max_num_interactions).astype(np.int32) + 1
@@ -498,8 +499,8 @@ class IncrementalContactPartitioner:
         contact_cols: ContactColumnContainer,
     ) -> None:
         """Refresh per-cid packed JP priorities from contact-column counts.
-        Joints and inactive tail cids get cost=0; contacts get the column's
-        contact count clamped to 0..255."""
+        Joints get cost=255; contacts use their count clamped to 0..254,
+        and inactive tail cids get cost=0."""
         wp.launch(
             _fill_packed_priorities_from_contacts_kernel,
             dim=self.max_num_interactions,
@@ -926,12 +927,6 @@ class IncrementalContactPartitioner:
         # constraints not in the cache stay at 0 and get coloured
         # normally by MIS.
         if self.enable_warm_start:
-            from newton._src.solvers.phoenx.graph_coloring.warm_start import (
-                seed_warm_start_kernel,
-                warm_start_invalidate_apply_kernel,
-                warm_start_invalidate_mark_kernel,
-            )
-
             # Pre-seed pass: bump the step counter and apply the
             # configured strategy for breaking the warm-start
             # coloring lock-in (periodic full invalidate, rotating
@@ -1099,13 +1094,6 @@ class IncrementalContactPartitioner:
         boundary entries into the cache (atomic-max sets
         ``num_entries``).
         """
-        from newton._src.solvers.phoenx.graph_coloring.warm_start import (
-            warm_start_dedup_pairs_kernel,
-            warm_start_emit_pairs_kernel,
-            warm_start_mark_boundaries_kernel,
-            warm_start_reset_count_kernel,
-        )
-
         # Step 1: emit pairs.
         wp.launch(
             warm_start_emit_pairs_kernel,

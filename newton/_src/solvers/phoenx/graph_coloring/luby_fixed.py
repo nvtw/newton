@@ -32,6 +32,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     GREEDY_MAX_COLORS,
     MAX_BODIES,
     ElementInteractionData,
+    _priority_is_greater,
     element_interaction_data_get,
     greedy_color_histogram_kernel,
     greedy_count_and_scan_color_starts_kernel,
@@ -157,7 +158,7 @@ def luby_coloring_kernel(
                 continue
             if _luby_is_removed(partition_data_concat, removed_marker, neighbor, color, luby_base, luby_marker):
                 continue
-            if packed_priorities[neighbor] > self_prio:
+            if _priority_is_greater(packed_priorities[neighbor], neighbor, self_prio, tid):
                 is_local_max = False
                 break
 
