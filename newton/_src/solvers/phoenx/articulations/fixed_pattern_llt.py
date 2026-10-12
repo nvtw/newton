@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import functools
 from ctypes import sizeof
 from dataclasses import dataclass
 
@@ -371,6 +372,95 @@ def _make_cooperative_factor_kernel(block_size: int):
                 _block_sync()
 
     return factor_cooperative
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+unsigned mask = width == 32 ? 0xffffffffu : (0xffffu << ((threadIdx.x & 31) & 16));
+return __shfl_sync(mask, value, source, width);
+#else
+return value;
+#endif
+""")
+def _shuffle_panel_value(value: wp.float32, source: wp.int32, width: wp.int32) -> wp.float32: ...
+
+
+@functools.cache
+def _make_subgroup_solve_kernel(width: int):
+    """Solve a one-panel mechanism in registers within a subgroup."""
+    Row = wp.types.vector(length=width, dtype=wp.float32)
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def solve(
+        mechanisms: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        offsets: wp.array[wp.int32],
+        tables: wp.array[wp.int32],
+        panels: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        rhs: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+    ):
+        task, lane = wp.tid()
+        mechanism = mechanisms[task]
+        dimension = dimensions[mechanism]
+        start = offsets[mechanism]
+        panel = panels[tables[mechanism]]
+        base = panel * wp.static(width * width)
+        diagonal = wp.float32(1.0)
+        value = wp.float32(0.0)
+        lower = Row(0.0)
+        if lane < dimension:
+            value = rhs[start + permutation[start + lane]]
+            diagonal = factor[base + lane * wp.static(width) + lane]
+            for column in range(wp.static(width)):
+                if column < lane:
+                    lower[column] = factor[base + lane * wp.static(width) + column]
+        for column in range(wp.static(width)):
+            if column < dimension:
+                pivot = wp.float32(0.0)
+                if lane == column:
+                    value = value * (wp.float32(1.0) / diagonal)
+                    pivot = value
+                solved = _shuffle_panel_value(pivot, column, wp.static(width))
+                if lane > column and lane < dimension:
+                    value = value - lower[column] * solved
+        upper = Row(0.0)
+        if lane < dimension:
+            for column in range(wp.static(width)):
+                if column > lane and column < dimension:
+                    upper[column] = factor[base + column * wp.static(width) + lane]
+        if dimension < wp.static(width):
+            # Match the existing tail solve's ascending dot-product order.
+            solved_values = Row(0.0)
+            for reverse in range(wp.static(width)):
+                column = wp.static(width - 1) - reverse
+                if column < dimension:
+                    pivot = wp.float32(0.0)
+                    if lane == column:
+                        row_value = value
+                        for solved_row in range(wp.static(width)):
+                            if solved_row > column and solved_row < dimension:
+                                row_value = row_value - upper[solved_row] * solved_values[solved_row]
+                        value = row_value / diagonal
+                        pivot = value
+                    solved_values[column] = _shuffle_panel_value(pivot, column, wp.static(width))
+        else:
+            # Full tiles use cuSolverDx's reciprocal/update ordering.
+            for reverse in range(wp.static(width)):
+                column = wp.static(width - 1) - reverse
+                pivot = wp.float32(0.0)
+                if lane == column:
+                    value = value * (wp.float32(1.0) / diagonal)
+                    pivot = value
+                solved = _shuffle_panel_value(pivot, column, wp.static(width))
+                if lane < column:
+                    value = value - upper[column] * solved
+        if lane < dimension:
+            solution[start + permutation[start + lane]] = value
+
+    return solve
 
 
 def _make_cooperative_solve_kernel(block_size: int):
@@ -839,6 +929,7 @@ class FixedPatternPanelLLT:
         *,
         block_size: int = 16,
         device: wp.DeviceLike = None,
+        use_subgroup_solve: bool = True,
     ):
         self.dimensions = dimensions
         self.block_size = block_size
@@ -1057,6 +1148,17 @@ class FixedPatternPanelLLT:
                 assume_unique=True,
             )
         )
+        # Single-panel systems need no panel traversal or global intermediate
+        # vectors. Pack multiple independent subgroups into each CUDA block.
+        subgroup_mechanisms = np.empty(0, dtype=np.int32)
+        mathdx_solver = wp.get_module(__name__).options.get("enable_mathdx_solver")
+        if mathdx_solver is None:
+            mathdx_solver = getattr(wp.config, "enable_mathdx_solver", False)
+        if use_subgroup_solve and mathdx_solver and self.device.is_cuda and block_size in (16, 32):
+            subgroup_mechanisms = np.intersect1d(cooperative_mechanisms, small_mechanisms, assume_unique=True)
+            cooperative_mechanisms = np.setdiff1d(cooperative_mechanisms, subgroup_mechanisms, assume_unique=True)
+        self.subgroup_mechanism = wp.array(subgroup_mechanisms, dtype=wp.int32, device=self.device)
+        self._solve_subgroup = _make_subgroup_solve_kernel(block_size) if subgroup_mechanisms.size else None
         self.cooperative_mechanism = wp.array(cooperative_mechanisms, dtype=wp.int32, device=self.device)
         self._factor_cooperative = _make_cooperative_factor_kernel(block_size)
         self._solve_cooperative = _make_cooperative_solve_kernel(block_size)
@@ -1154,6 +1256,24 @@ class FixedPatternPanelLLT:
         if self._pcr_stream is not None:
             with wp.ScopedStream(self._pcr_stream):
                 self._pcr.reduce(rhs, refine=refine)
+        if self.subgroup_mechanism.size > 0:
+            wp.launch(
+                self._solve_subgroup,
+                dim=(self.subgroup_mechanism.size, self.block_size),
+                inputs=[
+                    self.subgroup_mechanism,
+                    self.dimension,
+                    self.vector_offset,
+                    self.panel_table_offset,
+                    self.panel_index,
+                    self.permutation,
+                    self.factor,
+                    rhs,
+                    solution,
+                ],
+                block_dim=128,
+                device=self.device,
+            )
         if self.cooperative_mechanism.size > 0:
             wp.launch_tiled(
                 self._solve_cooperative,
