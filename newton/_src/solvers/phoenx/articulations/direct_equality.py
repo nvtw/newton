@@ -2289,11 +2289,12 @@ class DirectEqualitySystem:
                 device=self.model.device,
             )
 
-    def begin_substep(self, idt: wp.float32) -> None:
+    def begin_substep(self, idt: wp.float32, *, reuse_geometry: bool = False) -> None:
         """Prepare rows and snapshot pre-force joint velocities."""
         if not self.enabled:
             return
-        self.refresh_geometry(idt)
+        if not reuse_geometry:
+            self.refresh_geometry(idt)
         wp.launch(
             _snapshot_direct_dynamic_velocity_kernel,
             dim=len(self.topology.row_joint),

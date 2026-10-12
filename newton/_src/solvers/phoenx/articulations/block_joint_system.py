@@ -374,8 +374,15 @@ class MixedJointSystem:
     def refresh_geometry(self, idt):
         self._forward("refresh_geometry", idt)
 
-    def begin_substep(self, idt):
-        self._forward("begin_substep", idt)
+    def begin_substep(self, idt, *, reuse_geometry=False):
+        if reuse_geometry:
+            # The reuse gate permits only an all-exact system. Block rows
+            # have a separate per-color preparation lifecycle.
+            if self.blocks.enabled:
+                raise ValueError("Direct factor reuse requires no block-owned joints")
+            self.exact.begin_substep(idt, reuse_geometry=True)
+        else:
+            self._forward("begin_substep", idt)
 
     def prepare_and_factor(self, idt):
         self._forward("prepare_and_factor", idt)

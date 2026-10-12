@@ -45,7 +45,7 @@ from newton._src.solvers.phoenx.articulations.maximal_projector import (
 )
 from newton._src.solvers.phoenx.articulations.maximal_projector_general import GeneralMaximalTreeProjector
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation, _get_reduced_model
-from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros
+from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, BodyContainer, body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_DAMPING_DRIVE,
     _OFF_DRIVE_MODE,
@@ -74,6 +74,39 @@ __all__ = ["SolverPhoenX"]
 
 
 _AUTO_SINGLE_WORLD_MIN_BODIES = 2048
+
+
+def _can_reuse_relax_direct_factor(direct, world, model, bodies, solver_scheme: str) -> bool:
+    """Whether a relax factor remains valid at the next substep's solve.
+
+    Exact static rows depend on pose and inertia, which the preceding relax
+    pass just refreshed. Moving kinematic endpoints and dynamic rows can
+    change that matrix without an intervening position integration.
+    """
+    exact = direct.exact if isinstance(direct, MixedJointSystem) else direct
+    if not (
+        (not isinstance(direct, MixedJointSystem) or not direct.blocks.enabled)
+        and type(exact) is DirectEqualitySystem
+        and exact.enabled
+        and not exact.has_dynamic_rows
+        and not exact.has_bounded_drives
+        and not exact.has_direct_friction
+        and world.step_layout == "single_world"
+        and world.mass_splitting_unrolled
+        and world.velocity_relaxation == "each_substep"
+        and world.velocity_iterations > 0
+        and not world._sleeping_enabled
+        and solver_scheme == "soft"
+    ):
+        return False
+
+    joints = np.asarray(exact.topology.joints, dtype=np.int32)
+    motion = bodies.motion_type.numpy()
+    parent = model.joint_parent.numpy()[joints] + 1
+    child = model.joint_child.numpy()[joints] + 1
+    return not (
+        np.any(motion[parent[parent > 0]] == MOTION_KINEMATIC) or np.any(motion[child[child > 0]] == MOTION_KINEMATIC)
+    )
 
 
 def _resolve_auto_step_layout(
@@ -255,6 +288,7 @@ class SolverPhoenX(SolverBase):
         enable_warm_start_coloring: bool = True,
         colored_contact_headers: bool = False,
         colored_contact_rows: bool = False,
+        colored_singleton_contact_lanes: bool | None = None,
         enable_column_timers: bool = False,
         sor_boost: float = 1.0,
         sleeping_velocity_threshold: float = 0.0,
@@ -389,6 +423,9 @@ class SolverPhoenX(SolverBase):
                 rigid contacts. Supports single- and multi-world layouts.
             colored_contact_rows: Also store per-contact solve state in solver
                 color order. Requires ``colored_contact_headers``.
+            colored_singleton_contact_lanes: Use one lane for one-point
+                contacts in eligible CUDA single-world rigid scenes. ``None``
+                selects automatically; ``False`` disables this optimization.
             enable_column_timers: Collect per-constraint-column timing
                 counters for diagnostics. Defaults to ``False``.
             sor_boost: Per-impulse SOR factor. 1.0 = vanilla PGS;
@@ -908,6 +945,7 @@ class SolverPhoenX(SolverBase):
             enable_warm_start_coloring=enable_warm_start_coloring,
             colored_contact_headers=colored_contact_headers,
             colored_contact_rows=colored_contact_rows,
+            colored_singleton_contact_lanes=colored_singleton_contact_lanes,
             enable_column_timers=enable_column_timers,
             sor_boost=sor_boost,
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),
@@ -1066,6 +1104,7 @@ class SolverPhoenX(SolverBase):
             )
             self.world._direct_equality_system = self._direct_equality_system
             self._direct_equality_system.bind_constraint_indices(self._joint_constraints.joint_idx_to_cid)
+            self._refresh_direct_factor_reuse_eligibility()
             if np.any(self._direct_equality_system.direct_friction_dof_mask):
                 d6_data, d6_inequality_count = build_d6_inequality_data(
                     model,
@@ -1708,6 +1747,13 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
+    def _refresh_direct_factor_reuse_eligibility(self) -> None:
+        """Recheck factor reuse after direct rows or body motion types change."""
+        direct = self._direct_equality_system
+        self.world._reuse_exact_relax_factor = direct is not None and _can_reuse_relax_direct_factor(
+            direct, self.world, self.model, self.bodies, self.solver_scheme
+        )
+
     def notify_model_changed(self, flags: int) -> None:
         """Refresh state on Model edits. Joint-property changes rebuild the joint constraint
         init arrays from scratch; gravity is reread from ``model.gravity``."""
@@ -1772,6 +1818,8 @@ class SolverPhoenX(SolverBase):
                 if self._reduced_articulation is not None:
                     self._reduced_articulation.system.refresh_inertial_properties()
                     self._reduced_articulation.invalidate_kinematics()
+        if joint_props_changed or body_properties_changed:
+            self._refresh_direct_factor_reuse_eligibility()
         if joint_props_changed and self._uses_maximal_tree_projector:
             assert self._maximal_tree_projector_cls is not None
             if not self._maximal_tree_projector_cls.supports_model(self.model):
