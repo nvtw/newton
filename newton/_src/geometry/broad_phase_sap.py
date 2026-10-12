@@ -267,7 +267,7 @@ def _sap_project_kernel(
 
 @wp.kernel(enable_backward=False)
 def _sap_update_direction_search_kernel(
-    sap_cumulative_sum: wp.array[int],
+    sap_cumulative_sum: wp.array[wp.int64],
     candidate_pair_count: wp.array[int],
     total_elements: int,
     direction_candidate_count: int,
@@ -343,7 +343,7 @@ def _sap_range_kernel(
     sap_projection_lower_in: wp.array[float],
     sap_projection_upper_in: wp.array[float],
     sap_sort_index_in: wp.array[int],
-    sap_range_out: wp.array[int],
+    sap_range_out: wp.array[wp.int64],
 ):
     world_id, local_shape_id = wp.tid()
 
@@ -358,7 +358,7 @@ def _sap_range_kernel(
     num_shapes_in_world = world_slice_end - world_slice_start
 
     if local_shape_id >= num_shapes_in_world:
-        sap_range_out[idx] = 0
+        sap_range_out[idx] = wp.int64(0)
         return
 
     # Current bounding shape (after sort, this is the original local geometry index)
@@ -368,7 +368,7 @@ def _sap_range_kernel(
 
     # Invalid shape (padding)
     if sort_idx < 0:
-        sap_range_out[idx] = 0
+        sap_range_out[idx] = wp.int64(0)
         return
 
     # Get upper bound for this shape
@@ -386,19 +386,21 @@ def _sap_range_kernel(
     limit = wp.min(num_shapes_in_world, limit)
 
     # Range of shapes for the sweep and prune process
-    sap_range_out[idx] = limit - local_shape_id - 1
+    sap_range_out[idx] = wp.int64(limit - local_shape_id - 1)
 
 
 @wp.kernel(enable_backward=False)
-def _sap_chunk_count_kernel(sap_range: wp.array[int], chunk_count: wp.array[int]):
+def _sap_chunk_count_kernel(sap_range: wp.array[wp.int64], chunk_count: wp.array[wp.int64]):
     tid = wp.tid()
-    chunk_count[tid] = (sap_range[tid] + _SAP_SWEEP_CHUNK_SIZE_WP - wp.int32(1)) // _SAP_SWEEP_CHUNK_SIZE_WP
+    chunk_count[tid] = (sap_range[tid] + wp.int64(_SAP_SWEEP_CHUNK_SIZE_WP) - wp.int64(1)) // wp.int64(
+        _SAP_SWEEP_CHUNK_SIZE_WP
+    )
 
 
 @wp.func
 def _process_sap_work_package(
     flat_id: int,
-    workid: int,
+    workid: wp.int64,
     shape_bounding_box_lower: wp.array[wp.vec3],
     shape_bounding_box_upper: wp.array[wp.vec3],
     shape_gap: wp.array[float],
@@ -408,7 +410,7 @@ def _process_sap_work_package(
     world_index_map: wp.array[int],
     world_slice_ends: wp.array[int],
     sap_sort_index_in: wp.array[int],
-    sap_cumulative_sum_in: wp.array[int],
+    sap_cumulative_sum_in: wp.array[wp.int64],
     max_shapes_per_world: int,
     num_regular_worlds: int,
     single_segment_identity_map: bool,
@@ -422,9 +424,10 @@ def _process_sap_work_package(
     max_candidate_pair: int,
 ):
     """Process one mapped SAP work package."""
-    j = flat_id + workid + 1
+    work_end = wp.int64(flat_id) + workid + wp.int64(1)
     if flat_id > 0:
-        j -= sap_cumulative_sum_in[flat_id - 1]
+        work_end -= sap_cumulative_sum_in[flat_id - 1]
+    j = wp.int32(work_end)
 
     # With no regular worlds, the map contains only the dedicated global
     # segment. Avoid per-pair segment arithmetic and redundant world reads.
@@ -506,13 +509,13 @@ def _advance_sap_chunk_base(chunk_base: int, chunk_stride: int, total_work_packa
 
 @wp.kernel(enable_backward=False)
 def _sap_select_sweep_kernel(
-    sap_cumulative_sum: wp.array[int],
+    sap_cumulative_sum: wp.array[wp.int64],
     total_elements: int,
     sweep_mode: wp.array[int],
 ):
     total_work = sap_cumulative_sum[total_elements - 1]
     sweep_mode[0] = wp.int32(0)
-    if total_work >= total_elements * _SAP_CHUNKED_MIN_OVERLAPS_PER_SHAPE_WP:
+    if total_work >= wp.int64(total_elements) * wp.int64(_SAP_CHUNKED_MIN_OVERLAPS_PER_SHAPE_WP):
         sweep_mode[0] = wp.int32(1)
 
 
@@ -657,7 +660,7 @@ def create_sap_broadphase_kernel(filter_func: Any, filter_data_type: Any, adapti
         world_index_map: wp.array[int],
         world_slice_ends: wp.array[int],
         sap_sort_index_in: wp.array[int],
-        sap_cumulative_sum_in: wp.array[int],
+        sap_cumulative_sum_in: wp.array[wp.int64],
         world_count: int,
         max_shapes_per_world: int,
         nsweep_in: int,
@@ -680,13 +683,14 @@ def create_sap_broadphase_kernel(filter_func: Any, filter_data_type: Any, adapti
 
         total_work_packages = sap_cumulative_sum_in[world_count * max_shapes_per_world - 1]
 
-        workid = tid
+        workid = wp.int64(tid)
         while workid < total_work_packages:
             flat_id = binary_search(sap_cumulative_sum_in, workid, 0, world_count * max_shapes_per_world)
 
-            j = flat_id + workid + 1
+            work_end = wp.int64(flat_id) + workid + wp.int64(1)
             if flat_id > 0:
-                j -= sap_cumulative_sum_in[flat_id - 1]
+                work_end -= sap_cumulative_sum_in[flat_id - 1]
+            j = wp.int32(work_end)
 
             world_id = flat_id // max_shapes_per_world
             i = flat_id % max_shapes_per_world
@@ -699,11 +703,11 @@ def create_sap_broadphase_kernel(filter_func: Any, filter_data_type: Any, adapti
             num_shapes_in_world = world_slice_end - world_slice_start
 
             if i >= num_shapes_in_world or j >= num_shapes_in_world:
-                workid += nsweep_in
+                workid += wp.int64(nsweep_in)
                 continue
 
             if i >= j:
-                workid += nsweep_in
+                workid += wp.int64(nsweep_in)
                 continue
 
             idx_i = world_id * max_shapes_per_world + i
@@ -712,7 +716,7 @@ def create_sap_broadphase_kernel(filter_func: Any, filter_data_type: Any, adapti
             local_shape2 = sap_sort_index_in[idx_j]
 
             if local_shape1 < 0 or local_shape2 < 0:
-                workid += nsweep_in
+                workid += wp.int64(nsweep_in)
                 continue
 
             shape1_tmp = world_index_map[world_slice_start + local_shape1]
@@ -739,7 +743,7 @@ def create_sap_broadphase_kernel(filter_func: Any, filter_data_type: Any, adapti
                 candidate_pair_count,
                 max_candidate_pair,
             )
-            workid += nsweep_in
+            workid += wp.int64(nsweep_in)
         return
 
     return kernel
@@ -761,8 +765,8 @@ def create_sap_chunked_broadphase_kernel(filter_func: Any, filter_data_type: Any
         world_index_map: wp.array[int],
         world_slice_ends: wp.array[int],
         sap_sort_index_in: wp.array[int],
-        sap_range_in: wp.array[int],
-        sap_chunk_cumulative_sum_in: wp.array[int],
+        sap_range_in: wp.array[wp.int64],
+        sap_chunk_cumulative_sum_in: wp.array[wp.int64],
         world_count: int,
         max_shapes_per_world: int,
         nsweep_in: int,
@@ -783,10 +787,10 @@ def create_sap_chunked_broadphase_kernel(filter_func: Any, filter_data_type: Any
             return
         total_elements = world_count * max_shapes_per_world
         total_chunks = sap_chunk_cumulative_sum_in[total_elements - 1]
-        chunk_id = tid
+        chunk_id = wp.int64(tid)
         while chunk_id < total_chunks:
             flat_id = binary_search(sap_chunk_cumulative_sum_in, chunk_id, 0, total_elements)
-            chunk_start = wp.int32(0)
+            chunk_start = wp.int64(0)
             if flat_id > wp.int32(0):
                 chunk_start = sap_chunk_cumulative_sum_in[flat_id - wp.int32(1)]
             chunk_offset = chunk_id - chunk_start
@@ -798,8 +802,8 @@ def create_sap_chunked_broadphase_kernel(filter_func: Any, filter_data_type: Any
                 world_slice_start = world_slice_ends[world_id - 1]
             local_shape1 = sap_sort_index_in[flat_id]
             shape1_tmp = world_index_map[world_slice_start + local_shape1]
-            candidate_count_i = sap_range_in[flat_id]
-            first_offset = chunk_offset * _SAP_SWEEP_CHUNK_SIZE_WP
+            candidate_count_i = wp.int32(sap_range_in[flat_id])
+            first_offset = wp.int32(chunk_offset) * _SAP_SWEEP_CHUNK_SIZE_WP
             for lane in range(_SAP_SWEEP_CHUNK_SIZE):
                 offset = first_offset + lane
                 if offset >= candidate_count_i:
@@ -830,7 +834,7 @@ def create_sap_chunked_broadphase_kernel(filter_func: Any, filter_data_type: Any
                         candidate_pair_count,
                         max_candidate_pair,
                     )
-            chunk_id += nsweep_in
+            chunk_id += wp.int64(nsweep_in)
 
     return kernel
 
@@ -999,10 +1003,12 @@ class BroadPhaseSAP:
         self.sap_projection_lower = wp.zeros(2 * total_elements, dtype=wp.float32, device=device)
         self.sap_projection_upper = wp.zeros(total_elements, dtype=wp.float32, device=device)
         self.sap_sort_index = wp.zeros(2 * total_elements, dtype=wp.int32, device=device)
-        self.sap_range = wp.zeros(total_elements, dtype=wp.int32, device=device)
-        self.sap_chunk_count = wp.zeros(total_elements, dtype=wp.int32, device=device)
-        self.sap_chunk_cumulative_sum = wp.zeros(total_elements, dtype=wp.int32, device=device)
-        self.sap_cumulative_sum = wp.zeros(total_elements, dtype=wp.int32, device=device)
+        # Projection overlaps can exceed int32 even with only 65,537 shapes.
+        # Widen the scans and their work indices; shape indices stay int32.
+        self.sap_range = wp.zeros(total_elements, dtype=wp.int64, device=device)
+        self.sap_chunk_count = wp.zeros(total_elements, dtype=wp.int64, device=device)
+        self.sap_chunk_cumulative_sum = wp.zeros(total_elements, dtype=wp.int64, device=device)
+        self.sap_cumulative_sum = wp.zeros(total_elements, dtype=wp.int64, device=device)
         self.sap_sweep_mode = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Segment indices for segmented sort (needed for graph capture)
