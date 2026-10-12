@@ -8,7 +8,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.tests.unittest_utils import USD_AVAILABLE
+from newton.tests.unittest_utils import USD_AVAILABLE, patch_sys_module
 from newton.viewer import ViewerRTX
 
 if USD_AVAILABLE:
@@ -20,9 +20,10 @@ class TestViewerRTXMarkers(unittest.TestCase):
     def setUp(self):
         self.ovrtx = mock.MagicMock()
         self.ovrtx.__version__ = "0.3.0"
-        patcher = mock.patch.dict("sys.modules", {"ovrtx": self.ovrtx})
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # Preserve lazy Warp imports and their ctypes identities across tests.
+        patcher = patch_sys_module("ovrtx", self.ovrtx)
+        patcher.__enter__()
+        self.addCleanup(patcher.__exit__, None, None, None)
         self.viewer = ViewerRTX(headless=True)
         self.addCleanup(self.viewer.close)
         self.viewer._phase = ViewerRTX._PHASE_RENDER
