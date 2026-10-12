@@ -109,6 +109,29 @@ _LOCALITY_FAMILY_COUNT_HOST = 6
 _LOCALITY_FAMILY_COUNT = wp.constant(_LOCALITY_FAMILY_COUNT_HOST)
 
 
+@wp.func
+def _locality_min_body(elements: wp.array[ElementInteractionData], eid: wp.int32) -> wp.int32:
+    body_min = wp.int32(0x7FFFFF)
+    el = elements[eid]
+    for j in range(MAX_BODIES):
+        body = element_interaction_data_get(el, j)
+        if body < wp.int32(0):
+            break
+        if body < body_min:
+            body_min = body
+    return body_min
+
+
+@wp.func
+def _locality_unbucketed_key(color: wp.int32, family: wp.int32, body_min: wp.int32, eid: wp.int32) -> wp.int64:
+    return (
+        (wp.int64(color) << (_LOCALITY_FAMILY_BITS + _LOCALITY_BODY_MIN_BITS + _LOCALITY_EID_BITS))
+        | ((wp.int64(family) & _LOCALITY_FAMILY_MASK) << (_LOCALITY_BODY_MIN_BITS + _LOCALITY_EID_BITS))
+        | ((wp.int64(body_min) & _LOCALITY_BODY_MIN_MASK) << _LOCALITY_EID_BITS)
+        | (wp.int64(eid) & _LOCALITY_EID_MASK)
+    )
+
+
 @wp.kernel(enable_backward=False)
 def _locality_combined_keys_kernel(
     elements: wp.array[ElementInteractionData],
@@ -142,20 +165,57 @@ def _locality_combined_keys_kernel(
     family = element_family[eid]
     if family_sort_cutoff >= wp.int32(0) and color >= family_sort_cutoff:
         family = wp.int32(0)
-    el = elements[eid]
-    body_min = wp.int32(0x7FFFFF)  # 24-bit sentinel for "no body"
-    for j in range(MAX_BODIES):
-        b = element_interaction_data_get(el, j)
-        if b < wp.int32(0):
-            break
-        if b < body_min:
-            body_min = b
-    key = (
-        (wp.int64(color) << (_LOCALITY_FAMILY_BITS + _LOCALITY_BODY_MIN_BITS + _LOCALITY_EID_BITS))
-        | ((wp.int64(family) & _LOCALITY_FAMILY_MASK) << (_LOCALITY_BODY_MIN_BITS + _LOCALITY_EID_BITS))
-        | ((wp.int64(body_min) & _LOCALITY_BODY_MIN_MASK) << _LOCALITY_EID_BITS)
-        | (wp.int64(eid) & _LOCALITY_EID_MASK)
-    )
+    body_min = _locality_min_body(elements, eid)
+    key = _locality_unbucketed_key(color, family, body_min, eid)
+    keys[tid] = key
+    values[tid] = eid
+
+
+@wp.kernel(enable_backward=False)
+def _locality_contact_count_keys_kernel(
+    elements: wp.array[ElementInteractionData],
+    element_ids_by_color: wp.array[wp.int32],
+    interaction_id_to_partition: wp.array[wp.int32],
+    element_family: wp.array[wp.int32],
+    packed_priorities: wp.array[wp.int32],
+    family_sort_cutoff: wp.int32,
+    num_elements: wp.array[wp.int32],
+    keys: wp.array[wp.int64],
+    values: wp.array[wp.int32],
+):
+    """Group regular contact columns by point count in the existing sort.
+
+    Joint-first family ordering remains. Overflow uses the original key bit
+    layout exactly, because its copy-state batch order is position-dependent.
+    Regular contacts use four body-id bits for a count bucket; callers enable
+    this kernel only when body ids fit in the remaining 20 bits.
+    """
+    tid = wp.tid()
+    if tid >= keys.shape[0]:
+        return
+    if tid >= num_elements[0]:
+        keys[tid] = wp.int64(_LOCALITY_TAIL_KEY)
+        values[tid] = wp.int32(0)
+        return
+    eid = element_ids_by_color[tid]
+    color = interaction_id_to_partition[eid]
+    family = element_family[eid]
+    regular = color < family_sort_cutoff
+    if not regular:
+        family = wp.int32(0)
+    body_min = _locality_min_body(elements, eid)
+    if regular and family == wp.int32(1):
+        count_bucket = (packed_priorities[eid] >> wp.int32(24)) & wp.int32(0xFF)
+        count_bucket = wp.min(count_bucket, wp.int32(15))
+        key = (
+            (wp.int64(color) << wp.int64(53))
+            | ((wp.int64(family) & wp.int64(15)) << wp.int64(49))
+            | (wp.int64(count_bucket) << wp.int64(45))
+            | ((wp.int64(body_min) & wp.int64(0xFFFFF)) << wp.int64(25))
+            | (wp.int64(eid) & _LOCALITY_EID_MASK)
+        )
+    else:
+        key = _locality_unbucketed_key(color, family, body_min, eid)
     keys[tid] = key
     values[tid] = eid
 
@@ -211,6 +271,11 @@ def _scan_color_family_starts_kernel(
     color_starts: wp.array[wp.int32],
     color_family_count: wp.array[wp.int32],
     color_family_starts: wp.array[wp.int32],
+    element_ids_by_color: wp.array[wp.int32],
+    packed_priorities: wp.array[wp.int32],
+    sort_regular_contacts_by_point_count: wp.bool,
+    family_sort_cutoff: wp.int32,
+    color_singleton_end: wp.array[wp.int32],
 ):
     color = wp.tid()
     if color >= wp.int32(MAX_COLORS):
@@ -221,6 +286,22 @@ def _scan_color_family_starts_kernel(
         slot = base + wp.int32(family)
         color_family_starts[slot] = running
         running = running + color_family_count[slot]
+    contact_start = color_family_starts[base + wp.int32(1)]
+    contact_end = color_family_starts[base + wp.int32(2)]
+    singleton_end = contact_start
+    if sort_regular_contacts_by_point_count and color < family_sort_cutoff:
+        low = contact_start
+        high = contact_end
+        while low < high:
+            mid = low + (high - low) / wp.int32(2)
+            eid = element_ids_by_color[mid]
+            point_count = (packed_priorities[eid] >> wp.int32(24)) & wp.int32(255)
+            if point_count <= wp.int32(1):
+                low = mid + wp.int32(1)
+            else:
+                high = mid
+        singleton_end = low
+    color_singleton_end[color] = singleton_end
 
 
 @wp.kernel(enable_backward=False, module="unique")
@@ -417,7 +498,9 @@ class IncrementalContactPartitioner:
         family_slots = int(MAX_COLORS) * _LOCALITY_FAMILY_COUNT_HOST
         self._color_family_count = wp.zeros(family_slots, dtype=wp.int32, device=device)
         self._color_family_starts = wp.zeros(family_slots, dtype=wp.int32, device=device)
+        self._color_singleton_end = wp.zeros(int(MAX_COLORS), dtype=wp.int32, device=device)
         self._compute_color_family_starts = False
+        self._sort_regular_contacts_by_point_count = False
 
         self._current_color = wp.zeros(1, dtype=wp.int32, device=device)
         self._num_remaining = wp.zeros(1, dtype=wp.int32, device=device)
@@ -522,6 +605,12 @@ class IncrementalContactPartitioner:
         CSR stays grouped by row family within each colour.
         """
         self._locality_family = element_family
+
+    def set_regular_contact_count_sort(self, enabled: bool, num_bodies: int) -> None:
+        """Opt in to point-count grouping for regular contact colors only."""
+        if enabled and num_bodies >= (1 << 20):
+            raise ValueError("Singleton contact-count sort requires fewer than 2^20 bodies")
+        self._sort_regular_contacts_by_point_count = bool(enabled)
 
     def reset(
         self,
@@ -1156,19 +1245,28 @@ class IncrementalContactPartitioner:
         batch ids are derived from CSR position.
         """
         n = self.max_num_interactions
-        wp.launch(
-            _locality_combined_keys_kernel,
-            dim=n,
-            inputs=[
-                self._elements,
-                self._element_ids_by_color,
-                self._interaction_id_to_partition,
-                self._locality_family,
+        locality_inputs = [
+            self._elements,
+            self._element_ids_by_color,
+            self._interaction_id_to_partition,
+            self._locality_family,
+        ]
+        if self._sort_regular_contacts_by_point_count:
+            locality_inputs.append(self._packed_priorities)
+        locality_inputs.extend(
+            [
                 wp.int32(self._max_colored_partitions_kernel_arg),
                 self._num_elements,
                 self._locality_keys,
                 self._locality_values,
-            ],
+            ]
+        )
+        wp.launch(
+            _locality_contact_count_keys_kernel
+            if self._sort_regular_contacts_by_point_count
+            else _locality_combined_keys_kernel,
+            dim=n,
+            inputs=locality_inputs,
         )
         wp.utils.radix_sort_pairs(self._locality_keys, self._locality_values, n)
         wp.launch(
@@ -1206,6 +1304,11 @@ class IncrementalContactPartitioner:
                 self._color_starts,
                 self._color_family_count,
                 self._color_family_starts,
+                self._element_ids_by_color,
+                self._packed_priorities,
+                wp.bool(self._sort_regular_contacts_by_point_count),
+                wp.int32(self._max_colored_partitions_kernel_arg),
+                self._color_singleton_end,
             ],
         )
 
@@ -1396,6 +1499,11 @@ class IncrementalContactPartitioner:
     def color_family_starts(self) -> wp.array:
         """Family starts for each colour, length ``MAX_COLORS * 6``."""
         return self._color_family_starts
+
+    @property
+    def color_singleton_end(self) -> wp.array:
+        """End of each regular color's sorted one-point contact prefix."""
+        return self._color_singleton_end
 
     @property
     def num_colors(self) -> wp.array:

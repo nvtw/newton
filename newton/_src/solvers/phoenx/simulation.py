@@ -364,6 +364,7 @@ class PhoenXWorld:
         enable_body_pair_grouping: bool = False,
         colored_contact_headers: bool = False,
         colored_contact_rows: bool = False,
+        colored_singleton_contact_lanes: bool | None = None,
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
@@ -722,6 +723,9 @@ class PhoenXWorld:
         self._direct_contact_schedule: DirectContactRunSchedule | None = None
         self._direct_tree_contacts = False
         self._direct_factor_pending = False
+        # SolverPhoenX enables reuse only for eligible static exact rows.
+        self._reuse_exact_relax_factor = False
+        self._reuse_direct_relax_factor_this_substep = False
         self._contact_input_active_this_step = False
         self._regular_pgs_active_this_step = True
         self._reduced_contacts_active_this_step = False
@@ -984,6 +988,26 @@ class PhoenXWorld:
         ):
             raise ValueError("overflow-only mass splitting requires a rigid single world with unrolled dispatch")
         self._singleworld_overflow_only_mass_splitting = bool(mass_splitting_overflow_only)
+        singleton_eligible = (
+            self.device.is_cuda
+            and step_layout == "single_world"
+            and self._colored_contact_headers
+            and self._colored_contact_rows
+            and self._singleworld_overflow_only_mass_splitting
+            and self.partitioner_algorithm in ("greedy", "endpoint_owner")
+            and self.max_colored_partitions is not None
+            and self.max_colored_partitions > 0
+            and self.max_contact_columns > 0
+            and self._reduced_articulation is None
+            and self.num_bodies < (1 << 20)
+            and float(sleeping_velocity_threshold) <= 0.0
+            and not self._contact_patch_enabled
+        )
+        if colored_singleton_contact_lanes is True and not singleton_eligible:
+            raise ValueError("colored_singleton_contact_lanes is unsupported for this scene")
+        self._colored_singleton_contact_lanes = (
+            singleton_eligible if colored_singleton_contact_lanes is None else bool(colored_singleton_contact_lanes)
+        )
         if warm_start_invalidate_period is None:
             warm_start_invalidate_period = 4 if _has_dynamic_rigid_rows else 0
         if warm_start_rotate_skip_color is None:
@@ -2595,6 +2619,9 @@ class PhoenXWorld:
         # reused columns are exactly the prior substep's converged values.
         if not reuse_partition:
             self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
+            if self._colored_singleton_contact_lanes:
+                # Soft-contact PD uses the existing contact iteration path.
+                self._partitioner.set_regular_contact_count_sort(not self._has_soft_contact_pd, self.num_bodies)
             if (
                 self._contact_input_active_this_step
                 and self._direct_contact_schedule is not None
@@ -2686,8 +2713,15 @@ class PhoenXWorld:
                     ),
                 )
             direct = getattr(self, "_direct_equality_system", None)
+            reuse_direct_factor = bool(
+                self._reuse_exact_relax_factor
+                and k > 0
+                and self._active_velocity_iterations > 0
+                and not self._direct_factor_pending
+            )
+            self._reuse_direct_relax_factor_this_substep = reuse_direct_factor
             if direct is not None and direct.enabled:
-                direct.begin_substep(wp.float32(1.0 / self.substep_dt))
+                direct.begin_substep(wp.float32(1.0 / self.substep_dt), reuse_geometry=reuse_direct_factor)
             self._integrate_forces_and_gravity()
             # TGS-soft (Box2D-v3) substep order: solve-with-bias ->
             # integrate -> relax (bias=False). Reversing regresses
@@ -4476,6 +4510,11 @@ class PhoenXWorld:
                 self._partitioner.element_ids_by_color,
                 self._partitioner.color_starts,
                 self._partitioner.color_family_starts,
+                (
+                    self._partitioner.color_singleton_end
+                    if self._colored_singleton_contact_lanes
+                    else self._partitioner.color_starts
+                ),
                 self._partitioner.num_colors,
                 self._partitioner.color_cursor,
                 contact_container,
@@ -4542,6 +4581,11 @@ class PhoenXWorld:
                 self._partitioner.element_ids_by_color,
                 self._partitioner.color_starts,
                 self._partitioner.color_family_starts,
+                (
+                    self._partitioner.color_singleton_end
+                    if self._colored_singleton_contact_lanes
+                    else self._partitioner.color_starts
+                ),
                 self._partitioner.num_colors,
                 self._partitioner.color_cursor,
                 contact_container,
@@ -5032,7 +5076,16 @@ class PhoenXWorld:
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw),
             get_singleworld_kernel(phase="prepare", fused=True, **kw),
-            get_singleworld_kernel(phase="iterate", fused=False, **kw, **cooperative, cooperative_contacts=cuda),
+            get_singleworld_kernel(
+                phase="iterate",
+                fused=False,
+                **kw,
+                **cooperative,
+                cooperative_contacts=cuda,
+                adaptive_singleton_contacts=cuda
+                and self._colored_singleton_contact_lanes
+                and not kw["has_soft_contact_pd"],
+            ),
             get_singleworld_kernel(phase="iterate", fused=True, **kw),
             get_singleworld_kernel(phase="relax", fused=False, **kw, **cooperative),
             get_singleworld_kernel(phase="relax", fused=True, **kw),

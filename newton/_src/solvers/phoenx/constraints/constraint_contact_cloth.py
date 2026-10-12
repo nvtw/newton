@@ -1905,10 +1905,11 @@ def _make_contact_iterate_at(
                         imp,
                     )
             if wp.static(cooperative_lanes > 1):
-                v1 = shuffle_vec(v1, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
-                v2 = shuffle_vec(v2, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
-                w1 = shuffle_vec(w1, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
-                w2 = shuffle_vec(w2, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
+                if contact_count > wp.int32(1):
+                    v1 = shuffle_vec(v1, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
+                    v2 = shuffle_vec(v2, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
+                    w1 = shuffle_vec(w1, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
+                    w2 = shuffle_vec(w2, i % wp.static(cooperative_lanes), wp.static(cooperative_lanes))
 
         if wp.static(patch_friction):
             if use_patch:

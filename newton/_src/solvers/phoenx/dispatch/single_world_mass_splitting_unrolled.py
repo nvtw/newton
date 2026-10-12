@@ -67,7 +67,8 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         # joints: copying slot zero back would discard the averaged impulse.
         sync_direct_copies = not w._singleworld_overflow_only_mass_splitting
         if direct is not None and direct.enabled:
-            direct.prepare_and_factor(idt)
+            if not w._reuse_direct_relax_factor_this_substep:
+                direct.prepare_and_factor(idt)
 
         if not w._regular_pgs_active_this_step:
             if not w._singleworld_overflow_only_mass_splitting:

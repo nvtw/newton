@@ -196,6 +196,25 @@ def _rigid_family_lane_allocation(
     return wp.vec2i(joint_lanes, contact_lane_base)
 
 
+@wp.func
+def _rigid_singleton_lane_allocation(
+    count_single: wp.int32, count_multi: wp.int32, contact_lanes: wp.int32
+) -> wp.int32:
+    """Allocate warp-aligned lanes for one-point contact columns."""
+    if count_multi == wp.int32(0):
+        return contact_lanes
+    if count_single <= wp.int32(0) or contact_lanes < wp.int32(64):
+        return wp.int32(0)
+    weighted = count_single + wp.int32(4) * count_multi
+    # A large single-world launch can exceed 250k lanes, so the product
+    # overflows int32 even when both operands and the quotient fit.
+    desired = wp.int32(
+        (wp.int64(contact_lanes) * wp.int64(count_single) + wp.int64(weighted) / wp.int64(2)) / wp.int64(weighted)
+    )
+    single_lanes = ((desired + wp.int32(31)) / wp.int32(32)) * wp.int32(32)
+    return wp.clamp(single_lanes, wp.int32(32), contact_lanes - wp.int32(32))
+
+
 __all__ = [
     "_PER_WORLD_COLORING_BLOCK_DIM",
     "_PER_WORLD_FAST_FAMILIES",
@@ -3867,6 +3886,7 @@ def _make_singleworld_rigid_direct_color_func(
     cooperative_joints: bool = False,
     joint_row_capacity: int = 6,
     cooperative_contacts: bool = False,
+    adaptive_singleton_contacts: bool = False,
 ):
     """Generated rigid-only color dispatch for single-world kernels.
 
@@ -3927,6 +3947,7 @@ def _make_singleworld_rigid_direct_color_func(
         copy_state: CopyStateContainer,
         element_ids_by_color: wp.array[wp.int32],
         color_family_starts: wp.array[wp.int32],
+        color_singleton_end: wp.array[wp.int32],
         start: wp.int32,
         count: wp.int32,
         c: wp.int32,
@@ -4033,6 +4054,63 @@ def _make_singleworld_rigid_direct_color_func(
             count_contacts = color_end - contact_start
             base = lane - contact_lane_base
             if wp.static(
+                adaptive_singleton_contacts
+                and cooperative_contacts
+                and direct_regular_colors
+                and not is_prepare
+                and not is_cached_prepare
+                and use_bias
+                and not has_sleeping
+                and not has_soft_contact_pd
+                and not patch_friction
+                and packed_contact_headers
+            ):
+                # One lane per count-1 column, four lanes per larger column.
+                # Both spans start on warp boundaries so shuffle groups stay
+                # disjoint from scalar contacts and any concurrent joint tile.
+                singleton_end = wp.clamp(color_singleton_end[c], contact_start, color_end)
+                count_single = singleton_end - contact_start
+                count_multi = color_end - singleton_end
+                contact_lanes = stride - contact_lane_base
+                if count_single > wp.int32(0) and count_multi > wp.int32(0) and contact_lanes < wp.int32(64):
+                    singleton_end = contact_start
+                    count_single = wp.int32(0)
+                    count_multi = count_contacts
+                single_lanes = _rigid_singleton_lane_allocation(count_single, count_multi, contact_lanes)
+
+                # Select a contact range and point lane, then use one solver
+                # call site for both schedules to avoid duplicating its large
+                # inlined body in the generated CUDA kernel.
+                if base >= wp.int32(0):
+                    contact_slot = contact_start + base
+                    contact_step = single_lanes
+                    span_end = singleton_end
+                    point_lane = wp.int32(0)
+                    if base >= single_lanes:
+                        multi_lane = base - single_lanes
+                        contact_slot = singleton_end + multi_lane / wp.int32(4)
+                        contact_step = (contact_lanes - single_lanes) / wp.int32(4)
+                        span_end = color_end
+                        point_lane = multi_lane % wp.int32(4)
+                    while contact_slot < span_end:
+                        cid = read1d_i32(element_ids_by_color, contact_slot)
+                        if contact_cols.articulation_owner[cid - num_joints] < wp.int32(0):
+                            contact_iterate_lean_no_sleep_no_soft_pd_cooperative(
+                                contact_cols,
+                                contact_slot,
+                                bodies,
+                                particles,
+                                num_bodies,
+                                idt,
+                                cc,
+                                contacts,
+                                copy_state,
+                                wp.int32(0),
+                                sor_boost,
+                                point_lane,
+                            )
+                        contact_slot += contact_step
+            elif wp.static(
                 cooperative_contacts
                 and direct_regular_colors
                 and not is_prepare
@@ -4109,6 +4187,7 @@ def _make_singleworld_persistent_kernel(
     cooperative_joints: bool = False,
     joint_row_capacity: int = 6,
     cooperative_contacts: bool = False,
+    adaptive_singleton_contacts: bool = False,
 ):
     """Persistent-grid PGS kernel for the requested phase.
 
@@ -4157,6 +4236,7 @@ def _make_singleworld_persistent_kernel(
         cooperative_joints=cooperative_joints,
         joint_row_capacity=joint_row_capacity,
         cooperative_contacts=cooperative_contacts,
+        adaptive_singleton_contacts=adaptive_singleton_contacts,
     )
     if direct_regular_colors:
         _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
@@ -4177,6 +4257,7 @@ def _make_singleworld_persistent_kernel(
             cooperative_joints=cooperative_joints,
             joint_row_capacity=joint_row_capacity,
             cooperative_contacts=cooperative_contacts,
+            adaptive_singleton_contacts=adaptive_singleton_contacts,
         )
 
     # Approximate float32 division and square roots shorten the latency-bound
@@ -4199,6 +4280,7 @@ def _make_singleworld_persistent_kernel(
         element_ids_by_color: wp.array[wp.int32],
         color_starts: wp.array[wp.int32],
         color_family_starts: wp.array[wp.int32],
+        color_singleton_end: wp.array[wp.int32],
         num_colors: wp.array[wp.int32],
         color_cursor: wp.array[wp.int32],
         cc: ContactContainer,
@@ -4286,6 +4368,7 @@ def _make_singleworld_persistent_kernel(
                     copy_state,
                     element_ids_by_color,
                     color_family_starts,
+                    color_singleton_end,
                     start,
                     count,
                     c,
@@ -4436,6 +4519,7 @@ def _make_singleworld_fused_kernel(
         element_ids_by_color: wp.array[wp.int32],
         color_starts: wp.array[wp.int32],
         color_family_starts: wp.array[wp.int32],
+        color_singleton_end: wp.array[wp.int32],
         num_colors: wp.array[wp.int32],
         color_cursor: wp.array[wp.int32],
         cc: ContactContainer,
@@ -4494,6 +4578,7 @@ def _make_singleworld_fused_kernel(
                         copy_state,
                         element_ids_by_color,
                         color_family_starts,
+                        color_singleton_end,
                         start,
                         count,
                         c,
@@ -4569,6 +4654,7 @@ def get_singleworld_kernel(
     cooperative_joints: bool = False,
     joint_row_capacity: int = 6,
     cooperative_contacts: bool = False,
+    adaptive_singleton_contacts: bool = False,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
@@ -4581,6 +4667,7 @@ def get_singleworld_kernel(
             "cooperative_joints": cooperative_joints,
             "joint_row_capacity": joint_row_capacity,
             "cooperative_contacts": cooperative_contacts,
+            "adaptive_singleton_contacts": adaptive_singleton_contacts,
         }
     )
     return factory(
