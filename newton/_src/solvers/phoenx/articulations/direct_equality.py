@@ -674,12 +674,16 @@ def _prepare_direct_rows(
                     structural_index, row, row_wrench0, row_wrench1, row_bias, row_error, row_stiffness, row_damping
                 )
             row += wp.int32(1)
-    rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
-    if material_rows:
-        rotation_error = _quat_log(
-            q1 * wp.quat_inverse(material_rest_relative_orientation[joint]) * wp.quat_inverse(q0)
-        )
     angular_count = generic_angular_count[joint]
+    # The finalized locked-axis counts are configuration flags. Fully free
+    # rotations need no quaternion logarithm or material reference load.
+    rotation_error = wp.vec3f(0.0)
+    if angular_count > wp.int32(0):
+        rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
+        if material_rows:
+            rotation_error = _quat_log(
+                q1 * wp.quat_inverse(material_rest_relative_orientation[joint]) * wp.quat_inverse(q0)
+            )
     alignment_error = wp.vec3f(0.0)
     tangent0 = wp.vec3f(0.0)
     tangent1 = wp.vec3f(0.0)
@@ -729,14 +733,15 @@ def _prepare_direct_rows(
     # Native one-axis joints keep their dynamic row adjacent to the compact
     # structural block. Preparing that row here avoids a separate kernel in
     # scenes dominated by hinges while using the same paired row primitives.
-    axis = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
+    axis = wp.vec3f(0.0)
     unused_start = row
     if joint_type[joint] == JointType.REVOLUTE or joint_type[joint] == JointType.PRISMATIC:
+        axis = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
         row_error[structural_index, row] = wp.float32(0.0)
         row_stiffness[structural_index, row] = wp.float32(0.0)
         row_damping[structural_index, row] = wp.float32(0.0)
         unused_start = row + wp.int32(1)
-    for unused in range(_MAX_ROWS):
+    for unused in range(row_bias.shape[1]):
         if wp.int32(unused) >= unused_start:
             _zero_direct_row(
                 structural_index, unused, row_wrench0, row_wrench1, row_bias, row_error, row_stiffness, row_damping
@@ -1968,12 +1973,19 @@ class DirectEqualitySystem:
         self.body_row_start = wp.array(self.topology.body_row_start, dtype=wp.int32, device=device)
         self.body_rows = wp.array(self.topology.body_rows, dtype=wp.int32, device=device)
         self.row_count = wp.zeros(structural_count, dtype=wp.int32, device=device)
-        self.row_wrench0 = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.spatial_vector, device=device)
-        self.row_wrench1 = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.spatial_vector, device=device)
-        self.row_bias = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.float32, device=device)
-        self.row_error = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.float32, device=device)
-        self.row_stiffness = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.float32, device=device)
-        self.row_damping = wp.zeros((structural_count, _MAX_ROWS), dtype=wp.float32, device=device)
+        # Store only the largest row block this topology can prepare. Native
+        # axial joints also prepare their free-axis row for drive/friction use.
+        prepared_counts = structural_row_counts[self.topology.joints] + np.isin(
+            joint_types[self.topology.joints], (int(JointType.REVOLUTE), int(JointType.PRISMATIC))
+        )
+        row_width = max(int(self.topology.row_local.max()) + 1, int(prepared_counts.max()))
+        row_shape = (structural_count, row_width)
+        self.row_wrench0 = wp.zeros(row_shape, dtype=wp.spatial_vector, device=device)
+        self.row_wrench1 = wp.zeros(row_shape, dtype=wp.spatial_vector, device=device)
+        self.row_bias = wp.zeros(row_shape, dtype=wp.float32, device=device)
+        self.row_error = wp.zeros(row_shape, dtype=wp.float32, device=device)
+        self.row_stiffness = wp.zeros(row_shape, dtype=wp.float32, device=device)
+        self.row_damping = wp.zeros(row_shape, dtype=wp.float32, device=device)
         row_direct_drive = np.zeros(row_count, dtype=bool)
         row_bounded_drive = np.zeros(row_count, dtype=bool)
         row_target_q = np.zeros(row_count, dtype=np.int32)
