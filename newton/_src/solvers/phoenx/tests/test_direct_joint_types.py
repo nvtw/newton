@@ -826,7 +826,9 @@ class TestDirectJointTypes(unittest.TestCase):
             device=wp.get_preferred_device(),
         )
         np.testing.assert_array_equal(panel.large_mechanism.numpy(), [2, 3])
-        np.testing.assert_array_equal(panel.cooperative_mechanism.numpy(), [0, 1])
+        np.testing.assert_array_equal(
+            np.sort(np.concatenate((panel.cooperative_mechanism.numpy(), panel.subgroup_mechanism.numpy()))), [0, 1]
+        )
         self.assertTrue(panel._use_push_solve)
         self.assertEqual(panel.cooperative_factor_mechanism.size, 0)
 
@@ -1097,7 +1099,9 @@ class TestDirectJointTypes(unittest.TestCase):
             device=wp.get_preferred_device(),
         )
         self.assertEqual(panel.block_size, 16)
-        np.testing.assert_array_equal(panel.cooperative_mechanism.numpy(), [0])
+        np.testing.assert_array_equal(
+            np.sort(np.concatenate((panel.cooperative_mechanism.numpy(), panel.subgroup_mechanism.numpy()))), [0]
+        )
         self.assertFalse(panel._use_push_solve)
 
         rng = np.random.default_rng(5678)

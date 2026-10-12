@@ -1,0 +1,1 @@
+Accelerate PhoenX exact joint solves for CUDA mechanisms that fit a single panel by keeping triangular solve state in registers and packing independent subgroups into each block. Preserve the existing cuSolverDx arithmetic order and larger-mechanism paths; no configuration changes are required.
