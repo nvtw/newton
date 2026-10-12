@@ -1423,8 +1423,9 @@ class TestDVISolver(unittest.TestCase):
             ) as separate_bilateral_solves,
         ):
             solver.solve(problem)
-        # Sweep reconstruction stays fused regardless of solve intervals.
-        self.assertEqual(body_products.call_count, 0)
+        # Sweeps stay fused; only the final solution matvec applies J^T separately.
+        self.assertEqual(body_products.call_count, 1)
+        self.assertIs(body_products.call_args.args[1], problem.delassus._vec_temp_body_space)
         # CUDA prepares the RHS and scatters the result in the same solve CTA.
         self.assertEqual(separate_bilateral_solves.call_count, 0 if self.device.is_cuda else 4)
 
@@ -1470,8 +1471,9 @@ class TestDVISolver(unittest.TestCase):
             ):
                 fallback.solve(problem)
         self.assertEqual(fallback.data.state.bilateral_coupling.size, 1)
-        # The small CUDA inverse path also fuses matrix-free RHS construction.
-        self.assertEqual(body_products.call_count, 0 if self.device.is_cuda else 4)
+        # CUDA fuses RHS construction; CPU adds four products to the final matvec.
+        self.assertEqual(body_products.call_count, 1 if self.device.is_cuda else 5)
+        self.assertIs(body_products.call_args.args[1], problem.delassus._vec_temp_body_space)
         np.testing.assert_array_equal(fallback.data.state.bilateral_active_dim.numpy(), joint_dims)
         np.testing.assert_allclose(fallback.data.solution.lambdas.numpy(), expected, atol=2e-5, rtol=2e-5)
 
