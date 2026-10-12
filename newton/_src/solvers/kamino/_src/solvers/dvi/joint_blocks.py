@@ -11,6 +11,7 @@ Response tiles omit those dummy rows, preserving the compact Schur layout.
 
 from __future__ import annotations
 
+from functools import cache
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,6 +20,7 @@ import warp as wp
 from ...core.math import FLOAT32_EPS
 from ...core.types import vec6f
 from ...linalg.factorize.llt_blocked_rcm import _sync_threads, get_float32_array_offset_ptr
+from .coupling import PackedCoupling, read_packed_coupling
 from .kernels import BILATERAL_DIAGONAL_FLOOR, _compact_schur_fits
 from .sparse_kernels import _shuffle_lane_32, _unilateral_nzb_offsets
 
@@ -167,8 +169,8 @@ def _build_topology(
     }, "eligible homogeneous joint-block graph"
 
 
-def _build_body_reach(path: SparseDVIPath, metadata: dict) -> wp.array | None:
-    """Find conservative forward-solve support shared by all local body labels."""
+def _build_body_masks(path: SparseDVIPath, metadata: dict) -> tuple[wp.array, wp.array] | None:
+    """Find coupling seeds and forward-solve support shared by local body labels."""
     groups = metadata["ng"]
     if groups > 64:
         return None
@@ -200,13 +202,14 @@ def _build_body_reach(path: SparseDVIPath, metadata: dict) -> wp.array | None:
     for code in incidence[0]:
         body, group = divmod(int(code), groups)
         masks[body] |= 1 << group
+    seeds = wp.array(np.asarray(masks, dtype=np.uint64), dtype=wp.uint64, device=path.device)
     # Columns are already in elimination order: propagate each body's seed
     # groups through every potentially nonzero lower-factor block.
     for body in range(bodies):
         for row, col in zip(metadata["rows"], metadata["cols"], strict=True):
             if masks[body] & (1 << int(col)):
                 masks[body] |= 1 << int(row)
-    return wp.array(np.asarray(masks, dtype=np.uint64), dtype=wp.uint64, device=path.device)
+    return seeds, wp.array(np.asarray(masks, dtype=np.uint64), dtype=wp.uint64, device=path.device)
 
 
 @wp.func_native("""
@@ -598,109 +601,124 @@ def _scatter(
         out[vio[w] + order[row]] = scratch[w * padded + row]
 
 
-@wp.kernel
-def _response(
-    factors: wp.array[wp.float32],
-    diagonal: wp.array[wp.int32],
-    starts: wp.array[wp.int32],
-    previous: wp.array[wp.int32],
-    cols: wp.array[wp.int32],
-    nb: int,
-    ng: int,
-    dim: wp.array[wp.int32],
-    njc: wp.array[wp.int32],
-    vio: wp.array[wp.int32],
-    rio: wp.array[wp.int32],
-    order: wp.array[wp.int32],
-    scale: wp.array[wp.float32],
-    coupling: wp.array[wp.float32],
-    response: wp.array[wp.float32],
-    lengths: wp.array[wp.int32],
-    offsets: wp.array[wp.int32],
-    body_reach: wp.array[wp.uint64],
-    bsm_num_nzb: wp.array[wp.int32],
-    bsm_nzb_start: wp.array[wp.int32],
-    bsm_nzb_coords: wp.array2d[wp.int32],
-    nbc: wp.array[wp.int32],
-    nl: wp.array[wp.int32],
-    bcio: wp.array[wp.int32],
-    lio: wp.array[wp.int32],
-    cio: wp.array[wp.int32],
-    limit_indices: wp.array[wp.int32],
-    contact_indices: wp.array[wp.int32],
-    bounded_offsets: wp.array[wp.vec2i],
-    limit_offsets: wp.array[wp.int32],
-    contact_offsets: wp.array[wp.int32],
-):
-    w, group, lane = wp.tid()
-    nu = dim[w] - njc[w]
-    if group * 16 >= nu:
-        return
-    ll = wp.array(ptr=get_float32_array_offset_ptr(factors, w * nb * 36), shape=(nb * 6, 6), dtype=wp.float32)
-    reach = wp.uint64(0)
-    if body_reach:
-        unilateral = group * 16 + lane % 16
-        if unilateral < nu:
-            blocks = _unilateral_nzb_offsets(
-                unilateral,
-                njc[w],
-                nbc[w],
-                nbc[w] + nl[w],
-                bcio[w],
-                lio[w],
-                cio[w],
-                bsm_nzb_start[w] + bsm_num_nzb[w],
-                bsm_nzb_coords,
-                limit_indices,
-                contact_indices,
-                bounded_offsets,
-                limit_offsets,
-                contact_offsets,
-            )
-            for side in range(2):
-                if blocks[side] >= 0:
-                    reach = reach | body_reach[bsm_nzb_coords[blocks[side], 1] // 6]
-        reach = _warp_or_mask(reach)
-    for row in range(ng):
-        value = wp.tile_zeros(shape=(6, 16), dtype=wp.float32, storage="shared")
-        if body_reach and (reach & (wp.uint64(1) << wp.uint64(row))) == wp.uint64(0):
-            # Contacts can move to another branch: overwrite formerly active
-            # response rows instead of retaining values from the previous solve.
+@cache
+def make_response_kernel(use_packed: bool):
+    """Specialize coefficient loads while sharing the block-whitening algorithm."""
+
+    @wp.kernel(module="unique")
+    def response(
+        packed_masks: wp.array[wp.uint64],
+        packed_values: wp.array[wp.float32],
+        packed_width: int,
+        packed_slots: int,
+        factors: wp.array[wp.float32],
+        diagonal: wp.array[wp.int32],
+        starts: wp.array[wp.int32],
+        previous: wp.array[wp.int32],
+        cols: wp.array[wp.int32],
+        nb: int,
+        ng: int,
+        dim: wp.array[wp.int32],
+        njc: wp.array[wp.int32],
+        vio: wp.array[wp.int32],
+        rio: wp.array[wp.int32],
+        order: wp.array[wp.int32],
+        scale: wp.array[wp.float32],
+        coupling: wp.array[wp.float32],
+        response: wp.array[wp.float32],
+        lengths: wp.array[wp.int32],
+        offsets: wp.array[wp.int32],
+        body_reach: wp.array[wp.uint64],
+        bsm_num_nzb: wp.array[wp.int32],
+        bsm_nzb_start: wp.array[wp.int32],
+        bsm_nzb_coords: wp.array2d[wp.int32],
+        nbc: wp.array[wp.int32],
+        nl: wp.array[wp.int32],
+        bcio: wp.array[wp.int32],
+        lio: wp.array[wp.int32],
+        cio: wp.array[wp.int32],
+        limit_indices: wp.array[wp.int32],
+        contact_indices: wp.array[wp.int32],
+        bounded_offsets: wp.array[wp.vec2i],
+        limit_offsets: wp.array[wp.int32],
+        contact_offsets: wp.array[wp.int32],
+    ):
+        w, group, lane = wp.tid()
+        nu = dim[w] - njc[w]
+        if group * 16 >= nu:
+            return
+        ll = wp.array(ptr=get_float32_array_offset_ptr(factors, w * nb * 36), shape=(nb * 6, 6), dtype=wp.float32)
+        reach = wp.uint64(0)
+        if body_reach:
+            unilateral = group * 16 + lane % 16
+            if unilateral < nu:
+                blocks = _unilateral_nzb_offsets(
+                    unilateral,
+                    njc[w],
+                    nbc[w],
+                    nbc[w] + nl[w],
+                    bcio[w],
+                    lio[w],
+                    cio[w],
+                    bsm_nzb_start[w] + bsm_num_nzb[w],
+                    bsm_nzb_coords,
+                    limit_indices,
+                    contact_indices,
+                    bounded_offsets,
+                    limit_offsets,
+                    contact_offsets,
+                )
+                for side in range(2):
+                    if blocks[side] >= 0:
+                        reach = reach | body_reach[bsm_nzb_coords[blocks[side], 1] // 6]
+            reach = _warp_or_mask(reach)
+        for row in range(ng):
+            value = wp.tile_zeros(shape=(6, 16), dtype=wp.float32, storage="shared")
+            if body_reach and (reach & (wp.uint64(1) << wp.uint64(row))) == wp.uint64(0):
+                # Contacts can move to another branch: overwrite formerly active
+                # response rows instead of retaining values from the previous solve.
+                target = wp.array(
+                    ptr=get_float32_array_offset_ptr(response, rio[w] + offsets[row] * nu),
+                    shape=(lengths[row], nu),
+                    dtype=wp.float32,
+                )
+                wp.tile_store(target, value, offset=(0, group * 16))
+                continue
+            for entry in range(lane, 96, 32):
+                local = entry // 16
+                col = group * 16 + entry % 16
+                original = order[row * 6 + local]
+                v = wp.float32(0)
+                if original >= 0 and col < nu:
+                    if wp.static(use_packed):
+                        v = scale[vio[w] + original] * read_packed_coupling(
+                            packed_values, packed_masks, w, col, row, local, packed_width, packed_slots
+                        )
+                    else:
+                        v = scale[vio[w] + original] * coupling[rio[w] + original * nu + col]
+                value[local, entry % 16] = v
+            _sync_threads()
+            for entry in range(starts[row], starts[row + 1]):
+                block = previous[entry]
+                left = wp.tile_load(ll, shape=(6, 6), offset=(block * 6, 0))
+                previous_row = cols[block]
+                source = wp.array(
+                    ptr=get_float32_array_offset_ptr(response, rio[w] + offsets[previous_row] * nu),
+                    shape=(lengths[previous_row], nu),
+                    dtype=wp.float32,
+                )
+                right = wp.tile_load(source, shape=(6, 16), offset=(0, group * 16))
+                wp.tile_matmul(left, right, value, alpha=-1.0)
+            d = wp.tile_load(ll, shape=(6, 6), offset=(diagonal[row] * 6, 0))
+            wp.tile_lower_solve_inplace(d, value)
             target = wp.array(
                 ptr=get_float32_array_offset_ptr(response, rio[w] + offsets[row] * nu),
                 shape=(lengths[row], nu),
                 dtype=wp.float32,
             )
             wp.tile_store(target, value, offset=(0, group * 16))
-            continue
-        for entry in range(lane, 96, 32):
-            local = entry // 16
-            col = group * 16 + entry % 16
-            original = order[row * 6 + local]
-            v = wp.float32(0)
-            if original >= 0 and col < nu:
-                v = scale[vio[w] + original] * coupling[rio[w] + original * nu + col]
-            value[local, entry % 16] = v
-        _sync_threads()
-        for entry in range(starts[row], starts[row + 1]):
-            block = previous[entry]
-            left = wp.tile_load(ll, shape=(6, 6), offset=(block * 6, 0))
-            previous_row = cols[block]
-            source = wp.array(
-                ptr=get_float32_array_offset_ptr(response, rio[w] + offsets[previous_row] * nu),
-                shape=(lengths[previous_row], nu),
-                dtype=wp.float32,
-            )
-            right = wp.tile_load(source, shape=(6, 16), offset=(0, group * 16))
-            wp.tile_matmul(left, right, value, alpha=-1.0)
-        d = wp.tile_load(ll, shape=(6, 6), offset=(diagonal[row] * 6, 0))
-        wp.tile_lower_solve_inplace(d, value)
-        target = wp.array(
-            ptr=get_float32_array_offset_ptr(response, rio[w] + offsets[row] * nu),
-            shape=(lengths[row], nu),
-            dtype=wp.float32,
-        )
-        wp.tile_store(target, value, offset=(0, group * 16))
+
+    return response
 
 
 def _build_levels(metadata: dict) -> dict:
@@ -771,7 +789,8 @@ class JointBlockSolver:
         self._factor = wp.empty_like(self._matrix)
         self._vector = wp.empty(self._worlds * self._padded, dtype=wp.float32, device=self._device)
         self.failure = wp.zeros(1, dtype=wp.int32, device=self._device)
-        self._body_reach = _build_body_reach(path, metadata)
+        masks = _build_body_masks(path, metadata)
+        self._body_seeds, self._body_reach = (None, None) if masks is None else masks
 
         order = np.asarray(metadata["order"], dtype=np.int32)
         inverse = np.empty(self._n, dtype=np.int32)
@@ -973,7 +992,7 @@ class JointBlockSolver:
             device=self._device,
         )
 
-    def response(self, path: SparseDVIPath, problem: DualProblem) -> None:
+    def response(self, path: SparseDVIPath, problem: DualProblem, *, coupling: PackedCoupling | None = None) -> None:
         """Whiten into compact response storage, omitting identity dummy rows."""
         state, schedule = path.data.state, self._schedule
         reach_inputs = [None] * 14
@@ -996,9 +1015,13 @@ class JointBlockSolver:
                 path.jacobians.contact_constraint_nzb_offsets,
             ]
         wp.launch_tiled(
-            _response,
+            make_response_kernel(coupling is not None),
             dim=(self._worlds, (self._n + 15) // 16),
             inputs=[
+                coupling.masks if coupling is not None else None,
+                coupling.values if coupling is not None else None,
+                coupling.width if coupling is not None else 0,
+                coupling.slots if coupling is not None else 0,
                 self._factor,
                 schedule["diagonal"],
                 schedule["pstart"],

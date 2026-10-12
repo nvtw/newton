@@ -20,6 +20,7 @@ from ...kinematics.jacobians import SparseSystemJacobians
 from ...kinematics.limits import LimitsKamino
 from ...linalg import LLTBlockedRCMSolver, LLTBlockedSolver
 from ...linalg.factorize.llt_blocked_rcm import make_llt_blocked_rcm_solve_kernel
+from .coupling import PackedCoupling
 from .joint_blocks import JointBlockSolver
 from .kernels import (
     _FUSED_BILATERAL_BLOCK,
@@ -148,6 +149,7 @@ class SparseDVIPath:
         self.body_space = wp.empty(shape=size.sum_of_num_body_dofs, dtype=wp.float32, device=device)
         self.parallel_contact_colors = wp.zeros(shape=1, dtype=wp.int32, device=device)
         self.joint_block_solver: JointBlockSolver | None = None
+        self.packed_coupling: PackedCoupling | None = None
         self.motor_condensation: MotorCondensation | None = None
         self.bilateral_solver = bilateral_solver
         self.use_schur_complement = use_schur_complement
@@ -250,6 +252,7 @@ class SparseDVIPath:
                 )
                 self.bilateral_inverse = wp.zeros_like(self.bilateral_lower_inverse)
 
+        self.packed_coupling = PackedCoupling.create(self, self.joint_block_solver)
         self.motor_condensation = MotorCondensation.create(self)
 
     def solve(self, problem: DualProblem) -> None:
@@ -1336,7 +1339,9 @@ def _solve_sparse_bilateral_block(
             block_dim=solver._solve_block_dim,
         )
         return
-    if state._sparse_coupling_allocated:
+    if joint_blocks is not None and path.packed_coupling is not None:
+        path.packed_coupling.build_rhs(path, problem)
+    elif state._sparse_coupling_allocated:
         # Wider row groups improve coupling loads in GPU-saturating batches.
         workers = (16 if path.size.num_worlds >= 2048 else 8) if path.device.is_cuda else 1
         wp.launch(
@@ -1585,7 +1590,10 @@ def _solve_sparse_with_bilateral_schur_complement(
         raise RuntimeError(_SPARSE_INEQUALITY_TOPOLOGY_ERROR)
     _prepare_sparse_inequality_pgs(path, problem)
 
-    _assemble_sparse_bilateral_coupling(path, problem, enable_compact_schur)
+    if joint_blocks is not None and path.packed_coupling is not None:
+        path.packed_coupling.assemble(path, problem)
+    else:
+        _assemble_sparse_bilateral_coupling(path, problem, enable_compact_schur)
     state.bilateral_delta.zero_()
     _solve_sparse_bilateral_block(
         path, problem, forward_only=forward_bilateral, compact_coupling=enable_compact_schur, joint_blocks=joint_blocks
@@ -1627,7 +1635,7 @@ def _solve_sparse_with_bilateral_schur_complement(
     # Independent columns amortize their serial work only in large batches.
     use_scalar_response = enable_compact_schur and use_permutation and path.size.num_worlds >= 2048
     if joint_blocks is not None:
-        joint_blocks.response(path, problem)
+        joint_blocks.response(path, problem, coupling=path.packed_coupling)
     elif use_scalar_response:
         wp.launch(
             kernel=_solve_bilateral_unilateral_response_compact,

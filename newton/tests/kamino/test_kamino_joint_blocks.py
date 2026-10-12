@@ -15,7 +15,7 @@ from newton._src.solvers.kamino._src.core.types import vec6f
 from newton._src.solvers.kamino._src.solvers.dvi import sparse
 from newton._src.solvers.kamino._src.solvers.dvi.joint_blocks import (
     JointBlockSolver,
-    _build_body_reach,
+    _build_body_masks,
     _build_topology,
 )
 
@@ -355,8 +355,8 @@ class TestKaminoJointBlocks(unittest.TestCase):
         device = self._device()
         path, *_ = _fixture(device)
         metadata, _ = _build_topology(path, *path.bilateral_nzb_pairs[:3])
-        self.assertIsNotNone(_build_body_reach(path, metadata))
-        self.assertIsNone(_build_body_reach(path, {**metadata, "ng": 65}))
+        self.assertIsNotNone(_build_body_masks(path, metadata))
+        self.assertIsNone(_build_body_masks(path, {**metadata, "ng": 65}))
         bsm = path.jacobians._J_cts.bsm
         coords = bsm.nzb_coords.numpy()
         start = int(bsm.nzb_start.numpy()[1])
