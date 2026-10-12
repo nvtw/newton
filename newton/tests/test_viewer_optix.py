@@ -287,6 +287,8 @@ class TestViewerOptix(unittest.TestCase):
         self.assertEqual(args.optix_max_bounces, 3)
         self.assertEqual(args.optix_direct_light_samples, 1)
         self.assertEqual(args.optix_samples_per_frame, 1)
+        self.assertEqual(args.optix_max_instances, 16384)
+        self.assertEqual(parser.parse_args(["--optix-max-instances", "192001"]).optix_max_instances, 192001)
         self.assertFalse(args.optix_texture_mipmaps)
         self.assertTrue(parser.parse_args(["--optix-texture-mipmaps"]).optix_texture_mipmaps)
         optix_parameters = inspect.signature(ViewerOptix).parameters
