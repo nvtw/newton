@@ -4,6 +4,7 @@ Read and follow the canonical [source code and public API guidelines](CODING_GUI
 For reviews, also read and apply the [review guidelines](REVIEW_GUIDELINES.rst) and follow `.claude/skills/code-review-newton/SKILL.md`.
 
 - Create a feature branch on your fork before committing—never commit directly to `main`. Give the pull request a concise, descriptive title.
+- Name all new PhoenX branches `phoenx/<branch_name>` and work in the main checkout unless the user requests a worktree.
 - Use imperative mood in commit messages ("Fix X", not "Fixed X"), with a roughly 50-character subject and a body wrapped at 72 characters that explains what and why.
 - Verify regression tests fail without the fix before committing.
 
