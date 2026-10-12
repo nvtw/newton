@@ -1398,3 +1398,32 @@ mechanism fallback. The full rendered run also matches the accepted final
 state hash and quality peaks, but reaches only 29.941 FPS versus 30.691.
 Its fused kernel costs 2.976 ms/frame (48 calls, 55 registers/thread, zero
 reported local-memory bytes). The prototype is removed from production.
+
+## Stackless implicit-tree queries (2026-10-12)
+
+Replace per-level pair queues with one stackless query per leaf. Pair
+ownership uses expanded AABB span, with leaf order breaking ties; cached
+subtree span and last-leaf metadata prune subtrees without eligible owners.
+This distributes unbounded-floor pairs across smaller leaves rather than
+making the floor query serially visit every body. The existing exact pair
+filter, output capacity counter, collision groups and world filters remain.
+The constructor's queue capacity argument remains accepted for compatibility.
+
+For 192,002 shapes, removing two intermediate queues saves approximately
+197 MB of queue storage, offset by approximately 4 MB of node metadata.
+The full rendered 32,000-ragdoll run reaches 36.762 FPS versus 35.872 before
+this change, with eight substeps, four sweeps and one velocity iteration.
+Sleeping remains off. The 600-frame state hash remains
+`e16843d7597338d6200b9ca6bc8aa0ecfbeb86f38a726bedececfca9281e1c45`;
+contact counts and quality peaks also match. This preserves the reference,
+whose excessive transient floor penetration remains unresolved.
+
+Conservative per-axis roundoff padding prevents missing moving overlaps
+when the scene is translated to large coordinates. Tests compare candidate
+pairs with the actual all-pairs predicate at the origin and at +/-2e6,
+including filters, output overflow, append behavior and CUDA graph replay.
+SAP is not an exact oracle at those translations because its projection
+rounding can omit valid pairs. The memory-budget regression fails on the
+previous queued implementation (100,812 bytes versus a 38,400-byte budget
+for 96 shapes), and passes with the stackless implementation. The complete
+CUDA regression passes.

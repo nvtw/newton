@@ -1,0 +1,1 @@
+Use stackless queries in the experimental implicit-tree broad phase to remove intermediate pair queues, while retaining conservative swept bounds and exact pair filtering. Existing constructor arguments remain accepted.

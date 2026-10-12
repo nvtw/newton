@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental implicit binary BVH with breadth-first self traversal.
+"""Experimental implicit binary BVH with stackless per-leaf traversal.
 
 This module is intentionally separate from the production broad phases. Its
 complete binary topology isolates the cost of BVH pair-tree traversal; it is
@@ -64,18 +64,23 @@ def _tree_leaves(
     node_lower: wp.array[wp.vec3],
     node_upper: wp.array[wp.vec3],
     node_shape: wp.array[int],
+    node_last_leaf: wp.array[int],
+    node_max_span: wp.array[float],
     leaf_base: int,
     shape_count: int,
 ):
     slot = wp.tid()
     node = leaf_base + slot
     node_shape[node] = -1
+    node_last_leaf[node] = -1
+    node_max_span[node] = wp.float32(-1.0)
     node_lower[node] = wp.vec3(1.0e30, 1.0e30, 1.0e30)
     node_upper[node] = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
     if slot >= shape_count:
         return
     shape = shape_index[sorted_values[slot]]
     node_shape[node] = shape
+    node_last_leaf[node] = slot
     margin = wp.float32(0.0)
     if gap.shape[0] > 0:
         margin = gap[shape]
@@ -85,33 +90,46 @@ def _tree_leaves(
     expand = wp.vec3(margin, margin, margin)
     node_lower[node] = wp.min(lower[shape], lower[shape] + shift) - expand
     node_upper[node] = wp.max(upper[shape], upper[shape] + shift) + expand
+    # At distant world coordinates, float32 rounding can make a swept bound
+    # narrower than the equivalent moving-AABB test (which combines the two
+    # gaps before subtraction). Expand by a few ulps of the coordinate scale;
+    # the shared exact pair filter still decides which contacts are accepted.
+    low = node_lower[node]
+    high = node_upper[node]
+    rounding = wp.vec3(
+        wp.max(wp.abs(low[0]), wp.abs(high[0])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
+        wp.max(wp.abs(low[1]), wp.abs(high[1])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
+        wp.max(wp.abs(low[2]), wp.abs(high[2])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
+    )
+    node_lower[node] = low - rounding
+    node_upper[node] = high + rounding
+    span = node_upper[node] - node_lower[node]
+    node_max_span[node] = wp.max(span[0], wp.max(span[1], span[2]))
 
 
 @wp.kernel(enable_backward=False)
-def _tree_build_level(node_lower: wp.array[wp.vec3], node_upper: wp.array[wp.vec3], start: int):
+def _tree_build_level(
+    node_lower: wp.array[wp.vec3],
+    node_upper: wp.array[wp.vec3],
+    node_last_leaf: wp.array[int],
+    node_max_span: wp.array[float],
+    start: int,
+):
     node = start + wp.tid()
     node_lower[node] = wp.min(node_lower[node * 2], node_lower[node * 2 + 1])
     node_upper[node] = wp.max(node_upper[node * 2], node_upper[node * 2 + 1])
-
-
-@wp.kernel(enable_backward=False)
-def _tree_root(queue: wp.array[wp.vec2i], count: wp.array[int]):
-    queue[0] = wp.vec2i(1, 1)
-    count[0] = 1
-
-
-@wp.kernel(enable_backward=False)
-def _tree_save_count(candidate_pair_count: wp.array[int], initial_count: wp.array[int]):
-    initial_count[0] = candidate_pair_count[0]
+    node_last_leaf[node] = wp.max(node_last_leaf[node * 2], node_last_leaf[node * 2 + 1])
+    node_max_span[node] = wp.max(node_max_span[node * 2], node_max_span[node * 2 + 1])
 
 
 @wp.func
-def _tree_push(queue: wp.array[wp.vec2i], count: wp.array[int], overflow: wp.array[int], capacity: int, a: int, b: int):
-    slot = wp.atomic_add(count, 0, 1)
-    if slot < capacity:
-        queue[slot] = wp.vec2i(a, b)
-    else:
-        overflow[0] = 1
+def _tree_next_dfs(node: wp.int32) -> wp.int32:
+    """Advance past a visited/pruned subtree in the complete binary tree."""
+    while node > wp.int32(1):
+        if (node & wp.int32(1)) == wp.int32(0):
+            return node + wp.int32(1)
+        node = node / wp.int32(2)
+    return wp.int32(0)
 
 
 def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
@@ -119,118 +137,13 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
     module = f"implicit_tree_{filter_func.__name__}_{filter_data_type.__name__}"
 
     @wp.kernel(enable_backward=False, module=module)
-    def expand(
-        current: wp.array[wp.vec2i],
-        current_count: wp.array[int],
-        following: wp.array[wp.vec2i],
-        following_count: wp.array[int],
-        overflow: wp.array[int],
-        node_lower: wp.array[wp.vec3],
-        node_upper: wp.array[wp.vec3],
-        capacity: int,
-    ):
-        slot = wp.tid()
-        if slot >= current_count[0] or overflow[0] != 0:
-            return
-        pair = current[slot]
-        a = pair[0]
-        b = pair[1]
-        if (
-            node_lower[a][0] > node_upper[b][0]
-            or node_lower[b][0] > node_upper[a][0]
-            or node_lower[a][1] > node_upper[b][1]
-            or node_lower[b][1] > node_upper[a][1]
-            or node_lower[a][2] > node_upper[b][2]
-            or node_lower[b][2] > node_upper[a][2]
-        ):
-            return
-        if a == b:
-            _tree_push(following, following_count, overflow, capacity, 2 * a, 2 * a)
-            _tree_push(following, following_count, overflow, capacity, 2 * a, 2 * a + 1)
-            _tree_push(following, following_count, overflow, capacity, 2 * a + 1, 2 * a + 1)
-        else:
-            _tree_push(following, following_count, overflow, capacity, 2 * a, 2 * b)
-            _tree_push(following, following_count, overflow, capacity, 2 * a, 2 * b + 1)
-            _tree_push(following, following_count, overflow, capacity, 2 * a + 1, 2 * b)
-            _tree_push(following, following_count, overflow, capacity, 2 * a + 1, 2 * b + 1)
-
-    @wp.kernel(enable_backward=False, module=module)
-    def finish(
-        current: wp.array[wp.vec2i],
-        current_count: wp.array[int],
-        overflow: wp.array[int],
+    def query(
         node_lower: wp.array[wp.vec3],
         node_upper: wp.array[wp.vec3],
         node_shape: wp.array[int],
-        shape_lower: wp.array[wp.vec3],
-        shape_upper: wp.array[wp.vec3],
-        shape_gap: wp.array[float],
-        shape_displacement: wp.array[wp.vec3],
-        collision_group: wp.array[int],
-        shape_world: wp.array[int],
-        filter_pairs: wp.array[wp.vec2i],
-        num_filter_pairs: int,
-        shape_body: wp.array[int],
-        body_flags: wp.array[int],
-        include_static_kinematic_pairs: bool,
-        filter_data: Any,
-        candidate_pair: wp.array[wp.vec2i],
-        candidate_pair_count: wp.array[int],
-        max_candidate_pair: int,
-    ):
-        slot = wp.tid()
-        if slot >= current_count[0] or overflow[0] != 0:
-            return
-        nodes = current[slot]
-        a = nodes[0]
-        b = nodes[1]
-        if a == b or node_shape[a] < 0 or node_shape[b] < 0:
-            return
-        if (
-            node_lower[a][0] > node_upper[b][0]
-            or node_lower[b][0] > node_upper[a][0]
-            or node_lower[a][1] > node_upper[b][1]
-            or node_lower[b][1] > node_upper[a][1]
-            or node_lower[a][2] > node_upper[b][2]
-            or node_lower[b][2] > node_upper[a][2]
-        ):
-            return
-        shape1 = node_shape[a]
-        shape2 = node_shape[b]
-        world_id = wp.int32(0)
-        if shape_world[shape1] == -1 and shape_world[shape2] == -1:
-            world_id = 1
-        process_pair(
-            shape1,
-            shape2,
-            world_id,
-            1,
-            shape_lower,
-            shape_upper,
-            shape_gap,
-            shape_displacement,
-            collision_group,
-            shape_world,
-            filter_pairs,
-            num_filter_pairs,
-            shape_body,
-            body_flags,
-            include_static_kinematic_pairs,
-            filter_data,
-            candidate_pair,
-            candidate_pair_count,
-            max_candidate_pair,
-        )
-
-    @wp.kernel(enable_backward=False, module=module)
-    def fallback_reset(overflow: wp.array[int], candidate_pair_count: wp.array[int], initial_count: wp.array[int]):
-        if overflow[0] != 0:
-            candidate_pair_count[0] = initial_count[0]
-
-    @wp.kernel(enable_backward=False, module=module)
-    def fallback_pairs(
-        overflow: wp.array[int],
-        shape_index: wp.array[int],
+        node_last_leaf: wp.array[int],
+        node_max_span: wp.array[float],
+        leaf_base: int,
         shape_count: int,
         shape_lower: wp.array[wp.vec3],
         shape_upper: wp.array[wp.vec3],
@@ -248,45 +161,77 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
         candidate_pair_count: wp.array[int],
         max_candidate_pair: int,
     ):
-        i = wp.tid()
-        if overflow[0] == 0:
+        leaf = wp.tid()
+        if leaf >= shape_count:
             return
-        shape1 = shape_index[i]
-        for j in range(i + 1, shape_count):
-            shape2 = shape_index[j]
-            world_id = wp.int32(0)
-            if shape_world[shape1] == -1 and shape_world[shape2] == -1:
-                world_id = 1
-            process_pair(
-                shape1,
-                shape2,
-                world_id,
-                1,
-                shape_lower,
-                shape_upper,
-                shape_gap,
-                shape_displacement,
-                collision_group,
-                shape_world,
-                filter_pairs,
-                num_filter_pairs,
-                shape_body,
-                body_flags,
-                include_static_kinematic_pairs,
-                filter_data,
-                candidate_pair,
-                candidate_pair_count,
-                max_candidate_pair,
-            )
+        query_node = leaf_base + leaf
+        query_lower = node_lower[query_node]
+        query_upper = node_upper[query_node]
+        query_span = node_max_span[query_node]
+        shape1 = node_shape[query_node]
+        node = wp.int32(1)
 
-    return expand, finish, fallback_reset, fallback_pairs
+        # Every leaf independently walks exact BVH bounds. The smaller AABB
+        # span owns a pair; equal spans use sorted leaf index as the tie break.
+        # Large shapes such as an infinite floor therefore never serially
+        # query thousands of smaller shapes from one thread.
+        # The successor is computed from the implicit topology: no stack,
+        # global pair queues, or atomic queue reservations are needed.
+        while node != wp.int32(0):
+            max_span = node_max_span[node]
+            if max_span < query_span or (max_span == query_span and node_last_leaf[node] <= leaf):
+                node = _tree_next_dfs(node)
+                continue
+            if (
+                node_lower[node][0] > query_upper[0]
+                or query_lower[0] > node_upper[node][0]
+                or node_lower[node][1] > query_upper[1]
+                or query_lower[1] > node_upper[node][1]
+                or node_lower[node][2] > query_upper[2]
+                or query_lower[2] > node_upper[node][2]
+            ):
+                node = _tree_next_dfs(node)
+                continue
+            if node < leaf_base:
+                node = node * wp.int32(2)
+                continue
+            other_leaf = node - leaf_base
+            if other_leaf < shape_count and (max_span > query_span or (max_span == query_span and other_leaf > leaf)):
+                shape2 = node_shape[node]
+                pair_world_id = wp.int32(0)
+                if shape_world[shape1] == wp.int32(-1) and shape_world[shape2] == wp.int32(-1):
+                    pair_world_id = wp.int32(1)
+                process_pair(
+                    shape1,
+                    shape2,
+                    pair_world_id,
+                    wp.int32(1),
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_displacement,
+                    collision_group,
+                    shape_world,
+                    filter_pairs,
+                    num_filter_pairs,
+                    shape_body,
+                    body_flags,
+                    include_static_kinematic_pairs,
+                    filter_data,
+                    candidate_pair,
+                    candidate_pair_count,
+                    max_candidate_pair,
+                )
+            node = _tree_next_dfs(node)
+
+    return query
 
 
 _DEFAULT_KERNELS = _make_pair_kernels(keep_all_filter, EmptyFilterData)
 
 
 class BroadPhaseImplicitTree:
-    """Experimental graph-capturable implicit BVH for exact pair-set studies."""
+    """Experimental graph-capturable implicit BVH with exact pair traversal."""
 
     def __init__(
         self,
@@ -315,16 +260,16 @@ class BroadPhaseImplicitTree:
         self.shape_count = len(valid)
         self.leaf_base = 1 << max(1, (self.shape_count - 1).bit_length())
         self.depth = self.leaf_base.bit_length() - 1
+        # Retain the constructor argument for API compatibility. Stackless
+        # traversal allocates no per-level pair queues or overflow fallback.
         self.capacity = max(1, queue_capacity_factor * self.shape_count)
         self.keys = wp.empty(2 * self.shape_count, dtype=wp.uint64, device=device)
         self.values = wp.empty(2 * self.shape_count, dtype=wp.int32, device=device)
         self.node_lower = wp.empty(2 * self.leaf_base, dtype=wp.vec3, device=device)
         self.node_upper = wp.empty(2 * self.leaf_base, dtype=wp.vec3, device=device)
         self.node_shape = wp.empty(2 * self.leaf_base, dtype=wp.int32, device=device)
-        self.queues = [wp.empty(self.capacity, dtype=wp.vec2i, device=device) for _ in range(2)]
-        self.counts = [wp.zeros(1, dtype=wp.int32, device=device) for _ in range(2)]
-        self.overflow = wp.zeros(1, dtype=wp.int32, device=device)
-        self.initial_count = wp.zeros(1, dtype=wp.int32, device=device)
+        self.node_last_leaf = wp.empty(2 * self.leaf_base, dtype=wp.int32, device=device)
+        self.node_max_span = wp.empty(2 * self.leaf_base, dtype=wp.float32, device=device)
         self._has_custom_filter = filter_func is not None
         self._empty_filter_data = EmptyFilterData()
         self._kernels = (
@@ -359,13 +304,6 @@ class BroadPhaseImplicitTree:
             candidate_pair_count.zero_()
         if shape_count < 2 or self.shape_count < 2:
             return
-        wp.launch(
-            _tree_save_count,
-            dim=1,
-            inputs=[candidate_pair_count, self.initial_count],
-            device=device,
-            record_tape=False,
-        )
         if self._has_custom_filter and filter_data is None:
             raise ValueError("BroadPhaseImplicitTree requires filter_data for its custom filter")
         shape_gap = shape_gap if shape_gap is not None else wp.empty(0, dtype=wp.float32, device=device)
@@ -398,6 +336,8 @@ class BroadPhaseImplicitTree:
                 self.node_lower,
                 self.node_upper,
                 self.node_shape,
+                self.node_last_leaf,
+                self.node_max_span,
                 self.leaf_base,
                 self.shape_count,
             ],
@@ -409,34 +349,11 @@ class BroadPhaseImplicitTree:
             wp.launch(
                 _tree_build_level,
                 dim=start,
-                inputs=[self.node_lower, self.node_upper, start],
+                inputs=[self.node_lower, self.node_upper, self.node_last_leaf, self.node_max_span, start],
                 device=device,
                 record_tape=False,
             )
-        self.overflow.zero_()
-        wp.launch(_tree_root, dim=1, inputs=[self.queues[0], self.counts[0]], device=device, record_tape=False)
-        expand, finish, fallback_reset, fallback_pairs = self._kernels
-        for level in range(self.depth):
-            src = level & 1
-            dst = 1 - src
-            self.counts[dst].zero_()
-            launch_dim = min(self.capacity, 1 << min(30, 2 * (level + 1)))
-            wp.launch(
-                expand,
-                dim=launch_dim,
-                inputs=[
-                    self.queues[src],
-                    self.counts[src],
-                    self.queues[dst],
-                    self.counts[dst],
-                    self.overflow,
-                    self.node_lower,
-                    self.node_upper,
-                    self.capacity,
-                ],
-                device=device,
-                record_tape=False,
-            )
+        query = self._kernels
         pair_inputs = [
             shape_lower,
             shape_upper,
@@ -455,31 +372,18 @@ class BroadPhaseImplicitTree:
             candidate_pair.shape[0],
         ]
         wp.launch(
-            finish,
-            dim=self.capacity,
+            query,
+            dim=self.shape_count,
             inputs=[
-                self.queues[self.depth & 1],
-                self.counts[self.depth & 1],
-                self.overflow,
                 self.node_lower,
                 self.node_upper,
                 self.node_shape,
+                self.node_last_leaf,
+                self.node_max_span,
+                self.leaf_base,
+                self.shape_count,
                 *pair_inputs,
             ],
-            device=device,
-            record_tape=False,
-        )
-        wp.launch(
-            fallback_reset,
-            dim=1,
-            inputs=[self.overflow, candidate_pair_count, self.initial_count],
-            device=device,
-            record_tape=False,
-        )
-        wp.launch(
-            fallback_pairs,
-            dim=self.shape_count,
-            inputs=[self.overflow, self.shape_index, self.shape_count, *pair_inputs],
             device=device,
             record_tape=False,
         )
