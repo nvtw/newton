@@ -410,12 +410,11 @@ def _merge_inv_mass_matrix_kernel(
     nzb_start: wp.array[wp.int32],
     nzb_coords: wp.array2d[wp.int32],
     jacobian_nzb_values: wp.array[vec6f],
+    row_start: wp.array[wp.int32],
+    preconditioner: wp.array[wp.float32],
     mass_weighted_nzb_values: wp.array[vec6f],
 ):
-    """
-    Kernel to merge the inverse mass matrix into an existing sparse matrix, so that the resulting
-    matrix is given as `A <- A @ M^-1`.
-    """
+    """Apply inverse mass and optional row preconditioning in one Jacobian pass."""
     mat_id, block_idx = wp.tid()
 
     # Check if block index is valid for this matrix.
@@ -446,6 +445,8 @@ def _merge_inv_mass_matrix_kernel(
     block[3] = w[0]
     block[4] = w[1]
     block[5] = w[2]
+    if preconditioner:
+        block = block * preconditioner[row_start[mat_id] + block_coord[0]]
     mass_weighted_nzb_values[global_block_idx] = block
 
 
@@ -1646,7 +1647,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
             else:
                 self._col_major_jacobian.update(self._model, self._jacobians, self._limits, self._contacts)
 
-        # Apply inverse mass matrix while copying the current Jacobian values.
+        # Apply inverse mass and row preconditioning while copying the Jacobian.
         wp.launch(
             kernel=_merge_inv_mass_matrix_kernel,
             dim=(self.bsm.num_matrices, self.bsm.max_of_num_nzb),
@@ -1659,6 +1660,8 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
                 self.bsm.nzb_start,
                 self.bsm.nzb_coords,
                 self.constraint_jacobian.nzb_values,
+                self.bsm.row_start,
+                self._preconditioner,
                 # Outputs:
                 self.bsm.nzb_values,
             ],
@@ -1666,23 +1669,6 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
         )
 
         if self._preconditioner is not None:
-            # Apply preconditioner to (copy of) constraint Jacobian
-            wp.launch(
-                kernel=_make_merge_preconditioner_kernel(self.bsm.nzb_dtype),
-                dim=(self.bsm.num_matrices, self.bsm.max_of_num_nzb),
-                inputs=[
-                    # Inputs:
-                    self.bsm.num_nzb,
-                    self.bsm.nzb_start,
-                    self.bsm.nzb_coords,
-                    self.bsm.row_start,
-                    self._preconditioner,
-                    # Outputs:
-                    self.bsm.nzb_values,
-                ],
-                device=self.bsm.device,
-            )
-
             if not self._use_raw_transpose:
                 # Apply preconditioner to column-major constraint Jacobian
                 wp.launch(
