@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import numpy as np
 import warp as wp
 
 from ...core.types import vec6f
@@ -159,27 +158,34 @@ def _build_rhs(
     lambdas: wp.array[wp.float32],
     bvio: wp.array[wp.int32],
     scale: wp.array[wp.float32],
-    inverse: wp.array[wp.int32],
+    order: wp.array[wp.int32],
     masks: wp.array[wp.uint64],
     values: wp.array[wp.float32],
     width: int,
     slots: int,
     rhs: wp.array[wp.float32],
 ):
-    """Form the scaled bilateral RHS from cached joint-block coefficients."""
-    w, row, lane = wp.tid()
-    if row >= njc[w]:
-        return
-    padded = inverse[row]
-    value = wp.float32(0)
+    """Reuse each sparse lookup and impulse across a joint's six RHS rows."""
+    w, group, lane = wp.tid()
+    value = vec6f(0.0)
+    bit = wp.uint64(1) << wp.uint64(group)
     for col in range(lane, dim[w] - njc[w], 16):
-        value += (
-            read_packed_coupling(values, masks, w, col, padded // 6, padded % 6, width, slots)
-            * lambdas[pvio[w] + njc[w] + col]
-        )
-    value = _subgroup_sum(value, 16)
-    if lane == 0:
-        rhs[bvio[w] + row] = -scale[bvio[w] + row] * (value + vf[pvio[w] + row])
+        mask = masks[w * width + col]
+        impulse = lambdas[pvio[w] + njc[w] + col]
+        slot = int(0)
+        present = (mask & bit) != wp.uint64(0)
+        if present:
+            slot = _count_bits(mask & (bit - wp.uint64(1)))
+        for local in range(6):
+            coefficient = wp.float32(0.0)
+            if present:
+                coefficient = values[((w * slots + slot) * 6 + local) * width + col]
+            value[local] += coefficient * impulse
+    for local in range(6):
+        total = _subgroup_sum(value[local], 16)
+        row = order[group * 6 + local]
+        if lane == 0 and row >= 0 and row < njc[w]:
+            rhs[bvio[w] + row] = -scale[bvio[w] + row] * (total + vf[pvio[w] + row])
 
 
 class PackedCoupling:
@@ -214,10 +220,6 @@ class PackedCoupling:
             seeds = set(self._body_seeds.numpy().tolist())
             slots = max((int(a) | int(b)).bit_count() for a in seeds for b in seeds)
         self.slots = slots
-        order = blocks._schedule["order"].numpy()
-        inverse = np.empty(self.width, dtype=np.int32)
-        inverse[order[order >= 0]] = np.flatnonzero(order >= 0)
-        self.inverse = wp.array(inverse, dtype=wp.int32, device=self._device)
         self.masks = wp.empty(self._worlds * self.width, dtype=wp.uint64, device=self._device)
         self.values = wp.empty(self._worlds * self.width * self.slots * 6, dtype=wp.float32, device=self._device)
 
@@ -267,7 +269,7 @@ class PackedCoupling:
         data, state = problem.data, path.data.state
         wp.launch(
             _build_rhs,
-            dim=(self._worlds, self.width, 16),
+            dim=(self._worlds, self._blocks._groups, 16),
             inputs=[
                 data.vio,
                 data.njc,
@@ -276,7 +278,7 @@ class PackedCoupling:
                 path.data.solution.lambdas,
                 path.data.bilateral_operator.info.vio,
                 state.bilateral_preconditioner,
-                self.inverse,
+                self._blocks._schedule["order"],
                 self.masks,
                 self.values,
                 self.width,
