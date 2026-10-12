@@ -19,6 +19,7 @@ from newton._src.geometry.broad_phase_grid import BroadPhaseGrid
 from newton._src.solvers.phoenx.examples.example_hoberman_sphere import make_hoberman_builder
 from newton._src.solvers.phoenx.examples.example_kapla_tower import GROUND_HEIGHT, add_kapla_bricks
 from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
+from newton.examples.phoenx._rigid_solver import make_colored_solver
 
 HOBERMAN_COUNT = 10
 WARMUP_FRAMES = 10
@@ -103,23 +104,12 @@ def make_solver(
     contact_chunk_size: int = 0,
 ) -> newton.solvers.SolverPhoenX:
     """Single-world PhoenX configuration shared by the mixed scenes."""
-    return newton.solvers.SolverPhoenX(
+    return make_colored_solver(
         model,
-        collision_pipeline=pipeline,
+        pipeline,
+        device,
         substeps=substeps,
         solver_iterations=solver_iterations,
-        velocity_iterations=1,
-        step_layout="single_world",
-        mass_splitting=True,
-        mass_splitting_overflow_only=True,
-        max_colored_partitions=9,
-        mass_splitting_batch_size=1,
-        mass_splitting_unrolled=True,
-        partitioner_algorithm="endpoint_owner",
-        colored_contact_headers=True,
-        colored_contact_rows=True,
-        joint_mode="maximal_pgs",
-        max_thread_blocks=8 * device.sm_count,
         direct_joint_mask=direct_joint_mask,
         direct_joint_projection_passes=direct_joint_projection_passes,
         contact_chunk_size=contact_chunk_size,

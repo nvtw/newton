@@ -1019,7 +1019,11 @@ contact accuracy are still being investigated.
       <br><b>Tourbillon clock</b>
       <br><code>python -m newton.examples phoenx_tourbillon_clock</code>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_ragdoll_pile.jpg" alt="PhoenX ragdoll pile">
+      <br><b>32,000 box ragdolls</b>
+      <br><code>python -m newton.examples phoenx_ragdoll_pile</code>
+    </td>
   </tr>
 </table>
 
