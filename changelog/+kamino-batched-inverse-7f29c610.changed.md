@@ -1,1 +1,0 @@
-Improve Kamino DVI throughput for batched sparse solves by fusing small bilateral inverse solves with matrix-free right-hand-side construction and reducing inequality-kernel register pressure. Solver settings require no changes.

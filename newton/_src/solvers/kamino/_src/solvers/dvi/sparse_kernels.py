@@ -205,7 +205,7 @@ def _build_sparse_bilateral_rhs(
 
 
 @wp.kernel
-def _sparse_delassus_gemv_rows(
+def _sparse_bilateral_gemv(
     # Matrix data:
     num_nzb: wp.array[int32],
     nzb_start: wp.array[int32],
@@ -216,7 +216,6 @@ def _sparse_delassus_gemv_rows(
     # Row ranges:
     problem_dim: wp.array[int32],
     problem_njc: wp.array[int32],
-    row_kind: int32,
     # Regularization:
     eta: wp.array[float32],
     # Vectors:
@@ -236,10 +235,7 @@ def _sparse_delassus_gemv_rows(
 
     if block_idx < dim:
         row = block_idx
-        row_active = row < njc
-        if row_kind == int32(1):
-            row_active = row >= njc
-        if row_active:
+        if row < njc:
             vec_idx = row_start[wid] + row
             wp.atomic_add(y, vec_idx, eta[vec_idx] * lambdas[vec_idx])
 
@@ -252,14 +248,11 @@ def _sparse_delassus_gemv_rows(
     if row < 0 or row >= dim:
         return
 
-    row_active = row < njc
-    if row_kind == int32(1):
-        row_active = row >= njc
-    if not row_active:
+    if row >= njc:
         return
 
-    # The body-space input already contains M^-1 * J^T * lambda. Accumulate
-    # selected rows of J times that vector; eta * lambda supplies R * lambda.
+    # Weighted blocks contain J * M^-1; body_space contains J^T * lambda.
+    # Accumulate their bilateral rows and the regularization term above.
     block = nzb_values[global_block_idx]
     x_idx_base = col_start[wid] + block_coord[1]
     acc = float32(0.0)

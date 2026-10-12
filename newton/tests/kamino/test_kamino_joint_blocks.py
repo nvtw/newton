@@ -426,8 +426,14 @@ class TestKaminoJointBlocks(unittest.TestCase):
         path.jacobians._J_cts.bsm.nzb_start = ints([0, len(entries) // 2])
         solver = JointBlockSolver.create(path)
         self.assertIsNotNone(solver)
-        self.assertIsNotNone(getattr(solver, "_assembly_template", None))
-        template = solver._assembly_template
+        self.assertIsNotNone(solver._assembly_template)
+        self.assertIs(solver._entry_target, solver._assembly_template[-1])
+        with patch(
+            "newton._src.solvers.kamino._src.solvers.dvi.joint_blocks._build_assembly_template", return_value=None
+        ):
+            ordinary = JointBlockSolver.create(path)
+        self.assertIsNone(ordinary._assembly_template)
+        self.assertEqual(ordinary._entry_target.size, 2 * solver._entry_target.size)
         raw_values = rng.normal(0, 0.2, (len(entries), 6)).astype(np.float32)
         reference = path.data.bilateral_operator.mat
         for iteration in range(2):
@@ -459,10 +465,8 @@ class TestKaminoJointBlocks(unittest.TestCase):
             solver.assemble(path, problem)
             shared_result = solver._matrix.numpy()
             np.testing.assert_allclose(shared_result, expected, atol=2e-6, rtol=2e-6)
-            solver._assembly_template = None
-            solver.assemble(path, problem)
-            np.testing.assert_array_equal(solver._matrix.numpy(), shared_result)
-            solver._assembly_template = template
+            ordinary.assemble(path, problem)
+            np.testing.assert_array_equal(ordinary._matrix.numpy(), shared_result)
             for world in range(2):
                 np.testing.assert_allclose(
                     path.data.state.bilateral_preconditioner.numpy()[vio[world] : vio[world] + 16],

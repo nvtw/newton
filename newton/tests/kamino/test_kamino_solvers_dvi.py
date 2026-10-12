@@ -40,10 +40,8 @@ from newton._src.solvers.kamino._src.solvers.dvi.projections import (
     project_contact_tangent_update as _project_contact_tangent_update,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse import (
-    _SPARSE_DELASSUS_ROWS_JOINTS,
-    _SPARSE_DELASSUS_ROWS_UNILATERAL,
     _can_use_cooperative_articulation,
-    _sparse_delassus_matvec_rows_path,
+    _sparse_bilateral_matvec,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import (
     _assemble_compact_unilateral_schur_blocked,
@@ -2164,8 +2162,9 @@ class TestDVISolver(unittest.TestCase):
                 self.assertEqual(config.sparse_dynamics, sparse)
                 self.assertTrue(config.sparse_jacobian)
 
-    def test_03a_sparse_dvi_filtered_matvec_matches_full_rows(self):
-        builder = basics.build_box_on_plane()
+    def test_03a_sparse_dvi_bilateral_matvec_matches_full_rows(self):
+        """Match nonempty bilateral rows and leave contact rows zero."""
+        builder = basics.build_boxes_hinged()
         model = ModelKamino.from_newton(builder.finalize(device=self.device))
         model, data, state, limits, detector, jacobians = make_containers(
             model=model,
@@ -2206,15 +2205,15 @@ class TestDVISolver(unittest.TestCase):
         problem.delassus.matvec(solver.data.solution.lambdas, full, solver.all_worlds_mask)
         full_np = full.numpy()
 
-        _sparse_delassus_matvec_rows_path(solver._sparse_path, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
+        _sparse_bilateral_matvec(solver._sparse_path, problem)
         joint_np = solver.data.state.v_aug.numpy()
-        _sparse_delassus_matvec_rows_path(solver._sparse_path, problem, _SPARSE_DELASSUS_ROWS_UNILATERAL)
-        unilateral_np = solver.data.state.v_aug.numpy()
 
         dim = int(problem.data.dim.numpy()[0])
         njc = int(problem.data.njc.numpy()[0])
+        self.assertGreater(njc, 0)
+        self.assertGreater(dim, njc)
         np.testing.assert_allclose(joint_np[:njc], full_np[:njc], rtol=1e-5, atol=1e-5)
-        np.testing.assert_allclose(unilateral_np[njc:dim], full_np[njc:dim], rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(joint_np[njc:dim], 0.0)
 
     def test_05_dvi_solve_multi_world_contacts(self):
         builder = newton.ModelBuilder()

@@ -891,10 +891,14 @@ class JointBlockSolver:
         rows, cols = np.where(swap, j, i), np.where(swap, i, j)
         blocks = lookup[rows // 6, cols // 6]
         offsets = worlds * (self._blocks * 36) + blocks * 36 + (rows % 6) * 6 + cols % 6
-        self._entry_target = wp.array(offsets, dtype=wp.int32, device=self._device)
         self._assembly_template = None
         if not persistent and self._worlds > 1:
             self._assembly_template = _build_assembly_template(path, offsets, self._blocks)
+        self._entry_target = (
+            self._assembly_template[-1]
+            if self._assembly_template is not None
+            else wp.array(offsets, dtype=wp.int32, device=self._device)
+        )
         # Numeric factorization has separate storage, so structural zeros and
         # dummy identities need initialization only when the topology is built.
         wp.launch(

@@ -75,7 +75,7 @@ from .sparse_kernels import (
     _solve_dvi_sparse_contacts_pgs,
     _solve_dvi_sparse_inequalities_pgs,
     _solve_dvi_sparse_inequalities_pgs_cooperative,
-    _sparse_delassus_gemv_rows,
+    _sparse_bilateral_gemv,
     _zero_bilateral_lambdas,
     make_compact_schur_pgs_kernel,
     make_sparse_bilateral_inverse_kernel,
@@ -87,8 +87,6 @@ wp.set_module_options({"enable_backward": False})
 int32 = wp.int32
 
 
-_SPARSE_DELASSUS_ROWS_JOINTS = 0
-_SPARSE_DELASSUS_ROWS_UNILATERAL = 1
 _CONTACT_PAIR_SORT_MIN_CAPACITY = 4096
 _PARALLEL_CONTACT_MAX_COLORS = 8
 _PARALLEL_CONTACT_MIN_CAPACITY = 32768
@@ -983,7 +981,8 @@ def _compute_sparse_solution_vectors(path: SparseDVIPath, problem: DualProblem) 
     )
 
 
-def _sparse_delassus_matvec_rows_path(path: SparseDVIPath, problem: DualProblem, row_kind: int) -> None:
+def _sparse_bilateral_matvec(path: SparseDVIPath, problem: DualProblem) -> None:
+    """Evaluate the bilateral rows needed by the matrix-free RHS solve."""
     delassus = _get_sparse_delassus(problem)
     state = path.data.state
     regularization = delassus.regularization
@@ -992,12 +991,12 @@ def _sparse_delassus_matvec_rows_path(path: SparseDVIPath, problem: DualProblem,
     if bsm is None:
         raise RuntimeError("Sparse DVI row products require initialized Delassus sparse operators.")
 
-    # Evaluate selected rows of D * lambda = J * M^-1 * J^T * lambda + R * lambda
+    # Evaluate bilateral rows of D * lambda = J * M^-1 * J^T * lambda + R * lambda
     # without materializing the Delassus matrix.
     delassus.apply_jacobian_transpose(path.data.solution.lambdas, body_space, path.all_worlds_mask)
     state.v_aug.zero_()
     wp.launch(
-        kernel=_sparse_delassus_gemv_rows,
+        kernel=_sparse_bilateral_gemv,
         dim=(bsm.num_matrices, bsm.max_of_num_nzb),
         inputs=[
             bsm.num_nzb,
@@ -1008,7 +1007,6 @@ def _sparse_delassus_matvec_rows_path(path: SparseDVIPath, problem: DualProblem,
             bsm.col_start,
             problem.data.dim,
             problem.data.njc,
-            row_kind,
             regularization,
             body_space,
             state.v_aug,
@@ -1291,7 +1289,7 @@ def _solve_sparse_bilateral_block(
             inputs=[problem.data.njc, problem.data.vio, path.data.solution.lambdas],
             device=path.device,
         )
-        _sparse_delassus_matvec_rows_path(path, problem, _SPARSE_DELASSUS_ROWS_JOINTS)
+        _sparse_bilateral_matvec(path, problem)
         wp.launch(
             _build_sparse_bilateral_rhs_from_matvec,
             dim=(path.size.num_worlds, path.size.max_of_num_bilateral_joint_cts),
