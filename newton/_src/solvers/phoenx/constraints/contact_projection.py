@@ -25,6 +25,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 __all__ = [
     "contact_frame_velocity_update",
     "contact_frame_velocity_update_no_soft_pd",
+    "contact_project_coupled_velocity_update_mobility",
+    "contact_project_coupled_velocity_update_mobility_no_soft_pd",
     "contact_project_coupled_velocity_update_no_soft_pd",
     "contact_project_friction_metric",
     "contact_project_normal_delta_load",
@@ -375,7 +377,7 @@ def contact_project_friction_metric(
     )
 
 
-def _make_contact_project_coupled_velocity_update(has_soft_contact_pd: bool):
+def _make_contact_project_coupled_velocity_update(has_soft_contact_pd: bool, tangent_mobility_stored: bool = False):
     @wp.func
     def impl(
         cc: ContactContainer,
@@ -465,8 +467,12 @@ def _make_contact_project_coupled_velocity_update(has_soft_contact_pd: bool):
         # The normal impulse changes tangential velocity before friction acts.
         rhs_t1 = jv_t1 + bias_t1 + mobility_nt1 * normal_update.delta
         rhs_t2 = jv_t2 + bias_t2 + mobility_nt2 * normal_update.delta
-        mobility_t1 = wp.float32(1.0) / eff_t1 if eff_t1 > wp.float32(0.0) else wp.float32(0.0)
-        mobility_t2 = wp.float32(1.0) / eff_t2 if eff_t2 > wp.float32(0.0) else wp.float32(0.0)
+        if wp.static(tangent_mobility_stored):
+            mobility_t1 = eff_t1
+            mobility_t2 = eff_t2
+        else:
+            mobility_t1 = wp.float32(1.0) / eff_t1 if eff_t1 > wp.float32(0.0) else wp.float32(0.0)
+            mobility_t2 = wp.float32(1.0) / eff_t2 if eff_t2 > wp.float32(0.0) else wp.float32(0.0)
         friction = contact_project_friction_metric(
             mobility_t1,
             mobility_t1t2,
@@ -625,6 +631,12 @@ contact_project_coupled_velocity_update_no_soft_pd = _make_contact_project_coupl
 )
 
 contact_project_coupled_velocity_update = _make_contact_project_coupled_velocity_update(has_soft_contact_pd=True)
+contact_project_coupled_velocity_update_mobility = _make_contact_project_coupled_velocity_update(
+    has_soft_contact_pd=True, tangent_mobility_stored=True
+)
+contact_project_coupled_velocity_update_mobility_no_soft_pd = _make_contact_project_coupled_velocity_update(
+    has_soft_contact_pd=False, tangent_mobility_stored=True
+)
 
 
 def _make_contact_project_normal_delta_load(has_soft_contact_pd: bool):

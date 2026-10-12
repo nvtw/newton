@@ -77,6 +77,102 @@ def dynamic_owner(columns: ContactColumnContainer, cid: int, bodies: BodyContain
     return int(-1)
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    return blockIdx.x;
+#else
+    return -1;
+#endif
+"""
+)
+def current_block() -> wp.int32: ...
+
+
+@wp.func
+def record_worker(
+    constraints: ConstraintContainer,
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    particles: ParticleContainer,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    copies: CopyStateContainer,
+    num_joints: wp.int32,
+    previous: wp.array[wp.int32],
+    triangles: wp.int32,
+    bending: wp.int32,
+    tetrahedra: wp.int32,
+    hexahedra: wp.int32,
+    num_bodies: wp.int32,
+    idt: wp.float32,
+    sor: wp.float32,
+    cid: wp.int32,
+    slot: wp.int32,
+    group: wp.int32,
+):
+    wp.atomic_add(cc.impulses, 0, cid, 1.0)
+    cc.impulses[1, cid] = wp.float32(group)
+    cc.impulses[2, cid] = wp.float32(current_block())
+
+
+class TestSingleColorWorkers(unittest.TestCase):
+    def test_cpu_exact_ownership(self):
+        self._check_workers("cpu")
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Block distribution requires CUDA")
+    def test_large_colors_span_blocks_with_exact_ownership(self):
+        self._check_workers("cuda:0")
+
+    def _check_workers(self, device):
+        """Distribute disjoint color rows while retaining exact-once ownership."""
+        with patch.object(groups, "_make_singleworld_dispatch_func", return_value=(record_worker, None)):
+            kernels = {
+                blocks: groups.get_sweep_kernel("single_color_workers_test", False, blocks) for blocks in (7, 64)
+            }
+        for colors in (0, 1, 3, 9, 65):
+            sizes = 2048 + np.arange(colors, dtype=np.int32) % 13
+            starts = np.r_[0, np.cumsum(sizes)].astype(np.int32)
+            count = int(starts[-1])
+            expected_groups = np.repeat(np.arange(colors), sizes)
+            for blocks, kernel in kernels.items():
+                with self.subTest(colors=colors, blocks=blocks):
+                    cc = ContactContainer()
+                    cc.impulses = wp.zeros((3, count), dtype=wp.float32, device=device)
+                    wp.launch(
+                        kernel,
+                        (blocks, 32),
+                        [
+                            ConstraintContainer(),
+                            ContactColumnContainer(),
+                            BodyContainer(),
+                            ParticleContainer(),
+                            cc,
+                            ContactViews(),
+                            CopyStateContainer(),
+                            0,
+                            wp.zeros(count, dtype=wp.int32, device=device),
+                            0,
+                            1.0,
+                            wp.array(np.arange(count), dtype=wp.int32, device=device),
+                            wp.array(starts, dtype=wp.int32, device=device),
+                            wp.array([colors], dtype=wp.int32, device=device),
+                            1,
+                        ],
+                        block_dim=32,
+                        device=device,
+                    )
+                    actual = cc.impulses.numpy()
+                    np.testing.assert_array_equal(actual[0], np.ones(count))
+                    np.testing.assert_array_equal(actual[1], expected_groups)
+                    if colors and device != "cpu":
+                        self.assertEqual(len(np.unique(actual[2])), blocks)
+                        for color in range(colors):
+                            workers = np.unique(actual[2, starts[color] : starts[color + 1]])
+                            if colors < blocks:
+                                self.assertGreater(len(workers), 1)
+
+
 @unittest.skipUnless(wp.is_cuda_available(), "Group dispatch requires CUDA")
 class TestColorGroupGrid(unittest.TestCase):
     def test_ragged_groups_cover_rows_once_and_keep_color_order(self):

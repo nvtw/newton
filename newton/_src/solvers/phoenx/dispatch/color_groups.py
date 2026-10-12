@@ -6,7 +6,10 @@ import functools
 
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.bilateral_joint import get_iterate_bilateral_joint_block
+from newton._src.solvers.phoenx.constraints.bilateral_joint import (
+    get_bilateral_joint_tile_width,
+    get_iterate_bilateral_joint_block,
+)
 from newton._src.solvers.phoenx.simulation_kernels import (
     BodyContainer,
     ConstraintContainer,
@@ -31,9 +34,9 @@ def use_cooperative_joint_rhs(*, phase: str, is_cuda: bool, has_bilateral_blocks
     return is_cuda and has_bilateral_blocks and phase in ("iterate", "relax")
 
 
-def get_sweep_block_dim(cooperative_joints: bool) -> int:
+def get_sweep_block_dim(cooperative_joints: bool, joint_row_capacity: int = 6) -> int:
     """Match the launch width to the compile-time constraint lane mapping."""
-    return CONSTRAINTS_PER_BLOCK * (JOINT_RHS_LANES if cooperative_joints else 1)
+    return CONSTRAINTS_PER_BLOCK * (get_bilateral_joint_tile_width(joint_row_capacity) if cooperative_joints else 1)
 
 
 @functools.cache
@@ -43,6 +46,7 @@ def get_sweep_kernel(
     block_count=DEFAULT_SWEEP_BLOCK_COUNT,
     *,
     cooperative_joints=False,
+    joint_row_capacity=6,
     temporal_springs=False,
     joint_only=False,
     reverse_colors=False,
@@ -52,8 +56,11 @@ def get_sweep_kernel(
         raise ValueError("Color-group dispatch requires at least one block")
     if cooperative_joints and phase not in ("iterate", "relax"):
         raise ValueError("Cooperative joint RHS is only available for iteration and relaxation")
-    lanes_per_constraint = JOINT_RHS_LANES if cooperative_joints else 1
-    joint_iterate = get_iterate_bilateral_joint_block(True, temporal_springs=temporal_springs)
+    joint_width = get_bilateral_joint_tile_width(joint_row_capacity)
+    lanes_per_constraint = joint_width if cooperative_joints else 1
+    joint_iterate = get_iterate_bilateral_joint_block(
+        True, temporal_springs=temporal_springs, row_capacity=joint_row_capacity
+    )
     use_bias = phase == "iterate"
     dispatch, _ = _make_singleworld_dispatch_func(
         cloth_support=False,
@@ -92,7 +99,19 @@ def get_sweep_kernel(
         slab_width: wp.int32,
     ):
         block, lane = wp.tid()
-        for slab in range(block, (num_colors[0] + slab_width - 1) / slab_width, block_count):
+        slab_begin = block
+        slab_stride = block_count
+        row_worker = wp.int32(0)
+        row_workers = wp.int32(1)
+        if slab_width == wp.int32(1) and num_colors[0] > wp.int32(0):
+            # Each color owns independent copy slots, so its rows can span
+            # multiple blocks without a cross-block barrier. Wider groups
+            # retain one block per slab to order their dependent colors.
+            slab_stride = wp.min(num_colors[0], wp.int32(block_count))
+            slab_begin = block % slab_stride
+            row_worker = block / slab_stride
+            row_workers = (wp.int32(block_count) - wp.int32(1) - slab_begin) / slab_stride + wp.int32(1)
+        for slab in range(slab_begin, (num_colors[0] + slab_width - 1) / slab_width, slab_stride):
             for local_color in range(slab_width):
                 ordered_color = local_color
                 if wp.static(reverse_colors):
@@ -100,7 +119,9 @@ def get_sweep_kernel(
                 color = slab * slab_width + ordered_color
                 if color < num_colors[0]:
                     for index in range(
-                        starts[color] + lane / lanes_per_constraint, starts[color + 1], CONSTRAINTS_PER_BLOCK
+                        starts[color] + row_worker * CONSTRAINTS_PER_BLOCK + lane / lanes_per_constraint,
+                        starts[color + 1],
+                        CONSTRAINTS_PER_BLOCK * row_workers,
                     ):
                         cid = ids[index]
                         if wp.static(cooperative_joints):
@@ -115,9 +136,9 @@ def get_sweep_kernel(
                                         num_bodies,
                                         slab,
                                         use_bias,
-                                        lane % JOINT_RHS_LANES,
+                                        lane % wp.static(joint_width),
                                     )
-                                    if lane % JOINT_RHS_LANES == 0:
+                                    if lane % wp.static(joint_width) == 0:
                                         joint_constraint_iterate_inequality(
                                             constraints,
                                             cid,
@@ -130,7 +151,7 @@ def get_sweep_kernel(
                                             1.0,
                                             use_bias,
                                         )
-                            elif wp.static(not joint_only) and lane % JOINT_RHS_LANES == 0:
+                            elif wp.static(not joint_only) and lane % wp.static(joint_width) == 0:
                                 dispatch(
                                     constraints,
                                     columns,

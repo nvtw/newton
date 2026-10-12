@@ -6,7 +6,10 @@ import functools
 
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.bilateral_joint import get_iterate_bilateral_joint_block
+from newton._src.solvers.phoenx.constraints.bilateral_joint import (
+    get_bilateral_joint_tile_width,
+    get_iterate_bilateral_joint_block,
+)
 from newton._src.solvers.phoenx.constraints.constraint_contact import contact_get_body1, contact_get_body2
 from newton._src.solvers.phoenx.constraints.constraint_container import constraint_get_body1, constraint_get_body2
 from newton._src.solvers.phoenx.constraints.contact_static_ownership import static_owner
@@ -15,7 +18,6 @@ from newton._src.solvers.phoenx.constraints.contact_tgs_dynamic import make_iter
 from newton._src.solvers.phoenx.dispatch.color_groups import (
     CONSTRAINTS_PER_BLOCK,
     DEFAULT_SWEEP_BLOCK_COUNT,
-    JOINT_RHS_LANES,
 )
 from newton._src.solvers.phoenx.simulation_kernels import (
     BodyContainer,
@@ -37,6 +39,7 @@ def get_sweep_kernel(
     block_count=DEFAULT_SWEEP_BLOCK_COUNT,
     *,
     cooperative_joints=False,
+    joint_row_capacity=6,
     temporal_springs=True,
     record_wrenches=False,
     world_count=1,
@@ -49,10 +52,13 @@ def get_sweep_kernel(
         raise ValueError("Expected a valid temporal sweep phase and positive block/world counts")
     if cooperative_joints and phase not in ("iterate", "relax"):
         raise ValueError("Cooperative joints require iterate or relax")
-    lanes_per_constraint = JOINT_RHS_LANES if cooperative_joints else 1
+    joint_width = get_bilateral_joint_tile_width(joint_row_capacity)
+    lanes_per_constraint = joint_width if cooperative_joints else 1
     use_bias = phase == "iterate"
     preparing = phase in ("prepare", "cached_prepare")
-    joint_iterate = get_iterate_bilateral_joint_block(True, temporal_springs=temporal_springs)
+    joint_iterate = get_iterate_bilateral_joint_block(
+        True, temporal_springs=temporal_springs, row_capacity=joint_row_capacity
+    )
     joint_dispatch = _make_singleworld_rigid_joint_dispatch_func(
         is_prepare=phase == "prepare",
         is_cached_prepare=phase == "cached_prepare",
@@ -159,9 +165,9 @@ def get_sweep_kernel(
                                             num_bodies,
                                             slab,
                                             use_bias,
-                                            lane % JOINT_RHS_LANES,
+                                            lane % wp.static(joint_width),
                                         )
-                                        if lane % JOINT_RHS_LANES == 0:
+                                        if lane % wp.static(joint_width) == 0:
                                             joint_constraint_iterate_inequality(
                                                 constraints,
                                                 cid,

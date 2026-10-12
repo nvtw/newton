@@ -24,6 +24,7 @@ from newton._src.solvers.phoenx.body import (
 )
 from newton._src.solvers.phoenx.constraints.bilateral_joint import (
     EXPERIMENTAL_JOINT_INVERSE,
+    get_bilateral_joint_tile_width,
     get_iterate_bilateral_joint_block,
     iterate_bilateral_joint_block,
 )
@@ -60,10 +61,14 @@ from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     contact_iterate,
     contact_iterate_cloth_aware,
     contact_iterate_lean,
+    contact_iterate_lean_mobility,
     contact_iterate_lean_no_sleep,
+    contact_iterate_lean_no_sleep_mobility,
     contact_iterate_lean_no_sleep_no_soft_pd,
     contact_iterate_lean_no_sleep_no_soft_pd_cooperative,
+    contact_iterate_lean_no_sleep_no_soft_pd_mobility,
     contact_iterate_lean_no_soft_pd,
+    contact_iterate_lean_no_soft_pd_mobility,
     contact_iterate_no_sleep,
     contact_iterate_no_sleep_no_soft_pd,
     contact_iterate_no_soft_pd,
@@ -132,7 +137,9 @@ from newton._src.solvers.phoenx.contact_endpoints import (
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     ElementInteractionData,
+    _endpoint_owner_priority,
     _lowest_set_bit,
+    _pack_constraint_priority,
     element_interaction_data_make,
 )
 from newton._src.solvers.phoenx.helpers.array_access import read1d_i32
@@ -175,12 +182,14 @@ _SOFT_HEX_OFF_BODY8 = wp.constant(wp.int32(8))
 
 
 @wp.func
-def _rigid_family_lane_allocation(count_joints: wp.int32, count_contacts: wp.int32, stride: wp.int32) -> wp.vec2i:
+def _rigid_family_lane_allocation(
+    count_joints: wp.int32, count_contacts: wp.int32, stride: wp.int32, joint_width: wp.int32
+) -> wp.vec2i:
     """Return joint lane count and contact lane offset for one rigid color."""
     joint_lanes = stride
     contact_lane_base = wp.int32(0)
     if count_joints > wp.int32(0) and count_contacts > wp.int32(0):
-        needed_joint_lanes = ((count_joints * wp.int32(8) + wp.int32(31)) / wp.int32(32)) * wp.int32(32)
+        needed_joint_lanes = ((count_joints * joint_width + wp.int32(31)) / wp.int32(32)) * wp.int32(32)
         if needed_joint_lanes <= stride / wp.int32(2):
             joint_lanes = needed_joint_lanes
             contact_lane_base = joint_lanes
@@ -506,15 +515,15 @@ def _merge_monotone_world_runs_kernel(
 def _cost_biased_priority(
     packed_priorities: wp.array[wp.int32],
     cid: wp.int32,
-) -> wp.int32:
+) -> wp.uint64:
     """Read prepacked (cost << 24) | (random & 0xFFFFFF) priority.
 
     The pack happens once per step in the partitioner; coloring just
     reads. See :func:`pack_priorities_kernel` in :mod:`graph_coloring_common`.
-    Bit layout makes plain int32 lexicographic comparison equivalent
-    to ``(cost, random)`` lex order.
+    Unsigned packed bits retain cost ordering across the sign bit. The cid
+    breaks hash collisions with the same total order as endpoint elections.
     """
-    return packed_priorities[cid]
+    return _endpoint_owner_priority(packed_priorities[cid], cid)
 
 
 @wp.kernel(enable_backward=False)
@@ -2701,9 +2710,12 @@ def _constraints_to_elements_kernel(
     n = num_constraints[0]
     if tid >= n:
         return
-    packed_priorities[tid] = random_values[tid] & wp.int32(0x00FFFFFF)
+    packed_priorities[tid] = _pack_constraint_priority(wp.int32(0), random_values[tid], False)
     if tid < num_joints:
         element_family[tid] = wp.int32(0)
+        packed_priorities[tid] = _pack_constraint_priority(
+            wp.int32(0), random_values[tid], joint_pgs_enabled[tid] != wp.int32(0)
+        )
         if joint_pgs_enabled[tid] == wp.int32(0) and preserve_equality_island_edges == wp.int32(0):
             elements[tid] = _element_data_compact2(wp.int32(-1), wp.int32(-1))
             if track_rigid_topology != wp.int32(0):
@@ -2802,10 +2814,9 @@ def _constraints_to_elements_kernel(
 
     contact_first = contact_get_contact_first(contact_cols, local_cid)
     contact_count = contact_get_contact_count(contact_cols, local_cid)
-    priority_cost = wp.min(contact_count, wp.int32(255))
     pair = pair_source_idx[local_cid]
     priority_rand = _stable_contact_pair_priority(pair_shape_a[pair], pair_shape_b[pair])
-    packed_priorities[tid] = (priority_cost << wp.int32(24)) | priority_rand
+    packed_priorities[tid] = _pack_constraint_priority(contact_count, priority_rand, False)
     side0_use0 = bool(True)
     side0_use1 = bool(True)
     side0_use2 = bool(True)
@@ -3418,11 +3429,23 @@ def _make_singleworld_rigid_contact_dispatch_func(
             else:
                 iterate_func = contact_iterate_no_sleep if has_soft_contact_pd else contact_iterate_no_sleep_no_soft_pd
         elif has_sleeping:
-            iterate_func = contact_iterate_lean if has_soft_contact_pd else contact_iterate_lean_no_soft_pd
+            if packed_contact_headers:
+                iterate_func = (
+                    contact_iterate_lean_mobility if has_soft_contact_pd else contact_iterate_lean_no_soft_pd_mobility
+                )
+            else:
+                iterate_func = contact_iterate_lean if has_soft_contact_pd else contact_iterate_lean_no_soft_pd
         else:
-            iterate_func = (
-                contact_iterate_lean_no_sleep if has_soft_contact_pd else contact_iterate_lean_no_sleep_no_soft_pd
-            )
+            if packed_contact_headers:
+                iterate_func = (
+                    contact_iterate_lean_no_sleep_mobility
+                    if has_soft_contact_pd
+                    else contact_iterate_lean_no_sleep_no_soft_pd_mobility
+                )
+            else:
+                iterate_func = (
+                    contact_iterate_lean_no_sleep if has_soft_contact_pd else contact_iterate_lean_no_sleep_no_soft_pd
+                )
 
         @wp.func
         def _dispatch_rigid_contact(
@@ -3842,11 +3865,12 @@ def _make_singleworld_rigid_direct_color_func(
     direct_regular_colors: bool = False,
     patch_friction: bool = False,
     cooperative_joints: bool = False,
+    joint_row_capacity: int = 6,
     cooperative_contacts: bool = False,
 ):
     """Generated rigid-only color dispatch for single-world kernels.
 
-    ``cooperative_joints`` solves each bilateral joint block with eight lanes
+    ``cooperative_joints`` solves each bilateral joint block with four or eight lanes
     in iterate/relax and runs joint and contact families of a color on
     disjoint lanes. ``cooperative_contacts`` solves eligible regular-color
     contact columns with four lanes in iterate. Both require CUDA warp shuffles.
@@ -3881,7 +3905,10 @@ def _make_singleworld_rigid_direct_color_func(
         bilateral_joint_blocks=bilateral_joint_blocks,
         direct_regular_colors=direct_regular_colors,
     )
-    cooperative_iterate = get_iterate_bilateral_joint_block(True, dense_inverse=EXPERIMENTAL_JOINT_INVERSE)
+    joint_width = get_bilateral_joint_tile_width(joint_row_capacity)
+    cooperative_iterate = get_iterate_bilateral_joint_block(
+        True, dense_inverse=EXPERIMENTAL_JOINT_INVERSE, row_capacity=joint_row_capacity
+    )
 
     @wp.func
     def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
@@ -3936,18 +3963,18 @@ def _make_singleworld_rigid_direct_color_func(
         ):
             count_joints = contact_start - joint_start
             count_contacts = color_end - contact_start
-            allocation = _rigid_family_lane_allocation(count_joints, count_contacts, stride)
+            allocation = _rigid_family_lane_allocation(count_joints, count_contacts, stride, wp.static(joint_width))
             joint_lanes = allocation[0]
             contact_lane_base = allocation[1]
 
         if wp.static(has_joints and not skip_joint_pgs):
             count_joints = contact_start - joint_start
             if wp.static(cooperative_joints and bilateral_joint_blocks and not is_prepare and not is_cached_prepare):
-                # A warp contains four independent eight-lane D6 solves.
+                # A warp contains independent topology-sized joint tiles.
                 # The color is an independent set, so the leader can scatter
                 # its paired impulse while other tiles progress independently.
-                tile_lane = lane % wp.int32(8)
-                base = lane / wp.int32(8)
+                tile_lane = lane % wp.static(joint_width)
+                base = lane / wp.static(joint_width)
                 while base < count_joints:
                     cid = read1d_i32(element_ids_by_color, joint_start + base)
                     if _joint_pgs_enabled(cid, joint_pgs_enabled):
@@ -3978,7 +4005,7 @@ def _make_singleworld_rigid_direct_color_func(
                                 sor_boost,
                                 use_bias,
                             )
-                    base = base + joint_lanes / wp.int32(8)
+                    base = base + joint_lanes / wp.static(joint_width)
             else:
                 base = lane
                 while base < count_joints:
@@ -4080,6 +4107,7 @@ def _make_singleworld_persistent_kernel(
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
     cooperative_joints: bool = False,
+    joint_row_capacity: int = 6,
     cooperative_contacts: bool = False,
 ):
     """Persistent-grid PGS kernel for the requested phase.
@@ -4127,6 +4155,7 @@ def _make_singleworld_persistent_kernel(
         bilateral_joint_blocks=bilateral_joint_blocks,
         patch_friction=patch_friction,
         cooperative_joints=cooperative_joints,
+        joint_row_capacity=joint_row_capacity,
         cooperative_contacts=cooperative_contacts,
     )
     if direct_regular_colors:
@@ -4146,6 +4175,7 @@ def _make_singleworld_persistent_kernel(
             direct_regular_colors=True,
             patch_friction=patch_friction,
             cooperative_joints=cooperative_joints,
+            joint_row_capacity=joint_row_capacity,
             cooperative_contacts=cooperative_contacts,
         )
 
@@ -4537,13 +4567,22 @@ def get_singleworld_kernel(
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
     cooperative_joints: bool = False,
+    joint_row_capacity: int = 6,
     cooperative_contacts: bool = False,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
     factory = _make_singleworld_fused_kernel if fused else _make_singleworld_persistent_kernel
     # The single-block fused tail keeps scalar rows; both paths are bitwise equal.
-    extra = {} if fused else {"cooperative_joints": cooperative_joints, "cooperative_contacts": cooperative_contacts}
+    extra = (
+        {}
+        if fused
+        else {
+            "cooperative_joints": cooperative_joints,
+            "joint_row_capacity": joint_row_capacity,
+            "cooperative_contacts": cooperative_contacts,
+        }
+    )
     return factory(
         **extra,
         phase=phase,

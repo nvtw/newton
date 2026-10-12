@@ -102,6 +102,9 @@ CC_RIGID_DWORDS_PER_CONTACT: int = 12
 #: velocity sweeps. Three slots cache the off-diagonal rigid contact-frame mobility terms reused
 #: by every velocity sweep. The final slot stores the generation-time gap for
 #: current contacts only; it is written by ingest and consumed by prepare.
+#: Canonical eff_t1/eff_t2 contain inverse tangent mobility. Packed rigid solve
+#: rows store tangent mobility directly; their prepare/projector factories
+#: must both select tangent_mobility_layout.
 CC_DERIVED_DWORDS_PER_CONTACT: int = 19
 
 

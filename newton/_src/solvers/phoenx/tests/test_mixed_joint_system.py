@@ -3,12 +3,14 @@
 """Exact mechanisms inside block-PGS joint sweeps (``direct_joint_mask``)."""
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem, MixedJointSystem
+from newton._src.solvers.phoenx.tests.test_contact_coupling import _total_momentum
 from newton._src.solvers.phoenx.tests.test_direct_drive import _cuda_with_graph_capture
 
 _LINK_MASSES = (10.0, 0.05, 10.0)
@@ -97,8 +99,82 @@ def _max_tip_deviation(model, solver, frames=60):
     return float(np.max(np.abs(2.0 - tips)))
 
 
+class TestMixedProjectionOwnership(unittest.TestCase):
+    def test_unbounded_exact_mechanisms_require_global_projection(self):
+        """Contact dispatch must retain exact equality solves without drives."""
+        system = MixedJointSystem.__new__(MixedJointSystem)
+        system.exact = SimpleNamespace(enabled=True, has_bounded_drives=False)
+        system.blocks = SimpleNamespace(enabled=False, has_bounded_drives=False)
+        system._parts = (system.exact,)
+        self.assertTrue(system.requires_global_projection)
+
+        system.exact.enabled = False
+        system.blocks.enabled = True
+        system._parts = (system.blocks,)
+        self.assertFalse(system.requires_global_projection)
+        system.blocks.has_bounded_drives = True
+        self.assertTrue(system.requires_global_projection)
+
+
 @unittest.skipUnless(_cuda_with_graph_capture(), "PhoenX block PGS requires CUDA graph capture")
 class TestMixedJointSystem(unittest.TestCase):
+    def test_exact_only_overflow_contacts_conserve_momentum(self):
+        """An exact mechanism receives the mean of two unequal contact copies."""
+        builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+        masses = (1.0, 2.0, 3.0, 1.0)
+        positions = ((0.0, 0.0, 0.0), (0.999, 0.0, 0.0), (-0.999, 0.0, 0.0), (0.0, 2.0, 0.0))
+        bodies = []
+        for mass, position in zip(masses, positions, strict=True):
+            body = builder.add_body(
+                mass=mass,
+                inertia=wp.mat33(np.eye(3) * 0.2 * mass),
+                xform=wp.transform(wp.vec3(*position), wp.quat_identity()),
+            )
+            builder.add_shape_sphere(
+                body,
+                radius=0.5,
+                cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5, gap=0.001),
+            )
+            bodies.append(body)
+        builder.add_joint_fixed(
+            bodies[0],
+            bodies[3],
+            parent_xform=wp.transform(wp.vec3(0.0, 1.0, 0.0), wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(0.0, -1.0, 0.0), wp.quat_identity()),
+        )
+        model = builder.finalize(device="cuda:0")
+        state = model.state()
+        velocity = state.body_qd.numpy()
+        velocity[:, :3] = ((0.0, 0.2, 0.0), (-0.5, 0.4, 0.0), (0.7, -0.2, 0.0), (0.0, 0.2, 0.0))
+        state.body_qd.assign(velocity)
+        initial = _total_momentum(model, state)
+        pipeline = newton.CollisionPipeline(model, rigid_contact_max=32, contact_matching="sticky")
+        contacts = pipeline.contacts()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            collision_pipeline=pipeline,
+            joint_mode="maximal_pgs",
+            direct_joint_mask=np.ones(model.joint_count, dtype=bool),
+            step_layout="single_world",
+            mass_splitting=True,
+            mass_splitting_overflow_only=True,
+            mass_splitting_batch_size=1,
+            mass_splitting_unrolled=True,
+            max_colored_partitions=0,
+            contact_chunk_size=1,
+            substeps=1,
+            solver_iterations=2,
+            velocity_iterations=1,
+            sor_boost=1.0,
+        )
+        self.assertFalse(solver._direct_equality_system.blocks.enabled)
+        self.assertFalse(solver.world.constraints.bilateral.enabled)
+        pipeline.collide(state, contacts)
+        self.assertGreaterEqual(int(contacts.rigid_contact_count.numpy()[0]), 2)
+        solver.step(state, state, model.control(), contacts, 1.0e-4)
+        self.assertGreaterEqual(int(solver.world._copy_state.count_per_node.numpy()[bodies[0] + 1]), 2)
+        np.testing.assert_allclose(_total_momentum(model, state), initial, atol=3.0e-6, rtol=0)
+
     def test_exact_mechanisms_hold_high_mass_ratio_arms(self):
         """Exact mechanisms keep stiff drives rigid across a 200:1 link mass ratio; local blocks do not."""
         model = _make_model()

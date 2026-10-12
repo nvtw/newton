@@ -24,6 +24,13 @@ EXPERIMENTAL_JOINT_INVERSE = os.environ.get("PHOENX_EXPERIMENTAL_JOINT_INVERSE")
 EXPERIMENTAL_COOPERATIVE_JOINT_INVERSE = os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_JOINT_INVERSE") == "1"
 
 
+def get_bilateral_joint_tile_width(row_capacity: int) -> int:
+    """Fit the topology's block rows into a power-of-two CUDA subgroup."""
+    if row_capacity not in (3, 6):
+        raise ValueError("Bilateral row capacity must be 3 or 6")
+    return 4 if row_capacity == 3 else 8
+
+
 @wp.func
 def _dot_double(a: wp.spatial_vector, b: wp.spatial_vector) -> wp.float64:
     value = wp.float64(0.0)
@@ -114,68 +121,81 @@ def prepare_bilateral_joint_blocks(
         data.valid[cid] = wp.int32(1)
 
 
-@wp.func
-def _backward_bilateral_impulses(
-    data: BilateralJointData,
-    cid: wp.int32,
-    count: wp.int32,
-    structural: wp.int32,
-    solution: Vec6d,
-):
-    lower = data.lower[cid]
-    # Constant bounds let Warp unroll matrix indexing without changing
-    # descending solve rows or ascending subtractions within each row.
-    for reverse in range(6):
-        i = 5 - reverse
-        if i < count:
-            value = solution[i]
-            for j in range(6):
-                if j > i and j < count:
-                    value -= lower[j, i] * solution[j]
-            solution[i] = value
+@functools.cache
+def _get_bilateral_impulse_functions(row_capacity: int):
+    Vector = wp.types.vector(length=row_capacity, dtype=wp.float64)
 
-    return _scatter_bilateral_impulses(data, cid, count, structural, solution)
+    @wp.func
+    def _backward_bilateral_impulses(
+        data: BilateralJointData,
+        cid: wp.int32,
+        count: wp.int32,
+        structural: wp.int32,
+        solution: Vector,
+    ):
+        lower = data.lower[cid]
+        # Constant bounds let Warp unroll matrix indexing without changing
+        # descending solve rows or ascending subtractions within each row.
+        for reverse in range(wp.static(row_capacity)):
+            i = wp.static(row_capacity - 1) - reverse
+            if i < count:
+                value = solution[i]
+                for j in range(wp.static(row_capacity)):
+                    if j > i and j < count:
+                        value -= lower[j, i] * solution[j]
+                solution[i] = value
+
+        return _scatter_bilateral_impulses(data, cid, count, structural, solution)
+
+    @wp.func
+    def _scatter_bilateral_impulses(
+        data: BilateralJointData,
+        cid: wp.int32,
+        count: wp.int32,
+        structural: wp.int32,
+        solution: Vector,
+    ):
+        impulse0 = wp.spatial_vector()
+        impulse1 = wp.spatial_vector()
+        for i in range(wp.static(row_capacity)):
+            if i < count:
+                row = data.row_indices[cid, i]
+                local = data.row_local[row]
+                impulse = wp.float32(solution[i])
+                data.accumulated[row] += impulse
+                impulse0 += impulse * data.wrench0[structural, local]
+                impulse1 += impulse * data.wrench1[structural, local]
+        return impulse0, impulse1
+
+    @wp.func
+    def _solve_bilateral_impulses(
+        data: BilateralJointData,
+        cid: wp.int32,
+        count: wp.int32,
+        structural: wp.int32,
+        rhs: Vector,
+    ):
+        lower = data.lower[cid]
+        diagonal = data.diagonal[cid]
+        solution = Vector()
+        for i in range(wp.static(row_capacity)):
+            if i < count:
+                value = rhs[i]
+                for j in range(wp.static(row_capacity)):
+                    if j < i:
+                        value -= lower[i, j] * solution[j]
+                solution[i] = value
+        for i in range(wp.static(row_capacity)):
+            if i < count:
+                solution[i] /= diagonal[i]
+        return _backward_bilateral_impulses(data, cid, count, structural, solution)
+
+    return _backward_bilateral_impulses, _scatter_bilateral_impulses, _solve_bilateral_impulses
 
 
-@wp.func
-def _scatter_bilateral_impulses(
-    data: BilateralJointData,
-    cid: wp.int32,
-    count: wp.int32,
-    structural: wp.int32,
-    solution: Vec6d,
-):
-    impulse0 = wp.spatial_vector()
-    impulse1 = wp.spatial_vector()
-    for i in range(count):
-        row = data.row_indices[cid, i]
-        local = data.row_local[row]
-        impulse = wp.float32(solution[i])
-        data.accumulated[row] += impulse
-        impulse0 += impulse * data.wrench0[structural, local]
-        impulse1 += impulse * data.wrench1[structural, local]
-    return impulse0, impulse1
-
-
-@wp.func
-def _solve_bilateral_impulses(
-    data: BilateralJointData,
-    cid: wp.int32,
-    count: wp.int32,
-    structural: wp.int32,
-    rhs: Vec6d,
-):
-    lower = data.lower[cid]
-    diagonal = data.diagonal[cid]
-    solution = Vec6d()
-    for i in range(count):
-        value = rhs[i]
-        for j in range(i):
-            value -= lower[i, j] * solution[j]
-        solution[i] = value
-    for i in range(count):
-        solution[i] /= diagonal[i]
-    return _backward_bilateral_impulses(data, cid, count, structural, solution)
+_backward_bilateral_impulses, _scatter_bilateral_impulses, _solve_bilateral_impulses = _get_bilateral_impulse_functions(
+    6
+)
 
 
 @wp.func
@@ -237,6 +257,19 @@ def invert_prepared_bilateral_joint_blocks(constraints: ConstraintContainer):
 """
 )
 def _shuffle_bilateral_rhs(value: wp.float64, source_lane: wp.int32) -> wp.float64: ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    unsigned int mask = (0xffffffffu >> (32 - width)) << (threadIdx.x & (32 - width));
+    return __shfl_sync(mask, value, source_lane, width);
+#else
+    return value;
+#endif
+"""
+)
+def _shuffle_bilateral_rhs_width(value: wp.float64, source_lane: wp.int32, width: wp.int32) -> wp.float64: ...
 
 
 @wp.kernel(enable_backward=False)
@@ -330,8 +363,8 @@ def _prepare_bilateral_joint_blocks_cooperative(
         wrench1 = data.wrench1[structural, local]
         response0 = factor0 * _response(bodies, body0, wrench0)
         response1 = factor1 * _response(bodies, body1, wrench1)
-        data.response0[cid, lane] = response0
-        data.response1[cid, lane] = response1
+        # CUDA rows exchange responses through warp shuffles below. Only
+        # the scalar prepare path uses global response scratch arrays.
     matrix_row = Vec6d()
     for j in range(6):
         other0 = wp.spatial_vector()
@@ -385,11 +418,12 @@ def _prepare_bilateral_joint_blocks_cooperative(
 
 @functools.cache
 def get_iterate_bilateral_joint_block(
-    cooperative: bool = False, *, temporal_springs: bool = False, dense_inverse: bool = False
+    cooperative: bool = False, *, temporal_springs: bool = False, dense_inverse: bool = False, row_capacity: int = 6
 ):
-    """Build scalar or eight-lane D6 block solve with paired impulse scatter.
+    """Build a topology-sized D6 block solve with paired impulse scatter.
 
-    The cooperative variant requires eight participating CUDA lanes per joint.
+    The cooperative variant uses four CUDA lanes for at most three rows,
+    and eight lanes for larger blocks. Row capacity comes from the topology.
     All lanes take the same enabled/count/valid returns, and gather before
     nonleaders exit. Each row retains its original FP64 component and
     subtraction order; backward substitution and impulse scatter stay scalar.
@@ -403,6 +437,10 @@ def get_iterate_bilateral_joint_block(
     one spring solve per temporal substep. Velocity relaxation solves only
     structural rows; applying springs there would advance them beyond the step.
     """
+
+    Vector = wp.types.vector(length=row_capacity, dtype=wp.float64)
+    tile_width = get_bilateral_joint_tile_width(row_capacity)
+    backward, scatter, solve = _get_bilateral_impulse_functions(row_capacity)
 
     @wp.func
     def iterate(
@@ -425,10 +463,11 @@ def get_iterate_bilateral_joint_block(
                 # Topology orders structural rows before springs. The leading
                 # LDL factor solves the structural block without spring forces,
                 # as PhysX conclude1DStep requires for velocity iterations.
-                for i in range(count):
-                    if data.row_dynamic[data.row_indices[cid, i]]:
-                        count = i
-                        break
+                for i in range(wp.static(row_capacity)):
+                    if i < count:
+                        if data.row_dynamic[data.row_indices[cid, i]]:
+                            count = i
+                            break
         if count == 0 or data.valid[cid] == 0:
             return
         structural = data.structural_index[cid]
@@ -439,7 +478,7 @@ def get_iterate_bilateral_joint_block(
         )
         twist0 = wp.spatial_vector(v0, w0)
         twist1 = wp.spatial_vector(v1, w1)
-        rhs = Vec6d()
+        rhs = Vector()
         if wp.static(cooperative):
             rhs_value = wp.float64(0.0)
             if tile_lane < count:
@@ -460,60 +499,64 @@ def get_iterate_bilateral_joint_block(
                 # Each row subtracts solved earlier rows in the same ascending
                 # order as the scalar forward solve. Scaling follows all rows.
                 lower = data.lower[cid]
-                for forward_row in range(count):
-                    solved = _shuffle_bilateral_rhs(rhs_value, forward_row)
-                    if tile_lane > forward_row and tile_lane < count:
-                        rhs_value -= lower[tile_lane, forward_row] * solved
+                for forward_row in range(wp.static(row_capacity)):
+                    if forward_row < count:
+                        solved = _shuffle_bilateral_rhs_width(rhs_value, forward_row, wp.static(tile_width))
+                        if tile_lane > forward_row and tile_lane < count:
+                            rhs_value -= lower[tile_lane, forward_row] * solved
                 if tile_lane < count:
                     diagonal = data.diagonal[cid]
                     rhs_value /= diagonal[tile_lane]
-            rhs = Vec6d()
-            for row_lane in range(count):
-                rhs[row_lane] = _shuffle_bilateral_rhs(rhs_value, row_lane)
+            rhs = Vector()
+            for row_lane in range(wp.static(row_capacity)):
+                if row_lane < count:
+                    rhs[row_lane] = _shuffle_bilateral_rhs_width(rhs_value, row_lane, wp.static(tile_width))
             if wp.static(not dense_inverse):
                 if tile_lane != 0:
                     return
         else:
-            rhs = Vec6d()
-            for i in range(count):
-                row = data.row_indices[cid, i]
-                local = data.row_local[row]
-                residual = _dot_double(data.wrench0[structural, local], twist0)
-                residual += _dot_double(data.wrench1[structural, local], twist1)
-                if data.row_dynamic[row]:
-                    if wp.static(not temporal_springs):
-                        residual += wp.float64(data.accumulated[row]) / wp.float64(data.dynamic_mass[row])
-                    residual -= wp.float64(data.reference[row])
-                elif use_bias:
-                    residual += wp.float64(data.bias[structural, local])
-                rhs[i] = -residual
+            rhs = Vector()
+            for i in range(wp.static(row_capacity)):
+                if i < count:
+                    row = data.row_indices[cid, i]
+                    local = data.row_local[row]
+                    residual = _dot_double(data.wrench0[structural, local], twist0)
+                    residual += _dot_double(data.wrench1[structural, local], twist1)
+                    if data.row_dynamic[row]:
+                        if wp.static(not temporal_springs):
+                            residual += wp.float64(data.accumulated[row]) / wp.float64(data.dynamic_mass[row])
+                        residual -= wp.float64(data.reference[row])
+                    elif use_bias:
+                        residual += wp.float64(data.bias[structural, local])
+                    rhs[i] = -residual
 
         if wp.static(dense_inverse):
             inverse = data.inverse[cid]
-            solution = Vec6d()
+            solution = Vector()
             if wp.static(cooperative):
                 value = wp.float64(0.0)
                 if tile_lane < count:
-                    for j in range(6):
+                    for j in range(wp.static(row_capacity)):
                         if j < count:
                             value += inverse[tile_lane, j] * rhs[j]
-                for row_lane in range(count):
-                    solution[row_lane] = _shuffle_bilateral_rhs(value, row_lane)
+                for row_lane in range(wp.static(row_capacity)):
+                    if row_lane < count:
+                        solution[row_lane] = _shuffle_bilateral_rhs_width(value, row_lane, wp.static(tile_width))
                 if tile_lane != 0:
                     return
             else:
-                for i in range(6):
+                for i in range(wp.static(row_capacity)):
                     if i < count:
                         value = wp.float64(0.0)
-                        for j in range(6):
+                        for j in range(wp.static(row_capacity)):
                             if j < count:
                                 value += inverse[i, j] * rhs[j]
                         solution[i] = value
-            impulse0, impulse1 = _scatter_bilateral_impulses(data, cid, count, structural, solution)
+            impulse0, impulse1 = scatter(data, cid, count, structural, solution)
         elif wp.static(cooperative):
-            impulse0, impulse1 = _backward_bilateral_impulses(data, cid, count, structural, rhs)
+            impulse0, impulse1 = backward(data, cid, count, structural, rhs)
         else:
-            impulse0, impulse1 = _solve_bilateral_impulses(data, cid, count, structural, rhs)
+            impulse0, impulse1 = solve(data, cid, count, structural, rhs)
         v0 += inv_m0 * wp.spatial_top(impulse0)
         v1 += inv_m1 * wp.spatial_top(impulse1)
         w0 += inv_i0 * wp.spatial_bottom(impulse0)

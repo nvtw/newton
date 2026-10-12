@@ -12,6 +12,7 @@ Mat66d = wp.types.matrix(shape=(6, 6), dtype=wp.float64)
 @wp.struct
 class BilateralJointData:
     enabled: wp.int32
+    row_capacity: wp.int32
     row_count: wp.array[wp.int32]
     row_indices: wp.array2d[wp.int32]
     structural_index: wp.array[wp.int32]

@@ -188,6 +188,7 @@ class BlockJointSystem(DirectEqualitySystem):
         self._correction_counts = wp.array(correction_counts, dtype=wp.int32, device=device)
         data = BilateralJointData()
         data.enabled = 1
+        data.row_capacity = 3 if counts.max(initial=0) <= 3 else 6
         data.row_count = wp.array(counts, dtype=wp.int32, device=device)
         data.row_indices = wp.array(indices, dtype=wp.int32, device=device)
         data.structural_index = wp.array(structural, dtype=wp.int32, device=device)
@@ -335,7 +336,7 @@ class MixedJointSystem:
 
     @property
     def requires_global_projection(self) -> bool:
-        return self.has_bounded_drives
+        return self.exact.enabled or self.has_bounded_drives
 
     @property
     def supports_async_factor(self) -> bool:
