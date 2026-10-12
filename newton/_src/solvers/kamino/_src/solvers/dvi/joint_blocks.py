@@ -451,49 +451,71 @@ def _assemble_diagonal(
     matrix[world * num_blocks * 36 + row_diagonal[row]] = p * diag * p + wp.float32(BILATERAL_DIAGONAL_FLOOR)
 
 
-@wp.kernel
-def _assemble_entries(
-    inv_mass: wp.array[wp.float32],
-    inv_inertia: wp.array[wp.mat33f],
-    entry_starts: wp.array[wp.int32],
-    pair_world: wp.array[wp.int32],
-    pair_row: wp.array[wp.int32],
-    pair_col: wp.array[wp.int32],
-    pair_body: wp.array[wp.int32],
-    pair_i: wp.array[wp.int32],
-    pair_j: wp.array[wp.int32],
-    jacobian: wp.array[vec6f],
-    bilateral_vio: wp.array[wp.int32],
-    scale: wp.array[wp.float32],
-    entry_target: wp.array[wp.int32],
-    block_rows: wp.array[wp.int32],
-    block_cols: wp.array[wp.int32],
-    num_blocks: int,
-    matrix: wp.array[wp.float32],
-):
-    entry = wp.tid()
-    first = entry_starts[entry]
-    value = wp.float32(0.0)
-    # Keep body accumulation and normalization in the dense assembly's order.
-    for pair in range(first, entry_starts[entry + 1]):
-        block_i = jacobian[pair_i[pair]]
-        block_j = jacobian[pair_j[pair]]
-        Jv_i = wp.vec3f(block_i[0], block_i[1], block_i[2])
-        Jv_j = wp.vec3f(block_j[0], block_j[1], block_j[2])
-        Jw_i = wp.vec3f(block_i[3], block_i[4], block_i[5])
-        Jw_j = wp.vec3f(block_j[3], block_j[4], block_j[5])
-        body = pair_body[pair]
-        value += inv_mass[body] * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, inv_inertia[body] @ Jw_j)
-    bvio = bilateral_vio[pair_world[first]]
-    value = scale[bvio + pair_row[first]] * value * scale[bvio + pair_col[first]]
-    target = entry_target[entry]
-    matrix[target] = value
-    local = target % (num_blocks * 36)
-    block = local // 36
-    if block_rows[block] == block_cols[block]:
-        # Diagonal tiles need both triangles; off-diagonal tiles have one owner.
-        cell = local % 36
-        matrix[target - cell + (cell % 6) * 6 + cell // 6] = value
+@cache
+def _make_assemble_entries(shared: bool):
+    """Specialize assembly for shared local or original global indices."""
+
+    @wp.kernel
+    def assemble_entries(
+        inv_mass: wp.array[wp.float32],
+        inv_inertia: wp.array[wp.mat33f],
+        entry_starts: wp.array[wp.int32],
+        pair_world: wp.array[wp.int32],
+        body_offsets: wp.array[wp.int32],
+        nzb_offsets: wp.array[wp.int32],
+        pair_row: wp.array[wp.int32],
+        pair_col: wp.array[wp.int32],
+        pair_body: wp.array[wp.int32],
+        pair_i: wp.array[wp.int32],
+        pair_j: wp.array[wp.int32],
+        jacobian: wp.array[vec6f],
+        bilateral_vio: wp.array[wp.int32],
+        scale: wp.array[wp.float32],
+        entry_target: wp.array[wp.int32],
+        block_rows: wp.array[wp.int32],
+        block_cols: wp.array[wp.int32],
+        num_blocks: int,
+        matrix: wp.array[wp.float32],
+    ):
+        world = int(0)
+        entry = int(0)
+        if wp.static(shared):
+            world, entry = wp.tid()
+        else:
+            entry = wp.tid()
+        first = entry_starts[entry]
+        body_offset = int(0)
+        nzb_offset = int(0)
+        if wp.static(shared):
+            body_offset = body_offsets[world]
+            nzb_offset = nzb_offsets[world]
+        else:
+            world = pair_world[first]
+        value = wp.float32(0.0)
+        # Keep body accumulation and normalization in the dense assembly's order.
+        for pair in range(first, entry_starts[entry + 1]):
+            block_i = jacobian[nzb_offset + pair_i[pair]]
+            block_j = jacobian[nzb_offset + pair_j[pair]]
+            Jv_i = wp.vec3f(block_i[0], block_i[1], block_i[2])
+            Jv_j = wp.vec3f(block_j[0], block_j[1], block_j[2])
+            Jw_i = wp.vec3f(block_i[3], block_i[4], block_i[5])
+            Jw_j = wp.vec3f(block_j[3], block_j[4], block_j[5])
+            body = body_offset + pair_body[pair]
+            value += inv_mass[body] * wp.dot(Jv_i, Jv_j) + wp.dot(Jw_i, inv_inertia[body] @ Jw_j)
+        bvio = bilateral_vio[world]
+        value = scale[bvio + pair_row[first]] * value * scale[bvio + pair_col[first]]
+        target = entry_target[entry]
+        if wp.static(shared):
+            target += world * num_blocks * 36
+        matrix[target] = value
+        local = target % (num_blocks * 36)
+        block = local // 36
+        if block_rows[block] == block_cols[block]:
+            # Diagonal tiles need both triangles; off-diagonal tiles have one owner.
+            cell = local % 36
+            matrix[target - cell + (cell % 6) * 6 + cell // 6] = value
+
+    return assemble_entries
 
 
 @wp.kernel
@@ -763,6 +785,49 @@ def _build_levels(metadata: dict) -> dict:
     return levels
 
 
+def _build_assembly_template(path: SparseDVIPath, targets: np.ndarray, num_blocks: int) -> tuple | None:
+    """Share metadata only when every world's complete ordered contribution list agrees."""
+    if not targets.size:
+        return None
+    starts = path.bilateral_entry_starts.numpy()
+    pairs = [array.numpy() for array in path.bilateral_nzb_pairs]
+    owners = pairs[0][starts[:-1]]
+    worlds = path.size.num_worlds
+    if np.any(np.diff(owners) < 0) or owners[0] < 0 or owners[-1] >= worlds:
+        return None
+    bounds = np.searchsorted(owners, np.arange(worlds + 1))
+    body_offsets = path.model.info.bodies_offset.numpy()
+    # Jacobian regions use fixed capacities; dynamic contacts change num_nzb,
+    # not these starts or the joint contributions at the front of each region.
+    nzb_offsets = path.jacobians._J_cts.bsm.nzb_start.numpy()
+    reference = None
+    for world in range(worlds):
+        entry_begin, entry_end = bounds[world : world + 2]
+        if entry_begin == entry_end:
+            return None
+        begin, end = starts[entry_begin], starts[entry_end]
+        boundaries = starts[entry_begin : entry_end + 1] - begin
+        if np.any(np.diff(boundaries) <= 0) or not np.all(pairs[0][begin:end] == world):
+            return None
+        contributions = np.column_stack(
+            [
+                pairs[1][begin:end],
+                pairs[2][begin:end],
+                pairs[3][begin:end] - body_offsets[world],
+                pairs[4][begin:end] - nzb_offsets[world],
+                pairs[5][begin:end] - nzb_offsets[world],
+            ]
+        )
+        candidate = (boundaries, contributions, targets[entry_begin:entry_end] - world * num_blocks * 36)
+        if reference is None:
+            reference = candidate
+        elif any(not np.array_equal(a, b) for a, b in zip(reference, candidate, strict=True)):
+            return None
+    boundaries, contributions, local_targets = reference
+    arrays = (boundaries, *contributions.T, local_targets)
+    return (len(local_targets), *(wp.array(a, dtype=wp.int32, device=path.device) for a in arrays))
+
+
 class JointBlockSolver:
     """Own a fixed block schedule and scratch without modifying the RCM solver.
 
@@ -827,6 +892,9 @@ class JointBlockSolver:
         blocks = lookup[rows // 6, cols // 6]
         offsets = worlds * (self._blocks * 36) + blocks * 36 + (rows % 6) * 6 + cols % 6
         self._entry_target = wp.array(offsets, dtype=wp.int32, device=self._device)
+        self._assembly_template = None
+        if not persistent and self._worlds > 1:
+            self._assembly_template = _build_assembly_template(path, offsets, self._blocks)
         # Numeric factorization has separate storage, so structural zeros and
         # dummy identities need initialization only when the topology is built.
         wp.launch(
@@ -857,18 +925,35 @@ class JointBlockSolver:
             device=self._device,
         )
         if self._entry_target.size:
+            template = self._assembly_template
+            shared = template is not None
+            if shared:
+                count, starts, *pairs, targets = template
+                pair_world = None
+                body_offsets = path.model.info.bodies_offset
+                nzb_offsets = path.jacobians._J_cts.bsm.nzb_start
+                dim = (self._worlds, count)
+            else:
+                starts = path.bilateral_entry_starts
+                pair_world, *pairs = path.bilateral_nzb_pairs
+                targets = self._entry_target
+                body_offsets = nzb_offsets = None
+                dim = self._entry_target.size
             wp.launch(
-                _assemble_entries,
-                dim=self._entry_target.size,
+                _make_assemble_entries(shared),
+                dim=dim,
                 inputs=[
                     path.model.bodies.inv_m_i,
                     path.model_data.bodies.inv_I_i,
-                    path.bilateral_entry_starts,
-                    *path.bilateral_nzb_pairs,
+                    starts,
+                    pair_world,
+                    body_offsets,
+                    nzb_offsets,
+                    *pairs,
                     problem.delassus.constraint_jacobian.nzb_values,
                     self._info.vio,
                     state.bilateral_preconditioner,
-                    self._entry_target,
+                    targets,
                     self._schedule["rows"],
                     self._schedule["cols"],
                     self._blocks,

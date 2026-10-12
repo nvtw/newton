@@ -100,7 +100,10 @@ def _fixture(device, *, topology="chain"):
         jacobians=SimpleNamespace(
             _J_cts=SimpleNamespace(bsm=bsm), joint_constraint_nzb_count=ints([len(joint_coords)] * worlds)
         ),
-        model=SimpleNamespace(joints=joints, info=SimpleNamespace(total_cts_offset=ints([0, origin]))),
+        model=SimpleNamespace(
+            joints=joints,
+            info=SimpleNamespace(total_cts_offset=ints([0, origin]), bodies_offset=ints([0, 2])),
+        ),
         data=SimpleNamespace(bilateral_dim=info.dim, bilateral_operator=operator, state=state),
         bilateral_nzb_pairs=(ints(pair_world), ints(pair_row), ints(pair_col), *[ints(np.zeros(len(pair_world)))] * 3),
         bilateral_entry_starts=ints(np.arange(len(pair_world) + 1)),
@@ -419,8 +422,12 @@ class TestKaminoJointBlocks(unittest.TestCase):
         inv_inertia = wp.empty(4, dtype=wp.mat33f, device=device)
         path.model.bodies = SimpleNamespace(inv_m_i=inv_mass)
         path.model_data = SimpleNamespace(bodies=SimpleNamespace(inv_I_i=inv_inertia))
+        # This fixture contains only joint Jacobians, without reserved contact slots.
+        path.jacobians._J_cts.bsm.nzb_start = ints([0, len(entries) // 2])
         solver = JointBlockSolver.create(path)
         self.assertIsNotNone(solver)
+        self.assertIsNotNone(getattr(solver, "_assembly_template", None))
+        template = solver._assembly_template
         raw_values = rng.normal(0, 0.2, (len(entries), 6)).astype(np.float32)
         reference = path.data.bilateral_operator.mat
         for iteration in range(2):
@@ -450,7 +457,12 @@ class TestKaminoJointBlocks(unittest.TestCase):
             expected_scale = path.data.state.bilateral_preconditioner.numpy()
             path.data.state.bilateral_preconditioner.fill_(-99.0)
             solver.assemble(path, problem)
-            np.testing.assert_allclose(solver._matrix.numpy(), expected, atol=2e-6, rtol=2e-6)
+            shared_result = solver._matrix.numpy()
+            np.testing.assert_allclose(shared_result, expected, atol=2e-6, rtol=2e-6)
+            solver._assembly_template = None
+            solver.assemble(path, problem)
+            np.testing.assert_array_equal(solver._matrix.numpy(), shared_result)
+            solver._assembly_template = template
             for world in range(2):
                 np.testing.assert_allclose(
                     path.data.state.bilateral_preconditioner.numpy()[vio[world] : vio[world] + 16],
@@ -458,6 +470,47 @@ class TestKaminoJointBlocks(unittest.TestCase):
                     atol=1e-7,
                     rtol=1e-7,
                 )
+
+        # Matching joint graphs alone do not establish identical assembly metadata.
+        original_pairs = [array.numpy() for array in path.bilateral_nzb_pairs]
+        original_starts = path.bilateral_entry_starts.numpy()
+        original_bodies = path.model.info.bodies_offset.numpy()
+        original_nzb_starts = path.jacobians._J_cts.bsm.nzb_start.numpy()
+        second_world = np.flatnonzero(original_pairs[0] == 1)
+        double_entry = next(
+            int(start) for start, end in pairwise(original_starts) if end - start == 2 and original_pairs[0][start] == 1
+        )
+        for mismatch in ("pair_order", "body_index", "body_offset", "jacobian_offset"):
+            with self.subTest(mismatch=mismatch):
+                changed = [array.copy() for array in original_pairs]
+                bodies = original_bodies.copy()
+                nzb_starts = original_nzb_starts.copy()
+                if mismatch == "pair_order":
+                    # Reverse two body contributions to the same matrix entry.
+                    for array in changed:
+                        array[double_entry : double_entry + 2] = array[double_entry : double_entry + 2][::-1]
+                elif mismatch == "body_index":
+                    changed[3][second_world[0]] = 2 + (changed[3][second_world[0]] - 2 + 1) % 2
+                elif mismatch == "body_offset":
+                    bodies[1] += 1
+                else:
+                    nzb_starts[1] += 1
+                path.bilateral_nzb_pairs = tuple(ints(array) for array in changed)
+                path.model.info.bodies_offset.assign(bodies)
+                path.jacobians._J_cts.bsm.nzb_start.assign(nzb_starts)
+                fallback = JointBlockSolver.create(path)
+                self.assertIsNotNone(fallback)
+                self.assertIsNone(fallback._assembly_template)
+                np.testing.assert_array_equal(fallback._schedule["order"].numpy(), solver._schedule["order"].numpy())
+                reference.zero_()
+                sparse._assemble_sparse_bilateral_block(path, problem, reference)
+                expected = _packed_matrix(fallback, reference.numpy(), mio, 20)
+                fallback.assemble(path, problem)
+                np.testing.assert_allclose(fallback._matrix.numpy(), expected, atol=2e-6, rtol=2e-6)
+        path.bilateral_nzb_pairs = tuple(ints(array) for array in original_pairs)
+        path.model.info.bodies_offset.assign(original_bodies)
+        path.jacobians._J_cts.bsm.nzb_start.assign(original_nzb_starts)
+        self.assertIsNotNone(JointBlockSolver.create(path)._assembly_template)
 
     def test_reject_nonchordal_topology(self):
         """Reject a four-cycle instead of silently dropping symbolic fill."""
