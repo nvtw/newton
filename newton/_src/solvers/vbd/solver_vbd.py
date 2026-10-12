@@ -1695,6 +1695,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.rigid_soft_contact_use_log_barrier,
                     self.model.particle_radius,
                     contacts.soft_contact_count,
+                    contacts.soft_contact_force_mask,
                     contacts.soft_contact_particle,
                     self.body_particle_contact_penalty_k,
                     self.body_particle_contact_material_kd,
@@ -2595,9 +2596,8 @@ class SolverVBD(SolverBase, CouplingInterface):
         if self._pre_initialization_detection(state_in, dt):
             update_rigid = True
         if contacts is not None:
-            # Collision detection reports every full-surface mesh feature pair. Until force
-            # evaluation and penetration prevention consume them separately, keep only the
-            # canonical pairs. No-op once these contacts have been filtered.
+            # Select force rows without removing geometry needed for penetration prevention.
+            # No-op once this detection's force mask has been computed.
             filter_soft_mesh_contacts(self.model, state_in, contacts)
 
         if control is None:
@@ -3428,6 +3428,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 dim=contacts.soft_contact_max,
                 inputs=[
                     contacts.soft_contact_count,
+                    contacts.soft_contact_force_mask,
                     contacts.soft_contact_shape,
                     model.shape_body,
                     self.body_inv_mass_effective,
@@ -3488,6 +3489,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         inputs=[
                             contacts.soft_contact_indices,
                             contacts.soft_contact_count,
+                            contacts.soft_contact_force_mask,
                             contacts.soft_contact_max,
                             self._particle_contact_head,
                             self._particle_contact_next,
@@ -3881,6 +3883,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                             model.particle_radius,
                             contacts.soft_contact_indices,
                             contacts.soft_contact_count,
+                            contacts.soft_contact_force_mask,
                             contacts.soft_contact_max,
                             self._particle_contact_worker_count,
                             *contact_material_and_body_inputs,
@@ -4037,6 +4040,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     dim=contacts.soft_contact_max,
                     inputs=[
                         contacts.soft_contact_count,
+                        contacts.soft_contact_force_mask,
                         contacts.soft_contact_indices,
                         contacts.soft_contact_shape,
                         contacts.soft_contact_body_pos,
@@ -4315,6 +4319,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 dim=contacts.soft_contact_max,
                 inputs=[
                     contacts.soft_contact_count,
+                    contacts.soft_contact_force_mask,
                     contacts.soft_contact_indices,
                     contacts.soft_contact_shape,
                     contacts.soft_contact_body_pos,
@@ -4488,6 +4493,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 self.body_particle_contact_material_kd,
                 self.body_particle_contact_material_mu,
                 contacts.soft_contact_count,
+                contacts.soft_contact_force_mask,
                 contacts.soft_contact_indices,
                 contacts.soft_contact_shape,
                 contacts.soft_contact_body_pos,

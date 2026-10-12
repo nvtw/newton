@@ -1569,6 +1569,22 @@ Soft contacts are generated automatically when particles are present. They use a
     particles = contacts.soft_contact_particle.numpy()[:n_soft]
     shapes = contacts.soft_contact_shape.numpy()[:n_soft]
 
+With full-surface deformable-rigid mesh contacts enabled, detection retains
+the returned feature pairs, including endpoint contacts. :class:`~solvers.SolverVBD`
+selects force contributions through the experimental
+:attr:`Contacts.soft_contact_force_mask` without changing the contact count,
+row order, or geometry. ``False`` disables a row's force; ``None`` accepts all
+rows. VBD computes this selection once per detection, including during CUDA
+graph replay. Rigid-soft division-plane constraints consume the detected rows
+independently of force selection.
+
+Reverse rigid-vertex/soft-triangle contacts test the soft target's neighbors
+and retain one eligible owner for a shared soft edge or vertex. They remain
+separate force contributions from soft-vertex/rigid-triangle queries.
+Preserving returned rows does not guarantee complete contact topology:
+mesh detection may use SDF-selected rigid edges, and edge penetration-recovery
+records are not ordinary edge-edge quadrature samples.
+
 .. _collision-frequency-in-the-simulation-loop:
 
 Collision frequency in the simulation loop
@@ -1720,6 +1736,8 @@ and is consumed by the solver :meth:`~solvers.SolverBase.step` method for contac
      - Particle id for particle contacts (``-1`` for edge/face records) — the particle-only view of ``soft_contact_indices``, for solvers that consume particle contacts exclusively.
    * - ``soft_contact_barycentric``
      - Barycentric weights of the contact point over the record's soft particles (``(1, 0, 0)`` for a particle contact).
+   * - ``soft_contact_force_mask``
+     - Experimental optional boolean array for solver force selection. ``False`` suppresses a row's force while preserving its geometry; ``None`` accepts all rows. Mesh filtering computes it once per detection, and full-surface coupled entries copy it separately from geometry.
    * - ``soft_contact_shape``
      - Shape indices.
    * - ``soft_contact_body_pos``, ``soft_contact_body_vel``
@@ -1754,6 +1772,8 @@ and is consumed by the solver :meth:`~solvers.SolverBase.step` method for contac
    soft-contact rows (row ``rigid_contact_max + i`` for soft contact ``i``) for
    rigid-soft particle, edge, and face records. With an external rigid solver, VBD's
    rigid rows are zero; consume that solver's forces from its own observables.
+   Soft rows retain their detection indices; rows rejected by
+   :attr:`Contacts.soft_contact_force_mask` report zero force.
    See :ref:`vbd_contact_forces` for the sign and torque convention.
 
 Example usage:

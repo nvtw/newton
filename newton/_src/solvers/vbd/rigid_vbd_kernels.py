@@ -4156,6 +4156,7 @@ def build_body_body_contact_lists(
 @wp.kernel
 def build_body_particle_contact_lists(
     body_particle_contact_count: wp.array[int],
+    soft_contact_force_mask: wp.array[bool],
     body_particle_contact_shape: wp.array[int],
     shape_body: wp.array[wp.int32],
     body_inv_mass_effective: wp.array[float],
@@ -4174,7 +4175,7 @@ def build_body_particle_contact_lists(
     tid = wp.tid()
     # Bucket every soft contact (particle + edge + face; single total count) by its rigid body, so
     # the per-body kernel drives all reactions from one adjacency list.
-    if tid >= body_particle_contact_count[0]:
+    if tid >= body_particle_contact_count[0] or (soft_contact_force_mask and not soft_contact_force_mask[tid]):
         return
 
     shape = body_particle_contact_shape[tid]
@@ -6114,6 +6115,7 @@ def compute_body_particle_contact_forces(
     body_particle_contact_material_mu: wp.array[float],
     # Soft contact data (body-particle)
     body_particle_contact_count: wp.array[int],
+    soft_contact_force_mask: wp.array[bool],
     soft_contact_indices: wp.array[wp.vec3i],
     body_particle_contact_shape: wp.array[int],
     body_particle_contact_body_pos: wp.array[wp.vec3],
@@ -6135,7 +6137,7 @@ def compute_body_particle_contact_forces(
     solver state.
     """
     tid = wp.tid()
-    if tid >= body_particle_contact_count[0]:
+    if tid >= body_particle_contact_count[0] or (soft_contact_force_mask and not soft_contact_force_mask[tid]):
         contact_force[tid] = wp.spatial_vector()
         return
 
@@ -7229,6 +7231,7 @@ update_duals_body_body_contacts = create_update_duals_body_body_contacts()
 @wp.kernel
 def update_duals_body_particle_contacts(
     body_particle_contact_count: wp.array[int],
+    soft_contact_force_mask: wp.array[bool],
     soft_contact_indices: wp.array[wp.vec3i],
     body_particle_contact_shape: wp.array[int],
     body_particle_contact_body_pos: wp.array[wp.vec3],
@@ -7252,7 +7255,7 @@ def update_duals_body_particle_contacts(
     2-3 soft particles -- matching _eval_soft_ef_contact.
     """
     idx = wp.tid()
-    if idx >= body_particle_contact_count[0]:
+    if idx >= body_particle_contact_count[0] or (soft_contact_force_mask and not soft_contact_force_mask[idx]):
         return
 
     corners = soft_contact_indices[idx]
