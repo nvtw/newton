@@ -603,7 +603,7 @@ class TestDVISolver(unittest.TestCase):
 
         def make_model(dimensions):
             return SimpleNamespace(
-                size=SimpleNamespace(sum_of_num_bilateral_joint_cts=sum(dimensions)),
+                size=SimpleNamespace(num_worlds=len(dimensions), sum_of_num_bilateral_joint_cts=sum(dimensions)),
                 info=SimpleNamespace(
                     num_joint_bilateral_cts=wp.array(dimensions, dtype=wp.int32, device=self.device),
                     joint_bilateral_cts_offset=wp.array(
