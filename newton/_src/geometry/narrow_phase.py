@@ -1129,6 +1129,13 @@ def create_narrow_phase_kernel_gjk_mpr(
                 shape_data_b.center = 0.5 * (shape_collision_aabb_lower[shape_b] + shape_collision_aabb_upper[shape_b])
             data_provider = provider_type()
             data_provider.shape_support_data = shape_support_data
+            if type_a != GeoType.PLANE and type_b != GeoType.PLANE:
+                shape_data_a.bounds_half = 0.5 * (
+                    shape_collision_aabb_upper[shape_a] - shape_collision_aabb_lower[shape_a]
+                )
+                shape_data_b.bounds_half = 0.5 * (
+                    shape_collision_aabb_upper[shape_b] - shape_collision_aabb_lower[shape_b]
+                )
             if wp.static(accelerated_support):
                 data_provider.support_lut = support_lut
                 data_provider.support_vertex_offsets = support_vertex_offsets
@@ -1349,6 +1356,9 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                     wp.vec3(0.0),
                 )
                 needs_certificate = wp.static(solve_mpr.needs_certificate)(query.geom_a, query.geom_b)
+                needs_certificate = needs_certificate or (
+                    query.type_a != GeoType.PLANE and query.type_b != GeoType.PLANE
+                )
                 if collision and (not witnesses_valid or needs_certificate):
                     # Queue confirmed overlaps from the back of the same array,
                     # keeping both passes compact without another work buffer.
@@ -1445,6 +1455,13 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                 if valid:
                     provider = provider_type()
                     provider.shape_support_data = shape_support_data
+                    if query.type_a != GeoType.PLANE and query.type_b != GeoType.PLANE:
+                        query.geom_a.bounds_half = 0.5 * (
+                            shape_collision_aabb_upper[query.shape_a] - shape_collision_aabb_lower[query.shape_a]
+                        )
+                        query.geom_b.bounds_half = 0.5 * (
+                            shape_collision_aabb_upper[query.shape_b] - shape_collision_aabb_lower[query.shape_b]
+                        )
                     if wp.static(accelerated_support):
                         provider.support_lut = support_lut
                         provider.support_vertex_offsets = support_vertex_offsets

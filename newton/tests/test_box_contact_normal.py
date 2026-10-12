@@ -232,5 +232,121 @@ add_function_test(
 )
 
 
+def test_convex_contact_near_plate_end(test, device, *, split=False):
+    """Keep shallow convex contacts on the nearby plate face in either shape order."""
+    builder = newton.ModelBuilder()
+    cases = []
+    frame_rotations = (wp.quat_identity(), wp.quat_from_axis_angle(wp.normalize(wp.vec3(1.0, 2.0, 3.0)), 0.7))
+    for plate, partner, swap, rotation, thickness, distance, penetration in product(
+        ("box", "hull"),
+        ("hull", "cylinder", "cone", "ellipsoid"),
+        (False, True),
+        frame_rotations,
+        (0.01, 0.6),
+        (0.04, 0.6),
+        (0.002, 0.004),
+    ):
+        builder.begin_world()
+        frame = wp.transform(wp.vec3(0.0), rotation)
+        plate_pose = frame * wp.transform(wp.vec3(0.0, 0.0, -thickness / 2), wp.quat_identity())
+        body = builder.add_body(
+            xform=frame * wp.transform(wp.vec3(0.6 - distance, 0.0, 0.005 - penetration), wp.quat_identity())
+        )
+        plate_shape = -1
+        for is_plate in (False, True) if swap else (True, False):
+            if is_plate:
+                if plate == "box":
+                    plate_shape = builder.add_shape_box(-1, xform=plate_pose, hx=0.6, hy=0.15, hz=thickness / 2)
+                else:
+                    plate_shape = builder.add_shape_convex_hull(
+                        -1,
+                        xform=plate_pose,
+                        mesh=newton.Mesh.create_box(0.6, 0.15, thickness / 2, duplicate_vertices=False),
+                    )
+            elif partner == "hull":
+                builder.add_shape_convex_hull(
+                    body, mesh=newton.Mesh.create_box(0.025, 0.015, 0.005, duplicate_vertices=False)
+                )
+            elif partner == "cylinder":
+                builder.add_shape_cylinder(
+                    body,
+                    xform=wp.transform(wp.vec3(0.0), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.pi / 2)),
+                    radius=0.005,
+                    half_height=0.025,
+                )
+            elif partner == "cone":
+                builder.add_shape_cone(body, radius=0.02, half_height=0.005)
+            else:
+                builder.add_shape_ellipsoid(body, rx=0.025, ry=0.015, rz=0.005)
+        builder.end_world()
+        cases.append((plate_shape, body, rotation, penetration, (plate, partner, swap, thickness, distance)))
+    model = builder.finalize(device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="explicit", deterministic=True)
+    test.assertEqual(pipeline.narrow_phase.split_gjk_mpr, split)
+    state = model.state()
+    contacts = pipeline.contacts()
+    pipeline.collide(state, contacts)
+    count = int(contacts.rigid_contact_count.numpy()[0])
+    shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+    shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+    normals = contacts.rigid_contact_normal.numpy()[:count]
+    point0 = contacts.rigid_contact_point0.numpy()[:count]
+    point1 = contacts.rigid_contact_point1.numpy()[:count]
+    poses = state.body_q.numpy()
+    for plate_shape, body, rotation, penetration, description in cases:
+        with test.subTest(case=description, rotation=rotation, penetration=penetration):
+            mask = (shape0 == plate_shape) | (shape1 == plate_shape)
+            test.assertTrue(np.any(mask))
+            signs = np.where(shape0[mask] == plate_shape, 1.0, -1.0)
+            upward = np.asarray(wp.quat_rotate(rotation, wp.vec3(0.0, 0.0, 1.0)))
+            np.testing.assert_allclose(normals[mask], signs[:, None] * upward, atol=1.0e-3)
+            partner0 = shape0[mask] != plate_shape
+            world0, world1 = point0[mask].copy(), point1[mask].copy()
+            pose = wp.transform(wp.vec3(*poses[body, :3]), wp.quat(*poses[body, 3:]))
+            for i in range(len(world0)):
+                if partner0[i]:
+                    world0[i] = np.asarray(wp.transform_point(pose, wp.vec3(world0[i])))
+                else:
+                    world1[i] = np.asarray(wp.transform_point(pose, wp.vec3(world1[i])))
+            depths = np.sum((world0 - world1) * normals[mask], axis=1)
+            np.testing.assert_allclose(depths, penetration, atol=2.0e-5)
+    if device.is_cuda:
+        with wp.ScopedCapture(device=device) as capture:
+            pipeline.collide(state, contacts)
+        for lift in (0.3, 0.0):
+            lifted = poses.copy()
+            for _plate_shape, body, rotation, _penetration, _description in cases:
+                lifted[body, :3] += lift * np.asarray(wp.quat_rotate(rotation, wp.vec3(0.0, 0.0, 1.0)))
+            state.body_q.assign(lifted)
+            wp.capture_launch(capture.graph)
+            test.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 0 if lift else count)
+            if not lift:
+                np.testing.assert_allclose(contacts.rigid_contact_normal.numpy()[:count], normals, atol=1.0e-5)
+
+
+add_function_test(
+    TestBoxContactNormal,
+    "test_convex_contact_near_plate_end",
+    test_convex_contact_near_plate_end,
+    devices=get_test_devices(),
+)
+
+
+def test_convex_contact_near_plate_end_split(test, device):
+    """Check plate-end contacts through the split CUDA kernels."""
+    if not device.is_cuda:
+        test.skipTest("Split collision kernels run only on CUDA")
+    with patch("newton._src.sim.collide._SPLIT_GJK_MPR_FULL_PAIR_COUNT_THRESHOLD", 0):
+        test_convex_contact_near_plate_end(test, device, split=True)
+
+
+add_function_test(
+    TestBoxContactNormal,
+    "test_convex_contact_near_plate_end_split",
+    test_convex_contact_near_plate_end_split,
+    devices=get_test_devices(),
+)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
