@@ -5324,13 +5324,15 @@ def test_particle_only_mesh_sdf_emits_full_surface_contacts(test, device):
                 # Exercise retained internal provisioning; ShapeConfig rejects mesh resolution settings.
                 builder.shape_sdf_max_resolution[shape] = 32
             builder.add_cloth_grid(
-                pos=wp.vec3(-0.2, -0.2, 1.03),
+                # Cover rigid vertices and edges to exercise exact face-vertex and
+                # edge-edge contacts as well as vertex-face contacts.
+                pos=wp.vec3(-0.6, -0.6, 1.03),
                 rot=wp.quat_identity(),
                 vel=wp.vec3(0.0),
                 dim_x=2,
                 dim_y=2,
-                cell_x=0.2,
-                cell_y=0.2,
+                cell_x=0.6,
+                cell_y=0.6,
                 mass=0.1,
             )
             model = builder.finalize(device=device)
@@ -5383,13 +5385,14 @@ def test_particle_only_usd_mesh_sdf_near_surface_contacts(test, device):
             test.assertEqual(builder.shape_sdf_max_resolution[shape], resolution)
             builder.shape_flags[shape] &= ~ShapeFlags.COLLIDE_SHAPES
             builder.add_cloth_grid(
-                pos=wp.vec3(-0.2, -0.2, 0.9995),
+                # Rigid vertices must overlap the cloth for exact face-vertex contacts.
+                pos=wp.vec3(-0.6, -0.6, 0.9995),
                 rot=wp.quat_identity(),
                 vel=wp.vec3(0.0),
                 dim_x=2,
                 dim_y=2,
-                cell_x=0.2,
-                cell_y=0.2,
+                cell_x=0.6,
+                cell_y=0.6,
                 mass=0.1,
             )
             model = builder.finalize(device=device)
@@ -5406,7 +5409,12 @@ def test_particle_only_usd_mesh_sdf_near_surface_contacts(test, device):
             normals = contacts.soft_contact_normal.numpy()[:count][full_surface]
             np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1.0, atol=1.0e-5)
             positions = contacts.soft_contact_body_pos.numpy()[:count][full_surface]
-            np.testing.assert_allclose(positions[:, 2], 1.0, atol=5.0e-5)
+            # Crossing soft edges can also contact the box's side faces below its top.
+            half_extents = np.array([0.5, 0.5, 1.0])
+            np.testing.assert_allclose(np.max(np.abs(positions) / half_extents, axis=1), 1.0, atol=5.0e-5)
+            np.testing.assert_allclose(
+                contacts.soft_contact_body_pos.numpy()[:count][indices[:, 2] >= 0, 2], 1.0, atol=5.0e-5
+            )
 
 
 def test_particle_only_convex_sdf_preserves_voxel_size(test, device):
