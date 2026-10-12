@@ -1351,3 +1351,50 @@ These later results supersede the early FP16/contact-row prioritization:
   sweeps also passed, but reached only 58.56 and 49.26 FPS. The 64-world pile
   was still rearranging after 1,200 frames, so its moving-state velocities are
   retained as robustness data rather than mislabeled as settled jitter.
+
+## Ragdoll iteration and contact coverage investigation (2026-10-12)
+
+Full 32,000-ragdoll runs on `47bdd8fed` keep maximal-coordinate D6 joints,
+eight substeps, one velocity iteration, sleeping off, and identical geometry.
+OptiX/DLSS rendering and quality monitoring are included in FPS, measured over
+frames 301--600. Quality peaks cover all 600 frames. Each run starts below
+10% GPU utilization. These are separate collapse trajectories, so extrema
+need not vary monotonically with the sweep count.
+
+| D6 solve | Sweeps | Rendered FPS | Final joint gap (mm) | Peak floor depth (mm) | Final floor depth (mm) | Final boxes deeper than 5 mm |
+|---|---:|---:|---:|---:|---:|---:|
+| Exact mechanism | 4 | 30.691 | 0.136 | 122.824 | 25.887 | 4 |
+| Exact mechanism | 3 | 33.296 | 0.103 | 195.081 | 49.302 | 25 |
+| Exact mechanism | 2 | 36.051 | 0.192 | 155.573 | 83.071 | 99 |
+| Colored local blocks | 4 | 26.909 | 20.728 | 166.506 | Not recorded | Not recorded |
+
+Neither lower sweep count preserves contact quality. Keep four as the default;
+the four-sweep reference itself still has unacceptable floor transients.
+Small final joint errors and finite state are insufficient stability gates.
+The exact path projects joints after every complete contact-color sweep and
+again after the required bias-free velocity sweep.
+
+The six-body figure has mass ratio 3.033:1. An independent joint-only dense
+reference has Schur condition number 9.451 and block-Gauss--Seidel spectral
+radius 0.255. CUDA color-boundary diagnostics find residuals below
+`6e-8 m/s` immediately after each local joint solve for one impacted ragdoll,
+and below `1.2e-7 m/s` for eight interacting ragdolls. Subsequent mixed colors
+reintroduce residuals in other joints. No local D6 block defect is established
+by these cases; they do not rule out a large-scene defect.
+
+A frozen box--plane witness reproduction exposes a coverage issue independent
+of iteration convergence. At a 5-degree tilt and 1 mm initial clearance, the
+narrow phase retains two supporting vertices. After a 10-degree tilt reversal
+and 20 mm COM descent, both retained vertices are 22.835 mm above the plane,
+while an independent eight-corner oracle finds 19 mm penetration. Fresh narrow
+phase correctly finds the new supports. Retaining future witnesses must also
+preserve them through compaction and avoid capping positive speculative
+`gap/dt`, which would cause distant witnesses to constrain closing speed too
+early. A complete retained-witness fix is under investigation.
+
+A reusable fused small-mechanism solve/accumulate/apply prototype passes mixed
+D6 CUDA bitwise parity, including drives, shared static endpoints and larger
+mechanism fallback. The full rendered run also matches the accepted final
+state hash and quality peaks, but reaches only 29.941 FPS versus 30.691.
+Its fused kernel costs 2.976 ms/frame (48 calls, 55 registers/thread, zero
+reported local-memory bytes). The prototype is removed from production.
