@@ -346,16 +346,17 @@ then OptiX path tracing and DLSS continue on the render stream while the next ph
 step runs. Enabling debug contact arrows intentionally synchronizes the deferred step
 because contact buffers remain owned by the solver.
 
-The renderer is maintained separately in the ``otk-pyoptix`` repository. Build its
-native PyOptiX binding and install the Warp viewer addon into Newton's environment:
+The renderer is maintained separately in the ``warp-optix`` repository. Build and
+install it with its viewer extras into Newton's environment:
 
 .. code-block:: bash
 
-    git clone https://github.com/NVIDIA/otk-pyoptix.git
-    uv pip install ./otk-pyoptix
-    uv pip install -e './otk-pyoptix/warp_optix[pathtracing,ui,recording]'
+    git clone --branch develop https://github.com/NVIDIA/warp-optix.git
+    uv pip install './warp-optix[pathtracing,ui]'
 
-The PyOptiX build downloads the supported OptiX and DLSS SDK components automatically.
+The build downloads the supported OptiX and DLSS SDK components automatically and
+installs the standard PyOptiX dependency. Replace older editable PyOptiX builds
+that bundle DLSS bindings with the dependency pinned by ``warp-optix``.
 A CUDA-capable NVIDIA RTX GPU and compatible display driver are required. When DLSS Ray
 Reconstruction is unavailable, the viewer continues at full render resolution without it.
 
