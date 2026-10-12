@@ -462,6 +462,33 @@ class _NarrowPhaseSetupMixin:
 class TestNarrowPhase(_NarrowPhaseSetupMixin, unittest.TestCase):
     """Test NarrowPhase collision detection API with various primitive pairs."""
 
+    def test_primitive_pairs_without_local_bounds(self):
+        """Allow primitive custom callers to omit optional local bounds."""
+        devices = ["cpu"]
+        if _cuda_available:
+            devices.append("cuda:0")
+        geoms = [
+            {"type": GeoType.BOX, "data": ([1.0, 1.0, 1.0], 0.0)},
+            {
+                "type": GeoType.CYLINDER,
+                "data": ([0.5, 0.5, 0.0], 0.0),
+                "transform": ([0.0, 0.0, 1.25], [0.0, 0.0, 0.0, 1.0]),
+            },
+        ]
+        for device in devices:
+            for split in (False, True) if device != "cpu" else (False,):
+                with self.subTest(device=device, split=split), wp.ScopedDevice(device):
+                    self.narrow_phase = NarrowPhase(max_candidate_pairs=1, device=device, split_gjk_mpr=split)
+                    arrays = list(self._create_geometry_arrays(geoms))
+                    arrays[8] = wp.empty(0, dtype=wp.vec3)
+                    arrays[9] = wp.empty(0, dtype=wp.vec3)
+                    with mock.patch.object(self, "_create_geometry_arrays", return_value=arrays):
+                        count, pairs, _points, normals, depths, _tangents = self._run_narrow_phase(geoms, [(0, 1)])
+                    self.assertGreater(count, 0)
+                    signs = np.where(pairs[:, 0] == 0, 1.0, -1.0)
+                    np.testing.assert_allclose(normals, signs[:, None] * np.array([0.0, 0.0, 1.0]), atol=1.0e-3)
+                    np.testing.assert_allclose(depths, -0.25, atol=1.0e-3)
+
     def test_launch_forwards_convex_support_metadata(self):
         """Forward cooked convex support metadata through the standard launch path."""
         self.narrow_phase = NarrowPhase(

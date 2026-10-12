@@ -1129,7 +1129,7 @@ def create_narrow_phase_kernel_gjk_mpr(
                 shape_data_b.center = 0.5 * (shape_collision_aabb_lower[shape_b] + shape_collision_aabb_upper[shape_b])
             data_provider = provider_type()
             data_provider.shape_support_data = shape_support_data
-            if type_a != GeoType.PLANE and type_b != GeoType.PLANE:
+            if type_a != GeoType.PLANE and type_b != GeoType.PLANE and shape_collision_aabb_lower.shape[0] > 0:
                 shape_data_a.bounds_half = 0.5 * (
                     shape_collision_aabb_upper[shape_a] - shape_collision_aabb_lower[shape_a]
                 )
@@ -1357,7 +1357,9 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                 )
                 needs_certificate = wp.static(solve_mpr.needs_certificate)(query.geom_a, query.geom_b)
                 needs_certificate = needs_certificate or (
-                    query.type_a != GeoType.PLANE and query.type_b != GeoType.PLANE
+                    query.type_a != GeoType.PLANE
+                    and query.type_b != GeoType.PLANE
+                    and shape_collision_aabb_lower.shape[0] > 0
                 )
                 if collision and (not witnesses_valid or needs_certificate):
                     # Queue confirmed overlaps from the back of the same array,
@@ -1455,7 +1457,11 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                 if valid:
                     provider = provider_type()
                     provider.shape_support_data = shape_support_data
-                    if query.type_a != GeoType.PLANE and query.type_b != GeoType.PLANE:
+                    if (
+                        query.type_a != GeoType.PLANE
+                        and query.type_b != GeoType.PLANE
+                        and shape_collision_aabb_lower.shape[0] > 0
+                    ):
                         query.geom_a.bounds_half = 0.5 * (
                             shape_collision_aabb_upper[query.shape_a] - shape_collision_aabb_lower[query.shape_a]
                         )
