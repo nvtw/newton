@@ -282,19 +282,36 @@ def _factor_persistent(
             block = tasks[task]
             value = vec6f(0.0)
             result = vec6f(0.0)
-            if lane < 6:
-                for col in range(6):
-                    value[col] = matrix[origin + block * 36 + lane * 6 + col]
-                for update in range(updates[block], updates[block + 1]):
-                    left = lefts[update]
-                    right = rights[update]
-                    for col in range(6):
-                        accum = wp.float32(0.0)
-                        for k in range(6):
-                            accum += (
-                                factors[origin + left * 36 + lane * 6 + k] * factors[origin + right * 36 + col * 6 + k]
-                            )
-                        value[col] -= accum
+            # Distribute all 36 entries across the warp during block updates.
+            entry0 = matrix[origin + block * 36 + lane]
+            entry1 = wp.float32(0.0)
+            if lane < 4:
+                entry1 = matrix[origin + block * 36 + lane + 32]
+            for update in range(updates[block], updates[block + 1]):
+                left = lefts[update]
+                right = rights[update]
+                accum0 = wp.float32(0.0)
+                for k in range(6):
+                    accum0 += (
+                        factors[origin + left * 36 + (lane // 6) * 6 + k]
+                        * factors[origin + right * 36 + (lane % 6) * 6 + k]
+                    )
+                entry0 -= accum0
+                if lane < 4:
+                    accum1 = wp.float32(0.0)
+                    for k in range(6):
+                        accum1 += (
+                            factors[origin + left * 36 + ((lane + 32) // 6) * 6 + k]
+                            * factors[origin + right * 36 + ((lane + 32) % 6) * 6 + k]
+                        )
+                    entry1 -= accum1
+            # Gather rows for the six-lane triangular solve. Both shuffles
+            # require participation from every lane, including unused rows.
+            for col in range(6):
+                source = wp.min(lane, 5) * 6 + col
+                first = _shuffle_lane_32(entry0, source % 32)
+                tail = _shuffle_lane_32(entry1, source % 32)
+                value[col] = wp.where(source < 32, first, tail)
             if rows[block] == cols[block]:
                 for pivot in range(6):
                     accum = wp.float32(0.0)
