@@ -14,6 +14,7 @@ import warp as wp
 from ..core.types import override
 from ..geometry.types import GeoType
 from .camera import Camera
+from .picking import Picking
 from .viewer import _DEFAULT_LAYER_ID, Layer, ViewerBase
 from .viewer_gui import ViewerGui
 
@@ -28,8 +29,8 @@ except ImportError as error:
         def __init__(self, *args, **kwargs):
             del args, kwargs
             raise ImportError(
-                "ViewerOptix requires the warp_optix package from otk-pyoptix. "
-                "Install otk-pyoptix and its path-tracing extras before creating the viewer."
+                "ViewerOptix requires warp-optix with its pathtracing extras. "
+                "Install warp-optix before creating the viewer."
             ) from _WARP_OPTIX_IMPORT_ERROR
 
         def end_frame(self):
@@ -116,7 +117,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     to Newton's common viewer interface. It supports Newton model/state logging,
     camera navigation, body picking, an ImGui overlay, and headless frame
     extraction. Rendering and DLSS are provided by the separately installed
-    ``otk-pyoptix`` project.
+    ``warp-optix`` project.
     """
 
     _DEFAULT_COLOR_PALETTE = (
@@ -179,7 +180,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             headless: Render without opening a window.
             paused: Start with simulation stepping paused.
             fps: Standalone presentation frame rate. Use ``0`` for uncapped
-                rendering. Recording has its own frame-rate setting.
+                rendering.
             num_frames: Maximum number of rendered frames, or ``None`` to run
                 until the window closes.
             enable_dlss_rr: Enable DLSS Ray Reconstruction when available.
@@ -222,8 +223,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         """
         if _WARP_OPTIX_IMPORT_ERROR is not None:
             raise ImportError(
-                "ViewerOptix requires the warp_optix package from otk-pyoptix. "
-                "Install otk-pyoptix and its path-tracing extras before creating the viewer."
+                "ViewerOptix requires warp-optix with its pathtracing extras. "
+                "Install warp-optix before creating the viewer."
             ) from _WARP_OPTIX_IMPORT_ERROR
 
         self.gui: ViewerGui | None = None
@@ -276,6 +277,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._overlay_depth_pbo = None
         self._overlay_depth_cuda = None
         self._overlay_depth_size = (0, 0)
+        kwargs.setdefault("picking_factory", Picking)
         super().__init__(
             width=width,
             height=height,
@@ -1264,7 +1266,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             self._copy_backend_camera()
 
     def on_key_press(self, symbol: int, modifiers: int) -> None:
-        """Handle common ViewerGL keys and OptiX debug/recording keys."""
+        """Handle common ViewerGL keys and OptiX debug keys."""
         if self.gui is not None:
             if self.gui.should_ignore_keyboard_input():
                 return

@@ -469,7 +469,7 @@ class TestViewerOptix(unittest.TestCase):
     @unittest.skipIf(warp_optix is not None, "Exercise the missing-dependency path only without warp_optix")
     def test_missing_backend_error(self):
         """Report how to install the optional backend when it is unavailable."""
-        with self.assertRaisesRegex(ImportError, "otk-pyoptix"):
+        with self.assertRaisesRegex(ImportError, "warp-optix"):
             ViewerOptix(headless=True)
 
     @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
