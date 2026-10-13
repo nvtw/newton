@@ -588,7 +588,7 @@ def remove_zero_length_edges(loop: wp.array[wp.vec2], loop_count: int, eps: floa
     Args:
         loop: Array of loop vertices (2D).
         loop_count: Number of vertices in the loop.
-        eps: Epsilon threshold for considering edges as zero-length.
+        eps: Distance threshold for considering edges as zero-length [m].
 
     Returns:
         New number of vertices in the cleaned loop.
@@ -600,14 +600,14 @@ def remove_zero_length_edges(loop: wp.array[wp.vec2], loop_count: int, eps: floa
 
     for read_idx in range(1, loop_count):
         diff = loop[read_idx] - loop[write_idx]
-        if wp.length_sq(diff) > eps:
+        if wp.length_sq(diff) > eps * eps:
             write_idx += 1
             loop[write_idx] = loop[read_idx]
 
     # Handle loop closure
     if write_idx > 0:
         diff = loop[write_idx] - loop[0]
-        if wp.length_sq(diff) < eps:
+        if wp.length_sq(diff) < eps * eps:
             new_loop_count = write_idx
         else:
             new_loop_count = write_idx + 1
@@ -629,7 +629,7 @@ def add_avoid_duplicates_vec2(arr: wp.array[wp.vec2], arr_count: int, vec: wp.ve
         arr: Array to add to.
         arr_count: Current number of elements in the array.
         vec: Vector to add.
-        eps: Epsilon threshold for duplicate detection.
+        eps: Distance threshold for duplicate detection [m].
 
     Returns:
         Tuple of (new_count, was_added) where was_added is True if point was added
@@ -637,11 +637,11 @@ def add_avoid_duplicates_vec2(arr: wp.array[wp.vec2], arr_count: int, vec: wp.ve
     # Check for duplicates. If the new vertex 'vec' is too close to the first or last existing vertex, ignore it.
     # This is a simple reduction step to avoid redundant points.
     if arr_count > 0:
-        if wp.length_sq(arr[0] - vec) < eps:
+        if wp.length_sq(arr[0] - vec) < eps * eps:
             return arr_count, False
 
     if arr_count > 1:
-        if wp.length_sq(arr[arr_count - 1] - vec) < eps:
+        if wp.length_sq(arr[arr_count - 1] - vec) < eps * eps:
             return arr_count, False
 
     arr[arr_count] = vec

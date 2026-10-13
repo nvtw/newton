@@ -348,5 +348,83 @@ add_function_test(
 )
 
 
+def test_small_convex_contact_footprint(test, device, *, split=False):
+    """Preserve both sides of submillimeter contact faces in either shape order."""
+    for scale, cylinder, swap in product((1.0, 10.0), (False, True), (False, True)):
+        with test.subTest(scale=scale, cylinder=cylinder, swap=swap):
+            builder = newton.ModelBuilder()
+            phase = wp.pi / 64 if cylinder else 0.0
+            rotation = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -wp.pi / 2)
+            rotation *= wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), phase)
+            radius = 0.00725 * scale
+            half_width = radius * np.sin(phase) if cylinder else 0.0004 * scale
+            half_height = 0.024375 * scale
+            bottom = radius * np.cos(phase) if cylinder else radius
+            pose = wp.transform(wp.vec3(0.585, -0.22, 0.23 + bottom - 1.0e-5 * scale), rotation)
+            body = builder.add_body(xform=pose)
+            mesh = (
+                newton.Mesh.create_cylinder(radius, half_height, up_axis=newton.Axis.Z, segments=64)
+                if cylinder
+                else newton.Mesh.create_box(half_width, radius, half_height, duplicate_vertices=False)
+            )
+            for is_table in (False, True) if swap else (True, False):
+                if is_table:
+                    table_shape = builder.add_shape_box(
+                        -1, xform=wp.transform(wp.vec3(0.585, 0.0, 0.215)), hx=0.3675, hy=0.61, hz=0.015
+                    )
+                else:
+                    builder.add_shape_convex_hull(body, mesh=mesh)
+            model = builder.finalize(device)
+            pipeline = newton.CollisionPipeline(model)
+            test.assertEqual(pipeline.narrow_phase.split_gjk_mpr, split)
+            contacts = pipeline.contacts()
+            pipeline.collide(model.state(), contacts)
+            count = int(contacts.rigid_contact_count.numpy()[0])
+            test.assertGreaterEqual(count, 4)
+            shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+            point0 = contacts.rigid_contact_point0.numpy()[:count]
+            point1 = contacts.rigid_contact_point1.numpy()[:count]
+            object_points = np.where((shape0 == table_shape)[:, None], point1, point0)
+            world_points = np.array([wp.transform_point(pose, wp.vec3(p)) for p in object_points])
+            # The complete footprint must bracket the center of mass on both axes.
+            np.testing.assert_allclose(
+                [world_points[:, 0].min(), world_points[:, 0].max()],
+                [0.585 - half_width, 0.585 + half_width],
+                atol=2.0e-6 * scale,
+                rtol=0.0,
+            )
+            np.testing.assert_allclose(
+                [world_points[:, 1].min(), world_points[:, 1].max()],
+                [-0.22 - half_height, -0.22 + half_height],
+                atol=2.0e-6 * scale,
+                rtol=0.0,
+            )
+            np.testing.assert_allclose(world_points[:, 2], 0.23 - 1.0e-5 * scale, atol=2.0e-6 * scale)
+
+
+add_function_test(
+    TestBoxContactNormal,
+    "test_small_convex_contact_footprint",
+    test_small_convex_contact_footprint,
+    devices=get_test_devices(),
+)
+
+
+def test_small_convex_contact_footprint_split(test, device):
+    """Preserve small contact faces through the split CUDA kernels."""
+    if not device.is_cuda:
+        test.skipTest("Split collision kernels run only on CUDA")
+    with patch("newton._src.sim.collide._SPLIT_GJK_MPR_LEAN_PAIR_COUNT_THRESHOLD", 0):
+        test_small_convex_contact_footprint(test, device, split=True)
+
+
+add_function_test(
+    TestBoxContactNormal,
+    "test_small_convex_contact_footprint_split",
+    test_small_convex_contact_footprint_split,
+    devices=get_test_devices(),
+)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
