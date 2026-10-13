@@ -34,7 +34,6 @@ def make_colored_solver(
         colored_contact_headers=True,
         colored_contact_rows=True,
         joint_mode="maximal_pgs",
-        max_thread_blocks=8 * device.sm_count if device.is_cuda else None,
         sleeping_velocity_threshold=0.0,
         direct_joint_mask=direct_joint_mask,
         direct_joint_projection_passes=direct_joint_projection_passes,
