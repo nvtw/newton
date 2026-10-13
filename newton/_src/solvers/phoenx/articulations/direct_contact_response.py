@@ -39,6 +39,9 @@ class DirectContactResponseData:
     body_mechanism: wp.array[wp.int32]
     body_constraint_mechanism: wp.array[wp.int32]
     body_lane: wp.array[wp.int32]
+    body_basis_item: wp.array[wp.int32]
+    body_basis_task: wp.array[wp.int32]
+    body_basis_active: wp.array[wp.int32]
     endpoint_response: wp.array3d[wp.spatial_vector]
     contact_response: wp.array3d[wp.spatial_vector]
     mechanism_body_start: wp.array[wp.int32]
@@ -136,21 +139,38 @@ def _unconstrained_pair_cross_mobility(
 
 
 @wp.func
+def _endpoint_basis_item(
+    response: DirectContactResponseData,
+    column: wp.int32,
+    endpoint: wp.int32,
+    body: wp.int32,
+) -> wp.int32:
+    if response.body_basis_item.shape[0] > wp.int32(0):
+        return response.body_basis_item[body]
+    return column * wp.int32(4) + endpoint * wp.int32(2)
+
+
+@wp.func
 def _build_endpoint_equality_rhs(
     response: DirectContactResponseData,
     bodies: BodyContainer,
     item: wp.int32,
     lane: wp.int32,
 ):
-    column = item // wp.int32(4)
-    slot = item - column * wp.int32(4)
-    endpoint = slot // wp.int32(2)
-    angular_basis = slot - endpoint * wp.int32(2)
-    mechanism = response.column_mechanism0[column]
-    body = response.column_body0[column]
-    if endpoint == wp.int32(1):
-        mechanism = response.column_mechanism1[column]
-        body = response.column_body1[column]
+    mechanism = wp.int32(-1)
+    body = wp.int32(0)
+    angular_basis = item & wp.int32(1)
+    if response.body_basis_item.shape[0] > wp.int32(0):
+        body = response.mechanism_body[item // wp.int32(2)]
+        mechanism = response.body_mechanism[body]
+    else:
+        column = item // wp.int32(4)
+        endpoint = (item - column * wp.int32(4)) // wp.int32(2)
+        mechanism = response.column_mechanism0[column]
+        body = response.column_body0[column]
+        if endpoint == wp.int32(1):
+            mechanism = response.column_mechanism1[column]
+            body = response.column_body1[column]
 
     row_begin = response.mechanism_row_start[mechanism]
     row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
@@ -162,6 +182,8 @@ def _build_endpoint_equality_rhs(
         response.rhs[offset + wp.int32(2)] = wp.float32(0.0)
     _block_sync()
 
+    if response.body_basis_active.shape[0] > wp.int32(0) and response.body_basis_active[body] == wp.int32(0):
+        return
     if response.body_mechanism[body] != mechanism:
         return
     inverse_inertia = mat33_from_sym6(bodies.inverse_inertia_world[body])
@@ -206,8 +228,11 @@ def _build_grouped_endpoint_equality_rhs_kernel(
     response: DirectContactResponseData,
     bodies: BodyContainer,
     task_item: wp.array[wp.int32],
+    task_mechanism: wp.array[wp.int32],
 ):
     task, lane = wp.tid()
+    if task_mechanism[task] < wp.int32(0):
+        return
     for item_slot in range(GROUPED_RHS_ITEMS_PER_TASK):
         item = task_item[task * wp.int32(GROUPED_RHS_ITEMS_PER_TASK) + item_slot]
         if item >= wp.int32(0):
@@ -391,7 +416,7 @@ def _compute_column_endpoint_response_kernel(
 
     corrected_wrench = wp.spatial_vectorf(0.0)
     if source_mechanism >= wp.int32(0) and target_mechanism == source_mechanism:
-        item = column * wp.int32(4) + source_endpoint * wp.int32(2)
+        item = _endpoint_basis_item(response, column, source_endpoint, source_body)
         item_column = component
         if component >= wp.int32(3):
             item += wp.int32(1)
@@ -437,6 +462,7 @@ class DirectContactResponse:
         column_capacity: int,
         *,
         active_mechanisms: tuple[bool, ...] | None = None,
+        shared_body_basis: bool | None = None,
     ):
         if not direct.enabled:
             raise ValueError("direct contact response requires an enabled equality system")
@@ -488,8 +514,46 @@ class DirectContactResponse:
         capacity = max(1, int(contact_capacity))
         column_capacity = max(1, int(column_capacity))
         self.active_mechanisms = tuple(active_mechanisms)
-        item_capacity = 4 * column_capacity
-        self.contact_batch = direct.solver.create_grouped_rhs_batch(item_capacity, 2 * column_capacity)
+        # Count 32-bit elements: two smaller RHS/solution buffers must pay
+        # for all three world-sized body maps. Ignore further savings in
+        # intermediate, Gram, and task storage to keep this conservative.
+        workspace_stride = max(direct.solver.symbolic.tile_counts) * direct.solver.block_size * GROUPED_RHS_ITEM_WIDTH
+        response_savings = 2 * (4 * column_capacity - max(1, 2 * len(flat_bodies))) * workspace_stride
+        shared_body_basis = (
+            shared_body_basis is not False
+            and len(flat_bodies) < 2 * column_capacity
+            and 3 * len(body_mechanism) < response_savings
+        )
+        self.shared_body_basis = shared_body_basis
+        item_capacity = 2 * len(flat_bodies) if shared_body_basis else 4 * column_capacity
+        # Group consecutive body force/torque pairs without crossing mechanisms.
+        body_task_counts = [
+            (2 * len(bodies) + GROUPED_RHS_ITEMS_PER_TASK - 1) // GROUPED_RHS_ITEMS_PER_TASK
+            for bodies in mechanism_bodies
+        ]
+        task_capacity = sum(body_task_counts) if shared_body_basis else 2 * column_capacity
+        self.contact_batch = direct.solver.create_grouped_rhs_batch(item_capacity, task_capacity)
+        body_basis_item = np.empty(0, dtype=np.int32)
+        body_basis_task = np.empty(0, dtype=np.int32)
+        if shared_body_basis:
+            body_basis_item = np.full(len(body_mechanism), -1, dtype=np.int32)
+            body_basis_task = np.full(len(body_mechanism), -1, dtype=np.int32)
+            body_basis_item[flat_bodies] = 2 * np.arange(len(flat_bodies), dtype=np.int32)
+            task_mechanism = np.full(self.contact_batch.task_capacity, -1, dtype=np.int32)
+            task_item = np.full(self.contact_batch.task_capacity * GROUPED_RHS_ITEMS_PER_TASK, -1, dtype=np.int32)
+            task = 0
+            for mechanism in range(mechanism_count):
+                first_item = 2 * int(body_starts[mechanism])
+                end_item = 2 * int(body_starts[mechanism + 1])
+                for first in range(first_item, end_item, GROUPED_RHS_ITEMS_PER_TASK):
+                    count = min(GROUPED_RHS_ITEMS_PER_TASK, end_item - first)
+                    offset = task * GROUPED_RHS_ITEMS_PER_TASK
+                    task_item[offset : offset + count] = np.arange(first, first + count, dtype=np.int32)
+                    for item in range(first, first + count, 2):
+                        body_basis_task[flat_bodies[item // 2]] = task
+                    task += 1
+            self.contact_batch.task_mechanism.assign(task_mechanism)
+            self.contact_batch.task_item.assign(task_item)
         self.contact_mechanism = wp.full(capacity, -1, dtype=wp.int32, device=device)
         self.contact_column = wp.full(capacity, -1, dtype=wp.int32, device=device)
         self.contact_body0 = wp.zeros(capacity, dtype=wp.int32, device=device)
@@ -506,6 +570,9 @@ class DirectContactResponse:
             device=device,
         )
         self.data.body_lane = wp.array(body_lane, dtype=wp.int32, device=device)
+        self.data.body_basis_item = wp.array(body_basis_item, dtype=wp.int32, device=device)
+        self.data.body_basis_task = wp.array(body_basis_task, dtype=wp.int32, device=device)
+        self.data.body_basis_active = wp.zeros(len(body_basis_task), dtype=wp.int32, device=device)
         self.data.mechanism_body_start = wp.array(body_starts, dtype=wp.int32, device=device)
         self.data.mechanism_body = wp.array(flat_bodies, dtype=wp.int32, device=device)
         self.data.mechanism_row_start = wp.array(topology.mechanism_row_start, dtype=wp.int32, device=device)
@@ -543,13 +610,21 @@ class DirectContactResponse:
         self.data.row_scale = direct.row_scale
         self.data.accumulated_impulse = direct.accumulated_impulse
 
+    def reset_rhs_tasks(self) -> None:
+        """Clear contact activation while retaining immutable shared item IDs."""
+        self.contact_batch.task_mechanism.fill_(-1)
+        if self.shared_body_basis:
+            self.data.body_basis_active.zero_()
+        else:
+            self.contact_batch.task_item.fill_(-1)
+
     def compute(self, contacts: ContactContainer) -> None:
         """Solve endpoint spatial responses and form active contact blocks."""
         wp.launch_tiled(
             _build_grouped_endpoint_equality_rhs_kernel,
             dim=self.contact_batch.task_capacity,
             block_dim=_CONTACT_RHS_BLOCK_DIM,
-            inputs=[self.data, self.direct.bodies, self.contact_batch.task_item],
+            inputs=[self.data, self.direct.bodies, self.contact_batch.task_item, self.contact_batch.task_mechanism],
             device=self.direct.model.device,
         )
         self.contact_batch.solve()

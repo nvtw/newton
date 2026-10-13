@@ -11,6 +11,7 @@ from newton._src.solvers.phoenx.articulations.direct_contact_response import (
     DirectContactResponse,
     DirectContactResponseData,
     _contact_twist_delta,
+    _endpoint_basis_item,
 )
 from newton._src.solvers.phoenx.articulations.direct_equality import _row_wrench_for_body
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
@@ -152,6 +153,17 @@ def _fill_direct_contact_rhs_tasks_kernel(
             mechanism = response.column_mechanism1[column]
         if mechanism < wp.int32(0):
             continue
+        if response.body_basis_item.shape[0] > wp.int32(0):
+            body = response.column_body0[column]
+            if endpoint == wp.int32(1):
+                body = response.column_body1[column]
+            body_task = response.body_basis_task[body]
+            if body_task >= wp.int32(0):
+                # All writers name the same mechanism; integer atomics keep
+                # activation race-free without making contact order relevant.
+                wp.atomic_max(task_mechanism, body_task, mechanism)
+                wp.atomic_max(response.body_basis_active, body, wp.int32(1))
+            continue
         item = column * wp.int32(4) + wp.int32(endpoint) * wp.int32(2)
         task_mechanism[task] = mechanism
         task_item[task * wp.int32(GROUPED_RHS_ITEMS_PER_TASK)] = item
@@ -247,7 +259,7 @@ def _row_correction_from_wrenches(
             body = body1
             wrench = wrench1
         if response.body_mechanism[body] == mechanism:
-            item = column * wp.int32(4) + endpoint * wp.int32(2)
+            item = _endpoint_basis_item(response, column, wp.int32(endpoint), body)
             force = wp.spatial_top(wrench)
             torque = wp.spatial_bottom(wrench)
             base = item * response.workspace_stride + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)
@@ -595,8 +607,7 @@ class DirectContactRunSchedule:
         self.response.contact_column.fill_(-1)
         self.response.column_mechanism0.fill_(-1)
         self.response.column_mechanism1.fill_(-1)
-        self.response.contact_batch.task_mechanism.fill_(-1)
-        self.response.contact_batch.task_item.fill_(-1)
+        self.response.reset_rhs_tasks()
         self.interactions.fill_(-1)
         wp.launch(
             _build_direct_contact_candidates_kernel,
