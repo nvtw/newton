@@ -56,6 +56,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     speculative_pick_kernel,
     speculative_validate_commit_kernel,
     warm_start_periodic_invalidate_kernel,
+    warp_aggregated_increment,
 )
 from newton._src.solvers.phoenx.graph_coloring.warm_start import (
     seed_warm_start_kernel,
@@ -263,7 +264,7 @@ def _count_color_families_kernel(
         family = wp.int32(0)
     if family >= wp.int32(_LOCALITY_FAMILY_COUNT):
         family = wp.int32(_LOCALITY_FAMILY_COUNT - 1)
-    wp.atomic_add(color_family_count, color * wp.int32(_LOCALITY_FAMILY_COUNT) + family, wp.int32(1))
+    warp_aggregated_increment(color_family_count, color * wp.int32(_LOCALITY_FAMILY_COUNT) + family)
 
 
 @wp.kernel(enable_backward=False)
