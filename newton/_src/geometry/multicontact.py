@@ -847,6 +847,26 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         a_count = int(0)
         b_count = int(0)
 
+        feature_normal_a = normal
+        if (
+            geom_a.shape_type == int(GeoType.CYLINDER)
+            and geom_b.shape_type == int(GeoType.CYLINDER)
+            and geom_a.scale[2] == 0.0
+            and geom_b.scale[2] == 0.0
+        ):
+            axis_b = wp.quat_rotate(relative_orientation_b, wp.vec3(0.0, 0.0, 1.0))
+            radial_offset = wp.vec3(relative_position_b[0], relative_position_b[1], 0.0)
+            if (
+                axis_b[0] * axis_b[0] + axis_b[1] * axis_b[1] <= 1.0e-12
+                and wp.abs(relative_position_b[2]) < geom_a.scale[1] + geom_b.scale[1]
+                and wp.length_sq(radial_offset) > 1.0e-20
+            ):
+                radial_normal = wp.normalize(radial_offset)
+                if wp.dot(normal, radial_normal) >= COS_TILT_ANGLE:
+                    # Parallel cylinder sides support exact axial lines. Their
+                    # feature type must not depend on GJK/MPR normal error.
+                    feature_normal_a = radial_normal
+
         # Orthonormal basis from the collision normal (in A-local frame).
         tangent_a, tangent_b = orthonormal_basis(normal)
 
@@ -863,6 +883,7 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         # Shape A: support_func returns points in A-local frame directly, no quat_rotate needed.
         # Shape B: pre-transform basis to B-local, then transform results back to A-local.
         local_normal_b = wp.quat_rotate_inv(relative_orientation_b, -normal)
+        local_feature_normal_b = wp.quat_rotate_inv(relative_orientation_b, -feature_normal_a)
         local_ta_b = wp.quat_rotate_inv(relative_orientation_b, -tangent_a)
         local_tb_b = wp.quat_rotate_inv(relative_orientation_b, -tangent_b)
 
@@ -888,7 +909,7 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
             # Shape A: direction and result both in A-local frame, zero quaternion ops.
             dir_a = normal * cos_tilt + c_sin * tangent_a + s_sin * tangent_b
-            pt_a_3d = support_contact_feature(geom_a, dir_a, normal, data_provider)
+            pt_a_3d = support_contact_feature(geom_a, dir_a, feature_normal_a, data_provider)
             projected_a = pt_a_3d - center
             pt_a_2d = wp.vec2(wp.dot(tangent_a, projected_a), wp.dot(tangent_b, projected_a))
             a_count, was_added_a = add_avoid_duplicates_vec2(a_buffer, a_count, pt_a_2d, EPS)
@@ -897,7 +918,7 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
             # Shape B: direction in B-local, result transformed to A-local.
             local_dir_b = local_normal_b * cos_tilt + c_sin * local_ta_b + s_sin * local_tb_b
-            pt_b_local = support_contact_feature(geom_b, local_dir_b, local_normal_b, data_provider)
+            pt_b_local = support_contact_feature(geom_b, local_dir_b, local_feature_normal_b, data_provider)
             pt_b_3d = wp.quat_rotate(relative_orientation_b, pt_b_local) + relative_position_b
             projected_b = pt_b_3d - center
             pt_b_2d = wp.vec2(wp.dot(tangent_a, projected_b), wp.dot(tangent_b, projected_b))

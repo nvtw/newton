@@ -12,6 +12,10 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.geometry.collision_core import post_process_minkowski_only
+from newton._src.geometry.contact_data import ContactData
+from newton._src.geometry.multicontact import create_build_manifold
+from newton._src.geometry.support_function import GenericShapeData, SupportMapDataProvider, support_map
 from newton.tests.unittest_utils import add_function_test, get_test_devices
 
 
@@ -573,6 +577,84 @@ add_function_test(
     TestBoxContactNormal,
     "test_resized_primitive_contact_split",
     test_resized_primitive_contact_split,
+    devices=get_test_devices(),
+)
+
+
+@wp.struct
+class _ManifoldWriterData:
+    contacts: wp.array[ContactData]
+    count: wp.array[int]
+
+
+@wp.func
+def _write_manifold_contact(contact: ContactData, writer: _ManifoldWriterData, slot: int):
+    index = wp.atomic_add(writer.count, 0, 1)
+    writer.contacts[index] = contact
+
+
+_build_cylinder_manifold = create_build_manifold(support_map, _write_manifold_contact, post_process_minkowski_only)
+
+
+@wp.kernel(enable_backward=False)
+def _cylinder_manifold_kernel(axial_error: float, swap: bool, cap: bool, writer: _ManifoldWriterData):
+    shape_a = GenericShapeData()
+    shape_a.shape_type = int(newton.GeoType.CYLINDER)
+    shape_a.scale = wp.vec3(0.025, 0.05, 0.0)
+    shape_b = shape_a
+    shape_b.scale = wp.vec3(0.003, 0.0075, 0.0)
+    if swap:
+        shape_a.scale = wp.vec3(0.003, 0.0075, 0.0)
+        shape_b.scale = wp.vec3(0.025, 0.05, 0.0)
+    sign = -1.0 if swap else 1.0
+    position = wp.vec3(sign * 0.0279, 0.0, 0.0)
+    point_a = wp.vec3(sign * shape_a.scale[0], 0.0, 0.0)
+    point_b = position - wp.vec3(sign * shape_b.scale[0], 0.0, 0.0)
+    normal = wp.normalize(wp.vec3(sign, sign * 0.006, axial_error))
+    if cap:
+        position = wp.vec3(0.001, 0.0, 0.0574)
+        point_a = wp.vec3(0.001, 0.0, shape_a.scale[1])
+        point_b = position - wp.vec3(0.0, 0.0, shape_b.scale[1])
+        normal = wp.vec3(0.0, 0.0, 1.0)
+    _build_cylinder_manifold(
+        shape_a,
+        shape_b,
+        wp.quat_identity(),
+        wp.vec3(0.0),
+        wp.quat_identity(),
+        position,
+        point_a,
+        point_b,
+        normal,
+        SupportMapDataProvider(),
+        writer,
+        ContactData(),
+    )
+
+
+def test_parallel_cylinder_manifold_normal_error(test, device):
+    """Preserve side endpoints under normal error while retaining cylinder cap faces."""
+    with wp.ScopedDevice(device):
+        writer = _ManifoldWriterData()
+        writer.contacts = wp.empty(5, dtype=ContactData)
+        writer.count = wp.zeros(1, dtype=int)
+        for error, swap, cap in product((0.0, 5.0e-5, -2.0e-4, 1.0e-3), (False, True), (False, True)):
+            with test.subTest(error=error, swap=swap, cap=cap):
+                writer.count.zero_()
+                wp.launch(_cylinder_manifold_kernel, 1, inputs=[error, swap, cap, writer])
+                count = int(writer.count.numpy()[0])
+                if cap:
+                    test.assertGreaterEqual(count, 3)
+                else:
+                    test.assertEqual(count, 2)
+                    points = writer.contacts.numpy()["contact_point_center"][:count]
+                    np.testing.assert_allclose(np.sort(points[:, 2]), [-0.0075, 0.0075], atol=1.0e-5)
+
+
+add_function_test(
+    TestBoxContactNormal,
+    "test_parallel_cylinder_manifold_normal_error",
+    test_parallel_cylinder_manifold_normal_error,
     devices=get_test_devices(),
 )
 
