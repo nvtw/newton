@@ -3,8 +3,8 @@
 
 """Conditionally eliminate interior effort rows from a compact Schur solve.
 
-Factor the motor block M and subtract C.T @ inv(M) @ C from the remaining
-system. Recover motor impulses after projected sweeps and certify against
+Factor the effort block M and subtract C.T @ inv(M) @ C from the remaining
+system. Recover effort impulses after projected sweeps and certify against
 the original bounds and projection law before replacing the original solve.
 Rejected worlds retain their original inputs for ordinary PGS.
 """
@@ -106,8 +106,8 @@ def _view(arguments):
 
 @wp.struct
 class _Workspace:
-    motors: wp.array[wp.int32]
-    motor_count: wp.array[wp.int32]
+    efforts: wp.array[wp.int32]
+    effort_count: wp.array[wp.int32]
     remaining: wp.array[wp.int32]
     eligible: wp.array[wp.int32]
     failure: wp.array[wp.int32]
@@ -124,7 +124,7 @@ class _Workspace:
 @wp.kernel
 def _gather(source: _Inputs, target: _Inputs, work: _Workspace):
     w, lane = wp.tid()
-    nm = work.motor_count[w]
+    nm = work.effort_count[w]
     nb = source.nbc[w]
     nc = source.nc[w]
     nj = source.njc[w]
@@ -137,7 +137,7 @@ def _gather(source: _Inputs, target: _Inputs, work: _Workspace):
     valid = valid and cfg.max_alternating_iterations * cfg.inequality_sweeps_per_iteration >= 32
     if valid:
         for i in range(nm):
-            if work.motors[w * 16 + i] < 0 or work.motors[w * 16 + i] >= nb:
+            if work.efforts[w * 16 + i] < 0 or work.efforts[w * 16 + i] >= nb:
                 valid = False
         for i in range(nc):
             if source.contact_indices[source.cio[w] + i] < 0:
@@ -154,14 +154,14 @@ def _gather(source: _Inputs, target: _Inputs, work: _Workspace):
     origin = source.vio[w] + nj
     for row in range(lane, nu, 32):
         removed = int(0)
-        motor = bool(False)
+        effort = bool(False)
         for i in range(nm):
-            index = work.motors[w * 16 + i]
+            index = work.efforts[w * 16 + i]
             if index < row:
                 removed += 1
             if index == row:
-                motor = True
-        if not motor:
+                effort = True
+        if not effort:
             r = row - removed
             work.remaining[w * 32 + r] = row
             target.P[w * 64 + 32 + r] = source.P[origin + row]
@@ -199,16 +199,16 @@ def _gather(source: _Inputs, target: _Inputs, work: _Workspace):
                     for slot in range(first, last):
                         uid = source.ids[source.uio[w] + slot]
                         removed = int(0)
-                        motor = bool(False)
+                        effort = bool(False)
                         for i in range(nm):
-                            index = work.motors[w * 16 + i]
+                            index = work.efforts[w * 16 + i]
                             if index < uid:
                                 removed += 1
                             if index == uid:
-                                motor = True
+                                effort = True
                         if uid < 0 or uid >= nb + nc:
                             good = False
-                        elif not motor:
+                        elif not effort:
                             if kept < capacity:
                                 target.ids[w * capacity + kept] = uid - removed
                                 kept += 1
@@ -227,7 +227,7 @@ def _condense(source: _Inputs, target: _Inputs, work: _Workspace):
     w, lane = wp.tid()
     if work.eligible[w] == 0:
         return
-    nm = work.motor_count[w]
+    nm = work.effort_count[w]
     nu = source.nbc[w] + 3 * source.nc[w]
     nr = nu - nm
     origin = source.vio[w] + source.njc[w]
@@ -236,8 +236,8 @@ def _condense(source: _Inputs, target: _Inputs, work: _Workspace):
         row, col = entry // 16, entry % 16
         value = wp.float32(0.0)
         if row < nm and col < nm:
-            i = wp.int32(work.motors[w * 16 + row])
-            j = wp.int32(work.motors[w * 16 + col])
+            i = wp.int32(work.efforts[w * 16 + row])
+            j = wp.int32(work.efforts[w * 16 + col])
             value = -source.schur[offset + j * nu + i]
         elif row == col:
             value = wp.float32(1.0)
@@ -246,14 +246,14 @@ def _condense(source: _Inputs, target: _Inputs, work: _Workspace):
         row, col = entry // 32, entry % 32
         value = wp.float32(0.0)
         if row < nm and col < nr:
-            i = wp.int32(work.motors[w * 16 + row])
+            i = wp.int32(work.efforts[w * 16 + row])
             j = wp.int32(work.remaining[w * 32 + col])
             value = -source.schur[offset + j * nu + i]
         work.response[w * 512 + entry] = value
     if lane < 16:
         value = wp.float32(0.0)
         if lane < nm:
-            value = source.q[origin + work.motors[w * 16 + lane]]
+            value = source.q[origin + work.efforts[w * 16 + lane]]
         work.gradient[w * 16 + lane] = value
     _sync_threads()
     matrix = wp.array(ptr=get_float32_array_offset_ptr(work.factor, w * 256), shape=(16, 16), dtype=wp.float32)
@@ -307,7 +307,7 @@ def _recover_and_certify(source: _Inputs, target: _Inputs, work: _Workspace):
         work.fallback_nc[w] = source.nc[w]
     if work.eligible[w] == 0 or work.failure[w] != 0:
         return
-    nm = work.motor_count[w]
+    nm = work.effort_count[w]
     nu = source.nbc[w] + 3 * source.nc[w]
     nr = nu - nm
     origin = source.vio[w] + source.njc[w]
@@ -331,7 +331,7 @@ def _recover_and_certify(source: _Inputs, target: _Inputs, work: _Workspace):
     wp.tile_matmul(columns, change, rhs)
     wp.tile_upper_solve_inplace(wp.tile_transpose(lower), rhs)
     if lane < nm:
-        row = work.motors[w * 16 + lane]
+        row = work.efforts[w * 16 + lane]
         impulse = source.impulses[origin + row] - rhs[lane, 0]
         work.candidate[w * 48 + row] = impulse
         lo = wp.float32(source.lower[source.bcio[w] + row])
@@ -364,7 +364,7 @@ def _recover_and_certify(source: _Inputs, target: _Inputs, work: _Workspace):
         ):
             wp.atomic_or(work.failure, w, 8)
     if lane < nm:
-        row = work.motors[w * 16 + lane]
+        row = work.efforts[w * 16 + lane]
         scale = source.P[origin + row]
         if not wp.isfinite(scale) or wp.abs(work.candidate_q[w * 48 + row]) > cfg.tolerance * wp.abs(scale):
             wp.atomic_or(work.failure, w, 8)
@@ -406,7 +406,7 @@ def _recover_and_certify(source: _Inputs, target: _Inputs, work: _Workspace):
 
 
 @wp.kernel
-def _publish(source: _Inputs, work: _Workspace):
+def _publish(source: _Inputs, staged_status: wp.array[DVIStatus], work: _Workspace):
     w, lane = wp.tid()
     if work.eligible[w] == 0 or work.failure[w] != 0:
         return
@@ -417,13 +417,11 @@ def _publish(source: _Inputs, work: _Workspace):
         source.q[origin + row] = work.candidate_q[w * 48 + row]
     if lane == 0:
         status = source.status[w]
-        status.iterations = (
-            source.config[w].max_alternating_iterations * source.config[w].inequality_sweeps_per_iteration
-        )
+        status.iterations = staged_status[w].iterations
         source.status[w] = status
 
 
-class MotorCondensation:
+class EffortLimitCondensation:
     """Own mapped candidate solves and preserve rejected worlds for ordinary PGS."""
 
     @classmethod
@@ -442,25 +440,25 @@ class MotorCondensation:
         worlds, counts = joints.wid.numpy(), joints.num_effort_cts.numpy()
         offsets = joints.effort_cts_offset_total_cts.numpy()
         origins = info.total_cts_offset.numpy() + info.joint_bounded_cts_group_offset.numpy()
-        motors = [[] for _ in range(path.size.num_worlds)]
+        efforts = [[] for _ in range(path.size.num_worlds)]
         for joint, world in enumerate(worlds):
             start = int(offsets[joint] - origins[world])
-            motors[world].extend(range(start, start + int(counts[joint])))
-        motors = [sorted(rows) if 0 < len(rows) <= 16 else [] for rows in motors]
-        if not any(motors):
+            efforts[world].extend(range(start, start + int(counts[joint])))
+        efforts = [sorted(rows) if 0 < len(rows) <= 16 else [] for rows in efforts]
+        if not any(efforts):
             return None
-        return cls(motors, device=path.device, schedule_capacity=path.size.max_of_max_inequalities)
+        return cls(efforts, device=path.device, schedule_capacity=path.size.max_of_max_inequalities)
 
-    def __init__(self, motor_ids: list[list[int]], *, device, schedule_capacity: int):
+    def __init__(self, effort_ids: list[list[int]], *, device, schedule_capacity: int):
         """Allocate fixed-capacity scratch for each world's original bounded IDs."""
         self._device = wp.get_device(device)
-        self._worlds = len(motor_ids)
+        self._worlds = len(effort_ids)
         if schedule_capacity < 1:
             raise ValueError("A positive inequality schedule capacity is required.")
         ids = np.full((self._worlds, 16), -1, dtype=np.int32)
-        for world, rows in enumerate(motor_ids):
+        for world, rows in enumerate(effort_ids):
             if len(rows) > 16 or rows != sorted(set(rows)) or any(row < 0 for row in rows):
-                raise ValueError("Motor IDs must be sorted, unique bounded IDs, with at most sixteen per world.")
+                raise ValueError("Effort limit IDs must be sorted, unique bounded IDs, with at most sixteen per world.")
             ids[world, : len(rows)] = rows
 
         def array(values):
@@ -473,8 +471,8 @@ class MotorCondensation:
             return array(np.full(self._worlds, value, dtype=np.int32))
 
         work = _Workspace()
-        work.motors = array(ids.ravel())
-        work.motor_count = array([len(rows) for rows in motor_ids])
+        work.efforts = array(ids.ravel())
+        work.effort_count = array([len(rows) for rows in effort_ids])
         work.remaining = zeros(self._worlds * 32, wp.int32)
         work.eligible = zeros(self._worlds, wp.int32)
         work.failure = zeros(self._worlds, wp.int32)
@@ -550,7 +548,7 @@ class MotorCondensation:
         wp.launch(
             _publish,
             dim=(self._worlds, 32),
-            inputs=[_view(compact_inputs), self._work],
+            inputs=[_view(compact_inputs), self._overrides[30], self._work],
             block_dim=32,
             device=self._device,
         )

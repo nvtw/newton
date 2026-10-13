@@ -261,8 +261,8 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
 
     def test_parallel_factorization_with_partial_tile(self):
         """Handle partial tiles and clear panels removed between factorizations."""
-        for n in (33, 65):
-            with self.subTest(n=n):
+        for n, batch_size in ((33, 1), (65, 1), (33, 18), (65, 18)):
+            with self.subTest(n=n, batch_size=batch_size):
                 matrix = np.eye(n, dtype=np.float32) * 2.0
                 indices = np.arange(n - 1)
                 matrix[indices, indices + 1] = -0.25
@@ -270,10 +270,12 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
                 rhs = np.ones(n, dtype=np.float32)
 
                 info = DenseSquareMultiLinearInfo()
-                info.finalize(dimensions=[n], dtype=wp.float32, device=self.default_device)
-                matrix_wp = wp.array(matrix.reshape(-1), dtype=wp.float32, device=self.default_device)
-                rhs_wp = wp.array(rhs, dtype=wp.float32, device=self.default_device)
-                result_wp = wp.zeros(n, dtype=wp.float32, device=self.default_device)
+                info.finalize(dimensions=[n] * batch_size, dtype=wp.float32, device=self.default_device)
+                matrix_wp = wp.array(
+                    np.tile(matrix.reshape(-1), batch_size), dtype=wp.float32, device=self.default_device
+                )
+                rhs_wp = wp.array(np.tile(rhs, batch_size), dtype=wp.float32, device=self.default_device)
+                result_wp = wp.zeros(n * batch_size, dtype=wp.float32, device=self.default_device)
                 solver = LLTBlockedRCMSolver(
                     operator=DenseLinearOperatorData(info=info, mat=matrix_wp),
                     block_size=32,
@@ -283,14 +285,14 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
                 )
 
                 for candidate in (matrix, np.eye(n, dtype=np.float32) * 2.0):
-                    matrix_wp.assign(candidate.reshape(-1))
+                    matrix_wp.assign(np.tile(candidate.reshape(-1), batch_size))
                     solver.compute(matrix_wp)
                     solver.solve(rhs_wp, result_wp)
-                    expected = np.linalg.solve(candidate, rhs)
+                    expected = np.tile(np.linalg.solve(candidate, rhs), batch_size)
                     np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-4, atol=1.0e-5)
                 # Disappearing panels must not retain values from the previous factor.
-                factor = solver.L.numpy().reshape(n, n)
-                np.testing.assert_allclose(np.tril(factor), np.eye(n) * np.sqrt(2.0), rtol=1.0e-6, atol=0.0)
+                for factor in solver.L.numpy().reshape(batch_size, n, n):
+                    np.testing.assert_allclose(np.tril(factor), np.eye(n) * np.sqrt(2.0), rtol=1.0e-6, atol=0.0)
 
     def test_cached_permutation_on_cpu_fallback(self):
         """Verify the CPU fallback reuses a cached permutation."""

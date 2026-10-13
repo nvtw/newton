@@ -21,6 +21,7 @@ from ...kinematics.limits import LimitsKamino
 from ...linalg import LLTBlockedRCMSolver, LLTBlockedSolver
 from ...linalg.factorize.llt_blocked_rcm import make_llt_blocked_rcm_solve_kernel
 from .coupling import PackedCoupling
+from .effort_limit_condensation import EffortLimitCondensation
 from .joint_blocks import JointBlockSolver
 from .kernels import (
     _FUSED_BILATERAL_BLOCK,
@@ -34,7 +35,6 @@ from .kernels import (
     _solve_bilateral_unilateral_response_compact,
     _solve_bilateral_unilateral_response_cooperative,
 )
-from .motor_condensation import MotorCondensation
 from .response import (
     _RESPONSE_WIDTH,
     _add_forward_bilateral_gradient,
@@ -148,7 +148,7 @@ class SparseDVIPath:
         self.parallel_contact_colors = wp.zeros(shape=1, dtype=wp.int32, device=device)
         self.joint_block_solver: JointBlockSolver | None = None
         self.packed_coupling: PackedCoupling | None = None
-        self.motor_condensation: MotorCondensation | None = None
+        self.effort_limit_condensation: EffortLimitCondensation | None = None
         self.bilateral_solver = bilateral_solver
         self.use_schur_complement = use_schur_complement
         self.max_alternating_iterations = max_alternating_iterations
@@ -251,7 +251,7 @@ class SparseDVIPath:
                 self.bilateral_inverse = wp.zeros_like(self.bilateral_lower_inverse)
 
         self.packed_coupling = PackedCoupling.create(self, self.joint_block_solver)
-        self.motor_condensation = MotorCondensation.create(self)
+        self.effort_limit_condensation = EffortLimitCondensation.create(self)
 
     def solve(self, problem: DualProblem) -> None:
         """Solve a sparse Kamino DVI problem without materializing dense Delassus."""
@@ -912,9 +912,9 @@ def _launch_sparse_inequality_pgs(
             path.data.solution.lambdas,
         ]
         fallback_inputs = compact_inputs
-        if path.motor_condensation is not None:
+        if path.effort_limit_condensation is not None:
             fallback_inputs = list(compact_inputs)
-            fallback_inputs[4] = path.motor_condensation.prepare_candidates(compact_inputs)
+            fallback_inputs[4] = path.effort_limit_condensation.prepare_candidates(compact_inputs)
         for max_rows in (64, 128):
             wp.launch(
                 kernel=make_compact_schur_pgs_kernel(max_rows),
@@ -923,8 +923,8 @@ def _launch_sparse_inequality_pgs(
                 device=path.device,
                 block_dim=32,
             )
-        if path.motor_condensation is not None:
-            path.motor_condensation.publish(compact_inputs)
+        if path.effort_limit_condensation is not None:
+            path.effort_limit_condensation.publish(compact_inputs)
     if kernel == _solve_dvi_sparse_inequalities_pgs:
         kernel_inputs.extend(body_inputs)
     wp.launch(

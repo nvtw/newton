@@ -1267,6 +1267,9 @@ def _raw_joint_transpose(
     output: wp.array[wp.float32],
 ):
     """Accumulate joint transpose products directly from grouped row blocks."""
+    # Match jacobians.py: dynamic, kinematic, friction, then effort blocks,
+    # with body A rows before body B rows in each group. Adapt this traversal
+    # if the sparse joint Jacobian block ordering changes.
     joint, slot = wp.tid()
     world = joint_world[joint]
     if not mask[world]:

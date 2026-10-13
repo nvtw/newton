@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Check compact motor elimination and preservation of rejected-world solves."""
+"""Check compact effort elimination and preservation of rejected-world solves."""
 
 import unittest
 from types import SimpleNamespace
@@ -9,17 +9,17 @@ from types import SimpleNamespace
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.kamino._src.solvers.dvi.motor_condensation import MotorCondensation
+from newton._src.solvers.kamino._src.solvers.dvi.effort_limit_condensation import EffortLimitCondensation
 from newton._src.solvers.kamino._src.solvers.dvi.sparse_kernels import make_compact_schur_pgs_kernel
 from newton._src.solvers.kamino._src.solvers.dvi.types import DVIConfigStruct, DVIStatus
 
 
-def _fixture(device, motors, remaining):
+def _fixture(device, efforts, remaining):
     worlds, n, vector_stride, schedule_capacity = 4, 64, 135, 64
-    nonmotor, nc = remaining % 3, remaining // 3
-    nb, nu = motors + nonmotor, motors + remaining
-    other = np.linspace(1, nb - 2, nonmotor, dtype=int)
-    motor_ids = sorted(set(range(nb)) - set(other))
+    non_effort, nc = remaining % 3, remaining // 3
+    nb, nu = efforts + non_effort, efforts + remaining
+    other = np.linspace(1, nb - 2, non_effort, dtype=int)
+    effort_ids = sorted(set(range(nb)) - set(other))
     rng = np.random.default_rng(34791 + nu)
 
     def ints(values):
@@ -101,53 +101,69 @@ def _fixture(device, motors, remaining):
         wp.array([status] * worlds, dtype=DVIStatus, device=device),
         floats(initial),
     ]
-    helper = MotorCondensation([motor_ids] * worlds, device=device, schedule_capacity=schedule_capacity)
-    return helper, inputs, target, motor_ids, nu
+    helper = EffortLimitCondensation([effort_ids] * worlds, device=device, schedule_capacity=schedule_capacity)
+    return helper, inputs, target, effort_ids, nu
 
 
-class TestKaminoMotorCondensation(unittest.TestCase):
+class TestKaminoEffortLimitCondensation(unittest.TestCase):
     def setUp(self):
         if not wp.get_cuda_device_count():
-            self.skipTest("Motor elimination uses CUDA tile kernels")
+            self.skipTest("Effort limit elimination uses CUDA tile kernels")
         self.device = wp.get_cuda_devices()[0]
 
     def launch(self, inputs):
         wp.launch(make_compact_schur_pgs_kernel(64), dim=128, inputs=inputs, block_dim=32, device=self.device)
 
     def test_static_fallback(self):
-        """Keep small batches, short sweeps, and models without motors on the original path."""
-        for worlds, iterations, sweeps, motors in ((4, 32, 2, 12), (4096, 16, 1, 16), (8192, 32, 2, 0)):
-            with self.subTest(worlds=worlds, iterations=iterations, sweeps=sweeps, motors=motors):
+        """Keep small batches, short sweeps, and models without efforts on the original path."""
+        for worlds, iterations, sweeps, efforts in ((4, 32, 2, 12), (4096, 16, 1, 16), (8192, 32, 2, 0)):
+            with self.subTest(worlds=worlds, iterations=iterations, sweeps=sweeps, efforts=efforts):
                 path = SimpleNamespace(
                     device=self.device,
-                    size=SimpleNamespace(num_worlds=worlds, sum_of_num_effort_joint_cts=motors),
+                    size=SimpleNamespace(num_worlds=worlds, sum_of_num_effort_joint_cts=efforts),
                     use_schur_complement=True,
                     data=SimpleNamespace(bilateral_operator=object()),
                     max_alternating_iterations=iterations,
                     max_inequality_sweeps_per_iteration=sweeps,
                 )
-                self.assertIsNone(MotorCondensation.create(path))
+                self.assertIsNone(EffortLimitCondensation.create(path))
 
     def test_dense_stationary_solution(self):
-        """Recover a known full-system solution with ragged and full motor/response tiles."""
-        for motors, remaining in ((2, 5), (1, 31), (16, 32)):
-            with self.subTest(motors=motors, remaining=remaining):
-                helper, inputs, target, _, nu = _fixture(self.device, motors, remaining)
+        """Recover a known full-system solution with ragged and full effort/response tiles."""
+        for efforts, remaining in ((2, 5), (1, 31), (16, 32)):
+            with self.subTest(efforts=efforts, remaining=remaining):
+                helper, inputs, target, _, nu = _fixture(self.device, efforts, remaining)
                 initial, gradient = inputs[31].numpy(), inputs[24].numpy()
                 fallback = helper.prepare_candidates(inputs)
                 np.testing.assert_array_equal(inputs[31].numpy(), initial)
                 np.testing.assert_array_equal(inputs[24].numpy(), gradient)
                 np.testing.assert_array_equal(fallback.numpy(), np.zeros(4))
+                staged_iterations = helper._overrides[30].numpy()["iterations"]
                 helper.publish(inputs)
+                np.testing.assert_array_equal(inputs[30].numpy()["iterations"], staged_iterations)
                 np.testing.assert_array_equal(inputs[30].numpy()["r_p"], np.full(4, 0.125))
                 solution, residual = inputs[31].numpy(), inputs[24].numpy()
                 for world, offset in enumerate(inputs[12].numpy() + 64):
                     np.testing.assert_allclose(solution[offset : offset + nu], target[world], atol=3e-6, rtol=3e-5)
                     np.testing.assert_allclose(residual[offset : offset + nu], 0.0, atol=3e-6)
 
+    def test_publish_staged_iterations(self):
+        """Publish per-world staged sweep counts while preserving other status fields."""
+        helper, inputs, _, _, _ = _fixture(self.device, 2, 5)
+        helper.prepare_candidates(inputs)
+        np.testing.assert_array_equal(helper.eligible.numpy(), np.ones(4))
+        np.testing.assert_array_equal(helper.failure.numpy(), np.zeros(4))
+        staged_status = helper._overrides[30].numpy()
+        staged_status["iterations"] = [1, 3, 8, 64]
+        helper._overrides[30].assign(staged_status)
+        expected = inputs[30].numpy()
+        expected["iterations"] = staged_status["iterations"]
+        helper.publish(inputs)
+        np.testing.assert_array_equal(inputs[30].numpy(), expected)
+
     def test_mixed_fallback_graph_replay(self):
         """Preserve original PGS on bound rejection and changing contacts, then reset acceptance."""
-        helper, inputs, _, motors, nu = _fixture(self.device, 2, 5)
+        helper, inputs, _, efforts, nu = _fixture(self.device, 2, 5)
         seed_x, seed_q = wp.clone(inputs[31]), wp.clone(inputs[24])
         reference = list(inputs)
         reference[31], reference[24], reference[30] = wp.clone(seed_x), wp.clone(seed_q), wp.clone(inputs[30])
@@ -174,7 +190,7 @@ class TestKaminoMotorCondensation(unittest.TestCase):
         for rejected in (True, False, True, False):
             lower, upper, contacts = original_lower.copy(), original_upper.copy(), original_nc.copy()
             if rejected:
-                lower[motors[0]], upper[motors[0]] = 1.0, 2.0
+                lower[efforts[0]], upper[efforts[0]] = 1.0, 2.0
                 contacts[1] = 0
             inputs[14].assign(lower)
             inputs[15].assign(upper)
@@ -198,14 +214,14 @@ class TestKaminoMotorCondensation(unittest.TestCase):
                 np.testing.assert_array_equal(helper.fallback_nc.numpy(), np.zeros(4))
 
     def test_invalid_factor_preserves_inputs(self):
-        """Reject negative and nonfinite motor pivots without publishing or retaining stale flags."""
-        helper, inputs, _, motors, nu = _fixture(self.device, 2, 5)
+        """Reject negative and nonfinite effort pivots without publishing or retaining stale flags."""
+        helper, inputs, _, efforts, nu = _fixture(self.device, 2, 5)
         matrix, initial, gradient = inputs[23].numpy(), inputs[31].numpy(), inputs[24].numpy()
         for bad in (True, False):
             changed = matrix.copy()
             if bad:
                 for world, value in ((0, 100.0), (1, np.nan)):
-                    changed[inputs[21].numpy()[world] + motors[0] * (nu + 1)] = value
+                    changed[inputs[21].numpy()[world] + efforts[0] * (nu + 1)] = value
             inputs[23].assign(changed)
             helper.prepare_candidates(inputs)
             np.testing.assert_array_equal(inputs[31].numpy(), initial)
