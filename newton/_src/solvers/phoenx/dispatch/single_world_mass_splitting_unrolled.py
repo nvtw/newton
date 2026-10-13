@@ -112,7 +112,14 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         prepare_head, _, iterate_head, _, _, _ = w._singleworld_kernels()
         fused_average = self._fused_average(direct)
         refreshed = w._refresh_prepare_this_substep()
-        if refreshed:
+        gathered = getattr(w, "_contact_body_entries", None) is not None and w._use_gathered_warm_start()
+        if refreshed and gathered:
+            # Row-parallel geometry plus a per-body warm start leave no copy
+            # slots to average. Begin the sweep anyway so the alternating
+            # color order of the following sweeps is unchanged.
+            w._partitioner.begin_sweep()
+            w._prepare_contacts_gathered(idt)
+        elif refreshed:
             w._partitioner.begin_sweep()
             self._unrolled_sweep(
                 prepare_head,
@@ -128,7 +135,9 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             if sync_direct_copies:
                 w._mass_splitting_writeback(already_averaged=True)
             w._warm_start_owned_contacts()
-            direct.solve(use_bias=False, refine=False, **self._average_kwargs(fused_average and refreshed))
+            direct.solve(
+                use_bias=False, refine=False, **self._average_kwargs(fused_average and refreshed and not gathered)
+            )
             if sync_direct_copies:
                 w._mass_splitting_broadcast()
         # Without explicit projection passes, project after every iteration.

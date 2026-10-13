@@ -104,14 +104,21 @@ def _restore_sort_scratch_kernel(keys: wp.array[wp.int64], values: wp.array[int]
     values[prefix + tid] = values[prefix - 1]
 
 
+@wp.kernel(enable_backward=False)
+def _restore_sort_scratch_int_kernel(keys: wp.array[int], values: wp.array[int], prefix: int):
+    tid = wp.tid()
+    keys[prefix + tid] = keys[prefix - 1]
+    values[prefix + tid] = values[prefix - 1]
+
+
 def radix_sort_active_prefix(
-    keys: wp.array[wp.int64],
+    keys: wp.array,
     values: wp.array[int],
     active_length: wp.array[int],
     flags: wp.array[wp.int32],
     end_bit: int | None = None,
 ) -> None:
-    """Sort ``keys[:count]`` whose entries past ``active_length`` hold one sentinel.
+    """Sort int32 or int64 ``keys[:count]`` whose entries past ``active_length`` hold one sentinel.
 
     ``count = keys.shape[0] // 2`` and ``flags`` must contain
     :func:`active_prefix_sort_levels` entries. The sentinel must sort after
@@ -133,7 +140,7 @@ def radix_sort_active_prefix(
             wp.utils.radix_sort_pairs(keys, values, prefix, end_bit=end_bit)
             if prefix < count:
                 wp.launch(
-                    _restore_sort_scratch_kernel,
+                    _restore_sort_scratch_kernel if keys.dtype == wp.int64 else _restore_sort_scratch_int_kernel,
                     dim=min(prefix, count - prefix),
                     inputs=[keys, values, prefix],
                     device=keys.device,

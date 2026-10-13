@@ -61,6 +61,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
     _get_parallel_contact_prepare_kernel,
+    get_colored_point_prepare_kernel,
     rebase_ordinary_contact_relax_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -120,6 +121,7 @@ from newton._src.solvers.phoenx.constraints.contact_tgs_prepare import (
     patches,
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs_static import build_lists, get_sweep
+from newton._src.solvers.phoenx.constraints.contact_warm_start import ContactBodyEntries
 from newton._src.solvers.phoenx.contact_endpoints import (
     pack_contact_barycentric_kernel,
     pack_contact_endpoints_kernel,
@@ -1214,6 +1216,7 @@ class PhoenXWorld:
                 if self._colored_contact_rows
                 else self._contact_container
             )
+            self._contact_body_entries = None
             if self._colored_contact_rows:
                 self._contact_row_counts = wp.zeros(self._constraint_capacity, dtype=wp.int32, device=self.device)
                 self._contact_row_offsets = wp.zeros(self._constraint_capacity, dtype=wp.int32, device=self.device)
@@ -1394,6 +1397,11 @@ class PhoenXWorld:
         self._assert_invariants()
 
         self._pre_compile_dispatch_kernels()
+        # Allocated last: eligibility depends on flags set throughout construction.
+        if self._colored_contact_rows and self._gathered_warm_start_supported():
+            self._contact_body_entries = ContactBodyEntries(
+                self._constraint_capacity, self.bodies.velocity.shape[0], self.device
+            )
 
     def _fast_tail_fixed_tpw(self) -> int:
         """Static kernel axis for fixed-tpw launches; 0 keeps dynamic lookup."""
@@ -2701,6 +2709,14 @@ class PhoenXWorld:
         # substep. Prepare maps immutable Newton inputs through the canonical
         # range stored in each packed column and updates packed state in place.
         self._gather_colored_contact_rows()
+        if self._use_gathered_warm_start():
+            self._contact_body_entries.build(
+                self._contact_cols_packed,
+                self._partitioner.element_ids_by_color,
+                self._num_active_constraints,
+                self._contact_offset,
+                self._contact_cols.articulation_owner,
+            )
 
         # Substep order: bias-on solve -> integrate -> bias-off relax. Reversing
         # would discard the positional bias's penetration recovery.
@@ -4798,6 +4814,60 @@ class PhoenXWorld:
             )
 
         wp.capture_while(self._partitioner.color_cursor, _round)
+
+    def _gathered_warm_start_supported(self) -> bool:
+        """Whether contact preparation can run row-parallel with a per-body warm start.
+
+        Rigid point contacts in color order are the only rows that need
+        preparing, and the per-body gather replaces both the colored sweep
+        and its copy average.
+        """
+        return bool(
+            self._colored_contact_headers
+            and self._colored_contact_rows
+            and self.device.is_cuda
+            and self.step_layout == "single_world"
+            and self.num_particles == 0
+            and self.num_cloth_triangles == 0
+            and self.num_cloth_bending == 0
+            and self.num_soft_tetrahedra == 0
+            and self.num_soft_hexahedra == 0
+            and not self._contact_patch_enabled
+            and not self._sleeping_enabled
+            and (not self.mass_splitting_enabled or self._singleworld_overflow_only_mass_splitting)
+        )
+
+    def _use_gathered_warm_start(self) -> bool:
+        """Whether this step's prepare pass uses the per-body warm start."""
+        return self._contact_body_entries is not None and self._skip_all_joint_pgs()
+
+    def _prepare_contacts_gathered(self, idt: wp.float32) -> None:
+        """Prepare contact rows in parallel, then apply warm starts per body."""
+        if self.max_contact_columns:
+            wp.launch(
+                get_colored_point_prepare_kernel(self._dispatch_specialization_flags()["has_soft_contact_pd"]),
+                dim=self.rigid_contact_max,
+                inputs=[
+                    self._contact_cols_packed,
+                    self._contact_row_total,
+                    self._contact_row_slots,
+                    self._partitioner.color_starts,
+                    wp.int32(
+                        int(self.max_colored_partitions) if self._singleworld_overflow_only_mass_splitting else -1
+                    ),
+                    self.bodies,
+                    self._particles_or_sentinel(),
+                    wp.int32(self.num_bodies),
+                    idt,
+                    self._contact_container_solve,
+                    self._active_contact_views(),
+                    self._copy_state,
+                ],
+                device=self.device,
+            )
+            self._contact_body_entries.apply_warm_start(
+                self._contact_cols_packed, self._contact_container_solve, self.bodies
+            )
 
     def _gather_colored_contact_rows(self) -> None:
         if not self._colored_contact_rows:
