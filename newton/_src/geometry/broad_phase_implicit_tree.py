@@ -169,60 +169,63 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
         query_upper = node_upper[query_node]
         query_span = node_max_span[query_node]
         shape1 = node_shape[query_node]
-        node = wp.int32(1)
-
-        # Every leaf independently walks exact BVH bounds. The smaller AABB
-        # span owns a pair; equal spans use sorted leaf index as the tie break.
-        # Large shapes such as an infinite floor therefore never serially
-        # query thousands of smaller shapes from one thread.
-        # The successor is computed from the implicit topology: no stack,
-        # global pair queues, or atomic queue reservations are needed.
-        while node != wp.int32(0):
-            max_span = node_max_span[node]
-            if max_span < query_span or (max_span == query_span and node_last_leaf[node] <= leaf):
+        # An ancestor always contains the query leaf, so its bound cannot
+        # reject it. Visit only the sibling subtrees along the leaf-to-root
+        # path. These disjoint subtrees contain every other leaf exactly once.
+        ancestor = query_node
+        while ancestor > wp.int32(1):
+            sibling = ancestor ^ wp.int32(1)
+            stop = _tree_next_dfs(sibling)
+            node = sibling
+            while node != stop:
+                max_span = node_max_span[node]
+                if max_span < query_span or (max_span == query_span and node_last_leaf[node] <= leaf):
+                    node = _tree_next_dfs(node)
+                    continue
+                if (
+                    node_lower[node][0] > query_upper[0]
+                    or query_lower[0] > node_upper[node][0]
+                    or node_lower[node][1] > query_upper[1]
+                    or query_lower[1] > node_upper[node][1]
+                    or node_lower[node][2] > query_upper[2]
+                    or query_lower[2] > node_upper[node][2]
+                ):
+                    node = _tree_next_dfs(node)
+                    continue
+                if node < leaf_base:
+                    node = node * wp.int32(2)
+                    continue
+                other_leaf = node - leaf_base
+                if other_leaf < shape_count and (
+                    max_span > query_span or (max_span == query_span and other_leaf > leaf)
+                ):
+                    shape2 = node_shape[node]
+                    pair_world_id = wp.int32(0)
+                    if shape_world[shape1] == wp.int32(-1) and shape_world[shape2] == wp.int32(-1):
+                        pair_world_id = wp.int32(1)
+                    process_pair(
+                        shape1,
+                        shape2,
+                        pair_world_id,
+                        wp.int32(1),
+                        shape_lower,
+                        shape_upper,
+                        shape_gap,
+                        shape_displacement,
+                        collision_group,
+                        shape_world,
+                        filter_pairs,
+                        num_filter_pairs,
+                        shape_body,
+                        body_flags,
+                        include_static_kinematic_pairs,
+                        filter_data,
+                        candidate_pair,
+                        candidate_pair_count,
+                        max_candidate_pair,
+                    )
                 node = _tree_next_dfs(node)
-                continue
-            if (
-                node_lower[node][0] > query_upper[0]
-                or query_lower[0] > node_upper[node][0]
-                or node_lower[node][1] > query_upper[1]
-                or query_lower[1] > node_upper[node][1]
-                or node_lower[node][2] > query_upper[2]
-                or query_lower[2] > node_upper[node][2]
-            ):
-                node = _tree_next_dfs(node)
-                continue
-            if node < leaf_base:
-                node = node * wp.int32(2)
-                continue
-            other_leaf = node - leaf_base
-            if other_leaf < shape_count and (max_span > query_span or (max_span == query_span and other_leaf > leaf)):
-                shape2 = node_shape[node]
-                pair_world_id = wp.int32(0)
-                if shape_world[shape1] == wp.int32(-1) and shape_world[shape2] == wp.int32(-1):
-                    pair_world_id = wp.int32(1)
-                process_pair(
-                    shape1,
-                    shape2,
-                    pair_world_id,
-                    wp.int32(1),
-                    shape_lower,
-                    shape_upper,
-                    shape_gap,
-                    shape_displacement,
-                    collision_group,
-                    shape_world,
-                    filter_pairs,
-                    num_filter_pairs,
-                    shape_body,
-                    body_flags,
-                    include_static_kinematic_pairs,
-                    filter_data,
-                    candidate_pair,
-                    candidate_pair_count,
-                    max_candidate_pair,
-                )
-            node = _tree_next_dfs(node)
+            ancestor = ancestor / wp.int32(2)
 
     return query
 
