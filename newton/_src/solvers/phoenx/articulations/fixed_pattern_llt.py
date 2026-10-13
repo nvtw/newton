@@ -393,10 +393,30 @@ __syncwarp(width == 32 ? 0xffffffffu : (0xffffu << ((threadIdx.x & 31) & 16)));
 def sync_panel_subgroup(width: wp.int32): ...
 
 
+def packed_lower_size(width: int) -> int:
+    """Return the float count of one packed lower-triangular register panel."""
+    return width * (width + 1) // 2
+
+
+@wp.func
+def _packed_lower_index(row: wp.int32, column: wp.int32) -> wp.int32:
+    return row * (row + wp.int32(1)) / wp.int32(2) + column
+
+
 @functools.cache
-def make_subgroup_panel_solve_func(width: int):
-    """Return a register solve of one permuted right-hand-side value per lane."""
+def make_subgroup_panel_solve_func(width: int, packed: bool = False):
+    """Return a register solve of one permuted right-hand-side value per lane.
+
+    ``packed`` reads a row-major lower triangle of :func:`packed_lower_size`
+    floats instead of a full panel; the arithmetic is unchanged.
+    """
     Row = wp.types.vector(length=width, dtype=wp.float32)
+
+    @wp.func
+    def entry(row: wp.int32, column: wp.int32) -> wp.int32:
+        if wp.static(packed):
+            return _packed_lower_index(row, column)
+        return row * wp.int32(width) + column
 
     @wp.func
     def solve_panel(
@@ -409,10 +429,10 @@ def make_subgroup_panel_solve_func(width: int):
         diagonal = wp.float32(1.0)
         lower = Row(0.0)
         if lane < dimension:
-            diagonal = factor[base + lane * wp.static(width) + lane]
+            diagonal = factor[base + entry(lane, lane)]
             for column in range(wp.static(width)):
                 if column < lane:
-                    lower[column] = factor[base + lane * wp.static(width) + column]
+                    lower[column] = factor[base + entry(lane, column)]
         for column in range(wp.static(width)):
             if column < dimension:
                 pivot = wp.float32(0.0)
@@ -426,7 +446,7 @@ def make_subgroup_panel_solve_func(width: int):
         if lane < dimension:
             for column in range(wp.static(width)):
                 if column > lane and column < dimension:
-                    upper[column] = factor[base + column * wp.static(width) + lane]
+                    upper[column] = factor[base + entry(column, lane)]
         if dimension < wp.static(width):
             # Match the existing tail solve's ascending dot-product order.
             solved_values = Row(0.0)
@@ -463,8 +483,10 @@ def _make_subgroup_factor_kernel(width: int):
     """Factor a one-panel mechanism in registers within a subgroup.
 
     Lane ``i`` owns row ``i`` of the lower triangle. Rows and columns past
-    the mechanism dimension are identity padding and the stored upper triangle
-    is zero, matching the cooperative tile factor's panel layout.
+    the mechanism dimension are identity padding. A nonempty ``packed_factor``
+    receives the task-ordered lower triangles read by packed subgroup solves;
+    ``write_panel`` also stores the cooperative tile layout with a zero upper
+    triangle for other panel consumers.
     """
     Row = wp.types.vector(length=width, dtype=wp.float32)
 
@@ -476,6 +498,8 @@ def _make_subgroup_factor_kernel(width: int):
         panels: wp.array[wp.int32],
         matrix: wp.array[wp.float32],
         factor: wp.array[wp.float32],
+        packed_factor: wp.array[wp.float32],
+        write_panel: wp.bool,
     ):
         task, lane = wp.tid()
         mechanism = mechanisms[task]
@@ -503,19 +527,25 @@ def _make_subgroup_factor_kernel(width: int):
                     trailing = _shuffle_panel_value(row[k], column, wp.static(width))
                     if lane >= column:
                         row[column] = row[column] - row[k] * trailing
-        for column in range(wp.static(width)):
-            value = wp.float32(0.0)
-            if column <= lane:
-                value = row[column]
-            factor[base + lane * wp.static(width) + column] = value
+        if packed_factor.shape[0] > 0:
+            packed_base = task * wp.static(packed_lower_size(width)) + _packed_lower_index(lane, wp.int32(0))
+            for column in range(wp.static(width)):
+                if column <= lane:
+                    packed_factor[packed_base + column] = row[column]
+        if write_panel:
+            for column in range(wp.static(width)):
+                value = wp.float32(0.0)
+                if column <= lane:
+                    value = row[column]
+                factor[base + lane * wp.static(width) + column] = value
 
     return factor_subgroup
 
 
 @functools.cache
-def _make_subgroup_solve_kernel(width: int):
+def _make_subgroup_solve_kernel(width: int, packed: bool = False):
     """Solve a one-panel mechanism in registers within a subgroup."""
-    solve_panel = make_subgroup_panel_solve_func(width)
+    solve_panel = make_subgroup_panel_solve_func(width, packed)
 
     @wp.kernel(enable_backward=False, module="unique")
     def solve(
@@ -534,6 +564,8 @@ def _make_subgroup_solve_kernel(width: int):
         dimension = dimensions[mechanism]
         start = offsets[mechanism]
         base = panels[tables[mechanism]] * wp.static(width * width)
+        if wp.static(packed):
+            base = task * wp.static(packed_lower_size(width))
         value = wp.float32(0.0)
         if lane < dimension:
             value = rhs[start + permutation[start + lane]]
@@ -1253,8 +1285,21 @@ class FixedPatternPanelLLT:
             dtype=wp.int32,
             device=self.device,
         )
+        # When both use the same task order, solves read the factor kernel's
+        # packed lower triangles, about half the bytes of full panels.
+        self.subgroup_packed = subgroup_mechanisms.size > 0 and np.array_equal(
+            subgroup_factor_mechanisms, subgroup_mechanisms
+        )
+        self.packed_factor = wp.zeros(
+            subgroup_mechanisms.size * packed_lower_size(block_size) if self.subgroup_packed else 0,
+            dtype=wp.float32,
+            device=self.device,
+        )
+        self._write_subgroup_panels = not self.subgroup_packed
         self._factor_subgroup = _make_subgroup_factor_kernel(block_size) if subgroup_factor_mechanisms.size else None
-        self._solve_subgroup = _make_subgroup_solve_kernel(block_size) if subgroup_mechanisms.size else None
+        self._solve_subgroup = (
+            _make_subgroup_solve_kernel(block_size, self.subgroup_packed) if subgroup_mechanisms.size else None
+        )
         self.cooperative_mechanism = wp.array(cooperative_mechanisms, dtype=wp.int32, device=self.device)
         self._factor_cooperative = _make_cooperative_factor_kernel(block_size)
         self._solve_cooperative = _make_cooperative_solve_kernel(block_size)
@@ -1268,6 +1313,11 @@ class FixedPatternPanelLLT:
             else None
         )
         self._grouped_rhs_block_dim = block_size * GROUPED_RHS_ITEMS_PER_TASK
+
+    @property
+    def subgroup_factor(self) -> wp.array[wp.float32]:
+        """Factor storage read by subgroup solves: packed triangles or full panels."""
+        return self.packed_factor if self.subgroup_packed else self.factor
 
     def create_grouped_rhs_batch(
         self,
@@ -1294,6 +1344,8 @@ class FixedPatternPanelLLT:
                     self.panel_index,
                     self.matrix,
                     self.factor,
+                    self.packed_factor,
+                    wp.bool(self._write_subgroup_panels or self._grouped_rhs_factor_required),
                 ],
                 block_dim=128,
                 device=self.device,
@@ -1378,7 +1430,7 @@ class FixedPatternPanelLLT:
                     self.panel_table_offset,
                     self.panel_index,
                     self.permutation,
-                    self.factor,
+                    self.subgroup_factor,
                     rhs,
                     solution,
                 ],
