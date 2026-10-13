@@ -49,6 +49,16 @@ class TestFixedPanelSubgroups(unittest.TestCase):
                         block = padded[i * width : (i + 1) * width, j * width : (j + 1) * width]
                         packed[panel * width * width : (panel + 1) * width * width] = block.ravel()
             solver.factor.assign(packed)
+            if solver.subgroup_packed:
+                # Packed subgroup solves read task-ordered lower triangles.
+                triangle = width * (width + 1) // 2
+                packed_lower = np.zeros(solver.packed_factor.shape, dtype=np.float32)
+                for task, m in enumerate(solver.subgroup_mechanism.numpy()):
+                    padded = np.eye(width, dtype=np.float32)
+                    padded[: dimensions[m], : dimensions[m]] = factors[m]
+                    rows, columns = np.tril_indices(width)
+                    packed_lower[task * triangle : (task + 1) * triangle] = padded[rows, columns]
+                solver.packed_factor.assign(packed_lower)
         rhs_host = rng.normal(size=starts[-1]).astype(np.float32)
         rhs = wp.array(rhs_host, device="cuda:0")
         results = []

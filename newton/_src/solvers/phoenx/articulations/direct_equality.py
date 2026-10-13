@@ -23,6 +23,7 @@ from newton._src.sim.articulation import (
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     FixedPatternPanelLLT,
     make_subgroup_panel_solve_func,
+    packed_lower_size,
     sync_panel_subgroup,
 )
 from newton._src.solvers.phoenx.articulations.reduced_loop import (
@@ -1723,14 +1724,14 @@ def _apply_direct_equality_descriptor_kernel(
 
 
 @functools.cache
-def _make_fused_subgroup_projection_kernel(width: int):
+def _make_fused_subgroup_projection_kernel(width: int, packed: bool):
     """Build, solve, accumulate, and apply one-panel mechanisms in one launch.
 
     Each dynamic body belongs to exactly one mechanism, so a subgroup can apply
     its own solution after a subgroup barrier. Row and body arithmetic match the
     separate RHS, solve, accumulation, and application kernels exactly.
     """
-    solve_panel = make_subgroup_panel_solve_func(width)
+    solve_panel = make_subgroup_panel_solve_func(width, packed)
 
     @wp.kernel(enable_backward=False, module="unique", grid_stride=False)
     def project(
@@ -1770,6 +1771,8 @@ def _make_fused_subgroup_projection_kernel(width: int):
         dimension = dimensions[mechanism]
         start = offsets[mechanism]
         base = panels[tables[mechanism]] * wp.static(width * width)
+        if wp.static(packed):
+            base = task * wp.static(packed_lower_size(width))
         row = wp.int32(-1)
         value = wp.float32(0.0)
         if lane < dimension:
@@ -2287,7 +2290,7 @@ class DirectEqualitySystem:
             if np.unique(flat_bodies).size != flat_bodies.size:
                 raise ValueError("Direct equality mechanisms must not share dynamic bodies")
             body_start = np.concatenate(([0], np.cumsum([len(bodies) for bodies in mechanism_bodies]))).astype(np.int32)
-            self._fused_projection = _make_fused_subgroup_projection_kernel(solver.block_size)
+            self._fused_projection = _make_fused_subgroup_projection_kernel(solver.block_size, solver.subgroup_packed)
             self._mechanism_body_start = wp.array(body_start, dtype=wp.int32, device=device)
             self._mechanism_bodies = wp.array(flat_bodies, dtype=wp.int32, device=device)
 
@@ -2764,7 +2767,7 @@ class DirectEqualitySystem:
                     solver.panel_table_offset,
                     solver.panel_index,
                     solver.permutation,
-                    solver.factor,
+                    solver.subgroup_factor,
                     self.row_joint,
                     self.row_local,
                     self.row_dynamic,

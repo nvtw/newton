@@ -8,14 +8,19 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import FixedPatternPanelLLT
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import FixedPatternPanelLLT, _make_subgroup_solve_kernel
 
 
 def _factor_storage(panel: FixedPatternPanelLLT, subgroup: bool, rhs: wp.array) -> tuple[np.ndarray, np.ndarray]:
     device = panel.device
+    # Packed solves skip full panels unless another consumer requests them.
+    panel._write_subgroup_panels = True
     if not subgroup:
+        # Reference: tile factor and full-panel subgroup solves.
         panel._tile_factor_mechanism = panel.cooperative_factor_mechanism
         panel.subgroup_factor_mechanism = wp.zeros(0, dtype=wp.int32, device=device)
+        panel.subgroup_packed = False
+        panel._solve_subgroup = _make_subgroup_solve_kernel(panel.block_size)
     panel.factor.zero_()
     solution = wp.zeros_like(rhs)
     with wp.ScopedCapture(device) as capture:
@@ -53,6 +58,7 @@ class TestSubgroupPanelFactor(unittest.TestCase):
                     )
                     small = [m for m, d in enumerate(dimensions) if d <= block_size]
                     np.testing.assert_array_equal(np.sort(panel.subgroup_factor_mechanism.numpy()), small)
+                    self.assertTrue(panel.subgroup_packed)
                     storage = np.zeros(panel.matrix.size, dtype=np.float32)
                     for row, column, address in zip(
                         panel.symbolic.matrix_row,
