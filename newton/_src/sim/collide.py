@@ -1892,10 +1892,12 @@ class CollisionPipeline:
             mesh_sdf_identity_scale_only = False
             max_mesh_mesh_pairs = self.shape_pairs_max
             max_mesh_plane_pairs = self.shape_pairs_max
+            box_candidate_count = 0
             if hasattr(model, "shape_type") and model.shape_type is not None:
                 shape_types = model.shape_type.numpy()
                 colliding_mask = _shape_collide_mask(model, len(shape_types))
                 colliding_shape_types = shape_types[colliding_mask]
+                box_candidate_count = int(np.count_nonzero(colliding_shape_types == int(GeoType.BOX)))
                 mesh_mask = colliding_mask & (shape_types == int(GeoType.MESH))
                 heightfield_mask = colliding_mask & (shape_types == int(GeoType.HFIELD))
                 plane_mask = colliding_mask & (shape_types == int(GeoType.PLANE))
@@ -2045,6 +2047,14 @@ class CollisionPipeline:
             split_gjk_mpr = (
                 device.is_cuda and has_generic_convex_pairs and generic_convex_pair_work_estimate >= split_threshold
             )
+            filter_split_gjk_box_pairs = split_gjk_mpr and box_candidate_count >= 2
+            # Virtual suffix shapes have no entries in model.shape_type. The
+            # runtime filter reads the unified type array after binding.
+            if filter_split_gjk_box_pairs and self.broad_phase_mode == "explicit" and self.extra_shape_count == 0:
+                explicit_pairs = self.shape_pairs_filtered.numpy().reshape(-1, 2)
+                filter_split_gjk_box_pairs = bool(
+                    np.any(np.all(shape_types[explicit_pairs] == int(GeoType.BOX), axis=1))
+                )
 
             # Initialize narrow phase with pre-allocated buffers
             # max_triangle_pairs is a conservative estimate for mesh collision triangle pairs
@@ -2075,6 +2085,7 @@ class CollisionPipeline:
                 convex_support_acceleration=model._convex_support_lut.shape[0] > 1,
                 has_generic_convex_pairs=has_generic_convex_pairs,
                 split_gjk_mpr=split_gjk_mpr,
+                _filter_split_gjk_box_pairs=filter_split_gjk_box_pairs,
                 candidate_pair_work_estimate=candidate_pair_work_estimate,
                 mesh_sdf_identity_scale_only=mesh_sdf_identity_scale_only,
                 mesh_sdf_texture_only=mesh_sdf_texture_only,

@@ -315,6 +315,94 @@ def create_prepare_convex_pair(external_aabb: bool, speculative: bool = False):
 
 
 @wp.func
+def _box_face_axis_separated(query: ConvexPairQueryData) -> bool:
+    """Prove box separation on either box's three face axes."""
+    h_a = query.geom_a.scale
+    h_b = query.geom_b.scale
+    t = query.relative_position_b
+    rotation = wp.quat_to_matrix(query.relative_orientation_b)
+    size_scale = (
+        1.0
+        + wp.abs(t[0])
+        + wp.abs(t[1])
+        + wp.abs(t[2])
+        + h_a[0]
+        + h_a[1]
+        + h_a[2]
+        + h_b[0]
+        + h_b[1]
+        + h_b[2]
+        + wp.abs(query.contact_threshold)
+    )
+    # Preserve borderline pairs for GJK, including support enlargement and projection roundoff.
+    allowance = wp.max(0.0, query.contact_threshold) + query.enlarge + 4.0e-6 * size_scale
+    for i in range(3):
+        radius_b = float(0.0)
+        for j in range(3):
+            radius_b += wp.abs(rotation[i, j]) * h_b[j]
+        if wp.abs(t[i]) > h_a[i] + radius_b + allowance:
+            return True
+    for j in range(3):
+        radius_a = float(0.0)
+        projected_center = float(0.0)
+        for i in range(3):
+            axis_component = rotation[i, j]
+            projected_center += t[i] * axis_component
+            radius_a += wp.abs(axis_component) * h_a[i]
+        if wp.abs(projected_center) > h_b[j] + radius_a + allowance:
+            return True
+    return False
+
+
+def create_filter_split_gjk_box_pairs(external_aabb: bool, speculative: bool = False):
+    """Compact split GJK work after original MPR, excluding proven-separated boxes."""
+    prepare_pair = create_prepare_convex_pair(external_aabb, speculative)
+
+    @wp.kernel(enable_backward=False, module=f"filter_split_gjk_box_pairs_{external_aabb}_{speculative}")
+    def filter_split_gjk_box_pairs(
+        gjk_work_items: wp.array[int],
+        gjk_work_count: wp.array[int],
+        candidate_pair: wp.array[wp.vec2i],
+        shape_types: wp.array[int],
+        shape_data: wp.array[wp.vec4],
+        shape_transform: wp.array[wp.transform],
+        shape_source: wp.array[wp.uint64],
+        shape_gap: wp.array[float],
+        shape_collision_radius: wp.array[float],
+        shape_aabb_lower: wp.array[wp.vec3],
+        shape_aabb_upper: wp.array[wp.vec3],
+        shape_collision_aabb_lower: wp.array[wp.vec3],
+        shape_collision_aabb_upper: wp.array[wp.vec3],
+        total_num_threads: int,
+        filtered_work_items: wp.array[int],
+        filtered_work_count: wp.array[int],
+    ):
+        num_work_items = wp.min(gjk_work_items.shape[0], gjk_work_count[0])
+        for work_index in range(wp.tid(), num_work_items, total_num_threads):
+            pair_index = gjk_work_items[work_index]
+            pair = candidate_pair[pair_index]
+            keep = True
+            if shape_types[pair[0]] == GeoType.BOX and shape_types[pair[1]] == GeoType.BOX:
+                valid, query = wp.static(prepare_pair)(
+                    pair,
+                    shape_types,
+                    shape_data,
+                    shape_transform,
+                    shape_source,
+                    shape_gap,
+                    shape_collision_radius,
+                    shape_aabb_lower,
+                    shape_aabb_upper,
+                    shape_collision_aabb_lower,
+                    shape_collision_aabb_upper,
+                )
+                keep = valid and not _box_face_axis_separated(query)
+            _append_work_index_compacted(keep, pair_index, filtered_work_items, filtered_work_count)
+
+    return filter_split_gjk_box_pairs
+
+
+@wp.func
 def _write_contact_simple_at_index(
     contact_data: ContactData,
     writer_data: ContactWriterData,
@@ -2250,6 +2338,7 @@ class NarrowPhase:
         has_generic_convex_pairs: bool = True,
         sparse_gjk_pairs: bool | None = None,
         split_gjk_mpr: bool = False,
+        _filter_split_gjk_box_pairs: bool = False,
         candidate_pair_work_estimate: int | None = None,
         mesh_sdf_texture_only: bool = False,
         mesh_sdf_identity_scale_only: bool = False,
@@ -2301,6 +2390,9 @@ class NarrowPhase:
             split_gjk_mpr: Whether to split generic convex collision into MPR,
                 GJK, and manifold kernels. Ignored on CPU and when generic
                 convex processing is unnecessary.
+            _filter_split_gjk_box_pairs: Internal box face-axis rejection for
+                the split MPR-to-GJK queue. Has no effect on MPR or on other
+                shape types. Ignored unless ``split_gjk_mpr`` is active.
             candidate_pair_work_estimate: Static upper bound on pairs that the
                 broad phase can emit. Defaults to ``max_candidate_pairs``.
             mesh_sdf_texture_only: Whether every participating mesh SDF has a texture representation,
@@ -2460,6 +2552,7 @@ class NarrowPhase:
         if candidate_pair_work_estimate < 0:
             raise ValueError("candidate_pair_work_estimate must be non-negative or None")
         self.split_gjk_mpr = device_obj.is_cuda and has_generic_convex_pairs and split_gjk_mpr
+        self.box_face_sat_gate = self.split_gjk_mpr and _filter_split_gjk_box_pairs
         # Create the appropriate kernel variants
         # Primitive kernel handles lightweight primitives and routes remaining pairs
         self.primitive_kernel = create_narrow_phase_primitive_kernel(
@@ -2506,10 +2599,14 @@ class NarrowPhase:
                 post_process_contact=split_post_process,
                 speculative=speculative,
             )
+            self.filter_split_gjk_box_pairs_kernel = (
+                create_filter_split_gjk_box_pairs(self.external_aabb, speculative) if self.box_face_sat_gate else None
+            )
         else:
             self.narrow_phase_mpr_kernel = None
             self.narrow_phase_gjk_kernel = None
             self.narrow_phase_manifold_kernel = None
+            self.filter_split_gjk_box_pairs_kernel = None
         # Create triangle contacts kernel when meshes or heightfields are present
         if has_meshes or has_heightfields:
             self.mesh_triangle_contacts_kernel = create_narrow_phase_process_mesh_triangle_contacts_kernel(
@@ -2607,6 +2704,8 @@ class NarrowPhase:
             n += 1
             split_gjk_idx = n if self.split_gjk_mpr else None
             n += 2 if self.split_gjk_mpr else 0
+            filtered_gjk_idx = n if self.box_face_sat_gate else None
+            n += 1 if self.box_face_sat_gate else 0
             sdf_sdf_idx = n
             n += 1
             mesh_like_idx = n if has_mesh_like else None
@@ -2620,6 +2719,9 @@ class NarrowPhase:
 
             self.gjk_candidate_pairs_count = c[gjk_idx : gjk_idx + 1]
             self.split_gjk_work_count = c[split_gjk_idx : split_gjk_idx + 1] if self.split_gjk_mpr else None
+            self.filtered_gjk_work_count = (
+                c[filtered_gjk_idx : filtered_gjk_idx + 1] if self.box_face_sat_gate else None
+            )
             self.split_manifold_work_count = c[split_gjk_idx + 1 : split_gjk_idx + 2] if self.split_gjk_mpr else None
             self.shape_pairs_sdf_sdf_count = c[sdf_sdf_idx : sdf_sdf_idx + 1]
             self.shape_pairs_mesh_count = c[mesh_like_idx : mesh_like_idx + 1] if has_mesh_like else None
@@ -2643,6 +2745,11 @@ class NarrowPhase:
             )
             self.split_gjk_work_items = (
                 wp.zeros(candidate_pair_work_estimate, dtype=wp.int32, device=device) if self.split_gjk_mpr else None
+            )
+            self.filtered_gjk_work_items = (
+                wp.zeros(candidate_pair_work_estimate, dtype=wp.int32, device=device)
+                if self.box_face_sat_gate
+                else None
             )
             self.split_manifold_work_items = (
                 wp.zeros(candidate_pair_work_estimate, dtype=wp.int32, device=device) if self.split_gjk_mpr else None
@@ -2975,6 +3082,36 @@ class NarrowPhase:
                     block_dim=self.split_convex_block_dim,
                     record_tape=False,
                 )
+                gjk_work_items = self.split_gjk_work_items
+                gjk_work_count = self.split_gjk_work_count
+                if self.box_face_sat_gate:
+                    wp.launch(
+                        kernel=self.filter_split_gjk_box_pairs_kernel,
+                        dim=self.split_convex_total_num_threads,
+                        inputs=[
+                            self.split_gjk_work_items,
+                            self.split_gjk_work_count,
+                            convex_pairs,
+                            shape_types,
+                            shape_data,
+                            shape_transform,
+                            shape_source,
+                            shape_gap,
+                            shape_collision_radius,
+                            self.shape_aabb_lower,
+                            self.shape_aabb_upper,
+                            shape_collision_aabb_lower,
+                            shape_collision_aabb_upper,
+                            self.split_convex_total_num_threads,
+                            self.filtered_gjk_work_items,
+                            self.filtered_gjk_work_count,
+                        ],
+                        device=device,
+                        block_dim=self.split_convex_block_dim,
+                        record_tape=False,
+                    )
+                    gjk_work_items = self.filtered_gjk_work_items
+                    gjk_work_count = self.filtered_gjk_work_count
                 wp.launch(
                     kernel=self.narrow_phase_gjk_kernel,
                     dim=self.split_convex_total_num_threads,
@@ -2983,8 +3120,8 @@ class NarrowPhase:
                         *common_inputs,
                         self.split_convex_total_num_threads,
                         self.split_query_results,
-                        self.split_gjk_work_items,
-                        self.split_gjk_work_count,
+                        gjk_work_items,
+                        gjk_work_count,
                         self.split_manifold_work_items,
                         self.split_manifold_work_count,
                     ],
