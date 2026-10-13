@@ -117,7 +117,6 @@ class TestContactRelaxMomentum(unittest.TestCase):
                     ).sum(axis=0)
 
                 before = momentum()
-                prepared_responses = cc.derived.numpy()[:3, 0].copy()
                 world._refresh_owned_relax_geometry(wp.float32(1000.0))
                 prepared = cc.derived.numpy()
                 mapping = world._active_contact_views().shape_body.numpy()
@@ -125,8 +124,12 @@ class TestContactRelaxMomentum(unittest.TestCase):
                 b1 = int(mapping[int(contacts.rigid_contact_shape1.numpy()[0])])
                 r0, r1 = prepared[9:12, 0], prepared[12:15, 0]
                 np.testing.assert_allclose(positions[b0] + r0, positions[b1] + r1, rtol=0.0, atol=1.0e-6)
-                # Only the lever arms move; the prepared responses are retained.
-                np.testing.assert_array_equal(prepared[:3, 0], prepared_responses)
+                normal = cc.lambdas.numpy()[:3, 0]
+                tangent = cc.lambdas.numpy()[3:6, 0]
+                for row, direction in enumerate((normal, tangent, np.cross(normal, tangent))):
+                    a0, a1 = np.cross(r0, direction), np.cross(r1, direction)
+                    mobility = 2.0 + a0 @ inverse_inertia[b0] @ a0 + a1 @ inverse_inertia[b1] @ a1
+                    self.assertAlmostEqual(float(prepared[row, 0]), 1.0 / mobility, delta=1.0e-6)
                 # This single pair has no overflow copies; exercise the same
                 # ordinary projection after each world's central refresh.
                 wp.launch(

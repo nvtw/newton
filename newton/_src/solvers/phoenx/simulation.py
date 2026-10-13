@@ -4001,6 +4001,7 @@ class PhoenXWorld:
                     self._num_active_constraints
                     if self._colored_contact_headers
                     else self._ingest_scratch.num_contact_columns,
+                    wp.bool(self.mass_splitting_enabled),
                     self._contact_cols.articulation_owner,
                     self._partitioner.element_ids_by_color,
                     wp.int32(self._contact_offset),

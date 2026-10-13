@@ -331,19 +331,14 @@ def rebase_ordinary_contact_relax_kernel(
     cc: ContactContainer,
     bodies: BodyContainer,
     column_count: wp.array[wp.int32],
+    mass_splitting: wp.bool,
     canonical_owner: wp.array[wp.int32],
     element_ids_by_color: wp.array[wp.int32],
     contact_offset: wp.int32,
     packed_headers: wp.bool,
     rows_per_column: wp.int32,
 ):
-    """Retain each prepared world impulse point as body COMs advance.
-
-    Only the lever arms move, so both bodies keep one common impulse point
-    and relaxation conserves angular momentum. The prepared effective masses
-    stay: they differ from the integrated pose by O(omega * dt), which only
-    perturbs the Gauss-Seidel step size, and the next prepare rebuilds them.
-    """
+    """Retain each prepared world impulse point as body COMs advance."""
     cid, lane = wp.tid()
     if cid >= column_count[0]:
         return
@@ -358,12 +353,56 @@ def rebase_ordinary_contact_relax_kernel(
     b2 = contact_get_body2(columns, cid)
     shift1 = bodies.position_prev_substep[b1] - bodies.position[b1]
     shift2 = bodies.position_prev_substep[b2] - bodies.position[b2]
+    factor1 = wp.float32(1.0)
+    factor2 = wp.float32(1.0)
+    if mass_splitting:
+        factor1 = wp.float32(contact_get_count1(columns, cid))
+        factor2 = wp.float32(contact_get_count2(columns, cid))
+    inverse_mass1 = bodies.inverse_mass[b1] * factor1
+    inverse_mass2 = bodies.inverse_mass[b2] * factor2
+    inverse_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * factor1
+    inverse_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * factor2
     first = contact_get_contact_first(columns, cid)
     count = contact_get_contact_count(columns, cid)
     # Rebase rows independently; no impulse or body velocity is modified.
     for k in range(first + lane, first + count, rows_per_column):
-        cc_set_r0(cc, k, cc_get_r0(cc, k) + shift1)
-        cc_set_r1(cc, k, cc_get_r1(cc, k) + shift2)
+        r1 = cc_get_r0(cc, k) + shift1
+        r2 = cc_get_r1(cc, k) + shift2
+        cc_set_r0(cc, k, r1)
+        cc_set_r1(cc, k, r2)
+        normal = cc_get_normal(cc, k)
+        tangent1 = cc_get_tangent1(cc, k)
+        tangent2 = wp.cross(normal, tangent1)
+        eff_n = effective_mass_scalar(normal, r1, r2, inverse_mass1, inverse_mass2, inverse_inertia1, inverse_inertia2)
+        cc_set_eff_n(cc, k, eff_n)
+        tangent_response1 = contact_mobility_scalar(
+            tangent1, r1, r2, inverse_mass1, inverse_mass2, inverse_inertia1, inverse_inertia2
+        )
+        tangent_response2 = contact_mobility_scalar(
+            tangent2, r1, r2, inverse_mass1, inverse_mass2, inverse_inertia1, inverse_inertia2
+        )
+        if not packed_headers:
+            # Ordinary columns and reduced-coordinate consumers retain
+            # reciprocal effective masses; packed rigid PGS uses mobility.
+            tangent_response1 = wp.float32(1.0) / tangent_response1 if tangent_response1 > 0.0 else 0.0
+            tangent_response2 = wp.float32(1.0) / tangent_response2 if tangent_response2 > 0.0 else 0.0
+        cc_set_eff_t1(cc, k, tangent_response1)
+        cc_set_eff_t2(cc, k, tangent_response2)
+        rn1 = wp.cross(r1, normal)
+        rn2 = wp.cross(r2, normal)
+        rt11 = wp.cross(r1, tangent1)
+        rt12 = wp.cross(r2, tangent1)
+        rt21 = wp.cross(r1, tangent2)
+        rt22 = wp.cross(r2, tangent2)
+        response_t11 = inverse_inertia1 * rt11
+        response_t12 = inverse_inertia2 * rt12
+        response_t21 = inverse_inertia1 * rt21
+        response_t22 = inverse_inertia2 * rt22
+        cc_set_mobility_nt1(cc, k, wp.dot(rn1, response_t11) + wp.dot(rn2, response_t12))
+        cc_set_mobility_nt2(cc, k, wp.dot(rn1, response_t21) + wp.dot(rn2, response_t22))
+        cc_set_mobility_t1t2(cc, k, wp.dot(rt11, response_t21) + wp.dot(rt12, response_t22))
+        if cc_get_pd_eff_soft(cc, k) > wp.float32(0.0) and eff_n > wp.float32(0.0):
+            cc_set_pd_eff_soft(cc, k, wp.float32(1.0) / (wp.float32(1.0) / eff_n + cc_get_pd_gamma(cc, k)))
 
 
 def _make_contact_prepare_for_iteration_at(
