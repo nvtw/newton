@@ -448,13 +448,13 @@ add_function_test(
 def test_capsule_cylinder_tangent_contact(test, device, *, split=False):
     """Use a single contact where a capsule is tangent to a straight cylinder's side."""
     rotations = (wp.quat_identity(), wp.quat_from_axis_angle(wp.normalize(wp.vec3(1.0, 2.0, 3.0)), 0.7))
-    for swap, rotation in product((False, True), rotations):
-        with test.subTest(swap=swap, rotation=rotation):
+    for swap, rotation, angle in product((False, True), rotations, (wp.pi / 2, wp.pi / 6, wp.pi / 12)):
+        with test.subTest(swap=swap, rotation=rotation, angle=angle):
             radius, capsule_radius, overlap = 0.025, 0.003, 0.0001
             frame = wp.transform(wp.vec3(0.585, -0.22, 0.046), rotation)
             capsule_pose = frame * wp.transform(
                 wp.vec3(0.0, radius + capsule_radius - overlap, 0.0),
-                wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.pi / 2),
+                wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), angle),
             )
             builder = newton.ModelBuilder()
             body = builder.add_body(xform=capsule_pose)
@@ -476,12 +476,13 @@ def test_capsule_cylinder_tangent_contact(test, device, *, split=False):
             point0, point1 = contacts.rigid_contact_point0.numpy()[0], contacts.rigid_contact_point1.numpy()[0]
             cylinder_point = point0 if cylinder_first else point1
             capsule_point = point1 if cylinder_first else point0
-            # Allow numerical error in the deepest GJK witness.
+            # Oblique crossings amplify axial error in the deepest GJK witness.
+            witness_tolerance = 1.0e-5 if angle == wp.pi / 2 else 1.0e-4
             np.testing.assert_allclose(
-                cylinder_point, np.asarray(wp.transform_point(frame, wp.vec3(0.0, radius, 0.0))), atol=1.0e-5
+                cylinder_point, np.asarray(wp.transform_point(frame, wp.vec3(0.0, radius, 0.0))), atol=witness_tolerance
             )
             # The capsule's radius is stored as a separate friction-anchor offset.
-            np.testing.assert_allclose(capsule_point[[0, 2]], [0.0, 0.0], atol=1.0e-5)
+            np.testing.assert_allclose(capsule_point[[0, 2]], [0.0, 0.0], atol=witness_tolerance)
             offset0, offset1 = contacts.rigid_contact_offset0.numpy()[0], contacts.rigid_contact_offset1.numpy()[0]
             capsule_offset = offset1 if cylinder_first else offset0
             np.testing.assert_allclose(capsule_offset, [0.0, -capsule_radius, 0.0], atol=1.0e-6)
@@ -507,6 +508,122 @@ add_function_test(
     TestBoxContactNormal,
     "test_capsule_cylinder_tangent_contact_split",
     test_capsule_cylinder_tangent_contact_split,
+    devices=get_test_devices(),
+)
+
+
+def test_resized_primitive_contact(test, device, *, split=False):
+    """Keep shallow contact normals after resizing either primitive at runtime."""
+    for resized, swap in product(("box", "cylinder"), (False, True)):
+        with test.subTest(resized=resized, swap=swap):
+            builder = newton.ModelBuilder()
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.63, 0.0, 0.049)))
+            for is_box in (False, True) if swap else (True, False):
+                if is_box:
+                    box = builder.add_shape_box(
+                        -1,
+                        hx=0.6 / 1.05 if resized == "box" else 0.6,
+                        hy=0.15,
+                        hz=0.025,
+                        cfg=builder.ShapeConfig(gap=0.0),
+                    )
+                else:
+                    cylinder = builder.add_shape_cylinder(
+                        body,
+                        xform=wp.transform(wp.vec3(0.0), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.pi / 2)),
+                        radius=0.025 / 1.05 if resized == "cylinder" else 0.025,
+                        half_height=0.05,
+                        cfg=builder.ShapeConfig(gap=0.0),
+                    )
+            model = builder.finalize(device)
+            pipeline = newton.CollisionPipeline(model)
+            test.assertEqual(pipeline.narrow_phase.split_gjk_mpr, split)
+            state, contacts = model.state(), pipeline.contacts()
+            for factor in (1.0, 0.5, 1.0):
+                scales = model.shape_scale.numpy()
+                scales[box, 0] = 0.6 * factor if resized == "box" else 0.6
+                scales[cylinder, 0] = 0.025 * factor if resized == "cylinder" else 0.025
+                model.shape_scale.assign(scales)
+                pipeline.collide(state, contacts)
+                count = int(contacts.rigid_contact_count.numpy()[0])
+                if factor == 0.5:
+                    test.assertEqual(count, 0)
+                    continue
+                test.assertGreater(count, 0)
+                shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+                normals = contacts.rigid_contact_normal.numpy()[:count]
+                expected = np.where((shape0 == box)[:, None], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0])
+                np.testing.assert_allclose(normals, expected, atol=1.0e-4)
+
+
+add_function_test(
+    TestBoxContactNormal, "test_resized_primitive_contact", test_resized_primitive_contact, devices=get_test_devices()
+)
+
+
+def test_resized_primitive_contact_split(test, device):
+    """Check runtime primitive resizing through the split CUDA kernels."""
+    if not device.is_cuda:
+        test.skipTest("Split collision kernels run only on CUDA")
+    with patch("newton._src.sim.collide._SPLIT_GJK_MPR_FULL_PAIR_COUNT_THRESHOLD", 0):
+        test_resized_primitive_contact(test, device, split=True)
+
+
+add_function_test(
+    TestBoxContactNormal,
+    "test_resized_primitive_contact_split",
+    test_resized_primitive_contact_split,
+    devices=get_test_devices(),
+)
+
+
+def test_parallel_cylinder_contact_endpoints(test, device, *, split=False):
+    """Retain both endpoints of the contact line between parallel cylinders."""
+    rotations = (wp.quat_identity(), wp.quat_from_axis_angle(wp.normalize(wp.vec3(1.0, 2.0, 3.0)), 0.7))
+    for swap, rotation in product((False, True), rotations):
+        with test.subTest(swap=swap, rotation=rotation):
+            frame = wp.transform(wp.vec3(0.0), rotation)
+            builder = newton.ModelBuilder()
+            body = builder.add_body(xform=frame * wp.transform(wp.vec3(0.0279, 0.0, 0.0)))
+            for is_large in (False, True) if swap else (True, False):
+                if is_large:
+                    large = builder.add_shape_cylinder(-1, xform=frame, radius=0.025, half_height=0.05)
+                else:
+                    builder.add_shape_cylinder(body, radius=0.003, half_height=0.0075)
+            model = builder.finalize(device)
+            pipeline = newton.CollisionPipeline(model)
+            test.assertEqual(pipeline.narrow_phase.split_gjk_mpr, split)
+            contacts = pipeline.contacts()
+            pipeline.collide(model.state(), contacts)
+            count = int(contacts.rigid_contact_count.numpy()[0])
+            test.assertEqual(count, 2)
+            shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+            point0 = contacts.rigid_contact_point0.numpy()[:count]
+            point1 = contacts.rigid_contact_point1.numpy()[:count]
+            points = np.where((shape0 == large)[:, None], point1, point0)
+            np.testing.assert_allclose(np.sort(points[:, 2]), [-0.0075, 0.0075], atol=1.0e-5)
+
+
+add_function_test(
+    TestBoxContactNormal,
+    "test_parallel_cylinder_contact_endpoints",
+    test_parallel_cylinder_contact_endpoints,
+    devices=get_test_devices(),
+)
+
+
+def test_parallel_cylinder_contact_endpoints_split(test, device):
+    """Retain parallel-cylinder endpoints through the split CUDA kernels."""
+    if not device.is_cuda:
+        test.skipTest("Split collision kernels run only on CUDA")
+    with patch("newton._src.sim.collide._SPLIT_GJK_MPR_FULL_PAIR_COUNT_THRESHOLD", 0):
+        test_parallel_cylinder_contact_endpoints(test, device, split=True)
+
+
+add_function_test(
+    TestBoxContactNormal,
+    "test_parallel_cylinder_contact_endpoints_split",
+    test_parallel_cylinder_contact_endpoints_split,
     devices=get_test_devices(),
 )
 
