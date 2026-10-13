@@ -20,7 +20,11 @@ from newton._src.sim.articulation import (
     transform_2d_rotational_axes,
     transform_3d_rotational_axes,
 )
-from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import FixedPatternPanelLLT
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
+    FixedPatternPanelLLT,
+    make_subgroup_panel_solve_func,
+    sync_panel_subgroup,
+)
 from newton._src.solvers.phoenx.articulations.reduced_loop import (
     _body_origin_transform,
     _quat_log,
@@ -1222,6 +1226,48 @@ def _prepare_direct_equality_diagonal_kernel(
     matrix[diagonal_index[row]] = value * scale * scale
 
 
+@wp.func
+def _direct_equality_row_rhs(
+    row: wp.int32,
+    row_joint: wp.array[wp.int32],
+    row_local: wp.array[wp.int32],
+    row_dynamic: wp.array[wp.bool],
+    joint_to_structural: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    row_wrench0: wp.array2d[wp.spatial_vector],
+    row_wrench1: wp.array2d[wp.spatial_vector],
+    row_bias: wp.array2d[wp.float32],
+    velocity_reference: wp.array[wp.float32],
+    accumulated_impulse: wp.array[wp.float32],
+    dynamic_mass: wp.array[wp.float32],
+    bodies: BodyContainer,
+    use_bias: wp.bool,
+    row_scale: wp.array[wp.float32],
+) -> wp.float32:
+    joint = row_joint[row]
+    structural_index = joint_to_structural[joint]
+    local_row = row_local[row]
+    body0 = joint_parent[joint] + wp.int32(1)
+    body1 = joint_child[joint] + wp.int32(1)
+    relative_velocity = wp.float32(0.0)
+    if body0 > wp.int32(0):
+        relative_velocity += wp.dot(row_wrench0[structural_index, local_row], _body_com_twist(bodies, body0))
+    if body1 > wp.int32(0):
+        relative_velocity += wp.dot(row_wrench1[structural_index, local_row], _body_com_twist(bodies, body1))
+    value = wp.float32(0.0)
+    if row_dynamic[row]:
+        value = row_scale[row] * (
+            velocity_reference[row]
+            - relative_velocity
+            - accumulated_impulse[row] / wp.max(dynamic_mass[row], wp.float32(1.0e-10))
+        )
+    else:
+        bias = row_bias[structural_index, local_row] if use_bias else wp.float32(0.0)
+        value = -row_scale[row] * (relative_velocity + bias)
+    return value
+
+
 @wp.kernel(enable_backward=False)
 def _build_direct_equality_rhs_kernel(
     row_joint: wp.array[wp.int32],
@@ -1243,26 +1289,24 @@ def _build_direct_equality_rhs_kernel(
     solve_active: wp.array[wp.int32],
 ):
     row = wp.tid()
-    joint = row_joint[row]
-    structural_index = joint_to_structural[joint]
-    local_row = row_local[row]
-    body0 = joint_parent[joint] + wp.int32(1)
-    body1 = joint_child[joint] + wp.int32(1)
-    relative_velocity = wp.float32(0.0)
-    if body0 > wp.int32(0):
-        relative_velocity += wp.dot(row_wrench0[structural_index, local_row], _body_com_twist(bodies, body0))
-    if body1 > wp.int32(0):
-        relative_velocity += wp.dot(row_wrench1[structural_index, local_row], _body_com_twist(bodies, body1))
-    value = wp.float32(0.0)
-    if row_dynamic[row]:
-        value = row_scale[row] * (
-            velocity_reference[row]
-            - relative_velocity
-            - accumulated_impulse[row] / wp.max(dynamic_mass[row], wp.float32(1.0e-10))
-        )
-    else:
-        bias = row_bias[structural_index, local_row] if use_bias else wp.float32(0.0)
-        value = -row_scale[row] * (relative_velocity + bias)
+    value = _direct_equality_row_rhs(
+        row,
+        row_joint,
+        row_local,
+        row_dynamic,
+        joint_to_structural,
+        joint_parent,
+        joint_child,
+        row_wrench0,
+        row_wrench1,
+        row_bias,
+        velocity_reference,
+        accumulated_impulse,
+        dynamic_mass,
+        bodies,
+        use_bias,
+        row_scale,
+    )
     rhs[row] = value
     # Primary dynamics and bias impulses must never be thresholded: a
     # small velocity change can carry a large impulse through armature or a
@@ -1638,8 +1682,9 @@ def _gather_direct_friction_wrenches_kernel(
         out[cid] += idt * friction_impulse[row]
 
 
-@wp.kernel(enable_backward=False)
-def _apply_direct_equality_descriptor_kernel(
+@wp.func
+def _apply_direct_equality_body(
+    body: wp.int32,
     body_row_start: wp.array[wp.int32],
     descriptor: wp.array[wp.vec2i],
     row_wrench0: wp.array[wp.spatial_vector],
@@ -1648,7 +1693,6 @@ def _apply_direct_equality_descriptor_kernel(
     row_scale: wp.array[wp.float32],
     bodies: BodyContainer,
 ):
-    body = wp.tid()
     if body <= wp.int32(0) or bodies.inverse_mass[body] <= wp.float32(0.0):
         return
     wrench = wp.spatial_vector()
@@ -1661,6 +1705,114 @@ def _apply_direct_equality_descriptor_kernel(
     force = wp.spatial_top(wrench)
     bodies.velocity[body] += bodies.inverse_mass[body] * force
     bodies.angular_velocity[body] += mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
+
+
+@wp.kernel(enable_backward=False)
+def _apply_direct_equality_descriptor_kernel(
+    body_row_start: wp.array[wp.int32],
+    descriptor: wp.array[wp.vec2i],
+    row_wrench0: wp.array[wp.spatial_vector],
+    row_wrench1: wp.array[wp.spatial_vector],
+    delta: wp.array[wp.float32],
+    row_scale: wp.array[wp.float32],
+    bodies: BodyContainer,
+):
+    _apply_direct_equality_body(
+        wp.tid(), body_row_start, descriptor, row_wrench0, row_wrench1, delta, row_scale, bodies
+    )
+
+
+@functools.cache
+def _make_fused_subgroup_projection_kernel(width: int):
+    """Build, solve, accumulate, and apply one-panel mechanisms in one launch.
+
+    Each dynamic body belongs to exactly one mechanism, so a subgroup can apply
+    its own solution after a subgroup barrier. Row and body arithmetic match the
+    separate RHS, solve, accumulation, and application kernels exactly.
+    """
+    solve_panel = make_subgroup_panel_solve_func(width)
+
+    @wp.kernel(enable_backward=False, module="unique", grid_stride=False)
+    def project(
+        mechanisms: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        offsets: wp.array[wp.int32],
+        tables: wp.array[wp.int32],
+        panels: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        row_joint: wp.array[wp.int32],
+        row_local: wp.array[wp.int32],
+        row_dynamic: wp.array[wp.bool],
+        joint_to_structural: wp.array[wp.int32],
+        joint_parent: wp.array[wp.int32],
+        joint_child: wp.array[wp.int32],
+        row_wrench0: wp.array2d[wp.spatial_vector],
+        row_wrench1: wp.array2d[wp.spatial_vector],
+        row_bias: wp.array2d[wp.float32],
+        velocity_reference: wp.array[wp.float32],
+        accumulated_impulse: wp.array[wp.float32],
+        dynamic_mass: wp.array[wp.float32],
+        use_bias: wp.bool,
+        row_scale: wp.array[wp.float32],
+        mechanism_body_start: wp.array[wp.int32],
+        mechanism_bodies: wp.array[wp.int32],
+        body_row_start: wp.array[wp.int32],
+        descriptor: wp.array[wp.vec2i],
+        apply_wrench0: wp.array[wp.spatial_vector],
+        apply_wrench1: wp.array[wp.spatial_vector],
+        bodies: BodyContainer,
+        rhs: wp.array[wp.float32],
+        delta: wp.array[wp.float32],
+    ):
+        task, lane = wp.tid()
+        mechanism = mechanisms[task]
+        dimension = dimensions[mechanism]
+        start = offsets[mechanism]
+        base = panels[tables[mechanism]] * wp.static(width * width)
+        row = wp.int32(-1)
+        value = wp.float32(0.0)
+        if lane < dimension:
+            row = start + permutation[start + lane]
+            value = _direct_equality_row_rhs(
+                row,
+                row_joint,
+                row_local,
+                row_dynamic,
+                joint_to_structural,
+                joint_parent,
+                joint_child,
+                row_wrench0,
+                row_wrench1,
+                row_bias,
+                velocity_reference,
+                accumulated_impulse,
+                dynamic_mass,
+                bodies,
+                use_bias,
+                row_scale,
+            )
+            rhs[row] = value
+        value = solve_panel(factor, base, dimension, lane, value)
+        if lane < dimension:
+            delta[row] = value
+            accumulated_impulse[row] += row_scale[row] * value
+        # Body updates read the whole mechanism solution and must follow every
+        # velocity read of the right-hand side.
+        sync_panel_subgroup(wp.static(width))
+        for entry in range(mechanism_body_start[mechanism] + lane, mechanism_body_start[mechanism + 1], width):
+            _apply_direct_equality_body(
+                mechanism_bodies[entry],
+                body_row_start,
+                descriptor,
+                apply_wrench0,
+                apply_wrench1,
+                delta,
+                row_scale,
+                bodies,
+            )
+
+    return project
 
 
 @wp.kernel(enable_backward=False)
@@ -2116,6 +2268,28 @@ class DirectEqualitySystem:
         self.matrix = self.solver.matrix
         self.row_scale = wp.ones(row_count, dtype=wp.float32, device=device)
         self.max_dimension = max(self.topology.dimensions)
+        self._fused_projection = None
+        solver = self.solver
+        if (
+            solver.subgroup_mechanism.size == len(self.topology.dimensions)
+            and solver.cooperative_mechanism.size == 0
+            and solver._pcr is None
+            and not solver._use_push_solve
+        ):
+            # Dynamic endpoints are united into one mechanism, so each body
+            # receives impulses from the rows of exactly one subgroup.
+            row_start = self.topology.mechanism_row_start
+            mechanism_bodies = [
+                sorted(frozenset().union(*row_bodies[row_start[mechanism] : row_start[mechanism + 1]]))
+                for mechanism in range(len(self.topology.dimensions))
+            ]
+            flat_bodies = np.asarray([body + 1 for bodies in mechanism_bodies for body in bodies], dtype=np.int32)
+            if np.unique(flat_bodies).size != flat_bodies.size:
+                raise ValueError("Direct equality mechanisms must not share dynamic bodies")
+            body_start = np.concatenate(([0], np.cumsum([len(bodies) for bodies in mechanism_bodies]))).astype(np.int32)
+            self._fused_projection = _make_fused_subgroup_projection_kernel(solver.block_size)
+            self._mechanism_body_start = wp.array(body_start, dtype=wp.int32, device=device)
+            self._mechanism_bodies = wp.array(flat_bodies, dtype=wp.int32, device=device)
 
     @property
     def joint_mask(self) -> np.ndarray:
@@ -2575,6 +2749,49 @@ class DirectEqualitySystem:
 
     def solve(self, *, use_bias: bool, refine: bool = True) -> None:
         if not self.enabled:
+            return
+        if use_bias and self._fused_projection is not None:
+            # Biased projections are never skipped, so no activity flag or
+            # conditional graph node is needed.
+            solver = self.solver
+            wp.launch(
+                self._fused_projection,
+                dim=(solver.subgroup_mechanism.size, solver.block_size),
+                inputs=[
+                    solver.subgroup_mechanism,
+                    solver.dimension,
+                    solver.vector_offset,
+                    solver.panel_table_offset,
+                    solver.panel_index,
+                    solver.permutation,
+                    solver.factor,
+                    self.row_joint,
+                    self.row_local,
+                    self.row_dynamic,
+                    self.joint_to_structural,
+                    self.model.joint_parent,
+                    self.model.joint_child,
+                    self.row_wrench0,
+                    self.row_wrench1,
+                    self.row_bias,
+                    self.velocity_reference,
+                    self.accumulated_impulse,
+                    self.dynamic_mass,
+                    wp.bool(True),
+                    self.row_scale,
+                    self._mechanism_body_start,
+                    self._mechanism_bodies,
+                    self.body_row_start,
+                    self._body_row_wrench_descriptors,
+                    self._apply_wrench0,
+                    self._apply_wrench1,
+                    self.bodies,
+                    self.rhs,
+                    self.delta,
+                ],
+                block_dim=128,
+                device=self.model.device,
+            )
             return
         self.solve_active.fill_(int(use_bias))
         wp.launch(
