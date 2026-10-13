@@ -260,10 +260,13 @@ class BlockJointSystem(DirectEqualitySystem):
                         device=self.model.device,
                     )
 
-    def solve(self, *, use_bias, refine=True):
+    def solve(self, *, use_bias, refine=True, copy_state=None, average_copies=False):
         # Match the direct equality solve interface. Block systems always
-        # perform their complete local correction, so refine has no effect.
-        del refine
+        # perform their complete local correction, so refine has no effect,
+        # and they never own the mass-splitting copy average.
+        del refine, copy_state
+        if average_copies:
+            raise ValueError("block joint systems cannot average mass-splitting copies")
         if not self.enabled or not self._resolving_bounds:
             return
         wp.launch(
@@ -387,8 +390,20 @@ class MixedJointSystem:
     def prepare_and_factor(self, idt):
         self._forward("prepare_and_factor", idt)
 
-    def solve(self, *, use_bias, refine=True):
+    def solve(self, *, use_bias, refine=True, copy_state=None, average_copies=False):
+        if average_copies:
+            if not self.fuses_copy_average:
+                raise ValueError("average_copies requires the exact system to cover every dynamic body")
+            self.exact.solve(use_bias=use_bias, refine=refine, copy_state=copy_state, average_copies=True)
+            if self.blocks.enabled:
+                self.blocks.solve(use_bias=use_bias, refine=refine)
+            return
         self._forward("solve", use_bias=use_bias, refine=refine)
+
+    @property
+    def fuses_copy_average(self) -> bool:
+        """Whether the exact projection can replace the standalone copy average."""
+        return bool(self.exact.enabled and self.exact.fuses_copy_average)
 
     def resolve_bounded_drives(self, idt, *, use_bias):
         self._forward("resolve_bounded_drives", idt, use_bias=use_bias)

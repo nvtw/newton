@@ -39,8 +39,12 @@ class SingleWorldMassSplittingUnrolledDispatcher:
     def begin_step(self) -> None:
         self._world._rebuild_mass_splitting_graph()
 
-    def _unrolled_sweep(self, head_kernel, idt: wp.float32, contact_container=None) -> None:
-        """Head-only fixed-count colour drain."""
+    def _unrolled_sweep(self, head_kernel, idt: wp.float32, contact_container=None, average: bool = True) -> None:
+        """Head-only fixed-count colour drain.
+
+        ``average=False`` leaves the overflow copy average to the exact joint
+        projection that follows the sweep.
+        """
         w = self._world
         fuse_threshold = wp.int32(-1)
         regular_colors = self._launch_bound
@@ -50,7 +54,24 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container, step_idx)
         if w._singleworld_overflow_only_mass_splitting:
             w._launch_singleworld_head(head_kernel, idt, fuse_threshold, contact_container, regular_colors)
-            w._mass_splitting_average_overflow_into_bodies()
+            if average:
+                w._mass_splitting_average_overflow_into_bodies()
+
+    def _average_kwargs(self, fused: bool) -> dict:
+        """Solve arguments that move the copy average into the projection."""
+        if not fused:
+            return {}
+        return {"copy_state": self._world._copy_state, "average_copies": True}
+
+    def _fused_average(self, direct) -> bool:
+        """Whether exact projections reduce overflow copies themselves."""
+        w = self._world
+        return (
+            w._singleworld_overflow_only_mass_splitting
+            and direct is not None
+            and direct.enabled
+            and getattr(direct, "fuses_copy_average", False)
+        )
 
     def solve(self, idt: wp.float32) -> None:
         w = self._world
@@ -89,12 +110,15 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             if sync_direct_copies:
                 w._mass_splitting_broadcast()
         prepare_head, _, iterate_head, _, _, _ = w._singleworld_kernels()
-        if w._refresh_prepare_this_substep():
+        fused_average = self._fused_average(direct)
+        refreshed = w._refresh_prepare_this_substep()
+        if refreshed:
             w._partitioner.begin_sweep()
             self._unrolled_sweep(
                 prepare_head,
                 idt,
                 w._contact_container_solve if w._colored_contact_rows else None,
+                average=not fused_average,
             )
             if not w._singleworld_overflow_only_mass_splitting:
                 w._mass_splitting_average_and_broadcast(inv_dt)
@@ -104,25 +128,26 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             if sync_direct_copies:
                 w._mass_splitting_writeback(already_averaged=True)
             w._warm_start_owned_contacts()
-            direct.solve(use_bias=False, refine=False)
+            direct.solve(use_bias=False, refine=False, **self._average_kwargs(fused_average and refreshed))
             if sync_direct_copies:
                 w._mass_splitting_broadcast()
         # Without explicit projection passes, project after every iteration.
         every_iteration = w.direct_joint_projection_passes is None
         for iteration in range(w.solver_iterations):
-            w._partitioner.begin_sweep()
-            self._unrolled_sweep(iterate_head, idt, w._contact_container_solve)
-            if not w._singleworld_overflow_only_mass_splitting:
-                w._mass_splitting_average_and_broadcast(inv_dt)
-            final = iteration == w.solver_iterations - 1
-            if (
+            project = (
                 direct is not None
                 and direct.enabled
                 and (every_iteration or iteration in w._direct_joint_projection_iterations)
-            ):
+            )
+            w._partitioner.begin_sweep()
+            self._unrolled_sweep(iterate_head, idt, w._contact_container_solve, average=not (fused_average and project))
+            if not w._singleworld_overflow_only_mass_splitting:
+                w._mass_splitting_average_and_broadcast(inv_dt)
+            final = iteration == w.solver_iterations - 1
+            if project:
                 if sync_direct_copies:
                     w._mass_splitting_writeback(already_averaged=True)
-                direct.solve(use_bias=final, refine=every_iteration or final)
+                direct.solve(use_bias=final, refine=every_iteration or final, **self._average_kwargs(fused_average))
                 if sync_direct_copies and iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
 
@@ -151,16 +176,17 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             w._mass_splitting_broadcast()
         inv_dt = 1.0 / w.substep_dt
         _, _, _, _, relax_head, _ = w._singleworld_kernels()
+        fused_average = self._fused_average(direct)
         for iteration in range(w._active_velocity_iterations):
             w._partitioner.begin_sweep()
-            self._unrolled_sweep(relax_head, idt, w._contact_container_solve)
+            self._unrolled_sweep(relax_head, idt, w._contact_container_solve, average=not fused_average)
             if not w._singleworld_overflow_only_mass_splitting:
                 w._mass_splitting_average_and_broadcast(inv_dt)
             if direct is not None and direct.enabled:
                 if sync_direct_copies:
                     w._mass_splitting_writeback(already_averaged=True)
                 w._wait_direct_factor()
-                direct.solve(use_bias=False)
+                direct.solve(use_bias=False, **self._average_kwargs(fused_average))
                 if sync_direct_copies and iteration + 1 < w._active_velocity_iterations:
                     w._mass_splitting_broadcast()
 

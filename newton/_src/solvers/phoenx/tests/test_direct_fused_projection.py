@@ -12,6 +12,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.articulations.block_joint_system import MixedJointSystem
+from newton._src.solvers.phoenx.mass_splitting.kernels import launch_average_rigid_velocity_into_bodies
 from newton.examples.phoenx import example_phoenx_ragdoll_pile as scene
 from newton.viewer import ViewerNull
 
@@ -93,6 +94,45 @@ class TestDirectFusedProjection(unittest.TestCase):
                 ):
                     np.testing.assert_array_equal(candidate, reference, err_msg=f"{name}, bias={use_bias}")
             exact._fused_projection = fused_kernel
+        finally:
+            viewer.close()
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA required")
+    def test_fused_copy_average_matches_standalone_kernel_bitwise(self):
+        """Averaging overflow copies inside the projection equals the separate average pass."""
+        viewer = ViewerNull()
+        try:
+            example = scene.Example(
+                viewer,
+                SimpleNamespace(grid=(4, 4, 4), seed=42, substeps=8, iterations=4, joint_solver="exact"),
+            )
+            for _ in range(40):
+                example.step()
+            world = example.solver.world
+            direct = world._direct_equality_system
+            exact = direct.exact if isinstance(direct, MixedJointSystem) else direct
+            self.assertTrue(direct.fuses_copy_average)
+            copies = world._copy_state
+            self.assertGreater(int(copies.highest_index_in_use.numpy()[0]), 0)
+            # Perturb copies so the average visibly changes body velocities.
+            rng = np.random.default_rng(5)
+            velocity = copies.velocity.numpy()
+            copies.velocity.assign(velocity + rng.normal(scale=0.05, size=velocity.shape).astype(np.float32))
+            bodies = exact.bodies
+            state = (bodies.velocity, bodies.angular_velocity, exact.accumulated_impulse)
+            initial = [array.numpy().copy() for array in state]
+            results = []
+            for fused in (False, True):
+                for array, values in zip(state, initial, strict=True):
+                    array.assign(values)
+                if not fused:
+                    launch_average_rigid_velocity_into_bodies(copies, bodies)
+                exact.solve(use_bias=True, copy_state=copies, average_copies=fused)
+                wp.synchronize()
+                results.append([array.numpy().copy() for array in state])
+            self.assertFalse(np.array_equal(results[0][0], initial[0]))
+            for name, reference, candidate in zip(("velocity", "angular_velocity", "impulse"), *results, strict=True):
+                np.testing.assert_array_equal(candidate, reference, err_msg=name)
         finally:
             viewer.close()
 

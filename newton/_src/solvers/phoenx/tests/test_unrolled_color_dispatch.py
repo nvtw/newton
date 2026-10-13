@@ -54,7 +54,7 @@ class TestUnrolledColorDispatch(unittest.TestCase):
         def writeback(**kwargs):
             world.velocity = world.copies[0]
 
-        def overflow_sweep(*args):
+        def overflow_sweep(*args, **kwargs):
             # Equal-mass copies have different constraint impulses. The
             # overflow reduction writes their mean only into physical bodies.
             world.copies = [2.0, 4.0]
