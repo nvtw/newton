@@ -7,7 +7,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
+from newton._src.solvers.phoenx.helpers.scan_and_sort import active_prefix_sort_levels, sort_variable_length_int64
 
 
 def _sort(keys: np.ndarray, active: int, end_bit: int | None) -> tuple[np.ndarray, np.ndarray]:
@@ -46,6 +46,39 @@ class TestSortEndBit(unittest.TestCase):
             actual = _sort(keys, active, end_bit)
             np.testing.assert_array_equal(actual[1], expected[1])
             np.testing.assert_array_equal(actual[0][:active], expected[0][:active])
+
+    def test_active_prefix_sort_matches_full_sort(self):
+        """Every captured prefix branch matches a full sort and restores the sentinel tail."""
+        capacity = 1 << 20
+        levels = active_prefix_sort_levels(capacity)
+        self.assertEqual(levels, 5)
+        rng = np.random.default_rng(11)
+        source = rng.integers(0, 1 << 40, capacity, dtype=np.int64)
+        source[::5] = source[3]
+        device = "cuda:0"
+        keys = wp.zeros(2 * capacity, dtype=wp.int64, device=device)
+        values = wp.zeros(2 * capacity, dtype=wp.int32, device=device)
+        source_keys = wp.array(source, dtype=wp.int64, device=device)
+        source_values = wp.array(np.arange(capacity, dtype=np.int32), dtype=wp.int32, device=device)
+        count = wp.zeros(1, dtype=wp.int32, device=device)
+        flags = wp.zeros(levels, dtype=wp.int32, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            wp.copy(keys, source_keys, count=capacity)
+            wp.copy(values, source_values, count=capacity)
+            # Fill the ping-pong half with stale keys a prefix sort must not expose.
+            wp.copy(keys, source_keys, dest_offset=capacity, count=capacity)
+            sort_variable_length_int64(keys, values, count, end_bit=41, prefix_flags=flags)
+        sentinel = np.iinfo(np.int64).max
+        for active in (0, 1, 4097, 65535, 65536, 131071, 131072, 200001, 524287, 524288, capacity):
+            with self.subTest(active=active):
+                count.fill_(active)
+                wp.capture_launch(capture.graph)
+                order = np.argsort(source[:active], kind="stable")
+                sorted_keys = keys.numpy()[:capacity]
+                np.testing.assert_array_equal(sorted_keys[:active], source[:active][order])
+                np.testing.assert_array_equal(values.numpy()[:active], order.astype(np.int32))
+                np.testing.assert_array_equal(sorted_keys[active:], sentinel)
+                self.assertEqual(int(flags.numpy().sum()), 1)
 
 
 if __name__ == "__main__":
